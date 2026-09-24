@@ -29,6 +29,7 @@ naming the missing dependency rather than returning something a caller could
 mistake for a connection.
 """
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 
@@ -45,6 +46,8 @@ except ImportError:
     # something a caller could mistake for a connection.
     current_app = None
     g = None
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -145,6 +148,76 @@ CREATE TABLE IF NOT EXISTS swap_audit_log (
 """
 
 
+# The one live payout per swap, as a CONSTRAINT rather than a convention.
+#
+# PARTIAL ON PURPOSE. A payout that genuinely FAILED must still be retryable,
+# so 'failed' is not in the list: a plain UNIQUE(swap_id) would turn one
+# rejected transaction into a permanently stuck swap. 'created' IS in the list,
+# because a payout row written before a send is an intent to pay that may
+# already have been relayed -- see services/payout_service.py's ordering note.
+#
+# It is not in SCHEMA above, and that is deliberate. Every worker runs
+# `executescript(SCHEMA)` at the top of every cycle, so an index that FAILED to
+# build -- which is exactly what happens on a database that already contains a
+# double payout -- would kill all three workers on startup, including the two
+# that have nothing to do with payouts. apply_migrations() below checks first
+# and reports instead.
+PAYOUT_UNIQUE_INDEX_NAME = "idx_payouts_one_live_per_swap"
+PAYOUT_LIVE_STATUSES = ("created", "broadcast", "completed")
+PAYOUT_UNIQUE_INDEX_SQL = (
+    f"CREATE UNIQUE INDEX IF NOT EXISTS {PAYOUT_UNIQUE_INDEX_NAME} "
+    "ON payouts(swap_id) WHERE status IN ('created', 'broadcast', 'completed')"
+)
+
+
+def duplicate_live_payouts(conn: sqlite3.Connection) -> list:
+    """Swaps that already have more than one LIVE payout row.
+
+    A non-empty result is the double-payout this index exists to prevent,
+    already in the database and already on chain. It is read out rather than
+    inferred, because "the index would have stopped it" says nothing about
+    rows written before the index existed.
+    """
+    return conn.execute(
+        "SELECT swap_id, COUNT(*) AS live_rows FROM payouts "
+        "WHERE status IN ('created', 'broadcast', 'completed') "
+        "GROUP BY swap_id HAVING COUNT(*) > 1 ORDER BY swap_id"
+    ).fetchall()
+
+
+def apply_migrations(conn: sqlite3.Connection) -> dict:
+    """Bring an EXISTING database up to the current constraints. Idempotent.
+
+    Safe to run against a database with rows in it, and safe to run repeatedly:
+    the index is IF NOT EXISTS, and the pre-check is a read.
+
+    What it will NOT do is destroy evidence to make itself succeed. If a swap
+    already has two live payout rows, the index cannot be created -- SQLite
+    refuses to build a unique index over data that violates it -- and the
+    honest outcome is to say so, name the swap_ids, and leave the rows alone.
+    Deleting one of them to get the index built would be deleting the record of
+    a payment that may be on chain.
+
+    Returns a dict the caller can print or assert on:
+        {"index_created": bool, "duplicates": [{"swap_id":…, "live_rows":…}, …]}
+    """
+    duplicates = duplicate_live_payouts(conn)
+    if duplicates:
+        rows = ", ".join(f"{row['swap_id']}={row['live_rows']}" for row in duplicates)
+        logger.error(
+            "%s NOT created: %d swap(s) already have more than one live payout row (%s)  <- each of those is a "
+            "payout that was made twice; reconcile them on chain before this constraint can be applied. Nothing "
+            "has been deleted.",
+            PAYOUT_UNIQUE_INDEX_NAME,
+            len(duplicates),
+            rows,
+        )
+        return {"index_created": False, "duplicates": duplicates}
+    conn.execute(PAYOUT_UNIQUE_INDEX_SQL)
+    conn.commit()
+    return {"index_created": True, "duplicates": []}
+
+
 def dict_factory(cursor, row):
     return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
 
@@ -175,6 +248,7 @@ def init_db() -> None:
     db = get_db()
     db.executescript(SCHEMA)
     db.commit()
+    apply_migrations(db)
 
 
 @contextmanager
