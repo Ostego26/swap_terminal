@@ -18,3 +18,8 @@ wallet.dat
 # solana local validator artifacts
 test-ledger/
 node_modules/
+
+# supervisor pid files and worker logs (swap_terminal/supervisor.py).
+# Runtime state, never source: a pid file that outlives its process is the
+# stale record that makes the next start refuse for no reason (rule 13).
+swap_terminal/runtime/
