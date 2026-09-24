@@ -91,7 +91,7 @@ the filename, not just the import graph. Shell scripts, `package.json` scripts,
 `.desktop` launchers, cron entries and docs all reference files by name in ways
 an import-based check never sees.
 
-Deletion is not a licence to guess. On a system holding keys, "I could not find
+Deletion is not a license to guess. On a system holding keys, "I could not find
 a caller" is not the same as "there is no caller"; say which one you
 established.
 
@@ -309,7 +309,7 @@ root -- `PID_ringdown.py`, `atomic_swap_gui.py`, `clear_prices.py`,
 and they are a mix of entry points, libraries and experiments with no marker
 saying which is which. `transactions.py` alone is large enough to contain its
 own GUI thread (`transactions.py:726`). Treat rule 10 as the direction for new
-code and for whatever you are already touching, not as licence for a mass
+code and for whatever you are already touching, not as license for a mass
 reorganisation.
 
 ## 11. One vocabulary for assets and chains, derived in one place
@@ -505,7 +505,7 @@ WHAT STILL COMES BACK, and the line is money rather than risk-of-being-wrong:
                     the payout path, signing, fee selection, address derivation,
                     confirmation thresholds, timelock values.
   armed state       funded HTLCs awaiting redeem or refund, pending payouts,
-                    open swap intents, anything cancelling or resizing them.
+                    open swap intents, anything canceling or resizing them.
   secrets and env   `.env`, keys, keypair files, wallet RPC credentials, live
                     runtime state. Never read one back into a terminal, and
                     never print one into a log or a commit.
@@ -665,3 +665,78 @@ that is safe to run against a live wallet unless it says otherwise.
 Test before shipping, and diff the full suite line by line against a recorded
 baseline rather than comparing failure counts. Counting failures hides a new
 break that lands the same day an old one is fixed.
+
+---
+
+## Re-measured 2026-09-24, after the first enforcement pass
+
+Every figure above was taken on 2026-09-24 before any of these rules had been
+applied to the tree. An enforcement pass ran the same day and moved several of
+them. The originals are kept exactly as written rather than overwritten,
+because the drift is the point (rule 1) -- and here the drift happened in
+hours, not days.
+
+    rule  measurement                            was            now
+    1     Python files with a module header      0 of 45        41 of 41 in
+                                                                swap_terminal/,
+                                                                10 of 10 in tests/
+    12    pyproject.toml                         absent         present
+    12    tests/ directory                       absent         83 tests, all passing
+    12    ruff findings under the new standard   270 (first     0
+                                                 measurement)
+    13    unreaped worker loops                  3, no supervisor   supervisor.py,
+                                                                    pid files, a stop
+                                                                    that proves absence
+    18    British spellings in .py/.js/.md       0              3, ALL OF THEM IN THIS
+                                                                FILE, now fixed
+
+The denominator moved too, which is why rule 1's count cannot be read as
+"45 became 45": six files were deleted as proven dead (modules/rpc_clients.py,
+modules/bitshares_client.py, modules/module.py, models/__init__.py,
+PID_ringdown.py, clear_prices.py) and two were added (microfortnights.py,
+supervisor.py), so 45 - 6 + 2 = 41. Stating the count without the denominator
+would have hidden the cull entirely.
+
+THREE MEASUREMENTS IN THE RULES ABOVE TURNED OUT TO BE WRONG, and they are
+corrected here rather than in place:
+
+  rule 5 says transactions.json has "TWO writers: transactions.py,
+  clear_prices.py". Measured by grepping the whole tree for the filename:
+  clear_prices.py wrote to a hardcoded
+  /home/mpjones26/Documents/Prototypes/transactions.json -- a DIFFERENT file,
+  outside this repository. swap_terminal/transactions.json has one writer and
+  no reader other than its writer, which makes it a single-writer cache rather
+  than a contested authority. It is still a rule 5 item; it is not the second
+  worst one.
+
+  rule 8 presents modules/ as one family of 1001 lines rooted at
+  rpc_clients.py. Measured: NOTHING imports rpc_clients.py. The three
+  atomic_*_client.py files each define their own rpc_call and never touch it,
+  so it was a fourth independent JSON-RPC implementation that nothing used. It
+  has been deleted. The real count of live JSON-RPC implementations against a
+  Bitcoin-style daemon in this tree is FIVE in Python (chains/base.py, three
+  atomic clients, identity.py) plus an inline requests.post in transactions.py,
+  one in JavaScript (server.js) and six curl invocations in chain_tx.sh.
+
+  rule 18 says 0 British spellings. Measured with a 40-pattern scan over all
+  84 .py/.js/.jsx/.md files: 3, every one of them in CLAUDE.md itself --
+  "licence" twice and "cancelling" once. Fixed in the same commit that found
+  them. (Three further matches are the rule's own examples, which quote the
+  British spelling in order to name it, and are left alone.) The file that
+  states the rule is the one place a violation refutes itself.
+
+WHAT DID NOT MOVE, and is named work rather than a baseline (rule 19):
+
+  - swap_terminal/important and swap_terminal/test.py both contain plaintext
+    private keys, and so does this repository's history. NOT deleted: deleting
+    would make the tree look clean while the keys stayed published. Remediation
+    is the operator's -- sweep, rotate, then purge history (the one rewrite
+    rule 4 allows).
+  - the HTLC refund branch is unspendable: the locktime is encoded as a varint
+    rather than a script number, so a requested height of 500,000 is enforced
+    as 128,000,254. Measured in tests/test_htlc_locktime_encoding.py.
+  - two payout workers pay the same swap twice. Measured in
+    tests/test_payout_concurrency.py, with the claim-by-UPDATE and the partial
+    unique index that would prevent it demonstrated against a real database.
+  - grc-sol-swap/abstergo_exchange/swap_intents.json is still the Express
+    server's authority for a fund-releasing decision.
