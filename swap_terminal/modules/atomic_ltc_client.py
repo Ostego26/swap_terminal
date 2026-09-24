@@ -85,6 +85,7 @@ import requests
 
 # Import the HTLC script builder from atomic_htlc_scripts.
 from modules.atomic_htlc_scripts import build_htlc_redeem_script
+from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 
 # Import the wait_for_tx_output helper from utils.
 
@@ -351,7 +352,10 @@ if __name__ == "__main__":
             amount_ltc=Decimal("0.1"),
             participant_address="tltc1qexampleparticipantaddressxxxxxxxxxxxxxxxxxxx",
             refund_address="tltc1qexamplerefundaddressxxxxxxxxxxxxxxxxxxxx",
-            locktime=500000,
+            # Derived from the daemon's own tip, never a literal -- see the
+            # BTC client's demo block for why a hardcoded 500000 is now
+            # dangerous rather than merely wrong.
+            locktime=contract_locktime("LTC", ROLE_INITIATOR, int(client.rpc_call("getblockcount"))),
             # Not a credential: a placeholder SHA-256 digest for the demo block.
             secret_hash="ff" * 32,
         )

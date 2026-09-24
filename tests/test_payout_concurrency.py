@@ -2,106 +2,85 @@
 
 Role: test / measurement (seeds real rows, runs the real function)
 Reads: swap_terminal/services/payout_service.py, swap_terminal/db.py SCHEMA
+       and apply_migrations()
 Writes: a throwaway SQLite database under pytest's tmp_path
 Can move funds: no -- the adapter is a stub that appends to a list. No socket
         is opened, no RPC is issued, nothing is signed and nothing is
         broadcast. `send_to_address` here returns a fake txid string.
 Mainnet-safe: yes
 
-WHAT THIS FILE IS FOR.
+WHAT THIS FILE MEASURED, AND WHAT IT MEASURES NOW.
 
-CLAUDE.md rule 13 states the hazard as a consequence, not as a measurement:
-
-    "A payout worker started by hand in a second terminal is invisible to the
-    first. Two payout workers polling the same SQLite database will both read
-    the same pending swap. Without a database-level state transition guard,
-    that is a double payout, and it is on-chain and final."
-
-Rule 17 says not to leave it there: "before a claim about what the live system
-is doing, run the thing that would show it false." This file runs it. It seeds
-ONE swap in `payout_pending`, runs the REAL `process_pending_payouts()` from
-two connections to the SAME database with a controlled overlap, and counts the
-sends that actually reached the adapter.
-
-THE RESULT, measured 2026-09-24 on this tree:
+On 2026-09-24 it ran ONE swap in `payout_pending` through the REAL
+`process_pending_payouts()` from two connections to the SAME database with a
+controlled overlap, and counted the sends that reached the adapter:
 
     sends observed by the adapter        2
     distinct swap_ids in those sends     1
     rows in payouts for that swap        2   (both status='broadcast')
 
-So yes. Twice, for one deposit.
-
-AND THE FIRST RUN OF THIS TEST SAID OTHERWISE, WHICH IS WORTH RECORDING.
-Seeded without a `wallet_inventory` row, worker B does not send: it dies inside
-reserve_inventory() with `IntegrityError: UNIQUE constraint failed:
-wallet_inventory.asset`, because both workers read no inventory row (A's INSERT
-being uncommitted) and both took the INSERT branch. That looks like a guard and
-is not one. It only fires on the very first payout for an asset, it protects
-nothing afterwards, and what it does instead of paying twice is crash the
-worker -- rule 12's "the caller cannot tell the failure from a real answer",
-one layer up. test_missing_inventory_row_masks_the_race_by_crashing_the_worker
-pins that behavior so nobody mistakes it for the fix.
-
-The realistic state is the one with the row, because payout_worker.py calls
-refresh_wallet_inventory() immediately before process_pending_payouts() on
-every single cycle, and that function creates the row the first time it runs.
-Measuring the cold-start state and stopping there would have produced a
-confident, wrong "no, it cannot happen" (rule 17).
-
-WHY SQLITE'S WRITER LOCK DOES NOT SAVE IT -- this is the part that is easy to
-get wrong by reasoning. SQLite has one writer lock, so the second worker's
-INSERT really does block behind the first one. But the guard that is supposed
-to prevent the second payout is a READ:
+Twice, for one deposit. SQLite's writer lock did not prevent it, and the
+reason is the part that is easy to get wrong by reasoning: the guard was a
+READ,
 
     SELECT * FROM payouts WHERE swap_id = ? AND status IN ('broadcast','completed')
 
-and that read happens BEFORE the write lock is ever contended. Worker B reads
-it while worker A is still inside `send_to_address` with its transaction open
-and uncommitted, so B sees no payout row, decides to pay, and only THEN blocks
-on the write lock. When A commits, B's write proceeds -- and B is still acting
-on a decision it made from a snapshot that is now stale. The lock serialized
-the writes and did nothing at all about the decision.
+and it completed before the write lock was ever contended. Worker B ran it
+while worker A was still inside `send_to_address` with its transaction open
+and uncommitted, so B saw no payout row, decided to pay, and only THEN blocked
+on the write lock. When A committed, B's write proceeded -- acting on a
+decision made from a snapshot that was already stale. Check-then-act across
+two transactions. The lock serialized the writes and did nothing about the
+decision.
 
-That is check-then-act across two transactions, and it is why rule 13's last
-bullet says a database constraint beats a lock: "it survives the case where
-the lock was wrong."
+THE FIX LANDED THE SAME DAY, AND THIS FILE IS INVERTED ACCORDINGLY (rule 2).
 
-THE PROPOSAL THIS MEASUREMENT ARGUES FOR IS NOT APPLIED HERE.
+    test_two_workers_can_pay_the_same_swap_twice   ->
+    test_two_workers_cannot_pay_the_same_swap_twice, asserting ONE send.
 
-Changing the payout path is fund movement (rule 16), so the two changes below
-are for the operator to apply, not for this pass. Both are demonstrated
-against a real database in the last two tests of this file, so the operator can
-see the evidence rather than take the claim:
+Both halves are applied and both are exercised below, because neither is
+sufficient alone:
 
-  1. Claim the swap with a conditional UPDATE, and proceed only if it won:
+  1. claim_swap_for_payout() runs
 
          UPDATE swaps SET status = 'paying', updated_at = ?
           WHERE id = ? AND status = 'payout_pending'
 
-     then check `cursor.rowcount == 1`. The loser updates zero rows and must
-     `continue`. This turns the guard from a read into a write, so the writer
-     lock that already exists is the thing that serializes the DECISION
-     instead of only the insert.
+     and only a caller whose `rowcount` is 1 may send. This turns the guard
+     from a read into a write, so the writer lock that already existed
+     serializes the DECISION. Alone it reopens the hole the moment a future
+     caller forgets the rowcount check.
 
-  2. Back it with a constraint, so it holds even when the code is wrong:
+  2. idx_payouts_one_live_per_swap, a PARTIAL unique index on payouts(swap_id)
+     WHERE status IN ('created','broadcast','completed'), created by
+     db.apply_migrations(). A second LIVE payout row is impossible to insert;
+     a genuinely FAILED payout is still retryable, which a plain
+     UNIQUE(swap_id) would have forbidden -- turning one incident into a stuck
+     swap. Alone it converts a double payout into an IntegrityError AFTER the
+     first send has already gone out.
 
-         CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_one_live_per_swap
-             ON payouts(swap_id)
-          WHERE status IN ('created', 'broadcast', 'completed');
+AND THE FIRST RUN OF THE ORIGINAL TEST SAID OTHERWISE, WHICH IS STILL WORTH
+RECORDING. Seeded without a `wallet_inventory` row, worker B did not send: it
+died inside reserve_inventory() with `IntegrityError: UNIQUE constraint failed:
+wallet_inventory.asset`, because both workers read no inventory row (A's INSERT
+being uncommitted) and both took the INSERT branch. That looked like a guard
+and was not one -- it only ever fired on the very first payout for an asset,
+and what it did instead of paying twice was crash the worker.
 
-     A partial unique index, so that a payout which genuinely FAILED can still
-     be retried, while a second live payout for the same swap is impossible to
-     insert. test_partial_unique_index_would_have_stopped_it below shows the
-     second INSERT raising IntegrityError on a real database.
+The realistic state is the one WITH the row, because payout_worker.py calls
+refresh_wallet_inventory() immediately before process_pending_payouts() on
+every cycle, and that function creates the row the first time it runs. Seeding
+without it measures the first fifteen seconds of a worker's life and nothing
+after it. test_the_cold_start_case_no_longer_crashes_the_worker keeps that case
+around, inverted: B now declines at the claim, before it ever reaches
+inventory, so there is no crash to mistake for a guard.
 
-Both are needed. (1) alone still leaves the window open if a future caller
-forgets the rowcount check; (2) alone converts a double payout into an
-unhandled IntegrityError after the first send, which is safe but ugly.
-
-WHEN THE OPERATOR APPLIES THE FIX, test_two_workers_can_pay_the_same_swap_twice
-BELOW WILL FAIL. That is correct and intended: it is a characterization test of
-a defect, it is named and commented as one, and its failure is the signal that
-the defect is gone. Invert it then -- assert 1 send, not 2.
+WHAT THIS FILE DOES NOT PROVE. Nothing here touches a chain. `send_to_address`
+returns a string. The concurrency it demonstrates is two threads against one
+local SQLite file, which is the faithful shape for two worker processes on one
+host; it says nothing about two hosts against a database on a network file
+system, where SQLite's locking assumptions are different and were not tested
+(rule 17).
 """
 
 import sqlite3
@@ -109,28 +88,36 @@ import threading
 import time
 
 import pytest
-from db import SCHEMA, connect_db
-from services.payout_service import process_pending_payouts
+from db import SCHEMA, apply_migrations, connect_db
+from services.payout_service import claim_swap_for_payout, process_pending_payouts
 
 
 class RecordingAdapter:
     """A stand-in for a chain adapter that records sends instead of making them.
 
-    `hold` is an optional threading.Event: when set on the instance, the first
-    send blocks until it is set, which is how the overlap between the two
+    `release` is an optional threading.Event: when set on the instance, the
+    first send blocks until it is set, which is how the overlap between the two
     workers is made deterministic rather than timing-dependent.
+
+    `on_send` is an optional callback invoked while the first send is "in
+    flight", so a test can observe what the database looks like at the one
+    moment that matters: after the intent to pay is committed and before the
+    txid exists.
     """
 
     def __init__(self, asset: str):
         self.asset = asset
         self.sends: list[tuple[str, float]] = []
         self.release = None
+        self.on_send = None
         self._lock = threading.Lock()
 
     def send_to_address(self, address: str, amount: float) -> str:
         with self._lock:
             index = len(self.sends)
             self.sends.append((address, float(amount)))
+        if index == 0 and self.on_send is not None:
+            self.on_send()
         if self.release is not None and index == 0:
             # Only the FIRST send waits. This is worker A sitting inside its
             # RPC call, which is exactly the window a second worker walks into.
@@ -149,17 +136,23 @@ CONFIG = {
 }
 
 
-def _seed_one_pending_swap(db_path: str, swap_id: str = "s_double", with_inventory_row: bool = True) -> None:
+def _seed_one_pending_swap(
+    db_path: str,
+    swap_id: str = "s_double",
+    with_inventory_row: bool = True,
+    with_index: bool = True,
+) -> None:
     """Put exactly one swap into `payout_pending`, the state the worker acts on.
 
-    `with_inventory_row` seeds `wallet_inventory` for LTC, and the default is
-    True because that is what a running system looks like: payout_worker.py
-    calls refresh_wallet_inventory() immediately before process_pending_payouts()
-    on EVERY cycle, and that function inserts a row for each asset the first
-    time it sees one. A test that omits the row is testing the first fifteen
-    seconds of a worker's life and nothing after it -- and, as
-    test_missing_inventory_row_masks_the_race_by_crashing_the_worker below
-    shows, it measures something completely different.
+    `with_inventory_row` defaults True because that is what a running system
+    looks like: payout_worker.py calls refresh_wallet_inventory() immediately
+    before process_pending_payouts() on EVERY cycle.
+
+    `with_index` runs db.apply_migrations(), which is what payout_worker.py
+    does once at startup. It is a parameter rather than unconditional so that
+    the claim-by-UPDATE can be measured on its own, without the index standing
+    behind it -- otherwise a regression in the claim would be masked by the
+    constraint and nobody would learn which one was holding.
     """
     conn = connect_db(db_path)
     conn.executescript(SCHEMA)
@@ -193,6 +186,8 @@ def _seed_one_pending_swap(db_path: str, swap_id: str = "s_double", with_invento
             (now,),
         )
     conn.commit()
+    if with_index:
+        apply_migrations(conn)
     conn.close()
 
 
@@ -203,8 +198,53 @@ def db_path(tmp_path):
     return path
 
 
+def _run_two_overlapping_workers(path: str, adapters: dict, adapter: RecordingAdapter) -> list:
+    """Start A, wait until it is inside send_to_address, then start B.
+
+    Returns whatever escaped either worker, so a test can assert on the
+    absence of an exception rather than on a green run that swallowed one.
+    """
+    failures: list[BaseException] = []
+
+    def worker():
+        # Each thread opens its own connection, because sqlite3 objects are
+        # bound to the thread that created them -- and because that is the
+        # faithful shape anyway: two worker PROCESSES each hold their own.
+        conn = connect_db(path)
+        try:
+            process_pending_payouts(conn, CONFIG, adapters)
+        except BaseException as exc:  # noqa: BLE001 -- recorded, not swallowed: what escapes is the subject
+            failures.append(exc)
+        finally:
+            conn.close()
+
+    thread_a = threading.Thread(target=worker, name="payout-worker-A")
+    thread_a.start()
+
+    # Wait for A to be inside send_to_address -- its payout row is committed
+    # and its txid does not exist yet, which is the window a second worker
+    # enters.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not adapter.sends:
+        time.sleep(0.01)
+    assert adapter.sends, "worker A never reached send_to_address; test setup failed"
+
+    thread_b = threading.Thread(target=worker, name="payout-worker-B")
+    thread_b.start()
+
+    # Give B time to complete its claim attempt and everything after it. Half a
+    # second is roughly five orders of magnitude more than an indexed UPDATE on
+    # a local temp file needs.
+    time.sleep(0.5)
+    adapter.release.set()
+
+    thread_a.join(timeout=30)
+    thread_b.join(timeout=30)
+    return failures
+
+
 def test_one_worker_alone_pays_exactly_once(db_path):
-    """The control. Without overlap the guard works, which is why this is subtle."""
+    """The control. Unchanged by the fix, and it must stay that way."""
     adapter = RecordingAdapter("LTC")
     conn = connect_db(db_path)
     process_pending_payouts(conn, CONFIG, {"LTC": adapter, "GRC": RecordingAdapter("GRC")})
@@ -220,117 +260,133 @@ def test_one_worker_alone_pays_exactly_once(db_path):
     assert len(adapter.sends) == 1
 
 
-def test_two_workers_can_pay_the_same_swap_twice(db_path):
-    """MEASUREMENT, not a specification. See this file's header.
+def test_two_workers_cannot_pay_the_same_swap_twice(db_path):
+    """INVERTED from test_two_workers_can_pay_the_same_swap_twice.
 
-    When the operator applies the claim-by-UPDATE and the partial unique index,
-    this test must be INVERTED to assert exactly one send. Its failure is the
-    signal that the double payout is fixed, not a regression.
+    That test asserted 2 sends and said, in its own docstring, that its failure
+    would be the signal that the defect was gone. The fix landed on 2026-09-24
+    and this is that same overlap, asserting the number that matters: ONE.
     """
     adapter = RecordingAdapter("LTC")
     adapter.release = threading.Event()
     adapters = {"LTC": adapter, "GRC": RecordingAdapter("GRC")}
 
-    def worker():
-        # Each thread opens its own connection, because sqlite3 objects are
-        # bound to the thread that created them -- and because that is the
-        # faithful shape anyway: two worker PROCESSES each hold their own.
-        conn = connect_db(db_path)
-        try:
-            process_pending_payouts(conn, CONFIG, adapters)
-        finally:
-            conn.close()
+    failures = _run_two_overlapping_workers(db_path, adapters, adapter)
 
-    thread_a = threading.Thread(target=worker, name="payout-worker-A")
-    thread_a.start()
-
-    # Wait for A to be inside send_to_address -- its transaction is open and
-    # uncommitted at this point, which is the window a second worker enters.
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not adapter.sends:
-        time.sleep(0.01)
-    assert adapter.sends, "worker A never reached send_to_address; test setup failed"
-
-    thread_b = threading.Thread(target=worker, name="payout-worker-B")
-    thread_b.start()
-
-    # Give B time to complete BOTH of its reads -- the swaps SELECT and the
-    # payouts guard SELECT -- and then block on the write lock. Half a second
-    # is roughly five orders of magnitude more than two indexed SELECTs on a
-    # local temp file need, and B's busy timeout is SQLite's default 5s, so
-    # the ordering does not depend on how fast the machine is.
-    time.sleep(0.5)
-    adapter.release.set()
-
-    thread_a.join(timeout=30)
-    thread_b.join(timeout=30)
-
-    # The measurement.
-    assert len(adapter.sends) == 2, (
-        f"expected the double payout this file documents, saw {len(adapter.sends)} send(s). "
-        "If this now says 1, the guard was fixed -- invert this test and delete the proposal."
+    assert failures == [], f"a worker died instead of declining: {failures}"
+    assert len(adapter.sends) == 1, (
+        f"expected exactly one send for one swap, saw {len(adapter.sends)}. "
+        "Two means the claim-by-UPDATE stopped holding."
     )
-    assert adapter.sends[0] == adapter.sends[1], "both sends went to the same address for the same amount"
 
     conn = connect_db(db_path)
     payouts = conn.execute("SELECT status, txid FROM payouts WHERE swap_id = 's_double'").fetchall()
+    swap = conn.execute("SELECT status, payout_txid FROM swaps WHERE id = 's_double'").fetchone()
+    audit = conn.execute(
+        "SELECT new_status FROM swap_audit_log WHERE swap_id = 's_double' ORDER BY id"
+    ).fetchall()
     conn.close()
-    assert len(payouts) == 2
-    assert [row["status"] for row in payouts] == ["broadcast", "broadcast"]
+
+    assert len(payouts) == 1
+    assert payouts[0]["status"] == "broadcast"
+    assert swap["status"] == "completed"
+    assert swap["payout_txid"] == payouts[0]["txid"]
+    # The claim is recorded as a transition, so an operator reading the audit
+    # log can see which worker took the swap and when.
+    assert [row["new_status"] for row in audit] == ["paying", "completed"]
 
 
-def test_missing_inventory_row_masks_the_race_by_crashing_the_worker(tmp_path):
-    """The cold-start case, pinned so it is not mistaken for a guard.
+def test_the_claim_alone_holds_without_the_index(tmp_path):
+    """One send even with NO unique index, so it is clear which half is holding.
 
-    With no `wallet_inventory` row for the payout asset, both workers take
-    reserve_inventory()'s INSERT branch and the second one hits
-    UNIQUE(wallet_inventory.asset). B therefore does not send -- but it does
-    not decline either: it raises out of process_pending_payouts(), the
-    db_session rolls back, and the worker loop dies. This protects exactly the
-    first payout ever made for an asset and nothing after it.
+    If this passes and the index test also passes, the two mechanisms are
+    independent. If only the index were doing the work, a future caller that
+    forgets the rowcount check would silently reopen the hole and nothing here
+    would say so.
+    """
+    path = str(tmp_path / "claim_only.db")
+    _seed_one_pending_swap(path, with_index=False)
+
+    conn = connect_db(path)
+    has_index = conn.execute(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_payouts_one_live_per_swap'"
+    ).fetchone()["n"]
+    conn.close()
+    assert has_index == 0, "this test is only meaningful without the index"
+
+    adapter = RecordingAdapter("LTC")
+    adapter.release = threading.Event()
+    failures = _run_two_overlapping_workers(path, {"LTC": adapter, "GRC": RecordingAdapter("GRC")}, adapter)
+
+    assert failures == []
+    assert len(adapter.sends) == 1
+
+
+def test_the_intent_to_pay_is_committed_before_the_send(db_path):
+    """The ordering rule 5 asks for, observed from a SECOND connection mid-send.
+
+    While worker A is inside send_to_address, another connection must already
+    be able to SEE a payouts row for this swap -- with no txid yet -- and the
+    swap already out of `payout_pending`. That is what makes a crash during the
+    send a visible, non-repeating failure instead of a lost payment that the
+    next cycle pays again.
+    """
+    observed = {}
+    adapter = RecordingAdapter("LTC")
+
+    def observe():
+        other = connect_db(db_path)
+        observed["payouts"] = other.execute(
+            "SELECT status, txid FROM payouts WHERE swap_id = 's_double'"
+        ).fetchall()
+        observed["swap_status"] = other.execute(
+            "SELECT status FROM swaps WHERE id = 's_double'"
+        ).fetchone()["status"]
+        other.close()
+
+    adapter.on_send = observe
+    conn = connect_db(db_path)
+    process_pending_payouts(conn, CONFIG, {"LTC": adapter, "GRC": RecordingAdapter("GRC")})
+    conn.close()
+
+    assert len(observed["payouts"]) == 1
+    assert observed["payouts"][0]["status"] == "created"
+    assert observed["payouts"][0]["txid"] is None, "the txid does not exist yet -- that is the point of the window"
+    assert observed["swap_status"] == "paying"
+
+
+def test_the_cold_start_case_no_longer_crashes_the_worker(tmp_path):
+    """INVERTED from test_missing_inventory_row_masks_the_race_by_crashing_the_worker.
+
+    With no `wallet_inventory` row, both workers used to take
+    reserve_inventory()'s INSERT branch and the second one hit
+    UNIQUE(wallet_inventory.asset): B did not send, but it did not decline
+    either -- it raised out of process_pending_payouts() and the worker loop
+    died. That protected exactly the first payout ever made for an asset and
+    nothing after it.
+
+    B now loses the claim before it reaches inventory at all, so there is no
+    crash and nothing to mistake for a guard.
     """
     path = str(tmp_path / "cold_start.db")
     _seed_one_pending_swap(path, with_inventory_row=False)
 
     adapter = RecordingAdapter("LTC")
     adapter.release = threading.Event()
-    adapters = {"LTC": adapter, "GRC": RecordingAdapter("GRC")}
-    failures: list[BaseException] = []
+    failures = _run_two_overlapping_workers(path, {"LTC": adapter, "GRC": RecordingAdapter("GRC")}, adapter)
 
-    def worker():
-        conn = connect_db(path)
-        try:
-            process_pending_payouts(conn, CONFIG, adapters)
-        except BaseException as exc:  # noqa: BLE001 -- the test's whole subject is which exception escapes; it is recorded, not swallowed
-            failures.append(exc)
-        finally:
-            conn.close()
-
-    thread_a = threading.Thread(target=worker, name="cold-A")
-    thread_a.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not adapter.sends:
-        time.sleep(0.01)
-    thread_b = threading.Thread(target=worker, name="cold-B")
-    thread_b.start()
-    time.sleep(0.5)
-    adapter.release.set()
-    thread_a.join(timeout=30)
-    thread_b.join(timeout=30)
-
-    assert len(adapter.sends) == 1  # B never got to send
-    assert len(failures) == 1
-    assert isinstance(failures[0], sqlite3.IntegrityError)
-    assert "wallet_inventory" in str(failures[0])
+    assert len(adapter.sends) == 1
+    assert failures == [], f"no worker should raise any more, saw {failures}"
 
 
-def test_the_guard_read_is_what_goes_stale(db_path):
-    """Isolate the mechanism, so the fix is aimed at the right thing.
+def test_the_guard_read_that_used_to_go_stale_still_goes_stale(db_path):
+    """The mechanism, isolated, so nobody re-introduces the old shape.
 
     Worker A inserts its payout row and holds the transaction open. From a
-    SECOND connection, the exact guard query in payout_service returns nothing
-    -- not because the guard is wrong about what it asks, but because the row
-    it would match is not committed yet.
+    SECOND connection, the OLD guard query returns nothing -- not because it
+    asks the wrong question, but because the row it would match is not
+    committed yet. This is why the decision had to become a write; the read is
+    reproduced here rather than described.
     """
     conn_a = connect_db(db_path)
     conn_a.execute(
@@ -346,15 +402,15 @@ def test_the_guard_read_is_what_goes_stale(db_path):
     ).fetchone()
 
     assert still_pending["status"] == "payout_pending"  # B sees work to do
-    assert guard is None  # and B's guard says nobody is doing it
+    assert guard is None  # and the old guard says nobody is doing it
 
     conn_a.rollback()
     conn_a.close()
     conn_b.close()
 
 
-def test_claim_by_conditional_update_would_have_stopped_it(db_path):
-    """Proposal 1, demonstrated on a real database. NOT applied to the tree.
+def test_claim_by_conditional_update_lets_exactly_one_claimant_through(db_path):
+    """Mechanism 1, on a real database. Now applied, not proposed.
 
     Exactly one of two concurrent claimants can win a conditional UPDATE,
     because the UPDATE takes the writer lock and re-reads the row under it.
@@ -373,25 +429,61 @@ def test_claim_by_conditional_update_would_have_stopped_it(db_path):
         "UPDATE swaps SET status = 'paying', updated_at = ? WHERE id = 's_double' AND status = 'payout_pending'",
         ("2026-09-24T00:00:02+00:00",),
     )
-    assert claim_b.rowcount == 0  # B lost and must `continue`, sending nothing
+    assert claim_b.rowcount == 0  # B lost and must decline, sending nothing
     conn_b.commit()
 
     conn_a.close()
     conn_b.close()
 
 
-def test_partial_unique_index_would_have_stopped_it(db_path):
-    """Proposal 2, demonstrated on a real database. NOT applied to the tree.
+def test_a_second_claim_on_the_same_swap_is_refused_by_the_real_function(db_path):
+    """claim_swap_for_payout() itself, from two connections. The rowcount check.
 
-    A partial unique index makes a second LIVE payout row impossible while
-    still allowing a genuinely failed payout to be retried -- which a plain
-    UNIQUE(swap_id) would forbid, turning one incident into a stuck swap.
+    This is deliberately separate from the two-worker test above, and the
+    reason is worth writing down because it changes what each test proves.
+
+    In the two-worker test, B starts while A is already inside send_to_address
+    -- and by then A's claim is COMMITTED, so B's opening
+    `SELECT ... WHERE status = 'payout_pending'` returns nothing at all and B
+    has no swap to act on. That is a real and sufficient defense, but it means
+    that test does not exercise the rowcount branch: it is the commit-before-
+    send ordering doing the work.
+
+    The window the rowcount branch is for is the narrower one where BOTH
+    workers read the pending list before EITHER claims. That is what these two
+    calls reproduce, at the function that decides, with seeded state rather
+    than with sleeps.
+    """
+    conn_a = connect_db(db_path)
+    conn_b = connect_db(db_path)
+    try:
+        assert claim_swap_for_payout(conn_a, "s_double") is True
+        assert claim_swap_for_payout(conn_b, "s_double") is False, (
+            "the second claimant must decline; if this returns True the rowcount check is gone "
+            "and only the unique index stands between one payout and two"
+        )
+        # And a swap that is not payable at all is refused too.
+        assert claim_swap_for_payout(conn_a, "no_such_swap") is False
+    finally:
+        conn_a.close()
+        conn_b.close()
+
+
+def test_the_partial_unique_index_is_in_place_and_is_partial(db_path):
+    """Mechanism 2, on a real database, created by the real apply_migrations().
+
+    A second LIVE payout row is impossible while a genuinely failed payout can
+    still be retried -- which a plain UNIQUE(swap_id) would forbid, turning one
+    incident into a stuck swap.
     """
     conn = connect_db(db_path)
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_one_live_per_swap "
-        "ON payouts(swap_id) WHERE status IN ('created', 'broadcast', 'completed')"
-    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_payouts_one_live_per_swap'"
+        ).fetchone()["n"]
+        == 1
+    ), "apply_migrations() did not create the index"
+
     insert = (
         "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
         "VALUES ('s_double', 'LTC', 'ltc_payout_addr', 0.0975, ?, ?, '2026-09-24T00:00:00+00:00', NULL)"
@@ -412,3 +504,50 @@ def test_partial_unique_index_would_have_stopped_it(db_path):
     ).fetchone()
     assert live["n"] == 1
     conn.close()
+
+
+def test_apply_migrations_refuses_to_destroy_evidence_of_a_past_double_payout(tmp_path):
+    """A database that ALREADY contains a double payout keeps both rows.
+
+    SQLite cannot build a unique index over data that violates it, and the
+    honest outcome is to say which swaps are affected and leave the rows alone.
+    Deleting one to get the index built would be deleting the record of a
+    payment that is on chain -- and the index is not the thing that matters at
+    that point; the reconciliation is.
+    """
+    path = str(tmp_path / "already_doubled.db")
+    _seed_one_pending_swap(path, with_index=False)
+    conn = connect_db(path)
+    insert = (
+        "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
+        "VALUES ('s_double', 'LTC', 'ltc_payout_addr', 0.0975, ?, 'broadcast', '2026-09-24T00:00:00+00:00', NULL)"
+    )
+    conn.execute(insert, ("txid-a",))
+    conn.execute(insert, ("txid-b",))
+    conn.commit()
+
+    result = apply_migrations(conn)
+
+    assert result["index_created"] is False
+    assert [row["swap_id"] for row in result["duplicates"]] == ["s_double"]
+    assert result["duplicates"][0]["live_rows"] == 2
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM payouts WHERE swap_id = 's_double'").fetchone()["n"] == 2
+    ), "both rows must still be there -- they are the record of what was sent"
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_payouts_one_live_per_swap'"
+        ).fetchone()["n"]
+        == 0
+    )
+    conn.close()
+
+
+def test_apply_migrations_is_idempotent(db_path):
+    """Running it twice is a no-op, because the worker runs it on every start."""
+    conn = connect_db(db_path)
+    first = apply_migrations(conn)
+    second = apply_migrations(conn)
+    conn.close()
+    assert first == {"index_created": True, "duplicates": []}
+    assert second == {"index_created": True, "duplicates": []}

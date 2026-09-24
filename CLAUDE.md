@@ -732,11 +732,30 @@ WHAT DID NOT MOVE, and is named work rather than a baseline (rule 19):
     would make the tree look clean while the keys stayed published. Remediation
     is the operator's -- sweep, rotate, then purge history (the one rewrite
     rule 4 allows).
-  - the HTLC refund branch is unspendable: the locktime is encoded as a varint
-    rather than a script number, so a requested height of 500,000 is enforced
-    as 128,000,254. Measured in tests/test_htlc_locktime_encoding.py.
-  - two payout workers pay the same swap twice. Measured in
-    tests/test_payout_concurrency.py, with the claim-by-UPDATE and the partial
-    unique index that would prevent it demonstrated against a real database.
   - grc-sol-swap/abstergo_exchange/swap_intents.json is still the Express
     server's authority for a fund-releasing decision.
+
+TWO OF THE ITEMS THAT WERE ON THIS LIST MOVED LATER THE SAME DAY, and the
+lines are rewritten rather than left standing, because a rule file that
+describes a defect which no longer exists is the wrong-comment bug (rule 16)
+in the document that forbids it:
+
+  - the HTLC refund branch was unspendable -- the locktime was encoded as a
+    varint rather than a script number, so a requested height of 500,000 was
+    enforced as 128,000,254. Fixed together with the two defects that could not
+    be separated from it: the hardcoded `locktime=500000` (a height already
+    passed, which a CORRECT encoder would have made refundable on funding) and
+    the participant and refund addresses being one value. encode_script_number()
+    and modules/htlc_timelock.py are the replacements;
+    tests/test_htlc_locktime_encoding.py's DEFECT assertions are inverted and
+    tests/test_htlc_timelock.py covers the derivation. NOT PROVEN ON A CHAIN:
+    no contract built with the corrected script has been funded, redeemed or
+    refunded anywhere, and the refund branch is still the branch that has never
+    run. That is the proof this file asks for and it is still outstanding.
+  - two payout workers paid the same swap twice -- 2 sends, 1 swap_id, 2
+    'broadcast' rows. Fixed with both halves the measurement argued for: the
+    claim-by-UPDATE in services/payout_service.claim_swap_for_payout() and the
+    partial unique index idx_payouts_one_live_per_swap, applied by
+    db.apply_migrations(). tests/test_payout_concurrency.py now measures 1 send
+    where it measured 2, and keeps each mechanism demonstrated in isolation so
+    a regression says which half stopped holding.
