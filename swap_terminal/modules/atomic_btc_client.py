@@ -69,10 +69,16 @@ connection handling and the HTLC methods belong on top of it -- but the merge
 has to resolve every row above, and each resolution changes what a live swap
 does.
 
-AND THE REFUND BRANCH OF EVERY CONTRACT BUILT HERE IS UNSPENDABLE. The locktime
-encoding in modules/atomic_htlc_scripts.number_to_le_bytes() emits a varint,
-not a script number: a requested block height of 500000 is read by
-CHECKLOCKTIMEVERIFY as 128,000,254. See that file's header for the measurement.
+THE REFUND BRANCH OF EVERY CONTRACT BUILT HERE WAS UNSPENDABLE UNTIL
+2026-09-24. The locktime encoding in modules/atomic_htlc_scripts emitted a
+varint, not a script number: a requested block height of 500000 was read by
+CHECKLOCKTIMEVERIFY as 128,000,254. encode_script_number() replaced it, the
+locktime is now derived per swap from the chain tip by
+modules/htlc_timelock.py, and the participant and refund addresses are two
+values rather than one. See atomic_htlc_scripts.py's header for the
+measurement -- and note that no contract built with the corrected script has
+been funded, redeemed or refunded on any chain, so the refund branch remains
+untested where it counts (rule 17).
 """
 
 import logging
@@ -81,6 +87,7 @@ from decimal import Decimal
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, script_to_p2sh_address
+from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 from modules.utils import wait_for_tx_output
 
 # Configure logger.
@@ -318,7 +325,12 @@ if __name__ == "__main__":
             secret_hash="ff" * 32,
             participant_address="tb1qexampleparticipantaddress0000000000000000000000",
             refund_address="tb1qexamplerefundaddress000000000000000000000000",
-            locktime=500000
+            # Derived from the daemon's own tip, never a literal. This block
+            # BROADCASTS, and a hardcoded 500000 -- a height BTC passed in
+            # 2017 -- would now build a contract refundable the instant it is
+            # funded, because the encoder that used to mangle that number into
+            # an unreachable height was fixed on 2026-09-24.
+            locktime=contract_locktime("BTC", ROLE_INITIATOR, int(client.rpc_call("getblockcount")))
         )
         print("Contract created:", example_contract)
     except Exception as e:  # noqa: BLE001 -- checked: the demo driver at the bottom of the file; it prints and exits, and nothing reads a value from it.

@@ -14,37 +14,53 @@ Mainnet-safe: NO, and structurally so. TESTNET_P2PKH_VERSION (0x6F) and
        address, strip its version byte and re-encode the same hash160 as
        testnet. There is no mainnet path here at all.
 
-MEASURED DEFECT, NOT FIXED HERE: THE LOCKTIME IS ENCODED AS A VARINT.
+FIXED 2026-09-24: THE LOCKTIME WAS ENCODED AS A VARINT AND NOW IS NOT.
 
-number_to_le_bytes() implements Bitcoin's COMPACT SIZE (varint) encoding -- the
-one used for array lengths in the p2p protocol. The value it produces is then
-pushed into the script as the argument to OP_CHECKLOCKTIMEVERIFY, which reads
-its operand as a CScriptNum. The two encodings are not the same, and for every
-locktime a real swap would use they do not agree. Measured by running the
-function:
+number_to_le_bytes() implemented Bitcoin's COMPACT SIZE (varint) encoding --
+the one used for array lengths in the p2p protocol -- and its output was pushed
+into the script as the operand of OP_CHECKLOCKTIMEVERIFY, which reads a
+CScriptNum. The two encodings are not the same, and for every locktime a real
+swap would use they did not agree. Measured by running the function before it
+was deleted:
 
-    locktime asked        bytes pushed      CLTV reads       correct encoding
+    locktime asked        bytes pushed      CLTV read        pushed now
         500,000           fe20a10700        128,000,254      20a107
         800,000           fe00350c00        204,800,254      00350c
       3,000,000           fec0c62d00        768,000,254      c0c62d
   1,735,689,600           fe80857467    444,336,537,854      80857467
 
-The 0xfe prefix is the varint's "a 4-byte value follows" tag. CScriptNum has no
-such tag, so it reads the tag as the low byte of the number. Every value above
-is far beyond any height Bitcoin will reach, so the refund branch of every
-contract this module builds never becomes spendable: coins funded into one are
-recoverable only through the redeem branch, and only by whoever holds the
-participant key.
+The 0xfe prefix was the varint's "a 4-byte value follows" tag. CScriptNum has
+no such tag, so it read the tag as the low byte of the number. Every value in
+the third column is far beyond any height Bitcoin will reach, so the refund
+branch of every contract this module built never became spendable: coins funded
+into one were recoverable only through the redeem branch, and only by whoever
+held the participant key.
 
-The correct encoding is a minimally-encoded little-endian CScriptNum -- three
-bytes for a block height in the hundreds of thousands, with a zero padding byte
-if the top bit of the most significant byte is set.
+encode_script_number() replaces it -- minimally-encoded little-endian, with a
+zero pad byte when the top bit of the most significant byte is set. The old
+function is DELETED rather than kept beside the new one (rule 2): the whole
+tree was grepped for the name before removing it, and the only callers were
+this module's script builder and the test file, both of which now name the new
+one. Nothing else in Python, JavaScript, shell or documentation referenced it.
 
-THIS IS NOT FIXED HERE. A timelock value is fund movement (rule 16), the change
-alters the P2SH address of every future contract, and it cannot be tested from
-here -- the honest proof is a testnet contract funded and then REFUNDED after
-expiry, which is exactly the branch CLAUDE.md says has never been exercised.
-Handed over with the numbers rather than patched.
+THIS FIX WAS NOT SHIPPED ALONE, AND MUST NOT BE READ AS IF IT WERE. Correcting
+the encoder in isolation would have made things WORSE: modules/atomic_swapper.py
+hardcoded `locktime=500000`, a height passed on BTC in 2017 and on LTC earlier,
+so a correctly encoded 500000 is a refund that is claimable the instant the
+contract is funded -- the initiator refunds their own leg and still redeems the
+counterparty's. The same commit therefore added modules/htlc_timelock.py, which
+derives a per-swap locktime from the chain tip with the initiator's lock
+strictly longer than the participant's, and split the participant and refund
+addresses that atomic_swapper.py passed as one value.
+
+WHAT IS STILL NOT PROVEN, AND CANNOT BE PROVEN FROM HERE (rule 17). Neither
+branch of a contract built with this encoder has been exercised on any chain.
+The encoding is verified by round-tripping it through an independent CScriptNum
+decoder and by disassembling the produced script
+(tests/test_htlc_locktime_encoding.py); that is a measurement of the bytes, not
+of a spend. The only honest proof is a testnet contract funded and then
+REFUNDED after expiry -- the branch that runs when something has already gone
+wrong -- and that needs a chain this machine does not have.
 
 TWO MORE THINGS WORTH KNOWING BEFORE TRUSTING build_htlc_redeem_script().
 
@@ -88,9 +104,11 @@ WHAT WAS REMOVED FROM THIS FILE ON 2026-09-24 (rules 9 and 12).
 import logging
 import os
 import struct
+import sys
 
 import base58
 import bech32
+from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime, describe_locktime
 from modules.utils import hash160
 
 # No setLevel and no handler: a library module that forces DEBUG at import
@@ -107,17 +125,60 @@ BASE58_VERSIONED_HASH160_LEN = 21
 # A witness v0 keyhash program is a hash160, so 20 bytes.
 WITNESS_V0_KEYHASH_LEN = 20
 
-def number_to_le_bytes(num: int) -> bytes:
-    """Convert integer to little-endian variable-length byte representation."""
-    logger.debug(f"Converting number {num} to little-endian bytes.")
-    if num < 253:  # noqa: PLR2004 -- checked: these are compact-size varint boundaries, and this function is the SUBJECT of an unresolved fund-path proposal (see the module header). It is left byte-identical so the operator reviews the defect, not a rename.
-        return bytes([num])
-    elif num <= 0xFFFF:  # noqa: PLR2004 -- same: varint boundary, function under proposal
-        return b'\xfd' + struct.pack("<H", num)
-    elif num <= 0xFFFFFFFF:  # noqa: PLR2004 -- same: varint boundary, function under proposal
-        return b'\xfe' + struct.pack("<I", num)
-    else:
-        return b'\xff' + struct.pack("<Q", num)
+def encode_script_number(value: int) -> bytes:
+    """Encode an integer the way Bitcoin script reads one (CScriptNum).
+
+    Little-endian, minimally encoded, with a zero pad byte appended when the
+    top bit of the most significant byte is set -- because script numbers are
+    SIGN-AND-MAGNITUDE: that top bit is the sign, so 0x80 unpadded reads as
+    -0 and 0xFFFF unpadded reads as a negative number. A locktime that reads
+    negative makes OP_CHECKLOCKTIMEVERIFY fail the script outright, which on
+    the refund branch means the refund is not merely late, it is impossible.
+    Zero is the empty byte string, which is what an empty stack element is.
+
+    WHY THIS REPLACED number_to_le_bytes(), WHICH IS NOW DELETED.
+
+    That function emitted Bitcoin's COMPACT SIZE encoding -- the varint used
+    for array lengths in the p2p protocol, with a leading tag byte saying how
+    many bytes follow. CScriptNum has no tag, so the tag was read as the low
+    byte of the number. Measured 2026-09-24 by running it:
+
+        locktime asked   bytes it pushed   CLTV read      this function pushes
+            500,000      fe20a10700        128,000,254    20a107
+            800,000      fe00350c00        204,800,254    00350c
+          3,000,000      fec0c62d00        768,000,254    c0c62d
+      1,735,689,600      fe80857467    444,336,537,854    80857467 ... 0080857467
+
+    Every value in the third column is a block height tens of thousands of
+    years out, so the refund branch of every contract this module built was
+    unspendable: the coins could only come back through the redeem branch, and
+    only to whoever held the participant key.
+
+    The last row is worth reading twice, because it is the pad byte earning its
+    place: 1,735,689,600 is a unix TIMESTAMP (above LOCKTIME_THRESHOLD), its
+    little-endian form is 80 85 74 67, and 0x67 has its top bit clear, so no
+    pad is needed there. A value like 0x80000000 does need one, and the
+    boundary cases are exercised in tests/test_htlc_locktime_encoding.py.
+
+    Negative values raise rather than encode. Nothing in an HTLC wants one --
+    CLTV rejects a negative operand -- so a negative arriving here is a caller
+    bug, and encoding it would hide the bug inside a script that fails much
+    later, on the branch that runs when something has already gone wrong.
+    """
+    if value < 0:
+        raise ValueError(f"script numbers in an HTLC locktime are never negative, got {value}")
+    if value == 0:
+        return b""
+    raw = bytearray()
+    magnitude = value
+    while magnitude:
+        raw.append(magnitude & 0xFF)
+        magnitude >>= 8
+    # Sign-and-magnitude: a set top bit on the most significant byte would be
+    # read as "negative", so pad with a zero byte to keep it positive.
+    if raw[-1] & 0x80:
+        raw.append(0x00)
+    return bytes(raw)
 
 def strip_address_prefix(address: str) -> str:
     """Remove URI scheme prefixes from an address."""
@@ -191,9 +252,42 @@ def build_htlc_redeem_script(secret_hash: str | bytes,
                              participant_address: str,
                              refund_address: str,
                              locktime: int) -> bytes:
-    """Build an HTLC redeem script."""
+    """Build an HTLC redeem script.
+
+    Args:
+        secret_hash: SHA-256 of the preimage, hex or bytes. The PREIMAGE never
+            appears here and must never be logged anywhere (CLAUDE.md's
+            chain-safety rules); the hash is public by construction.
+        participant_address: the COUNTERPARTY's address on this chain. Whoever
+            controls it can take the coins by revealing the preimage.
+        refund_address: YOUR address on this chain. Whoever controls it can
+            take the coins back once the locktime has passed.
+        locktime: an absolute block height (below 500,000,000) or a unix
+            timestamp (at or above it), from modules/htlc_timelock.py. It is
+            pushed as a CScriptNum, not as a varint -- see the module header
+            for what happened when it was the other way round.
+
+    Raises:
+        ValueError: if locktime is not positive, or if the participant and
+            refund addresses resolve to the SAME hash160.
+
+    The two guards below are not defensive decoration; each pins a defect this
+    file shipped. A locktime of 0 encodes to the empty byte string, which CLTV
+    reads as the number zero -- the refund branch would then be spendable
+    immediately, by anyone holding the refund key, from the moment of funding.
+    And identical participant and refund hashes make both branches require the
+    SAME key, which is what modules/atomic_swapper.py passed in all six of its
+    swap directions until 2026-09-24: the counterparty could never claim with
+    the preimage, so the contract was an expensive way to pay yourself.
+    """
     logger.info("Building HTLC redeem script.")
-    
+
+    if locktime <= 0:
+        raise ValueError(
+            f"locktime must be a positive block height or unix timestamp, got {locktime!r}; "
+            "zero encodes to an empty script number and makes the refund branch spendable immediately"
+        )
+
     part = parse_and_reencode_as_testnet_p2pkh(participant_address)
     ref = parse_and_reencode_as_testnet_p2pkh(refund_address)
     logger.debug(f"Re-encoded participant address: {part}")
@@ -204,6 +298,13 @@ def build_htlc_redeem_script(secret_hash: str | bytes,
     r_hash = _extract_hash160_from_testnet_p2pkh(ref)
     logger.debug(f"Participant hash160: {p_hash.hex()}")
     logger.debug(f"Refund hash160: {r_hash.hex()}")
+
+    if p_hash == r_hash:
+        raise ValueError(
+            "participant and refund addresses resolve to the same hash160: both branches of the HTLC "
+            "would need the same key, so the counterparty could never redeem with the preimage. "
+            "The participant address is the COUNTERPARTY's; the refund address is YOURS."
+        )
 
     if isinstance(secret_hash, str):
         logger.debug(f"Secret hash input (str): {secret_hash}")
@@ -252,7 +353,7 @@ def build_htlc_redeem_script(secret_hash: str | bytes,
             OP_EQUALVERIFY +
             OP_CHECKSIG +
         OP_ELSE +
-            push_data(number_to_le_bytes(locktime)) +
+            push_data(encode_script_number(locktime)) +
             OP_CHECKLOCKTIMEVERIFY +
             OP_DROP +
             OP_DUP + OP_HASH160 +
@@ -267,82 +368,74 @@ def build_htlc_redeem_script(secret_hash: str | bytes,
     logger.info(f"Computed P2SH address from redeem script: {computed_p2sh}")
     return script
 
-def run_swap_tests():
+def run_swap_tests(chain_tip: int):
     """Exercise build_htlc_redeem_script() over the six swap directions.
+
+    Args:
+        chain_tip: the current block height of the chain being FUNDED. It is a
+            required argument and there is no default, deliberately: this
+            function used to pass `locktime=500000` six times, a height BTC
+            passed in December 2017, and a hardcoded height in a file people
+            copy from is how that value reached the live swapper in the first
+            place. Every locktime below is now derived from this tip by
+            modules/htlc_timelock.contract_locktime().
 
     The SECRET_HASH lookup used to live at module scope and raise on import,
     which made importing this module -- and therefore the whole atomic-swap
     package -- fail unless that variable happened to be set. It is read here
-    because this is the only place that ever used it.
+    because this is the only place that ever used it. It is a HASH, never a
+    preimage; do not put a preimage in that variable.
+
+    Nothing here broadcasts, signs, or opens a socket: it builds scripts and
+    logs their P2SH addresses. The asset named in each call is the chain being
+    funded, which is what decides how many blocks the 48-hour initiator lock
+    is worth (rule 11: one vocabulary, one place).
     """
     secret_hash = os.getenv("SECRET_HASH")
     if not secret_hash:
         logger.error("SECRET_HASH is not set; run_swap_tests() needs one to build a script.")
         raise ValueError("SECRET_HASH is required and must not be empty.")
-    try:
-        # Test GRC to LTC Swap
-        logger.info("Testing GRC to LTC Swap...")
-        build_htlc_redeem_script(
-            secret_hash=secret_hash,
-            participant_address="mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA",
-            refund_address="TLTC1QZS8GM6R673QKD7DS6NPKD2QLLRRSEV48H2VFPQ",
-            locktime=500000
-        )
-        logger.info("GRC to LTC Swap completed successfully.")
-        
-        # Test LTC to GRC Swap
-        logger.info("Testing LTC to GRC Swap...")
-        build_htlc_redeem_script(
-            secret_hash=secret_hash,
-            participant_address="QWeUHZvDSKxSm7UDyVi3VFoMTxUHc3t9jD",
-            refund_address="mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA",
-            locktime=500000
-        )
-        logger.info("LTC to GRC Swap completed successfully.")
-        
-        # Test GRC to BTC Swap (example)
-        logger.info("Testing GRC to BTC Swap...")
-        build_htlc_redeem_script(
-            secret_hash=secret_hash,
-            participant_address="mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA",
-            refund_address="2MwJ8Q735vzVkaL1SnfbGvefofrDnXgXbfY",
-            locktime=500000
-        )
-        logger.info("GRC to BTC Swap completed successfully.")
-        
-        # Test BTC to GRC Swap (example)
-        logger.info("Testing BTC to GRC Swap...")
-        build_htlc_redeem_script(
-            secret_hash=secret_hash,
-            participant_address="TB1Q7K90Z9QS8UT25KTS8VQ8WWAA6H4SSY9RKJC9J3",
-            refund_address="mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA",
-            locktime=500000
-        )
-        logger.info("BTC to GRC Swap completed successfully.")
-        
-        # Test BTC to LTC Swap (example)
-        logger.info("Testing BTC to LTC Swap...")
-        build_htlc_redeem_script(
-            secret_hash=secret_hash,
-            participant_address="TB1Q7K90Z9QS8UT25KTS8VQ8WWAA6H4SSY9RKJC9J3",
-            refund_address="TLTC1QZS8GM6R673QKD7DS6NPKD2QLLRRSEV48H2VFPQ",
-            locktime=500000
-        )
-        logger.info("BTC to LTC Swap completed successfully.")
-        
-        # Test LTC to BTC Swap (example)
-        logger.info("Testing LTC to BTC Swap...")
-        build_htlc_redeem_script(
-            secret_hash=secret_hash,
-            participant_address="QWeUHZvDSKxSm7UDyVi3VFoMTxUHc3t9jD",
-            refund_address="2MwJ8Q735vzVkaL1SnfbGvefofrDnXgXbfY",
-            locktime=500000
-        )
-        logger.info("LTC to BTC Swap completed successfully.")
 
-    except Exception as e:  # noqa: BLE001 -- checked: this is the demo driver at the bottom of the file. It reports and returns; nothing downstream reads a value from it.
-        logger.error(f"Swap test error: {e}")
+    # (label, funded asset, participant address = the COUNTERPARTY's address on
+    # the funded chain, refund address = OURS on the funded chain). The two
+    # differ in every row; build_htlc_redeem_script() now refuses a row where
+    # they do not.
+    directions = [
+        ("GRC to LTC", "GRC", "mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA", "TLTC1QZS8GM6R673QKD7DS6NPKD2QLLRRSEV48H2VFPQ"),
+        ("LTC to GRC", "LTC", "QWeUHZvDSKxSm7UDyVi3VFoMTxUHc3t9jD", "mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA"),
+        # The refund address in this row is a testnet P2SH address, and
+        # parse_and_reencode_as_testnet_p2pkh() re-encodes its SCRIPT hash as a
+        # P2PKH key hash -- a refund branch nobody can satisfy. That is the
+        # defect named in this module's header, left here on purpose so the
+        # example keeps demonstrating it rather than hiding it.
+        ("GRC to BTC", "GRC", "mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA", "2MwJ8Q735vzVkaL1SnfbGvefofrDnXgXbfY"),
+        ("BTC to GRC", "BTC", "TB1Q7K90Z9QS8UT25KTS8VQ8WWAA6H4SSY9RKJC9J3", "mg3G6MkQSxMp1iCUYFH5JztynohhGYHPDA"),
+        ("BTC to LTC", "BTC", "TB1Q7K90Z9QS8UT25KTS8VQ8WWAA6H4SSY9RKJC9J3", "TLTC1QZS8GM6R673QKD7DS6NPKD2QLLRRSEV48H2VFPQ"),
+        ("LTC to BTC", "LTC", "QWeUHZvDSKxSm7UDyVi3VFoMTxUHc3t9jD", "2MwJ8Q735vzVkaL1SnfbGvefofrDnXgXbfY"),
+    ]
+
+    for index, (label, asset, participant_address, refund_address) in enumerate(directions, start=1):
+        locktime = contract_locktime(asset, ROLE_INITIATOR, chain_tip)
+        # Progress, with a counter, so a run of six is not a blinking cursor
+        # (rule 14). The locktime line says what the number means next to it.
+        logger.info(f"[{index}/{len(directions)}] {label} swap, funding {asset}")
+        logger.info(f"    {describe_locktime(asset, ROLE_INITIATOR, chain_tip, locktime)}")
+        try:
+            build_htlc_redeem_script(
+                secret_hash=secret_hash,
+                participant_address=participant_address,
+                refund_address=refund_address,
+                locktime=locktime,
+            )
+            logger.info(f"    {label} script built.")
+        except Exception as e:  # noqa: BLE001 -- checked: this is the demo driver at the bottom of the file. It reports which direction failed and carries on to the next; nothing downstream reads a value from it, and no funds are involved because nothing here broadcasts.
+            logger.error(f"    {label} FAILED to build: {e}")
 
 if __name__ == "__main__":
-    # Call the function to run the swap tests.
-    run_swap_tests()
+    # The chain tip is required on the command line rather than defaulted: see
+    # run_swap_tests()'s docstring for why there is no fallback height.
+    if len(sys.argv) != 2:  # noqa: PLR2004 -- program name plus one argument
+        print("usage: atomic_htlc_scripts.py <current_block_height_of_the_funded_chain>", flush=True)
+        print("  builds six example HTLC redeem scripts; broadcasts nothing, signs nothing", flush=True)
+        sys.exit(2)
+    run_swap_tests(int(sys.argv[1]))

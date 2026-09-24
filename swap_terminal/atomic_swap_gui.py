@@ -16,12 +16,20 @@ Mainnet-safe: NO, and it cannot be made mainnet-safe by configuration:
       modules/atomic_htlc_scripts.py hardcodes testnet version bytes, so every
       contract address this GUI can produce is a testnet address.
 
-BEFORE USING THE SWAP BUTTON, READ modules/atomic_swapper.py's HEADER. Three
-measured defects sit between this button and a working swap: the HTLC's refund
-branch is unspendable because the locktime is encoded as a varint rather than a
-script number, the locktime is hardcoded to a block height already in the past,
-and the participant and refund addresses are the same value. All three are
-fund-path findings handed to the operator rather than changed (rule 16).
+BEFORE USING THE SWAP BUTTON, READ modules/atomic_swapper.py's HEADER. The
+three measured defects that used to sit between this button and a working swap
+-- a locktime encoded as a varint rather than a script number, a locktime
+hardcoded to a block height already in the past, and a participant address that
+was the operator's own -- were fixed together on 2026-09-24. None of them has
+been proven on a chain: no contract built by this GUI has ever been funded and
+then refunded after expiry, and that is the only proof that settles the refund
+branch.
+
+THAT FIX ADDED A FIELD TO THIS WINDOW. "Counterparty's Address (chain you
+fund)" is the participant address -- THEIRS, on the chain being funded -- and
+the three "Your Testnet <coin> Address" fields are yours. The one for the coin
+being sent becomes the refund address. The swap refuses to start if the two are
+the same string.
 
 The swap result shown in the "Swap Complete" message box CONTAINS THE HTLC
 PREIMAGE, on purpose -- the initiator needs it to redeem the counterparty's leg
@@ -127,20 +135,33 @@ class AtomicSwapGUI:
         self.setup_address_field("LTC", 2)
         self.setup_address_field("GRC", 3)
         
+        # COUNTERPARTY (PARTICIPANT) ADDRESS. This field did not exist before
+        # 2026-09-24, and its absence was the third of the three HTLC defects:
+        # modules/atomic_swapper.py had nowhere to get a counterparty address
+        # from, so it passed the operator's OWN address as both the participant
+        # and the refund address and built a contract whose two branches needed
+        # the same key. The three fields above are "Your <coin> address"; this
+        # one is THEIRS, on the chain being funded, and the two can never be
+        # the same string -- start_swap() refuses that.
+        self.label_counterparty = tk.Label(self.master, text="Counterparty's Address (chain you fund):")
+        self.label_counterparty.grid(row=4, column=0, sticky="e")
+        self.entry_counterparty = tk.Entry(self.master, width=45)
+        self.entry_counterparty.grid(row=4, column=1, padx=5, pady=5)
+
         # Swap Amount
         self.label_swap_amount = tk.Label(self.master, text="Swap Amount (BTC for BTC2LTC):")
-        self.label_swap_amount.grid(row=4, column=0, sticky="e")
+        self.label_swap_amount.grid(row=5, column=0, sticky="e")
         self.entry_swap_amount = tk.Entry(self.master, width=10)
-        self.entry_swap_amount.grid(row=4, column=1, padx=5, pady=5, sticky="w")
+        self.entry_swap_amount.grid(row=5, column=1, padx=5, pady=5, sticky="w")
         self.entry_swap_amount.insert(0, "0.001")
         
         # Execute Swap Button
         self.button_swap = tk.Button(self.master, text="Execute Swap", command=self.swap_coins, state="disabled")
-        self.button_swap.grid(row=5, column=1, pady=10, sticky="e")
+        self.button_swap.grid(row=6, column=1, pady=10, sticky="e")
         
         # Marquee for market data
         self.marquee_label = tk.Label(self.master, text="", bg="black", fg="lime", font=("Courier", 12, "bold"))
-        self.marquee_label.grid(row=6, column=0, columnspan=4, sticky="we", pady=5)
+        self.marquee_label.grid(row=7, column=0, columnspan=4, sticky="we", pady=5)
         self.marquee_text = ""
         self.start_marquee()
 
@@ -348,14 +369,37 @@ class AtomicSwapGUI:
         addresses = self.get_validated_addresses(direction)
         if not addresses:
             return
-        
+
+        # The refund address is OURS on the chain being funded -- from_coin is
+        # that chain, so the operator's own validated address for it is the
+        # only correct choice and is not a free parameter. The participant
+        # address is the COUNTERPARTY's on the same chain, which only they can
+        # supply; there is nothing in this process that could derive it.
+        refund_address = addresses.get(from_coin, "")
+        participant_address = self.entry_counterparty.get().strip()
+        if not participant_address:
+            messagebox.showerror(
+                "Counterparty Address Required",
+                f"Enter the counterparty's {from_coin} address (the chain you are funding).\n\n"
+                "It is the address that can claim this contract by revealing the preimage. "
+                "Your own address goes in the refund branch and is taken from the field above.",
+            )
+            return
+        if participant_address == refund_address:
+            messagebox.showerror(
+                "Addresses Must Differ",
+                "The counterparty address and your own address are the same.\n\n"
+                "Both branches of the HTLC would then need the same key, so the counterparty could never "
+                "redeem it with the preimage.",
+            )
+            return
+
         swapper = Swapper(self.btc_client, self.ltc_client, self.grc_client)
         try:
             result = swapper.start_swap(
                 swap_direction=direction,
-                btc_address=addresses.get("BTC", ""),
-                ltc_address=addresses.get("LTC", ""),
-                grc_address=addresses.get("GRC", ""),
+                participant_address=participant_address,
+                refund_address=refund_address,
                 swap_amount=swap_amount
             )
             messagebox.showinfo("Swap Complete", f"Swap {direction} Completed!\n\n{result}")

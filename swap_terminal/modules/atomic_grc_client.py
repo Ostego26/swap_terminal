@@ -95,6 +95,7 @@ from decimal import Decimal
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script
+from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 from modules.utils import wait_for_tx_output
 
 # Configure logger
@@ -390,7 +391,10 @@ if __name__ == "__main__":
             secret_hash="ff" * 32,
             participant_address="tgrc1qexampleparticipantaddress0000000000000000000000",
             refund_address="tgrc1qexamplerefundaddress000000000000000000000000",
-            locktime=500000
+            # Derived from the daemon's own tip, never a literal -- see the
+            # BTC client's demo block for why a hardcoded 500000 is now
+            # dangerous rather than merely wrong.
+            locktime=contract_locktime("GRC", ROLE_INITIATOR, int(client.rpc_call("getblockcount")))
         )
         print("GRC Contract created:", example_contract)
     except Exception as e:  # noqa: BLE001 -- checked: the demo driver at the bottom of the file.
