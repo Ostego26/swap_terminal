@@ -212,6 +212,9 @@ export function hasValidSharedSecret(req, config) {
  * and no counterparty to unwind it with. A warning printed into a log that
  * nobody is watching is not a control over an irreversible action.
  *
+ * `armedDescription` is what the refusal names as the exposed capability. It
+ * is the caller's, because only the caller knows which routes it serves.
+ *
  * With NO payer keypair, /execute already returns 501 and the same
  * configuration is merely unwise, not dangerous, so it warns instead. That
  * asymmetry is deliberate: it lets someone run the bridge read-only for
@@ -224,7 +227,16 @@ export function hasValidSharedSecret(req, config) {
  * is worth stating because the obvious `Boolean(process.env.X)` spelling of
  * the same idea fails OPEN on an unset variable.
  */
-export function describeSharedSecretConfig({ enforcementEnabled, secret, payoutEnabled }) {
+export function describeSharedSecretConfig({ enforcementEnabled, secret, payoutEnabled, armedDescription }) {
+  // What this process can SPEND, named by the caller, because the two servers
+  // in this directory are armed in different ways and a message that names the
+  // wrong one is a wrong message -- which is a bug, with the same seriousness
+  // as wrong code (rule 16). server.js says "POST /swap-intents/:intentId/
+  // execute -- a signed, final Solana transfer"; services/gridcoin.js says
+  // "POST /deposit -- a Gridcoin sendtoaddress". Measured by running both:
+  // before this argument existed, gridcoin.js refused to start with a message
+  // naming an endpoint it does not have.
+  const armed = armedDescription || 'an endpoint that moves funds';
   const lines = [];
   const secretLength = typeof secret === 'string' ? secret.length : 0;
 
@@ -235,15 +247,15 @@ export function describeSharedSecretConfig({ enforcementEnabled, secret, payoutE
     if (payoutEnabled) {
       return {
         fatal:
-          'REQUIRE_GRIDCOIN_SHARED_SECRET=false with a payer keypair loaded would expose ' +
-          'POST /swap-intents/:intentId/execute -- a signed, final, irreversible Solana transfer -- ' +
-          'to unauthenticated callers. Refusing to start. Set REQUIRE_GRIDCOIN_SHARED_SECRET=true ' +
-          'and GRIDCOIN_VERIFY_SHARED_SECRET, or unset SOLANA_PAYER_KEYPAIR_PATH to run read-only.',
+          `REQUIRE_GRIDCOIN_SHARED_SECRET=false while this process is armed would expose ${armed} ` +
+          'to unauthenticated callers, and an on-chain transfer is final. Refusing to start. ' +
+          'Set REQUIRE_GRIDCOIN_SHARED_SECRET=true and GRIDCOIN_VERIFY_SHARED_SECRET, or run a ' +
+          'process that cannot move funds (for server.js, that means leaving SOLANA_PAYER_KEYPAIR_PATH unset).',
         lines,
       };
     }
     lines.push(
-      'payouts are disabled (no payer keypair), so /execute answers 501 and no funds can move; this configuration is unwise but not armed',
+      'this process is NOT armed (no payer keypair), so no funds can move; the configuration is unwise but not dangerous',
     );
     return { fatal: null, lines };
   }

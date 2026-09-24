@@ -192,6 +192,7 @@ const SHARED_SECRET_STATUS = describeSharedSecretConfig({
   enforcementEnabled: REQUIRE_GRIDCOIN_SHARED_SECRET,
   secret: GRIDCOIN_VERIFY_SHARED_SECRET,
   payoutEnabled: Boolean(configuredPayer),
+  armedDescription: 'POST /swap-intents/:intentId/execute -- a signed, final, irreversible Solana transfer',
 });
 
 for (const line of SHARED_SECRET_STATUS.lines) console.log(line);

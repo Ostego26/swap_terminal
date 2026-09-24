@@ -87,6 +87,7 @@ const SHARED_SECRET_CONFIG = {
 const SHARED_SECRET_STATUS = describeSharedSecretConfig({
   ...SHARED_SECRET_CONFIG,
   payoutEnabled: true,
+  armedDescription: 'POST /deposit -- a Gridcoin sendtoaddress with an amount taken from the request body and no ceiling',
 });
 for (const line of SHARED_SECRET_STATUS.lines) console.log(line);
 if (SHARED_SECRET_STATUS.fatal) throw new Error(SHARED_SECRET_STATUS.fatal);

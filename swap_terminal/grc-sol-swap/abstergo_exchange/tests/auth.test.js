@@ -147,6 +147,35 @@ test('startup REFUSES enforcement-off while a payer keypair is loaded', () => {
   assert.match(status.fatal, /Refusing to start/);
 });
 
+test('the refusal names the CALLER\'s armed route, not a hard-coded one', () => {
+  // Measured by running services/gridcoin.js with enforcement off: it refused
+  // to start with a message naming POST /swap-intents/:intentId/execute, a
+  // route it does not serve. A message that names the wrong thing is a bug of
+  // the same seriousness as wrong code (rule 16), and the operator reading it
+  // at 3am is the person it misleads.
+  const bridge = describeSharedSecretConfig({
+    enforcementEnabled: false,
+    secret: null,
+    payoutEnabled: true,
+    armedDescription: 'POST /swap-intents/:intentId/execute -- a Solana transfer',
+  });
+  assert.match(bridge.fatal, /swap-intents/);
+
+  const deposit = describeSharedSecretConfig({
+    enforcementEnabled: false,
+    secret: null,
+    payoutEnabled: true,
+    armedDescription: 'POST /deposit -- a Gridcoin sendtoaddress',
+  });
+  assert.match(deposit.fatal, /sendtoaddress/);
+  assert.ok(!deposit.fatal.includes('swap-intents'), 'the deposit server must not be told about a route it does not serve');
+
+  // And with no description, it still refuses -- it just cannot be specific.
+  const unnamed = describeSharedSecretConfig({ enforcementEnabled: false, secret: null, payoutEnabled: true });
+  assert.ok(unnamed.fatal);
+  assert.match(unnamed.fatal, /an endpoint that moves funds/);
+});
+
 test('startup ALLOWS enforcement-off when no payer keypair is loaded, and says so', () => {
   const status = describeSharedSecretConfig({ enforcementEnabled: false, secret: null, payoutEnabled: false });
   assert.equal(status.fatal, null);
