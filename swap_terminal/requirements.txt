@@ -25,11 +25,19 @@
 # to work on. Every ceiling below is the next major above a version observed
 # working, not a recollection of what the current release was.
 #
-# One exception, stated rather than hidden: ecdsa is NOT installed in the
-# environment where the 83 tests pass, and the suite still passes -- so no test
-# exercises identity.py's import path, and its range below is the only one here
-# that has not been observed working. Treat it as a declaration, not a
-# measurement (rule 17).
+# The ecdsa range was the one exception when this was written -- unverified,
+# because ecdsa is not installed in the environment the 83 tests pass in, and
+# they pass anyway. It was CONFIRMED on 2026-09-24 on the operator's machine:
+# `pip install -r` resolved ecdsa 0.19.2 against `>=0.19,<1.0`, alongside
+# pandas 3.0.6, yfinance 1.7.0, pytest 9.1.1 and ruff 0.16.9. Every range in
+# these two files is now observed working on at least one machine.
+#
+# What that install did NOT establish, and the distinction is rule 17's: that
+# the pin resolves is not that the code behind it runs. NO TEST EXERCISES
+# identity.py, which is the only importer of ecdsa -- the suite passes with the
+# package absent entirely. Its signing path is undeclared territory, and that
+# is also where the unfixed proposal about store_attestation_on_chain()
+# spending a whole UTXO as fee lives.
 #
 # Development-only tooling (pytest, ruff) is NOT here -- see requirements-dev.txt
 # at the repository root. Keeping them apart means a deployment does not install
