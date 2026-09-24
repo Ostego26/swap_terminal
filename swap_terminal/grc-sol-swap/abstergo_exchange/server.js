@@ -1,3 +1,43 @@
+/**
+ * The Solana bridge: verify a Gridcoin deposit, pay the matching SOL out.
+ *
+ * Role: file (entry point -- `node server.js`) plus its own route layer
+ * Reads: the process environment, swap_intents.json (through intent_store.js),
+ *        the Gridcoin daemon over JSON-RPC, the Solana RPC endpoint, the price
+ *        feed at VITE_API_URL, and the payer keypair at
+ *        SOLANA_PAYER_KEYPAIR_PATH if one is configured
+ * Writes: swap_intents.json (through intent_store.js) AND THE SOLANA CHAIN
+ * Can move funds: YES. `sendSolPayout()` signs with the payer keypair and calls
+ *        sendAndConfirmTransaction. It is the only broadcast in this suite and
+ *        it is final the instant the cluster accepts it.
+ * Mainnet-safe: NO. DEVNET_RPC_URL is a variable NAME, not a guarantee -- point
+ *        it at a mainnet endpoint and this server pays mainnet SOL. Running it
+ *        with a funded payer keypair is operating the payout path, not
+ *        inspecting it.
+ *
+ * THE ROUTE TABLE, and what each route requires. Kept here because the answer
+ * to "which routes are open?" should be readable in one place rather than
+ * assembled by grepping nine handlers (rule 14: pasted output has to be
+ * self-describing).
+ *
+ *   GET  /health                            open (minimal) / secret (detailed)
+ *   GET  /prices                            open      -- public price feed proxy
+ *   GET  /deposit-addresses                 open      -- public addresses only
+ *   GET  /swap-intents/:intentId            SECRET    <- was open
+ *   POST /quote/grc-to-sol                  open      -- pure function, no state
+ *   POST /swap-intents                      open      -- depositor entry point
+ *   POST /swap-intents/:id/verify-gridcoin  SECRET    -- was already
+ *   POST /swap-intents/:id/execute          SECRET    <- WAS OPEN, AND IT PAYS
+ *
+ * The reasoning for each is at its handler, including for the ones that stay
+ * open: "why is this not authenticated" is a question that gets asked once per
+ * reader and should be answered next to the code rather than re-derived.
+ *
+ * The second Express server in this directory, services/gridcoin.js, is not
+ * part of this file and carries its own header. It is also not started by
+ * anything -- see the note there.
+ */
+
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
@@ -5,6 +45,21 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import {
+  SHARED_SECRET_HEADER,
+  describeSharedSecretConfig,
+  hasValidSharedSecret,
+  requireSharedSecret as assertSharedSecret,
+} from './auth.js';
+import {
+  claimIntentForPayout,
+  createIntent,
+  formatDurationMs,
+  getIntentById,
+  recordPayoutFailure,
+  recordPayoutSuccess,
+  updateIntent,
+} from './intent_store.js';
 import {
   Connection,
   PublicKey,
@@ -96,52 +151,52 @@ if (SOLANA_HOT_WALLET_PUBLIC_KEY && derivedHotWalletPublicKey && SOLANA_HOT_WALL
 
 const EFFECTIVE_SOLANA_HOT_WALLET_PUBLIC_KEY = derivedHotWalletPublicKey || SOLANA_HOT_WALLET_PUBLIC_KEY;
 
-function ensureIntentStore() {
-  if (!fs.existsSync(SWAP_INTENTS_PATH)) {
-    fs.writeFileSync(SWAP_INTENTS_PATH, JSON.stringify({ intents: [] }, null, 2));
-  }
+/**
+ * The shared-secret configuration, resolved once and passed to auth.js.
+ *
+ * auth.js deliberately does not read process.env itself (rule 12: no
+ * import-time side effects, and a decision that takes its inputs as arguments
+ * is a decision that can be tested with seeded ones). This object is that
+ * argument.
+ */
+const SHARED_SECRET_CONFIG = {
+  enforcementEnabled: REQUIRE_GRIDCOIN_SHARED_SECRET,
+  secret: GRIDCOIN_VERIFY_SHARED_SECRET,
+};
+
+/**
+ * Throw a 401 unless the request carries the shared secret.
+ *
+ * Kept as a one-line wrapper so every route reads `requireSharedSecret(req)`
+ * exactly as it did before, while the decision itself lives in auth.js where a
+ * test can call it with seeded inputs.
+ */
+function requireSharedSecret(req) {
+  assertSharedSecret(req, SHARED_SECRET_CONFIG);
 }
 
-function loadIntentStore() {
-  ensureIntentStore();
-  try {
-    const parsed = JSON.parse(fs.readFileSync(SWAP_INTENTS_PATH, 'utf8'));
-    if (!parsed || !Array.isArray(parsed.intents)) return { intents: [] };
-    return parsed;
-  } catch {
-    return { intents: [] };
-  }
-}
+/**
+ * FAIL-CLOSED STARTUP CHECK -- runs at import, before app.listen.
+ *
+ * Measured 2026-09-24: REQUIRE_GRIDCOIN_SHARED_SECRET could be set to 'false'
+ * and the server would start, serve, and pay out, with every route open. The
+ * DEFAULT was already safe (enforcement is disabled only by the exact string
+ * 'false', so unset, empty, '0' and 'no' all enforce -- fail-closed by
+ * construction, unlike the `Boolean(process.env.X)` spelling of the same idea,
+ * which fails open on an unset variable). What was missing was any check on
+ * the combination of that switch with an armed payer keypair. See auth.js's
+ * describeSharedSecretConfig for why that one combination is fatal rather than
+ * a warning.
+ */
+const SHARED_SECRET_STATUS = describeSharedSecretConfig({
+  enforcementEnabled: REQUIRE_GRIDCOIN_SHARED_SECRET,
+  secret: GRIDCOIN_VERIFY_SHARED_SECRET,
+  payoutEnabled: Boolean(configuredPayer),
+  armedDescription: 'POST /swap-intents/:intentId/execute -- a signed, final, irreversible Solana transfer',
+});
 
-function saveIntentStore(store) {
-  fs.writeFileSync(SWAP_INTENTS_PATH, JSON.stringify(store, null, 2));
-}
-
-function listIntents() {
-  return loadIntentStore().intents;
-}
-
-function getIntentById(intentId) {
-  return listIntents().find((intent) => intent.intentId === intentId) || null;
-}
-
-function persistNewIntent(intent) {
-  const store = loadIntentStore();
-  store.intents.push(intent);
-  saveIntentStore(store);
-  return intent;
-}
-
-function updateIntent(intentId, updater) {
-  const store = loadIntentStore();
-  const index = store.intents.findIndex((intent) => intent.intentId === intentId);
-  if (index === -1) throw new Error(`Unknown intentId: ${intentId}`);
-  const current = store.intents[index];
-  const next = updater({ ...current });
-  store.intents[index] = next;
-  saveIntentStore(store);
-  return next;
-}
+for (const line of SHARED_SECRET_STATUS.lines) console.log(line);
+if (SHARED_SECRET_STATUS.fatal) throw new Error(SHARED_SECRET_STATUS.fatal);
 
 function newIntentId() {
   return `si_${crypto.randomBytes(12).toString('hex')}`;
@@ -153,19 +208,6 @@ function nowIso() {
 
 function isIntentExpired(intent) {
   return Date.now() > new Date(intent.expiresAt).getTime();
-}
-
-function requireSharedSecret(req) {
-  if (!REQUIRE_GRIDCOIN_SHARED_SECRET) return;
-  if (!GRIDCOIN_VERIFY_SHARED_SECRET) {
-    throw new Error('GRIDCOIN_VERIFY_SHARED_SECRET is required when verification secret enforcement is enabled');
-  }
-  const provided = req.get('x-gridcoin-verify-secret');
-  if (provided !== GRIDCOIN_VERIFY_SHARED_SECRET) {
-    const err = new Error('Unauthorized Gridcoin verification request');
-    err.statusCode = 401;
-    throw err;
-  }
 }
 
 async function getPrices() {
@@ -333,9 +375,37 @@ async function verifyGridcoinReceiptForIntent(intent, gridcoinTxid) {
   };
 }
 
-app.get('/health', async (_req, res) => {
+/**
+ * Liveness, plus diagnostics to an authenticated caller.
+ *
+ * AUTHENTICATION: partially required, and the split is the point.
+ *
+ * Before 2026-09-24 this route was fully open and answered with the Gridcoin
+ * RPC URL, the hot-wallet public key, the absolute path of the intent store,
+ * and whether payouts were armed. That is a map of the deployment handed to
+ * anyone who can reach the port -- not a key and not money, but every one of
+ * those is a fact an attacker would otherwise have to guess, and
+ * `payoutEnabled: true` in particular says "this host will sign transfers."
+ *
+ * Making the whole route authenticated would have broken the legitimate use:
+ * an unauthenticated liveness probe (a container health check, an uptime
+ * monitor) has no secret to present and only needs to know the process is up.
+ * So the probe still gets an answer, and the answer carries nothing that is
+ * not already implied by the port being open.
+ */
+app.get('/health', async (req, res) => {
+  const detailed = hasValidSharedSecret(req, SHARED_SECRET_CONFIG);
   try {
     const version = await solanaConnection.getVersion();
+    if (!detailed) {
+      // Rule 14: an empty or ambiguous result is a defect. This says what it
+      // is and why it is short, so an operator who expected the full body can
+      // tell "misconfigured" from "unauthenticated" without reading the source.
+      return res.json({
+        ok: true,
+        detail: `omitted; present the ${SHARED_SECRET_HEADER} header for the full diagnostic body`,
+      });
+    }
     res.json({
       ok: true,
       rpcUrl: DEVNET_RPC_URL,
@@ -349,10 +419,23 @@ app.get('/health', async (_req, res) => {
       gridcoinMinConfirmations: GRIDCOIN_MIN_CONFIRMATIONS,
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
+    // The Solana RPC being unreachable is a real 500 and is reported as one.
+    // The message is echoed only to an authenticated caller, because an RPC
+    // error string routinely contains the endpoint URL.
+    res.status(500).json({ ok: false, error: detailed ? error.message : 'health check failed' });
   }
 });
 
+/**
+ * AUTHENTICATION: deliberately NOT required, and this is the reasoning, so the
+ * next reader does not have to decide it again.
+ *
+ * It is a cached read-through proxy of a public price feed (CoinGecko). It
+ * writes no state, reads no intent, names no address and cannot move funds --
+ * and src/App.jsx fetches it directly from the browser, which has nowhere safe
+ * to hold a shared secret. Gating it would break the frontend to protect data
+ * that is public at its source.
+ */
 app.get('/prices', async (_req, res) => {
   try {
     res.json(await getPrices());
@@ -361,6 +444,14 @@ app.get('/prices', async (_req, res) => {
   }
 });
 
+/**
+ * AUTHENTICATION: deliberately NOT required.
+ *
+ * Both values are public by construction -- the Gridcoin deposit address is
+ * the address a depositor is supposed to send to, and a Solana public key is
+ * public. Neither is a credential and neither is a decision. Withholding them
+ * would protect nothing and would break the deposit flow.
+ */
 app.get('/deposit-addresses', (_req, res) => {
   res.json({
     gridcoinDepositAddress: GRIDCOIN_DEPOSIT_ADDRESS,
@@ -368,12 +459,46 @@ app.get('/deposit-addresses', (_req, res) => {
   });
 });
 
+/**
+ * AUTHENTICATION: NOW REQUIRED. It was not before 2026-09-24.
+ *
+ * This route returns a whole intent: the depositor's destination Solana
+ * address, the exact lamport amount, the verified deposit including its
+ * Gridcoin txid, and -- once paid -- the payout signature. That is the full
+ * transaction history of one customer, handed to anyone who has the intentId.
+ *
+ * And the intentId is not a secret worth relying on as one. It is 12 random
+ * bytes, so it is not guessable, but it is handed to a browser, it travels in
+ * a URL (and therefore into access logs and Referer headers), and an
+ * unauthenticated GET that echoes the entire record turns one leaked id into
+ * a complete disclosure. "Unguessable identifier" is not authentication; it is
+ * an identifier.
+ *
+ * WHO THIS COULD BREAK: no caller in this tree. Measured by grepping every
+ * .js/.jsx under grc-sol-swap/ for `swap-intents` -- the only frontend call is
+ * SwapIntentForm.jsx's POST to /swap-intents. Nothing polls this route. If a
+ * depositor-facing status page is added later, it needs a per-intent token,
+ * not a shared operator secret.
+ */
 app.get('/swap-intents/:intentId', (req, res) => {
-  const intent = getIntentById(req.params.intentId);
-  if (!intent) return res.status(404).json({ success: false, error: 'Intent not found' });
-  res.json({ success: true, intent });
+  try {
+    requireSharedSecret(req);
+    const intent = getIntentById(SWAP_INTENTS_PATH, req.params.intentId);
+    if (!intent) return res.status(404).json({ success: false, error: 'Intent not found' });
+    res.json({ success: true, intent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
+/**
+ * AUTHENTICATION: deliberately NOT required.
+ *
+ * A quote is a pure function of a public price feed and an amount. It writes
+ * nothing, reads no intent, and creates no obligation -- the intent created
+ * later carries its own quote, and `/execute` pays `intent.expectedQuote`, not
+ * anything a quote request returned. Gating it would protect nothing.
+ */
 app.post('/quote/grc-to-sol', async (req, res) => {
   try {
     const grcAmount = parsePositiveNumber(req.body?.grcAmount, 'grcAmount');
@@ -384,6 +509,36 @@ app.post('/quote/grc-to-sol', async (req, res) => {
   }
 });
 
+/**
+ * AUTHENTICATION: deliberately NOT required, with a caveat recorded below.
+ *
+ * This is the depositor's entry point and SwapIntentForm.jsx calls it from the
+ * browser, which has nowhere to hold a shared secret. An intent created here
+ * starts at `awaiting_deposit` and cannot become payable without a
+ * `/verify-gridcoin` call, which DOES require the secret -- so creating one
+ * releases no funds and commits the operator to nothing.
+ *
+ * TWO THINGS THIS LEAVES OPEN, named rather than fixed, because both are
+ * changes to what the bridge will accept and therefore the operator's (rule
+ * 16):
+ *
+ *   - Unbounded growth. Every POST appends a row to a JSON file that is read
+ *     in full on every request. Nothing rate-limits it and nothing prunes
+ *     expired intents. A few thousand junk intents make every route slow; a
+ *     few million make the process run out of memory parsing its own store.
+ *     The migration to SQLite (migrate_swap_intents.py) removes the
+ *     read-everything-per-request half of this.
+ *
+ *   - An intent names the DESTINATION but nothing binds it to a DEPOSITOR.
+ *     Anyone can create an intent for 100 GRC paying their own Solana address.
+ *     Verification then checks that some Gridcoin transaction paid the shared
+ *     deposit address with at least that amount -- it does not check WHO sent
+ *     it (verifyGridcoinReceiptForIntent returns sourceGridcoinAddress: null,
+ *     hard-coded). An operator verifying a txid against the wrong intent would
+ *     pay the wrong person, and the server would not be able to tell. That is
+ *     a property of the verification step, not of this route, and it is
+ *     surfaced rather than changed.
+ */
 app.post('/swap-intents', async (req, res) => {
   try {
     const grcAmount = parsePositiveNumber(req.body?.grcAmount, 'grcAmount');
@@ -407,13 +562,27 @@ app.post('/swap-intents', async (req, res) => {
       payout: null,
     };
 
-    persistNewIntent(intent);
+    await createIntent(SWAP_INTENTS_PATH, intent);
     res.status(201).json({ success: true, intent });
   } catch (error) {
-    res.status(400).json({ success: false, error: error.message });
+    // A store-level failure (unreadable JSON, lock contention) carries its own
+    // statusCode and is NOT a 400: the caller's request was fine. Conflating
+    // the two is how "the store is corrupt" gets reported to a depositor as
+    // "your amount is invalid".
+    res.status(error.statusCode || 400).json({ success: false, error: error.message });
   }
 });
 
+/**
+ * AUTHENTICATION: required, and it was the ONLY route that checked before
+ * 2026-09-24. The check itself was `provided !== SECRET`, a short-circuiting
+ * string comparison whose failure time leaks how many leading bytes matched;
+ * it is now a constant-time digest comparison in auth.js.
+ *
+ * This is the step that makes an intent payable, so it is the correct place
+ * for a secret: only the operator, who has watched the Gridcoin deposit
+ * confirm, can move an intent to `verified`.
+ */
 app.post('/swap-intents/:intentId/verify-gridcoin', async (req, res) => {
   try {
     requireSharedSecret(req);
@@ -422,21 +591,39 @@ app.post('/swap-intents/:intentId/verify-gridcoin', async (req, res) => {
     const gridcoinTxid = String(req.body?.gridcoinTxid || '').trim();
     if (!gridcoinTxid) throw new Error('gridcoinTxid is required');
 
-    const existing = getIntentById(intentId);
+    const existing = getIntentById(SWAP_INTENTS_PATH, intentId);
     if (!existing) return res.status(404).json({ success: false, error: 'Intent not found' });
     if (existing.status === 'paid') return res.status(409).json({ success: false, error: 'Intent already paid' });
+    if (existing.status === 'paying') return res.status(409).json({ success: false, error: 'Intent has a payout in flight' });
+    if (existing.status === 'payout_failed') {
+      return res.status(409).json({
+        success: false,
+        error: 'Intent has a failed payout and needs an operator to establish on-chain what happened before it can be re-armed',
+      });
+    }
     if (existing.status === 'verified') return res.status(409).json({ success: false, error: 'Intent already verified' });
     if (isIntentExpired(existing)) {
-      const expired = updateIntent(intentId, (current) => ({ ...current, status: 'expired' }));
+      const expired = await updateIntent(SWAP_INTENTS_PATH, intentId, (current) => ({ ...current, status: 'expired' }));
       return res.status(400).json({ success: false, error: 'Intent has expired', intent: expired });
     }
 
+    // The network call happens OUTSIDE the store lock, deliberately. Holding a
+    // lock across an RPC round trip to a Gridcoin daemon means one slow or
+    // hung daemon stops every other request in the process. The status
+    // transition below re-reads under the lock and re-checks, so nothing is
+    // decided from the stale copy read above.
     const verifiedDeposit = await verifyGridcoinReceiptForIntent(existing, gridcoinTxid);
 
-    const updated = updateIntent(intentId, (intent) => {
-      intent.status = 'verified';
-      intent.verifiedDeposit = verifiedDeposit;
-      return intent;
+    const updated = await updateIntent(SWAP_INTENTS_PATH, intentId, (intent) => {
+      if (intent.status !== 'awaiting_deposit') {
+        // Re-checked inside the lock: between the read above and here, another
+        // request may have verified, paid or expired this intent. Overwriting
+        // a `paying` or `paid` intent with `verified` would re-arm a payout.
+        const err = new Error(`Intent moved to ${intent.status} while its deposit was being verified; refusing to overwrite`);
+        err.statusCode = 409;
+        throw err;
+      }
+      return { ...intent, status: 'verified', verifiedDeposit };
     });
 
     res.json({ success: true, intent: updated });
@@ -445,8 +632,50 @@ app.post('/swap-intents/:intentId/verify-gridcoin', async (req, res) => {
   }
 });
 
+/**
+ * AUTHENTICATION: NOW REQUIRED. IT HAD NONE.
+ *
+ * This is the route that signs and broadcasts a Solana transfer out of the hot
+ * wallet, and before 2026-09-24 it was the only fund-moving route in either of
+ * the two Express servers here with no check of any kind on the caller. It
+ * read the intent store, compared `status === 'verified'`, and called
+ * sendSolPayout(). Anyone who could reach the port and produce an intentId
+ * could trigger a final, irreversible transfer.
+ *
+ * WHAT ELSE CHANGED HERE, AND WHY EACH PIECE IS LOAD-BEARING.
+ *
+ * The old handler was check-then-act across an await:
+ *
+ *     intent = getIntentById(id)            // read the file
+ *     if (intent.status !== 'verified') ...  // decide
+ *     updateIntent(id, -> 'paying')          // write the file
+ *     await sendSolPayout(...)               // spend
+ *
+ * Two concurrent requests for one intentId interleave at the awaits and both
+ * reach sendSolPayout. Node being single-threaded does not prevent it: the
+ * event loop runs the other handler at every await point. `claimIntentForPayout`
+ * collapses the read, the decision and the durable write into one critical
+ * section held by both an in-process mutex and a cross-process lock, and
+ * returns a boolean that IS the authorization. Nothing below re-derives it.
+ *
+ * This is the same defect and the same fix as the Python payout worker on the
+ * other side of this repository -- services/payout_service.py, measured in
+ * tests/test_payout_concurrency.py, where two workers pay one swap through a
+ * guard that is a read. Named at both sites (rule 8) so that whoever finds one
+ * is told the other exists.
+ *
+ * The failure path no longer rolls `paying` back to `verified`. See
+ * intent_store.js defect 3: an error out of sendAndConfirmTransaction includes
+ * confirmation timeouts on transactions that were broadcast and may have
+ * landed, and re-arming on one of those is how one deposit becomes two
+ * transfers.
+ */
 app.post('/swap-intents/:intentId/execute', async (req, res) => {
+  const startedAt = Date.now();
+  let claim = null;
+
   try {
+    requireSharedSecret(req);
     const { intentId } = req.params;
 
     if (!configuredPayer) {
@@ -456,71 +685,94 @@ app.post('/swap-intents/:intentId/execute', async (req, res) => {
       });
     }
 
-    let intent = getIntentById(intentId);
-    if (!intent) return res.status(404).json({ success: false, error: 'Intent not found' });
+    // ONE call, and its answer is the whole authorization. Expiry, status,
+    // the presence of a verified deposit and the transition to `paying` all
+    // happen inside the store lock and are fsynced before this returns.
+    claim = await claimIntentForPayout(SWAP_INTENTS_PATH, intentId);
 
-    if (isIntentExpired(intent)) {
-      intent = updateIntent(intentId, (current) => ({ ...current, status: 'expired' }));
-      return res.status(400).json({ success: false, error: 'Intent has expired', intent });
+    if (!claim.claimed) {
+      // Every refusal reports WHICH one it is, next to the status that caused
+      // it (rule 14). A bare 409 taught an operator nothing about whether to
+      // wait, look at the chain, or create a new intent.
+      const refusals = {
+        not_found: [404, 'Intent not found'],
+        expired: [400, 'Intent has expired'],
+        verified_without_deposit: [
+          500,
+          'Intent is marked verified but carries no verified deposit; the store is inconsistent and this was not written by this server',
+        ],
+        not_claimable: [
+          409,
+          `Intent is not claimable from status '${claim.status}'  <- payable only from 'verified'. ` +
+            `'paying' means a payout is already in flight or a process died holding the claim; ` +
+            `'paid' means it is done; ` +
+            `'payout_failed' means an earlier attempt errored and an operator must establish on-chain what happened before re-arming.`,
+        ],
+      };
+      const [status, message] = refusals[claim.reason] || [409, `Intent refused: ${claim.reason}`];
+      return res.status(status).json({ success: false, error: message, intent: claim.intent });
     }
 
-    if (intent.status === 'paid') {
-      return res.status(409).json({ success: false, error: 'Intent already spent', intent });
-    }
-
-    if (intent.status !== 'verified' || !intent.verifiedDeposit) {
-      return res.status(409).json({ success: false, error: 'Intent is not verified yet', intent });
-    }
-
-    intent = updateIntent(intentId, (current) => ({
-      ...current,
-      status: 'paying',
-      payout: {
-        ...(current.payout || {}),
-        startedAt: nowIso(),
-      },
-    }));
-
+    const intent = claim.intent;
     const signature = await sendSolPayout(intent.destinationSolanaAddress, intent.expectedQuote.lamports);
 
-    const paidIntent = updateIntent(intentId, (current) => ({
-      ...current,
-      status: 'paid',
-      payout: {
-        ...(current.payout || {}),
-        signature,
-        lamports: current.expectedQuote.lamports,
-        solAmount: current.expectedQuote.solAmount,
-        paidAt: nowIso(),
-      },
-    }));
+    const paidIntent = await recordPayoutSuccess(SWAP_INTENTS_PATH, intentId, claim.claimToken, {
+      signature,
+      lamports: intent.expectedQuote.lamports,
+      solAmount: intent.expectedQuote.solAmount,
+    });
 
+    console.log(
+      `payout sent intent=${intentId} lamports=${intent.expectedQuote.lamports} signature=${signature} in ${formatDurationMs(Date.now() - startedAt)}`,
+    );
     res.json({ success: true, intent: paidIntent, signature });
   } catch (error) {
-    try {
-      const { intentId } = req.params;
-      const existing = getIntentById(intentId);
-      if (existing && existing.status === 'paying') {
-        updateIntent(intentId, (current) => ({
-          ...current,
-          status: 'verified',
-          payout: {
-            ...(current.payout || {}),
-            error: error.message,
-            failedAt: nowIso(),
-          },
-        }));
+    if (claim?.claimed) {
+      // The claim is ours and the send failed or its outcome is unknown. Mark
+      // it terminally failed so nothing claims it again, and say so loudly:
+      // this line is the operator's only prompt to go and look at the chain.
+      console.error(
+        `payout FAILED intent=${req.params.intentId} after ${formatDurationMs(Date.now() - startedAt)}: ${error.message}  <- ` +
+          `the transfer may still have been broadcast; check the hot wallet on chain before re-arming this intent`,
+      );
+      try {
+        await recordPayoutFailure(SWAP_INTENTS_PATH, req.params.intentId, claim.claimToken, error.message);
+      } catch (recordError) {
+        // Checked, and NOT swallowed silently (rule 12). If the store cannot
+        // record the failure, the intent is left at `paying` -- which is
+        // still safe, because `paying` is not claimable -- but the reason is
+        // lost unless it is printed here. The original error is what the
+        // caller is told; this one is what the operator needs.
+        console.error(
+          `payout failure could NOT be recorded for intent=${req.params.intentId}: ${recordError.message}  <- ` +
+            `intent remains 'paying' and is not claimable, which is safe, but the store does not say why`,
+        );
       }
-    } catch {}
-    res.status(400).json({ success: false, error: error.message });
+    }
+    res.status(error.statusCode || 400).json({ success: false, error: error.message });
   }
 });
 
+/**
+ * Startup banner.
+ *
+ * Rule 14: announce before, not only after, and echo the parameters that
+ * decide the answer. An operator reading a pasted banner a day later has to be
+ * able to tell which store, which Gridcoin daemon, which Solana endpoint and
+ * whether the thing was armed -- without opening the source or the .env.
+ *
+ * What is deliberately NOT printed: the shared secret, the keypair path's
+ * CONTENTS, and any credential. auth.js prints the secret's LENGTH, which is
+ * what lets a truncated value be spotted without reading it back.
+ */
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Effective hot wallet: ${EFFECTIVE_SOLANA_HOT_WALLET_PUBLIC_KEY || 'not configured'}`);
-  console.log(`Payout enabled: ${Boolean(configuredPayer)}`);
+  console.log(`Payout enabled: ${Boolean(configuredPayer)}  <- true means this process will sign and broadcast SOL transfers`);
   console.log(`Swap intent store: ${SWAP_INTENTS_PATH}`);
+  console.log(`Solana RPC: ${DEVNET_RPC_URL}  <- the variable is named DEVNET_RPC_URL; the URL is what decides the network`);
   console.log(`Gridcoin RPC URL: ${GRIDCOIN_RPC_URL}`);
-  console.log(`Gridcoin min confirmations: ${GRIDCOIN_MIN_CONFIRMATIONS}`);
+  console.log(`Gridcoin min confirmations: ${GRIDCOIN_MIN_CONFIRMATIONS}  <- not a duration; never rendered in microfortnights (rule 6)`);
+  console.log('Routes requiring the shared secret: GET /swap-intents/:id, POST /swap-intents/:id/verify-gridcoin, POST /swap-intents/:id/execute');
+  console.log('Routes open: GET /health (minimal body), GET /prices, GET /deposit-addresses, POST /quote/grc-to-sol, POST /swap-intents');
 });
