@@ -1,0 +1,88 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  padding: 2rem;
+  line-height: 1.5;
+  background: #f8f8f8;
+}
+
+header {
+  margin-bottom: 1rem;
+}
+
+h1 {
+  color: #2670B9;
+  margin-bottom: 0.2rem;
+}
+
+section {
+  background-color: rgba(255, 255, 255, 0.95);
+  margin-bottom: 20px;
+  padding: 1rem;
+  border-radius: 8px;
+  box-shadow: 0 0 8px rgba(0,0,0,0.1);
+}
+
+.marquee-container {
+  background-color: #000;
+  color: lime;
+  padding: 10px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 1.1rem;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+#crypto-marquee {
+  display: inline-block;
+  animation: scroll-left 20s linear infinite;
+}
+
+@keyframes scroll-left {
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
+.grid-form {
+  display: grid;
+  grid-template-columns: 180px 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+label {
+  font-weight: bold;
+  color: #333;
+}
+
+button {
+  padding: 8px 12px;
+  background-color: #2670B9;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  background-color: #3691de;
+}
+
+button:disabled {
+  background-color: #aaa;
+  cursor: not-allowed;
+}
+
+input, select {
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+pre {
+  background-color: #f4f4f4;
+  padding: 1rem;
+  border: 1px solid #ccc;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}

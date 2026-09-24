@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GRC Swap Terminal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header>
+    <h1>GRC Swap Terminal</h1>
+    <p>Brokered hot-wallet swap MVP</p>
+  </header>
+
+  <section>
+    <div class="marquee-container">
+      <p id="crypto-marquee">Loading rates...</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>1. Request quote</h2>
+    <div class="grid-form">
+      <label for="from_asset">Send</label>
+      <select id="from_asset">
+        <option value="GRC">GRC</option>
+        <option value="BTC">BTC</option>
+        <option value="LTC">LTC</option>
+      </select>
+
+      <label for="to_asset">Receive</label>
+      <select id="to_asset">
+        <option value="BTC">BTC</option>
+        <option value="GRC">GRC</option>
+        <option value="LTC">LTC</option>
+      </select>
+
+      <label for="input_amount">Amount</label>
+      <input id="input_amount" type="number" min="0" step="any" placeholder="1000">
+
+      <button id="request_quote_btn">Get quote</button>
+    </div>
+    <pre id="quote_output">No quote yet.</pre>
+  </section>
+
+  <section>
+    <h2>2. Create swap</h2>
+    <div class="grid-form">
+      <label for="payout_address">Your payout address</label>
+      <input id="payout_address" type="text" placeholder="Destination address">
+      <button id="create_swap_btn" disabled>Create swap</button>
+    </div>
+    <pre id="swap_output">No swap created yet.</pre>
+  </section>
+
+  <section>
+    <h2>3. Deposit and status</h2>
+    <div class="grid-form">
+      <label for="swap_id_lookup">Swap ID</label>
+      <input id="swap_id_lookup" type="text" placeholder="s_xxx">
+      <button id="lookup_swap_btn">Lookup</button>
+      <button id="refresh_rates_btn">Refresh rates</button>
+    </div>
+    <pre id="status_output">Waiting for swap.</pre>
+  </section>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
