@@ -1,21 +1,85 @@
 #!/usr/bin/env python3
-"""
-File: atomic_btc_client.py
+"""Bitcoin HTLC client: build, fund and redeem a contract over JSON-RPC.
 
-Description:
-  This module implements the BTCClient class which communicates with a Bitcoin node via JSON-RPC.
-  It provides methods to:
-    - Make JSON-RPC calls.
-    - Import HTLC redeem scripts and private keys.
-    - Create HTLC contracts.
-    - Redeem HTLC contracts.
-    - Retrieve the balance for a given address.
+Role: submodule (one chain's HTLC operations)
+Reads: a Bitcoin wallet daemon -- decodescript, getrawtransaction, listunspent,
+       getreceivedbyaddress; and the environment variables BTC_RPC_WALLET and
+       BTC_HTLC_PRIVKEY
+Writes: nothing to disk. THE CHAIN AND THE WALLET: importaddress and
+       importprivkey mutate the wallet; sendtoaddress and sendrawtransaction
+       broadcast.
+Can move funds: YES. create_contract() sends coins to a P2SH address and
+       redeem_contract() signs and broadcasts a spend of it.
+Mainnet-safe: NO. It also cannot build a mainnet contract correctly --
+       modules/atomic_htlc_scripts.py hardcodes TESTNET version bytes (0x6F
+       P2PKH, 0xC4 P2SH), so every address it derives is a testnet address.
+
+THE THREE CLIENTS DISAGREE. THE TABLE IS IN ALL THREE FILES, ON PURPOSE.
+
+Rule 8: "if they genuinely differ, the difference is the point and belongs in a
+comment at BOTH sites, naming the other one. A reader who finds one must be
+told the other exists." Measured 2026-09-24 by reading
+modules/atomic_btc_client.py, modules/atomic_ltc_client.py and
+modules/atomic_grc_client.py side by side. The last column names which file is
+the odd one out; where none is named, no two agree.
+
+  aspect                     BTC                 LTC                 GRC                 odd one out
+  rpc HTTP timeout           timeout=30          NONE                NONE                BTC (only one with a timeout)
+  platform fee on redeem     none                0.25%               0.25%               BTC (charges nothing)
+  ...fee amount vs comment   --                  matches             comment says 2.5%   GRC (comment contradicts code)
+  miner fee                  0.0001 BTC          0.0001 LTC          0.01 GRC            (scales differ by chain; fine)
+  create_contract arg order  amount, secret_hash,   amount, participant,  amount, secret_hash,   LTC
+                             participant, refund,   refund, locktime,     participant, refund,
+                             locktime               secret_hash=None      locktime
+  secret_hash required?      yes                 NO, defaults None   yes                 LTC
+  imports redeem script      importaddress(p2sh) importaddress(hex)  does not import     GRC
+  imports HTLC private key   YES (importprivkey) no                  no                  BTC
+  signing route              wallet, then key    key, then legacy    legacy only         (all three differ)
+  unlocks the wallet         no                  no                  YES                 GRC
+  waits for the output       wait_for_tx_output  ONE getrawtransaction  wait_for_tx_output   LTC (does not wait)
+  ...with max_wait           300s                n/a                 60s (the default)   (BTC and GRC disagree)
+  returns secret_hash        no                  yes                 yes                 BTC
+  rpc_call catches           Request/Value/all   RequestException    Request/Value/all   LTC
+  balance fallback guarded   yes                 NO try around it    yes                 LTC
+  default creds in __main__  no                  YES, a literal      no                  LTC
+
+Two of those are worth reading twice. LTC's `create_contract` takes
+`secret_hash` FIFTH and OPTIONAL while the other two take it SECOND and
+required, so a caller that passes positionally in the BTC/GRC order builds an
+LTC contract whose participant address is the secret hash -- and a caller that
+omits it builds one with `secret_hash=None`. And LTC and GRC are the only two
+issuing HTTP requests with NO timeout, so a wallet daemon that accepts the
+connection and never answers hangs the swap forever with nothing printed.
+
+NONE OF THE THREE USES THE PREIMAGE WHEN REDEEMING. Proven mechanically, by
+walking each function's AST for names referenced in its body: in all three,
+`redeem_contract`'s `secret: bytes` parameter is accepted and never referenced.
+The transaction is built with `createrawtransaction` and handed to a
+`signrawtransaction*` call, which for a P2SH input constructs the scriptSig
+from the redeem script -- it has no way to know that this particular script
+needs the preimage and a TRUE flag pushed to take its OP_IF branch. That the
+parameter is unused is measured; that the resulting scriptSig therefore cannot
+satisfy the hashlock branch follows from how P2SH spending works and has NOT
+been confirmed against a chain here. Say which you have (rule 17): this is the
+second.
+
+MERGING THESE THREE IS A PROPOSAL, NOT A CHANGE. They sign and broadcast, which
+is fund movement (rule 16). chains/base.py's RPCAdapter is the survivor for
+connection handling and the HTLC methods belong on top of it -- but the merge
+has to resolve every row above, and each resolution changes what a live swap
+does.
+
+AND THE REFUND BRANCH OF EVERY CONTRACT BUILT HERE IS UNSPENDABLE. The locktime
+encoding in modules/atomic_htlc_scripts.number_to_le_bytes() emits a varint,
+not a script number: a requested block height of 500000 is read by
+CHECKLOCKTIMEVERIFY as 128,000,254. See that file's header for the measurement.
 """
 
-import os
-import requests
 import logging
+import os
 from decimal import Decimal
+
+import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, script_to_p2sh_address
 from modules.utils import wait_for_tx_output
 
@@ -109,7 +173,7 @@ class BTCClient:
                 logger.error(f"Failed to import HTLC private key: {e}")
                 raise
 
-    def create_contract(self,
+    def create_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the six are the HTLC's own parameters (amount, secret hash, participant, refund, locktime, fee). Bundling them into a dataclass changes every call site in the fund path for no behavioral gain.
                         amount_btc: Decimal,
                         secret_hash: str,
                         participant_address: str,
@@ -151,7 +215,7 @@ class BTCClient:
             "p2shAddress": p2sh_addr
         }
 
-    def redeem_contract(self,
+    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: same. Note `secret` is one of the six and is never used; see the divergence table in the module header.
                         contract_txid: str,
                         contract_vout: int,
                         redeem_script: bytes,
@@ -187,11 +251,18 @@ class BTCClient:
             "amount": float(total_amount)
         }
         
-        logger.debug(f"Signing raw transaction with key {participant_privkey}.")
+        # The WIF PRIVATE KEY used to be logged here, in full, at DEBUG -- and
+        # this module sets its own logger to DEBUG with a StreamHandler at
+        # import time, so it was printed by default. Exposure of a signing key
+        # is total loss of whatever it controls; there is no partial version of
+        # that failure. Nothing about this line needed the key itself: what a
+        # reader wants to know is WHICH signing route was taken, which the two
+        # log lines below now say.
+        logger.debug("Signing raw transaction (wallet first, then key fallback).")
         try:
             sign_result = self.rpc_call("signrawtransactionwithwallet", [raw_hex])
-        except Exception as e:
-            logger.warning(f"signrawtransactionwithwallet failed: {e}. Falling back to signing with key.")
+        except Exception as e:  # noqa: BLE001 -- checked: any failure of the wallet route is a reason to try the key route, and the key route's own failure is NOT caught, so a genuine signing failure still propagates.
+            logger.warning(f"signrawtransactionwithwallet failed: {e}. Falling back to signing with the supplied key.")
             sign_result = self.rpc_call("signrawtransactionwithkey", [raw_hex, [participant_privkey], [prevtx]])
         
         if not sign_result.get("complete"):
@@ -213,7 +284,7 @@ class BTCClient:
             bal = self.rpc_call("getreceivedbyaddress", [address, 0])
             logger.debug(f"Balance from getreceivedbyaddress: {bal}")
             return Decimal(bal)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- checked: getreceivedbyaddress is absent on some wallet builds, so any failure means "try the UTXO sum instead". The fallback below is NOT itself swallowed -- it raises -- so a caller never receives a zero balance that actually means "the call failed".
             logger.warning(f"getreceivedbyaddress failed for {address}: {e}. Falling back to UTXO sum.")
             fallback = Decimal("0.0")
             try:
@@ -221,9 +292,13 @@ class BTCClient:
                 for utxo in utxos:
                     if utxo.get("address") == address:
                         fallback += Decimal(str(utxo.get("amount", "0")))
+            # Checked: this one RE-RAISES (with `from utxo_error`, so the cause
+            # survives). Both routes to a balance have failed, and the caller
+            # gets an exception rather than a number it cannot distinguish
+            # from a real empty address.
             except Exception as utxo_error:
                 logger.error(f"Failed to list UTXOs: {utxo_error}")
-                raise Exception("Could not retrieve address balance.")
+                raise Exception("Could not retrieve address balance.") from utxo_error
             return fallback
 
 
@@ -238,11 +313,13 @@ if __name__ == "__main__":
         )
         example_contract = client.create_contract(
             amount_btc=Decimal("0.0001"),
-            secret_hash="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            # Not a credential: a placeholder SHA-256 DIGEST for the demo
+            # block. The preimage that hashes to it does not exist.
+            secret_hash="ff" * 32,
             participant_address="tb1qexampleparticipantaddress0000000000000000000000",
             refund_address="tb1qexamplerefundaddress000000000000000000000000",
             locktime=500000
         )
         print("Contract created:", example_contract)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: the demo driver at the bottom of the file; it prints and exits, and nothing reads a value from it.
         print("Error during testing:", e)

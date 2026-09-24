@@ -1,9 +1,48 @@
+"""SQLite schema and connection handling for the swap terminal.
+
+Role: submodule (persistence; holds no decision of its own)
+Reads: swap_terminal.db
+Writes: swap_terminal.db -- creates quotes, swaps, deposit_events, payouts,
+       wallet_inventory and swap_audit_log if they are absent
+Can move funds: no
+Mainnet-safe: yes
+
+swap_terminal.db is the ONE authority (rule 15). Everything else in this tree
+that holds state -- transactions.json, gridcoin_transactions.csv,
+grc-sol-swap/.../swap_intents.json -- is either a mirror or, in
+swap_intents.json's case, a second system of record that nothing reconciles
+with this one. Nothing new may become an authority: there is one.
+
+Two things worth knowing before changing anything here.
+
+WAL is on (`PRAGMA journal_mode=WAL`), so readers do not block the writer. That
+is not a concurrency guarantee for the application: SQLite still has exactly
+one writer lock, and a guard implemented as a SELECT can go stale between the
+read and the write even though the writes themselves are serialized. That is
+measured, not supposed -- see tests/test_payout_concurrency.py, where two
+payout workers both pay the same swap through a guard that reads correctly.
+
+The `except Exception` around the Flask import is deliberate and is the narrow
+kind rule 12 allows: it lets the workers import this module without Flask
+installed, and the failure is not silent -- get_db() raises RuntimeError
+naming the missing dependency rather than returning something a caller could
+mistake for a connection.
+"""
+
 import sqlite3
 from contextlib import contextmanager
 
 try:
     from flask import current_app, g
-except Exception:
+except ImportError:
+    # Checked, and narrowed from `except Exception` on 2026-09-24: the only
+    # thing that legitimately fails here is Flask being absent, which is the
+    # supported case -- the workers use db_session() and never touch
+    # request-scoped state. A broader catch would also swallow an error INSIDE
+    # a Flask that is installed but broken, and then get_db() would report the
+    # wrong cause. The failure is not silent either way: get_db() raises
+    # RuntimeError naming the missing dependency rather than returning
+    # something a caller could mistake for a connection.
     current_app = None
     g = None
 

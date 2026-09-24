@@ -1,6 +1,24 @@
+"""Turn a price and an amount into a recorded quote.
+
+Role: submodule -> function (create_quote is the decision)
+Reads: config (fee bps, TTL, allowed pairs, per-asset fee reserve), CoinGecko
+       through services/pricing.py
+Writes: swap_terminal.db (quotes)
+Can move funds: no, and yes one step removed. output_amount_estimate computed
+       here is the exact figure services/payout_service.py later broadcasts.
+       The fee arithmetic in create_quote() is therefore a fund-moving
+       decision and changing it is the operator's (rule 16).
+Mainnet-safe: yes
+
+validate_pair() is the gate that stops an unsupported direction from ever
+reaching a swap. It reads ALLOWED_PAIRS from config rather than carrying its
+own list, so there is one vocabulary (rule 11).
+"""
+
 from datetime import timedelta
-from .helpers import new_id, utc_now, utc_now_iso
-from .pricing import fetch_usd_prices, derive_pair_rate
+
+from .helpers import new_id, utc_now
+from .pricing import derive_pair_rate, fetch_usd_prices
 
 
 def get_network_fee_reserve(config, to_asset: str) -> float:

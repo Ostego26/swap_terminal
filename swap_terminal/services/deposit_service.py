@@ -1,3 +1,25 @@
+"""Watch the source chain for a swap's deposit and credit it when confirmed.
+
+Role: submodule -> function (refresh_swap_from_chain is the decision)
+Reads: the source chain adapter (listtransactions, getrawtransaction),
+       swap_terminal.db (swaps, deposit_events)
+Writes: swap_terminal.db (deposit_events, swaps, swap_audit_log)
+Can move funds: no broadcast here -- but this is the module that decides a
+       deposit is CONFIRMED and moves the swap to `payout_pending`, which is
+       the state payout_worker.py broadcasts against. The confirmation
+       comparison on the `confirmations >= min_confirmations` line is the
+       gate between "somebody sent us coins" and "we send coins back", and a
+       confirmations value that is wrong in the low direction stalls a swap
+       forever while one that is wrong in the high direction releases a payout
+       against an unconfirmed deposit.
+Mainnet-safe: yes; read-only with respect to the chain.
+
+The amount tolerance (AMOUNT_TOLERANCE_PCT) sends an out-of-range deposit to
+`under_review` rather than crediting or refunding it. That is the right
+default: a human decides what happens to a deposit that does not match its
+quote.
+"""
+
 from .helpers import utc_now_iso
 from .swap_service import set_swap_status
 
@@ -86,12 +108,16 @@ def refresh_swap_from_chain(db, config, adapters: dict, swap: dict) -> dict:
 
 
 def process_active_swaps(db, config, adapters: dict) -> list[dict]:
+    # The f-string interpolates a run of '?' generated from the LENGTH of
+    # ACTIVE_STATUSES -- structure, not input. The statuses themselves are
+    # bound as parameters on the line below. That is what the suppression
+    # claims and it is what a reviewer can check from this line (rule 12's
+    # S608 note: "a reviewer should be able to see which from the line").
+    placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     swaps = db.execute(
-        f"SELECT * FROM swaps WHERE status IN ({','.join('?' for _ in ACTIVE_STATUSES)}) ORDER BY created_at ASC",
+        f"SELECT * FROM swaps WHERE status IN ({placeholders}) ORDER BY created_at ASC",  # noqa: S608
         ACTIVE_STATUSES,
     ).fetchall()
-    processed = []
-    for swap in swaps:
-        processed.append(refresh_swap_from_chain(db, config, adapters, swap))
+    processed = [refresh_swap_from_chain(db, config, adapters, swap) for swap in swaps]
     db.commit()
     return processed

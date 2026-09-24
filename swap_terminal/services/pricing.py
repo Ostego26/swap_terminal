@@ -1,5 +1,24 @@
+"""CoinGecko price fetch with a process-wide cache.
+
+Role: submodule (price source)
+Reads: https://api.coingecko.com/api/v3/simple/price
+Writes: an in-process cache only
+Can move funds: no -- but the number it returns is multiplied by the deposit
+       amount to decide the payout amount, so a wrong price here becomes a
+       wrong amount sent. It is the input to a fund-moving decision, not the
+       decision.
+Mainnet-safe: yes
+
+No broad except: a failed fetch RAISES rather than returning a stale or zero
+price. That is deliberate and is rule 12's whole point on this path -- a
+`except Exception: return 0` here would make "the price API is down"
+indistinguishable from "this asset is worthless", and the second one produces
+a payout of zero or a division by zero rather than an error.
+"""
+
 from threading import Lock
 from time import time
+
 import requests
 
 _cache = {"data": None, "expires_at": 0.0}

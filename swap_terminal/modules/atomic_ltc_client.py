@@ -1,30 +1,92 @@
 #!/usr/bin/env python3
-"""
-File: atomic_ltc_client.py
+"""Litecoin HTLC client: build, fund and redeem a contract over JSON-RPC.
 
-Description:
-  This module implements the LTCClient class for interacting with a Litecoin testnet node
-  via JSON-RPC. It provides methods for:
-    - Making RPC calls.
-    - Retrieving an address balance.
-    - Creating HTLC contracts.
-    - Redeeming HTLC contracts.
-  
-  NOTE: Ensure that your environment variables for LTC_RPC_URL, LTC_RPC_USER, and LTC_RPC_PASS are set.
+Role: submodule (one chain's HTLC operations)
+Reads: a Litecoin wallet daemon -- decodescript, getrawtransaction, listunspent,
+       getreceivedbyaddress; and the environment variable
+       PLATFORM_FEE_LTC_ADDRESS
+Writes: nothing to disk. THE CHAIN AND THE WALLET: importaddress mutates the
+       wallet; sendtoaddress and sendrawtransaction broadcast.
+Can move funds: YES. create_contract() sends coins to a P2SH address, and
+       redeem_contract() signs and broadcasts a spend that pays TWO outputs --
+       the user, and a platform fee address.
+Mainnet-safe: NO. Same testnet-only script derivation as the BTC client, and
+       the default platform fee address in redeem_contract() is a testnet
+       address (a `tltc1...` literal), so on mainnet the fee output would be
+       unspendable or rejected.
+
+THE THREE CLIENTS DISAGREE. THE TABLE IS IN ALL THREE FILES, ON PURPOSE.
+
+Rule 8: "if they genuinely differ, the difference is the point and belongs in a
+comment at BOTH sites, naming the other one. A reader who finds one must be
+told the other exists." Measured 2026-09-24 by reading
+modules/atomic_btc_client.py, modules/atomic_ltc_client.py and
+modules/atomic_grc_client.py side by side. The last column names which file is
+the odd one out; where none is named, no two agree.
+
+  aspect                     BTC                 LTC                 GRC                 odd one out
+  rpc HTTP timeout           timeout=30          NONE                NONE                BTC (only one with a timeout)
+  platform fee on redeem     none                0.25%               0.25%               BTC (charges nothing)
+  ...fee amount vs comment   --                  matches             comment says 2.5%   GRC (comment contradicts code)
+  miner fee                  0.0001 BTC          0.0001 LTC          0.01 GRC            (scales differ by chain; fine)
+  create_contract arg order  amount, secret_hash,   amount, participant,  amount, secret_hash,   LTC
+                             participant, refund,   refund, locktime,     participant, refund,
+                             locktime               secret_hash=None      locktime
+  secret_hash required?      yes                 NO, defaults None   yes                 LTC
+  imports redeem script      importaddress(p2sh) importaddress(hex)  does not import     GRC
+  imports HTLC private key   YES (importprivkey) no                  no                  BTC
+  signing route              wallet, then key    key, then legacy    legacy only         (all three differ)
+  unlocks the wallet         no                  no                  YES                 GRC
+  waits for the output       wait_for_tx_output  ONE getrawtransaction  wait_for_tx_output   LTC (does not wait)
+  ...with max_wait           300s                n/a                 60s (the default)   (BTC and GRC disagree)
+  returns secret_hash        no                  yes                 yes                 BTC
+  rpc_call catches           Request/Value/all   RequestException    Request/Value/all   LTC
+  balance fallback guarded   yes                 NO try around it    yes                 LTC
+  default creds in __main__  no                  YES, a literal      no                  LTC
+
+Two of those are worth reading twice. LTC's `create_contract` takes
+`secret_hash` FIFTH and OPTIONAL while the other two take it SECOND and
+required, so a caller that passes positionally in the BTC/GRC order builds an
+LTC contract whose participant address is the secret hash -- and a caller that
+omits it builds one with `secret_hash=None`. And LTC and GRC are the only two
+issuing HTTP requests with NO timeout, so a wallet daemon that accepts the
+connection and never answers hangs the swap forever with nothing printed.
+
+NONE OF THE THREE USES THE PREIMAGE WHEN REDEEMING. Proven mechanically, by
+walking each function's AST for names referenced in its body: in all three,
+`redeem_contract`'s `secret: bytes` parameter is accepted and never referenced.
+The transaction is built with `createrawtransaction` and handed to a
+`signrawtransaction*` call, which for a P2SH input constructs the scriptSig
+from the redeem script -- it has no way to know that this particular script
+needs the preimage and a TRUE flag pushed to take its OP_IF branch. That the
+parameter is unused is measured; that the resulting scriptSig therefore cannot
+satisfy the hashlock branch follows from how P2SH spending works and has NOT
+been confirmed against a chain here. Say which you have (rule 17): this is the
+second.
+
+MERGING THESE THREE IS A PROPOSAL, NOT A CHANGE. They sign and broadcast, which
+is fund movement (rule 16). chains/base.py's RPCAdapter is the survivor for
+connection handling and the HTLC methods belong on top of it -- but the merge
+has to resolve every row above, and each resolution changes what a live swap
+does.
+
+THE HARDCODED CREDENTIAL IN `__main__` IS NOT A SECRET WORTH ROTATING, BUT IT
+IS A HABIT WORTH STOPPING. The block at the bottom defaults LTC_RPC_PASS to a
+literal. It is the shape that put a live GRIDCOIN_RPC_PASSWORD into this
+repository's history (rule 2).
 """
 
-import os
-import requests
 import logging
-import time
-import struct
+import os
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+import requests
 
 # Import the HTLC script builder from atomic_htlc_scripts.
 from modules.atomic_htlc_scripts import build_htlc_redeem_script
+
 # Import the wait_for_tx_output helper from utils.
-from modules.utils import wait_for_tx_output
 
 # Configure module logger.
 logger = logging.getLogger(__name__)
@@ -54,7 +116,7 @@ class LTCClient:
         self.rpc_pass: str = rpc_pass
         logger.debug(f"LTCClient initialized at {self.rpc_url}")
 
-    def rpc_call(self, method: str, params: Optional[List[Any]] = None) -> Any:
+    def rpc_call(self, method: str, params: list[Any] | None = None) -> Any:
         """
         Make a JSON-RPC call to the Litecoin node.
         
@@ -70,7 +132,7 @@ class LTCClient:
         """
         if params is None:
             params = []
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "jsonrpc": "1.0",
             "id": "atomic-swap",
             "method": method,
@@ -78,7 +140,11 @@ class LTCClient:
         }
         logger.debug(f"LTC RPC Call Payload: {payload}")
         try:
-            response = requests.post(
+            # See the GRC client for the full note: this call has NO timeout
+            # while the BTC client's has timeout=30, and adding one is a
+            # fund-path change because the same call carries sendtoaddress and
+            # sendrawtransaction. Reported, not made (rule 16).
+            response = requests.post(  # noqa: S113
                 self.rpc_url,
                 json=payload,
                 auth=(self.rpc_user, self.rpc_pass)
@@ -94,7 +160,7 @@ class LTCClient:
             return rj.get("result")
         except requests.exceptions.RequestException as e:
             logger.exception(f"LTC RPC request failed for method {method} with params {params}")
-            raise Exception(f"LTC RPC request failed: {e}")
+            raise Exception(f"LTC RPC request failed: {e}") from e
 
     def get_address_balance(self, address: str) -> Decimal:
         """
@@ -112,7 +178,7 @@ class LTCClient:
             bal = self.rpc_call("getreceivedbyaddress", [address, 0])
             logger.debug(f"Balance from getreceivedbyaddress: {bal}")
             return Decimal(bal)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- checked: any failure means "try the UTXO sum". UNLIKE the BTC and GRC clients, the fallback here is NOT wrapped, so a failure of listunspent propagates -- which is the right direction, and the divergence is noted in the module header.
             logger.warning(f"getreceivedbyaddress failed for {address}: {e}. Using fallback.")
             fallback = Decimal("0.0")
             utxos = self.rpc_call("listunspent", [])
@@ -122,7 +188,7 @@ class LTCClient:
             logger.debug(f"Fallback balance for {address}: {fallback}")
             return fallback
 
-    def sign_fallback(self, rawtx_hex: str, private_keys: List[str], prevtxs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def sign_fallback(self, rawtx_hex: str, private_keys: list[str], prevtxs: list[dict[str, Any]]) -> dict[str, Any]:
         """
         Attempt to sign a transaction using 'signrawtransactionwithkey'.
         If that fails (e.g., due to the method not being available), fallback to the legacy 'signrawtransaction' method.
@@ -136,7 +202,7 @@ class LTCClient:
             Dict[str, Any]: The result from the signing RPC call.
         """
         try:
-            logger.debug(f"Attempting to sign transaction using 'signrawtransactionwithkey' method.")
+            logger.debug("Attempting to sign transaction using 'signrawtransactionwithkey' method.")
             result = self.rpc_call("signrawtransactionwithkey", [rawtx_hex, private_keys, prevtxs])
             logger.debug("Signed LTC transaction with signrawtransactionwithkey.")
             return result
@@ -150,13 +216,13 @@ class LTCClient:
             else:
                 raise
 
-    def create_contract(self,
+    def create_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the six are the HTLC's own parameters. Note this signature's ORDER differs from the other two clients (see the divergence table in the module header); reordering it is a fund-path change.
                         amount_ltc: Decimal,
                         participant_address: str,
                         refund_address: str,
                         locktime: int,
-                        secret_hash: Optional[str] = None,
-                        fee: Decimal = Decimal('0.0001')) -> Dict[str, Any]:
+                        secret_hash: str | None = None,
+                        fee: Decimal = Decimal('0.0001')) -> dict[str, Any]:
         """
         Create an LTC HTLC contract by:
           1. Building the HTLC redeem script.
@@ -167,7 +233,7 @@ class LTCClient:
         
         Args:
             amount_ltc (Decimal): The LTC amount to send.
-            participant_address (str): The participant’s Litecoin address.
+            participant_address (str): The participant's Litecoin address.
             refund_address (str): The refund Litecoin address.
             locktime (int): The locktime for the HTLC.
             secret_hash (Optional[str]): A hex string representing the secret hash.
@@ -194,7 +260,7 @@ class LTCClient:
         logger.info(f"sendtoaddress returned TXID: {txid}")
         # Wait up to 300 seconds for the contract output to appear.
         raw_tx = self.rpc_call("getrawtransaction", [txid, True])
-        vout_index: Optional[int] = None
+        vout_index: int | None = None
         for i, v in enumerate(raw_tx.get("vout", [])):
             addresses = v.get("scriptPubKey", {}).get("addresses", [])
             if p2sh_addr in addresses:
@@ -211,7 +277,7 @@ class LTCClient:
             "secret_hash": secret_hash
         }
 
-    def redeem_contract(self,
+    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: same. `secret` is one of the six and is never used.
                         contract_txid: str,
                         contract_vout: int,
                         redeem_script: bytes,
@@ -241,7 +307,7 @@ class LTCClient:
         total_amount = Decimal(str(raw_tx["vout"][contract_vout]["value"]))
         miner_fee = Decimal("0.0001")
         # Calculate platform fee (0.25% of total) and quantize.
-        platform_fee = (Decimal("0.25") / Decimal("100")) * total_amount
+        platform_fee = (Decimal("0.25") / Decimal(100)) * total_amount
         platform_fee = platform_fee.quantize(Decimal("0.00000001"))
         net_to_user = total_amount - miner_fee - platform_fee
         if net_to_user <= 0:
@@ -286,8 +352,9 @@ if __name__ == "__main__":
             participant_address="tltc1qexampleparticipantaddressxxxxxxxxxxxxxxxxxxx",
             refund_address="tltc1qexamplerefundaddressxxxxxxxxxxxxxxxxxxxx",
             locktime=500000,
-            secret_hash="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            # Not a credential: a placeholder SHA-256 digest for the demo block.
+            secret_hash="ff" * 32,
         )
         print("Contract created:", contract)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: the demo driver at the bottom of the file.
         print("Error during LTC contract creation:", e)

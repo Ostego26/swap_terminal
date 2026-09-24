@@ -1,5 +1,14 @@
+"""GET /api/rates -- current USD prices and the derived pair rates.
+
+Role: submodule (HTTP handler; no decision of its own)
+Reads: CoinGecko simple/price, through the cache in services/pricing.py
+Writes: nothing
+Can move funds: no
+Mainnet-safe: yes -- it talks to a price API, not to a chain.
+"""
+
 from flask import Blueprint, current_app, jsonify
-from services.pricing import fetch_usd_prices, derive_pair_rate
+from services.pricing import derive_pair_rate, fetch_usd_prices
 
 bp = Blueprint("rates", __name__)
 

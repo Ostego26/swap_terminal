@@ -1,3 +1,21 @@
+"""Create a swap from a quote, and read one back.
+
+Role: submodule -> function (create_swap is the decision)
+Reads: swap_terminal.db (quotes, swaps, deposit_events, payouts), the
+       destination adapter (validateaddress) and the source adapter
+       (getnewaddress)
+Writes: swap_terminal.db (swaps, swap_audit_log)
+Can move funds: no broadcast. It DERIVES a deposit address in the hot wallet
+       and fixes the payout address, and it sets min_confirmations from
+       config -- the threshold that later decides when a payout is released.
+Mainnet-safe: yes
+
+set_swap_status() writes the status and the audit row together, so every
+transition is recorded. It does NOT commit: the caller owns the transaction
+boundary, which is what lets create_swap() insert the swap and its first audit
+row atomically.
+"""
+
 from .helpers import new_id, parse_iso, utc_now_iso
 
 

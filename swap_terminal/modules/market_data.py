@@ -1,122 +1,93 @@
 #!/usr/bin/env python3
-"""
-File: market_data.py
+"""CoinGecko spot prices for BTC, LTC and GRC, with a process-wide cache.
 
-Description:
-  This module provides functions to fetch market prices from CoinGecko with caching.
-  The cache duration is set to 180 seconds (3 minutes) by default. A caller may force a refresh.
-  
-  The module supports:
-    - Fetching BTC, LTC, GRC, and BTS prices (in USD).
-    - Includes a Market class to interface with BitShares DEX for trading.
+Role: submodule (price source for the atomic-swap suite)
+Reads: https://api.coingecko.com/api/v3/simple/price
+Writes: an in-process cache only
+Can move funds: no -- but modules/atomic_swapper.py multiplies these numbers by
+       the swap amount to compute what the counterparty is expected to send, so
+       a wrong price here becomes a wrong expectation about somebody else's
+       leg. It is an input to a fund-moving decision, not the decision.
+Mainnet-safe: yes; it talks to a price API, not to a chain.
 
+WHAT WAS REMOVED FROM THIS FILE ON 2026-09-24, AND WHY IT MATTERED.
+
+This module used to open with
+
+    from bitshares import BitShares
+    from bitshares.account import Account
+
+and carry a `Market` class wrapping the BitShares DEX, plus a
+`fetch_bts_price()` and its cache globals. All of it was dead: the only
+consumer of `Market` was modules/bitshares_client.py, and that file had ZERO
+consumers anywhere in the tree -- established by grepping the whole tree for
+the NAME, not just the import graph (rule 2). `fetch_bts_price` had no
+consumers at all.
+
+Removing it is not only tidiness, and this is the measurable part (rule 3).
+`bitshares` is not in requirements.txt, which lists exactly two packages, so
+the import at the top of this file made the module unimportable in a clean
+checkout:
+
+    before:  import modules.market_data -> ModuleNotFoundError: No module named 'bitshares'
+    after:   import modules.market_data -> OK
+
+and since modules/atomic_swapper.py imports this module, the entire
+atomic-swap path was unimportable from a correct install of the declared
+requirements. A dead class took a live path down with it, which is rule 9's
+argument in one line: dead code is not inert.
+
+THE BROAD EXCEPTS HERE RETURN "N/A", AND THAT IS ANNOTATED RATHER THAN LEFT
+IMPLICIT. See the note at each site: a string is not a price, and the point of
+returning one is that no caller can mistake it for a number.
 """
+
+import logging
+import time
 
 import requests
-import time
-import logging
-from typing import Union, Dict
-from bitshares import BitShares
-from bitshares.account import Account
 
-# Configure logger for debugging
+# Configure logger for debugging. Deliberately NOT setLevel(DEBUG) with a
+# StreamHandler attached: several modules in this package do that at import
+# time, which forces DEBUG output on every program that imports them and has
+# no way to turn it off. A library module should let the application decide.
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
-# Global cache variables for BTC and LTC prices.
-_cached_btc_ltc: Union[Dict[str, Union[float, str]], None] = None
+# Cache duration in SECONDS. It is compared against time.time() arithmetic, so
+# it stays in seconds (rule 6: convert on the way out, at the print, not on the
+# way in to control flow).
+_CACHE_DURATION_SECONDS: float = 180
+
+# Global cache for BTC and LTC prices.
+_cached_btc_ltc: dict[str, float | str] | None = None
 _btc_ltc_timestamp: float = 0.0
-_btc_ltc_cache_duration: float = 180  # seconds
 
-# Global cache variables for GRC price.
-_cached_grc: Union[float, str, None] = None
+# Global cache for the GRC price.
+_cached_grc: float | str | None = None
 _grc_timestamp: float = 0.0
-_grc_cache_duration: float = 180  # seconds
-
-# Global cache variables for BTS price.
-_cached_bts: Union[float, str, None] = None
-_bts_timestamp: float = 0.0
-_bts_cache_duration: float = 180  # seconds
 
 
-class Market:
-    """
-    Represents a market on the BitShares DEX.
-    """
-    def __init__(self, market_name: str, bitshares_instance: BitShares):
-        self.market_name = market_name
-        self.bitshares_instance = bitshares_instance
+def fetch_btc_ltc_prices(force_refresh: bool = False) -> dict[str, float | str]:
+    """Fetch the current BTC and LTC prices in USD from CoinGecko.
 
-    def ticker(self) -> Dict[str, float]:
-        """
-        Fetch the latest ticker data for the market.
-        
-        Returns:
-            dict: Ticker information with the latest price.
-        """
-        try:
-            ticker_data = self.bitshares_instance.get_ticker(self.market_name)
-            return ticker_data
-        except Exception as e:
-            logger.error(f"Error fetching ticker for market {self.market_name}: {e}")
-            return {"latest": 0.0}
+    Cached for _CACHE_DURATION_SECONDS unless force_refresh is True.
 
-    def buy(self, amount: float, price: float, account_name: str):
-        """
-        Place a buy order on the market.
-        
-        Args:
-            amount (float): Amount of the base asset to buy.
-            price (float): Price per unit of the base asset.
-            account_name (str): The account placing the order.
-        """
-        try:
-            self.bitshares_instance.market_order(account_name, 'buy', self.market_name, amount, price)
-            logger.info(f"Placed buy order for {amount} at {price} on {self.market_name}.")
-        except Exception as e:
-            logger.error(f"Error placing buy order: {e}")
-            raise
-
-    def sell(self, amount: float, price: float, account_name: str):
-        """
-        Place a sell order on the market.
-        
-        Args:
-            amount (float): Amount of the base asset to sell.
-            price (float): Price per unit of the base asset.
-            account_name (str): The account placing the order.
-        """
-        try:
-            self.bitshares_instance.market_order(account_name, 'sell', self.market_name, amount, price)
-            logger.info(f"Placed sell order for {amount} at {price} on {self.market_name}.")
-        except Exception as e:
-            logger.error(f"Error placing sell order: {e}")
-            raise
-
-
-def fetch_btc_ltc_prices(force_refresh: bool = False) -> Dict[str, Union[float, str]]:
-    """
-    Fetch the current BTC and LTC prices (in USD) from CoinGecko.
-    
-    The results are cached for _btc_ltc_cache_duration seconds unless force_refresh is True.
-    
-    Expected JSON response:
-      {
-         "bitcoin": {"usd": <price>},
-         "litecoin": {"usd": <price>}
-      }
-    
-    Args:
-        force_refresh (bool): If True, bypass the cache and fetch fresh data.
-    
     Returns:
-        Dict[str, Union[float, str]]: A dictionary with keys "BTC" and "LTC" containing their USD prices.
-                                     If an error occurs, values will be "N/A".
+        {"BTC": <price>, "LTC": <price>} on success, or {"BTC": "N/A",
+        "LTC": "N/A"} if the fetch failed.
+
+    The failure value is a STRING, on purpose, and that is what makes the broad
+    except at the bottom legitimate under rule 12. The rule's test is whether
+    the caller can tell a failure from a real answer: 0.0 would be
+    indistinguishable from a real price of zero and would silently produce a
+    swap expectation of nothing, while "N/A" cannot be multiplied or compared
+    numerically -- modules/atomic_swapper.py's `Decimal(str(...))` raises
+    InvalidOperation on it rather than proceeding. The failure announces itself
+    at the first attempt to use it.
     """
-    global _cached_btc_ltc, _btc_ltc_timestamp
+    global _cached_btc_ltc, _btc_ltc_timestamp  # noqa: PLW0603 -- module-level memo cache; the alternative is a class or a mutable dict, and neither is worth the churn in a file this size
     now = time.time()
-    if (not force_refresh and _cached_btc_ltc is not None and 
-            (now - _btc_ltc_timestamp) < _btc_ltc_cache_duration):
+    if not force_refresh and _cached_btc_ltc is not None and (now - _btc_ltc_timestamp) < _CACHE_DURATION_SECONDS:
         return _cached_btc_ltc
 
     try:
@@ -131,29 +102,20 @@ def fetch_btc_ltc_prices(force_refresh: bool = False) -> Dict[str, Union[float, 
         _cached_btc_ltc = {"BTC": btc_price, "LTC": ltc_price}
         _btc_ltc_timestamp = now
         return _cached_btc_ltc
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: network, HTTP, JSON and shape failures all mean "no price", and the return value says so in a form no caller can use as a number. See the docstring.
         logger.error(f"Error fetching BTC and LTC prices: {e}")
         return {"BTC": "N/A", "LTC": "N/A"}
 
 
-def fetch_grc_price(force_refresh: bool = False) -> Union[float, str]:
+def fetch_grc_price(force_refresh: bool = False) -> float | str:
+    """Fetch the current Gridcoin price in USD from CoinGecko.
+
+    Cached for _CACHE_DURATION_SECONDS unless force_refresh is True. Returns
+    "N/A" on failure, for the reason given in fetch_btc_ltc_prices' docstring.
     """
-    Fetch the current Gridcoin (GRC) price (in USD) from CoinGecko.
-    
-    The result is cached for _grc_cache_duration seconds unless force_refresh is True.
-    
-    Expected JSON response:
-      {"gridcoin-research": {"usd": <price>}}
-    
-    Args:
-        force_refresh (bool): If True, bypass the cache and fetch fresh data.
-    
-    Returns:
-        Union[float, str]: The current GRC price in USD, or "N/A" if fetching fails.
-    """
-    global _cached_grc, _grc_timestamp
+    global _cached_grc, _grc_timestamp  # noqa: PLW0603 -- module-level memo cache; see fetch_btc_ltc_prices
     now = time.time()
-    if not force_refresh and _cached_grc is not None and (now - _grc_timestamp) < _grc_cache_duration:
+    if not force_refresh and _cached_grc is not None and (now - _grc_timestamp) < _CACHE_DURATION_SECONDS:
         return _cached_grc
 
     try:
@@ -167,31 +129,6 @@ def fetch_grc_price(force_refresh: bool = False) -> Union[float, str]:
         _cached_grc = grc_price
         _grc_timestamp = now
         return grc_price
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: same reasoning as fetch_btc_ltc_prices; "N/A" is not usable as a number by any caller
         logger.error(f"Error fetching GRC price from CoinGecko: {e}")
-        return "N/A"
-
-
-def fetch_bts_price(force_refresh: bool = False) -> Union[float, str]:
-    """
-    Fetch the current BTS price (in USD) from CoinGecko or other source.
-    """
-    global _cached_bts, _bts_timestamp
-    now = time.time()
-    if not force_refresh and _cached_bts is not None and (now - _bts_timestamp) < _bts_cache_duration:
-        return _cached_bts
-
-    try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitshares&vs_currencies=usd"
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        bts_price = data.get("bitshares", {}).get("usd")
-        if bts_price is None:
-            raise ValueError("Missing BTS price in response.")
-        _cached_bts = bts_price
-        _bts_timestamp = now
-        return bts_price
-    except Exception as e:
-        logger.error(f"Error fetching BTS price from CoinGecko: {e}")
         return "N/A"

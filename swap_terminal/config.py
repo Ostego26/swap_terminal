@@ -1,5 +1,28 @@
+"""Configuration for the Flask swap terminal, read from the environment once.
+
+Role: submodule (configuration constants; holds no decision of its own)
+Reads: the process environment at IMPORT time -- SWAP_DB_PATH, the per-chain
+       RPC credentials and endpoints, fee and tolerance settings
+Writes: nothing
+Can move funds: no by itself, but it CARRIES the values that decide what
+       moves: DEFAULT_FEE_BPS, the *_NETWORK_FEE_RESERVE figures, the
+       *_MIN_CONFIRMATIONS thresholds and ALLOWED_PAIRS. Changing any of those
+       changes what gets sent or when, which makes them the operator's (rule
+       16), not something to adjust in passing.
+Mainnet-safe: yes to import. Note the DEFAULTS POINT AT MAINNET: 8332 is
+       Bitcoin's mainnet RPC port, 9332 Litecoin's, 15715 Gridcoin's. A
+       checkout with no environment set is configured for mainnet daemons, not
+       for testnet ones -- set BTC_RPC_PORT=18332, LTC_RPC_PORT=19332 and
+       GRC_RPC_PORT=25779 to point it at test chains.
+
+Everything here is evaluated when the module is imported, because `Config` is a
+class body. That is why tests/conftest.py sets SWAP_DB_PATH before importing
+anything: setting it afterwards is too late, the value is already baked in.
+"""
+
 import os
 from pathlib import Path
+from typing import ClassVar
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -17,13 +40,18 @@ class Config:
     BTC_NETWORK_FEE_RESERVE = float(os.getenv("BTC_NETWORK_FEE_RESERVE", "0.00002"))
     LTC_NETWORK_FEE_RESERVE = float(os.getenv("LTC_NETWORK_FEE_RESERVE", "0.001"))
     GRC_NETWORK_FEE_RESERVE = float(os.getenv("GRC_NETWORK_FEE_RESERVE", "0.01"))
-    ALLOWED_PAIRS = {
+    # ClassVar annotations: these are shared configuration read by every
+    # request, not per-instance defaults. Config is never instantiated --
+    # app.py copies its uppercase attributes into app.config -- so the
+    # mutable-default hazard RUF012 warns about does not arise, and saying
+    # so in the type is better than suppressing the check.
+    ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]] = {
         ("GRC", "BTC"),
         ("BTC", "GRC"),
         ("GRC", "LTC"),
         ("LTC", "GRC"),
     }
-    RPC = {
+    RPC: ClassVar[dict[str, dict[str, object]]] = {
         "BTC": {
             "user": os.getenv("BTC_RPC_USER", ""),
             "password": os.getenv("BTC_RPC_PASS", ""),

@@ -1,15 +1,59 @@
+"""JSON-RPC adapter for the three Bitcoin-derived chains.
+
+Role: submodule (one class; the three chains differ only by an `asset` string)
+Reads: a wallet daemon over JSON-RPC -- validateaddress, getaddressinfo,
+       getbalance, gettransaction, getrawtransaction, listtransactions,
+       estimatesmartfee
+Writes: nothing to disk. On the chain it can write: see below.
+Can move funds: YES. send_to_address() calls `sendtoaddress`, which broadcasts.
+       get_new_address() also mutates the wallet (it derives and stores a new
+       key). Everything else here is read-only.
+Mainnet-safe: the read methods are. send_to_address() is the payout path and
+       is only ever called by services/payout_service.py.
+
+THIS IS THE GOOD SHAPE, AND THERE IS A SECOND ONE (rule 8).
+
+Measured 2026-09-24: this family is 140 lines -- one base class plus three
+four-line subclasses -- and `modules/rpc_clients.py` plus the three
+`modules/atomic_*_client.py` files are 1001 lines doing the same JSON-RPC
+against the same three daemons. They share no code. A reader who finds one
+must be told the other exists, so: the other one is modules/, it is used by
+atomic_swap_gui.py, and the divergences between its three near-copies are
+written up in the enforcement report rather than silently merged, because
+merging them touches signing and broadcasting.
+
+WHAT THE BROAD EXCEPTS HERE DO AND DO NOT HIDE. Each is annotated at its site
+with what was checked. The rule (12) is that a broad catch is never legitimate
+when the caller cannot tell the failure from a real answer -- and on this money
+path `except Exception: return 0` around a confirmation count reads as "zero
+confirmations", which is indistinguishable from a real unconfirmed deposit.
+"""
+
 import json
-from decimal import Decimal
+
 import requests
 
+
 class RPCError(Exception):
-    pass
+    """A JSON-RPC call failed, or the daemon returned an error object.
+
+    Raised rather than swallowed on purpose: on this path, a failure that
+    returns a plausible value (False, 0, an empty list) is worse than one that
+    stops the caller, because the caller cannot tell it from a real answer.
+    """
+
+
+# One satoshi, as a float, used as the tolerance when matching an output's
+# value against an expected amount. The chains here all use 8 decimal places,
+# so anything smaller than this is float noise rather than a difference in
+# money.
+SATOSHI = 1e-8
 
 
 class RPCAdapter:
     asset = ""
 
-    def __init__(self, user: str, password: str, host: str, port: int, wallet: str = "", timeout: float = 30.0):
+    def __init__(self, user: str, password: str, host: str, port: int, wallet: str = "", timeout: float = 30.0):  # noqa: PLR0913, PLR0917 -- checked: these six ARE the RPC connection. They arrive as **Config.RPC[asset], a dict built for exactly this signature, so bundling them into an object would add a type without removing a parameter.
         self.user = user
         self.password = password
         self.host = host
@@ -43,19 +87,48 @@ class RPCAdapter:
         return self.call("getnewaddress", label)
 
     def validate_address(self, address: str) -> bool:
-        try:
-            result = self.call("validateaddress", address)
+        """Ask the daemon whether an address is valid.
+
+        Returns True or False for an ANSWER, and RAISES if the daemon could not
+        be asked. That distinction is the whole point, and it is what this
+        method used to get wrong (rule 12's BLE001, fixed 2026-09-24).
+
+        It previously ended with `except Exception: return False`, so a
+        Litecoin daemon that was down, wedged, or refusing authentication
+        produced the SAME answer as a genuinely malformed address: False. The
+        caller -- services/swap_service.create_swap() -- turns that into
+        `ValueError("Invalid LTC payout address")`, so the operator's response
+        to an outage was to go and check the customer's address.
+
+        NOTE FOR THE FUND-SAFETY REVIEW: this change cannot make a swap proceed
+        that would not have proceeded before. Both the old behavior and the new
+        one REFUSE; only the reason given changes, from a wrong one to a true
+        one. tests/test_address_validation.py asserts exactly that, including
+        that create_swap() still writes no swap row in either case.
+
+        Two RPC names are tried because they belong to different daemon
+        vintages: `validateaddress` carried `isvalid` on older builds, and
+        Bitcoin Core moved wallet-related fields to `getaddressinfo` in 0.18.
+        """
+        errors = []
+        for method in ("validateaddress", "getaddressinfo"):
+            try:
+                result = self.call(method, address)
+            except Exception as exc:  # noqa: BLE001 -- checked: a failure of ONE method is not an answer, it is a reason to try the other. It is collected, not discarded, and if both fail the RPCError below carries them. Nothing here can return False because of a transport failure.
+                errors.append(f"{method}: {exc}")
+                continue
+            if isinstance(result, dict) and "isvalid" in result:
+                return bool(result["isvalid"])
+            # A dict without `isvalid` is a daemon that answered about the
+            # address at all, which older Gridcoin builds do for addresses they
+            # recognize. Treat the answer as affirmative rather than inventing
+            # a refusal.
             if isinstance(result, dict):
-                return bool(result.get("isvalid"))
-        except Exception:
-            pass
-        try:
-            result = self.call("getaddressinfo", address)
-            if isinstance(result, dict):
-                return bool(result.get("isvalid", True))
-        except Exception:
-            return False
-        return False
+                return True
+        raise RPCError(
+            f"could not validate address with {self.asset or 'this'} daemon at {self.host}:{self.port}; "
+            f"this is NOT a statement about the address: {'; '.join(errors) or 'no method returned a usable answer'}"
+        )
 
     def get_balance(self) -> float:
         return float(self.call("getbalance"))
@@ -64,29 +137,39 @@ class RPCAdapter:
         return self.call("sendtoaddress", address, float(amount))
 
     def get_transaction(self, txid: str) -> dict:
+        # Checked: `gettransaction` only knows wallet transactions, so its
+        # failure means "ask about it as a raw transaction instead". The second
+        # call is NOT wrapped -- if that fails too, the exception reaches the
+        # caller rather than becoming an empty dict that get_confirmations()
+        # would read as zero confirmations.
         try:
             return self.call("gettransaction", txid)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- checked: see the comment above; the fallback's own failure propagates.
             return self.call("getrawtransaction", txid, True)
 
     def get_confirmations(self, txid: str) -> int:
         tx = self.get_transaction(txid)
         return int(tx.get("confirmations", 0))
 
-    def estimate_fee(self) -> float:
-        try:
-            result = self.call("estimatesmartfee", 2)
-            return float(result.get("feerate", 0) or 0)
-        except Exception:
-            return 0.0
-
     def _raw_tx_for_vouts(self, txid: str) -> dict:
         return self.call("getrawtransaction", txid, True)
 
     def _extract_matching_vouts(self, txid: str, address: str, amount: float):
+        # PROPOSAL MARKER, NOT AN ENDORSEMENT. The handler below FABRICATES a
+        # deposit event -- vout 0, the amount the caller already believed, and
+        # a confirmation count from a second RPC -- and returns it in the same
+        # shape as a real one. services/deposit_service.py cannot tell the two
+        # apart, so a transaction this adapter failed to decode is credited
+        # from the wallet's summary rather than from its outputs.
+        #
+        # That is rule 12's BLE001 in its expensive form and it is NOT fixed
+        # here, because this value feeds the confirmation comparison that
+        # releases a payout: making it raise would stall swaps that credit
+        # today. Which of the two failure modes the operator wants is a fund
+        # decision (rule 16).
         try:
             raw = self._raw_tx_for_vouts(txid)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- checked: see the proposal marker above. The caller CANNOT distinguish this synthetic event from a real one, which is exactly why it is being handed over rather than patched.
             return [{"txid": txid, "vout": 0, "address": address, "amount": float(amount), "confirmations": self.get_confirmations(txid)}]
         matches = []
         confirmations = int(raw.get("confirmations", 0))
@@ -94,7 +177,7 @@ class RPCAdapter:
             script_pub_key = vout.get("scriptPubKey", {})
             addresses = script_pub_key.get("addresses") or []
             value = float(vout.get("value", 0))
-            if address in addresses and abs(value - float(amount)) < 1e-8:
+            if address in addresses and abs(value - float(amount)) < SATOSHI:
                 matches.append({
                     "txid": txid,
                     "vout": int(vout.get("n", 0)),
@@ -108,9 +191,15 @@ class RPCAdapter:
 
     def find_deposits_to_address(self, address: str, tx_limit: int = 500):
         results = []
+        # Checked: the 5-argument form (with include_watchonly) is not
+        # accepted by every daemon vintage, so its failure means "retry with
+        # the short form". The retry is NOT wrapped: if that fails too, the
+        # exception reaches the worker rather than becoming an empty deposit
+        # list, which would read as "no deposit has arrived" and stall the swap
+        # silently.
         try:
             txs = self.call("listtransactions", "*", tx_limit, 0, True)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- checked: see above; the retry's failure propagates.
             txs = self.call("listtransactions", "*", tx_limit)
         for tx in txs or []:
             if tx.get("category") != "receive":

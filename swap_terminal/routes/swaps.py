@@ -1,5 +1,22 @@
-from flask import Blueprint, current_app, jsonify, request
+"""POST /api/swaps and GET /api/swaps/<id>.
+
+Role: submodule (HTTP handlers; the decisions are services/swap_service.py)
+Reads: swap_terminal.db (quotes, swaps, deposit_events, payouts), the
+       destination chain's RPC (validateaddress) and the source chain's RPC
+       (getnewaddress, which derives a new wallet key)
+Writes: swap_terminal.db (swaps, swap_audit_log)
+Can move funds: no broadcast happens here. It does fix the PAYOUT ADDRESS for
+       the swap, which is the address payout_worker will later send to -- so
+       the address validation in create_swap() is the last check before a
+       destination becomes final.
+Mainnet-safe: yes
+
+The `except Exception -> 400` here is the broad kind rule 12 warns about, and
+it is annotated at the site with what was checked.
+"""
+
 from db import get_db
+from flask import Blueprint, current_app, jsonify, request
 from services.swap_service import create_swap, get_swap
 
 bp = Blueprint("swaps", __name__)
@@ -16,7 +33,7 @@ def create_swap_route():
             payload.get("payout_address", ""),
         )
         return jsonify(swap), 201
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: HTTP boundary, same as routes/quotes.py. Note this one now also carries RPCError from validate_address, which means "the daemon could not be asked" rather than "the address is bad" -- the message says which, and no swap row is written in either case.
         return jsonify({"error": str(exc)}), 400
 
 @bp.get("/api/swaps/<swap_id>")

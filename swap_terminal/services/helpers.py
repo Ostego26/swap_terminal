@@ -1,9 +1,22 @@
-from datetime import datetime, timezone
+"""Small shared leaf functions: timestamps and identifiers.
+
+Role: function level (the bottom of rule 10's stack)
+Reads: the system clock, os.urandom via `secrets`
+Writes: nothing
+Can move funds: no
+Mainnet-safe: yes
+
+new_id() uses `secrets.token_hex`, not `random`: a swap id is handed to a
+client and is the only thing standing between a stranger and
+GET /api/swaps/<id>. 8 bytes of CSPRNG output is 64 bits of unguessability.
+"""
+
 import secrets
+from datetime import UTC, datetime
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def utc_now_iso() -> str:
