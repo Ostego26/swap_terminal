@@ -1,6 +1,43 @@
 #!/usr/bin/env python3
-"""
-transactions.py
+"""Tkinter viewer for Gridcoin wallet transactions, with historical USD prices.
+
+Role: file (an operator-facing GUI; nothing in this tree imports it)
+Reads: a Gridcoin wallet daemon -- `listtransactions` ONLY, established by
+       grepping every "method" key in this file; transactions.json as a cache;
+       and four price sources: CoinGecko, CryptoCompare, Yahoo Finance
+       (yfinance) and CoinPaprika
+Writes: transactions.json (the cache) and gridcoin_transactions.csv (an export)
+Can move funds: no. Established rather than assumed: this file issues exactly
+       one RPC method, `listtransactions`, and contains zero occurrences of
+       sendtoaddress, sendrawtransaction, signrawtransaction*, walletpassphrase
+       or importprivkey. It reads the wallet and never writes to it.
+Mainnet-safe: yes -- it is read-only with respect to both the wallet and the
+       chain. It does hold GRIDCOIN_RPC_PASSWORD, so the usual care about where
+       it runs applies.
+
+WHERE THIS SITS RELATIVE TO RULE 5 (SQL AND PYTHON ARE THE MAIN PATH).
+
+transactions.json is the largest state file in the tree at 466KB, and CLAUDE.md
+rule 5 lists it as a rule-5 violation with "TWO writers: transactions.py,
+clear_prices.py". Re-measured 2026-09-24 by grepping the whole tree for the
+filename: this file is the ONLY writer of swap_terminal/transactions.json.
+clear_prices.py wrote to a hardcoded
+/home/mpjones26/Documents/Prototypes/transactions.json -- a different file,
+outside the repository -- and has been deleted as a completed one-shot
+migration.
+
+So transactions.json is a single-writer CACHE of `listtransactions` plus fetched
+prices, and nothing else in the tree reads it. That makes it a mirror, not an
+authority, and it is off the fund-moving path entirely: no payout, no swap and
+no gate reads it. Moving it into swap_terminal.db is the right direction under
+rule 5 and is proposed in the enforcement report -- it is not urgent in the way
+swap_intents.json is, because no decision depends on it.
+
+The daemon thread at the bottom of TxViewerApp.__init__ (rule 13) is a GUI
+worker whose only reaper is process exit. That is acceptable HERE and only
+here: it is daemon=True, it holds no lock, it writes only the cache file, and
+the process it belongs to is a window an operator closes. It is named so that
+nobody copies the pattern into a worker that holds a wallet.
 """
 
 import csv
@@ -9,13 +46,13 @@ import logging
 import os
 import queue
 import threading
-from datetime import date, datetime, timedelta, timezone
+import tkinter as tk
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 import pandas as pd
 import requests
-import tkinter as tk
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -49,6 +86,8 @@ COINPAPRIKA_TIMEOUT_SECONDS = 10
 CRYPTOCOMPARE_TIMEOUT_SECONDS = 10
 YAHOO_TICKER = "GRC-USD"
 MAX_YAHOO_STALENESS_DAYS = 3
+# Length of an ISO date prefix, "YYYY-MM-DD", used when slicing timestamps.
+ISO_DATE_LEN = 10
 
 class PriceRecord(TypedDict):
     price: float
@@ -56,17 +95,17 @@ class PriceRecord(TypedDict):
     source_date: str
 
 
-price_cache: dict[str, Optional[PriceRecord]] = {}
-grc_data_cache: Optional[pd.DataFrame] = None
+price_cache: dict[str, PriceRecord | None] = {}
+grc_data_cache: pd.DataFrame | None = None
 coingecko_disabled = False
-coingecko_disable_reason: Optional[str] = None
+coingecko_disable_reason: str | None = None
 coinpaprika_latest_disabled = False
-coinpaprika_latest_disable_reason: Optional[str] = None
+coinpaprika_latest_disable_reason: str | None = None
 cryptocompare_disabled = False
-cryptocompare_disable_reason: Optional[str] = None
+cryptocompare_disable_reason: str | None = None
 
 
-def coerce_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+def coerce_float(value: Any, default: float | None = 0.0) -> float | None:
     if value is None:
         return default
     if isinstance(value, (int, float)):
@@ -82,7 +121,7 @@ def coerce_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
     return default
 
 
-def coerce_int(value: Any, default: int = 0) -> int:
+def coerce_int(value: Any, default: int = 0) -> int:  # noqa: PLR0911 -- checked: seven returns, one per input SHAPE (None, int/float, empty string, unparseable string, parsed string, fallthrough). Collapsing them needs a condition chain that says less than the shapes do.
     if value is None:
         return default
     if isinstance(value, int):
@@ -110,7 +149,7 @@ def clean_string(value: Any, default: str = "") -> str:
         return default
     if isinstance(value, str):
         stripped = value.strip()
-        return stripped if stripped else default
+        return stripped or default
     return str(value)
 
 
@@ -163,8 +202,8 @@ def normalize_transactions(transactions: Any) -> list[dict[str, Any]]:
     return [normalize_transaction(tx) for tx in transactions]
 
 
-def load_full_grc_data() -> Optional[pd.DataFrame]:
-    global grc_data_cache
+def load_full_grc_data() -> pd.DataFrame | None:
+    global grc_data_cache  # noqa: PLW0603 -- checked: module-level memo cache and per-run circuit breaker. Both are process-wide by design -- the point of the breaker is that one 429 disables a source for the WHOLE run -- and threading them through every caller is a larger change than this file warrants.
     if grc_data_cache is None:
         try:
             logging.info("Downloading full historical data for %s", YAHOO_TICKER)
@@ -174,13 +213,13 @@ def load_full_grc_data() -> Optional[pd.DataFrame]:
                 return None
             df.index = pd.to_datetime(df.index).normalize()
             grc_data_cache = df
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- checked: yfinance raises a wide, undocumented range (network, parse, empty frame). None is distinguishable from a result because every caller tests `is None`, and this function's contract is "a DataFrame or nothing".
             logging.error("Error downloading %s data: %s", YAHOO_TICKER, exc)
             return None
     return grc_data_cache
 
 
-def extract_close_series(df: Optional[pd.DataFrame | pd.Series]) -> pd.Series:
+def extract_close_series(df: pd.DataFrame | pd.Series | None) -> pd.Series:
     if df is None:
         return pd.Series(dtype=float)
 
@@ -225,15 +264,13 @@ def needs_price_refresh(tx: dict[str, Any]) -> bool:
     source_date = clean_string(tx.get("PriceSourceDate"), "")
     if amount_numeric is None or price_numeric is None:
         return True
-    if not price_source or not source_date:
-        return True
-    return False
+    return bool(not price_source or not source_date)
 
 
 def load_transactions_from_json(file_path: Path) -> list[dict[str, Any]]:
     logging.debug("Loading transactions from %s", file_path)
     try:
-        with open(file_path, "r", encoding="utf-8") as file:
+        with file_path.open(encoding="utf-8") as file:
             transactions = json.load(file)
         transactions = normalize_transactions(transactions)
         logging.info("Loaded %s transactions from %s", len(transactions), file_path)
@@ -241,7 +278,7 @@ def load_transactions_from_json(file_path: Path) -> list[dict[str, Any]]:
     except FileNotFoundError:
         logging.warning("Transactions file not found: %s", file_path)
         return []
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked, and this is the weakest one in the file: a corrupt transactions.json returns [], which the caller reads as "fewer than MIN_LOCAL_TX_COUNT" and re-fetches from the wallet, so it self-corrects. But [] is the same value an empty cache gives, and what keeps that safe is only that nothing downstream decides anything. This is a viewer.
         logging.error("Error loading transactions: %s", exc)
         return []
 
@@ -249,10 +286,10 @@ def load_transactions_from_json(file_path: Path) -> list[dict[str, Any]]:
 def save_transactions_to_json(file_path: Path, transactions: list[dict[str, Any]]) -> None:
     logging.debug("Saving %s transactions to %s", len(transactions), file_path)
     try:
-        with open(file_path, "w", encoding="utf-8") as file:
+        with file_path.open("w", encoding="utf-8") as file:
             json.dump(transactions, file, indent=4)
         logging.info("Transactions saved to %s", file_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: returns None either way and the file is a mirror, so a failed write costs one re-fetch. Logged at ERROR so a disk-full condition is visible rather than inferred.
         logging.error("Error saving transactions: %s", exc)
 
 
@@ -286,7 +323,7 @@ def fetch_transactions_from_blockchain() -> tuple[list[dict[str, Any]], bool]:
             transactions.extend(batch)
             logging.info("Fetched %s transactions (skip=%s)", len(batch), skip)
             skip += RPC_BATCH_SIZE
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- checked, and this handler gets it RIGHT: it sets `partial` and returns that flag with the rows, so the caller can tell "the wallet has 40 transactions" from "the RPC died after 40". That is exactly what rule 12 asks a broad catch to do -- say so in the return value.
             partial = bool(transactions)
             logging.error("Error fetching transactions from blockchain: %s", exc)
             break
@@ -296,8 +333,8 @@ def fetch_transactions_from_blockchain() -> tuple[list[dict[str, Any]], bool]:
     return normalized, partial
 
 
-def get_coingecko_request_config(target_date: Optional[date] = None) -> Optional[dict[str, Any]]:
-    global coingecko_disabled, coingecko_disable_reason
+def get_coingecko_request_config(target_date: date | None = None) -> dict[str, Any] | None:
+    global coingecko_disabled, coingecko_disable_reason  # noqa: PLW0603 -- checked: module-level memo cache and per-run circuit breaker. Both are process-wide by design -- the point of the breaker is that one 429 disables a source for the WHOLE run -- and threading them through every caller is a larger change than this file warrants.
 
     if coingecko_disabled:
         return None
@@ -312,7 +349,7 @@ def get_coingecko_request_config(target_date: Optional[date] = None) -> Optional
     demo_key = COINGECKO_DEMO_API_KEY or COINGECKO_GENERIC_API_KEY
     if demo_key:
         if target_date is not None:
-            oldest_demo_date = datetime.now(timezone.utc).date() - timedelta(days=365)
+            oldest_demo_date = datetime.now(UTC).date() - timedelta(days=365)
             if target_date < oldest_demo_date:
                 logging.debug(
                     "Skipping CoinGecko Demo for %s because it is older than the public 365-day historical window",
@@ -331,8 +368,8 @@ def get_coingecko_request_config(target_date: Optional[date] = None) -> Optional
     return None
 
 
-def fetch_grc_price_from_coingecko(date_str: str) -> Optional[PriceRecord]:
-    global coingecko_disabled, coingecko_disable_reason
+def fetch_grc_price_from_coingecko(date_str: str) -> PriceRecord | None:
+    global coingecko_disabled, coingecko_disable_reason  # noqa: PLW0603 -- checked: module-level memo cache and per-run circuit breaker. Both are process-wide by design -- the point of the breaker is that one 429 disables a source for the WHOLE run -- and threading them through every caller is a larger change than this file warrants.
 
     target_date = datetime.strptime(date_str, "%d-%m-%Y").date()
     config = get_coingecko_request_config(target_date=target_date)
@@ -366,20 +403,69 @@ def fetch_grc_price_from_coingecko(date_str: str) -> Optional[PriceRecord]:
             "source": config["label"],
             "source_date": target_date.strftime("%Y-%m-%d"),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: one of four price sources tried in order. None means "this source had nothing", the next is tried, and if all four fail the caller records NO price rather than a wrong one. None is not confusable with a price.
         logging.error("Error fetching from CoinGecko: %s", exc)
         return None
 
 
-def fetch_grc_price_from_cryptocompare(date_str: str) -> Optional[PriceRecord]:
-    global cryptocompare_disabled, cryptocompare_disable_reason
+def select_cryptocompare_row(rows: Any, target_date: date) -> dict[str, Any] | None:
+    """Pick the latest CryptoCompare daily row at or before `target_date`.
+
+    Extracted from fetch_grc_price_from_cryptocompare() on 2026-09-24. It was a
+    loop in the middle of a function that also built request parameters, made
+    an HTTP call, ran a circuit breaker and parsed a payload -- which is rule
+    10's defect wearing rule 12's lint code (C901): "a function past the
+    ceiling is orchestration that has swallowed decisions." The fix rule 12
+    names is to extract the decision so it can be called with seeded inputs,
+    not to raise the ceiling. tests/test_price_row_selection.py does exactly
+    that.
+
+    Rows are walked in reverse because CryptoCompare returns them oldest
+    first, so the first row at or before the target is the closest one to it.
+    A row with a non-positive timestamp is skipped rather than trusted.
+
+    Returns the row, or None if no row qualifies.
+    """
+    if not isinstance(rows, list):
+        return None
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        row_time = coerce_int(row.get("time"), 0)
+        if row_time <= 0:
+            continue
+        if datetime.fromtimestamp(row_time, tz=UTC).date() <= target_date:
+            return row
+    return None
+
+
+def usable_close_or_open(row: dict[str, Any]) -> float | None:
+    """Return a positive USD price from a daily row, preferring the close.
+
+    Also extracted on 2026-09-24. The preference order matters and was
+    previously inline: a zero or missing close falls back to the open, and a
+    non-positive result is None rather than 0.0 -- because on a price path a
+    zero is not a cheap asset, it is a missing measurement, and the caller must
+    be able to tell (rule 12).
+    """
+    close_price = coerce_float(row.get("close"), None)
+    if close_price is not None and close_price > 0:
+        return close_price
+    open_price = coerce_float(row.get("open"), None)
+    if open_price is not None and open_price > 0:
+        return open_price
+    return None
+
+
+def fetch_grc_price_from_cryptocompare(date_str: str) -> PriceRecord | None:  # noqa: PLR0911 -- checked: each return is a DIFFERENT failure of an external API (breaker open, auth/rate-limit, error payload, no rows, no usable row, no usable price) and each logs which. One return with a flag would lose that.
+    global cryptocompare_disabled, cryptocompare_disable_reason  # noqa: PLW0603 -- checked: module-level memo cache and per-run circuit breaker. Both are process-wide by design -- the point of the breaker is that one 429 disables a source for the WHOLE run -- and threading them through every caller is a larger change than this file warrants.
 
     if cryptocompare_disabled:
         logging.debug("CryptoCompare historical data disabled for this run: %s", cryptocompare_disable_reason)
         return None
 
     target_date = datetime.strptime(date_str, "%d-%m-%Y").date()
-    end_of_day_utc = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=timezone.utc)
+    end_of_day_utc = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=UTC)
     params: dict[str, Any] = {
         "fsym": "GRC",
         "tsym": "USD",
@@ -420,40 +506,29 @@ def fetch_grc_price_from_cryptocompare(date_str: str) -> Optional[PriceRecord]:
             logging.warning("CryptoCompare returned no rows for %s", date_str)
             return None
 
-        best_row = None
-        for row in reversed(rows):
-            row_time = coerce_int(row.get("time"), 0)
-            if row_time <= 0:
-                continue
-            row_date = datetime.fromtimestamp(row_time, tz=timezone.utc).date()
-            if row_date <= target_date:
-                best_row = row
-                break
-
-        if not isinstance(best_row, dict):
+        best_row = select_cryptocompare_row(rows, target_date)
+        if best_row is None:
             logging.warning("CryptoCompare returned no usable row for %s", date_str)
             return None
 
-        close_price = coerce_float(best_row.get("close"), None)
-        open_price = coerce_float(best_row.get("open"), None)
-        parsed = close_price if close_price is not None and close_price > 0 else open_price
-        if parsed is None or parsed <= 0:
+        parsed = usable_close_or_open(best_row)
+        if parsed is None:
             logging.warning("CryptoCompare returned no usable USD close/open for %s", date_str)
             return None
 
         source_timestamp = coerce_int(best_row.get("time"), 0)
-        source_date = datetime.fromtimestamp(source_timestamp, tz=timezone.utc).date().strftime("%Y-%m-%d")
+        source_date = datetime.fromtimestamp(source_timestamp, tz=UTC).date().strftime("%Y-%m-%d")
         return {
             "price": parsed,
             "source": "CryptoCompare histoday",
             "source_date": source_date,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: one of four price sources tried in order. None means "this source had nothing", the next is tried, and if all four fail the caller records NO price rather than a wrong one. None is not confusable with a price.
         logging.error("Error fetching from CryptoCompare: %s", exc)
         return None
 
 
-def fetch_grc_price_from_yahoo(date_str: str) -> Optional[PriceRecord]:
+def fetch_grc_price_from_yahoo(date_str: str) -> PriceRecord | None:  # noqa: PLR0911 -- checked: same shape as the CryptoCompare fetcher; each return names a distinct reason this source produced no price.
     logging.debug("Fetching %s price from Yahoo for %s using full dataset", YAHOO_TICKER, date_str)
     try:
         target_date = pd.Timestamp(datetime.strptime(date_str, "%d-%m-%Y").date())
@@ -509,13 +584,13 @@ def fetch_grc_price_from_yahoo(date_str: str) -> Optional[PriceRecord]:
             "source": f"Yahoo fallback ({gap_days}d)",
             "source_date": closest_timestamp.strftime("%Y-%m-%d"),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: one of four price sources tried in order. None means "this source had nothing", the next is tried, and if all four fail the caller records NO price rather than a wrong one. None is not confusable with a price.
         logging.error("Error in fetch_grc_price_from_yahoo: %s", exc)
         return None
 
 
-def fetch_latest_grc_price_from_coinpaprika() -> Optional[PriceRecord]:
-    global coinpaprika_latest_disabled, coinpaprika_latest_disable_reason
+def fetch_latest_grc_price_from_coinpaprika() -> PriceRecord | None:
+    global coinpaprika_latest_disabled, coinpaprika_latest_disable_reason  # noqa: PLW0603 -- checked: module-level memo cache and per-run circuit breaker. Both are process-wide by design -- the point of the breaker is that one 429 disables a source for the WHOLE run -- and threading them through every caller is a larger change than this file warrants.
 
     if coinpaprika_latest_disabled:
         logging.debug("CoinPaprika latest ticker disabled for this run: %s", coinpaprika_latest_disable_reason)
@@ -541,18 +616,19 @@ def fetch_latest_grc_price_from_coinpaprika() -> Optional[PriceRecord]:
             logging.warning("CoinPaprika returned no current USD price")
             return None
         last_updated = clean_string(data.get("last_updated"), "")
-        source_date = last_updated[:10] if len(last_updated) >= 10 else ""
+        # 10 = the length of an ISO date prefix, "YYYY-MM-DD".
+        source_date = last_updated[:ISO_DATE_LEN] if len(last_updated) >= ISO_DATE_LEN else ""
         return {
             "price": parsed,
             "source": "CoinPaprika ticker",
             "source_date": source_date,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: one of four price sources tried in order. None means "this source had nothing", the next is tried, and if all four fail the caller records NO price rather than a wrong one. None is not confusable with a price.
         logging.error("Error fetching latest price from CoinPaprika: %s", exc)
         return None
 
 
-def get_grc_price_record_on_date(date_str: str) -> Optional[PriceRecord]:
+def get_grc_price_record_on_date(date_str: str) -> PriceRecord | None:
     cache_key = f"GRC_{date_str}"
     if cache_key in price_cache:
         return price_cache[cache_key]
@@ -569,7 +645,7 @@ def get_grc_price_record_on_date(date_str: str) -> Optional[PriceRecord]:
     return record
 
 
-def get_latest_grc_price_record() -> Optional[PriceRecord]:
+def get_latest_grc_price_record() -> PriceRecord | None:
     record = fetch_latest_grc_price_from_coinpaprika()
     if record is not None:
         return record
@@ -593,7 +669,7 @@ def get_latest_grc_price_record() -> Optional[PriceRecord]:
             "source": "Yahoo latest close",
             "source_date": latest_timestamp.strftime("%Y-%m-%d"),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- checked: one of four price sources tried in order. None means "this source had nothing", the next is tried, and if all four fail the caller records NO price rather than a wrong one. None is not confusable with a price.
         logging.error("Error getting latest %s price: %s", YAHOO_TICKER, exc)
         return None
 
@@ -817,10 +893,7 @@ class TxViewerApp:
         else:
             priced_subset_value_text = f"${priced_subset_current_value_usd:,.4f}"
 
-        if priced_subset_gain_loss_usd is None:
-            gain_loss_text = "N/A"
-        else:
-            gain_loss_text = f"${priced_subset_gain_loss_usd:,.4f}"
+        gain_loss_text = "N/A" if priced_subset_gain_loss_usd is None else f"${priced_subset_gain_loss_usd:,.4f}"
 
         summary_lines = [
             f"Net GRC (all txs): {net_grc:,.4f}",
@@ -859,7 +932,7 @@ class TxViewerApp:
     def export_to_csv(self):
         logging.debug("Exporting transactions to CSV: %s", CSV_EXPORT_PATH)
         try:
-            with open(CSV_EXPORT_PATH, mode="w", newline="", encoding="utf-8") as file:
+            with CSV_EXPORT_PATH.open(mode="w", newline="", encoding="utf-8") as file:
                 writer = csv.writer(file)
                 totals = self.totals or calculate_transaction_totals(self.transactions)
                 latest_price_record = totals.get("latest_price_record") or {}
@@ -917,7 +990,7 @@ class TxViewerApp:
                     ])
             self.status_var.set(f"Exported CSV to {CSV_EXPORT_PATH}")
             self.listbox.insert(tk.END, f"Transactions have been successfully exported to {CSV_EXPORT_PATH}.")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- checked: a Tk button handler. It must not take the window down, and it reports the failure on screen ("CSV export failed") as well as in the log, so the operator sees it rather than a silently missing file.
             logging.error("Error exporting CSV: %s", exc)
             self.status_var.set("CSV export failed")
             self.listbox.insert(tk.END, "Error exporting to CSV.")

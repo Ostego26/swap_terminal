@@ -46,7 +46,9 @@ class StubAdapter(RPCAdapter):
     asset = "LTC"
 
     def __init__(self, responses=None, raises=None):
-        super().__init__(user="u", password="p", host="127.0.0.1", port=19332)
+        # Not a credential: this stub never opens a socket, so the values are
+        # only here because RPCAdapter.__init__ requires them.
+        super().__init__(user="u", password="p", host="127.0.0.1", port=19332)  # noqa: S106
         self._responses = responses or {}
         self._raises = raises or {}
         self.calls = []

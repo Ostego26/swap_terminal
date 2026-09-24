@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
-"""
-File: atomic_swap_gui.py
+"""Tkinter front end for the atomic-swap modules: validate, quote, and SWAP.
 
-Description:
-  This script implements an atomic swap GUI and swap logic for BTC, LTC, and GRC.
-  It validates user-entered addresses, disables fields not required for the chosen swap direction,
-  and initiates the swap using the unified Swapper class and coin client modules.
-  
-  Additionally, once a valid address is entered, it automatically queries and displays its balance
-  (via RPC calls or UTXO summing).
-  
-  NOTE: Currently, only the BTC2LTC swap direction is fully implemented.
+Role: file (an operator-facing GUI and the only caller of the atomic-swap
+      modules)
+Reads: BTC/LTC/GRC wallet RPC through the three atomic clients
+      (getreceivedbyaddress, listunspent), CoinGecko through
+      modules/market_data.py, and BTC_RPC_*/LTC_RPC_*/GRC_RPC_* from the
+      environment
+Writes: nothing to disk. THE CHAIN, through Swapper.start_swap().
+Can move funds: YES. The "Swap" button calls modules/atomic_swapper.py's
+      start_swap(), which funds an HTLC on the initiator's chain. There is no
+      confirmation step between the button and the broadcast beyond a balance
+      check.
+Mainnet-safe: NO, and it cannot be made mainnet-safe by configuration:
+      modules/atomic_htlc_scripts.py hardcodes testnet version bytes, so every
+      contract address this GUI can produce is a testnet address.
+
+BEFORE USING THE SWAP BUTTON, READ modules/atomic_swapper.py's HEADER. Three
+measured defects sit between this button and a working swap: the HTLC's refund
+branch is unspendable because the locktime is encoded as a varint rather than a
+script number, the locktime is hardcoded to a block height already in the past,
+and the participant and refund addresses are the same value. All three are
+fund-path findings handed to the operator rather than changed (rule 16).
+
+The swap result shown in the "Swap Complete" message box CONTAINS THE HTLC
+PREIMAGE, on purpose -- the initiator needs it to redeem the counterparty's leg
+and there is no other channel. Do not paste that box anywhere. It is the one
+value in this system that cannot be un-revealed.
 """
 
-import tkinter as tk
-from tkinter import messagebox
-from decimal import Decimal
-import os
 import logging
+import os
+import tkinter as tk
+from decimal import Decimal
+from tkinter import messagebox
+
 from dotenv import load_dotenv
-from typing import Dict
-from modules.utils import generate_secret, sha256_hash
 
 # Load environment variables.
 load_dotenv()
@@ -36,15 +51,32 @@ GRC_RPC_URL = os.environ.get("GRC_RPC_URL")
 GRC_RPC_USER = os.environ.get("GRC_RPC_USER")
 GRC_RPC_PASS = os.environ.get("GRC_RPC_PASS")
 
-# Import unified Swapper and coin clients.
-from modules.atomic_swapper import Swapper
-from modules.atomic_btc_client import BTCClient
-from modules.atomic_ltc_client import LTCClient
-from modules.atomic_grc_client import GRCClient
-from modules.atomic_htlc_scripts import parse_and_reencode_as_testnet_p2pkh
+# THESE IMPORTS MUST STAY BELOW load_dotenv(), WHICH IS WHY E402 IS SUPPRESSED
+# ON EACH OF THEM RATHER THAN THE BLOCK BEING MOVED UP.
+#
+# modules/atomic_grc_client.py reads GRC_WALLET_PASSPHRASE in a DEFAULT
+# ARGUMENT -- `wallet_passphrase: str = os.environ.get(...)` -- which Python
+# evaluates once, when the class body executes, i.e. at import. Importing it
+# before load_dotenv() therefore bakes in an EMPTY passphrase, and
+# ensure_fully_unlocked() then silently skips the wallet unlock, so every GRC
+# contract and redeem fails on a locked wallet with a confusing error.
+#
+# The real fix is to move that lookup into GRCClient.__init__, which is a
+# fund-path change (it decides whether the wallet gets unlocked) and is handed
+# to the operator rather than made here (rule 16). Until then, this ordering is
+# load-bearing and the suppression records why.
+from modules.atomic_btc_client import BTCClient  # noqa: E402
+from modules.atomic_grc_client import GRCClient  # noqa: E402
+from modules.atomic_htlc_scripts import parse_and_reencode_as_testnet_p2pkh  # noqa: E402
+from modules.atomic_ltc_client import LTCClient  # noqa: E402
+from modules.atomic_swapper import Swapper  # noqa: E402
 
 # Import market data functions.
-from modules.market_data import fetch_btc_ltc_prices, fetch_grc_price
+from modules.market_data import fetch_btc_ltc_prices, fetch_grc_price  # noqa: E402
+
+# Minimum length accepted for a Gridcoin address by the GUI's field check.
+# See the note at its use site: this is a length check, not validation.
+MIN_GRC_ADDRESS_LEN = 10
 
 # Configure logger.
 logger = logging.getLogger(__name__)
@@ -74,8 +106,8 @@ class AtomicSwapGUI:
         self.grc_client = GRCClient(GRC_RPC_URL, GRC_RPC_USER, GRC_RPC_PASS)
         
         # Track validation status and validated addresses.
-        self.validation_status: Dict[str, bool] = {"BTC": False, "LTC": False, "GRC": False}
-        self.validated_addresses: Dict[str, str] = {}
+        self.validation_status: dict[str, bool] = {"BTC": False, "LTC": False, "GRC": False}
+        self.validated_addresses: dict[str, str] = {}
         
         self.setup_ui()
         self.update_field_states()
@@ -200,13 +232,20 @@ class AtomicSwapGUI:
                     validated = parse_and_reencode_as_testnet_p2pkh(address)
                     valid = True
                 elif coin == "GRC":
-                    # Minimal validation for Gridcoin.
-                    if len(address) >= 10:
+                    # "Minimal validation" means a LENGTH CHECK: any string of
+                    # at least MIN_GRC_ADDRESS_LEN characters is accepted as a
+                    # Gridcoin address and shown with a green tick. It is not
+                    # checked against the daemon, its checksum is not verified,
+                    # and its version byte is not read. The other two coins go
+                    # through parse_and_reencode_as_testnet_p2pkh(), which at
+                    # least decodes. Tightening this is address validation on
+                    # the fund path (rule 16) -- reported, not changed.
+                    if len(address) >= MIN_GRC_ADDRESS_LEN:
                         validated = address
                         valid = True
                     else:
                         valid = False
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 -- checked: an address that fails to parse IS an invalid address for this field, and the GUI shows a red mark either way. Note it does not distinguish "malformed" from "the parser raised for another reason"; neither reaches a broadcast, because the swap path re-derives from self.validated_addresses.
                 logger.debug(f"Validation error for {coin} address '{address}': {e}")
                 valid = False
         
@@ -239,12 +278,12 @@ class AtomicSwapGUI:
             elif coin == "GRC":
                 balance = self.grc_client.get_address_balance(address)
             else:
-                balance = Decimal("0")
+                balance = Decimal(0)
             # Format the balance with 9 decimal places.
             balance_text = f"Balance: {balance:.9f}"
             getattr(self, f"balance_{coin.lower()}").config(text=balance_text)
             logger.debug(f"{coin} balance for {address}: {balance}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- checked: the field shows "Balance: Error", which is visibly different from a number and from a zero. That is rule 14's "make did-nothing look different from did-work" at widget level, and it is why the broad catch is acceptable: the operator cannot mistake the failure for a balance.
             logger.error(f"Error checking {coin} balance for {address}: {e}")
             getattr(self, f"balance_{coin.lower()}").config(text="Balance: Error")
 
@@ -294,7 +333,7 @@ class AtomicSwapGUI:
         direction = self.direction_var.get()
         try:
             swap_amount = Decimal(self.entry_swap_amount.get().strip())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- checked: Decimal() on operator input raises InvalidOperation and several ValueError subclasses depending on what was typed. Every one of them means "that is not an amount", the box says so, and the function RETURNS -- no swap is started.
             messagebox.showerror("Error", f"Invalid swap amount: {e}")
             return
         
@@ -320,7 +359,15 @@ class AtomicSwapGUI:
                 swap_amount=swap_amount
             )
             messagebox.showinfo("Swap Complete", f"Swap {direction} Completed!\n\n{result}")
-        except Exception as e:
+        # Checked, and this is the most consequential handler in the file: it
+        # wraps start_swap(), which BROADCASTS. A failure here is reported as
+        # "Swap failed" -- but an exception raised AFTER create_contract() has
+        # already sent funds to the P2SH address (for example a timeout inside
+        # wait_for_tx_output) shows the operator the same message as a failure
+        # that sent nothing. The contract txid is then only in the log.
+        # Distinguishing them means returning partial state from start_swap(),
+        # which is a fund-path change (rule 16) and is reported, not made.
+        except Exception as e:  # noqa: BLE001
             messagebox.showerror("Swap Error", f"Swap failed:\n{e}")
 
     def get_swap_parameters(self, direction: str) -> tuple:
@@ -350,7 +397,7 @@ class AtomicSwapGUI:
             return None, None, None
         return from_coin, balance, fee
 
-    def get_validated_addresses(self, direction: str) -> Dict[str, str]:
+    def get_validated_addresses(self, direction: str) -> dict[str, str]:
         """
         Retrieve the validated addresses based on the swap direction.
         
@@ -394,7 +441,7 @@ class AtomicSwapGUI:
             btc_price_str = f"{float(btc_price):,.2f}" if btc_price != "N/A" else "N/A"
             ltc_price_str = f"{float(ltc_price):,.2f}" if ltc_price != "N/A" else "N/A"
             grc_price_str = f"{float(grc_price):,.2f}" if grc_price != "N/A" else "N/A"
-        except Exception:
+        except Exception:  # noqa: BLE001 -- checked: the price sources return the STRING "N/A" on failure (see modules/market_data.py), so float() on one raises. The fallback shows the raw value in the marquee, which reads as "N/A" rather than as a price. Display only; nothing decides on it.
             btc_price_str, ltc_price_str, grc_price_str = btc_price, ltc_price, grc_price
 
         self.marquee_text = f" BTC: ${btc_price_str} | LTC: ${ltc_price_str} | GRC: ${grc_price_str} | "
@@ -409,7 +456,9 @@ class AtomicSwapGUI:
 
 def main() -> None:
     root = tk.Tk()
-    gui = AtomicSwapGUI(root)
+    # The GUI object is not bound to a name: Tk keeps it alive through the
+    # widget tree, and an unused local is rule 9's dead name.
+    AtomicSwapGUI(root)
     root.mainloop()
 
 if __name__ == "__main__":

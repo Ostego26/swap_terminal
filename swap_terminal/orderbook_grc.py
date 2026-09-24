@@ -1,8 +1,34 @@
+#!/usr/bin/env python3
+"""In-memory order book and HTLC simulation. No chain, no money, no callers.
+
+Role: file (a standalone simulation)
+Reads: CoinGecko simple/price, at the bottom of the __main__ block
+Writes: nothing
+Can move funds: no. The HTLCContract class here is a SIMULATION -- it holds a
+       `secrets.token_hex(16)` string and a settled flag, builds no script,
+       signs nothing and broadcasts nothing. A reader skimming for "HTLC"
+       could easily mistake it for the real one, which is in
+       modules/atomic_htlc_scripts.py and modules/atomic_*_client.py.
+Mainnet-safe: yes, trivially -- there is no chain in this file at all.
+
+Nothing in the tree imports it, established by grepping the whole tree for the
+name. It is kept rather than culled because it is domain work rather than
+stray debris, but it is named in the enforcement report as a deletion
+candidate: rule 2's point is that a second thing called an HTLC, with its own
+notion of a locktime in SECONDS rather than in blocks, is one more thing the
+next reader has to disambiguate before they can answer any other question.
+
+Note the locktime here is a DURATION in seconds compared against time.time(),
+where a real HTLC's locktime is a block height or a unix timestamp enforced by
+OP_CHECKLOCKTIMEVERIFY. Two different things sharing a name, in one tree.
+"""
+
+import hashlib
+import logging
+import secrets
 import time
 import uuid
-import hashlib
-import secrets
-import logging
+
 import requests  # For external API calls
 
 # Configure logging to display timestamp and level information
@@ -32,7 +58,12 @@ def get_external_price(asset, vs_currency="usd"):
     # Adding a cache buster to avoid potential caching issues.
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_gecko_id}&vs_currencies={vs_currency.lower()}&cache_buster={int(time.time())}"
     try:
-        response = requests.get(url)
+        # A price lookup in a simulation with no money in it, so a timeout
+        # here is hygiene rather than safety -- unlike the missing timeouts
+        # in modules/atomic_{ltc,grc}_client.py, which sit on the same call
+        # that carries sendtoaddress. Fixed rather than reported for exactly
+        # that reason: nothing downstream of this is a broadcast.
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         # Log the full JSON response for debugging.
@@ -40,7 +71,7 @@ def get_external_price(asset, vs_currency="usd"):
         price = data[coin_gecko_id][vs_currency.lower()]
         logging.info(f"[CoinGecko] {asset} price in {vs_currency.upper()}: {price}")
         return price
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: the caller tests `if price is not None` before using it, so None is a value it can tell apart from a price. Nothing here decides anything.
         logging.error(f"Error fetching price from CoinGecko for {asset}: {e}")
         return None
 
@@ -99,7 +130,15 @@ class HTLCContract:
         """Simulate settling the HTLC contract by verifying the revealed secret."""
         if hashlib.sha256(revealed_secret.encode()).hexdigest() == self.secret_hash:
             self.settled = True
-            logging.info(f"HTLC settled for trade {self.trade.trade_id[:8]} using secret {revealed_secret}")
+            # The preimage is NOT logged, even here. This contract is a
+            # simulation and its "secret" spends nothing, but the line that
+            # prints a revealed secret is the line that gets copied into the
+            # file where it does. The hash prefix identifies the contract.
+            logging.info(
+                "HTLC settled for trade %s (secret_hash=%s...)",
+                self.trade.trade_id[:8],
+                self.secret_hash[:8],
+            )
             return True
         else:
             logging.error("Failed to settle HTLC: invalid secret")

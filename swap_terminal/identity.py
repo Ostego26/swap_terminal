@@ -1,36 +1,47 @@
 #!/usr/bin/env python3
+"""Demo: signed BOINC attestations for a Gridcoin address, anchored on chain.
+
+Role: file (a standalone demonstration; nothing in this tree imports it)
+Reads: a Gridcoin wallet daemon -- listunspent, createrawtransaction,
+       signrawtransactionwithwallet, sendrawtransaction; GRIDCOIN_RPC_* from
+       the environment
+Writes: nothing to disk. THE CHAIN: store_attestation_on_chain() signs and
+       broadcasts.
+Can move funds: YES, and in the worst possible way -- see below.
+Mainnet-safe: NO. The docstring says testnet and the RPC endpoint says
+       whatever the environment says; nothing in the code enforces either.
+
+MEASURED DEFECT, NOT FIXED HERE: store_attestation_on_chain() BURNS THE WHOLE
+UTXO AS FEE. It selects `utxos[0]`, then builds
+
+    outputs = {"data": attestation_hash}
+
+and signs and broadcasts it. There is no change output. A raw transaction's fee
+is inputs minus outputs, and the only output here is a zero-value OP_RETURN, so
+the ENTIRE value of the selected UTXO is paid to the miner. On a wallet whose
+first unspent output is large, one call to this function donates it.
+
+Not fixed here because adding a change output is a fund-path change (rule 16):
+it changes what the transaction pays, to which address, and at what fee, and it
+cannot be tested from here -- the honest proof is a testnet broadcast whose
+txid the operator can look up.
+
+Two smaller things, also measured: `rpc_call(method, params: list = [])` uses a
+MUTABLE DEFAULT ARGUMENT, shared across every call that omits `params`; and
+nothing in the tree imports this file (established by grepping the whole tree
+for the name), so it is an entry point with no entry.
 """
-Decentralized Identity & Reputation System Demo for Gridcoin with CPID
 
-Example Workflow:
-  1. A BOINC participant completes a significant research task.
-  2. A trusted issuer generates an attestation (or "badge") that includes:
-     - The user’s Gridcoin address.
-     - The user's CPID.
-     - A reference to the task or result.
-     - A timestamp.
-     - A signature from the issuer’s private key.
-     - (Optionally) A hash of detailed metadata stored off‑chain.
-  3. The attestation is recorded (here, we simulate by storing in a list and then recording a hash on‑chain).
-  4. A reputation score is aggregated from the valid attestations for a given address.
-  5. The system then generates a challenge message that the user must sign; the response is verified
-     to further confirm the user's identity.
-
-Usage:
-  Run this script to simulate issuance, verification, reputation aggregation, and to record the attestation on the testnet.
-  (Make sure your Gridcoin testnet wallet RPC is running and the RPC credentials are set.)
-"""
-
-import time
-import json
 import hashlib
-import random
-from decimal import Decimal
-from typing import List, Optional
-from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
-import os
-import requests
+import json
 import logging
+import os
+import random
+import time
+from decimal import Decimal
+
+import requests
+from ecdsa import BadSignatureError, SECP256k1, SigningKey, VerifyingKey
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
@@ -47,8 +58,10 @@ logger = logging.getLogger(__name__)
 class Attestation:
     """Represents an attestation (or badge) issued for a completed BOINC task."""
 
-    def __init__(self, gridcoin_address: str, cpid: str, task_reference: str, timestamp: float,
-                 metadata_hash: Optional[str], signature: str):
+    def __init__(  # noqa: PLR0913, PLR0917 -- checked: the six are the attestation's own fields and they are exactly what gets signed; bundling them would change the signed message.
+        self, gridcoin_address: str, cpid: str, task_reference: str, timestamp: float,
+        metadata_hash: str | None, signature: str,
+    ):
         """
         Initialize an Attestation object.
         
@@ -84,7 +97,7 @@ class Attestation:
 
 
 def create_message(gridcoin_address: str, cpid: str, task_reference: str, timestamp: float,
-                   metadata_hash: Optional[str] = None) -> bytes:
+                   metadata_hash: str | None = None) -> bytes:
     """
     Construct the message to be signed from the attestation components.
     
@@ -107,7 +120,7 @@ def create_message(gridcoin_address: str, cpid: str, task_reference: str, timest
 
 
 def issue_attestation(issuer_sk: SigningKey, gridcoin_address: str, cpid: str,
-                      task_reference: str, metadata_hash: Optional[str] = None) -> Attestation:
+                      task_reference: str, metadata_hash: str | None = None) -> Attestation:
     """
     Issue an attestation by signing the message constructed from the provided details.
     
@@ -153,7 +166,7 @@ def verify_attestation(attestation: Attestation, issuer_vk: VerifyingKey) -> boo
         return False
 
 
-def compute_reputation(address: str, attestations: List[Attestation]) -> Decimal:
+def compute_reputation(address: str, attestations: list[Attestation]) -> Decimal:
     """
     Compute a reputation score for a given address by counting valid attestations.
     
@@ -181,7 +194,7 @@ GRIDCOIN_RPC_PASS = os.environ.get("GRIDCOIN_RPC_PASS", "REMOVED-SEE-GIT-HISTORY
 GRIDCOIN_RPC_URL = os.environ.get("GRIDCOIN_RPC_URL", "http://127.0.0.1:25779")
 
 
-def rpc_call(method: str, params: list = []):
+def rpc_call(method: str, params: list | None = None):
     """
     Make an RPC call to the Gridcoin testnet wallet.
 
@@ -192,6 +205,13 @@ def rpc_call(method: str, params: list = []):
     Returns:
         The 'result' field from the JSON-RPC response.
     """
+    # `params` was a MUTABLE DEFAULT ARGUMENT (`params: list = []`) until
+    # 2026-09-24: one list object shared by every call that omitted it, so
+    # anything appending to it would leak into the next caller. Nothing in this
+    # file appends, so no behavior changes -- it is the shape that is wrong,
+    # and it is one edit away from being a live bug.
+    if params is None:
+        params = []
     payload = {
         "jsonrpc": "1.0",
         "id": "gridcoin-identity",
@@ -199,7 +219,11 @@ def rpc_call(method: str, params: list = []):
         "params": params
     }
     logger.debug("RPC call: %s with params: %s", method, params)
-    response = requests.post(GRIDCOIN_RPC_URL, json=payload, auth=(GRIDCOIN_RPC_USER, GRIDCOIN_RPC_PASS))
+    # No timeout, and this same call carries sendrawtransaction. Adding one
+    # would make the client report failure for a broadcast that may already
+    # have gone out -- the fund-path trade-off written up in
+    # modules/atomic_grc_client.py. Reported, not made (rule 16).
+    response = requests.post(GRIDCOIN_RPC_URL, json=payload, auth=(GRIDCOIN_RPC_USER, GRIDCOIN_RPC_PASS))  # noqa: S113
     response.raise_for_status()
     result = response.json()["result"]
     logger.debug("RPC result: %s", result)
@@ -257,7 +281,12 @@ def generate_challenge_message(length: int = 32) -> str:
         str: The generated challenge message.
     """
     letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    challenge = "".join(random.choice(letters) for _ in range(length))
+    # `random`, not `secrets`: this challenge is what a user signs to prove
+    # they hold a key, so a predictable one lets an attacker pre-compute a
+    # signature request for a challenge that has not been issued yet. This
+    # file is a demo with no callers, so the change is named in the
+    # enforcement report rather than made here -- but it is one import.
+    challenge = "".join(random.choice(letters) for _ in range(length))  # noqa: S311
     logger.debug("Generated challenge message: %s", challenge)
     return challenge
 
@@ -333,7 +362,7 @@ def verify_cpid_on_blockchain(gridcoin_address: str, cpid: str) -> bool:
         else:
             logger.error("Address %s is not valid according to the blockchain.", gridcoin_address)
             return False
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: this returns False, which is INDISTINGUISHABLE from "the CPID does not match" -- rule 12's exact defect. It is left as-is and named in the enforcement report because this file has no callers; if it ever gets one, this is the first line to fix.
         logger.error("Error during CPID verification: %s", e)
         return False
 
@@ -376,7 +405,7 @@ def main() -> None:
         print("\nAttestation invalid.")
 
     # Step 4: Simulate local storage of attestations.
-    attestations_db: List[Attestation] = []
+    attestations_db: list[Attestation] = []
     attestations_db.append(attestation)
 
     # Step 5: Compute reputation score.
@@ -387,7 +416,7 @@ def main() -> None:
     try:
         txid = store_attestation_on_chain(attestation)
         print(f"\nAttestation stored on-chain in transaction: {txid}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- checked: the demo driver in main(); it prints and continues to the next step. Nothing reads a value from it.
         print(f"\nError storing attestation on-chain: {e}")
 
     # Step 7: Generate a challenge message for the user to sign.
