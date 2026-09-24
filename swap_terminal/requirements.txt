@@ -1,2 +1,79 @@
+# Runtime dependencies for swap_terminal.
+#
+# MEASURED 2026-09-24, not listed from memory. This file declared TWO packages
+# (Flask and requests) while the tree imported EIGHT, and the gap was not
+# theoretical: a clean checkout could not collect the test suite, because
+# `tests/test_htlc_locktime_encoding.py` imports `modules.atomic_htlc_scripts`,
+# which does `import bech32` at module level (line 93) --
+#
+#     ModuleNotFoundError: No module named 'bech32'
+#
+# -- and bech32 was one of the six that were never declared. An undeclared
+# dependency does not fail at install time, when it would be cheap. It fails on
+# whichever machine happens not to have it, at import, which on this tree means
+# the atomic-swap path.
+#
+# The list below was taken by walking the AST of every .py file outside .venv
+# and node_modules, collecting every top-level import, and subtracting the
+# standard library and this repository's own modules. Denominator: 8 third-party
+# runtime imports found, 2 previously declared, 6 added here.
+#
+# THE UPPER BOUNDS WERE ALSO MEASURED, after a first draft of this file got them
+# wrong. Written from memory they were pandas <3.0 and yfinance <0.3 -- and the
+# environment the suite actually passes in runs pandas 3.0.6 and yfinance 1.7.0,
+# so `pip install -r` would have refused the exact versions this code is known
+# to work on. Every ceiling below is the next major above a version observed
+# working, not a recollection of what the current release was.
+#
+# One exception, stated rather than hidden: ecdsa is NOT installed in the
+# environment where the 83 tests pass, and the suite still passes -- so no test
+# exercises identity.py's import path, and its range below is the only one here
+# that has not been observed working. Treat it as a declaration, not a
+# measurement (rule 17).
+#
+# Development-only tooling (pytest, ruff) is NOT here -- see requirements-dev.txt
+# at the repository root. Keeping them apart means a deployment does not install
+# a test runner, and `pip install -r requirements.txt` on a production host
+# stays the minimal set that the application actually needs to run.
+
+# --- Web application (app.py, routes/, services/, workers/) -------------------
 Flask>=3.0,<4.0
+
+# --- JSON-RPC to the chain daemons -------------------------------------------
+# Used by chains/base.py and all three modules/atomic_*_client.py. This is the
+# fund-moving path: every sendtoaddress and sendrawtransaction goes through it.
 requests>=2.31,<3.0
+
+# --- Address and script encoding (modules/atomic_htlc_scripts.py) -------------
+# base58 decodes and re-encodes P2PKH/P2SH addresses; bech32 handles the
+# segwit forms. Both are imported at module level, so the whole atomic-swap
+# path is unimportable without them -- which is exactly how the gap was found.
+base58>=2.1,<3.0
+bech32>=1.2,<2.0
+
+# --- Signing (identity.py) ----------------------------------------------------
+ecdsa>=0.19,<1.0
+
+# --- Environment loading (atomic_swap_gui.py, modules/atomic_grc_client.py) ---
+# Imported as `dotenv`, distributed as `python-dotenv`. CLAUDE.md rule 12 warns
+# about load_dotenv() at import time making later imports order-dependent;
+# declaring the package does not endorse where it is called.
+python-dotenv>=1.0,<2.0
+
+# --- Price history (transactions.py only) -------------------------------------
+# transactions.py is a reporting/cache file off the fund-moving path: it issues
+# exactly one RPC method (listtransactions) and contains no send, sign or
+# unlock call. These two are heavy and are needed ONLY by it, so if you are
+# deploying the Flask application alone you can safely omit them -- the app
+# does not import transactions.py.
+pandas>=2.0,<4.0
+yfinance>=0.2,<2.0
+
+# --- Not installable with pip -------------------------------------------------
+# tkinter (transactions.py:49, atomic_swap_gui.py:34) ships with CPython but is
+# packaged separately on Debian and Ubuntu. If `import tkinter` fails:
+#
+#     sudo apt install python3-tk
+#
+# It is listed here as a comment rather than a requirement because pip cannot
+# satisfy it, and a line pip cannot satisfy would break `pip install -r`.

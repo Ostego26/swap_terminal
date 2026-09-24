@@ -1,0 +1,28 @@
+# Development tooling for swap_terminal. Not needed to RUN the application.
+#
+# Split out from swap_terminal/requirements.txt on 2026-09-24 so that a
+# deployment does not install a test runner and a linter onto a host that holds
+# wallet RPC credentials. Install both on a development machine:
+#
+#     pip install -r swap_terminal/requirements.txt -r requirements-dev.txt
+#
+# These two are what CLAUDE.md rule 12 names as the declared standard, so
+# neither is optional for anyone changing code here:
+#
+#     python3 -m pytest          # the suite must pass before committing
+#     python3 -m ruff check .    # the files you TOUCHED must be clean
+
+# The test runner. tests/conftest.py puts swap_terminal/ on sys.path, because
+# the application imports its own modules rootlessly (`from config import
+# Config`). That is CLAUDE.md rule 10's layout gap, not a pytest setting.
+pytest>=8.0,<10.0
+
+# The linter, configured in pyproject.toml. Pinned to a minor range on purpose:
+# ruff adds rules between minor versions, and a floating upper bound means a
+# checkout that was clean on Monday fails on Tuesday for a reason nobody
+# changed. Raise the ceiling deliberately, read what the new rules found, and
+# fix it -- rule 19 forbids adding a baseline or a blanket ignore to get green
+# again. The ceiling is measured: ruff 0.16.8 is what reports "All checks
+# passed" over the 84 files here, and pytest 9.1.1 is what runs the 83 tests.
+# A first draft of this file said <0.14 and <9.0, which excluded both.
+ruff>=0.6,<0.17
