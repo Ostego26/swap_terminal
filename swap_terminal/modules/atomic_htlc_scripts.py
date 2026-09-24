@@ -328,7 +328,17 @@ def build_htlc_redeem_script(secret_hash: str | bytes,
     OP_DROP = b'\x75'
 
     def push_data(data: bytes) -> bytes:
-        """Pushes data onto the script stack using the appropriate opcode."""
+        """Pushes data onto the script stack using the appropriate opcode.
+
+        THERE IS A SECOND COPY OF THIS, and rule 8 requires each site to name
+        the other: `regtest/txbuild.py::push_data` has identical boundaries and
+        is used to assemble the scriptSigs that SPEND the script this function
+        builds. They are not merged because this one lives inside the function
+        that decides the redeem script -- fund-path code (rule 16) -- and
+        extracting it would be a change to the fund path made on behalf of a
+        harness whose job is to measure that path, not to edit it. If either
+        changes, change both.
+        """
         length = len(data)
         logger.debug(f"Pushing data (length {length}): {data.hex()}")
         if length < 0x4c:  # noqa: PLR2004 -- checked: OP_PUSHDATA1's boundary, a script opcode constant
