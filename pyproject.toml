@@ -1,0 +1,69 @@
+# pyproject.toml -- the declared standard for this repository (CLAUDE.md rule 12).
+#
+# Before 2026-09-24 there was no pyproject.toml and no tests/ directory, so rule
+# 12 had nothing to point at: "conform to a declared standard" cannot be checked
+# when no standard is declared. This file is that declaration. Once it exists it
+# is the standard and is not renegotiable mid-change:
+#
+#     python3 -m ruff check <the files you touched>
+#
+# Clean the files you TOUCHED, not the tree. A sweep across files you were not
+# otherwise in is a large diff on a key-holding system with no behavioral
+# benefit.
+#
+# Rule 19 governs what may NOT be added here: no per-file baselines, no ratchet
+# files, and no `noqa` added to silence a finding nobody read. A `noqa` in this
+# repository is a claim that you checked, and the comment beside it says what
+# you checked.
+
+[project]
+name = "swap-terminal"
+version = "0.1.0"
+description = "Brokered hot-wallet cross-chain swap terminal (GRC/BTC/LTC) plus atomic-swap modules."
+requires-python = ">=3.11"
+
+[tool.ruff]
+# py312 is the declared target even though some hosts still run 3.11: it is the
+# version the code is written against, and it is what CLAUDE.md rule 12 names.
+target-version = "py312"
+
+# Generous, and E501 is ignored below. Rule 1 asks for the reasoning to be
+# written down at length next to the code; a line-length limit that forces a
+# comment to be trimmed is the checker winning an argument it should lose.
+line-length = 120
+
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "node_modules",
+    "swap_terminal/grc-sol-swap",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PERF", "RUF", "PTH", "FLY", "FURB", "BLE", "S", "PL", "C901"]
+
+ignore = [
+    # Rule 1: verbosity in comments and docstrings is the point, not a defect.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on seeded conditions; `assert` is the mechanism, not a hazard,
+# and a test that builds SQL from a literal table name it wrote itself is not
+# taking input from anywhere. S101 = assert, S603/S607 = subprocess with a
+# fixed argv the test itself constructs.
+#
+# PLR2004 (magic value in comparison) is off in tests for a different reason:
+# the expected literal IS the test. `assert kwargs["port"] == 5000` says what
+# the default port is; hoisting 5000 into EXPECTED_PORT and asserting against
+# that asserts only that the constant equals itself.
+"tests/*" = ["S101", "S603", "S607", "PLR2004"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# swap_terminal/ is on sys.path via tests/conftest.py, because the application
+# imports its own modules rootlessly (`from config import Config`) rather than
+# as a package. That is rule 10's layout gap, not something this config should
+# paper over by rewriting every import.
+addopts = "-q"
