@@ -1,0 +1,70 @@
+{
+  "intents": [
+    {
+      "intentId": "si_1ceb9d2d20bc23a6898f8ab8",
+      "status": "paid",
+      "createdAt": "2026-03-26T18:30:32.525Z",
+      "expiresAt": "2026-03-26T19:30:32.525Z",
+      "gridcoinDepositAddress": "mre8bKn5zM72oVCk3W6noNwajtoFEqpHhT",
+      "destinationSolanaAddress": "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN",
+      "expectedGrcAmount": 100,
+      "expectedQuote": {
+        "grcAmount": 100,
+        "grcPriceUsd": 0.00477897,
+        "solPriceUsd": 85.94,
+        "solAmount": 0.005560821,
+        "lamports": 5560821
+      },
+      "verifiedDeposit": {
+        "sourceGridcoinAddress": "mre8bKn5zM72oVCk3W6noNwajtoFEqpHhT",
+        "gridcoinTxid": "example-txid",
+        "confirmations": 6,
+        "receivedGrcAmount": 100,
+        "verifiedAt": "2026-03-26T18:32:05.677Z"
+      },
+      "payout": {
+        "startedAt": "2026-03-26T18:32:43.249Z",
+        "signature": "3BVAb7ry5TvLiYTLooiXePzoiN9rSWQkDtSsLPTebLZosdGcSHnHK6p2Wtrv4djMHmkWQMQMg6T8bzphn9vQ3df4",
+        "lamports": 5560821,
+        "solAmount": 0.005560821,
+        "paidAt": "2026-03-26T18:32:44.294Z"
+      }
+    },
+    {
+      "intentId": "si_869351920c24c7be4b2a6ff8",
+      "status": "awaiting_deposit",
+      "createdAt": "2026-03-26T18:49:29.421Z",
+      "expiresAt": "2026-03-26T19:49:29.421Z",
+      "gridcoinDepositAddress": "mre8bKn5zM72oVCk3W6noNwajtoFEqpHhT",
+      "destinationSolanaAddress": "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN",
+      "expectedGrcAmount": 100,
+      "expectedQuote": {
+        "grcAmount": 100,
+        "grcPriceUsd": 0.00477936,
+        "solPriceUsd": 85.94,
+        "solAmount": 0.005561275,
+        "lamports": 5561275
+      },
+      "verifiedDeposit": null,
+      "payout": null
+    },
+    {
+      "intentId": "si_ef11c730a29359ac7014797d",
+      "status": "awaiting_deposit",
+      "createdAt": "2026-03-26T18:59:12.577Z",
+      "expiresAt": "2026-03-26T19:59:12.577Z",
+      "gridcoinDepositAddress": "mre8bKn5zM72oVCk3W6noNwajtoFEqpHhT",
+      "destinationSolanaAddress": "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN",
+      "expectedGrcAmount": 0.1,
+      "expectedQuote": {
+        "grcAmount": 0.1,
+        "grcPriceUsd": 0.00478771,
+        "solPriceUsd": 86.01,
+        "solAmount": 0.000005566,
+        "lamports": 5566
+      },
+      "verifiedDeposit": null,
+      "payout": null
+    }
+  ]
+}

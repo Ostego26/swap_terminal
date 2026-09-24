@@ -6,3 +6,15 @@ __pycache__/
 *.sqlite3
 wallet.dat
 *.log
+
+# secrets and backups
+.env
+.env.*
+*.bak
+*.bak.*
+*keypair*.json
+*.gpg
+
+# solana local validator artifacts
+test-ledger/
+node_modules/
