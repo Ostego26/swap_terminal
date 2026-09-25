@@ -307,15 +307,32 @@ This is the single most important thing to know before turning it on.
 | `chains/monero_transfers.py` -- which transfers count as a deposit | **measured**, tested directly |
 | `chains/monero.py` -- RPC method and field names | **UNVERIFIED** |
 
-The unverified half is not a matter of polish. The environment this was written
-in could not reach `getmonero.org` (403 through the proxy) or run a daemon, so
-every method name (`get_transfers`, `create_address`, ...) and every field name
-(`unlocked_balance`, `subaddr_index`, ...) came from prior knowledge.
+The third row moved on 2026-09-25 and the table above keeps the old wording
+because the drift is the point. Those names were originally written from prior
+knowledge, because the environment they were written in could not reach
+`getmonero.org` (403 through the proxy) or run a daemon.
 
-**If one of them is wrong, all 72 tests still pass and the adapter fails on the
-first real call**, because a unit test seeds the same shape it asserts. That is
-why `monero_chain_check.py` exists and why it should be run before anything
-else.
+**They have since been checked against the published spec**, fetched from the
+operator's host (`docs.getmonero.org/rpc-library/wallet-rpc/`, 380,318 bytes).
+All six method names, the `in` array returned by `get_transfers`, the
+`{major, minor}` shape of `subaddr_index`, `txid`, `type: "in"`, `locked`,
+`unlock_time`, `double_spend_seen` and `unlocked_balance` are all in the
+request/response spec as this code reads them, and `validate_address`'s
+`any_net_type` does default to false, which the adapter relies on.
+
+So it is no longer a guess. Three things are still open, and they are why
+`monero_chain_check.py` should still be the first thing you run:
+
+1. **Documentation is not a daemon.** A spec can lag a release, and nothing
+   above came from a wallet answering a real call.
+2. **The multi-output amount.** Every `amounts` example in the spec has one
+   element, so nothing published proves `amount` is the *sum* when several
+   outputs arrive. `_reject_amount_disagreement()` checks it at runtime and
+   refuses rather than short-paying a customer silently.
+3. **`locked` is described contradictorily** -- `locked - boolean; Is the
+   output spendable`, which is the opposite of what the field name says. This
+   code follows the name, so the worst case is a deposit deferred that was
+   fine: a delay, printed, never a wrong credit.
 
 ### Verify it first
 

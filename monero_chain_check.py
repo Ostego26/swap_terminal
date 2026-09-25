@@ -72,6 +72,7 @@ from chains.monero import (
 from chains.monero_transfers import (
     FIELD_ADDRESS,
     FIELD_AMOUNT,
+    FIELD_AMOUNTS,
     FIELD_CONFIRMATIONS,
     FIELD_DOUBLE_SPEND,
     FIELD_LOCKED,
@@ -90,6 +91,11 @@ TRANSFER_FIELDS = [
     (FIELD_TXID, True),
     (FIELD_AMOUNT, True),
     (FIELD_ADDRESS, True),
+    # Optional, and the most interesting line in a real run: `amounts` is the
+    # per-output breakdown, so a transfer carrying MORE THAN ONE of them is a
+    # live instance of the aggregation that (txid, subaddress) depends on.
+    # Every example in the published spec has exactly one.
+    (FIELD_AMOUNTS, False),
     (FIELD_SUBADDR_INDEX, True),
     (FIELD_CONFIRMATIONS, False),
     (FIELD_TYPE, False),
@@ -199,7 +205,7 @@ def transfer_field_report(transfers: list[dict]) -> tuple[list[str], list[str]]:
             failures.append(f"no incoming transfer carries `{name}`, and chains/monero_transfers.py REQUIRES it")
             lines.append(f"    FAIL {name:<18} MISSING and required")
         else:
-            lines.append(f"    -  {name:<20} absent from every transfer  <- optional; the adapter defaults it")
+            lines.append(f"    -  {name:<20} absent from every transfer  <- optional; the adapter tolerates this")
 
     unexpected = observed - {name for name, _ in TRANSFER_FIELDS}
     lines.append(f"    fields the adapter ignores   {', '.join(sorted(unexpected)) if unexpected else '(none)'}")

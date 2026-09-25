@@ -55,8 +55,14 @@ per swap, so the minor index IS which swap the money arrived for.
 That is only a valid unique key if `get_transfers` reports at most ONE incoming
 entry per (transaction, subaddress) -- aggregating several outputs to the same
 subaddress in one transaction into a single summed entry. That is the
-documented behavior as I understand it, AND IT WAS NOT VERIFIED AGAINST A
-RUNNING DAEMON (see THE HONEST STATUS in chains/monero.py).
+CONFIRMED 2026-09-25 against docs.getmonero.org, fetched from the operator's
+host: a transfer entry carries `amounts`, "array of unsigned int; If multiple
+amounts where recived they are individually listed." A per-entry breakdown of
+several received amounts can only exist because the entry AGGREGATES them,
+which is the mechanism this key depends on -- so the assumption now has a
+documented reason and not just a guard. It is still not verified against a
+RUNNING DAEMON; see CONFIRMED in chains/monero.py for what that distinction
+does and does not cover.
 
 So it is not assumed. It is CHECKED, every scan, by
 _reject_ambiguous_keys() below: if two entries ever collide on that key, the
@@ -79,7 +85,8 @@ from .monero_units import from_atomic
 # why they could not be confirmed where this was written.
 # ---------------------------------------------------------------------------
 FIELD_TXID = "txid"
-FIELD_AMOUNT = "amount"                  # atomic units (piconero), an integer
+FIELD_AMOUNT = "amount"                  # atomic units (piconero), an integer -- the AGGREGATE
+FIELD_AMOUNTS = "amounts"                # the same money broken out per output, when several arrived
 FIELD_ADDRESS = "address"                # the subaddress that received it
 FIELD_CONFIRMATIONS = "confirmations"
 FIELD_SUBADDR_INDEX = "subaddr_index"    # {"major": account, "minor": index}
@@ -143,6 +150,57 @@ def _minor_index(transfer: dict, txid: str) -> int:
         raise MoneroTransferError(
             f"transfer {txid} has a non-integer {FIELD_SUBADDR_INDEX}.minor ({index['minor']!r}). NOT credited."
         ) from error
+
+
+def _reject_amount_disagreement(transfer: dict, txid: str, atomic: int) -> None:
+    """Cross-check the aggregate `amount` against the per-output `amounts`.
+
+    WHY THIS EXISTS, and it is the one thing reading the documentation changed
+    rather than merely confirmed.
+
+    A wallet transfer entry carries BOTH `amount` and `amounts`: the official
+    spec describes the second as "array of unsigned int; If multiple amounts
+    where recived they are individually listed." That is the mechanism behind
+    this module's central assumption -- get_transfers COLLAPSES several outputs
+    to one subaddress into ONE entry, which is exactly why (txid, subaddress)
+    identifies a deposit and why `subaddr_index.minor` is a sound `vout`.
+
+    So the aggregation is documented. What is NOT documented is the arithmetic:
+    every example on that page shows `amounts` with a single element equal to
+    `amount`, so there is no published case proving `amount` is the SUM when
+    several outputs arrive rather than, say, the largest or the first.
+
+    This code reads `amount` and ignores `amounts`. If that reading is wrong,
+    the failure is silent and it under-credits a customer on a multi-output
+    deposit -- money they sent and we did not see. There is no error, no log
+    line, and the swap simply settles short.
+
+    Checking costs one sum and turns an invisible shortfall into a refusal that
+    names the transaction and both figures. Rule 17: a reason to believe
+    something is not the same as having checked it, and the difference here is
+    somebody else's money.
+
+    Absent or empty `amounts` is fine and common -- the check simply has
+    nothing to compare against and says nothing.
+    """
+    amounts = transfer.get(FIELD_AMOUNTS)
+    if not isinstance(amounts, list) or not amounts:
+        return
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in amounts):
+        raise MoneroTransferError(
+            f"transfer {txid} has a non-integer entry in {FIELD_AMOUNTS}={amounts!r}. NOT credited: "
+            f"this field is the per-output breakdown of the money that arrived, and it cannot be "
+            f"reconciled against {FIELD_AMOUNT} if it is not all integers."
+        )
+    total = sum(amounts)
+    if total != atomic:
+        raise MoneroTransferError(
+            f"transfer {txid} reports {FIELD_AMOUNT}={atomic} but its {FIELD_AMOUNTS} sum to {total} "
+            f"(a difference of {total - atomic} atomic units). NOT credited, and NOT silently resolved "
+            f"in either direction: this module credits `{FIELD_AMOUNT}` on the understanding that it is "
+            f"the aggregate, and this row refutes that. Crediting the smaller figure short-pays whoever "
+            f"sent it; crediting the larger over-pays from the hot wallet. A human decides which this is."
+        )
 
 
 def _reject_ambiguous_keys(events: list[dict]) -> None:
@@ -211,6 +269,7 @@ def deposit_events_from_transfers(transfers, address: str, min_confirmations: in
                 f"units. NOT credited: reading a float here would silently lose piconero, and reading a "
                 f"string would coerce to the wrong scale."
             )
+        _reject_amount_disagreement(transfer, txid, atomic)
         confirmations = int(transfer.get(FIELD_CONFIRMATIONS, 0) or 0)
 
         # A custom unlock_time can hold an output beyond the ten-block

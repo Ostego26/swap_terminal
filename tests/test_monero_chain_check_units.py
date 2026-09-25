@@ -107,7 +107,7 @@ def test_a_missing_required_field_is_a_failure():
 
 
 def test_a_missing_optional_field_is_reported_but_is_not_a_failure():
-    """The adapter defaults these, so their absence is information, not a fault."""
+    """The adapter tolerates these, so their absence is information, not a fault."""
     entry = transfer()
     del entry["locked"]
     lines, failures = transfer_field_report([entry])
