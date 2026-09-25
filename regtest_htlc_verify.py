@@ -324,6 +324,7 @@ def print_verdicts(console: Console, outcomes: list[steps.ChainOutcome]) -> None
             f"{outcome.asset}:   real create_contract()={outcome.real_create_contract}  "
             f"real redeem_contract() [confirmed]={outcome.real_redeem}  "
             f"[unconfirmed]={outcome.real_redeem_unconfirmed}  "
+            f"preimage on chain={outcome.preimage_on_chain}  "
             f"control hashlock spend={outcome.control_redeem}  "
             f"refund refused before expiry={outcome.refund_before_expiry_rejected}  "
             f"refund after expiry={outcome.refund_after_expiry}"
@@ -335,11 +336,19 @@ def print_verdicts(console: Console, outcomes: list[steps.ChainOutcome]) -> None
         # could not spend (rule 14 -- "did nothing" must not look like "did
         # work", and here it is the reverse: a SKIP that means success needs
         # saying).
+        # `preimage on chain` is scored SEPARATELY from the two redeem results
+        # and it is the one that answers defect 1. The redeem results are the
+        # client's RETURN VALUE -- a broadcast txid -- which says the coins
+        # moved, not that the hashlock branch is what moved them. Until
+        # 2026-09-25 this line credited defect 1 to `real_redeem` and the
+        # on-chain scriptSig check fed nothing at all.
         console.say(
             f"{outcome.asset}:   the four 2026-09-25 fixes: "
             f"contract created={outcome.real_create_contract} (defects 3 and 4), "
-            f"confirmed redeem={outcome.real_redeem} (defects 1 and 2), "
-            f"unconfirmed redeem={outcome.real_redeem_unconfirmed} (defect 1)"
+            f"confirmed redeem={outcome.real_redeem} (defect 2), "
+            f"unconfirmed redeem={outcome.real_redeem_unconfirmed}, "
+            f"preimage read back off the chain={outcome.preimage_on_chain} (defect 1 -- this is the one that "
+            f"says the swap is atomic; a txid alone does not)"
         )
         for note in outcome.notes:
             console.say(f"{outcome.asset}:   note: {note}")

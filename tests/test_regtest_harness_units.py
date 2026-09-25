@@ -598,6 +598,11 @@ def test_verdict_when_both_branches_spend_through_real_code():
         asset="BTC",
         real_redeem=OK,
         real_redeem_unconfirmed=OK,
+        # THE CHAIN'S OWN ANSWER, and it is now required for this verdict.
+        # `real_redeem=OK` alone is the client's return value -- a broadcast
+        # txid -- and a txid says the coins moved, not that the hashlock branch
+        # is what moved them. See the test below.
+        preimage_on_chain=OK,
         control_redeem=SKIP,
         refund_after_expiry=OK,
     )
@@ -617,12 +622,61 @@ def test_verdict_does_not_claim_both_lookup_routes_when_only_one_worked():
         asset="BTC",
         real_redeem=OK,
         real_redeem_unconfirmed=FAIL,
+        preimage_on_chain=OK,
         control_redeem=SKIP,
         refund_after_expiry=OK,
     )
     verdict = outcome.verdict()
     assert "one of the two lookup routes is still broken" in verdict
     assert "through real code" not in verdict
+
+
+def test_the_verdict_does_not_certify_the_preimage_fix_from_a_broadcast_txid():
+    """WHAT THE VERDICT WAS BUILT FROM UNTIL 2026-09-25, and it was the weaker thing.
+
+    `real_redeem` is set from redeem_contract()'s RETURN VALUE -- a txid. The
+    run has always ALSO read the broadcast scriptSig back off the block and
+    checked it for the preimage push, and that result went to the console and
+    nowhere else. So the verdict could print "redeem_contract() spent the
+    hashlock branch" on the strength of a txid while the on-chain check two
+    lines above it printed ABSENT.
+
+    SKIP here is "no spend landed to read", which is not evidence and must not
+    be treated as either answer.
+    """
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=OK,
+        real_redeem_unconfirmed=OK,
+        preimage_on_chain=SKIP,
+        control_redeem=SKIP,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "both branches spend, through real code" not in verdict
+
+
+def test_the_verdict_says_so_loudly_when_a_spend_confirmed_without_the_preimage():
+    """The worst outcome this run can reach, and it outranks every other sentence.
+
+    The coins moved and the secret did not become public, so the counterparty's
+    leg cannot be redeemed. That is not a failed redeem; it is a swap that has
+    stopped being atomic, and it must not be reported as "only the refund
+    branch spends" -- which is where the old structure would have routed it,
+    since the control spend is SKIPPED precisely when the real client
+    succeeded.
+    """
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=OK,
+        preimage_on_chain=FAIL,
+        control_redeem=SKIP,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "WITHOUT REVEALING THE PREIMAGE" in verdict
+    assert "stopped being atomic" in verdict
+    assert "ONLY THE REFUND BRANCH SPENDS" not in verdict
 
 
 def test_verdict_when_the_refund_branch_was_exercised_and_failed():
@@ -912,6 +966,45 @@ def test_the_verdict_refuses_to_judge_a_redeem_that_never_reached_signing():
     assert "was NOT judged on the hashlock branch" in verdict
     assert "THIS IS A REGRESSION" in verdict
     assert "CANNOT spend the hashlock branch" not in verdict
+
+
+def test_a_signing_failure_in_7b_is_not_reported_as_never_reaching_signing():
+    """THE 6b REGRESSION, driven through the accumulation rather than the flag.
+
+    Step 7 makes two attempts. 7a used to assign `reached_the_signer` directly
+    and 7b's failure branch assigned nothing, so this exact pair --
+
+        7a failed on the LOOKUP,  before the node was ever asked to sign
+        7b failed on SIGNING,     which is the preimage defect regressing
+
+    -- left the flag False, and the verdict printed "it failed earlier (stage
+    'lookup') and NEVER REACHED SIGNING". 7b had reached signing and been
+    refused there, which is the single most important thing the run can find
+    about this fix, and the verdict said it had not been measured.
+    """
+    outcome = ChainOutcome(asset="BTC")
+    outcome.note_signer_reached(RedeemAttempt(succeeded=False, detail="", stage=REDEEM_FAILED_ON_LOOKUP))
+    assert outcome.reached_the_signer is False, "a lookup failure never put the question to the node"
+    outcome.note_signer_reached(RedeemAttempt(succeeded=False, detail="", stage=REDEEM_FAILED_ON_SIGNING))
+    assert outcome.reached_the_signer is True, "7b reached the signer and 7a's earlier failure hid it"
+
+    outcome.real_redeem = FAIL
+    outcome.real_redeem_stage = REDEEM_FAILED_ON_LOOKUP
+    outcome.real_redeem_unconfirmed = FAIL
+    outcome.real_redeem_unconfirmed_stage = REDEEM_FAILED_ON_SIGNING
+    outcome.control_redeem = OK
+    outcome.refund_after_expiry = OK
+    verdict = outcome.verdict()
+    assert "never reached signing" not in verdict
+    assert "CANNOT spend the hashlock branch" in verdict
+
+
+def test_reaching_the_signer_once_is_never_unmade_by_a_later_attempt():
+    """It is a fact about the run, not about the last attempt."""
+    outcome = ChainOutcome(asset="BTC")
+    outcome.note_signer_reached(RedeemAttempt(succeeded=True, detail="txid=ab", stage=""))
+    outcome.note_signer_reached(RedeemAttempt(succeeded=False, detail="", stage=REDEEM_FAILED_ON_LOOKUP))
+    assert outcome.reached_the_signer is True
 
 
 def test_the_verdict_does_judge_a_redeem_that_reached_signing_and_failed():
