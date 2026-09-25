@@ -178,7 +178,17 @@ def test_transactions_no_longer_carries_a_default_password():
     pytest.importorskip("tkinter", reason="transactions.py imports tkinter at module level")
     import transactions  # noqa: PLC0415 -- checked: see above; a module-level import breaks collection headless.
 
-    for name in gridcoin_credentials.GRIDCOIN_PASSWORD_VARIABLES:
-        if os.environ.get(name):
-            pytest.skip(f"{name} is set in this environment, so the default is not observable")
-    assert transactions.RPC_PASSWORD == ""
+    # ASSERTS THE SOURCE, NOT A VALUE, AND THE FIRST VERSION GOT THIS WRONG.
+    #
+    # It read `assert transactions.RPC_PASSWORD == ""` after checking that no
+    # password variable was set in os.environ. That passed here and FAILED on
+    # the operator's machine, because transactions.py calls load_dotenv() at
+    # import: the environment check ran BEFORE the import, and the import then
+    # populated os.environ from a real .env. The test looked wrong and the
+    # import-time side effect was the thing it had tripped over (rule 12).
+    #
+    # What is actually being pinned is that this module has no hardcoded
+    # default -- that it resolves through the shared resolver like everything
+    # else. Comparing the two is true whether or not a .env supplied a value,
+    # so it holds on a developer's laptop and on the operator's host alike.
+    assert gridcoin_credentials.gridcoin_rpc_password() == transactions.RPC_PASSWORD
