@@ -59,6 +59,7 @@ from collections.abc import Mapping
 from .bitcoin import BitcoinAdapter
 from .gridcoin import GridcoinAdapter
 from .litecoin import LitecoinAdapter
+from .monero import MoneroAdapter
 from .solana import SolanaAdapter
 
 # The three Bitcoin-derived chains, whose Config.RPC entries all have the same
@@ -97,4 +98,21 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # and left to warn on every inventory refresh.
     if solana and solana.get("url"):
         adapters["SOL"] = SolanaAdapter(**solana)
+
+    # XMR is conditional for the same reason SOL is, and on the same test:
+    # "configured" means the operator supplied the one value that cannot be
+    # defaulted. For Solana that is the endpoint URL; for Monero it is the
+    # wallet RPC port, because monero-wallet-rpc has no conventional port the
+    # way bitcoind's 8332 does -- it is whatever the operator passed to
+    # --rpc-bind-port when they started it, and guessing one would produce an
+    # adapter that fails on every cycle against a port nothing is listening on.
+    #
+    # Config.RPC["XMR"] has its own shape again -- {host, port, user, password,
+    # account_index, min_confirmations, can_spend, timeout} -- matching
+    # MoneroAdapter.__init__ exactly, for the reason the SOL paragraph above
+    # gives: the dict is built for the signature, and the splat makes a
+    # mismatch fail loudly here instead of being ignored.
+    monero = rpc.get("XMR")
+    if monero and monero.get("port"):
+        adapters["XMR"] = MoneroAdapter(**monero)
     return adapters

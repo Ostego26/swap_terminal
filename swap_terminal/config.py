@@ -62,6 +62,26 @@ class Config:
         ("GRC", "LTC"),
         ("LTC", "GRC"),
     }
+    # Monero. No default port: monero-wallet-rpc binds wherever it was told to
+    # with --rpc-bind-port, and there is no conventional value the way 8332 is
+    # Bitcoin's. XMR_RPC_PORT unset means "no Monero wallet here", and
+    # chains/registry.py leaves the adapter unbuilt rather than pointing one at
+    # a guess.
+    XMR_RPC_PORT = int(os.getenv("XMR_RPC_PORT", "0"))
+    # Clamped to Monero's ten-block consensus spend lock by
+    # chains/monero_units.effective_min_confirmations(). The default is that
+    # floor rather than a number chosen to look like the others: anything lower
+    # would release a swap the wallet then refuses to pay.
+    XMR_MIN_CONFIRMATIONS = int(os.getenv("XMR_MIN_CONFIRMATIONS", "10"))
+    XMR_NETWORK_FEE_RESERVE = float(os.getenv("XMR_NETWORK_FEE_RESERVE", "0.0005"))
+    # FALSE BY DEFAULT, AND THIS IS THE ONE CHAIN THAT CAN AFFORD IT. Monero
+    # splits the view key from the spend key, so the deposit watcher can run
+    # against a wallet that is cryptographically unable to send. The other
+    # three chains inherit send_to_address() unconditionally from
+    # chains/base.py and have no equivalent. Setting this true is a deliberate
+    # act that arms the payout path for XMR.
+    XMR_WALLET_CAN_SPEND = os.getenv("XMR_WALLET_CAN_SPEND", "").strip().lower() in {"1", "true", "yes"}
+
     RPC: ClassVar[dict[str, dict[str, object]]] = {
         "BTC": {
             "user": os.getenv("BTC_RPC_USER", ""),
@@ -114,5 +134,22 @@ class Config:
             "port": int(os.getenv("GRC_RPC_PORT", "15715")),
             "wallet": os.getenv("GRC_RPC_WALLET", ""),
             "timeout": float(os.getenv("GRC_RPC_TIMEOUT", "30")),
+        },
+        # A DIFFERENT SHAPE ON PURPOSE, matching MoneroAdapter.__init__ rather
+        # than RPCAdapter's six. There is no `wallet` key because a
+        # monero-wallet-rpc process serves exactly one wallet -- the name is
+        # chosen when the daemon starts, not per request -- and there is an
+        # `account_index` instead, because that is what a subaddress is derived
+        # under. chains/registry.py splats this dict, so a key added here
+        # without a matching parameter fails at construction.
+        "XMR": {
+            "host": os.getenv("XMR_RPC_HOST", "127.0.0.1"),
+            "port": XMR_RPC_PORT,
+            "user": os.getenv("XMR_RPC_USER", ""),
+            "password": os.getenv("XMR_RPC_PASS", ""),
+            "account_index": int(os.getenv("XMR_ACCOUNT_INDEX", "0")),
+            "min_confirmations": XMR_MIN_CONFIRMATIONS,
+            "can_spend": XMR_WALLET_CAN_SPEND,
+            "timeout": float(os.getenv("XMR_RPC_TIMEOUT", "30")),
         },
     }

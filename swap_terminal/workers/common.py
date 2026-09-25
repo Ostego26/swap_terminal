@@ -52,6 +52,7 @@ import signal
 import time
 from collections.abc import Callable
 
+from chains.monero import MoneroAdapter
 from chains.registry import build_adapters
 from chains.solana import SolanaAdapter
 from config import Config
@@ -115,6 +116,18 @@ def endpoint_lines() -> list[str]:
         lines.append(SolanaAdapter(**Config.RPC["SOL"]).endpoint_line())
     else:
         lines.append("  SOL  not configured (SOL_RPC_URL unset)  <- no Solana adapter is constructed; no SOL pair is allowed")
+
+    # XMR, appended separately for a DIFFERENT reason than SOL's. Its threshold
+    # genuinely is a count of blocks, so it is not the unit mismatch above --
+    # it is that the number printed may not be the number configured. Monero's
+    # ten-block consensus spend lock is a floor under XMR_MIN_CONFIRMATIONS
+    # (chains/monero_units.py), so a banner echoing the raw setting could tell
+    # an operator their wallet waits 2 blocks when it waits 10. The adapter
+    # renders its own line and says so when it raised the figure.
+    if Config.RPC.get("XMR", {}).get("port"):
+        lines.append(MoneroAdapter(**Config.RPC["XMR"]).endpoint_line())
+    else:
+        lines.append("  XMR  not configured (XMR_RPC_PORT unset)  <- no Monero adapter is constructed; no XMR pair is allowed")
     return lines
 
 
