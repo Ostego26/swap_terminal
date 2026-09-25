@@ -189,9 +189,38 @@ def compute_reputation(address: str, attestations: list[Attestation]) -> Decimal
 # =============================================================================
 
 # These credentials should match your gridcoinresearch.conf file.
+#
+# GRIDCOIN_RPC_PASS HAS NO DEFAULT, AND IT USED TO. Until 2026-09-25 this line
+# carried a hardcoded password as its fallback -- the same literal as
+# chain_tx.sh, which is rule 8's two-copies-of-one-thing wearing a secret.
+#
+# The value is deliberately not named here. A comment reproducing it would keep
+# the string in the tree, trip every secret scanner, and survive the history
+# rewrite meant to remove it.
+#
+# It was a TESTNET credential (25779 is Gridcoin's test chain; mainnet is
+# 15715), so nothing of value was behind it. It went anyway, for the reason a
+# default like that is always wrong: it makes the insecure path the SILENT one.
+# A reader who never sets the variable gets a working script and no signal,
+# right up until the day they point it at something that is not testnet.
+#
+# Empty rather than absent so that importing this module still works -- reading
+# the environment at import time is already a rule 12 hazard, and raising here
+# would make a failed import the first symptom. rpc_call() refuses instead, at
+# the point of use, where the message can say what to do.
 GRIDCOIN_RPC_USER = os.environ.get("GRIDCOIN_RPC_USER", "gridcoinrpc")
-GRIDCOIN_RPC_PASS = os.environ.get("GRIDCOIN_RPC_PASS", "REMOVED-SEE-GIT-HISTORY-PURGE")
+GRIDCOIN_RPC_PASS = os.environ.get("GRIDCOIN_RPC_PASS", "")
 GRIDCOIN_RPC_URL = os.environ.get("GRIDCOIN_RPC_URL", "http://127.0.0.1:25779")
+
+
+class GridcoinRPCNotConfigured(RuntimeError):
+    """GRIDCOIN_RPC_PASS is unset, so no RPC call was attempted.
+
+    Its own class rather than a bare RuntimeError because this is not the
+    daemon refusing -- it is this process declining before it opens a socket,
+    and an operator reading a traceback needs to tell "the wallet said no" from
+    "you did not configure me".
+    """
 
 
 def rpc_call(method: str, params: list | None = None):
@@ -219,6 +248,19 @@ def rpc_call(method: str, params: list | None = None):
         "params": params
     }
     logger.debug("RPC call: %s with params: %s", method, params)
+    # Checked before the socket opens. An unauthenticated Gridcoin RPC call
+    # comes back as an HTTP 401, and raise_for_status() turns that into a
+    # generic HTTPError several frames from the cause -- so a missing password
+    # would present as "the wallet is broken" rather than "you did not set a
+    # password". This method carries sendrawtransaction, so that confusion is
+    # expensive: the obvious reaction to an unexplained failure is to retry.
+    if not GRIDCOIN_RPC_PASS:
+        raise GridcoinRPCNotConfigured(
+            f"GRIDCOIN_RPC_PASS is not set, so {method!r} was NOT sent and no socket was opened. "
+            f"Set it from your gridcoinresearch.conf rpcpassword. This module talks to "
+            f"{GRIDCOIN_RPC_URL}, which is Gridcoin's TEST chain by default (port 25779; mainnet "
+            f"is 15715) -- check which one you meant before setting it."
+        )
     # No timeout, and this same call carries sendrawtransaction. Adding one
     # would make the client report failure for a broadcast that may already
     # have gone out -- the fund-path trade-off written up in
