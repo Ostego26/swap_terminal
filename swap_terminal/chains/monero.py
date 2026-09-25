@@ -16,7 +16,8 @@ Mainnet-safe: the read methods are. Nothing in this file selects a network; it
 
 THE HONEST STATUS -- READ THIS FIRST
 
-**No part of this file has been run against a monero-wallet-rpc.** Measured
+**No part of this file has been run against a monero-wallet-rpc** -- though its
+names are now confirmed against the published spec; see CONFIRMED below. Measured
 2026-09-25 from the environment it was written in: `getmonero.org` returns
 `403 CONNECT tunnel failed` through this container's proxy, so Monero's RPC
 documentation could not be opened and no daemon could be downloaded, let alone
@@ -37,6 +38,50 @@ Every unverified name is gathered in one block per file -- `_METHOD_*` below,
 and the `FIELD_*` constants in chains/monero_transfers.py -- so that confirming
 them against a real stagenet wallet is a read of two short blocks, and fixing a
 wrong one is a one-line change rather than a hunt.
+
+CONFIRMED AGAINST THE OFFICIAL SPEC ON 2026-09-25, AND THE STATUS ABOVE HAS
+MOVED BECAUSE OF IT.
+
+docs.getmonero.org/rpc-library/wallet-rpc/ was unreachable from the machine
+this was written on (403 through the proxy) and IS reachable from the
+operator's host. Fetched there, 380,318 bytes, and every name this code
+depends on was read out of the published request/response spec:
+
+    method            create_address, validate_address, get_balance,
+                      get_transfers, transfer, get_address     ALL PRESENT
+    get_transfers     takes `in` as a boolean input and returns
+                      `in - array of transfers`                CONFIRMED
+    transfer entry    address, amount, amounts, confirmations,
+                      double_spend_seen, subaddr_index, txid,
+                      type, unlock_time, locked                ALL PRESENT
+    subaddr_index     "JSON object containing the major & minor
+                      subaddress index"                        EXACT SHAPE
+    type              'Transfer type: "in"'                    CONFIRMED
+    validate_address  any_net_type "Defaults to false ... only consider an
+                      address valid if it belongs to the network on which
+                      the rpc-wallet's current daemon is running"
+                                                               THE DEFAULT
+                      THIS CODE RELIES ON, CONFIRMED
+    create_address    returns `address` and `address_index`    CONFIRMED
+
+So the wire format is no longer a guess. Three things are still NOT
+established, and they are the reason monero_chain_check.py still exists:
+
+1. DOCUMENTATION IS NOT A DAEMON. A published spec can lag a release, and
+   nothing above was produced by a wallet answering a real call. Reading that
+   `txid` is documented is not watching one arrive.
+2. THE MULTI-OUTPUT AMOUNT. Every `amounts` example on that page has exactly
+   one element. See _reject_amount_disagreement() in
+   chains/monero_transfers.py -- the arithmetic relating `amount` to `amounts`
+   is checked at runtime precisely because the spec does not state it.
+3. `locked` IS DESCRIBED CONTRADICTORILY. The spec reads
+   `locked - boolean; Is the output spendable`, which is the opposite of what
+   the field NAME says, beside an example carrying `"locked": false` on a
+   transfer with one confirmation. This code treats truthy `locked` as
+   not-yet-creditable, which follows the name. If the description is the
+   accurate one, this defers deposits that were fine -- a delay, never a
+   wrong credit, and the deferral is printed rather than silent.
+
 
 WHY THIS IS A SIBLING OF RPCAdapter AND NOT A SUBCLASS OF IT
 

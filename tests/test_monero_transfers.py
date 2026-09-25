@@ -184,6 +184,81 @@ def test_a_non_integer_amount_raises_rather_than_being_coerced():
             deposit_events_from_transfers([transfer(amount=bad)], ADDRESS, 10)
 
 
+def test_a_single_amount_matching_the_aggregate_is_credited():
+    """The ordinary case, and the one every example in the spec shows.
+
+    `"amount": 200000000000, "amounts": [200000000000]` -- one output, and the
+    breakdown agrees with the total.
+    """
+    scan = deposit_events_from_transfers(
+        [transfer(amount=2_500_000_000_000, amounts=[2_500_000_000_000])], ADDRESS, 10
+    )
+    assert scan.events[0]["amount"] == 2.5
+
+
+def test_several_outputs_summing_to_the_aggregate_are_credited_once():
+    """THE CASE THE KEY DEPENDS ON.
+
+    Two outputs to one subaddress in one transaction arrive as ONE entry whose
+    `amount` is the total. That aggregation is why (txid, subaddr_index)
+    identifies a deposit at all, and it must produce exactly one event.
+    """
+    scan = deposit_events_from_transfers(
+        [transfer(amount=3_000_000_000_000, amounts=[1_000_000_000_000, 2_000_000_000_000])],
+        ADDRESS,
+        10,
+    )
+    assert len(scan.events) == 1
+    assert scan.events[0]["amount"] == 3.0
+
+
+def test_an_aggregate_that_disagrees_with_its_breakdown_refuses():
+    """The silent shortfall this guard exists to prevent.
+
+    Reading `amount` while `amounts` says something else would credit the
+    customer less than they sent, with no error and no log line -- the swap
+    would simply settle short. Neither figure is chosen here: crediting the
+    smaller short-pays them, crediting the larger over-pays from the hot
+    wallet, so a human decides which it is.
+    """
+    with pytest.raises(MoneroTransferError, match="sum to"):
+        deposit_events_from_transfers(
+            [transfer(amount=1_000_000_000_000, amounts=[1_000_000_000_000, 2_000_000_000_000])],
+            ADDRESS,
+            10,
+        )
+
+
+def test_the_amount_disagreement_names_both_figures_and_the_difference():
+    """An operator's first question is how much is unaccounted for."""
+    with pytest.raises(MoneroTransferError) as caught:
+        deposit_events_from_transfers(
+            [transfer(amount=1_000_000_000_000, amounts=[3_000_000_000_000])], ADDRESS, 10
+        )
+    message = str(caught.value)
+    assert "1000000000000" in message
+    assert "3000000000000" in message
+    assert "difference of 2000000000000" in message
+
+
+def test_a_missing_or_empty_amounts_field_is_not_a_problem():
+    """There is simply nothing to compare against, so the check says nothing.
+
+    A guard that fired on an absent optional field would refuse ordinary
+    deposits, which is a worse failure than the one it guards against.
+    """
+    plain = transfer()
+    plain.pop("amounts", None)
+    assert deposit_events_from_transfers([plain], ADDRESS, 10).events[0]["amount"] == 2.5
+    assert deposit_events_from_transfers([transfer(amounts=[])], ADDRESS, 10).events[0]["amount"] == 2.5
+
+
+def test_a_non_integer_in_the_breakdown_refuses():
+    """It cannot be reconciled against the aggregate, so it is not waved through."""
+    with pytest.raises(MoneroTransferError, match="non-integer entry"):
+        deposit_events_from_transfers([transfer(amounts=[1.5, 2])], ADDRESS, 10)
+
+
 def test_a_transfer_with_no_txid_raises():
     """An event without a transaction id cannot be deduplicated.
 
