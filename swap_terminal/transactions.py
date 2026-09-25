@@ -97,6 +97,56 @@ CRYPTOCOMPARE_BASE_URL = "https://min-api.cryptocompare.com/data/v2/histoday"
 
 FORCE_REFRESH = False
 MIN_LOCAL_TX_COUNT = 50
+# Gridcoin's conventional RPC ports, so the banner below can say which chain it
+# is about to bill you for rather than printing a bare number.
+MAINNET_RPC_PORT = 15715
+KNOWN_TESTNET_RPC_PORTS = frozenset({25715, 25779, 9876})
+
+
+def describe_rpc_target() -> str:
+    """One line naming the port AND which chain it implies. Rule 14.
+
+    THIS FILE READS MAINNET TRANSACTIONS FOR TAX PURPOSES, and it was one
+    unset environment variable away from asking a test chain instead.
+
+    Measured 2026-09-25 on the operator's host. load_dotenv() above reads
+    BASE_DIR/.env -- that is swap_terminal/swap_terminal/.env, which does not
+    exist. The .env that DOES exist, and which carries GRIDCOIN_RPC_PORT=25715,
+    sits in grc-sol-swap/abstergo_exchange/ and is never seen from here. So
+    RPC_PORT fell through to its default of 25779, which is the rpcport of
+    grctest/testnet3 -- one of FOUR different testnet ports configured across
+    that machine (25715 twice, 9876, 25779).
+
+    Nothing failed loudly, because a wrong port produces connection-refused,
+    which reads as "no transactions found" to anyone not looking closely. For a
+    cost-basis report, "no transactions" is not a harmless empty result: it is
+    a tax document that omits everything.
+
+    So the number is never printed alone. If the port is not mainnet's, this
+    says so in the same breath.
+    """
+    if RPC_PORT == MAINNET_RPC_PORT:
+        return f"rpc 127.0.0.1:{RPC_PORT}  <- MAINNET, which is what cost-basis reporting needs"
+    if RPC_PORT in KNOWN_TESTNET_RPC_PORTS:
+        return (
+            f"rpc 127.0.0.1:{RPC_PORT}  <- ***TESTNET***. Mainnet is {MAINNET_RPC_PORT}. Any report "
+            f"produced from this port is NOT your real transaction history. Set GRIDCOIN_RPC_PORT="
+            f"{MAINNET_RPC_PORT}, or put it in {ENV_PATH} (which is the ONLY .env this file reads)."
+        )
+    return (
+        f"rpc 127.0.0.1:{RPC_PORT}  <- not a port this file recognizes; mainnet is "
+        f"{MAINNET_RPC_PORT} and known test ports are {sorted(KNOWN_TESTNET_RPC_PORTS)}"
+    )
+
+
+def announce_rpc_target() -> None:
+    """Print the target BEFORE any work, because that is when it is useful."""
+    print("transactions.py: Gridcoin transaction and cost-basis export", flush=True)
+    print(f"  {describe_rpc_target()}", flush=True)
+    print(f"  env file  {ENV_PATH}  ({'loaded' if ENV_PATH.exists() else 'ABSENT -- nothing was loaded'})", flush=True)
+    print(f"  user      {RPC_USER}  (password not shown)", flush=True)
+
+
 RPC_BATCH_SIZE = 100
 RPC_TIMEOUT_SECONDS = 10
 COINGECKO_TIMEOUT_SECONDS = 10
@@ -1018,6 +1068,9 @@ def _report_callback_exception(exc, val, tb):
     logging.exception("Tk callback exception", exc_info=(exc, val, tb))
 
 if __name__ == "__main__":
+    # Announced before the window opens, so the chain is on screen rather than
+    # inferred from an empty result (rule 14: announce before, not only after).
+    announce_rpc_target()
     root = tk.Tk()
     root.report_callback_exception = _report_callback_exception
     app = TxViewerApp(root)
