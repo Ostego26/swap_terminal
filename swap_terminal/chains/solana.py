@@ -120,7 +120,10 @@ name, parameter shape and response field below was written from Solana's JSON-
 RPC documentation and from the shapes server.js already relies on. The pure
 functions are tested; the RPC plumbing is tested against seeded responses. The
 proof that it talks to a real cluster is the operator's run, and
-`python3 -m swap_terminal.chains.solana --describe` is written to be that run.
+`solana_chain_check.py` at the repository root is written to be exactly that
+run: read-only, one pasteable block, every step announced before it runs, and
+a non-zero exit when any step's response does not have the shape this file
+expects.
 """
 
 from __future__ import annotations

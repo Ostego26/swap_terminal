@@ -255,6 +255,36 @@ directly; the adapter is tested against seeded responses. The proof that it
 talks to a real cluster is a run against `solana-test-validator` or devnet, and
 it has not happened.
 
+### Proving it against a real cluster -- `solana_chain_check.py`
+
+`solana_chain_check.py` at the repository root is the run that would settle it.
+It is **read-only**: it signs nothing, broadcasts nothing, opens no database and
+reads no key, and there is no flag that changes that.
+
+    source .venv/bin/activate
+    export SOL_RPC_URL=http://127.0.0.1:8899          # a local test validator
+    python3 solana_chain_check.py
+
+    # or devnet, with an address and a mint to inspect:
+    export SOL_RPC_URL=https://api.devnet.solana.com
+    python3 solana_chain_check.py --address <wallet> --mint <spl mint>
+
+It **identifies the network from `getGenesisHash`, not from the URL**, because a
+cluster cannot lie about its genesis and a hostname can -- an operator with a
+"devnet" alias pointed at mainnet would otherwise read the word devnet all the
+way to a real transfer. Mainnet prints as `MAINNET-BETA  <- REAL MONEY`.
+
+Every step announces before it runs, carries its own elapsed time in
+microfortnights, and says what its number means. `(none)` is printed for an
+empty result rather than a blank gap. It exits non-zero if any step's response
+does not have the shape `chains/solana.py` expects -- which is the specific
+thing that could not be verified where the adapter was written, so a failure
+here is the useful outcome, not a broken script.
+
+`tests/test_solana_chain_check_units.py` covers what is provable without a
+cluster: the genesis mapping, the exit codes and the output properties. The rest
+is the operator's run.
+
 The two cryptographic derivations *were* verified, against `solders` in a
 throwaway virtualenv: ed25519 curve membership over 7 named vectors and 4,000
 random keys, and associated-token-account derivation over 300 random triples
