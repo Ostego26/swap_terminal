@@ -28,13 +28,21 @@ default and refuses it there. Generating in-process sidesteps a version
 divergence entirely rather than branching on a guess about it.
 
 THE PRIVATE KEY NEVER LEAVES THIS PROCESS EXCEPT AS A WIF HANDED TO THE REAL
-CLIENT. `BTCClient.import_redeem_script_and_key()` reads `BTC_HTLC_PRIVKEY`
-from the environment and calls `importprivkey`, and the only way to drive that
-real code path is to give it a key. The one the harness sets there is a
-freshly generated regtest key that exists nowhere else and controls nothing
-but regtest coins the harness itself mined. It is set into os.environ for the
-lifetime of the run and is never printed, never logged, and never written to a
-file by this harness.
+CLIENT, and as of 2026-09-25 it does not go through the environment to get
+there.
+
+It used to. `BTCClient.import_redeem_script_and_key()` read `BTC_HTLC_PRIVKEY`
+and called `importprivkey`, so that the WALLET could sign the redeem -- which
+never worked, because `signrawtransactionwithwallet` cannot build a scriptSig
+for an OP_IF script. That whole path is gone: the clients sign with the
+`participant_privkey` argument they were already being passed, in-process, and
+nothing in the tree reads `BTC_HTLC_PRIVKEY` any more. The harness no longer
+sets it.
+
+What remains is the same guarantee, one step shorter. The key handed to
+`redeem_contract()` is generated in this process seconds earlier, exists
+nowhere else, controls nothing but regtest coins the harness itself mined, and
+is never printed, never logged and never written to a file.
 """
 
 from __future__ import annotations
@@ -89,9 +97,14 @@ def double_sha256(data: bytes) -> bytes:
 class RegtestKey:
     """One throwaway keypair and the four forms of it the harness needs.
 
-    `wif` is included because the real BTC client requires one through
-    BTC_HTLC_PRIVKEY. It must never be printed; there is no __str__ override
-    that would make that safe, so the rule is at the call sites.
+    `wif` is included because every client's `redeem_contract()` takes the
+    participant's key as a WIF argument and signs with it directly. (It used to
+    be needed for a second reason -- the BTC client read one out of
+    BTC_HTLC_PRIVKEY to `importprivkey` into the wallet -- and that path was
+    deleted on 2026-09-25 along with the wallet-signing it existed for.)
+
+    It must never be printed; there is no __str__ override that would make that
+    safe, so the rule is at the call sites.
     """
 
     private_key: bytes

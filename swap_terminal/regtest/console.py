@@ -58,6 +58,13 @@ from microfortnights import format_duration
 # printing it as FAIL would invite somebody to "fix" the assertion.
 OK = "OK"
 FAIL = "FAIL"
+# XFAIL means MEASURED, CONFIRMED, AND DELIBERATELY NOT MADE GREEN. It has had
+# no user since 2026-09-25: regtest/steps.py's step 7 was the only one, marking
+# a redeem that could not push the preimage, and that defect is fixed. The
+# constant stays because a future known defect will want exactly this
+# vocabulary -- but a redeem, a contract creation or a refund that FAILS must
+# never be re-marked XFAIL to quiet a run. That is the one move this harness
+# exists to prevent, and tests/test_regtest_harness_units.py holds it.
 XFAIL = "XFAIL"
 SKIP = "SKIP"
 

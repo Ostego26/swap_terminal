@@ -319,8 +319,9 @@ def p2sh_script_for(script: bytes) -> bytes:
     code that locates its own contract output by comparing an address against
     `scriptPubKey.addresses` finds nothing on a modern node no matter how
     correctly the contract was funded -- which is exactly what
-    modules/utils.wait_for_tx_output() and LTCClient.create_contract() did
-    until 2026-09-25.
+    `wait_for_tx_output()` and LTCClient.create_contract() did until
+    2026-09-25. (That function lived in modules/utils.py then; it is
+    modules/htlc_rpc.wait_for_tx_output() now, and matches on this.)
 
     `hex` is present on BOTH daemons and is the same bytes on both, and the two
     chains do not even agree on the base58 P2SH version byte (0xC4 on Bitcoin,
