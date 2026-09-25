@@ -174,6 +174,7 @@ from typing import Any
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
+from modules.htlc_fee import platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     build_hashlock_spend,
@@ -293,29 +294,55 @@ class LTCClient:
             logger.debug(f"Fallback balance for {address}: {fallback}")
             return fallback
 
-    def create_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the six are the HTLC's own parameters. Note this signature's ORDER differs from the other two clients (see the divergence table in the module header); reordering it is a fund-path change.
+    # No suppression: removing the dead `fee` argument took this signature
+    # back under PLR0913's ceiling (rule 19 -- a suppression that reaches zero
+    # gets deleted). This signature's ORDER still differs from the other two
+    # clients (see the divergence table in the module header), and reordering
+    # it is a fund-path change that belongs to the operator.
+    def create_contract(self,
                         amount_ltc: Decimal,
                         participant_address: str,
                         refund_address: str,
                         locktime: int,
-                        secret_hash: str | None = None,
-                        fee: Decimal = Decimal('0.0001')) -> dict[str, Any]:
+                        secret_hash: str | None = None) -> dict[str, Any]:
         """
         Create an LTC HTLC contract by:
           1. Building the HTLC redeem script.
-          2. Importing the redeem script as an address.
-          3. Decoding the redeem script to obtain the P2SH address.
+          2. Decoding the redeem script to obtain the P2SH address.
+          3. Best-effort watch-only import -- NEVER fatal, and never
+             `importaddress(redeem_hex)`. See below.
           4. Sending funds to that P2SH address.
-          5. Waiting for the contract output to appear (up to 300 seconds).
-        
+          5. Waiting up to 300 SECONDS (an interface, not a report -- rule 6)
+             for the contract output to appear, matched on the scriptPubKey
+             HEX rather than on `scriptPubKey.addresses` (defect 4).
+
+        STEP 2 USED TO READ "Importing the redeem script as an address", and it
+        described a defect as if it were the design. The call was
+        `importaddress(redeem_hex, ...)` -- note it passed the SCRIPT HEX where
+        the BTC client passed the P2SH ADDRESS, a third spelling of one call --
+        and on a Bitcoin Core 28.1-style descriptor wallet it answers
+        `code=-4, Only legacy wallets are supported by this command` and RAISED,
+        so no contract could be created at all. It is now step 3, goes through
+        modules/htlc_rpc.ensure_watch_only_import(), asks getwalletinfo which
+        kind of wallet this is instead of assuming, and cannot stop a swap.
+
+        THE `fee` PARAMETER IS GONE, and it went for the same reason the
+        `secret` defect was worth fixing: it was accepted and never read. It
+        was `fee: Decimal = Decimal('0.0001')` and its own docstring line said
+        "reserved for future use" -- a number an operator could pass, believing
+        it set the funding fee, that nothing anywhere consumed. Grepped by name
+        across every .py, .sh and .js in the tree before removing it: no caller
+        on any of the three clients ever passed it. The funding fee is the
+        wallet's own `sendtoaddress` choice; the REDEEM fee is
+        modules/htlc_fee.py's.
+
         Args:
             amount_ltc (Decimal): The LTC amount to send.
             participant_address (str): The participant's Litecoin address.
             refund_address (str): The refund Litecoin address.
             locktime (int): The locktime for the HTLC.
             secret_hash (Optional[str]): A hex string representing the secret hash.
-            fee (Decimal): A fee parameter (reserved for future use).
-        
+
         Returns:
             Dict[str, Any]: A dictionary containing contract details.
         """
@@ -337,7 +364,12 @@ class LTCClient:
         # spelling of one call and exactly the drift rule 8 is about. It now
         # goes through the shared helper, which asks getwalletinfo which kind
         # of wallet this is instead of assuming.
-        logger.info(ensure_watch_only_import(self.rpc_call, p2sh_addr))
+        # The level is chosen INSIDE ensure_watch_only_import(), which is the
+        # only place that knows whether this succeeded, was skipped or failed.
+        # This line used to be `logger.info(ensure_watch_only_import(...))` in
+        # both clients, so a failure and a success printed at the same level on
+        # the same shape of sentence (rule 14).
+        ensure_watch_only_import(self.rpc_call, p2sh_addr)
 
         # Send funds to the P2SH address.
         txid = self.rpc_call("sendtoaddress", [p2sh_addr, float(amount_ltc)])
@@ -362,7 +394,7 @@ class LTCClient:
             "secret_hash": secret_hash
         }
 
-    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs, and `secret` is the PREIMAGE, which is now pushed onto the stack rather than accepted and ignored (defect 1). They stay POSITIONAL because modules/atomic_swapper.py and the regtest harness both call this positionally.
+    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs, and `secret` is the PREIMAGE, which is now pushed onto the stack rather than accepted and ignored (defect 1). They stay POSITIONAL because the two callers in this tree pass them positionally: swap_terminal/regtest/steps.py::_attempt_real_redeem and tests/test_htlc_spend.py::_drive_redeem. UNTIL 2026-09-25 THIS COMMENT NAMED modules/atomic_swapper.py AS A CALLER AND IT IS NOT ONE -- atomic_swapper has no redeem path at all, only start_swap(), which is the same file whose header says the counterparty's leg is redeemed by hand. Grepped by name across every .py, .sh and .js in the tree. Reordering a fund-path signature to satisfy a lint ceiling is the trade rule 12 refuses either way, but the reason has to be true.
                         contract_txid: str,
                         contract_vout: int,
                         redeem_script: bytes,
@@ -402,10 +434,14 @@ class LTCClient:
         )
         assert_output_pays_the_contract(found, redeem_script, "LTC redeem")
 
-        # 0.25% platform fee, quantized to the satoshi. The GRC client charges
-        # the same rate; the BTC client charges nothing. It is taken off the
-        # TOTAL, so it does not move when the miner fee does.
-        platform_fee = ((Decimal("0.25") / Decimal(100)) * found.value).quantize(Decimal("0.00000001"))
+        # 0.25% platform fee, from modules/htlc_fee.PLATFORM_FEE_RATE. This
+        # used to be `(Decimal("0.25") / Decimal(100)) * found.value` here and
+        # `Decimal("0.0025") * found.value` in the GRC client -- one rule,
+        # spelled twice, in two files (rule 8). The BTC client charges nothing
+        # and is deliberately absent from that table; see the divergence table
+        # in the module header. Taken off the TOTAL, so it does not move when
+        # the miner fee does, which is what both spellings did.
+        platform_fee = platform_fee_coin("LTC", found.value)
         fee_address = os.environ.get("PLATFORM_FEE_LTC_ADDRESS", "tltc1qzxllez2nfy70rypyh3re0v4z8v0jp57egw6w4p")
 
         spend = build_hashlock_spend(

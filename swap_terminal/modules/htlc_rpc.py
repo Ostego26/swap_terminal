@@ -627,16 +627,28 @@ def ensure_watch_only_import(rpc_call, p2sh_address: str, label: str = "HTLC-wat
     into a wallet that has no use for it is a liability with no remaining
     consumer.
 
+    IT LOGS THE OUTCOME ITSELF, at the level the outcome deserves, and this
+    changed on 2026-09-25. The suppression on the broad catch below claimed the
+    failure "is returned in the string the caller logs at WARNING" -- and both
+    callers did `logger.info(ensure_watch_only_import(...))`. So a success and
+    a failure came out at the SAME level, on the same shape of sentence, which
+    is rule 14's "make did-nothing look different from did-work" in the one
+    place the function had already decided which it was. Doing it here rather
+    than in each caller also stops the level being a third thing the three
+    clients could disagree about (rule 8).
+
     Returns:
-        A short sentence saying which route was taken and how it went, for the
-        caller to log. It never raises.
+        The same sentence, for a caller that wants it in a report. It never
+        raises.
     """
     descriptors = _wallet_is_descriptor(rpc_call)
     if descriptors is None:
-        return (
+        skipped = (
             "watch-only import SKIPPED: getwalletinfo did not answer, so the wallet type is unknown and the two "
             "import RPCs are mutually exclusive. The contract is unaffected -- only wallet visibility is."
         )
+        logger.warning("%s", skipped)
+        return skipped
     try:
         if descriptors:
             info = rpc_call("getdescriptorinfo", [f"addr({p2sh_address})"])
@@ -647,16 +659,22 @@ def ensure_watch_only_import(rpc_call, p2sh_address: str, label: str = "HTLC-wat
                 "internal": False,
                 "active": False,
             }]])
-            return f"watch-only import OK via importdescriptors (descriptor wallet): {p2sh_address}"
+            succeeded = f"watch-only import OK via importdescriptors (descriptor wallet): {p2sh_address}"
+            logger.info("%s", succeeded)
+            return succeeded
         rpc_call("importaddress", [p2sh_address, label, False])
-    except Exception as exc:  # noqa: BLE001 -- checked: this is the one call in create_contract() whose failure must NOT stop a contract, and the failure is not swallowed -- it is returned in the string the caller logs at WARNING. Nothing downstream reads a value from it, and the contract's correctness does not depend on it (see the docstring's measurement).
-        return (
+    except Exception as exc:  # noqa: BLE001 -- checked: this is the one call in create_contract() whose failure must NOT stop a contract, and the failure is not swallowed -- it is emitted at WARNING on the line below AND returned to the caller. That claim used to be false: both callers logged the returned string at INFO, so a failure and a success came out identically. Nothing downstream reads a value from it, and the contract's correctness does not depend on it (see the docstring's measurement).
+        failed = (
             f"watch-only import FAILED on a {'descriptor' if descriptors else 'legacy'} wallet and was not fatal: "
             f"{exc}. The contract is unaffected; the wallet just will not track {p2sh_address}. Note that Bitcoin "
             "Core refuses a watch-only descriptor on a wallet that has private keys enabled, so this failing on a "
             "descriptor wallet is expected rather than alarming."
         )
-    return f"watch-only import OK via importaddress (legacy wallet): {p2sh_address}"
+        logger.warning("%s", failed)
+        return failed
+    succeeded = f"watch-only import OK via importaddress (legacy wallet): {p2sh_address}"
+    logger.info("%s", succeeded)
+    return succeeded
 
 
 def _wallet_is_descriptor(rpc_call) -> bool | None:
@@ -766,25 +784,21 @@ def find_output_by_script(outputs: list[tuple[Decimal, str]], script_hex: str) -
     return None
 
 
-def address_of(script_pub_key: dict) -> str:
-    """The address a decoded scriptPubKey names, under EITHER daemon's field shape.
-
-    For REPORTING ONLY. Nothing decides anything from this -- the match is
-    always on the hex -- but an operator reading a log wants the address, and
-    the two daemons spell it differently: Core 28.1 has a single `address`,
-    Litecoin 0.21.4 has a list under `addresses`. Returns "(none: this daemon
-    reports no address for the output)" rather than an empty string, because a
-    blank gap is ambiguous between "no address" and "the lookup broke"
-    (rule 14).
-    """
-    single = script_pub_key.get("address")
-    if single:
-        return str(single)
-    plural = script_pub_key.get("addresses") or []
-    if plural:
-        return ", ".join(str(entry) for entry in plural)
-    return "(none: this daemon reports no address for the output)"
-
+# address_of() MOVED to swap_terminal/script_pub_key.py on 2026-09-25, and the
+# move is the point rather than the tidying. It had NO production caller here:
+# every comparison in this module is on the scriptPubKey HEX, so the one thing
+# that knew how the two daemons spell an address was reachable only from a
+# test. Meanwhile chains/base.RPCAdapter._extract_matching_vouts() -- the
+# brokered Flask path -- read `addresses` alone and so was blind on Core 28.1,
+# a FOURTH copy of the defect the three clients were fixed for.
+#
+# It could not simply be imported from here: this module imports
+# modules/htlc_spend, which imports ecdsa, base58 and bech32, and
+# swap_terminal/requirements.txt records that the Flask app is deployable
+# without them. So the decision went to a leaf at the package root with no
+# third-party imports, beside microfortnights.py, where both suites reach it
+# without either dragging the other in (rule 8: let the survivor own the
+# concept, somewhere both callers can reach).
 
 def wait_for_tx_output(
     rpc_client,

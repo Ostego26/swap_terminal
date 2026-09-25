@@ -73,9 +73,27 @@ equals a script hash -- which nobody has. `run_swap_tests()` below passes
 `2MwJ8Q735vzVkaL1SnfbGvefofrDnXgXbfY`, a testnet P2SH address, as a refund
 address, so the case is not hypothetical.
 
-And the script's OP_IF branch requires the preimage on the stack, which none of
-the three redeem_contract() implementations in this package ever puts there --
-see the divergence table in any of modules/atomic_*_client.py.
+And the script's OP_IF branch requires the preimage on the stack. UNTIL
+2026-09-25 THIS PARAGRAPH SAID none of the three redeem_contract()
+implementations "ever puts there -- see the divergence table in any of
+modules/atomic_*_client.py", and BOTH HALVES OF THAT ARE NOW FALSE. All three
+push it: modules/htlc_spend.hashlock_script_sig() lays out
+<sig> <pubkey> <preimage> OP_1 <redeemScript> and
+modules/htlc_rpc.build_hashlock_spend() signs it, one implementation for all
+three clients. Verified by walking each redeem_contract()'s AST -- `secret`
+appears in all three bodies and is passed by keyword in all three. And the
+divergence table no longer carries that row: it reads
+`redeem scriptSig  ---- modules/htlc_rpc.build_hashlock_spend, one
+implementation ----`, so the sentence pointed a reader at a table that had
+stopped saying it.
+
+WHY THIS SENTENCE WAS WORTH FIXING AT ALL, given that the code was already
+right. This is the authoritative file for what the script REQUIRES. An
+operator holding a funded contract whose counterparty has already taken the
+other leg reads it to learn whether they can redeem, is told the package
+cannot, and waits out the timelock instead -- losing both legs, at the one
+moment when the refund branch is not the safe default. Rule 16: a wrong
+comment is a bug, and the sentence was the thing that was wrong.
 
 WHAT WAS REMOVED FROM THIS FILE ON 2026-09-24 (rules 9 and 12).
 

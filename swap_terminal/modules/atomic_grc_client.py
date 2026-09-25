@@ -15,7 +15,17 @@ Can move funds: YES, and this is the only one of the three that UNLOCKS THE
        the configured passphrase and leaves the wallet unlocked for 120
        seconds by default -- during which anything else with RPC access can
        spend from it.
-Mainnet-safe: NO. Same testnet-only script derivation as the other two clients.
+Mainnet-safe: NO, for two independent reasons. The script derivation is
+       testnet-only, exactly as on the other two clients. AND THE DEFAULT
+       PLATFORM FEE ADDRESS IS A TESTNET ADDRESS: redeem_contract() falls back
+       to the literal `mnTh582mZM12fQry6rtZV7XehNVtZRVdDw` when
+       PLATFORM_FEE_GRC_ADDRESS is unset, and that is base58 with the 0x6F
+       testnet P2PKH version byte -- a mainnet Gridcoin address begins with S.
+       So on mainnet, unset, 0.25% of every redeemed contract goes to an
+       address on the wrong network: unspendable by anyone, and gone. The LTC
+       client's header has always said this about its own `tltc1...` default
+       and this one did not, which is why it is here now rather than only at
+       the call site (rule 16: a wrong -- or missing -- comment is a bug).
 
 NOTHING BELOW HAS BEEN RUN AGAINST A GRIDCOIN NODE. There is none in this
 setup. Everything here is the BTC/LTC fix applied to this file by reasoning,
@@ -181,6 +191,7 @@ from decimal import Decimal
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
+from modules.htlc_fee import platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     build_hashlock_spend,
@@ -344,13 +355,15 @@ class GRCClient:
             raise
         time.sleep(delay)
 
-    def create_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the six are the HTLC's own parameters; bundling them changes every fund-path call site for no behavioral gain.
+    # No suppression: removing the dead `fee` argument took this signature
+    # back under PLR0913's ceiling (rule 19 -- a suppression that reaches zero
+    # gets deleted).
+    def create_contract(self,
                         amount_grc: Decimal,
                         secret_hash: str,
                         participant_address: str,
                         refund_address: str,
-                        locktime: int,
-                        fee: Decimal = Decimal('0.01')) -> dict:
+                        locktime: int) -> dict:
         """
         Creates a Gridcoin HTLC contract by:
           1. Building the HTLC redeem script.
@@ -364,7 +377,15 @@ class GRCClient:
             participant_address (str): The Gridcoin address of the counterparty.
             refund_address (str): The refund address in case the contract times out.
             locktime (int): The locktime for the contract.
-            fee (Decimal, optional): The fee to be considered (currently not used in this method).
+
+        THE `fee` PARAMETER IS GONE. Its own docstring line said "currently not
+        used in this method", which was true and had been for as long as the
+        method existed -- the same shape as the `secret` parameter
+        redeem_contract() accepted and never referenced (defect 1 in the module
+        header). Grepped by name across every .py, .sh and .js in the tree: no
+        caller on any of the three clients ever passed it. The funding fee is
+        the wallet's own `sendtoaddress` choice; the REDEEM fee is
+        modules/htlc_fee.py's.
             
         Returns:
             dict: A dictionary containing the contract's TXID, output index, redeem script, P2SH address, and secret hash.
@@ -415,7 +436,7 @@ class GRCClient:
             "secret_hash": secret_hash
         }
 
-    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs, and `secret` is the PREIMAGE, which is now pushed onto the stack rather than accepted and ignored (defect 1). They stay POSITIONAL because modules/atomic_swapper.py calls this positionally.
+    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs, and `secret` is the PREIMAGE, which is now pushed onto the stack rather than accepted and ignored (defect 1). They stay POSITIONAL because the two callers in this tree pass them positionally: swap_terminal/regtest/steps.py::_attempt_real_redeem and tests/test_htlc_spend.py::_drive_redeem. UNTIL 2026-09-25 THIS COMMENT NAMED modules/atomic_swapper.py AS A CALLER AND IT IS NOT ONE -- atomic_swapper has no redeem path at all, only start_swap(), which is the same file whose header says the counterparty's leg is redeemed by hand. Grepped by name across every .py, .sh and .js in the tree. Reordering a fund-path signature to satisfy a lint ceiling is the trade rule 12 refuses either way, but the reason has to be true. GRC has an extra reason to be careful: nothing in this tree calls GRCClient.redeem_contract() at all -- not even the harness, which has no Gridcoin node -- so this signature has no caller to break and no run to prove it.
                         contract_txid: str,
                         contract_vout: int,
                         redeem_script: bytes,
@@ -468,15 +489,22 @@ class GRCClient:
         )
         assert_output_pays_the_contract(found, redeem_script, "GRC redeem")
 
-        # 0.25% platform fee, the same rate the LTC client charges. THE COMMENT
-        # THAT USED TO SIT HERE SAID "2.5% of the total amount" beside an
-        # expression that computes 0.25%, and a reader in a hurry trusts the
-        # sentence. The CODE was right -- it agrees with the LTC client, which
-        # spells the same rate as `Decimal("0.25") / Decimal(100)` -- so the
-        # sentence was the defect and the sentence is what changed. Nothing
-        # about what this pays has moved (rule 16: a wrong comment is a bug, and
-        # say which of the two was wrong).
-        platform_fee = (Decimal("0.0025") * found.value).quantize(Decimal("0.00000001"))
+        # 0.25% platform fee, from modules/htlc_fee.PLATFORM_FEE_RATE. THE
+        # COMMENT THAT USED TO SIT HERE SAID "2.5% of the total amount" beside
+        # an expression that computes 0.25%, and a reader in a hurry trusts the
+        # sentence. The CODE was right -- it agreed with the LTC client, which
+        # spelled the same rate as `Decimal("0.25") / Decimal(100)` -- so the
+        # sentence was the defect. THE TWO SPELLINGS ARE NOW ONE (rule 8): that
+        # a wrong comment could sit beside a right expression for as long as it
+        # did is what two copies of one rule buy you.
+        platform_fee = platform_fee_coin("GRC", found.value)
+        # THE DEFAULT IS A TESTNET ADDRESS, and this now says so where the LTC
+        # client's header always did. `mnTh...` is a base58 address with the
+        # 0x6F testnet P2PKH version byte -- a MAINNET Gridcoin address starts
+        # with S. So on mainnet, with PLATFORM_FEE_GRC_ADDRESS unset, 0.25% of
+        # every redeemed contract is paid to an address on the wrong network:
+        # unspendable by anyone, and gone. Setting the variable is the fix and
+        # it is the operator's; naming it here is this comment's job.
         fee_address = os.environ.get("PLATFORM_FEE_GRC_ADDRESS", "mnTh582mZM12fQry6rtZV7XehNVtZRVdDw")
 
         spend = build_hashlock_spend(

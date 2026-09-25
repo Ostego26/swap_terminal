@@ -367,6 +367,60 @@ def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -
         )
 
 
+# --------------------------------------------------------------------------
+# the PLATFORM fee, which is not the miner fee and was spelled twice
+# --------------------------------------------------------------------------
+#
+# ONE RULE, TWO SPELLINGS, TWO FILES until 2026-09-25:
+#
+#     atomic_ltc_client.py   (Decimal("0.25") / Decimal(100)) * found.value
+#     atomic_grc_client.py   Decimal("0.0025") * found.value
+#
+# They agree -- Decimal("0.25") / Decimal(100) is exactly Decimal("0.0025") --
+# which is rule 8's whole point: two copies of one rule agree on the day they
+# are written and drift from then on, invisibly, because each reads correctly
+# in its own file. The GRC one had ALREADY drifted once in its comment, which
+# said "2.5% of the total amount" beside an expression computing 0.25%, and
+# that was caught only because somebody read the two side by side.
+#
+# It lives beside the miner fee because both are amounts subtracted from what
+# the redeemer receives, and an operator asking "where does the money go"
+# should find the answer once.
+PLATFORM_FEE_RATE: dict[str, Decimal] = {
+    "LTC": Decimal("0.0025"),
+    "GRC": Decimal("0.0025"),
+}
+
+# BTC IS DELIBERATELY ABSENT rather than present as zero. BTCClient.
+# redeem_contract() passes no extra outputs at all, and whether it should
+# charge a platform fee is fund movement and the operator's (rule 16) -- it is
+# the one row of the divergence table this merge did not settle. A zero entry
+# here would read as "the table decided BTC charges nothing", which is a
+# different and untrue statement: the table was never asked.
+
+
+def platform_fee_coin(asset: str, contract_value: Decimal) -> Decimal:
+    """The platform fee this chain charges on a redeem, quantized to the satoshi.
+
+    Taken off the TOTAL, so it does not move when the miner fee does -- which
+    is what both clients did and is the behavior this merge preserves exactly.
+    Default (half-even) rounding, for the same reason: changing it would change
+    what somebody is paid, and nothing here is asking to.
+
+    Raises:
+        ValueError: for an asset that charges none, naming BTC specifically,
+            because "BTC charges nothing" and "BTC is missing from the table"
+            are different sentences and a caller must not conflate them.
+    """
+    if asset not in PLATFORM_FEE_RATE:
+        raise ValueError(
+            f"no platform fee rule for asset {asset!r}; it is charged on {', '.join(PLATFORM_FEE_RATE)}. "
+            "BTC is absent on purpose: BTCClient.redeem_contract() passes no extra outputs, and whether it "
+            "should is the operator's call rather than this table's."
+        )
+    return (PLATFORM_FEE_RATE[asset] * contract_value).quantize(SATOSHI)
+
+
 # sendrawtransaction's default maxfeerate, in coin per kvB, on Bitcoin Core and
 # Litecoin Core. A transaction whose fee rate exceeds this is refused as
 # `absurdly-high-fee` before it reaches the mempool. The flat fee this replaces
@@ -458,10 +512,18 @@ def redeem_miner_fee(asset: str, size_bytes: int) -> Decimal:
     Args:
         asset: BTC, LTC or GRC.
         size_bytes: the SERIALIZED size of the signed transaction, in bytes. The
-            caller measures it; this function never guesses it. See
-            modules/htlc_spend.estimated_signed_size(), which computes an exact
-            upper bound before the signature exists, and asserts against the
-            real size afterwards.
+            caller measures it; this function never guesses it. The upper bound
+            it is sized from before a signature exists comes from
+            modules/htlc_spend.estimated_script_sig_length() fed to
+            ParsedTransaction.size_with_script_sig(), and
+            modules/htlc_rpc.build_hashlock_spend() asserts the real size
+            against that bound afterwards.
+
+            THIS PARAGRAPH NAMED `modules/htlc_spend.estimated_signed_size()`
+            until 2026-09-25 and there has never been a function of that name
+            anywhere in the tree (verified by walking every def in the
+            package). A reader who went looking found nothing and had to
+            reconstruct the two-call answer above from the call site.
 
     Raises:
         ValueError: if the size is not positive, or the asset is unknown, or an

@@ -252,13 +252,21 @@ class BTCClient:
             logger.exception(f"RPC call failed: {ex}")
             raise
 
-    def create_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the six are the HTLC's own parameters (amount, secret hash, participant, refund, locktime, fee). Bundling them into a dataclass changes every call site in the fund path for no behavioral gain.
+    # NO SUPPRESSION HERE ANY MORE. This line carried a PLR0913 and PLR0917
+    # suppression whose reason read "the six are the HTLC's own parameters
+    # (amount, secret hash, participant, refund, locktime, fee)", and removing
+    # the dead `fee` argument took the signature back under the ceiling on all
+    # three clients. Rule 19: a suppression that reaches zero gets deleted
+    # rather than kept -- and the thing this one was quieting turned out to be
+    # a parameter nobody read, which is exactly what an argument-count warning
+    # is for. (Spelled out in words rather than quoted, because a linter reads
+    # the quotation as a live directive.)
+    def create_contract(self,
                         amount_btc: Decimal,
                         secret_hash: str,
                         participant_address: str,
                         refund_address: str,
-                        locktime: int,
-                        fee: Decimal = Decimal('0.0001')) -> dict:
+                        locktime: int) -> dict:
         """Build the HTLC redeem script, fund its P2SH, and wait for the output.
 
           1. Build the redeem script.
@@ -273,6 +281,18 @@ class BTCClient:
           5. Wait (up to 300 SECONDS -- an interface, not a report, rule 6) for
              the output to appear, matched on the scriptPubKey HEX rather than
              on `scriptPubKey.addresses`, which Core removed in 22.0 (defect 4).
+
+        THE `fee` PARAMETER IS GONE, on all three clients, and it went for the
+        same reason the `secret` defect was worth fixing: it was accepted and
+        never read. `fee: Decimal = Decimal('0.0001')` here, the same on LTC,
+        `Decimal('0.01')` on GRC, and no method body referenced it -- the GRC
+        docstring even said "currently not used in this method". A number an
+        operator could pass, believing it set the funding fee, that nothing
+        anywhere consumed. Grepped by name across every .py, .sh and .js in the
+        tree before removing it: no caller on any of the three ever passed it,
+        and it was the last positional parameter with a default, so no
+        positional caller could break either. The funding fee is the wallet's
+        own `sendtoaddress` choice; the REDEEM fee is modules/htlc_fee.py's.
         """
         logger.info(f"Creating BTC HTLC contract for {amount_btc} BTC.")
         redeem_script = build_htlc_redeem_script(secret_hash, participant_address, refund_address, locktime)
@@ -285,7 +305,12 @@ class BTCClient:
             logger.error("Failed to derive P2SH from redeem script.")
             raise Exception("Failed to derive P2SH from redeem script.")
 
-        logger.info(ensure_watch_only_import(self.rpc_call, p2sh_addr))
+        # The level is chosen INSIDE ensure_watch_only_import(), which is the
+        # only place that knows whether this succeeded, was skipped or failed.
+        # This line used to be `logger.info(ensure_watch_only_import(...))` in
+        # both clients, so a failure and a success printed at the same level on
+        # the same shape of sentence (rule 14).
+        ensure_watch_only_import(self.rpc_call, p2sh_addr)
 
         logger.info(f"Sending {amount_btc} BTC to P2SH address {p2sh_addr}.")
         txid = self.rpc_call("sendtoaddress", [p2sh_addr, float(amount_btc)])
@@ -304,7 +329,7 @@ class BTCClient:
             "p2shAddress": p2sh_addr
         }
 
-    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs. `secret` is the PREIMAGE and is now used -- it is pushed onto the stack, which is the whole point of the hashlock branch; it was accepted and ignored until 2026-09-25 (defect 1 in the module header). They stay POSITIONAL because modules/atomic_swapper.py and the regtest harness both call this positionally, and reordering a fund-path signature to satisfy a lint ceiling is the trade rule 12 refuses.
+    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs. `secret` is the PREIMAGE and is now used -- it is pushed onto the stack, which is the whole point of the hashlock branch; it was accepted and ignored until 2026-09-25 (defect 1 in the module header). They stay POSITIONAL because the two callers in this tree pass them positionally: swap_terminal/regtest/steps.py::_attempt_real_redeem and tests/test_htlc_spend.py::_drive_redeem. UNTIL 2026-09-25 THIS COMMENT NAMED modules/atomic_swapper.py AS A CALLER AND IT IS NOT ONE -- atomic_swapper has no redeem path at all, only start_swap(), which is the same file whose header says the counterparty's leg is redeemed by hand. Grepped by name across every .py, .sh and .js in the tree. Reordering a fund-path signature to satisfy a lint ceiling is the trade rule 12 refuses either way, but the reason has to be true.
                         contract_txid: str,
                         contract_vout: int,
                         redeem_script: bytes,
@@ -324,8 +349,17 @@ class BTCClient:
              scriptSig by recognizing a pattern and an HTLC matches none.
           4. Broadcast it, WITHOUT disabling the node's fee ceiling. Leaving
              maxfeerate at its default is what makes the run prove the fee rule
-             in modules/htlc_fee.py: the old flat 0.0001 was three times over
-             it and would be refused here.
+             in modules/htlc_fee.py holds on a real transaction rather than
+             only in arithmetic.
+
+             THIS SENTENCE USED TO END "the old flat 0.0001 was three times
+             over it and would be refused here", which is the 1000x error this
+             file's own header refutes forty lines up -- 0.0001 over a 250-byte
+             redeem is 0.0004 coin/kvB, 250 times UNDER the 0.10 ceiling, not
+             four times over it. A reader who got this far without reading the
+             header would have carried the wrong figure away from the line that
+             looked most authoritative, which is the whole hazard of leaving a
+             refuted number anywhere it still reads as a statement.
 
         Args:
             contract_blockhash: optional, and only a speed-up. The lookup finds

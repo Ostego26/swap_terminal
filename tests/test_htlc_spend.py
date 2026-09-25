@@ -23,8 +23,20 @@ Bitcoin Core 28.1.0 and Litecoin Core 0.21.4 regtest daemons:
      22.0, so the poll never found a perfectly funded output.
 
 And a fifth that only became reachable once 1 was fixed: the flat 0.0001 miner
+fee is not a fee RATE at all, so it is the right amount at exactly one size and
+drifts under the minimum relay fee as a transaction grows.
+
+THIS PARAGRAPH SAID SOMETHING ELSE UNTIL 2026-09-25 -- "the flat 0.0001 miner
 fee is 0.31 coin/kvB on a ~323-byte redeem, three times over
-sendrawtransaction's 0.10 default maxfeerate.
+sendrawtransaction's 0.10 default maxfeerate" -- and that is the 1000x error
+modules/htlc_fee.py's header exists to correct, restated here as fact in the
+file whose own test_the_flat_fee_was_never_over_the_ceiling asserts the
+opposite thirty functions down. 0.0001 over 0.323 kvB is 0.00031 coin/kvB, 323
+times UNDER the ceiling. A reader who trusted this header would have concluded
+the fee rule exists to avoid a refusal that could never have happened.
+
+AND A SIXTH, found by the review of the five above: there was no DUST check at
+all. See the dust section near the end of this file.
 
 THE STRONGEST THING AVAILABLE WITHOUT A CHAIN is to run the REAL builder's
 redeem script against the REAL client's scriptSig in a stack machine. That is
@@ -74,10 +86,10 @@ from modules.htlc_fee import (
     fee_rate_coin_per_kvb,
     is_witness_program,
     minimum_fee_coin,
+    platform_fee_coin,
     redeem_miner_fee,
 )
 from modules.htlc_rpc import (
-    address_of,
     assert_output_pays_the_contract,
     build_hashlock_spend,
     describe_rpc_payload,
@@ -857,10 +869,14 @@ def test_find_output_by_script_is_indifferent_to_the_address_field():
     assert find_output_by_script(outputs, "a914" + "33" * 20 + "87") is None
 
 
-def test_the_address_is_read_from_either_daemons_field_shape():
-    assert address_of({"address": "bcrt1qexample"}) == "bcrt1qexample"
-    assert address_of({"addresses": ["2NexampleLTC"]}) == "2NexampleLTC"
-    assert "(none:" in address_of({"asm": "OP_HASH160 ..."}), "an empty result never prints nothing (rule 14)"
+# test_the_address_is_read_from_either_daemons_field_shape MOVED to
+# tests/test_deposit_vout_matching.py on 2026-09-25, with the code it tests.
+# address_of() lived in modules/htlc_rpc.py with no production caller at all,
+# and the thing that needed it was chains/base.py on the brokered Flask path --
+# a FOURTH copy of the same defect, reading `addresses` alone. The decision now
+# lives in swap_terminal/script_pub_key.py and its tests live beside the caller
+# that actually exercises it. Rule 2: when something moves, its test moves with
+# it or changes to pin the stronger invariant; the replacement does both.
 
 
 # --------------------------------------------------------------------------
@@ -1612,3 +1628,45 @@ def test_lookup_contract_output_reads_a_witness_serialized_contract_back(contrac
     # report them", which _as_int_or_none() keeps as different answers.
     assert found.confirmations == 3
     assert "decoderawtransaction" in found.route
+
+
+def test_both_platform_fee_clients_read_one_rate_from_one_place():
+    """ONE rule, two spellings, two files -- until 2026-09-25 (rule 8).
+
+        atomic_ltc_client.py   (Decimal("0.25") / Decimal(100)) * found.value
+        atomic_grc_client.py   Decimal("0.0025") * found.value
+
+    They agreed, which is what makes this rule 8's shape rather than a bug
+    report: two copies agree on the day they are written and drift from then
+    on, invisibly, because each reads correctly in its own file. The GRC copy's
+    COMMENT had already drifted -- it said "2.5% of the total amount" beside an
+    expression computing 0.25% -- and that was caught only because somebody
+    read the two side by side.
+
+    Asserted as equality between the chains and against the arithmetic, not
+    against a restated constant: `platform_fee_coin("LTC", x) == 0.0025 * x`
+    checked against a literal would pass if both the table and this line were
+    changed together, which is the failure mode a shared table is supposed to
+    make impossible.
+    """
+    for value in (Decimal("1.0"), Decimal("0.01"), Decimal("123.456789"), Decimal("0.00000001")):
+        assert platform_fee_coin("LTC", value) == platform_fee_coin("GRC", value)
+        # The old LTC spelling and the old GRC spelling, both still true of the
+        # survivor. If either stops being true, one client's payout moved.
+        assert platform_fee_coin("LTC", value) == ((Decimal("0.25") / Decimal(100)) * value).quantize(
+            Decimal("0.00000001")
+        )
+        assert platform_fee_coin("GRC", value) == (Decimal("0.0025") * value).quantize(Decimal("0.00000001"))
+
+
+def test_btc_is_absent_from_the_platform_fee_table_rather_than_zero():
+    """"BTC charges nothing" and "BTC is missing from the table" are different sentences.
+
+    BTCClient.redeem_contract() passes no extra outputs, and whether it should
+    charge a platform fee is fund movement and the operator's (rule 16) -- the
+    one row of the divergence table this merge deliberately did not settle. A
+    zero entry would read as the table having decided, and this asserts that it
+    has not.
+    """
+    with pytest.raises(ValueError, match="BTC is absent on purpose"):
+        platform_fee_coin("BTC", Decimal("1.0"))
