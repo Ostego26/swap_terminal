@@ -61,7 +61,13 @@ from decimal import Decimal
 
 from microfortnights import format_duration
 from modules.atomic_htlc_scripts import p2sh_script_for
-from modules.htlc_fee import assert_within_broadcast_ceiling, describe_fee, minimum_fee_coin, redeem_miner_fee
+from modules.htlc_fee import (
+    assert_no_output_is_dust,
+    assert_within_broadcast_ceiling,
+    describe_fee,
+    minimum_fee_coin,
+    redeem_miner_fee,
+)
 from modules.htlc_spend import (
     decode_wif,
     estimated_script_sig_length,
@@ -468,6 +474,22 @@ def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. 
             f"{asset}: the transaction the node built pays a fee of {encoded_fee} but {miner_fee} was intended, a "
             f"difference of {encoded_fee - miner_fee}. That gap would go to a miner. Nothing was signed."
         )
+
+    # EVERY OUTPUT IS LARGE ENOUGH TO RELAY, and this is the last refusal
+    # before a signature exists. Checked against the node's OWN layout --
+    # parsed.outputs is what createrawtransaction actually built, scriptPubKeys
+    # included -- rather than against this function's arithmetic about what it
+    # asked for, which is the same reason the encoded-fee check above reads the
+    # bytes instead of trusting the intent.
+    #
+    # Until 2026-09-25 the only amount guard on this path was
+    # `destination_amount <= 0` in _unsigned_transaction() below, which never
+    # looked at the extra outputs at all. The LTC and GRC platform fee is a
+    # fixed 0.25% of the contract, so it shrinks with the contract while a dust
+    # limit does not: a 0.01 LTC contract builds [986790, 2500] and Litecoin's
+    # P2WPKH dust limit is 2,940. See modules/htlc_fee.py for the measurement
+    # and for why this refuses rather than reallocating.
+    assert_no_output_is_dust(asset, parsed.outputs)
 
     digest = legacy_sighash(parsed, 0, redeem_script)
     script_sig = hashlock_script_sig(sign_digest(private_key, digest), public_key, secret, redeem_script)

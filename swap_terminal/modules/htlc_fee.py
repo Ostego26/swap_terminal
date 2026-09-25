@@ -115,7 +115,15 @@ without a deploy.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from decimal import ROUND_UP, Decimal, InvalidOperation
+
+# varint_length is imported rather than re-implemented (rule 8). It is three
+# lines, and spelling it again here is exactly how one encoding rule becomes
+# two that agree on the day they are written. modules/htlc_spend does not
+# import this file, so there is no cycle; modules/htlc_rpc already imports
+# both, so nothing gains a dependency it did not already have.
+from modules.htlc_spend import varint_length
 
 # Coin per kvB, per chain. Chosen so that the FLOOR below -- which is each
 # chain's old flat fee -- is what binds at an ordinary redeem size, and the
@@ -138,6 +146,226 @@ MINIMUM_FEE_COIN: dict[str, Decimal] = {
     "LTC": Decimal("0.0001"),
     "GRC": Decimal("0.01"),
 }
+
+# --------------------------------------------------------------------------
+# DUST: the OTHER end of the amount a redeem may pay, and the one that was
+# missing entirely until 2026-09-25
+# --------------------------------------------------------------------------
+#
+# WHAT WAS WRONG. modules/htlc_rpc._unsigned_transaction()'s only amount guard
+# was `destination_amount <= 0`. Nothing checked whether an output was large
+# enough for a node to RELAY, and the LTC and GRC platform fee is a fixed
+# 0.25% of the contract -- so it shrinks with the contract while a dust limit
+# does not.
+#
+# MEASURED 2026-09-25 through the real LTCClient.redeem_contract(): a 0.01 LTC
+# contract builds outputs of [986880, 2500] satoshis. The 2500 is the platform
+# fee, and PLATFORM_FEE_LTC_ADDRESS's shipped default is a bech32 `tltc1q...`
+# -- P2WPKH, whose dust limit on Litecoin Core 0.21.4 is 2,940 satoshis. So the
+# whole transaction would be refused with code=-26 dust, and NO CLIENT HERE
+# IMPLEMENTS A REFUND: a redeemer whose broadcast is refused has no recovery
+# path and loses their own already-funded leg. The harness could not see it --
+# CONTRACT_AMOUNT is "1.0", which puts the platform fee 85x over the limit, and
+# regtest does not enforce standardness anyway. BTC has the same hole with no
+# platform fee at all: a contract under 0.00010546 leaves a sub-546 destination.
+#
+# The destination figure is 986,880 and not 986,790, which is the number the
+# review that found this reported, and the 90 satoshis are worth a sentence
+# because they are the whole reason this table is per-SCRIPT. 986,790 is a
+# 357-byte transaction and 986,880 is a 354-byte one: paying the platform fee
+# to a P2PKH address makes the output 34 bytes, and paying it to the bech32
+# address actually shipped in PLATFORM_FEE_LTC_ADDRESS makes it 31. The
+# smaller output is also the one with the LOWER threshold -- 2,940 rather than
+# 5,460 -- so the shipped default is simultaneously the cheaper transaction
+# and the harder case to catch. Both are refused. The two numbers that decide,
+# 2,500 and 2,940, are identical either way.
+#
+# THE RULE IS BITCOIN CORE'S OWN, and it is derived per OUTPUT rather than
+# taken as one constant, because the threshold depends on what it would cost
+# to spend the output it is protecting:
+#
+#     dust = (serialized size of the txout + size of the input that spends it)
+#            x the chain's dust relay rate / 1000
+#
+#     txout      8 bytes of value + the compact size + the scriptPubKey
+#                P2SH 32, P2PKH 34, P2WPKH 31
+#     spend      148 for a legacy input; 67 for a witness one, which is Core's
+#                32+4+1+(107/4)+4 with the witness discount applied
+#
+# An output is dust when its value is strictly LESS than that, which is Core's
+# `nValue < GetDustThreshold(...)` -- so a P2PKH output of exactly 546 on BTC
+# is fine and 545 is not.
+DUST_RELAY_FEE_SAT_PER_KVB: dict[str, int] = {
+    # Bitcoin Core's DUST_RELAY_TX_FEE. Gives 546 for P2PKH, 294 for P2WPKH.
+    "BTC": 3000,
+    # Litecoin Core 0.21.4's is TEN TIMES Bitcoin's, which is the fact that
+    # makes this a live defect rather than a theoretical one: 5,460 for P2PKH
+    # and 2,940 for P2WPKH.
+    "LTC": 30000,
+    # GRIDCOIN HAS NO DUST RULE, and this is READ FROM THE POLICY SOURCE rather
+    # than assumed from Bitcoin's (rule 17). gridcoin-community/
+    # Gridcoin-Research, master branch, read 2026-09-25:
+    #
+    #   src/policy/policy.cpp   IsStandardTx() walks tx.vout and the only
+    #                           amount test in it is `if (txout.nValue == 0)
+    #                           return false;`. There is no dust branch.
+    #   whole repository        zero occurrences of IsDust, GetDustThreshold or
+    #                           DUST_RELAY_TX_FEE -- each searched separately
+    #                           across the repository, not just these files.
+    #   src/main.cpp:117        nMinimumInputValue = 0.
+    #   src/consensus/consensus.h:26-28
+    #                           the only amount floor is a FEE floor --
+    #                           MIN_TX_FEE = MIN_RELAY_TX_FEE = 10000 halfords,
+    #                           scaled by (1 + bytes/1000). A fee rule, not an
+    #                           output rule.
+    #
+    # So a rate of 0, and MINIMUM_OUTPUT_SATOSHIS below is what actually binds
+    # on GRC -- which is exactly Gridcoin's rule, expressed in the same
+    # machinery as the other two rather than as a special case.
+    #
+    # WHAT THIS IS NOT: a measurement against a running Gridcoin daemon. There
+    # is none in this setup. It is a reading of the current source of the
+    # reference implementation, which is a weaker claim than the BTC and LTC
+    # rows -- those were measured against daemons -- and an operator on an
+    # older build should check their own before trusting it.
+    "GRC": 0,
+}
+
+# Every chain here refuses an output worth nothing. On BTC and LTC the dust
+# threshold is far above it and this never binds; on GRC it is the whole rule.
+# It also catches a 0.25% platform fee that quantizes to zero, which on GRC --
+# with no dust threshold above it -- is otherwise the one way to build a
+# non-standard transaction that the old `<= 0` guard could never have seen,
+# because that guard only ever looked at the DESTINATION.
+MINIMUM_OUTPUT_SATOSHIS = 1
+
+# Core's GetDustThreshold: the cost of spending the output being protected.
+# 148 = 32 (txid) + 4 (vout) + 1 (script length) + 107 (scriptSig) + 4
+# (sequence). The witness figure is the same sum with 107 scaled down by
+# WITNESS_SCALE_FACTOR 4 and integer-divided: 32 + 4 + 1 + 26 + 4.
+LEGACY_INPUT_SPEND_BYTES = 148
+WITNESS_INPUT_SPEND_BYTES = 67
+
+# Eight bytes of value precede every output's script.
+TXOUT_VALUE_BYTES = 8
+
+# BIP141: a witness program is OP_0..OP_16 followed by a single push of 2 to 40
+# bytes, which is what Core's CScript::IsWitnessProgram() checks.
+WITNESS_PROGRAM_MIN_PUSH = 2
+WITNESS_PROGRAM_MAX_PUSH = 40
+OP_0 = 0x00
+OP_1 = 0x51
+OP_16 = 0x60
+
+# The same 1000 the fee rate uses, as an int, because the dust arithmetic is
+# integer satoshis throughout and Core's is too -- its CFeeRate::GetFee
+# truncates, so doing this in Decimal and rounding would give a threshold this
+# repository believes and no node applies.
+BYTES_PER_KVB_INT = 1000
+
+
+def is_witness_program(script_pubkey: bytes) -> bool:
+    """BIP141's shape test: a version opcode, then one push of 2 to 40 bytes.
+
+    Read off the BYTES, never off a rendered address or a daemon's
+    `scriptPubKey.type` string, for the same reason every other comparison in
+    this package is: Bitcoin Core 28.1 and Litecoin Core 0.21.4 disagree about
+    what a decoded scriptPubKey contains, and agree about the hex.
+    """
+    if len(script_pubkey) < WITNESS_PROGRAM_MIN_PUSH + 2 or len(script_pubkey) > WITNESS_PROGRAM_MAX_PUSH + 2:
+        return False
+    version = script_pubkey[0]
+    if version != OP_0 and not (OP_1 <= version <= OP_16):
+        return False
+    return script_pubkey[1] == len(script_pubkey) - 2
+
+
+def dust_threshold_satoshis(asset: str, script_pubkey: bytes) -> int:
+    """The smallest value this chain will relay in an output paying `script_pubkey`.
+
+    Args:
+        asset: BTC, LTC or GRC. It selects the dust relay rate and nothing else.
+        script_pubkey: the output's script, as the node laid it out. The bytes,
+            never an address -- what lets one call answer for a P2WPKH
+            platform-fee address and a P2PKH destination in the same
+            transaction is that it reads the shape instead of being told it.
+
+    Raises:
+        ValueError: if the asset is unknown. Adding a chain means adding its
+            dust relay rate here, in this one table, beside its fee rate and
+            its floor (rule 11).
+    """
+    if asset not in DUST_RELAY_FEE_SAT_PER_KVB:
+        raise ValueError(
+            f"no dust rule for asset {asset!r}; known assets are {', '.join(SUPPORTED_ASSETS)}. "
+            "Adding a chain means adding its dust relay rate here, beside its fee rate and its floor."
+        )
+    spend_bytes = WITNESS_INPUT_SPEND_BYTES if is_witness_program(script_pubkey) else LEGACY_INPUT_SPEND_BYTES
+    txout_bytes = TXOUT_VALUE_BYTES + varint_length(len(script_pubkey)) + len(script_pubkey)
+    by_rate = (txout_bytes + spend_bytes) * DUST_RELAY_FEE_SAT_PER_KVB[asset] // BYTES_PER_KVB_INT
+    return max(by_rate, MINIMUM_OUTPUT_SATOSHIS)
+
+
+def describe_dust_threshold(asset: str, script_pubkey: bytes) -> str:
+    """One self-describing line: the threshold, and every number that decided it.
+
+    Rule 14 -- an operator reading a refusal must not have to open this file to
+    learn why 2,500 satoshis was too small.
+    """
+    spend_bytes = WITNESS_INPUT_SPEND_BYTES if is_witness_program(script_pubkey) else LEGACY_INPUT_SPEND_BYTES
+    txout_bytes = TXOUT_VALUE_BYTES + varint_length(len(script_pubkey)) + len(script_pubkey)
+    kind = "witness" if is_witness_program(script_pubkey) else "legacy"
+    return (
+        f"{asset} dust threshold is {dust_threshold_satoshis(asset, script_pubkey)} satoshis "
+        f"= ({txout_bytes}-byte output + {spend_bytes}-byte {kind} spend) x "
+        f"{DUST_RELAY_FEE_SAT_PER_KVB[asset]} sat/kvB / 1000, floored at {MINIMUM_OUTPUT_SATOSHIS}"
+    )
+
+
+def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -> None:
+    """Refuse a spend that carries an output no node will relay. BEFORE SIGNING.
+
+    Args:
+        asset: BTC, LTC or GRC.
+        outputs: every output as (value in satoshis, scriptPubKey bytes) --
+            exactly modules/htlc_spend.ParsedTransaction.outputs, which is the
+            node's OWN layout read back, not this repository's arithmetic about
+            what it asked for.
+
+    Raises:
+        ValueError: naming which output, its value, the threshold, and the
+            arithmetic that produced the threshold. The same shape as the
+            `nothing would be left to send` refusal it sits beside, and for the
+            same reason: a number in a refusal that the operator has to come
+            back here to interpret is rule 14's defect.
+
+    IT REFUSES; IT DOES NOT REALLOCATE. Dropping the platform-fee output and
+    paying the remainder to the destination would make every one of these
+    transactions broadcastable, and it is a decision about where somebody
+    else's money goes. That is fund movement and it is the operator's
+    (rule 16), so the refusal says so rather than quietly choosing.
+
+    WHY IT IS CHECKED HERE AND NOT LEFT TO THE NODE. The node's refusal is
+    `code=-26 dust` arriving after the spend is signed and submitted, and on a
+    chain whose sendrawtransaction applies no such policy at all (Gridcoin's
+    IsStandardTx has no dust branch -- see the table above) no refusal arrives.
+    More to the point: NO CLIENT IN THIS PACKAGE IMPLEMENTS A REFUND. A
+    redeemer whose broadcast is refused cannot recover their own funded leg, so
+    the refusal has to arrive while a different decision is still possible.
+    """
+    for index, (satoshis, script_pubkey) in enumerate(outputs):
+        threshold = dust_threshold_satoshis(asset, script_pubkey)
+        if satoshis >= threshold:
+            continue
+        raise ValueError(
+            f"{asset}: output {index} pays {satoshis} satoshis to scriptPubKey {script_pubkey.hex()}, "
+            f"which is DUST -- {describe_dust_threshold(asset, script_pubkey)}. The node would refuse the "
+            f"whole transaction with `code=-26 dust`, and no client here implements a refund, so a redeemer "
+            f"whose broadcast is refused has no recovery path. Nothing was signed. Dropping an output or "
+            f"paying its amount somewhere else is fund movement and is the operator's call, not this "
+            f"function's."
+        )
+
 
 # sendrawtransaction's default maxfeerate, in coin per kvB, on Bitcoin Core and
 # Litecoin Core. A transaction whose fee rate exceeds this is refused as

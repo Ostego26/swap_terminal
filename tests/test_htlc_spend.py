@@ -67,9 +67,12 @@ from modules.atomic_htlc_scripts import push_data as client_push_data
 from modules.atomic_ltc_client import LTCClient
 from modules.htlc_fee import (
     BROADCAST_CEILING_COIN_PER_KVB,
+    assert_no_output_is_dust,
     assert_within_broadcast_ceiling,
+    dust_threshold_satoshis,
     effective_rate_coin_per_kvb,
     fee_rate_coin_per_kvb,
+    is_witness_program,
     minimum_fee_coin,
     redeem_miner_fee,
 )
@@ -283,18 +286,37 @@ def contract():
     }
 
 
-def _node_for(contract, prefix: bytes = VERSION_2_PREFIX) -> FakeNode:
-    """A node that knows this contract's output and the addresses it can pay."""
+def p2wpkh_script(key) -> bytes:
+    """OP_0 <20-byte hash160> -- what a bech32 address decodes to.
+
+    Needed because the SHIPPED default PLATFORM_FEE_LTC_ADDRESS is a bech32
+    `tltc1q...`, so the platform-fee output on a real LTC redeem is P2WPKH and
+    carries Litecoin's LOWER dust threshold (2,940 rather than 5,460). A test
+    that laid the fee out as P2PKH like everything else here would be measuring
+    the easier case.
+    """
+    return b"\x00\x14" + key.hash160
+
+
+def _node_for(contract, prefix: bytes = VERSION_2_PREFIX, platform_script=None, value=CONTRACT_COINS) -> FakeNode:
+    """A node that knows this contract's output and the addresses it can pay.
+
+    `platform_script` and `value` default to what every pre-existing test here
+    used -- a P2PKH platform fee and a 1.0 contract. Both are parameters now so
+    the dust tests can build the shape a real LTC redeem has (a P2WPKH fee
+    address) at the amount a small swap has, which is the combination nothing
+    in this file could express before.
+    """
     node = FakeNode(
         scripts={
             contract["destination"].address: contract["destination"].p2pkh_script,
-            contract["platform"].address: contract["platform"].p2pkh_script,
+            contract["platform"].address: platform_script or contract["platform"].p2pkh_script,
             contract["participant"].address: contract["participant"].p2pkh_script,
         },
         prefix=prefix,
     )
     node.unspent[(contract["txid"], contract["vout"])] = (
-        CONTRACT_COINS,
+        value,
         p2sh_script_for(contract["redeem_script"]).hex(),
     )
     return node
@@ -1226,3 +1248,199 @@ def test_no_client_reads_a_confirmed_contract_with_getrawtransaction_alone(asset
     # getrawtransaction, so a redeem that completed cannot have depended on one.
     assert node.broadcast, f"{asset} did not broadcast"
     assert node.methods[0] == "gettxout" if asset != "GRC" else True
+
+
+# --------------------------------------------------------------------------
+# dust: the other end of the amount a redeem may pay
+# --------------------------------------------------------------------------
+#
+# There was NO dust check on this path until 2026-09-25. The only amount guard
+# was `destination_amount <= 0`, and the LTC and GRC platform fee is a fixed
+# 0.25% of the contract, so it shrinks with the contract while a dust limit
+# does not. The harness could not catch it: CONTRACT_AMOUNT is "1.0", which
+# puts the platform fee 85x over the limit, and regtest does not enforce
+# standardness anyway.
+
+P2PKH_SCRIPT = bytes.fromhex("76a914" + "11" * 20 + "88ac")
+P2SH_SCRIPT = bytes.fromhex("a914" + "11" * 20 + "87")
+P2WPKH_SCRIPT = bytes.fromhex("0014" + "11" * 20)
+P2WSH_SCRIPT = bytes.fromhex("0020" + "11" * 32)
+
+
+@pytest.mark.parametrize(
+    ("asset", "script", "expected"),
+    [
+        # Bitcoin Core's own published dust limits, which is what makes this a
+        # table with an external referent rather than a restatement of the
+        # implementation: 546 for P2PKH is the number every Bitcoin wallet
+        # quotes, and 294 for P2WPKH is the witness-discounted one.
+        ("BTC", P2PKH_SCRIPT, 546),
+        ("BTC", P2SH_SCRIPT, 540),
+        ("BTC", P2WPKH_SCRIPT, 294),
+        ("BTC", P2WSH_SCRIPT, 330),
+        # Litecoin Core 0.21.4's DUST_RELAY_TX_FEE is ten times Bitcoin's, so
+        # every row is exactly ten times the row above it. That is the fact
+        # that turns the platform fee into a live defect.
+        ("LTC", P2PKH_SCRIPT, 5460),
+        ("LTC", P2SH_SCRIPT, 5400),
+        ("LTC", P2WPKH_SCRIPT, 2940),
+        ("LTC", P2WSH_SCRIPT, 3300),
+        # Gridcoin has no dust rule at all -- read from its policy source, not
+        # assumed from Bitcoin's. Its IsStandardTx() rejects an output only for
+        # `nValue == 0`, so the universal floor of one satoshi is the whole
+        # rule and it is the same for every script shape.
+        ("GRC", P2PKH_SCRIPT, 1),
+        ("GRC", P2WPKH_SCRIPT, 1),
+        ("GRC", P2WSH_SCRIPT, 1),
+    ],
+)
+def test_the_dust_table_reproduces_each_chains_published_limit(asset, script, expected):
+    """The decision, called with seeded inputs (rule 10).
+
+    Derived from the output's SHAPE -- Core's (txout bytes + spend bytes) x
+    rate / 1000 -- rather than from one constant per chain, because a P2WPKH
+    output and a P2PKH one have different limits on the same chain and the
+    platform fee is the first and the destination is the second.
+    """
+    assert dust_threshold_satoshis(asset, script) == expected
+
+
+@pytest.mark.parametrize(
+    ("script", "witness"),
+    [
+        (P2WPKH_SCRIPT, True),
+        (P2WSH_SCRIPT, True),
+        # OP_1 <32>, a taproot output: a witness program at version 1.
+        (bytes.fromhex("5120" + "11" * 32), True),
+        (P2PKH_SCRIPT, False),
+        (P2SH_SCRIPT, False),
+        # OP_0 followed by a push of ONE byte. Not a witness program: BIP141
+        # requires 2 to 40, and getting this wrong the other way would apply
+        # the witness discount to something that does not earn it.
+        (bytes.fromhex("000111"), False),
+        # OP_RETURN, which is neither.
+        (bytes.fromhex("6a0411111111"), False),
+        (b"", False),
+    ],
+)
+def test_is_witness_program_reads_the_bytes(script, witness):
+    """Which spend size the threshold uses, and it is a 2x difference on the answer."""
+    assert is_witness_program(script) is witness
+
+
+def test_a_small_ltc_redeem_refuses_before_signing_because_the_platform_fee_is_dust(contract, monkeypatch):
+    """THE MEASUREMENT, through the real LTCClient.redeem_contract().
+
+    A 0.01 LTC contract builds outputs of [986790, 2500] satoshis. The 2500 is
+    the 0.25% platform fee; PLATFORM_FEE_LTC_ADDRESS's shipped default is a
+    bech32 `tltc1q...`, so that output is P2WPKH and Litecoin Core 0.21.4's
+    dust limit for one is 2,940. Before 2026-09-25 this was signed and handed
+    to `sendrawtransaction`, which refuses the WHOLE transaction with
+    `code=-26 dust` -- and no client here implements a refund, so the redeemer
+    loses their own already-funded leg.
+
+    The assertion that matters is not the exception, it is
+    `node.broadcast == []` plus the absence of sendrawtransaction from the
+    call list: the refusal has to arrive while a different decision is still
+    possible, which means before a signature exists.
+    """
+    monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", contract["platform"].address)
+    node = _node_for(
+        contract,
+        platform_script=p2wpkh_script(contract["platform"]),
+        value=Decimal("0.01"),
+    )
+    client = LTCClient("http://127.0.0.1:19443/wallet/w", "u", "p")
+    client.rpc_call = node.rpc_call
+
+    with pytest.raises(ValueError) as raised:
+        _drive_redeem(client, node, contract)
+
+    message = str(raised.value)
+    assert "DUST" in message
+    assert "2500 satoshis" in message, message
+    assert "2940 satoshis" in message, message
+    # The arithmetic, not just the verdict (rule 14).
+    assert "31-byte output + 67-byte witness spend" in message, message
+    assert "30000 sat/kvB" in message, message
+    # And it says what it will NOT do on the operator's behalf (rule 16).
+    assert "operator's call" in message, message
+
+    assert node.broadcast == [], "a dust transaction was broadcast anyway"
+    assert "sendrawtransaction" not in node.methods, "the refusal arrived after signing, which is too late"
+
+
+def test_a_small_btc_redeem_refuses_when_the_destination_alone_is_dust(contract):
+    """BTC charges NO platform fee and has the identical hole.
+
+    The destination absorbs the miner fee, so a contract only a little above
+    the fee leaves a destination below 546. 0.00010500 minus the 0.0001 floor
+    is 500 satoshis, which is dust to a P2PKH output on Bitcoin.
+
+    This is the case with no platform fee in it at all, which is why it is a
+    separate test: a reader could otherwise conclude the defect was the fee.
+    """
+    node = _node_for(contract, value=Decimal("0.000105"))
+    client = BTCClient("http://127.0.0.1:18443/wallet/w", "u", "p")
+    client.rpc_call = node.rpc_call
+
+    with pytest.raises(ValueError) as raised:
+        _drive_redeem(client, node, contract)
+
+    message = str(raised.value)
+    assert "DUST" in message
+    assert "500 satoshis" in message, message
+    assert "546 satoshis" in message, message
+    assert node.broadcast == []
+
+
+def test_gridcoin_refuses_a_zero_value_output_and_nothing_larger():
+    """Gridcoin's ONLY output rule, asserted on the decision rather than end to end.
+
+    `IsStandardTx()` in src/policy/policy.cpp rejects an output for
+    `nValue == 0` and for nothing else, so GRC's threshold is one satoshi for
+    every script shape.
+
+    WHY THIS DOES NOT DRIVE redeem_contract(). Measured: the GRC dust guard is
+    currently UNREACHABLE through that path. GRC's miner-fee floor is 0.01 coin
+    = 1,000,000 satoshis, so any contract large enough to cover the fee at all
+    carries a 0.25% platform fee of at least 2,500 -- and any contract too
+    small is already refused by the `nothing would be left to send` guard
+    before an output exists. An end-to-end test would therefore pass on the
+    OTHER refusal while claiming to measure this one, which is the "an
+    assertion that accepts either outcome" defect this repository's harness was
+    rewritten to remove.
+
+    That unreachability is a property of the 0.01 fee floor, not of the rule.
+    It stops holding the day somebody lowers the floor, which is exactly when
+    the guard is needed and exactly why it is written and tested now.
+    """
+    # Zero is refused, on every script shape, because Gridcoin refuses it.
+    for script in (P2PKH_SCRIPT, P2SH_SCRIPT, P2WPKH_SCRIPT):
+        with pytest.raises(ValueError, match="DUST"):
+            assert_no_output_is_dust("GRC", [(0, script)])
+    # And one satoshi is not, which is the half that says this is Gridcoin's
+    # rule rather than Bitcoin's applied to the wrong chain: the same output
+    # on BTC or LTC IS dust, and the same call says so.
+    assert_no_output_is_dust("GRC", [(1, P2PKH_SCRIPT)])
+    for asset in ("BTC", "LTC"):
+        with pytest.raises(ValueError, match="DUST"):
+            assert_no_output_is_dust(asset, [(1, P2PKH_SCRIPT)])
+
+
+def test_an_ordinary_contract_is_not_refused_by_the_dust_guard(contract, monkeypatch):
+    """The guard must not break the path that works.
+
+    Rule 19's test for a patch is whether it stops the cause or the symptom;
+    the matching hazard for a new refusal is that it refuses everything. At
+    CONTRACT_COINS the LTC platform fee is 250,000 satoshis, which is 85 times
+    the P2WPKH limit, so this is the ordinary case with the awkward script
+    shape.
+    """
+    monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", contract["platform"].address)
+    node = _node_for(contract, platform_script=p2wpkh_script(contract["platform"]))
+    client = LTCClient("http://127.0.0.1:19443/wallet/w", "u", "p")
+    client.rpc_call = node.rpc_call
+
+    _drive_redeem(client, node, contract)
+    assert node.broadcast, "the ordinary redeem stopped working"
