@@ -151,6 +151,44 @@ def test_an_unvalidated_payment_is_credited_at_rank_zero_and_reported():
 
 # --- shape and identity -----------------------------------------------------
 
+def test_the_flat_shape_a_real_server_actually_sends_is_accepted():
+    """MEASURED, and it caught a bug before this shipped.
+
+    Probed 2026-09-25 against rippled 3.4.1 on s.altnet.rippletest.net, via
+    `ledger` with expand=true: the transaction body is FLAT ON THE ENTRY and
+    the metadata key is `metaData`. An earlier _unwrap() looked only under `tx`
+    and `tx_json`, returned {} for this, found no TransactionType, and SKIPPED
+    the payment -- reporting "no deposits" for money that had arrived.
+
+    The field values below are copied from that real response.
+    """
+    real = {
+        "TransactionType": "Payment",
+        "Destination": ADDRESS,
+        "DestinationTag": 77,
+        "Amount": "2500000",
+        "hash": "1064AB5F72A9925CD65AFAD41AA70948D62ACA59A014" + "0" * 20,
+        "metaData": {"TransactionResult": "tesSUCCESS", "delivered_amount": "2500000"},
+        "validated": True,
+    }
+    scan = deposit_events_from_transactions([real], ADDRESS, 1)
+    assert len(scan.events) == 1
+    assert scan.events[0]["amount"] == 2.5
+    assert scan.events[0]["vout"] == 77
+
+
+def test_an_entry_with_no_recognizable_body_refuses_instead_of_skipping():
+    """A shape this module does not understand must not read as "not a Payment".
+
+    Returning {} made every entry look like a non-payment, so an unrecognized
+    response produced an empty deposit list -- indistinguishable from a real
+    "nothing has arrived yet", which is the failure this module exists to
+    prevent.
+    """
+    with pytest.raises(XRPPaymentError, match="no transaction body"):
+        deposit_events_from_transactions([{"ledger_index": 21050264, "validated": True}], ADDRESS, 1)
+
+
 def test_both_rippled_api_shapes_are_accepted():
     """v1 nests the transaction under `tx`, v2 under `tx_json`.
 

@@ -119,20 +119,47 @@ class PaymentScan:
 
 
 def _unwrap(entry: dict) -> tuple[dict, dict]:
-    """Pull the transaction and its metadata out of an account_tx entry.
+    """Pull the transaction and its metadata out of a ledger entry.
 
-    Accepts both API shapes rather than choosing one: rippled v1 nests the
-    transaction under `tx`, v2 under `tx_json`, and metadata appears as `meta`
-    or `metaData` depending on the call. Guessing wrong would make every
-    deposit invisible -- an empty result that reads as "no deposits yet".
+    THREE SHAPES, AND THE THIRD WAS FOUND BY PROBING A REAL SERVER.
+
+    Measured 2026-09-25 against rippled 3.4.1 on s.altnet.rippletest.net, via
+    `ledger` with transactions=true and expand=true:
+
+        transaction body   FLAT ON THE ENTRY   <- not under tx, not tx_json
+        metadata key       metaData            <- not meta
+
+    An earlier version of this function looked only under `tx` and `tx_json`.
+    Against that response it returned an empty dict, found no TransactionType,
+    and SKIPPED the payment -- reporting "no deposits" for money that had
+    arrived. That is the silent-empty failure this whole module is written
+    against, and it was in the module doing the writing.
+
+    So all three nestings are accepted, and a body that cannot be located at
+    all now RAISES rather than becoming {}. The difference matters: {} means
+    "not a Payment" to the caller, which is indistinguishable from a real
+    answer, while an exception says the response shape is not understood.
     """
-    tx = entry.get(FIELD_TX) or entry.get(FIELD_TX_V2) or {}
     meta = entry.get(FIELD_META) or entry.get(FIELD_META_ALT) or {}
-    if not isinstance(tx, dict) or not isinstance(meta, dict):
+    if isinstance(entry.get(FIELD_TX), dict):
+        tx = entry[FIELD_TX]
+    elif isinstance(entry.get(FIELD_TX_V2), dict):
+        tx = entry[FIELD_TX_V2]
+    elif FIELD_TRANSACTION_TYPE in entry:
+        # The flat shape: the entry IS the transaction, with metadata beside it.
+        tx = entry
+    else:
         raise XRPPaymentError(
-            f"an account_tx entry has {FIELD_TX}/{FIELD_TX_V2}={type(tx).__name__} and "
-            f"{FIELD_META}={type(meta).__name__}; expected objects. NOT credited -- this is the shape "
-            f"the whole scan depends on, and reading it wrong would silently credit nothing."
+            f"a ledger entry carries no transaction body -- no {FIELD_TX}, no {FIELD_TX_V2}, and no "
+            f"{FIELD_TRANSACTION_TYPE} of its own. NOT skipped silently: an unrecognized shape returns "
+            f"nothing from every scan, which reads as 'no deposits have arrived' for money that has. "
+            f"Keys present: {sorted(entry)[:8]}"
+        )
+    if not isinstance(meta, dict):
+        raise XRPPaymentError(
+            f"a ledger entry has {FIELD_META}/{FIELD_META_ALT}={type(meta).__name__}; expected an "
+            f"object. NOT credited -- delivered_amount lives in there, and without it the credited "
+            f"figure would have to come from Amount, which is the partial payment exploit."
         )
     return tx, meta
 

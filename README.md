@@ -325,10 +325,23 @@ XRP for a token the depositor minted themselves.
 | `chains/xrp_address.py` — base58 + checksum | **measured** against ACCOUNT_ZERO and ACCOUNT_ONE, 2,000 round trips, every single-character mutation rejected |
 | `chains/xrp_units.py` — drops, finality ladder | **measured**, tested directly |
 | `chains/xrp_payments.py` — what counts as a deposit | **rules measured**, response shape unverified |
-| `chains/xrp.py` — RPC method and field names | **UNVERIFIED** — xrpl.org was unreachable when this was written |
+| `chains/xrp.py` — RPC method and field names | **partly confirmed against rippled 3.4.1** — see below |
 
-Run `xrp_chain_check.py` before trusting the adapter, the same way
-`monero_chain_check.py` is the proof for Monero.
+Probed 2026-09-25 against `s.altnet.rippletest.net` from the operator's host.
+Confirmed: the `params: [{...}]` request shape, that errors arrive in
+`result.status` rather than the HTTP code, `reserve_base_xrp` / `reserve_inc_xrp`,
+and — the one that matters — `meta.delivered_amount` present as a **string**.
+
+**The probe found a bug.** On that server's `ledger` response the transaction
+body is **flat on the entry** and the metadata key is **`metaData`**, not nested
+under `tx`/`tx_json`. The unwrap looked only under those two, so it returned an
+empty dict and *skipped the payment silently* — reporting "no deposits" for
+money that had arrived. Fixed, and an unrecognizable entry now raises rather
+than reading as "not a Payment".
+
+Still unverified: `account_tx` specifically (the probe used `ledger`), and a
+payment actually carrying a `DestinationTag` — none of the three sampled had
+one, which is normal wallet-to-wallet traffic.
 
 ### Deposits are attributed by destination tag, not by address
 

@@ -20,11 +20,35 @@ That is the same limitation chains/monero.py carried, and it was resolved there
 by fetching the docs from the operator's host, which is the first thing to do
 here too.
 
-What IS measured: chains/xrp_address.py, verified against the ledger's own
-ACCOUNT_ZERO and ACCOUNT_ONE constants, 5,000 round trips and 33 single
-character mutations, all rejected by checksum. And chains/xrp_payments.py's
-filtering, tested directly. The wire format is the hypothesis; the arithmetic
-and the rules are not.
+CONFIRMED AGAINST A LIVE SERVER ON 2026-09-25, from the operator's host --
+rippled 3.4.1 on s.altnet.rippletest.net, network_id 1:
+
+    params as a LIST containing one object     ACCEPTED (HTTP 200)
+    result.status == "success"                 CONFIRMED -- this is where
+                                               errors live, not the HTTP code
+    info.validated_ledger.reserve_base_xrp     1    (a NUMBER, not a string)
+    info.validated_ledger.reserve_inc_xrp      0.2
+    info.network_id / build_version            1 / "3.4.1"
+    meta.delivered_amount                      "2500000" -- a STRING, exactly
+                                               as chains/xrp_payments.py reads
+    meta.TransactionResult                     "tesSUCCESS"
+    Amount                                     "2500000" (never credited)
+
+AND IT FOUND A BUG. On that server's `ledger` response the transaction body is
+FLAT ON THE ENTRY and the metadata key is `metaData` -- not nested under `tx` or
+`tx_json`. _unwrap() looked only under those two, returned an empty dict, found
+no TransactionType and SKIPPED the payment: "no deposits" reported for money
+that had arrived. Fixed, and an unrecognizable entry now raises instead of
+becoming {}.
+
+Still unverified: the `account_tx` response specifically (the probe used
+`ledger`), and whether a deposit carrying a DestinationTag looks as expected --
+none of the three payments sampled had one, which is normal for wallet-to-wallet
+traffic and says nothing either way about ours.
+
+Also measured: chains/xrp_address.py against the ledger's own ACCOUNT_ZERO and
+ACCOUNT_ONE constants, 2,000 round trips and every single-character mutation
+rejected by checksum.
 
 TWO THINGS ABOUT rippled's JSON-RPC THAT ARE EASY TO GET WRONG
 
