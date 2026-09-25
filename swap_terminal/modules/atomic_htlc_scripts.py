@@ -73,9 +73,27 @@ equals a script hash -- which nobody has. `run_swap_tests()` below passes
 `2MwJ8Q735vzVkaL1SnfbGvefofrDnXgXbfY`, a testnet P2SH address, as a refund
 address, so the case is not hypothetical.
 
-And the script's OP_IF branch requires the preimage on the stack, which none of
-the three redeem_contract() implementations in this package ever puts there --
-see the divergence table in any of modules/atomic_*_client.py.
+And the script's OP_IF branch requires the preimage on the stack. UNTIL
+2026-09-25 THIS PARAGRAPH SAID none of the three redeem_contract()
+implementations "ever puts there -- see the divergence table in any of
+modules/atomic_*_client.py", and BOTH HALVES OF THAT ARE NOW FALSE. All three
+push it: modules/htlc_spend.hashlock_script_sig() lays out
+<sig> <pubkey> <preimage> OP_1 <redeemScript> and
+modules/htlc_rpc.build_hashlock_spend() signs it, one implementation for all
+three clients. Verified by walking each redeem_contract()'s AST -- `secret`
+appears in all three bodies and is passed by keyword in all three. And the
+divergence table no longer carries that row: it reads
+`redeem scriptSig  ---- modules/htlc_rpc.build_hashlock_spend, one
+implementation ----`, so the sentence pointed a reader at a table that had
+stopped saying it.
+
+WHY THIS SENTENCE WAS WORTH FIXING AT ALL, given that the code was already
+right. This is the authoritative file for what the script REQUIRES. An
+operator holding a funded contract whose counterparty has already taken the
+other leg reads it to learn whether they can redeem, is told the package
+cannot, and waits out the timelock instead -- losing both legs, at the one
+moment when the refund branch is not the safe default. Rule 16: a wrong
+comment is a bug, and the sentence was the thing that was wrong.
 
 WHAT WAS REMOVED FROM THIS FILE ON 2026-09-24 (rules 9 and 12).
 
@@ -241,12 +259,101 @@ def _extract_hash160_from_testnet_p2pkh(address: str) -> bytes:
         return hash160_val
     raise ValueError("Not a valid testnet P2PKH address.")
 
+def push_data(data: bytes) -> bytes:
+    """Push `data` onto the script stack with the smallest push opcode that fits.
+
+    LIFTED OUT OF `build_htlc_redeem_script` ON 2026-09-25, and the reason the
+    old comment gave for leaving it nested no longer holds. It said extracting
+    it "would be a change to the fund path made on behalf of a harness whose
+    job is to measure that path, not to edit it" -- true while the only other
+    caller was the harness. It is now called by modules/htlc_spend.py, which
+    assembles the scriptSig that SPENDS this script on the real fund path, and
+    a push encoder spelled twice inside one fund path is rule 8's failure with
+    a delay on it: the scriptSig's pushes and the redeem script's pushes have
+    to agree byte for byte or the P2SH hash does not match.
+
+    THERE IS STILL A SECOND COPY, deliberately, and rule 8 requires each site
+    to name the other: `regtest/txbuild.py::push_data` has identical boundaries.
+    That one is NOT merged into this one, because regtest/txbuild.py is the
+    harness's independent control spender -- the instrument that answers
+    "is the SCRIPT sound, or is the CLIENT wrong?" If the instrument imported
+    the thing it measures, a defect shared by both would make the control fail
+    exactly when the client fails, and the harness would report the redeem
+    SCRIPT as broken when the shared encoder was. The two are kept apart on
+    purpose and held together by a test instead:
+    tests/test_htlc_spend.py::test_the_two_push_encoders_agree_byte_for_byte.
+    """
+    length = len(data)
+    if length < 0x4c:  # noqa: PLR2004 -- checked: OP_PUSHDATA1's boundary, a script opcode constant
+        result = bytes([length]) + data
+    elif length <= 0xff:  # noqa: PLR2004 -- checked: OP_PUSHDATA2's boundary, a script opcode constant
+        result = b'\x4c' + bytes([length]) + data
+    elif length <= 0xffff:  # noqa: PLR2004 -- checked: OP_PUSHDATA4's boundary, a script opcode constant
+        result = b'\x4d' + struct.pack("<H", length) + data
+    else:
+        result = b'\x4e' + struct.pack("<I", length) + data
+    # THE DATA ITSELF IS NOT LOGGED, and that changed on 2026-09-25 when this
+    # function acquired its second caller.
+    #
+    # It used to log both `data.hex()` and `result.hex()` at DEBUG. That was
+    # merely noisy while the only things it pushed were a secret HASH and two
+    # hash160s -- all public by construction, all already in the script this
+    # builds. The moment modules/htlc_spend.hashlock_script_sig() started using
+    # it, one of the things it pushes is the PREIMAGE, and those two lines
+    # printed it in full.
+    #
+    # That is the single most dangerous value in this tree, and CLAUDE.md's
+    # chain-safety rules are absolute about it: "Never reveal a preimage. Not
+    # in a log, not in a commit, not in a pasted diagnostic, not in an error
+    # message. Log secret_hash, never secret." It is caught by
+    # tests/test_htlc_spend.py::test_no_client_logs_the_preimage, which found
+    # it -- the leak existed for the length of one test run and never reached
+    # a chain.
+    #
+    # The LENGTH is kept, because that is what a reader diagnosing a push
+    # boundary needs and it reveals nothing.
+    logger.debug("pushed %d bytes as a %d-byte script element", length, len(result))
+    return result
+
+
 def script_to_p2sh_address(script: bytes) -> str:
     """Compute the testnet P2SH address corresponding to a redeem script."""
     script_hash = hash160(script)
     p2sh_addr = base58.b58encode_check(TESTNET_P2SH_VERSION + script_hash).decode()
     logger.debug(f"Computed P2SH address: {p2sh_addr}")
     return p2sh_addr
+
+
+def p2sh_script_for(script: bytes) -> bytes:
+    """The scriptPubKey that pays a P2SH: OP_HASH160 <20-byte script hash> OP_EQUAL.
+
+    THE VERSION-INDEPENDENT NAME FOR A CONTRACT OUTPUT, and that is why it
+    exists rather than the address `script_to_p2sh_address()` returns.
+
+    Measured on regtest 2026-09-25: Bitcoin Core 28.1 returns
+    `['address', 'asm', 'desc', 'hex', 'type']` in a decoded scriptPubKey and
+    Litecoin Core 0.21.4 returns `['addresses', 'asm', 'hex', 'reqSigs',
+    'type']`. Core deprecated `addresses` in 0.20 and removed it in 22.0, so
+    code that locates its own contract output by comparing an address against
+    `scriptPubKey.addresses` finds nothing on a modern node no matter how
+    correctly the contract was funded -- which is exactly what
+    `wait_for_tx_output()` and LTCClient.create_contract() did until
+    2026-09-25. (That function lived in modules/utils.py then; it is
+    modules/htlc_rpc.wait_for_tx_output() now, and matches on this.)
+
+    `hex` is present on BOTH daemons and is the same bytes on both, and the two
+    chains do not even agree on the base58 P2SH version byte (0xC4 on Bitcoin,
+    printed as 0x3A by Litecoin), so the rendered address is the wrong key in
+    two independent ways. Match on this.
+
+    There is a second copy in regtest/steps.py::_p2sh_script_for, and rule 8
+    requires each to name the other. That one belongs to the harness, which is
+    kept independent of the code it measures on purpose -- see push_data above
+    for the full reasoning. They are held together by
+    tests/test_htlc_spend.py::test_the_harness_and_the_client_agree_on_the_p2sh_script.
+    """
+    script_hash = hash160(script)
+    return b"\xa9" + bytes([len(script_hash)]) + script_hash + b"\x87"
 
 def build_htlc_redeem_script(secret_hash: str | bytes,
                              participant_address: str,
@@ -326,31 +433,6 @@ def build_htlc_redeem_script(secret_hash: str | bytes,
     OP_CHECKSIG = b'\xac'
     OP_CHECKLOCKTIMEVERIFY = b'\xb1'
     OP_DROP = b'\x75'
-
-    def push_data(data: bytes) -> bytes:
-        """Pushes data onto the script stack using the appropriate opcode.
-
-        THERE IS A SECOND COPY OF THIS, and rule 8 requires each site to name
-        the other: `regtest/txbuild.py::push_data` has identical boundaries and
-        is used to assemble the scriptSigs that SPEND the script this function
-        builds. They are not merged because this one lives inside the function
-        that decides the redeem script -- fund-path code (rule 16) -- and
-        extracting it would be a change to the fund path made on behalf of a
-        harness whose job is to measure that path, not to edit it. If either
-        changes, change both.
-        """
-        length = len(data)
-        logger.debug(f"Pushing data (length {length}): {data.hex()}")
-        if length < 0x4c:  # noqa: PLR2004 -- checked: OP_PUSHDATA1's boundary, a script opcode constant
-            result = bytes([length]) + data
-        elif length <= 0xff:  # noqa: PLR2004 -- checked: OP_PUSHDATA2's boundary, a script opcode constant
-            result = b'\x4c' + bytes([length]) + data
-        elif length <= 0xffff:  # noqa: PLR2004 -- checked: OP_PUSHDATA4's boundary, a script opcode constant
-            result = b'\x4d' + struct.pack("<H", length) + data
-        else:
-            result = b'\x4e' + struct.pack("<I", length) + data
-        logger.debug(f"push_data result: {result.hex()}")
-        return result
 
     # Build the script with two branches.
     script = (

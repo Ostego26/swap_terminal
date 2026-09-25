@@ -431,6 +431,9 @@ def describe_rpc_exception(exc: BaseException) -> str:
 
         XFAIL REAL redeem_contract(): got=HTTPError: 500 Server Error ...
 
+    (that line is quoted as it was printed on the day; step 7 scores the same
+    outcome FAIL since the defect it marked was fixed on 2026-09-25)
+
     and the harness could say nothing about which defect caused it, because
     the sentence that would have said was thrown away three frames down.
 
@@ -808,8 +811,10 @@ def ensure_wallet(console: Console, config: ChainConfig, wallet_name: str) -> st
     legacy wallet on Core 28 -- that needs -deprecatedrpc=create_bdb there, and
     branching on a guess about a deprecation token is exactly what this file
     refuses to do. Which kind was created is REPORTED by probe_capabilities(),
-    and what it means for the real client's importaddress/importprivkey calls
-    is reported where those fail.
+    and step 3 says what it means for the real client -- which since 2026-09-25
+    reads the same `getwalletinfo.descriptors` field itself and picks
+    importdescriptors or importaddress accordingly, rather than calling a
+    legacy RPC and raising when it is refused.
     """
     node = adapter_for(config)
     try:

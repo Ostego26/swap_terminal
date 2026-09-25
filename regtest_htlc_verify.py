@@ -16,20 +16,38 @@ Mainnet-safe: NO, AND IT REFUSES TO BE ASKED. The first assertion after every
        turns it off. It is in regtest/daemons.py::assert_regtest, called from
        step 2 for every chain on every run.
 
-WHY THIS EXISTS.
+WHY THIS EXISTS, AND WHAT CHANGED ON 2026-09-25.
 
-Everything this repository believes about its HTLC path is inferred from
-reading. The three clients' module headers say, correctly and in detail, that
-`redeem_contract()` never references its `secret` parameter -- established by
-walking the AST -- and then say plainly that what follows from it "has NOT been
-confirmed against a chain here." modules/htlc_timelock.py says the same about
-the refund branch: "Nothing in this tree has funded a contract built on one of
-these values and then refunded it after expiry, on any chain."
+It was written because everything this repository believed about its HTLC path
+was inferred from reading. Its first run settled four of those inferences at
+once, against Bitcoin Core 28.1.0 and Litecoin Core 0.21.4:
 
-CLAUDE.md's verification rule is what makes that gap the outstanding work:
-"the only honest proof that a contract is correct is that both of its branches
-were exercised on a test chain: a redeem with the preimage, and a refund after
-the timelock expired." This harness is that proof, or that refutation.
+    create_contract()   refused outright on BTC -- `importaddress` is a
+                        legacy-wallet RPC and Core 28.1 makes descriptor
+                        wallets. It also could not have found its own contract
+                        output afterwards: it matched on
+                        `scriptPubKey.addresses`, removed in Core 22.0.
+    redeem_contract()   failed on its own FIRST line against a confirmed
+                        contract -- `getrawtransaction` searches only the
+                        mempool without -txindex -- and, when finally given an
+                        unconfirmed one to chew on, failed at signing:
+                        `Unable to sign input, invalid stack size` on Bitcoin,
+                        `Invalid OP_IF construction` on Litecoin. It never
+                        pushed the preimage.
+
+ALL FOUR ARE FIXED, and this harness's job on its next run is to say whether
+that is true. The predictions have been REVERSED, not widened: step 6 expects a
+funded contract, step 7 expects two broadcast txids, and a redeem that cannot
+spend the hashlock branch is now a FAIL that lands in the exit code. An
+assertion that accepted either outcome would pass whether or not the fix
+worked, which is worse than having no assertion at all.
+
+What remains inferred is the REFUND branch, and CLAUDE.md's verification rule
+is why that is still the outstanding work: "the only honest proof that a
+contract is correct is that both of its branches were exercised on a test
+chain: a redeem with the preimage, and a refund after the timelock expired."
+No client in this tree implements a refund at all, so steps 8 and 9 exercise it
+with the harness's own spender and every line about it says `control`.
 
 WHERE THE TEST HAS TO RUN, WHICH IS NOT OBVIOUS AND COST A ROUND TRIP.
 
@@ -57,11 +75,16 @@ than by the chain's rules at that height.
 
 WHAT IT DOES NOT DO.
 
-It does not fix anything. `redeem_contract()` is fund-moving code and CLAUDE.md
-rule 16 puts that decision with the operator; the harness measures and reports.
-It also does not stub, skip, or soften the assertion that is expected to fail
--- a known defect confirmed on a real chain is a successful measurement, and it
-is printed as XFAIL so nobody reads it as something to make green.
+It does not fix anything, and it never softens an assertion to make a run
+green. Nothing in step 6 or step 7 is scored XFAIL any more: XFAIL means
+"measured, confirmed, and deliberately not made green", and the defects it used
+to mark have been fixed, so the same outcomes are now FAIL. Re-marking a
+failing redeem XFAIL to quiet a run would be exactly the move this file exists
+to prevent.
+
+It does not implement a refund either. `redeem_contract()` is fund-moving code
+and CLAUDE.md rule 16 puts that kind of decision with the operator; writing a
+`refund_contract()` is a change to the fund path, not a measurement of one.
 
 HOW TO RUN IT.
 
@@ -161,15 +184,32 @@ from regtest.keys import generate_key  # noqa: E402 -- same
 
 WALLET_NAME = "regtest_htlc_harness"
 
-# The loggers the real modules install at import. They set themselves to DEBUG
-# and attach their own StreamHandler, which prints every RPC payload including
-# every raw transaction. Useful exactly once. Raised to INFO by default and
-# left at DEBUG by --verbose-clients; propagate is turned off so their own
-# handler does not print each line a second time through the root logger.
+# The loggers the real modules use. UNTIL 2026-09-25 this read "the loggers the
+# real modules INSTALL at import. They set themselves to DEBUG and attach their
+# own StreamHandler, which prints every RPC payload including every raw
+# transaction" -- and it was accurate, which is exactly how a raw transaction
+# carrying an HTLC preimage reached stderr with no application opt-in. See
+# describe_rpc_payload() in modules/htlc_rpc.py for the measurement. The three
+# clients no longer set a level or attach a handler, so this file is now the
+# only thing deciding where their lines go, which is what "the application owns
+# logging policy" means in practice.
+#
+# `propagate` is therefore NO LONGER turned off. With their own handlers gone,
+# the root handler basicConfig() installs is the only one they have, and
+# silencing propagation would make the harness print nothing at all from the
+# code it exists to measure -- rule 14's defect introduced while fixing rule
+# 12's. Nothing prints twice now, because nothing has a second handler.
 CLIENT_LOGGERS = (
     "modules.atomic_btc_client",
     "modules.atomic_ltc_client",
     "modules.atomic_htlc_scripts",
+    # The shared HTLC modules, added 2026-09-25 with the fixes. htlc_rpc is the
+    # one that logs the fee it chose and which lookup route answered, both of
+    # which an operator wants at INFO; htlc_spend and htlc_fee are quieter.
+    # Listing them here is what keeps --verbose-clients meaning what it says.
+    "modules.htlc_rpc",
+    "modules.htlc_spend",
+    "modules.htlc_fee",
     "modules.utils",
 )
 
@@ -178,9 +218,7 @@ def configure_logging(verbose_clients: bool) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     level = logging.DEBUG if verbose_clients else logging.INFO
     for name in CLIENT_LOGGERS:
-        logger = logging.getLogger(name)
-        logger.setLevel(level)
-        logger.propagate = False
+        logging.getLogger(name).setLevel(level)
 
 
 def build_real_client(asset: str, config, wallet: str):
@@ -284,9 +322,33 @@ def print_verdicts(console: Console, outcomes: list[steps.ChainOutcome]) -> None
         console.say(f"{outcome.asset}: {outcome.cltv_verdict()}")
         console.say(
             f"{outcome.asset}:   real create_contract()={outcome.real_create_contract}  "
-            f"real redeem_contract()={outcome.real_redeem}  control hashlock spend={outcome.control_redeem}  "
+            f"real redeem_contract() [confirmed]={outcome.real_redeem}  "
+            f"[unconfirmed]={outcome.real_redeem_unconfirmed}  "
+            f"preimage on chain={outcome.preimage_on_chain}  "
+            f"control hashlock spend={outcome.control_redeem}  "
             f"refund refused before expiry={outcome.refund_before_expiry_rejected}  "
             f"refund after expiry={outcome.refund_after_expiry}"
+        )
+        # The four fixes, scored on one line, because that is the question this
+        # run exists to answer and an operator should not have to assemble it
+        # from five fields. `control hashlock spend=SKIP` beside a passing
+        # redeem is the GOOD outcome: the control is only run when the client
+        # could not spend (rule 14 -- "did nothing" must not look like "did
+        # work", and here it is the reverse: a SKIP that means success needs
+        # saying).
+        # `preimage on chain` is scored SEPARATELY from the two redeem results
+        # and it is the one that answers defect 1. The redeem results are the
+        # client's RETURN VALUE -- a broadcast txid -- which says the coins
+        # moved, not that the hashlock branch is what moved them. Until
+        # 2026-09-25 this line credited defect 1 to `real_redeem` and the
+        # on-chain scriptSig check fed nothing at all.
+        console.say(
+            f"{outcome.asset}:   the four 2026-09-25 fixes: "
+            f"contract created={outcome.real_create_contract} (defects 3 and 4), "
+            f"confirmed redeem={outcome.real_redeem} (defect 2), "
+            f"unconfirmed redeem={outcome.real_redeem_unconfirmed}, "
+            f"preimage read back off the chain={outcome.preimage_on_chain} (defect 1 -- this is the one that "
+            f"says the swap is atomic; a txid alone does not)"
         )
         for note in outcome.notes:
             console.say(f"{outcome.asset}:   note: {note}")

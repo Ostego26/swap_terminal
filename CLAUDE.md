@@ -165,7 +165,7 @@ reports, diagnostics, tables -- is in microfortnights.
 
 **The unit is written `µfn`. Never `ufn`, and never with a space before it.**
 `2.3µfn`, not `2.3 µfn`, exactly as nobody writes `2 s` for two seconds.
-Together: `done in 2.3µfn (2.8s)`. The parenthesised seconds follow the same
+Together: `done in 2.3µfn (2.8s)`. The parenthesized seconds follow the same
 rule -- `2.8s`, never `2.8 s`.
 
 µ in anything a human READS, ASCII in anything a machine parses. Identifiers
@@ -310,7 +310,7 @@ and they are a mix of entry points, libraries and experiments with no marker
 saying which is which. `transactions.py` alone is large enough to contain its
 own GUI thread (`transactions.py:726`). Treat rule 10 as the direction for new
 code and for whatever you are already touching, not as license for a mass
-reorganisation.
+reorganization.
 
 ## 11. One vocabulary for assets and chains, derived in one place
 
@@ -690,6 +690,36 @@ hours, not days.
     18    British spellings in .py/.js/.md       0              3, ALL OF THEM IN THIS
                                                                 FILE, now fixed
 
+RE-MEASURED 2026-09-25, with the same walk, after the regtest harness and the
+HTLC client fixes landed, and AGAIN later the same day after the five-lens
+review of those fixes. The drift is left visible rather than overwritten,
+because that is what rule 1 asks for -- and this one aged in hours:
+
+    rule  measurement                     2026-09-24   2026-09-25   after review
+    1     module headers, swap_terminal/  41 of 41     53 of 53     54 of 54
+    1     module headers, tests/          10 of 10     14 of 14     15 of 15
+    12    tests, all passing              83           273          327
+
+THE MIDDLE COLUMN SAID 270 AND THE BRANCH RAN 273, which is the small version
+of the thing this whole section is about: a count written in prose is stale the
+moment anything lands, and three tests is exactly the size of gap nobody
+notices. The figure was never re-run against the branch it describes; 273 is
+what `python3 -m pytest` reported on it before the review pass began.
+
+The two new files after the review are swap_terminal/script_pub_key.py -- the
+one place that knows how each daemon spells a decoded output's address, which
+was a defect found in a FOURTH place -- and tests/test_deposit_vout_matching.py.
+Both carry a complete header, so the gate is still clean rather than merely
+unchanged, which is why the denominator is stated beside every numerator.
+
+THE TABLE ABOVE USED TO BE CUT IN HALF by this block. The 2026-09-25 figures
+and their explanatory paragraph were inserted BETWEEN rule 12's row and rules
+13 and 18's rows of the 2026-09-24 table, so two rows of the older measurement
+sat orphaned below a paragraph about a different one, reading as if they
+belonged to it. Rule 14: pasted output has to be self-describing a day later,
+and a table a reader cannot tell the boundaries of is the document version of
+the same defect.
+
 The denominator moved too, which is why rule 1's count cannot be read as
 "45 became 45": six files were deleted as proven dead (modules/rpc_clients.py,
 modules/bitshares_client.py, modules/module.py, models/__init__.py,
@@ -724,6 +754,44 @@ corrected here rather than in place:
   them. (Three further matches are the rule's own examples, which quote the
   British spelling in order to name it, and are left alone.) The file that
   states the rule is the one place a violation refutes itself.
+
+  AND THAT MEASUREMENT WAS ITSELF SHORT BY THREE, found 2026-09-25 while
+  re-checking this file for the review pass. The 40-pattern scan did not carry
+  -is-/-iz- endings or the doubled-L forms, so it could not have seen any of
+  them -- which is the ordinary way a clean gate reports clean: THE
+  DENOMINATOR IS THE PATTERNS, NOT THE LANGUAGE, and a scan reports on what it
+  was told to look for. A count with no denominator is rule 3's error, and
+  "0 British spellings" with an unstated pattern list is exactly that.
+
+      CLAUDE.md:313                    "reorganisation"  rule 10's own closing
+                                                         sentence
+      CLAUDE.md:168                    "parenthesised"   rule 6, and
+      swap_terminal/microfortnights.py "parenthesised"   the module that
+                                                         implements rule 6,
+                                                         which quotes it
+      modules/htlc_timelock.py         "cancelled"       and rule 18 names
+                                                         "Canceled" by example
+
+  All four are fixed, and the count for 2026-09-24 should be read as 7 rather
+  than 3. The scan that found these looked for 60 patterns rather than 40; that
+  number is also a denominator and it is also not the language.
+
+WHAT THE 2026-09-25 REVIEW PASS LEFT FOR THE OPERATOR, and it is one item.
+Named here rather than baselined (rule 19), and it is armed state rather than
+code (rule 16):
+
+  chains/base.RPCAdapter._extract_matching_vouts() read `scriptPubKey.addresses`
+  alone -- removed from Bitcoin Core in 22.0 -- so on a Core 28.1 node nothing
+  ever matched and every deposit_events row was written by the FABRICATED
+  fallback beside it, carrying vout=0 and the amount from the wallet's
+  listtransactions summary. That is fixed. The rows it already wrote are not:
+  upsert_deposit_event() keys on (asset, txid, vout), so a deposit whose real
+  output is at vout=N now inserts a SECOND row, and refresh_swap_from_chain()
+  sums every row for the swap. The double count sends the swap to
+  `under_review` rather than to a payout -- a halt, not a release, which is the
+  safe direction -- but it is a swap that stops moving. The remedy is to delete
+  the fabricated vout=0 row for any swap still open across the deploy, and it
+  belongs to whoever can see those rows.
 
 WHAT DID NOT MOVE, and is named work rather than a baseline (rule 19):
 

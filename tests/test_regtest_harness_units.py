@@ -56,6 +56,7 @@ from modules.atomic_htlc_scripts import (
     script_to_p2sh_address,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, timelock_blocks
+from regtest import steps
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console, redact, value
 from regtest.daemons import (
     COINBASE_MATURITY_HEIGHT,
@@ -80,6 +81,7 @@ from regtest.steps import (
     REFUSAL_POLICY,
     ChainFacts,
     ChainOutcome,
+    Contract,
     Mined,
     RedeemAttempt,
     Run,
@@ -566,7 +568,12 @@ def test_durations_use_the_micro_sign_and_no_space():
 
 
 def test_verdict_when_only_the_refund_branch_spends():
-    outcome = ChainOutcome(asset="BTC", real_redeem=XFAIL, control_redeem=FAIL, refund_after_expiry=OK)
+    # SEEDED WITH FAIL, NOT XFAIL, SINCE 2026-09-25. A redeem that cannot spend
+    # the hashlock branch used to be a predicted failure and is now a
+    # regression, so step 7 scores it FAIL. The verdict logic tests `== OK` and
+    # is indifferent, but a seed that can no longer occur teaches the next
+    # reader the wrong thing about what this harness expects.
+    outcome = ChainOutcome(asset="BTC", real_redeem=FAIL, control_redeem=FAIL, refund_after_expiry=OK)
     assert "ONLY THE REFUND BRANCH SPENDS" in outcome.verdict()
 
 
@@ -574,7 +581,7 @@ def test_verdict_when_the_script_is_sound_but_the_client_is_not():
     """Only claimable when the node was actually asked to build a scriptSig."""
     outcome = ChainOutcome(
         asset="BTC",
-        real_redeem=XFAIL,
+        real_redeem=FAIL,
         real_redeem_stage=REDEEM_FAILED_ON_SIGNING,
         reached_the_signer=True,
         control_redeem=OK,
@@ -583,16 +590,98 @@ def test_verdict_when_the_script_is_sound_but_the_client_is_not():
     verdict = outcome.verdict()
     assert "SCRIPT is sound" in verdict
     assert "only by refund" in verdict
+    assert "regressed" in verdict, "this was the state before 2026-09-25, and the verdict must say so"
 
 
 def test_verdict_when_both_branches_spend_through_real_code():
-    outcome = ChainOutcome(asset="BTC", real_redeem=OK, control_redeem=SKIP, refund_after_expiry=OK)
-    assert "both branches spend" in outcome.verdict()
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=OK,
+        real_redeem_unconfirmed=OK,
+        # THE CHAIN'S OWN ANSWER, and it is now required for this verdict.
+        # `real_redeem=OK` alone is the client's return value -- a broadcast
+        # txid -- and a txid says the coins moved, not that the hashlock branch
+        # is what moved them. See the test below.
+        preimage_on_chain=OK,
+        control_redeem=SKIP,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "both branches spend, through real code" in verdict
+    assert "CONFIRMED contract and of an UNCONFIRMED one" in verdict
+
+
+def test_verdict_does_not_claim_both_lookup_routes_when_only_one_worked():
+    """The realistic redeem worked and the mempool one did not, or the other way round.
+
+    Step 7 runs both because a real swap may redeem either, and reporting "both
+    branches spend" without saying one of the two routes failed is the
+    overclaim this verdict keeps being rewritten to stop.
+    """
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=OK,
+        real_redeem_unconfirmed=FAIL,
+        preimage_on_chain=OK,
+        control_redeem=SKIP,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "one of the two lookup routes is still broken" in verdict
+    assert "through real code" not in verdict
+
+
+def test_the_verdict_does_not_certify_the_preimage_fix_from_a_broadcast_txid():
+    """WHAT THE VERDICT WAS BUILT FROM UNTIL 2026-09-25, and it was the weaker thing.
+
+    `real_redeem` is set from redeem_contract()'s RETURN VALUE -- a txid. The
+    run has always ALSO read the broadcast scriptSig back off the block and
+    checked it for the preimage push, and that result went to the console and
+    nowhere else. So the verdict could print "redeem_contract() spent the
+    hashlock branch" on the strength of a txid while the on-chain check two
+    lines above it printed ABSENT.
+
+    SKIP here is "no spend landed to read", which is not evidence and must not
+    be treated as either answer.
+    """
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=OK,
+        real_redeem_unconfirmed=OK,
+        preimage_on_chain=SKIP,
+        control_redeem=SKIP,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "both branches spend, through real code" not in verdict
+
+
+def test_the_verdict_says_so_loudly_when_a_spend_confirmed_without_the_preimage():
+    """The worst outcome this run can reach, and it outranks every other sentence.
+
+    The coins moved and the secret did not become public, so the counterparty's
+    leg cannot be redeemed. That is not a failed redeem; it is a swap that has
+    stopped being atomic, and it must not be reported as "only the refund
+    branch spends" -- which is where the old structure would have routed it,
+    since the control spend is SKIPPED precisely when the real client
+    succeeded.
+    """
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=OK,
+        preimage_on_chain=FAIL,
+        control_redeem=SKIP,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "WITHOUT REVEALING THE PREIMAGE" in verdict
+    assert "stopped being atomic" in verdict
+    assert "ONLY THE REFUND BRANCH SPENDS" not in verdict
 
 
 def test_verdict_when_the_refund_branch_was_exercised_and_failed():
     """FAIL means tried and did not spend -- which is a claim, unlike SKIP."""
-    outcome = ChainOutcome(asset="BTC", real_redeem=XFAIL, control_redeem=OK, refund_after_expiry=FAIL)
+    outcome = ChainOutcome(asset="BTC", real_redeem=FAIL, control_redeem=OK, refund_after_expiry=FAIL)
     verdict = outcome.verdict()
     assert "was exercised and did NOT spend" in verdict
     assert "NOT TESTED" not in verdict
@@ -868,27 +957,165 @@ def test_an_unrecognized_failure_is_classified_as_unrecognized():
 def test_the_verdict_refuses_to_judge_a_redeem_that_never_reached_signing():
     outcome = ChainOutcome(
         asset="BTC",
-        real_redeem=XFAIL,
+        real_redeem=FAIL,
         real_redeem_stage=REDEEM_FAILED_ON_LOOKUP,
         control_redeem=OK,
         refund_after_expiry=OK,
     )
     verdict = outcome.verdict()
     assert "was NOT judged on the hashlock branch" in verdict
-    assert "remains inferred from the source" in verdict
+    assert "THIS IS A REGRESSION" in verdict
     assert "CANNOT spend the hashlock branch" not in verdict
+
+
+def test_a_signing_failure_in_7b_is_not_reported_as_never_reaching_signing():
+    """THE 6b REGRESSION, driven through the accumulation rather than the flag.
+
+    Step 7 makes two attempts. 7a used to assign `reached_the_signer` directly
+    and 7b's failure branch assigned nothing, so this exact pair --
+
+        7a failed on the LOOKUP,  before the node was ever asked to sign
+        7b failed on SIGNING,     which is the preimage defect regressing
+
+    -- left the flag False, and the verdict printed "it failed earlier (stage
+    'lookup') and NEVER REACHED SIGNING". 7b had reached signing and been
+    refused there, which is the single most important thing the run can find
+    about this fix, and the verdict said it had not been measured.
+    """
+    outcome = ChainOutcome(asset="BTC")
+    outcome.note_signer_reached(RedeemAttempt(succeeded=False, detail="", stage=REDEEM_FAILED_ON_LOOKUP))
+    assert outcome.reached_the_signer is False, "a lookup failure never put the question to the node"
+    outcome.note_signer_reached(RedeemAttempt(succeeded=False, detail="", stage=REDEEM_FAILED_ON_SIGNING))
+    assert outcome.reached_the_signer is True, "7b reached the signer and 7a's earlier failure hid it"
+
+    outcome.real_redeem = FAIL
+    outcome.real_redeem_stage = REDEEM_FAILED_ON_LOOKUP
+    outcome.real_redeem_unconfirmed = FAIL
+    outcome.real_redeem_unconfirmed_stage = REDEEM_FAILED_ON_SIGNING
+    outcome.control_redeem = OK
+    outcome.refund_after_expiry = OK
+    verdict = outcome.verdict()
+    assert "never reached signing" not in verdict
+    assert "CANNOT spend the hashlock branch" in verdict
+
+
+def test_reaching_the_signer_once_is_never_unmade_by_a_later_attempt():
+    """It is a fact about the run, not about the last attempt."""
+    outcome = ChainOutcome(asset="BTC")
+    outcome.note_signer_reached(RedeemAttempt(succeeded=True, detail="txid=ab", stage=""))
+    outcome.note_signer_reached(RedeemAttempt(succeeded=False, detail="", stage=REDEEM_FAILED_ON_LOOKUP))
+    assert outcome.reached_the_signer is True
 
 
 def test_the_verdict_does_judge_a_redeem_that_reached_signing_and_failed():
     outcome = ChainOutcome(
         asset="BTC",
-        real_redeem=XFAIL,
+        real_redeem=FAIL,
         real_redeem_stage=REDEEM_FAILED_ON_SIGNING,
         reached_the_signer=True,
         control_redeem=OK,
         refund_after_expiry=OK,
     )
     assert "CANNOT spend the hashlock branch" in outcome.verdict()
+
+
+# --------------------------------------------------------------------------
+# step 7's grading, which REVERSED on 2026-09-25 and must not drift back
+# --------------------------------------------------------------------------
+
+
+def test_step_7_scores_a_failing_redeem_as_a_failure_and_not_as_a_known_defect(monkeypatch):
+    """The whole point of updating the harness rather than widening it.
+
+    Until the preimage fix, a redeem that could not spend the hashlock branch
+    was a PREDICTED failure: step 7 scored it XFAIL, which the console counts
+    separately and which does not set the exit code. Scoring it that way after
+    the fix would make the harness pass whether or not the fix worked, and the
+    run's one job is to say whether it did.
+
+    Driven through the real `step_7_redeem`, with only the three helpers that
+    need a daemon stubbed out, so what is asserted is the grading the operator
+    will actually see -- not a re-reading of the branch that produces it.
+    """
+    console = Console(total_steps=9, stream=StringIO())
+    run = Run(console=console, config=resolve_chain_config("BTC"))
+    outcome = ChainOutcome(asset="BTC")
+    contract = _contract_stub()
+    outpoint = Outpoint(txid="ab" * 32, vout=0, value_satoshis=100_000_000)
+
+    monkeypatch.setattr(
+        steps,
+        "_attempt_real_redeem",
+        lambda *_args: RedeemAttempt(succeeded=False, detail="Invalid OP_IF construction", stage="signing"),
+    )
+    monkeypatch.setattr(steps, "_explain_redeem_failure", lambda *_args: REDEEM_FAILED_ON_SIGNING)
+    monkeypatch.setattr(steps, "_fund_unconfirmed", lambda *_args: None)
+    monkeypatch.setattr(steps, "_control_redeem", lambda *_args: None)
+
+    steps.step_7_redeem(run, object(), contract, outpoint, outcome)
+
+    assert outcome.real_redeem == FAIL
+    assert outcome.real_redeem_unconfirmed == FAIL
+    assert console.counts[XFAIL] == 0, "a redeem that cannot spend the hashlock branch is no longer expected"
+    assert console.counts[FAIL] == 2
+    printed = console.stream.getvalue()
+    assert "EXPECTED TO SUCCEED" in printed
+    assert "a broadcast txid" in printed
+    assert "PREDICTS this failure" not in printed
+
+
+def test_step_7_does_not_run_the_control_when_the_real_client_spent(monkeypatch):
+    """A SKIPPED control is the GOOD outcome, and the screen has to say so.
+
+    The control exists to answer "can the SCRIPT be spent when the CLIENT
+    cannot". When the client can, there is nothing left for it to establish --
+    and the output must not let a skip read as a gap (rule 14).
+    """
+    console = Console(total_steps=9, stream=StringIO())
+    run = Run(console=console, config=resolve_chain_config("BTC"))
+    outcome = ChainOutcome(asset="BTC")
+    contract = _contract_stub()
+    outpoint = Outpoint(txid="ab" * 32, vout=0, value_satoshis=100_000_000)
+
+    monkeypatch.setattr(
+        steps, "_attempt_real_redeem", lambda *_args: RedeemAttempt(succeeded=True, detail="txid=" + "cd" * 32, stage="")
+    )
+    monkeypatch.setattr(steps, "_confirm_real_redeem", lambda *_args: None)
+    monkeypatch.setattr(steps, "_fund_unconfirmed", lambda *_args: Outpoint("ef" * 32, 0, 100_000_000))
+    control_ran = []
+    monkeypatch.setattr(steps, "_control_redeem", lambda *_args: control_ran.append(True))
+
+    steps.step_7_redeem(run, object(), contract, outpoint, outcome)
+
+    assert outcome.real_redeem == OK
+    assert outcome.real_redeem_unconfirmed == OK
+    assert outcome.control_redeem == SKIP
+    assert control_ran == [], "the control must not spend an output the real client already spent"
+    assert "7c is SKIPPED, and that is the good outcome" in console.stream.getvalue()
+
+
+def _contract_stub():
+    """A Contract with real keys and a real redeem script, for grading tests."""
+    participant = generate_key()
+    refund = generate_key()
+    secret = os.urandom(32)
+    secret_hash = hashlib.sha256(secret).digest()
+    redeem_script = build_htlc_redeem_script(
+        secret_hash=secret_hash.hex(),
+        participant_address=participant.address,
+        refund_address=refund.address,
+        locktime=LOCKTIME,
+    )
+    return Contract(
+        redeem_script=redeem_script,
+        p2sh_address=script_to_p2sh_address(redeem_script),
+        p2sh_script=_p2sh_script_for(redeem_script),
+        locktime=LOCKTIME,
+        secret=secret,
+        secret_hash=secret_hash,
+        participant=participant,
+        refund=refund,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -903,7 +1130,7 @@ def test_a_refund_branch_that_was_never_exercised_is_not_reported_as_broken():
     That asserted the opposite of what BTC proved about the same script builder
     on the same day. SKIP is a third state and the verdict has to honor it.
     """
-    outcome = ChainOutcome(asset="LTC", real_redeem=XFAIL, control_redeem=OK, refund_after_expiry=SKIP)
+    outcome = ChainOutcome(asset="LTC", real_redeem=FAIL, control_redeem=OK, refund_after_expiry=SKIP)
     verdict = outcome.verdict()
     assert "NOT TESTED" in verdict
     assert "says nothing about it in either direction" in verdict

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Gridcoin HTLC client: build, fund and redeem a contract over JSON-RPC.
 
-Role: submodule (one chain's HTLC operations)
-Reads: a Gridcoin wallet daemon -- decodescript, getrawtransaction, listunspent,
+Role: submodule (one chain's HTLC operations; every decision it makes is a call
+      into modules/htlc_rpc.py, modules/htlc_spend.py or modules/htlc_fee.py)
+Reads: a Gridcoin wallet daemon -- decodescript, gettxout, gettransaction,
+       getrawtransaction, createrawtransaction, listunspent,
        getreceivedbyaddress; and the environment variables
        GRC_WALLET_PASSPHRASE and PLATFORM_FEE_GRC_ADDRESS
 Writes: nothing to disk. THE CHAIN AND THE WALLET: walletlock/walletpassphrase
@@ -13,7 +15,22 @@ Can move funds: YES, and this is the only one of the three that UNLOCKS THE
        the configured passphrase and leaves the wallet unlocked for 120
        seconds by default -- during which anything else with RPC access can
        spend from it.
-Mainnet-safe: NO. Same testnet-only script derivation as the other two clients.
+Mainnet-safe: NO, for two independent reasons. The script derivation is
+       testnet-only, exactly as on the other two clients. AND THE DEFAULT
+       PLATFORM FEE ADDRESS IS A TESTNET ADDRESS: redeem_contract() falls back
+       to the literal `mnTh582mZM12fQry6rtZV7XehNVtZRVdDw` when
+       PLATFORM_FEE_GRC_ADDRESS is unset, and that is base58 with the 0x6F
+       testnet P2PKH version byte -- a mainnet Gridcoin address begins with S.
+       So on mainnet, unset, 0.25% of every redeemed contract goes to an
+       address on the wrong network: unspendable by anyone, and gone. The LTC
+       client's header has always said this about its own `tltc1...` default
+       and this one did not, which is why it is here now rather than only at
+       the call site (rule 16: a wrong -- or missing -- comment is a bug).
+
+NOTHING BELOW HAS BEEN RUN AGAINST A GRIDCOIN NODE. There is none in this
+setup. Everything here is the BTC/LTC fix applied to this file by reasoning,
+and the "GRIDCOIN IS NOT VERIFIED" paragraph further down says exactly what
+that leaves unknown (rule 17).
 
 THE WALLET PASSPHRASE IS READ AT IMPORT TIME, NOT AT CALL TIME. The default
 argument `wallet_passphrase: str = os.environ.get("GRC_WALLET_PASSPHRASE", "")`
@@ -23,98 +40,148 @@ skips the unlock, and a process that changes the variable later never sees the
 change. That is an import-time side effect (rule 12) hiding in a default
 argument.
 
-THE PLATFORM FEE COMMENT CONTRADICTS THE CODE. The comment above the
-calculation says "2.5% of the total amount"; the expression is
-`Decimal("0.0025") * total_amount`, which is 0.25%. One of the two is wrong and
-a reader in a hurry will trust the sentence. Which one is INTENDED is a fund
-question and belongs to the operator (rule 16) -- the mismatch is reported, not
-resolved. Note the LTC client charges 0.25% and spells it
-`Decimal("0.25") / Decimal("100")`, so the code agrees across the two chains
-and only this comment disagrees with both.
+FOUR DEFECTS WERE FIXED ON 2026-09-25. ALL FOUR WERE IN ALL THREE CLIENTS.
 
-THE THREE CLIENTS DISAGREE. THE TABLE IS IN ALL THREE FILES, ON PURPOSE.
+This block is IDENTICAL IN ALL THREE FILES, on purpose. Rule 8: "if they
+genuinely differ, the difference is the point and belongs in a comment at BOTH
+sites, naming the other one. A reader who finds one must be told the other
+exists." Each defect was confirmed against real Bitcoin Core 28.1.0 and
+Litecoin Core 0.21.4 regtest daemons by regtest_htlc_verify.py, except where a
+line says otherwise.
 
-Rule 8: "if they genuinely differ, the difference is the point and belongs in a
-comment at BOTH sites, naming the other one. A reader who finds one must be
-told the other exists." Measured 2026-09-24 by reading
-modules/atomic_btc_client.py, modules/atomic_ltc_client.py and
-modules/atomic_grc_client.py side by side. The last column names which file is
-the odd one out; where none is named, no two agree.
+  1. redeem_contract() NEVER PUSHED THE PREIMAGE. It accepted `secret: bytes`
+     and never referenced it -- proven first by walking each function's AST,
+     then on chain. The spend was built with createrawtransaction and handed to
+     a signrawtransaction* call, which builds a scriptSig for a P2SH input by
+     RECOGNIZING A SCRIPT PATTERN. An HTLC is OP_IF/OP_ELSE/OP_ENDIF and
+     matches none, and no argument either RPC takes says "take the OP_IF branch,
+     and here is the preimage". The daemons' own words:
+
+         BTC   'error': 'Unable to sign input, invalid stack size (possibly missing key)'
+         LTC   'error': 'Invalid OP_IF construction'
+
+     So a funded contract was recoverable only by REFUND -- that is, only by
+     abandoning the swap and waiting out the timelock. The spend is now
+     assembled and signed in this process:
+     modules/htlc_spend.hashlock_script_sig() lays out
+     <sig> <pubkey> <preimage> OP_1 <redeemScript>, and
+     modules/htlc_rpc.build_hashlock_spend() signs it. ONE implementation, all
+     three clients.
+
+  2. redeem_contract() COULD NOT READ BACK A CONFIRMED CONTRACT. Its first
+     statement was `getrawtransaction(contract_txid, True)`, which searches only
+     the mempool on a node without -txindex. Measured on both chains:
+
+         code=-5, No such mempool transaction. Use -txindex or provide a block
+         hash to enable blockchain transaction queries.
+
+     Every contract a real swap redeems is CONFIRMED -- that is what the
+     counterparty waited for -- so the redeem failed on its own first line,
+     always, before reaching anything to do with HTLCs.
+     modules/htlc_rpc.lookup_contract_output() replaces it with four routes
+     that each work on a default node: gettxout, getrawtransaction with a block
+     hash, gettransaction, and the original call last. It does NOT use
+     -txindex, because enabling that on an existing datadir forces a reindex.
+
+  3. create_contract() CALLED importaddress. Measured on Core 28.1, which
+     creates DESCRIPTOR wallets by default:
+
+         code=-4, Only legacy wallets are supported by this command
+
+     and the BTC client RAISED on it, so no contract could be created at all.
+     Establishing whether the import was needed came first: the harness funds
+     the identical P2SH with a plain sendtoaddress and then spends it, and
+     `getreceivedbyaddress` -- the only thing in this tree that needs an address
+     to be in the wallet -- is called only from get_address_balance(), whose six
+     call sites in atomic_swap_gui.py all pass an operator's own validated
+     address and never a contract P2SH. So the import is not a precondition of
+     anything here. It is KEPT, because "no caller in this tree" is not "no
+     caller" (rule 2) and an operator may watch the address on their own node,
+     but it is now best-effort: modules/htlc_rpc.ensure_watch_only_import()
+     reads getwalletinfo.descriptors AT RUNTIME (never a version string), calls
+     importdescriptors on a descriptor wallet and importaddress on a legacy one,
+     and cannot stop a swap. The companion `importprivkey` was DELETED: its only
+     purpose was to let signrawtransactionwithwallet sign the redeem, which
+     never worked and cannot.
+
+  4. wait_for_tx_output() READ scriptPubKey.addresses. Measured:
+
+         BTC, Bitcoin Core 28.1.0    ['address', 'asm', 'desc', 'hex', 'type']
+         LTC, Litecoin Core 0.21.4   ['addresses', 'asm', 'hex', 'reqSigs', 'type']
+
+     Core deprecated `addresses` in 0.20 and removed it in 22.0. The match is
+     now on the scriptPubKey HEX, which is present and identical on both:
+     modules/htlc_rpc.find_output_by_script(). LTC's create_contract() had its
+     own inline copy of the same search and it worked ONLY because its daemon is
+     four years behind; it would have broken on the day that daemon was upgraded.
+
+  AND A FIFTH THING, WHICH TURNED OUT NOT TO BE A DEFECT AT ALL. Every client
+  hardcoded a flat miner fee -- 0.0001 on BTC and LTC, 0.01 on GRC -- and paid
+  it whatever the transaction weighed. The brief for this work predicted that
+  fixing defect 1 would simply move the failure to `sendrawtransaction`
+  refusing the spend as `absurdly-high-fee`, on the grounds that 0.0001 over a
+  ~250-byte redeem is "roughly 0.4 coin/kvB, about four times" the 0.10
+  default maxfeerate. IT IS 0.0004 coin/kvB -- a thousandth of that, and 250
+  times UNDER the ceiling rather than four times over. The same wrong figure
+  was already written into this repository's regtest harness and is corrected
+  there in the same commit. The fee is now sized from the actual transaction
+  anyway, because a constant is the right fee at exactly one size and drifts
+  under the minimum RELAY fee as a transaction grows -- but the floor for each
+  chain is that chain's old flat fee, so an ordinary redeem pays what it always
+  paid. modules/htlc_fee.py carries the rule, the arithmetic, and what it costs.
+
+WHAT IS SHARED NOW, AND WHAT STILL DIVERGES. Measured by reading the three
+files side by side after the fix.
 
   aspect                     BTC                 LTC                 GRC                 odd one out
+  redeem scriptSig           ---- modules/htlc_rpc.build_hashlock_spend, one implementation ----
+  redeem miner fee           ---- modules/htlc_fee.redeem_miner_fee, one rule, per-chain constants ----
+  contract read-back         ---- modules/htlc_rpc.lookup_contract_output, one implementation ----
+  finding an output          ---- modules/htlc_rpc.find_output_by_script, on the scriptPubKey hex ----
+  waits for the output       wait_for_tx_output  wait_for_tx_output  wait_for_tx_output  (LTC used to not wait)
+  ...with max_wait           300s                300s                60s (the default)   GRC (and it always did)
+  watch-only import          best-effort         best-effort         does not import     GRC (unchanged; it never did)
   rpc HTTP timeout           timeout=30          NONE                NONE                BTC (only one with a timeout)
   platform fee on redeem     none                0.25%               0.25%               BTC (charges nothing)
-  ...fee amount vs comment   --                  matches             comment says 2.5%   GRC (comment contradicts code)
-  miner fee                  0.0001 BTC          0.0001 LTC          0.01 GRC            (scales differ by chain; fine)
+  ...fee amount vs comment   --                  matches             comment said 2.5%   (fixed 2026-09-25)
   create_contract arg order  amount, secret_hash,   amount, participant,  amount, secret_hash,   LTC
                              participant, refund,   refund, locktime,     participant, refund,
                              locktime               secret_hash=None      locktime
   secret_hash required?      yes                 NO, defaults None   yes                 LTC
-  imports redeem script      importaddress(p2sh) importaddress(hex)  does not import     GRC
-  imports HTLC private key   YES (importprivkey) no                  no                  BTC
-  signing route              wallet, then key    key, then legacy    legacy only         (all three differ)
   unlocks the wallet         no                  no                  YES                 GRC
-  waits for the output       wait_for_tx_output  ONE getrawtransaction  wait_for_tx_output   LTC (does not wait)
-  ...with max_wait           300s                n/a                 60s (the default)   (BTC and GRC disagree)
   returns secret_hash        no                  yes                 yes                 BTC
   rpc_call catches           Request/Value/all   RequestException    Request/Value/all   LTC
   balance fallback guarded   yes                 NO try around it    yes                 LTC
   default creds in __main__  no                  YES, a literal      no                  LTC
 
-MEASURED ON REGTEST 2026-09-25, and it changes what the `addresses` row above
-means. `regtest_htlc_verify.py` ran both chains against real daemons and
-printed each one's scriptPubKey fields:
+The rows that still diverge are the ones a merge cannot settle without deciding
+something: whether BTC should charge a platform fee, whether LTC's parameter
+order should change under its callers, whether GRC should stop unlocking the
+wallet. Each is fund movement or armed state, and belongs to the operator
+(rule 16). The rows that are merged are the ones where all three were wrong in
+the same way, which is the merge rule 8 actually asks for.
 
-  BTC, Bitcoin Core 28.1.0    ['address', 'asm', 'desc', 'hex', 'type']
-  LTC, Litecoin Core 0.21.4   ['addresses', 'asm', 'hex', 'reqSigs', 'type']
+GRIDCOIN IS NOT VERIFIED AND CANNOT BE. There is no Gridcoin regtest in this
+setup and no GRC node the fixes could be run against, so every GRC line above
+is REASONED FROM THE BTC AND LTC RESULT AND NOT MEASURED (rule 17). Two
+specifics a reader should carry: Gridcoin descends from the Peercoin line of
+proof-of-stake forks, whose transactions carry a 4-byte nTime field Bitcoin and
+Litecoin do not have -- modules/htlc_spend.parse_transaction() handles that by
+re-serializing the daemon's own bytes and refusing anything it cannot reproduce
+exactly, rather than by assuming a layout -- and Gridcoin's sendrawtransaction
+takes no maxfeerate argument, so the fee ceiling is checked in
+modules/htlc_fee.assert_within_broadcast_ceiling() before broadcasting rather
+than being enforced by the node.
 
-So the reliance on `scriptPubKey.addresses` in modules/utils.wait_for_tx_output()
-and LTCClient.create_contract() is VERSION-DEPENDENT, not universal: Bitcoin
-Core deprecated the field in 0.20 and removed it in 22.0, and Litecoin 0.21.4
-still returns it. The real LTCClient.create_contract() therefore SUCCEEDED on
-regtest (txid=232594016d..., vout=0) while BTCClient.create_contract() failed --
-and BTC's failure was a DIFFERENT cause, `importaddress` refusing on a
-descriptor wallet, which Core 28.1 creates by default.
-
-Two consequences worth stating, because the first is easy to read backwards:
-LTC's create_contract works today only because its daemon is four years behind,
-and it will break the moment that daemon is upgraded past the removal. And the
-BTC failure is not fixed by restoring `addresses`; it is a legacy-wallet RPC on
-a wallet type that no longer supports one.
-
-A THIRD DEFECT, MEASURED THE SAME DAY AND SHARED BY ALL THREE CLIENTS.
-redeem_contract()'s first statement is `getrawtransaction(contract_txid, True)`,
-which searches only the mempool. On any node without -txindex -- the default --
-it cannot see a contract that has been CONFIRMED, so the redeem path fails
-before it reaches signing on exactly the contracts a real swap would redeem.
-`gettransaction`, or `getrawtransaction` with the contract's block hash, both
-work without an index.
-
-Two of those are worth reading twice. LTC's `create_contract` takes
-`secret_hash` FIFTH and OPTIONAL while the other two take it SECOND and
-required, so a caller that passes positionally in the BTC/GRC order builds an
-LTC contract whose participant address is the secret hash -- and a caller that
-omits it builds one with `secret_hash=None`. And LTC and GRC are the only two
-issuing HTTP requests with NO timeout, so a wallet daemon that accepts the
-connection and never answers hangs the swap forever with nothing printed.
-
-NONE OF THE THREE USES THE PREIMAGE WHEN REDEEMING. Proven mechanically, by
-walking each function's AST for names referenced in its body: in all three,
-`redeem_contract`'s `secret: bytes` parameter is accepted and never referenced.
-The transaction is built with `createrawtransaction` and handed to a
-`signrawtransaction*` call, which for a P2SH input constructs the scriptSig
-from the redeem script -- it has no way to know that this particular script
-needs the preimage and a TRUE flag pushed to take its OP_IF branch. That the
-parameter is unused is measured; that the resulting scriptSig therefore cannot
-satisfy the hashlock branch follows from how P2SH spending works and has NOT
-been confirmed against a chain here. Say which you have (rule 17): this is the
-second.
-
-MERGING THESE THREE IS A PROPOSAL, NOT A CHANGE. They sign and broadcast, which
-is fund movement (rule 16). chains/base.py's RPCAdapter is the survivor for
-connection handling and the HTLC methods belong on top of it -- but the merge
-has to resolve every row above, and each resolution changes what a live swap
-does.
+THE REFUND BRANCH OF EVERY CONTRACT BUILT HERE WAS UNSPENDABLE UNTIL
+2026-09-24. The locktime was encoded as a varint, not a script number: a
+requested block height of 500,000 was read by CHECKLOCKTIMEVERIFY as
+128,000,254. encode_script_number() replaced it, the locktime is derived per
+swap from the chain tip by modules/htlc_timelock.py, and the participant and
+refund addresses are two values rather than one. NO CLIENT HERE IMPLEMENTS A
+REFUND AT ALL -- there is no refund_contract() on any of the three -- so the
+refund branch is exercised only by the regtest harness's own spender, and the
+one a real swap would have to use does not exist yet.
 """
 
 import logging
@@ -123,21 +190,28 @@ import time
 from decimal import Decimal
 
 import requests
-from modules.atomic_htlc_scripts import build_htlc_redeem_script
+from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
+from modules.htlc_fee import platform_fee_coin
+from modules.htlc_rpc import (
+    assert_output_pays_the_contract,
+    build_hashlock_spend,
+    describe_rpc_payload,
+    lookup_contract_output,
+    wait_for_tx_output,
+)
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
-from modules.utils import wait_for_tx_output
 
-# Configure logger
+# No setLevel and no handler. A library module that forces DEBUG on its own
+# logger and attaches a StreamHandler AT IMPORT decides logging policy for
+# every program that imports it, and there is no way for the application to
+# turn it back off short of reaching into the logger object. That is an
+# import-time side effect (rule 12), and on this branch it was the delivery
+# mechanism for a preimage leak: see describe_rpc_payload() in
+# modules/htlc_rpc.py for the measurement. modules/utils.py had exactly this
+# removed on 2026-09-24 for exactly this reason. The application owns logging
+# policy -- regtest_htlc_verify.py and atomic_swap_gui.py both call
+# logging.basicConfig().
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
 
 
 class GRCClient:
@@ -181,7 +255,13 @@ class GRCClient:
             "method": method,
             "params": params
         }
-        logger.debug(f"RPC Call Payload: {payload}")
+        # REDACTED -- see the BTC client and describe_rpc_payload() in
+        # modules/htlc_rpc.py. On THIS client the line carried two
+        # secrets, not one: ensure_fully_unlocked() calls
+        # `walletpassphrase` with the operator's wallet passphrase as
+        # parameter 0, on every create_contract() and every
+        # redeem_contract().
+        logger.debug("RPC call: %s", describe_rpc_payload(method, params))
         try:
             # The suppression on the requests.post line is a PROPOSAL MARKER,
             # not a dismissal. This
@@ -275,13 +355,15 @@ class GRCClient:
             raise
         time.sleep(delay)
 
-    def create_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the six are the HTLC's own parameters; bundling them changes every fund-path call site for no behavioral gain.
+    # No suppression: removing the dead `fee` argument took this signature
+    # back under PLR0913's ceiling (rule 19 -- a suppression that reaches zero
+    # gets deleted).
+    def create_contract(self,
                         amount_grc: Decimal,
                         secret_hash: str,
                         participant_address: str,
                         refund_address: str,
-                        locktime: int,
-                        fee: Decimal = Decimal('0.01')) -> dict:
+                        locktime: int) -> dict:
         """
         Creates a Gridcoin HTLC contract by:
           1. Building the HTLC redeem script.
@@ -295,7 +377,15 @@ class GRCClient:
             participant_address (str): The Gridcoin address of the counterparty.
             refund_address (str): The refund address in case the contract times out.
             locktime (int): The locktime for the contract.
-            fee (Decimal, optional): The fee to be considered (currently not used in this method).
+
+        THE `fee` PARAMETER IS GONE. Its own docstring line said "currently not
+        used in this method", which was true and had been for as long as the
+        method existed -- the same shape as the `secret` parameter
+        redeem_contract() accepted and never referenced (defect 1 in the module
+        header). Grepped by name across every .py, .sh and .js in the tree: no
+        caller on any of the three clients ever passed it. The funding fee is
+        the wallet's own `sendtoaddress` choice; the REDEEM fee is
+        modules/htlc_fee.py's.
             
         Returns:
             dict: A dictionary containing the contract's TXID, output index, redeem script, P2SH address, and secret hash.
@@ -321,8 +411,21 @@ class GRCClient:
         txid = self.rpc_call("sendtoaddress", [p2sh_addr, float(amount_grc)])
         logger.info(f"Transaction sent with TXID: {txid}")
         
-        # Wait for the output to appear.
-        vout_index, _ = wait_for_tx_output(self, txid, p2sh_addr)
+        # Wait for the output to appear, matched on the scriptPubKey HEX rather
+        # than on `scriptPubKey.addresses` (defect 4). max_wait is left at the
+        # helper's 60-SECOND default, which is the one row of the divergence
+        # table this merge did NOT change: BTC and LTC wait 300s and this waits
+        # 60s, and lengthening a wait on the chain that cannot be tested here
+        # would be a change made on a guess about Gridcoin's block timing.
+        #
+        # NO WATCH-ONLY IMPORT HERE, and that is deliberate rather than an
+        # omission. This client never imported the contract address -- the
+        # other two did -- and the import is not a precondition of anything
+        # (see defect 3 in the module header). Adding an RPC round trip to the
+        # fund path of the one chain nobody can run would be a change with no
+        # way to measure it, on a client whose rpc_call has no HTTP timeout.
+        contract_script_hex = p2sh_script_for(redeem_script).hex()
+        vout_index, _outputs = wait_for_tx_output(self, txid, contract_script_hex, expected_address=p2sh_addr)
         logger.debug(f"Transaction output found at index {vout_index}.")
         
         return {
@@ -333,73 +436,94 @@ class GRCClient:
             "secret_hash": secret_hash
         }
 
-    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: same. `secret` is one of the six and is never used; see the divergence table in the module header.
+    def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs, and `secret` is the PREIMAGE, which is now pushed onto the stack rather than accepted and ignored (defect 1). They stay POSITIONAL because the two callers in this tree pass them positionally: swap_terminal/regtest/steps.py::_attempt_real_redeem and tests/test_htlc_spend.py::_drive_redeem. UNTIL 2026-09-25 THIS COMMENT NAMED modules/atomic_swapper.py AS A CALLER AND IT IS NOT ONE -- atomic_swapper has no redeem path at all, only start_swap(), which is the same file whose header says the counterparty's leg is redeemed by hand. Grepped by name across every .py, .sh and .js in the tree. Reordering a fund-path signature to satisfy a lint ceiling is the trade rule 12 refuses either way, but the reason has to be true. GRC has an extra reason to be careful: nothing in this tree calls GRCClient.redeem_contract() at all -- not even the harness, which has no Gridcoin node -- so this signature has no caller to break and no run to prove it.
                         contract_txid: str,
                         contract_vout: int,
                         redeem_script: bytes,
                         secret: bytes,
                         participant_privkey: str,
-                        destination_address: str) -> str:
-        """
-        Redeems a Gridcoin HTLC contract by:
-          1. Retrieving the raw transaction details.
-          2. Creating a raw transaction that spends the HTLC output.
-          3. Signing the raw transaction.
-          4. Broadcasting the signed transaction.
-        
+                        destination_address: str,
+                        contract_blockhash: str | None = None) -> str:
+        """Spend the contract's HASHLOCK branch by revealing the preimage.
+
+        NOT RUN AGAINST A GRIDCOIN NODE, because there is none in this setup.
+        This is the BTC and LTC fix applied here by reasoning (rule 17). Two
+        Gridcoin-specific things it depends on, both reasoned and neither
+        measured:
+
+          THE TRANSACTION LAYOUT. Gridcoin descends from the Peercoin line of
+          proof-of-stake forks, whose CTransaction carries a 4-byte nTime
+          between the version and the input count. modules/htlc_spend.py does
+          not assume either layout: the node builds the unsigned transaction,
+          the parser tries each known layout, and it accepts only one that
+          re-serializes to the daemon's exact bytes AND whose first input is
+          the outpoint asked for. Being wrong about nTime therefore fails
+          loudly with TransactionLayoutError before anything is signed, rather
+          than producing a signature over the wrong bytes.
+
+          THE BROADCAST CEILING. Gridcoin's sendrawtransaction takes no
+          maxfeerate argument, so no node-side refusal protects a wrong fee
+          here. modules/htlc_fee.assert_within_broadcast_ceiling() checks it in
+          this process, before broadcasting, for that reason.
+
+        The old `signrawtransaction` call is gone. It was the third of three
+        different signing routes across three clients for one job, and like the
+        other two it cannot satisfy an OP_IF script whatever arguments it is
+        given.
+
         Args:
-            contract_txid (str): The TXID of the contract.
-            contract_vout (int): The output index of the contract.
-            redeem_script (bytes): The redeem script used in the contract.
-            secret (bytes): The secret (preimage) to unlock the funds.
-            participant_privkey (str): The private key (in WIF) to sign the transaction.
-            destination_address (str): The address to which the funds should be sent.
-            
+            contract_blockhash: optional, and only a speed-up; see the BTC
+                client. Defaulted, so no existing caller changes.
+
         Returns:
-            str: The TXID of the redeemed transaction.
-            
-        Raises:
-            Exception: If signing or broadcasting the transaction fails.
+            The broadcast txid.
         """
         logger.info(f"Redeeming GRC HTLC contract with TXID {contract_txid}.")
         self.ensure_fully_unlocked()
-        raw_tx = self.rpc_call("getrawtransaction", [contract_txid, True])
-        total_amount = Decimal(str(raw_tx["vout"][contract_vout]["value"]))
-        miner_fee = Decimal("0.01")
-        # Calculate platform fee (2.5% of the total amount).
-        platform_fee = (Decimal("0.0025") * total_amount).quantize(Decimal("0.00000001"))
-        net_to_user = total_amount - miner_fee - platform_fee
-        logger.debug(f"Net amount after fee: {net_to_user}")
-        
-        if net_to_user <= 0:
-            logger.error("Not enough GRC to cover fees after deductions.")
-            raise Exception("Not enough GRC after fees.")
-        
-        inputs = [{"txid": contract_txid, "vout": contract_vout}]
+        found = lookup_contract_output(self.rpc_call, contract_txid, contract_vout, contract_blockhash)
+        logger.info(
+            "contract output read via %s: value=%s confirmations=%s (a count, never a duration)",
+            found.route,
+            found.value,
+            found.confirmations,
+        )
+        assert_output_pays_the_contract(found, redeem_script, "GRC redeem")
+
+        # 0.25% platform fee, from modules/htlc_fee.PLATFORM_FEE_RATE. THE
+        # COMMENT THAT USED TO SIT HERE SAID "2.5% of the total amount" beside
+        # an expression that computes 0.25%, and a reader in a hurry trusts the
+        # sentence. The CODE was right -- it agreed with the LTC client, which
+        # spelled the same rate as `Decimal("0.25") / Decimal(100)` -- so the
+        # sentence was the defect. THE TWO SPELLINGS ARE NOW ONE (rule 8): that
+        # a wrong comment could sit beside a right expression for as long as it
+        # did is what two copies of one rule buy you.
+        platform_fee = platform_fee_coin("GRC", found.value)
+        # THE DEFAULT IS A TESTNET ADDRESS, and this now says so where the LTC
+        # client's header always did. `mnTh...` is a base58 address with the
+        # 0x6F testnet P2PKH version byte -- a MAINNET Gridcoin address starts
+        # with S. So on mainnet, with PLATFORM_FEE_GRC_ADDRESS unset, 0.25% of
+        # every redeemed contract is paid to an address on the wrong network:
+        # unspendable by anyone, and gone. Setting the variable is the fix and
+        # it is the operator's; naming it here is this comment's job.
         fee_address = os.environ.get("PLATFORM_FEE_GRC_ADDRESS", "mnTh582mZM12fQry6rtZV7XehNVtZRVdDw")
-        outputs = {
-            destination_address: float(net_to_user),
-            fee_address: float(platform_fee)
-        }
-        # Create a raw transaction.
-        rawtx = self.rpc_call("createrawtransaction", [inputs, outputs])
-        prevtx = {
-            "txid": contract_txid,
-            "vout": contract_vout,
-            "scriptPubKey": raw_tx["vout"][contract_vout]["scriptPubKey"]["hex"],
-            "redeemScript": redeem_script.hex(),
-            "amount": float(total_amount)
-        }
-        # Sign the raw transaction.
-        sign_result = self.rpc_call("signrawtransaction", [rawtx, [prevtx], [participant_privkey], "ALL"])
-        
-        if not sign_result.get("complete"):
-            logger.error(f"GRC signing incomplete: {sign_result}")
-            raise Exception(f"GRC signing incomplete: {sign_result}")
-        
-        final_hex = sign_result["hex"]
-        # Broadcast the transaction.
-        txid = self.rpc_call("sendrawtransaction", [final_hex])
+
+        spend = build_hashlock_spend(
+            asset="GRC",
+            rpc_call=self.rpc_call,
+            contract_txid=contract_txid,
+            contract_vout=contract_vout,
+            contract_value=found.value,
+            redeem_script=redeem_script,
+            secret=secret,
+            wif=participant_privkey,
+            destination_address=destination_address,
+            extra_outputs={fee_address: platform_fee},
+        )
+        logger.info("%s; platform fee %s to %s", spend.describe("GRC"), platform_fee, fee_address)
+
+        # The preimage is on the stack of what is about to be broadcast and is
+        # never logged.
+        txid = self.rpc_call("sendrawtransaction", [spend.raw_hex])
         logger.info(f"Redeemed contract with TXID: {txid}")
         return txid
 

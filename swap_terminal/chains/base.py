@@ -30,8 +30,20 @@ confirmations", which is indistinguishable from a real unconfirmed deposit.
 """
 
 import json
+import sys
+from pathlib import Path
 
 import requests
+
+# The application imports its own modules rootlessly, so a file two
+# directories down needs the package root on the path to reach a leaf beside
+# microfortnights.py. This is rule 10's layout gap, the same one
+# workers/deposit_watcher.py names; fixing it properly means moving entry
+# points to the root, which is a large diff with no behavioral benefit on a
+# key-holding system.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from script_pub_key import pays_address
 
 
 class RPCError(Exception):
@@ -174,10 +186,43 @@ class RPCAdapter:
         matches = []
         confirmations = int(raw.get("confirmations", 0))
         for vout in raw.get("vout", []):
+            # MATCHED ON EITHER DAEMON'S FIELD SHAPE, and this was the FOURTH
+            # copy of one defect. This line read
+            #
+            #     addresses = script_pub_key.get("addresses") or []
+            #     if address in addresses and ...
+            #
+            # and `addresses` (plural) was deprecated in Bitcoin Core 0.20 and
+            # REMOVED in 22.0. On a Core 28.1 node it is simply absent, so the
+            # list was empty for every output, nothing ever matched, and this
+            # function fell through to the fabricated event below -- crediting
+            # a deposit at vout 0 with the amount the WALLET SUMMARY reported
+            # instead of the amount its outputs actually carry.
+            #
+            # The same defect was found and fixed in modules/utils.
+            # wait_for_tx_output() and in LTCClient.create_contract() on
+            # 2026-09-25 and was never carried across to here, because nothing
+            # pointed from one copy to the others. swap_terminal/
+            # script_pub_key.py is now the one place that knows, and it is at
+            # the package root with no third-party imports precisely so this
+            # file can reach it without importing the atomic-swap path.
+            #
+            # A MIGRATION NOTE, because this changes which rows appear rather
+            # than only whether they are right. On a Core 28.1 node every
+            # existing deposit_events row was written by the fabricated branch
+            # and carries vout=0. upsert_deposit_event() keys on
+            # (asset, txid, vout), so a deposit whose real output is at vout=N
+            # now inserts a SECOND row, and refresh_swap_from_chain() sums
+            # every row for the swap -- which double-counts and sends the swap
+            # to `under_review` rather than to a payout. That direction is a
+            # halt, not a release, but it is still armed state for any swap
+            # open across the deploy and it belongs to the operator (rule 16):
+            # the fix for those rows is to delete the fabricated vout=0 row for
+            # any swap still open, and this comment is where that is written
+            # down rather than discovered.
             script_pub_key = vout.get("scriptPubKey", {})
-            addresses = script_pub_key.get("addresses") or []
             value = float(vout.get("value", 0))
-            if address in addresses and abs(value - float(amount)) < SATOSHI:
+            if pays_address(script_pub_key, address) and abs(value - float(amount)) < SATOSHI:
                 matches.append({
                     "txid": txid,
                     "vout": int(vout.get("n", 0)),
