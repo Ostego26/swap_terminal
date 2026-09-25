@@ -48,9 +48,19 @@ import time
 import requests
 
 # Configure logger for debugging. Deliberately NOT setLevel(DEBUG) with a
-# StreamHandler attached: several modules in this package do that at import
-# time, which forces DEBUG output on every program that imports them and has
-# no way to turn it off. A library module should let the application decide.
+# StreamHandler attached, which forces DEBUG output on every program that
+# imports the module and gives it no way to turn it back off. A library module
+# lets the application decide.
+#
+# THIS COMMENT USED TO SAY "several modules in this package do that at import
+# time", naming the practice as current. As of 2026-09-25 NONE do: the last
+# three were atomic_btc_client, atomic_ltc_client and atomic_grc_client, and
+# what they were forcing to DEBUG turned out to be a line that printed every
+# RPC payload -- including the raw transaction whose scriptSig carries an HTLC
+# preimage. See describe_rpc_payload() in modules/htlc_rpc.py. This file was
+# right about the hazard before anybody measured it; the sentence is updated
+# because it now describes a practice that is gone, and a comment that names a
+# defect as present is the same bug pointed the other way (rule 16).
 logger = logging.getLogger(__name__)
 
 # Cache duration in SECONDS. It is compared against time.time() arithmetic, so
