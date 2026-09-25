@@ -291,6 +291,81 @@ random keys, and associated-token-account derivation over 300 random triples
 across both token programs. Zero mismatches. `solders` is deliberately not a
 dependency.
 
+## Ethereum: deliberately not implemented
+
+Measured and deferred on 2026-09-25. This is a decided question, not a gap
+nobody looked at — the numbers below are the reason, so they do not have to be
+re-derived.
+
+### ETH does not fit the amount columns, and no cheap type does
+
+`db.py` stores every amount as `REAL`. ETH has **18 decimals**.
+
+| type | exact integers up to | in ETH |
+|---|---|---|
+| `REAL` (IEEE double) | 2⁵³ = 9,007,199,254,740,992 | **0.009 ETH** |
+| `INTEGER` (int64) | 2⁶³−1 = 9,223,372,036,854,775,807 | **9.22 ETH** |
+| uint256 (what the EVM uses) | 1.16 × 10⁷⁷ | 1.16 × 10⁵⁹ |
+
+A `REAL` cannot hold 0.01 ETH in wei. An `INTEGER` overflows on a 10 ETH swap,
+and an ERC-20 with 18 decimals and a low unit price blows past it entirely.
+Float arithmetic loses wei on ordinary amounts — measured over 200,000 random
+values, `9.048138690642862` ETH comes out 80 wei high, `17.137403264689` comes
+out 1,600 wei low.
+
+**int64 is ample for every other chain**, which is why only ETH forces this:
+
+```
+BTC/LTC/GRC   8 decimals    92,233,720,368 coins
+XRP           6 decimals     9,223,372,036,854
+SOL           9 decimals         9,223,372,036
+XMR          12 decimals             9,223,372
+ETH          18 decimals                  9.22   <- the only one that fails
+```
+
+### The migration that would be needed, priced
+
+A minimal big-endian `BLOB` of base units, measured against every alternative
+over 100,000 rows after `VACUUM`:
+
+| option | bytes/row | exact | verdict |
+|---|---|---|---|
+| `REAL` (today) | 17.0 | no | — |
+| **`BLOB` minimal** | **13.6** | yes | cheapest, and **smaller than today** |
+| `INTEGER` + overflow `BLOB` | 15.1 | yes | +10.5% and two representations for one value |
+| `TEXT` decimal | 28.3 | yes | 1.7× |
+| `BLOB` fixed-32 | 41.4 | yes | 2.4× for sortability nothing uses |
+| `TEXT` zero-padded | 89.3 | yes | 5.3× |
+
+So storage is not the obstacle — the `BLOB` is *cheaper* than the current
+`REAL`, because SQLite packs a short integer into few bytes while a `REAL` is
+always 8 bytes.
+
+**The obstacle is blast radius.** It would touch 7 amount columns across 4
+tables, the 5 Python `sum(float(...))` sites, and the event-dict contract of
+**all six existing adapters** — because ETH in base units while the others use
+floats is the duplication rule 8 exists to prevent. It also requires an
+asset→decimals authority that does not exist yet: XMR, SOL and XRP each declare
+their own, and BTC/LTC/GRC declare none (only `SATOSHI = 1e-8` as a float
+tolerance in `chains/base.py`).
+
+### What would have been easy
+
+Worth recording, so nobody assumes ETH is hard everywhere. Unlike Solana, ETH
+uses BIP32, so per-swap deposit addresses can be derived from an **extended
+public key with no spend key on the web host** — better than any account-model
+chain here on that axis. And ETH has contracts, so unlike Monero it could join
+the atomic-swap path.
+
+The awkward parts are gas (sweeping a deposit address means funding it with ETH
+first, and an ERC-20 transfer needs ETH the depositor never sent) and the
+18-decimal storage above.
+
+### If this is revisited
+
+Do the asset→decimals authority first; it is owed under rule 11 regardless of
+ETH, and it is the prerequisite for everything else here.
+
 ## XRP
 
 Brokered deposits only. **Payouts are refused** and the refusal is structural:
