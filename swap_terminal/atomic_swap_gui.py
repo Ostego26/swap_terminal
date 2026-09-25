@@ -86,15 +86,24 @@ from modules.market_data import fetch_btc_ltc_prices, fetch_grc_price  # noqa: E
 # See the note at its use site: this is a length check, not validation.
 MIN_GRC_ADDRESS_LEN = 10
 
-# Configure logger.
+# THIS FILE IS AN APPLICATION, so it is allowed to decide logging policy --
+# and after 2026-09-25 it is the only thing that does, for everything it
+# imports. It used to attach a DEBUG StreamHandler to its OWN logger only,
+# which was two defects at once:
+#
+#   - it left modules.atomic_*_client to configure themselves, and they did,
+#     at DEBUG with their own handler, which is how a preimage reached stderr
+#     (see describe_rpc_payload() in modules/htlc_rpc.py);
+#   - and now that those modules configure nothing, a per-module handler here
+#     would leave every line the swap path emits with nowhere to go, which is
+#     rule 14's silence.
+#
+# basicConfig fixes both: one handler at the root, at INFO. INFO rather than
+# DEBUG is the substantive choice -- the DEBUG lines in this package are the
+# RPC request and response bodies, and the only reason to want them is the one
+# reason nobody should have them by default.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
 
 
 class AtomicSwapGUI:

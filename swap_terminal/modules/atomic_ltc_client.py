@@ -177,21 +177,24 @@ from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_fo
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     build_hashlock_spend,
+    describe_rpc_payload,
     ensure_watch_only_import,
     lookup_contract_output,
     wait_for_tx_output,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 
-# Configure module logger.
+# No setLevel and no handler. A library module that forces DEBUG on its own
+# logger and attaches a StreamHandler AT IMPORT decides logging policy for
+# every program that imports it, and there is no way for the application to
+# turn it back off short of reaching into the logger object. That is an
+# import-time side effect (rule 12), and on this branch it was the delivery
+# mechanism for a preimage leak: see describe_rpc_payload() in
+# modules/htlc_rpc.py for the measurement. modules/utils.py had exactly this
+# removed on 2026-09-24 for exactly this reason. The application owns logging
+# policy -- regtest_htlc_verify.py and atomic_swap_gui.py both call
+# logging.basicConfig().
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
 
 
 class LTCClient:
@@ -233,7 +236,9 @@ class LTCClient:
             "method": method,
             "params": params
         }
-        logger.debug(f"LTC RPC Call Payload: {payload}")
+        # REDACTED -- see the BTC client and describe_rpc_payload() in
+        # modules/htlc_rpc.py. One table, three callers (rule 8).
+        logger.debug("LTC RPC call: %s", describe_rpc_payload(method, params))
         try:
             # See the GRC client for the full note: this call has NO timeout
             # while the BTC client's has timeout=30, and adding one is a
@@ -254,7 +259,12 @@ class LTCClient:
             logger.debug(f"RPC response result: {rj['result']}")
             return rj.get("result")
         except requests.exceptions.RequestException as e:
-            logger.exception(f"LTC RPC request failed for method {method} with params {params}")
+            # This used to be `... with params {params}` and so was a
+            # SECOND copy of the payload leak -- on the failure path,
+            # which is precisely when an operator pastes the output to
+            # ask why a redeem did not go out. logger.exception also
+            # emits at ERROR, which no application has to opt into.
+            logger.exception("LTC RPC request failed: %s", describe_rpc_payload(method, params))
             raise Exception(f"LTC RPC request failed: {e}") from e
 
     def get_address_balance(self, address: str) -> Decimal:

@@ -176,23 +176,24 @@ from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_fo
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     build_hashlock_spend,
+    describe_rpc_payload,
     ensure_watch_only_import,
     lookup_contract_output,
     wait_for_tx_output,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 
-# Configure logger.
+# No setLevel and no handler. A library module that forces DEBUG on its own
+# logger and attaches a StreamHandler AT IMPORT decides logging policy for
+# every program that imports it, and there is no way for the application to
+# turn it back off short of reaching into the logger object. That is an
+# import-time side effect (rule 12), and on this branch it was the delivery
+# mechanism for a preimage leak: see describe_rpc_payload() in
+# modules/htlc_rpc.py for the measurement. modules/utils.py had exactly this
+# removed on 2026-09-24 for exactly this reason. The application owns logging
+# policy -- regtest_htlc_verify.py and atomic_swap_gui.py both call
+# logging.basicConfig().
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
 
 
 class BTCClient:
@@ -218,7 +219,14 @@ class BTCClient:
             "method": method,
             "params": params
         }
-        logger.debug(f"RPC Call Payload: {payload}")
+        # REDACTED, never the payload verbatim. `sendrawtransaction`'s
+        # parameter is the signed spend, whose scriptSig carries the
+        # PREIMAGE -- and this line runs BEFORE requests.post, so a
+        # broadcast that never leaves the building still printed it. See
+        # describe_rpc_payload() in modules/htlc_rpc.py for the
+        # measurement and for the one table that decides what is safe to
+        # print. The same call is made from all three clients (rule 8).
+        logger.debug("RPC call: %s", describe_rpc_payload(method, params))
         try:
             response = requests.post(
                 self.rpc_url,

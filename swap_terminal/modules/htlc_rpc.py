@@ -91,6 +91,131 @@ MAX_FEE_PASSES = 2
 POLL_INTERVAL_SECONDS = 5
 
 
+# --------------------------------------------------------------------------
+# what an RPC payload may be PRINTED as -- the one place that decides it
+# --------------------------------------------------------------------------
+
+# WHY THIS EXISTS, MEASURED 2026-09-25 ON THIS BRANCH.
+#
+# All three clients' rpc_call() began with
+#
+#     logger.debug(f"RPC Call Payload: {payload}")
+#
+# one line BEFORE requests.post, and each module did logger.setLevel(DEBUG) and
+# attached a StreamHandler AT IMPORT -- so that line reached stderr with no
+# application opt-in at all. Until this branch nothing on the redeem path put a
+# secret into a payload: redeem_contract() handed createrawtransaction's output
+# (empty scriptSigs) to a signrawtransaction* call, and the daemon did the
+# signing. This branch fixed that defect by signing in-process and calling
+# `sendrawtransaction` with spend.raw_hex -- whose scriptSig is
+# <sig> <pubkey> <PREIMAGE> OP_1 <redeemScript>. Driving the real
+# BTCClient.redeem_contract() with requests.post stubbed and no logging config
+# printed the 32-byte preimage in full on stderr, inside
+#
+#     RPC Call Payload: {... 'method': 'sendrawtransaction' ...}
+#
+# immediately followed by 51 4c5e -- OP_1, OP_PUSHDATA1 94 -- which is the tail
+# of the scriptSig and confirms what the bytes are.
+#
+# THE MONEY PATH, and it is why this is a leak rather than an untidiness: a
+# redeem whose broadcast is refused (node down, HTTP 500, relay refusal) puts
+# NOTHING on any chain and the preimage in the operator's terminal. This
+# repository's stated workflow is that the operator runs commands on their own
+# machine and pastes the output back, so that DEBUG block is exactly what gets
+# pasted when a redeem fails. A counterparty who reads it takes the other leg
+# and then refunds their own when its timelock expires. Both legs, and nothing
+# about it can be taken back.
+#
+# The three clients now log describe_rpc_payload(method, params) instead, and
+# the two things that made the leak reach a terminal -- the setLevel and the
+# handler -- are gone from all three (modules/utils.py had exactly this removed
+# on 2026-09-24 for exactly this reason: a library does not set logging policy
+# for its host).
+
+# A raw transaction, as hex, in a parameter. Its scriptSig is the preimage's
+# only hiding place on this path.
+_RAW_TRANSACTION = "raw tx"
+# A private key or a list of them.
+_SIGNING_KEY = "signing key"
+# The wallet passphrase. Named _WALLET_UNLOCK_PHRASE rather than _PASSPHRASE
+# because ruff's S105 reads the NAME and would call this constant a hardcoded
+# password -- it is the LABEL printed in place of one. Renaming is the fix;
+# a `noqa` here would be a suppression standing in for a two-word rename
+# (rule 19). GRCClient.ensure_fully_unlocked() calls
+# `walletpassphrase` with self.wallet_passphrase as parameter 0, on EVERY
+# create_contract() and EVERY redeem_contract(), so before this the operator's
+# wallet passphrase went to stderr at DEBUG as well -- a second secret in the
+# same line, found while fixing the first.
+_WALLET_UNLOCK_PHRASE = "wallet passphrase"
+
+# method -> {parameter index: what that parameter is}. A method absent from
+# this table has its parameters logged verbatim, which is what makes a pasted
+# log useful for everything that is not one of these.
+#
+# The sign* family and importprivkey are listed although THIS repository no
+# longer calls them (the redeem signs in-process now, and importprivkey was
+# deleted): the table has to be right on the day somebody reaches for one
+# again, and a redaction table that only knows today's call sites is the
+# duplicate-with-a-delay rule 8 is about.
+_SECRET_BEARING_PARAMS: dict[str, dict[int, str]] = {
+    "sendrawtransaction": {0: _RAW_TRANSACTION},
+    "signrawtransaction": {0: _RAW_TRANSACTION, 2: _SIGNING_KEY},
+    "signrawtransactionwithkey": {0: _RAW_TRANSACTION, 1: _SIGNING_KEY},
+    "signrawtransactionwithwallet": {0: _RAW_TRANSACTION},
+    "decoderawtransaction": {0: _RAW_TRANSACTION},
+    "importprivkey": {0: _SIGNING_KEY},
+    "walletpassphrase": {0: _WALLET_UNLOCK_PHRASE},
+    "walletpassphrasechange": {0: _WALLET_UNLOCK_PHRASE, 1: _WALLET_UNLOCK_PHRASE},
+    "encryptwallet": {0: _WALLET_UNLOCK_PHRASE},
+}
+
+
+def _summarize_secret_param(value: object, kind: str) -> str:
+    """One bracketed summary standing in for a value that must not be printed.
+
+    It carries the SIZE, because that is what a reader actually needs from a
+    raw transaction in a log -- "did the thing I built get sent" is answered by
+    321 bytes as well as by 642 hex characters, and only one of the two can
+    reveal a preimage. Nothing here echoes any part of the value itself: a
+    prefix or a suffix of a 32-byte secret is a 32-byte secret with a head
+    start on it.
+    """
+    if kind is _RAW_TRANSACTION and isinstance(value, str):
+        return f"<{kind}, {len(value) // 2} bytes>"
+    return f"<{kind}, redacted>"
+
+
+def describe_rpc_payload(method: str, params: object) -> str:
+    """A log-safe rendering of one JSON-RPC call: the method, and its parameters.
+
+    The method is ALWAYS named in full. That is the half of the old line worth
+    keeping -- an operator reading a failure needs to know which call failed,
+    and no RPC method name is a secret.
+
+    Parameters are printed verbatim unless _SECRET_BEARING_PARAMS says this
+    method carries one, in which case that position becomes a bracketed
+    summary. So `gettxout` and `createrawtransaction` read exactly as they did,
+    and `sendrawtransaction` reads
+
+        sendrawtransaction params=[<raw tx, 321 bytes>]
+
+    A NEGATIVE, stated because it is the thing to check when adding a method:
+    this redacts the REQUEST. A response is logged separately by each client,
+    and the only response shape in this package that could carry a preimage is
+    a verbose read-back of a spend of a hashlock branch -- nothing here does
+    that. lookup_contract_output() and read_transaction_outputs() are both
+    pointed at the CONTRACT's funding transaction, whose scriptSigs spend the
+    operator's own ordinary coins.
+    """
+    entries = list(params) if isinstance(params, (list, tuple)) else [params]
+    redactions = _SECRET_BEARING_PARAMS.get(method, {})
+    rendered = [
+        _summarize_secret_param(value, redactions[index]) if index in redactions else repr(value)
+        for index, value in enumerate(entries)
+    ]
+    return f"{method} params=[{', '.join(rendered)}]"
+
+
 @dataclass(frozen=True)
 class ContractOutput:
     """One funded contract output, read back from the chain.

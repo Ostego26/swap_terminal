@@ -184,11 +184,21 @@ from regtest.keys import generate_key  # noqa: E402 -- same
 
 WALLET_NAME = "regtest_htlc_harness"
 
-# The loggers the real modules install at import. They set themselves to DEBUG
-# and attach their own StreamHandler, which prints every RPC payload including
-# every raw transaction. Useful exactly once. Raised to INFO by default and
-# left at DEBUG by --verbose-clients; propagate is turned off so their own
-# handler does not print each line a second time through the root logger.
+# The loggers the real modules use. UNTIL 2026-09-25 this read "the loggers the
+# real modules INSTALL at import. They set themselves to DEBUG and attach their
+# own StreamHandler, which prints every RPC payload including every raw
+# transaction" -- and it was accurate, which is exactly how a raw transaction
+# carrying an HTLC preimage reached stderr with no application opt-in. See
+# describe_rpc_payload() in modules/htlc_rpc.py for the measurement. The three
+# clients no longer set a level or attach a handler, so this file is now the
+# only thing deciding where their lines go, which is what "the application owns
+# logging policy" means in practice.
+#
+# `propagate` is therefore NO LONGER turned off. With their own handlers gone,
+# the root handler basicConfig() installs is the only one they have, and
+# silencing propagation would make the harness print nothing at all from the
+# code it exists to measure -- rule 14's defect introduced while fixing rule
+# 12's. Nothing prints twice now, because nothing has a second handler.
 CLIENT_LOGGERS = (
     "modules.atomic_btc_client",
     "modules.atomic_ltc_client",
@@ -208,9 +218,7 @@ def configure_logging(verbose_clients: bool) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     level = logging.DEBUG if verbose_clients else logging.INFO
     for name in CLIENT_LOGGERS:
-        logger = logging.getLogger(name)
-        logger.setLevel(level)
-        logger.propagate = False
+        logging.getLogger(name).setLevel(level)
 
 
 def build_real_client(asset: str, config, wallet: str):

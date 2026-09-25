@@ -50,11 +50,16 @@ that the parser handles the shape -- not that Gridcoin's shape is that one.
 """
 
 import hashlib
+import logging
 import os
 import struct
 from decimal import Decimal
+from json import dumps as json_dumps
 
 import pytest
+from modules import atomic_btc_client as btc_module
+from modules import atomic_grc_client as grc_module
+from modules import atomic_ltc_client as ltc_module
 from modules.atomic_btc_client import BTCClient
 from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
@@ -72,6 +77,7 @@ from modules.htlc_rpc import (
     address_of,
     assert_output_pays_the_contract,
     build_hashlock_spend,
+    describe_rpc_payload,
     ensure_watch_only_import,
     find_output_by_script,
     lookup_contract_output,
@@ -102,6 +108,10 @@ from regtest.txbuild import redeem_script_sig as harness_redeem_script_sig
 from test_regtest_harness_units import ScriptFailure, _eval_p2sh_spend
 
 CONTRACT_COINS = Decimal("1.0")
+# Not a credential: a literal handed to a FakeNode that has no wallet. It is
+# here so that the GRC case actually makes the `walletpassphrase` call whose
+# parameter used to be printed, and so the assertion has a value to look for.
+GRC_WALLET_UNLOCK_LITERAL = "not-a-real-passphrase-0000"
 CONTRACT_SATOSHIS = 100_000_000
 LOCKTIME = 400_000
 
@@ -205,6 +215,18 @@ class FakeNode:
         return {"p2sh": f"p2sh-for-{script_hex[:8]}"}
 
     # -- writes ---------------------------------------------------------------
+    # The GRC client unlocks the wallet before create_contract() and before
+    # redeem_contract(), and `walletpassphrase` carries the operator's
+    # passphrase as its first parameter. Answered here so that
+    # test_no_client_logs_the_preimage can drive that call and assert the
+    # passphrase never reaches a log -- it is the second secret in the line
+    # that used to print the payload verbatim.
+    def _rpc_walletlock(self):
+        return None
+
+    def _rpc_walletpassphrase(self, _passphrase, _timeout):
+        return None
+
     def _rpc_importdescriptors(self, _requests):
         return [{"success": True}]
 
@@ -977,30 +999,212 @@ def test_every_client_redeems_a_confirmed_contract_without_asking_the_wallet_to_
     )
 
 
-@pytest.mark.parametrize("asset", ["BTC", "LTC", "GRC"])
-def test_no_client_logs_the_preimage(asset, contract, caplog, monkeypatch):
-    """The single most dangerous value in this tree, and the redeem is where it is used.
+class _FakeHTTPResponse:
+    """What `requests.post` hands back, carrying only what rpc_call reads off it.
 
-    A progress line that helpfully echoes the secret has published it. The
-    secret HASH is public by construction and is fine.
+    `text` is rendered the way a daemon renders it, because all three clients
+    log `response.text` and a test that made it empty would not be measuring
+    the line that prints it.
+    """
+
+    status_code = 200
+
+    def __init__(self, result=None, error=None):
+        self._body = {"result": result, "error": error, "id": "atomic-swap"}
+
+    @property
+    def text(self) -> str:
+        return json_dumps(self._body)
+
+    def json(self) -> dict:
+        return self._body
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+def _post_through(node):
+    """A `requests.post` stand-in that answers out of the FakeNode.
+
+    THIS IS THE WHOLE POINT OF THE TEST BELOW, so it is worth saying why the
+    obvious shortcut is wrong. Every other test in this file replaces the
+    client's `rpc_call` with the node's -- which is right when the question is
+    what the client ASKS. It is useless when the question is what the client
+    PRINTS, because `rpc_call` is the method that does the printing and
+    replacing it deletes the code under test. Stubbing one level lower, at
+    `requests.post`, leaves the real `rpc_call` running: its logging, its error
+    branches and its response handling all execute.
+    """
+
+    # `json` shadows the stdlib module's name on purpose: it is
+    # requests.post's own keyword and all three clients pass it by that
+    # name, so the stand-in has to accept it by that name. json.dumps is
+    # imported as json_dumps at the top of this file for the same reason.
+    def post(url, json=None, auth=None, timeout=None, **_kwargs):
+        try:
+            result = node.rpc_call(json["method"], json["params"])
+        except Exception as exc:  # noqa: BLE001 -- checked: the FakeNode signals a daemon-side refusal by raising, and a real daemon signals it by answering 200 with an `error` object. Translating one into the other is this stub's job; nothing is swallowed, because the error text is handed straight back to rpc_call, which raises on it.
+            return _FakeHTTPResponse(error={"code": -1, "message": str(exc)})
+        return _FakeHTTPResponse(result=result)
+
+    return post
+
+
+@pytest.mark.parametrize("asset", ["BTC", "LTC", "GRC"])
+def test_no_client_logs_the_preimage(asset, contract, caplog, capfd, monkeypatch):
+    """The single most dangerous value in this tree, driven through the REAL rpc_call.
+
+    THIS TEST WAS STRUCTURALLY UNABLE TO FAIL UNTIL 2026-09-25. It did
+    `client.rpc_call = node.rpc_call` -- replacing the only method that ever
+    handles the raw transaction, and therefore the only method that could leak
+    it. It then asserted that a redeem driven through a method the client does
+    not own printed no preimage, which it could not have done.
+
+    WHAT IT WAS NOT CATCHING, measured on this branch by driving the real
+    BTCClient.redeem_contract() with requests.post stubbed and no logging
+    configuration of its own: the 32-byte preimage appeared in full on stderr,
+    inside
+
+        RPC Call Payload: {... 'method': 'sendrawtransaction' ...}
+
+    immediately followed by `51 4c5e` -- OP_1, OP_PUSHDATA1 94 -- which is the
+    tail of the scriptSig. `rpc_call` logged the whole payload one line BEFORE
+    requests.post, and each client did logger.setLevel(DEBUG) plus a
+    StreamHandler AT IMPORT, so it reached a terminal with no application
+    opt-in at all.
+
+    So this now asserts on BOTH sinks, because they fail for different reasons
+    and a fix could close one and leave the other:
+
+      caplog  the log RECORD exists at all, wherever it would have been sent.
+      capfd   it reached the process's stderr, which is what an operator sees
+              and pastes. This is the assertion that the import-time handler
+              was the delivery mechanism.
+
+    The sibling test_no_module_here_installs_a_logging_handler pins the CAUSE;
+    this pins the outcome. Rule 19: a check on the symptom alone is a patch.
     """
     monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", contract["platform"].address)
     monkeypatch.setenv("PLATFORM_FEE_GRC_ADDRESS", contract["platform"].address)
     prefix = GRIDCOIN_PREFIX if asset == "GRC" else VERSION_2_PREFIX
     node = _node_for(contract, prefix=prefix)
+    modules = {"BTC": btc_module, "LTC": ltc_module, "GRC": grc_module}
     clients = {
         "BTC": lambda: BTCClient("http://127.0.0.1:18443/wallet/w", "u", "p"),
         "LTC": lambda: LTCClient("http://127.0.0.1:19443/wallet/w", "u", "p"),
-        "GRC": lambda: GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase=""),
+        # A NON-EMPTY passphrase, unlike every other test here, because
+        # ensure_fully_unlocked() returns early on an empty one and the
+        # `walletpassphrase` call -- which carries the operator's wallet
+        # passphrase as parameter 0 -- would never be made. That call goes
+        # through the same rpc_call and used to print it, so the GRC case
+        # carries two secrets and both are asserted below.
+        "GRC": lambda: GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase=GRC_WALLET_UNLOCK_LITERAL),
     }
+    # Patched on the CLIENT'S module, not on `requests` globally: each client
+    # does `import requests` and calls `requests.post`, so the attribute the
+    # client resolves is the one on its own module's `requests` reference.
+    monkeypatch.setattr(modules[asset].requests, "post", _post_through(node))
+    # ensure_fully_unlocked() sleeps three SECONDS after unlocking (an
+    # interface, not a report -- rule 6). Nothing here is racing a daemon.
+    monkeypatch.setattr(grc_module.time, "sleep", lambda _seconds: None)
+
+    capfd.readouterr()  # discard anything earlier in the session
     client = clients[asset]()
-    client.rpc_call = node.rpc_call
     with caplog.at_level("DEBUG"):
         _drive_redeem(client, node, contract)
-    text = caplog.text
-    assert contract["secret"].hex() not in text
-    assert contract["secret"].hex().upper() not in text
-    assert contract["participant"].wif not in text, "and never the signing key either"
+    on_stderr = capfd.readouterr().err
+
+    secret_hex = contract["secret"].hex()
+    for where, text in (("the log records", caplog.text), ("stderr", on_stderr)):
+        assert secret_hex not in text, f"the HTLC preimage reached {where}"
+        assert secret_hex.upper() not in text, f"the HTLC preimage reached {where}, upper-cased"
+        assert contract["participant"].wif not in text, f"the signing key reached {where}"
+        if asset == "GRC":
+            assert GRC_WALLET_UNLOCK_LITERAL not in text, f"the wallet passphrase reached {where}"
+
+    # The redaction has to leave the line USEFUL, or the next person puts the
+    # payload back. The METHOD is never a secret and is the half an operator
+    # reading a failure actually needs.
+    assert "sendrawtransaction" in caplog.text
+    assert node.broadcast, f"{asset} did not broadcast, so this proved nothing about the broadcast's payload"
+
+
+def test_no_module_here_installs_a_logging_handler():
+    """The CAUSE, pinned separately from the leak it delivered.
+
+    A library module that calls setLevel() and attaches a StreamHandler at
+    import decides logging policy for every program that imports it, and the
+    application cannot turn it back off short of reaching into the logger
+    object. All three clients did exactly that, at DEBUG, which is why the
+    payload line above reached a terminal by default rather than only in a
+    debugging session.
+
+    modules/utils.py had the identical pair removed on 2026-09-24 for the
+    identical reason, and tests/test_secrets_are_not_logged.py has held it ever
+    since. This is that assertion extended to the three files that still had
+    it -- one rule, and now it is checked everywhere it applies rather than in
+    the one place somebody happened to look (rule 8).
+    """
+    for name in (
+        "modules.atomic_btc_client",
+        "modules.atomic_ltc_client",
+        "modules.atomic_grc_client",
+        "modules.htlc_rpc",
+        "modules.htlc_spend",
+        "modules.htlc_fee",
+        "modules.atomic_htlc_scripts",
+        "modules.atomic_swapper",
+        "modules.utils",
+    ):
+        module_logger = logging.getLogger(name)
+        assert module_logger.handlers == [], f"{name} attaches its own logging handler at import"
+        assert module_logger.level == logging.NOTSET, f"{name} sets its own logging level at import"
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "expected"),
+    [
+        # The leak, and what replaced it. 321 bytes is an ordinary BTC redeem.
+        ("sendrawtransaction", ["ab" * 321], "sendrawtransaction params=[<raw tx, 321 bytes>]"),
+        # Both signing routes, neither of which this repository still calls --
+        # listed so that reaching for one again does not reintroduce the leak.
+        ("signrawtransactionwithwallet", ["ab" * 10], "signrawtransactionwithwallet params=[<raw tx, 10 bytes>]"),
+        (
+            "signrawtransactionwithkey",
+            ["ab" * 10, ["cPrivateKeyWIF"]],
+            "signrawtransactionwithkey params=[<raw tx, 10 bytes>, <signing key, redacted>]",
+        ),
+        # The second secret in the same line, on the GRC client only.
+        ("walletpassphrase", ["hunter2", 120], "walletpassphrase params=[<wallet passphrase, redacted>, 120]"),
+        # And everything else stays verbatim, or the line stops being useful.
+        ("gettxout", ["ab" * 32, 1, True], f"gettxout params=['{'ab' * 32}', 1, True]"),
+        ("getblockcount", [], "getblockcount params=[]"),
+    ],
+)
+def test_describe_rpc_payload_redacts_exactly_the_secret_bearing_parameters(method, params, expected):
+    """The decision, called with seeded inputs (rule 10).
+
+    Asserted on the whole rendered string rather than on "the secret is
+    absent", because absence alone is satisfied by printing nothing, and a line
+    that says nothing is rule 14's defect traded for rule 12's.
+    """
+    assert describe_rpc_payload(method, params) == expected
+
+
+def test_describe_rpc_payload_never_echoes_any_part_of_a_raw_transaction():
+    """A prefix of a preimage is a preimage with a head start on it.
+
+    The summary carries the SIZE and nothing else. This is the assertion that
+    would fail if somebody later made the line "more useful" by showing the
+    first and last few bytes -- which is safe for regtest/console.py's
+    describe_script_sig(), where the caller has already decided the audience,
+    and is not safe here, where the audience is a default-on log.
+    """
+    raw = "deadbeef" * 80
+    rendered = describe_rpc_payload("sendrawtransaction", [raw])
+    assert "deadbeef" not in rendered
+    assert "dead" not in rendered
+    assert rendered == "sendrawtransaction params=[<raw tx, 320 bytes>]"
 
 
 @pytest.mark.parametrize("asset", ["BTC", "LTC", "GRC"])
