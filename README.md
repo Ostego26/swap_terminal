@@ -339,9 +339,41 @@ empty dict and *skipped the payment silently* — reporting "no deposits" for
 money that had arrived. Fixed, and an unrecognizable entry now raises rather
 than reading as "not a Payment".
 
-Still unverified: `account_tx` specifically (the probe used `ledger`), and a
-payment actually carrying a `DestinationTag` — none of the three sampled had
-one, which is normal wallet-to-wallet traffic.
+### Run the check
+
+```
+python3 xrp_chain_check.py                      # testnet, self-bootstrapping
+python3 xrp_chain_check.py --account rSomeAcct  # a specific account
+python3 xrp_chain_check.py --url https://s1.ripple.com:51234/   # mainnet
+```
+
+Read-only: submits nothing, signs nothing, and the adapter it builds refuses
+`send_to_address()` structurally. It names the network from the server's
+`network_id`, not the URL, and prints `MAINNET, REAL MONEY` if that is where you
+pointed it.
+
+**With no `--account` it walks back through validated ledgers, finds a real
+Payment and uses its destination** — so a bare run examines an account that
+actually has history, rather than reporting an empty one as a pass.
+
+Three exit codes:
+
+| exit | meaning |
+|---|---|
+| 0 | every field the adapter reads was observed over real Payments |
+| 1 | at least one is wrong, each named |
+| **3** | **inconclusive** — nothing failed, but there was nothing to look at |
+
+It closes the two gaps the first probe left: **`account_tx`** specifically,
+which is the method the adapter actually calls and whose entries may nest
+differently again, and a payment **carrying a `DestinationTag`** — none of the
+three sampled had one, which is normal wallet-to-wallet traffic and says
+nothing either way about deposits addressed to us.
+
+Step 4 runs the adapter's own scan over the real response, and an empty result
+there is treated as a **failure** when the response did contain inbound
+payments — because that is the skipped-payment bug returning, not an empty
+account.
 
 ### Deposits are attributed by destination tag, not by address
 
