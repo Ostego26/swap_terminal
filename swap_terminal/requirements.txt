@@ -52,6 +52,23 @@
 # --- Web application (app.py, routes/, services/, workers/) -------------------
 Flask>=3.0,<4.0
 
+# --- Production WSGI server ---------------------------------------------------
+# `gunicorn -c gunicorn.conf.py wsgi:app`. Flask's own `app.run()` is a
+# development server -- single-threaded by default, and its own documentation
+# says not to use it in production. That matters more here than it usually does
+# because this process holds BTC_RPC_PASS, LTC_RPC_PASS and GRC_RPC_PASS.
+#
+# IT SERVES HTTP AND STARTS NO WORKERS. Gunicorn forks N worker processes and
+# each one imports the application, so anything started at import time or in
+# create_app() runs N times -- see gunicorn.conf.py's header and
+# swap_terminal/import_spawn_guard.py for the full reasoning, and
+# swap_terminal/supervisor.py for where the three polling loops actually live.
+#
+# The range is measured, not recalled: gunicorn 23.0.0 is what the banner,
+# the two boot hooks and `GET /api/health` were exercised against on
+# 2026-09-25. 24.0 is the next major above it.
+gunicorn>=22.0,<24.0
+
 # --- JSON-RPC to the chain daemons -------------------------------------------
 # Used by chains/base.py and all three modules/atomic_*_client.py. This is the
 # fund-moving path: every sendtoaddress and sendrawtransaction goes through it.
