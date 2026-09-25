@@ -86,6 +86,7 @@ from regtest.daemons import (
     COINBASE_MATURITY_HEIGHT,
     ChainConfig,
     RegtestSetupError,
+    cltv_activation_height,
     daemon_help_text,
     describe_rpc_exception,
     mweb_override_args,
@@ -99,6 +100,11 @@ TOTAL_STEPS = 9
 # are coin amounts as strings so the satoshi conversion is exact.
 CONTRACT_AMOUNT = "1.0"
 CONTROL_FEE = "0.0001"
+
+# How many contract outputs one run funds: [A] for the redeem attempts, [B] for
+# the refund, [C] the unconfirmed copy step 7b needs, [D] the one step 8c tries
+# to mine into a block. A COUNT, checked against the wallet balance in step 4.
+CONTRACTS_PER_RUN = 4
 
 # generatetoaddress is called in batches so that mining a four-figure number of
 # blocks prints progress instead of sitting silent (rule 14). A COUNT OF
@@ -120,6 +126,19 @@ NO_FEE_LIMIT = 0
 # it is rendered in microfortnights wherever the harness prints it (rule 6).
 # Spelled here only so the announcement can state the scale up front.
 REAL_CLIENT_WAIT_SECONDS = 300
+
+
+@dataclass
+class ChainFacts:
+    """What step 2 learned from the daemon that a later step has to act on.
+
+    Mutable and carried on the frozen Run for the same reason SpawnRecord is:
+    it must be set the moment it is known, not passed through the return value
+    of a function that can raise before it returns.
+    """
+
+    cltv_activation_height: int | None = None
+    cltv_height_source: str = "(none: not looked up yet)"
 
 
 @dataclass
@@ -163,6 +182,7 @@ class Run:
     # regtest_htlc_verify.main() reads this, and it must be true by the time
     # anything after the spawn can raise.
     spawn: SpawnRecord = field(default_factory=SpawnRecord)
+    facts: ChainFacts = field(default_factory=ChainFacts)
 
     @property
     def asset(self) -> str:
@@ -206,6 +226,13 @@ class ChainOutcome:
     reached_the_signer: bool = False
     control_redeem: str = SKIP
     refund_before_expiry_rejected: str = SKIP
+    # WHICH layer refused the early refund, and whether the chain itself was
+    # asked. `policy` is a weaker result than `consensus` and the verdict says
+    # so rather than scoring them alike.
+    refund_refusal_kind: str = ""
+    cltv_consensus_refused: str = SKIP
+    cltv_activation_height: int | None = None
+    height_at_refund_test: int | None = None
     refund_after_expiry: str = SKIP
     notes: list[str] = field(default_factory=list)
 
@@ -256,6 +283,61 @@ class ChainOutcome:
             )
 
         return "neither branch was shown to spend; read the failures above before concluding anything"
+
+    def cltv_verdict(self) -> str:
+        """What this chain established about CHECKLOCKTIMEVERIFY, at the right strength.
+
+        Printed beside the branch verdict rather than folded into it, because
+        they answer different questions: the branch verdict says whether the
+        coins can move, and this says how strong the evidence is that the
+        timelock is what stopped them moving early.
+
+        THE DISTINCTION IS PER CHAIN AND IS NOT COSMETIC. Measured 2026-09-25,
+        before this was fixed: BTC refused the early refund with
+        `mandatory-script-verify-flag-failed` and LTC with
+        `non-mandatory-script-verify-flag`, and the harness reported them as
+        the same result. They are not. The second means the transaction passed
+        consensus and was declined by relay policy, at heights below the 1351
+        at which the Litecoin daemon's own table says BIP65 activates.
+        """
+        if self.refund_before_expiry_rejected == SKIP:
+            return "CHECKLOCKTIMEVERIFY: NOT TESTED on this chain -- step 8 did not run."
+
+        where = (
+            f"the test ran at height {self.height_at_refund_test} and the daemon puts BIP65 activation at "
+            f"{self.cltv_activation_height}"
+            if self.cltv_activation_height is not None
+            else f"the test ran at height {self.height_at_refund_test} and this daemon did NOT report a BIP65 "
+            "activation height, so consensus enforcement cannot be established from the height alone"
+        )
+
+        if self.cltv_consensus_refused == OK:
+            return (
+                "CHECKLOCKTIMEVERIFY is enforced BY CONSENSUS: the daemon refused to mine the early refund into a "
+                f"block at all (step 8c), which is the chain refusing rather than the mempool. Mempool refusal was "
+                f"'{self.refund_refusal_kind}'; {where}."
+            )
+        if self.cltv_consensus_refused == FAIL:
+            return (
+                "CHECKLOCKTIMEVERIFY IS NOT ENFORCED BY CONSENSUS HERE: the daemon MINED the early refund into a "
+                f"block (step 8c). The mempool refusal was '{self.refund_refusal_kind}' and is relay policy only, "
+                f"so a miner could include an early refund. {where}."
+            )
+        if self.refund_refusal_kind == REFUSAL_CONSENSUS:
+            return (
+                "CHECKLOCKTIMEVERIFY refused the early refund with `mandatory-script-verify-flag-failed`, which is "
+                f"the script failing under the flags the chain applies. Step 8c was not run ({where})."
+            )
+        if self.refund_refusal_kind == REFUSAL_POLICY:
+            return (
+                "CHECKLOCKTIMEVERIFY evidence here is WEAK: the early refund was refused with "
+                "`non-mandatory-script-verify-flag`, meaning it PASSED consensus and was declined by relay policy. "
+                f"A miner not applying that policy could have included it. {where}."
+            )
+        return (
+            f"CHECKLOCKTIMEVERIFY: the early refund was refused, but the refusal was '{self.refund_refusal_kind}', "
+            f"which does not by itself say whether consensus or policy refused it. {where}."
+        )
 
     def _verdict_with_a_working_script(self) -> str:
         """Both branches spend under a correct scriptSig. What can be said about the CLIENT?"""
@@ -370,6 +452,24 @@ def step_2_daemon(run: Run) -> bool:
     # connection exists. Everything below this line mines or broadcasts.
     info = daemons.assert_regtest(run.console, run.config)
     run.say(f"chain={info.get('chain')} blocks={info.get('blocks')} (a height, not a duration)")
+
+    # BIP65 IS CHECKLOCKTIMEVERIFY, and where it activates decides whether the
+    # refund test measures consensus or merely relay policy. Read now, acted on
+    # in step 4, which mines above it before step 5 derives a locktime from the
+    # tip. See daemons.cltv_activation_height for the run that made this
+    # necessary.
+    height, source = cltv_activation_height(run.node(wallet=""), info)
+    run.facts.cltv_activation_height = height
+    run.facts.cltv_height_source = source
+    if height is None:
+        run.say(f"CHECKLOCKTIMEVERIFY activation height: (none) -- {source}")
+        run.say(
+            "so this run CANNOT state that CLTV was consensus-enforced when the refund is asserted. Step 8b's "
+            "refusal kind is then the only evidence, and it is reported as such rather than assumed adequate."
+        )
+    else:
+        run.say(f"CHECKLOCKTIMEVERIFY becomes consensus-enforced at height {height} (a height, not a duration)")
+        run.say(f"read from {source}")
     return we_started_it
 
 
@@ -544,19 +644,55 @@ def _verbose_tx(node, txid: str, block_hash: str | None = None) -> dict:
 
 
 def step_4_maturity(run: Run) -> int:
-    run.step(4, f"mine to coinbase maturity so a coinbase is spendable (>= {COINBASE_MATURITY_HEIGHT} blocks)")
+    """Coinbase maturity, AND past CHECKLOCKTIMEVERIFY's activation height.
+
+    THE SECOND HALF IS NOT HOUSEKEEPING, it is what makes step 8 mean anything.
+
+    The locktime step 5 derives is `tip + 1152` on LTC and `tip + 288` on BTC.
+    Leaving the tip at 101 put LTC's locktime at 1253 -- BELOW the height 1351
+    at which the daemon's own softfork table says BIP65 becomes consensus
+    enforced -- so the refund assertion ran in a window where the chain would
+    not have refused an early refund and only the mempool's relay policy did.
+    Measured 2026-09-25; see daemons.cltv_activation_height.
+
+    Mining past the activation height FIRST moves the whole test above it: a
+    tip of 1351 gives a locktime of 2503 on LTC, and step 8 runs at 2502. The
+    1152-block lock is NOT shortened to make this cheaper -- that number is
+    what modules/htlc_timelock.py derives for a 48-hour LTC lock, and a test
+    that uses a convenient number tests a number nobody ships.
+    """
+    activation = run.facts.cltv_activation_height
+    target = max(COINBASE_MATURITY_HEIGHT, activation or 0)
+    run.step(4, f"mine to coinbase maturity ({COINBASE_MATURITY_HEIGHT}) and past CLTV activation, to height >= {target}")
     node = run.node()
     height = int(node.call("getblockcount"))
-    run.say(f"current height={height}, maturity needs {COINBASE_MATURITY_HEIGHT}")
-    if height < COINBASE_MATURITY_HEIGHT:
-        height = _mine(run, COINBASE_MATURITY_HEIGHT - height).height
-    run.check("chain height", height, f">= {COINBASE_MATURITY_HEIGHT}",
-              OK if height >= COINBASE_MATURITY_HEIGHT else FAIL)
+    run.say(f"current height={height}; maturity needs {COINBASE_MATURITY_HEIGHT}")
+    if activation is None:
+        run.say(
+            "CLTV activation height is (none: this daemon did not report one), so the tip is taken to maturity "
+            "only. Step 8 will say that consensus enforcement could not be established from the height."
+        )
+    else:
+        run.say(
+            f"CLTV is consensus-enforced from height {activation}, so the tip goes past it BEFORE step 5 derives a "
+            "locktime from it -- otherwise the refund assertion measures relay policy, not consensus"
+        )
+    if height < target:
+        height = _mine(run, target - height).height
+    run.check("chain height", height, f">= {target}", OK if height >= target else FAIL)
+    if activation is not None:
+        run.check(
+            "tip is at or above the CLTV activation height",
+            f"{height} vs activation {activation}",
+            f">= {activation}",
+            OK if height >= activation else FAIL,
+        )
+
     balance = Decimal(str(node.call("getbalance")))
-    needed = Decimal(CONTRACT_AMOUNT) * 2 + Decimal("0.01")
+    needed = Decimal(CONTRACT_AMOUNT) * CONTRACTS_PER_RUN + Decimal("0.01")
     run.check(
         "spendable wallet balance",
-        f"{balance} (two contracts of {CONTRACT_AMOUNT} plus fees need about {needed})",
+        f"{balance} ({CONTRACTS_PER_RUN} contracts of {CONTRACT_AMOUNT} plus fees need about {needed})",
         f">= {needed}",
         OK if balance >= needed else FAIL,
     )
@@ -1196,19 +1332,110 @@ def _build_refund(contract: Contract, outpoint: Outpoint, nlocktime: int) -> tup
     )
 
 
-def _attempt_refund_expecting_refusal(run: Run, contract: Contract, outpoint: Outpoint, nlocktime: int, label: str) -> str:
+# Which layer refused a spend. The difference is the whole point of step 8 and
+# it is NOT cosmetic: `mandatory-script-verify-flag-failed` means the script
+# failed under the flags the chain itself applies, and
+# `non-mandatory-script-verify-flag` means it passed consensus and was declined
+# by RELAY POLICY -- a miner not applying that policy could have included it.
+REFUSAL_CONSENSUS = "consensus"
+REFUSAL_POLICY = "policy"
+REFUSAL_NON_FINAL = "non-final"
+REFUSAL_OTHER = "other"
+
+# Checked in this order. `non-mandatory-script-verify-flag` must be tested
+# first: it contains the word "mandatory", and scoring a policy refusal as a
+# consensus one is exactly the overclaim this step exists to avoid.
+_REFUSAL_MARKERS = (
+    (REFUSAL_POLICY, ("non-mandatory-script-verify-flag",)),
+    (REFUSAL_CONSENSUS, ("mandatory-script-verify-flag-failed",)),
+    (REFUSAL_NON_FINAL, ("non-final", "non-bip68-final")),
+)
+
+
+def classify_refusal(message: str) -> str:
+    """Which layer said no: consensus, relay policy, finality, or something else."""
+    lowered = message.lower()
+    for kind, markers in _REFUSAL_MARKERS:
+        if any(marker in lowered for marker in markers):
+            return kind
+    return REFUSAL_OTHER
+
+
+def _attempt_refund_expecting_refusal(run: Run, contract: Contract, outpoint: Outpoint, nlocktime: int, label: str) -> tuple[str, str]:
+    """Broadcast a refund that must be refused. Returns (outcome, refusal kind)."""
     raw_hex, script_sig = _build_refund(contract, outpoint, nlocktime)
     run.say(f"{label} -- nLockTime={nlocktime}, script locktime={contract.locktime} (both heights)")
     run.say(f"{label} scriptSig = {describe_script_sig(script_sig)}")
     try:
         txid = _broadcast(run, raw_hex)
     except RPCError as exc:
-        return run.check(f"{label} is REFUSED", f"RPCError: {exc}", "the node to refuse it", OK)
-    return run.check(f"{label} is REFUSED", f"the node ACCEPTED it: txid={txid}", "the node to refuse it", FAIL)
+        kind = classify_refusal(str(exc))
+        return run.check(f"{label} is REFUSED", f"[{kind}] RPCError: {exc}", "the node to refuse it", OK), kind
+    return (
+        run.check(f"{label} is REFUSED", f"the node ACCEPTED it: txid={txid}", "the node to refuse it", FAIL),
+        REFUSAL_OTHER,
+    )
+
+
+def _attempt_refund_into_a_block(run: Run, contract: Contract, outpoint: Outpoint, nlocktime: int) -> str:
+    """Ask the daemon to MINE the early refund into a block. Consensus, not policy.
+
+    WHY THE MEMPOOL'S ANSWER IS NOT ENOUGH, which is the half of the 2026-09-25
+    finding the refusal string cannot settle on its own. `mandatory` versus
+    `non-mandatory` is decided by a compile-time flag set, so the wording can
+    differ between two daemons that would both enforce -- or both not enforce --
+    CHECKLOCKTIMEVERIFY at a given height. The question the operator actually
+    asked is "could a miner have included it", and the way to answer that is to
+    ask a miner.
+
+    `generateblock` runs TestBlockValidity over a block containing the
+    transaction, so a refusal here is the CHAIN refusing, not the mempool. It
+    is the strongest assertion this harness can make about CLTV, and it needs
+    no assumption about which flags a given build calls mandatory.
+
+    This spends a DEDICATED output [D], never the one step 9 refunds. If
+    consensus did accept an early refund -- the failure this exists to catch --
+    the output it consumed must not be the one the last step depends on.
+    """
+    node = run.node()
+    if not daemons.method_exists(node, "generateblock"):
+        return run.check(
+            "8c early refund is refused by CONSENSUS (mined into a block)",
+            "not attempted: this daemon has no `generateblock`",
+            "the daemon to refuse to build the block",
+            SKIP,
+        )
+    raw_hex, _ = _build_refund(contract, outpoint, nlocktime)
+    address = node.call("getnewaddress", "regtest-harness-mining")
+    run.say(
+        "8c: asking the daemon to MINE this same early refund into a block. The mempool's wording says which flag "
+        "set refused it; only this says whether the CHAIN would have."
+    )
+    try:
+        result = node.call("generateblock", address, [raw_hex])
+    except RPCError as exc:
+        kind = classify_refusal(str(exc))
+        return run.check(
+            "8c early refund is refused by CONSENSUS (mined into a block)",
+            f"[{kind}] RPCError: {exc}",
+            "the daemon to refuse to build the block",
+            OK,
+        )
+    return run.check(
+        "8c early refund is refused by CONSENSUS (mined into a block)",
+        f"the daemon MINED IT: {result}",
+        "the daemon to refuse to build the block",
+        FAIL,
+    )
 
 
 def step_8_refund_before_expiry(run: Run, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
-    run.step(8, "refund BEFORE expiry must be REJECTED -- twice, for two different reasons")
+    run.step(8, "refund BEFORE expiry must be REJECTED -- three times, for three different reasons")
+
+    # [D] is funded FIRST, while mining a block for it cannot disturb the
+    # height arithmetic below.
+    consensus_outpoint = _fund_directly(run, contract, "D")
+
     height = int(run.node().call("getblockcount"))
     target = contract.locktime - 1
     run.say(
@@ -1219,24 +1446,62 @@ def step_8_refund_before_expiry(run: Run, contract: Contract, outpoint: Outpoint
         height = _mine(run, target - height).height
     run.check("height one block short of the locktime", height, target, OK if height == target else FAIL)
 
+    activation = run.facts.cltv_activation_height
+    outcome.cltv_activation_height = activation
+    outcome.height_at_refund_test = height
+    if activation is None:
+        run.say(
+            "CLTV activation height is (none: this daemon did not report one), so whether the chain itself would "
+            "enforce the locktime at this height cannot be stated from the height. 8c below asks the chain directly."
+        )
+    else:
+        run.check(
+            "the refund test runs where CLTV is consensus-enforced",
+            f"height {height} vs BIP65 activation {activation}",
+            f">= {activation}",
+            OK if height >= activation else FAIL,
+        )
+
     # 8a: final-ness. The mempool refuses before any script runs.
-    first = _attempt_refund_expecting_refusal(
+    first, _ = _attempt_refund_expecting_refusal(
         run, contract, outpoint, contract.locktime,
         "8a refund with nLockTime = the script's locktime (mempool non-final check; proves nothing about CLTV)",
     )
-    # 8b: the one that proves CHECKLOCKTIMEVERIFY is enforcing something. The
-    # transaction is final for this block, so the script actually executes, and
-    # CLTV compares the script's larger locktime against this smaller nLockTime.
-    second = _attempt_refund_expecting_refusal(
+    # 8b: the transaction is final for this block, so the script actually runs
+    # and CLTV compares the script's larger locktime against this nLockTime.
+    second, refusal_kind = _attempt_refund_expecting_refusal(
         run, contract, outpoint, height,
         "8b refund with nLockTime = the current tip (final, so the script RUNS; this is the CLTV assertion)",
     )
+    outcome.refund_refusal_kind = refusal_kind
+    _report_refusal_strength(run, refusal_kind)
+
+    # 8c: the chain itself, not the mempool.
+    outcome.cltv_consensus_refused = _attempt_refund_into_a_block(run, contract, consensus_outpoint, height)
+
     outcome.refund_before_expiry_rejected = OK if first == OK and second == OK else FAIL
-    if outcome.refund_before_expiry_rejected == OK:
+
+
+def _report_refusal_strength(run: Run, kind: str) -> None:
+    """Say how strong 8b's refusal actually was. Never score the two the same."""
+    if kind == REFUSAL_CONSENSUS:
         run.say(
-            "both refusals arrived. 8b is the one that matters: the script executed and CHECKLOCKTIMEVERIFY refused "
-            "it, which is the first time this repository's refund branch has been shown to enforce anything."
+            "8b was refused with `mandatory-script-verify-flag-failed`: the script failed under the flags the chain "
+            "itself applies. This is the result worth having."
         )
+        return
+    if kind == REFUSAL_POLICY:
+        run.say(
+            "8b was refused with `non-mandatory-script-verify-flag`, which is WEAKER and must not be read as the "
+            "same result. It means the transaction PASSED consensus and was declined by relay policy: this node "
+            "would not carry it, but the chain did not refuse it, and a miner not applying that policy could have "
+            "included an early refund. 8c is what settles whether the chain would have refused it."
+        )
+        return
+    if kind == REFUSAL_NON_FINAL:
+        run.say("8b was refused as non-final, which is the 8a condition rather than the CLTV one -- read the nLockTime above.")
+        return
+    run.say(f"8b's refusal did not match any known shape ({kind}); read the message above before concluding anything.")
 
 
 def step_9_refund_after_expiry(run: Run, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:

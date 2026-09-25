@@ -55,10 +55,13 @@ from modules.atomic_htlc_scripts import (
     parse_and_reencode_as_testnet_p2pkh,
     script_to_p2sh_address,
 )
+from modules.htlc_timelock import ROLE_INITIATOR, timelock_blocks
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console, redact, value
 from regtest.daemons import (
+    COINBASE_MATURITY_HEIGHT,
     RegtestRPC,
     RegtestSetupError,
+    cltv_activation_height,
     describe_rpc_exception,
     mweb_override_args,
     resolve_chain_config,
@@ -71,6 +74,11 @@ from regtest.steps import (
     REDEEM_FAILED_ON_SIGNING,
     REDEEM_FAILED_ON_WALLET_CAPABILITY,
     REDEEM_FAILED_UNCLASSIFIED,
+    REFUSAL_CONSENSUS,
+    REFUSAL_NON_FINAL,
+    REFUSAL_OTHER,
+    REFUSAL_POLICY,
+    ChainFacts,
     ChainOutcome,
     Mined,
     RedeemAttempt,
@@ -80,6 +88,7 @@ from regtest.steps import (
     _p2sh_script_for,
     _verbose_tx,
     classify_redeem_failure,
+    classify_refusal,
 )
 from regtest.txbuild import (
     SEQUENCE_NON_FINAL,
@@ -1021,3 +1030,123 @@ def test_stages_before_signing_mean_the_preimage_question_was_never_asked():
     assert capability.reached_the_signer is False
     assert signing.reached_the_signer is True
     assert spent.reached_the_signer is True
+
+
+# --------------------------------------------------------------------------
+# measured 2026-09-25: LTC's CLTV assertion ran below BIP65's activation
+# height, so it demonstrated relay policy and was reported as consensus
+# --------------------------------------------------------------------------
+
+
+def test_the_cltv_activation_height_comes_from_the_softforks_table():
+    """Litecoin Core 0.21.4 keeps it in getblockchaininfo."""
+    node = _StubNode({"getdeploymentinfo": RPCError("Method not found")})
+    height, source = cltv_activation_height(
+        node, {"softforks": {"bip65": {"type": "buried", "active": False, "height": 1351}}}
+    )
+    assert height == 1351
+    assert "getblockchaininfo.softforks" in source
+
+
+def test_the_cltv_activation_height_comes_from_getdeploymentinfo_when_absent():
+    """Bitcoin Core moved it out of getblockchaininfo in v25, which is why BTC printed (none)."""
+    node = _StubNode({"getdeploymentinfo": {"deployments": {"bip65": {"type": "buried", "height": 1351}}}})
+    height, source = cltv_activation_height(node, {"blocks": 101})
+    assert height == 1351
+    assert "getdeploymentinfo" in source
+
+
+def test_an_unknown_activation_height_is_an_answer_and_says_so():
+    node = _StubNode({"getdeploymentinfo": RPCError("Method not found")})
+    height, source = cltv_activation_height(node, {"blocks": 101})
+    assert height is None
+    assert "does not say when CHECKLOCKTIMEVERIFY becomes consensus-enforced" in source
+
+
+def test_a_policy_refusal_is_not_classified_as_a_consensus_one():
+    """`non-mandatory-script-verify-flag` contains the word mandatory. Order matters."""
+    assert classify_refusal(
+        "sendrawtransaction: code=-26 message=non-mandatory-script-verify-flag (Locktime requirement not satisfied)"
+    ) == REFUSAL_POLICY
+    assert classify_refusal(
+        "sendrawtransaction: code=-26 message=mandatory-script-verify-flag-failed (Locktime requirement not satisfied)"
+    ) == REFUSAL_CONSENSUS
+    assert classify_refusal("code=-26 message=non-final") == REFUSAL_NON_FINAL
+    assert classify_refusal("code=-25 message=bad-txns-inputs-missingorspent") == REFUSAL_OTHER
+
+
+def test_the_cltv_verdict_calls_a_policy_refusal_weak():
+    outcome = ChainOutcome(
+        asset="LTC",
+        refund_before_expiry_rejected=OK,
+        refund_refusal_kind=REFUSAL_POLICY,
+        cltv_consensus_refused=SKIP,
+        cltv_activation_height=1351,
+        height_at_refund_test=1252,
+    )
+    verdict = outcome.cltv_verdict()
+    assert "WEAK" in verdict
+    assert "PASSED consensus" in verdict
+    assert "1351" in verdict and "1252" in verdict
+
+
+def test_the_cltv_verdict_reports_a_mined_block_refusal_as_consensus():
+    outcome = ChainOutcome(
+        asset="LTC",
+        refund_before_expiry_rejected=OK,
+        refund_refusal_kind=REFUSAL_POLICY,
+        cltv_consensus_refused=OK,
+        cltv_activation_height=1351,
+        height_at_refund_test=2502,
+    )
+    verdict = outcome.cltv_verdict()
+    assert "enforced BY CONSENSUS" in verdict
+    assert "refused to mine" in verdict
+
+
+def test_the_cltv_verdict_says_so_when_a_block_actually_included_the_early_refund():
+    outcome = ChainOutcome(
+        asset="LTC",
+        refund_before_expiry_rejected=OK,
+        refund_refusal_kind=REFUSAL_POLICY,
+        cltv_consensus_refused=FAIL,
+        cltv_activation_height=1351,
+        height_at_refund_test=400,
+    )
+    assert "IS NOT ENFORCED BY CONSENSUS" in outcome.cltv_verdict()
+
+
+def test_the_cltv_verdict_does_not_claim_a_height_it_could_not_read():
+    outcome = ChainOutcome(
+        asset="BTC",
+        refund_before_expiry_rejected=OK,
+        refund_refusal_kind=REFUSAL_CONSENSUS,
+        cltv_consensus_refused=SKIP,
+        cltv_activation_height=None,
+        height_at_refund_test=388,
+    )
+    verdict = outcome.cltv_verdict()
+    assert "did NOT report a BIP65 activation height" in verdict
+    assert "mandatory-script-verify-flag-failed" in verdict
+
+
+def test_the_cltv_verdict_reports_a_step_that_never_ran():
+    assert "NOT TESTED" in ChainOutcome(asset="LTC").cltv_verdict()
+
+
+def test_step_4_targets_the_activation_height_not_just_maturity():
+    """The arithmetic that was wrong: tip 101 + 1152 = 1253, below BIP65 at 1351."""
+    facts = ChainFacts(cltv_activation_height=1351)
+    target = max(COINBASE_MATURITY_HEIGHT, facts.cltv_activation_height or 0)
+    assert target == 1351
+    # LTC's initiator lock, from the real module, must land the test above activation.
+    assert 1351 + timelock_blocks("LTC", ROLE_INITIATOR) > 1351
+    assert COINBASE_MATURITY_HEIGHT + timelock_blocks("LTC", ROLE_INITIATOR) < 1351, (
+        "this is the defect: at maturity alone the locktime lands below BIP65 activation"
+    )
+
+
+def test_the_real_lock_length_is_not_shortened_to_make_this_cheaper():
+    """1152 blocks is what a 48-hour LTC lock derives to, and the harness uses that number."""
+    assert timelock_blocks("LTC", ROLE_INITIATOR) == 1152
+    assert timelock_blocks("BTC", ROLE_INITIATOR) == 288

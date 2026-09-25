@@ -639,10 +639,15 @@ def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
 
     Never an empty block (rule 14): a daemon with no softforks field says so.
     """
-    softforks = info.get("softforks")
-    if not softforks:
-        console.say(f"{config.asset}: softforks reported by the daemon: (none: no `softforks` field in getblockchaininfo)")
+    tables = _deployment_tables(adapter_for(config), info)
+    if not tables:
+        console.say(
+            f"{config.asset}: deployments reported by the daemon: (none: no `softforks` in getblockchaininfo and "
+            "no usable `getdeploymentinfo`). The activation heights below cannot be read from this daemon."
+        )
         return
+    source, softforks = tables[0]
+    console.say(f"{config.asset}: deployment table read from {source}")
     for name, detail in sorted(softforks.items()):
         if isinstance(detail, dict):
             kind = detail.get("type")
@@ -654,6 +659,84 @@ def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
             )
         else:
             console.say(f"{config.asset}: softfork {name}: {detail}")
+
+
+# The deployment that IS CHECKLOCKTIMEVERIFY. Named once; every lookup below
+# uses this key, because "bip65" is what both daemon families call it in their
+# softfork and deployment tables.
+CLTV_DEPLOYMENT = "bip65"
+
+
+def _deployment_tables(node: RegtestRPC, info: dict) -> list[tuple[str, dict]]:
+    """Every place a daemon might keep its deployment table, with where it came from.
+
+    TWO PLACES, because the field moved. Bitcoin Core carried `softforks` in
+    `getblockchaininfo` until v25, which moved it to `getdeploymentinfo`.
+    Measured on the operator's machine 2026-09-25: Litecoin Core 0.21.4 filled
+    `softforks`, and Bitcoin Core 28.1 printed
+
+        BTC: softforks reported by the daemon: (none: no `softforks` field ...)
+
+    which the harness correctly reported and then did nothing with. Asking both
+    places is the whole fix; guessing from a version number is what this file
+    refuses to do everywhere else.
+    """
+    tables: list[tuple[str, dict]] = []
+    softforks = info.get("softforks")
+    if isinstance(softforks, dict) and softforks:
+        tables.append(("getblockchaininfo.softforks", softforks))
+    try:
+        deployment_info = node.call("getdeploymentinfo")
+    except RPCError:
+        return tables
+    deployments = deployment_info.get("deployments") if isinstance(deployment_info, dict) else None
+    if isinstance(deployments, dict) and deployments:
+        tables.append(("getdeploymentinfo.deployments", deployments))
+    return tables
+
+
+def cltv_activation_height(node: RegtestRPC, info: dict) -> tuple[int | None, str]:
+    """The height at or above which CHECKLOCKTIMEVERIFY is enforced by CONSENSUS.
+
+    WHY THIS DECIDES WHERE THE REFUND TEST HAS TO RUN, and it is the finding
+    that prompted this function. The operator's run of 2026-09-25 printed, from
+    the Litecoin daemon itself:
+
+        LTC: softfork bip65: type=buried active=False height=1351
+
+    and then asserted the refund branch at heights 1252 and 1253. BIP65 IS
+    CHECKLOCKTIMEVERIFY, so at those heights the opcode was not consensus
+    enforced: the refusal that came back was
+
+        LTC 8b: non-mandatory-script-verify-flag (Locktime requirement not satisfied)
+
+    against BTC's `mandatory-script-verify-flag-failed`. `non-mandatory` means
+    the transaction passed consensus and was declined by RELAY POLICY. The
+    mempool would not carry it; the chain would not have refused it, and a
+    miner not applying that policy could have included an early refund. The
+    test demonstrated something weaker than it claimed, which is the same
+    defect class as a verdict asserting more than its run supports.
+
+    This is a REGTEST ARTIFACT and not a Litecoin mainnet vulnerability --
+    BIP65 has been active there since 2015. It is a defect in the instrument.
+
+    Returns (height, how it was learned). A None height is an answer too, and
+    the caller must say that the activation height could not be read rather
+    than assume the test was run under consensus rules.
+    """
+    for source, table in _deployment_tables(node, info):
+        entry = table.get(CLTV_DEPLOYMENT)
+        if not isinstance(entry, dict):
+            continue
+        height = entry.get("height")
+        if height is None:
+            height = entry.get("bip9", {}).get("since") if isinstance(entry.get("bip9"), dict) else None
+        if height is not None:
+            return int(height), f"{source}[{CLTV_DEPLOYMENT}].height, with active={entry.get('active')}"
+    return None, (
+        "neither getblockchaininfo.softforks nor getdeploymentinfo gave a height for "
+        f"{CLTV_DEPLOYMENT}; this daemon does not say when CHECKLOCKTIMEVERIFY becomes consensus-enforced"
+    )
 
 
 def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") -> dict:
@@ -672,8 +755,9 @@ def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") 
         capabilities["subversion"] = f"(none: getnetworkinfo failed: {exc})"
 
     for method in ("signrawtransactionwithwallet", "signrawtransactionwithkey", "signrawtransaction",
-                   "importaddress", "importprivkey", "importdescriptors", "generatetoaddress"):
-        capabilities[method] = _method_exists(node, method)
+                   "importaddress", "importprivkey", "importdescriptors", "generatetoaddress",
+                   "generateblock", "getdeploymentinfo"):
+        capabilities[method] = method_exists(node, method)
 
     if wallet:
         wallet_node = adapter_for(config, wallet=wallet)
@@ -691,7 +775,7 @@ def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") 
     return capabilities
 
 
-def _method_exists(node: RegtestRPC, method: str) -> bool:
+def method_exists(node: RegtestRPC, method: str) -> bool:
     """Whether the daemon recognizes an RPC name, via `help <method>`.
 
     `help` returns a STRING for an unknown command rather than raising, on both

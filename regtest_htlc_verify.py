@@ -31,6 +31,30 @@ CLAUDE.md's verification rule is what makes that gap the outstanding work:
 were exercised on a test chain: a redeem with the preimage, and a refund after
 the timelock expired." This harness is that proof, or that refutation.
 
+WHERE THE TEST HAS TO RUN, WHICH IS NOT OBVIOUS AND COST A ROUND TRIP.
+
+CHECKLOCKTIMEVERIFY is BIP65, and BIP65 is a buried deployment with an
+ACTIVATION HEIGHT -- 1351 on both chains' regtest parameters. Below it the
+chain does not apply the opcode's script flag, so an early refund is refused
+only by the mempool's relay policy and a miner could have included it. Measured
+2026-09-25: the refund assertion ran at height 1252 on LTC and came back
+`non-mandatory-script-verify-flag`, against BTC's
+`mandatory-script-verify-flag-failed`, and the harness scored the two the same.
+
+So step 4 now mines PAST the activation height -- read from the daemon's own
+deployment table, never hardcoded -- before step 5 derives a locktime from the
+tip. That makes every run mine at least 1351 blocks per chain plus the lock
+itself (288 on BTC, 1152 on LTC), which is the cost of the assertion meaning
+what it says. The 1152 is not shortened to make it cheaper: it is what
+modules/htlc_timelock.py derives for a 48-hour LTC lock.
+
+Step 8 then asserts three things, not one: 8a that the mempool refuses a
+non-final transaction, 8b that the script itself is refused when it runs, and
+8c that the daemon refuses to MINE the early refund into a block. Only 8c
+answers "could a miner have included it", because the mempool's
+mandatory/non-mandatory wording is decided by a compile-time flag set rather
+than by the chain's rules at that height.
+
 WHAT IT DOES NOT DO.
 
 It does not fix anything. `redeem_contract()` is fund-moving code and CLAUDE.md
@@ -254,6 +278,10 @@ def print_verdicts(console: Console, outcomes: list[steps.ChainOutcome]) -> None
         return
     for outcome in outcomes:
         console.say(f"{outcome.asset}: {outcome.verdict()}")
+        # Printed per chain and separately from the branch verdict: how strong
+        # the timelock evidence is differs between daemons, and reporting two
+        # different strengths as one result is what this line exists to stop.
+        console.say(f"{outcome.asset}: {outcome.cltv_verdict()}")
         console.say(
             f"{outcome.asset}:   real create_contract()={outcome.real_create_contract}  "
             f"real redeem_contract()={outcome.real_redeem}  control hashlock spend={outcome.control_redeem}  "
