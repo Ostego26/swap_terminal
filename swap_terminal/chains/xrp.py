@@ -34,17 +34,26 @@ rippled 3.4.1 on s.altnet.rippletest.net, network_id 1:
     meta.TransactionResult                     "tesSUCCESS"
     Amount                                     "2500000" (never credited)
 
-AND IT FOUND A BUG. On that server's `ledger` response the transaction body is
-FLAT ON THE ENTRY and the metadata key is `metaData` -- not nested under `tx` or
-`tx_json`. _unwrap() looked only under those two, returned an empty dict, found
-no TransactionType and SKIPPED the payment: "no deposits" reported for money
-that had arrived. Fixed, and an unrecognizable entry now raises instead of
-becoming {}.
+account_tx WAS THEN CONFIRMED TOO, and it corrected an overstatement. A second
+run, xrp_chain_check.py against the same server, examined 20 entries and 10
+Payments on a real account:
 
-Still unverified: the `account_tx` response specifically (the probe used
-`ledger`), and whether a deposit carrying a DestinationTag looks as expected --
-none of the three payments sampled had one, which is normal for wallet-to-wallet
-traffic and says nothing either way about ours.
+    account_tx             transaction nested under `tx`     <- the shape the
+                                                             ORIGINAL code
+                                                             already handled
+    ledger (expand=true)   transaction FLAT on the entry
+    hash, TransactionType, Destination, TransactionResult,
+    delivered_amount       present in all 10
+    DestinationTag         present in 1 of 10  <- the field DOES appear on real
+                                                 traffic; the rest is ordinary
+                                                 wallet-to-wallet
+
+The flat shape had been reported as a bug that "would have lost deposits". It
+would not have: this module calls only account_tx, which nests under `tx`. The
+impact was inferred from one method's response and stated as measured, which is
+rule 17's failure inside a change about that failure. The wider _unwrap() stays
+because xrp_chain_check.py does call `ledger` -- see the full correction in
+chains/xrp_payments.py::_unwrap.
 
 Also measured: chains/xrp_address.py against the ledger's own ACCOUNT_ZERO and
 ACCOUNT_ONE constants, 2,000 round trips and every single-character mutation

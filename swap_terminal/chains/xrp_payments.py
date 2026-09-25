@@ -121,24 +121,34 @@ class PaymentScan:
 def _unwrap(entry: dict) -> tuple[dict, dict]:
     """Pull the transaction and its metadata out of a ledger entry.
 
-    THREE SHAPES, AND THE THIRD WAS FOUND BY PROBING A REAL SERVER.
+    THREE SHAPES, TWO OF THEM MEASURED ON THE SAME SERVER.
 
-    Measured 2026-09-25 against rippled 3.4.1 on s.altnet.rippletest.net, via
-    `ledger` with transactions=true and expand=true:
+    rippled 3.4.1 on s.altnet.rippletest.net, probed from the operator's host
+    on 2026-09-25, uses a DIFFERENT nesting per method:
 
-        transaction body   FLAT ON THE ENTRY   <- not under tx, not tx_json
-        metadata key       metaData            <- not meta
+        ledger (expand=true)   transaction FLAT on the entry, metadata under
+                               `metaData`
+        account_tx             transaction nested under `tx`
 
-    An earlier version of this function looked only under `tx` and `tx_json`.
-    Against that response it returned an empty dict, found no TransactionType,
-    and SKIPPED the payment -- reporting "no deposits" for money that had
-    arrived. That is the silent-empty failure this whole module is written
-    against, and it was in the module doing the writing.
+    AND THE FIRST CHARACTERIZATION OF THIS WAS WRONG, which is worth keeping
+    rather than quietly correcting. An earlier version of this function looked
+    only under `tx`/`tx_json`, and the commit that changed it claimed it "would
+    have lost deposits" -- inferred from the `ledger` shape alone, before
+    anyone had looked at `account_tx`.
 
-    So all three nestings are accepted, and a body that cannot be located at
-    all now RAISES rather than becoming {}. The difference matters: {} means
-    "not a Payment" to the caller, which is indistinguishable from a real
-    answer, while an exception says the response shape is not understood.
+    They then looked. chains/xrp.py calls ONLY account_tx, and account_tx
+    returns the `tx`-nested shape the original code handled. So the original
+    would have worked on the production path; the flat shape appears in
+    `ledger`, which no adapter method calls. The claim was a hypothesis stated
+    in the voice of a measurement (rule 17), inside a change about exactly that
+    failure.
+
+    What this function is, then, is defensive rather than a rescue: all three
+    nestings are accepted so a future caller of `ledger` -- xrp_chain_check.py
+    already is one -- cannot be silently wrong, and a body that cannot be
+    located at all RAISES rather than becoming {}. That last part is the real
+    improvement: {} means "not a Payment" to the caller, indistinguishable from
+    a real answer, while an exception says the shape is not understood.
     """
     meta = entry.get(FIELD_META) or entry.get(FIELD_META_ALT) or {}
     if isinstance(entry.get(FIELD_TX), dict):

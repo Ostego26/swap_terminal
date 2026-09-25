@@ -332,12 +332,22 @@ Confirmed: the `params: [{...}]` request shape, that errors arrive in
 `result.status` rather than the HTTP code, `reserve_base_xrp` / `reserve_inc_xrp`,
 and — the one that matters — `meta.delivered_amount` present as a **string**.
 
-**The probe found a bug.** On that server's `ledger` response the transaction
-body is **flat on the entry** and the metadata key is **`metaData`**, not nested
-under `tx`/`tx_json`. The unwrap looked only under those two, so it returned an
-empty dict and *skipped the payment silently* — reporting "no deposits" for
-money that had arrived. Fixed, and an unrecognizable entry now raises rather
-than reading as "not a Payment".
+**Two nestings are real, and which one you get depends on the method:**
+
+| method | shape |
+|---|---|
+| `ledger` (expand=true) | transaction **flat on the entry**, metadata under `metaData` |
+| `account_tx` | transaction **nested under `tx`** |
+
+The adapter calls only `account_tx`. This was first reported as a bug that
+"would have lost deposits" — it would not have: the original unwrap handled
+`tx`, which is what `account_tx` returns. The impact was inferred from `ledger`
+alone and stated as measured, before anyone had looked at `account_tx`.
+
+The wider unwrap stays anyway, because `xrp_chain_check.py` *does* call
+`ledger`, and because the genuine improvement was the other half: an entry whose
+body cannot be located now **raises** instead of returning `{}`, which read as
+"not a Payment" and was indistinguishable from a real answer.
 
 ### Run the check
 
