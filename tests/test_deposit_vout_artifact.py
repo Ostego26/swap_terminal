@@ -594,15 +594,38 @@ def test_a_dry_run_leaves_the_row_count_unchanged(tmp_path):
     conn.close()
 
 
-def test_a_dry_run_against_a_nonexistent_path_creates_no_file(tmp_path):
-    """migrate_swap_intents.py's first version created a database during a dry run.
+def test_a_dry_run_against_a_nonexistent_path_refuses_and_creates_no_file(tmp_path):
+    """Two invariants, and the second one was learned the hard way.
 
-    sqlite3.connect() creates a missing file, so this is not a hypothetical
-    hazard -- it is the one that already happened in this repository once.
+    The first: migrate_swap_intents.py's first version created a database
+    during a dry run. sqlite3.connect() creates a missing file, so that is not
+    a hypothetical hazard -- it is one that already happened in this repository.
+
+    The second, added 2026-09-25 after it happened in this script: a dry run
+    against a path that does not exist used to return 0 and print the ordinary
+    findings block, ending in `(none)  <- the database has no deposit_events
+    table` and `DRY RUN -- nothing was written`. The operator ran it against
+    the literal placeholder `/path/to/swap_terminal.db` out of a pasted command
+    and got a clean bill of health for a file that was never there.
+
+    A scan that examined NOTHING must not read like a scan that FOUND nothing:
+    the two lead to opposite conclusions about whether a database carries the
+    artifact, and this tool exists to answer exactly that question. CLAUDE.md
+    rule 14: make "did nothing" look different from "did work."
+
+    So the refusal is asserted alongside the no-file invariant rather than in a
+    test of its own -- they are two halves of one behavior, and a later change
+    that satisfied either alone would be a regression (rule 2: a test changes
+    to pin the stronger invariant).
     """
     missing = tmp_path / "does_not_exist.db"
     result = run_script(["--db", str(missing), "--run-dir", str(tmp_path / "run")])
-    assert result.returncode == 0, result.stderr
+
+    assert result.returncode == 2, f"a missing database must be REFUSED, not reported: {result.stdout}"
+    assert "does not exist" in result.stderr
+    assert "NOT a clean result" in result.stderr, "the refusal must say the silence is not an all-clear"
+    assert "affected swaps" not in result.stdout, "a findings block was printed for a database that was never read"
+
     assert not missing.exists(), "the dry run created a database"
     assert list(tmp_path.glob("*.db")) == [], f"the dry run left files behind: {list(tmp_path.iterdir())}"
 

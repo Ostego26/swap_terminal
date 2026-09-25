@@ -673,6 +673,40 @@ def migrate(db_path: Path, apply: bool, delete_ids: list[int], backup: Path | No
             f"back. Stop them first. Nothing was written."
         )
 
+    # A path that is not there is refused, in BOTH modes.
+    #
+    # --apply already refused it, inside open_database(). A DRY RUN did not: it
+    # fell back to an in-memory connection -- correct in that it created no
+    # file -- and then printed the ordinary findings block, ending in
+    #
+    #     scanned     deposit_events 0 rows across swaps 0 rows  (schema present: no)
+    #     affected swaps  0
+    #     (none)  <- the database has no deposit_events table
+    #     DRY RUN -- nothing was written ...          exit code 0
+    #
+    # Measured 2026-09-25: the operator ran this against the literal
+    # placeholder `/path/to/swap_terminal.db` out of a pasted command, and got
+    # exactly that -- a clean bill of health for a file that does not exist.
+    # Nothing in the output said the path was wrong, and the exit code agreed
+    # with it.
+    #
+    # That is CLAUDE.md rule 14's own instruction, failed by the tool written
+    # to serve it: "Make 'did nothing' look different from 'did work.'" A scan
+    # that examined nothing must not read like a scan that found nothing,
+    # because the two lead an operator to opposite conclusions about whether
+    # their database carries the artifact. The in-memory fallback in
+    # open_database() stays -- it is what makes "a dry run creates no file"
+    # true by construction rather than by remembering -- but it is no longer
+    # reachable with a report attached to it.
+    if not db_path.exists():
+        raise MigrationRefused(
+            f"{db_path} does not exist  <- nothing was scanned, and this is NOT a clean result. "
+            f"No report was printed, because a scan of nothing reads exactly like a scan that found "
+            f"nothing, and this script will not create a database to scan. Pass the real path with "
+            f"--db: it is SWAP_DB_PATH, or swap_terminal/swap_terminal.db when that is unset "
+            f"(config.py:31)."
+        )
+
     conn = open_database(db_path, apply)
     try:
         counts = scan_counts(conn)
