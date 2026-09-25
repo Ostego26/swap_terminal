@@ -221,6 +221,76 @@ def binary_version(path: str) -> str:
     return first_line[0] if first_line else f"(none: {path} -version printed nothing)"
 
 
+def daemon_help_text(path: str) -> str:
+    """The daemon's own `-help -help-debug` output, or an empty string.
+
+    Asking the binary what options it has is the only honest way to settle a
+    question like "does this build accept a deployment override". A flag
+    remembered from another codebase, passed to a daemon that does not know
+    it, makes the daemon refuse to START -- turning a mining failure several
+    hundred blocks in into a failure at step 2, which is strictly worse.
+    """
+    resolved = shutil.which(path)
+    if resolved is None:
+        return ""
+    completed = subprocess.run(  # noqa: S603 -- checked: `resolved` came from shutil.which and the argument list is two literals. No shell, nothing operator-supplied in the argv.
+        [resolved, "-help", "-help-debug"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    return (completed.stdout or "") + (completed.stderr or "")
+
+
+def mweb_override_args(help_text: str) -> tuple[list[str], str]:
+    """Arguments that keep Litecoin's MWEB deployment from activating, if this build has any.
+
+    MEASURED ON THE OPERATOR'S MACHINE 2026-09-25. Mining toward the LTC
+    locktime died several hundred blocks in:
+
+        generatetoaddress: code=-1 message=CreateNewBlock: TestBlockValidity
+        failed: bad-txns-vin-empty, Transaction check failed (tx hash 58338ec7...)
+
+    A transaction with NO INPUTS, in a block the daemon was assembling for
+    itself, is not something an HTLC test can produce. Litecoin 0.21.x carries
+    Mimblewimble Extension Blocks, whose integrating "HogEx" transaction is
+    exactly a transaction whose input structure a generic `CheckTransaction`
+    can read as vin-empty, and MWEB activates by height -- which is why the
+    first few hundred blocks mined fine and then one did not.
+
+    THAT IS A HYPOTHESIS AND THE HARNESS TREATS IT AS ONE (rule 17). It cannot
+    be tested from the machine this was written on: there is no litecoind here
+    and none can be installed. So the harness does three things instead of
+    assuming: it prints `getblockchaininfo.softforks` for both chains so the
+    daemon states MWEB's status and activation height itself; it asks THIS
+    binary which options it accepts rather than passing a remembered flag; and
+    if the daemon refuses to start with what it picked, it says so and starts
+    again without it.
+
+    `-vbparams=<deployment>:<start>:<timeout>` is the regtest-only versionbits
+    override inherited from Bitcoin Core. A deployment whose start and timeout
+    are both zero is STARTED and immediately timed out, so it reaches FAILED
+    and never activates -- the conventional way to switch a deployment off on
+    regtest. `mweb` is the deployment name Litecoin gives it.
+
+    Returns (args, explanation). An empty arg list with an explanation is a
+    perfectly good answer and says so on screen.
+    """
+    if not help_text:
+        return [], "could not read the daemon's -help output, so no deployment override was attempted"
+    if "-vbparams" not in help_text:
+        return [], (
+            "this build does not advertise -vbparams, so there is no deployment override to apply. "
+            "If mining fails with bad-txns-vin-empty, MWEB cannot be switched off from the command line here"
+        )
+    return (
+        ["-vbparams=mweb:0:0"],
+        "this build advertises -vbparams, so MWEB is held at start=0/timeout=0, which reaches FAILED and never "
+        "activates. If the daemon refuses to start with it, the harness retries without it and says so",
+    )
+
+
 def check_binaries(console: Console, config: ChainConfig) -> str:
     """Step 1 for one chain: the daemon and the cli exist, and say which build."""
     console.say(f"looking for {config.daemon_path} and {config.cli_path} on PATH")
@@ -315,6 +385,79 @@ class RegtestRPC(RPCAdapter):
         return data.get("result")
 
 
+# How far to walk an exception's __cause__ / __context__ chain looking for the
+# HTTP response. Two is enough for every wrapper in this tree and stops a
+# pathological chain from turning a diagnosis into a loop.
+_EXCEPTION_CHAIN_DEPTH = 4
+# Body text is truncated before printing: an HTML error page in a terminal
+# helps nobody, and the JSON-RPC message is always at the front.
+_BODY_EXCERPT = 400
+
+
+def _response_of(exc: BaseException):
+    """Find the requests Response on an exception, or on what it was raised from.
+
+    BOTH HALVES ARE NEEDED, and the second is why the first live run showed
+    nothing useful for LTC. `requests.HTTPError` carries `.response` directly,
+    which is what modules/atomic_btc_client.py re-raises. But
+    modules/atomic_ltc_client.py catches it and raises
+
+        Exception(f"LTC RPC request failed: {e}") from e
+
+    so the object the harness catches has no `.response` at all -- the response
+    is on `__cause__`. Walking the chain is the difference between "HTTPError:
+    500 Server Error" and the daemon's own code and message.
+    """
+    seen = exc
+    for _ in range(_EXCEPTION_CHAIN_DEPTH):
+        if seen is None:
+            return None
+        response = getattr(seen, "response", None)
+        if response is not None:
+            return response
+        seen = seen.__cause__ or seen.__context__
+    return None
+
+
+def describe_rpc_exception(exc: BaseException) -> str:
+    """The exception, plus the JSON-RPC error the daemon put in the body.
+
+    WHY THIS EXISTS. The three real clients call `response.raise_for_status()`
+    BEFORE parsing, so on any daemon that answers an RPC error with a non-2xx
+    status -- which is every pre-JSON-RPC-2.0 daemon, and Bitcoin Core itself
+    for a `"jsonrpc": "1.0"` request -- the body is discarded and the caller
+    gets a bare status line. Measured on the operator's machine 2026-09-25:
+    both chains reported
+
+        XFAIL REAL redeem_contract(): got=HTTPError: 500 Server Error ...
+
+    and the harness could say nothing about which defect caused it, because
+    the sentence that would have said was thrown away three frames down.
+
+    The response object survives on the exception, so the harness reads it
+    there. This changes nothing about the clients -- they are fund-path code
+    (rule 16) and the defect is reported, not patched -- it only means the
+    harness stops repeating a status code where a diagnosis was available.
+    """
+    base = f"{type(exc).__name__}: {exc}"
+    response = _response_of(exc)
+    if response is None:
+        return base
+    try:
+        payload = response.json()
+    except ValueError:
+        body = (getattr(response, "text", "") or "").strip()
+        excerpt = body[:_BODY_EXCERPT] if body else "(none: empty body)"
+        return f"{base} -- HTTP {response.status_code}, non-JSON body: {excerpt}"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        return (
+            f"{base} -- the daemon said code={error.get('code')} message={error.get('message')} "
+            f"(HTTP {response.status_code})"
+        )
+    return f"{base} -- HTTP {response.status_code}, body carried no error object: {payload!r}"
+
+
 def adapter_for(config: ChainConfig, wallet: str = "") -> RegtestRPC:
     """An RPCAdapter pointed at this chain, optionally at one wallet endpoint.
 
@@ -380,15 +523,21 @@ def start_daemon(console: Console, config: ChainConfig) -> bool:
     if resolved is None:
         raise RegtestSetupError(f"{config.daemon_path} vanished between step 1 and step 2; not on PATH")
 
-    argv = [resolved, f"-datadir={config.datadir}", "-regtest", "-daemon", *config.extra_args]
-    console.say(f"{config.asset}: starting {' '.join(argv)}")
-    completed = subprocess.run(  # noqa: S603 -- checked: `resolved` is from shutil.which; the datadir and the extra args come from this harness's own flags and defaults, never from a network source. No shell.
-        argv,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    base_argv = [resolved, f"-datadir={config.datadir}", "-regtest", "-daemon"]
+    completed = _spawn(console, config, base_argv + config.extra_args)
+    if completed.returncode != 0 and config.extra_args:
+        # A daemon that will not start because of an option the harness ADDED
+        # must not become a step-2 failure for the operator. Say exactly what
+        # it refused, then start it the plain way -- the run continues, and
+        # whatever the option was for is reported as not applied rather than
+        # silently assumed.
+        console.say(
+            f"{config.asset}: refused to start with {' '.join(config.extra_args)} -- "
+            f"{completed.stderr.strip() or completed.stdout.strip() or '(none: it said nothing)'}"
+        )
+        console.say(f"{config.asset}: retrying WITHOUT those options; whatever they were for is NOT in effect")
+        config.extra_args.clear()
+        completed = _spawn(console, config, base_argv)
     if completed.returncode != 0:
         raise RegtestSetupError(
             f"{config.asset} daemon refused to start (exit {completed.returncode}). "
@@ -397,6 +546,17 @@ def start_daemon(console: Console, config: ChainConfig) -> bool:
             "stop it, or rerun with --wipe."
         )
     return True
+
+
+def _spawn(console: Console, config: ChainConfig, argv: list[str]):
+    console.say(f"{config.asset}: starting {' '.join(argv)}")
+    return subprocess.run(  # noqa: S603 -- checked: argv[0] is from shutil.which; the datadir and the options come from this harness's own defaults and its own -help probe, never from a network source. No shell.
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
 
 
 def wait_for_rpc(console: Console, config: ChainConfig) -> None:
@@ -461,7 +621,39 @@ def assert_regtest(console: Console, config: ChainConfig) -> dict:
             "network, and there is no flag to override this."
         )
     console.check(f"{config.asset} network", chain, "regtest", OK)
+    report_softforks(console, config, info)
     return info
+
+
+def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
+    """Print each deployment and its status, from the daemon's own mouth.
+
+    This exists for one measured reason. Mining toward the LTC locktime died
+    with `bad-txns-vin-empty` several hundred blocks in, and Mimblewimble
+    Extension Blocks -- which activate BY HEIGHT on Litecoin -- are the leading
+    hypothesis. A hypothesis about an activation height is settled by asking
+    the daemon what its activation heights are, not by reasoning about them, so
+    this block is printed before anything mines. If MWEB shows active, or
+    active at a height the run will cross, the later failure has its
+    explanation attached to it rather than inferred afterwards.
+
+    Never an empty block (rule 14): a daemon with no softforks field says so.
+    """
+    softforks = info.get("softforks")
+    if not softforks:
+        console.say(f"{config.asset}: softforks reported by the daemon: (none: no `softforks` field in getblockchaininfo)")
+        return
+    for name, detail in sorted(softforks.items()):
+        if isinstance(detail, dict):
+            kind = detail.get("type")
+            height = detail.get("height", detail.get("bip9", {}).get("since"))
+            active = detail.get("active")
+            console.say(
+                f"{config.asset}: softfork {name}: type={kind} active={active} "
+                f"height={height if height is not None else '(none)'} (a height, not a duration)"
+            )
+        else:
+            console.say(f"{config.asset}: softfork {name}: {detail}")
 
 
 def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") -> dict:

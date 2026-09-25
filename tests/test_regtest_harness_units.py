@@ -46,6 +46,7 @@ from io import StringIO
 
 import base58
 import pytest
+import requests
 from chains.base import RPCError
 from ecdsa import SECP256k1, VerifyingKey
 from ecdsa.util import sigdecode_der
@@ -55,16 +56,27 @@ from modules.atomic_htlc_scripts import (
     script_to_p2sh_address,
 )
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console, redact, value
-from regtest.daemons import RegtestRPC, RegtestSetupError, resolve_chain_config
+from regtest.daemons import (
+    RegtestRPC,
+    RegtestSetupError,
+    describe_rpc_exception,
+    mweb_override_args,
+    resolve_chain_config,
+)
 from regtest.keys import RegtestKey, generate_key, hash160
 from regtest.steps import (
+    REDEEM_FAILED_ON_BROADCAST,
+    REDEEM_FAILED_ON_FEE_POLICY,
     REDEEM_FAILED_ON_LOOKUP,
     REDEEM_FAILED_ON_SIGNING,
+    REDEEM_FAILED_ON_WALLET_CAPABILITY,
     REDEEM_FAILED_UNCLASSIFIED,
     ChainOutcome,
     Mined,
+    RedeemAttempt,
     Run,
     _find_vout_by_script,
+    _mining_failure,
     _p2sh_script_for,
     _verbose_tx,
     classify_redeem_failure,
@@ -550,7 +562,15 @@ def test_verdict_when_only_the_refund_branch_spends():
 
 
 def test_verdict_when_the_script_is_sound_but_the_client_is_not():
-    outcome = ChainOutcome(asset="BTC", real_redeem=XFAIL, control_redeem=OK, refund_after_expiry=OK)
+    """Only claimable when the node was actually asked to build a scriptSig."""
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=XFAIL,
+        real_redeem_stage=REDEEM_FAILED_ON_SIGNING,
+        reached_the_signer=True,
+        control_redeem=OK,
+        refund_after_expiry=OK,
+    )
     verdict = outcome.verdict()
     assert "SCRIPT is sound" in verdict
     assert "only by refund" in verdict
@@ -561,14 +581,17 @@ def test_verdict_when_both_branches_spend_through_real_code():
     assert "both branches spend" in outcome.verdict()
 
 
-def test_verdict_when_the_refund_branch_is_the_broken_one():
+def test_verdict_when_the_refund_branch_was_exercised_and_failed():
+    """FAIL means tried and did not spend -- which is a claim, unlike SKIP."""
     outcome = ChainOutcome(asset="BTC", real_redeem=XFAIL, control_redeem=OK, refund_after_expiry=FAIL)
-    assert "REFUND branch does not" in outcome.verdict()
+    verdict = outcome.verdict()
+    assert "was exercised and did NOT spend" in verdict
+    assert "NOT TESTED" not in verdict
 
 
 def test_verdict_refuses_to_conclude_when_nothing_was_shown():
     outcome = ChainOutcome(asset="LTC")
-    assert "neither branch was shown to spend" in outcome.verdict()
+    assert "NOTHING WAS ESTABLISHED" in outcome.verdict()
 
 
 # --------------------------------------------------------------------------
@@ -852,7 +875,149 @@ def test_the_verdict_does_judge_a_redeem_that_reached_signing_and_failed():
         asset="BTC",
         real_redeem=XFAIL,
         real_redeem_stage=REDEEM_FAILED_ON_SIGNING,
+        reached_the_signer=True,
         control_redeem=OK,
         refund_after_expiry=OK,
     )
     assert "CANNOT spend the hashlock branch" in outcome.verdict()
+
+
+# --------------------------------------------------------------------------
+# measured on the operator's machine 2026-09-25: LTC died mining toward the
+# locktime, and the verdict then asserted something the run never established
+# --------------------------------------------------------------------------
+
+
+def test_a_refund_branch_that_was_never_exercised_is_not_reported_as_broken():
+    """The LTC verdict said "the REFUND branch does not spend" after steps 8 and 9 never ran.
+
+    That asserted the opposite of what BTC proved about the same script builder
+    on the same day. SKIP is a third state and the verdict has to honor it.
+    """
+    outcome = ChainOutcome(asset="LTC", real_redeem=XFAIL, control_redeem=OK, refund_after_expiry=SKIP)
+    verdict = outcome.verdict()
+    assert "NOT TESTED" in verdict
+    assert "says nothing about it in either direction" in verdict
+    assert "does not" not in verdict.lower().replace("did not run", "")
+
+
+def test_a_mining_failure_names_mweb_as_a_hypothesis_and_says_so():
+    run = Run(console=Console(total_steps=9, stream=StringIO()), config=resolve_chain_config("LTC"))
+    error = _mining_failure(
+        run,
+        RPCError("generatetoaddress: code=-1 message=CreateNewBlock: TestBlockValidity failed: bad-txns-vin-empty"),
+        288,
+        1148,
+    )
+    message = str(error)
+    assert "288 of 1148 blocks" in message
+    assert "Mimblewimble" in message
+    assert "HYPOTHESIS, not a measurement" in message
+    assert "softfork table" in message
+    assert "locktime is NOT shortened" in message
+
+
+def test_a_mining_failure_that_is_not_vin_empty_does_not_blame_mweb():
+    run = Run(console=Console(total_steps=9, stream=StringIO()), config=resolve_chain_config("LTC"))
+    message = str(_mining_failure(run, RPCError("generatetoaddress: code=-1 message=out of memory"), 10, 20))
+    assert "Mimblewimble" not in message
+    assert "daemon-side condition" in message
+
+
+def test_the_mweb_override_is_taken_from_the_binarys_own_help():
+    args, explanation = mweb_override_args("  -vbparams=<deployment:start:end>\n       Use given start/end times")
+    assert args == ["-vbparams=mweb:0:0"]
+    assert "advertises -vbparams" in explanation
+
+
+def test_no_mweb_override_is_invented_when_the_binary_does_not_offer_one():
+    args, explanation = mweb_override_args("  -printtoconsole\n       Send trace/debug info to console")
+    assert args == []
+    assert "does not advertise -vbparams" in explanation
+
+
+def test_an_unreadable_help_output_is_not_treated_as_a_missing_flag():
+    args, explanation = mweb_override_args("")
+    assert args == []
+    assert "could not read the daemon's -help output" in explanation
+
+
+# --------------------------------------------------------------------------
+# measured the same run: both XFAILs printed a bare HTTP status because the
+# clients discard the body that carried the daemon's own diagnosis
+# --------------------------------------------------------------------------
+
+
+def _http_error(status, payload=None, text="", wrap=False):
+    """An exception shaped like the one each real client actually raises."""
+    error = requests.HTTPError(f"{status} Server Error")
+    error.response = _StubResponse(status, payload, text)
+    if wrap:
+        # modules/atomic_ltc_client.py does exactly this, which is why the
+        # response is on __cause__ rather than on the exception itself.
+        # Built by hand rather than by raising and catching: the point is the
+        # __cause__ link, and constructing it directly keeps this helper from
+        # needing a blind except in a file that asserts on blind excepts.
+        wrapped = Exception(f"LTC RPC request failed: {error}")
+        wrapped.__cause__ = error
+        return wrapped
+    return error
+
+
+def test_the_daemons_error_is_read_off_an_httperror():
+    payload = {"error": {"code": -5, "message": "No such mempool transaction. Use -txindex"}}
+    described = describe_rpc_exception(_http_error(500, payload))
+    assert "code=-5" in described
+    assert "No such mempool transaction" in described
+
+
+def test_the_daemons_error_is_read_off_a_wrapped_exception():
+    """The LTC client re-raises a plain Exception `from e`, so .response is on __cause__."""
+    payload = {"error": {"code": -4, "message": "Only legacy wallets are supported by this command"}}
+    described = describe_rpc_exception(_http_error(500, payload, wrap=True))
+    assert "code=-4" in described
+    assert "Only legacy wallets" in described
+
+
+def test_an_exception_with_no_response_still_describes_itself():
+    described = describe_rpc_exception(ValueError("plain"))
+    assert described == "ValueError: plain"
+
+
+def test_a_non_json_error_body_is_excerpted_rather_than_dropped():
+    described = describe_rpc_exception(_http_error(403, None, text="<html>nope</html>"))
+    assert "HTTP 403" in described
+    assert "nope" in described
+
+
+# --------------------------------------------------------------------------
+# the five failure shapes, so an XFAIL is a diagnosis rather than a shrug
+# --------------------------------------------------------------------------
+
+
+def test_a_descriptor_wallet_refusal_is_not_read_as_the_preimage_defect():
+    assert classify_redeem_failure(
+        "HTTPError: 500 -- the daemon said code=-4 message=Only legacy wallets are supported by this command"
+    ) == REDEEM_FAILED_ON_WALLET_CAPABILITY
+
+
+def test_a_script_verify_rejection_is_the_strongest_form_of_the_finding():
+    assert classify_redeem_failure(
+        "code=-26 message=mandatory-script-verify-flag-failed (Locktime requirement not satisfied)"
+    ) == REDEEM_FAILED_ON_BROADCAST
+
+
+def test_an_absurd_fee_rejection_is_the_fee_defect_and_not_the_script():
+    """It also proves signing SUCCEEDED, so it must not be filed under broadcast."""
+    assert classify_redeem_failure("code=-26 message=absurdly-high-fee") == REDEEM_FAILED_ON_FEE_POLICY
+
+
+def test_stages_before_signing_mean_the_preimage_question_was_never_asked():
+    lookup = RedeemAttempt(succeeded=False, detail="x", stage=REDEEM_FAILED_ON_LOOKUP)
+    capability = RedeemAttempt(succeeded=False, detail="x", stage=REDEEM_FAILED_ON_WALLET_CAPABILITY)
+    signing = RedeemAttempt(succeeded=False, detail="x", stage=REDEEM_FAILED_ON_SIGNING)
+    spent = RedeemAttempt(succeeded=True, detail="txid=ab", stage="")
+    assert lookup.reached_the_signer is False
+    assert capability.reached_the_signer is False
+    assert signing.reached_the_signer is True
+    assert spent.reached_the_signer is True

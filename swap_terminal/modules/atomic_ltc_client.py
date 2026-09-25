@@ -44,6 +44,35 @@ the odd one out; where none is named, no two agree.
   balance fallback guarded   yes                 NO try around it    yes                 LTC
   default creds in __main__  no                  YES, a literal      no                  LTC
 
+MEASURED ON REGTEST 2026-09-25, and it changes what the `addresses` row above
+means. `regtest_htlc_verify.py` ran both chains against real daemons and
+printed each one's scriptPubKey fields:
+
+  BTC, Bitcoin Core 28.1.0    ['address', 'asm', 'desc', 'hex', 'type']
+  LTC, Litecoin Core 0.21.4   ['addresses', 'asm', 'hex', 'reqSigs', 'type']
+
+So the reliance on `scriptPubKey.addresses` in modules/utils.wait_for_tx_output()
+and LTCClient.create_contract() is VERSION-DEPENDENT, not universal: Bitcoin
+Core deprecated the field in 0.20 and removed it in 22.0, and Litecoin 0.21.4
+still returns it. The real LTCClient.create_contract() therefore SUCCEEDED on
+regtest (txid=232594016d..., vout=0) while BTCClient.create_contract() failed --
+and BTC's failure was a DIFFERENT cause, `importaddress` refusing on a
+descriptor wallet, which Core 28.1 creates by default.
+
+Two consequences worth stating, because the first is easy to read backwards:
+LTC's create_contract works today only because its daemon is four years behind,
+and it will break the moment that daemon is upgraded past the removal. And the
+BTC failure is not fixed by restoring `addresses`; it is a legacy-wallet RPC on
+a wallet type that no longer supports one.
+
+A THIRD DEFECT, MEASURED THE SAME DAY AND SHARED BY ALL THREE CLIENTS.
+redeem_contract()'s first statement is `getrawtransaction(contract_txid, True)`,
+which searches only the mempool. On any node without -txindex -- the default --
+it cannot see a contract that has been CONFIRMED, so the redeem path fails
+before it reaches signing on exactly the contracts a real swap would redeem.
+`gettransaction`, or `getrawtransaction` with the contract's block hash, both
+work without an index.
+
 Two of those are worth reading twice. LTC's `create_contract` takes
 `secret_hash` FIFTH and OPTIONAL while the other two take it SECOND and
 required, so a caller that passes positionally in the BTC/GRC order builds an

@@ -82,7 +82,14 @@ from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime, describe_lo
 from modules.utils import generate_secret, sha256_hash
 from regtest import daemons
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console, redact
-from regtest.daemons import COINBASE_MATURITY_HEIGHT, ChainConfig, RegtestSetupError
+from regtest.daemons import (
+    COINBASE_MATURITY_HEIGHT,
+    ChainConfig,
+    RegtestSetupError,
+    daemon_help_text,
+    describe_rpc_exception,
+    mweb_override_args,
+)
 from regtest.keys import RegtestKey, generate_key, hash160
 from regtest.txbuild import Outpoint, build_branch_spend, coins_to_satoshis, describe_script_sig
 
@@ -188,6 +195,15 @@ class ChainOutcome:
     # branch" about a call that never reached the signing step -- see
     # classify_redeem_failure().
     real_redeem_stage: str = ""
+    # 7a: the same call against a CONFIRMED contract, which is the path a real
+    # swap takes. Recorded separately because it fails for a different reason
+    # and is a finding in its own right.
+    real_redeem_confirmed: str = SKIP
+    real_redeem_confirmed_stage: str = ""
+    # Whether any attempt got far enough for the node to be asked to build a
+    # scriptSig. When this is False the run says nothing about the preimage,
+    # and the verdict must not pretend otherwise.
+    reached_the_signer: bool = False
     control_redeem: str = SKIP
     refund_before_expiry_rejected: str = SKIP
     refund_after_expiry: str = SKIP
@@ -198,38 +214,82 @@ class ChainOutcome:
 
         This is the single most valuable line the harness prints, so it is
         assembled from the recorded outcomes rather than from anything a step
-        decided in passing.
+        decided in passing -- and it distinguishes THREE states per branch, not
+        two:
+
+            OK    the branch was exercised and spent.
+            FAIL  the branch was exercised and did not spend.
+            SKIP  the branch was NEVER EXERCISED.
+
+        MEASURED 2026-09-25, and this is why the third state had to exist. On
+        LTC, mining toward the locktime failed, so steps 8 and 9 never ran --
+        and the verdict said "the hashlock branch spends and the REFUND branch
+        does not". That asserted a conclusion the run did not reach, about the
+        same script builder BTC had just proven correct on the same day. A step
+        that did not execute is not evidence about the branch it would have
+        exercised, and saying otherwise is worse than saying nothing.
         """
         hashlock_by_real_client = self.real_redeem == OK
         hashlock_by_control = self.control_redeem == OK
-        timelock = self.refund_after_expiry == OK
-        if hashlock_by_real_client and timelock:
+        timelock_ran = self.refund_after_expiry in (OK, FAIL)
+        timelock_ok = self.refund_after_expiry == OK
+
+        if not timelock_ran:
+            return self._verdict_without_a_refund_test(hashlock_by_real_client or hashlock_by_control)
+
+        if hashlock_by_real_client and timelock_ok:
             return "both branches spend: the real redeem_contract() worked and the refund worked"
-        if hashlock_by_control and timelock:
-            if self.real_redeem_stage == REDEEM_FAILED_ON_LOOKUP:
-                # The real call fell over before signing, so this run cannot
-                # say whether it would have pushed the preimage. Say what was
-                # measured and not one word more (rule 17).
-                return (
-                    "the SCRIPT is sound -- both branches spend when the scriptSig is built correctly. The real "
-                    "redeem_contract() was NOT judged on the hashlock branch: it failed earlier, on its own "
-                    "getrawtransaction lookup of the contract, and never reached signing. What is measured is that "
-                    "a funded contract is spendable by refund and by a correctly built hashlock spend; whether "
-                    "redeem_contract() pushes the preimage remains inferred from the source."
-                )
-            return (
-                "the SCRIPT is sound -- both branches spend when the scriptSig is built correctly -- but the real "
-                "redeem_contract() CANNOT spend the hashlock branch. A funded contract is recoverable in practice "
-                "only by refund, until redeem_contract() pushes the preimage."
-            )
-        if timelock and not hashlock_by_control:
+
+        if hashlock_by_control and timelock_ok:
+            return self._verdict_with_a_working_script()
+
+        if timelock_ok and not hashlock_by_control:
             return (
                 "ONLY THE REFUND BRANCH SPENDS. Neither the real client nor a correctly built scriptSig could take "
                 "the hashlock branch, which points at the redeem SCRIPT rather than at the client."
             )
-        if hashlock_by_control and not timelock:
-            return "the hashlock branch spends and the REFUND branch does not -- the timelock path is broken"
+
+        if hashlock_by_control and not timelock_ok:
+            return (
+                "the hashlock branch spends and the REFUND branch was exercised and did NOT spend -- the timelock "
+                "path is broken"
+            )
+
         return "neither branch was shown to spend; read the failures above before concluding anything"
+
+    def _verdict_with_a_working_script(self) -> str:
+        """Both branches spend under a correct scriptSig. What can be said about the CLIENT?"""
+        if not self.reached_the_signer:
+            # The real call fell over before the node was ever asked to build a
+            # scriptSig, so this run cannot say whether it would have pushed the
+            # preimage. Say what was measured, and no more (rule 17).
+            return (
+                "the SCRIPT is sound -- both branches spend when the scriptSig is built correctly. The real "
+                f"redeem_contract() was NOT judged on the hashlock branch: it failed earlier (stage "
+                f"'{self.real_redeem_stage or self.real_redeem_confirmed_stage}') and never reached signing. "
+                "What is measured is that a funded contract is spendable by refund and by a correctly built "
+                "hashlock spend; whether redeem_contract() pushes the preimage remains inferred from the source."
+            )
+        return (
+            "the SCRIPT is sound -- both branches spend when the scriptSig is built correctly -- but the real "
+            f"redeem_contract() CANNOT spend the hashlock branch (it failed at the '{self.real_redeem_stage}' "
+            "stage, with the node asked and refusing). A funded contract is recoverable in practice only by "
+            "refund, until redeem_contract() pushes the preimage."
+        )
+
+    def _verdict_without_a_refund_test(self, hashlock_spends: bool) -> str:
+        """Steps 8 and 9 never executed. Say what was and was not measured, and stop."""
+        if hashlock_spends:
+            return (
+                "the HASHLOCK branch spends. The REFUND branch was NOT TESTED on this chain -- steps 8 and 9 did "
+                "not run -- so this run says nothing about it in either direction. Read the failure above for why "
+                "they did not run; a step that did not execute is not evidence about the branch it would have "
+                "exercised."
+            )
+        return (
+            "NOTHING WAS ESTABLISHED about either branch on this chain. The refund branch was never exercised "
+            "(steps 8 and 9 did not run) and the hashlock branch did not spend. Read the failures above."
+        )
 
 
 @dataclass
@@ -270,6 +330,30 @@ def _p2sh_script_for(redeem_script: bytes) -> bytes:
 def step_1_binaries(run: Run) -> None:
     run.step(1, "binaries present, versions printed")
     daemons.check_binaries(run.console, run.config)
+
+
+def apply_mweb_override(run: Run) -> None:
+    """Ask THIS litecoind whether it can hold MWEB inactive, and set it if so.
+
+    Runs between steps 1 and 2 -- after the binary is confirmed present, before
+    it is started -- because it works by reading the binary's own `-help`
+    output. See regtest.daemons.mweb_override_args for the measurement that
+    made this necessary and for why the flag is discovered rather than
+    remembered.
+
+    Everything it decides is printed. An override that could not be applied is
+    a result and says so; it is not a silent no-op.
+    """
+    args, explanation = mweb_override_args(daemon_help_text(run.config.daemon_path))
+    run.say(f"MWEB deployment override: {explanation}")
+    if args:
+        run.config.extra_args.extend(args)
+        run.say(f"MWEB deployment override: passing {' '.join(args)} to the daemon")
+    else:
+        run.say(
+            "MWEB deployment override: none applied. If mining toward the locktime fails with bad-txns-vin-empty, "
+            "that is the failure this would have prevented, and step 2's softfork listing says whether MWEB is why."
+        )
 
 
 def step_2_daemon(run: Run) -> bool:
@@ -334,7 +418,10 @@ def _mine(run: Run, blocks: int) -> Mined:
     hashes: list[str] = []
     while remaining > 0:
         batch = min(MINE_BATCH_BLOCKS, remaining)
-        hashes.extend(node.call("generatetoaddress", batch, address) or [])
+        try:
+            hashes.extend(node.call("generatetoaddress", batch, address) or [])
+        except RPCError as exc:
+            raise _mining_failure(run, exc, blocks - remaining, blocks) from exc
         remaining -= batch
         height = int(node.call("getblockcount"))
         run.say(
@@ -342,6 +429,51 @@ def _mine(run: Run, blocks: int) -> Mined:
             f"{format_duration(time.monotonic() - started)} elapsed"
         )
     return Mined(height=int(node.call("getblockcount")), hashes=hashes)
+
+
+# The daemon's wording when a block it assembled for itself fails validation
+# with a transaction that has no inputs. See _mining_failure().
+_VIN_EMPTY_MARKERS = ("bad-txns-vin-empty", "testblockvalidity")
+
+
+def _mining_failure(run: Run, exc: RPCError, mined_so_far: int, requested: int) -> RegtestSetupError:
+    """Turn a generatetoaddress refusal into something an operator can act on.
+
+    MEASURED ON THE OPERATOR'S MACHINE 2026-09-25: mining toward the LTC
+    locktime ran 288 blocks and then the daemon refused to assemble the next
+    one, reporting a transaction with no inputs. That ended the LTC run before
+    steps 8 and 9, and the only thing on screen was the RPC error.
+
+    A block the daemon built ITSELF failing its own validity check is not
+    something this harness can cause -- it broadcasts nothing between mining
+    batches -- so the diagnosis names the leading hypothesis, points at the
+    evidence printed earlier in the run, and says plainly that it is a
+    hypothesis. It does NOT shorten the locktime to route around it: 1152
+    blocks is what modules/htlc_timelock.py derives for a 48-hour LTC lock, and
+    a test that quietly uses a different number is measuring a different
+    contract.
+    """
+    lowered = str(exc).lower()
+    detail = (
+        f"{run.asset}: mining failed after {mined_so_far} of {requested} blocks "
+        f"(a count of blocks, not a duration): {exc}"
+    )
+    if not any(marker in lowered for marker in _VIN_EMPTY_MARKERS):
+        return RegtestSetupError(
+            f"{detail}. This harness broadcasts nothing between mining batches, so a block the daemon assembled "
+            "for itself failing validation is a daemon-side condition. Read step 2's softfork listing above."
+        )
+    applied = " ".join(run.config.extra_args) or "(none: no deployment override was applied)"
+    return RegtestSetupError(
+        f"{detail}. A transaction with NO INPUTS in a block the daemon built for itself points at Litecoin's "
+        "Mimblewimble Extension Blocks: MWEB activates BY HEIGHT and adds an integrating HogEx transaction whose "
+        "input structure a generic transaction check can read as vin-empty, which is why several hundred blocks "
+        "mined first and then one did not. THAT IS A HYPOTHESIS, not a measurement -- step 2 printed this daemon's "
+        "own softfork table, including MWEB's status and activation height, and that is the evidence to read. "
+        f"Deployment options this harness passed: {applied}. If none were applied, this build did not advertise "
+        "-vbparams; rerun with --wipe after adding one by hand if your build takes a different flag. The locktime "
+        "is NOT shortened to avoid this: 1152 blocks is what a 48-hour LTC lock derives to."
+    )
 
 
 def _verbose_tx(node, txid: str, block_hash: str | None = None) -> dict:
@@ -616,7 +748,7 @@ def _attempt_real_create_contract(run: Run, client, contract: Contract) -> Outpo
     try:
         result = client.create_contract(**kwargs)
     except Exception as exc:  # noqa: BLE001 -- checked: this is the measurement. Any failure of the real fund path is the answer this step exists to record; it is reported verbatim with its type, and the harness then funds the same contract itself so steps 7-9 can still run. Nothing downstream reads a value from the failed call.
-        run.check("REAL create_contract()", f"{type(exc).__name__}: {exc}", "a funded contract", FAIL)
+        run.check("REAL create_contract()", describe_rpc_exception(exc), "a funded contract", FAIL)
         run.say(
             "the real fund path did not complete. The harness will fund the SAME contract itself so that steps 7-9 "
             "still measure the redeem and refund branches. This is reported, not papered over."
@@ -709,13 +841,38 @@ def _broadcast(run: Run, raw_hex: str) -> str:
 # a confirmation of anything (rule 17).
 REDEEM_FAILED_ON_LOOKUP = "lookup"
 REDEEM_FAILED_ON_SIGNING = "signing"
+REDEEM_FAILED_ON_WALLET_CAPABILITY = "wallet-capability"
+REDEEM_FAILED_ON_BROADCAST = "broadcast"
+REDEEM_FAILED_ON_FEE_POLICY = "fee-policy"
 REDEEM_FAILED_UNCLASSIFIED = "unclassified"
 
-# Fragments of the daemon's own wording for "I cannot find that transaction
-# without an index". Matched on the message because the harness must not
-# depend on which of the two clients' exception wrappers the text arrived in.
-_LOOKUP_FAILURE_MARKERS = ("no such mempool transaction", "-txindex", "code=-5", "'code': -5")
-_SIGNING_FAILURE_MARKERS = ("signing incomplete", "complete': false", "complete\": false")
+# The daemon's own wording, matched on the message because the harness must not
+# depend on which of the two clients' exception wrappers the text arrived in --
+# and because, since 2026-09-25, the message carries the daemon's `code` and
+# `message` read off the discarded response body (daemons.describe_rpc_exception).
+#
+# ORDER MATTERS and the order below is the order they are checked. Fee policy
+# before broadcast, because `absurdly-high-fee` also arrives as code=-26 and is
+# a completely different finding from a script that would not verify.
+_FEE_POLICY_MARKERS = ("absurdly-high-fee", "max-fee-exceeded", "maxfeerate")
+_BROADCAST_MARKERS = ("mandatory-script-verify-flag-failed", "non-mandatory-script-verify-flag", "code=-26")
+_LOOKUP_MARKERS = ("no such mempool transaction", "-txindex", "code=-5", "'code': -5")
+_SIGNING_MARKERS = ("signing incomplete", "complete': false", "complete\": false", "unable to sign")
+_WALLET_CAPABILITY_MARKERS = (
+    "only legacy wallets",
+    "method not found",
+    "-32601",
+    "is not available due to",
+    "wallet file verification",
+)
+
+_FAILURE_MARKERS = (
+    (REDEEM_FAILED_ON_FEE_POLICY, _FEE_POLICY_MARKERS),
+    (REDEEM_FAILED_ON_BROADCAST, _BROADCAST_MARKERS),
+    (REDEEM_FAILED_ON_LOOKUP, _LOOKUP_MARKERS),
+    (REDEEM_FAILED_ON_SIGNING, _SIGNING_MARKERS),
+    (REDEEM_FAILED_ON_WALLET_CAPABILITY, _WALLET_CAPABILITY_MARKERS),
+)
 
 
 def classify_redeem_failure(message: str) -> str:
@@ -737,10 +894,9 @@ def classify_redeem_failure(message: str) -> str:
     of a measurement, so the two are separated here and reported differently.
     """
     lowered = message.lower()
-    if any(marker in lowered for marker in _LOOKUP_FAILURE_MARKERS):
-        return REDEEM_FAILED_ON_LOOKUP
-    if any(marker in lowered for marker in _SIGNING_FAILURE_MARKERS):
-        return REDEEM_FAILED_ON_SIGNING
+    for kind, markers in _FAILURE_MARKERS:
+        if any(marker in lowered for marker in markers):
+            return kind
     return REDEEM_FAILED_UNCLASSIFIED
 
 
@@ -753,20 +909,41 @@ def _explain_redeem_failure(run: Run, contract: Contract, message: str) -> str:
         run.say(
             "redeem_contract() failed on its FIRST line -- `getrawtransaction(contract_txid, True)` -- which on a "
             "node without -txindex cannot see a transaction that has already been mined out of the mempool. The "
-            "call never reached the signing step, so this run has NOT put the preimage question to the node."
+            "call never reached the signing step, so this attempt has NOT put the preimage question to the node."
         )
         run.say(
             "that is a SECOND finding about the real client and it is newly measured: redeem_contract() cannot read "
             "back a confirmed contract on a default node. `gettransaction`, or `getrawtransaction` with the "
             "contract's block hash, both work without an index."
         )
+        return kind
+
+    if kind == REDEEM_FAILED_ON_WALLET_CAPABILITY:
+        run.say("THIS IS NOT THE PREIMAGE DEFECT. The daemon refused an RPC the client needs before signing.")
         run.say(
-            "the preimage defect therefore remains INFERRED from the source, exactly as the module headers say. "
-            "The control spend below is the only evidence this run produces about the hashlock branch."
+            "a legacy-wallet RPC on a descriptor wallet, or a method this daemon vintage does not have. The call "
+            "did not reach the signing step, so the preimage question was not put to the node by this attempt."
         )
         return kind
 
-    if kind == REDEEM_FAILED_ON_SIGNING:
+    if kind == REDEEM_FAILED_ON_FEE_POLICY:
+        run.say("THIS IS NOT THE PREIMAGE DEFECT -- AND IT MEANS SIGNING SUCCEEDED, WHICH IS ITS OWN FINDING.")
+        run.say(
+            "the node refused the transaction on FEE policy, which it can only do after accepting the script. "
+            "redeem_contract() hardcodes a flat 0.0001 miner fee, and on a ~250-byte spend that is roughly "
+            "0.4 coin/kvB -- four times sendrawtransaction's 0.10 default maxfeerate. That is a separate defect in "
+            "the client and it is now measured rather than predicted."
+        )
+        return kind
+
+    if kind == REDEEM_FAILED_ON_BROADCAST:
+        run.say("THE CHAIN ITSELF REFUSED THE SPEND, WHICH IS THE STRONGEST FORM OF THIS MEASUREMENT.")
+        run.say(
+            "signing produced a scriptSig and the node evaluated it and rejected it. For the hashlock branch that "
+            "is exactly what an absent preimage looks like: the OP_IF branch cannot be taken without the preimage "
+            "and a TRUE flag on the stack, so the script fails verification."
+        )
+    elif kind == REDEEM_FAILED_ON_SIGNING:
         run.say("THIS IS THE KNOWN PREIMAGE DEFECT, CONFIRMED AGAINST A REAL CHAIN FOR THE FIRST TIME.")
         run.say(
             "redeem_contract() accepts `secret: bytes` and never references it. It builds the spend with "
@@ -777,8 +954,9 @@ def _explain_redeem_failure(run: Run, contract: Contract, message: str) -> str:
     else:
         run.say("THIS FAILURE IS NOT ONE THE HARNESS RECOGNIZES, so it claims nothing about which defect caused it.")
         run.say(
-            "it is neither the -txindex lookup failure nor an incomplete signing result. Read the message above "
-            "before concluding anything; the control spend below still says what the SCRIPT can do."
+            "it matched none of the five known shapes -- lookup, wallet capability, signing, fee policy, broadcast. "
+            "Read the daemon's code and message above before concluding anything; the control spend below still "
+            "says what the SCRIPT can do."
         )
 
     run.say("the redeem script's hashlock branch expects, bottom to top:")
@@ -788,11 +966,27 @@ def _explain_redeem_failure(run: Run, contract: Contract, message: str) -> str:
     return kind
 
 
-def step_7_redeem(run: Run, client, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
-    run.step(7, "redeem with the preimage -- the REAL redeem_contract(), then the harness control")
-    destination = contract.participant.address
-    run.say(f"redeeming [A] {outpoint.txid}:{outpoint.vout} to the participant address {destination}")
+# The stages at which the real client never got as far as asking the node to
+# build a scriptSig. A failure at one of these says nothing about the preimage.
+REDEEM_STAGES_BEFORE_SIGNING = (REDEEM_FAILED_ON_LOOKUP, REDEEM_FAILED_ON_WALLET_CAPABILITY)
 
+
+@dataclass(frozen=True)
+class RedeemAttempt:
+    """One call to the real redeem_contract(), and what it established."""
+
+    succeeded: bool
+    detail: str
+    stage: str
+
+    @property
+    def reached_the_signer(self) -> bool:
+        """Whether the preimage question was actually put to the node."""
+        return self.succeeded or self.stage not in REDEEM_STAGES_BEFORE_SIGNING
+
+
+def _attempt_real_redeem(run: Run, client, contract: Contract, outpoint: Outpoint) -> RedeemAttempt:
+    """Call the real redeem_contract() once, and read the daemon's own words out of the failure."""
     # The real BTC client reads its signing key out of the environment. The key
     # handed to it was generated in this process seconds ago, controls nothing
     # but regtest coins this harness mined, and is never printed.
@@ -804,26 +998,114 @@ def step_7_redeem(run: Run, client, contract: Contract, outpoint: Outpoint, outc
             contract.redeem_script,
             contract.secret,
             contract.participant.wif,
-            destination,
+            contract.participant.address,
         )
-    except Exception as exc:  # noqa: BLE001 -- checked: the failure IS the measurement. It is recorded as XFAIL (a predicted failure, not an unexplained one), printed with its type and message, and followed by the explanation block. The run continues to the control spend, which is what distinguishes "the client is broken" from "the script is broken".
-        outcome.real_redeem = run.check(
-            "REAL redeem_contract() spends the hashlock branch",
-            f"{type(exc).__name__}: {exc}",
-            "a broadcast txid -- but this harness PREDICTS this failure",
-            XFAIL,
-        )
-        outcome.real_redeem_stage = _explain_redeem_failure(run, contract, str(exc))
-        outcome.notes.append(f"real redeem_contract() failed at the {outcome.real_redeem_stage} stage")
-        _control_redeem(run, contract, outpoint, outcome)
-        return
+    except Exception as exc:  # noqa: BLE001 -- checked: the failure IS the measurement, and it is not swallowed: describe_rpc_exception() digs the daemon's own code and message out of the response the client discarded, the text is classified, and both are reported. Nothing downstream reads a value from the failed call.
+        detail = describe_rpc_exception(exc)
+        return RedeemAttempt(succeeded=False, detail=detail, stage=classify_redeem_failure(detail))
+    return RedeemAttempt(succeeded=True, detail=f"txid={txid}", stage="")
 
-    outcome.real_redeem = run.check(
-        "REAL redeem_contract() spends the hashlock branch",
-        f"txid={txid}",
-        "a broadcast txid",
-        OK,
+
+def _fund_unconfirmed(run: Run, contract: Contract, label: str) -> Outpoint | None:
+    """Fund the contract again and DELIBERATELY leave it in the mempool.
+
+    WHY A SECOND, UNMINED COPY OF THE SAME CONTRACT EXISTS.
+
+    Measured 2026-09-25: the real redeem_contract() fails on its own first line
+    -- `getrawtransaction(contract_txid, True)` -- against a CONFIRMED contract
+    on a node without -txindex, because that call searches only the mempool. So
+    the attempt against contract [A] can never reach the signing step, and the
+    question the whole harness exists to answer -- does redeem_contract() push
+    the preimage -- goes unasked.
+
+    An output that is still IN the mempool is found by that exact call. So the
+    harness funds the same redeem script once more, leaves it unconfirmed, and
+    runs the real client against that. It is the same script, the same P2SH and
+    the same two branches; the only difference is a confirmation, which is what
+    the client's lookup is sensitive to.
+
+    Step 6 is untouched: contract [A] is still funded, mined, and asserted on
+    chain exactly as the brief asks. This is an ADDITIONAL output, and every
+    line about it says which one it is.
+    """
+    node = run.node()
+    run.say(f"[{label}] funding the SAME contract again and leaving it UNCONFIRMED, so the real client's")
+    run.say(f"[{label}] first call -- a getrawtransaction that searches only the mempool -- can find it")
+    txid = node.call("sendtoaddress", contract.p2sh_address, float(CONTRACT_AMOUNT))
+    raw_tx = _verbose_tx(node, txid)
+    vout = _find_vout_by_script(raw_tx, contract.p2sh_script.hex())
+    if vout is None:
+        run.check(f"[{label}] unconfirmed contract output located", None,
+                  f"an output paying {contract.p2sh_script.hex()}", FAIL)
+        return None
+    run.check(f"[{label}] unconfirmed contract output located", f"{txid}:{vout}", "an output in the mempool", OK)
+    return Outpoint(txid=txid, vout=vout, value_satoshis=coins_to_satoshis(CONTRACT_AMOUNT))
+
+
+def step_7_redeem(run: Run, client, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
+    """Three attempts, because they answer three different questions.
+
+      7a  the real client against the CONFIRMED contract [A]. This is the path
+          a real swap takes, and on a default node it fails at its own lookup.
+      7b  the real client against an UNCONFIRMED copy [C]. Its lookup succeeds,
+          so this is the attempt that can actually put the preimage question to
+          the node -- and it is what `outcome.real_redeem` records, because it
+          is the only one able to judge.
+      7c  the harness's control spend on [A], which says what the SCRIPT can do
+          regardless of what the client can do.
+    """
+    run.step(7, "redeem with the preimage -- the REAL redeem_contract(), then the harness control")
+    run.say(f"redeeming to the participant address {contract.participant.address}")
+
+    run.say(f"7a: the real client against the CONFIRMED contract [A] {outpoint.txid}:{outpoint.vout}")
+    confirmed = _attempt_real_redeem(run, client, contract, outpoint)
+    outcome.real_redeem_confirmed = run.check(
+        "7a REAL redeem_contract() against a CONFIRMED contract",
+        confirmed.detail,
+        "a broadcast txid -- but this harness PREDICTS this failure",
+        OK if confirmed.succeeded else XFAIL,
     )
+    if confirmed.succeeded:
+        _finish_successful_real_redeem(run, contract, confirmed, outcome)
+        return
+    outcome.real_redeem_confirmed_stage = _explain_redeem_failure(run, contract, confirmed.detail)
+
+    run.say("7b: the real client against an UNCONFIRMED copy of the same contract")
+    unconfirmed_outpoint = _fund_unconfirmed(run, contract, "C")
+    if unconfirmed_outpoint is None:
+        outcome.real_redeem = run.check(
+            "7b REAL redeem_contract() against an UNCONFIRMED contract",
+            "not attempted: the unconfirmed funding could not be located",
+            "a broadcast txid",
+            FAIL,
+        )
+    else:
+        unconfirmed = _attempt_real_redeem(run, client, contract, unconfirmed_outpoint)
+        outcome.real_redeem = run.check(
+            "7b REAL redeem_contract() against an UNCONFIRMED contract",
+            unconfirmed.detail,
+            "a broadcast txid -- but this harness PREDICTS this failure",
+            OK if unconfirmed.succeeded else XFAIL,
+        )
+        if unconfirmed.succeeded:
+            _finish_successful_real_redeem(run, contract, unconfirmed, outcome)
+            return
+        outcome.real_redeem_stage = _explain_redeem_failure(run, contract, unconfirmed.detail)
+        outcome.reached_the_signer = unconfirmed.reached_the_signer
+        outcome.notes.append(
+            f"real redeem_contract() failed at the {outcome.real_redeem_stage} stage against an unconfirmed "
+            f"contract, and at the {outcome.real_redeem_confirmed_stage} stage against a confirmed one"
+        )
+
+    run.say("7c: the harness control, on the confirmed contract [A]")
+    _control_redeem(run, contract, outpoint, outcome)
+
+
+def _finish_successful_real_redeem(run: Run, contract: Contract, attempt: RedeemAttempt, outcome: ChainOutcome) -> None:
+    """The real client spent it. Confirm the spend and skip the control."""
+    outcome.real_redeem = OK
+    outcome.reached_the_signer = True
+    txid = attempt.detail.removeprefix("txid=")
     mined = _mine(run, 1)
     _assert_spend_landed(run, txid, contract.participant, "real redeem", mined.first_hash)
     outcome.control_redeem = run.check(
