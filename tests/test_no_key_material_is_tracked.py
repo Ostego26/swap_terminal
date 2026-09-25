@@ -39,8 +39,13 @@ BYTE_MAX = 255
 
 
 def tracked_files() -> list[str]:
-    result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, no input from anywhere
-        ["git", "ls-files"],  # noqa: S607 -- git is resolved from PATH deliberately; a pinned path breaks every other machine
+    # Fixed argv, no shell, and nothing here comes from outside this file.
+    # `git` is resolved from PATH on purpose: a pinned absolute path is correct
+    # on exactly one machine. S603/S607 are already off for tests/ in
+    # pyproject.toml, so a `noqa` here would be an unread claim (rule 19) --
+    # and RUF100 said so.
+    result = subprocess.run(
+        ["git", "ls-files"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
