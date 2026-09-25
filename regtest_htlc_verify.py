@@ -64,6 +64,13 @@ FLAGS
                              print every RPC payload, which is useful once and
                              unreadable twice, so the default raises them to
                              INFO.
+    --ltc-mweb               do NOT attempt to hold Litecoin's MWEB deployment
+                             inactive. By default the harness asks litecoind's
+                             own -help whether it accepts a deployment override
+                             and passes one if it does, because mining toward
+                             the LTC locktime failed with bad-txns-vin-empty on
+                             2026-09-25. If the daemon refuses to start with
+                             it, the harness says so and starts again without.
 
 ENVIRONMENT (every default matches the operator's described machine)
 
@@ -184,7 +191,7 @@ def build_real_client(asset: str, config, wallet: str):
     return LTCClient(f"{config.base_url}/wallet/{wallet}", config.rpc_user, config.rpc_password)
 
 
-def run_chain(console: Console, asset: str, wipe: bool, keep_running: bool) -> steps.ChainOutcome:
+def run_chain(console: Console, asset: str, args: argparse.Namespace) -> steps.ChainOutcome:
     """Run all nine steps against one chain. Always tears down what it started."""
     console.banner(f"{asset} -- regtest HTLC verification, nine steps")
     config = resolve_chain_config(asset)
@@ -192,7 +199,16 @@ def run_chain(console: Console, asset: str, wipe: bool, keep_running: bool) -> s
     run = steps.Run(console=console, config=config, wallet=WALLET_NAME)
     try:
         steps.step_1_binaries(run)
-        if wipe:
+        # Between steps 1 and 2: after the binary is known present, before it
+        # is started, because it works by reading that binary's own -help.
+        # Measured 2026-09-25: mining toward the LTC locktime died several
+        # hundred blocks in with bad-txns-vin-empty, and Litecoin's MWEB is the
+        # leading hypothesis. See regtest/daemons.py::mweb_override_args.
+        if asset == "LTC" and not args.ltc_mweb:
+            steps.apply_mweb_override(run)
+        elif asset == "LTC":
+            run.say("--ltc-mweb given, so MWEB is left to activate normally")
+        if args.wipe:
             console.say(f"{asset}: --wipe requested")
             daemons.wipe_datadir(console, config)
         steps.step_2_daemon(run)
@@ -219,7 +235,7 @@ def run_chain(console: Console, asset: str, wipe: bool, keep_running: bool) -> s
         # run.spawn.started, NOT a local set from step 2's return value: step 2
         # can raise after it has spawned, and a reaper that depends on the
         # spawner returning normally is how an orphan survives a stop (rule 13).
-        if keep_running:
+        if args.keep_running:
             console.say(
                 f"{asset}: --keep-running, so the daemon at {config.base_url} is LEFT UP"
                 f"{' (this harness started it)' if run.spawn.started else ' (this harness did not start it)'}. "
@@ -260,6 +276,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--wipe", action="store_true", help="delete each datadir's regtest subdirectory first")
     parser.add_argument("--keep-running", action="store_true", help="leave the daemons up after the run")
     parser.add_argument("--verbose-clients", action="store_true", help="leave the real clients' loggers at DEBUG")
+    parser.add_argument(
+        "--ltc-mweb",
+        action="store_true",
+        help=(
+            "do NOT try to hold Litecoin's MWEB deployment inactive. The default attempts it, because mining "
+            "toward the locktime failed with bad-txns-vin-empty on 2026-09-25 and MWEB is the leading hypothesis"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -278,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "implementation exists in this tree to drive."
     )
 
-    outcomes = [run_chain(console, asset, args.wipe, args.keep_running) for asset in assets]
+    outcomes = [run_chain(console, asset, args) for asset in assets]
     print_verdicts(console, outcomes)
     console.summary()
 
