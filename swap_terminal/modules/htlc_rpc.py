@@ -250,10 +250,31 @@ def lookup_contract_output(rpc_call, txid: str, vout: int, block_hash: str | Non
       2. `getrawtransaction txid true <blockhash>`, when the caller knows the
          block. This is the route the daemon's own error message asks for.
       3. `gettransaction txid`, the wallet's own record, whose raw hex is
-         parsed here rather than handed back to `decoderawtransaction` -- one
-         fewer round trip, and no dependence on a decoded field's name.
+         handed back to `decoderawtransaction` for the DAEMON to take apart.
       4. `getrawtransaction txid true`, the call this used to be. It still
          works for a transaction in the mempool, or on a node with -txindex.
+
+    ROUTE 3 USED TO PARSE THAT HEX IN PROCESS with
+    modules/htlc_spend.parse_transaction(), justified as "one fewer round trip,
+    and no dependence on a decoded field's name". Both halves were wrong, and
+    the second one was already untrue on the line above it -- routes 2 and 4
+    read `scriptPubKey.hex` off a decoded result, so this file depends on a
+    decoded field's name whatever route 3 does.
+
+    THE FIRST HALF COST MORE. parse_transaction() cannot read a SEGWIT
+    serialization and says so in its own error text. That is fine for the
+    SPEND, which is what that parser exists for -- an HTLC P2SH input has no
+    witness, so the transaction this module signs has none either. It is not
+    fine here: this route reads the FUNDING transaction, which spends the
+    operator's own coins, and a default Bitcoin Core 28.1 or Litecoin 0.21.4
+    wallet holds those in bech32 P2WPKH. Its hex therefore carries the 0x00
+    marker and 0x01 flag, parse_transaction() raises TransactionLayoutError,
+    and route 3 is dead on exactly the wallets everybody has.
+
+    The daemon decodes its own serialization by construction, at the cost of
+    one round trip, which is not a cost worth a dead route. regtest/steps.py's
+    _verbose_tx() has always done it this way; rule 8 says the two should
+    agree, and now they do.
 
     NOT `-txindex=1`. It is the third fix the daemon suggests and the only one
     that changes the operator's machine: enabling it on an existing datadir
@@ -289,14 +310,14 @@ def lookup_contract_output(rpc_call, txid: str, vout: int, block_hash: str | Non
 
     try:
         wallet_record = rpc_call("gettransaction", [txid])
-        parsed = parse_transaction(bytes.fromhex(wallet_record["hex"]))
-        value_satoshis, script_pubkey = parsed.outputs[vout]
-        return ContractOutput(
-            value=satoshis_to_coins(value_satoshis),
-            script_pubkey_hex=script_pubkey.hex(),
-            confirmations=_as_int_or_none(wallet_record.get("confirmations")),
-            route="gettransaction (the wallet's own record)",
-        )
+        decoded = rpc_call("decoderawtransaction", [wallet_record["hex"]])
+        # `decoderawtransaction` carries no confirmation count -- it is handed
+        # bytes, not a chain position -- so the wallet record's own count is
+        # spliced in. Every caller asserts on it, and losing it here would turn
+        # "three confirmations" into "this route does not report them", which
+        # _as_int_or_none() is careful to keep as different answers.
+        decoded["confirmations"] = wallet_record.get("confirmations")
+        return _output_from_decoded(decoded, vout, "gettransaction + decoderawtransaction (the wallet's own record)")
     except Exception as exc:  # noqa: BLE001 -- checked: same. This route only knows transactions the wallet took part in, so its failure is expected for a contract the COUNTERPARTY funded and must not end the search.
         attempts.append(f"gettransaction: {exc}")
 
@@ -671,8 +692,28 @@ def read_transaction_outputs(rpc_call, txid: str) -> list[tuple[Decimal, str]]:
       1. `getrawtransaction txid true` -- the mempool, or any transaction at
          all on a node with -txindex.
       2. `gettransaction txid` -- the wallet's own record, whose raw hex is
-         parsed here. This is the one that keeps working after the funding
-         transaction is confirmed, which is exactly when route 1 stops.
+         handed to `decoderawtransaction`. This is the one that keeps working
+         after the funding transaction is confirmed, which is exactly when
+         route 1 stops.
+
+    UNTIL 2026-09-25 ROUTE 2 PARSED THAT HEX IN PROCESS, and so could not
+    answer for the transaction it exists to answer for. modules/htlc_spend.
+    parse_transaction() cannot read a SEGWIT serialization -- its own error
+    text says so -- and the funding transaction spends the operator's own
+    coins, which on a default Core 28.1 or Litecoin 0.21.4 wallet are bech32
+    P2WPKH. Fed one, it raised TransactionLayoutError.
+
+    WHAT THAT COST, and it is the symptom defect 4 was fixed to remove.
+    create_contract() broadcasts and then polls through this function. Route 1
+    answers while the funding is unconfirmed; the moment a block lands inside
+    the poll window route 1 starts returning `code=-5, No such mempool
+    transaction` and route 2 could not parse -- so wait_for_tx_output() polled
+    to its full 300-SECOND deadline and raised. The coins are already at the
+    P2SH and the caller never learns the vout. Two causes, one symptom, and
+    only one of them was fixed.
+
+    The daemon decodes its own serialization by construction. regtest/steps.py's
+    _verbose_tx() has always done it that way (rule 8: the two should agree).
 
     Raises:
         LookupError: naming both routes and what each said.
@@ -688,8 +729,11 @@ def read_transaction_outputs(rpc_call, txid: str) -> list[tuple[Decimal, str]]:
         attempts.append(f"getrawtransaction: {exc}")
     try:
         wallet_record = rpc_call("gettransaction", [txid])
-        parsed = parse_transaction(bytes.fromhex(wallet_record["hex"]))
-        return [(satoshis_to_coins(value), script.hex()) for value, script in parsed.outputs]
+        decoded = rpc_call("decoderawtransaction", [wallet_record["hex"]])
+        return [
+            (Decimal(str(entry["value"])), entry["scriptPubKey"]["hex"])
+            for entry in decoded.get("vout", [])
+        ]
     except Exception as exc:  # noqa: BLE001 -- checked: the last route; its failure ends the search and is reported with the first one's.
         attempts.append(f"gettransaction: {exc}")
     raise LookupError(f"could not read transaction {txid}: " + "; ".join(attempts))

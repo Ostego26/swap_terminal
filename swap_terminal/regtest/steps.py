@@ -695,6 +695,19 @@ def _verbose_tx(node, txid: str, block_hash: str | None = None) -> dict:
     The confirmation count is spliced in from whichever route supplied it,
     because `decoderawtransaction` does not carry one and every caller asserts
     on it.
+
+    THE PRODUCTION SIBLING IS modules/htlc_rpc.lookup_contract_output() and
+    read_transaction_outputs(), and rule 8 requires each to name the other.
+    They take the same routes with one difference, and until 2026-09-25 that
+    difference was a defect: they parsed the wallet record's hex IN PROCESS
+    with modules/htlc_spend.parse_transaction() rather than asking the daemon
+    to decode it, justified as one fewer round trip and "no dependence on a
+    decoded field's name". parse_transaction() cannot read a segwit
+    serialization, and the funding transaction spends the operator's own
+    P2WPKH coins, so that route was dead there while it worked here. They are
+    still two implementations on purpose -- the harness must not import the
+    code it measures, for the reason modules/htlc_spend.py's header gives -- so
+    a change to either belongs at both.
     """
     attempts: list[str] = []
     if block_hash:

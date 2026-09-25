@@ -84,6 +84,7 @@ from modules.htlc_rpc import (
     ensure_watch_only_import,
     find_output_by_script,
     lookup_contract_output,
+    read_transaction_outputs,
     wait_for_tx_output,
 )
 from modules.htlc_spend import (
@@ -160,6 +161,33 @@ def _manual_unsigned_transaction(txid: str, vout: int, outputs: list[tuple[int, 
     return body.hex()
 
 
+def _manual_segwit_transaction(txid: str, vout: int, outputs: list[tuple[int, bytes]]) -> str:
+    """The SAME transaction, serialized with a witness. Laid out by hand, here.
+
+    This is the shape a default Bitcoin Core 28.1 or Litecoin 0.21.4 wallet
+    produces for an ordinary send, because those wallets hold the operator's
+    own coins in bech32 P2WPKH -- so it is the shape of every FUNDING
+    transaction this package's create_contract() broadcasts and then polls for.
+
+    BIP144: after the 4-byte version come a 0x00 marker and a 0x01 flag, and
+    after the outputs come one witness stack per input. modules/htlc_spend.
+    parse_transaction() reads the marker as an input count of zero and refuses,
+    which is correct of it -- an HTLC P2SH input has no witness and it is a
+    SPEND parser -- and was the defect when a LOOKUP used it.
+    """
+    body = VERSION_2_PREFIX + b"\x00\x01"
+    body += b"\x01"
+    body += bytes.fromhex(txid)[::-1] + struct.pack("<I", vout) + b"\x00" + SEQUENCE_NON_FINAL_BYTES
+    body += bytes([len(outputs)])
+    for satoshis, script in outputs:
+        body += struct.pack("<q", satoshis) + bytes([len(script)]) + script
+    # One witness stack for the single input: a 71-byte signature and a
+    # 33-byte compressed pubkey, which is what spending a P2WPKH costs.
+    body += b"\x02" + b"\x47" + b"\x30" * 0x47 + b"\x21" + b"\x02" * 0x21
+    body += struct.pack("<I", 0)
+    return body.hex()
+
+
 class FakeNode:
     """Every RPC the fixed clients make, answered from memory and recorded.
 
@@ -177,6 +205,11 @@ class FakeNode:
         self.unspent: dict[tuple[str, int], tuple[Decimal, str]] = {}
         self.raw_transactions: dict[str, str] = {}
         self.wallet_transactions: dict[str, str] = {}
+        # raw hex -> the outputs that went into it. A real daemon decodes its
+        # OWN serialization by construction, whatever shape that is; this is
+        # how the fake node does the same thing without a parser, which is the
+        # property the segwit test is about.
+        self.decoded_outputs: dict[str, list[tuple[int, bytes]]] = {}
         self.broadcast: list[str] = []
         self.fail: dict[str, str] = {}
         self.sent_to: list[tuple[str, float]] = []
@@ -198,6 +231,34 @@ class FakeNode:
             return None
         value, script_hex = entry
         return {"value": float(value), "scriptPubKey": {"hex": script_hex}, "confirmations": 3}
+
+    def remember_wallet_transaction(self, txid, outputs, prefix=VERSION_2_PREFIX, witness=False) -> str:
+        """Serialize a transaction the wallet knows, and record how to decode it."""
+        raw = (
+            _manual_segwit_transaction(txid, 0, outputs)
+            if witness
+            else _manual_unsigned_transaction("22" * 32, 0, outputs, prefix)
+        )
+        self.wallet_transactions[txid] = raw
+        self.decoded_outputs[raw] = outputs
+        return raw
+
+    def _rpc_decoderawtransaction(self, raw_hex):
+        outputs = self.decoded_outputs.get(raw_hex)
+        if outputs is None:
+            raise Exception(f"RPC Error: the fake node did not serialize {raw_hex[:16]}... and cannot decode it")
+        return {
+            "vout": [
+                {
+                    "value": float(satoshis_to_coins(satoshis)),
+                    "n": index,
+                    # `hex` and no `address`/`addresses`, which is Core 28.1's
+                    # shape minus the fields nothing here reads.
+                    "scriptPubKey": {"hex": script.hex()},
+                }
+                for index, (satoshis, script) in enumerate(outputs)
+            ]
+        }
 
     def _rpc_gettransaction(self, txid):
         raw = self.wallet_transactions.get(txid)
@@ -659,14 +720,12 @@ def test_the_wallet_record_is_used_when_the_output_is_already_gone_from_gettxout
     """Route 3. gettxout answers null for a SPENT output, and the wallet still knows it."""
     node = _node_for(contract)
     del node.unspent[(contract["txid"], contract["vout"])]
-    node.wallet_transactions[contract["txid"]] = _manual_unsigned_transaction(
-        "11" * 32,
-        0,
+    node.remember_wallet_transaction(
+        contract["txid"],
         [
             (500, contract["destination"].p2pkh_script),
             (CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"])),
         ],
-        VERSION_2_PREFIX,
     )
     found = lookup_contract_output(node.rpc_call, contract["txid"], contract["vout"])
     assert found.value == CONTRACT_COINS
@@ -749,11 +808,8 @@ def test_create_contract_survives_an_import_that_refuses(contract, monkeypatch):
     client = BTCClient("http://127.0.0.1:18443/wallet/w", "u", "p")
     client.rpc_call = node.rpc_call
     funding_txid = "cc" * 32
-    node.wallet_transactions[funding_txid] = _manual_unsigned_transaction(
-        "22" * 32,
-        0,
-        [(CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"]))],
-        VERSION_2_PREFIX,
+    node.remember_wallet_transaction(
+        funding_txid, [(CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"]))]
     )
     result = client.create_contract(
         amount_btc=CONTRACT_COINS,
@@ -777,14 +833,12 @@ def test_the_output_is_found_on_a_daemon_with_no_addresses_field(contract):
     """Core 28.1 returns ['address', 'asm', 'desc', 'hex', 'type'] -- no `addresses`."""
     node = _node_for(contract)
     funding_txid = "cc" * 32
-    node.wallet_transactions[funding_txid] = _manual_unsigned_transaction(
-        "22" * 32,
-        0,
+    node.remember_wallet_transaction(
+        funding_txid,
         [
             (500, contract["destination"].p2pkh_script),
             (CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"])),
         ],
-        VERSION_2_PREFIX,
     )
 
     class Holder:
@@ -1444,3 +1498,117 @@ def test_an_ordinary_contract_is_not_refused_by_the_dust_guard(contract, monkeyp
 
     _drive_redeem(client, node, contract)
     assert node.broadcast, "the ordinary redeem stopped working"
+
+
+# --------------------------------------------------------------------------
+# the confirmed-contract fallback, on a WITNESS-serialized funding transaction
+# --------------------------------------------------------------------------
+#
+# Route 2 of read_transaction_outputs() and route 3 of lookup_contract_output()
+# are documented as "the one that keeps working after the funding transaction
+# is confirmed, which is exactly when route 1 stops". Until 2026-09-25 they
+# parsed the wallet record's hex in process with htlc_spend.parse_transaction(),
+# which cannot read a segwit serialization and says so in its own error text.
+#
+# That reasoning holds for the SPEND -- an HTLC P2SH input has no witness -- and
+# not for the FUNDING transaction, which spends the operator's own coins, held
+# as bech32 P2WPKH on a default Core 28.1 or Litecoin 0.21.4 wallet. So the
+# route that exists for the confirmed case was dead on exactly the wallets
+# everybody has.
+
+
+def test_the_spend_parser_still_refuses_a_witness_serialization(contract):
+    """The premise, asserted rather than assumed.
+
+    If parse_transaction() ever learns to read a witness serialization, the two
+    tests below stop measuring anything and this one says so first.
+    """
+    raw = _manual_segwit_transaction("aa" * 32, 0, [(CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"]))])
+    with pytest.raises(TransactionLayoutError):
+        parse_transaction(bytes.fromhex(raw))
+
+
+def test_read_transaction_outputs_reads_a_witness_serialized_funding_transaction(contract):
+    """Route 2, on the shape a default wallet actually produces.
+
+    getrawtransaction answers the measured `No such mempool transaction`, so
+    only route 2 can answer -- which is the confirmed case this route exists
+    for.
+    """
+    node = _node_for(contract)
+    funding_txid = "cc" * 32
+    node.remember_wallet_transaction(
+        funding_txid,
+        [
+            (500, contract["destination"].p2pkh_script),
+            (CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"])),
+        ],
+        witness=True,
+    )
+    outputs = read_transaction_outputs(node.rpc_call, funding_txid)
+    assert len(outputs) == 2
+    assert outputs[1] == (CONTRACT_COINS, p2sh_script_for(contract["redeem_script"]).hex())
+    assert "decoderawtransaction" in node.methods, "the daemon was not asked to decode its own serialization"
+
+
+def test_wait_for_tx_output_finds_a_confirmed_witness_funding_before_its_deadline(contract):
+    """THE SYMPTOM, end to end, and it is the one defect 4 was fixed to remove.
+
+    create_contract() broadcasts and then polls. Route 1 answers while the
+    funding is unconfirmed; the moment a block lands inside the poll window
+    route 1 returns `code=-5, No such mempool transaction` and -- before this
+    fix -- route 2 could not parse the wallet's hex. wait_for_tx_output() then
+    polled to its full 300-SECOND deadline and raised, with the coins already
+    at the P2SH and the caller never learning the vout.
+
+    max_wait is 1 second here only so a regression fails in one second rather
+    than in five minutes. The assertion is that it does not time out at all.
+    """
+    node = _node_for(contract)
+    funding_txid = "cc" * 32
+    node.remember_wallet_transaction(
+        funding_txid,
+        [
+            (500, contract["destination"].p2pkh_script),
+            (CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"])),
+        ],
+        witness=True,
+    )
+
+    class Holder:
+        rpc_call = staticmethod(node.rpc_call)
+
+    index, outputs = wait_for_tx_output(
+        Holder, funding_txid, p2sh_script_for(contract["redeem_script"]).hex(), max_wait=1
+    )
+    assert index == 1
+    assert len(outputs) == 2
+
+
+def test_lookup_contract_output_reads_a_witness_serialized_contract_back(contract):
+    """Route 3, the same fix on the redeem side.
+
+    gettxout answers null for an output that has already been SPENT, which is
+    what sends the lookup to the wallet's own record -- and a contract funded
+    by a transaction that also spent the operator's P2WPKH change carries a
+    witness.
+    """
+    node = _node_for(contract)
+    del node.unspent[(contract["txid"], contract["vout"])]
+    node.remember_wallet_transaction(
+        contract["txid"],
+        [
+            (500, contract["destination"].p2pkh_script),
+            (CONTRACT_SATOSHIS, p2sh_script_for(contract["redeem_script"])),
+        ],
+        witness=True,
+    )
+    found = lookup_contract_output(node.rpc_call, contract["txid"], contract["vout"])
+    assert found.value == CONTRACT_COINS
+    assert found.script_pubkey_hex == p2sh_script_for(contract["redeem_script"]).hex()
+    # The confirmation count is spliced in from the WALLET RECORD, because
+    # decoderawtransaction is handed bytes and has no chain position to report.
+    # Losing it would turn "three confirmations" into "this route does not
+    # report them", which _as_int_or_none() keeps as different answers.
+    assert found.confirmations == 3
+    assert "decoderawtransaction" in found.route
