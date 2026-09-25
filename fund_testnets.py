@@ -52,6 +52,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 import requests
+from chains.base import RPCAdapter
 from regtest.console import Console
 from regtest.daemons import (
     RegtestSetupError,
@@ -62,6 +63,7 @@ from regtest.daemons import (
     resolve_chain_config,
     start_daemon,
     wait_for_rpc,
+    wipe_datadir,
 )
 
 # Pinned test hosts. Neither has a mainnet sibling reachable by changing a flag
@@ -79,6 +81,54 @@ SOLANA_DEVNET_ACCOUNT = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
 # like a broken daemon rather than immature coins.
 COINBASE_MATURITY_BLOCKS = 101
 WALLET_NAME = "swap_terminal_testnet"
+
+# regtest halves the block subsidy every 150 blocks, which matters far more than
+# it sounds. MEASURED on the operator's machine 2026-09-25, on chains already
+# deep from earlier HTLC harness runs:
+#
+#     BTC at height 390   390//150 = 2 halvings    50/4      = 12.5 per block
+#     LTC at height 2504  2504//150 = 16 halvings  50/65536  = 0.00076294
+#
+# So mining 101 blocks on an old regtest chain yields almost nothing, and the
+# reported balance looks like a broken daemon rather than an exhausted subsidy.
+# A wiped datadir restarts at height 0 where the subsidy is the full 50.
+REGTEST_HALVING_INTERVAL = 150
+REGTEST_INITIAL_SUBSIDY = 50.0
+# Below this, say so loudly and recommend --wipe rather than leaving the
+# operator to wonder why 101 blocks produced a rounding error.
+NEGLIGIBLE_SUBSIDY = 1.0
+
+
+def block_subsidy(height: int) -> float:
+    """The regtest coinbase reward at a given height, in whole coins.
+
+    Pure, so the halving arithmetic can be tested without a daemon -- and it is
+    the arithmetic that explains an otherwise baffling balance.
+    """
+    return REGTEST_INITIAL_SUBSIDY / (2 ** (int(height) // REGTEST_HALVING_INTERVAL))
+
+
+def describe_regtest_yield(height_before: int, blocks: int) -> str:
+    """What mining `blocks` from `height_before` will actually be worth, and why.
+
+    Rule 14: state what the number means, next to the number. A bare
+    "balance 0.00076293" after mining 101 blocks reads as a failure; the same
+    figure beside "16 halvings" reads as a chain that needs wiping.
+    """
+    subsidy = block_subsidy(height_before + 1)
+    matured = max(0, blocks - COINBASE_MATURITY_BLOCKS + 1)
+    halvings = (height_before + 1) // REGTEST_HALVING_INTERVAL
+    line = (
+        f"subsidy {subsidy:.8f}/block after {halvings} halving(s) at height {height_before + 1}; "
+        f"{blocks} blocks matures {matured} reward(s) = {matured * subsidy:.8f} spendable"
+    )
+    if subsidy < NEGLIGIBLE_SUBSIDY:
+        line += (
+            f"  <- NEGLIGIBLE. This chain is {height_before} blocks deep and the subsidy has halved "
+            f"{halvings} times. Rerun with --wipe to restart at height 0, where it is "
+            f"{REGTEST_INITIAL_SUBSIDY:.0f}/block."
+        )
+    return line
 
 
 def secret_destination(chain: str) -> Path:
@@ -116,7 +166,7 @@ def secret_destination(chain: str) -> Path:
     )
 
 
-def fund_regtest_chain(console: Console, asset: str, blocks: int) -> dict:
+def fund_regtest_chain(console: Console, asset: str, blocks: int, wipe: bool = False) -> dict:
     """Start a regtest daemon, make a wallet, mine to it. Returns a summary.
 
     assert_regtest() is called before anything is mined, and that ordering is
@@ -126,6 +176,11 @@ def fund_regtest_chain(console: Console, asset: str, blocks: int) -> dict:
     """
     config = resolve_chain_config(asset)
     console.say(f"{asset}: datadir {config.datadir}")
+    if wipe:
+        # Wipes BEFORE the daemon starts: wipe_datadir() removes the chain
+        # directory, and doing that under a running daemon leaves it writing
+        # into deleted files.
+        wipe_datadir(console, config)
     we_started = start_daemon(console, config)
     wait_for_rpc(console, config)
 
@@ -134,16 +189,31 @@ def fund_regtest_chain(console: Console, asset: str, blocks: int) -> dict:
 
     ensure_wallet(console, config, WALLET_NAME)
     node = adapter_for(config, wallet=WALLET_NAME)
+    height_before = int(node.call("getblockcount"))
     address = node.call("getnewaddress", "testnet-coins")
+
+    # ANNOUNCED BEFORE MINING, not after (rule 14). This is the line that
+    # explains a balance the operator would otherwise read as a failure.
+    console.say(f"{asset}: {describe_regtest_yield(height_before, blocks)}")
     console.say(f"{asset}: mining {blocks} blocks to {address}")
     node.call("generatetoaddress", blocks, address)
 
     balance = float(node.call("getbalance"))
     height = int(node.call("getblockcount"))
-    console.say(f"{asset}: balance {balance} (spendable), height {height}")
+    # Both halves of the balance. `getbalance` alone reports only what is
+    # SPENDABLE, so 100 freshly mined rewards are invisible in it -- and their
+    # absence looks like the mining did not work.
+    immature = 0.0
+    try:
+        balances = node.call("getbalances") or {}
+        immature = float((balances.get("mine") or {}).get("immature", 0.0))
+    except Exception as error:  # noqa: BLE001 -- checked: getbalances is absent on older daemons, and its absence costs only this one reporting line. The exception is NAMED in the output below rather than swallowed, and `balance` above came from a separate call that already succeeded.
+        console.say(f"{asset}: getbalances unavailable ({error}); immature total not reported")
+    console.say(f"{asset}: spendable {balance}, immature {immature}, height {height}")
     return {
         "asset": asset,
         "balance": balance,
+        "immature": immature,
         "height": height,
         "address": address,
         "datadir": str(config.datadir),
@@ -177,13 +247,38 @@ def fund_xrp_testnet(console: Console) -> dict:
     destination.write_text(json.dumps(payload, indent=2))
     destination.chmod(0o600)
 
-    balance = payload.get("balance")
+    # SEVERAL CANDIDATE KEYS, and the run says which one it found.
+    #
+    # The first version read payload["balance"] and printed "balance None" on
+    # the operator's real run -- a bare None that says nothing about whether
+    # the account was funded, which key is right, or where to look. The faucet's
+    # response shape is not documented here and could not be checked from the
+    # environment this was written in, so the code searches rather than assumes
+    # and REPORTS the absence of every candidate instead of one None.
+    balance, balance_key = None, None
+    for key in ("balance", "amount", "xrp", "drops"):
+        for holder, label in ((payload, ""), (account, "account.")):
+            if holder.get(key) is not None:
+                balance, balance_key = holder[key], f"{label}{key}"
+                break
+        if balance is not None:
+            break
+
     console.say(f"XRP: address {address}")
-    console.say(f"XRP: balance {balance} XRP (testnet, worth nothing)")
+    if balance is None:
+        console.say("XRP: balance NOT REPORTED under any of balance/amount/xrp/drops.")
+        console.say(f"     top-level keys: {sorted(payload)}")
+        console.say(f"     account keys:   {sorted(account)}")
+        console.say("     the account exists and is funded (the faucet only creates funded")
+        console.say("     accounts); this is a reporting gap, not a funding failure. Confirm with:")
+        console.say(f"       python3 xrp_chain_check.py --account {address}")
+    else:
+        console.say(f"XRP: balance {balance} XRP via `{balance_key}` (testnet, worth nothing)")
     console.say(f"XRP: secret written to {destination} (mode 0600, outside any git repo)")
     console.say("XRP: the secret was NOT printed and is not needed for deposit testing --")
     console.say("     only for paying OUT, which chains/xrp.py refuses to do anyway")
-    return {"asset": "XRP", "address": address, "balance": balance, "secret_file": str(destination)}
+    return {"asset": "XRP", "address": address, "balance": balance,
+            "balance_key": balance_key, "secret_file": str(destination)}
 
 
 def check_solana_devnet(console: Console) -> dict:
@@ -205,6 +300,107 @@ def check_solana_devnet(console: Console) -> dict:
     console.say(f"SOL: {lamports / 1e9:.9f} SOL ({lamports} lamports)")
     console.say("SOL: no airdrop requested -- this is already far more than any test needs")
     return {"asset": "SOL", "address": SOLANA_DEVNET_ACCOUNT, "balance": lamports / 1e9}
+
+
+GRIDCOIN_CONF_GLOBS = (
+    "~/.GridcoinResearch*/gridcoinresearch.conf",
+    "~/.GridcoinResearch/testnet/gridcoinresearch.conf",
+    "~/Documents/Python/grctest/*/gridcoinresearch.conf",
+)
+
+# Gridcoin mainnet RPC. Named so the report can say MAINNET rather than
+# mislabeling real money as test coins -- but the network is decided by the
+# DAEMON's own `testnet` field, never by this number.
+GRIDCOIN_MAINNET_RPC_PORT = 15715
+
+
+def gridcoin_conf_candidates() -> list[Path]:
+    """Every gridcoinresearch.conf on disk that declares an rpcport.
+
+    Scanned from disk rather than read from the environment, because the
+    operator has FIVE of these with FOUR different ports (measured 2026-09-25:
+    15715 mainnet, 25715 twice, 9876, 25779) and no single env var names the
+    one that is running. Backups are included deliberately -- a conf in a
+    directory called `testnet.backup...` may still be the live one, and the
+    only way to find out is to ask whether anything answers on its port.
+    """
+    seen: dict[Path, None] = {}
+    for pattern in GRIDCOIN_CONF_GLOBS:
+        expanded = Path(pattern).expanduser()
+        for path in sorted(expanded.parent.parent.glob("/".join(expanded.parts[-2:]))
+                           if "*" in expanded.parent.name else [expanded]):
+            if path.is_file():
+                seen.setdefault(path, None)
+    return list(seen)
+
+
+def read_gridcoin_conf(path: Path) -> dict:
+    """rpcport/rpcuser/rpcpassword from one conf. The password is never returned.
+
+    It is read because an RPC call needs it and immediately handed to the
+    adapter; it is not placed in the returned dict, so no caller can print it
+    by accident and no summary line can carry it.
+    """
+    values = {}
+    for line in path.read_text(errors="replace").splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def check_gridcoin_testnet(console: Console) -> dict:
+    """READ-ONLY. Report the Gridcoin balance of whichever daemon answers.
+
+    Mints nothing: the operator already holds testnet Gridcoin and asked only
+    to SEE it. So this makes exactly two RPC calls, both reads.
+
+    THE NETWORK IS TAKEN FROM THE DAEMON, not from the port. getinfo reports
+    `testnet`, and that is what decides the label -- because a conf in a
+    directory named `testnet` is not a testnet (measured 2026-09-25: several of
+    the operator's testnet-named confs have no testnet=1 at all, since Gridcoin
+    also takes -testnet on the command line). Reporting a mainnet balance as
+    test coins would be the worst possible outcome of a script called
+    fund_testnets.
+    """
+    candidates = gridcoin_conf_candidates()
+    console.say(f"GRC: {len(candidates)} gridcoinresearch.conf file(s) on disk")
+    if not candidates:
+        raise RegtestSetupError("no gridcoinresearch.conf found; nothing to ask")
+
+    tried: list[str] = []
+    for path in candidates:
+        conf = read_gridcoin_conf(path)
+        port = conf.get("rpcport")
+        user = conf.get("rpcuser")
+        if not port or not user:
+            continue
+        adapter = RPCAdapter(user=user, password=conf.get("rpcpassword", ""),
+                             host="127.0.0.1", port=int(port), timeout=8.0)
+        try:
+            info = adapter.call("getinfo") or {}
+        except Exception as error:  # noqa: BLE001 -- checked: a conf whose daemon is not running is the COMMON case, not an error, and the loop must continue to the next candidate. Every failure is collected into `tried` and printed below if none answers, so nothing is hidden.
+            tried.append(f"port {port}: {str(error).splitlines()[0][:70]}")
+            continue
+
+        is_testnet = bool(info.get("testnet"))
+        balance = float(info.get("balance", 0.0))
+        label = "TESTNET" if is_testnet else "*** MAINNET -- REAL MONEY ***"
+        console.say(f"GRC: answered on port {port} from {path}")
+        console.say(f"GRC: network {label} (from the daemon's getinfo.testnet, not the port)")
+        console.say(f"GRC: balance {balance} GRC, blocks {info.get('blocks')}, version {info.get('version')}")
+        if not is_testnet:
+            console.say("GRC: NOT counted as test coins. This is the mainnet wallet; nothing was minted")
+            console.say("     and nothing was sent, but a script called fund_testnets should not be")
+            console.say("     reporting a real balance as though it were play money.")
+        return {"asset": "GRC", "balance": balance, "address": f"{'testnet' if is_testnet else 'MAINNET'} "
+                f"port {port}", "testnet": is_testnet, "mainnet_warning": not is_testnet}
+
+    raise RegtestSetupError(
+        "no Gridcoin daemon answered on any configured rpcport. Tried: "
+        + ("; ".join(tried) if tried else "no conf declared both rpcport and rpcuser")
+        + f". Mainnet is normally {GRIDCOIN_MAINNET_RPC_PORT}; start the testnet daemon with -testnet."
+    )
 
 
 def explain_monero() -> None:
@@ -245,11 +441,13 @@ def selected_chains(args) -> list[tuple[str, str, object]]:
     """
     everything = [
         ("BTC", f"regtest: start daemon, make a wallet, mine {args.blocks} blocks",
-         lambda console: fund_regtest_chain(console, "BTC", args.blocks), args.btc),
+         lambda console: fund_regtest_chain(console, "BTC", args.blocks, args.wipe), args.btc),
         ("LTC", f"regtest: start daemon, make a wallet, mine {args.blocks} blocks",
-         lambda console: fund_regtest_chain(console, "LTC", args.blocks), args.ltc),
+         lambda console: fund_regtest_chain(console, "LTC", args.blocks, args.wipe), args.ltc),
         ("XRP", "testnet faucet: create and fund an account", fund_xrp_testnet, args.xrp),
         ("SOL", "devnet: confirm the balance the key rotation left (read-only)", check_solana_devnet, args.sol),
+        ("GRC", "testnet: report the balance (READ-ONLY; mints nothing)",
+         check_gridcoin_testnet, args.grc),
         ("XMR", "not scripted; explaining why", None, args.xmr),
     ]
     return [(asset, title, run) for asset, title, run, on in everything if on or args.all]
@@ -267,7 +465,8 @@ def report(console: Console, results: list[dict], problems: list[str]) -> None:
     if not results:
         print("  (none) -- no chain produced coins on this run", flush=True)
     for row in results:
-        print(f"  {row['asset']:<5} balance {row.get('balance')}  {row.get('address', '')}", flush=True)
+        extra = f" (+{row['immature']} immature)" if row.get("immature") else ""
+        print(f"  {row['asset']:<5} balance {row.get('balance')}{extra}  {row.get('address', '')}", flush=True)
     for row in results:
         if row.get("we_started"):
             pid = row.get("pid")
@@ -287,8 +486,15 @@ def main() -> int:
     parser.add_argument("--ltc", action="store_true", help="mine regtest LTC")
     parser.add_argument("--xrp", action="store_true", help="ask the XRP testnet faucet")
     parser.add_argument("--sol", action="store_true", help="confirm the existing devnet balance (read-only)")
+    parser.add_argument("--grc", action="store_true",
+                        help="report the Gridcoin balance, READ-ONLY -- the operator already holds "
+                             "testnet GRC, so this mints nothing and only looks")
     parser.add_argument("--xmr", action="store_true", help="explain why Monero is not scripted here")
     parser.add_argument("--all", action="store_true", help="every chain above")
+    parser.add_argument("--wipe", action="store_true",
+                        help="DELETE the regtest chain first and restart at height 0, where the subsidy "
+                             "is 50/block. regtest coins are worth nothing, but any wallet in that "
+                             "datadir goes with it")
     parser.add_argument("--blocks", type=int, default=COINBASE_MATURITY_BLOCKS,
                         help=f"regtest blocks to mine (default {COINBASE_MATURITY_BLOCKS}; "
                              f"fewer than 101 leaves the coinbase immature and the balance zero)")
