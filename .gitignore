@@ -23,3 +23,13 @@ node_modules/
 # Runtime state, never source: a pid file that outlives its process is the
 # stale record that makes the next start refuse for no reason (rule 13).
 swap_terminal/runtime/
+
+# Solana keypairs are a bare JSON array of 64 integers and are named anything at
+# all. `wgrc.json` -- the key to the account every swap payout in
+# swap_intents.json is addressed to -- sat in the repo because the pattern above
+# was `*keypair*.json` and the file is not called that. Matching key material by
+# FILENAME is guesswork; tests/test_no_key_material_is_tracked.py matches it by
+# SHAPE, which is what actually holds. These lines stop the known ones early.
+wgrc.json
+*.keypair.json
+id.json
