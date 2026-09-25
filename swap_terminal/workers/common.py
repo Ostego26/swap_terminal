@@ -55,6 +55,7 @@ from collections.abc import Callable
 from chains.monero import MoneroAdapter
 from chains.registry import build_adapters
 from chains.solana import SolanaAdapter
+from chains.xrp import XRPAdapter
 from config import Config
 from microfortnights import format_duration
 
@@ -124,6 +125,13 @@ def endpoint_lines() -> list[str]:
     # (chains/monero_units.py), so a banner echoing the raw setting could tell
     # an operator their wallet waits 2 blocks when it waits 10. The adapter
     # renders its own line and says so when it raised the figure.
+    # XRP, and its threshold is neither blocks nor a commitment rank -- it is
+    # a validated-ledger boolean. Its own line so the unit is stated (rule 6).
+    if Config.RPC.get("XRP", {}).get("url"):
+        lines.append(XRPAdapter(**Config.RPC["XRP"]).endpoint_line())
+    else:
+        lines.append("  XRP  not configured (XRP_RPC_URL unset)  <- no XRP adapter is constructed; no XRP pair is allowed")
+
     if Config.RPC.get("XMR", {}).get("port"):
         lines.append(MoneroAdapter(**Config.RPC["XMR"]).endpoint_line())
     else:

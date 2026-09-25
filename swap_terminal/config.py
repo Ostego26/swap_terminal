@@ -82,6 +82,16 @@ class Config:
     # act that arms the payout path for XMR.
     XMR_WALLET_CAN_SPEND = os.getenv("XMR_WALLET_CAN_SPEND", "").strip().lower() in {"1", "true", "yes"}
 
+    # XRP. No default URL: a rippled endpoint is either your own server or a
+    # public cluster, and guessing one would point this at somebody else's
+    # machine. Unset means no XRP adapter is constructed at all.
+    XRP_RPC_URL = os.getenv("XRP_RPC_URL", "")
+    # Must be 1. The XRP Ledger does not reorganize, so a payment is either in
+    # a validated ledger or it is not -- there is no depth to accumulate, and
+    # chains/xrp_units.py REFUSES any other value at construction rather than
+    # letting every XRP deposit sit below an unreachable threshold forever.
+    XRP_MIN_CONFIRMATIONS = int(os.getenv("XRP_MIN_CONFIRMATIONS", "1"))
+
     RPC: ClassVar[dict[str, dict[str, object]]] = {
         "BTC": {
             "user": os.getenv("BTC_RPC_USER", ""),
@@ -142,6 +152,14 @@ class Config:
         # `account_index` instead, because that is what a subaddress is derived
         # under. chains/registry.py splats this dict, so a key added here
         # without a matching parameter fails at construction.
+        # Its own shape again, matching XRPAdapter.__init__. An XRP endpoint is
+        # one URL with no HTTP auth, no wallet path and no port of its own --
+        # the same reason Config.RPC["SOL"] does not use the Bitcoin six.
+        "XRP": {
+            "url": XRP_RPC_URL,
+            "min_confirmations": XRP_MIN_CONFIRMATIONS,
+            "timeout": float(os.getenv("XRP_RPC_TIMEOUT", "30")),
+        },
         "XMR": {
             "host": os.getenv("XMR_RPC_HOST", "127.0.0.1"),
             "port": XMR_RPC_PORT,

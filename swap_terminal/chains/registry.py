@@ -61,6 +61,7 @@ from .gridcoin import GridcoinAdapter
 from .litecoin import LitecoinAdapter
 from .monero import MoneroAdapter
 from .solana import SolanaAdapter
+from .xrp import XRPAdapter
 
 # The three Bitcoin-derived chains, whose Config.RPC entries all have the same
 # six keys and are splatted straight into RPCAdapter's matching signature.
@@ -112,6 +113,12 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # MoneroAdapter.__init__ exactly, for the reason the SOL paragraph above
     # gives: the dict is built for the signature, and the splat makes a
     # mismatch fail loudly here instead of being ignored.
+    # XRP is conditional on its URL, exactly as SOL is, and for the same
+    # reason: an endpoint is the one value that cannot be defaulted.
+    xrp = rpc.get("XRP")
+    if xrp and xrp.get("url"):
+        adapters["XRP"] = XRPAdapter(**xrp)
+
     monero = rpc.get("XMR")
     if monero and monero.get("port"):
         adapters["XMR"] = MoneroAdapter(**monero)

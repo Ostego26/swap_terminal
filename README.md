@@ -291,6 +291,86 @@ random keys, and associated-token-account derivation over 300 random triples
 across both token programs. Zero mismatches. `solders` is deliberately not a
 dependency.
 
+## XRP
+
+Brokered deposits only. **Payouts are refused** and the refusal is structural:
+`chains/xrp.py` imports no signing library and reads no key path, so it could
+not sign if the check were deleted. `rippled` removed signing from its public
+API on purpose, so paying XRP means holding a key in this process — a custody
+decision, not an implementation gap.
+
+### The partial payment exploit, and why this code reads one field
+
+An XRP `Payment`'s `Amount` is what the sender *asked* to deliver. With
+`tfPartialPayment` set the ledger may deliver **less**, and the transaction
+still succeeds, still reports `tesSUCCESS`, and still shows the original larger
+`Amount`. What actually arrived is in `meta.delivered_amount` and nowhere else.
+
+Credit `Amount` and you can be drained: claim a million XRP, deliver one drop,
+get credited a million. This is the best-known integration mistake on this
+ledger and it has taken real money off real exchanges.
+
+`chains/xrp_payments.py` reads `meta.delivered_amount` and **never** falls back
+to `Amount` — a missing field refuses rather than degrades, because the
+fallback *is* the exploit. Two mutation tests pin it.
+
+It also refuses an **issued currency**: `delivered_amount` is a drop string for
+XRP and a JSON object for an IOU. Crediting the object as XRP would pay out real
+XRP for a token the depositor minted themselves.
+
+### Status: the address maths is measured, the wire format is not
+
+| part | state |
+|---|---|
+| `chains/xrp_address.py` — base58 + checksum | **measured** against ACCOUNT_ZERO and ACCOUNT_ONE, 2,000 round trips, every single-character mutation rejected |
+| `chains/xrp_units.py` — drops, finality ladder | **measured**, tested directly |
+| `chains/xrp_payments.py` — what counts as a deposit | **rules measured**, response shape unverified |
+| `chains/xrp.py` — RPC method and field names | **UNVERIFIED** — xrpl.org was unreachable when this was written |
+
+Run `xrp_chain_check.py` before trusting the adapter, the same way
+`monero_chain_check.py` is the proof for Monero.
+
+### Deposits are attributed by destination tag, not by address
+
+One account, one integer tag per swap. No new key, no reserve per swap, and it
+is what every exchange on this ledger does — so the attribution question
+`chains/solana.py` had to hand back does not arise here.
+
+`get_new_address()` therefore **refuses**, and says why: what is needed is a tag
+allocator in `services/swap_service.py`, which is a change to how a swap is
+created rather than to the adapter.
+
+### Two rippled quirks that bite
+
+**`params` is a list containing one object** — `{"method": "...", "params":
+[{...}]}`. Not an object like Monero's JSON-RPC, not a positional list like
+bitcoind's.
+
+**Errors arrive as HTTP 200**, with `result.status == "error"`. A client that
+only checks `raise_for_status()` reads every failure as a success. `call()`
+checks explicitly.
+
+### Finality is binary
+
+The XRP Ledger does not reorganize, so a payment is either in a validated
+ledger or it is not — there is no depth to accumulate. `XRP_MIN_CONFIRMATIONS`
+must be `1`, and any other value is **refused at construction**: a `6` copied
+from a Bitcoin-shaped config would leave every XRP deposit below an unreachable
+threshold forever, with nothing in any log saying why.
+
+The base reserve is asked of the server, never hardcoded — it has been 20 XRP,
+then 10, then 1, and a stale constant would overstate spendable balance.
+
+### Configuration
+
+```
+XRP_RPC_URL=              # unset means no XRP adapter is constructed at all
+XRP_MIN_CONFIRMATIONS=1
+```
+
+`ALLOWED_PAIRS` is unchanged, matching how Solana and Monero landed. No XRP
+swap can be created; enabling it is the operator's (rule 16).
+
 ## Monero
 
 Brokered only. There is no atomic-swap path for Monero and there is not going
