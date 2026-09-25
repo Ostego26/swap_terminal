@@ -52,20 +52,26 @@ import signal
 import time
 from collections.abc import Callable
 
-from chains.bitcoin import BitcoinAdapter
-from chains.gridcoin import GridcoinAdapter
-from chains.litecoin import LitecoinAdapter
+from chains.registry import build_adapters
+from chains.solana import SolanaAdapter
 from config import Config
 from microfortnights import format_duration
 
 
-def build_adapters() -> dict:
-    rpc = Config.RPC
-    return {
-        "BTC": BitcoinAdapter(**rpc["BTC"]),
-        "LTC": LitecoinAdapter(**rpc["LTC"]),
-        "GRC": GridcoinAdapter(**rpc["GRC"]),
-    }
+def build_adapters_from_config() -> dict:
+    """The workers' entry into chains/registry.build_adapters().
+
+    A one-line wrapper rather than a second implementation. Until 2026-09-25
+    this function WAS the second implementation -- six lines here and six more
+    in app.py, differing only in where the RPC mapping came from -- which is
+    CLAUDE.md rule 8's "bug with a delay on it", and a fourth chain is exactly
+    when that delay expires.
+
+    Named differently from the shared one it calls so that `from
+    chains.registry import build_adapters` and this can coexist in one module
+    without either shadowing the other.
+    """
+    return build_adapters(Config.RPC)
 
 
 def get_config_dict() -> dict:
@@ -92,6 +98,23 @@ def endpoint_lines() -> list[str]:
         lines.append(
             f"  {asset}  rpc={rpc['host']}:{rpc['port']} wallet={wallet} min_confirmations={confirmations} blocks"
         )
+    # SOL IS APPENDED SEPARATELY AND SAYS A DIFFERENT THING, because it IS a
+    # different thing. The loop above prints `min_confirmations=N blocks`; a
+    # Solana deposit has no block count and its threshold is a rung on a
+    # commitment ladder (chains/solana_units.py). Printing it through the same
+    # f-string would produce "min_confirmations=3 blocks", which is a sentence
+    # that is not true and that an operator would read all morning without
+    # noticing -- CLAUDE.md rule 6's unit laundering, arriving as a status line
+    # rather than as a number.
+    #
+    # It appears ONLY when configured, for the same reason chains/registry.py
+    # only constructs it then: a banner line for a chain nobody set up is
+    # noise, and "(none)" is reserved for a result rather than an absence of
+    # configuration.
+    if Config.RPC.get("SOL", {}).get("url"):
+        lines.append(SolanaAdapter(**Config.RPC["SOL"]).endpoint_line())
+    else:
+        lines.append("  SOL  not configured (SOL_RPC_URL unset)  <- no Solana adapter is constructed; no SOL pair is allowed")
     return lines
 
 

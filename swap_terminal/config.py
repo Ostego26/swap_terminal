@@ -37,6 +37,17 @@ class Config:
     BTC_MIN_CONFIRMATIONS = int(os.getenv("BTC_MIN_CONFIRMATIONS", "2"))
     LTC_MIN_CONFIRMATIONS = int(os.getenv("LTC_MIN_CONFIRMATIONS", "2"))
     GRC_MIN_CONFIRMATIONS = int(os.getenv("GRC_MIN_CONFIRMATIONS", "6"))
+    # SOL_MIN_CONFIRMATIONS IS NOT A COUNT OF BLOCKS. Solana has commitment
+    # LEVELS -- processed / confirmed / finalized -- and this is a rung on the
+    # ladder in chains/solana_units.COMMITMENT_RANKS, where 3 = finalized.
+    # The name matches the other three because services/deposit_service.py
+    # reads `swap["min_confirmations"]` for every chain, and the alternative
+    # was a per-chain branch in the one function that decides whether a deposit
+    # is creditable. The vocabulary lives in one place instead (rule 11), and
+    # SolanaAdapter.__init__ REFUSES a value that is not a rung -- an operator
+    # who copies Gridcoin's 6 here would otherwise stall every SOL swap
+    # forever, silently, because no deposit can reach rank 6.
+    SOL_MIN_CONFIRMATIONS = int(os.getenv("SOL_MIN_CONFIRMATIONS", "3"))
     BTC_NETWORK_FEE_RESERVE = float(os.getenv("BTC_NETWORK_FEE_RESERVE", "0.00002"))
     LTC_NETWORK_FEE_RESERVE = float(os.getenv("LTC_NETWORK_FEE_RESERVE", "0.001"))
     GRC_NETWORK_FEE_RESERVE = float(os.getenv("GRC_NETWORK_FEE_RESERVE", "0.01"))
@@ -67,6 +78,34 @@ class Config:
             "port": int(os.getenv("LTC_RPC_PORT", "9332")),
             "wallet": os.getenv("LTC_RPC_WALLET", ""),
             "timeout": float(os.getenv("LTC_RPC_TIMEOUT", "30")),
+        },
+        # SOLANA'S ENTRY HAS DIFFERENT KEYS, AND THAT IS THE POINT.
+        # The three above are Bitcoin JSON-RPC connections: user, password,
+        # host, port, wallet, timeout. A Solana RPC endpoint is ONE URL with no
+        # HTTP authentication and no wallet path, so forcing it into that shape
+        # would mean four empty strings and a reassembly step that can silently
+        # produce "http://:0". Each dict is built for the __init__ signature it
+        # is splatted into -- which is the contract RPCAdapter already had --
+        # and chains/registry.py is the single place that does the splatting.
+        #
+        # THERE IS DELIBERATELY NO DEFAULT URL. The three above default to
+        # MAINNET ports, which this file's header says out loud. Doing the same
+        # here would mean picking somebody's public cluster and defaulting to
+        # mainnet on it; an unset URL instead makes every call refuse with a
+        # message saying so, which is the loud version of the same fact.
+        #
+        # SOL_HOT_WALLET is a PUBLIC key. Nothing in chains/solana.py reads,
+        # loads or derives a private key, and there is no environment variable
+        # here for a keypair path -- unlike the Node bridge's
+        # SOLANA_PAYER_KEYPAIR_PATH, which is what signs over there.
+        "SOL": {
+            "url": os.getenv("SOL_RPC_URL", ""),
+            "commitment": os.getenv("SOL_RPC_COMMITMENT", "processed"),
+            "timeout": float(os.getenv("SOL_RPC_TIMEOUT", "30")),
+            # The SPL mint to operate on, e.g. wGRC. Empty means native SOL.
+            "mint": os.getenv("SOL_SPL_MINT", ""),
+            "hot_wallet": os.getenv("SOL_HOT_WALLET", ""),
+            "min_commitment_rank": int(os.getenv("SOL_MIN_CONFIRMATIONS", "3")),
         },
         "GRC": {
             "user": os.getenv("GRC_RPC_USER", ""),

@@ -59,11 +59,44 @@ def test_counts_carry_their_own_interpretation():
 
 
 def test_endpoint_lines_report_confirmations_as_blocks_never_as_microfortnights():
-    """Rule 6's hard boundary: six confirmations is six confirmations."""
-    for line in endpoint_lines():
-        assert "min_confirmations=" in line
-        assert "blocks" in line
+    """Rule 6's hard boundary: six confirmations is six confirmations.
+
+    THIS TEST WAS WIDENED ON 2026-09-25 AND IS STRICTER THAN IT WAS. It used to
+    assert that EVERY line contains `min_confirmations=` and the word `blocks`,
+    which was true while every chain here was proof-of-work. Solana is not: its
+    threshold is a rung on a commitment ladder (chains/solana_units.py), and a
+    line reading `min_confirmations=3 blocks` for a Solana endpoint would be a
+    sentence that is not true -- rule 6's unit laundering arriving as a status
+    line rather than as a number, and one an operator would read all morning
+    without noticing.
+
+    So the invariant is no longer "every line says blocks". It is the stronger
+    one that was always the point (CLAUDE.md rule 9: a test pinning replaced
+    behavior "changes to pin the stronger invariant"):
+
+      every line states its own unit, and states the RIGHT one,
+      and no line renders a settlement threshold in microfortnights.
+
+    The block-count chains must still say `blocks`; the Solana line must say it
+    is a commitment rank and must say it is NOT blocks; and the µfn ban covers
+    all of them as before.
+    """
+    lines = endpoint_lines()
+    assert lines, "endpoint_lines() returned nothing; the banner would be silent (rule 14)"
+    for line in lines:
+        # Unchanged and unconditional: a block count is not a duration, on any
+        # chain, configured or not.
         assert "µfn" not in line
+    for asset in ("BTC", "LTC", "GRC"):
+        matching = [line for line in lines if line.strip().startswith(asset)]
+        assert len(matching) == 1, f"expected exactly one {asset} line, got {matching}"
+        assert "min_confirmations=" in matching[0]
+        assert "blocks" in matching[0]
+    solana = [line for line in lines if line.strip().startswith("SOL")]
+    assert len(solana) == 1, f"expected exactly one SOL line, got {solana}"
+    # It must never claim blocks -- that is the whole reason it is not printed
+    # through the same f-string as the three above.
+    assert "blocks" not in solana[0]
 
 
 def test_the_banner_never_prints_a_credential(monkeypatch, capsys):

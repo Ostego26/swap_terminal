@@ -47,9 +47,7 @@ listening and one that is wedged look identical from outside.
 import os
 from collections.abc import Mapping
 
-from chains.bitcoin import BitcoinAdapter
-from chains.gridcoin import GridcoinAdapter
-from chains.litecoin import LitecoinAdapter
+from chains.registry import build_adapters
 from config import Config
 from db import close_db, init_db
 from flask import Flask
@@ -127,21 +125,16 @@ def exposure_warnings(host: str, debug: bool) -> list[str]:
     return warnings
 
 
-def build_adapters(app: Flask) -> dict:
-    rpc = app.config["RPC"]
-    return {
-        "BTC": BitcoinAdapter(**rpc["BTC"]),
-        "LTC": LitecoinAdapter(**rpc["LTC"]),
-        "GRC": GridcoinAdapter(**rpc["GRC"]),
-    }
-
-
 def create_app() -> Flask:
     app = Flask(__name__, static_folder="static", template_folder="templates")
     for key in dir(Config):
         if key.isupper():
             app.config[key] = getattr(Config, key)
-    app.config["ADAPTERS"] = build_adapters(app)
+    # chains/registry.build_adapters() is shared with workers/common.py. It was
+    # two six-line copies until 2026-09-25 (rule 8), and a fourth chain is
+    # exactly where that drifts: a SOL adapter added here and not there gives
+    # an HTTP process that hands out deposit addresses no watcher is polling.
+    app.config["ADAPTERS"] = build_adapters(app.config["RPC"])
     app.teardown_appcontext(close_db)
     app.register_blueprint(health_bp)
     app.register_blueprint(quotes_bp)
