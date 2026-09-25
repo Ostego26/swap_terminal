@@ -35,13 +35,17 @@ for the name), so it is an entry point with no entry.
 import hashlib
 import json
 import logging
-import os
 import random
 import time
 from decimal import Decimal
 
 import requests
 from ecdsa import BadSignatureError, SECP256k1, SigningKey, VerifyingKey
+from gridcoin_credentials import (
+    gridcoin_rpc_url,
+    gridcoin_rpc_user,
+    require_gridcoin_rpc_password,
+)
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
@@ -208,19 +212,15 @@ def compute_reputation(address: str, attestations: list[Attestation]) -> Decimal
 # the environment at import time is already a rule 12 hazard, and raising here
 # would make a failed import the first symptom. rpc_call() refuses instead, at
 # the point of use, where the message can say what to do.
-GRIDCOIN_RPC_USER = os.environ.get("GRIDCOIN_RPC_USER", "gridcoinrpc")
-GRIDCOIN_RPC_PASS = os.environ.get("GRIDCOIN_RPC_PASS", "")
-GRIDCOIN_RPC_URL = os.environ.get("GRIDCOIN_RPC_URL", "http://127.0.0.1:25779")
-
-
-class GridcoinRPCNotConfigured(RuntimeError):
-    """GRIDCOIN_RPC_PASS is unset, so no RPC call was attempted.
-
-    Its own class rather than a bare RuntimeError because this is not the
-    daemon refusing -- it is this process declining before it opens a socket,
-    and an operator reading a traceback needs to tell "the wallet said no" from
-    "you did not configure me".
-    """
+# RESOLVED THROUGH gridcoin_credentials, NOT READ DIRECTLY, because the name
+# this file used was not the name the operator's .env uses. Measured
+# 2026-09-25: the live .env spells it GRIDCOIN_RPC_PASSWORD and this file read
+# GRIDCOIN_RPC_PASS, so it could not have authenticated against the
+# configuration that actually exists -- and the symptom would have been a 401
+# reading as "the wallet is broken". See that module for all four spellings and
+# why they are not being renamed.
+GRIDCOIN_RPC_USER = gridcoin_rpc_user()
+GRIDCOIN_RPC_URL = gridcoin_rpc_url()
 
 
 def rpc_call(method: str, params: list | None = None):
@@ -254,18 +254,16 @@ def rpc_call(method: str, params: list | None = None):
     # would present as "the wallet is broken" rather than "you did not set a
     # password". This method carries sendrawtransaction, so that confusion is
     # expensive: the obvious reaction to an unexplained failure is to retry.
-    if not GRIDCOIN_RPC_PASS:
-        raise GridcoinRPCNotConfigured(
-            f"GRIDCOIN_RPC_PASS is not set, so {method!r} was NOT sent and no socket was opened. "
-            f"Set it from your gridcoinresearch.conf rpcpassword. This module talks to "
-            f"{GRIDCOIN_RPC_URL}, which is Gridcoin's TEST chain by default (port 25779; mainnet "
-            f"is 15715) -- check which one you meant before setting it."
-        )
+    # Resolved at CALL time, not import time. The environment can be set after
+    # this module is imported -- a test does exactly that -- and caching the
+    # answer at import would make configuration order-dependent, which is the
+    # rule 12 hazard this file already carries for its URL and user.
+    password = require_gridcoin_rpc_password(method)
     # No timeout, and this same call carries sendrawtransaction. Adding one
     # would make the client report failure for a broadcast that may already
     # have gone out -- the fund-path trade-off written up in
     # modules/atomic_grc_client.py. Reported, not made (rule 16).
-    response = requests.post(GRIDCOIN_RPC_URL, json=payload, auth=(GRIDCOIN_RPC_USER, GRIDCOIN_RPC_PASS))  # noqa: S113
+    response = requests.post(GRIDCOIN_RPC_URL, json=payload, auth=(GRIDCOIN_RPC_USER, password))  # noqa: S113
     response.raise_for_status()
     result = response.json()["result"]
     logger.debug("RPC result: %s", result)

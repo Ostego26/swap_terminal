@@ -29,17 +29,29 @@
 # It was also committed and pushed (b3aa36a), which is why removing it from
 # this line does not finish the job. A pushed credential is published; the only
 # step that changes anything is rotating it at the daemon.
-RPC_USER="${GRIDCOIN_RPC_USER:-gridcoinrpc}"
-RPC_PASS="${GRIDCOIN_RPC_PASS:-}"
-RPC_URL="${GRIDCOIN_RPC_URL:-http://127.0.0.1:25779}"
+# THREE NAMES ARE ACCEPTED FOR THE PASSWORD, in the same order
+# gridcoin_credentials.py resolves them, and that module is where the reason
+# lives. Short version: one credential is read under four spellings across this
+# tree, the operator's live .env uses GRIDCOIN_RPC_PASSWORD, and this script
+# used to accept only GRIDCOIN_RPC_PASS -- so it could not authenticate against
+# the configuration that actually exists on the host.
+#
+# This is shell and cannot import that module, so the order is duplicated here.
+# Rule 8 says a genuine duplicate names the other site at BOTH ends: the
+# Python-side list is GRIDCOIN_PASSWORD_VARIABLES in
+# swap_terminal/gridcoin_credentials.py, and the two must be changed together.
+RPC_USER="${GRIDCOIN_RPC_USER:-${RPC_USER:-gridcoinrpc}}"
+RPC_PASS="${GRIDCOIN_RPC_PASSWORD:-${GRIDCOIN_RPC_PASS:-${RPC_PASS:-}}}"
+RPC_URL="${GRIDCOIN_RPC_URL:-${RPC_URL:-http://127.0.0.1:25779}}"
 
 if [ -z "$RPC_PASS" ]; then
-  echo "REFUSED: GRIDCOIN_RPC_PASS is not set, so nothing was sent." >&2
+  echo "REFUSED: no Gridcoin RPC password is set, so nothing was sent." >&2
   echo "  This script signs and broadcasts a transaction, and an unauthenticated" >&2
   echo "  RPC call fails in a way that looks like an empty wallet rather than a" >&2
   echo "  missing password -- which is the more expensive failure." >&2
   echo "  Set it from your gridcoinresearch.conf rpcpassword:" >&2
-  echo "      export GRIDCOIN_RPC_PASS=...    # never paste it into a terminal you share" >&2
+  echo "      export GRIDCOIN_RPC_PASSWORD=...   # or GRIDCOIN_RPC_PASS, or RPC_PASS" >&2
+  echo "  Never paste it into a terminal whose output you share." >&2
   exit 2
 fi
 

@@ -55,6 +55,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
+from gridcoin_credentials import gridcoin_rpc_password
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -65,7 +66,24 @@ CSV_EXPORT_PATH = BASE_DIR / "gridcoin_transactions.csv"
 
 load_dotenv(dotenv_path=ENV_PATH if ENV_PATH.exists() else None)
 RPC_USER = os.getenv("GRIDCOIN_RPC_USER", "gridcoinrpc")
-RPC_PASSWORD = os.getenv("GRIDCOIN_RPC_PASSWORD", "changeme")
+# NO DEFAULT, AND IT USED TO HAVE A PLACEHOLDER ONE.
+#
+# The old value is not named here, for the same reason chain_tx.sh and
+# identity.py do not name theirs: a comment reproducing a credential keeps
+# the string in the tree and trips every scanner that looks for it. That
+# applies to a placeholder too -- a scanner cannot tell a real secret from a
+# famous bad default, and neither can a grep.
+#
+# That is the identical defect removed from identity.py in the same pass, and
+# missing it there is the argument for rule 8: one grep found identity.py, and
+# only a second, wider one found this. A default password makes the
+# unconfigured path the SILENT one -- this file authenticates, gets a 401, and
+# reports it as a wallet problem.
+#
+# Empty rather than raising at import: transactions.py is imported for its
+# price-cache helpers by things that never make an RPC call, and raising here
+# would make a failed import the first symptom of a missing password.
+RPC_PASSWORD = gridcoin_rpc_password()
 RPC_HOST = os.getenv("GRIDCOIN_RPC_HOST", "127.0.0.1")
 RPC_PORT = int(os.getenv("GRIDCOIN_RPC_PORT", "25779"))
 
