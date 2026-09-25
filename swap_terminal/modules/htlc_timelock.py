@@ -24,7 +24,7 @@ of atomicity, it is the absence of it: the initiator can fund their leg, wait
 for the counterparty to fund theirs, refund their own leg immediately, and then
 redeem the counterparty's leg with the preimage -- taking both.
 
-That defect was harmless only because a SECOND defect cancelled it. The
+That defect was harmless only because a SECOND defect canceled it. The
 locktime was pushed into the script by a compact-size varint encoder rather
 than a CScriptNum encoder, so `500000` was enforced as `128,000,254` -- a
 height roughly 127 million blocks out, which made the refund branch

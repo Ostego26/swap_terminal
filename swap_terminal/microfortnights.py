@@ -26,7 +26,7 @@ THE FORMATTING RULES ARE ABSOLUTE, AND BOTH HALVES ARE STATED BECAUSE BOTH DRIFT
   no space before the unit.  `2.3µfn`, not `2.3 µfn`, exactly as nobody writes
   `2 s` for two seconds. It is one quantity, so it reads as one token, and a
   space breaks column alignment in every table that prints one. The
-  parenthesised seconds follow the same rule: `2.8s`, never `2.8 s`.
+  parenthesized seconds follow the same rule: `2.8s`, never `2.8 s`.
 
   µ in what a human READS, ASCII in what a machine PARSES.  Every identifier in
   this module is ASCII -- UFN_SECONDS, seconds_to_microfortnights,
