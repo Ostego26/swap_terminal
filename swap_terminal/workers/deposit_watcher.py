@@ -43,7 +43,7 @@ from db import SCHEMA, db_session
 from services.deposit_service import ACTIVE_STATUSES, process_active_swaps
 from workers.common import (
     announce_start,
-    build_adapters,
+    build_adapters_from_config,
     cycle_line,
     get_config_dict,
     install_stop_handler,
@@ -59,7 +59,7 @@ _ACTIVE_PLACEHOLDERS = ",".join("?" for _ in ACTIVE_STATUSES)
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
     should_stop = install_stop_handler()
     announce_start(WORKER_NAME, poll_seconds, os.getpid())
-    adapters = build_adapters()
+    adapters = build_adapters_from_config()
     config = get_config_dict()
 
     cycle = 0

@@ -63,7 +63,7 @@ from db import SCHEMA, apply_migrations, db_session
 from services.payout_service import process_pending_payouts, refresh_wallet_inventory
 from workers.common import (
     announce_start,
-    build_adapters,
+    build_adapters_from_config,
     cycle_line,
     get_config_dict,
     install_stop_handler,
@@ -83,7 +83,7 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
         "see tests/test_payout_concurrency.py for the measurement of both.",
         flush=True,
     )
-    adapters = build_adapters()
+    adapters = build_adapters_from_config()
     config = get_config_dict()
 
     # The constraint that makes a double payout impossible, applied once at
