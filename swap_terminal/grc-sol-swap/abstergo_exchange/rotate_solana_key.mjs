@@ -47,6 +47,7 @@
  *   cd <repo>/swap_terminal/grc-sol-swap/abstergo_exchange
  *   node rotate_solana_key.mjs --network devnet                 # report only
  *   node rotate_solana_key.mjs --network devnet --move          # do it
+ *   node rotate_solana_key.mjs --network devnet --move --to <pubkey>   # resume
  *
  * Run it from that directory: it uses the @solana/web3.js and @solana/spl-token
  * already in its node_modules, so nothing new is installed.
@@ -72,6 +73,7 @@ const value = (name, fallback) => {
 };
 
 const NETWORK = value('--network', 'devnet');
+const TO_PUBKEY = value('--to', null);
 const OLD_KEY_PATH = value('--old-key', 'wgrc.json');
 const MOVE = flag('--move');
 const ENDPOINTS = {
@@ -80,11 +82,23 @@ const ENDPOINTS = {
   'mainnet-beta': 'https://api.mainnet-beta.solana.com',
 };
 
-// A fee-per-signature floor with headroom. Solana's base fee is 5000 lamports
-// per signature; this leaves room for a couple of signatures plus any priority
-// fee the cluster is charging, so the sweep cannot fail for being one lamport
-// short. Anything left behind is dust on a key that is being abandoned anyway.
-const SWEEP_RESERVE_LAMPORTS = 25_000;
+// Fee headroom ON TOP of the rent-exempt minimum. Solana's base fee is 5000
+// lamports per signature; 10000 covers that with room for a priority fee.
+//
+// The rent-exempt minimum itself is QUERIED, never assumed. Measured on devnet
+// 2026-09-25, the hard way: a first version reserved a flat 25000 lamports and
+// the sweep was rejected with
+//
+//     Transaction results in an account (0) with insufficient funds for rent
+//
+// A Solana system account must hold EITHER zero OR at least the rent-exempt
+// minimum -- about 890880 lamports for a zero-byte account. 25000 is neither,
+// so the runtime refused the whole transaction. Reserving a round number that
+// happens to be under the threshold is the same class of error as a dust
+// output on a Bitcoin chain: a value the network will not let an account sit
+// at. getMinimumBalanceForRentExemption(0) is the authority for it, and asking
+// the cluster costs one round trip and removes a constant that goes stale.
+const FEE_HEADROOM_LAMPORTS = 10_000;
 
 function die(message) {
   console.error(`\nREFUSED: ${message}\n`);
@@ -181,23 +195,39 @@ async function main() {
     return;
   }
 
-  const { dir, file } = newKeyDestination();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (fs.existsSync(file)) die(`${file} already exists; refusing to overwrite a key.`);
-  const fresh = Keypair.generate();
-  fs.writeFileSync(file, JSON.stringify(Array.from(fresh.secretKey)), { mode: 0o600 });
-  console.log(`new key     ${fresh.publicKey.toBase58()}`);
-  console.log(`            written to ${file} (mode 0600, outside any git repository)`);
-  console.log('');
+  // --to reuses a destination from an earlier run. Without it a second run
+  // would mint a SECOND replacement key and split the funds across two
+  // wallets -- which is what a resumed rotation needs least.
+  let destination;
+  if (TO_PUBKEY) {
+    try {
+      destination = new PublicKey(TO_PUBKEY);
+    } catch {
+      die(`--to ${TO_PUBKEY} is not a valid public key. Nothing was done.`);
+    }
+    console.log(`destination ${destination.toBase58()}  <- from --to; no new key was generated`);
+    console.log('');
+  } else {
+    const { dir, file } = newKeyDestination();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (fs.existsSync(file)) die(`${file} already exists; refusing to overwrite a key.`);
+    const fresh = Keypair.generate();
+    fs.writeFileSync(file, JSON.stringify(Array.from(fresh.secretKey)), { mode: 0o600 });
+    destination = fresh.publicKey;
+    console.log(`new key     ${destination.toBase58()}`);
+    console.log(`            written to ${file} (mode 0600, outside any git repository)`);
+    console.log(`            RESUMING? pass --to ${destination.toBase58()} so a rerun does not make another key.`);
+    console.log('');
+  }
 
   // Tokens first. Each needs the destination ATA to exist, and creating it is
   // paid for in SOL by the OLD wallet -- which is why the SOL sweep is last.
   for (const h of holdings) {
     const fromAta = h.tokenAccount;
-    const toAta = await getAssociatedTokenAddress(h.mint, fresh.publicKey, false, h.programId);
+    const toAta = await getAssociatedTokenAddress(h.mint, destination, false, h.programId);
     const tx = new Transaction();
     if ((await conn.getAccountInfo(toAta)) === null) {
-      tx.add(createAssociatedTokenAccountInstruction(old.publicKey, toAta, fresh.publicKey, h.mint, h.programId));
+      tx.add(createAssociatedTokenAccountInstruction(old.publicKey, toAta, destination, h.mint, h.programId));
     }
     tx.add(createTransferCheckedInstruction(fromAta, h.mint, toAta, old.publicKey, h.raw, h.decimals, [], h.programId));
     const sig = await sendAndConfirmTransaction(conn, tx, [old], { commitment: 'confirmed' });
@@ -207,12 +237,15 @@ async function main() {
 
   // SOL last: whatever survives the token transfers, minus a fee reserve.
   const remaining = await conn.getBalance(old.publicKey);
-  const sweep = remaining - SWEEP_RESERVE_LAMPORTS;
+  const rentExempt = await conn.getMinimumBalanceForRentExemption(0);
+  const reserve = rentExempt + FEE_HEADROOM_LAMPORTS;
+  const sweep = remaining - reserve;
+  console.log(`rent-exempt minimum for a system account: ${rentExempt} lamports (queried, not assumed)`);
   if (sweep <= 0) {
-    console.log(`SOL sweep   skipped: ${sol(remaining)} left, at or under the ${SWEEP_RESERVE_LAMPORTS}-lamport fee reserve`);
+    console.log(`SOL sweep   skipped: ${sol(remaining)} left, at or under the ${reserve}-lamport reserve`);
   } else {
     const tx = new Transaction().add(SystemProgram.transfer({
-      fromPubkey: old.publicKey, toPubkey: fresh.publicKey, lamports: sweep,
+      fromPubkey: old.publicKey, toPubkey: destination, lamports: sweep,
     }));
     const sig = await sendAndConfirmTransaction(conn, tx, [old], { commitment: 'confirmed' });
     console.log(`swept       ${sol(sweep)}`);
@@ -224,9 +257,9 @@ async function main() {
   console.log('');
   console.log('VERIFIED BY READING THE CHAIN BACK:');
   console.log(`  old ${old.publicKey.toBase58()}  ${sol(await conn.getBalance(old.publicKey))}`);
-  console.log(`  new ${fresh.publicKey.toBase58()}  ${sol(await conn.getBalance(fresh.publicKey))}`);
+  console.log(`  new ${destination.toBase58()}  ${sol(await conn.getBalance(destination))}`);
   for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-    const { value: accounts } = await conn.getParsedTokenAccountsByOwner(fresh.publicKey, { programId });
+    const { value: accounts } = await conn.getParsedTokenAccountsByOwner(destination, { programId });
     for (const { account } of accounts) {
       const info = account.data.parsed.info;
       if (info.tokenAmount.amount !== '0') {
@@ -235,7 +268,7 @@ async function main() {
     }
   }
   console.log('');
-  console.log(`NEXT: point your configuration at ${file} and at the new public key.`);
+  console.log('NEXT: point your configuration at the replacement key and its public key.');
   console.log('The old key stays compromised forever. Do not reuse it for anything.');
 }
 
