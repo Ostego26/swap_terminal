@@ -46,6 +46,7 @@ from io import StringIO
 
 import base58
 import pytest
+from chains.base import RPCError
 from ecdsa import SECP256k1, VerifyingKey
 from ecdsa.util import sigdecode_der
 from modules.atomic_htlc_scripts import (
@@ -54,9 +55,20 @@ from modules.atomic_htlc_scripts import (
     script_to_p2sh_address,
 )
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console, redact, value
-from regtest.daemons import RegtestSetupError, resolve_chain_config
+from regtest.daemons import RegtestRPC, RegtestSetupError, resolve_chain_config
 from regtest.keys import RegtestKey, generate_key, hash160
-from regtest.steps import ChainOutcome, Run, _find_vout_by_script, _p2sh_script_for
+from regtest.steps import (
+    REDEEM_FAILED_ON_LOOKUP,
+    REDEEM_FAILED_ON_SIGNING,
+    REDEEM_FAILED_UNCLASSIFIED,
+    ChainOutcome,
+    Mined,
+    Run,
+    _find_vout_by_script,
+    _p2sh_script_for,
+    _verbose_tx,
+    classify_redeem_failure,
+)
 from regtest.txbuild import (
     SEQUENCE_NON_FINAL,
     Outpoint,
@@ -632,3 +644,215 @@ def test_two_runs_do_not_share_a_spawn_record():
     second = Run(console=console, config=resolve_chain_config("LTC"))
     first.spawn.started = True
     assert second.spawn.started is False
+
+
+# --------------------------------------------------------------------------
+# bug 1, measured on the operator's machine 2026-09-25: a mined transaction
+# could not be read back, which killed BTC before steps 7, 8 and 9 ran
+# --------------------------------------------------------------------------
+
+
+class _StubNode:
+    """Records calls and answers them from a script of canned results.
+
+    Not a mock framework: the assertions here are about WHICH RPCs were tried
+    and in what ORDER, so the recording is the point.
+    """
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls = []
+
+    def call(self, method, *params):
+        self.calls.append((method, params))
+        answer = self.answers.get(method)
+        if isinstance(answer, Exception):
+            raise answer
+        if callable(answer):
+            return answer(*params)
+        if answer is None:
+            raise RPCError(f"{method}: no canned answer")
+        return answer
+
+
+_TXINDEX_ERROR = RPCError(
+    "getrawtransaction: code=-5 message=No such mempool transaction. "
+    "Use -txindex or provide a block hash to enable blockchain transaction queries."
+)
+
+
+def test_a_mined_transaction_is_read_back_with_its_block_hash():
+    """The exact failure from the first live run: mined, then unreadable."""
+    node = _StubNode({
+        "getrawtransaction": lambda txid, verbose, *rest: (
+            {"vout": [], "confirmations": 1} if rest else _raise(_TXINDEX_ERROR)
+        ),
+    })
+    result = _verbose_tx(node, "ab" * 32, "beef" * 16)
+    assert result["confirmations"] == 1
+    assert node.calls[0][0] == "getrawtransaction"
+    assert len(node.calls[0][1]) == 3, "the block hash must be passed, which is what makes it work"
+
+
+def _raise(exc):
+    raise exc
+
+
+def test_a_wallet_transaction_is_read_back_without_an_index_or_a_block_hash():
+    """Route 2: gettransaction carries the hex and the confirmations, and needs no index."""
+    node = _StubNode({
+        "gettransaction": {"hex": "00", "confirmations": 3, "blockhash": "cd" * 32},
+        "decoderawtransaction": {"vout": [{"scriptPubKey": {"hex": "aa"}}]},
+    })
+    result = _verbose_tx(node, "ab" * 32)
+    assert result["confirmations"] == 3
+    assert result["blockhash"] == "cd" * 32
+    assert [call[0] for call in node.calls] == ["gettransaction", "decoderawtransaction"]
+
+
+def test_a_non_wallet_spend_falls_through_every_route_and_names_them_all():
+    """The redeem and refund spends are not wallet transactions, so route 2 cannot see them."""
+    node = _StubNode({
+        "getrawtransaction": _TXINDEX_ERROR,
+        "gettransaction": RPCError("gettransaction: code=-5 message=Invalid or non-wallet transaction id"),
+    })
+    with pytest.raises(RegtestSetupError) as caught:
+        _verbose_tx(node, "ab" * 32, "beef" * 16)
+    message = str(caught.value)
+    assert "getrawtransaction with blockhash" in message
+    assert "gettransaction + decoderawtransaction" in message
+    assert "needs -txindex" in message
+    assert "does NOT add -txindex=1" in message, "the harness must not reindex the operator's datadir"
+
+
+def test_mined_keeps_the_block_hashes_generatetoaddress_returned():
+    mined = Mined(height=102, hashes=["aa" * 32, "bb" * 32])
+    assert mined.first_hash == "aa" * 32
+    assert Mined(height=0, hashes=[]).first_hash is None
+
+
+# --------------------------------------------------------------------------
+# bug 2, measured the same run: LTC died at step 3 with a bare HTTP status
+# --------------------------------------------------------------------------
+
+
+class _StubResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not JSON")
+        return self._payload
+
+
+def _call_with(monkeypatch, response):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        return response
+
+    monkeypatch.setattr("regtest.daemons.requests.post", fake_post)
+    # Built from the resolved config rather than from literals: there is then
+    # no credential spelled in this file at all, and the test also pins that
+    # the LTC defaults are what the harness would really connect with.
+    config = resolve_chain_config("LTC")
+    node = RegtestRPC(
+        user=config.rpc_user,
+        password=config.rpc_password,
+        host=config.host,
+        port=config.port,
+    )
+    return node, captured
+
+
+def test_an_rpc_error_carried_on_http_500_is_still_parsed(monkeypatch):
+    """Litecoin 0.21.4 answers an RPC error with HTTP 500 AND a JSON body.
+
+    The first live run threw the body away and printed only `HTTPError: 500`,
+    so the operator could not see which call failed or why.
+    """
+    payload = {"result": None, "error": {"code": -18, "message": "Wallet file verification failed"}}
+    node, _ = _call_with(monkeypatch, _StubResponse(500, payload))
+    with pytest.raises(RPCError) as caught:
+        node.call("loadwallet", "regtest_htlc_harness")
+    message = str(caught.value)
+    assert "loadwallet" in message
+    assert "code=-18" in message
+    assert "Wallet file verification failed" in message
+
+
+def test_a_successful_result_on_http_200_is_returned(monkeypatch):
+    node, _ = _call_with(monkeypatch, _StubResponse(200, {"result": {"blocks": 101}, "error": None}))
+    assert node.call("getblockchaininfo") == {"blocks": 101}
+
+
+def test_a_non_json_body_reports_the_status_and_what_was_sent(monkeypatch):
+    """No body to parse means the status IS the diagnosis -- and it says so."""
+    node, _ = _call_with(monkeypatch, _StubResponse(403, None, text="<html>forbidden</html>"))
+    with pytest.raises(RPCError) as caught:
+        node.call("uptime")
+    assert "HTTP 403" in str(caught.value)
+    assert "forbidden" in str(caught.value)
+
+
+def test_an_empty_non_json_body_still_prints_something(monkeypatch):
+    node, _ = _call_with(monkeypatch, _StubResponse(500, None, text=""))
+    with pytest.raises(RPCError, match=r"\(none: empty body\)"):
+        node.call("uptime")
+
+
+def test_a_non_2xx_with_no_error_object_is_not_treated_as_a_result(monkeypatch):
+    """A result the caller cannot tell from a real one is the failure mode to avoid."""
+    node, _ = _call_with(monkeypatch, _StubResponse(500, {"result": "surprise", "error": None}))
+    with pytest.raises(RPCError, match="carried no error object"):
+        node.call("uptime")
+
+
+# --------------------------------------------------------------------------
+# the harness must not claim a defect the run did not reach
+# --------------------------------------------------------------------------
+
+
+def test_a_txindex_lookup_failure_is_not_read_as_the_preimage_defect():
+    """redeem_contract()'s FIRST line is a getrawtransaction, so it can fail before signing."""
+    assert classify_redeem_failure(
+        "RPCError: getrawtransaction: code=-5 message=No such mempool transaction. Use -txindex"
+    ) == REDEEM_FAILED_ON_LOOKUP
+
+
+def test_an_incomplete_signing_result_is_the_preimage_defect():
+    assert classify_redeem_failure("Exception: BTC signing incomplete: {'complete': False}") == REDEEM_FAILED_ON_SIGNING
+
+
+def test_an_unrecognized_failure_is_classified_as_unrecognized():
+    """Not a synonym for 'signing': claiming a defect the run did not establish is the failure."""
+    assert classify_redeem_failure("ConnectionResetError: [Errno 104]") == REDEEM_FAILED_UNCLASSIFIED
+
+
+def test_the_verdict_refuses_to_judge_a_redeem_that_never_reached_signing():
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=XFAIL,
+        real_redeem_stage=REDEEM_FAILED_ON_LOOKUP,
+        control_redeem=OK,
+        refund_after_expiry=OK,
+    )
+    verdict = outcome.verdict()
+    assert "was NOT judged on the hashlock branch" in verdict
+    assert "remains inferred from the source" in verdict
+    assert "CANNOT spend the hashlock branch" not in verdict
+
+
+def test_the_verdict_does_judge_a_redeem_that_reached_signing_and_failed():
+    outcome = ChainOutcome(
+        asset="BTC",
+        real_redeem=XFAIL,
+        real_redeem_stage=REDEEM_FAILED_ON_SIGNING,
+        control_redeem=OK,
+        refund_after_expiry=OK,
+    )
+    assert "CANNOT spend the hashlock branch" in outcome.verdict()

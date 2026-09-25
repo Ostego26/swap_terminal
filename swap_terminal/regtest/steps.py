@@ -183,6 +183,11 @@ class ChainOutcome:
     asset: str
     real_create_contract: str = SKIP
     real_redeem: str = SKIP
+    # WHICH STAGE the real redeem failed at, when it failed. Recorded because
+    # the verdict must not say "redeem_contract() cannot spend the hashlock
+    # branch" about a call that never reached the signing step -- see
+    # classify_redeem_failure().
+    real_redeem_stage: str = ""
     control_redeem: str = SKIP
     refund_before_expiry_rejected: str = SKIP
     refund_after_expiry: str = SKIP
@@ -201,6 +206,17 @@ class ChainOutcome:
         if hashlock_by_real_client and timelock:
             return "both branches spend: the real redeem_contract() worked and the refund worked"
         if hashlock_by_control and timelock:
+            if self.real_redeem_stage == REDEEM_FAILED_ON_LOOKUP:
+                # The real call fell over before signing, so this run cannot
+                # say whether it would have pushed the preimage. Say what was
+                # measured and not one word more (rule 17).
+                return (
+                    "the SCRIPT is sound -- both branches spend when the scriptSig is built correctly. The real "
+                    "redeem_contract() was NOT judged on the hashlock branch: it failed earlier, on its own "
+                    "getrawtransaction lookup of the contract, and never reached signing. What is measured is that "
+                    "a funded contract is spendable by refund and by a correctly built hashlock spend; whether "
+                    "redeem_contract() pushes the preimage remains inferred from the source."
+                )
             return (
                 "the SCRIPT is sound -- both branches spend when the scriptSig is built correctly -- but the real "
                 "redeem_contract() CANNOT spend the hashlock branch. A funded contract is recoverable in practice "
@@ -285,22 +301,114 @@ def step_3_wallet(run: Run) -> dict:
     return capabilities
 
 
-def _mine(run: Run, blocks: int) -> int:
-    """Mine `blocks` blocks in batches, printing progress. Returns the new height."""
+@dataclass(frozen=True)
+class Mined:
+    """What a mining call produced: the new tip, and the hashes of the blocks.
+
+    THE HASHES ARE THE POINT, and they were being thrown away. `generatetoaddress`
+    already returns them, and a block hash is what lets `getrawtransaction` read
+    a CONFIRMED transaction back on a node with no `-txindex`. See _verbose_tx()
+    for the failure that taught this.
+    """
+
+    height: int
+    hashes: list[str]
+
+    @property
+    def first_hash(self) -> str | None:
+        """The block a transaction broadcast just before this mine landed in.
+
+        None rather than an exception when nothing was mined: the caller passes
+        it to _verbose_tx(), which has two further routes, and a missing hash
+        should degrade to the next route rather than abort the step.
+        """
+        return self.hashes[0] if self.hashes else None
+
+
+def _mine(run: Run, blocks: int) -> Mined:
+    """Mine `blocks` blocks in batches, printing progress. Returns tip and hashes."""
     node = run.node()
     address = node.call("getnewaddress", "regtest-harness-mining")
     started = time.monotonic()
     remaining = blocks
+    hashes: list[str] = []
     while remaining > 0:
         batch = min(MINE_BATCH_BLOCKS, remaining)
-        node.call("generatetoaddress", batch, address)
+        hashes.extend(node.call("generatetoaddress", batch, address) or [])
         remaining -= batch
         height = int(node.call("getblockcount"))
         run.say(
             f"mined {blocks - remaining}/{blocks} blocks, height={height} (a height, not a duration), "
             f"{format_duration(time.monotonic() - started)} elapsed"
         )
-    return int(node.call("getblockcount"))
+    return Mined(height=int(node.call("getblockcount")), hashes=hashes)
+
+
+def _verbose_tx(node, txid: str, block_hash: str | None = None) -> dict:
+    """Read a transaction back as a decoded dict, WITHOUT requiring -txindex.
+
+    MEASURED ON THE OPERATOR'S MACHINE, 2026-09-25, first run of this harness.
+    The funding transaction was sent and mined, and then:
+
+        RPCError: {'code': -5, 'message': 'No such mempool transaction. Use
+        -txindex or provide a block hash to enable blockchain transaction
+        queries. Use gettransaction for wallet transactions.'}
+
+    A bare `getrawtransaction <txid> true` only ever searched the MEMPOOL, and
+    the transaction had just been mined out of it. This killed BTC before steps
+    7, 8 and 9 ran -- so the one question the harness exists to answer went
+    unmeasured because of a lookup, not because of anything about HTLCs.
+
+    The daemon's own error names all three fixes and this takes two of them,
+    in order, and deliberately not the third:
+
+      1. WITH A BLOCK HASH. `getrawtransaction <txid> true <blockhash>` reads
+         the block directly. Every caller here mines the block itself and so
+         already knows the hash -- `generatetoaddress` returns it -- which
+         makes this the exact route the daemon asked for. It also works for a
+         transaction the WALLET DOES NOT OWN, which the redeem and refund
+         spends are: their inputs are a P2SH the wallet never imported and
+         their outputs pay keys generated inside this harness.
+
+      2. THE WALLET'S OWN RECORD. `gettransaction <txid>` needs no index and
+         carries the raw hex plus the confirmation count, which
+         `decoderawtransaction` turns into the same shape. It works on both
+         Bitcoin Core 28.1 and Litecoin 0.21.4. It only knows transactions the
+         wallet was involved in, which covers the funding but not the spends.
+
+      3. NOT `-txindex=1`. Adding it to the daemon's arguments changes the
+         datadir's indexes and forces a reindex on an operator who already has
+         a regtest chain. A harness must not silently re-shape the machine it
+         is measured on.
+
+    The confirmation count is spliced in from whichever route supplied it,
+    because `decoderawtransaction` does not carry one and every caller asserts
+    on it.
+    """
+    attempts: list[str] = []
+    if block_hash:
+        try:
+            return node.call("getrawtransaction", txid, True, block_hash)
+        except Exception as exc:  # noqa: BLE001 -- checked: a failure of ONE route is not an answer, it is a reason to try the next. Every attempt is collected and re-raised together below, so no route can return a value a caller would mistake for a real transaction.
+            attempts.append(f"getrawtransaction with blockhash: {exc}")
+    try:
+        wallet_record = node.call("gettransaction", txid)
+        decoded = node.call("decoderawtransaction", wallet_record["hex"])
+        decoded["confirmations"] = int(wallet_record.get("confirmations", 0))
+        if wallet_record.get("blockhash"):
+            decoded["blockhash"] = wallet_record["blockhash"]
+        return decoded
+    except Exception as exc:  # noqa: BLE001 -- checked: same. This route only knows wallet transactions, so its failure is expected for the redeem and refund spends and must not end the step.
+        attempts.append(f"gettransaction + decoderawtransaction: {exc}")
+    try:
+        return node.call("getrawtransaction", txid, True)
+    except Exception as exc:  # noqa: BLE001 -- checked: the last route. Its failure ends the search, and the RegtestSetupError below carries every attempt so the operator sees which three things were tried rather than only the last.
+        attempts.append(f"getrawtransaction without blockhash (needs -txindex): {exc}")
+    raise RegtestSetupError(
+        f"could not read transaction {txid} back from the node. Tried, in order: "
+        + "; ".join(attempts)
+        + ". The harness does NOT add -txindex=1, because that would reindex a datadir the operator already has."
+    )
 
 
 def step_4_maturity(run: Run) -> int:
@@ -309,7 +417,7 @@ def step_4_maturity(run: Run) -> int:
     height = int(node.call("getblockcount"))
     run.say(f"current height={height}, maturity needs {COINBASE_MATURITY_HEIGHT}")
     if height < COINBASE_MATURITY_HEIGHT:
-        height = _mine(run, COINBASE_MATURITY_HEIGHT - height)
+        height = _mine(run, COINBASE_MATURITY_HEIGHT - height).height
     run.check("chain height", height, f">= {COINBASE_MATURITY_HEIGHT}",
               OK if height >= COINBASE_MATURITY_HEIGHT else FAIL)
     balance = Decimal(str(node.call("getbalance")))
@@ -463,8 +571,8 @@ def _fund_directly(run: Run, contract: Contract, label: str) -> Outpoint:
     node = run.node()
     run.say(f"[{label}] sending {CONTRACT_AMOUNT} to {contract.p2sh_address}")
     txid = node.call("sendtoaddress", contract.p2sh_address, float(CONTRACT_AMOUNT))
-    _mine(run, 1)
-    raw_tx = node.call("getrawtransaction", txid, True)
+    mined = _mine(run, 1)
+    raw_tx = _verbose_tx(node, txid, mined.first_hash)
     _report_scriptpubkey_fields(run, raw_tx)
     vout = _find_vout_by_script(raw_tx, contract.p2sh_script.hex())
     if vout is None:
@@ -595,24 +703,89 @@ def _broadcast(run: Run, raw_hex: str) -> str:
     return run.node().call("sendrawtransaction", raw_hex, NO_FEE_LIMIT)
 
 
-def _explain_expected_redeem_failure(run: Run, contract: Contract) -> None:
-    """Print what the script wanted versus what the real client can build.
+# How the real redeem_contract() failed, which decides what the harness may
+# claim from it. These are the only three, and the third is deliberately not a
+# synonym for the second: a failure nobody classified must not be reported as
+# a confirmation of anything (rule 17).
+REDEEM_FAILED_ON_LOOKUP = "lookup"
+REDEEM_FAILED_ON_SIGNING = "signing"
+REDEEM_FAILED_UNCLASSIFIED = "unclassified"
 
-    This block's whole job is to make a known defect legible the first time it
-    is confirmed on a chain, so it states the mechanism rather than asserting a
-    conclusion.
+# Fragments of the daemon's own wording for "I cannot find that transaction
+# without an index". Matched on the message because the harness must not
+# depend on which of the two clients' exception wrappers the text arrived in.
+_LOOKUP_FAILURE_MARKERS = ("no such mempool transaction", "-txindex", "code=-5", "'code': -5")
+_SIGNING_FAILURE_MARKERS = ("signing incomplete", "complete': false", "complete\": false")
+
+
+def classify_redeem_failure(message: str) -> str:
+    """Which stage of redeem_contract() failed, from the exception's text.
+
+    WHY THIS EXISTS, AND IT IS THE DIFFERENCE BETWEEN A MEASUREMENT AND A GUESS.
+
+    redeem_contract()'s FIRST line is `getrawtransaction(contract_txid, True)`.
+    On a node without -txindex that call cannot see a transaction that has been
+    mined out of the mempool -- the same defect the harness itself had until
+    2026-09-25. So on a freshly mined contract the real client fails at its own
+    lookup and NEVER REACHES the signing step where the unused `secret`
+    parameter matters.
+
+    If the harness printed its "this is the known preimage defect" block for
+    that failure it would be asserting a conclusion the run did not establish:
+    the call failed for an unrelated reason and the preimage question was never
+    put to the node. That is precisely presenting a hypothesis in the register
+    of a measurement, so the two are separated here and reported differently.
     """
-    run.say("THIS IS THE KNOWN DEFECT, CONFIRMED AGAINST A REAL CHAIN FOR THE FIRST TIME.")
-    run.say(
-        "redeem_contract() accepts `secret: bytes` and never references it. It builds the spend with "
-        "createrawtransaction and hands it to a signrawtransaction* call, which constructs a scriptSig by "
-        "recognizing a script PATTERN. An HTLC is OP_IF/OP_ELSE/OP_ENDIF, which matches no pattern, so the signer "
-        "has nothing to build and no argument that would let it push a preimage and a TRUE flag."
-    )
+    lowered = message.lower()
+    if any(marker in lowered for marker in _LOOKUP_FAILURE_MARKERS):
+        return REDEEM_FAILED_ON_LOOKUP
+    if any(marker in lowered for marker in _SIGNING_FAILURE_MARKERS):
+        return REDEEM_FAILED_ON_SIGNING
+    return REDEEM_FAILED_UNCLASSIFIED
+
+
+def _explain_redeem_failure(run: Run, contract: Contract, message: str) -> str:
+    """Say what the failure does and does not establish. Returns the classification."""
+    kind = classify_redeem_failure(message)
+
+    if kind == REDEEM_FAILED_ON_LOOKUP:
+        run.say("THIS IS NOT THE PREIMAGE DEFECT, AND THE HARNESS WILL NOT CLAIM THAT IT IS.")
+        run.say(
+            "redeem_contract() failed on its FIRST line -- `getrawtransaction(contract_txid, True)` -- which on a "
+            "node without -txindex cannot see a transaction that has already been mined out of the mempool. The "
+            "call never reached the signing step, so this run has NOT put the preimage question to the node."
+        )
+        run.say(
+            "that is a SECOND finding about the real client and it is newly measured: redeem_contract() cannot read "
+            "back a confirmed contract on a default node. `gettransaction`, or `getrawtransaction` with the "
+            "contract's block hash, both work without an index."
+        )
+        run.say(
+            "the preimage defect therefore remains INFERRED from the source, exactly as the module headers say. "
+            "The control spend below is the only evidence this run produces about the hashlock branch."
+        )
+        return kind
+
+    if kind == REDEEM_FAILED_ON_SIGNING:
+        run.say("THIS IS THE KNOWN PREIMAGE DEFECT, CONFIRMED AGAINST A REAL CHAIN FOR THE FIRST TIME.")
+        run.say(
+            "redeem_contract() accepts `secret: bytes` and never references it. It builds the spend with "
+            "createrawtransaction and hands it to a signrawtransaction* call, which constructs a scriptSig by "
+            "recognizing a script PATTERN. An HTLC is OP_IF/OP_ELSE/OP_ENDIF, which matches no pattern, so the "
+            "signer has nothing to build and no argument that would let it push a preimage and a TRUE flag."
+        )
+    else:
+        run.say("THIS FAILURE IS NOT ONE THE HARNESS RECOGNIZES, so it claims nothing about which defect caused it.")
+        run.say(
+            "it is neither the -txindex lookup failure nor an incomplete signing result. Read the message above "
+            "before concluding anything; the control spend below still says what the SCRIPT can do."
+        )
+
     run.say("the redeem script's hashlock branch expects, bottom to top:")
     run.say("    <signature> <pubkey> <preimage> OP_1   then the redeem script itself")
     run.say(f"the preimage is {redact(contract.secret)}; its sha256 is {contract.secret_hash.hex()}")
     run.say(f"the redeem script it must satisfy is {contract.redeem_script.hex()}")
+    return kind
 
 
 def step_7_redeem(run: Run, client, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
@@ -640,7 +813,8 @@ def step_7_redeem(run: Run, client, contract: Contract, outpoint: Outpoint, outc
             "a broadcast txid -- but this harness PREDICTS this failure",
             XFAIL,
         )
-        _explain_expected_redeem_failure(run, contract)
+        outcome.real_redeem_stage = _explain_redeem_failure(run, contract, str(exc))
+        outcome.notes.append(f"real redeem_contract() failed at the {outcome.real_redeem_stage} stage")
         _control_redeem(run, contract, outpoint, outcome)
         return
 
@@ -650,8 +824,8 @@ def step_7_redeem(run: Run, client, contract: Contract, outpoint: Outpoint, outc
         "a broadcast txid",
         OK,
     )
-    _mine(run, 1)
-    _assert_spend_landed(run, txid, contract.participant, "real redeem")
+    mined = _mine(run, 1)
+    _assert_spend_landed(run, txid, contract.participant, "real redeem", mined.first_hash)
     outcome.control_redeem = run.check(
         "control redeem",
         "not attempted: the real client already spent the output",
@@ -690,17 +864,23 @@ def _control_redeem(run: Run, contract: Contract, outpoint: Outpoint, outcome: C
         )
         return
     outcome.control_redeem = run.check("control hashlock spend", f"txid={txid}", "a broadcast txid", OK)
-    _mine(run, 1)
-    _assert_spend_landed(run, txid, contract.participant, "control redeem")
+    mined = _mine(run, 1)
+    _assert_spend_landed(run, txid, contract.participant, "control redeem", mined.first_hash)
 
 
-def _assert_spend_landed(run: Run, txid: str, key: RegtestKey, label: str) -> None:
+def _assert_spend_landed(run: Run, txid: str, key: RegtestKey, label: str, block_hash: str | None = None) -> None:
     """The spend confirmed, and its output pays the expected key.
 
     Asserted on the scriptPubKey hex rather than on a rendered address, for the
     same encoding reason as everywhere else in this file.
+
+    `block_hash` is the block the caller just mined. It is passed rather than
+    looked up because these spends are NOT wallet transactions -- they spend a
+    P2SH the wallet never imported and pay keys this harness generated -- so
+    `gettransaction` cannot see them and a bare `getrawtransaction` searches
+    only the mempool they have just left. See _verbose_tx().
     """
-    raw_tx = run.node().call("getrawtransaction", txid, True)
+    raw_tx = _verbose_tx(run.node(), txid, block_hash)
     confirmations = int(raw_tx.get("confirmations", 0))
     run.check(
         f"{label} confirmations (a count, never a duration)",
@@ -754,7 +934,7 @@ def step_8_refund_before_expiry(run: Run, contract: Contract, outpoint: Outpoint
         "(heights, never durations)"
     )
     if height < target:
-        height = _mine(run, target - height)
+        height = _mine(run, target - height).height
     run.check("height one block short of the locktime", height, target, OK if height == target else FAIL)
 
     # 8a: final-ness. The mempool refuses before any script runs.
@@ -779,7 +959,7 @@ def step_8_refund_before_expiry(run: Run, contract: Contract, outpoint: Outpoint
 
 def step_9_refund_after_expiry(run: Run, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
     run.step(9, "refund AFTER expiry must SUCCEED")
-    height = _mine(run, 1)
+    height = _mine(run, 1).height
     run.check(
         "height now reaches the locktime",
         height,
@@ -794,5 +974,5 @@ def step_9_refund_after_expiry(run: Run, contract: Contract, outpoint: Outpoint,
         outcome.refund_after_expiry = run.check("refund after expiry", f"RPCError: {exc}", "a broadcast txid", FAIL)
         return
     outcome.refund_after_expiry = run.check("refund after expiry", f"txid={txid}", "a broadcast txid", OK)
-    _mine(run, 1)
-    _assert_spend_landed(run, txid, contract.refund, "refund")
+    mined = _mine(run, 1)
+    _assert_spend_landed(run, txid, contract.refund, "refund", mined.first_hash)
