@@ -69,6 +69,7 @@ trip and a diagnosis.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -76,6 +77,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import requests
 from chains.base import RPCAdapter, RPCError
 from microfortnights import format_duration
 from regtest.console import FAIL, OK, Console
@@ -119,6 +121,10 @@ POLL_INTERVAL_SECONDS = 0.5
 # be spent. This is a COUNT OF BLOCKS and is never rendered in microfortnights
 # (rule 6): a regtest block takes however long generatetoaddress took.
 COINBASE_MATURITY_HEIGHT = 101
+
+# Below this, an HTTP status is a success. Named because RegtestRPC checks it
+# AFTER parsing the body rather than before -- see that class for why.
+HTTP_ERROR_STATUS = 400
 
 
 class RegtestSetupError(RuntimeError):
@@ -230,7 +236,86 @@ def check_binaries(console: Console, config: ChainConfig) -> str:
     return daemon_version
 
 
-def adapter_for(config: ChainConfig, wallet: str = "") -> RPCAdapter:
+class RegtestRPC(RPCAdapter):
+    """RPCAdapter that reads the JSON body before it reads the HTTP status.
+
+    MEASURED ON THE OPERATOR'S MACHINE, 2026-09-25, first run of this harness.
+    Litecoin died at step 3 with nothing but
+
+        FAIL LTC run: got=HTTPError: 500 Server Error for url: http://127.0.0.1:19443/
+
+    while BTC, one step earlier, handled the identical situation and printed
+    the daemon's own words:
+
+        BTC: loadwallet said {'code': -18, 'message': 'Wallet file verification
+        failed...'}; creating 'regtest_htlc_harness'
+
+    WHY THE SAME CODE BEHAVED TWO DIFFERENT WAYS, which is the part worth
+    writing down because it will catch somebody else. chains/base.py's
+    RPCAdapter sends `"jsonrpc": "2.0"` and calls `raise_for_status()` BEFORE
+    it parses the body. Bitcoin Core 28.1 implements JSON-RPC 2.0 properly, and
+    that spec says a well-formed request gets HTTP 200 with the error carried
+    in the response object -- so on BTC the body was parsed and the -18 was
+    reported. Litecoin Core 0.21.4 predates that support, ignores the
+    `jsonrpc` field, and replies to an RPC error with HTTP 500 and a JSON body
+    -- so `raise_for_status()` fired first and threw the diagnosis away.
+
+    The evidence for that reading is in the operator's paste rather than in a
+    version table: the SAME daemon (BTC 28.1) produced a parsed -18 through
+    RPCAdapter, which sends 2.0, and a bare `HTTPError: 500` through
+    modules/atomic_btc_client.py, which sends `"jsonrpc": "1.0"`. Two protocol
+    versions, one daemon, two behaviors.
+
+    So: parse the body on every path, on every status, and put the daemon's
+    own `code` and `message` in the exception. An HTTP status alone is not a
+    diagnosis, and a harness that will only ever run on somebody else's machine
+    cannot afford to discard the one sentence that says what went wrong.
+
+    WHY THIS IS A SUBCLASS AND NOT A FIX TO chains/base.py. RPCAdapter.call()
+    is what services/payout_service.py sends money through. Changing which
+    exception type it raises changes how the Flask app's error handling behaves
+    on the payout path, which is fund movement and the operator's call (rule
+    16). The same defect is there and it is REPORTED, not patched from inside a
+    harness: any caller of RPCAdapter against a pre-2.0 daemon loses the error
+    code the same way this did.
+    """
+
+    def call(self, method: str, *params):
+        payload = {"jsonrpc": "2.0", "id": method, "method": method, "params": list(params)}
+        response = requests.post(
+            self.url,
+            auth=(self.user, self.password),
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload),
+            timeout=self.timeout,
+        )
+        try:
+            data = response.json()
+        except ValueError:
+            # No JSON at all. NOW the status is the only thing there is, and it
+            # is reported with whatever the daemon did send -- truncated,
+            # because an HTML error page in a terminal helps nobody.
+            body = (response.text or "").strip()
+            raise RPCError(
+                f"{method}: HTTP {response.status_code} with a non-JSON body from {self.url}: "
+                f"{body[:400] if body else '(none: empty body)'}"
+            ) from None
+        error = data.get("error")
+        if error:
+            code = error.get("code") if isinstance(error, dict) else None
+            message = error.get("message") if isinstance(error, dict) else error
+            raise RPCError(f"{method}: code={code} message={message} (HTTP {response.status_code})")
+        if response.status_code >= HTTP_ERROR_STATUS:
+            # A non-2xx with a JSON body carrying no error object. Should not
+            # happen; if it does, say so rather than returning a result nobody
+            # can tell apart from a real one.
+            raise RPCError(
+                f"{method}: HTTP {response.status_code} but the body carried no error object: {data!r}"
+            )
+        return data.get("result")
+
+
+def adapter_for(config: ChainConfig, wallet: str = "") -> RegtestRPC:
     """An RPCAdapter pointed at this chain, optionally at one wallet endpoint.
 
     chains/base.py's RPCAdapter is reused rather than a sixth JSON-RPC client
@@ -241,7 +326,7 @@ def adapter_for(config: ChainConfig, wallet: str = "") -> RPCAdapter:
     atomic clients are still used for the steps that drive THEM -- this is for
     the harness's own mining, funding and broadcasting.
     """
-    return RPCAdapter(
+    return RegtestRPC(
         user=config.rpc_user,
         password=config.rpc_password,
         host=config.host,
@@ -414,7 +499,7 @@ def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") 
     return capabilities
 
 
-def _method_exists(node: RPCAdapter, method: str) -> bool:
+def _method_exists(node: RegtestRPC, method: str) -> bool:
     """Whether the daemon recognizes an RPC name, via `help <method>`.
 
     `help` returns a STRING for an unknown command rather than raising, on both
@@ -451,7 +536,19 @@ def ensure_wallet(console: Console, config: ChainConfig, wallet_name: str) -> st
     is reported where those fail.
     """
     node = adapter_for(config)
-    loaded = node.call("listwallets") or []
+    try:
+        loaded = node.call("listwallets") or []
+    except RPCError as exc:
+        # Named rather than left to the generic handler, because this is the
+        # first WALLET call of the run and a daemon built without wallet
+        # support fails exactly here, with a message nobody would connect to
+        # wallets if it arrived as an unhandled exception three frames up.
+        raise RegtestSetupError(
+            f"{config.asset}: listwallets failed on {config.base_url}: {exc}. "
+            "A daemon built with --disable-wallet has no wallet RPCs at all; otherwise check that the [regtest] "
+            "credentials in the config match ST_REGTEST_"
+            f"{config.asset}_RPC_USER / _RPC_PASSWORD."
+        ) from exc
     if wallet_name in loaded:
         console.say(f"{config.asset}: wallet {wallet_name!r} is already loaded")
         return wallet_name
