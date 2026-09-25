@@ -195,6 +195,29 @@ MINIMUM_FEE_COIN: dict[str, Decimal] = {
 # An output is dust when its value is strictly LESS than that, which is Core's
 # `nValue < GetDustThreshold(...)` -- so a P2PKH output of exactly 546 on BTC
 # is fine and 545 is not.
+# SOLANA IS NOT IN THIS TABLE, AND THAT WAS A DECISION RATHER THAN AN OMISSION.
+# Recorded here as well as at the other end, because CLAUDE.md rule 8 asks that
+# where two implementations genuinely differ "the difference is the point and
+# belongs in a comment at BOTH sites, naming the other one." The other one is
+# chains/solana_units.py, whose RENT_EXEMPT_* constants are Solana's analogue
+# of this table, and its module docstring carries the full argument. The short
+# form, three reasons:
+#
+#   different suite       this file belongs to the atomic-swap modules; Solana
+#                         was added to the Flask app, which imports none of it.
+#   the signature dies    dust_threshold_satoshis(asset, script_pubkey) takes a
+#                         Bitcoin scriptPubKey and prices (txout_bytes +
+#                         spend_bytes) at a per-kvB relay rate. Solana has no
+#                         scriptPubKey, no txout and no per-byte pricing -- its
+#                         fee is 5,000 lamports per SIGNATURE.
+#   not the same quantity dust is REFUSED BY RELAY: the transaction never
+#                         propagates and nothing is lost. A Solana account
+#                         below the rent-exempt minimum is ACCEPTED, exists,
+#                         and is then collected by the runtime -- the funds go
+#                         away after the fact.
+#
+# Adding "SOL" here would mean a parameter meaningless for one of its assets,
+# which is how one table quietly becomes two rules sharing a name.
 DUST_RELAY_FEE_SAT_PER_KVB: dict[str, int] = {
     # Bitcoin Core's DUST_RELAY_TX_FEE. Gives 546 for P2PKH, 294 for P2WPKH.
     "BTC": 3000,

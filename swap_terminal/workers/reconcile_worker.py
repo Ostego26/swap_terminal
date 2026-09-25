@@ -46,7 +46,7 @@ from services.deposit_service import process_active_swaps
 from services.payout_service import refresh_wallet_inventory
 from workers.common import (
     announce_start,
-    build_adapters,
+    build_adapters_from_config,
     cycle_line,
     get_config_dict,
     install_stop_handler,
@@ -60,7 +60,7 @@ DEFAULT_POLL_SECONDS = 60
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
     should_stop = install_stop_handler()
     announce_start(WORKER_NAME, poll_seconds, os.getpid())
-    adapters = build_adapters()
+    adapters = build_adapters_from_config()
     config = get_config_dict()
 
     cycle = 0
