@@ -36,7 +36,7 @@
       "createdAt": "2026-03-26T18:49:29.421Z",
       "expiresAt": "2026-03-26T19:49:29.421Z",
       "gridcoinDepositAddress": "mre8bKn5zM72oVCk3W6noNwajtoFEqpHhT",
-      "destinationSolanaAddress": "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN",
+      "destinationSolanaAddress": "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM",
       "expectedGrcAmount": 100,
       "expectedQuote": {
         "grcAmount": 100,
@@ -54,13 +54,13 @@
       "createdAt": "2026-03-26T18:59:12.577Z",
       "expiresAt": "2026-03-26T19:59:12.577Z",
       "gridcoinDepositAddress": "mre8bKn5zM72oVCk3W6noNwajtoFEqpHhT",
-      "destinationSolanaAddress": "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN",
+      "destinationSolanaAddress": "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM",
       "expectedGrcAmount": 0.1,
       "expectedQuote": {
         "grcAmount": 0.1,
         "grcPriceUsd": 0.00478771,
         "solPriceUsd": 86.01,
-        "solAmount": 0.000005566,
+        "solAmount": 5.566e-06,
         "lamports": 5566
       },
       "verifiedDeposit": null,
