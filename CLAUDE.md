@@ -684,6 +684,21 @@ hours, not days.
     12    tests/ directory                       absent         83 tests, all passing
     12    ruff findings under the new standard   270 (first     0
                                                  measurement)
+
+RE-MEASURED 2026-09-25, with the same walk, after the regtest harness and the
+HTLC client fixes landed. Two of those rows have moved and the drift is left
+visible rather than overwritten, because that is what rule 1 asks for:
+
+    rule  measurement                            2026-09-24     2026-09-25
+    1     module headers, swap_terminal/         41 of 41       53 of 53
+    1     module headers, tests/                 10 of 10       14 of 14
+    12    tests, all passing                     83             270
+
+The denominators moved by more than the numerators because both grew: the
+harness added swap_terminal/regtest/ (five files) and its unit tests, and the
+HTLC fixes added modules/htlc_spend.py, modules/htlc_rpc.py,
+modules/htlc_fee.py and tests/test_htlc_spend.py. Stating 53 without the 53
+would hide that the gate is still clean rather than merely unchanged.
     13    unreaped worker loops                  3, no supervisor   supervisor.py,
                                                                     pid files, a stop
                                                                     that proves absence
