@@ -1,15 +1,35 @@
 #!/usr/bin/env python3
-"""Secret generation, hashing, and waiting for a contract output to appear.
+"""Secret generation and hashing. Nothing here opens a socket.
 
 Role: function level (the bottom of rule 10's stack)
-Reads: os.urandom; and, in wait_for_tx_output(), a chain daemon through the
-       caller's rpc_call (getrawtransaction)
+Reads: os.urandom, and nothing else
 Writes: nothing to disk
 Can move funds: no. It GENERATES the HTLC preimage, which is the single most
        dangerous value in this tree -- revealing it before the counterparty's
        leg is funded and confirmed hands them both legs -- but it neither
        signs nor broadcasts.
 Mainnet-safe: yes
+
+WHAT LEFT THIS FILE ON 2026-09-25, AND WHY IT COULD NOT BE FIXED IN PLACE.
+
+`wait_for_tx_output()` used to live here, and it is now
+`modules/htlc_rpc.wait_for_tx_output()`. Two reasons, and the second is the one
+that forced it:
+
+  IT DID NOT BELONG. This file is the bottom of rule 10's stack -- pure
+  functions over bytes, no socket, no daemon. A polling loop that holds an RPC
+  conversation for up to five minutes is a submodule, not a function, and its
+  presence here is what made this module's header have to say "Reads: ... a
+  chain daemon through the caller's rpc_call".
+
+  IT COULD NOT BE FIXED HERE. It matched a contract output by comparing an
+  address against `scriptPubKey.addresses`, a field Bitcoin Core removed in
+  22.0, so on Core 28.1 it found nothing and polled to its deadline against a
+  perfectly funded contract. The fix is to match on the scriptPubKey hex and
+  to fall back to the wallet's own record once the funding is confirmed -- and
+  that needs a transaction parser, which lives in modules/htlc_spend.py, which
+  imports THIS file for hash160(). Fixing it in place would have been an import
+  cycle.
 
 THE PREIMAGE USED TO BE LOGGED, AND THAT WAS THE WORST LINE IN THIS FILE.
 
@@ -41,10 +61,6 @@ mechanism for the leak above.
 import hashlib
 import logging
 import os
-import time
-from typing import Any
-
-from microfortnights import format_duration
 
 # No setLevel and no handler: this is a library module, and the application
 # owns logging policy. See the module docstring -- the handler that used to be
@@ -122,98 +138,3 @@ def hash160(data: bytes) -> bytes:
     digest = ripemd160.digest()
     logger.debug("HASH160 hash: %s", digest.hex())
     return digest
-
-
-def wait_for_tx_output(
-    rpc_client: Any,
-    txid: str,
-    expected_address: str,
-    max_wait: int = 60,
-    interval: int = 5,
-) -> tuple[int, dict]:
-    """Poll the node until a transaction output paying `expected_address` appears.
-
-    Args:
-        rpc_client: anything with an `rpc_call` method.
-        txid: the transaction to inspect.
-        expected_address: the address to look for among the outputs.
-        max_wait: SECONDS to keep polling. Seconds, not microfortnights: this
-            is compared against time.monotonic() arithmetic and passed to
-            time.sleep(), which is an interface, not a report (rule 6). The
-            µfn figure appears in the log lines, where a human reads it.
-        interval: SECONDS between checks, for the same reason.
-
-    Returns:
-        (vout index, the verbose raw transaction).
-
-    Raises:
-        TimeoutError: if the output does not appear in time. It carries the
-            count of RPC errors seen while waiting, because "the chain has not
-            included it yet" and "the daemon has been refusing us for a minute"
-            produce the same silence and must not produce the same message
-            (rules 12 and 14).
-
-    PROGRESS IS REPORTED, which it was not before 2026-09-24. This loop can sit
-    for a full minute by design, and a poll against a quiet chain and a poll
-    against a daemon that stopped answering rendered identically -- the RPC
-    error was swallowed at DEBUG and nothing was printed at all. An operator
-    watching that cannot tell working from hung, and the way that resolves is
-    Ctrl-C, which on this path can land between broadcasting a funding
-    transaction and recording it.
-    """
-    started = time.monotonic()
-    deadline = started + max_wait
-    attempts = 0
-    rpc_errors = 0
-    last_error = ""
-    logger.info(
-        "waiting for an output of %s paying %s; giving up after %s",
-        txid,
-        expected_address,
-        format_duration(max_wait),
-    )
-
-    while time.monotonic() < deadline:
-        attempts += 1
-        elapsed = time.monotonic() - started
-        try:
-            raw_tx = rpc_client.rpc_call("getrawtransaction", [txid, True])
-            for idx, v in enumerate(raw_tx.get("vout", [])):
-                addresses = v.get("scriptPubKey", {}).get("addresses", [])
-                if expected_address in addresses:
-                    logger.info(
-                        "found the output at index %d after %s (%d poll(s), %d rpc error(s))",
-                        idx,
-                        format_duration(time.monotonic() - started),
-                        attempts,
-                        rpc_errors,
-                    )
-                    return idx, raw_tx
-            logger.info(
-                "poll %d: not in the transaction yet, %s elapsed of %s, rpc_errors=%d",
-                attempts,
-                format_duration(elapsed),
-                format_duration(max_wait),
-                rpc_errors,
-            )
-        except Exception as exc:  # noqa: BLE001 -- checked: a transient RPC failure must not abort a wait that is otherwise going fine, but it is NOT swallowed: it is counted, logged at WARNING on every occurrence, and carried into the TimeoutError so the caller can tell a quiet chain from a broken daemon.
-            rpc_errors += 1
-            last_error = str(exc)
-            logger.warning(
-                "poll %d: rpc error after %s (%d of %d polls have failed): %s",
-                attempts,
-                format_duration(elapsed),
-                rpc_errors,
-                attempts,
-                exc,
-            )
-
-        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
-
-    waited = time.monotonic() - started
-    detail = f"; {rpc_errors} of {attempts} polls raised, last: {last_error}" if rpc_errors else "; no rpc errors"
-    logger.error("gave up on %s after %s%s", txid, format_duration(waited), detail)
-    raise TimeoutError(
-        f"output for txid {txid} paying {expected_address} did not appear within "
-        f"{format_duration(waited)}{detail}"
-    )

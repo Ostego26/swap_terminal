@@ -1,0 +1,697 @@
+#!/usr/bin/env python3
+"""The three RPC conversations an HTLC redeem needs, shared by all three clients.
+
+Role: submodule (it talks to a daemon and delegates every decision downward to
+      modules/htlc_spend.py and modules/htlc_fee.py)
+Reads: a chain daemon through the caller's own `rpc_call` -- gettxout,
+       gettransaction, getrawtransaction, getwalletinfo, getdescriptorinfo,
+       createrawtransaction. Every one of those is read-only except the import.
+Writes: THE WALLET, and only through the optional watch-only import, which
+       cannot move a coin. Nothing here broadcasts: build_hashlock_spend()
+       returns hex and the caller sends it.
+Can move funds: no directly. It builds and SIGNS a spend of a funded contract;
+       whoever broadcasts what it returns moves the coins. Treat a change here
+       as fund movement.
+Mainnet-safe: NO. It signs a transaction that is valid on whatever chain the
+       `rpc_call` it was handed is pointed at.
+
+WHY ONE FILE INSTEAD OF THREE COPIES.
+
+modules/atomic_btc_client.py, modules/atomic_ltc_client.py and
+modules/atomic_grc_client.py carried the same four defects, each spelled
+slightly differently, and the divergence table in all three headers records
+seventeen rows on which no two of them agree. Fixing one bug three times by
+hand is how those seventeen rows got there (rule 8: two copies of one rule is a
+bug with a delay on it). What is genuinely shared lives here; what genuinely
+differs -- the platform fee, the wallet unlock, the amount keyword -- stays in
+each client with a comment naming the others.
+
+THE THREE CONVERSATIONS
+
+  lookup_contract_output()   read a contract output back WITHOUT -txindex.
+  build_hashlock_spend()     build, size the fee for, and sign the spend.
+  ensure_watch_only_import() best-effort wallet visibility, on either wallet type.
+
+WHAT WAS MEASURED, 2026-09-25, AGAINST REAL REGTEST DAEMONS.
+
+  Bitcoin Core 28.1.0     Litecoin Core 0.21.4
+
+  `redeem_contract()`'s first statement was `getrawtransaction(txid, True)`,
+  which searches ONLY the mempool unless the node runs -txindex. On both chains
+  it answered:
+
+      code=-5, No such mempool transaction. Use -txindex or provide a block
+      hash to enable blockchain transaction queries. Use gettransaction for
+      wallet transactions.
+
+  Every contract a real swap redeems has been CONFIRMED -- that is what the
+  counterparty waited for before revealing anything -- so the redeem path
+  failed on its own first line, always, before reaching anything to do with
+  HTLCs. The daemon's error names the three fixes and this module takes the
+  ones that do not re-shape the operator's node: -txindex is NOT used, because
+  adding it to an existing datadir forces a reindex.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from decimal import Decimal
+
+from microfortnights import format_duration
+from modules.atomic_htlc_scripts import p2sh_script_for
+from modules.htlc_fee import assert_within_broadcast_ceiling, describe_fee, minimum_fee_coin, redeem_miner_fee
+from modules.htlc_spend import (
+    decode_wif,
+    estimated_script_sig_length,
+    hashlock_script_sig,
+    legacy_sighash,
+    parse_transaction,
+    participant_key_matches_script,
+    public_key_for,
+    satoshis_to_coins,
+    sign_digest,
+)
+
+logger = logging.getLogger(__name__)
+
+# How many times the fee is allowed to be re-derived from the transaction it
+# changes the size of. The circle closes in two passes and not more: the output
+# AMOUNTS depend on the fee, but the output SIZES do not -- eight bytes of value
+# and the same scriptPubKey whatever the number in them -- so the size measured
+# in pass one is the size in pass two, and the fee computed from it is stable.
+# A third pass would mean that assumption is false, and this module refuses
+# rather than looping: an unstable fee is a defect, not a thing to average.
+MAX_FEE_PASSES = 2
+
+# SECONDS between polls in wait_for_tx_output(). Seconds, not microfortnights,
+# because it is handed to time.sleep() -- rule 6's report-versus-interface
+# boundary. It is printed in µfn wherever a human reads it.
+POLL_INTERVAL_SECONDS = 5
+
+
+@dataclass(frozen=True)
+class ContractOutput:
+    """One funded contract output, read back from the chain.
+
+    `route` names WHICH of the four lookups answered, because that is the
+    difference between "the wallet happens to know this transaction" and "the
+    chain says this output exists and is unspent", and an operator reading a
+    pasted log needs to be able to tell (rule 14).
+    """
+
+    value: Decimal
+    script_pubkey_hex: str
+    confirmations: int | None
+    route: str
+
+
+def lookup_contract_output(rpc_call, txid: str, vout: int, block_hash: str | None = None) -> ContractOutput:
+    """Read a contract output back, on a default node, confirmed or not.
+
+    FOUR ROUTES, TRIED IN THIS ORDER, AND THE ORDER IS THE POINT.
+
+      1. `gettxout txid n true`. The chain's own unspent-output set. It needs no
+         index and no wallet, it sees both the mempool and the chain, and it
+         answers null for an output that has already been SPENT -- which is a
+         far better thing to learn before signing than after broadcasting.
+      2. `getrawtransaction txid true <blockhash>`, when the caller knows the
+         block. This is the route the daemon's own error message asks for.
+      3. `gettransaction txid`, the wallet's own record, whose raw hex is
+         parsed here rather than handed back to `decoderawtransaction` -- one
+         fewer round trip, and no dependence on a decoded field's name.
+      4. `getrawtransaction txid true`, the call this used to be. It still
+         works for a transaction in the mempool, or on a node with -txindex.
+
+    NOT `-txindex=1`. It is the third fix the daemon suggests and the only one
+    that changes the operator's machine: enabling it on an existing datadir
+    forces a full reindex.
+
+    Raises:
+        LookupError: naming every route tried and what each said. It never
+            returns a value it is unsure of -- an amount guessed here is the
+            amount a signature commits to.
+    """
+    attempts: list[str] = []
+
+    try:
+        entry = rpc_call("gettxout", [txid, vout, True])
+    except Exception as exc:  # noqa: BLE001 -- checked: one route failing is not an answer, it is a reason to try the next. Every attempt is collected and re-raised together below, so no route can return a value the caller would mistake for a real output.
+        attempts.append(f"gettxout: {exc}")
+    else:
+        if entry:
+            return ContractOutput(
+                value=Decimal(str(entry["value"])),
+                script_pubkey_hex=entry["scriptPubKey"]["hex"],
+                confirmations=_as_int_or_none(entry.get("confirmations")),
+                route="gettxout (the chain's unspent-output set)",
+            )
+        attempts.append("gettxout: null -- no such output, or it has already been spent")
+
+    if block_hash:
+        try:
+            decoded = rpc_call("getrawtransaction", [txid, True, block_hash])
+            return _output_from_decoded(decoded, vout, f"getrawtransaction with block hash {block_hash}")
+        except Exception as exc:  # noqa: BLE001 -- checked: same. A wrong or unknown block hash must not end the search.
+            attempts.append(f"getrawtransaction with block hash: {exc}")
+
+    try:
+        wallet_record = rpc_call("gettransaction", [txid])
+        parsed = parse_transaction(bytes.fromhex(wallet_record["hex"]))
+        value_satoshis, script_pubkey = parsed.outputs[vout]
+        return ContractOutput(
+            value=satoshis_to_coins(value_satoshis),
+            script_pubkey_hex=script_pubkey.hex(),
+            confirmations=_as_int_or_none(wallet_record.get("confirmations")),
+            route="gettransaction (the wallet's own record)",
+        )
+    except Exception as exc:  # noqa: BLE001 -- checked: same. This route only knows transactions the wallet took part in, so its failure is expected for a contract the COUNTERPARTY funded and must not end the search.
+        attempts.append(f"gettransaction: {exc}")
+
+    try:
+        decoded = rpc_call("getrawtransaction", [txid, True])
+        return _output_from_decoded(decoded, vout, "getrawtransaction without a block hash (mempool, or -txindex)")
+    except Exception as exc:  # noqa: BLE001 -- checked: the last route. Its failure ends the search and every attempt is named in the LookupError below, so the operator sees which four things were tried rather than only the last.
+        attempts.append(f"getrawtransaction without a block hash: {exc}")
+
+    raise LookupError(
+        f"could not read contract output {txid}:{vout} back from the node. Tried, in order: "
+        + "; ".join(attempts)
+        + ". This does NOT add -txindex, because enabling it on an existing datadir forces a reindex."
+    )
+
+
+def _as_int_or_none(raw: object) -> int | None:
+    """A confirmation COUNT, or None when the daemon did not supply one.
+
+    A count, never a duration, and so never rendered in microfortnights
+    (rule 6). None rather than 0 when it is missing, because zero confirmations
+    is a real and different answer from "this route does not report them".
+    """
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _output_from_decoded(decoded: dict, vout: int, route: str) -> ContractOutput:
+    """Pull one output out of a verbose getrawtransaction result.
+
+    Reads `scriptPubKey.hex` and never `scriptPubKey.addresses`. Measured
+    2026-09-25: Core 28.1 returns ['address', 'asm', 'desc', 'hex', 'type'] and
+    Litecoin 0.21.4 returns ['addresses', 'asm', 'hex', 'reqSigs', 'type'].
+    `addresses` was deprecated in Core 0.20 and removed in 22.0; `hex` is on
+    both, is the same bytes on both, and is what a scriptPubKey actually is.
+    """
+    outputs = decoded.get("vout", [])
+    if vout >= len(outputs):
+        raise LookupError(f"the transaction has {len(outputs)} output(s), so there is no vout {vout}")
+    entry = outputs[vout]
+    return ContractOutput(
+        value=Decimal(str(entry["value"])),
+        script_pubkey_hex=entry["scriptPubKey"]["hex"],
+        confirmations=_as_int_or_none(decoded.get("confirmations")),
+        route=route,
+    )
+
+
+@dataclass(frozen=True)
+class SignedSpend:
+    """A signed hashlock spend, and every number the operator needs beside it."""
+
+    raw_hex: str
+    script_sig: bytes
+    size_bytes: int
+    estimated_size_bytes: int
+    miner_fee: Decimal
+    fee_rate_coin_per_kvb: Decimal
+    destination_amount: Decimal
+
+    def describe(self, asset: str) -> str:
+        """One self-describing line for a log, echoing what decided the answer."""
+        return (
+            f"{asset} hashlock spend: {self.size_bytes} bytes (sized from an upper bound of "
+            f"{self.estimated_size_bytes}), miner fee {self.miner_fee} = {self.fee_rate_coin_per_kvb} coin/kvB, "
+            f"paying {self.destination_amount} to the destination"
+        )
+
+
+def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. Nine appear once each in the body and none can be defaulted -- the chain (which picks the fee rule), the RPC, the outpoint and its value, the script being satisfied, the preimage, the key, and where the coins go are independent inputs to one signature. Bundling them into a dataclass would add a type without removing an argument and would move the fund-path decisions away from the call site that makes them.
+    *,
+    asset: str,
+    rpc_call,
+    contract_txid: str,
+    contract_vout: int,
+    contract_value: Decimal,
+    redeem_script: bytes,
+    secret: bytes,
+    wif: str,
+    destination_address: str,
+    extra_outputs: dict[str, Decimal] | None = None,
+) -> SignedSpend:
+    """Build, size the fee for, and SIGN a spend of the contract's hashlock branch.
+
+    THE NODE SERIALIZES, THIS SIGNS. `createrawtransaction` turns the addresses
+    into output scripts and lays the transaction out in whatever shape its own
+    chain uses; modules/htlc_spend.parse_transaction() takes that apart, proves
+    it read the layout correctly by reproducing the bytes exactly, and only the
+    input's scriptSig is replaced. See that module's header for why this is not
+    built from scratch -- addresses on three chains, and Gridcoin's extra nTime
+    field.
+
+    Args:
+        asset: BTC, LTC or GRC. It selects the fee rule and nothing else.
+        rpc_call: the client's own `rpc_call(method, params)`.
+        contract_txid, contract_vout: the funded contract output.
+        contract_value: its value, in coin, as read back by
+            lookup_contract_output(). The fee and the destination amount are
+            both derived from it.
+        redeem_script: the HTLC script, exactly as the builder produced it.
+        secret: the PREIMAGE. It is pushed onto the stack, which is what
+            spending the hashlock branch means, and it becomes public when this
+            is broadcast. Never log it.
+        wif: the participant's private key. Never logged, never returned, and
+            never placed in an exception message.
+        destination_address: where the redeemed coins go. It absorbs the miner
+            fee, so it receives the contract value minus the fee minus any
+            extra outputs.
+        extra_outputs: fixed amounts paid to other addresses -- the platform
+            fee the LTC and GRC clients charge and the BTC one does not. Their
+            amounts do NOT move with the miner fee.
+
+    Raises:
+        ValueError: if the key does not match the script, if an address is
+            named twice, if nothing would be left after fees, if the fee does
+            not settle, or if the fee the transaction actually encodes is not
+            the fee that was intended. Every one of those refuses BEFORE
+            anything is signed or broadcast.
+    """
+    extras = dict(extra_outputs or {})
+    if destination_address in extras:
+        raise ValueError(
+            f"the destination address {destination_address} is also an extra output. The node would merge the two "
+            "into one, and the amounts asserted here would not be the amounts paid. Nothing was built."
+        )
+
+    private_key, compressed = decode_wif(wif)
+    public_key = public_key_for(private_key, compressed)
+    if not participant_key_matches_script(public_key, redeem_script):
+        raise ValueError(
+            f"the supplied private key's hash160 ({'compressed' if compressed else 'uncompressed'} form) does not "
+            "appear in the redeem script, so the spend could not satisfy OP_EQUALVERIFY. On chain this is "
+            "`mandatory-script-verify-flag-failed`, which is also what a wrong preimage and a wrong script look "
+            "like -- refused here instead, where it can be named. The key itself is not shown."
+        )
+
+    extras_total = sum(extras.values(), Decimal(0))
+    script_sig_length = estimated_script_sig_length(public_key, secret, redeem_script)
+
+    miner_fee = minimum_fee_coin(asset)
+    parsed = None
+    estimated_size = 0
+    for _ in range(MAX_FEE_PASSES):
+        parsed, estimated_size = _unsigned_transaction(
+            rpc_call=rpc_call,
+            contract_txid=contract_txid,
+            contract_vout=contract_vout,
+            contract_value=contract_value,
+            destination_address=destination_address,
+            extras=extras,
+            extras_total=extras_total,
+            miner_fee=miner_fee,
+            script_sig_length=script_sig_length,
+        )
+        settled = redeem_miner_fee(asset, estimated_size)
+        if settled == miner_fee:
+            break
+        miner_fee = settled
+    else:
+        raise ValueError(
+            f"{asset}: the miner fee did not settle in {MAX_FEE_PASSES} passes over a {estimated_size}-byte "
+            "transaction. The fee is derived from the size and the size does not depend on the amounts, so this "
+            "cannot happen unless the fee rule is not a function of the size alone. Nothing was signed."
+        )
+
+    # THE FEE THE BYTES ACTUALLY ENCODE, not the fee that was intended. The
+    # amounts made a round trip through the daemon's JSON as floating point, and
+    # the value read back here is the 8-byte integer the transaction carries.
+    # If the two ever disagree, the difference went to a miner.
+    encoded_fee = contract_value - satoshis_to_coins(parsed.output_total)
+    if encoded_fee != miner_fee:
+        raise ValueError(
+            f"{asset}: the transaction the node built pays a fee of {encoded_fee} but {miner_fee} was intended, a "
+            f"difference of {encoded_fee - miner_fee}. That gap would go to a miner. Nothing was signed."
+        )
+
+    digest = legacy_sighash(parsed, 0, redeem_script)
+    script_sig = hashlock_script_sig(sign_digest(private_key, digest), public_key, secret, redeem_script)
+    raw = parsed.serialize({0: script_sig})
+    size_bytes = len(raw)
+    if size_bytes > estimated_size:
+        raise ValueError(
+            f"{asset}: the signed transaction is {size_bytes} bytes but the fee was sized from an upper bound of "
+            f"{estimated_size}. The bound is supposed to be exact except for the signature's own length, so this "
+            "means the fee was computed for a smaller transaction than the one about to be broadcast. "
+            "Nothing was broadcast."
+        )
+    rate = assert_within_broadcast_ceiling(asset, miner_fee, size_bytes)
+    logger.info("%s", describe_fee(asset, miner_fee, size_bytes))
+    return SignedSpend(
+        raw_hex=raw.hex(),
+        script_sig=script_sig,
+        size_bytes=size_bytes,
+        estimated_size_bytes=estimated_size,
+        miner_fee=miner_fee,
+        fee_rate_coin_per_kvb=rate,
+        destination_amount=contract_value - miner_fee - extras_total,
+    )
+
+
+def _unsigned_transaction(  # noqa: PLR0913 -- checked: one caller, one call site, and every argument is a value that caller already holds. Folding them into an object would hide the fee pass's only variable -- miner_fee -- inside a mutation.
+    *,
+    rpc_call,
+    contract_txid: str,
+    contract_vout: int,
+    contract_value: Decimal,
+    destination_address: str,
+    extras: dict[str, Decimal],
+    extras_total: Decimal,
+    miner_fee: Decimal,
+    script_sig_length: int,
+):
+    """Ask the node to lay out the unsigned spend, and measure what it will weigh.
+
+    Returns (the parsed transaction, the size it will be once signed).
+    """
+    destination_amount = contract_value - miner_fee - extras_total
+    if destination_amount <= 0:
+        raise ValueError(
+            f"a contract worth {contract_value} cannot cover a miner fee of {miner_fee} plus {extras_total} of "
+            "other outputs; nothing would be left to send. Nothing was built."
+        )
+    outputs = {destination_address: float(destination_amount)}
+    for address, amount in extras.items():
+        outputs[address] = float(amount)
+    inputs = [{"txid": contract_txid, "vout": contract_vout}]
+    unsigned_hex = rpc_call("createrawtransaction", [inputs, outputs])
+    parsed = parse_transaction(bytes.fromhex(unsigned_hex), contract_txid, contract_vout)
+    return parsed, parsed.size_with_script_sig(0, script_sig_length)
+
+
+def assert_output_pays_the_contract(found: ContractOutput, redeem_script: bytes, label: str) -> None:
+    """Refuse to spend an output that is not this contract's.
+
+    The clients used to take the caller's `contract_vout` on trust and sign a
+    spend of whatever was at that index. An off-by-one, a reordered funding
+    transaction or a stale record would then produce a perfectly valid
+    signature over somebody else's output -- which fails on chain with a
+    message about scripts, if it fails at all.
+
+    The comparison is on the scriptPubKey HEX, not on a rendered address: the
+    two daemons disagree about whether `scriptPubKey.addresses` exists at all,
+    and Bitcoin and Litecoin do not even agree on the base58 P2SH version byte.
+    """
+    expected = p2sh_script_for(redeem_script).hex()
+    if found.script_pubkey_hex != expected:
+        raise ValueError(
+            f"{label}: the output found on chain pays {found.script_pubkey_hex}, and this contract's redeem "
+            f"script hashes to {expected}. That is a different output; nothing was signed. It was read via "
+            f"{found.route}."
+        )
+
+
+def ensure_watch_only_import(rpc_call, p2sh_address: str, label: str = "HTLC-watch") -> str:
+    """Best-effort: make the wallet WATCH the contract address. Never fatal.
+
+    WHAT THIS IS FOR, AND WHAT IT IS NOT FOR. Establishing this was the fix; the
+    call was the symptom.
+
+    `BTCClient.create_contract()` called `importaddress` and raised if it
+    failed, and on Bitcoin Core 28.1 -- which creates DESCRIPTOR wallets by
+    default -- it failed on every run:
+
+        code=-4, Only legacy wallets are supported by this command
+
+    So contract creation was impossible on a default modern node. Measured
+    2026-09-25: LTC's create_contract SUCCEEDED on the same run (Litecoin
+    0.21.4 still makes legacy wallets), and the harness funded the identical
+    P2SH with a plain `sendtoaddress` and then SPENT it -- so the import is not
+    a precondition of anything about the contract.
+
+    What in this repository needs the address in the wallet? Grepped the whole
+    tree by name, not by import graph: `getreceivedbyaddress` is called only
+    from `get_address_balance()`, and every call site of THAT
+    (swap_terminal/atomic_swap_gui.py, six of them) passes an operator's own
+    validated address, never a contract P2SH. So nothing here needs it.
+
+    It is kept rather than deleted because "no caller in this tree" is not "no
+    caller" (rule 2), and an operator running `listtransactions` or
+    `getreceivedbyaddress` against a contract address on their own node is a
+    use this cannot see. What changed is that it can no longer stop a swap: it
+    is attempted, its outcome is returned and logged, and a failure costs
+    wallet visibility and nothing else.
+
+    The companion `importprivkey` call was DELETED rather than made
+    conditional. Its only purpose was to let `signrawtransactionwithwallet`
+    sign the redeem -- which never worked, cannot work on a conditional script,
+    and has been replaced by signing in this process. Importing a signing key
+    into a wallet that has no use for it is a liability with no remaining
+    consumer.
+
+    Returns:
+        A short sentence saying which route was taken and how it went, for the
+        caller to log. It never raises.
+    """
+    descriptors = _wallet_is_descriptor(rpc_call)
+    if descriptors is None:
+        return (
+            "watch-only import SKIPPED: getwalletinfo did not answer, so the wallet type is unknown and the two "
+            "import RPCs are mutually exclusive. The contract is unaffected -- only wallet visibility is."
+        )
+    try:
+        if descriptors:
+            info = rpc_call("getdescriptorinfo", [f"addr({p2sh_address})"])
+            rpc_call("importdescriptors", [[{
+                "desc": info["descriptor"],
+                "timestamp": "now",
+                "label": label,
+                "internal": False,
+                "active": False,
+            }]])
+            return f"watch-only import OK via importdescriptors (descriptor wallet): {p2sh_address}"
+        rpc_call("importaddress", [p2sh_address, label, False])
+    except Exception as exc:  # noqa: BLE001 -- checked: this is the one call in create_contract() whose failure must NOT stop a contract, and the failure is not swallowed -- it is returned in the string the caller logs at WARNING. Nothing downstream reads a value from it, and the contract's correctness does not depend on it (see the docstring's measurement).
+        return (
+            f"watch-only import FAILED on a {'descriptor' if descriptors else 'legacy'} wallet and was not fatal: "
+            f"{exc}. The contract is unaffected; the wallet just will not track {p2sh_address}. Note that Bitcoin "
+            "Core refuses a watch-only descriptor on a wallet that has private keys enabled, so this failing on a "
+            "descriptor wallet is expected rather than alarming."
+        )
+    return f"watch-only import OK via importaddress (legacy wallet): {p2sh_address}"
+
+
+def _wallet_is_descriptor(rpc_call) -> bool | None:
+    """True, False, or None when the daemon would not say.
+
+    Read from `getwalletinfo.descriptors` AT RUNTIME and never inferred from a
+    version string. A version string says what the software could do; this says
+    what THIS wallet is, which is the thing `importaddress` refuses on. A wallet
+    whose getwalletinfo does not carry the field predates descriptor wallets,
+    which is itself the answer: it is legacy.
+    """
+    try:
+        info = rpc_call("getwalletinfo", [])
+    except Exception as exc:  # noqa: BLE001 -- checked: returns None rather than a boolean, so the caller can tell "unknown" from "legacy" and skips the import instead of guessing an RPC that would fail on the other wallet type.
+        logger.warning("getwalletinfo failed, so the wallet type is unknown: %s", exc)
+        return None
+    return bool(info.get("descriptors", False))
+
+
+# --------------------------------------------------------------------------
+# waiting for a contract output to appear -- what create_contract() polls
+# --------------------------------------------------------------------------
+
+
+def read_transaction_outputs(rpc_call, txid: str) -> list[tuple[Decimal, str]]:
+    """Every output of `txid` as (value in coin, scriptPubKey hex), without -txindex.
+
+    Two routes, for the same reason lookup_contract_output() has four: the
+    transaction may be in the mempool, or it may have been mined out of it
+    between two polls, and those are answered by different RPCs on a node with
+    no transaction index.
+
+      1. `getrawtransaction txid true` -- the mempool, or any transaction at
+         all on a node with -txindex.
+      2. `gettransaction txid` -- the wallet's own record, whose raw hex is
+         parsed here. This is the one that keeps working after the funding
+         transaction is confirmed, which is exactly when route 1 stops.
+
+    Raises:
+        LookupError: naming both routes and what each said.
+    """
+    attempts: list[str] = []
+    try:
+        decoded = rpc_call("getrawtransaction", [txid, True])
+        return [
+            (Decimal(str(entry["value"])), entry["scriptPubKey"]["hex"])
+            for entry in decoded.get("vout", [])
+        ]
+    except Exception as exc:  # noqa: BLE001 -- checked: one route failing is a reason to try the next, not an answer. Both attempts are named in the LookupError below and neither can return a value a caller would mistake for a real transaction.
+        attempts.append(f"getrawtransaction: {exc}")
+    try:
+        wallet_record = rpc_call("gettransaction", [txid])
+        parsed = parse_transaction(bytes.fromhex(wallet_record["hex"]))
+        return [(satoshis_to_coins(value), script.hex()) for value, script in parsed.outputs]
+    except Exception as exc:  # noqa: BLE001 -- checked: the last route; its failure ends the search and is reported with the first one's.
+        attempts.append(f"gettransaction: {exc}")
+    raise LookupError(f"could not read transaction {txid}: " + "; ".join(attempts))
+
+
+def find_output_by_script(outputs: list[tuple[Decimal, str]], script_hex: str) -> int | None:
+    """The index of the output paying `script_hex`, or None.
+
+    MATCHED ON THE SCRIPT, NEVER ON AN ADDRESS, and this is defect four.
+    Measured 2026-09-25 on real daemons:
+
+        Bitcoin Core 28.1.0    scriptPubKey keys: ['address', 'asm', 'desc', 'hex', 'type']
+        Litecoin Core 0.21.4   scriptPubKey keys: ['addresses', 'asm', 'hex', 'reqSigs', 'type']
+
+    `addresses` (plural) was deprecated in Core 0.20 and removed in 22.0.
+    Litecoin 0.21.4 still returns it. The old code compared its P2SH address
+    against `scriptPubKey.addresses` and so found NOTHING on Bitcoin -- the
+    poll ran to its 300-second deadline and timed out on a contract that had
+    been funded perfectly. Litecoin's copy worked only because its daemon is
+    four years behind, and would break the day it is upgraded.
+
+    There is a second copy of this search in regtest/steps.py::_find_vout_by_script,
+    which is the harness's own and is kept separate on purpose (rule 8 requires
+    each to name the other; see modules/htlc_spend.py's header for why the
+    harness does not import the code it measures).
+    """
+    for index, (_value, candidate) in enumerate(outputs):
+        if candidate == script_hex:
+            return index
+    return None
+
+
+def address_of(script_pub_key: dict) -> str:
+    """The address a decoded scriptPubKey names, under EITHER daemon's field shape.
+
+    For REPORTING ONLY. Nothing decides anything from this -- the match is
+    always on the hex -- but an operator reading a log wants the address, and
+    the two daemons spell it differently: Core 28.1 has a single `address`,
+    Litecoin 0.21.4 has a list under `addresses`. Returns "(none: this daemon
+    reports no address for the output)" rather than an empty string, because a
+    blank gap is ambiguous between "no address" and "the lookup broke"
+    (rule 14).
+    """
+    single = script_pub_key.get("address")
+    if single:
+        return str(single)
+    plural = script_pub_key.get("addresses") or []
+    if plural:
+        return ", ".join(str(entry) for entry in plural)
+    return "(none: this daemon reports no address for the output)"
+
+
+def wait_for_tx_output(
+    rpc_client,
+    txid: str,
+    expected_script_hex: str,
+    max_wait: int = 60,
+    expected_address: str = "",
+) -> tuple[int, list[tuple[Decimal, str]]]:
+    """Poll the node until an output of `txid` pays `expected_script_hex`.
+
+    MOVED HERE FROM modules/utils.py ON 2026-09-25, with the defect fixed on
+    the way. utils.py is the function level -- secret generation and hashing,
+    nothing that opens a socket -- and a polling loop that holds an RPC
+    conversation belongs one layer up (rule 10). It also could not be fixed
+    where it was: the fix needs a transaction parser, and utils.py is imported
+    BY the module that has one, so importing it back would be a cycle.
+
+    Args:
+        rpc_client: anything with an `rpc_call(method, params)` method.
+        txid: the transaction to inspect.
+        expected_script_hex: the scriptPubKey to look for, as hex. For an HTLC
+            that is `modules.atomic_htlc_scripts.p2sh_script_for(redeem_script).hex()`.
+            NOT an address -- see find_output_by_script() for the measurement.
+        max_wait: SECONDS to keep polling. Seconds, not microfortnights: it is
+            compared against time.monotonic() and passed to time.sleep(), which
+            is an interface, not a report (rule 6). The µfn figure appears in
+            the log lines, where a human reads it.
+        expected_address: for the log lines only. The match never uses it.
+
+    The old `interval` parameter is gone. It was never passed by either of the
+    two call sites in this repository -- BTCClient.create_contract() sets
+    max_wait=300 and GRCClient.create_contract() takes the defaults -- so it
+    was a knob nobody turned, and rule 9 asks for less of the file to be left
+    behind each time. POLL_INTERVAL_SECONDS below is the value it always had.
+
+    Returns:
+        (vout index, every output as (value in coin, scriptPubKey hex)).
+
+    Raises:
+        TimeoutError: carrying the count of RPC errors seen while waiting,
+            because "the chain has not included it yet" and "the daemon has
+            been refusing us for a minute" produce the same silence and must
+            not produce the same message (rule 14).
+    """
+    started = time.monotonic()
+    deadline = started + max_wait
+    attempts = 0
+    rpc_errors = 0
+    last_error = ""
+    logger.info(
+        "waiting for an output of %s paying scriptPubKey %s%s; giving up after %s",
+        txid,
+        expected_script_hex,
+        f" (address {expected_address})" if expected_address else "",
+        format_duration(max_wait),
+    )
+
+    while time.monotonic() < deadline:
+        attempts += 1
+        elapsed = time.monotonic() - started
+        try:
+            outputs = read_transaction_outputs(rpc_client.rpc_call, txid)
+            index = find_output_by_script(outputs, expected_script_hex)
+            if index is not None:
+                logger.info(
+                    "found the output at index %d after %s (%d poll(s), %d rpc error(s))",
+                    index,
+                    format_duration(time.monotonic() - started),
+                    attempts,
+                    rpc_errors,
+                )
+                return index, outputs
+            logger.info(
+                "poll %d: %d output(s), none paying this contract yet, %s elapsed of %s, rpc_errors=%d",
+                attempts,
+                len(outputs),
+                format_duration(elapsed),
+                format_duration(max_wait),
+                rpc_errors,
+            )
+        except Exception as exc:  # noqa: BLE001 -- checked: a transient RPC failure must not abort a wait that is otherwise going fine, but it is NOT swallowed: it is counted, logged at WARNING on every occurrence, and carried into the TimeoutError so the caller can tell a quiet chain from a broken daemon.
+            rpc_errors += 1
+            last_error = str(exc)
+            logger.warning(
+                "poll %d: rpc error after %s (%d of %d polls have failed): %s",
+                attempts,
+                format_duration(elapsed),
+                rpc_errors,
+                attempts,
+                exc,
+            )
+
+        time.sleep(min(POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+
+    waited = time.monotonic() - started
+    detail = f"; {rpc_errors} of {attempts} polls raised, last: {last_error}" if rpc_errors else "; no rpc errors"
+    logger.error("gave up on %s after %s%s", txid, format_duration(waited), detail)
+    raise TimeoutError(
+        f"output for txid {txid} paying scriptPubKey {expected_script_hex} did not appear within "
+        f"{format_duration(waited)}{detail}"
+    )
