@@ -27,6 +27,7 @@ from services import admin_view
 from services.admin_view import (
     DEPOSIT_QUIET_AFTER_SECONDS,
     INVENTORY_STALE_AFTER_SECONDS,
+    WORKER_STOPPED_CONSEQUENCES,
     chain_rows,
     config_echo,
     freshness,
@@ -39,8 +40,10 @@ from services.admin_view import (
     status_counts,
     swaps_in_flight,
     unresolved_payouts,
+    worker_stopped_consequence,
 )
 from services.swap_view import STALL_AFTER_SECONDS
+from supervisor import worker_commands
 from workers.reconcile_worker import DEFAULT_POLL_SECONDS as RECONCILE_POLL
 
 NOW = "2026-09-26T12:00:00+00:00"
@@ -461,3 +464,67 @@ def test_worker_rows_report_stopped_for_a_missing_pid_file(tmp_path):
     for row in rows:
         assert row["state"] == "stopped"
         assert row["detail"] == "no pid file"
+
+
+# --- each worker's consequence is its own ------------------------------------
+
+def test_each_worker_has_its_own_stopped_consequence():
+    """Measured on the operator's admin page 2026-09-26: all three cards said the same thing.
+
+    templates/admin.html hardcoded ONE sentence -- "a stopped payout worker leaves
+    credited swaps in payout_pending indefinitely" -- for every row, so two of the
+    three cards told the operator something FALSE about what stopping that worker
+    does, on the page they would consult to decide whether it mattered.
+
+    The three consequences are genuinely different: a stopped deposit_watcher means
+    deposits are never SEEN at all (a customer pays in full and the swap stays
+    awaiting_deposit forever), while a stopped reconcile_worker means the balances
+    on that page quietly go stale.
+    """
+    sentences = {name: worker_stopped_consequence(name)
+                 for name in ("deposit_watcher", "payout_worker", "reconcile_worker")}
+
+    assert len(set(sentences.values())) == 3, f"all three must differ, got {sentences}"
+    # Keyed on the STATUS each one strands a swap in, which is the distinguishing
+    # fact rather than a phrase -- a wording change should not fail this test, but
+    # describing the wrong failure must.
+    assert "awaiting_deposit" in sentences["deposit_watcher"]
+    assert "payout_pending" in sentences["payout_worker"]
+    assert "stale" in sentences["reconcile_worker"]
+
+
+def test_only_the_payout_worker_is_described_as_leaving_swaps_unpaid():
+    """The specific false statement, pinned so it cannot come back.
+
+    A stopped deposit_watcher does NOT leave swaps in payout_pending -- it leaves
+    them in awaiting_deposit, which is a different failure with a different fix.
+    """
+    for name in ("deposit_watcher", "reconcile_worker"):
+        assert "payout_pending" not in worker_stopped_consequence(name), (
+            f"{name}'s consequence must not borrow payout_worker's"
+        )
+
+
+def test_an_unrecorded_worker_does_not_borrow_the_nearest_answer():
+    """Rule 17 one step smaller: no consequence is better than another worker's.
+
+    The defect was a sentence applied where it did not belong, so the default for a
+    worker nobody has written up says so, and says not to assume it is harmless.
+    """
+    answer = worker_stopped_consequence("future_worker")
+
+    assert "not recorded here" in answer
+    assert "Do NOT assume it is harmless" in answer
+    assert "payout_pending" not in answer
+
+
+def test_every_worker_the_supervisor_knows_has_a_consequence_written():
+    """The table and the supervisor must not drift (rule 8).
+
+    A worker added to supervisor.worker_commands() without an entry here renders the
+    "not recorded" fallback on the operator's page -- which is honest, but this test
+    is what makes it a one-line fix at the time rather than a discovery later.
+    """
+    missing = [name for name in worker_commands() if name not in WORKER_STOPPED_CONSEQUENCES]
+
+    assert missing == [], f"these workers have no stopped-consequence written: {missing}"

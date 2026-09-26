@@ -431,6 +431,50 @@ def _attribution_note(asset: str) -> str:
     return "not decided in this application -- get_new_address() refuses and the custody choice is the operator's"
 
 
+# What a STOPPED worker costs, per worker. Written out because the three
+# consequences are genuinely different, and the page said otherwise.
+#
+# Measured on the operator's own admin page 2026-09-26: all three worker cards
+# rendered the SAME sentence -- "a stopped payout worker leaves credited swaps in
+# payout_pending indefinitely" -- because templates/admin.html hardcoded one
+# consequence for every row. So two of the three cards told the operator something
+# false about what stopping that worker does, on the page they would consult to
+# decide whether it mattered.
+#
+# Rule 16 counts a wrong comment as a bug, and this is a wrong comment rendered as
+# a fact about live state. It also belonged in a function rather than a template
+# (rule 10): "what does stopping this cost" is a decision, and a template is where
+# a decision cannot be tested.
+WORKER_STOPPED_CONSEQUENCES = {
+    "deposit_watcher": (
+        "no deposit is ever SEEN. A customer can pay in full and their swap stays in "
+        "awaiting_deposit forever, because nothing is polling the chain -- and every HTTP "
+        "response still says 200."
+    ),
+    "payout_worker": (
+        "credited swaps sit in payout_pending indefinitely. The deposit is already ours and "
+        "the customer is not paid -- and every HTTP response still says 200."
+    ),
+    "reconcile_worker": (
+        "the hot-wallet inventory stops being refreshed, so the balances on this page go stale. "
+        "A stale balance is not a small balance -- it is a number nobody has checked."
+    ),
+}
+
+
+def worker_stopped_consequence(name: str) -> str:
+    """What it costs that THIS worker is not running. Never another worker's answer.
+
+    An unknown worker gets a sentence that says it is unknown rather than borrowing
+    the nearest one -- which is the defect this function replaces, one step smaller.
+    """
+    return WORKER_STOPPED_CONSEQUENCES.get(
+        name,
+        f"what a stopped {name} costs is not recorded here. Do NOT assume it is harmless: add it to "
+        f"WORKER_STOPPED_CONSEQUENCES in services/admin_view.py.",
+    )
+
+
 def worker_rows(run_dir=None) -> list[dict]:
     """Each supervised worker's state, read from its pid file. Starts nothing.
 
@@ -444,11 +488,16 @@ def worker_rows(run_dir=None) -> list[dict]:
     grows a thread or a child process.
 
     A worker reported `stopped` is the reading the page most needs to make
-    obvious: a payout worker that is not running produces swaps that sit in
-    payout_pending forever while every HTTP response still says 200.
+    obvious, and WHAT it costs differs per worker -- so each row carries its own
+    consequence rather than the template stating one for all three.
     """
     directory = DEFAULT_RUN_DIR if run_dir is None else run_dir
-    return [worker_status(name, directory) for name in sorted(worker_commands())]
+    rows = []
+    for name in sorted(worker_commands()):
+        row = dict(worker_status(name, directory))
+        row["stopped_consequence"] = worker_stopped_consequence(name)
+        rows.append(row)
+    return rows
 
 
 def config_echo(config) -> list[dict]:

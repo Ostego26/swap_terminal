@@ -93,8 +93,10 @@
       <p class="card-body">pid {{ worker.pid if worker.pid is not none else '(none)' }}
         {% if worker.detail %}&#183; {{ worker.detail }}{% endif %}</p>
       {% if worker.state != 'running' %}
-      <p class="card-note">While this is not running, the work it does is not happening: a stopped payout worker
-         leaves credited swaps in <code>payout_pending</code> indefinitely and every HTTP response still says 200.</p>
+      {# Per worker, from services/admin_view.worker_stopped_consequence(). This was
+         one hardcoded sentence for all three rows until 2026-09-26, so two of the
+         three cards described a DIFFERENT worker's consequence. #}
+      <p class="card-note">While this is not running, {{ worker.stopped_consequence }}</p>
       {% endif %}
     </li>
     {% endfor %}
