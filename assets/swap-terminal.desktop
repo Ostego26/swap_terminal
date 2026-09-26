@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Swap Terminal
+GenericName=Atomic swap terminal
+Comment=Start the swap terminal, open its window, and stop everything when the window closes
+# Exec IS REWRITTEN BY install_desktop_icon.py, because a .desktop Exec= must be an
+# ABSOLUTE path -- the desktop runs it with a minimal environment and no working
+# directory of ours, so a relative path or a bare name finds nothing. The token
+# below is a placeholder the installer replaces with the real resolved path; this
+# file is a template and is NOT itself a working launcher.
+Exec=__SWAP_TERMINAL_EXEC__
+Icon=__SWAP_TERMINAL_ICON__
+# Terminal=true DELIBERATELY. The readiness wait can take up to ~30s, and the
+# launcher prints which chains the server will see, whether any of them is MAINNET,
+# and the teardown verdict. With Terminal=false all of that goes nowhere and a
+# refusal is indistinguishable from the icon doing nothing (rule 14).
+Terminal=true
+Categories=Office;Finance;
+Keywords=swap;crypto;gridcoin;xrp;
+StartupNotify=true

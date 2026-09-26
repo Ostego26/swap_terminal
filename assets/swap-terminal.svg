@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An SVG rather than a committed PNG: it is text, so it diffs and reviews like
+     the rest of the tree, and it scales to whatever size the desktop asks for
+     without shipping five raster files. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img"
+     aria-label="Swap Terminal">
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="#1b2430"/>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="none" stroke="#3d5a80" stroke-width="2"/>
+  <!-- The two arrows are the swap. Deliberately not coin logos: the pairs this
+       terminal allows are configuration, and an icon naming two chains would be
+       wrong the first time that list changes. -->
+  <path d="M16 25h26l-7-7" fill="none" stroke="#8ecae6" stroke-width="4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M48 39H22l7 7" fill="none" stroke="#ffb703" stroke-width="4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
