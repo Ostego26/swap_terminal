@@ -163,6 +163,13 @@ GRC_TEST_NETWORKS = frozenset({"test", "testnet", "regtest"})
 # number, the same reason xrp_htlc_escrow.ACCOUNTS_NEEDED exists.
 XRP_ACCOUNTS_NEEDED = 2
 
+# How long step 8 keeps trying to read the secret off the Gridcoin chain. Sixty
+# seconds of polling, because the claim is broadcast and then read within the
+# same program -- if it is not readable in a minute the routes are wrong, not
+# slow, and the reasons printed each attempt say which.
+READ_ATTEMPTS = 30
+READ_POLL_SECONDS = 2.0
+
 
 def swap_timelocks(now_unix: float, grc_tip_height: int, *, hours_scale: float = 1.0) -> tuple[int, int, dict]:
     """The two legs' timelocks, in the two chains' own clocks.
@@ -266,6 +273,54 @@ def grc_network(adapter) -> str:
             return "testnet" if value else "main"
         reasons.append(f"{method}: no `{field}` field")
     return f"unknown ({'; '.join(reasons) or 'no route answered'})"
+
+
+def claim_scriptsig_hex(adapter, txid: str) -> tuple[str, list[str]]:
+    """The claim transaction's input scriptSig, by whichever route answers.
+
+    Returns (hex, reasons_tried). An empty hex with reasons is a result, not an
+    exception -- the caller is polling and needs to say "not yet" per attempt.
+
+    TWO ROUTES, FOR THE REASON modules/htlc_rpc.lookup_contract_output() HAS
+    FOUR. `getrawtransaction` searches only the MEMPOOL unless the daemon runs
+    -txindex, which is the exact defect that killed the BTC redeem path on
+    2026-09-25 and cost a whole run to diagnose. Right after a broadcast the
+    claim is in the mempool and route 1 answers; once it is mined it may not be
+    findable that way at all, and this is the ONE step where failing is worst --
+    both legs are funded and the secret is already public, so a participant who
+    cannot read it has published nothing and lost the race to a timeout.
+
+    Route 2 is the wallet: `gettransaction` returns the raw hex for any
+    transaction the wallet knows, mined or not, with no -txindex, and
+    `decoderawtransaction` turns it into the same shape. It works here because
+    the claim was made by this wallet. A REAL participant is not the claimer and
+    would not have it in their wallet -- for them route 1 plus -txindex, or a
+    block scan, is the answer, and that is named here rather than discovered
+    later.
+    """
+    reasons: list[str] = []
+    try:
+        raw = adapter.call("getrawtransaction", txid, 1) or {}
+        script_sig = ((raw.get("vin") or [{}])[0].get("scriptSig") or {}).get("hex", "")
+        if script_sig:
+            return script_sig, reasons
+        reasons.append("getrawtransaction: answered with no vin[0].scriptSig.hex")
+    except Exception as error:  # noqa: BLE001 -- checked: the daemon answers "No information available about transaction" without -txindex once the claim is mined, which is not a failure but the signal to try the wallet. The reason is kept and printed rather than discarded, and a failure of BOTH routes returns "" which the caller reports as a FAIL -- never as "no preimage was revealed".
+        reasons.append(f"getrawtransaction: {type(error).__name__}")
+    try:
+        wallet_tx = adapter.call("gettransaction", txid) or {}
+        raw_hex = wallet_tx.get("hex")
+        if not raw_hex:
+            reasons.append("gettransaction: answered with no `hex`")
+            return "", reasons
+        decoded = adapter.call("decoderawtransaction", raw_hex) or {}
+        script_sig = ((decoded.get("vin") or [{}])[0].get("scriptSig") or {}).get("hex", "")
+        if script_sig:
+            return script_sig, reasons
+        reasons.append("decoderawtransaction: no vin[0].scriptSig.hex")
+    except Exception as error:  # noqa: BLE001 -- checked: same, and this is the last route. Returning "" is reported by the caller as a failure to READ, which is a different thing from reading successfully and finding no preimage -- the caller prints the reasons so an operator can tell them apart.
+        reasons.append(f"gettransaction/decoderawtransaction: {type(error).__name__}")
+    return "", reasons
 
 
 def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is the swap's SEQUENCE, and every decision in it is extracted -- the timelocks and their ordering above, the preimage read in modules/htlc_spend, the condition in chains/xrp_crypto_condition, the payloads in xrp_htlc_escrow. What is left is the order of five acts on two chains, which is what rule 10 says a file at the root is for. Splitting it would put the order somewhere other than the file named after the thing being done, and the order IS the protocol.
@@ -422,17 +477,22 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
     console.say("this is the step that makes the swap atomic. B does not ask A for anything, and A cannot "
                 "refuse: the secret is in A's own claim transaction.")
     revealed = None
-    for attempt in range(1, 31):
-        try:
-            raw = grc.call("getrawtransaction", claim_txid, 1)
-            script_sig_hex = ((raw.get("vin") or [{}])[0].get("scriptSig") or {}).get("hex", "")
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        script_sig_hex, reasons = claim_scriptsig_hex(grc, claim_txid)
+        if script_sig_hex:
             revealed = preimage_from_scriptsig(bytes.fromhex(script_sig_hex), secret_hash)
-        except Exception as error:  # noqa: BLE001 -- checked: the transaction may not be indexed for a moment after broadcast, and a poll that dies on the first miss would fail a swap that is proceeding correctly. The loop reports each miss and the failure below is the loop running out, not one attempt.
-            console.say(f"attempt {attempt}: not readable yet ({type(error).__name__})")
-        if revealed is not None:
-            break
-        console.say(f"attempt {attempt}: the claim's scriptSig does not yet carry a push matching the commitment")
-        time.sleep(2.0)
+            if revealed is not None:
+                console.say(f"attempt {attempt}: read the claim's scriptSig ({len(script_sig_hex) // 2} bytes) and "
+                            f"one of its pushes hashes to the commitment")
+                break
+            # READ BUT NO MATCH is a different answer from COULD NOT READ, and
+            # the two must not print the same line (rule 14). This one means the
+            # transaction is there and does not carry the preimage.
+            console.say(f"attempt {attempt}: read the scriptSig, but NO push hashes to the commitment -- this is "
+                        f"not a claim of this contract")
+        else:
+            console.say(f"attempt {attempt}: could not read the claim yet ({'; '.join(reasons) or '(none)'})")
+        time.sleep(READ_POLL_SECONDS)
     if not console.check("the secret was recovered from the chain", "yes" if revealed else None,
                          "a push whose sha256 matches the commitment", revealed is not None):
         console.say(f"B cannot finish the escrow without it and recovers the GRC at height {grc_timeout}... "
