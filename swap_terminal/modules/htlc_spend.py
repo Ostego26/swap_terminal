@@ -510,11 +510,37 @@ def estimated_script_sig_length(public_key: bytes, secret: bytes, redeem_script:
 
     Built by assembling the real scriptSig around a dummy signature of the
     maximum length, with the real push encoder, so the bound cannot drift from
-    what is actually produced: everything except the signature is known
-    exactly, and the signature's only freedom is to be one or two bytes
-    shorter. An upper bound is the safe direction -- the fee is computed from
-    it, so the transaction that is broadcast is never larger than the one the
-    fee was sized for.
+    what is actually produced: everything except the signature is known exactly.
+
+    HOW MUCH SHORTER THE SIGNATURE CAN BE, corrected 2026-09-26. This paragraph
+    used to say "the signature's only freedom is to be one or two bytes shorter."
+    That is wrong, and it was wrong in a way nothing failed on for months --
+    because it is wrong only about 1 run in 256.
+
+    MAX_DER_SIGNATURE_WITH_HASHTYPE is 73: 0x30, a length byte, then 0x02 and a
+    33-byte r, then 0x02 and a 33-byte s (2 + 35 + 35 = 72), plus the hashtype.
+    Each of r and s is 33 bytes only when its top bit is set and DER therefore
+    prepends a zero; the usual case is 32, giving 71. So 1 or 2 bytes of slack is
+    the COMMON case, not the bound. A value whose leading byte is itself zero
+    encodes in 31 bytes -- about one r in 256 -- and then the signature is 70 and
+    the slack is 3. Two zero bytes gives 4, and so on down, each a further factor
+    of 256 rarer. There is no small hard bound, only a distribution.
+
+    Measured the day this was corrected: a full-suite run under pytest-randomly
+    produced a 235-byte scriptSig against a 238-byte estimate, and separately an
+    LTC redeem paid 10710 satoshis (30 sat/byte over 357 bytes) for a 354-byte
+    transaction. Both are slack 3. Two tests asserted `<= 2` and a third sized a
+    fee bound at `size + 2`; all three now compute the slack exactly from the
+    signature the transaction actually carries, which is readable as
+    SignedSpend.script_sig[0] because a DER signature is shorter than 76 bytes and
+    so its push is a bare length byte.
+
+    AN UPPER BOUND IS STILL THE RIGHT THING TO COMPUTE, and none of that changes
+    it: the fee is computed from this number, so the transaction that is broadcast
+    is never larger than the one the fee was sized for. Erring high by a few bytes
+    costs a few satoshis on a spend that must confirm before a timelock expires.
+    Erring low would underpay a miner for what it is asked to carry, which is the
+    failure that matters.
     """
     dummy_signature = b"\x00" * MAX_DER_SIGNATURE_WITH_HASHTYPE
     return len(hashlock_script_sig(dummy_signature, public_key, secret, redeem_script))

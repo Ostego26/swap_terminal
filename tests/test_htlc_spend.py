@@ -100,6 +100,7 @@ from modules.htlc_rpc import (
     wait_for_tx_output,
 )
 from modules.htlc_spend import (
+    MAX_DER_SIGNATURE_WITH_HASHTYPE,
     TransactionLayoutError,
     coins_to_satoshis,
     decode_wif,
@@ -469,6 +470,49 @@ def push_of(data: bytes) -> bytes:
     return client_push_data(data)
 
 
+def signature_slack(script_sig: bytes) -> int:
+    """How many bytes shorter this scriptSig's signature is than the maximum.
+
+    THE FEE IS SIZED BEFORE THE SIGNATURE EXISTS, from
+    modules/htlc_spend.estimated_script_sig_length(), which reserves
+    MAX_DER_SIGNATURE_WITH_HASHTYPE bytes for it. The broadcast transaction is
+    therefore this many bytes shorter than the one the fee was computed for --
+    exactly, not approximately, because the signature is the only part of the
+    scriptSig whose length can vary.
+
+    WHY A FUNCTION AND WHY THIS IS NOT A `<= 2` ANYWHERE ANY MORE. Three
+    assertions in this file bounded that difference at 2, and the module docstring
+    claimed the same thing. All four were wrong about roughly 1 signature in 256:
+    DER drops a byte from r or s whenever the top bit is clear (the common case,
+    slack 1 or 2) and drops ANOTHER whenever the value's leading byte is itself
+    zero (slack 3, and 4 a further 1/256 down). Under pytest-randomly, which
+    reseeds each run, that surfaced as a test that passed 8 times in isolation and
+    failed in a full suite: a 235-byte scriptSig against a 238-byte estimate, and
+    an LTC redeem paying 30 sat/byte over 357 bytes for a 354-byte transaction.
+    Both slack 3.
+
+    So the bound is computed rather than guessed, and the assertions became
+    equalities that cannot flake.
+
+    READING IT NEEDS NO PARSER (rule 8: there is no push DECODER in this tree and
+    this is not the place to add the first one). A DER signature with its hashtype
+    is at most 73 bytes, which is below OP_PUSHDATA1's 76-byte threshold, so the
+    first byte of the scriptSig IS the signature's length. The read is checked back
+    through the client's own ENCODER below, so a wrong assumption fails here rather
+    than silently shifting every fee assertion in the file.
+    """
+    length = script_sig[0]
+    assert push_of(script_sig[1 : 1 + length]) == script_sig[: 1 + length], (
+        "the first push of a hashlock scriptSig is the signature; if this fails the "
+        "scriptSig layout changed and every fee assertion below is reading the wrong byte"
+    )
+    assert length <= MAX_DER_SIGNATURE_WITH_HASHTYPE, (
+        f"a {length}-byte signature exceeds the {MAX_DER_SIGNATURE_WITH_HASHTYPE}-byte maximum the "
+        f"estimate reserves, so the fee was sized for LESS than what is broadcast"
+    )
+    return MAX_DER_SIGNATURE_WITH_HASHTYPE - length
+
+
 def test_a_wrong_preimage_is_refused_by_the_script(contract):
     """Mutation check: the stack machine is not rubber-stamping the scriptSig."""
     node = _node_for(contract)
@@ -665,7 +709,9 @@ def test_the_size_estimate_is_an_upper_bound_and_close(contract):
 
     It must never be SMALLER than the transaction that gets broadcast, or the
     fee was computed for something lighter than what a miner is asked to carry.
-    Two bytes of slack is the DER signature's own variability.
+    The slack is the DER signature's own variability, and it is computed from the
+    signature this transaction actually carries rather than bounded at 2 -- see
+    signature_slack() for the run where `<= 2` was measured false.
     """
     node = _node_for(contract)
     spend = build_hashlock_spend(
@@ -680,20 +726,86 @@ def test_the_size_estimate_is_an_upper_bound_and_close(contract):
         destination_address=contract["destination"].address,
     )
     assert spend.size_bytes <= spend.estimated_size_bytes
-    assert spend.estimated_size_bytes - spend.size_bytes <= 2
+    assert spend.estimated_size_bytes - spend.size_bytes == signature_slack(spend.script_sig)
 
 
 def test_the_estimated_script_sig_length_matches_what_is_built(contract):
+    """The estimate is exactly the real scriptSig plus the bytes the signature did
+    not use -- asserted as an equality, since the signature is in hand here.
+
+    This is where `<= 2` was measured false: a full-suite run under pytest-randomly
+    produced estimate 238 against actual 235. The signature had a 31-byte r.
+    """
     private_key, compressed = decode_wif(contract["participant"].wif)
     public_key = public_key_for(private_key, compressed)
     estimate = estimated_script_sig_length(public_key, contract["secret"], contract["redeem_script"])
+    signature = sign_digest(private_key, b"\x22" * 32)
     actual = len(
-        hashlock_script_sig(
-            sign_digest(private_key, b"\x22" * 32), public_key, contract["secret"], contract["redeem_script"]
-        )
+        hashlock_script_sig(signature, public_key, contract["secret"], contract["redeem_script"])
     )
     assert actual <= estimate
-    assert estimate - actual <= 2
+    assert estimate - actual == MAX_DER_SIGNATURE_WITH_HASHTYPE - len(signature)
+
+
+def test_a_three_byte_signature_slack_is_computed_rather_than_bounded_away():
+    """THE RARE CASE, PINNED SO IT IS NO LONGER RARE.
+
+    Three assertions in this file bounded the estimate's slack at 2 bytes, and the
+    slack is 3 whenever r or s encodes in 31 bytes instead of 32. Measured here
+    2026-09-26 over 20,000 signatures of distinct digests under one key:
+
+        72 bytes  slack 1   9995   49.98%
+        71 bytes  slack 2   9912   49.56%
+        70 bytes  slack 3     93    0.47%   <- `<= 2` fails
+
+    0.465%, so about 1 signature in 215. Five such assertions run per suite, which
+    is why it surfaced as a test that passed 8 of 8 runs in isolation and failed
+    once in a full run under pytest-randomly -- roughly a 2% chance per suite.
+
+    A test that only meets this case on an unlucky seed is not covering it. So the
+    key and the digest are FIXED at a pair that produces a 70-byte signature
+    (found by the scan above), and the signature length is asserted first: if a
+    future ecdsa release changes its nonce derivation, this fails saying the case
+    is no longer reached, rather than quietly passing as a slack-2 test.
+    """
+    # Not a credential: a fixed 32-byte scalar, chosen only because digest 57 under
+    # it signs to 70 bytes. Nothing is funded and nothing is broadcast.
+    private_key = bytes.fromhex("123456789abcdef0112233445566778899aabbccddeeff00123456789abcdef0")
+    public_key = public_key_for(private_key, True)
+    secret = b"\x11" * 32
+    # Only its LENGTH reaches the estimate, so the bytes are arbitrary.
+    redeem_script = b"\x63" + b"\xa8" * 40
+
+    signature = sign_digest(private_key, (57).to_bytes(32, "big"))
+    assert len(signature) == MAX_DER_SIGNATURE_WITH_HASHTYPE - 3, (
+        f"this key/digest pair no longer signs to a 70-byte signature (got {len(signature)}), so the "
+        f"three-byte-slack case is NOT being exercised -- find another pair rather than deleting this"
+    )
+
+    estimate = estimated_script_sig_length(public_key, secret, redeem_script)
+    actual = len(hashlock_script_sig(signature, public_key, secret, redeem_script))
+
+    assert estimate - actual == 3
+    assert estimate - actual == MAX_DER_SIGNATURE_WITH_HASHTYPE - len(signature)
+    # And the estimate is still an UPPER bound, which is the property that matters:
+    # the fee is computed from it, so the broadcast transaction is never larger
+    # than the one the miner was paid for.
+    assert actual < estimate
+
+
+def test_signature_slack_refuses_a_signature_longer_than_the_estimate_reserved():
+    """The direction that would be a real underpayment, not a rounding cost.
+
+    signature_slack() asserts rather than returning a negative number, because a
+    scriptSig whose signature exceeds MAX_DER_SIGNATURE_WITH_HASHTYPE means the fee
+    was sized for FEWER bytes than are broadcast -- a spend that must confirm before
+    a timelock expires, underpaying a miner. Silence there is the one failure mode
+    worse than erring high.
+    """
+    oversized = push_of(b"\x30" * (MAX_DER_SIGNATURE_WITH_HASHTYPE + 1)) + b"\x51"
+
+    with pytest.raises(AssertionError, match="sized for LESS than what is broadcast"):
+        signature_slack(oversized)
 
 
 def test_satoshi_conversion_round_trips_without_float_error():
@@ -1081,13 +1193,20 @@ def test_every_client_redeems_a_confirmed_contract_without_asking_the_wallet_to_
     assert paid >= coins_to_satoshis(redeem_miner_fee(asset, size)), (
         f"{asset}: the {size}-byte transaction pays {paid} satoshis, under the fee rule for its own size"
     )
-    # The upper end is the estimate's own slack: the fee is sized before the
-    # signature exists, from an upper bound that can be up to two bytes long
-    # because a DER signature's length varies. Erring high is the safe
-    # direction for a time-critical spend; erring high by more than that would
-    # mean the estimate is not the bound it claims to be.
-    assert paid <= coins_to_satoshis(redeem_miner_fee(asset, size + 2)), (
-        f"{asset}: paid {paid} satoshis over {size} bytes, more than the size estimate's two bytes of slack allows"
+    # THE UPPER END IS AN EQUALITY, NOT A TOLERANCE. The fee is sized before the
+    # signature exists, from an upper bound that reserves the maximum DER length;
+    # the broadcast transaction is shorter by exactly the bytes that signature did
+    # not use, and signature_slack() reads that off the scriptSig. So the fee must
+    # be the fee rule applied to (actual size + that slack) and nothing else.
+    #
+    # This line read `size + 2` until 2026-09-26, when a seeded full-suite run
+    # failed with "LTC: paid 10710 satoshis over 354 bytes" -- 30 sat/byte over 357,
+    # slack 3, because r encoded in 31 bytes. A tolerance here was a claim about a
+    # distribution; an equality is a claim about this transaction.
+    slack = signature_slack(script_sig)
+    assert paid == coins_to_satoshis(redeem_miner_fee(asset, size + slack)), (
+        f"{asset}: paid {paid} satoshis over {size} bytes with {slack} bytes of signature slack, which is "
+        f"not the fee rule applied to the {size + slack} bytes the fee was sized for"
     )
 
 
