@@ -38,7 +38,10 @@ AMOUNT = 55.52645238
 TXID = "3e09dc9cfd7a61da0000000000000000000000000000000000000000000000ff"
 
 
-def seed(db_path, *, status="failed", txid=None, payout_rows=1, reason="the re-lock failed"):
+FAILURE_REASON = "the re-lock failed and ate the txid"
+
+
+def seed(db_path, *, status="failed", txid=None, payout_rows=1, payout_row=("failed", None)):
     conn = connect_db(str(db_path))
     conn.executescript(SCHEMA)
     conn.execute(
@@ -55,13 +58,23 @@ def seed(db_path, *, status="failed", txid=None, payout_rows=1, reason="the re-l
         " VALUES ('s_x','q_s','XRP','GRC','rDeposit',4,?,1.0,1.0,56.38,150,0.01,?,?,1,'xrptxid',"
         " ?, '2026-09-26T00:00:00+00:00','2026-09-26T00:01:00+00:00','2026-09-26T00:00:30+00:00',"
         " NULL,'2999-01-01T00:00:00+00:00',?)",
-        (ADDRESS, AMOUNT, status, txid, reason),
+        (ADDRESS, AMOUNT, status, txid, FAILURE_REASON),
     )
     for _ in range(payout_rows):
         conn.execute(
             "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at)"
-            " VALUES ('s_x','GRC',?,?,NULL,'created','2026-09-26T00:01:00+00:00')",
-            (ADDRESS, AMOUNT),
+            # 'failed', WHICH IS WHAT A FAILED PAYOUT ROW ACTUALLY HOLDS. This seeded
+            # 'created' and that made the whole file pass over a real bug:
+            # _record_broadcast() filtered `AND status = 'created'`, so against the
+            # operator's real row -- which payout_service's failure path had moved to
+            # `failed` -- the UPDATE matched nothing. Their swap read `completed` with
+            # a txid while its payout row read `status failed  txid (none)`.
+            #
+            # Fourth time in this project a fixture narrower than the real schema has
+            # hidden exactly the behavior under test. It is now the real value, and
+            # payout_row is a parameter so the 'created' case is covered too.
+            " VALUES ('s_x','GRC',?,?,?,?,'2026-09-26T00:01:00+00:00')",
+            (ADDRESS, AMOUNT, payout_row[1], payout_row[0]),
         )
     # The reservation the failure path never released.
     conn.execute(
@@ -173,13 +186,13 @@ def test_the_reservation_the_failure_left_behind_is_released(monkeypatch, db_pat
 def test_the_previous_reason_is_kept_rather_than_blanked(monkeypatch, db_path):
     """A swap reading `completed` with no trace of its time as `failed` loses the one
     thing a reader of the row will ask."""
-    seed(db_path, reason="the re-lock failed and ate the txid")
+    seed(db_path)
 
     run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
 
     swap = read(db_path, "SELECT failed_reason FROM swaps WHERE id = 's_x'")
     assert "CORRECTED by settle_payout.py" in swap["failed_reason"]
-    assert "the re-lock failed and ate the txid" in swap["failed_reason"]
+    assert FAILURE_REASON in swap["failed_reason"]
     assert TXID in swap["failed_reason"]
 
 
@@ -233,19 +246,84 @@ def test_only_the_send_side_counts_not_the_receive(monkeypatch, db_path):
         run(monkeypatch, db_path, ["--swap", "s_x", "--apply"], wallet=receive_only)
 
 
-def test_a_swap_that_already_has_a_txid_is_refused(monkeypatch, db_path):
-    """Overwriting a recorded txid would destroy the only link to a real payment."""
-    seed(db_path, status="completed", txid="already-recorded")
+def test_a_fully_recorded_swap_is_refused(monkeypatch, db_path):
+    """Overwriting a recorded txid would destroy the only link to a real payment.
+
+    BOTH halves must already carry it. A completed swap whose payout ROW has no txid
+    is the half-applied state below, not a finished one -- which is why this seeds the
+    row's txid as well, and why this test stopped passing when that distinction
+    arrived.
+    """
+    seed(db_path, status="completed", txid="already-recorded",
+         payout_row=("broadcast", "already-recorded"))
 
     with pytest.raises(SystemExit, match="already records payout_txid"):
         run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
 
 
-def test_a_swap_that_is_not_failed_is_refused(monkeypatch, db_path):
+def test_a_swap_in_any_other_state_is_refused(monkeypatch, db_path):
     seed(db_path, status="payout_pending")
 
-    with pytest.raises(SystemExit, match="not 'failed'"):
+    with pytest.raises(SystemExit, match="corrects one thing"):
         run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
+
+
+def test_a_completed_swap_with_no_txid_at_all_is_refused(monkeypatch, db_path):
+    """Neither repairable state. This tool did not produce it, so it will not guess."""
+    seed(db_path, status="completed", txid=None)
+
+    with pytest.raises(SystemExit, match="records no payout_txid at all"):
+        run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
+
+
+# --- the half-applied state, which an earlier version of this tool created ------
+
+
+def test_a_half_applied_correction_finishes_the_payout_row(monkeypatch, db_path):
+    """STATE B, AND IT IS MY OWN BUG'S WRECKAGE.
+
+    The first version reused _record_broadcast(), whose payouts UPDATE filtered
+    `AND status = 'created'`, while the failure path had already moved that row to
+    `failed`. So --apply corrected the swap and silently missed its payout row,
+    leaving `completed` with a txid beside `status failed  txid (none)`. Exactly the
+    state the operator's database was in on 2026-09-26.
+
+    Refusing it would have left them holding an inconsistent record with no
+    instrument. MUTATION: restore the `if row["payout_txid"]: raise` without the
+    row_needs_txid condition. This test fails and the fully-recorded one above keeps
+    passing, which is why both exist.
+    """
+    seed(db_path, status="completed", txid=TXID, payout_row=("failed", None))
+
+    code, _ = run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
+
+    assert code == 0
+    payout = read(db_path, "SELECT status, txid, sent_at FROM payouts WHERE swap_id = 's_x'")
+    assert payout["txid"] == TXID, "the payout row is the half that was missed"
+    assert payout["status"] == "broadcast"
+    assert payout["sent_at"]
+    swap = read(db_path, "SELECT status, payout_txid FROM swaps WHERE id = 's_x'")
+    assert swap["status"] == "completed"
+    assert swap["payout_txid"] == TXID
+
+
+def test_a_half_applied_correction_does_not_nest_a_second_corrected_note(monkeypatch, db_path):
+    """The reason was already rewritten by the run that half-applied it. Prefixing it
+    again would wrap one CORRECTED note inside another and bury the original."""
+    seed(db_path, status="completed", txid=TXID, payout_row=("failed", None))
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE swaps SET failed_reason = ? WHERE id = 's_x'",
+        (f"CORRECTED by settle_payout.py: the payout WAS delivered as {TXID}. Previous reason: {FAILURE_REASON}",),
+    )
+    conn.commit()
+    conn.close()
+
+    run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
+
+    reason = read(db_path, "SELECT failed_reason FROM swaps WHERE id = 's_x'")["failed_reason"]
+    assert reason.count("CORRECTED by settle_payout.py") == 1, reason
+    assert FAILURE_REASON in reason, "the original reason must survive both runs"
 
 
 def test_an_unknown_swap_is_refused(monkeypatch, db_path):
@@ -331,3 +409,29 @@ def test_an_unparseable_amount_can_never_become_a_match():
 
     assert settle_payout.matching_wallet_sends(rows, ADDRESS, 55.52645238) == []
     assert settle_payout.matching_wallet_sends([{"category": "send", "address": ADDRESS, "amount": None}], ADDRESS, 1.0) == []
+
+
+def test_the_recorder_runs_exactly_once(monkeypatch, db_path):
+    """ONE CALL, AND A DUPLICATE SHIPPED. main() held a bare _record_broadcast()
+    beside apply_correction() -- left behind when the write was extracted -- so every
+    --apply performed the four writes twice.
+
+    The swap UPDATEs are idempotent and hot_reserved is clamped by max(..., 0.0), so
+    the only visible damage was release_inventory_after_send() subtracting from
+    hot_confirmed a second time with no floor. That self-heals, because
+    refresh_wallet_inventory() overwrites hot_confirmed from get_balance() every
+    cycle -- luck, not design, and the reason this counts CALLS rather than asserting
+    an end state that happens to look right either way.
+    """
+    seed(db_path)
+    calls = []
+    real = settle_payout._record_broadcast
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs.get("old_status"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(settle_payout, "_record_broadcast", counted)
+    run(monkeypatch, db_path, ["--swap", "s_x", "--apply"])
+
+    assert calls == ["failed"], f"expected exactly one recorder call, got {len(calls)}: {calls}"

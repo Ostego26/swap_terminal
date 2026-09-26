@@ -393,6 +393,11 @@ WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
 WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
 
 
+# What the payouts row reads while the swap reads the key. The two move together in
+# both paths; see _record_broadcast() for the run that proved a literal wrong here.
+_PAYOUT_STATUS_BEFORE = {"paying": "created", "failed": "failed"}
+
+
 def _record_broadcast(db, swap, amount, txid: str, *, old_status: str = "paying") -> None:
     """Make a delivered payout durable. Commits. Called INSIDE the unlock context.
 
@@ -422,9 +427,27 @@ def _record_broadcast(db, swap, amount, txid: str, *, old_status: str = "paying"
     would leave the hot wallet permanently short on paper.
     """
     destination_asset = swap["to_asset"]
+    # THE PAYOUT ROW'S PRIOR STATUS IS DERIVED FROM THE SWAP'S, not filtered on a
+    # literal. This line read `AND status = 'created'` and that was a bug with a
+    # measurement behind it: on 2026-09-26 settle_payout.py corrected a swap whose
+    # payout row the failure path had already moved to `failed`, so this UPDATE
+    # matched NOTHING. The swap read `completed` with its txid while its payout row
+    # still read `status failed  txid (none)` -- an internally inconsistent record,
+    # which is worse than the one it was correcting.
+    #
+    # The two statuses move together in both paths and always have: the live path has
+    # swap `paying` / payout `created`, and the failure path sets swap `failed` AND
+    # payout `failed` (this file, the except clause above). So one mapping, in one
+    # place, rather than a second parameter -- which also keeps the argument count
+    # under PLR0913 without a suppression.
+    #
+    # It stays a FILTER rather than becoming an unconditional UPDATE, because a swap
+    # can hold an old `failed` payout row beside a new `created` one after a retry,
+    # and `WHERE txid IS NULL` alone would write the same txid onto both.
+    payout_status_before = _PAYOUT_STATUS_BEFORE[old_status]
     db.execute(
-        "UPDATE payouts SET txid = ?, status = ?, sent_at = ? WHERE swap_id = ? AND status = 'created'",
-        (txid, "broadcast", utc_now_iso(), swap["id"]),
+        "UPDATE payouts SET txid = ?, status = ?, sent_at = ? WHERE swap_id = ? AND status = ? AND txid IS NULL",
+        (txid, "broadcast", utc_now_iso(), swap["id"], payout_status_before),
     )
     db.execute(
         "UPDATE swaps SET payout_txid = ?, completed_at = ?, updated_at = ? WHERE id = ?",

@@ -83,18 +83,43 @@ def swap_to_settle(db, swap_id: str) -> dict:
     row = db.execute("SELECT * FROM swaps WHERE id = ?", (swap_id,)).fetchone()
     if row is None:
         raise SettleRefused(f"REFUSED: no swap {swap_id} in this database. Nothing was written.")
-    if row["payout_txid"]:
+    # TWO REPAIRABLE STATES, AND THE SECOND IS A BUG OF MINE FROM 2026-09-26.
+    #
+    #   A  swap `failed`, payout row without a txid
+    #      The original case: a delivered payout recorded as a failure.
+    #
+    #   B  swap `completed` WITH a payout_txid, payout row still without one
+    #      A HALF-APPLIED correction. The first version of this tool reused
+    #      _record_broadcast(), whose payouts UPDATE filtered `AND status =
+    #      'created'` -- and the failure path had already moved that row to
+    #      `failed`, so it matched nothing. The swap was corrected and its payout row
+    #      was not, leaving a record contradicting itself: `completed` with a txid
+    #      beside `status failed  txid (none)`. Worse than what it corrected.
+    #
+    # B is recognised rather than refused. Refusing would leave the operator holding
+    # an inconsistent record with no instrument for it, and the state is narrow
+    # enough to be unambiguous: a completed swap whose own payout row carries no txid
+    # cannot be anything else.
+    payouts = db.execute("SELECT txid FROM payouts WHERE swap_id = ?", (swap_id,)).fetchall()
+    row_needs_txid = any(not payout["txid"] for payout in payouts)
+
+    if row["payout_txid"] and not row_needs_txid:
         raise SettleRefused(
-            f"REFUSED: swap {swap_id} already records payout_txid {row['payout_txid']}. There is nothing "
-            f"to correct, and overwriting a recorded txid would destroy the only link to the payment "
-            f"that was made. Nothing was written."
+            f"REFUSED: swap {swap_id} already records payout_txid {row['payout_txid']} and its payout row "
+            f"carries it too. There is nothing to correct, and overwriting a recorded txid would destroy "
+            f"the only link to the payment that was made. Nothing was written."
         )
-    if row["status"] != "failed":
+    if row["status"] not in ("failed", "completed"):
         raise SettleRefused(
-            f"REFUSED: swap {swap_id} is '{row['status']}', not 'failed'. This tool exists for one "
-            f"specific record: a payout that WAS delivered and was written down as failed. A swap in "
-            f"any other state is a different problem and this is the wrong instrument for it. "
-            f"Nothing was written."
+            f"REFUSED: swap {swap_id} is '{row['status']}'. This tool corrects one thing: a payout that "
+            f"WAS delivered and is not fully written down -- a swap `failed` with a delivered payment, or "
+            f"one `completed` whose payout row never received the txid. Any other state is a different "
+            f"problem and this is the wrong instrument for it. Nothing was written."
+        )
+    if row["status"] == "completed" and not row["payout_txid"]:
+        raise SettleRefused(
+            f"REFUSED: swap {swap_id} is 'completed' and records no payout_txid at all. That is neither of "
+            f"the two states this repairs, and it was not produced by this tool. Nothing was written."
         )
     return row
 
@@ -220,7 +245,7 @@ def evidence_lines(chosen: dict, details: dict) -> list[str]:
     ]
 
 
-def apply_correction(db, swap: dict, amount, txid: str) -> None:
+def apply_correction(db, swap: dict, amount, txid: str, *, half_applied: bool = False) -> None:
     """The write. Commits. Reuses the worker's own recorder (rule 8).
 
     _record_broadcast() performs the four writes a successful payout performs --
@@ -232,7 +257,17 @@ def apply_correction(db, swap: dict, amount, txid: str) -> None:
     old_status='failed' so the audit row records the correction truthfully instead of
     claiming a paying -> completed transition that never happened.
     """
+    # old_status="failed" in BOTH states. In state B the swap already reads
+    # `completed`, but the payout ROW is still the `failed` one the failure path left,
+    # and that is what _record_broadcast() derives its payouts filter from -- passing
+    # "completed" would look for a row in a state that does not exist. The swap-side
+    # UPDATEs re-apply values it already holds, which is a no-op.
     _record_broadcast(db, swap, amount, txid, old_status="failed")
+    if half_applied:
+        # The reason was already rewritten by the run that half-applied it. Prefixing
+        # it a second time would nest one CORRECTED note inside another.
+        db.commit()
+        return
     # THE OLD REASON IS KEPT, PREFIXED. Blanking it would leave a swap reading
     # `completed` with no trace that it spent time as `failed`, or why -- and the why
     # is the first thing a reader of this row will want.
@@ -282,6 +317,9 @@ def main(argv: list[str] | None = None) -> int:
     db = connect_db(str(db_path))
     try:
         swap = swap_to_settle(db, args.swap)
+        # State B from swap_to_settle(): the swap half of the correction is already
+        # done and only the payout row was missed.
+        half_applied = swap["status"] == "completed"
         payout = payout_to_settle(db, args.swap)
         destination_asset = swap["to_asset"]
         address = payout["destination_address"]
@@ -317,12 +355,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    python3 settle_payout.py --swap {args.swap}{extra} --apply", flush=True)
             return 0
 
-        # Same four writes the worker performs on a successful payout, from the same
-        # function (rule 8). old_status='failed' so the audit trail records the
-        # correction truthfully rather than claiming a paying -> completed transition
-        # that never happened.
-        _record_broadcast(db, swap, amount, txid, old_status="failed")
-        apply_correction(db, swap, amount, txid)
+        # ONE CALL. This block held a bare _record_broadcast() as well until
+        # 2026-09-26, left behind when the write was extracted into
+        # apply_correction() -- so every --apply performed the four writes TWICE.
+        # The swap UPDATEs are idempotent and the reserved figure is clamped by
+        # max(..., 0.0), but release_inventory_after_send() subtracts from
+        # hot_confirmed WITHOUT a floor, so the second call took the asset's
+        # confirmed balance 55.5 GRC below the truth. refresh_wallet_inventory()
+        # overwrites hot_confirmed from get_balance() on every reconcile cycle, so it
+        # self-heals -- which is luck, not design, and is why the test below asserts
+        # the recorder runs exactly once rather than asserting the end state.
+        apply_correction(db, swap, amount, txid, half_applied=half_applied)
         print(f"\nCORRECTED. swap {args.swap} now reads completed with txid {txid}.", flush=True)
         print("  The previous failure reason is KEPT, prefixed with CORRECTED, so the record says what "
               "happened rather than pretending it always said this.", flush=True)
