@@ -33,7 +33,7 @@ different question, and each names the other (rule 8) so a reader who finds one
 knows the other exists.
 """
 
-from chains.registry import unconfigured_chains, why_unconfigured
+from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 
 
 def allowed_pair_rows(config, adapters) -> list[dict]:
@@ -67,21 +67,29 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
     rows = []
     for from_asset, to_asset in sorted(config["ALLOWED_PAIRS"]):
         missing = unconfigured_chains(adapters, from_asset, to_asset)
+        # TWO TESTS, NOT ONE. `missing` is "we cannot reach that chain"; this is "we
+        # can reach the destination and still cannot pay you". GRC -> XRP passed the
+        # first and failed the second, and was badged ENABLED for an afternoon -- see
+        # chains/registry.why_cannot_pay_out() for what that would have cost a
+        # customer. Only the DESTINATION is asked: a source chain never sends.
+        cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
         rows.append(
             {
                 "from_asset": from_asset,
                 "to_asset": to_asset,
                 "label": f"{from_asset} -> {to_asset}",
-                "enabled": not missing,
+                "enabled": not missing and not cannot_pay,
                 "missing": missing,
+                "cannot_pay": cannot_pay,
                 # `(none)` is never right here: a row is either enabled, in which
                 # case the reason says both chains are reachable, or it names every
                 # missing chain. A blank reason beside DISABLED would be rule 14's
                 # empty gap.
                 "reason": (
-                    "in ALLOWED_PAIRS, and both chains have an adapter in this process"
-                    if not missing
-                    else " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
+                    " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
+                    if missing
+                    else cannot_pay
+                    or "in ALLOWED_PAIRS, both chains have an adapter here, and the destination can pay out"
                 ),
             }
         )

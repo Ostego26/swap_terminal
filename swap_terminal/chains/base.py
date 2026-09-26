@@ -120,6 +120,24 @@ def rpc_error_from_body(response) -> str | None:
 class RPCAdapter:
     asset = ""
 
+    # CAN THIS CHAIN BE A PAYOUT DESTINATION? One name across every adapter, and
+    # the name is MoneroAdapter's, which has carried `can_spend` since it was
+    # written -- extended rather than replaced, because a second vocabulary for
+    # one concept is rule 8's bug with a delay on it.
+    #
+    # True here: a Bitcoin-derived daemon's own wallet signs, which is what
+    # send_to_address() below calls. False on XRPAdapter and SolanaAdapter;
+    # an instance attribute on MoneroAdapter, defaulting False.
+    #
+    # Read through chains/registry.why_cannot_pay_out(), which uses
+    # getattr(adapter, "can_spend", False) -- FAIL-CLOSED, so an adapter that
+    # forgets to declare it is treated as unable to pay rather than assumed able.
+    can_spend = True
+    # Empty when can_spend is True. Otherwise a sentence that goes straight onto
+    # the swap page beside a DISABLED pair. It lives on the adapter because the
+    # adapter is what knows.
+    payout_refusal = ""
+
     def __init__(self, user: str, password: str, host: str, port: int, wallet: str = "", timeout: float = 30.0):  # noqa: PLR0913, PLR0917 -- checked: these six ARE the RPC connection. They arrive as **Config.RPC[asset], a dict built for exactly this signature, so bundling them into an object would add a type without removing a parameter.
         self.user = user
         self.password = password

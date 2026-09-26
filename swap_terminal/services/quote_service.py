@@ -22,7 +22,34 @@ from .pricing import derive_pair_rate, fetch_usd_prices
 
 
 def get_network_fee_reserve(config, to_asset: str) -> float:
-    return float(config[f"{to_asset}_NETWORK_FEE_RESERVE"])
+    """What is held back from the payout for the destination chain's own fee.
+
+    THE SUBSCRIPT USED TO BE BARE, AND IT REACHED THE OPERATOR AS A KEY'S REPR.
+    2026-09-26, from their browser, after XRP<->GRC was added to ALLOWED_PAIRS:
+
+        No quote: 'XRP_NETWORK_FEE_RESERVE'
+
+    That is str(KeyError(...)). BTC, LTC, GRC and XMR each have a reserve in
+    config.py; XRP was never given one when the pair was enabled, so the subscript
+    raised, routes/quotes.py's HTTP boundary returned str(exc), and the page printed
+    the key and nothing else -- the third bare KeyError repr to reach a person that
+    day, after 'GRC' from create_swap() and the same shape one layer down.
+
+    The reserve is NOT defaulted to zero here, and that is the point rather than an
+    omission: zero would quote a payout with no allowance for the destination chain's
+    fee, so the payout would be short by whatever the network charges, or fail. A
+    reserve is a PRICING decision and belongs to the operator (rule 16), so a missing
+    one refuses the quote and says which setting to add.
+    """
+    key = f"{to_asset}_NETWORK_FEE_RESERVE"
+    if key not in config:
+        raise ValueError(
+            f"No quote: {to_asset} has no network fee reserve, so a payout amount cannot be computed. "
+            f"Set {key} in the environment this process was started with -- it is the amount held back "
+            f"from every {to_asset} payout for that chain's own transaction fee, and defaulting it to "
+            f"zero would quote a payout the chain will not deliver. Nothing was written."
+        )
+    return float(config[key])
 
 
 def validate_pair(config, from_asset: str, to_asset: str) -> None:

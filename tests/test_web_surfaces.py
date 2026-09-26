@@ -122,15 +122,14 @@ def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(clien
     # Exactly the operator's server on 2026-09-26, minus their missing GRC: the
     # membership test is all allowed_pair_rows() performs, so sentinels are enough
     # and no adapter is constructed (nothing here opens a socket).
-    reachable = {"XRP", "GRC"}
-    monkeypatch.setitem(
-        client.application.config, "ADAPTERS", {asset: object() for asset in reachable}
-    )
+    reachable_assets = {"XRP", "GRC"}
+    reachable_adapters = reachable(*reachable_assets)
+    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable_adapters)
     body = client.get("/").get_data(as_text=True)
 
     for from_asset, to_asset in allowed:
         option = f'value="{from_asset}:{to_asset}"'
-        if from_asset in reachable and to_asset in reachable:
+        if from_asset in reachable_assets and to_asset in reachable_assets:
             assert option in body, f"{from_asset}->{to_asset} is reachable and must be offered"
         else:
             assert option not in body, (
@@ -158,7 +157,7 @@ def test_a_disabled_pair_names_the_variable_that_would_enable_it(client, monkeyp
     network_target.configuring_variable() -- so this asserts the NAME reaches the
     page, not that a particular sentence was written.
     """
-    monkeypatch.setitem(client.application.config, "ADAPTERS", {"XRP": object()})
+    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable("XRP"))
     body = client.get("/").get_data(as_text=True)
 
     # GRC is in an allowed pair and has no adapter here, so its variable must be
@@ -191,9 +190,7 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
     """
     allowed = client.application.config["ALLOWED_PAIRS"]
     every_asset = {asset for pair in allowed for asset in pair}
-    monkeypatch.setitem(
-        client.application.config, "ADAPTERS", {asset: object() for asset in every_asset}
-    )
+    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable(*every_asset))
     body = client.get("/").get_data(as_text=True)
 
     for from_asset, to_asset in allowed:
@@ -563,6 +560,26 @@ def test_a_refused_swap_is_logged_and_not_only_returned(client, caplog):
     assert "no swap row was written" in caplog.text, "it must say what did NOT happen"
 
 
+# A STUB THAT DECLARES WHAT IT CAN DO, because the gate fails closed.
+#
+# chains/registry.why_cannot_pay_out() reads getattr(adapter, "can_spend", False),
+# so a bare object() counts as unable to pay -- deliberately, since an adapter that
+# forgets the declaration must not be silently offered as a destination. These four
+# tests used object() and correctly stopped passing when that gate landed. A stub
+# that says nothing about itself should not be treated as capable.
+class StubAdapter:
+    """Declares only what pair_view asks of it: can it be paid out to?"""
+
+    def __init__(self, can_spend=True):
+        self.can_spend = can_spend
+        self.payout_refusal = "" if can_spend else "cannot pay out in this test"
+
+
+def reachable(*assets, can_spend=True):
+    """An adapters dict for `assets`, each able (or not) to be a destination."""
+    return {asset: StubAdapter(can_spend=can_spend) for asset in assets}
+
+
 # NOT a credential. A SENTINEL: its only purpose is to be findable, so the leak
 # test below can search the whole response body for it. A value that looked like a
 # real credential would make the test weaker, not stronger -- the same reasoning
@@ -582,7 +599,7 @@ LEAK_SENTINEL = "health-response-must-not-echo-this"
 
 def test_health_reports_which_chains_have_an_adapter_in_this_process(client, monkeypatch):
     """adapter_built is per chain and comes from the adapters dict, not from config."""
-    monkeypatch.setitem(client.application.config, "ADAPTERS", {"XRP": object()})
+    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable("XRP"))
 
     body = client.get("/api/health").get_json()
 
@@ -626,7 +643,7 @@ def test_health_names_the_missing_settings_and_never_their_values(client, monkey
 def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkeypatch):
     """The line worth reading first: shorter than allowed_pairs means settings did
     not reach this process."""
-    monkeypatch.setitem(client.application.config, "ADAPTERS", {"XRP": object(), "GRC": object()})
+    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable("XRP", "GRC"))
 
     body = client.get("/api/health").get_json()
 
@@ -639,7 +656,7 @@ def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkey
 def test_health_offerable_equals_allowed_when_every_chain_is_reachable(client, monkeypatch):
     """So the field cannot pass by always being empty."""
     every = {asset for pair in client.application.config["ALLOWED_PAIRS"] for asset in pair}
-    monkeypatch.setitem(client.application.config, "ADAPTERS", {asset: object() for asset in every})
+    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable(*every))
 
     body = client.get("/api/health").get_json()
 
@@ -655,3 +672,58 @@ def test_health_offerable_pairs_is_empty_rather_than_absent_when_nothing_is_reac
     assert "offerable_pairs" in body
     assert body["offerable_pairs"] == []
     assert body["allowed_pairs"], "allowed_pairs must be unaffected -- it answers a different question"
+
+
+def test_a_destination_that_cannot_pay_out_is_not_offered(client, monkeypatch):
+    """REACHABLE IS NOT THE SAME AS ABLE TO PAY, and GRC -> XRP was the proof.
+
+    2026-09-26: the page had just learned that a pair whose chain has no adapter is
+    DISABLED. GRC -> XRP passed that test -- an XRP adapter exists and reaches the
+    testnet -- and was badged ENABLED. XRPAdapter holds no signing key and
+    payout_service calls send_to_address() unarmed, so that payout RAISES: the
+    customer's GRC would have been taken and credited, and the swap left in `failed`
+    needing a person.
+
+    A review the same day found the second hazard in the same pair: XRPAdapter's
+    validate_address() accepts any X-address WITHOUT checking its checksum, so a
+    typo would have been fixed as that swap's FINAL payout address. A chain that
+    cannot be a destination is never asked for one.
+
+    MUTATION: drop the why_cannot_pay_out() call from allowed_pair_rows(). Only this
+    test and the one below fail.
+    """
+    # Both chains reachable; only GRC can pay out. Exactly the operator's server.
+    monkeypatch.setitem(
+        client.application.config,
+        "ADAPTERS",
+        {"GRC": StubAdapter(can_spend=True), "XRP": StubAdapter(can_spend=False)},
+    )
+
+    body = client.get("/").get_data(as_text=True)
+
+    assert 'value="XRP:GRC"' in body, "GRC can pay out, so XRP -> GRC must still be offered"
+    assert 'value="GRC:XRP"' not in body, (
+        "XRP cannot pay out, so GRC -> XRP must not be offered -- a deposit into it is stranded"
+    )
+    assert "pair-off" in body, "the unofferable pair must still be LISTED, with its reason"
+
+
+def test_the_reason_says_it_cannot_pay_rather_than_that_it_is_unreachable(client, monkeypatch):
+    """Two different problems must not print the same sentence.
+
+    "XRP_RPC_URL is unset" would send the operator to configure a chain that is
+    already configured and would change nothing. The distinction is the whole point
+    of asking two questions instead of one.
+    """
+    monkeypatch.setitem(
+        client.application.config,
+        "ADAPTERS",
+        {"GRC": StubAdapter(can_spend=True), "XRP": StubAdapter(can_spend=False)},
+    )
+
+    body = client.get("/").get_data(as_text=True)
+
+    assert "cannot pay out in this test" in body, "the adapter's own refusal must reach the page"
+    assert "XRP_RPC_URL is unset" not in body, (
+        "XRP IS configured here; naming its endpoint variable would be the wrong remedy"
+    )

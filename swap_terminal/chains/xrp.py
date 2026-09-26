@@ -244,6 +244,33 @@ def new_deferrals(deferred: list[str], already_reported: set[str]) -> list[str]:
 class XRPAdapter:
     asset = "XRP"
 
+    # SEE chains/base.RPCAdapter.can_spend for why this name and not another.
+    #
+    # False, and it is a statement of FACT rather than a policy switch: this
+    # adapter holds no seed and has no Config field that would give it one, and
+    # services/payout_service.py calls send_to_address() with two positional
+    # arguments and no arming token -- so an XRP payout raises XRPSendNotArmed
+    # and the swap lands in `failed`.
+    #
+    # THAT MATTERS NOW IN A WAY IT DID NOT THIS MORNING. ALLOWED_PAIRS gained
+    # ('GRC','XRP') on 2026-09-26 on the operator's instruction, so the swap page
+    # offered GRC -> XRP and badged it ENABLED. A customer following that path
+    # would have sent GRC, had it credited, and then watched the payout refuse
+    # permanently with their deposit already taken -- a stranded swap needing a
+    # person, which is what the tolerance halt exists to avoid one stage earlier.
+    #
+    # It also closes a second hazard a review found the same day: validate_address()
+    # accepts ANY X-address without checking its checksum, so a typo would have
+    # been fixed as a swap's FINAL payout address. A chain that cannot be a
+    # destination cannot have a payout address at all.
+    can_spend = False
+    payout_refusal = (
+        "cannot pay out: it holds no signing key, and services/payout_service.py calls "
+        "send_to_address() without the arming token, so an XRP payout raises and the swap lands "
+        "in `failed` with the deposit already credited. Wiring that call site is the operator's "
+        "(rule 16: fund movement comes back). Nothing in a .env can arm it."
+    )
+
     def __init__(
         self,
         url: str = "",

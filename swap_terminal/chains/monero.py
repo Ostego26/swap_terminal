@@ -207,6 +207,16 @@ class MoneroAdapter:
         # argument.
         self.account_index = int(account_index)
         self.can_spend = bool(can_spend)
+        # The sibling of can_spend, named the same on every adapter -- see
+        # chains/base.RPCAdapter.can_spend. An INSTANCE attribute here rather than a
+        # class one, because unlike XRP and Solana this chain's answer is a
+        # configuration value (XMR_WALLET_CAN_SPEND) rather than a structural
+        # absence, and it can differ between two adapters in one process.
+        self.payout_refusal = "" if self.can_spend else (
+            "has an adapter but is view-only: it was constructed with can_spend=False, so "
+            "send_to_address() refuses. Set XMR_WALLET_CAN_SPEND=1 in the environment this "
+            "process is started with, and only for a wallet you intend to pay out from."
+        )
         self.timeout = float(timeout)
         # Clamped, not trusted. See chains/monero_units.py: a setting below the
         # ten-block consensus lock does not buy a faster payout, it buys a

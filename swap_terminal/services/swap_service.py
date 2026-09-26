@@ -16,7 +16,7 @@ boundary, which is what lets create_swap() insert the swap and its first audit
 row atomically.
 """
 
-from chains.registry import unconfigured_chains, why_unconfigured
+from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 
 from .helpers import new_id, parse_iso, utc_now_iso
 from .xrp_tag_service import allocate_destination_tag
@@ -177,6 +177,26 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             + f" The {from_asset}->{to_asset} pair is in ALLOWED_PAIRS, which is why the quote priced -- "
             f"ALLOWED_PAIRS says what this terminal is WILLING to swap and the adapters say what it can "
             f"REACH, and those are different questions. Nothing was written."
+        )
+    # REACHABLE IS NOT THE SAME AS ABLE TO PAY, and this is the authority rather
+    # than the page. routes/ui.py stops OFFERING such a pair, but a POST to
+    # /api/swaps does not come from the page, so the gate that matters is here.
+    #
+    # GRC -> XRP on 2026-09-26: an XRP adapter exists and reaches the testnet, so the
+    # check above passes. XRPAdapter holds no signing key and payout_service calls
+    # send_to_address() unarmed, so the payout RAISES -- the customer's GRC would be
+    # taken, credited, and the swap left in `failed` needing a person. Refusing
+    # before the swap row exists is the only stage at which nothing has been taken.
+    #
+    # Checked BEFORE validate_address(), deliberately: for XRP that validator accepts
+    # any X-address without verifying its checksum (found by review the same day), so
+    # a chain that cannot be a destination must never be asked for one.
+    cannot_pay = why_cannot_pay_out(adapters, to_asset)
+    if cannot_pay:
+        raise ValueError(
+            f"No swap was created, because {cannot_pay} The {from_asset}->{to_asset} pair is in "
+            f"ALLOWED_PAIRS and both chains are reachable -- but a swap that cannot be paid out takes "
+            f"a deposit it can never settle. Nothing was written."
         )
     if not adapters[to_asset].validate_address(payout_address):
         raise ValueError(f"Invalid {to_asset} payout address")

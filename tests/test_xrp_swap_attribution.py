@@ -119,6 +119,14 @@ def test_an_untagged_payment_to_the_shared_account_is_never_credited():
 # --- the deposit instruction -------------------------------------------------
 
 class FakeXRP:
+    # DECLARED, because chains/registry.why_cannot_pay_out() fails closed: a stub
+    # that says nothing about itself counts as unable to pay, and create_swap()
+    # refuses a destination that cannot. These stubs stand in for a chain that CAN
+    # be paid out to, so they say so -- the real XRPAdapter and SolanaAdapter both
+    # declare False, which is what took GRC -> XRP off the menu on 2026-09-26.
+    can_spend = True
+    payout_refusal = ""
+
     def validate_address(self, address):
         return isinstance(address, str) and address.startswith("r") and len(address) > 25
 
@@ -167,6 +175,14 @@ def test_xrp_never_asks_the_adapter_to_derive_an_address():
 # --- swap creation end to end, against a real database -----------------------
 
 class StubGRC:
+    # DECLARED, because chains/registry.why_cannot_pay_out() fails closed: a stub
+    # that says nothing about itself counts as unable to pay, and create_swap()
+    # refuses a destination that cannot. These stubs stand in for a chain that CAN
+    # be paid out to, so they say so -- the real XRPAdapter and SolanaAdapter both
+    # declare False, which is what took GRC -> XRP off the menu on 2026-09-26.
+    can_spend = True
+    payout_refusal = ""
+
     def validate_address(self, address):
         return isinstance(address, str) and address.startswith("S")
 

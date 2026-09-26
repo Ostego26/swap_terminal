@@ -246,3 +246,113 @@ def test_the_refusal_says_why_the_quote_priced_anyway(db):
     message = str(caught.value)
     assert "ALLOWED_PAIRS" in message
     assert "GRC->LTC" in message, "name the pair, so the message stands alone when pasted"
+
+
+# --- a destination that cannot pay out ----------------------------------------
+#
+# "REACHABLE" AND "ABLE TO PAY" ARE DIFFERENT QUESTIONS, and create_swap() is where
+# the second one has to be asked. routes/ui.py stops OFFERING such a pair, but a
+# POST to /api/swaps does not come from the page.
+#
+# GRC -> XRP, 2026-09-26: an XRP adapter exists and reaches the testnet, so the
+# unconfigured check passes. XRPAdapter holds no signing key and payout_service
+# calls send_to_address() unarmed, so the payout RAISES -- the customer's GRC would
+# be taken, credited, and the swap left in `failed` needing a person. These two
+# tests were added after a mutation run showed that removing the guard failed
+# NOTHING: the page had tests, the authority did not.
+
+
+def cannot_pay_quote(db):
+    """A GRC -> XRP quote, so to_asset is a chain that cannot be a destination."""
+    db.execute(
+        "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
+        " network_fee_reserve, output_amount_estimate, expires_at, created_at)"
+        " VALUES ('q_np','GRC','XRP',1.0,0.02,150,0.0,0.0195,'2999-01-01T00:00:00+00:00',"
+        " '2026-09-26T00:00:00+00:00')"
+    )
+    db.commit()
+
+
+class PayingAdapter:
+    """A destination that CAN pay out. Declared, because the check fails closed.
+
+    NOT a subclass of StubAdapter: that one records RPC calls and answers only from
+    a script, so validate_address() would go through the real RPCAdapter path and
+    raise RPCError for a method nobody scripted -- which is the right behavior for
+    the tests above and the wrong harness for these, where the address is incidental
+    and the payout capability is the subject.
+    """
+
+    can_spend = True
+    payout_refusal = ""
+
+    def validate_address(self, address):
+        return bool(address)
+
+    def get_new_address(self, label):
+        return f"fresh-address-for-{label}"
+
+
+class ViewOnlyAdapter:
+    """Reachable, and cannot be paid out from. What XRPAdapter and SolanaAdapter are."""
+
+    can_spend = False
+    payout_refusal = "cannot pay out: this adapter holds no signing key."
+
+    def validate_address(self, address):
+        raise AssertionError(
+            "validate_address must NOT be reached for a destination that cannot pay out -- "
+            "the capability check runs first, precisely because XRPAdapter's validator "
+            "accepts any X-address without verifying its checksum"
+        )
+
+
+def test_a_destination_that_cannot_pay_out_refuses_the_swap(db):
+    """MUTATION: delete the why_cannot_pay_out() call in create_swap(). Only this
+    test and the one below fail -- the page's tests do not cover the API."""
+    cannot_pay_quote(db)
+    adapters = {"GRC": PayingAdapter(), "XRP": ViewOnlyAdapter()}
+
+    with pytest.raises(ValueError) as caught:
+        create_swap(db, CONFIG, adapters, "q_np", "rBfM7je6e9Ca2cMvuRn7cr9xExFgDa5NGx")
+
+    message = str(caught.value)
+    assert "cannot pay out" in message
+    assert "GRC->XRP" in message, "name the pair, so the message stands alone when pasted"
+    assert "Nothing was written." in message
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
+
+
+def test_an_adapter_that_declares_nothing_is_treated_as_unable_to_pay(db):
+    """FAIL-CLOSED, and the mutation that reverses it failed no test until now.
+
+    chains/registry.why_cannot_pay_out() reads getattr(adapter, "can_spend", False).
+    The other default -- assume it can pay -- means a NEW adapter that forgets the
+    declaration is silently offered as a destination and strands the first deposit
+    into it. That is the expensive direction, so the silent one must be the safe one.
+    """
+    cannot_pay_quote(db)
+
+    class Undeclared:
+        """No can_spend, no payout_refusal. Exactly what a new adapter looks like."""
+
+        def validate_address(self, address):
+            return True
+
+    with pytest.raises(ValueError, match="cannot pay out"):
+        create_swap(db, CONFIG, {"GRC": PayingAdapter(), "XRP": Undeclared()}, "q_np", "raddress")
+
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
+
+
+def test_a_destination_that_can_pay_out_is_not_refused_by_this_check(db):
+    """So the guard cannot pass by refusing everything.
+
+    Uses the fixture's own GRC -> LTC quote, whose destination declares can_spend.
+    """
+    adapters = {"GRC": PayingAdapter(), "LTC": PayingAdapter()}
+
+    swap = create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+
+    assert swap["to_asset"] == "LTC"
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1

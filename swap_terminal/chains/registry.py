@@ -290,3 +290,38 @@ def why_unconfigured(asset: str, rpc: Mapping[str, Mapping] | None = None) -> st
         f"the shell that starts the server -- a value set only in a file, or only in another shell, does "
         f"not reach here."
     )
+
+
+def why_cannot_pay_out(adapters: Mapping[str, object], asset: str) -> str:
+    """Why this chain cannot be a payout DESTINATION, or "" if it can.
+
+    "CONFIGURED" AND "CAN PAY OUT" ARE DIFFERENT QUESTIONS, and conflating them cost
+    an afternoon on 2026-09-26. The swap page had just been taught that a pair whose
+    chain has no adapter is DISABLED. GRC -> XRP passed that test -- an XRP adapter
+    exists and reaches the testnet -- and was badged ENABLED. But XRPAdapter holds no
+    signing key and payout_service calls send_to_address() unarmed, so that payout
+    RAISES: a customer would have sent GRC, had it credited, and been left with a
+    swap in `failed` and their deposit already taken. Unconfigured is "we cannot
+    reach it"; this is "we can reach it and still cannot pay you".
+
+    A review the same day found the second hazard in the same pair: XRPAdapter's
+    validate_address() accepts any X-address without verifying its checksum, so a
+    typo would have been fixed as that swap's FINAL payout address. A chain that
+    cannot be a destination never gets asked for one.
+
+    FAIL-CLOSED, deliberately: getattr(adapter, "can_spend", False) treats an object
+    that does not declare the attribute as unable to pay. The alternative -- assume
+    it can -- means a new adapter that forgets the declaration is silently offered as
+    a destination, which is the expensive direction of the two.
+
+    Returns "" for an asset with NO adapter. That is a different problem and
+    unconfigured_chains() already reports it; answering both here would print two
+    reasons for one pair and leave the operator to work out which to act on.
+    """
+    adapter = adapters.get(asset)
+    if adapter is None or getattr(adapter, "can_spend", False):
+        return ""
+    detail = getattr(adapter, "payout_refusal", "") or (
+        "cannot pay out, and its adapter does not say why -- see chains/base.RPCAdapter.can_spend"
+    )
+    return f"{asset} {detail}"

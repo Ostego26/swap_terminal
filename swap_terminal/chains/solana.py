@@ -248,6 +248,17 @@ class SolanaAdapter:
     # and mint_decimals() reads it from the chain rather than assuming.
     decimals = SOL_DECIMALS
 
+    # SEE chains/base.RPCAdapter.can_spend. False because send_to_address() below
+    # RAISES: this module holds no keypair, reads no keypair path, and imports
+    # nothing that could sign. That is an absence rather than a gate, which is
+    # what makes the declaration a fact rather than a setting.
+    can_spend = False
+    payout_refusal = (
+        "cannot pay out: it holds no keypair and imports nothing that could sign, so "
+        "send_to_address() raises. build_transfer_plan() produces everything up to the "
+        "signature; the signature is the operator's (rule 16)."
+    )
+
     def __init__(  # noqa: PLR0913, PLR0917 -- checked: these six ARE the connection, exactly as RPCAdapter's six are. They arrive as **Config.RPC["SOL"], a dict built for this signature, so bundling them into an object would add a type without removing a parameter.
         self,
         url: str = "",
