@@ -45,16 +45,64 @@ above in the submit log. `(none)` for an empty result is right (rule 14) and it
 hid the answer anyway. Every assertion now goes through describe_result(), which
 falls back to `error` and `error_message`.
 
-STEPS 4 THROUGH 9 REMAIN UNMEASURED. The transaction payloads are checked
-offline -- tests/test_xrp_crypto_condition.py builds each one through xrpl-py's
-own model parser and signs it with fixed fields, so a malformed EscrowCreate or
-a dropped Condition fails here rather than on the ledger -- but no escrow has
-been created, finished or cancelled. The encoding underneath is separately
-measured: chains/xrp_crypto_condition.py was compared byte for byte against an
-independent implementation across five preimage lengths.
+ALL NINE STEPS PASSED ON 2026-09-26, SECOND RUN. The hashlock and the timelock
+on the XRP Ledger are MEASURED now, not read from the protocol. Both branches of
+a funded escrow were exercised against testnet build 3.4.1, OK=11 FAIL=0:
 
-So: the hashlock and the timelock are still PROPOSALS with a verifier attached,
-exactly as rule 16 defines one, and the next run settles them.
+    step 4  EscrowCreate [A]   tesSUCCESS, validated 9D3A81C4946F26E2...
+                               OfferSequence 21051271
+    step 5  wrong fulfillment  tecCRYPTOCONDITION_ERROR: "Malformed, invalid,
+                               or mismatched conditional or fulfillment."
+                               <- THE HASHLOCK ACTUALLY LOCKS
+    step 6  right fulfillment  tesSUCCESS, validated E7AC258695A58136...,
+                               destination 115000000 -> 116000000 drops,
+                               +1000000 EXACTLY
+    step 7  EscrowCreate [B]   tesSUCCESS, validated DDD2CE2A37A830AE...
+    step 8  early cancel       tecNO_PERMISSION: "No permission to perform
+                               requested operation."
+                               <- THE TIMELOCK ACTUALLY LOCKS
+    step 9  cancel after it    tesSUCCESS, validated AE73C8727D87609A...,
+                               sender 82999200 -> 83999180 drops, +999980 =
+                               the escrowed 1000000 less 20 drops of fees
+
+Step 5 is the one that makes the rest mean anything. An escrow that accepted any
+fulfillment would have produced an identical green step 6, and the refusal code
+names the mechanism rather than a generic failure. Step 8's tecNO_PERMISSION is
+its counterpart for the timelock: the escrow existed, was cancellable by
+construction, and the ledger refused because the time had not come.
+
+Step 6 asserts the BALANCE, not the engine result. tesSUCCESS says a transaction
+applied; +1000000 drops at the destination says the escrow paid out, which is the
+same distinction regtest_htlc_verify.py draws between a broadcast redeem and a
+spend read back off the chain.
+
+WHAT THIS DOES AND DOES NOT ESTABLISH ABOUT A CROSS-CHAIN SWAP.
+
+It establishes that both HTLC primitives exist and work on both sides: BTC and
+LTC have a script whose hashlock and timelock branches both spend through real
+code (regtest_htlc_verify.py, OK=38 on each chain), and XRPL has an escrow whose
+condition and CancelAfter both hold. They commit to the SAME sha256, so one
+preimage opens both.
+
+It does NOT establish a swap, and three things stand between here and one:
+
+  1. NOTHING WIRES ESCROW INTO THE SWAP FLOW. chains/xrp.py still does
+     Payment-with-a-DestinationTag, which is the custodial path that moved real
+     money on 2026-09-26. Making escrow the deposit mechanism changes what gets
+     traded and how, which is live posture and the operator's call (rule 16).
+  2. THE TIMELOCKS MUST BE ORDERED, and the XRP leg's clock is a different KIND.
+     modules/htlc_timelock.py already expresses the policy -- INITIATOR_LOCK_HOURS
+     48 against PARTICIPANT_LOCK_HOURS 24, a 2:1 ratio -- but it converts hours
+     into BLOCKS for BTC and LTC, and XRPL's CancelAfter is a wall-clock instant.
+     A swap whose participant leg expires after its initiator leg lets the
+     initiator take one side and refund the other, so whichever code derives the
+     XRP CancelAfter must read lock_hours_for_role() rather than the 90-second
+     demonstration value this harness uses. That derivation does not exist yet
+     and is deliberately not invented here.
+  3. WHO REVEALS FIRST is a sequencing decision, not an encoding one. The
+     preimage becomes public the instant either leg is claimed -- step 6's own
+     output says so -- and revealing before the counterparty's leg is funded and
+     confirmed gives the swap away for nothing.
 
 WHY XRPL CAN DO THIS AT ALL, WHICH IS NOT OBVIOUS.
 
@@ -396,11 +444,11 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
     console.banner("XRP LEDGER HTLC verification -- Escrow with a PREIMAGE-SHA-256 condition")
     console.say(f"endpoint={TESTNET_URL}")
     console.say(f"mode={'--run: transactions WILL be submitted on testnet' if args.run else 'DRY RUN: nothing is submitted'}")
-    console.say("STEPS 1 TO 3 HAVE RUN against a real ledger (testnet build 3.4.1, 2026-09-26). STEPS 4 TO 9")
-    console.say("HAVE NOT: the first run stopped at step 4 because that server will not sign on your behalf,")
-    console.say("which is fixed. So the hashlock and the timelock below are still read from the protocol")
-    console.say("rather than measured (rule 17), and this run is what settles them. The tx payloads and the")
-    console.say("condition encoding ARE checked -- offline, in the test suite.")
+    console.say("ALL NINE STEPS PASSED against a real ledger on 2026-09-26 (testnet build 3.4.1): the wrong")
+    console.say("fulfillment was refused tecCRYPTOCONDITION_ERROR, the right one paid +1000000 drops exactly,")
+    console.say("the early cancel was refused tecNO_PERMISSION, and the late one returned the escrow. So the")
+    console.say("expectations below are MEASURED, and a failure here is a regression rather than a discovery.")
+    console.say("What is still unbuilt is the swap around them -- see this file's header for the three gaps.")
 
     console.step(1, "the endpoint is a TEST network, and it says which")
     try:
@@ -552,6 +600,13 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
                 "wrong one refused (steps 5 and 6).")
     console.say("the timelock: an escrow cancelled only after CancelAfter, with an early cancel refused "
                 "(steps 8 and 9).")
+    # The comparison an operator actually wants, and the honest limit of it. The
+    # primitives match; the swap around them does not exist yet (rule 17 -- this
+    # says what was established, not what it implies).
+    console.say("this matches what regtest_htlc_verify.py establishes for BTC and LTC, on the SAME sha256: one "
+                "preimage opens either side. It does NOT mean a swap exists -- nothing wires escrow into the "
+                "deposit path, and the XRP leg's CancelAfter is not yet derived from "
+                "modules/htlc_timelock.lock_hours_for_role(). See this file's header.")
     return console.summary()
 
 
