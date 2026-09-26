@@ -55,6 +55,30 @@ def get_quote_or_raise(db, quote_id: str) -> dict:
 # entry rather than a second branch to find. Rule 11: one vocabulary, in one place.
 TAG_ATTRIBUTED_ASSETS = frozenset({"XRP"})
 
+# THE COLUMN that holds the tag, named once so no reader can spell it differently.
+#
+# It is `deposit_tag` and NOT `destination_tag`, and the difference is deliberate
+# rather than an accident -- so it is named at BOTH sites, per rule 8's "if they
+# genuinely differ, the difference is the point and belongs in a comment at both,
+# naming the other one".
+#
+#   deposit_tag       the SCHEMA's name. Generic, because the column is the
+#                     integer discriminator for any tag-attributed chain -- a
+#                     Stellar or Cosmos memo would live in the same column, and
+#                     `destination_tag` would then be a lie about two of the three.
+#   destination tag   the XRP LEDGER's own term, and what a customer sees on the
+#                     page. services/swap_view.py renders it under that name
+#                     because that is what their wallet's field is labeled.
+#
+# That split cost a real defect on 2026-09-26: swap_view.py read
+# swap["destination_tag"], a key that does not exist, so a swap WITH a tag
+# rendered "NO DESTINATION TAG HAS BEEN ISSUED" and told the customer not to send
+# anything. It failed safe -- it refused to show a send target rather than showing
+# a wrong one -- but the swap was unusable. The agent that wrote the page flagged
+# the dependency and named the one .get() to change if the column were called
+# something else. It was. This constant is so the next one cannot drift.
+DEPOSIT_TAG_COLUMN = "deposit_tag"
+
 
 def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tuple[str, bool]:
     """Where a customer sends the deposit. Returns (address, needs_tag). Writes nothing.

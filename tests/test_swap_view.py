@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 
 import pytest
 from services import swap_view
+from services.swap_service import DEPOSIT_TAG_COLUMN
 from services.swap_view import (
     STAGE_ORDER,
     STALL_AFTER_SECONDS,
@@ -248,27 +249,44 @@ def test_xrp_attributes_by_destination_tag_and_refuses_without_one():
     issued. `0` is a legal DestinationTag (README.md), so a default of 0 is not
     a harmless placeholder, it shadows a real value.
 
-    No XRP swap can be created through the API today: Config.ALLOWED_PAIRS has
-    no XRP pair. This is a seeded row, which is the only way this branch is
-    reachable, and it is why the branch is tested rather than assumed.
+    THE KEY IS DERIVED FROM DEPOSIT_TAG_COLUMN, and that is the whole repair here.
+
+    This test used to seed `destination_tag=4242` -- a key the schema does not
+    have. The column is `deposit_tag`. So the test was written against the same
+    guess as the code it checked, and confirmed it: both agreed on a name neither
+    had read from db.py. The suite was green while a real XRP swap rendered "NO
+    DESTINATION TAG HAS BEEN ISSUED" and told the customer not to send anything,
+    found on 2026-09-26 by the operator opening the page on a swap they created.
+
+    It failed SAFE -- the page refused to show a send target rather than showing a
+    wrong one -- but the swap was unusable, and no test could have caught it while
+    the fixture spelled the key the same wrong way as the reader.
+
+    Seeding through the constant means a future rename breaks this test at the
+    rename rather than at the customer.
     """
     swap = make_swap(from_asset="XRP", deposit_address="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe")
     deposit = deposit_instruction(swap)
-    assert deposit["model"] == "destination_tag"
+    assert deposit["model"] == "destination_tag", "the MODEL keeps the XRP Ledger's own term"
     assert deposit["tag"] is None
     assert deposit["problem"], "a swap with no tag issued must say so, loudly"
     assert "NO DESTINATION TAG" in deposit["problem"]
 
-    # With a tag present -- the shape the allocator in services/swap_service.py
-    # will produce -- there is no problem and the tag is carried through.
-    with_tag = deposit_instruction(make_swap(from_asset="XRP", destination_tag=4242))
+    # The shape services/swap_service.allocate_destination_tag() actually writes.
+    with_tag = deposit_instruction(make_swap(from_asset="XRP", **{DEPOSIT_TAG_COLUMN: 4242}))
     assert with_tag["tag"] == 4242
     assert with_tag["problem"] == ""
 
     # Tag 0 is a REAL tag and must not be reported as missing.
-    zero = deposit_instruction(make_swap(from_asset="XRP", destination_tag=0))
+    zero = deposit_instruction(make_swap(from_asset="XRP", **{DEPOSIT_TAG_COLUMN: 0}))
     assert zero["tag"] == 0
     assert zero["problem"] == ""
+
+    # And the wrong spelling must NOT work, or this test would pass again the day
+    # somebody reintroduces it.
+    wrong = deposit_instruction(make_swap(from_asset="XRP", destination_tag=4242))
+    assert wrong["tag"] is None, "only the real column may satisfy the reader"
+    assert "NO DESTINATION TAG" in wrong["problem"]
 
 
 def test_a_chain_with_no_attribution_model_refuses_to_say_where_to_send():

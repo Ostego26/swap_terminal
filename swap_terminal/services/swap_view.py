@@ -91,6 +91,7 @@ from __future__ import annotations
 from microfortnights import format_duration
 
 from .helpers import parse_iso
+from .swap_service import DEPOSIT_TAG_COLUMN
 
 # The happy path, in order. This is the rail the customer watches fill, and it
 # is a DISPLAY ordering, not a state machine: the transitions are owned by
@@ -406,7 +407,14 @@ def deposit_instruction(swap: dict) -> dict:
             "problem": "" if swap.get("deposit_address") else "No deposit address is recorded for this swap.",
         }
     if model == "destination_tag":
-        tag = swap.get("destination_tag")
+        # The MODEL is called destination_tag (the XRP Ledger's term, and what the
+        # customer's wallet labels the field). The COLUMN is deposit_tag (the
+        # schema's generic name, because the same column carries a Stellar or
+        # Cosmos memo). Read from the shared constant rather than either literal:
+        # this line read swap["destination_tag"] until 2026-09-26 and so found
+        # nothing, which rendered "NO DESTINATION TAG HAS BEEN ISSUED" for a swap
+        # that had one. See services/swap_service.DEPOSIT_TAG_COLUMN.
+        tag = swap.get(DEPOSIT_TAG_COLUMN)
         return {
             "model": "destination_tag",
             "asset": asset,
