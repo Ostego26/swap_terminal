@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -175,11 +177,73 @@ def refuse_mainnet() -> str:
     return f"network_id {network_id}, build {info.get('build_version')}"
 
 
+def deposit_target_for_swap(db_path: str, swap_id: str) -> tuple[str, int]:
+    """Read (account, tag) for a swap out of the database. Returns what to pay.
+
+    WHY THIS EXISTS RATHER THAN THE OPERATOR TYPING THE TAG. A destination tag is
+    what attributes a payment to a swap, and it is a bare integer with no checksum
+    -- so a mistyped tag is not an error, it is a payment credited to a DIFFERENT
+    swap or to none at all, with the ledger recording that the sender paid exactly
+    what they chose to pay. The account has a checksum and would catch a typo; the
+    tag has nothing.
+
+    Reading both from the row removes the transcription entirely. It also removes
+    the second failure, which is quieter: a correct tag sent to the wrong ACCOUNT.
+
+    Added 2026-09-26 after three separate commands in one session were pasted with
+    a `<placeholder>` still in them, because the value had to be carried by hand
+    from a web page to a shell. A parameter a human has to copy is a parameter a
+    human will eventually copy wrong.
+    """
+    if not Path(db_path).exists():
+        raise SystemExit(
+            f"REFUSED: no database at {db_path}. Pass --db, or set SWAP_DB_PATH to the same value "
+            f"the server uses -- the swap has to be read from the SAME database that created it."
+        )
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute(
+            "SELECT from_asset, deposit_address, deposit_tag, status FROM swaps WHERE id = ?",
+            (swap_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        raise SystemExit(f"REFUSED: no swap {swap_id} in {db_path}. Nothing was sent.")
+    if row["from_asset"] != "XRP":
+        raise SystemExit(
+            f"REFUSED: swap {swap_id} expects {row['from_asset']}, not XRP. Sending XRP to it would "
+            f"be money this terminal never credits. Nothing was sent."
+        )
+    # `is None`, not truthiness: 0 is a legal DestinationTag.
+    if row["deposit_tag"] is None:
+        raise SystemExit(
+            f"REFUSED: swap {swap_id} has no deposit_tag, so a payment to the shared account could "
+            f"not be attributed to it. Nothing was sent."
+        )
+    if not row["deposit_address"]:
+        raise SystemExit(f"REFUSED: swap {swap_id} has no deposit_address. Nothing was sent.")
+
+    print(f"    swap {swap_id} is {row['status']}, expects {row['from_asset']}", flush=True)
+    return row["deposit_address"], int(row["deposit_tag"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send one tagged TESTNET XRP payment. Dry run by default.")
     parser.add_argument("--to", default="", help="destination address (default: the second saved faucet account)")
     parser.add_argument("--tag", type=int, default=4242, help="destination tag (default 4242)")
     parser.add_argument("--amount", default="10", help="XRP to send (default 10)")
+    parser.add_argument(
+        "--swap", default="",
+        help="pay THIS swap: reads its account and destination tag from the database, so neither is "
+             "typed by hand. Overrides --to and --tag.",
+    )
+    parser.add_argument(
+        "--db", default="",
+        help="database to read --swap from (default: SWAP_DB_PATH, else the server's own default)",
+    )
     parser.add_argument("--send", action="store_true",
                         help="actually submit. Without this nothing is sent and the request is described")
     args = parser.parse_args()
@@ -205,18 +269,27 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
+    destination_tag = args.tag
+    if args.swap:
+        database = args.db or os.environ.get("SWAP_DB_PATH") or str(
+            Path(__file__).resolve().parent / "swap_terminal" / "swap_terminal.db"
+        )
+        print(f"\n    reading the deposit target for {args.swap} from {database}", flush=True)
+        destination, destination_tag = deposit_target_for_swap(database, args.swap)
+        print(f"    account {destination}  tag {destination_tag}  <- from the swap row, not typed", flush=True)
+
     drops = to_drops(args.amount)
     print(f"\n    network     {refuse_mainnet()}", flush=True)
     print(f"    from        {source}  (secret read from {source_path.name}, never printed)", flush=True)
     print(f"    to          {destination}", flush=True)
     print(f"    amount      {args.amount} XRP = {drops} drops", flush=True)
-    print(f"    tag         {args.tag}   <- THE FIELD THIS EXISTS TO PRODUCE", flush=True)
+    print(f"    tag         {destination_tag}   <- THE FIELD THIS EXISTS TO PRODUCE", flush=True)
 
     if not args.send:
         print("\nDRY RUN -- nothing was submitted. Re-run with --send.", flush=True)
         return 0
 
-    return submit_payment(source, destination, secret, args.tag, drops)
+    return submit_payment(source, destination, secret, destination_tag, drops)
 
 
 # Error codes a server returns when it will not sign on your behalf. Matched

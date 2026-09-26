@@ -9,6 +9,7 @@ Mainnet-safe: yes
 """
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from xrp_send_tagged import (
     MAINNET_NETWORK_IDS,
     SIGNING_REFUSED,
     TESTNET_URL,
+    deposit_target_for_swap,
     saved_faucet_accounts,
 )
 
@@ -300,3 +302,96 @@ def test_the_mismatch_message_names_both_addresses_and_never_the_seed():
     assert signing.classic_address in message
     assert announced.classic_address in message
     assert signing.seed not in message, "the seed must never reach an error message"
+
+
+# --- reading the deposit target instead of typing it --------------------------
+
+def swaps_db(tmp_path, rows):
+    """A minimal swaps table. Built by hand rather than from SCHEMA because this
+    function reads four columns and nothing else, and a full schema would imply
+    it depends on more than it does."""
+    path = tmp_path / "swaps.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE swaps (id TEXT PRIMARY KEY, from_asset TEXT, deposit_address TEXT, "
+        "deposit_tag INTEGER, status TEXT);"
+    )
+    connection.executemany("INSERT INTO swaps VALUES (?,?,?,?,?)", rows)
+    connection.commit()
+    connection.close()
+    return str(path)
+
+
+XRP_ACCOUNT = "rBfM7je6e9Ca2cMvuRn7cr9xExFgDa5NGx"
+
+
+def test_the_account_and_tag_come_from_the_swap_row(tmp_path):
+    """Why this exists: a destination tag is a bare integer with NO checksum.
+
+    A mistyped tag is not an error -- it is a payment credited to a different swap
+    or to none at all, with the ledger recording that the sender paid exactly what
+    they chose. The account has a checksum and would catch a typo; the tag has
+    nothing standing behind it.
+
+    Reading both from the row removes the transcription. It came from three
+    separate commands in one session being pasted with a `<placeholder>` still in
+    them, because the value had to travel by hand from a web page to a shell.
+    """
+    path = swaps_db(tmp_path, [("s_1", "XRP", XRP_ACCOUNT, 2, "awaiting_deposit")])
+
+    assert deposit_target_for_swap(path, "s_1") == (XRP_ACCOUNT, 2)
+
+
+def test_tag_zero_is_returned_rather_than_refused(tmp_path):
+    """0 is a legal DestinationTag, so the check is `is None` and not truthiness.
+
+    Third place in this tree where that distinction decides whether money is
+    attributable -- the others are chains/xrp_payments.py and
+    services/deposit_service.py. Same trap, same answer.
+    """
+    path = swaps_db(tmp_path, [("s_0", "XRP", XRP_ACCOUNT, 0, "awaiting_deposit")])
+
+    assert deposit_target_for_swap(path, "s_0") == (XRP_ACCOUNT, 0)
+
+
+def test_a_swap_with_no_tag_refuses_rather_than_sending_untagged(tmp_path):
+    """An untagged payment to the shared account cannot be attributed to anyone."""
+    path = swaps_db(tmp_path, [("s_n", "XRP", XRP_ACCOUNT, None, "awaiting_deposit")])
+
+    with pytest.raises(SystemExit, match="has no deposit_tag"):
+        deposit_target_for_swap(path, "s_n")
+
+
+def test_a_non_xrp_swap_refuses(tmp_path):
+    """Paying XRP into a GRC swap is money the terminal never credits.
+
+    Worth its own guard because the swap id carries no asset, so nothing about
+    `--swap s_abc123` tells the operator which chain it wants.
+    """
+    path = swaps_db(tmp_path, [("s_g", "GRC", "mSomeGridcoinAddress", None, "awaiting_deposit")])
+
+    with pytest.raises(SystemExit, match="expects GRC, not XRP"):
+        deposit_target_for_swap(path, "s_g")
+
+
+def test_an_unknown_swap_refuses_and_says_which_database_it_looked_in(tmp_path):
+    """The likely operator error is pointing at the WRONG database, not a typo.
+
+    The server's default lives inside swap_terminal/, and SWAP_DB_PATH may point
+    somewhere else entirely -- so "no such swap" without the path sends the reader
+    hunting for a missing row instead of a missing database.
+    """
+    path = swaps_db(tmp_path, [("s_1", "XRP", XRP_ACCOUNT, 2, "awaiting_deposit")])
+
+    with pytest.raises(SystemExit, match="no swap s_other"):
+        deposit_target_for_swap(path, "s_other")
+    with pytest.raises(SystemExit, match=str(tmp_path)):
+        deposit_target_for_swap(path, "s_other")
+
+
+def test_a_missing_database_says_so_rather_than_reporting_no_such_swap(tmp_path):
+    """sqlite3.connect() CREATES a missing file, so without this check the reader
+    would build an empty database and then report the swap as absent -- which reads
+    as "wrong swap id" when it was "wrong database". Two very different fixes."""
+    with pytest.raises(SystemExit, match="no database at"):
+        deposit_target_for_swap(str(tmp_path / "does-not-exist.db"), "s_1")
