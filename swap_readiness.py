@@ -279,7 +279,13 @@ def check_schema() -> None:
 
 def main() -> int:
     print("swap readiness -- XRP <-> GRC. Read-only: creates no swap, signs nothing.", flush=True)
-    print("  6 preconditions, one line each, saying what it read and what the number means.\n", flush=True)
+    # NOT a hardcoded count. It said "6 preconditions" while the verdict below
+    # said "1 of 7 failed", because the GRC lock check only runs once the wallet
+    # answers -- so the number is conditional and a literal was wrong half the
+    # time. Rule 14 asks output to be self-describing; two different totals in one
+    # block is the reader doing arithmetic to decide which to believe.
+    print("  one line per precondition, saying what it read and what the number means.", flush=True)
+    print("  Some checks only run once an earlier one passes, so the total varies.\n", flush=True)
 
     # EVERY check is wrapped, because a preflight that raises has failed at the
     # one thing it exists to do. Measured 2026-09-26: a KeyError in check_xrp()
