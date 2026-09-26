@@ -27,10 +27,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
-from chains.registry import build_adapters
+from chains.registry import build_adapters, missing_settings, why_unconfigured
 from network_target import (
     CHAIN_PORTS,
     UNCONFIGURED_PORT,
@@ -178,9 +179,21 @@ def test_no_chain_default_points_at_mainnet_with_a_clean_environment():
 
 # --- the registry guard, which is what stops a mainnet adapter being built ----
 
-def bitcoin_shaped(port):
-    """The six keys RPCAdapter.__init__ takes. build_adapters splats this."""
-    return {"user": "", "password": "", "host": "127.0.0.1", "port": port,
+def bitcoin_shaped(port, user=RPC_FIXTURE_USER, password=RPC_FIXTURE_AUTH):
+    """The six keys RPCAdapter.__init__ takes. build_adapters splats this.
+
+    THE CREDENTIALS USED TO BE EMPTY STRINGS HERE, and the fixture was narrower
+    than the real configuration: config.py reads <ASSET>_RPC_USER and
+    <ASSET>_RPC_PASS for all three Bitcoin-derived chains, and chains/base.py
+    authenticates with auth=(user, password) and cannot read a cookie file, so an
+    empty pair is never usable. Since 2026-09-26 build_adapters() requires them,
+    and this helper supplies them -- the third time in this project a fixture
+    thinner than the real schema has hidden exactly the behavior under test.
+
+    They are not credentials: nothing here opens a socket. Parameters so that a
+    test can pass "" deliberately and assert the refusal.
+    """
+    return {"user": user, "password": password, "host": "127.0.0.1", "port": port,
             "wallet": "", "timeout": 30.0}
 
 
@@ -212,6 +225,61 @@ def test_a_configured_test_chain_does_build_an_adapter():
     built = build_adapters({"GRC": bitcoin_shaped(25779)})
 
     assert sorted(built) == ["GRC"]
+
+
+def test_a_port_without_credentials_builds_no_adapter():
+    """A port alone was the whole test until 2026-09-26, and it is not enough.
+
+    The operator's shell had GRC_RPC_PORT=25715 and GRC_RPC_USER set. Whatever the
+    password state was, the shape is what matters: build_adapters() tested the port
+    alone, so an adapter WAS constructed for any port, and chains/base.RPCAdapter
+    authenticates with auth=(user, password) with no cookie-file path -- every call
+    through an adapter with an empty password is a guaranteed 401. Worse, the swap
+    page had just been taught to badge a pair DISABLED when its chain has no
+    adapter, so a credential-less chain would be badged ENABLED and the operator
+    walked into the 401 instead of reading what to set.
+
+    MUTATION: restore `rpc[asset].get("port")` as the condition. This fails, and
+    the paired test above still passes -- which is why both exist.
+    """
+    assert build_adapters({"GRC": bitcoin_shaped(25779, password="")}) == {}
+    assert build_adapters({"GRC": bitcoin_shaped(25779, user="")}) == {}
+    assert build_adapters({"GRC": bitcoin_shaped(25779, user="", password="")}) == {}
+
+
+def test_the_refusal_names_the_credential_rather_than_the_port_when_the_port_is_set():
+    """The message must not send the operator to check a variable that is correct.
+
+    This is the specific way a vague message would have wasted their time: the port
+    WAS set to 25715, so "GRC_RPC_PORT is unset" would have been false and would
+    have pointed at the one setting that needed nothing.
+    """
+    rpc = {"GRC": bitcoin_shaped(25715, password="")}
+
+    reason = why_unconfigured("GRC", rpc)
+
+    assert "GRC_RPC_PASS" in reason
+    assert "GRC_RPC_PORT" not in reason, "the port is set; naming it would be wrong"
+    assert missing_settings(rpc, "GRC") == ["GRC_RPC_PASS"]
+
+
+def test_the_refusal_names_every_missing_setting_when_more_than_one_is_missing():
+    rpc = {"GRC": bitcoin_shaped(0, user="", password="")}
+
+    assert missing_settings(rpc, "GRC") == ["GRC_RPC_PORT", "GRC_RPC_USER", "GRC_RPC_PASS"]
+    reason = why_unconfigured("GRC", rpc)
+    assert "GRC_RPC_PORT, GRC_RPC_USER and GRC_RPC_PASS are unset" in reason
+
+
+def test_monero_is_not_required_to_have_credentials():
+    """monero-wallet-rpc can be started with --disable-rpc-login, so an empty user
+    and password is a legitimate configuration for it -- unlike a Bitcoin-derived
+    daemon, which requires basic auth or a cookie this adapter cannot read."""
+    rpc = {"XMR": {"host": "127.0.0.1", "port": 18083, "user": "", "password": "",
+                   "account_index": 0, "min_confirmations": 10, "can_spend": False, "timeout": 30.0}}
+
+    assert missing_settings(rpc, "XMR") == []
+    assert sorted(build_adapters(rpc)) == ["XMR"]
 
 
 # --- which variable makes a chain reachable -----------------------------------

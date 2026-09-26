@@ -125,10 +125,13 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # module header's old claim that these three are "always constructed" was
     # accurate and is now wrong, so it has been rewritten rather than left to
     # mislead the next reader.
+    # `not missing_settings(...)` rather than `rpc[asset].get("port")`, since
+    # 2026-09-26: a port with no password builds an adapter that 401s on every
+    # call. See _REQUIRED_SETTINGS above for the run that measured it.
     adapters = {
         asset: cls(**rpc[asset])
         for asset, cls in _BITCOIN_DERIVED.items()
-        if asset in rpc and rpc[asset].get("port")
+        if asset in rpc and not missing_settings(rpc, asset)
     }
     solana = rpc.get("SOL")
     # Configured means "has a URL". See this module's header for why an
@@ -162,6 +165,65 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     return adapters
 
 
+# WHAT EACH SHAPE OF CHAIN CANNOT DO WITHOUT, as (the key in Config.RPC[asset],
+# the environment variable suffix). A None suffix means the name comes from
+# network_target.configuring_variable(), which already owns the primary one.
+#
+# THE CREDENTIALS ARE REQUIRED AND THAT IS NOT A STYLE CHOICE, measured
+# 2026-09-26. The operator's shell had GRC_RPC_PORT=25715 and GRC_RPC_USER set,
+# and the password under GRC_TESTNET_RPC_PASS -- a name nothing in this tree
+# reads. build_adapters() tested the port alone, so a Gridcoin adapter WAS
+# constructed, with an empty password. chains/base.RPCAdapter authenticates with
+# `auth=(self.user, self.password)` and has no cookie-file path, so every call
+# through that adapter is a guaranteed 401 -- and the swap page, which had just
+# been taught to badge a pair DISABLED when its chain has no adapter, would have
+# badged this one ENABLED and let the operator walk into the 401.
+#
+# An empty user or password is therefore never usable through this code, which
+# makes it exactly the same kind of value as an unset port: something that cannot
+# be defaulted. The registry's own principle, stated twice below for SOL and XMR,
+# is that "configured" means the operator supplied those values. The three oldest
+# chains were checking one of three.
+#
+# XMR is deliberately NOT here: monero-wallet-rpc can be started with
+# --disable-rpc-login, so an empty user and password is a legitimate
+# configuration for it. Bitcoin-derived daemons require basic auth or a cookie,
+# and this adapter cannot read a cookie.
+_REQUIRED_SETTINGS: dict[str, tuple[tuple[str, str | None], ...]] = {
+    "BTC": (("port", None), ("user", "USER"), ("password", "PASS")),
+    "LTC": (("port", None), ("user", "USER"), ("password", "PASS")),
+    "GRC": (("port", None), ("user", "USER"), ("password", "PASS")),
+    "SOL": (("url", None),),
+    "XRP": (("url", None),),
+    "XMR": (("port", None),),
+}
+
+
+def missing_settings(rpc: Mapping[str, Mapping], asset: str) -> list[str]:
+    """The environment variables this chain needs and does not have. [] is configured.
+
+    Names rather than keys, because the answer goes to a person who has to export
+    something. The primary one comes from network_target.configuring_variable() so
+    it cannot drift from CHAIN_PORTS or from the workers' startup banner; the
+    credential names are derived as <ASSET>_RPC_USER and <ASSET>_RPC_PASS, which
+    config.py:157-206 uses for all three Bitcoin-derived chains without exception.
+
+    Falsy rather than absent, on purpose: config.py defaults every one of these to
+    "" or to UNCONFIGURED_PORT, so a key is always PRESENT and the question is
+    always whether it carries a value.
+
+    An asset this function does not know returns [] -- it has no requirements to
+    fail. Callers that need a name for such a chain fall back to
+    configuring_variable(), which never raises.
+    """
+    entry = rpc.get(asset) or {}
+    names = []
+    for key, suffix in _REQUIRED_SETTINGS.get(asset, ()):
+        if not entry.get(key):
+            names.append(configuring_variable(asset) if suffix is None else f"{asset}_RPC_{suffix}")
+    return names
+
+
 def unconfigured_chains(adapters: Mapping[str, object], *assets: str) -> list[str]:
     """Which of these assets have no adapter in this process, in the order given.
 
@@ -190,8 +252,16 @@ def unconfigured_chains(adapters: Mapping[str, object], *assets: str) -> list[st
     return [asset for asset in assets if asset not in adapters]
 
 
-def why_unconfigured(asset: str) -> str:
+def why_unconfigured(asset: str, rpc: Mapping[str, Mapping] | None = None) -> str:
     """One sentence an operator can act on, for a chain with no adapter.
+
+    PASS `rpc` WHENEVER YOU HAVE IT. Without it this can only name the chain's
+    primary setting, and on 2026-09-26 that would have been actively wrong: the
+    operator's GRC_RPC_PORT WAS set to 25715, and what was missing was
+    GRC_RPC_PASS -- they had the value under GRC_TESTNET_RPC_PASS, a name nothing
+    in this tree reads. A message that said "GRC_RPC_PORT is unset" would have
+    sent them to check the one variable that was already correct. With `rpc` it
+    names exactly what missing_settings() found.
 
     Names the variable via network_target.configuring_variable() rather than
     spelling it here, so this cannot drift from the workers' startup banner or
@@ -206,9 +276,17 @@ def why_unconfigured(asset: str) -> str:
     to it -- belongs in the message rather than in a docstring the operator will
     never see.
     """
+    missing = missing_settings(rpc, asset) if rpc is not None else []
+    if not missing:
+        # Either no rpc was passed, or the asset has no requirements registered.
+        # configuring_variable() never raises, so this degrades to the primary
+        # name rather than to a KeyError on a page.
+        missing = [configuring_variable(asset)]
+    named = missing[0] if len(missing) == 1 else ", ".join(missing[:-1]) + f" and {missing[-1]}"
+    verb = "is" if len(missing) == 1 else "are"
     return (
-        f"{asset} has no adapter in this process: {configuring_variable(asset)} is unset (or 0) in the "
-        f"environment this process was started with. Nothing in the serving path reads a .env, so it has "
-        f"to be exported in the shell that starts the server -- a value set only in a file, or only in "
-        f"another shell, does not reach here."
+        f"{asset} has no adapter in this process: {named} {verb} unset (or 0) in the environment this "
+        f"process was started with. Nothing in the serving path reads a .env, so it has to be exported in "
+        f"the shell that starts the server -- a value set only in a file, or only in another shell, does "
+        f"not reach here."
     )

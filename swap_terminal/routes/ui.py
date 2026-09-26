@@ -115,7 +115,7 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
                 "reason": (
                     "in ALLOWED_PAIRS, and both chains have an adapter in this process"
                     if not missing
-                    else " Also: ".join(why_unconfigured(asset) for asset in missing)
+                    else " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
                 ),
             }
         )

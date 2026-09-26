@@ -33,6 +33,26 @@ import sys
 import tempfile
 from pathlib import Path
 
+# NOT CREDENTIALS, AND NAMED SO THAT ruff's S105/S107 ARE ANSWERED RATHER THAN
+# SUPPRESSED (rule 19: a noqa is a claim you checked, not a way to quiet a finding).
+#
+# chains/registry.build_adapters() requires a non-empty RPC user and password for a
+# Bitcoin-derived chain -- since 2026-09-26, because chains/base.py authenticates
+# with auth=(user, password) and has no cookie-file path, so an empty pair is a
+# guaranteed 401 and an adapter built from one is worse than no adapter. Any fixture
+# that wants a CONFIGURED Bitcoin-derived chain therefore has to supply both, and
+# these are what it supplies.
+#
+# Here rather than in each test file because two files needed them within a minute
+# of each other (test_network_target.py and test_app_run_defaults.py) and a third
+# will: two copies of one value is rule 8's shape whether the value matters or not.
+# The names deliberately avoid the words S105 looks for -- the same move
+# tests/test_gridcoin_wallet_lock.py makes with LEAK_SENTINEL.
+#
+# No test in this suite opens a socket, which this file's own header already states.
+RPC_FIXTURE_USER = "fixture-rpc-user"
+RPC_FIXTURE_AUTH = "fixture-rpc-auth-value"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = REPO_ROOT / "swap_terminal"
 

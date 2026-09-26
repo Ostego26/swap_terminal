@@ -31,6 +31,7 @@ import app
 import config as config_module
 import flask
 import pytest
+from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 from workers.common import endpoint_lines
 
 APP_PY = Path(__file__).resolve().parent.parent / "swap_terminal" / "app.py"
@@ -210,12 +211,24 @@ def test_a_configured_chain_says_which_network_the_port_belongs_to():
     is the number that matters most. Both verdicts asserted, because a version
     that said "test chain" unconditionally would pass a test for one of them.
     """
-    original = config_module.Config.RPC["GRC"]["port"]
+    # ALL THREE SETTINGS, not just the port. Since 2026-09-26 a Bitcoin-derived
+    # chain counts as configured only when its RPC user and password are set too
+    # (chains/registry.missing_settings), because chains/base.py authenticates with
+    # auth=(user, password) and has no cookie path, so an empty pair is a
+    # guaranteed 401. Setting the port alone leaves the chain unconfigured, and this
+    # test would then be asserting the banner's UNCONFIGURED line -- which the test
+    # directly above already covers. Not credentials: endpoint_lines() opens no
+    # socket, and it never prints either value (see its docstring).
+    entry = config_module.Config.RPC["GRC"]
+    original = {key: entry[key] for key in ("port", "user", "password")}
     try:
-        config_module.Config.RPC["GRC"]["port"] = 25715
+        entry["user"] = RPC_FIXTURE_USER
+        entry["password"] = RPC_FIXTURE_AUTH
+
+        entry["port"] = 25715
         assert any("test chain (mainnet is 15715)" in line for line in endpoint_lines())
 
-        config_module.Config.RPC["GRC"]["port"] = 15715
+        entry["port"] = 15715
         assert any("MAINNET, REAL MONEY" in line for line in endpoint_lines())
     finally:
-        config_module.Config.RPC["GRC"]["port"] = original
+        entry.update(original)

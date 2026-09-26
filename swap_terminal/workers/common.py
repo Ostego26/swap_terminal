@@ -53,12 +53,12 @@ import time
 from collections.abc import Callable
 
 from chains.monero import MoneroAdapter
-from chains.registry import build_adapters
+from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
 from config import Config
 from microfortnights import format_duration
-from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, classify, configuring_variable
+from network_target import CHAIN_PORTS, classify, configuring_variable
 
 
 def build_adapters_from_config() -> dict:
@@ -112,9 +112,20 @@ def endpoint_lines() -> list[str]:
         # the banner was naming adapters that do not exist. Rule 14's "make 'did
         # nothing' look different from 'did work'", and rule 16's "a wrong comment
         # is a bug" applied to a line of output.
-        if rpc["port"] == UNCONFIGURED_PORT:
+        # EVERY SETTING, not just the port, since 2026-09-26. The paragraph above is
+        # about a banner naming adapters that do not exist, and testing the port
+        # alone reintroduced it one setting over: chains/registry.build_adapters()
+        # now also requires the RPC user and password (an empty pair is a guaranteed
+        # 401 -- chains/base.py authenticates with auth=(user, password) and has no
+        # cookie path), so a chain with a port and no password has no adapter while
+        # this line would have printed `rpc=127.0.0.1:25715` for it.
+        #
+        # missing_settings() is the same function the page and create_swap() use, so
+        # the three cannot disagree about what "configured" means.
+        missing = missing_settings(Config.RPC, asset)
+        if missing:
             lines.append(
-                f"  {asset}  not configured ({CHAIN_PORTS[asset].port_variable} unset)  <- no {asset} "
+                f"  {asset}  not configured ({', '.join(missing)} unset)  <- no {asset} "
                 f"adapter is constructed; test chain is {CHAIN_PORTS[asset].test_hint}"
             )
             continue

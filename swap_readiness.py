@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from chains.registry import build_adapters
+from chains.registry import build_adapters, missing_settings
 from chains.xrp import XRPAdapter
 from chains.xrp_signing import reserve_drops
 from config import Config
@@ -305,7 +305,21 @@ def check_gridcoin() -> None:
 
     adapters = build_adapters(Config.RPC)
     if "GRC" not in adapters:
-        record(FAIL, "GRC wallet", f"port {port} is set but no adapter was built -- check GRC_RPC_USER/GRC_RPC_PASS")
+        # THIS BRANCH WAS UNREACHABLE UNTIL 2026-09-26 AND ITS ADVICE WAS RIGHT
+        # ANYWAY. build_adapters() tested the port alone, so once the port was set
+        # GRC was always in adapters -- the FAIL could not fire, while the sentence
+        # it would have printed ("check GRC_RPC_USER/GRC_RPC_PASS") named exactly
+        # the values that were being ignored. The registry now requires all three,
+        # so this fires, and it names which of them is actually missing rather than
+        # listing two for the operator to check by hand.
+        missing = missing_settings(Config.RPC, "GRC")
+        record(
+            FAIL,
+            "GRC wallet",
+            f"port {port} is set but no adapter was built: {', '.join(missing)} unset in THIS process. "
+            f"chains/base.py authenticates with (user, password) and cannot read a cookie file, so an "
+            f"adapter without them would 401 on every call -- which is why it is not built at all.",
+        )
         return
     started = time.monotonic()
     try:

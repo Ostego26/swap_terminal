@@ -510,9 +510,9 @@ def test_the_registry_builds_the_three_bitcoin_chains_and_omits_an_unconfigured_
     refresh_wallet_inventory() log a WARNING per worker per cycle, forever,
     about a fault that does not exist."""
     rpc = {
-        "BTC": {"user": "", "password": "", "host": "h", "port": 1},
-        "LTC": {"user": "", "password": "", "host": "h", "port": 2},
-        "GRC": {"user": "", "password": "", "host": "h", "port": 3},
+        "BTC": {"user": "u", "password": "p", "host": "h", "port": 1},
+        "LTC": {"user": "u", "password": "p", "host": "h", "port": 2},
+        "GRC": {"user": "u", "password": "p", "host": "h", "port": 3},
         "SOL": {"url": "", "commitment": "processed", "timeout": 1.0, "mint": "", "hot_wallet": "", "min_commitment_rank": 3},
     }
     adapters = build_adapters(rpc)
@@ -521,7 +521,7 @@ def test_the_registry_builds_the_three_bitcoin_chains_and_omits_an_unconfigured_
 
 def test_the_registry_builds_sol_once_a_url_is_set():
     rpc = {
-        "BTC": {"user": "", "password": "", "host": "h", "port": 1},
+        "BTC": {"user": "u", "password": "p", "host": "h", "port": 1},
         "SOL": {"url": "http://x.invalid", "commitment": "processed", "timeout": 1.0, "mint": "", "hot_wallet": "", "min_commitment_rank": 3},
     }
     adapters = build_adapters(rpc)

@@ -376,7 +376,7 @@ def pair_rows(config, adapters: dict) -> list[dict]:
             elif missing:
                 state, detail = "unreachable", (
                     "in Config.ALLOWED_PAIRS, but not reachable from this process: "
-                    + " Also: ".join(why_unconfigured(asset) for asset in missing)
+                    + " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
                     + " A quote WILL price; create_swap() refuses."
                 )
             else:

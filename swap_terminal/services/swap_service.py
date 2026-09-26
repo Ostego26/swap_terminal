@@ -173,7 +173,7 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     if missing:
         raise ValueError(
             "No swap was created, because "
-            + " Also: ".join(why_unconfigured(asset) for asset in missing)
+            + " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
             + f" The {from_asset}->{to_asset} pair is in ALLOWED_PAIRS, which is why the quote priced -- "
             f"ALLOWED_PAIRS says what this terminal is WILLING to swap and the adapters say what it can "
             f"REACH, and those are different questions. Nothing was written."
