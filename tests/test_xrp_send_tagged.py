@@ -349,7 +349,7 @@ def test_the_account_and_tag_come_from_the_swap_row(tmp_path):
     """
     path = swaps_db(tmp_path, [("s_1", "XRP", XRP_ACCOUNT, 2, "awaiting_deposit")])
 
-    assert deposit_target_for_swap(path, "s_1") == (XRP_ACCOUNT, 2)
+    assert deposit_target_for_swap(path, "s_1") == (XRP_ACCOUNT, 2, None)
 
 
 def test_tag_zero_is_returned_rather_than_refused(tmp_path):
@@ -361,7 +361,7 @@ def test_tag_zero_is_returned_rather_than_refused(tmp_path):
     """
     path = swaps_db(tmp_path, [("s_0", "XRP", XRP_ACCOUNT, 0, "awaiting_deposit")])
 
-    assert deposit_target_for_swap(path, "s_0") == (XRP_ACCOUNT, 0)
+    assert deposit_target_for_swap(path, "s_0") == (XRP_ACCOUNT, 0, None)
 
 
 def test_a_swap_with_no_tag_refuses_rather_than_sending_untagged(tmp_path):
@@ -519,8 +519,8 @@ def test_the_matching_amount_is_accepted_including_a_different_spelling(tmp_path
     connection.commit()
     connection.close()
 
-    assert deposit_target_for_swap(path, "s_5", "5") == (XRP_ACCOUNT, 1)
-    assert deposit_target_for_swap(path, "s_5", "5.00") == (XRP_ACCOUNT, 1)
+    assert deposit_target_for_swap(path, "s_5", "5") == (XRP_ACCOUNT, 1, 5.0)
+    assert deposit_target_for_swap(path, "s_5", "5.00") == (XRP_ACCOUNT, 1, 5.0)
 
 
 def test_no_amount_given_does_not_invent_a_mismatch(tmp_path):
@@ -536,4 +536,72 @@ def test_no_amount_given_does_not_invent_a_mismatch(tmp_path):
     connection.commit()
     connection.close()
 
-    assert deposit_target_for_swap(path, "s_5") == (XRP_ACCOUNT, 1)
+    assert deposit_target_for_swap(path, "s_5") == (XRP_ACCOUNT, 1, 5.0)
+
+
+# --- where the amount comes from ----------------------------------------------
+#
+# resolve_amount() is the reason these are separate from the tests above: the
+# account and the tag were already read from the row, and the amount was the one
+# of the three a person still had to type. Every test here seeds the inputs
+# directly, because the decision is a function rather than four lines inside
+# main() (rule 10) and a function can be called with the case that matters.
+
+def test_the_amount_comes_from_the_swap_row_when_none_is_given():
+    """The whole point. --amount unpassed and a swap present -> the row decides."""
+    target = xrp_send_tagged.DepositTarget(XRP_ACCOUNT, 7, 5.0)
+
+    amount, source = xrp_send_tagged.resolve_amount("", target)
+
+    assert amount == 5.0
+    assert "expected_input_amount" in source, "the preview must say where the figure came from"
+
+
+def test_an_explicit_amount_still_wins():
+    """--amount is an override, not a suggestion. The mismatch check in
+    deposit_target_for_swap() is what protects against it being wrong; this
+    function does not second-guess it, because two places deciding one thing is
+    rule 8's bug with a delay on it."""
+    target = xrp_send_tagged.DepositTarget(XRP_ACCOUNT, 7, 5.0)
+
+    amount, source = xrp_send_tagged.resolve_amount("2.5", target)
+
+    assert (amount, source) == ("2.5", "--amount")
+
+
+def test_no_swap_and_no_amount_falls_back_to_the_default():
+    """The ad hoc form: two faucet accounts and a tag, with no swap involved."""
+    amount, source = xrp_send_tagged.resolve_amount("", None)
+
+    assert amount == xrp_send_tagged.DEFAULT_AMOUNT_XRP
+    assert "default" in source
+
+
+def test_a_swap_with_no_expected_amount_refuses_rather_than_using_the_default():
+    """The branch that would have been the bug.
+
+    Falling back to DEFAULT_AMOUNT_XRP here would send 10 XRP at a swap whose
+    expectation is unknown -- a guaranteed tolerance halt, which is exactly what
+    reading the amount from the row exists to prevent. Reached only against a
+    database older than db.py's `expected_input_amount REAL NOT NULL`, so the
+    message says so instead of blaming the operator.
+    """
+    target = xrp_send_tagged.DepositTarget(XRP_ACCOUNT, 7, None)
+
+    with pytest.raises(SystemExit, match="no expected_input_amount"):
+        xrp_send_tagged.resolve_amount("", target)
+
+
+def test_an_expected_amount_of_zero_is_not_read_as_absent():
+    """`is None`, never truthiness. The same defect as tag 0, one column over.
+
+    0.0 is a nonsense swap amount and the tolerance check would reject the send --
+    but it must reject it as "the swap expects 0", not become a silent 10 through a
+    falsy test. A guard written `if not target.expected_amount` passes every other
+    test in this file and fails only this one.
+    """
+    target = xrp_send_tagged.DepositTarget(XRP_ACCOUNT, 7, 0.0)
+
+    amount, _source = xrp_send_tagged.resolve_amount("", target)
+
+    assert amount == 0.0, "0.0 must come back as itself, not be replaced by the default"

@@ -53,6 +53,7 @@ import sqlite3
 import sys
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
@@ -232,8 +233,30 @@ def pending_xrp_swap(db_path: str) -> str:
     return row["id"]
 
 
-def deposit_target_for_swap(db_path: str, swap_id: str, amount: str = "") -> tuple[str, int]:
-    """Read (account, tag) for a swap out of the database. Returns what to pay.
+class DepositTarget(NamedTuple):
+    """Everything about a swap that decides what payment satisfies it.
+
+    A NamedTuple rather than three return values or a dict, for one reason: the
+    three travel together or not at all. An account without its tag pays the wrong
+    swap on a shared account, and a tag without its amount pays the right swap an
+    amount the tolerance check halts. Splitting them into separate lookups would
+    let a caller take two of the three, which is the shape every bug in this
+    script has had.
+
+    expected_amount comes from a REAL column, so a swap for 5 XRP reads back as
+    5.0. to_drops() takes it through Decimal(str(...)) and is unbothered; the
+    display carries whatever the row holds rather than a reformatted copy, because
+    a number reprinted in a different shape than the database holds it is how a
+    reader concludes two values differ when they do not.
+    """
+
+    address: str
+    tag: int
+    expected_amount: object
+
+
+def deposit_target_for_swap(db_path: str, swap_id: str, amount: str = "") -> DepositTarget:
+    """Read the account, tag and expected amount for a swap. Returns what to pay.
 
     WHY THIS EXISTS RATHER THAN THE OPERATOR TYPING THE TAG. A destination tag is
     what attributes a payment to a swap, and it is a bare integer with no checksum
@@ -308,14 +331,77 @@ def deposit_target_for_swap(db_path: str, swap_id: str, amount: str = "") -> tup
             f"'under_review', which needs a person to resolve. Use --amount {expected}, or drop "
             f"--swap to send an arbitrary amount somewhere else. Nothing was sent."
         )
-    return row["deposit_address"], int(row["deposit_tag"])
+    return DepositTarget(row["deposit_address"], int(row["deposit_tag"]), expected)
+
+
+# What to send when nothing else says. Only reachable with no --swap, since a
+# swap always carries its own expected_input_amount -- so this is the amount for
+# an ad hoc "does the tagged path work at all" payment between two faucet
+# accounts, and 10 is a tenth of what the testnet faucet hands out.
+DEFAULT_AMOUNT_XRP = "10"
+
+
+def resolve_amount(explicit: str, target: DepositTarget | None) -> tuple[object, str]:
+    """Decide what to send, and say where the figure came from. (amount, source).
+
+    THE AMOUNT COMES FROM THE SWAP ROW WHEN THERE IS ONE, and --amount only
+    overrides it.
+
+    Measured 2026-09-26: --amount defaulted to the string "10", which is not falsy,
+    so deposit_target_for_swap()'s mismatch check fired on EVERY --swap run against
+    a swap for any other amount. The operator's loop was therefore: run, read
+    "REFUSED: swap s_... expects 5.0 XRP and --amount says 10", retype the flag, run
+    again. Two commands to send one payment, every time, and the second one typed
+    from a number just read off the screen one line earlier -- which is exactly the
+    hand transcription deposit_target_for_swap() was written to remove for the tag
+    and the account. The tag and the account came from the row; the amount did not,
+    and it was the only one of the three that could still be wrong.
+
+    THIS CANNOT WIDEN WHAT GETS SENT, which is why it is not a posture change. With
+    --swap, the only amount that survives the mismatch check is the row's own
+    expected_input_amount; every other value already refused before anything was
+    submitted. So the set of sendable amounts is unchanged at exactly one, and what
+    changed is whether a person has to name it. An explicitly passed --amount is
+    still compared against the row and still refused on a mismatch: the default
+    moved, the check did not.
+
+    A function rather than four lines inside main() because it is the decision and
+    main() is orchestration (rule 10). The `== ""` and `is None` comparisons are the
+    reason it earns its own tests: neither can be written as a truth test. A swap
+    expecting 0 and a swap naming no amount are different facts, and this file has
+    already been bitten once by testing a numeric field for truth -- tag 0 is a
+    legal DestinationTag and `if not tag` read it as absent.
+    """
+    if explicit != "":
+        return explicit, "--amount"
+    if target is None:
+        return DEFAULT_AMOUNT_XRP, f"the {DEFAULT_AMOUNT_XRP} XRP default -- no --amount and no --swap"
+    if target.expected_amount is None:
+        # REFUSE rather than fall back to the default. db.py:101 declares
+        # `expected_input_amount REAL NOT NULL`, so reaching here means the database
+        # named by --db predates that column or was built by hand -- and the one
+        # thing that must not happen then is sending DEFAULT_AMOUNT_XRP at a swap
+        # whose expectation is unknown. That is the halt this whole function exists
+        # to avoid, arrived at from the other direction.
+        raise SystemExit(
+            "REFUSED: the swap row carries no expected_input_amount, so what payment would satisfy "
+            "it is not knowable from here. db.py declares that column NOT NULL, so this database is "
+            "older than the schema or was built by hand. Pass --amount explicitly if you know the "
+            "figure. Nothing was sent."
+        )
+    return target.expected_amount, "the swap row's expected_input_amount, not typed"
+
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send one tagged TESTNET XRP payment. Dry run by default.")
     parser.add_argument("--to", default="", help="destination address (default: the second saved faucet account)")
     parser.add_argument("--tag", type=int, default=4242, help="destination tag (default 4242)")
-    parser.add_argument("--amount", default="10", help="XRP to send (default 10)")
+    parser.add_argument(
+        "--amount", default="",
+        help="XRP to send. Default: the amount the --swap row expects, or 10 with no --swap. "
+             "Passing it with --swap is still checked against the row and refused on a mismatch",
+    )
     parser.add_argument(
         "--swap", default="",
         help="pay THIS swap: reads its account and destination tag from the database, so neither is "
@@ -352,6 +438,7 @@ def main() -> int:
         return 2
 
     destination_tag = args.tag
+    target = None
     if args.swap:
         database = args.db or os.environ.get("SWAP_DB_PATH") or str(
             Path(__file__).resolve().parent / "swap_terminal" / "swap_terminal.db"
@@ -361,14 +448,16 @@ def main() -> int:
             print(f"\n    looking up the XRP swap awaiting a deposit in {database}", flush=True)
             swap_id = pending_xrp_swap(database)
         print(f"\n    reading the deposit target for {swap_id} from {database}", flush=True)
-        destination, destination_tag = deposit_target_for_swap(database, swap_id, args.amount)
+        target = deposit_target_for_swap(database, swap_id, args.amount)
+        destination, destination_tag = target.address, target.tag
         print(f"    account {destination}  tag {destination_tag}  <- from the swap row, not typed", flush=True)
 
-    drops = to_drops(args.amount)
+    amount, amount_source = resolve_amount(args.amount, target)
+    drops = to_drops(amount)
     print(f"\n    network     {refuse_mainnet()}", flush=True)
     print(f"    from        {source}  (secret read from {source_path.name}, never printed)", flush=True)
     print(f"    to          {destination}", flush=True)
-    print(f"    amount      {args.amount} XRP = {drops} drops", flush=True)
+    print(f"    amount      {amount} XRP = {drops} drops   <- from {amount_source}", flush=True)
     print(f"    tag         {destination_tag}   <- THE FIELD THIS EXISTS TO PRODUCE", flush=True)
 
     if not args.send:
