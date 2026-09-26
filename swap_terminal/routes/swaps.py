@@ -15,9 +15,13 @@ The `except Exception -> 400` here is the broad kind rule 12 warns about, and
 it is annotated at the site with what was checked.
 """
 
+import logging
+
 from db import get_db
 from flask import Blueprint, current_app, jsonify, request
 from services.swap_service import create_swap, get_swap
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint("swaps", __name__)
 
@@ -34,6 +38,23 @@ def create_swap_route():
         )
         return jsonify(swap), 201
     except Exception as exc:  # noqa: BLE001 -- checked: HTTP boundary, same as routes/quotes.py. Note this one now also carries RPCError from validate_address, which means "the daemon could not be asked" rather than "the address is bad" -- the message says which, and no swap row is written in either case.
+        # LOGGED as well as returned. The reason already reached the browser, but
+        # it reached NOTHING ELSE: the operator's terminal showed
+        # `POST /api/swaps HTTP/1.1" 400` five times on 2026-09-26 with no
+        # indication of why, and werkzeug's access log prints the status and
+        # nothing of the body. So the one place a person was watching had the
+        # least information.
+        #
+        # Rule 14: a failure an operator cannot distinguish from any other failure
+        # is a silent one, and a bare 400 is exactly that. At WARNING because a
+        # refused swap is not a server fault -- most of these are a bad payout
+        # address -- but it IS something somebody needs to be able to read back.
+        logger.warning(
+            "POST /api/swaps REFUSED: %s  <- quote_id=%r, payout_address=%r (no swap row was written)",
+            exc,
+            payload.get("quote_id", ""),
+            payload.get("payout_address", ""),
+        )
         return jsonify({"error": str(exc)}), 400
 
 @bp.get("/api/swaps/<swap_id>")

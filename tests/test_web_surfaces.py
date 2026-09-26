@@ -18,6 +18,7 @@ swap_display() and asserted on the dict would pass through every one of those.
 So: seed rows, ask the app for the page, and assert on the bytes it returned.
 """
 
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -446,3 +447,27 @@ def test_the_health_endpoint_still_answers_after_the_index_moved(client):
     assert payload["status"] == "ok"
     assert payload["db_path"] == client.application.config["DB_PATH"]
     assert client.get("/").status_code == 200
+
+
+def test_a_refused_swap_is_logged_and_not_only_returned(client, caplog):
+    """The reason must reach the LOG, not only the browser.
+
+    Measured 2026-09-26: the operator's terminal showed
+    `POST /api/swaps HTTP/1.1" 400` five times with no indication of why.
+    werkzeug's access log prints the status and nothing of the body, so the one
+    place a person was actually watching had the least information — while the
+    browser had the full reason all along.
+
+    Rule 14: a failure an operator cannot distinguish from any other failure is a
+    silent one. Asserted on both channels, because returning it without logging it
+    is the defect and logging it without returning it would be a new one.
+    """
+    caplog.set_level(logging.WARNING)
+
+    response = client.post("/api/swaps", json={"quote_id": "q-nope", "payout_address": "x"})
+
+    assert response.status_code == 400
+    assert response.get_json()["error"], "the browser must still get the reason"
+    assert "REFUSED" in caplog.text
+    assert "Quote not found" in caplog.text, "the log must carry the REASON, not just that it failed"
+    assert "no swap row was written" in caplog.text, "it must say what did NOT happen"
