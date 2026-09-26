@@ -144,8 +144,25 @@ def check_xrp(account: str) -> None:
 # send. That is why a timestamp is NOT reported as "can send" below -- it is
 # reported as "unlocked, but staking-only cannot be ruled out from here".
 #
-# Still open, and one unlock cycle on the operator's wallet would settle it:
-# whether a staking-only unlock leaves unlocked_until at 0 or sets a timestamp.
+# SETTLED 2026-09-26, by the one unlock cycle this paragraph asked for. A
+# staking-only unlock SETS unlocked_until to its timeout, it does not leave it at 0:
+#
+#     walletpassphrase <phrase> 31536000 true   ->   unlocked_until 1821989553
+#
+# So the two states are:
+#
+#   unlocked_until == 0        LOCKED, unambiguously. Not staking either.
+#   unlocked_until > now       unlocked -- and staking-only versus full is STILL not
+#                              distinguishable from this field, which is the
+#                              limitation the paragraph above describes and it stands.
+#
+# WHY THIS WAS BELIEVED THE OTHER WAY. The operator's earlier run read
+# `unlocked_until 0` on a wallet they described as "regularly unlocked for staking",
+# which looked like evidence that staking-only reports 0. It was not: the staking
+# unlock had been FAILING, because this codebase was sending it a timeout of 0 that
+# Gridcoin refuses with rpc -8 (see chains/gridcoin_wallet_lock.py). The wallet
+# really was locked, and the 0 was correct. A measurement taken through a bug
+# measured the bug.
 _LOCK_FIELDS = ("unlocked_until",)
 
 
@@ -194,17 +211,21 @@ def describe_wallet_lock(info: dict) -> tuple[str, str]:
         # right either way -- but "which field distinguishes staking-only" is still
         # unmeasured, and a line that showed its inputs would have answered it.
         return FAIL, (
-            f"wallet is LOCKED ({present}) -- a GRC payout cannot send until it is fully "
-            f"unlocked. NOTE: whether a staking-only unlock also reports unlocked_until=0 is "
-            f"NOT yet established; if this line looks wrong for a staking wallet, that is the "
-            f"thing to tell us"
+            f"wallet is LOCKED ({present}) -- a GRC payout cannot send, and it is not staking "
+            f"either. This is now UNAMBIGUOUS: measured 2026-09-26, a staking-only unlock sets "
+            f"unlocked_until to its timeout rather than leaving it at 0, so a 0 here means "
+            f"locked and nothing else. payout_worker performs the full unlock itself when "
+            f"GRIDCOIN_WALLET_PASSPHRASE is set; this line is about the resting state"
         )
-    # A timestamp is NOT reported as "can send", and that is the measured limitation
-    # rather than caution for its own sake. Gridcoin returns no field distinguishing
-    # a staking-only unlock from a full one, so if a staking-only unlock also sets
-    # unlocked_until, this state covers both -- and one of them cannot send. Saying
-    # PASS here would be a guess in the voice of a measurement about the one thing
-    # that decides whether a payout works.
+    # A timestamp is NOT reported as "can send", and the 2026-09-26 measurement
+    # CONFIRMED that caution rather than removing it: a staking-only unlock does set
+    # unlocked_until, so this state genuinely covers both, and one of the two cannot
+    # send. The `if` above was written when that was a hypothetical; it is now the
+    # measured case. Saying PASS here would be a guess in the voice of a measurement
+    # about the one thing that decides whether a payout works.
+    #
+    # A staking wallet in its normal resting state lands HERE, not in the locked
+    # branch, and that is expected rather than a warning about the wallet.
     return SKIP, (
         f"wallet is UNLOCKED until {unlocked_until} ({present}) -- but Gridcoin returns no field "
         f"saying whether that unlock was `walletpassphrase ... stakingonly`, and a staking-only "
