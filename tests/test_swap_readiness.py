@@ -120,11 +120,23 @@ def test_a_staking_only_unlock_is_reported_as_unable_to_send():
     assert "re-unlock for staking" in detail, "the line must say how to put it back"
 
 
-def test_a_locked_wallet_is_reported_as_locked():
+def test_a_locked_wallet_is_reported_as_locked_AND_shows_what_it_read():
+    """Echoing the inputs is not decoration; its absence already cost a measurement.
+
+    The first version printed "wallet is LOCKED" with nothing else. The operator's
+    run 2026-09-26 produced exactly that line for a wallet they had described as
+    normally "regularly unlocked for staking" -- and with no fields shown there was
+    no way to tell which of two things was true: the wallet really was locked, or
+    Gridcoin reports unlocked_until=0 for a staking-only unlock too. Both cannot
+    send, so the verdict held; the open question is the field, and a line that
+    showed its inputs would have answered it.
+    """
     state, detail = describe_wallet_lock({"unlocked_until": 0})
 
     assert state == FAIL
     assert "LOCKED" in detail
+    assert "unlocked_until" in detail, "the line must show the field it decided from"
+    assert "NOT yet established" in detail, "the open question must be visible to whoever reads it"
 
 
 def test_a_fully_unlocked_wallet_can_send_and_is_told_to_relock():

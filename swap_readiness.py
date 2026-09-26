@@ -118,16 +118,23 @@ def check_xrp(account: str) -> None:
            f"<- must be > 0 to pay anything out")
 
 
-# Gridcoin's getwalletinfo fields for lock state. THE NAMES ARE NOT CONFIRMED
-# against a live Gridcoin daemon from this environment -- no daemon is reachable
-# here -- so every one of them is read WHEN PRESENT and their absence is reported
-# as "not established" rather than as "unlocked". Rule 17: a field name our code
-# agrees on is still a guess until a server says it back.
+# Gridcoin's getwalletinfo fields for lock state.
 #
-# `unlocked_until` is the Bitcoin-derived convention (0 or absent means locked, a
-# unix timestamp means unlocked until then). Gridcoin is Bitcoin-derived so it is
-# the likely spelling; the staking-only distinction is the part with no Bitcoin
-# equivalent at all, because Bitcoin has no staking.
+# `unlocked_until` is CONFIRMED PRESENT, measured 2026-09-26 on the operator's
+# Gridcoin testnet GUI wallet (rpcport 25715): the check returned "wallet is
+# LOCKED" rather than "NOT ESTABLISHED", which it can only do when that field is
+# in the response. It follows the Bitcoin convention -- 0 or absent means locked,
+# a unix timestamp means unlocked until then.
+#
+# THE STAKING-ONLY FIELD IS STILL UNMEASURED and none of the three candidate
+# spellings has been seen. That distinction has no Bitcoin equivalent at all,
+# because Bitcoin has no staking, so the name is a guess and is treated as one:
+# read when present, and its absence never reported as "can send". What is not yet
+# known is whether Gridcoin reports unlocked_until=0 for a staking-only unlock as
+# well -- if it does, the two states are indistinguishable through this field, and
+# both cannot send, so the verdict stays correct while the wording would not.
+# Rule 17: a field name our code agrees on is still a guess until a server says it
+# back, and one of these two has now said it back while the other has not.
 _LOCK_FIELDS = ("unlocked_until",)
 _STAKING_ONLY_FIELDS = ("unlocked_for_staking_only", "staking_only", "walletunlockstakingonly")
 
@@ -169,7 +176,20 @@ def describe_wallet_lock(info: dict) -> tuple[str, str]:
     staking_only = next((info[key] for key in _STAKING_ONLY_FIELDS if key in info), None)
 
     if unlocked_until in (0, None) and staking_only is None:
-        return FAIL, "wallet is LOCKED -- a GRC payout cannot send until it is fully unlocked"
+        # Echoes what it READ, which the first version did not -- and that omission
+        # cost a measurement. The operator's run 2026-09-26 printed this exact line
+        # for a wallet they described as normally "regularly unlocked for staking",
+        # and without the fields there was no way to tell which of two things was
+        # true: the wallet really was locked, or Gridcoin reports unlocked_until=0
+        # for a staking-only unlock as well. Both cannot send, so the VERDICT is
+        # right either way -- but "which field distinguishes staking-only" is still
+        # unmeasured, and a line that showed its inputs would have answered it.
+        return FAIL, (
+            f"wallet is LOCKED ({present}) -- a GRC payout cannot send until it is fully "
+            f"unlocked. NOTE: whether a staking-only unlock also reports unlocked_until=0 is "
+            f"NOT yet established; if this line looks wrong for a staking wallet, that is the "
+            f"thing to tell us"
+        )
     if staking_only:
         return FAIL, (
             f"wallet is unlocked FOR STAKING ONLY ({present}) -- staking-only cannot send. "
