@@ -249,7 +249,7 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
                     # The commit is what makes it durable, and `recorded` is set only
                     # after it returns -- so a database failure here is still a
                     # payout failure, while a LOCK failure after it is not.
-                    _record_broadcast(db, swap, destination_asset, amount, txid)
+                    _record_broadcast(db, swap, amount, txid)
                     recorded = True
             except GridcoinLockError:
                 # THE PAYOUT IS ALREADY DURABLE. The wallet's lock state is a separate
@@ -393,14 +393,35 @@ WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
 WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
 
 
-def _record_broadcast(db, swap, destination_asset: str, amount, txid: str) -> None:
+def _record_broadcast(db, swap, amount, txid: str, *, old_status: str = "paying") -> None:
     """Make a delivered payout durable. Commits. Called INSIDE the unlock context.
 
     A function rather than inline, so the ordering that matters can be asserted
     directly (rule 10): everything here must be committed before the wallet's
     re-lock is attempted, because the re-lock can raise and a raised re-lock used to
     discard the txid of a payment that had already left the wallet.
+
+    THE DESTINATION ASSET IS DERIVED HERE, NOT PASSED. It was a parameter until ruff
+    put the count at six (PLR0913), and the honest fix was to remove an argument
+    rather than to suppress the finding (rule 19). It is always swap["to_asset"] --
+    payout_service.py:181 is the only place it was ever computed -- so passing it
+    added a way for a caller to name one asset while handing over another swap's row,
+    on the function that releases inventory against that asset. One fewer argument
+    and one fewer disagreement.
+
+    `old_status` IS KEYWORD-ONLY AND A PARAMETER BECAUSE THERE IS A SECOND CALLER,
+    which is the one
+    that made this function worth having. settle_payout.py corrects a swap whose
+    payout was delivered but recorded as failed -- the exact record this function's
+    original bug produced -- and for it the previous status is `failed`, not
+    `paying`. Writing an audit row that claims `paying -> completed` for a swap that
+    has been sitting in `failed` would falsify the one trail that explains the
+    correction. Everything else it does is identical, including the inventory
+    release, which the failure path never performed: a payout that failed left its
+    reservation standing, so a correction that skipped release_inventory_after_send()
+    would leave the hot wallet permanently short on paper.
     """
+    destination_asset = swap["to_asset"]
     db.execute(
         "UPDATE payouts SET txid = ?, status = ?, sent_at = ? WHERE swap_id = ? AND status = 'created'",
         (txid, "broadcast", utc_now_iso(), swap["id"]),
@@ -409,7 +430,7 @@ def _record_broadcast(db, swap, destination_asset: str, amount, txid: str) -> No
         "UPDATE swaps SET payout_txid = ?, completed_at = ?, updated_at = ? WHERE id = ?",
         (txid, utc_now_iso(), utc_now_iso(), swap["id"]),
     )
-    set_swap_status(db, swap["id"], "completed", "Payout broadcast", old_status="paying")
+    set_swap_status(db, swap["id"], "completed", "Payout broadcast", old_status=old_status)
     release_inventory_after_send(db, destination_asset, amount)
     db.commit()
 
