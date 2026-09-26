@@ -57,6 +57,7 @@ from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
 from config import Config
+from log_setup import configure_logging
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, configuring_variable
 
@@ -200,6 +201,12 @@ def chain_verdict(asset: str, port: int) -> str:
 
 def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
     """Print what this worker is about to do, before it does any of it."""
+    # FIRST, before the banner, so that anything the banner itself logs is captured.
+    # Here rather than in each worker's main() deliberately: all three already call
+    # announce_start() as their first statement, and three call sites for one
+    # startup step is three chances for a new worker to omit it -- which would
+    # reintroduce exactly the silence this fixes, in the one worker nobody checked.
+    configure_logging()
     print(f"{worker_name}: starting", flush=True)
     print(f"  pid             {pid}  <- supervisor.py stop reads this from runtime/{worker_name}.pid", flush=True)
     print(f"  database        {Config.DB_PATH}", flush=True)

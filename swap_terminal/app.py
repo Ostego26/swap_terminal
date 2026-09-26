@@ -52,6 +52,7 @@ from chains.registry import build_adapters
 from config import Config
 from db import close_db, init_db
 from flask import Flask
+from log_setup import configure_logging
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, mainnet_chains, startup_lines
 from routes.admin import bp as admin_bp
@@ -235,6 +236,20 @@ app = create_app()
 
 if __name__ == "__main__":
     import time
+
+    # BEFORE ANYTHING ELSE RUNS. Without it the root logger has no handler and sits
+    # at WARNING, so every logger.info() in the request path is discarded and
+    # routes/swaps.py's warning -- the one that records WHY a swap was refused, added
+    # because a bare 400 told the operator nothing -- reaches logging.lastResort with
+    # no timestamp and no logger name. Measured 2026-09-26; see log_setup.py for the
+    # reading and for why the level is INFO and not DEBUG.
+    #
+    # In the __main__ block and not at module scope, because importing app.py must
+    # not reconfigure the logging of whatever imported it (rule 12: import-time side
+    # effects). Under gunicorn this block does not run and gunicorn installs its own
+    # handlers -- UNVERIFIED here, since gunicorn is not installed in this
+    # environment, so it is stated as what is expected rather than as measured.
+    configure_logging()
 
     started = time.monotonic()
     run_host = bind_host()
