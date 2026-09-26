@@ -24,6 +24,17 @@ PROPOSAL, not a fix, and this script is the one thing that changes that.
 So this deliberately goes through the adapter. If it works, the claim "the XRP
 payout path works" becomes a measurement instead of an inference.
 
+IT RAN, 2026-09-26, and the claim is now a measurement:
+
+    TransactionResult tesSUCCESS  validated=True  waited 5.6ufn (6.8s)
+    hash=E118CA9636765E5F5954A49800E207BEB8AC50BCA603BBD8F5CECB2477EFD8E8
+
+This file is kept rather than deleted as a completed one-off (rule 2 would
+otherwise ask). It is the regression check for the armed path: every future
+change to send_to_address(), to the derivation guard or to the reserve
+arithmetic can be re-proved against a real ledger by running it again, which no
+test in tests/ can do -- they all stub the socket.
+
 THE SEED NEVER APPEARS ANYWHERE A HUMAN OR A LOG CAN SEE IT. It is read out of
 the faucet file this script already knows how to find, handed straight to the
 adapter as an argument, and never printed, never put in argv, never logged. It
@@ -86,7 +97,8 @@ def main() -> int:
     print("  WHAT THIS PROVES that nothing else does: the ADAPTER's armed path has", flush=True)
     print("  never signed against a real ledger. xrp_send_tagged.py proved local", flush=True)
     print("  signing works, but it signs with its own code; this goes through the", flush=True)
-    print("  adapter's guards. Until this runs with --send, that half is a PROPOSAL.", flush=True)
+    print("  adapter's guards. First proved 2026-09-26: tesSUCCESS, validated, hash", flush=True)
+    print("  E118CA96... -- so this is now a REGRESSION check, not a first proof.", flush=True)
 
     accounts = saved_faucet_accounts()
     print(f"\n  saved faucet accounts: {len(accounts)}", flush=True)

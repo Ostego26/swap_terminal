@@ -695,11 +695,29 @@ is not code:
 
 - the **custody decision** — whether this terminal should hold an XRP hot wallet
   at all, and which account. Nothing in the change decides it.
-- **one run of the armed path against testnet.** No session has been able to do
-  this: `s.altnet.rippletest.net:51234` is unreachable through the agent proxy,
-  measured as a connection reset rather than assumed. So the armed half is a
-  PROPOSAL by rule 16's own test, verified only against seeded responses and a
-  stubbed submit that captures the real `Payment` object.
+- ~~**one run of the armed path against testnet.**~~ **DONE, 2026-09-26.** This
+  was the last open item and it is closed. The operator ran
+  `xrp_payout_verify.py --send` from their host, which goes through
+  `chains/xrp.py::send_to_address()` rather than around it:
+
+  ```
+  XRP payout  derived address matches the announced source: rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv
+  XRP payout  submitting and waiting for validation (network_id 1 (NOT mainnet; mainnet is [0]))
+  XRP payout  TransactionResult tesSUCCESS  validated=True  waited 5.6µfn (6.8s)
+  XRP payout  DELIVERED and validated  hash=E118CA9636765E5F5954A49800E207BEB8AC50BCA603BBD8F5CECB2477EFD8E8
+  ```
+
+  So the armed half is no longer a PROPOSAL: the adapter's own guards ran, the
+  derivation check passed against a real wallet, the transaction was signed
+  locally, submitted, and validated by the ledger. Every session before this one
+  could only say the path was tested against seeded responses and a stubbed
+  submit, because `s.altnet.rippletest.net:51234` is unreachable through the
+  agent proxy — measured as a connection reset, not assumed. No session could
+  close this; only the operator could.
+
+  What that does **not** make true: this is testnet, and the custody question
+  above is still open and is still the thing standing between a working mechanism
+  and a payout that pays a customer. `Config.ALLOWED_PAIRS` names no XRP pair.
 
   The unarmed, preview and refusal paths are a fix, and as of 2026-09-26 they are
   measured rather than merely tested: the operator ran a real preview against
