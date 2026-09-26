@@ -311,6 +311,41 @@ def check_server(url: str) -> dict | None:
     return info
 
 
+def bad_address_verdict(account: str, *, from_operator: bool) -> str:
+    """What an address that fails the local decoder MEANS, which depends on where it came from.
+
+    The distinction is the whole value of this function and it was wrong until
+    2026-09-26. The message was a single hardcoded string saying the account
+    "came off the ledger but fails chains/xrp_address.py -- the decoder is
+    wrong", which is a real and serious finding on the ledger-walk path: an
+    address a validated ledger accepted and our decoder rejects means the
+    decoder disagrees with the network, and that is a bug in our code.
+
+    It is FALSE on the --account path, and that is the path an operator uses.
+    Run 2026-09-26 passed the literal placeholder `rTHE_ADDRESS_IT_PRINTED`
+    from a pasted command, and this script reported "the decoder is wrong"
+    about a decoder that was working perfectly -- it correctly rejected `_`,
+    which is not in the XRP Ledger base58 alphabet. An instrument that blames
+    itself for bad input sends the reader to read xrp_address.py, and the next
+    thing they do is "fix" a correct decoder.
+
+    So the provenance decides, and the caller knows it: `given` non-empty means
+    the operator supplied it.
+    """
+    if from_operator:
+        return (
+            f"{account} was supplied with --account and is not a valid address. "
+            "This is the INPUT, not the decoder -- chains/xrp_address.py rejected "
+            "it correctly. Pass a real account, or omit --account to have this "
+            "script find one off the ledger itself."
+        )
+    return (
+        f"{account} came off the ledger but fails chains/xrp_address.py -- the "
+        "decoder is wrong. A validated ledger accepted this address and our "
+        "decoder rejects it, so the two disagree and our side is the one to fix."
+    )
+
+
 def find_account(url: str, seq, how_many: int, given: str) -> str:
     """Step 2: an account guaranteed to have payment history.
 
@@ -347,7 +382,7 @@ def find_account(url: str, seq, how_many: int, given: str) -> str:
         print(f"    using account {account}", flush=True)
         print(f"    local check:  {describe_address(account)}", flush=True)
         if not is_valid_classic_address(account) and not account.startswith(("X", "T")):
-            fail(f"{account} came off the ledger but fails chains/xrp_address.py -- the decoder is wrong")
+            fail(bad_address_verdict(account, from_operator=bool(given)))
     else:
         print("    (none) -- no Payment found, so account_tx cannot be exercised", flush=True)
     done(started)
@@ -448,6 +483,24 @@ def main() -> int:
     seq = (info.get("validated_ledger") or {}).get("seq")
     account = find_account(args.url, seq, args.ledgers, args.account)
     if not account:
+        print("\n" + "=" * 70, flush=True)
+        print(verdict_text(failures, 0), flush=True)
+        return exit_code(failures, 0)
+
+    # Steps 3 and 4 are SKIPPED, not run and failed, when the address cannot be
+    # a valid account. Run 2026-09-26 sent the placeholder `rTHE_ADDRESS_IT_PRINTED`
+    # through to the server and reported "account_tx failed: actMalformed" -- which
+    # reads exactly like the wrong method name or a changed wire format, the two
+    # things this script exists to detect. It was neither; the server was telling us
+    # the ARGUMENT was garbage. Rule 13: a step that did not run must not report the
+    # same way as one that ran and found a defect.
+    if not is_valid_classic_address(account) and not account.startswith(("X", "T")):
+        print("\n[3] exercise account_tx, which is what the adapter actually calls", flush=True)
+        print("    SKIPPED -- the address above is not valid, so account_tx could only", flush=True)
+        print("    return actMalformed. That says nothing about the method or field", flush=True)
+        print("    names this script checks, so it is not run.", flush=True)
+        print("\n[4] run the adapter's own scan over that response", flush=True)
+        print("    SKIPPED -- nothing was fetched to scan.", flush=True)
         print("\n" + "=" * 70, flush=True)
         print(verdict_text(failures, 0), flush=True)
         return exit_code(failures, 0)

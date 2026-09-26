@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # The path insert above has to run first: xrp_chain_check.py lives at the
 # project root, which conftest.py does not put on sys.path.
 from xrp_chain_check import (
+    bad_address_verdict,
     collect_payments,
     delivered_amount_findings,
     exit_code,
@@ -211,3 +212,49 @@ def test_the_exit_code_distinguishes_inconclusive_from_pass(failures, examined, 
     that examined nothing for a confirmed adapter.
     """
     assert exit_code(failures, examined) == expected
+
+
+def test_an_operator_supplied_bad_address_does_not_blame_the_decoder():
+    """The defect found 2026-09-26, and it is a lie told in the voice of a finding.
+
+    An operator pasted the literal placeholder `rTHE_ADDRESS_IT_PRINTED` into
+    --account. The script reported "came off the ledger but fails
+    chains/xrp_address.py -- the decoder is wrong" about a decoder that had just
+    done its job correctly: `_` is genuinely not in the XRP Ledger base58
+    alphabet. A reader who trusts that sentence goes and "fixes" a correct
+    decoder, which is worse than no message.
+    """
+    verdict = bad_address_verdict("rTHE_ADDRESS_IT_PRINTED", from_operator=True)
+
+    assert "decoder is wrong" not in verdict
+    assert "came off the ledger" not in verdict
+    assert "--account" in verdict, "the verdict must name where the bad value came from"
+    assert "rejected" in verdict and "correctly" in verdict
+
+
+def test_a_ledger_supplied_bad_address_still_accuses_the_decoder():
+    """The other half, which is a REAL finding and must not be softened away.
+
+    An address a validated ledger accepted and chains/xrp_address.py rejects
+    means our decoder disagrees with the network. Fixing the false positive
+    above by deleting the accusation entirely would have thrown this away -- the
+    provenance is what distinguishes them, not the wording.
+    """
+    verdict = bad_address_verdict("rSomethingRealFromALedger", from_operator=False)
+
+    assert "decoder is wrong" in verdict
+    assert "came off the ledger" in verdict
+    assert "--account" not in verdict
+
+
+def test_the_two_provenances_never_produce_the_same_verdict():
+    """Rule 13's shape: two different situations must not read identically.
+
+    Pinned as its own assertion because the original defect was exactly this --
+    one hardcoded string for both paths -- and a future edit that collapses them
+    back into one message would pass both tests above while restoring the bug.
+    """
+    account = "rIdenticalInputBothWays"
+    assert bad_address_verdict(account, from_operator=True) != bad_address_verdict(
+        account, from_operator=False
+    )
