@@ -79,9 +79,12 @@ from chains.xrp_payments import (
     XRPPaymentError,
     deposit_events_from_transactions,
 )
+from chains.xrp_testnet import TESTNET_URL
 from microfortnights import format_duration
 
-TESTNET_URL = "https://s.altnet.rippletest.net:51234/"
+# The endpoint is chains/xrp_testnet.TESTNET_URL -- one spelling for every
+# XRP script, so refuse_mainnet() and the submit below cannot end up asking
+# two different servers (rule 8).
 MAINNET_NETWORK_IDS = {0}
 
 # Every field the adapter reads out of an account_tx entry, and whether its

@@ -57,9 +57,11 @@ from chains.xrp_signing import CONFIRM_XRP_SEND
 # read the SAME faucet files, and a second copy of that lookup is how the two
 # would come to disagree about where the faucet puts a secret -- which is exactly
 # the bug xrp_send_tagged.py shipped and had to fix on 2026-09-26.
-from xrp_send_tagged import saved_faucet_accounts
+from chains.xrp_testnet import TESTNET_URL, saved_faucet_accounts
 
-TESTNET_URL = "https://s.altnet.rippletest.net:51234/"
+# The endpoint is chains/xrp_testnet.TESTNET_URL -- one spelling for every
+# XRP script, so refuse_mainnet() and the submit below cannot end up asking
+# two different servers (rule 8).
 
 
 def arming_arguments(send: bool, seed: str) -> tuple[str, str]:

@@ -20,14 +20,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # The path insert above has to run first: the script is at the project root,
 # which conftest.py does not put on sys.path.
+# IMPORTED FROM WHERE EACH ONE LIVES, not from whatever re-exports it. These
+# five used to come through xrp_send_tagged, which imported MAINNET_NETWORK_IDS
+# and TESTNET_URL from elsewhere and so re-exported them by accident; moving the
+# endpoint into chains/xrp_testnet.py on 2026-09-26 broke this import and that
+# is the right outcome -- a test asserting the endpoint is pinned should read it
+# from the module that defines it, or it passes while pinning nothing.
+from chains.xrp_signing import MAINNET_NETWORK_IDS
+from chains.xrp_testnet import TESTNET_URL, saved_faucet_accounts
+
 import xrp_send_tagged
 from xrp_send_tagged import (
-    MAINNET_NETWORK_IDS,
     SIGNING_REFUSED,
-    TESTNET_URL,
     deposit_target_for_swap,
     pending_xrp_swap,
-    saved_faucet_accounts,
 )
 
 

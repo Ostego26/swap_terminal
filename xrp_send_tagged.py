@@ -47,7 +47,6 @@ canary appeared twice in `ps` output.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sqlite3
 import sys
@@ -57,7 +56,6 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-import requests
 from chains.xrp_address import is_valid_classic_address
 
 # derive_and_check() and MAINNET_NETWORK_IDS USED TO BE DEFINED IN THIS FILE.
@@ -72,111 +70,20 @@ from chains.xrp_address import is_valid_classic_address
 # Nothing else about this script changed. It still signs only against
 # s.altnet.rippletest.net, it still refuses a mainnet network_id before
 # anything is sent, and it still never puts a secret in argv.
-from chains.xrp_signing import MAINNET_NETWORK_IDS, derive_and_check
+from chains.xrp_signing import derive_and_check
+
+# MOVED to chains/xrp_testnet.py on 2026-09-26: the endpoint constant had
+# three copies across the root scripts and a fourth was about to be written
+# for the escrow harness (rule 8). Same code, one home; that module's header
+# carries the faucet-key table this file used to hold.
+from chains.xrp_testnet import (
+    KEY_DIRECTORY,
+    TESTNET_URL,
+    refuse_mainnet,
+    rpc,
+    saved_faucet_accounts,
+)
 from chains.xrp_units import to_drops
-
-TESTNET_URL = "https://s.altnet.rippletest.net:51234/"
-KEY_DIRECTORY = Path.home() / ".config" / "swap_terminal" / "keys"
-
-
-def rpc(method: str, params: dict) -> dict:
-    """One rippled call. params is a LIST of one object; errors arrive as HTTP 200."""
-    response = requests.post(
-        TESTNET_URL,
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({"method": method, "params": [params]}),
-        timeout=40,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    result = payload.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError(f"{method}: no `result` object in the response")
-    return result
-
-
-# WHERE THE FAUCET PUTS THINGS, MEASURED rather than guessed. Dumped from the
-# operator's own saved faucet files 2026-09-26, keys and string LENGTHS only so
-# no secret was displayed:
-#
-#     account.xAddress        str, len 47
-#     account.address         str, len 34
-#     account.classicAddress  str, len 34
-#     amount                  int = 100
-#     transactionHash         str, len 64
-#     seed                    str, len 31     <- THE SECRET, at the TOP level
-#
-# The first version looked for account.secret, payload.secret and account.seed.
-# The real key is payload.seed -- one level off, so it found zero accounts and
-# refused to send while two funded accounts sat in that directory. Exactly the
-# shape of the `balance` vs `amount` bug in fund_testnets.py, which is the
-# argument for searching a named list and REPORTING which key matched rather
-# than hardcoding one guess.
-ADDRESS_KEYS = ("address", "classicAddress")
-SECRET_KEYS = ("seed", "secret", "master_seed", "secretKey")
-
-
-def _first_present(keys: tuple[str, ...], *holders: dict):
-    """The first of `keys` present in any of `holders`, with the key it came from."""
-    for key in keys:
-        for holder in holders:
-            value = holder.get(key)
-            if value:
-                return value, key
-    return None, None
-
-
-def saved_faucet_accounts() -> list[tuple[Path, str, str]]:
-    """Every (file, address, secret) in the key directory, newest first.
-
-    The secret is returned because a caller has to sign with it. Nothing in this
-    file ever prints it -- only the FILE NAME it came from, and the key name it
-    was found under, both of which are safe and both of which are what made the
-    original bug diagnosable.
-    """
-    found = []
-    for path in sorted(KEY_DIRECTORY.glob("xrp-testnet-*.json"), reverse=True):
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        account = payload.get("account") or {}
-        address, address_key = _first_present(ADDRESS_KEYS, account, payload)
-        secret, secret_key = _first_present(SECRET_KEYS, payload, account)
-        if address and secret:
-            # Naming the two keys that matched is the whole point of searching a
-            # list instead of hardcoding one. When the faucet changes shape again
-            # this line says so on the next run, rather than the run reporting
-            # zero accounts and leaving the reader to dump the files by hand --
-            # which is what the original bug cost. Key NAMES only; the secret's
-            # value is never printed here or anywhere else in this file.
-            print(f"    {path.name}: address under {address_key!r}, "
-                  f"secret under {secret_key!r} (value not shown)", flush=True)
-            found.append((path, address, secret))
-        elif address:
-            print(f"    {path.name}: address under {address_key!r} but NO secret "
-                  f"under any of {', '.join(SECRET_KEYS)} -- cannot sign with "
-                  f"this one", flush=True)
-        else:
-            # Rule 14: an unusable file must not look identical to one this glob
-            # never saw. Zero accounts with no explanation is the ambiguity the
-            # original bug hid inside.
-            print(f"    {path.name}: no address under any of "
-                  f"{', '.join(ADDRESS_KEYS)} -- skipped", flush=True)
-    return found
-
-
-def refuse_mainnet() -> str:
-    """Ask the server which network it is on, and refuse anything but a test one."""
-    info = rpc("server_info", {}).get("info") or {}
-    network_id = info.get("network_id")
-    if network_id in MAINNET_NETWORK_IDS:
-        raise RuntimeError(
-            f"the endpoint reports network_id {network_id}, which is MAINNET. Nothing was sent. This "
-            f"file is pinned to {TESTNET_URL} so this should be impossible -- if you see it, the "
-            f"hostname now resolves somewhere else."
-        )
-    return f"network_id {network_id}, build {info.get('build_version')}"
 
 
 def pending_xrp_swap(db_path: str) -> str:
