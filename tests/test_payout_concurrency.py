@@ -83,12 +83,14 @@ system, where SQLite's locking assumptions are different and were not tested
 (rule 17).
 """
 
+import logging
 import sqlite3
 import threading
 import time
 
 import pytest
 from db import SCHEMA, add_column_if_missing, apply_migrations, connect_db
+from services.helpers import utc_now_iso
 from services.payout_service import claim_swap_for_payout, process_pending_payouts
 
 
@@ -583,3 +585,99 @@ def test_deposit_tag_migration_adds_the_column_to_an_old_db(tmp_path):
     row = conn.execute("SELECT id, deposit_address, deposit_tag FROM swaps").fetchone()
     conn.close()
     assert row == ("s-old", "rPreExisting", None), "the pre-existing swap must survive the ALTER"
+
+
+def seed_payout_pending_swap(conn, swap_id):
+    """One swap sitting at payout_pending, with the quote row its FOREIGN KEY needs."""
+    now = utc_now_iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps, "
+        "network_fee_reserve, output_amount_estimate, created_at, expires_at) "
+        "VALUES ('q_seed','XRP','GRC',1.0,56.0,150,0.01,55.43,?,'2099-01-01T00:00:00+00:00')",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address, "
+        "expected_input_amount, quoted_rate, fee_bps, network_fee_reserve, output_amount_estimate, "
+        "status, min_confirmations, created_at, updated_at, expires_at) "
+        "VALUES (?, 'q_seed','XRP','GRC','rAcct','mPayTo',1.0,56.0,150,0.01,55.43,"
+        "'payout_pending',1,?,?,'2099-01-01T00:00:00+00:00')",
+        (swap_id, now, now),
+    )
+    conn.commit()
+
+
+def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog):
+    """The reason reached the database and nothing the operator was watching.
+
+    Their run 2026-09-26 printed:
+
+        payout_worker cycle=1 WORKED pending_at_start=1 broadcast=0 failed_total=1
+
+    and nothing else. swaps.failed_reason and the audit log both had the reason —
+    but from the terminal a locked wallet, an insufficient balance, a rejected
+    address and an unreachable daemon all look identical, and the one that is a
+    five-second fix is indistinguishable from the one that needs an investigation.
+
+    At ERROR because a failed payout on a CREDITED swap is the most serious routine
+    outcome this worker has: the deposit is already ours and the customer has not
+    been paid.
+    """
+    caplog.set_level(logging.ERROR)
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_locked")
+
+    class LockedWallet:
+        def send_to_address(self, address, amount):
+            raise RuntimeError("Error: Please enter the wallet passphrase with walletpassphrase first.")
+
+        def get_balance(self):
+            return 4190.0
+
+    process_pending_payouts(conn, {}, {"GRC": LockedWallet()})
+    conn.close()
+
+    assert "payout FAILED" in caplog.text
+    assert "walletpassphrase" in caplog.text, "the log must carry the DAEMON's reason, not a summary"
+    assert "s_locked" in caplog.text, "it must name which swap"
+    assert "will NOT retry" in caplog.text, "it must say what happens next, not just what failed"
+
+
+def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path):
+    """MEASURED, and reported to the operator rather than changed here.
+
+    A locked Gridcoin wallet is a TRANSIENT, operator-fixable condition — the
+    wallet is normally unlocked for staking only, which cannot send, and a payout
+    needs a full unlock. But process_pending_payouts() marks every send failure
+    'failed', which is terminal: nothing retries it.
+
+    So a swap whose deposit was already credited dies because the operator had not
+    unlocked a wallet. Their XRP is in the account and the swap is dead.
+
+    This test PINS the current behavior rather than asserting the desired one,
+    because changing whether a failed payout retries changes what gets sent and
+    when — live posture, and the operator's call (rule 16). If they choose to make
+    transient failures retryable, this test is the one to change, and it names why.
+    """
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_locked")
+
+    class LockedWallet:
+        def send_to_address(self, address, amount):
+            raise RuntimeError("Error: Please enter the wallet passphrase with walletpassphrase first.")
+
+        def get_balance(self):
+            return 4190.0
+
+    process_pending_payouts(conn, {}, {"GRC": LockedWallet()})
+    row = conn.execute("SELECT status FROM swaps WHERE id = 's_locked'").fetchone()
+
+    # A second pass finds nothing, which is the whole point: 'failed' is not
+    # 'payout_pending', so the swap is never looked at again.
+    again = process_pending_payouts(conn, {}, {"GRC": LockedWallet()})
+    conn.close()
+
+    assert row["status"] == "failed"
+    assert again == [], "a terminally failed swap is never retried, even once the wallet is unlocked"

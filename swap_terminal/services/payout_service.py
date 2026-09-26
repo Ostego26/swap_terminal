@@ -256,6 +256,31 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
             )
             set_swap_status(db, swap["id"], "failed", f"Payout failed: {exc}", old_status="paying")
             db.commit()
+            # LOGGED, not only recorded. The reason reached swaps.failed_reason and
+            # the audit log; it reached NOTHING the operator was looking at. Their
+            # run 2026-09-26 printed
+            #
+            #     payout_worker cycle=1 WORKED pending_at_start=1 broadcast=0 failed_total=1
+            #
+            # and nothing else -- so a locked wallet, an insufficient balance, a
+            # rejected address and an unreachable daemon all look identical from the
+            # terminal, and the one that is a five-second fix is indistinguishable
+            # from the one that needs an investigation.
+            #
+            # At ERROR because a failed payout on a CREDITED swap is the most
+            # serious routine outcome this worker has: the customer's deposit is
+            # already ours and they have not been paid.
+            logger.error(
+                "payout FAILED for swap %s (%s -> %s, %s %s to %s): %s  <- the swap is now 'failed' "
+                "and this worker will NOT retry it",
+                swap["id"],
+                swap["from_asset"],
+                swap["to_asset"],
+                swap.get("output_amount_estimate"),
+                swap["to_asset"],
+                swap["payout_address"],
+                exc,
+            )
     db.commit()
     return completed
 
