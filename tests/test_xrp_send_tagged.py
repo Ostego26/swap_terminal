@@ -25,6 +25,7 @@ from xrp_send_tagged import (
     SIGNING_REFUSED,
     TESTNET_URL,
     deposit_target_for_swap,
+    pending_xrp_swap,
     saved_faucet_accounts,
 )
 
@@ -395,3 +396,82 @@ def test_a_missing_database_says_so_rather_than_reporting_no_such_swap(tmp_path)
     as "wrong swap id" when it was "wrong database". Two very different fixes."""
     with pytest.raises(SystemExit, match="no database at"):
         deposit_target_for_swap(str(tmp_path / "does-not-exist.db"), "s_1")
+
+
+# --- finding the swap, so no id is carried by hand ----------------------------
+
+def pending_db(tmp_path, rows):
+    path = tmp_path / "pending.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE swaps (id TEXT PRIMARY KEY, from_asset TEXT, status TEXT, "
+        "deposit_tag INTEGER, expected_input_amount REAL, created_at TEXT);"
+    )
+    connection.executemany("INSERT INTO swaps VALUES (?,?,?,?,?,?)", rows)
+    connection.commit()
+    connection.close()
+    return str(path)
+
+
+def test_the_one_waiting_swap_is_found_without_being_named(tmp_path):
+    """Why a lookup and not an argument.
+
+    `--swap` already took the TAG out of the operator's hands, which is the value
+    with no checksum behind it. But the swap ID still had to travel from a web page
+    into a shell, and across one session FOUR commands were pasted with a
+    `<placeholder>` still in them -- twice after I had said I would stop writing
+    them, and two of those pastes put something into bash that should not have been
+    there, one a wallet passphrase.
+
+    The lesson is not "be more careful with placeholders". A value a human has to
+    carry between two programs is a defect in the second program.
+    """
+    path = pending_db(tmp_path, [
+        ("s_waiting", "XRP", "awaiting_deposit", 3, 1.0, "2026-09-26T01:00:00Z"),
+        ("s_done", "XRP", "completed", 1, 1.0, "2026-09-25T01:00:00Z"),
+    ])
+
+    assert pending_xrp_swap(path) == "s_waiting"
+
+
+def test_two_waiting_swaps_refuse_rather_than_picking_the_newest(tmp_path):
+    """THE important half. Newest-wins would be the obvious convenience and is wrong.
+
+    With two swaps waiting, choosing silently sends a payment to a tag the operator
+    did not pick -- and on a shared account with no checksum on the tag, that money
+    is attributed to the wrong swap and the ledger records that the sender paid
+    exactly what they chose. Listing them costs one more command; guessing costs a
+    deposit.
+    """
+    path = pending_db(tmp_path, [
+        ("s_a", "XRP", "awaiting_deposit", 3, 1.0, "2026-09-26T01:00:00Z"),
+        ("s_b", "XRP", "awaiting_deposit", 4, 5.0, "2026-09-26T02:00:00Z"),
+    ])
+
+    with pytest.raises(SystemExit) as caught:
+        pending_xrp_swap(path)
+
+    message = str(caught.value)
+    assert "2 XRP swaps" in message
+    # Both must be listed with the flag that selects them, or the refusal leaves
+    # the operator no faster than before it.
+    assert "--swap s_a" in message
+    assert "--swap s_b" in message
+    assert "tag 3" in message and "tag 4" in message
+
+
+def test_no_waiting_swap_says_none_rather_than_erroring_obscurely(tmp_path):
+    """Rule 14: (none) is a result. Nothing waiting is an ordinary state, not a fault."""
+    path = pending_db(tmp_path, [("s_done", "XRP", "completed", 1, 1.0, "2026-09-25T01:00:00Z")])
+
+    with pytest.raises(SystemExit, match="no XRP swap is awaiting a deposit"):
+        pending_xrp_swap(path)
+
+
+def test_a_non_xrp_swap_waiting_is_not_offered(tmp_path):
+    """A GRC swap awaiting a deposit is waiting for GRC, and paying XRP into it is
+    money this terminal never credits."""
+    path = pending_db(tmp_path, [("s_grc", "GRC", "awaiting_deposit", None, 100.0, "2026-09-26T01:00:00Z")])
+
+    with pytest.raises(SystemExit, match="no XRP swap is awaiting a deposit"):
+        pending_xrp_swap(path)

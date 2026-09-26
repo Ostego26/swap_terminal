@@ -177,6 +177,60 @@ def refuse_mainnet() -> str:
     return f"network_id {network_id}, build {info.get('build_version')}"
 
 
+def pending_xrp_swap(db_path: str) -> str:
+    """The one XRP swap awaiting a deposit. Returns its id, or refuses.
+
+    WHY A LOOKUP RATHER THAN AN ARGUMENT. `--swap` already removed the tag from the
+    operator's hands, and the tag is the value with no checksum behind it. But the
+    swap ID still had to travel from a web page into a shell, and across this
+    session FOUR separate commands were pasted with a `<placeholder>` still in
+    them, twice after I had said I would stop writing them. Two of those pastes put
+    something into bash that should never have been there, one of them a wallet
+    passphrase.
+
+    The lesson is not "be more careful with placeholders". It is that a value a
+    human has to carry between two programs is a defect in the second program. So
+    this asks the database.
+
+    REFUSES ON AMBIGUITY rather than guessing newest-wins. With two swaps waiting,
+    picking one silently would send a payment to a tag the operator did not choose,
+    and on a shared account with no checksum that money is attributed to the wrong
+    swap. Listing them and stopping costs one command; guessing costs a deposit.
+    """
+    if not Path(db_path).exists():
+        raise SystemExit(f"REFUSED: no database at {db_path}. Nothing was sent.")
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT id, deposit_tag, expected_input_amount, created_at FROM swaps "
+            "WHERE from_asset = 'XRP' AND status = 'awaiting_deposit' ORDER BY created_at DESC"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    if not rows:
+        raise SystemExit(
+            f"REFUSED: no XRP swap is awaiting a deposit in {db_path}. (none) is the answer, not an "
+            f"error -- create one in the web UI first. Nothing was sent."
+        )
+    if len(rows) > 1:
+        listing = "\n".join(
+            f"      --swap {row['id']}   tag {row['deposit_tag']}  expects {row['expected_input_amount']} XRP  "
+            f"created {row['created_at']}"
+            for row in rows
+        )
+        raise SystemExit(
+            f"REFUSED: {len(rows)} XRP swaps are awaiting a deposit, so which one you meant is not "
+            f"knowable from here. Choosing for you would send a payment to a tag you did not pick, "
+            f"and on a shared account that money is attributed to the wrong swap. Name one:\n{listing}"
+        )
+    row = rows[0]
+    print(f"    one XRP swap is awaiting a deposit: {row['id']} (tag {row['deposit_tag']}, "
+          f"expects {row['expected_input_amount']} XRP)", flush=True)
+    return row["id"]
+
+
 def deposit_target_for_swap(db_path: str, swap_id: str) -> tuple[str, int]:
     """Read (account, tag) for a swap out of the database. Returns what to pay.
 
@@ -238,7 +292,8 @@ def main() -> int:
     parser.add_argument(
         "--swap", default="",
         help="pay THIS swap: reads its account and destination tag from the database, so neither is "
-             "typed by hand. Overrides --to and --tag.",
+             "typed by hand. Overrides --to and --tag. Pass `latest` to have the one XRP swap awaiting "
+             "a deposit looked up, which refuses if there is more than one.",
     )
     parser.add_argument(
         "--db", default="",
@@ -274,8 +329,12 @@ def main() -> int:
         database = args.db or os.environ.get("SWAP_DB_PATH") or str(
             Path(__file__).resolve().parent / "swap_terminal" / "swap_terminal.db"
         )
-        print(f"\n    reading the deposit target for {args.swap} from {database}", flush=True)
-        destination, destination_tag = deposit_target_for_swap(database, args.swap)
+        swap_id = args.swap
+        if swap_id == "latest":
+            print(f"\n    looking up the XRP swap awaiting a deposit in {database}", flush=True)
+            swap_id = pending_xrp_swap(database)
+        print(f"\n    reading the deposit target for {swap_id} from {database}", flush=True)
+        destination, destination_tag = deposit_target_for_swap(database, swap_id)
         print(f"    account {destination}  tag {destination_tag}  <- from the swap row, not typed", flush=True)
 
     drops = to_drops(args.amount)
