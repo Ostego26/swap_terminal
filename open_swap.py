@@ -412,9 +412,42 @@ def check_payout_address(adapters: dict, to_asset: str, payout_address: str) -> 
     # 2026-09-26: the line read `VALID <- the XRP daemon accepts it` when no daemon
     # was asked.
     how = "checked locally against the ledger's checksum" if to_asset == "XRP" else f"the {to_asset} daemon"
-    if answered:
-        return "VALID", how if to_asset == "XRP" else f"{how} accepts it"
-    return "INVALID", how if to_asset == "XRP" else f"{how} rejects it"
+    if not answered:
+        return "INVALID", how if to_asset == "XRP" else f"{how} rejects it"
+    detail = how if to_asset == "XRP" else f"{how} accepts it"
+    return "VALID", detail + payout_destination_note(adapters[to_asset], payout_address, to_asset)
+
+
+def payout_destination_note(adapter, payout_address: str, to_asset: str) -> str:
+    """Whether the payout lands back in this terminal's own wallet. "" when not.
+
+    THE LINE THAT WOULD HAVE SAVED AN HOUR, 2026-09-26. The operator's first
+    end-to-end XRP -> GRC swap paid 55.52645238 GRC to an address in their own
+    Gridcoin wallet, so the wallet reported a send AND a matching receive and the net
+    movement was the 0.001 GRC fee. Everything worked. What they said was "there's
+    still no goddamn grc from xrp testnets", because a payout into the wallet it came
+    out of looks exactly like nothing happening.
+
+    The screen had said `address check VALID <- the GRC daemon accepts it`, which is
+    true and answers a different question. validateaddress says WELL-FORMED, never
+    YOURS -- and for a customer's swap those are the right semantics, since a payout
+    address should NOT be the terminal's. So this is not a refusal. It is the fact
+    that decides how to read the result, printed beside the address rather than left
+    to be worked out from a wallet afterwards.
+
+    Silent for None as well as False: chains/base.owns_address() returns None when
+    the daemon answers the validity question and not the ownership one -- `ismine` is
+    a wallet field and Bitcoin Core moved it to getaddressinfo in 0.18 -- and saying
+    "not yours" for "not established" would be inventing the reassuring answer.
+    """
+    owns = adapter.owns_address(payout_address) if hasattr(adapter, "owns_address") else None
+    if not owns:
+        return ""
+    return (
+        f"; and it is THIS WALLET'S OWN address (ismine), so the {to_asset} payout returns to the wallet "
+        f"it is paid from -- the net movement will be the transaction fee only. Correct for a self-test, "
+        f"and NOT what a real customer's payout address should be"
+    )
 
 
 def deposit_preview(config: dict, adapters: dict, from_asset: str) -> list[str]:

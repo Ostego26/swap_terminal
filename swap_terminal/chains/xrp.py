@@ -365,6 +365,16 @@ class XRPAdapter:
             f"cost a base reserve per swap AND put a signing key per swap on this host."
         )
 
+    def owns_address(self, address: str) -> bool | None:
+        """Always None: the XRP Ledger has no "is this mine" to ask.
+
+        See chains/base.RPCAdapter.owns_address for why the question is asked at all.
+        There is no wallet here -- this adapter holds no key and the ledger has no
+        notion of an account belonging to a caller -- so the honest answer is "not
+        established" rather than False, which a caller must not print as "not yours".
+        """
+        return None
+
     def validate_address(self, address: str) -> bool:
         """Checksum-verified locally, with no network call.
 

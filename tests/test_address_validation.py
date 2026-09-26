@@ -356,3 +356,73 @@ def test_a_destination_that_can_pay_out_is_not_refused_by_this_check(db):
 
     assert swap["to_asset"] == "LTC"
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1
+
+
+# --- is this address ours? ------------------------------------------------------
+#
+# THREE ANSWERS, AND None IS NOT A FAILURE. `ismine` is a WALLET field, and Bitcoin
+# Core moved wallet fields out of validateaddress into getaddressinfo in 0.18 -- so a
+# daemon can answer "is this well-formed" and not "is this yours". A caller that read
+# None as False would print the reassuring answer about the one fact that decides how
+# to read a payout: on 2026-09-26 the operator's payout went to their OWN address, the
+# net movement was the fee, and they read a working swap as a broken one.
+#
+# These were added after a mutation run: making owns_address() return False instead of
+# None when unanswerable failed NOTHING, because every test went through open_swap's
+# stubs rather than through this method.
+
+
+def test_owns_address_is_true_when_the_daemon_says_ismine():
+    adapter = StubAdapter(responses={"getaddressinfo": {"isvalid": True, "ismine": True}})
+
+    assert adapter.owns_address("Sgrcaddr") is True
+
+
+def test_owns_address_is_false_when_the_daemon_says_not_ismine():
+    adapter = StubAdapter(responses={"getaddressinfo": {"isvalid": True, "ismine": False}})
+
+    assert adapter.owns_address("Sgrcaddr") is False
+
+
+def test_owns_address_is_none_when_no_method_reports_ismine():
+    """MUTATION: return False here instead of None. This test alone fails, and it is
+    the distinction the caller depends on."""
+    adapter = StubAdapter(responses={
+        "getaddressinfo": {"isvalid": True},
+        "validateaddress": {"isvalid": True},
+    })
+
+    assert adapter.owns_address("Sgrcaddr") is None
+
+
+def test_owns_address_is_none_when_the_daemon_cannot_be_asked():
+    """An outage is NOT "not yours". Same reasoning as validate_address() raising
+    rather than returning False -- see its docstring for the 2026-09-24 incident."""
+    adapter = StubAdapter(raises={
+        "getaddressinfo": RPCError("connection refused"),
+        "validateaddress": RPCError("connection refused"),
+    })
+
+    assert adapter.owns_address("Sgrcaddr") is None
+
+
+def test_owns_address_prefers_getaddressinfo():
+    """Bitcoin Core 0.18 moved wallet fields there, so it is asked first. A daemon
+    still carrying ismine on validateaddress is answered by the fallback."""
+    modern = StubAdapter(responses={"getaddressinfo": {"ismine": True}})
+    older = StubAdapter(responses={
+        "getaddressinfo": {"isvalid": True},
+        "validateaddress": {"isvalid": True, "ismine": True},
+    })
+
+    assert modern.owns_address("Sgrcaddr") is True
+    assert older.owns_address("Sgrcaddr") is True
+
+
+def test_owns_address_never_reaches_a_key():
+    """Read-only: the only RPCs it may call are the two validity ones."""
+    adapter = StubAdapter(responses={"getaddressinfo": {"ismine": False}})
+
+    adapter.owns_address("Sgrcaddr")
+
+    assert [method for method, _params in adapter.calls] == ["getaddressinfo"]

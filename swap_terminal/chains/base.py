@@ -52,6 +52,7 @@ confirmations", which is indistinguishable from a real unconfirmed deposit.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -66,6 +67,8 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from script_pub_key import pays_address
+
+logger = logging.getLogger(__name__)
 
 
 class RPCError(Exception):
@@ -193,6 +196,49 @@ class RPCAdapter:
 
     def get_new_address(self, label: str) -> str:
         return self.call("getnewaddress", label)
+
+    def owns_address(self, address: str) -> bool | None:
+        """Whether THIS wallet holds the key for `address`. None when unanswerable.
+
+        WHY A TERMINAL NEEDS THIS, measured on the operator 2026-09-26. Their first
+        end-to-end XRP -> GRC swap paid 55.52645238 GRC to an address in their own
+        wallet, so listtransactions reported a send AND a matching receive and the
+        net movement was the 0.001 GRC fee. Everything worked. What they saw was
+        "there's still no goddamn grc from xrp testnets", because a payout into the
+        wallet it came out of looks exactly like nothing happening.
+
+        The tools said "payout address ... VALID <- the GRC daemon accepts it", which
+        is true and answers a different question: validateaddress says WELL-FORMED,
+        never YOURS. For a customer's swap those are the right semantics -- a payout
+        address should NOT be in the terminal's wallet -- so this is not a refusal,
+        it is a fact worth putting on screen next to the address.
+
+        THREE ANSWERS, and None is not a failure. `ismine` is a WALLET field, and
+        Bitcoin Core moved wallet fields out of validateaddress into getaddressinfo
+        in 0.18 -- so a daemon may answer the validity question and not this one.
+        None means "not established", which is different from False, and a caller
+        that prints "not yours" for None would be inventing the reassuring answer.
+
+        Read-only: it calls the same two methods validate_address() already calls and
+        touches no key.
+        """
+        unanswered = []
+        for method in ("getaddressinfo", "validateaddress"):
+            try:
+                result = self.call(method, address)
+            except Exception as exc:  # noqa: BLE001 -- checked: one method failing is not an answer, it is a reason to try the other. The reason is COLLECTED and logged rather than dropped -- ruff's S112 flags a bare continue for exactly that, and falling through to None must mean "not established", never False.
+                unanswered.append(f"{method}: {exc}")
+                continue
+            if isinstance(result, dict) and "ismine" in result:
+                return bool(result["ismine"])
+            unanswered.append(f"{method}: answered, with no `ismine` field")
+        logger.debug(
+            "owns_address(%s) on %s: NOT ESTABLISHED -- %s",
+            address,
+            self.asset or "this chain",
+            "; ".join(unanswered),
+        )
+        return None
 
     def validate_address(self, address: str) -> bool:
         """Ask the daemon whether an address is valid.

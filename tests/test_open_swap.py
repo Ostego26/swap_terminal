@@ -998,3 +998,100 @@ def test_the_parser_itself_refuses_an_infinite_amount(capsys):
         f"the parser is not using swappable_amount -- an infinite amount reached the checks as a "
         f"number instead of being refused here. stderr was: {message!r}"
     )
+
+
+# --- a payout that lands back in this terminal's own wallet ---------------------
+#
+# 2026-09-26: the operator's first end-to-end swap paid 55.52645238 GRC to an address
+# in their own Gridcoin wallet. The wallet reported a send AND a matching receive, the
+# net movement was the 0.001 GRC fee, and they read that as the swap not having
+# worked. The screen had said `VALID <- the GRC daemon accepts it`, which is true and
+# answers a different question: validateaddress says WELL-FORMED, never YOURS.
+
+
+class OwnWalletGRC(StubGRC):
+    """Valid, and ismine. What the operator's payout address actually was."""
+
+    def owns_address(self, address):
+        return True
+
+
+class ForeignGRC(StubGRC):
+    """Valid, and NOT ismine. What a real customer's payout address is."""
+
+    def owns_address(self, address):
+        return False
+
+
+class SilentGRC(StubGRC):
+    """Valid, and cannot say. A daemon that answers validity and not ownership --
+    `ismine` is a wallet field Bitcoin Core moved to getaddressinfo in 0.18."""
+
+    def owns_address(self, address):
+        return None
+
+
+def test_a_payout_to_our_own_address_says_so(monkeypatch, tmp_path, capsys):
+    """MUTATION: return "" unconditionally from payout_destination_note(). This fails
+    and the two below keep passing, which is why all three exist."""
+    stub_prices(monkeypatch)
+    run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+         "--db", str(tmp_path / "own.db")],
+        adapters={"XRP": StubXRP(), "GRC": OwnWalletGRC()},
+    )
+
+    out = capsys.readouterr().out
+    assert "THIS WALLET'S OWN address" in out, out
+    assert "transaction fee only" in out, "say what the operator will actually observe"
+    assert "VALID" in out, "it is still a valid address; this is not a refusal"
+
+
+@pytest.mark.parametrize("adapter_class", [ForeignGRC, SilentGRC])
+def test_no_note_when_the_address_is_not_ours_or_cannot_be_judged(
+    monkeypatch, tmp_path, capsys, adapter_class
+):
+    """False and None must both stay silent.
+
+    None is the one that matters: it means "not established", and printing "not
+    yours" for it would be inventing the reassuring answer about the one fact that
+    decides how to read the result.
+    """
+    stub_prices(monkeypatch)
+    run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+         "--db", str(tmp_path / "other.db")],
+        adapters={"XRP": StubXRP(), "GRC": adapter_class()},
+    )
+
+    out = capsys.readouterr().out
+    assert "THIS WALLET'S OWN" not in out
+    assert "VALID" in out
+
+
+def test_an_adapter_without_owns_address_is_not_an_error(monkeypatch, tmp_path, capsys):
+    """An adapter predating the method must not crash the dry run.
+
+    hasattr rather than assuming, because this is the header of a read-only preview
+    and a missing capability is not a reason to refuse a swap.
+    """
+    class NoSuchMethod(StubGRC):
+        owns_address = None
+
+        def __getattribute__(self, name):
+            if name == "owns_address":
+                raise AttributeError(name)
+            return super().__getattribute__(name)
+
+    stub_prices(monkeypatch)
+    code = run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+         "--db", str(tmp_path / "old.db")],
+        adapters={"XRP": StubXRP(), "GRC": NoSuchMethod()},
+    )
+
+    assert code == 0
+    assert "THIS WALLET'S OWN" not in capsys.readouterr().out
