@@ -67,6 +67,48 @@ and explains the asymmetry; this converts it into the two chains' different
 CLOCKS, which is where it can go wrong: XRPL's CancelAfter is a wall-clock
 instant and Gridcoin's timeout is a BLOCK HEIGHT.
 
+IT RAN, AND IT WORKED -- 2026-09-26, OK=15 FAIL=0, on both live testnets.
+
+The first end-to-end atomic swap in this repository. XRPL testnet build 3.4.1
+against Gridcoin testnet at height 3294728, --hours-scale 0.02 (58 minutes
+against 29), one sha256 opening both legs:
+
+    step 5  XRP leg funded      escrow validated 24FACB8F1F40D64B...,
+                                OfferSequence 21051278
+    step 6  GRC leg funded      createhtlc d9966f6d7f6b6947...,
+                                p2sh 2NEYG15rtRNdHEEGypNyBn91T3zc2gbTefF,
+                                HTLC output located at VOUT 1
+    step 7  A claimed the GRC   claimhtlc b39897c6aa14970e... -- the secret is
+                                now public, by construction
+    step 8  B read the secret   off A's own claim scriptSig (222 bytes), on the
+                                first attempt, and it EQUALLED what A committed
+                                to
+    step 9  B claimed the XRP   escrow finished, validated B9B856C23BB36FB0...,
+                                B's balance 116000000 -> 117000000 drops,
+                                +1000000 EXACTLY
+
+VOUT 1 IS THE LINE WORTH KEEPING. An earlier version of this file passed
+`int(htlc.get("vout", 0))` to claimhtlc, because createhtlc returns no vout at
+all. The real output was at index 1 -- index 0 was the change SendMoney added --
+so the assumed index was wrong on the very first run that got that far, and the
+claim would have spent, or failed against, the wrong output. htlc_vout() locates
+it by scriptPubKey hex instead. An assumption that is wrong the first time it is
+exercised is the argument for not making it.
+
+Step 8 succeeding on attempt 1 is what makes the word "atomic" honest here: B's
+fulfillment came out of a transaction A broadcast, not out of a variable this
+program happened to be holding, and the assertion that the two are equal is in
+the run above.
+
+THREE DEFECTS CAME OUT OF THE RUNS BEFORE IT, all in step 6, all mine, and all
+of them found by reading Gridcoin's own src/rpc/htlc.cpp rather than guessing:
+the unlock was wrapped around claimhtlc only when createhtlc needs one too (rpc
+-13, `Wallet is unlocked for staking only.`); the response keys are snake_case
+(p2sh_address, redeem_script) so a successful call printed p2sh=None; and the
+vout above. The first failure funded the XRP leg and stopped -- and the safety
+line was right: nobody had the secret, so nothing was lost and the escrow
+returned to A at its CancelAfter.
+
 ONE OPERATOR PLAYS BOTH PARTIES, and that limit is stated rather than glossed.
 The XRP accounts are two faucet accounts on one machine and both Gridcoin
 addresses are in one wallet, so this does not exercise a counterparty who
@@ -387,6 +429,8 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
                 "PARTICIPANT, shorter lock).")
     console.say("one operator plays both parties here, so counterparty misbehavior is NOT exercised -- the "
                 "mechanism is, on real chains. See this file's header.")
+    console.say("this completed end to end on 2026-09-26 (OK=15 FAIL=0): GRC claim b39897c6aa14970e..., XRP "
+                "escrow finished B9B856C23BB36FB0..., +1000000 drops exactly. A failure here is a regression.")
 
     console.step(1, "both networks are TEST networks, and each says which")
     try:
