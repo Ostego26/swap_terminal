@@ -50,6 +50,7 @@ and its risk -- outside this module.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,33 @@ _METHOD_LOCK = "walletlock"
 # where an external API's unit is not converted to satisfy a display convention.
 DEFAULT_UNLOCK_SECONDS = 60
 
-# Timeout for the staking unlock. 0 means "until the wallet is stopped", which is
-# the resting state a staking wallet is supposed to be left in.
-STAKING_UNLOCK_SECONDS = 0
+# Timeout for the staking unlock.
+#
+# THIS WAS 0, AND GRIDCOIN REFUSES 0. Measured on the operator's live testnet
+# daemon 2026-09-26, on the first payout this code ever ran:
+#
+#     walletpassphrase <passphrase> 0 true
+#     -> Timeout cannot be negative or zero. (rpc code -8)
+#
+# The comment here used to read: `0 means "until the wallet is stopped", which is
+# the resting state a staking wallet is supposed to be left in.` That is Bitcoin
+# Core's behavior, asserted about Gridcoin without ever being run against one --
+# rule 17's "a reason to believe something is not the same as having checked it",
+# and it was the ONLY one of the four calls in this sequence that had never touched
+# a real daemon. The other three worked on the first try.
+#
+# THE NUMBER BELOW IS NOT MEASURED EITHER, and it is named as such (rule 16: a fix
+# you cannot test here is a proposal). What IS measured is that 0 is rejected. One
+# year of seconds is chosen because a staking wallet's resting state should outlast
+# any session, and because a value this far from a boundary is unlikely to hit a
+# second undocumented limit. If this daemon rejects it too, restore_failed_because()
+# below says so by name and the wallet is left LOCKED, which is the safe direction.
+#
+# Overridable so the operator can correct it without a code change, since they are
+# the one who can test it. Named _SECONDS, so it stays seconds (rule 6's boundary:
+# the RPC takes seconds and converting at an external API's call site would put
+# rounding into control flow).
+STAKING_UNLOCK_SECONDS = int(os.environ.get("GRIDCOIN_STAKING_UNLOCK_SECONDS", "31536000"))
 
 
 class GridcoinLockError(RuntimeError):
@@ -100,9 +125,59 @@ def unlock_for_sending(adapter, passphrase: str, seconds: int = DEFAULT_UNLOCK_S
 
 
 def unlock_for_staking(adapter, passphrase: str) -> None:
-    """Staking-only unlock: the resting state. `walletpassphrase <passphrase> 0 true`."""
-    logger.info("gridcoin wallet: %s stakingonly (parameters omitted)", _METHOD_UNLOCK)
+    """Staking-only unlock: the resting state. `walletpassphrase <phrase> <seconds> true`.
+
+    The seconds are printed, because the value is the thing that was wrong once and
+    an operator reading a log needs to see which number was sent.
+    """
+    logger.info(
+        "gridcoin wallet: %s stakingonly for %ds (parameters omitted)",
+        _METHOD_UNLOCK,
+        STAKING_UNLOCK_SECONDS,
+    )
     adapter.call(_METHOD_UNLOCK, passphrase, STAKING_UNLOCK_SECONDS, True)
+
+
+def restore_failed_because(locked: bool, error: Exception) -> str:
+    """The operator-facing sentence for a failed restore. Two OUTCOMES, not one.
+
+    THE OLD MESSAGE SAID "THE WALLET MAY STILL BE FULLY UNLOCKED" FOR BOTH, AND ON
+    2026-09-26 THAT WAS FALSE AND IT ALARMED THE OPERATOR. The restore is two calls
+    in order -- walletlock, then the staking unlock. Their daemon logged the
+    walletlock succeeding and then rejected the staking timeout, so the wallet was
+    LOCKED: `getwalletinfo` read `unlocked_until 0` when they checked. The message
+    had them hunting an exposure that did not exist, and the remedy it printed
+    (`walletpassphrase <passphrase> 0 true`) was the exact call that had just
+    failed.
+
+    So the two cases are told apart by whether the walletlock got through:
+
+      locked=False  the LOCK failed, so the full unlock may still be in force. This
+                    is the real hazard and the wallet is spendable by this process
+                    until the timeout expires.
+      locked=True   the lock succeeded and only the staking unlock failed. The
+                    wallet is SAFE and not staking. Different problem, different
+                    urgency, and saying the first when it is the second is how an
+                    instrument loses its reader.
+    """
+    if not locked:
+        return (
+            f"the payout sequence could not LOCK the wallet. IT MAY STILL BE FULLY UNLOCKED, and a full "
+            f"unlock lasts {DEFAULT_UNLOCK_SECONDS}s from when it was granted -- run walletlock by hand "
+            f"now, then restore staking the way you normally do. The daemon said: {error}"
+        )
+    rejected_timeout = "-8" in str(error) or "negative or zero" in str(error).lower()
+    hint = (
+        f" The daemon rejected the timeout: set GRIDCOIN_STAKING_UNLOCK_SECONDS to a positive number of "
+        f"seconds it accepts (currently {STAKING_UNLOCK_SECONDS})."
+        if rejected_timeout
+        else ""
+    )
+    return (
+        f"the wallet is LOCKED -- that call succeeded -- but the staking unlock did not, so it is NOT "
+        f"staking. No funds are exposed. Restore staking the way you normally do.{hint} The daemon "
+        f"said: {error}"
+    )
 
 
 @contextmanager
@@ -128,18 +203,15 @@ def unlocked_for_payout(adapter, passphrase: str, seconds: int = DEFAULT_UNLOCK_
         # KeyboardInterrupt and SystemExit too, which a bare `except Exception`
         # around the body would not have caught. An operator pressing Ctrl-C
         # during a slow payout is exactly when a wallet gets left open.
+        locked = False
         try:
             lock(adapter)
+            # Set only after the lock RETURNED. It is what tells the two failure
+            # outcomes apart, and guessing it from which line raised is how the old
+            # message came to claim an exposure that was not there.
+            locked = True
             unlock_for_staking(adapter, passphrase)
         except Exception as error:
-            logger.error(
-                "gridcoin wallet: FAILED to restore the lock state -- the wallet may still be "
-                "fully unlocked. Lock it by hand: %s",
-                error,
-            )
-            raise GridcoinLockError(
-                "the payout sequence could not restore the wallet's lock state. THE WALLET MAY "
-                "STILL BE FULLY UNLOCKED -- run walletlock, then walletpassphrase <passphrase> 0 "
-                "true, by hand. Nothing here retries, because a retry that also fails would "
-                "bury this message."
-            ) from error
+            reason = restore_failed_because(locked, error)
+            logger.error("gridcoin wallet: restore FAILED -- %s", reason)
+            raise GridcoinLockError(reason) from error

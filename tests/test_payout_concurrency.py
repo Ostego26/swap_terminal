@@ -920,3 +920,176 @@ def test_a_chain_that_needs_no_unlock_is_not_given_one(db_path, monkeypatch):
 
     assert row["status"] == "completed"
     assert wallet.calls == [], "no lock or unlock may be sent to a chain that does not need it"
+
+
+# --- a delivered payout whose re-lock fails afterwards -------------------------
+#
+# THIS IS WHAT HAPPENED ON THE FIRST REAL PAYOUT THIS CODE EVER MADE, 2026-09-26.
+# 55.52645238 GRC left the operator's wallet -- txid 3e09dc9cfd7a61da..., confirmed
+# in their own listtransactions -- and then the context manager's restore raised,
+# because the staking unlock was being sent a timeout of 0 that Gridcoin refuses
+# with rpc -8. The txid was assigned INSIDE the `with` and the UPDATE that stored it
+# sat AFTER, so control jumped from the `with` to the except clause and the txid was
+# discarded. The swap read `failed`, `txid (none)`, while the money was gone.
+#
+# Money out with no record is the worst outcome available on this path, and it was
+# caused by a wallet-housekeeping call that says nothing about whether the payment
+# was delivered. No test covered it: every existing one either succeeds at
+# everything or fails the SEND.
+
+
+class RestoreFailsWalletStub(GridcoinWalletStub):
+    """Sends successfully, then refuses the staking unlock exactly as Gridcoin did.
+
+    The refusal is on the SECOND walletpassphrase -- the staking one -- and not on
+    the walletlock before it, which is the real sequence: the operator's daemon
+    logged the walletlock succeeding.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.staking_unlocks = 0
+
+    def call(self, method, *params):
+        if method == "walletpassphrase" and len(params) > 2 and params[2]:
+            self.staking_unlocks += 1
+            self.calls.append(method)
+            raise RuntimeError("Timeout cannot be negative or zero. (rpc code -8)")
+        return super().call(method, *params)
+
+
+def test_a_broadcast_payout_stays_completed_when_the_relock_fails(db_path, monkeypatch):
+    """MUTATION: move _record_broadcast() back outside the `with`. This fails, and it
+    is the only test that does."""
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_relock")
+    wallet = RestoreFailsWalletStub()
+
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+
+    swap = conn.execute("SELECT status, payout_txid, failed_reason FROM swaps WHERE id = 's_relock'").fetchone()
+    payout = conn.execute("SELECT status, txid FROM payouts WHERE swap_id = 's_relock'").fetchone()
+    conn.close()
+
+    assert wallet.sends == 1, "the send must have happened, or this test proves nothing"
+    assert wallet.staking_unlocks == 1, "the staking unlock must have been attempted and refused"
+    assert swap["payout_txid"] == "grc-txid-1", (
+        "THE TXID OF A DELIVERED PAYMENT MUST SURVIVE A FAILED RE-LOCK -- losing it is money out "
+        "with no record"
+    )
+    assert swap["status"] == "completed", "a wallet-housekeeping failure is not a payout failure"
+    assert payout["status"] == "broadcast"
+    assert payout["txid"] == "grc-txid-1"
+
+
+def test_the_relock_failure_is_written_to_the_audit_log(db_path, monkeypatch):
+    """The swap reads `completed`, so the lock problem must be recorded somewhere a
+    person will find it -- otherwise fixing the mislabeling would have hidden it."""
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_audit")
+
+    process_pending_payouts(conn, {}, {"GRC": RestoreFailsWalletStub()})
+
+    messages = [
+        row["message"]
+        for row in conn.execute("SELECT message FROM swap_audit_log WHERE swap_id = 's_audit'").fetchall()
+    ]
+    conn.close()
+
+    assert any("lock restore FAILED" in message for message in messages), messages
+    assert any("grc-txid-1" in message for message in messages), (
+        "the audit row must name the txid, so the delivered payment and the wallet problem are "
+        "connected in the record"
+    )
+
+
+def test_a_failed_send_whose_restore_also_fails_is_a_payout_failure(db_path, monkeypatch):
+    """THE RE-RAISE BRANCH, and my first attempt at this test did not reach it.
+
+    A restore failure stops being the payout's problem only once the payout is
+    DURABLE. Before that it IS the payout's problem, and `if not recorded: raise` is
+    what says so.
+
+    Reaching that line needs BOTH halves to fail: the send raises, and then the
+    restore raises too, so a GridcoinLockError arrives with nothing recorded. My
+    first version of this test failed the first UNLOCK instead -- which raises from
+    inside unlocked_for_payout() before its `yield`, so the restore never runs, a
+    plain RuntimeError propagates, and the `except GridcoinLockError` clause is never
+    entered. The mutation run is what showed it: removing the re-raise failed no
+    test, which is the only reason I looked.
+
+    MUTATION: drop the `if not recorded: raise`. The lock error is then swallowed,
+    `txid` is never assigned, and the swap is appended to `completed` while its row
+    still says `paying` -- a payout that silently reports success having sent
+    nothing, which is the original defect inverted.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+
+    class SendAndRestoreBothFail(RestoreFailsWalletStub):
+        def send_to_address(self, address, amount):
+            self.sends += 1
+            raise RuntimeError("Error: Insufficient funds (rpc code -6)")
+
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_both")
+    wallet = SendAndRestoreBothFail()
+
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+
+    swap = conn.execute("SELECT status, payout_txid, failed_reason FROM swaps WHERE id = 's_both'").fetchone()
+    conn.close()
+
+    assert wallet.sends == 1
+    assert wallet.staking_unlocks == 1, "the restore must have been attempted and refused"
+    assert swap["status"] == "failed", "nothing was delivered, so this is the payout's failure"
+    assert swap["payout_txid"] is None
+    assert swap["failed_reason"], "the reason must be recorded, not just the status"
+    # THE STATUS ALONE DOES NOT CATCH THE MUTATION, which is why the reason is
+    # asserted. Without `if not recorded: raise`, the handler below it reaches for a
+    # `txid` that was never assigned, raises NameError, and the OUTER handler marks
+    # the swap failed anyway -- same status, and the recorded reason becomes a Python
+    # bug instead of what the daemon said. Found by running the mutation twice and
+    # getting no failure either time.
+    reason = swap["failed_reason"]
+    assert "NameError" not in reason and "not defined" not in reason, (
+        f"the reason must be the real cause, not an error from the error handler: {reason}"
+    )
+    assert "wallet" in reason.lower() or "-6" in reason or "-8" in reason, (
+        f"the reason should name the daemon's own failure: {reason}"
+    )
+
+
+def test_a_lock_failure_before_the_send_is_still_a_payout_failure(db_path, monkeypatch):
+    """A wrong passphrase: the full unlock raises before anything is sent.
+
+    Not the re-raise branch -- that one is above. This raises from inside
+    unlocked_for_payout() before its `yield`, so it never becomes a
+    GridcoinLockError at all and the outer handler marks the swap failed.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+
+    class FirstUnlockFails(GridcoinWalletStub):
+        def call(self, method, *params):
+            self.calls.append(method)
+            if method == "walletpassphrase":
+                raise RuntimeError("Error: The wallet passphrase entered was incorrect. (rpc code -14)")
+            return {}
+
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_early")
+    wallet = FirstUnlockFails()
+
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+
+    swap = conn.execute("SELECT status, payout_txid FROM swaps WHERE id = 's_early'").fetchone()
+    conn.close()
+
+    assert wallet.sends == 0, "nothing may be sent when the unlock failed"
+    assert swap["status"] == "failed"
+    assert swap["payout_txid"] is None

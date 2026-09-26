@@ -49,7 +49,7 @@ import os
 import sqlite3
 from contextlib import nullcontext
 
-from chains.gridcoin_wallet_lock import unlocked_for_payout
+from chains.gridcoin_wallet_lock import GridcoinLockError, unlocked_for_payout
 
 from .helpers import utc_now_iso
 from .swap_service import set_swap_status
@@ -226,19 +226,59 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
             # the send raises -- a wallet left fully unlocked because a payout failed
             # is the outcome that must not happen.
             adapter = adapters[destination_asset]
-            with payout_unlock_context(destination_asset, adapter):
-                txid = adapter.send_to_address(swap["payout_address"], amount)
-            db.execute(
-                "UPDATE payouts SET txid = ?, status = ?, sent_at = ? WHERE swap_id = ? AND status = 'created'",
-                (txid, "broadcast", utc_now_iso(), swap["id"]),
-            )
-            db.execute(
-                "UPDATE swaps SET payout_txid = ?, completed_at = ?, updated_at = ? WHERE id = ?",
-                (txid, utc_now_iso(), utc_now_iso(), swap["id"]),
-            )
-            set_swap_status(db, swap["id"], "completed", "Payout broadcast", old_status="paying")
-            release_inventory_after_send(db, destination_asset, amount)
-            db.commit()
+            recorded = False
+            try:
+                with payout_unlock_context(destination_asset, adapter):
+                    txid = adapter.send_to_address(swap["payout_address"], amount)
+                    # RECORDED INSIDE THE CONTEXT, BEFORE THE RE-LOCK CAN RAISE.
+                    #
+                    # This block sat AFTER the `with` until 2026-09-26, and the first
+                    # real payout this code ever made is what found it. The send
+                    # succeeded -- 55.52645238 GRC left the wallet, txid
+                    # 3e09dc9cfd7a61da..., confirmed afterwards in the operator's own
+                    # listtransactions -- and then the context's restore raised,
+                    # because the staking unlock was being sent a timeout of 0 that
+                    # Gridcoin refuses. Control jumped from the `with` straight to the
+                    # except clause below, `txid` was discarded, and the swap was
+                    # marked `failed` with `txid (none)`.
+                    #
+                    # Money out, no record: the single worst outcome available on this
+                    # path, and it was caused by a wallet-housekeeping call that has
+                    # nothing to do with whether the payment was delivered.
+                    #
+                    # The commit is what makes it durable, and `recorded` is set only
+                    # after it returns -- so a database failure here is still a
+                    # payout failure, while a LOCK failure after it is not.
+                    _record_broadcast(db, swap, destination_asset, amount, txid)
+                    recorded = True
+            except GridcoinLockError:
+                # THE PAYOUT IS ALREADY DURABLE. The wallet's lock state is a separate
+                # problem with its own loud message (chains/gridcoin_wallet_lock.py
+                # distinguishes "locked, not staking" from "may still be unlocked"),
+                # and treating it as a payout failure is what mislabeled a delivered
+                # payment. Re-raised when the send never got as far as being recorded,
+                # because then it IS the payout's failure.
+                if not recorded:
+                    raise
+                logger.exception(
+                    "payout for swap %s WAS BROADCAST as %s and is recorded as completed. The wallet's "
+                    "lock state could not be restored afterwards -- read the message above and act on "
+                    "the wallet, NOT on the swap.",
+                    swap["id"],
+                    txid,
+                )
+                db.execute(
+                    "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (
+                        swap["id"],
+                        "completed",
+                        "completed",
+                        f"payout broadcast {txid}; wallet lock restore FAILED afterwards",
+                        utc_now_iso(),
+                    ),
+                )
+                db.commit()
             completed.append(db.execute("SELECT * FROM swaps WHERE id = ?", (swap["id"],)).fetchone())
         # Checked, and this broad catch is the right one: `send_to_address`
         # can fail for transport reasons, daemon reasons, insufficient funds,
@@ -351,6 +391,27 @@ WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
 # something that gets rendered -- services/admin_view.py's own comment notes that
 # Config.RPC holds wallet credentials "one key away from these".
 WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
+
+
+def _record_broadcast(db, swap, destination_asset: str, amount, txid: str) -> None:
+    """Make a delivered payout durable. Commits. Called INSIDE the unlock context.
+
+    A function rather than inline, so the ordering that matters can be asserted
+    directly (rule 10): everything here must be committed before the wallet's
+    re-lock is attempted, because the re-lock can raise and a raised re-lock used to
+    discard the txid of a payment that had already left the wallet.
+    """
+    db.execute(
+        "UPDATE payouts SET txid = ?, status = ?, sent_at = ? WHERE swap_id = ? AND status = 'created'",
+        (txid, "broadcast", utc_now_iso(), swap["id"]),
+    )
+    db.execute(
+        "UPDATE swaps SET payout_txid = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+        (txid, utc_now_iso(), utc_now_iso(), swap["id"]),
+    )
+    set_swap_status(db, swap["id"], "completed", "Payout broadcast", old_status="paying")
+    release_inventory_after_send(db, destination_asset, amount)
+    db.commit()
 
 
 def payout_unlock_context(asset: str, adapter):

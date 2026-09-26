@@ -24,9 +24,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
 from chains.gridcoin_wallet_lock import (
+    _METHOD_LOCK,
+    _METHOD_UNLOCK,
     DEFAULT_UNLOCK_SECONDS,
     STAKING_UNLOCK_SECONDS,
     GridcoinLockError,
+    restore_failed_because,
     unlocked_for_payout,
 )
 
@@ -101,8 +104,15 @@ def test_the_full_unlock_omits_the_stakingonly_parameter():
     assert params == (LEAK_SENTINEL, DEFAULT_UNLOCK_SECONDS), "two parameters only -- no third"
 
 
-def test_the_restore_unlocks_for_staking_with_no_timeout():
-    """The resting state: timeout 0 means until the wallet stops, stakingonly true."""
+def test_the_restore_unlocks_for_staking_with_a_positive_timeout():
+    """The resting state: a POSITIVE timeout, stakingonly true.
+
+    RENAMED FROM ..._with_no_timeout, which was the defect wearing a test name. The
+    timeout was 0 on the belief that Gridcoin reads 0 as "until the wallet stops",
+    which is Bitcoin Core's behavior and not Gridcoin's: measured on the operator's
+    daemon 2026-09-26, `walletpassphrase <phrase> 0 true` answers
+    "Timeout cannot be negative or zero. (rpc code -8)".
+    """
     adapter = RecordingAdapter()
 
     with unlocked_for_payout(adapter, LEAK_SENTINEL):
@@ -110,6 +120,10 @@ def test_the_restore_unlocks_for_staking_with_no_timeout():
 
     _method, params = adapter.calls[3]
     assert params == (LEAK_SENTINEL, STAKING_UNLOCK_SECONDS, True)
+    assert STAKING_UNLOCK_SECONDS > 0, (
+        "Gridcoin refuses a zero or negative timeout with rpc -8; a staking unlock sent with 0 is "
+        "what turned the first real payout into a `failed` swap"
+    )
 
 
 def test_a_failing_body_still_locks_and_returns_to_staking():
@@ -190,3 +204,82 @@ def test_the_passphrase_never_reaches_a_log_line(caplog):
 
     assert LEAK_SENTINEL not in caplog.text, "the passphrase must never be logged"
     assert "walletpassphrase" in caplog.text, "the method name is safe and should be logged"
+
+
+# --- which restore call failed decides what the operator is told ---------------
+#
+# THE RESTORE IS TWO CALLS AND THE OLD MESSAGE TREATED THEM AS ONE. It said "THE
+# WALLET MAY STILL BE FULLY UNLOCKED" for either failure. On 2026-09-26 the
+# walletlock succeeded and only the staking unlock was rejected, so the wallet was
+# LOCKED -- the operator's getwalletinfo read `unlocked_until 0` -- and the message
+# sent them looking for an exposure that did not exist, with a remedy
+# (`walletpassphrase <passphrase> 0 true`) that was the call which had just failed.
+
+
+def test_a_failed_staking_unlock_says_the_wallet_is_locked_and_safe():
+    """THE CASE THAT ACTUALLY HAPPENED, and it had no test.
+
+    MUTATION: have restore_failed_because() ignore `locked`. This fails and
+    test_a_failed_lock_still_warns_about_a_possible_exposure keeps passing, which is
+    why both exist.
+    """
+    adapter = RecordingAdapter(fail_on=_METHOD_UNLOCK, fail_after=1)
+
+    with pytest.raises(GridcoinLockError) as caught, unlocked_for_payout(adapter, LEAK_SENTINEL):
+        pass
+
+    message = str(caught.value)
+    assert "the wallet is LOCKED" in message
+    assert "No funds are exposed" in message
+    assert "NOT staking" in message
+    assert "FULLY UNLOCKED" not in message, (
+        "the lock succeeded, so claiming a possible exposure is false and is what cost the operator "
+        "a search for a problem that was not there"
+    )
+    # The walletlock ran and returned before the staking unlock was attempted.
+    assert adapter.methods == [_METHOD_LOCK, _METHOD_UNLOCK, _METHOD_LOCK, _METHOD_UNLOCK]
+
+
+def test_a_failed_lock_still_warns_about_a_possible_exposure():
+    """The other outcome, which IS the hazard. Unchanged behavior, now pinned to the
+    lock specifically rather than to any restore failure."""
+    adapter = RecordingAdapter(fail_on=_METHOD_LOCK, fail_after=1)
+
+    with pytest.raises(GridcoinLockError) as caught, unlocked_for_payout(adapter, LEAK_SENTINEL):
+        pass
+
+    message = str(caught.value)
+    assert "MAY STILL BE FULLY UNLOCKED" in message
+    assert "run walletlock by hand" in message
+    assert str(DEFAULT_UNLOCK_SECONDS) in message, "say how long the unlock lasts, so they know the window"
+
+
+def test_the_remedy_never_names_the_call_that_just_failed():
+    """The old text told the operator to run `walletpassphrase <passphrase> 0 true`,
+    which is precisely the call the daemon had rejected."""
+    for failing in (_METHOD_LOCK, _METHOD_UNLOCK):
+        adapter = RecordingAdapter(fail_on=failing, fail_after=1)
+        with pytest.raises(GridcoinLockError) as caught, unlocked_for_payout(adapter, LEAK_SENTINEL):
+            pass
+        assert "walletpassphrase <passphrase> 0 true" not in str(caught.value)
+        assert " 0 true" not in str(caught.value)
+
+
+def test_a_rejected_timeout_names_the_override():
+    """When the daemon refuses the number, say which variable changes it.
+
+    Matched on the daemon's own words rather than on a code we invented: the
+    operator's build answered "Timeout cannot be negative or zero. (rpc code -8)".
+    """
+    reason = restore_failed_because(True, RuntimeError("Timeout cannot be negative or zero. (rpc code -8)"))
+
+    assert "GRIDCOIN_STAKING_UNLOCK_SECONDS" in reason
+    assert str(STAKING_UNLOCK_SECONDS) in reason, "echo the value that was refused"
+
+
+def test_an_unrelated_restore_failure_does_not_blame_the_timeout():
+    """So the hint cannot fire on every failure and stop meaning anything."""
+    reason = restore_failed_because(True, RuntimeError("Method not found"))
+
+    assert "GRIDCOIN_STAKING_UNLOCK_SECONDS" not in reason
+    assert "the wallet is LOCKED" in reason
