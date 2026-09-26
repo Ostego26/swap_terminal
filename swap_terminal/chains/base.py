@@ -84,6 +84,39 @@ class RPCError(Exception):
 SATOSHI = 1e-8
 
 
+def rpc_error_from_body(response) -> str | None:
+    """The daemon's own error message, or None if this response is not a JSON-RPC error.
+
+    Returns a STRING rather than the raw error object, built from the code and the
+    message, because that string is what lands in swaps.failed_reason and is read
+    by a person deciding what to do about an unpaid customer. The code alone
+    ("-13") is not that; the message alone loses which class of failure it was.
+
+    None means "not a JSON-RPC error", which covers three cases that must all fall
+    through to raise_for_status():
+      - a 2xx success, where there is no error to report
+      - a body that is not JSON at all, which is what a 401 returns
+      - JSON without an `error` object
+
+    Never raises. A diagnostic helper that can throw while explaining a throw makes
+    the original failure unreachable, which is the shape this whole fix is about.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not error:
+        return None
+    if isinstance(error, dict):
+        message = error.get("message") or "(no message)"
+        code = error.get("code")
+        return f"{message} (rpc code {code})" if code is not None else str(message)
+    return str(error)
+
+
 class RPCAdapter:
     asset = ""
 
@@ -111,11 +144,34 @@ class RPCAdapter:
             data=json.dumps(payload),
             timeout=self.timeout,
         )
+        # THE BODY IS READ BEFORE THE STATUS, and the order is the whole fix.
+        #
+        # Bitcoin-derived daemons -- bitcoind, litecoind, gridcoinresearch -- return
+        # HTTP 500 for an ORDINARY JSON-RPC error, with the real reason in the body's
+        # `error` object. raise_for_status() therefore fired first and the
+        # `data.get("error")` branch below was UNREACHABLE for every RPC error on
+        # all three chains. The reason was parsed, then discarded, then replaced
+        # with the status line.
+        #
+        # Measured on the operator's host 2026-09-26. A payout failed and
+        # swaps.failed_reason recorded:
+        #
+        #     500 Server Error: Internal Server Error for url: http://127.0.0.1:25715/
+        #
+        # which says nothing. The daemon had sent the actual cause and this method
+        # threw it away -- so a locked wallet, an insufficient balance and a bad
+        # address were one indistinguishable line, on the fund path, in the field an
+        # operator reads to decide what to do about a customer who was not paid.
+        #
+        # rpc_error_from_body() decides; raise_for_status() is the fallback for a
+        # response that is NOT a JSON-RPC error (a 401 returns no JSON at all, and
+        # "401 Client Error: Unauthorized" is genuinely the most informative thing
+        # available for it).
+        error = rpc_error_from_body(response)
+        if error is not None:
+            raise RPCError(error)
         response.raise_for_status()
-        data = response.json()
-        if data.get("error"):
-            raise RPCError(data["error"])
-        return data.get("result")
+        return response.json().get("result")
 
     def get_new_address(self, label: str) -> str:
         return self.call("getnewaddress", label)
