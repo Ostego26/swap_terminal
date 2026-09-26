@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # The path insert above has to run first: fund_testnets.py is at the project
 # root, which conftest.py does not put on sys.path.
+import fund_testnets
 from fund_testnets import (
     COINBASE_MATURITY_BLOCKS,
     GRIDCOIN_MAINNET_RPC_PORT,
@@ -35,7 +36,7 @@ class Args:
     """Stands in for argparse's namespace."""
 
     def __init__(self, **kwargs):
-        for name in ("btc", "ltc", "xrp", "sol", "grc", "xmr", "all", "wipe"):
+        for name in ("btc", "ltc", "xrp", "sol", "grc", "xmr", "all", "wipe", "grc_mainnet"):
             setattr(self, name, kwargs.get(name, False))
         self.blocks = kwargs.get("blocks", COINBASE_MATURITY_BLOCKS)
 
@@ -265,3 +266,56 @@ def test_the_negligible_threshold_is_a_whole_coin():
     assert NEGLIGIBLE_SUBSIDY == 1.0
     assert block_subsidy(150 * 6 + 1) < NEGLIGIBLE_SUBSIDY   # 6 halvings = 0.78
     assert block_subsidy(150 * 5 + 1) > NEGLIGIBLE_SUBSIDY   # 5 halvings = 1.5
+
+
+def test_the_mainnet_gridcoin_port_is_skipped_without_connecting(tmp_path, monkeypatch):
+    """THE CORRECTION, and it has a date on it.
+
+    On 2026-09-26 the first version of check_gridcoin_testnet() returned the
+    first conf that ANSWERED. The only Gridcoin daemon running was mainnet, so
+    it connected to port 15715 and printed a real 157,797 GRC balance into a
+    terminal whose output goes into a chat transcript.
+
+    It labelled the result correctly and refused to count it as test coins --
+    and that was the wrong altitude of fix. A script called fund_testnets
+    should not OPEN A SOCKET to the mainnet wallet, so the port is now skipped
+    BEFORE any call, and the refusal says how many were skipped and what flag
+    would reach them.
+
+    This test asserts the socket is never opened, by making any RPC call a test
+    failure.
+    """
+    def explode(*args, **kwargs):
+        raise AssertionError("an RPC call was made to the mainnet port")
+
+    monkeypatch.setattr(fund_testnets, "gridcoin_conf_candidates", lambda: [tmp_path / "does-not-matter.conf"])
+    monkeypatch.setattr(fund_testnets, "read_gridcoin_conf",
+                        lambda path: {"rpcport": str(GRIDCOIN_MAINNET_RPC_PORT), "rpcuser": "u", "rpcpassword": "p"})
+    monkeypatch.setattr(fund_testnets.RPCAdapter, "call", explode)
+
+    console = fund_testnets.Console(total_steps=1)
+    with pytest.raises(Exception, match="no Gridcoin TESTNET daemon answered"):
+        fund_testnets.check_gridcoin_testnet(console)
+
+
+def test_the_mainnet_refusal_names_the_skip_and_the_flag(tmp_path, monkeypatch):
+    """So an operator can tell "nothing is running" from "I declined to ask"."""
+    monkeypatch.setattr(fund_testnets, "gridcoin_conf_candidates", lambda: [tmp_path / "x.conf"])
+    monkeypatch.setattr(fund_testnets, "read_gridcoin_conf",
+                        lambda path: {"rpcport": str(GRIDCOIN_MAINNET_RPC_PORT), "rpcuser": "u", "rpcpassword": "p"})
+    console = fund_testnets.Console(total_steps=1)
+    with pytest.raises(Exception) as caught:
+        fund_testnets.check_gridcoin_testnet(console)
+    message = str(caught.value)
+    assert "Skipped 1 conf(s) on the mainnet port" in message
+    assert "--grc-mainnet" in message
+    assert "gridcoinresearchd -testnet" in message
+    assert "The coins are already there" in message
+
+
+def test_grc_mainnet_is_off_by_default_in_the_dispatch_table():
+    """The flag has to be said out loud; --all does not turn it on."""
+    grc = next(entry for entry in selected_chains(Args(all=True)) if entry[0] == "GRC")
+    assert callable(grc[2])
+    # Args(all=True) leaves grc_mainnet False, which is what the runner closes over.
+    assert Args(all=True).grc_mainnet is False

@@ -349,7 +349,7 @@ def read_gridcoin_conf(path: Path) -> dict:
     return values
 
 
-def check_gridcoin_testnet(console: Console) -> dict:
+def check_gridcoin_testnet(console: Console, allow_mainnet: bool = False) -> dict:
     """READ-ONLY. Report the Gridcoin balance of whichever daemon answers.
 
     Mints nothing: the operator already holds testnet Gridcoin and asked only
@@ -369,11 +369,29 @@ def check_gridcoin_testnet(console: Console) -> dict:
         raise RegtestSetupError("no gridcoinresearch.conf found; nothing to ask")
 
     tried: list[str] = []
+    skipped_mainnet = 0
     for path in candidates:
         conf = read_gridcoin_conf(path)
         port = conf.get("rpcport")
         user = conf.get("rpcuser")
         if not port or not user:
+            continue
+
+        # THE MAINNET PORT IS NOT ASKED AT ALL, and this is a correction with a
+        # date on it. On 2026-09-26 the first version of this function returned
+        # the first conf that ANSWERED -- which was the mainnet daemon on 15715,
+        # the only one running. It labelled the result correctly and refused to
+        # count it, but it had already printed a real 157,797 GRC balance into a
+        # terminal whose output goes into a chat transcript.
+        #
+        # Labelling a mainnet hit is the wrong altitude of fix. A script called
+        # fund_testnets should not OPEN A SOCKET to the mainnet wallet, so the
+        # port is skipped before any call is made, and reaching it requires
+        # --grc-mainnet said out loud. The label stays for the case where a
+        # testnet-configured port turns out to be a mainnet daemon, which is a
+        # thing only the daemon can tell us.
+        if int(port) == GRIDCOIN_MAINNET_RPC_PORT and not allow_mainnet:
+            skipped_mainnet += 1
             continue
         adapter = RPCAdapter(user=user, password=conf.get("rpcpassword", ""),
                              host="127.0.0.1", port=int(port), timeout=8.0)
@@ -396,10 +414,16 @@ def check_gridcoin_testnet(console: Console) -> dict:
         return {"asset": "GRC", "balance": balance, "address": f"{'testnet' if is_testnet else 'MAINNET'} "
                 f"port {port}", "testnet": is_testnet, "mainnet_warning": not is_testnet}
 
+    detail = "; ".join(tried) if tried else "no conf declared both rpcport and rpcuser"
+    skipped = (
+        f" Skipped {skipped_mainnet} conf(s) on the mainnet port {GRIDCOIN_MAINNET_RPC_PORT} without "
+        f"connecting -- pass --grc-mainnet if you really want the real wallet's balance printed."
+        if skipped_mainnet else ""
+    )
     raise RegtestSetupError(
-        "no Gridcoin daemon answered on any configured rpcport. Tried: "
-        + ("; ".join(tried) if tried else "no conf declared both rpcport and rpcuser")
-        + f". Mainnet is normally {GRIDCOIN_MAINNET_RPC_PORT}; start the testnet daemon with -testnet."
+        f"no Gridcoin TESTNET daemon answered. Tried: {detail}.{skipped} To start one:\n"
+        f"        gridcoinresearchd -testnet -datadir=<your testnet datadir> -daemon\n"
+        f"      The coins are already there -- this only means nothing is serving RPC for them."
     )
 
 
@@ -447,7 +471,7 @@ def selected_chains(args) -> list[tuple[str, str, object]]:
         ("XRP", "testnet faucet: create and fund an account", fund_xrp_testnet, args.xrp),
         ("SOL", "devnet: confirm the balance the key rotation left (read-only)", check_solana_devnet, args.sol),
         ("GRC", "testnet: report the balance (READ-ONLY; mints nothing)",
-         check_gridcoin_testnet, args.grc),
+         lambda console: check_gridcoin_testnet(console, args.grc_mainnet), args.grc),
         ("XMR", "not scripted; explaining why", None, args.xmr),
     ]
     return [(asset, title, run) for asset, title, run, on in everything if on or args.all]
@@ -489,6 +513,9 @@ def main() -> int:
     parser.add_argument("--grc", action="store_true",
                         help="report the Gridcoin balance, READ-ONLY -- the operator already holds "
                              "testnet GRC, so this mints nothing and only looks")
+    parser.add_argument("--grc-mainnet", action="store_true",
+                        help="also ask the MAINNET Gridcoin daemon on port 15715. Off by default: it "
+                             "prints a real balance, and this script's output tends to get pasted")
     parser.add_argument("--xmr", action="store_true", help="explain why Monero is not scripted here")
     parser.add_argument("--all", action="store_true", help="every chain above")
     parser.add_argument("--wipe", action="store_true",
