@@ -723,3 +723,73 @@ def test_the_submit_wait_is_reported_in_microfortnights(post, monkeypatch, capsy
     out = capsys.readouterr().out
     assert "µfn" in out
     assert "ufn" not in out, "an ASCII u in displayed output is a defect, not a rendering fallback"
+
+
+def test_the_preview_is_emitted_exactly_once_on_a_refusal(post, capsys):
+    """Found on the operator's host 2026-09-26, against a real rippled.
+
+    An unarmed run printed the eight-line plan, then the refusal, then the SAME
+    eight lines again: send_to_address() printed plan["description"] before the
+    arming check AND appended it to the refusal, so a caller that surfaced the
+    exception saw both copies.
+
+    Rule 14 asks for output a human can read, and a doubled block is how a reader
+    starts skimming the thing that exists to be read -- on the one path whose
+    whole purpose is that an operator reads the plan before arming it.
+
+    The copy inside the EXCEPTION is the one kept, because it survives being
+    caught and logged: a caller that swallows the refusal still holds the plan it
+    refused. So the live print moved below the arming check, where rule 14's
+    "announce before" most wants it anyway -- immediately before the one
+    irreversible step rather than before a guard that usually stops.
+
+    Asserted across BOTH channels together, since that is where the duplication
+    lived: one copy in total between stdout and the message, not one in each.
+    """
+    post(server_info=server_info(), account_info=account_info())
+
+    with pytest.raises(XRPSendNotArmed) as caught:
+        adapter().send_to_address(ACCOUNT_ONE, 1.5, source=ACCOUNT_ZERO)
+
+    printed = capsys.readouterr().out
+    message = str(caught.value)
+    # A line from the middle of the plan, not its first line: the "announce
+    # before" progress lines legitimately print the amount and the accounts, so
+    # keying on those would count an announcement as a duplicate plan.
+    marker = "partial pay"
+
+    assert message.count(marker) == 1, "the refusal must carry the plan exactly once"
+    assert printed.count(marker) == 0, (
+        "the plan must NOT also print live on the refusal path -- that is the "
+        f"duplication this test exists for. Printed:\n{printed}"
+    )
+    assert printed.count(marker) + message.count(marker) == 1
+
+
+def test_the_plan_still_prints_live_when_the_send_is_actually_armed(post, monkeypatch, capsys):
+    """The other half, and it needs its own test.
+
+    Removing the duplication by deleting the print would pass the test above and
+    lose something real: on an ARMED send the operator must see the plan before
+    the irreversible step, and there is no exception on that path to carry it. A
+    fix that silences both paths is not a fix, which is why these two are written
+    as a pair.
+
+    Uses armed_adapter(), so the real Wallet, Payment model, serialization and
+    refuse_partial_payment() all run and only the socket is stubbed.
+    """
+    instance, source, captured = armed_adapter(
+        post, monkeypatch,
+        result={"meta": {"TransactionResult": "tesSUCCESS"}, "validated": True, "hash": "A" * 64},
+    )
+
+    instance.send_to_address(
+        ACCOUNT_ONE, 1, source=source.classic_address, seed=source.seed,
+        confirm_send=CONFIRM_XRP_SEND,
+    )
+
+    printed = capsys.readouterr().out
+    assert len(captured) == 1, "the armed path must actually submit"
+    assert printed.count("partial pay") == 1, (
+        f"the plan must print exactly once before signing. Printed:\n{printed}"
+    )

@@ -374,9 +374,21 @@ class XRPAdapter:
 
         OwnerCount comes back as None when the response omits it. That is
         handled rather than assumed away in xrp_signing.reserve_drops(), which
-        says on screen that its figure understates the reserve when it happens
-        -- OwnerCount is a required AccountRoot field, but it was not read off a
-        live server from the environment this was written in (rule 17).
+        says on screen that its figure understates the reserve when it happens.
+
+        MEASURED PRESENT 2026-09-26 on the operator's host against rippled 3.4.1:
+        a real preview printed "1000000 base + 200000 x 0 owned objects" with no
+        UNDERSTATES warning, and that warning is the fallback's marker -- so
+        OwnerCount was read and its value was 0. This docstring said the field
+        "was not read off a live server from the environment this was written in",
+        which was accurate when written: that environment could not reach port
+        51234 at all.
+
+        The None branch stays. It is cheap, and a field being present on one
+        server on one day is evidence about that server rather than a guarantee
+        (rule 17). The failure it guards is also asymmetric: understating the
+        reserve lets a payout through that the ledger then rejects, which is why
+        it says so on screen instead of quietly using the low number.
         """
         result = self.call(_METHOD_ACCOUNT_INFO, {"account": address, "ledger_index": "validated"})
         data = result.get("account_data") or {}
@@ -460,9 +472,21 @@ class XRPAdapter:
         against, let alone sent to.
 
         base_fee_xrp is read WHEN PRESENT and the fallback is named in the
-        returned description (rule 14). That field was not among the ones
-        confirmed against a live server on 2026-09-25, so this does not claim to
-        have read it -- it says which figure it used.
+        returned description (rule 14).
+
+        MEASURED PRESENT 2026-09-26 on the operator's host, against rippled 3.4.1
+        on s.altnet.rippletest.net: a real preview printed "fee allowance 10
+        drops, read from server_info.validated_ledger.base_fee_xrp", so the read
+        branch is the one that ran and the field is confirmed. This docstring said
+        the field "was not among the ones confirmed against a live server" until
+        that run, which was true when written and is not now.
+
+        The fallback stays, and not as dead code: base_fee_xrp is optional in
+        rippled's own reply and a server under load or a different build may omit
+        it. One server answering once is evidence about that server, not a
+        guarantee about the field (rule 17) -- which is the same reason the
+        description names which figure it used rather than printing a bare
+        number.
         """
         result = self.call(_METHOD_SERVER_INFO)
         info = result.get("info") or {}
@@ -691,18 +715,34 @@ class XRPAdapter:
         the exception says WHICH guard fired (see chains/xrp_signing.py).
         """
         plan = self.preview_payout(address, amount, source, destination_tag)
-        print(plan["description"], flush=True)
 
         # The arming check comes AFTER the preview and BEFORE anything that
         # could sign, which is the order that makes the default useful: an
         # unarmed caller gets the full preview inside the refusal message rather
         # than a bare "not armed", so an operator who then arms it is arming
         # something they have read.
+        #
+        # THE DESCRIPTION IS EMITTED EXACTLY ONCE, and which path emits it is the
+        # point. It used to be printed here, before this check, AND appended to
+        # the refusal below -- so an unarmed caller that surfaced the exception
+        # got the whole eight-line block twice. Measured on the operator's host
+        # 2026-09-26, against a real rippled: the preview, the refusal, then the
+        # same preview again. Rule 14 asks for output a human can read, and a
+        # doubled block is how a reader starts skimming the thing that exists to
+        # be read.
+        #
+        # The copy inside the exception is the one that survives: a caller that
+        # catches and logs the refusal still has the plan it refused. So the
+        # unarmed path carries it there, and the live print moved BELOW the
+        # arming check -- which is also where rule 14's "announce before" most
+        # wants it, immediately before the one irreversible step in this file
+        # rather than before a guard that usually stops.
         try:
             require_send_confirmation(confirm_send, seed)
         except XRPSendNotArmed as error:
             raise XRPSendNotArmed(f"{error}\n{plan['description']}") from error
 
+        print(plan["description"], flush=True)
         return self._sign_and_submit(plan, seed)
 
     def _sign_and_submit(self, plan: dict, seed: str) -> str:

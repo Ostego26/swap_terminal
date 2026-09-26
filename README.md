@@ -699,9 +699,29 @@ is not code:
   this: `s.altnet.rippletest.net:51234` is unreachable through the agent proxy,
   measured as a connection reset rather than assumed. So the armed half is a
   PROPOSAL by rule 16's own test, verified only against seeded responses and a
-  stubbed submit that captures the real `Payment` object. The unarmed, preview
-  and refusal paths are a fix: they are what every test exercises and what any
-  real caller reaches today.
+  stubbed submit that captures the real `Payment` object.
+
+  The unarmed, preview and refusal paths are a fix, and as of 2026-09-26 they are
+  measured rather than merely tested: the operator ran a real preview against
+  rippled 3.4.1 from their host. It read `server_info` and `account_info`, named
+  the network from `network_id 1`, computed the reserve, and refused for want of
+  the arming token — signing nothing. Two figures the code had labeled
+  unconfirmed came back present in that run, `validated_ledger.base_fee_xrp` (10
+  drops) and `account_data.OwnerCount` (0), so both docstrings that said they had
+  never been read off a live server have been corrected. Their fallbacks stay:
+  one server answering once is evidence about that server, not a guarantee about
+  the field.
+
+  That run also found a defect. The plan was emitted TWICE on a refusal — printed
+  before the arming check and appended to the refusal message — so a caller that
+  surfaced the exception saw the same eight lines twice, on the one path whose
+  whole purpose is that an operator reads the plan before arming it. The copy
+  inside the exception is the one kept, because it survives being caught and
+  logged; the live print moved below the arming check, where rule 14's "announce
+  before" most wants it anyway: immediately before the one irreversible step
+  rather than before a guard that usually stops. Pinned by a PAIR of tests, since
+  removing the duplicate by deleting the print would have passed the first and
+  lost the announcement an armed send needs.
 
 `services/payout_service.py:219` is the call site, and it is NOT connected. It
 calls `send_to_address(address, amount)` with two positional arguments, which is
