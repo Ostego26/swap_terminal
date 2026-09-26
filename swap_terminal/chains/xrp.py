@@ -2,12 +2,20 @@
 
 Role: module (chain binding; transport plus the ledger's own vocabulary)
 Reads: a rippled server -- account_info, account_tx, server_info
-Writes: nothing to disk, nothing to the ledger. send_to_address() REFUSES;
-        see WHY PAYOUTS ARE NOT IMPLEMENTED below.
-Can move funds: NO. This module holds no key, reads no key path, and imports
-        nothing that can sign. The refusal is an absence, not a flag.
-Mainnet-safe: yes to import and to every method it implements. It identifies
-        the network from the server rather than from the URL.
+Writes: nothing to disk. ONE Payment transaction to a NON-MAINNET XRP Ledger,
+        and only when a caller passes the exact arming token from
+        chains/xrp_signing.py plus a signing seed. Everything else, including
+        send_to_address()'s default mode, is a read.
+Can move funds: CONDITIONALLY, AND NEVER ON MAINNET, AND NEVER BY
+        CONFIGURATION. This module holds no key, reads no key path, and has no
+        Config field or RPC dict key that would give it one -- so no .env edit
+        and no environment variable can arm a payout. A seed and the arming
+        token both have to be passed at the call site, and before either is
+        used the SERVER is asked for its network_id and a mainnet id refuses.
+        See the four structural properties in send_to_address()'s docstring.
+Mainnet-safe: yes, and stronger than that -- mainnet is UNREACHABLE from this
+        module's payout path, including in preview mode. Every read method is
+        mainnet-safe in the ordinary sense: they are reads.
 
 THE HONEST STATUS
 
@@ -74,17 +82,43 @@ TWO THINGS ABOUT rippled's JSON-RPC THAT ARE EASY TO GET WRONG
    empty. That is the shape this whole codebase keeps being bitten by, so it is
    checked explicitly below.
 
-WHY PAYOUTS ARE NOT IMPLEMENTED, AND WHY THAT IS NOT LAZINESS
+HOW PAYOUTS WORK, AND WHAT MAKES THEM UNARMED BY DEFAULT
 
 rippled removed transaction signing from its public API. There is no `sign`
 method to call on a remote server, deliberately: signing there would mean
 sending a secret key over the wire. So paying out XRP means THIS process holds
 a signing key and signs locally.
 
-That is the same custody question chains/solana.py handed back, and it is
-answered the same way: not here, and not without the operator deciding. So
-send_to_address() refuses, and the refusal is structural -- this module imports
-no signing library and reads no key path, so it could not sign if it tried.
+UNTIL 2026-09-26 THIS MODULE SIMPLY REFUSED, and the refusal was an absence
+rather than a flag: no signing library was imported and no key path was read,
+so it could not have signed if the check had been deleted. That was honest and
+it was also a dead end -- it left the operator no way to inspect what a payout
+WOULD be before deciding whether to allow one.
+
+What replaced it is a mechanism that is structurally incapable of sending on
+mainnet and cannot be armed by configuration alone. In one list, with the
+argument for each spelled out at length in send_to_address()'s docstring and in
+chains/xrp_signing.py:
+
+  the default is a PREVIEW   send_to_address(address, amount) reads the server,
+                             converts the amount, checks the reserve, prints
+                             the whole plan, and then REFUSES. A caller that
+                             forgets to arm it cannot send.
+  mainnet is refused by ID   the network comes from server_info.network_id, not
+                             from the url, because a hostname resolves to
+                             whatever DNS says today. A missing or unreadable id
+                             refuses too: not reading the network is not the
+                             same as reading a safe one.
+  the arming token           an exact string, not a boolean, so no truthy value
+                             or drifted positional argument can supply it.
+  no key anywhere here       no seed, no key path, no Config field, no
+                             environment variable. The seed is an argument. So
+                             there is no .env edit that arms this.
+
+That still leaves the custody question chains/solana.py hands back exactly
+where it was: whether this terminal should hold an XRP hot wallet at all, and
+which account it should be, is the operator's (rule 16). Nothing here decides
+it, and nothing here is wired to the payout worker.
 
 get_new_address() also refuses, but for a happier reason. XRP does not need
 one: a DESTINATION TAG is a per-swap identifier on a single account, costs
@@ -97,15 +131,49 @@ services/ change rather than an adapter one.
 from __future__ import annotations
 
 import json
+import time
 
 import requests
 
+# Rootless, matching workers/common.py:60, and NOT a relative import.
+#
+# `from ..microfortnights import ...` was the first spelling and it fails with
+# "attempted relative import beyond top-level package" -- measured, it broke
+# collection of three test files. The application imports its own modules
+# rootlessly (`from config import Config`), so `chains` is itself a top-level
+# package and there is no parent to go up into. That is rule 10's layout gap.
+#
+# Deliberately NOT fixed with the `sys.path.insert` that chains/base.py uses for
+# script_pub_key: an import-time side effect is the one thing rule 12 names that
+# a linter cannot check, and a second copy of it would make import order matter
+# in one more place. This import needs no path help, because anything that can
+# import `chains.xrp` at all already has swap_terminal/ on the path.
+from microfortnights import format_duration
+
 from .xrp_address import describe_address, is_valid_classic_address, looks_like_x_address
 from .xrp_payments import XRPPaymentError, deposit_events_from_transactions
+
+# EVERY DECISION THE PAYOUT PATH MAKES IS IMPORTED, NOT SPELLED HERE. The
+# functions below are the guards, they live one layer down in the function layer
+# (rule 10), and they are each callable with seeded arguments -- which is what
+# makes it possible to disable one at a time and watch a test fail, rather than
+# having to run a whole send to find out whether a check is load-bearing.
+from .xrp_signing import (
+    FEE_ALLOWANCE_DROPS,
+    XRPSendNotArmed,
+    derive_and_check,
+    refuse_partial_payment,
+    require_non_mainnet,
+    require_reserve_headroom,
+    require_send_confirmation,
+    reserve_drops,
+)
 from .xrp_units import (
     REFERENCE_BASE_RESERVE_XRP,
     describe_min_confirmations,
     from_drops,
+    from_drops_decimal,
+    to_drops,
     validate_min_confirmations,
 )
 
@@ -125,8 +193,24 @@ class XRPRPCError(Exception):
     """
 
 
-class XRPPayoutDisabled(XRPRPCError):
-    """send_to_address() was called. This module cannot sign and will not try."""
+# XRPPayoutDisabled USED TO BE DEFINED HERE and it is deleted rather than kept
+# (rule 9: every time you are in a file, leave less of it behind; rule 2:
+# delete, do not quarantine -- git history is the archive). Its whole meaning
+# was "this module cannot sign and will not try", which stopped being true on
+# 2026-09-26, and a class kept for compatibility would be a name a reader finds
+# and reasons about before discovering nothing raises it.
+#
+# What replaced it is FOUR named refusals in chains/xrp_signing.py --
+# XRPMainnetRefused, XRPSendNotArmed, XRPReserveRefused and
+# XRPPartialPaymentRefused -- because an operator reading a failure needs to
+# tell "this is mainnet" from "you did not arm it" from "this breaches the
+# reserve" from "the flags would let it under-deliver", and three of those four
+# do not mean "retry".
+#
+# Proven dead before deleting, not assumed (rule 2): grepped the whole tree for
+# the NAME rather than the import graph, and the only occurrences were its own
+# definition and the single raise in the old send_to_address(). Nothing in
+# tests/, scripts, or the two root-level chain-check files named it.
 
 
 class XRPAdapter:
@@ -152,12 +236,26 @@ class XRPAdapter:
 
         Says "validated ledger" rather than a bare number so the figure cannot
         be read as a block depth the way the BTC/LTC/GRC lines are, and states
-        that payouts are off -- an operator who expects this chain to pay needs
-        to learn that here rather than from a refusal hours later.
+        the payout posture -- an operator who expects this chain to pay needs to
+        learn that here rather than from a refusal hours later.
+
+        THE PAYOUT WORD CHANGED ON 2026-09-26 and the old one would now be a
+        lie. It read `payouts=REFUSED (holds no signing key)`, which was true
+        while send_to_address() refused unconditionally. It still holds no
+        signing key -- that part is unchanged and is why the line still says it
+        -- but the method now previews by default and can submit when a caller
+        arms it, so `REFUSED` would tell an operator the mechanism does not
+        exist. Rule 16: a wrong comment is a bug, and a wrong banner line is a
+        wrong comment an operator reads every cycle.
+
+        NOT stated as a boolean, because the honest answer is not one. What the
+        banner can promise is the two properties that no configuration changes:
+        this process holds no key, and mainnet is refused by network id.
         """
         return (
             f"  XRP  rpc={self.url} min_confirmations={describe_min_confirmations(self.min_confirmations)} "
-            f"payouts=REFUSED (holds no signing key)"
+            f"payouts=PREVIEW-ONLY unless armed at the call site (holds no signing key; mainnet refused "
+            f"by server network_id, not by url)"
         )
 
     def call(self, method: str, params: dict | None = None):
@@ -241,6 +339,33 @@ class XRPAdapter:
         would let a caller commit to a payment the ledger then refuses -- the
         gate-versus-send disagreement in a third form.
         """
+        drops, _owner_count = self.account_drops_and_owner_count(address)
+        return from_drops(drops) - float(self.reserve_xrp())
+
+    def account_drops_and_owner_count(self, address: str) -> tuple[int, int | None]:
+        """One account_info read, returning RAW drops and OwnerCount. No subtraction.
+
+        Extracted so account_balance() above and the payout preview below share
+        ONE reader of this response (rule 8). They need different things from
+        it and that is exactly the situation where two copies get written: the
+        balance method wants spendable XRP as a float, the reserve check wants
+        raw integer drops and the count of owned ledger objects, and a second
+        parse would have been the shorter diff. The two would then disagree the
+        first time the response shape changed, and only one of them would be
+        wrong at a time -- which is rule 8's "nothing fails until a decision
+        made through copy A contradicts a decision made through copy B."
+
+        DROPS, AS AN INTEGER, is what this returns. The subtraction and the
+        float conversion belong to the caller that needs them; the payout path
+        never converts, because integer drops is the only representation in
+        which a reserve check cannot be wrong by a rounding.
+
+        OwnerCount comes back as None when the response omits it. That is
+        handled rather than assumed away in xrp_signing.reserve_drops(), which
+        says on screen that its figure understates the reserve when it happens
+        -- OwnerCount is a required AccountRoot field, but it was not read off a
+        live server from the environment this was written in (rule 17).
+        """
         result = self.call(_METHOD_ACCOUNT_INFO, {"account": address, "ledger_index": "validated"})
         data = result.get("account_data") or {}
         raw = data.get("Balance")
@@ -250,7 +375,8 @@ class XRPAdapter:
                 f"JSON STRINGS, specifically so a client cannot round them through a double. A "
                 f"non-string here means the response shape is not what this adapter expects."
             )
-        return from_drops(raw) - float(self.reserve_xrp())
+        owner_count = data.get("OwnerCount")
+        return int(raw), (None if owner_count is None else int(owner_count))
 
     def reserve_xrp(self) -> float:
         """The base reserve, ASKED OF THE SERVER rather than hardcoded.
@@ -305,19 +431,380 @@ class XRPAdapter:
             print(f"  XRP deferred  {line}", flush=True)
         return scan.events
 
-    def send_to_address(self, address: str, amount: float) -> str:
-        """Refuses, structurally. This module cannot sign.
+    def server_parameters(self) -> dict:
+        """One server_info read: the network verdict, the reserve figures, the fee.
 
-        rippled removed signing from its public API, so paying XRP means
-        holding a key in THIS process. That is the operator's decision (rule
-        16), and until it is made the refusal is an absence rather than a flag:
-        no signing library is imported here and no key path is read, so this
-        could not sign if the check were deleted.
+        ONE CALL, not three, and that is a correctness point rather than a
+        performance one. network(), reserve_xrp() and a fee read would each
+        issue their own server_info, so the network the payment is checked
+        against could differ from the network whose reserve was used -- up to
+        three answers from three different moments, with nothing saying they
+        disagreed. The payout path reads the server once and decides from that
+        one snapshot.
+
+        THE NETWORK CHECK HAPPENS HERE, before anything else in the payout path
+        can proceed, and it raises on mainnet. That is why this is called at the
+        top of preview_payout(): a mainnet endpoint cannot even be PREVIEWED
+        against, let alone sent to.
+
+        base_fee_xrp is read WHEN PRESENT and the fallback is named in the
+        returned description (rule 14). That field was not among the ones
+        confirmed against a live server on 2026-09-25, so this does not claim to
+        have read it -- it says which figure it used.
         """
-        raise XRPPayoutDisabled(
-            f"XRP payouts are not implemented, so {amount} XRP was NOT sent to {address} and no "
-            f"network call was made. rippled has no remote `sign` method -- deliberately, since that "
-            f"would mean sending a secret key over the wire -- so paying out requires a signing key in "
-            f"this process. That is a custody decision for the operator, the same one chains/solana.py "
-            f"hands back."
+        result = self.call(_METHOD_SERVER_INFO)
+        info = result.get("info") or {}
+        ledger = info.get("validated_ledger") or {}
+        # Raises XRPMainnetRefused on a mainnet id, on a missing id, and on an
+        # id of an unexpected shape. See xrp_signing.require_non_mainnet.
+        network = require_non_mainnet(info.get("network_id"), self.url)
+
+        base_reserve = ledger.get("reserve_base_xrp")
+        if base_reserve is None:
+            raise XRPRPCError(
+                f"{_METHOD_SERVER_INFO} did not report validated_ledger.reserve_base_xrp, so the "
+                f"reserve this payment must respect is unknown. NOT falling back to the reference "
+                f"value {REFERENCE_BASE_RESERVE_XRP} XRP: the reserve is a network parameter that has "
+                f"changed before (20, then 10, then 1), and guessing it low would let this path commit "
+                f"to a payment the ledger refuses after claiming a fee."
+            )
+
+        base_fee_xrp = ledger.get("base_fee_xrp")
+        if base_fee_xrp is None:
+            fee_drops = FEE_ALLOWANCE_DROPS
+            fee_source = (
+                f"{fee_drops} drops, the conservative allowance in chains/xrp_signing.py -- the server "
+                f"did NOT report validated_ledger.base_fee_xrp. The fee actually paid is autofilled by "
+                f"xrpl-py at submit time and may differ; this figure is only what the reserve check "
+                f"subtracts."
+            )
+        else:
+            fee_drops = to_drops(base_fee_xrp)
+            fee_source = (
+                f"{fee_drops} drops, read from server_info.validated_ledger.base_fee_xrp. The fee "
+                f"actually paid is autofilled by xrpl-py at submit time and rises with load."
+            )
+        return {
+            "network": network,
+            "build_version": info.get("build_version"),
+            "base_reserve_xrp": base_reserve,
+            "owner_reserve_xrp": ledger.get("reserve_inc_xrp"),
+            "fee_drops": fee_drops,
+            "fee_source": fee_source,
+        }
+
+    def preview_payout(self, address: str, amount, source: str, destination_tag: int | None = None) -> dict:
+        """Everything about an XRP payout except the signature. Read-only.
+
+        THIS IS THE DEFAULT MODE of send_to_address(), not a separate feature.
+        It reads the server, does every conversion, applies every guard that can
+        be applied without a key, and returns the result plus a `description` an
+        operator can read (rule 14: echo the parameters that decide the answer,
+        so a pasted block is self-describing a day later). Modeled on
+        chains/solana.py's build_transfer_plan() for the reason that one exists:
+        the half that can be built without custody should be built, shown, and
+        testable.
+
+        NOTHING HERE CAN MOVE MONEY. No key is touched, no signing library is
+        imported, and the only network calls are server_info and account_info,
+        both reads. Running this against any endpoint is safe -- except that a
+        MAINNET endpoint refuses, via server_parameters() above, which is
+        deliberate: wanting a preview is not a reason to let this path talk to
+        mainnet at all.
+
+        THE ORDER OF THE GUARDS IS THE DESIGN, cheapest-and-most-fatal first:
+
+          1  destination address   local checksum, no network call
+          2  the amount            to_drops(), which refuses a negative, a
+                                   non-number and a zero
+          3  the NETWORK           server_info; mainnet refuses here and
+                                   everything below is unreachable
+          4  the balance           account_info on the SOURCE account
+          5  the reserve           integer drops arithmetic, refusing before any
+                                   signature rather than letting the ledger
+                                   refuse after it has claimed a fee
+
+        Raises rather than returning a refusal in a field. A dict with
+        `ok: False` in it is the shape every caller forgets to check, and on this
+        path the cost of forgetting is a send.
+        """
+        if looks_like_x_address(address):
+            raise XRPRPCError(
+                f"{address} is an X-ADDRESS, and this payout path will not send to one. It is a valid "
+                f"address -- validate_address() accepts it -- but it CARRIES ITS OWN destination tag "
+                f"encoded into the string, so sending to it while also passing "
+                f"destination_tag={destination_tag!r} would mean two tags, one of which silently loses. "
+                f"Decode it to a classic address plus a tag and pass them separately. Nothing was read "
+                f"from the server and nothing was sent."
+            )
+        if not is_valid_classic_address(address):
+            raise XRPRPCError(
+                f"{address} fails the checksum in chains/xrp_address.py, so it is not a payable XRPL "
+                f"address. NOTHING was read from the server and nothing was sent. An XRPL address "
+                f"carries a double-SHA256 checksum, so this is decided locally and a typo cannot reach "
+                f"the ledger."
+            )
+        if not source:
+            raise XRPRPCError(
+                "preview_payout() needs the SOURCE account this payment would debit, and none was "
+                "given. It is a required argument rather than adapter state on purpose: an adapter that "
+                "held a hot-wallet account would be one configuration value away from being a payout "
+                "path, and which account pays is the operator's decision (CLAUDE.md rule 16)."
+            )
+        if not is_valid_classic_address(source):
+            raise XRPRPCError(
+                f"the source account {source} fails the checksum in chains/xrp_address.py. NOTHING was "
+                f"read and nothing was sent. A malformed source would otherwise produce an account_info "
+                f"error several layers from the cause."
+            )
+        send_drops = to_drops(amount)
+        if send_drops <= 0:
+            raise XRPRPCError(
+                f"{amount!r} XRP is {send_drops} drops, so there is nothing to pay. A zero-value Payment "
+                f"is a perfectly valid XRPL transaction that costs a fee and delivers nothing, and it "
+                f"would be written into `payouts` as a broadcast payout. Refused."
+            )
+
+        # Rule 14: announce BEFORE, not only after. Everything below this line
+        # makes network calls, and an operator watching a blinking cursor cannot
+        # tell working from hung -- which on this path resolves with a Ctrl-C.
+        print(
+            f"  XRP payout preview  {from_drops_decimal(send_drops)} XRP ({send_drops} drops) "
+            f"{source} -> {address} tag={destination_tag if destination_tag is not None else '(none)'}",
+            flush=True,
         )
+        print(f"  XRP payout preview  reading server_info and account_info from {self.url}", flush=True)
+
+        parameters = self.server_parameters()
+        balance_drops, owner_count = self.account_drops_and_owner_count(source)
+        required_reserve, reserve_line = reserve_drops(
+            parameters["base_reserve_xrp"], parameters["owner_reserve_xrp"], owner_count
+        )
+        headroom = require_reserve_headroom(
+            balance_drops, send_drops, parameters["fee_drops"], required_reserve
+        )
+
+        description = "\n".join(
+            [
+                f"    network       {parameters['network']}  build {parameters['build_version']}",
+                f"    from          {source}  (the account this DEBITS)",
+                f"    to            {address}",
+                f"    tag           {destination_tag if destination_tag is not None else '(none)'}",
+                f"    amount        {from_drops_decimal(send_drops)} XRP = {send_drops} drops",
+                f"    fee allowance {parameters['fee_source']}",
+                f"    reserve       {reserve_line}",
+                f"    headroom      {headroom}",
+                "    partial pay   tfPartialPayment will NOT be set, so Amount is an exact figure and "
+                "not a ceiling",
+            ]
+        )
+        return {
+            "source": source,
+            "destination": address,
+            "destination_tag": destination_tag,
+            "send_drops": send_drops,
+            "balance_drops": balance_drops,
+            "fee_drops": parameters["fee_drops"],
+            "required_reserve_drops": required_reserve,
+            "network": parameters["network"],
+            "description": description,
+        }
+
+    def send_to_address(  # noqa: PLR0913 -- checked: these four keywords ARE the payment, and bundling them into one object would add a type without removing a parameter AND would let a single object carry both the seed and the arming token. Their separation is the reason a forgotten opt-in cannot become a send. Same judgment recorded at chains/base.py:68 and chains/monero.py:186. PLR0917 is deliberately NOT suppressed beside it: it does not fire, because every one of the four is keyword-only, which is the same property the arming argument relies on.
+        self,
+        address: str,
+        amount: float,
+        *,
+        source: str = "",
+        seed: str = "",
+        destination_tag: int | None = None,
+        confirm_send: str = "",
+    ) -> str:
+        """PREVIEWS by default. Signs and submits only when armed, and never on mainnet.
+
+        WHAT CHANGED ON 2026-09-26, AND WHAT DID NOT. This method used to refuse
+        unconditionally, and the refusal was an absence: no signing library was
+        imported into this module, so it could not have signed if the check had
+        been deleted. It can sign now, and the honest statement of what replaced
+        that absence is FOUR structural properties, not one of which is a
+        configuration value:
+
+          the network       server_parameters() asks the SERVER for its
+                            network_id and xrp_signing.require_non_mainnet()
+                            refuses id 0, a MISSING id, and an unreadable id.
+                            The url is echoed and never consulted, because a
+                            hostname resolves to whatever DNS says today. There
+                            is no flag, environment variable or argument that
+                            turns this off, and the PREVIEW path runs it too --
+                            so mainnet cannot even be previewed against.
+          the arming token  confirm_send must equal
+                            xrp_signing.CONFIRM_XRP_SEND exactly. A caller that
+                            omits it gets the preview and a refusal.
+                            Deliberately NOT a boolean: a truthy variable, a
+                            parsed config value or a positional argument that
+                            drifted one place could each produce a send nobody
+                            wrote.
+          no stored key     this adapter holds no seed, reads no key path, and
+                            has no Config field or RPC dict key that would give
+                            it one. The seed arrives as an argument from a caller
+                            that already had it. So CONFIGURATION ALONE CANNOT
+                            ARM THIS: there is no .env edit that results in a
+                            payout.
+          the caller        services/payout_service.py:219 calls
+                            `send_to_address(swap["payout_address"], amount)` --
+                            two positional arguments and no keywords. It
+                            therefore gets XRPSendNotArmed with the preview in
+                            the message, and the swap lands in `failed` with the
+                            reason recorded. THAT CALL SITE WAS NOT WIRED UP and
+                            wiring it is the operator's (CLAUDE.md rule 16: fund
+                            movement comes back).
+
+        AND XRP IS STILL NOT TRADEABLE. Config.ALLOWED_PAIRS is unchanged and
+        names no XRP pair, so services/quote_service.py cannot produce an XRP
+        quote and services/swap_service.py cannot create an XRP swap -- which
+        means the payout worker never reaches this method with an XRP swap at
+        all. Enabling a pair is live posture and is the operator's.
+
+        WHY submit_and_wait() AND NOT submit(). submit() returns when the server
+        has accepted the blob for relay, which is not the same as the ledger
+        having applied it: a transaction that fails with a tec* code, or that
+        never validates, would come back as a txid and be written into `payouts`
+        as `broadcast`. submit_and_wait() waits for validation, and the final
+        result is checked below against tesSUCCESS AND the validated flag before
+        any hash is returned. Rule 13's "a stop that cannot prove it worked is
+        not a stop", applied to a send: the assertion is the outcome, not the
+        absence of an exception.
+
+        Returns the transaction hash. Raises on every refusal, and the class of
+        the exception says WHICH guard fired (see chains/xrp_signing.py).
+        """
+        plan = self.preview_payout(address, amount, source, destination_tag)
+        print(plan["description"], flush=True)
+
+        # The arming check comes AFTER the preview and BEFORE anything that
+        # could sign, which is the order that makes the default useful: an
+        # unarmed caller gets the full preview inside the refusal message rather
+        # than a bare "not armed", so an operator who then arms it is arming
+        # something they have read.
+        try:
+            require_send_confirmation(confirm_send, seed)
+        except XRPSendNotArmed as error:
+            raise XRPSendNotArmed(f"{error}\n{plan['description']}") from error
+
+        return self._sign_and_submit(plan, seed)
+
+    def _sign_and_submit(self, plan: dict, seed: str) -> str:
+        """The only code in this tree's chains/ that signs anything.
+
+        Separate from send_to_address() rather than inlined, and the split is
+        exactly where the guards end and the irreversible part begins:
+        everything above this call is a read or a refusal, everything inside it
+        touches a key. Reaching it requires the arming token, a seed, and a
+        server that has already answered with a non-mainnet network id.
+
+        Kept as a private method here rather than a function in xrp_signing.py
+        for one reason: it makes network calls, and xrp_signing.py's header
+        promises that nothing in it opens a socket. That promise is worth more
+        than the symmetry would be.
+        """
+        try:
+            # Lazy, for the reason chains/xrp_signing.derive_and_check() records
+            # at length: xrpl-py is an OPTIONAL dependency, chains/registry.py
+            # imports this module unconditionally, and a module-level import
+            # would make a signing library mandatory in order to start a
+            # read-only deposit watcher.
+            import httpx  # noqa: PLC0415 -- checked: optional dependency, arrives with xrpl-py
+            from xrpl.clients import JsonRpcClient  # noqa: PLC0415 -- checked: optional dependency
+            from xrpl.constants import XRPLException  # noqa: PLC0415 -- checked: optional dependency
+            from xrpl.models.transactions import Payment  # noqa: PLC0415 -- checked: optional dependency
+            from xrpl.transaction import submit_and_wait  # noqa: PLC0415 -- checked: optional dependency
+        except ImportError as error:
+            raise XRPRPCError(
+                "xrpl-py is not importable, so this payment was NOT signed and NOT submitted. It is an "
+                "optional dependency on purpose -- the preview path, every guard and the whole test "
+                "suite work without it -- so a missing signing library is a refusal here rather than a "
+                "crash at import. `pip install xrpl-py` if this host is meant to pay XRP out."
+            ) from error
+
+        wallet = derive_and_check(seed, plan["source"])
+        print(
+            f"  XRP payout  derived address matches the announced source: {wallet.classic_address}",
+            flush=True,
+        )
+
+        payment = Payment(
+            account=plan["source"],
+            destination=plan["destination"],
+            destination_tag=plan["destination_tag"],
+            amount=str(plan["send_drops"]),
+            # NO flags. See xrp_signing.TF_PARTIAL_PAYMENT: with tfPartialPayment
+            # set, the ledger may deliver LESS than Amount and still return
+            # tesSUCCESS, so a payout could under-pay a customer and be recorded
+            # as a successful broadcast with a real hash. The next line verifies
+            # the SERIALIZED transaction rather than trusting this comment,
+            # because "the code does not pass flags" is evidence about today's
+            # call site and not about the transaction that gets signed.
+        )
+        refuse_partial_payment(payment.to_xrpl())
+
+        print(f"  XRP payout  submitting and waiting for validation ({plan['network']})", flush=True)
+        started = time.monotonic()
+        try:
+            response = submit_and_wait(payment, JsonRpcClient(self.url), wallet)
+        except (XRPLException, httpx.HTTPError) as error:
+            # NAMED types, not `except Exception`. Measured against the installed
+            # xrpl-py 5.2.0: XRPLReliableSubmissionException and
+            # XRPLRequestFailureException both subclass
+            # xrpl.constants.XRPLException, and the only other family that
+            # reaches here is transport failure from httpx, which xrpl-py's
+            # JSON-RPC client uses. Two names cover it, so no breadth is needed
+            # and no BLE001 suppression is required (rule 19: fix the code, do
+            # not suppress the finding).
+            #
+            # WHAT THIS DOES NOT ESTABLISH, said plainly because it is the
+            # expensive case: a timeout here does NOT mean nothing was submitted.
+            # The transaction may have been relayed and may still validate.
+            # Nothing retries, and nothing should retry without looking first.
+            raise XRPRPCError(
+                f"submit_and_wait failed: {type(error).__name__}: {error}. THIS IS NOT PROOF NOTHING "
+                f"WAS SENT -- a transport failure after the blob was relayed looks identical to a "
+                f"refusal before it. Look the source account's recent transactions up before retrying; "
+                f"a retry that duplicates a validated payment pays twice, and on this ledger that is "
+                f"final."
+            ) from error
+        elapsed = format_duration(time.monotonic() - started)
+
+        result = response.result or {}
+        meta = result.get("meta") or {}
+        outcome = str(meta.get("TransactionResult") or result.get("engine_result") or "(none)")
+        tx_hash = result.get("hash") or (result.get("tx_json") or {}).get("hash")
+        validated = result.get("validated")
+        print(
+            f"  XRP payout  TransactionResult {outcome}  validated={validated}  waited {elapsed}",
+            flush=True,
+        )
+
+        if outcome != "tesSUCCESS":
+            raise XRPRPCError(
+                f"the payment was submitted and the ledger's final result is {outcome}, which is NOT "
+                f"tesSUCCESS, so no value was delivered. hash={tx_hash or '(none)'}. A tec* result "
+                f"REACHED the ledger and claimed a fee, so it was not free; a ter*/tem* result did not. "
+                f"Nothing is retried here. Raised rather than returned so that a failed payment cannot "
+                f"be written into `payouts` as a broadcast one."
+            )
+        if validated is not True:
+            raise XRPRPCError(
+                f"the payment reported {outcome} but validated={validated!r}, so the ledger has NOT "
+                f"confirmed it. hash={tx_hash or '(none)'}. Treated as a failure on purpose: the XRP "
+                f"Ledger's finality is binary (chains/xrp_units.py), so 'succeeded but not validated' "
+                f"is not a weaker yes -- it is an answer this path will not read as delivery. Look the "
+                f"hash up before retrying, because the transaction may yet validate."
+            )
+        if not tx_hash:
+            raise XRPRPCError(
+                f"the payment reported {outcome} and validated, but the response carried no hash. THE "
+                f"PAYMENT WAS ALMOST CERTAINLY MADE: a missing field is not evidence it did not happen. "
+                f"Check the source account before retrying, because retrying would pay twice."
+            )
+        print(f"  XRP payout  DELIVERED and validated  hash={tx_hash}", flush=True)
+        return str(tx_hash)

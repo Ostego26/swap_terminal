@@ -55,11 +55,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 import requests
 from chains.xrp_address import is_valid_classic_address
+
+# derive_and_check() and MAINNET_NETWORK_IDS USED TO BE DEFINED IN THIS FILE.
+#
+# They moved to chains/xrp_signing.py on 2026-09-26, when chains/xrp.py's
+# payout path needed the identical derivation guard. Rule 8: two copies of one
+# rule is not redundancy, it is a bug with a delay on it -- the copies agree on
+# the day they are written and drift from then on, invisibly, because each one
+# looks correct in its own file. So there is one copy, it lives where both
+# callers can reach it, and this file imports it rather than keeping a second.
+#
+# Nothing else about this script changed. It still signs only against
+# s.altnet.rippletest.net, it still refuses a mainnet network_id before
+# anything is sent, and it still never puts a secret in argv.
+from chains.xrp_signing import MAINNET_NETWORK_IDS, derive_and_check
 from chains.xrp_units import to_drops
 
 TESTNET_URL = "https://s.altnet.rippletest.net:51234/"
 KEY_DIRECTORY = Path.home() / ".config" / "swap_terminal" / "keys"
-MAINNET_NETWORK_IDS = {0}
 
 
 def rpc(method: str, params: dict) -> dict:
@@ -213,45 +226,6 @@ def main() -> int:
 SIGNING_REFUSED = frozenset({"notSupported", "noPermission", "internal", "srcActNotFound"})
 
 
-def derive_and_check(secret: str, announced: str):
-    """Derive the signing wallet and REFUSE if it is not the account we announced.
-
-    This guard is the reason local signing is safe to add at all, and it has no
-    equivalent on the server-side path. `submit` with a `secret` sends the secret
-    and an `Account` field separately: the server derives the key, compares, and
-    rejects a mismatch. Signing here, WE choose which account the transaction
-    claims, so a seed paired with the wrong address would sign a Payment from an
-    account the dry run never showed -- the operator reads "from rnjG8..." and a
-    different account is debited.
-
-    That is not hypothetical bookkeeping. The lookup this file shipped two commits
-    ago read the address from one place and the secret from another, both searched
-    independently over two nesting levels. Nothing structurally guarantees the two
-    came from the same faucet file. So the derived address is compared against the
-    announced one and a mismatch refuses rather than warns.
-
-    Returns the wallet. Raises RuntimeError with the mismatch named -- the two
-    ADDRESSES are safe to print, the seed is not and is never in the message.
-    """
-    # Imported here, not at the top, and PLC0415 suppressed with the reason --
-    # matching the pattern already used in tests/test_gridcoin_rpc_is_configured.py.
-    # xrpl-py is an OPTIONAL dependency: the dry run, the field survey and the
-    # server-side submit path all work without it, and the test suite imports this
-    # module. A module-level import would make a signing library mandatory to
-    # collect the tests for a script whose default mode signs nothing.
-    from xrpl.wallet import Wallet  # noqa: PLC0415 -- checked: optional dependency; see above
-
-    wallet = Wallet.from_seed(secret)
-    if wallet.classic_address != announced:
-        raise RuntimeError(
-            f"the seed in that file derives {wallet.classic_address}, not the "
-            f"{announced} this run announced. REFUSING to sign: the address and the "
-            f"seed are read from separate keys and may not be the same account. "
-            f"Nothing was submitted."
-        )
-    return wallet
-
-
 def submit_locally_signed(source: str, destination: str, secret: str, tag: int, drops: int) -> int:
     """Sign here with xrpl-py and submit the signed blob. Returns an exit code.
 
@@ -270,7 +244,8 @@ def submit_locally_signed(source: str, destination: str, secret: str, tag: int, 
     applied to a send.
     """
     try:
-        # Lazy for the same reason as in derive_and_check(); see the note there.
+        # Lazy for the same reason chains/xrp_signing.derive_and_check() is lazy;
+        # the note lives there now, with the import that explains it.
         import httpx  # noqa: PLC0415 -- checked: optional dependency, arrives with xrpl-py
         from xrpl.clients import JsonRpcClient  # noqa: PLC0415 -- checked: optional dependency
         from xrpl.constants import XRPLException  # noqa: PLC0415 -- checked: optional dependency

@@ -5,8 +5,18 @@ Role: file (operator entry point, at the project root per CLAUDE.md rule 10)
 Reads: a rippled JSON-RPC endpoint, and chains/xrp*.py
 Writes: nothing. No file, no database, no ledger.
 Can move funds: NO. This script imports no signing path and never submits a
-        transaction. There is no flag that broadcasts, and the adapter it
-        builds refuses send_to_address() structurally.
+        transaction. There is no flag that broadcasts, and it never calls
+        send_to_address() at all.
+
+        THAT LAST CLAUSE USED TO READ "and the adapter it builds refuses
+        send_to_address() structurally", which stopped being true on 2026-09-26
+        when chains/xrp.py gained a payout path: it previews by default and can
+        submit when a caller arms it with an exact token, a seed, and a server
+        whose own network_id is not mainnet. Rule 16 -- a wrong comment is a bug
+        -- and this one would have told a reader the adapter cannot sign while
+        pointing at a file that can. What makes THIS script safe was never the
+        adapter's refusal: it is that this script does not call that method,
+        which is a property of this file and is unchanged.
 Mainnet-safe: yes to run. It identifies the network from the SERVER's
         network_id rather than from the URL, and says MAINNET in capitals.
 

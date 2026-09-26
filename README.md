@@ -368,11 +368,43 @@ ETH, and it is the prerequisite for everything else here.
 
 ## XRP
 
-Brokered deposits only. **Payouts are refused** and the refusal is structural:
-`chains/xrp.py` imports no signing library and reads no key path, so it could
-not sign if the check were deleted. `rippled` removed signing from its public
-API on purpose, so paying XRP means holding a key in this process — a custody
-decision, not an implementation gap.
+Brokered deposits only, **and XRP is not a tradeable pair** — `Config.ALLOWED_PAIRS`
+names none, so no XRP quote can be produced and no XRP swap can be created.
+
+`rippled` removed signing from its public API on purpose, so paying XRP means
+holding a key in this process — a custody decision, not an implementation gap,
+and it is still the operator's.
+
+**Until 2026-09-26 this section said "payouts are refused" and the refusal was an
+absence**: no signing library was imported into `chains/xrp.py`, so it could not
+have signed if the check had been deleted. That was honest and it was a dead end,
+because it left no way to inspect what a payout *would* be before deciding
+whether to allow one.
+
+`send_to_address()` now **previews by default** and is armed only at the call
+site. Four structural properties, none of them a configuration value:
+
+| property | what it means |
+| --- | --- |
+| mainnet is refused **by network id** | `server_info.network_id`, not the URL, because a hostname resolves to whatever DNS says today. A **missing** or unreadable id refuses too — not reading the network is not the same as reading a safe one. The preview path runs this check as well, so mainnet cannot even be previewed against. |
+| the default is a **preview** | it reads the server, converts the amount, checks the reserve, prints the whole plan, and then refuses. A caller who forgets to arm it cannot send. |
+| an exact **arming token**, not a boolean | `confirm_send=CONFIRM_XRP_SEND`. A truthy variable, a parsed config value or a positional argument that drifted could each supply a `True`; none of them can spell a string. |
+| **no key anywhere in the adapter** | no seed, no key path, no `Config` field, no environment variable. The seed is a function argument. So there is **no `.env` edit that arms a payout.** |
+
+Plus `submit_and_wait()` rather than `submit()`, with the ledger's final result
+and its `validated` flag both asserted before any hash is returned — so a
+transaction the ledger rejected cannot be written into `payouts` as broadcast.
+
+**Nothing is wired to the payout worker.** `services/payout_service.py:219` calls
+`send_to_address(address, amount)` with two positional arguments, which is
+refused before it reaches the network at all (no source account). Wiring it up is
+the operator's decision.
+
+**The signing path has never run against a live ledger from a session.** It is
+verified against seeded responses and a stubbed `submit_and_wait` in
+`tests/test_xrp_adapter.py`. The one real-ledger evidence in this repository is
+`xrp_send_tagged.py`'s testnet payment on 2026-09-26 — and the adapter reuses
+that file's derivation guard rather than a copy of it.
 
 ### The partial payment exploit, and why this code reads one field
 
@@ -450,10 +482,13 @@ python3 xrp_chain_check.py --account rSomeAcct  # a specific account
 python3 xrp_chain_check.py --url https://s1.ripple.com:51234/   # mainnet
 ```
 
-Read-only: submits nothing, signs nothing, and the adapter it builds refuses
-`send_to_address()` structurally. It names the network from the server's
-`network_id`, not the URL, and prints `MAINNET, REAL MONEY` if that is where you
-pointed it.
+Read-only: submits nothing, signs nothing, and **never calls
+`send_to_address()`**. That last clause used to read "the adapter it builds
+refuses `send_to_address()` structurally", which the payout path made wrong on
+2026-09-26 — and it was the wrong guarantee to cite anyway: what makes this
+script safe is that it does not call the method, which is a property of the
+script and has not changed. It names the network from the server's `network_id`,
+not the URL, and prints `MAINNET, REAL MONEY` if that is where you pointed it.
 
 **With no `--account` it walks back through validated ledgers, finds a real
 Payment and uses its destination** — so a bare run examines an account that
@@ -574,10 +609,15 @@ and the amount from `delivered_amount`. The `deferred` row is the earlier
 untagged faucet payment, correctly held back rather than guessed at — both
 outcomes on one response, which is the pair worth seeing together.
 
-That leaves **no unverified field** in the XRP deposit path. What remains is not
-verification but construction: the destination-tag allocator in
-`services/swap_service.py`, and the payout side, where `send_to_address()` still
-refuses structurally.
+That leaves **no unverified field** in the XRP deposit path. What remains is the
+destination-tag allocator in `services/swap_service.py`.
+
+The payout side is no longer "refuses structurally" — as of 2026-09-26 it is a
+preview-by-default mechanism that cannot reach mainnet and cannot be armed by
+configuration (see the XRP section above). What remains THERE is not code: it is
+the custody decision, the operator's choice of a hot-wallet account, and a run of
+the armed path against testnet, which no session has been able to do because
+`s.altnet.rippletest.net:51234` is unreachable through this environment's proxy.
 
 ### Tag 0 is a real tag
 
