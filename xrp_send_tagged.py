@@ -78,11 +78,44 @@ def rpc(method: str, params: dict) -> dict:
     return result
 
 
+# WHERE THE FAUCET PUTS THINGS, MEASURED rather than guessed. Dumped from the
+# operator's own saved faucet files 2026-09-26, keys and string LENGTHS only so
+# no secret was displayed:
+#
+#     account.xAddress        str, len 47
+#     account.address         str, len 34
+#     account.classicAddress  str, len 34
+#     amount                  int = 100
+#     transactionHash         str, len 64
+#     seed                    str, len 31     <- THE SECRET, at the TOP level
+#
+# The first version looked for account.secret, payload.secret and account.seed.
+# The real key is payload.seed -- one level off, so it found zero accounts and
+# refused to send while two funded accounts sat in that directory. Exactly the
+# shape of the `balance` vs `amount` bug in fund_testnets.py, which is the
+# argument for searching a named list and REPORTING which key matched rather
+# than hardcoding one guess.
+ADDRESS_KEYS = ("address", "classicAddress")
+SECRET_KEYS = ("seed", "secret", "master_seed", "secretKey")
+
+
+def _first_present(keys: tuple[str, ...], *holders: dict):
+    """The first of `keys` present in any of `holders`, with the key it came from."""
+    for key in keys:
+        for holder in holders:
+            value = holder.get(key)
+            if value:
+                return value, key
+    return None, None
+
+
 def saved_faucet_accounts() -> list[tuple[Path, str, str]]:
     """Every (file, address, secret) in the key directory, newest first.
 
-    The secret is returned because a caller has to sign with it, and is never
-    printed by anything in this file.
+    The secret is returned because a caller has to sign with it. Nothing in this
+    file ever prints it -- only the FILE NAME it came from, and the key name it
+    was found under, both of which are safe and both of which are what made the
+    original bug diagnosable.
     """
     found = []
     for path in sorted(KEY_DIRECTORY.glob("xrp-testnet-*.json"), reverse=True):
@@ -91,10 +124,28 @@ def saved_faucet_accounts() -> list[tuple[Path, str, str]]:
         except (OSError, json.JSONDecodeError):
             continue
         account = payload.get("account") or {}
-        address = account.get("address") or account.get("classicAddress")
-        secret = account.get("secret") or payload.get("secret") or account.get("seed")
+        address, address_key = _first_present(ADDRESS_KEYS, account, payload)
+        secret, secret_key = _first_present(SECRET_KEYS, payload, account)
         if address and secret:
+            # Naming the two keys that matched is the whole point of searching a
+            # list instead of hardcoding one. When the faucet changes shape again
+            # this line says so on the next run, rather than the run reporting
+            # zero accounts and leaving the reader to dump the files by hand --
+            # which is what the original bug cost. Key NAMES only; the secret's
+            # value is never printed here or anywhere else in this file.
+            print(f"    {path.name}: address under {address_key!r}, "
+                  f"secret under {secret_key!r} (value not shown)", flush=True)
             found.append((path, address, secret))
+        elif address:
+            print(f"    {path.name}: address under {address_key!r} but NO secret "
+                  f"under any of {', '.join(SECRET_KEYS)} -- cannot sign with "
+                  f"this one", flush=True)
+        else:
+            # Rule 14: an unusable file must not look identical to one this glob
+            # never saw. Zero accounts with no explanation is the ambiguity the
+            # original bug hid inside.
+            print(f"    {path.name}: no address under any of "
+                  f"{', '.join(ADDRESS_KEYS)} -- skipped", flush=True)
     return found
 
 
@@ -143,7 +194,7 @@ def main() -> int:
 
     drops = to_drops(args.amount)
     print(f"\n    network     {refuse_mainnet()}", flush=True)
-    print(f"    from        {source}  (secret from {source_path.name}, never printed)", flush=True)
+    print(f"    from        {source}  (secret read from {source_path.name}, never printed)", flush=True)
     print(f"    to          {destination}", flush=True)
     print(f"    amount      {args.amount} XRP = {drops} drops", flush=True)
     print(f"    tag         {args.tag}   <- THE FIELD THIS EXISTS TO PRODUCE", flush=True)
