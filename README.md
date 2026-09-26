@@ -497,8 +497,81 @@ is what every exchange on this ledger does — so the attribution question
 `chains/solana.py` had to hand back does not arise here.
 
 `get_new_address()` therefore **refuses**, and says why: what is needed is a tag
-allocator in `services/swap_service.py`, which is a change to how a swap is
-created rather than to the adapter.
+allocator, which is a change to how a swap is created rather than to the adapter.
+
+### The destination-tag allocator — `services/xrp_tag_service.py`
+
+`allocate_destination_tag(db, account, swap_id) -> int`. One account, one integer
+per swap, allocated from 1 upward and **never reused**.
+
+**Uniqueness is enforced by the database, not by Python.** Two live swaps sharing
+a tag means one customer's deposit is credited against the other's swap and the
+payout is broadcast and final, so the guarantee is four constraints in `db.py`'s
+`SCHEMA` rather than a `SELECT` followed by an `INSERT`:
+
+| guarantee | mechanism |
+| --- | --- |
+| no two rows share a tag on an account | `PRIMARY KEY (account, destination_tag)` |
+| no swap gets two tags | `UNIQUE idx_xrp_tag_one_per_swap` |
+| `1..4294967295` | `CONSTRAINT xrp_tag_is_allocatable` |
+| no row is deleted or re-pointed | two `BEFORE` triggers that `RAISE(ABORT)` |
+
+A check-then-insert was not an option and the reason is measured in this repo,
+not argued: two payout workers paid one swap twice on 2026-09-24 through a guard
+that read correctly, because the `SELECT` completed before the write lock was
+contended (`tests/test_payout_concurrency.py`). Allocation is therefore ONE
+statement — `INSERT ... SELECT COALESCE(MAX(destination_tag), 0) + 1 ...
+RETURNING destination_tag` — so there is no moment at which a caller holds a
+chosen-but-unclaimed number.
+
+**The range is 32 bits, measured rather than recalled.** `xrpl.org` is not
+reachable from the container this was written in, so the bound was taken from the
+reference implementation's own serializer: `UInt32.from_value(4294967295)`
+encodes, `4294967296` raises `OverflowError`, and a real `Payment` round-trips
+`DestinationTag` at `0`, `1` and `4294967295`.
+`tests/test_xrp_destination_tags.py` re-runs that against the installed
+`xrpl-py` and skips if it is absent, naming what goes unchecked. What that does
+**not** prove is that a rippled server accepted a transaction at the bound; no
+socket is opened by the suite.
+
+**Tags are never reused, and that is the interesting decision.** Nothing on the
+XRP Ledger expires a tag. Once a customer has been told "pay account X with tag
+7", that instruction lives in their wallet's address book, their exchange's saved
+withdrawal template, or an email — and a payment carrying it can arrive months
+later, from a retried withdrawal, a returning customer, or a top-up after an
+underpayment. If tag 7 has been reallocated by then, that money is credited to a
+stranger's swap and the payout is irreversible. So `MAX(destination_tag)` is
+taken over **every** row including long-completed swaps, and the `BEFORE DELETE`
+trigger makes reclaiming them fail rather than merely discouraged. The cost is
+exhaustion, and it is not a real cost: 4,294,967,295 tags is 11,759 years at
+1,000 swaps a day and 1,176 years at 10,000.
+
+**Tag 0 is reserved, unallocated, and still readable.** `0` is a legal tag that
+decodes back as *present* — which is exactly what makes it dangerous, because it
+is the value an uninitialized int, an empty form field and a "0 means none"
+convention all produce. Reserving it turns that whole class of mistaken payment
+from "credited to an unrelated swap" into "arrived with a tag nothing owns",
+which `chains/xrp_payments.py` already reports as `deferred` for an operator.
+The reading end stays permissive on purpose: the tag on an incoming payment was
+chosen by the sender. `validate_destination_tag(tag, allocatable=...)` carries
+both questions as one flag so they cannot drift apart.
+
+**What is NOT wired, and XRP is still untradeable.** `XRP` is not in
+`Config.ALLOWED_PAIRS`, so nothing in the running application calls the
+allocator. Two things stand between it and a working XRP deposit path, both
+named in the module's docstring:
+
+1. `swaps.deposit_address` is one column and an XRP deposit instruction is the
+   pair `(account, tag)`. Both halves are mandatory, so wiring this in means
+   deciding how the pair is stored and rendered.
+2. `services/deposit_service.py::refresh_swap_from_chain()` scans
+   `swap["deposit_address"]` and credits **every** returned event to that swap.
+   For a per-address chain the address *is* the swap; for XRP the account is
+   shared, so it would attribute every tagged payment to whichever swap is being
+   refreshed. The missing filter is the event's `vout` against the swap's own
+   tag, and `swap_id_for_tag()` is the function that answers it — but the change
+   is to the one function that decides, for every chain, that a deposit is
+   confirmed. That is fund movement, so it is reported rather than done.
 
 ### Producing a tagged payment — `xrp_send_tagged.py`
 
@@ -575,9 +648,10 @@ untagged faucet payment, correctly held back rather than guessed at — both
 outcomes on one response, which is the pair worth seeing together.
 
 That leaves **no unverified field** in the XRP deposit path. What remains is not
-verification but construction: the destination-tag allocator in
-`services/swap_service.py`, and the payout side, where `send_to_address()` still
-refuses structurally.
+verification but construction: the destination-tag allocator now exists at
+`services/xrp_tag_service.py` but is not wired into swap creation (see that
+section above for the two reasons), and the payout side, where
+`send_to_address()` still refuses structurally.
 
 ### Tag 0 is a real tag
 
@@ -590,8 +664,11 @@ back as unattributable, and wait for a hand match. Money arrives, the swap does
 not credit, nothing fails. Both are pinned now, mutation-checked by making that
 exact edit.
 
-Whether the allocator in `services/swap_service.py` ever *issues* 0 is a separate
-question and still open; a reader that drops a legal value is wrong either way.
+Whether the allocator ever *issues* 0 is a separate question, and it is no longer
+open: `services/xrp_tag_service.py` reserves 0 and starts at 1, because 0 is what
+every "no tag to send" integration emits. That does not license tightening the
+reader — the tag on an incoming payment was chosen by the sender, and a reader
+that drops a legal value is wrong either way.
 
 ### Two rippled quirks that bite
 

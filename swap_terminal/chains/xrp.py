@@ -90,8 +90,18 @@ get_new_address() also refuses, but for a happier reason. XRP does not need
 one: a DESTINATION TAG is a per-swap identifier on a single account, costs
 nothing, creates no key, and is what every exchange on this ledger uses. The
 attribution problem chains/solana.py had to hand back does not exist here --
-what it needs instead is a tag allocator wired into swap creation, which is a
-services/ change rather than an adapter one.
+what it needs instead is a tag allocator, which is a services/ change rather
+than an adapter one.
+
+THAT ALLOCATOR NOW EXISTS, at services/xrp_tag_service.py, and this refusal
+still stands rather than calling it. The reason is written out in full under
+WHAT IS NOT WIRED in that module and is worth one line here: every other
+chain's deposit instruction is ONE address, XRP's is the PAIR (account, tag),
+and `swaps.deposit_address` is one column. Returning the account alone from
+here would satisfy the method signature while handing the customer half of an
+instruction -- a payment to the right account with no tag is exactly the case
+chains/xrp_payments.py reports as deferred and cannot credit. Storing the pair
+is a change to how a swap is created, so it is still not an adapter change.
 """
 
 from __future__ import annotations
@@ -194,8 +204,10 @@ class XRPAdapter:
             f"this adapter does not derive per-swap XRP addresses, and for {label!r} it should not. "
             f"The XRP Ledger attributes deposits with a DESTINATION TAG on a single account: an "
             f"integer per swap, no new key, no funding reserve, and it is what every exchange on this "
-            f"ledger uses. What is needed is a tag allocator in services/swap_service.py -- a change "
-            f"to how a swap is created, not to this adapter. Deriving a fresh account instead would "
+            f"ledger uses. That allocator EXISTS: services/xrp_tag_service.py::"
+            f"allocate_destination_tag(db, account, swap_id). It is not wired into swap creation, "
+            f"because an XRP deposit instruction is the PAIR (account, tag) and swaps.deposit_address is "
+            f"one column -- see WHAT IS NOT WIRED in that module. Deriving a fresh account instead would "
             f"cost a base reserve per swap AND put a signing key per swap on this host."
         )
 

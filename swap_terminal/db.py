@@ -3,7 +3,9 @@
 Role: submodule (persistence; holds no decision of its own)
 Reads: swap_terminal.db
 Writes: swap_terminal.db -- creates quotes, swaps, deposit_events, payouts,
-       wallet_inventory and swap_audit_log if they are absent
+       wallet_inventory, swap_audit_log and xrp_destination_tags if they are
+       absent, plus the two triggers that make an allocated XRP destination
+       tag immutable and undeletable
 Can move funds: no
 Mainnet-safe: yes
 
@@ -32,6 +34,14 @@ mistake for a connection.
 import logging
 import sqlite3
 from contextlib import contextmanager
+
+# Rootless, the same way services/deposit_service.py reaches
+# deposit_vout_artifact.py: swap_terminal/ is already on sys.path for `db` to
+# have been importable at all. chains/__init__.py is deliberately empty of code
+# and chains/xrp_units.py imports only `decimal`, so this pulls in no adapter,
+# opens no socket and reads no credential -- which is what makes it safe for a
+# module every worker imports at startup.
+from chains.xrp_units import FIRST_ALLOCATABLE_TAG, MAX_DESTINATION_TAG
 
 try:
     from flask import current_app, g
@@ -146,6 +156,128 @@ CREATE TABLE IF NOT EXISTS swap_audit_log (
     FOREIGN KEY (swap_id) REFERENCES swaps(id)
 );
 """
+
+
+# THE XRP TAG DDL IS DERIVED, NOT SPELLED A SECOND TIME.
+#
+# The two bounds in the CHECK come from chains/xrp_units.py, which is where
+# the measurement behind them lives. Writing `BETWEEN 1 AND 4294967295` into
+# the schema literal would put the same rule in two files, which is rule 8's
+# bug-with-a-delay-on-it: the copies agree the day they are written, and the
+# one that drifts is whichever file the next reader does not open. Mammon's
+# contract_horizon_sql() is generated from _HORIZON_SUFFIXES for exactly this
+# reason, and this is the same shape.
+#
+# An f-string building SQL would normally be S608 territory. It is not
+# interpolating input or an identifier here -- both values are module-level
+# integer constants from this application's own source, and ruff does not
+# flag it because there is no execute() call in sight: this is a DDL string
+# handed to executescript() at startup.
+XRP_DESTINATION_TAG_SCHEMA = f"""
+-- THE XRP DEPOSIT IDENTIFIER. One shared account, one integer per swap.
+--
+-- Every other chain here hands out a fresh deposit address, so `swaps.deposit_
+-- address` alone identifies who paid. The XRP Ledger does not work that way:
+-- chains/xrp.py::get_new_address() refuses precisely because deriving an
+-- account per swap would cost a base reserve and put a signing key per swap on
+-- this host, and the ledger's own answer -- the one every exchange on it uses
+-- -- is a `DestinationTag`: an integer carried by the payment, read by
+-- chains/xrp_payments.py into the event's `vout` field.
+--
+-- WHY THIS IS A TABLE AND NOT A COLUMN ON `swaps`.
+--
+-- The invariant that matters is UNIQUENESS, and it is worth stating what it
+-- costs to lose: two open swaps sharing a tag means one customer's deposit is
+-- credited to the other customer's swap, and the payout that follows is on
+-- chain and final. A nullable `swaps.xrp_destination_tag` could carry a UNIQUE
+-- index too, but it could not carry the other three guarantees below, and it
+-- would be NULL for five of the six assets -- a column that means nothing for
+-- most rows is a column readers have to learn the exception for.
+--
+-- FOUR GUARANTEES, ALL OF THEM IN THE DATABASE (rules 5, 15 and 20). None is a
+-- Python check, because a Python check-then-insert is a read that can go stale
+-- before the write -- which is not a hypothesis here: it is exactly how two
+-- payout workers paid one swap twice on 2026-09-24, measured in
+-- tests/test_payout_concurrency.py, and the fix was the same shape as this.
+--
+--   PRIMARY KEY (account, destination_tag)
+--        No two rows share a tag on one account. Per ACCOUNT rather than
+--        globally because that is the real scope -- a tag means nothing except
+--        against the account it was sent to -- and it keeps the numbers small
+--        if the operator ever moves accounts.
+--
+--   UNIQUE swap_id (idx_xrp_tag_one_per_swap)
+--        No swap gets two tags. A swap with two tags is a swap whose deposit
+--        instructions differ depending on which row you read.
+--
+--   CONSTRAINT xrp_tag_is_allocatable
+--        FIRST_ALLOCATABLE_TAG..MAX_DESTINATION_TAG, which is 1..4294967295.
+--        The upper bound is the protocol's, MEASURED against xrpl-py's own
+--        serializer (chains/xrp_units.py point 4). The LOWER bound is OURS: 0
+--        is a perfectly legal tag and is reserved unallocated, because it is
+--        what every "no tag to send" integration emits. The reasoning is at
+--        chains/xrp_units.RESERVED_DESTINATION_TAG and is not repeated here.
+--        The constraint is NAMED so the IntegrityError says which rule was
+--        broken -- measured: "CHECK constraint failed: xrp_tag_is_allocatable".
+--
+--   xrp_destination_tags_are_never_released / _repointed
+--        Two BEFORE triggers that RAISE(ABORT). This is the reuse decision,
+--        expressed as something the database will not let anyone do rather than
+--        as a convention a future writer can forget. TAGS ARE NEVER REUSED:
+--        the XRP Ledger puts no expiry on a tag, an address-book entry or a
+--        withdrawal retry can carry one months after a swap completed, and a
+--        reallocated tag turns that late payment into a credit against a
+--        stranger's swap. Allocation reads MAX(destination_tag) over ALL rows,
+--        so as long as no row is ever deleted the sequence cannot go backward
+--        -- the DELETE trigger is what makes that "cannot" rather than
+--        "should not". The cost is exhaustion, and it is not a real cost: at
+--        4,294,967,295 tags, 1,000 swaps a day lasts 11,759 years and 10,000 a
+--        day lasts 1,176.
+--
+-- THERE IS NO `retired_at` COLUMN, on purpose. Whether a swap is finished is
+-- already `swaps.status`, and a second copy of that fact here would be rule
+-- 8's two-copies-drift: the row that says a tag is retired and the swap that
+-- says it is still open, each correct in its own table. Join instead.
+--
+-- ORDERING NOTE FOR A CALLER: the FOREIGN KEY means the swap row must exist
+-- before its tag is allocated. Measured 2026-09-26 and worth knowing before
+-- relying on it -- `PRAGMA foreign_keys` defaults to OFF on a fresh
+-- sqlite3 connection and is turned ON by the pragma at the top of this SCHEMA,
+-- so the constraint bites on any connection that ran executescript(SCHEMA)
+-- (every worker, every cycle) and does not on a bare connect_db().
+CREATE TABLE IF NOT EXISTS xrp_destination_tags (
+    account TEXT NOT NULL,
+    destination_tag INTEGER NOT NULL,
+    swap_id TEXT NOT NULL,
+    allocated_at TEXT NOT NULL,
+    PRIMARY KEY (account, destination_tag),
+    CONSTRAINT xrp_tag_is_allocatable CHECK (destination_tag BETWEEN {FIRST_ALLOCATABLE_TAG} AND {MAX_DESTINATION_TAG}),
+    FOREIGN KEY (swap_id) REFERENCES swaps(id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_xrp_tag_one_per_swap ON xrp_destination_tags(swap_id);
+
+CREATE TRIGGER IF NOT EXISTS xrp_destination_tags_are_never_released
+BEFORE DELETE ON xrp_destination_tags
+BEGIN
+    SELECT RAISE(ABORT, 'xrp_destination_tags rows are never deleted: allocation reads MAX(destination_tag), so a deleted row lets the next tag repeat one already given out, and a late payment carrying it would credit the wrong swap');
+END;
+
+CREATE TRIGGER IF NOT EXISTS xrp_destination_tags_are_never_repointed
+BEFORE UPDATE OF account, destination_tag, swap_id ON xrp_destination_tags
+BEGIN
+    SELECT RAISE(ABORT, 'xrp_destination_tags: account, destination_tag and swap_id are immutable once allocated. Re-pointing a tag at a different swap misattributes every payment already in flight against it');
+END;
+"""
+
+# One string for executescript(). Concatenated rather than interpolated into
+# SCHEMA itself so that SCHEMA stays a plain literal and only the part that
+# genuinely needs derived values is an f-string.
+#
+# ORDER: after `swaps`, because xrp_destination_tags has a FOREIGN KEY into
+# it. SQLite resolves foreign key TARGETS at DML time rather than at CREATE
+# time, so this ordering is for a human reader rather than for the engine.
+SCHEMA = SCHEMA + XRP_DESTINATION_TAG_SCHEMA
 
 
 # The one live payout per swap, as a CONSTRAINT rather than a convention.
