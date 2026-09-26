@@ -223,6 +223,24 @@ class XRPRPCError(Exception):
 # tests/, scripts, or the two root-level chain-check files named it.
 
 
+def new_deferrals(deferred: list[str], already_reported: set[str]) -> list[str]:
+    """The deferred lines not yet reported, MUTATING already_reported to include them.
+
+    Pure enough to test without a server, which is the point of extracting it
+    (rule 10): the decision is "has this been said already", and that is the whole
+    behavior worth pinning.
+
+    Deduped on the WHOLE LINE rather than on a parsed txid. The line is built by
+    chains/xrp_payments.py and carries the txid plus the reason, so two different
+    reasons for one txid are two different facts and both deserve saying -- and
+    parsing a txid back out of a formatted string would couple this to that
+    format for no gain.
+    """
+    fresh = [line for line in deferred if line not in already_reported]
+    already_reported.update(fresh)
+    return fresh
+
+
 class XRPAdapter:
     asset = "XRP"
 
@@ -236,6 +254,17 @@ class XRPAdapter:
             raise XRPRPCError("XRPAdapter needs a rippled JSON-RPC url; there is no sensible default")
         self.url = url
         self.timeout = float(timeout)
+        # Deferred lines already printed by THIS adapter instance. See
+        # find_deposits_to_address() for why it is per-instance rather than
+        # per-call or global: an unattributable payment is one fact, and it should
+        # be said once per worker run, not once per swap scanned.
+        #
+        # Named with a leading underscore and NOT part of the adapter contract --
+        # tests/test_xrp_adapter.py asserts the instance holds no key material by
+        # walking vars(), so anything added here is visible to that test by
+        # construction. This set holds transaction hashes and refusal reasons,
+        # both of which are already printed, so nothing secret enters it.
+        self._reported_deferrals: set[str] = set()
         # Validated at CONSTRUCTION, not at poll time. A threshold no XRP
         # payment can reach would leave every deposit below it forever, with
         # nothing in any log saying why (see chains/xrp_units.py).
@@ -451,7 +480,27 @@ class XRPAdapter:
             )
         except XRPPaymentError as error:
             raise XRPRPCError(f"deposit scan for {address} refused: {error}") from error
-        for line in scan.deferred:
+        # REPORTED ONCE PER RUN, not once per scan.
+        #
+        # Measured on the operator's host 2026-09-26: two unattributable payments
+        # printed FOUR lines, because find_deposits_to_address() is called once per
+        # active swap and every one of those calls scans the SAME shared account,
+        # so it sees the same untagged payments every time. Two open swaps doubled
+        # it; ten would have printed twenty, and each line ends with "this needs an
+        # operator to match it by hand", so the count itself reads as the number of
+        # problems. It was two.
+        #
+        # This is the shape rule 14 warns about from the other direction: not
+        # silence, but noise that misrepresents scale. A deferred payment is a fact
+        # about the ACCOUNT, and on a tag-attributed chain the account is shared by
+        # every swap -- so it is not per-swap news and must not be printed as if it
+        # were.
+        #
+        # State on the instance, deliberately: it lives as long as the worker, so a
+        # RESTART re-reports everything still unattributed, which is what an
+        # operator starting a worker wants to see. A set that outlived the process
+        # would hide the backlog from whoever came next.
+        for line in new_deferrals(scan.deferred, self._reported_deferrals):
             print(f"  XRP deferred  {line}", flush=True)
         return scan.events
 

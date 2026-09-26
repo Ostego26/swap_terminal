@@ -53,7 +53,7 @@ import json
 
 import pytest
 import requests
-from chains.xrp import XRPAdapter, XRPRPCError
+from chains.xrp import XRPAdapter, XRPRPCError, new_deferrals
 from chains.xrp_signing import (
     CONFIRM_XRP_SEND,
     FEE_ALLOWANCE_DROPS,
@@ -819,3 +819,69 @@ def test_the_plan_still_prints_live_when_the_send_is_actually_armed(post, monkey
     assert printed.count("partial pay") == 1, (
         f"the plan must print exactly once before signing. Printed:\n{printed}"
     )
+
+
+# --- an account-wide fact must not be reported per swap -----------------------
+
+def test_the_same_deferred_payment_is_reported_once_not_once_per_swap():
+    """Measured on the operator's host 2026-09-26: two payments, four lines.
+
+    find_deposits_to_address() is called once per ACTIVE SWAP, and on a
+    tag-attributed chain every one of those calls scans the same shared account —
+    so it sees the same untagged payments every time. Two open swaps doubled the
+    output; ten would have printed twenty. Each line ends with "this needs an
+    operator to match it by hand", so the line COUNT reads as the number of
+    problems needing attention. There were two.
+
+    Rule 14 from the less obvious direction: not silence, but noise that
+    misrepresents scale.
+    """
+    seen = set()
+    lines = ["txA  NO DestinationTag", "txB  NO DestinationTag"]
+
+    assert new_deferrals(list(lines), seen) == lines, "the first scan says everything"
+    assert new_deferrals(list(lines), seen) == [], "the second swap's scan of the same account says nothing"
+    assert new_deferrals(list(lines), seen) == []
+
+
+def test_a_newly_arrived_deferral_is_still_reported():
+    """Deduping must not silence NEW news, which is the obvious way to overshoot.
+
+    A version that reported only on the first call ever would pass the test above
+    and hide every subsequent unattributable payment — which is money arriving that
+    nobody is told about, strictly worse than the noise it replaced.
+    """
+    seen = set()
+    new_deferrals(["txA  NO DestinationTag"], seen)
+
+    fresh = new_deferrals(["txA  NO DestinationTag", "txB  NO DestinationTag"], seen)
+
+    assert fresh == ["txB  NO DestinationTag"]
+
+
+def test_two_different_reasons_for_one_transaction_are_two_facts():
+    """Deduped on the whole LINE, not a parsed txid, and that is deliberate.
+
+    xrp_payments.py builds the line from the txid AND the reason, so the same
+    transaction refused for a second reason is new information. Parsing the txid
+    back out would also couple this to that format for no gain.
+    """
+    seen = set()
+    new_deferrals(["txA  NO DestinationTag"], seen)
+
+    assert new_deferrals(["txA  TransactionResult=tecPATH_DRY"], seen) == ["txA  TransactionResult=tecPATH_DRY"]
+
+
+def test_the_deferral_memory_is_per_instance_so_a_restart_re_reports():
+    """A restart must show the backlog again.
+
+    State that outlived the process would hide every still-unattributed payment
+    from whoever started the worker next — and an operator starting a watcher is
+    exactly the person who needs to see them.
+    """
+    first = adapter()
+    second = adapter()
+
+    assert first._reported_deferrals is not second._reported_deferrals
+    new_deferrals(["txA  NO DestinationTag"], first._reported_deferrals)
+    assert second._reported_deferrals == set(), "a fresh adapter starts with no memory"
