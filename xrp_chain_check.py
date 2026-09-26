@@ -287,6 +287,48 @@ def collect_payments(entries) -> list[tuple[dict, dict]]:
     ]
 
 
+# How often the ledger hunt prints a progress line. Rule 14: 200 ledgers at
+# ~0.2s each is a silent minute, and a silent minute is where Ctrl-C comes from.
+# Every tenth keeps the cursor moving without burying the hit when one lands.
+PROGRESS_EVERY_LEDGERS = 10
+
+
+def tag_survey(payments: list[tuple[dict, dict]]) -> tuple[int, int, list[tuple[str, int]]]:
+    """Split Payments by whether they carry DestinationTag, and sample the tagged ones.
+
+    Returns (tagged, untagged, samples) where samples is up to five
+    (tx_hash, tag) pairs. Pure so it is testable without a network, which is the
+    point: the SCAN needs a real ledger, the DECISION about what the scan found
+    does not.
+
+    Why this exists at all. DestinationTag is the one field in ADAPTER_FIELDS
+    that no run has ever observed on a real ledger -- every other field was
+    confirmed 2026-09-26 over a real Payment, and that one read "absent from all
+    1" because ordinary faucet traffic is untagged. It is also the field the
+    whole XRP deposit path is BUILT on: without it a payment cannot be attributed
+    to a swap, so chains/xrp_payments.py defers it rather than guessing.
+
+    The obvious way to observe it is to send one, which needs local signing and
+    therefore a new dependency. This is the cheaper way and it needs neither:
+    the testnet carries other people's traffic, some of it tagged, and reading
+    somebody else's Payment proves the wire spelling exactly as well as reading
+    our own. Rule 17 -- a field name our tests agree on is still a guess until a
+    server says it back, and a seeded test cannot discover a wire format.
+
+    What it does NOT prove, stated because the distinction is the whole value of
+    the check: that OUR sender populates the field correctly. It proves rippled
+    spells it `DestinationTag` and that deposit_events_from_transactions() reads
+    a real tagged Payment without deferring it. Proving our own sender still
+    needs our own send.
+    """
+    tagged = [
+        (str(body.get(FIELD_HASH) or "?"), int(body[FIELD_DESTINATION_TAG]))
+        for body, _meta in payments
+        if body.get(FIELD_DESTINATION_TAG) is not None
+    ]
+    return len(tagged), len(payments) - len(tagged), tagged[:5]
+
+
 NETWORK_ERRORS = (requests.RequestException, RuntimeError, TimeoutError, OSError)
 
 
@@ -460,11 +502,77 @@ def check_real_scan(entries: list[dict], payments: list[tuple[dict, dict]], acco
     done(started)
 
 
+def hunt_tagged_payment(url: str, seq, how_many: int) -> bool:
+    """Step 5: walk validated ledgers for ANYONE's tagged Payment. Read-only.
+
+    Announces the scale up front and prints a line per ledger, because 200
+    ledgers at ~0.2s each is a minute of otherwise-silent work and rule 14's
+    whole point is that a blinking cursor gets Ctrl-C'd.
+
+    Returns True if a tagged Payment was found. Not a `fail()` when none is:
+    absence here is a statement about testnet traffic, not about our code, and
+    reporting it as a defect would be the instrument claiming more than the run
+    established -- the exact thing the --account verdict got wrong.
+    """
+    started = step(
+        5, "hunt a real DestinationTag anywhere on the testnet",
+        f"walking back up to {how_many} validated ledgers from {seq} for any tagged Payment",
+    )
+    print("    WHY: DestinationTag is the last field in ADAPTER_FIELDS never seen on a", flush=True)
+    print("    real ledger, and it is the field the deposit path is built on. Somebody", flush=True)
+    print("    else's tagged Payment proves the wire spelling as well as our own would.", flush=True)
+
+    seen = tagged_total = 0
+    for offset in range(how_many):
+        index = seq - offset
+        try:
+            result = rpc(url, "ledger", {
+                "ledger_index": index, "transactions": True, "expand": True, "binary": False,
+            })
+        except NETWORK_ERRORS as error:
+            print(f"    ledger {index} could not be read: {error}  <- skipped, not fatal", flush=True)
+            continue
+        entries = (result.get("ledger") or {}).get("transactions") or []
+        payments = collect_payments(entries)
+        seen += len(payments)
+        tagged, _untagged, samples = tag_survey(payments)
+        tagged_total += tagged
+        if tagged:
+            print(f"    ledger {index}: {tagged} TAGGED of {len(payments)} Payment(s) "
+                  f"-- scanned {offset + 1} ledgers, {seen} Payment(s)", flush=True)
+            for tx_hash, tag in samples:
+                print(f"        DestinationTag {tag}  tx {tx_hash}", flush=True)
+            print(f"    CONFIRMED: rippled spells it {FIELD_DESTINATION_TAG!r}, which is what", flush=True)
+            print("    chains/xrp_payments.py reads. NOT proven: that OUR sender sets it.", flush=True)
+            done(started)
+            return True
+        if (offset + 1) % PROGRESS_EVERY_LEDGERS == 0:
+            print(f"    scanned {offset + 1}/{how_many} ledgers, {seen} Payment(s), "
+                  f"0 tagged so far", flush=True)
+
+    print(f"    (none) -- {seen} Payment(s) across {how_many} ledgers, 0 carrying "
+          f"{FIELD_DESTINATION_TAG}", flush=True)
+    print("    That is a fact about testnet traffic, NOT a defect in our code, so it is", flush=True)
+    # Naming --hunt-tag and not --ledgers: the two flags both take a ledger count
+    # and only this one controls THIS walk. Printing the wrong one sends the
+    # operator to widen a number that changes nothing, which is rule 14's "echo
+    # the parameters that decide the answer" failing in the most annoying way.
+    print(f"    not counted as a failure. Widen with --hunt-tag (this walk used "
+          f"{how_many}), or send a tagged payment.", flush=True)
+    done(started)
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify the XRP adapter against a real rippled. Read-only.")
     parser.add_argument("--url", default=TESTNET_URL, help=f"rippled JSON-RPC endpoint (default {TESTNET_URL})")
     parser.add_argument("--account", default="", help="account for account_tx; found from the ledger if omitted")
     parser.add_argument("--ledgers", type=int, default=20, help="ledgers to search for a Payment (default 20)")
+    parser.add_argument(
+        "--hunt-tag", type=int, default=0, metavar="N",
+        help="also walk N validated ledgers for ANYONE's tagged Payment (read-only; "
+             "confirms the DestinationTag wire spelling without sending anything)",
+    )
     args = parser.parse_args()
 
     print("xrp adapter check -- read-only, submits nothing, signs nothing", flush=True)
@@ -507,6 +615,13 @@ def main() -> int:
 
     entries, payments = check_account_tx(args.url, account)
     check_real_scan(entries, payments, account)
+
+    # Opt-in because it is the only step here that can run for a minute. Its
+    # result is deliberately NOT folded into the verdict: finding no tagged
+    # payment on the testnet says nothing about our code, and exit_code() means
+    # "a field or method the adapter depends on did not match a real server".
+    if args.hunt_tag > 0:
+        hunt_tagged_payment(args.url, seq, args.hunt_tag)
 
     print("\n" + "=" * 70, flush=True)
     print(verdict_text(failures, len(payments)), flush=True)

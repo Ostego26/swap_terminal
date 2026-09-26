@@ -36,6 +36,7 @@ from xrp_chain_check import (
     network_banner,
     payment_field_report,
     server_findings,
+    tag_survey,
     unwrap_shape,
     verdict_text,
 )
@@ -258,3 +259,62 @@ def test_the_two_provenances_never_produce_the_same_verdict():
     assert bad_address_verdict(account, from_operator=True) != bad_address_verdict(
         account, from_operator=False
     )
+
+
+def tagged_payment(tag, txhash="D" * 64):
+    """A Payment carrying DestinationTag, in the nesting a `ledger` call returns.
+
+    Flat on the entry, which is the shape the 2026-09-25 probe measured for
+    `ledger` -- distinct from the `tx`-nested shape account_tx returned on
+    2026-09-26. Both are real and collect_payments handles both; the hunt reads
+    `ledger`, so this fixture uses that one.
+    """
+    body = {
+        "TransactionType": "Payment",
+        "Destination": "r" + "A" * 33,
+        "DestinationTag": tag,
+        "hash": txhash,
+        "metaData": {"TransactionResult": "tesSUCCESS", "delivered_amount": "1000000"},
+    }
+    return body
+
+
+def test_a_tagged_payment_is_counted_and_sampled():
+    """The field no run has ever observed, once a ledger finally carries one."""
+    payments = collect_payments([tagged_payment(4242)])
+    tagged, untagged, samples = tag_survey(payments)
+
+    assert (tagged, untagged) == (1, 0)
+    assert samples == [("D" * 64, 4242)]
+
+
+def test_an_untagged_payment_is_not_counted_as_tagged():
+    """The observed case: ordinary faucet traffic, which is why the field went unseen."""
+    body = tagged_payment(4242)
+    del body["DestinationTag"]
+    tagged, untagged, samples = tag_survey(collect_payments([body]))
+
+    assert (tagged, untagged, samples) == (0, 1, [])
+
+
+def test_destination_tag_zero_counts_as_present():
+    """Tag 0 is a REAL tag and `if body.get(...)` would drop it.
+
+    Zero is a legal DestinationTag and some services use it. A truthiness test
+    reads it as absent, which on the deposit path would defer a payment that was
+    correctly attributed -- so the check is `is not None`, and this pins it. The
+    same falsy-zero trap the drops arithmetic elsewhere in this tree guards.
+    """
+    tagged, untagged, samples = tag_survey(collect_payments([tagged_payment(0)]))
+
+    assert (tagged, untagged) == (1, 0)
+    assert samples == [("D" * 64, 0)]
+
+
+def test_the_sample_is_capped_so_a_busy_ledger_cannot_flood_the_screen():
+    """Rule 14 asks for output a human reads, which a 900-line dump is not."""
+    bodies = [tagged_payment(i, txhash=f"{i:064d}") for i in range(9)]
+    tagged, untagged, samples = tag_survey(collect_payments(bodies))
+
+    assert (tagged, untagged) == (9, 0), "the COUNT must be complete"
+    assert len(samples) == 5, "only the SAMPLE is capped"

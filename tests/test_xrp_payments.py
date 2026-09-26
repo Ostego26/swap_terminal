@@ -237,3 +237,36 @@ def test_an_empty_ledger_answer_is_an_empty_scan_not_an_error():
     for empty in ([], None):
         scan = deposit_events_from_transactions(empty, ADDRESS, 1)
         assert scan.events == [] and scan.deferred == []
+
+
+def test_destination_tag_zero_is_credited_because_zero_is_a_real_tag():
+    """Zero is a legal DestinationTag, and truthiness would silently defer it.
+
+    _classify() reads `if tag is None`, which is correct. Nothing pinned it until
+    2026-09-26, so a plausible-looking edit to `if not tag:` would have passed the
+    whole suite while making every deposit tagged 0 arrive, get held back as
+    unattributable, and wait for an operator to match it by hand. That is the
+    silent-skip shape this module's other tests exist to prevent, and it is worse
+    than a crash: the money arrives and the swap does not credit.
+
+    Whether the tag allocator ever ISSUES 0 is a separate question and belongs to
+    services/swap_service.py. This pins the reader, because a reader that drops a
+    legal value is wrong regardless of what our own allocator happens to emit --
+    and rule 17 says do not assume the allocator's range, test the field.
+    """
+    scan = deposit_events_from_transactions([entry(tx={"DestinationTag": 0})], ADDRESS, 1)
+
+    assert len(scan.events) == 1, "a payment tagged 0 must be credited, not deferred"
+    assert scan.events[0]["vout"] == 0
+
+
+def test_a_boolean_destination_tag_is_refused_rather_than_read_as_one():
+    """`True == 1` in Python, so a bool tag would silently become tag 1.
+
+    isinstance(tag, bool) is checked explicitly for this reason. Pinned alongside
+    the zero case because the two are the same class of defect from opposite
+    directions: a value that IS an int and must be rejected, and a value that
+    looks falsy and must be accepted.
+    """
+    with pytest.raises(XRPPaymentError, match="non-integer"):
+        deposit_events_from_transactions([entry(tx={"DestinationTag": True})], ADDRESS, 1)
