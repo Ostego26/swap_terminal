@@ -132,17 +132,30 @@ def unwrap_shape(entry: dict) -> str:
     return "*** UNRECOGNIZED -- no tx, no tx_json, no TransactionType ***"
 
 
-def payment_field_report(payments: list[tuple[dict, dict]]) -> tuple[list[str], list[str]]:
-    """Check every field the adapter reads. Returns (display lines, failures).
+def payment_field_report(
+    payments: list[tuple[dict, dict]],
+) -> tuple[list[str], list[str], set[str]]:
+    """Check every field the adapter reads. Returns (display lines, failures, unobserved).
+
+    `unobserved` is the OPTIONAL fields absent from every Payment. It is returned
+    rather than only printed because it has to reach the verdict: the summary line
+    said "every field the adapter reads was observed" over a run where
+    DestinationTag was absent from all 1, and the summary is the line a human
+    reads. A fact that stays in the body and never reaches the conclusion is the
+    same defect as not measuring it.
 
     Counted per payment rather than unioned across them, because a union says
     the NAME exists and a human reads it as a statement about every row --
     the misreading monero_chain_check.py was corrected for.
     """
     if not payments:
-        return (["    (none) -- no Payments to examine, so every field below is UNCONFIRMED"], [])
+        return (
+            ["    (none) -- no Payments to examine, so every field below is UNCONFIRMED"],
+            [],
+            {name for name, _required in PAYMENT_FIELDS},
+        )
 
-    lines, failures = [], []
+    lines, failures, unobserved = [], [], set()
     total = len(payments)
     for name, required in PAYMENT_FIELDS:
         count = sum(1 for body, meta in payments if name in body or name in meta)
@@ -154,11 +167,12 @@ def payment_field_report(payments: list[tuple[dict, dict]]) -> tuple[list[str], 
             failures.append(f"no Payment carries `{name}`, and chains/xrp_payments.py REQUIRES it")
             lines.append(f"    FAIL {name:<22} MISSING and required")
         else:
+            unobserved.add(name)
             lines.append(
                 f"    -    {name:<22} absent from all {total}  <- optional; for DestinationTag this is "
                 f"normal wallet traffic and says nothing about deposits to us"
             )
-    return lines, failures
+    return lines, failures, unobserved
 
 
 def delivered_amount_findings(payments: list[tuple[dict, dict]]) -> list[str]:
@@ -190,13 +204,16 @@ def delivered_amount_findings(payments: list[tuple[dict, dict]]) -> list[str]:
     return findings
 
 
-def verdict_text(failures: list[str], payments_examined: int) -> str:
-    """THREE outcomes, not two.
+def verdict_text(
+    failures: list[str], payments_examined: int, unobserved: set[str] | None = None
+) -> str:
+    """FOUR outcomes, not two.
 
     No failures over zero payments confirmed nothing. Printing PASSED for that
     is the instrument reporting more than the run established -- the shape this
     session has been bitten by repeatedly.
     """
+    unobserved = unobserved or set()
     if failures:
         body = "\n".join(f"  - {item}" for item in failures)
         return (
@@ -210,6 +227,27 @@ def verdict_text(failures: list[str], payments_examined: int) -> str:
             "  No Payments were examined, so the field names -- the ones no unit test can check --\n"
             "  were NOT confirmed. Re-run, or pass --account for an account with payment history.\n"
             "  Exit status 3 means inconclusive, so a script cannot mistake this for a pass either."
+        )
+    if unobserved:
+        # This branch did not exist until 2026-09-26, and its absence made the
+        # summary line false. That run printed the unqualified "every field ...
+        # was observed" while step 3, two screens above, said DestinationTag was
+        # absent from all 1 Payment. Both cannot be true.
+        #
+        # The old sentence is deliberately NOT quoted in the printed output, only
+        # here. The first version of this branch quoted it to explain itself, so
+        # the screen carried the true claim and the false one together and a
+        # reader grepping the output found both -- which is worse than either.
+        # Rule 1 says the history goes next to the code; it does not say it goes
+        # on the operator's screen.
+        names = ", ".join(sorted(unobserved))
+        return (
+            f"PASSED, WITH {len(unobserved)} FIELD(S) STILL UNOBSERVED: {names}\n"
+            f"  Every REQUIRED field was seen over {payments_examined} real Payment(s) and nothing\n"
+            f"  disagreed with the adapter, so this is a pass and the exit status is 0.\n"
+            f"  Optional means optional to THIS CHECK, not to the deposit path: DestinationTag is\n"
+            f"  the field that attributes a payment to a swap, and nothing here has seen a real one.\n"
+            f"  Pass --hunt-tag N to observe it on somebody else's testnet traffic, read-only."
         )
     return f"PASSED: every field the adapter reads was observed, over {payments_examined} real Payment(s)."
 
@@ -290,6 +328,82 @@ def collect_payments(entries) -> list[tuple[dict, dict]]:
 # How often the ledger hunt prints a progress line. Rule 14: 200 ledgers at
 # ~0.2s each is a silent minute, and a silent minute is where Ctrl-C comes from.
 # Every tenth keeps the cursor moving without burying the hit when one lands.
+def credit_a_real_tagged_payment(entries, samples) -> tuple[list[str], bool]:
+    """Run the REAL adapter over a REAL tagged Payment. Returns (lines, confirmed).
+
+    This is the check tag_survey() only looked like it was doing. A survey
+    confirms rippled sends a key spelled `DestinationTag`; it says nothing about
+    whether deposit_events_from_transactions() then credits the payment, reads
+    the tag into `vout`, and gets the amount from delivered_amount. Those are
+    separate claims and the code has to make each one separately.
+
+    Somebody else's Payment serves perfectly here, because the adapter takes the
+    address to scan for as an argument: pass the tagged payment's own Destination
+    and the function does exactly what it does for a deposit to us. Read-only --
+    it is a pure function over a response already fetched.
+
+    THREE outcomes, and they are not two:
+
+      credited        the tag became `vout` and the amount came off
+                      delivered_amount. This is the confirmation.
+      deferred        a tagged Payment the adapter declined to credit. A real
+                      finding, because a tag is present and attribution should
+                      have succeeded.
+      XRPPaymentError the adapter's DESIGNED refusal, not a defect. An
+                      issued-currency Payment has no XRP `delivered_amount` to
+                      credit and xrp_payments.py refuses rather than guessing a
+                      number -- which is the partial-payment defense working.
+                      Testnet carries plenty of token traffic, so this is
+                      expected and must not be reported as a failure.
+    """
+    lines: list[str] = []
+    confirmed = False
+    for tx_hash, tag in samples:
+        body = next(
+            (b for b, _m in collect_payments(entries) if b.get(FIELD_HASH) == tx_hash), None
+        )
+        if body is None:
+            continue
+        destination = body.get(FIELD_DESTINATION) or ""
+        entry = next(
+            (e for e in entries if isinstance(e, dict) and _entry_hash(e) == tx_hash), None
+        )
+        try:
+            scan = deposit_events_from_transactions([entry], destination, 1)
+        except XRPPaymentError as error:
+            lines.append(f"        tag {tag}: adapter REFUSED -- {error}")
+            lines.append("            ^ by design, not a defect; almost always an issued-currency")
+            lines.append("              Payment with no XRP delivered_amount to credit.")
+            continue
+        credited = [event for event in scan.events if event.get("vout") == tag]
+        if credited:
+            event = credited[0]
+            lines.append(
+                f"        tag {tag}: CREDITED vout={event['vout']} amount={event['amount']} XRP "
+                f"confirmations={event['confirmations']}"
+            )
+            confirmed = True
+        else:
+            lines.append(
+                f"        tag {tag}: DEFERRED by the adapter despite carrying a tag  <- FINDING"
+            )
+            lines.extend(f"            {reason}" for reason in scan.deferred)
+    return lines, confirmed
+
+
+def _entry_hash(entry: dict) -> str:
+    """The transaction hash, wherever this nesting keeps it.
+
+    Duplicating collect_payments()'s unwrap would be rule 8's defect, so this
+    only reaches for the hash: flat on the entry, or on the entry beside a
+    nested body, which are the two shapes measured on this network.
+    """
+    for holder in (entry, entry.get("tx") or {}, entry.get("tx_json") or {}):
+        if isinstance(holder, dict) and holder.get(FIELD_HASH):
+            return str(holder[FIELD_HASH])
+    return ""
+
+
 PROGRESS_EVERY_LEDGERS = 10
 
 
@@ -315,11 +429,17 @@ def tag_survey(payments: list[tuple[dict, dict]]) -> tuple[int, int, list[tuple[
     our own. Rule 17 -- a field name our tests agree on is still a guess until a
     server says it back, and a seeded test cannot discover a wire format.
 
-    What it does NOT prove, stated because the distinction is the whole value of
-    the check: that OUR sender populates the field correctly. It proves rippled
-    spells it `DestinationTag` and that deposit_events_from_transactions() reads
-    a real tagged Payment without deferring it. Proving our own sender still
-    needs our own send.
+    This function alone proves only the SPELLING -- that rippled sends a key
+    named `DestinationTag`. It does not run the adapter; credit_a_real_tagged_payment()
+    below does that, and the two claims are kept apart on purpose. The first
+    version of this docstring said this check proved the adapter "reads a real
+    tagged Payment without deferring it", which it did not do and which no line
+    of it attempted. A survey of field NAMES asserting something about adapter
+    BEHAVIOR is rule 17's failure written into a comment, and a comment is where
+    it is least likely to be caught, because nothing runs it.
+
+    Neither function proves that OUR sender populates the field. That needs our
+    own send.
     """
     tagged = [
         (str(body.get(FIELD_HASH) or "?"), int(body[FIELD_DESTINATION_TAG]))
@@ -431,7 +551,9 @@ def find_account(url: str, seq, how_many: int, given: str) -> str:
     return account
 
 
-def check_account_tx(url: str, account: str) -> tuple[list[dict], list[tuple[dict, dict]]]:
+def check_account_tx(
+    url: str, account: str
+) -> tuple[list[dict], list[tuple[dict, dict]], set[str]]:
     """Step 3: THE GAP the earlier probe left -- account_tx is what the adapter calls."""
     started = step(
         3, "exercise account_tx, which is what the adapter actually calls",
@@ -455,14 +577,14 @@ def check_account_tx(url: str, account: str) -> tuple[list[dict], list[tuple[dic
     except NETWORK_ERRORS as error:
         fail(f"account_tx failed: {error}")
 
-    lines, found = payment_field_report(payments)
+    lines, found, unobserved = payment_field_report(payments)
     for line in lines:
         print(line, flush=True)
     failures.extend(found)
     for finding in delivered_amount_findings(payments):
         fail(finding)
     done(started)
-    return entries, payments
+    return entries, payments, unobserved
 
 
 def check_real_scan(entries: list[dict], payments: list[tuple[dict, dict]], account: str) -> None:
@@ -543,9 +665,20 @@ def hunt_tagged_payment(url: str, seq, how_many: int) -> bool:
             for tx_hash, tag in samples:
                 print(f"        DestinationTag {tag}  tx {tx_hash}", flush=True)
             print(f"    CONFIRMED: rippled spells it {FIELD_DESTINATION_TAG!r}, which is what", flush=True)
-            print("    chains/xrp_payments.py reads. NOT proven: that OUR sender sets it.", flush=True)
+            print("    chains/xrp_payments.py reads.", flush=True)
+            print("    now running the REAL adapter over these, which the survey above does NOT do:", flush=True)
+            lines, credited = credit_a_real_tagged_payment(entries, samples)
+            for line in lines or ["        (none) -- no sampled payment could be re-read"]:
+                print(line, flush=True)
+            if credited:
+                print("    CONFIRMED END TO END: a real tagged Payment was credited with the tag", flush=True)
+                print("    as `vout` and the amount from delivered_amount.", flush=True)
+            else:
+                print("    NOT confirmed end to end: the spelling is proven, but no sampled payment", flush=True)
+                print("    was credited. See the per-payment reasons above.", flush=True)
+            print("    NOT proven either way: that OUR sender sets the field.", flush=True)
             done(started)
-            return True
+            return credited
         if (offset + 1) % PROGRESS_EVERY_LEDGERS == 0:
             print(f"    scanned {offset + 1}/{how_many} ledgers, {seen} Payment(s), "
                   f"0 tagged so far", flush=True)
@@ -613,18 +746,20 @@ def main() -> int:
         print(verdict_text(failures, 0), flush=True)
         return exit_code(failures, 0)
 
-    entries, payments = check_account_tx(args.url, account)
+    entries, payments, unobserved = check_account_tx(args.url, account)
     check_real_scan(entries, payments, account)
 
     # Opt-in because it is the only step here that can run for a minute. Its
     # result is deliberately NOT folded into the verdict: finding no tagged
     # payment on the testnet says nothing about our code, and exit_code() means
     # "a field or method the adapter depends on did not match a real server".
-    if args.hunt_tag > 0:
-        hunt_tagged_payment(args.url, seq, args.hunt_tag)
+    if args.hunt_tag > 0 and hunt_tagged_payment(args.url, seq, args.hunt_tag):
+        # The hunt OBSERVED the field, so the verdict must stop calling it
+        # unobserved. This is the whole reason the hunt returns a bool.
+        unobserved.discard(FIELD_DESTINATION_TAG)
 
     print("\n" + "=" * 70, flush=True)
-    print(verdict_text(failures, len(payments)), flush=True)
+    print(verdict_text(failures, len(payments), unobserved), flush=True)
     return exit_code(failures, len(payments))
 
 

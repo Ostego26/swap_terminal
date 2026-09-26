@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from xrp_chain_check import (
     bad_address_verdict,
     collect_payments,
+    credit_a_real_tagged_payment,
     delivered_amount_findings,
     exit_code,
     network_banner,
@@ -114,7 +115,7 @@ def test_collect_payments_finds_payments_in_the_flat_shape():
 # --- the field report -------------------------------------------------------
 
 def test_every_field_present_is_no_failures():
-    lines, failures = payment_field_report(collect_payments([flat_payment()]))
+    lines, failures, _unobserved = payment_field_report(collect_payments([flat_payment()]))
     assert failures == []
     assert any("present in all 1" in line for line in lines)
 
@@ -122,7 +123,7 @@ def test_every_field_present_is_no_failures():
 def test_a_missing_required_field_is_a_failure():
     broken = flat_payment()
     del broken["metaData"]["delivered_amount"]
-    lines, failures = payment_field_report(collect_payments([broken]))
+    lines, failures, _unobserved = payment_field_report(collect_payments([broken]))
     assert len(failures) == 1
     assert "delivered_amount" in failures[0]
     assert any("MISSING and required" in line for line in lines)
@@ -130,7 +131,7 @@ def test_a_missing_required_field_is_a_failure():
 
 def test_a_missing_destination_tag_is_not_a_failure_and_says_why():
     """Absent on ordinary wallet traffic, so its absence proves nothing about us."""
-    lines, failures = payment_field_report(collect_payments([flat_payment(tag=None)]))
+    lines, failures, _unobserved = payment_field_report(collect_payments([flat_payment(tag=None)]))
     assert failures == []
     line = next(line for line in lines if "DestinationTag" in line)
     assert "normal wallet traffic" in line
@@ -138,13 +139,13 @@ def test_a_missing_destination_tag_is_not_a_failure_and_says_why():
 
 def test_a_field_present_in_only_some_payments_is_shown_as_a_fraction():
     """Counted per payment, not unioned -- the correction monero_chain_check needed."""
-    lines, _ = payment_field_report(collect_payments([flat_payment(), flat_payment(tag=None, txhash="D" * 64)]))
+    lines, _failures, _unobserved = payment_field_report(collect_payments([flat_payment(), flat_payment(tag=None, txhash="D" * 64)]))
     line = next(line for line in lines if "DestinationTag" in line)
     assert "present in 1/2" in line
 
 
 def test_no_payments_means_unconfirmed_and_never_a_failure():
-    lines, failures = payment_field_report([])
+    lines, failures, _unobserved = payment_field_report([])
     assert failures == []
     assert "UNCONFIRMED" in lines[0]
 
@@ -318,3 +319,92 @@ def test_the_sample_is_capped_so_a_busy_ledger_cannot_flood_the_screen():
 
     assert (tagged, untagged) == (9, 0), "the COUNT must be complete"
     assert len(samples) == 5, "only the SAMPLE is capped"
+
+
+def test_an_unobserved_optional_field_reaches_the_verdict():
+    """The summary line lied on 2026-09-26, and the summary is what a human reads.
+
+    That run printed "PASSED: every field the adapter reads was observed" while
+    step 3 two screens above said "DestinationTag absent from all 1". Both cannot
+    be true. The field is optional to the CHECK -- its absence is not a defect --
+    but it is not optional to the deposit path, since it is the field that
+    attributes a payment to a swap. So "not seen" has to survive into the
+    conclusion rather than staying in the body.
+    """
+    verdict = verdict_text([], 1, {"DestinationTag"})
+
+    assert "every field the adapter reads was observed" not in verdict
+    assert "UNOBSERVED" in verdict
+    assert "DestinationTag" in verdict
+
+
+def test_observing_everything_still_gives_the_clean_pass():
+    """The unqualified claim must remain available, or the new branch is just noise."""
+    verdict = verdict_text([], 4, set())
+
+    assert verdict.startswith("PASSED: every field the adapter reads was observed")
+    assert "UNOBSERVED" not in verdict
+
+
+def test_a_real_failure_still_outranks_an_unobserved_field():
+    """Precedence: a field that DISAGREED beats a field merely not seen."""
+    verdict = verdict_text(["Destination missing"], 2, {"DestinationTag"})
+
+    assert verdict.startswith("FAILED")
+
+
+def test_the_field_report_names_which_optional_fields_went_unseen():
+    """The report and the verdict must agree, so the report is the one source."""
+    _lines, failures, unobserved = payment_field_report(collect_payments([flat_payment(tag=None)]))
+
+    assert failures == []
+    assert unobserved == {"DestinationTag"}
+
+
+def test_no_payments_means_every_field_is_unobserved_not_none_of_them():
+    """Zero rows confirmed zero fields, and the empty set would claim the opposite.
+
+    Returning set() here would have made the verdict print the unqualified
+    "every field was observed" for a run that examined nothing -- which is the
+    exact over-claim verdict_text's third branch exists to prevent, arriving
+    through a different door.
+    """
+    _lines, failures, unobserved = payment_field_report([])
+
+    assert failures == []
+    assert "DestinationTag" in unobserved
+    assert "Destination" in unobserved
+
+
+def test_the_adapter_is_actually_run_over_a_real_tagged_payment():
+    """The check tag_survey() only LOOKED like it was doing.
+
+    My own docstring claimed the survey proved the adapter "reads a real tagged
+    Payment without deferring it". It did not, and no line of it attempted to --
+    the survey counts field presence. A comment asserting behavior no code
+    exercises is rule 17's failure in the place least likely to be caught, since
+    nothing runs a comment. This pins the claim to code.
+    """
+    body = tagged_payment(4242)
+    lines, confirmed = credit_a_real_tagged_payment([body], [("D" * 64, 4242)])
+
+    assert confirmed is True
+    assert any("CREDITED" in line and "vout=4242" in line for line in lines)
+
+
+def test_an_issued_currency_refusal_is_reported_as_by_design_not_as_a_finding():
+    """Testnet carries token traffic, and refusing it is the partial-payment defense.
+
+    An issued-currency Payment has no XRP delivered_amount, so the adapter raises
+    rather than guessing a number. Rendering that as a FINDING would send the
+    operator to fix working safety code -- the same mistake the --account verdict
+    made about the address decoder.
+    """
+    body = tagged_payment(99)
+    body["metaData"]["delivered_amount"] = {"currency": "USD", "value": "5", "issuer": "r" + "B" * 33}
+    lines, confirmed = credit_a_real_tagged_payment([body], [("D" * 64, 99)])
+
+    assert confirmed is False
+    assert any("REFUSED" in line for line in lines)
+    assert any("by design" in line for line in lines)
+    assert not any("FINDING" in line for line in lines)
