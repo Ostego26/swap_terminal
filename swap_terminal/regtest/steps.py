@@ -717,14 +717,19 @@ def _mining_failure(run: Run, exc: RPCError, mined_so_far: int, requested: int) 
         )
     applied = " ".join(run.config.extra_args) or "(none: no deployment override was applied)"
     return RegtestSetupError(
-        f"{detail}. A transaction with NO INPUTS in a block the daemon built for itself points at Litecoin's "
-        "Mimblewimble Extension Blocks: MWEB activates BY HEIGHT and adds an integrating HogEx transaction whose "
-        "input structure a generic transaction check can read as vin-empty, which is why several hundred blocks "
-        "mined first and then one did not. THAT IS A HYPOTHESIS, not a measurement -- step 2 printed this daemon's "
-        "own softfork table, including MWEB's status and activation height, and that is the evidence to read. "
-        f"Deployment options this harness passed: {applied}. If none were applied, this build did not advertise "
-        "-vbparams; rerun with --wipe after adding one by hand if your build takes a different flag. The locktime "
-        "is NOT shortened to avoid this: 1152 blocks is what a 48-hour LTC lock derives to."
+        f"{detail}. THIS IS MWEB, and it is no longer a hypothesis: reproduced on 2026-09-26 against Litecoin "
+        "Core v0.21.4 by running this harness with --ltc-mweb, which failed at the same block with the SAME "
+        "transaction hash the operator saw on 2026-09-25 (58338ec7c9c4e608...). MWEB is a bip9 deployment that "
+        "regtest activates at height 288 -- STARTED at genesis, LOCKED_IN at 144, ACTIVE at 288 on a 144-block "
+        "window -- and src/mweb/mweb_miner.cpp::AddHogExTransaction then builds an integrating HogEx transaction "
+        "for EVERY block. On an idle chain the first one has no previous HogAddr to spend and no peg-in, so its "
+        "vin is empty and one vout, and src/consensus/tx_check.cpp rejects exactly that shape as bad-txns-vin-empty "
+        "(IsMWEBOnly() requires vout to be empty too, so the HogEx does not qualify). src/miner.cpp calls it "
+        "unconditionally once MWEB is enabled, so no block can be built after 288. "
+        f"Deployment options this harness passed: {applied}. The fix is -vbparams=mweb:-2:0 and -2 is the value "
+        "that matters: see regtest.daemons.mweb_override_args, where mweb:0:0 is shown to be a no-op. If none were "
+        "applied, this build did not advertise -vbparams. The locktime is NOT shortened to avoid this: 1152 blocks "
+        "is what a 48-hour LTC lock derives to."
     )
 
 

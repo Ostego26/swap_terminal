@@ -65,6 +65,7 @@ from regtest.daemons import (
     cltv_activation_height,
     describe_rpc_exception,
     mweb_override_args,
+    mweb_state_line,
     resolve_chain_config,
 )
 from regtest.keys import RegtestKey, generate_key, hash160
@@ -1137,7 +1138,15 @@ def test_a_refund_branch_that_was_never_exercised_is_not_reported_as_broken():
     assert "does not" not in verdict.lower().replace("did not run", "")
 
 
-def test_a_mining_failure_names_mweb_as_a_hypothesis_and_says_so():
+def test_a_mining_failure_names_mweb_as_the_confirmed_cause_and_the_fix():
+    """Updated 2026-09-26: this used to pin the word HYPOTHESIS, and must not.
+
+    It was honest while nobody had run it. The cause was then reproduced --
+    same block, same transaction hash as the operator's 2026-09-25 failure --
+    so a message still hedging would be the opposite of rule 17's defect: a
+    measurement written in the register of a guess. Rule 2's "its test changes
+    to pin the stronger invariant" is why this is edited rather than deleted.
+    """
     run = Run(console=Console(total_steps=9, stream=StringIO()), config=resolve_chain_config("LTC"))
     error = _mining_failure(
         run,
@@ -1147,23 +1156,77 @@ def test_a_mining_failure_names_mweb_as_a_hypothesis_and_says_so():
     )
     message = str(error)
     assert "288 of 1148 blocks" in message
-    assert "Mimblewimble" in message
-    assert "HYPOTHESIS, not a measurement" in message
-    assert "softfork table" in message
+    assert "MWEB" in message
+    assert "no longer a hypothesis" in message
+    # The reproduction is what makes it a measurement, so the txid that matched
+    # and the fix to apply both have to survive into the operator's screen.
+    assert "58338ec7c9c4e608" in message
+    assert "-vbparams=mweb:-2:0" in message
+    assert "height 288" in message
     assert "locktime is NOT shortened" in message
+    assert "HYPOTHESIS, not a measurement" not in message
 
 
 def test_a_mining_failure_that_is_not_vin_empty_does_not_blame_mweb():
     run = Run(console=Console(total_steps=9, stream=StringIO()), config=resolve_chain_config("LTC"))
     message = str(_mining_failure(run, RPCError("generatetoaddress: code=-1 message=out of memory"), 10, 20))
-    assert "Mimblewimble" not in message
+    # "MWEB", not "Mimblewimble": the message stopped spelling the name out, and
+    # an absence assertion on a word the code no longer uses passes for free.
+    assert "MWEB" not in message
     assert "daemon-side condition" in message
 
 
 def test_the_mweb_override_is_taken_from_the_binarys_own_help():
     args, explanation = mweb_override_args("  -vbparams=<deployment:start:end>\n       Use given start/end times")
-    assert args == ["-vbparams=mweb:0:0"]
+    assert args == ["-vbparams=mweb:-2:0"]
     assert "advertises -vbparams" in explanation
+
+
+def test_the_override_value_is_never_active_and_not_a_zero_width_window():
+    """-2 is NEVER_ACTIVE; 0:0 switches versionbits to height-based and activates it.
+
+    This pins the correction made 2026-09-26. `mweb:0:0` was passed for a day
+    on the reasoning that start=0/timeout=0 times out immediately. Litecoin
+    v0.21.4's src/versionbits.cpp opens GetStateFor with
+
+        bool fHeightBased = (nTimeStart == 0 && nTimeTimeout == 0) ? true : false;
+
+    so `0:0` means height-based-from-zero, i.e. STARTED on the first block, and
+    MWEB activated on schedule at 288. Asserting the exact string is the point:
+    a test that only checked for "-vbparams" in the output passed the whole
+    time the value was a no-op.
+    """
+    args, _ = mweb_override_args("  -vbparams=<deployment:start:end>")
+    assert args == ["-vbparams=mweb:-2:0"]
+    assert "0:0" not in args[0].split("=", 1)[1].removeprefix("mweb:")
+
+
+def test_a_listed_mweb_row_is_reported_as_live_and_names_the_failure_height():
+    line = mweb_state_line("LTC", {"mweb": {"type": "bip9", "active": False}}, [])
+    assert "MWEB IS LISTED" in line
+    assert "288" in line
+
+
+def test_a_missing_mweb_row_with_an_override_is_reported_as_the_override_working():
+    line = mweb_state_line("LTC", {"bip65": {"height": 1351}}, ["-vbparams=mweb:-2:0"])
+    assert "NOT listed" in line
+    assert "-vbparams=mweb:-2:0" in line
+    assert "NEVER_ACTIVE" in line
+
+
+def test_a_missing_mweb_row_with_no_override_is_not_credited_to_the_override():
+    """The two ways to have no `mweb` row must not print the same sentence.
+
+    Absence of the row is the only evidence the override took, so absence
+    WITHOUT an override has to read differently or the line proves nothing.
+    """
+    line = mweb_state_line("LTC", {"bip65": {"height": 1351}}, [])
+    assert "no override was passed" in line
+    assert "NEVER_ACTIVE" not in line
+
+
+def test_mweb_state_is_not_reported_for_bitcoin():
+    assert "does not apply" in mweb_state_line("BTC", {}, [])
 
 
 def test_no_mweb_override_is_invented_when_the_binary_does_not_offer_one():

@@ -269,10 +269,69 @@ def mweb_override_args(help_text: str) -> tuple[list[str], str]:
     again without it.
 
     `-vbparams=<deployment>:<start>:<timeout>` is the regtest-only versionbits
-    override inherited from Bitcoin Core. A deployment whose start and timeout
-    are both zero is STARTED and immediately timed out, so it reaches FAILED
-    and never activates -- the conventional way to switch a deployment off on
-    regtest. `mweb` is the deployment name Litecoin gives it.
+    override inherited from Bitcoin Core, and `mweb` is the deployment name
+    Litecoin gives MWEB. The VALUE matters and the first version of this
+    function had it wrong.
+
+    CORRECTED 2026-09-26 by reading Litecoin Core v0.21.4's own source, which
+    is the measurement the paragraph above could not take. This used to pass
+    `mweb:0:0` on the reasoning that a deployment started at zero and timed out
+    at zero reaches FAILED. That reasoning is refuted by
+    src/versionbits.cpp::AbstractThresholdConditionChecker::GetStateFor, whose
+    FIRST line is
+
+        bool fHeightBased = (nTimeStart == 0 && nTimeTimeout == 0) ? true : false;
+
+    so `0:0` does not mean "time window of zero width", it switches the
+    deployment to HEIGHT-based signaling -- and with no 4th and 5th fields
+    given, nStartHeight defaults to 0, so DEFINED -> STARTED fires on the very
+    first block and MWEB activates on schedule. `mweb:0:0` was a no-op that
+    printed as an override, which is rule 14's "did nothing must not look like
+    did work" wearing a versionbits flag.
+
+    The value that works is `-2`, because the same function returns early:
+
+        if (nTimeStart == Consensus::BIP9Deployment::NEVER_ACTIVE) {
+            return ThresholdState::FAILED;
+        }
+
+    and src/consensus/params.h defines `NEVER_ACTIVE = -2`. It is unconditional
+    -- no period, no threshold, no signaling -- so MWEB can never activate at
+    any height.
+
+    That is also what Litecoin's own functional tests pass, in 20+ files
+    including test/functional/feature_cltv.py, which is this harness's exact
+    situation: a test that has to mine past BIP65's regtest activation height
+    without MWEB turning on partway. They all write `-vbparams=mweb:-2:0`.
+
+    AND THE CAUSE IS NOW CONFIRMED, not merely the leading hypothesis. Read
+    src/mweb/mweb_miner.cpp::AddHogExTransaction: it appends the previous
+    block's HogAddr as the new HogEx's only input *if* the previous block
+    carried a HogEx, and appends peg-in inputs if any exist. On the first block
+    after activation on an idle chain NEITHER holds, so the HogEx it builds has
+    an empty vin and one vout. src/consensus/tx_check.cpp rejects exactly that:
+
+        if (!tx.IsMWEBOnly()) {
+            if (tx.vin.empty())
+                return state.Invalid(..., "bad-txns-vin-empty");
+
+    and `IsMWEBOnly()` is `HasMWEBTx() && vin.empty() && vout.empty()`, which
+    the HogEx fails on its vout. src/miner.cpp calls AddHogExTransaction
+    unconditionally once `IsMWEBEnabled(pindexPrev, ...)`, so this is
+    deterministic rather than intermittent: the first block mined after
+    activation cannot be built.
+
+    MEASURED, NOT DERIVED, 2026-09-26: this harness was run against Litecoin
+    Core v0.21.4 with --ltc-mweb, so MWEB was left to activate, and it died
+    `after 288 of 1351 blocks` with `bad-txns-vin-empty, Transaction check
+    failed (tx hash 58338ec7c9c4e608...)` -- the SAME transaction hash the
+    operator's 2026-09-25 run reported, which is a bit-for-bit reproduction
+    rather than a similar-looking failure. Activation is at height 288, not the
+    432 a first reading of the window arithmetic suggests: on a 144-block
+    window MWEB is STARTED from genesis (its nStartTime is in the past), so
+    LOCKED_IN lands at 144 and ACTIVE at 288, and 288 is also where the
+    deployment table stops listing it as pending. The run with the override
+    mined straight past 288 to 2504 and finished OK=37 FAIL=0.
 
     Returns (args, explanation). An empty arg list with an explanation is a
     perfectly good answer and says so on screen.
@@ -285,9 +344,10 @@ def mweb_override_args(help_text: str) -> tuple[list[str], str]:
             "If mining fails with bad-txns-vin-empty, MWEB cannot be switched off from the command line here"
         )
     return (
-        ["-vbparams=mweb:0:0"],
-        "this build advertises -vbparams, so MWEB is held at start=0/timeout=0, which reaches FAILED and never "
-        "activates. If the daemon refuses to start with it, the harness retries without it and says so",
+        ["-vbparams=mweb:-2:0"],
+        "this build advertises -vbparams, so MWEB is held at NEVER_ACTIVE (start=-2), which versionbits returns "
+        "FAILED for unconditionally -- the value Litecoin's own feature_cltv.py passes. If the daemon refuses to "
+        "start with it, the harness retries without it and says so",
     )
 
 
@@ -632,13 +692,21 @@ def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
     """Print each deployment and its status, from the daemon's own mouth.
 
     This exists for one measured reason. Mining toward the LTC locktime died
-    with `bad-txns-vin-empty` several hundred blocks in, and Mimblewimble
-    Extension Blocks -- which activate BY HEIGHT on Litecoin -- are the leading
-    hypothesis. A hypothesis about an activation height is settled by asking
-    the daemon what its activation heights are, not by reasoning about them, so
-    this block is printed before anything mines. If MWEB shows active, or
-    active at a height the run will cross, the later failure has its
-    explanation attached to it rather than inferred afterwards.
+    with `bad-txns-vin-empty` 288 blocks in, and Mimblewimble Extension Blocks
+    were the leading hypothesis when this was written. They are now the
+    confirmed cause -- see mweb_override_args for the reproduction -- and this
+    block is still printed before anything mines, because it is what says
+    whether the override took effect on THIS daemon.
+
+    MWEB'S ABSENCE FROM THE TABLE IS THE EVIDENCE, which is why it gets a line
+    of its own below. A deployment held at NEVER_ACTIVE is not reported by
+    getblockchaininfo at all, so the successful run's table simply has no
+    `mweb` row while the failing run's reads
+    `softfork mweb: type=bip9 active=False height=0`. Without a line saying so,
+    those two are a present row versus a missing one, and a missing row reads
+    as "this build has no MWEB" exactly as easily as "the override worked" --
+    rule 14's did-nothing-must-not-look-like-did-work, at the one place in this
+    harness where the difference decides whether 1351 blocks can be mined.
 
     Never an empty block (rule 14): a daemon with no softforks field says so.
     """
@@ -662,6 +730,36 @@ def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
             )
         else:
             console.say(f"{config.asset}: softfork {name}: {detail}")
+    console.say(f"{config.asset}: {mweb_state_line(config.asset, softforks, config.extra_args)}")
+
+
+def mweb_state_line(asset: str, softforks: dict, extra_args: list[str]) -> str:
+    """One sentence on MWEB's state, reading the table the daemon just printed.
+
+    Separated from the printing loop so it can be asserted on without a daemon
+    (tests/test_regtest_harness_units.py). It answers the question the table
+    cannot answer by itself: a `mweb` row means MWEB is live and this run will
+    die at height 288, and no `mweb` row means either the override took or the
+    build has none -- which is decided by whether the override was passed, not
+    by the table.
+    """
+    if asset != "LTC":
+        return "MWEB is a Litecoin deployment and does not apply to this chain"
+    override = [arg for arg in extra_args if "mweb" in arg]
+    if "mweb" in softforks:
+        return (
+            f"MWEB IS LISTED, so it is live on this daemon and mining will fail at height 288. "
+            f"Deployment override passed: {' '.join(override) or '(none)'}"
+        )
+    if override:
+        return (
+            f"MWEB is NOT listed, which is what {' '.join(override)} looks like when it works -- a deployment held "
+            "at NEVER_ACTIVE is omitted from getblockchaininfo rather than reported inactive"
+        )
+    return (
+        "MWEB is NOT listed and no override was passed, so this build has no MWEB deployment. Nothing should "
+        "fail at height 288"
+    )
 
 
 # The deployment that IS CHECKLOCKTIMEVERIFY. Named once; every lookup below

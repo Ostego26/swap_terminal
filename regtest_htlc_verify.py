@@ -92,6 +92,32 @@ HOW TO RUN IT.
     source .venv/bin/activate
     python3 regtest_htlc_verify.py --wipe
 
+IT DOES NOT NEED THE OPERATOR'S MACHINE, and finding that out cost a day.
+Every ST_REGTEST_* variable below is a path or a port, so the daemons can be
+anywhere -- including a release tarball unpacked into a scratch directory in
+whatever container this session is running in. That is how LTC was first
+verified, on 2026-09-26:
+
+    curl -sSLo ltc.tar.gz https://github.com/litecoin-project/litecoin/\
+releases/download/v0.21.4/litecoin-0.21.4-x86_64-linux-gnu.tar.gz
+    tar xzf ltc.tar.gz
+    mkdir -p "$PWD/rt/ltc"
+    printf 'regtest=1\nserver=1\nfallbackfee=0.0002\n[regtest]\n' > "$PWD/rt/ltc/litecoin.conf"
+    printf 'rpcuser=rt\nrpcpassword=rt\nrpcport=19443\n' >> "$PWD/rt/ltc/litecoin.conf"
+    ST_REGTEST_LTC_DATADIR="$PWD/rt/ltc" \
+    ST_REGTEST_LTC_DAEMON="$PWD/litecoin-0.21.4/bin/litecoind" \
+    ST_REGTEST_LTC_CLI="$PWD/litecoin-0.21.4/bin/litecoin-cli" \
+    python3 regtest_htlc_verify.py --chain ltc --wipe
+
+The whole LTC run takes under a minute of wall clock and mines 2504 blocks.
+There is no reason to read a nine-step harness's output over somebody's
+shoulder; run it where the session is and paste nothing.
+
+The conf is the one thing the harness does NOT create -- it refuses with a
+message naming the file and the four settings it needs, deliberately, because
+writing an rpcpassword into a file on the operator's behalf is not this
+harness's business.
+
 This is NOT a pytest test and is deliberately not under tests/: it needs two
 external daemons, it starts processes, and it mines four-figure numbers of
 blocks. `python3 -m pytest` must stay runnable on a machine with no chain at
