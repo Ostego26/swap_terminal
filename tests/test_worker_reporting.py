@@ -90,6 +90,20 @@ def test_endpoint_lines_report_confirmations_as_blocks_never_as_microfortnights(
     for asset in ("BTC", "LTC", "GRC"):
         matching = [line for line in lines if line.strip().startswith(asset)]
         assert len(matching) == 1, f"expected exactly one {asset} line, got {matching}"
+        # A threshold is reported only by a CONFIGURED chain, and this distinction
+        # arrived 2026-09-26 when these three gained an unconfigured state. An
+        # unconfigured chain has no adapter, watches nothing, and has no threshold
+        # to report -- printing `min_confirmations=2 blocks` beside "not configured"
+        # would describe a watcher that does not exist.
+        #
+        # The ONE line every chain must still satisfy is the µfn ban above, which is
+        # unconditional: a block count is not a duration whether or not the chain is
+        # configured. That is the invariant this test is actually for.
+        if "not configured" in matching[0]:
+            assert "min_confirmations=" not in matching[0], (
+                f"an unconfigured chain must not report a threshold: {matching[0]}"
+            )
+            continue
         assert "min_confirmations=" in matching[0]
         assert "blocks" in matching[0]
     solana = [line for line in lines if line.strip().startswith("SOL")]

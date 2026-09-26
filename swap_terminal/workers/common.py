@@ -58,6 +58,7 @@ from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
 from config import Config
 from microfortnights import format_duration
+from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, classify
 
 
 def build_adapters_from_config() -> dict:
@@ -97,8 +98,29 @@ def endpoint_lines() -> list[str]:
         rpc = Config.RPC[asset]
         wallet = rpc["wallet"] or "(default wallet)"
         confirmations = getattr(Config, f"{asset}_MIN_CONFIRMATIONS")
+        # AN UNCONFIGURED CHAIN SAYS SO, matching what SOL, XRP and XMR say below.
+        #
+        # This printed `rpc=127.0.0.1:0` until 2026-09-26, and it was a regression
+        # from the same day's change that made these three default to
+        # UNCONFIGURED_PORT instead of a mainnet port. Before that a port always
+        # had a real value, so interpolating it was safe; afterwards, `:0` rendered
+        # an unconfigured chain as a configured one -- a reader would see three
+        # chains with an endpoint and three marked "not configured", when in fact
+        # all six were unconfigured.
+        #
+        # Worse than cosmetic, because chains/registry.py SKIPS a port-0 chain, so
+        # the banner was naming adapters that do not exist. Rule 14's "make 'did
+        # nothing' look different from 'did work'", and rule 16's "a wrong comment
+        # is a bug" applied to a line of output.
+        if rpc["port"] == UNCONFIGURED_PORT:
+            lines.append(
+                f"  {asset}  not configured ({CHAIN_PORTS[asset].port_variable} unset)  <- no {asset} "
+                f"adapter is constructed; test chain is {CHAIN_PORTS[asset].test_hint}"
+            )
+            continue
         lines.append(
             f"  {asset}  rpc={rpc['host']}:{rpc['port']} wallet={wallet} min_confirmations={confirmations} blocks"
+            f"  <- {chain_verdict(asset, rpc['port'])}"
         )
     # SOL IS APPENDED SEPARATELY AND SAYS A DIFFERENT THING, because it IS a
     # different thing. The loop above prints `min_confirmations=N blocks`; a
@@ -137,6 +159,23 @@ def endpoint_lines() -> list[str]:
     else:
         lines.append("  XMR  not configured (XMR_RPC_PORT unset)  <- no Monero adapter is constructed; no XMR pair is allowed")
     return lines
+
+
+def chain_verdict(asset: str, port: int) -> str:
+    """Which network a configured port belongs to, for the startup banner.
+
+    A bare `rpc=127.0.0.1:15715` requires the reader to know Gridcoin's port
+    table. Rule 14 asks output to say what a number MEANS next to the number, and
+    on a worker that is about to watch for real deposits, "which chain" is the
+    number that matters most. network_target.classify() is the one place that
+    decides it (rule 11), so this does not re-derive it.
+    """
+    verdict = classify(asset, port)
+    if verdict == "MAINNET":
+        return "*** MAINNET, REAL MONEY ***"
+    if verdict == "TEST":
+        return f"test chain (mainnet is {CHAIN_PORTS[asset].mainnet_port})"
+    return f"UNRECOGNIZED port, so which chain this is was NOT established; mainnet is {CHAIN_PORTS[asset].mainnet_port}"
 
 
 def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:

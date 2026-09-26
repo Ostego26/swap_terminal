@@ -28,8 +28,10 @@ import sys
 from pathlib import Path
 
 import app
+import config as config_module
 import flask
 import pytest
+from workers.common import endpoint_lines
 
 APP_PY = Path(__file__).resolve().parent.parent / "swap_terminal" / "app.py"
 
@@ -169,3 +171,51 @@ def test_exposure_warnings_are_empty_only_for_the_safe_default():
     assert len(both) == 3
     assert sum("SWAP_TERMINAL_DEBUG" in warning for warning in both) == 1
     assert sum("/admin" in warning for warning in both) == 1
+
+
+# --- the worker banner must not name an adapter that does not exist -----------
+
+def test_an_unconfigured_chain_is_named_not_shown_as_port_zero(monkeypatch):
+    """A regression from 2026-09-26, introduced by that same day's own change.
+
+    Making BTC/LTC/GRC default to UNCONFIGURED_PORT was the fix for the terminal
+    polling a mainnet wallet. But this banner interpolated the port directly, so it
+    then printed `rpc=127.0.0.1:0` — rendering an unconfigured chain as a
+    configured one, three lines above three chains correctly marked "not
+    configured". Before the change a port always had a real value and
+    interpolating it was safe.
+
+    Worse than cosmetic: chains/registry.py SKIPS a port-0 chain, so the banner was
+    naming adapters that do not exist. Rule 14's "make did-nothing look different
+    from did-work", and rule 16's "a wrong comment is a bug" applied to output.
+    """
+    for variable in ("BTC_RPC_PORT", "LTC_RPC_PORT", "GRC_RPC_PORT"):
+        monkeypatch.delenv(variable, raising=False)
+
+    lines = endpoint_lines()
+    text = "\n".join(lines)
+
+    assert ":0 " not in text and not text.endswith(":0"), f"a port of 0 must never be printed:\n{text}"
+    for asset in ("BTC", "LTC", "GRC"):
+        assert any(line.startswith(f"  {asset}  not configured") for line in lines), (
+            f"{asset} is unconfigured and must say so:\n{text}"
+        )
+
+
+def test_a_configured_chain_says_which_network_the_port_belongs_to():
+    """Rule 14: say what the number MEANS next to the number.
+
+    A bare `rpc=127.0.0.1:15715` requires the reader to know Gridcoin's port
+    table, and this is a worker about to watch for real deposits — "which chain"
+    is the number that matters most. Both verdicts asserted, because a version
+    that said "test chain" unconditionally would pass a test for one of them.
+    """
+    original = config_module.Config.RPC["GRC"]["port"]
+    try:
+        config_module.Config.RPC["GRC"]["port"] = 25715
+        assert any("test chain (mainnet is 15715)" in line for line in endpoint_lines())
+
+        config_module.Config.RPC["GRC"]["port"] = 15715
+        assert any("MAINNET, REAL MONEY" in line for line in endpoint_lines())
+    finally:
+        config_module.Config.RPC["GRC"]["port"] = original
