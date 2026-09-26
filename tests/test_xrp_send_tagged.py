@@ -9,6 +9,7 @@ Mainnet-safe: yes
 """
 
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -313,11 +314,19 @@ def swaps_db(tmp_path, rows):
     it depends on more than it does."""
     path = tmp_path / "swaps.db"
     connection = sqlite3.connect(path)
+    # expected_input_amount is part of this table because deposit_target_for_swap()
+    # READS it -- the helper mirrors the columns the function under test selects,
+    # rather than the minimum that made an earlier version of it pass. Three tests
+    # broke when that column was added to the query, which is the helper doing its
+    # job: a fixture narrower than the real schema hides exactly this.
     connection.executescript(
         "CREATE TABLE swaps (id TEXT PRIMARY KEY, from_asset TEXT, deposit_address TEXT, "
-        "deposit_tag INTEGER, status TEXT);"
+        "deposit_tag INTEGER, status TEXT, expected_input_amount REAL);"
     )
-    connection.executemany("INSERT INTO swaps VALUES (?,?,?,?,?)", rows)
+    connection.executemany(
+        "INSERT INTO swaps (id, from_asset, deposit_address, deposit_tag, status) VALUES (?,?,?,?,?)",
+        rows,
+    )
     connection.commit()
     connection.close()
     return str(path)
@@ -475,3 +484,56 @@ def test_a_non_xrp_swap_waiting_is_not_offered(tmp_path):
 
     with pytest.raises(SystemExit, match="no XRP swap is awaiting a deposit"):
         pending_xrp_swap(path)
+
+
+def test_an_amount_the_swap_will_not_accept_is_refused(tmp_path):
+    """Measured 2026-09-26: --amount 1 against a swap expecting 5 sent anyway.
+
+    The tolerance check then did its job and halted the swap to 'under_review' --
+    correctly, because crediting a wrong amount is what it exists to prevent. But
+    the information needed to avoid that was printed on screen one line earlier,
+    and the result is testnet XRP sitting against a swap nothing will advance and a
+    reconciliation that needs a person.
+
+    Refusing costs a retyped flag. Proceeding costs the manual fix.
+    """
+    path = swaps_db(tmp_path, [("s_5", "XRP", XRP_ACCOUNT, 1, "awaiting_deposit")])
+    connection = sqlite3.connect(path)
+    connection.execute("UPDATE swaps SET expected_input_amount = 5.0")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(SystemExit, match=re.escape("expects 5.0 XRP and --amount says 1")):
+        deposit_target_for_swap(path, "s_5", "1")
+
+
+def test_the_matching_amount_is_accepted_including_a_different_spelling(tmp_path):
+    """5 and 5.00 are the same number, and a string comparison would reject one.
+
+    Decimal, not float: this is money, and `0.1 + 0.2 != 0.3` is the reason every
+    amount in this tree goes through Decimal rather than binary floating point.
+    """
+    path = swaps_db(tmp_path, [("s_5", "XRP", XRP_ACCOUNT, 1, "awaiting_deposit")])
+    connection = sqlite3.connect(path)
+    connection.execute("UPDATE swaps SET expected_input_amount = 5.0")
+    connection.commit()
+    connection.close()
+
+    assert deposit_target_for_swap(path, "s_5", "5") == (XRP_ACCOUNT, 1)
+    assert deposit_target_for_swap(path, "s_5", "5.00") == (XRP_ACCOUNT, 1)
+
+
+def test_no_amount_given_does_not_invent_a_mismatch(tmp_path):
+    """The check is opt-in via --amount, so a caller that omits it is not blocked.
+
+    Written because the obvious implementation compares unconditionally and then
+    refuses every call that did not pass --amount, which would break the plain
+    `--swap <id>` form entirely.
+    """
+    path = swaps_db(tmp_path, [("s_5", "XRP", XRP_ACCOUNT, 1, "awaiting_deposit")])
+    connection = sqlite3.connect(path)
+    connection.execute("UPDATE swaps SET expected_input_amount = 5.0")
+    connection.commit()
+    connection.close()
+
+    assert deposit_target_for_swap(path, "s_5") == (XRP_ACCOUNT, 1)

@@ -16,9 +16,11 @@ intended.
 """
 
 import time
+from pathlib import Path
 
 import pytest
 from config import Config
+from workers import deposit_watcher
 from workers.common import announce_start, cycle_line, endpoint_lines, sleep_until_next_cycle
 
 
@@ -167,3 +169,33 @@ def test_sleep_actually_sleeps_when_no_stop_is_requested():
     started = time.monotonic()
     sleep_until_next_cycle(0.3, should_stop=lambda: False)
     assert time.monotonic() - started == pytest.approx(0.3, abs=0.25)
+
+
+def test_the_deposit_watcher_reports_halted_swaps():
+    """A halt was invisible until 2026-09-26, and it is the one outcome that waits on a person.
+
+    The operator sent 1 XRP to a swap expecting 5. The tolerance check correctly
+    refused to credit a wrong amount and moved the swap to 'under_review' -- which
+    is NOT in ACTIVE_STATUSES, so the swap left the polled set. The cycle line
+    printed:
+
+        active_swaps=1 refreshed=1 now_payout_pending=0
+
+    and nothing else. The only signal was a 0 where a reader had to already know to
+    expect 1.
+
+    A halted swap will not resolve on its own -- it exists precisely to wait for a
+    person -- so a cycle that halted a customer's swap must not read like one that
+    found nothing to do (rule 14). Asserted over the module SOURCE because the
+    counter is built inside the worker's loop, which cannot run without a database
+    and a chain; what is checkable here is that the field and its explanation exist
+    and travel together.
+    """
+    source = Path(deposit_watcher.__file__).read_text()
+
+    assert "HALTED_for_review" in source, "the cycle line must carry a halted count"
+    assert "under_review" in source, "it must be counted from the real status"
+    assert "waiting on a PERSON" in source, (
+        "the note must say what the number MEANS -- a bare count does not tell a reader "
+        "that nothing will resolve it (rule 14)"
+    )

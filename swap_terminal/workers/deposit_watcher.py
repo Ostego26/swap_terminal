@@ -79,15 +79,45 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
             ).fetchone()["n"]
             processed = process_active_swaps(db, config, adapters)
             pending = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'payout_pending'").fetchone()["n"]
+            # HALTED SWAPS, counted because a halt was invisible until 2026-09-26.
+            #
+            # The operator sent 1 XRP to a swap expecting 5. The tolerance check did
+            # exactly what it should -- refused to credit a wrong amount and moved the
+            # swap to 'under_review' -- and the cycle line printed
+            #
+            #     active_swaps=1 refreshed=1 now_payout_pending=0
+            #
+            # and nothing else. 'under_review' is not in ACTIVE_STATUSES, so the swap
+            # left the polled set silently. The only signal was a 0 where a reader had
+            # to already know to expect 1.
+            #
+            # A halt is the single most important thing this worker can report: it is
+            # the one outcome that will not resolve on its own, because it exists
+            # precisely to wait for a person. Rule 14's "make 'did nothing' look
+            # different from 'did work'" -- a cycle that halted a customer's swap must
+            # not read like one that found nothing to do.
+            #
+            # Counted as a TOTAL rather than a delta on purpose: a delta shows the
+            # transition once and then reads as zero forever, so a swap sitting halted
+            # for a day would be invisible to anyone who started watching after it
+            # happened. The standing count keeps it on screen.
+            halted = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'under_review'").fetchone()["n"]
         print(
             cycle_line(
                 WORKER_NAME,
                 cycle,
                 time.monotonic() - started,
-                {"active_swaps": before, "refreshed": len(processed), "now_payout_pending": pending},
+                {
+                    "active_swaps": before,
+                    "refreshed": len(processed),
+                    "now_payout_pending": pending,
+                    "HALTED_for_review": halted,
+                },
                 notes=(
                     "active_swaps=0 is expected only when no swap is open; "
-                    "now_payout_pending is what payout_worker acts on"
+                    "now_payout_pending is what payout_worker acts on; "
+                    "HALTED_for_review>0 means a swap is waiting on a PERSON and will "
+                    "never resolve by itself -- query swaps WHERE status='under_review'"
                 ),
             ),
             flush=True,

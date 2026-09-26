@@ -51,6 +51,7 @@ import json
 import os
 import sqlite3
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -231,7 +232,7 @@ def pending_xrp_swap(db_path: str) -> str:
     return row["id"]
 
 
-def deposit_target_for_swap(db_path: str, swap_id: str) -> tuple[str, int]:
+def deposit_target_for_swap(db_path: str, swap_id: str, amount: str = "") -> tuple[str, int]:
     """Read (account, tag) for a swap out of the database. Returns what to pay.
 
     WHY THIS EXISTS RATHER THAN THE OPERATOR TYPING THE TAG. A destination tag is
@@ -258,7 +259,8 @@ def deposit_target_for_swap(db_path: str, swap_id: str) -> tuple[str, int]:
     connection.row_factory = sqlite3.Row
     try:
         row = connection.execute(
-            "SELECT from_asset, deposit_address, deposit_tag, status FROM swaps WHERE id = ?",
+            "SELECT from_asset, deposit_address, deposit_tag, status, expected_input_amount "
+            "FROM swaps WHERE id = ?",
             (swap_id,),
         ).fetchone()
     finally:
@@ -281,6 +283,31 @@ def deposit_target_for_swap(db_path: str, swap_id: str) -> tuple[str, int]:
         raise SystemExit(f"REFUSED: swap {swap_id} has no deposit_address. Nothing was sent.")
 
     print(f"    swap {swap_id} is {row['status']}, expects {row['from_asset']}", flush=True)
+
+    # REFUSE AN AMOUNT THE SWAP WILL NOT ACCEPT, rather than sending into a
+    # guaranteed halt.
+    #
+    # Measured 2026-09-26: `--swap latest --amount 1` resolved to a swap expecting
+    # 5 XRP, printed "expects 5.0 XRP", and sent anyway. The tolerance check then
+    # did its job and moved the swap to 'under_review' -- correctly, because
+    # crediting a wrong amount is the thing it exists to prevent. But the
+    # information needed to avoid that was on screen one line earlier.
+    #
+    # A halted swap needs a PERSON to resolve it, and the testnet XRP is now sitting
+    # against a swap nothing will advance. Refusing costs a retyped flag; proceeding
+    # costs a manual reconciliation. The comparison is exact rather than
+    # tolerance-aware on purpose: this script does not know
+    # Config.AMOUNT_TOLERANCE_PCT and should not guess at it, and "send exactly what
+    # the swap expects" is a rule with no edge cases. --amount is still honored when
+    # it matches, and --swap can be omitted entirely to send an arbitrary amount.
+    expected = row["expected_input_amount"]
+    if amount and expected is not None and Decimal(str(amount)) != Decimal(str(expected)):
+        raise SystemExit(
+            f"REFUSED: swap {swap_id} expects {expected} XRP and --amount says {amount}. Sending a "
+            f"different amount would be credited by nothing: the tolerance check halts the swap to "
+            f"'under_review', which needs a person to resolve. Use --amount {expected}, or drop "
+            f"--swap to send an arbitrary amount somewhere else. Nothing was sent."
+        )
     return row["deposit_address"], int(row["deposit_tag"])
 
 
@@ -334,7 +361,7 @@ def main() -> int:
             print(f"\n    looking up the XRP swap awaiting a deposit in {database}", flush=True)
             swap_id = pending_xrp_swap(database)
         print(f"\n    reading the deposit target for {swap_id} from {database}", flush=True)
-        destination, destination_tag = deposit_target_for_swap(database, swap_id)
+        destination, destination_tag = deposit_target_for_swap(database, swap_id, args.amount)
         print(f"    account {destination}  tag {destination_tag}  <- from the swap row, not typed", flush=True)
 
     drops = to_drops(args.amount)
