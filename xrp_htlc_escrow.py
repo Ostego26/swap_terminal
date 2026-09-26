@@ -14,19 +14,47 @@ Can move funds: YES, testnet XRP between two faucet accounts the operator
 Mainnet-safe: NO, AND IT REFUSES TO BE ASKED, the same unconditional shape
        regtest_htlc_verify.py uses. The endpoint is not a flag.
 
-NOT YET RUN AGAINST A LEDGER. SAY SO BEFORE QUOTING IT.
+WHAT THE FIRST RUN ESTABLISHED, AND WHAT IT REFUTED.
 
-The container this was written in cannot reach the XRP testnet: both
+Written in a container that cannot reach the XRP testnet -- both
 s.altnet.rippletest.net:51234 and faucet.altnet.rippletest.net are refused by
-its egress proxy (403 on CONNECT, measured 2026-09-26). So every claim in this
-file about what XRPL will DO is a reading of the protocol, not a measurement,
-and CLAUDE.md rule 17 says which one you are holding matters more than being
-right. The encoding underneath it is a different story and IS measured -- see
-chains/xrp_crypto_condition.py, whose output was compared byte for byte against
-an independent implementation across five preimage lengths.
+its egress proxy with 403 on CONNECT, measured 2026-09-26 -- so every claim here
+about what XRPL would DO started as a reading of the protocol rather than a
+measurement (rule 17).
 
-The first operator run settles it. Until then this is a proposal with a
-verifier attached, exactly as rule 16 defines one.
+The operator ran it the same day, and steps 1 to 3 passed: network_id 1 on build
+3.4.1, two faucet accounts found, the condition built and self-checked, and the
+360-drop EscrowFinish fee computed. STEP 4 THEN FAILED, and not on anything to
+do with escrow:
+
+    submitting EscrowCreate: Fee=(autofilled) drops
+    EscrowCreate -> notSupported: Signing is not supported by this server.
+
+This file's own header had said rippled's legacy server-side `submit` "may" be
+allowed on a public testnet server. It is not, on that server. The fallback is
+to sign locally with xrpl-py -- which is what xrp_send_tagged.py already did for
+the real XRP payment that went out earlier the same day, so the capability was
+in the tree and this file could not reach it. Both now go through
+chains/xrp_submit.Submitter, which probes server-side signing once, announces
+the refusal, and signs locally from then on.
+
+The run also exposed a reporting defect worth more than the fix: the failed
+check printed `got=(none)`, because it read `engine_result`, which is ABSENT when
+the transaction never reaches the ledger. The actual diagnosis sat one line
+above in the submit log. `(none)` for an empty result is right (rule 14) and it
+hid the answer anyway. Every assertion now goes through describe_result(), which
+falls back to `error` and `error_message`.
+
+STEPS 4 THROUGH 9 REMAIN UNMEASURED. The transaction payloads are checked
+offline -- tests/test_xrp_crypto_condition.py builds each one through xrpl-py's
+own model parser and signs it with fixed fields, so a malformed EscrowCreate or
+a dropped Condition fails here rather than on the ledger -- but no escrow has
+been created, finished or cancelled. The encoding underneath is separately
+measured: chains/xrp_crypto_condition.py was compared byte for byte against an
+independent implementation across five preimage lengths.
+
+So: the hashlock and the timelock are still PROPOSALS with a verifier attached,
+exactly as rule 16 defines one, and the next run settles them.
 
 WHY XRPL CAN DO THIS AT ALL, WHICH IS NOT OBVIOUS.
 
@@ -116,6 +144,7 @@ from chains.xrp_crypto_condition import (  # noqa: E402 -- the sys.path line abo
     preimage_condition,
     preimage_fulfillment,
 )
+from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -- same
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
 
@@ -213,23 +242,112 @@ class Console:
         return 1 if failures else 0
 
 
-def submit(console: Console, secret: str, tx_json: dict) -> dict:
-    """Submit one transaction through rippled's legacy server-side signing.
+def escrow_create_tx(sender: str, receiver: str, drops: int, condition: str, cancel_after: int) -> dict:
+    """The EscrowCreate payload. EXTRACTED so it can be checked without a ledger.
 
-    The same mechanism xrp_send_tagged.submit_payment() uses, and for the same
-    reason: nothing in this repository signs an XRPL transaction locally unless
-    xrpl-py happens to be installed. It announces the transaction type and the
-    fee BEFORE submitting (rule 14), and it NEVER prints tx_json verbatim --
-    an EscrowFinish's tx_json contains the Fulfillment, which is the secret.
+    These three builders were inline dicts inside main() until 2026-09-26, which
+    meant the only way to find out whether a payload was well formed was to
+    submit it -- and the operator's first run spent its step 4 learning something
+    else entirely. A payload is a decision (rule 10's bottom layer), so it is a
+    function, and tests/test_xrp_escrow_payloads.py now parses and signs all
+    three through xrpl-py's own model classes offline. A missing required field
+    or a mistyped one fails there, for free.
+
+    Amount is a STRING of drops. xrpl-py's model accepts an int and rippled does
+    not; passing the int works locally and is rejected by the server, which is a
+    failure that only appears where it is expensive.
+    """
+    return {
+        "TransactionType": "EscrowCreate",
+        "Account": sender,
+        "Destination": receiver,
+        "Amount": str(drops),
+        "Condition": condition,
+        "CancelAfter": cancel_after,
+    }
+
+
+def escrow_finish_tx(  # noqa: PLR0913 -- checked: six, and each one is a field of the transaction. `owner` is separate from `sender` on purpose rather than defaulted to it: an EscrowFinish may be submitted by ANYONE, and Owner is the account that CREATED the escrow. Collapsing them would bake in "the creator finishes it", which is the opposite of how a swap's counterparty claims their leg.
+    sender: str,
+    owner: str,
+    offer_sequence: int,
+    *,
+    condition: str,
+    fulfillment: str,
+    fee: int,
+) -> dict:
+    """The EscrowFinish payload. Fee is explicit -- autofill's 10 drops is too low.
+
+    THE FULFILLMENT IS THE SECRET. Nothing may print this dict.
+    """
+    return {
+        "TransactionType": "EscrowFinish",
+        "Account": sender,
+        "Owner": owner,
+        "OfferSequence": offer_sequence,
+        "Condition": condition,
+        "Fulfillment": fulfillment,
+        "Fee": str(fee),
+    }
+
+
+def escrow_cancel_tx(sender: str, owner: str, offer_sequence: int) -> dict:
+    """The EscrowCancel payload. No condition and no fulfillment: this is the timelock branch."""
+    return {
+        "TransactionType": "EscrowCancel",
+        "Account": sender,
+        "Owner": owner,
+        "OfferSequence": offer_sequence,
+    }
+
+
+def submit(console: Console, submitter, secret: str, tx_json: dict) -> dict:
+    """Submit one transaction, through whichever signer this server allows.
+
+    CORRECTED 2026-09-26 after the first run against a real ledger. This used to
+    call rippled's legacy server-side `submit` only, on the reasoning that a
+    public testnet server "may" permit it. s.altnet.rippletest.net build 3.4.1
+    answers `notSupported: Signing is not supported by this server.` and step 4
+    of nine died there. chains/xrp_submit.Submitter falls back to signing locally
+    with xrpl-py, which is the path xrp_send_tagged.py already used for the real
+    payment that went out today.
+
+    It announces the transaction type and the fee BEFORE submitting (rule 14),
+    and it NEVER prints tx_json verbatim -- an EscrowFinish's tx_json contains
+    the Fulfillment, which IS the secret.
     """
     kind = tx_json.get("TransactionType", "(none)")
     console.say(f"submitting {kind}: Fee={tx_json.get('Fee', '(autofilled)')} drops "
                 f"(Fulfillment is never printed)")
-    result = rpc("submit", {"secret": secret, "tx_json": tx_json})
-    status = str(result.get("engine_result") or result.get("error") or "(none)")
-    message = result.get("engine_result_message") or result.get("error_message") or "(no message)"
-    console.say(f"{kind} -> {status}: {message}")
+    result = submitter(tx_json, secret)
+    console.say(f"{kind} -> {describe_result(result)}")
     return result
+
+
+def describe_result(result: dict) -> str:
+    """The engine result and its message, or the error when there is no engine result.
+
+    WHY THIS IS A FUNCTION. The first run printed `got=(none)` for a failed
+    EscrowCreate while the real answer -- `notSupported: Signing is not supported
+    by this server.` -- sat one line above in the submit log. The check read
+    `result.get("engine_result")`, which is absent when the transaction never
+    reached the ledger at all, and `(none)` is what rule 14 asks an empty result
+    to print. Correct in isolation, and it hid the diagnosis in the one line an
+    operator reads. Every assertion below now goes through this instead.
+    """
+    status = result.get("engine_result") or result.get("error") or "(none)"
+    message = (
+        result.get("engine_result_message")
+        or result.get("error_message")
+        or result.get("error_exception")
+        or "(no message)"
+    )
+    return f"{status}: {message}"
+
+
+def engine_result(result: dict) -> str:
+    """Just the code, for comparing against tesSUCCESS or a tec/tem prefix."""
+    return str(result.get("engine_result") or result.get("error") or "(none)")
 
 
 def wait_validated(console: Console, tx_hash: str) -> dict:
@@ -278,8 +396,11 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
     console.banner("XRP LEDGER HTLC verification -- Escrow with a PREIMAGE-SHA-256 condition")
     console.say(f"endpoint={TESTNET_URL}")
     console.say(f"mode={'--run: transactions WILL be submitted on testnet' if args.run else 'DRY RUN: nothing is submitted'}")
-    console.say("NOT PREVIOUSLY RUN AGAINST A LEDGER -- see this file's header. Until it is, every")
-    console.say("expectation printed below is read from the protocol, not measured (rule 17).")
+    console.say("STEPS 1 TO 3 HAVE RUN against a real ledger (testnet build 3.4.1, 2026-09-26). STEPS 4 TO 9")
+    console.say("HAVE NOT: the first run stopped at step 4 because that server will not sign on your behalf,")
+    console.say("which is fixed. So the hashlock and the timelock below are still read from the protocol")
+    console.say("rather than measured (rule 17), and this run is what settles them. The tx payloads and the")
+    console.say("condition encoding ARE checked -- offline, in the test suite.")
 
     console.step(1, "the endpoint is a TEST network, and it says which")
     try:
@@ -288,8 +409,8 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
         console.check("network", f"{type(error).__name__}: {error}", "a non-mainnet network_id", False)
         console.say(f"nothing was submitted. If this is a connection failure rather than a mainnet refusal, "
                     f"{TESTNET_URL} is unreachable from this machine -- check egress before reading anything "
-                    f"into it. This script cannot run where the ledger cannot be reached, and that is the "
-                    f"reason its own header says it has never been run.")
+                    f"into it. This script cannot run where the ledger cannot be reached -- which is why "
+                    f"steps 4 to 9 are still unmeasured; see this file's header.")
         return console.summary()
 
     console.step(2, "two funded faucet accounts on this machine")
@@ -330,20 +451,32 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
         console.say("re-run with --run to submit them.")
         return console.summary()
 
+    # ONE submitter for the whole run: it probes server-side signing on the first
+    # transaction and switches to local signing permanently on a refusal, saying
+    # so once. Probing before each of the six would print the same refusal six
+    # times, which is rule 14's other failure -- output that says nothing new.
+    submitter = Submitter(console.say)
+
+    # A missing xrpl-py is now a FATAL condition rather than a fallback, since
+    # this server will not sign. It is caught around every submit below through
+    # this one wrapper, so the operator gets the install line instead of an
+    # ImportError traceback at step 4 of nine (rule 14).
+    def guarded(tx_json: dict, secret: str) -> dict:
+        try:
+            return submitter.submit(tx_json, secret)
+        except LocalSigningUnavailable as error:
+            return {"error": "localSigningUnavailable", "error_message": str(error)}
+
+    submitter_submit = guarded
+
     before = balance_drops(receiver)
     console.step(4, f"EscrowCreate [A]: {ESCROW_DROPS} drops with the condition and the timelock")
-    created = submit(console, sender_secret, {
-        "TransactionType": "EscrowCreate",
-        "Account": sender,
-        "Destination": receiver,
-        "Amount": str(ESCROW_DROPS),
-        "Condition": condition,
-        "CancelAfter": cancel_after,
-    })
+    created = submit(console, submitter_submit, sender_secret,
+                     escrow_create_tx(sender, receiver, ESCROW_DROPS, condition, cancel_after))
     tx_json = created.get("tx_json") or {}
     escrow_sequence = tx_json.get("Sequence")
-    if not console.check("EscrowCreate [A] accepted", created.get("engine_result"), "tesSUCCESS",
-                         created.get("engine_result") == "tesSUCCESS"):
+    if not console.check("EscrowCreate [A] accepted", describe_result(created), "tesSUCCESS",
+                         engine_result(created) == "tesSUCCESS"):
         return console.summary()
     console.say(f"OfferSequence for the finish/cancel below = {escrow_sequence} (the CREATE's Sequence; "
                 f"EscrowFinish names the escrow by it, not by a hash)")
@@ -353,31 +486,17 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
     wrong = preimage_fulfillment(bytes(HTLC_PREIMAGE_BYTES))  # a fulfillment for all-zero bytes
     console.say("submitting a fulfillment for a DIFFERENT preimage. An escrow that accepts this is not a "
                 "hashlock, and step 6 would be green either way.")
-    refused = submit(console, sender_secret, {
-        "TransactionType": "EscrowFinish",
-        "Account": sender,
-        "Owner": sender,
-        "OfferSequence": escrow_sequence,
-        "Condition": condition,
-        "Fulfillment": wrong,
-        "Fee": str(fee),
-    })
-    wrong_result = str(refused.get("engine_result") or refused.get("error"))
-    console.check("a wrong fulfillment is refused", wrong_result, "tecCRYPTOCONDITION_ERROR (any tec/tem is a refusal)",
-                  wrong_result.startswith(("tec", "tem")))
+    refused = submit(console, submitter_submit, sender_secret,
+                     escrow_finish_tx(sender, sender, escrow_sequence, condition=condition, fulfillment=wrong, fee=fee))
+    console.check("a wrong fulfillment is refused", describe_result(refused),
+                  "tecCRYPTOCONDITION_ERROR (any tec/tem is a refusal)",
+                  engine_result(refused).startswith(("tec", "tem")))
 
     console.step(6, "EscrowFinish with the RIGHT fulfillment must SUCCEED")
-    finished = submit(console, sender_secret, {
-        "TransactionType": "EscrowFinish",
-        "Account": sender,
-        "Owner": sender,
-        "OfferSequence": escrow_sequence,
-        "Condition": condition,
-        "Fulfillment": fulfillment,
-        "Fee": str(fee),
-    })
-    ok_finish = console.check("the right fulfillment finishes the escrow", finished.get("engine_result"),
-                              "tesSUCCESS", finished.get("engine_result") == "tesSUCCESS")
+    finished = submit(console, submitter_submit, sender_secret,
+                      escrow_finish_tx(sender, sender, escrow_sequence, condition=condition, fulfillment=fulfillment, fee=fee))
+    ok_finish = console.check("the right fulfillment finishes the escrow", describe_result(finished),
+                              "tesSUCCESS", engine_result(finished) == "tesSUCCESS")
     if ok_finish:
         wait_validated(console, (finished.get("tx_json") or {}).get("hash", ""))
         after = balance_drops(receiver)
@@ -395,32 +514,21 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
     console.say("a dedicated escrow, never the one step 6 finished -- if an early cancel were wrongly accepted, "
                 "the object it destroyed must not be the one the last step depends on.")
     refund_cancel_after = ripple_time(time.time() + args.cancel_after)
-    created_b = submit(console, sender_secret, {
-        "TransactionType": "EscrowCreate",
-        "Account": sender,
-        "Destination": receiver,
-        "Amount": str(ESCROW_DROPS),
-        "Condition": condition,
-        "CancelAfter": refund_cancel_after,
-    })
+    created_b = submit(console, submitter_submit, sender_secret,
+                       escrow_create_tx(sender, receiver, ESCROW_DROPS, condition, refund_cancel_after))
     tx_b = created_b.get("tx_json") or {}
     sequence_b = tx_b.get("Sequence")
-    if not console.check("EscrowCreate [B] accepted", created_b.get("engine_result"), "tesSUCCESS",
-                         created_b.get("engine_result") == "tesSUCCESS"):
+    if not console.check("EscrowCreate [B] accepted", describe_result(created_b), "tesSUCCESS",
+                         engine_result(created_b) == "tesSUCCESS"):
         return console.summary()
     wait_validated(console, tx_b.get("hash", ""))
     sender_before_cancel = balance_drops(sender)
 
     console.step(8, "EscrowCancel BEFORE CancelAfter must be REFUSED -- this is the timelock")
-    early = submit(console, sender_secret, {
-        "TransactionType": "EscrowCancel",
-        "Account": sender,
-        "Owner": sender,
-        "OfferSequence": sequence_b,
-    })
-    early_result = str(early.get("engine_result") or early.get("error"))
-    console.check("an early cancel is refused", early_result, "tecNO_PERMISSION (any tec/tem is a refusal)",
-                  early_result.startswith(("tec", "tem")))
+    early = submit(console, submitter_submit, sender_secret, escrow_cancel_tx(sender, sender, sequence_b))
+    console.check("an early cancel is refused", describe_result(early),
+                  "tecNO_PERMISSION (any tec/tem is a refusal)",
+                  engine_result(early).startswith(("tec", "tem")))
 
     console.step(9, "EscrowCancel AFTER CancelAfter must SUCCEED")
     # The wait is announced with its reason and its length, because a silent
@@ -430,14 +538,9 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
     console.say(f"waiting {format_duration(remaining)} for the timelock to pass. Nothing is wrong; XRPL compares "
                 f"CancelAfter against the LAST CLOSED LEDGER's time, so a few seconds of slack is added.")
     time.sleep(remaining)
-    late = submit(console, sender_secret, {
-        "TransactionType": "EscrowCancel",
-        "Account": sender,
-        "Owner": sender,
-        "OfferSequence": sequence_b,
-    })
-    if console.check("a cancel after the timelock succeeds", late.get("engine_result"), "tesSUCCESS",
-                     late.get("engine_result") == "tesSUCCESS"):
+    late = submit(console, submitter_submit, sender_secret, escrow_cancel_tx(sender, sender, sequence_b))
+    if console.check("a cancel after the timelock succeeds", describe_result(late), "tesSUCCESS",
+                     engine_result(late) == "tesSUCCESS"):
         wait_validated(console, (late.get("tx_json") or {}).get("hash", ""))
         sender_after = balance_drops(sender)
         console.check("the sender got the escrowed amount back",

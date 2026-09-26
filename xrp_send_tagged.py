@@ -76,6 +76,7 @@ from chains.xrp_signing import derive_and_check
 # three copies across the root scripts and a fourth was about to be written
 # for the escrow harness (rule 8). Same code, one home; that module's header
 # carries the faucet-key table this file used to hold.
+from chains.xrp_submit import SIGNING_REFUSED
 from chains.xrp_testnet import (
     KEY_DIRECTORY,
     TESTNET_URL,
@@ -411,11 +412,12 @@ def main() -> int:
     return submit_payment(source, destination, secret, destination_tag, drops)
 
 
-# Error codes a server returns when it will not sign on your behalf. Matched
-# exactly rather than by substring: an earlier version tested
-# `"ignInvalid" in str(status)`, which is a fragment of a guessed code and would
-# also match anything else containing those eight characters.
-SIGNING_REFUSED = frozenset({"notSupported", "noPermission", "internal", "srcActNotFound"})
+# SIGNING_REFUSED moved to chains/xrp_submit.py on 2026-09-26 and is imported at
+# the top of this file. It is the same set, and it is shared because
+# xrp_htlc_escrow.py needs the identical decision -- "will this server sign for
+# me" -- and a second copy of a set of error codes is rule 8's bug with a delay
+# on it. The measurement that made it matter: the public testnet answers
+# `notSupported`, so the fallback below is not a rare path, it is THE path.
 
 
 def submit_locally_signed(source: str, destination: str, secret: str, tag: int, drops: int) -> int:

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # endpoint into chains/xrp_testnet.py on 2026-09-26 broke this import and that
 # is the right outcome -- a test asserting the endpoint is pinned should read it
 # from the module that defines it, or it passes while pinning nothing.
+from chains import xrp_testnet
 from chains.xrp_signing import MAINNET_NETWORK_IDS
 from chains.xrp_testnet import TESTNET_URL, saved_faucet_accounts
 
@@ -62,14 +63,24 @@ def test_mainnet_is_identified_by_network_id_zero():
 
 def test_no_saved_accounts_means_an_empty_list_not_an_error(tmp_path, monkeypatch):
     """So main() can refuse with the command that fixes it."""
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", tmp_path / "empty")
+    # PATCHED ON chains.xrp_testnet, which is where KEY_DIRECTORY and
+    # saved_faucet_accounts() live since 2026-09-26. These patched
+    # xrp_send_tagged, the module that IMPORTS them, and that worked only while
+    # the definition happened to be in the same file: a from-import binds a new
+    # name in the importer, and rebinding it does not change what the defining
+    # module's own function reads. Moving the definition made all eight of these
+    # patch a name nothing consults, and the tests failed loudly rather than
+    # silently passing against the real ~/.config directory -- which is the
+    # outcome worth having, since a faucet-key test that reads the operator's
+    # actual keys is not a test.
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", tmp_path / "empty")
     assert saved_faucet_accounts() == []
 
 
 def test_a_faucet_file_is_read_and_the_secret_is_returned_for_signing(tmp_path, monkeypatch):
     keys = tmp_path / "keys"
     write_faucet_file(keys, "xrp-testnet-20260926T000000Z.json", "rAlice", "sSecretAlice")
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
     found = saved_faucet_accounts()
     assert len(found) == 1
     _, address, secret = found[0]
@@ -91,7 +102,7 @@ def test_accounts_come_back_newest_first(tmp_path, monkeypatch):
     keys = tmp_path / "keys"
     write_faucet_file(keys, "xrp-testnet-20260101T000000Z.json", "rOld", "sOld")
     write_faucet_file(keys, "xrp-testnet-20260926T000000Z.json", "rNew", "sNew")
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
     assert [address for _, address, _ in saved_faucet_accounts()] == ["rNew", "rOld"]
 
 
@@ -100,7 +111,7 @@ def test_a_file_without_a_secret_is_skipped_not_half_used(tmp_path, monkeypatch)
     keys = tmp_path / "keys"
     keys.mkdir(parents=True)
     (keys / "xrp-testnet-20260926T000001Z.json").write_text(json.dumps({"account": {"address": "rNoSecret"}}))
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
     assert saved_faucet_accounts() == []
 
 
@@ -110,7 +121,7 @@ def test_unreadable_or_corrupt_files_are_skipped_not_fatal(tmp_path, monkeypatch
     keys.mkdir(parents=True)
     (keys / "xrp-testnet-20260926T000002Z.json").write_text("{ not json")
     write_faucet_file(keys, "xrp-testnet-20260926T000003Z.json", "rGood", "sGood")
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
     assert [address for _, address, _ in saved_faucet_accounts()] == ["rGood"]
 
 
@@ -184,7 +195,7 @@ def test_the_secret_is_found_at_the_top_level_where_the_faucet_puts_it(tmp_path,
     """
     keys = tmp_path / "keys"
     write_real_faucet_file(keys, "xrp-testnet-1.json", "r" + "A" * 33, "s" * 31)
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
 
     found = saved_faucet_accounts()
 
@@ -205,7 +216,7 @@ def test_both_faucet_shapes_are_accepted_so_older_saved_files_still_sign(tmp_pat
     keys = tmp_path / "keys"
     write_faucet_file(keys, "xrp-testnet-1.json", "r" + "B" * 33, "old" * 10)
     write_real_faucet_file(keys, "xrp-testnet-2.json", "r" + "A" * 33, "s" * 31)
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
 
     found = saved_faucet_accounts()
 
@@ -223,7 +234,7 @@ def test_a_matching_secret_key_name_is_reported_but_never_its_value(tmp_path, mo
     keys = tmp_path / "keys"
     secret = "s" * 31
     write_real_faucet_file(keys, "xrp-testnet-1.json", "r" + "A" * 33, secret)
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
 
     saved_faucet_accounts()
     out = capsys.readouterr().out
@@ -244,7 +255,7 @@ def test_a_file_with_neither_address_nor_secret_says_so_rather_than_vanishing(
     keys = tmp_path / "keys"
     keys.mkdir(parents=True)
     (keys / "xrp-testnet-1.json").write_text(json.dumps({"amount": 100}))
-    monkeypatch.setattr(xrp_send_tagged, "KEY_DIRECTORY", keys)
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", keys)
 
     assert saved_faucet_accounts() == []
     assert "xrp-testnet-1.json" in capsys.readouterr().out
