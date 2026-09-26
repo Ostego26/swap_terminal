@@ -561,3 +561,97 @@ def test_a_refused_swap_is_logged_and_not_only_returned(client, caplog):
     assert "REFUSED" in caplog.text
     assert "Quote not found" in caplog.text, "the log must carry the REASON, not just that it failed"
     assert "no swap row was written" in caplog.text, "it must say what did NOT happen"
+
+
+# NOT a credential. A SENTINEL: its only purpose is to be findable, so the leak
+# test below can search the whole response body for it. A value that looked like a
+# real credential would make the test weaker, not stronger -- the same reasoning
+# tests/test_gridcoin_wallet_lock.py gives for its own LEAK_SENTINEL.
+LEAK_SENTINEL = "health-response-must-not-echo-this"
+
+
+# --- the one endpoint an operator can curl -------------------------------------
+#
+# /api/health echoed allowed_pairs and nothing about what the process could reach.
+# That is what the terminal is WILLING to swap; the operator's question on
+# 2026-09-26 was what the SERVER could reach, and every instrument they had
+# answered the wrong one or described the wrong process -- `env | grep` describes
+# the shell, the workers' banners described the workers, and the swap page needs a
+# browser. This endpoint was the thing they could curl.
+
+
+def test_health_reports_which_chains_have_an_adapter_in_this_process(client, monkeypatch):
+    """adapter_built is per chain and comes from the adapters dict, not from config."""
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {"XRP": object()})
+
+    body = client.get("/api/health").get_json()
+
+    assert body["chains"]["XRP"]["adapter_built"] is True
+    assert body["chains"]["GRC"]["adapter_built"] is False
+    # Every chain the configuration knows, not just the ones in a pair: a chain set
+    # up and never enabled must be visible rather than absent.
+    assert set(body["chains"]) == set(client.application.config["RPC"])
+
+
+def test_health_names_the_missing_settings_and_never_their_values(client, monkeypatch):
+    """The whole point, and the reason it is safe to paste.
+
+    chains/registry.missing_settings() returns variable NAMES. A version that
+    echoed config values would put RPC credentials into every pasted health
+    response -- they sit one key away in the same object, which this module's header
+    already says out loud about the credentials it declines to print.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+    # The port and user are SET and the password is not, so the expected answer is
+    # exactly one name -- and it must be the password, never the port. That is the
+    # specific way a vague message would waste an operator's time: on 2026-09-26
+    # GRC_RPC_PORT was correct and naming it would have sent them to check it.
+    monkeypatch.setitem(
+        client.application.config,
+        "RPC",
+        {"GRC": {"user": LEAK_SENTINEL, "password": "", "host": "127.0.0.1",
+                 "port": 25715, "wallet": "", "timeout": 30.0}},
+    )
+
+    response = client.get("/api/health")
+    body = response.get_json()
+
+    assert body["chains"]["GRC"]["missing_settings"] == ["GRC_RPC_PASS"]
+    assert LEAK_SENTINEL not in response.get_data(as_text=True), (
+        "a config VALUE reached the response -- the RPC user is a credential, and it "
+        "sits one key away from the password this module already declines to print"
+    )
+
+
+def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkeypatch):
+    """The line worth reading first: shorter than allowed_pairs means settings did
+    not reach this process."""
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {"XRP": object(), "GRC": object()})
+
+    body = client.get("/api/health").get_json()
+
+    assert body["offerable_pairs"] == ["GRC->XRP", "XRP->GRC"]
+    assert set(body["offerable_pairs"]) < set(body["allowed_pairs"]), (
+        "with only XRP and GRC reachable, the offerable set must be a strict subset"
+    )
+
+
+def test_health_offerable_equals_allowed_when_every_chain_is_reachable(client, monkeypatch):
+    """So the field cannot pass by always being empty."""
+    every = {asset for pair in client.application.config["ALLOWED_PAIRS"] for asset in pair}
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {asset: object() for asset in every})
+
+    body = client.get("/api/health").get_json()
+
+    assert body["offerable_pairs"] == body["allowed_pairs"]
+
+
+def test_health_offerable_pairs_is_empty_rather_than_absent_when_nothing_is_reachable(client, monkeypatch):
+    """An absent key reads as a broken endpoint; an empty list is a result."""
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+
+    body = client.get("/api/health").get_json()
+
+    assert "offerable_pairs" in body
+    assert body["offerable_pairs"] == []
+    assert body["allowed_pairs"], "allowed_pairs must be unaffected -- it answers a different question"

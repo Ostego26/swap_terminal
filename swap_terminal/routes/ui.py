@@ -59,76 +59,33 @@ second, which is the "instrument reporting more than the run established" shape
 this codebase keeps paying for. Both are now read, disabled pairs are LISTED with
 the reason rather than hidden (admin.html already did it that way), and the select
 offers only the pairs that could actually complete.
+
+allowed_pair_rows() ITSELF NOW LIVES IN services/pair_view.py. It moved there the
+moment /api/health needed the same answer: a health probe importing from the
+customer surface would make a reader ask why, and "because that is where the
+decision happened to be written" is rule 10's defect. The page reads it; it does
+not own it.
 """
 
-from chains.registry import unconfigured_chains, why_unconfigured
 from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from services.helpers import utc_now_iso
+from services.pair_view import allowed_pair_rows, offerable_pairs
 from services.swap_service import get_swap
 from services.swap_view import swap_display
 
 bp = Blueprint("ui", __name__)
 
 
-def allowed_pair_rows(config, adapters) -> list[dict]:
-    """Every allowed pair, as a row that says whether it can actually complete.
-
-    TWO AUTHORITIES, NOT ONE, and the difference is the whole reason this
-    function changed on 2026-09-26. config["ALLOWED_PAIRS"] is what the operator
-    is WILLING to swap; `adapters` is what this process can REACH. A pair needs
-    both, and the page used to read only the first -- see this module's header for
-    what that printed at the operator.
-
-    Returns rows for ALL allowed pairs, disabled ones included, because a pair
-    that is silently missing is indistinguishable from a pair that was never
-    configured: the operator would see five entries where they set up six and have
-    nothing to read. admin.html already lists disabled pairs rather than hiding
-    them; this follows it. index() passes the enabled SUBSET separately for the
-    select, so the form still cannot offer something the server would refuse.
-
-    `reason` is prose for a person and is the only part of the row that should
-    ever be shown next to DISABLED. It is built by chains/registry.why_unconfigured(),
-    which names the environment variable through network_target.configuring_variable()
-    -- so the page, the workers' startup banner and create_swap()'s refusal all
-    name the same variable from one place (rule 8).
-
-    A function rather than an inline comprehension in the handler so it can be
-    called with a seeded config and a seeded adapters dict in a test (rule 10),
-    and so there is exactly one place that turns the two authorities into
-    something a template iterates.
-    """
-    rows = []
-    for from_asset, to_asset in sorted(config["ALLOWED_PAIRS"]):
-        missing = unconfigured_chains(adapters, from_asset, to_asset)
-        rows.append(
-            {
-                "from_asset": from_asset,
-                "to_asset": to_asset,
-                "label": f"{from_asset} -> {to_asset}",
-                "enabled": not missing,
-                "missing": missing,
-                # `(none)` is never right here: a row is either enabled, in which
-                # case the reason says both chains are reachable, or it names every
-                # missing chain. A blank reason beside DISABLED would be rule 14's
-                # empty gap.
-                "reason": (
-                    "in ALLOWED_PAIRS, and both chains have an adapter in this process"
-                    if not missing
-                    else " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
-                ),
-            }
-        )
-    return rows
-
-
 @bp.get("/")
 def index():
     pairs = allowed_pair_rows(current_app.config, current_app.config["ADAPTERS"])
     # The select iterates `offerable`; the list iterates `pairs`. Two names for two
-    # jobs, computed here rather than filtered in the template, so the rule stays
-    # in Python where a test can call it.
-    offerable = [row for row in pairs if row["enabled"]]
+    # jobs, filtered in Python rather than in the template so the rule stays where a
+    # test can call it -- and through services/pair_view.offerable_pairs(), which
+    # /api/health also uses, so the page and the endpoint cannot come to disagree
+    # about which pairs can complete.
+    offerable = offerable_pairs(pairs)
     return render_template(
         "index.html",
         pairs=pairs,
