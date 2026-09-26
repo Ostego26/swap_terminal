@@ -285,15 +285,40 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
     return completed
 
 
+# Assets whose get_balance() failure has already been reported this process. A
+# DESIGNED refusal must not warn every cycle.
+#
+# Measured on the operator's host 2026-09-26: ten payout_worker cycles printed ten
+# copies of "wallet inventory for XRP NOT refreshed", because the XRP adapter
+# refuses get_balance() BY DESIGN -- it holds no hot-wallet account, which is the
+# custody decision it is waiting on. So the warning described a fault that does not
+# exist, once every ten seconds, forever.
+#
+# chains/registry.py's own header names this exact hazard as the reason SOL is left
+# unconstructed rather than built and left to warn: "a log that cries wolf is a log
+# nobody reads the day something real happens". This is that, arriving through the
+# other door -- a configured adapter whose refusal is permanent.
+#
+# Said ONCE per process, and a restart says it again: an operator starting a worker
+# is exactly the person who needs to know an asset's balance is not being polled.
+# Keyed on the asset AND the message, so a DIFFERENT failure for the same asset --
+# a daemon that was up and is now down -- still reports.
+_REPORTED_INVENTORY_FAILURES: set[tuple[str, str]] = set()
+
+
 def refresh_wallet_inventory(db, adapters: dict):
     now = utc_now_iso()
     for asset, adapter in adapters.items():
         try:
             balance = float(adapter.get_balance())
-        except Exception as exc:  # noqa: BLE001 -- checked: one chain being unreachable must not stop the other two from being refreshed, so this continues rather than raising. It is NOT silent any more: the row for that asset keeps its previous values and the WARNING below says which asset and why, so a stale inventory figure can be traced to the poll that failed instead of looking like a balance that did not move.
-            logger.warning(
-                "wallet inventory for %s NOT refreshed (previous values kept): %s", asset, exc
-            )
+        except Exception as exc:  # noqa: BLE001 -- checked: one chain being unreachable must not stop the other two from being refreshed, so this continues rather than raising. It is NOT silent: the row for that asset keeps its previous values and the WARNING below says which asset and why, so a stale inventory figure can be traced to the poll that failed instead of looking like a balance that did not move.
+            signature = (asset, str(exc)[:200])
+            if signature not in _REPORTED_INVENTORY_FAILURES:
+                _REPORTED_INVENTORY_FAILURES.add(signature)
+                logger.warning(
+                    "wallet inventory for %s NOT refreshed (previous values kept), and this is said "
+                    "ONCE per process rather than every cycle: %s", asset, exc
+                )
             continue
         row = db.execute("SELECT * FROM wallet_inventory WHERE asset = ?", (asset,)).fetchone()
         reserved = float(row["hot_reserved"]) if row else 0.0

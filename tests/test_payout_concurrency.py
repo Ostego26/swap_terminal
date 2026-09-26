@@ -91,7 +91,11 @@ import time
 import pytest
 from db import SCHEMA, add_column_if_missing, apply_migrations, connect_db
 from services.helpers import utc_now_iso
-from services.payout_service import claim_swap_for_payout, process_pending_payouts
+from services.payout_service import (
+    claim_swap_for_payout,
+    process_pending_payouts,
+    refresh_wallet_inventory,
+)
 
 
 class RecordingAdapter:
@@ -681,3 +685,60 @@ def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path):
 
     assert row["status"] == "failed"
     assert again == [], "a terminally failed swap is never retried, even once the wallet is unlocked"
+
+
+def test_a_designed_refusal_warns_once_not_every_cycle(db_path, caplog):
+    """Ten payout_worker cycles printed ten identical warnings on the operator's host.
+
+    The XRP adapter refuses get_balance() BY DESIGN -- it holds no hot-wallet
+    account, which is the custody decision it is waiting on -- so the warning
+    described a fault that does not exist, once every ten seconds, forever.
+
+    chains/registry.py's own header names this hazard as the reason SOL is left
+    unconstructed rather than built and left to warn: "a log that cries wolf is a
+    log nobody reads the day something real happens."
+    """
+    caplog.set_level(logging.WARNING)
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+
+    class RefusesByDesign:
+        def get_balance(self):
+            raise RuntimeError("this adapter holds no hot-wallet account")
+
+    adapters = {"XRP": RefusesByDesign()}
+    for _cycle in range(5):
+        refresh_wallet_inventory(conn, adapters)
+    conn.close()
+
+    assert caplog.text.count("wallet inventory for XRP NOT refreshed") == 1, (
+        f"five cycles must produce ONE warning, got:\n{caplog.text}"
+    )
+
+
+def test_a_different_failure_for_the_same_asset_still_reports(db_path, caplog):
+    """Deduping must not silence NEW news, which is the obvious way to overshoot.
+
+    A daemon that was up and is now down is a different fact from an adapter that
+    refuses by design, even for the same asset -- so the key is the asset AND the
+    message, not the asset alone. Without this, the first failure would mask every
+    later one for that chain and a real outage would be invisible.
+    """
+    caplog.set_level(logging.WARNING)
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+
+    class FailsDifferentlyEachTime:
+        def __init__(self):
+            self.calls = 0
+
+        def get_balance(self):
+            self.calls += 1
+            raise RuntimeError(f"failure number {self.calls}")
+
+    adapters = {"LTC": FailsDifferentlyEachTime()}
+    for _cycle in range(3):
+        refresh_wallet_inventory(conn, adapters)
+    conn.close()
+
+    assert caplog.text.count("wallet inventory for LTC NOT refreshed") == 3
