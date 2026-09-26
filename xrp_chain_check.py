@@ -318,7 +318,16 @@ def find_account(url: str, seq, how_many: int, given: str) -> str:
     produce a clean run that confirmed nothing -- which is the failure mode this
     whole script is written against.
     """
-    started = step(2, "find an account to examine", f"walking back up to {how_many} validated ledgers")
+    # ANNOUNCES WHAT IT WILL ACTUALLY DO. With --account supplied no ledger walk
+    # happens, and the first version said "walking back up to 20 validated
+    # ledgers" regardless -- claiming work it did not do, which is the same
+    # shape as every other correction in this file's history, just smaller.
+    detail = (
+        f"--account given, so no ledger walk: {given}"
+        if given else
+        f"no --account, so walking back up to {how_many} validated ledgers for a real Payment"
+    )
+    started = step(2, "find an account to examine", detail)
     account = given
     if not account and seq:
         for offset in range(how_many):
