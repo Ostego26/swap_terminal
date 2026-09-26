@@ -178,6 +178,46 @@ def describe_wallet_lock(info: dict) -> tuple[str, str]:
     return PASS, f"wallet reports it can send ({present})  <- re-lock for staking when the swap is done"
 
 
+def explain_grc_failure(error: Exception, port: int) -> str:
+    """What a failed Gridcoin RPC call actually TELLS you. Returns the detail line.
+
+    Added 2026-09-26 because the previous version appended one hardcoded hint --
+    "is the testnet daemon running?" -- to every failure, and the operator's run
+    produced a 401. A 401 PROVES the daemon is running: something accepted the
+    connection, parsed the request and rejected the credentials. The hint asserted
+    the opposite of what the response established, which sends a reader to restart
+    a wallet that was working.
+
+    That is the same defect as xrp_chain_check.py's "the decoder is wrong" line,
+    one file over: one message covering several situations that mean different
+    things, so it could only be right about one of them. Here the shape matters
+    more than usual, because the wrong hint's remedy is "restart the staking
+    wallet" -- and a needless restart of a staking wallet is a real cost, which
+    this session has already caused once by misreading a different signal.
+
+    The three cases a reader must be able to tell apart:
+
+      401 / 403     it IS listening. The credentials are wrong or absent.
+      refused       nothing is listening on that port.
+      anything else reported as itself, with no hint invented for it.
+    """
+    text = str(error)
+    if "401" in text or "403" in text or "Authorization" in text:
+        return (
+            f"{type(error).__name__}: the wallet IS listening on {port} and REJECTED the "
+            f"credentials. The daemon is fine -- do not restart it. Check GRC_RPC_USER and "
+            f"GRC_RPC_PASS against rpcuser/rpcpassword in the conf that wallet actually reads "
+            f"(and check you exported the VALUE, not a placeholder)"
+        )
+    if "refused" in text.lower() or "NewConnectionError" in text or "Max retries" in text:
+        return (
+            f"{type(error).__name__}: nothing is listening on {port}. The wallet is not "
+            f"running, or is running without server=1, or is reading a different conf with a "
+            f"different rpcport"
+        )
+    return f"{type(error).__name__}: {text[:150]}  <- reported as-is; this failure has no known interpretation"
+
+
 def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
     """Decide whether to OPEN A SOCKET to the Gridcoin wallet. Returns (connect?, state, detail).
 
@@ -236,7 +276,7 @@ def check_gridcoin() -> None:
     try:
         balance = adapters["GRC"].get_balance()
     except Exception as error:  # noqa: BLE001 -- checked: a down daemon, a refused login and a bad response all mean "the GRC leg cannot run", the type and message are printed, and the exit code is non-zero. Telling them apart would not change what the operator does next, which is to look at the daemon.
-        record(FAIL, "GRC wallet", f"{type(error).__name__}: {str(error)[:110]}  <- is the testnet daemon running?")
+        record(FAIL, "GRC wallet", explain_grc_failure(error, port))
         return
     state = PASS if balance > 0 else FAIL
     record(state, "GRC wallet",

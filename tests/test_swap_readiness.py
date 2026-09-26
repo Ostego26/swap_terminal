@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
@@ -18,7 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 from network_target import UNCONFIGURED_PORT
 
 import swap_readiness
-from swap_readiness import FAIL, PASS, SKIP, describe_wallet_lock, gridcoin_precheck
+from swap_readiness import (
+    FAIL,
+    PASS,
+    SKIP,
+    describe_wallet_lock,
+    explain_grc_failure,
+    gridcoin_precheck,
+)
 
 MAINNET_PORT = 15715
 TESTNET_PORT = 25779
@@ -191,3 +199,70 @@ def test_a_crashing_check_is_reported_and_does_not_kill_the_run(monkeypatch, cap
     assert "KeyError" in out
     assert "swap_readiness.py" in out, "the line must say the bug is in the preflight, not the subject"
     assert out.count("reached") == 2, "the checks AFTER the crash must still run -- that was the real cost"
+
+
+# --- a failure must not assert the opposite of what it proves -----------------
+
+def test_a_401_says_the_wallet_is_running_because_that_is_what_a_401_proves():
+    """The operator's run, 2026-09-26, and the hint contradicted the evidence.
+
+    Every GRC failure used to get the same appended hint -- "is the testnet daemon
+    running?" -- and the run produced a 401. A 401 PROVES the daemon is running:
+    something accepted the connection, parsed the request, and rejected the
+    credentials. The hint asserted the opposite of what the response established.
+
+    The remedy the wrong hint implies is "restart the staking wallet", which is
+    not free, and this session has already caused one needless restart by
+    misreading a different signal. So the line now says "do not restart it".
+    """
+    error = requests.HTTPError("401 Client Error: Authorization Required for url: http://127.0.0.1:25715/")
+
+    detail = explain_grc_failure(error, 25715)
+
+    assert "IS listening" in detail
+    assert "do not restart" in detail
+    assert "running?" not in detail, "a 401 must never ask whether the daemon is running"
+
+
+def test_a_refused_connection_says_nothing_is_listening():
+    """The other case, which is where the old hint was actually right.
+
+    Fixing the 401 by deleting the hint entirely would have lost this: a refused
+    connection genuinely does mean the wallet is not up, or is up without
+    server=1, or is reading a different conf. Both branches are asserted so a
+    future edit cannot collapse them back into one message.
+    """
+    error = requests.ConnectionError("HTTPConnectionPool(host='127.0.0.1', port=25779): Max retries exceeded")
+
+    detail = explain_grc_failure(error, 25779)
+
+    assert "nothing is listening" in detail
+    assert "server=1" in detail, "the line should name the switch that produces this exact symptom"
+
+
+def test_an_unrecognized_failure_invents_no_hint_for_itself():
+    """Rule 17: no interpretation is better than a guessed one.
+
+    The whole defect above was a hint attached to a failure it did not fit, so the
+    default for an unfamiliar failure is to report it and say plainly that it has
+    not been interpreted.
+    """
+    detail = explain_grc_failure(ValueError("something nobody has seen before"), 25715)
+
+    assert "no known interpretation" in detail
+    assert "listening" not in detail
+
+
+def test_the_three_failure_kinds_never_render_the_same_way():
+    """Rule 14's shape, pinned as its own assertion.
+
+    The original defect was ONE message for several situations, so a future edit
+    that merges any two of these would pass the tests above while restoring it.
+    """
+    details = {
+        explain_grc_failure(requests.HTTPError("401 Client Error: Authorization Required"), 25715),
+        explain_grc_failure(requests.ConnectionError("Max retries exceeded"), 25715),
+        explain_grc_failure(ValueError("unknown"), 25715),
+    }
+
+    assert len(details) == 3, "each failure kind must read differently"
