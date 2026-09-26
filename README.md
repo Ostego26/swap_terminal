@@ -398,13 +398,33 @@ already taken. `swap_readiness.py` reports the lock state as its own check,
 separate from the balance, because a funded wallet that cannot send is a
 different failure from an empty one.
 
-**The field names are NOT confirmed.** No Gridcoin daemon is reachable from the
-environment this was written in, so `unlocked_until` and the staking-only key are
-read *when present* and an unrecognized response is reported as **NOT
-ESTABLISHED** rather than as unlocked — guessing "fine" there means a swap
-created against a wallet that cannot pay it. The check echoes the keys
-`getwalletinfo` actually returned, which is how the real names get confirmed: the
-same way the Monero and XRP field names were, from a run on the operator's host.
+**Measured 2026-09-26** against the operator's Gridcoin testnet GUI wallet
+(rpcport 25715) and its own `help wallet` output:
+
+| fact | how |
+|---|---|
+| `walletpassphrase <passphrase> <timeout> [stakingonly]` | the wallet's own command list — so the staking-only **state** exists |
+| `getwalletinfo` returns exactly one lock field, `unlocked_until` | a live call returned `{'unlocked_until': 0}` and nothing else |
+| **no wallet-category RPC reports staking-only back** | the full list is `getwalletinfo`, `walletlock`, `walletpassphrase`, `walletpassphrasechange`, `walletdiagnose`, and only the first introspects |
+
+**So a staking-only unlock may be indistinguishable from a full one over RPC**,
+and that is a limitation rather than a bug in this code. If both set
+`unlocked_until` to a timestamp, nothing available separates a wallet that can pay
+from one that cannot, and the only way to learn which is to attempt the send.
+
+That is why an unlocked wallet is reported as **SKIP, not PASS** — it says the
+unlock might have been staking-only and names the RPC parameter. Reporting PASS
+would be a guess in the voice of a measurement about the single condition that
+decides whether a payout works.
+
+Three field names were **deleted** rather than kept as guesses:
+`unlocked_for_staking_only`, `staking_only`, `walletunlockstakingonly`. None
+exists; they were a guess at a name for a field Gridcoin does not return at all,
+and a reader finding that tuple would reasonably take it for a list of names
+somebody had seen (rule 2).
+
+Still open, and one unlock cycle would settle it: whether a staking-only unlock
+leaves `unlocked_until` at 0 or sets a timestamp.
 
 ## XRP
 

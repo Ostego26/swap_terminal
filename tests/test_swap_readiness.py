@@ -98,52 +98,46 @@ def test_no_refusing_case_ever_returns_connect_true(port):
 
 # --- the Gridcoin lock state, which is a precondition no other chain has ------
 
-def test_a_staking_only_unlock_is_reported_as_unable_to_send():
-    """The operator's own operational fact, 2026-09-26.
+def test_an_unlocked_wallet_is_NOT_reported_as_able_to_send():
+    """The measured limitation, 2026-09-26, and the reason this returns SKIP not PASS.
 
-    A Gridcoin wallet that stakes is normally left unlocked FOR STAKING ONLY, and
-    a staking-only unlock cannot send. Paying out needs a full unlock, and the
-    wallet is meant to be re-locked and re-unlocked for staking afterwards --
-    leaving it fully unlocked is a security regression on a live wallet.
+    Established from the wallet's own `help wallet` and a live getwalletinfo:
+    `walletpassphrase <passphrase> <timeout> [stakingonly]` means the staking-only
+    STATE exists, but NO wallet-category RPC reports it back. getwalletinfo returns
+    exactly one lock field, `unlocked_until`.
 
-    So a GRC payout has a precondition nothing else here has, and an adapter
-    cannot satisfy it: a full unlock needs the passphrase, which this terminal
-    deliberately does not hold. What it can do is say so BEFORE a swap is
-    created, instead of letting sendtoaddress fail opaquely mid-payout with a
-    customer's deposit already taken.
+    So if a staking-only unlock also sets a timestamp, this state covers both a
+    wallet that can pay and one that cannot, and nothing over RPC separates them.
+    Reporting PASS would be a guess in the voice of a measurement about the single
+    condition that decides whether a payout works -- so it reports SKIP and says
+    what it cannot rule out.
     """
-    state, detail = describe_wallet_lock({"unlocked_until": 1790000000, "staking_only": True})
+    state, detail = describe_wallet_lock({"unlocked_until": 1790000000})
 
-    assert state == FAIL
-    assert "STAKING ONLY" in detail
-    assert "full unlock" in detail
-    assert "re-unlock for staking" in detail, "the line must say how to put it back"
+    assert state != PASS, "an unlock that might be staking-only must not read as PASS"
+    assert state == SKIP
+    assert "stakingonly" in detail, "the line must name the actual RPC parameter"
+    assert "CANNOT send" in detail
+    assert "re-unlock for staking" in detail, "the line must say how to put the wallet back"
 
 
-def test_a_locked_wallet_is_reported_as_locked_AND_shows_what_it_read():
-    """Echoing the inputs is not decoration; its absence already cost a measurement.
+def test_the_deleted_field_names_are_gone_rather_than_kept_as_guesses():
+    """Three invented names were removed: they describe a field Gridcoin never returns.
 
-    The first version printed "wallet is LOCKED" with nothing else. The operator's
-    run 2026-09-26 produced exactly that line for a wallet they had described as
-    normally "regularly unlocked for staking" -- and with no fields shown there was
-    no way to tell which of two things was true: the wallet really was locked, or
-    Gridcoin reports unlocked_until=0 for a staking-only unlock too. Both cannot
-    send, so the verdict held; the open question is the field, and a line that
-    showed its inputs would have answered it.
+    unlocked_for_staking_only, staking_only and walletunlockstakingonly were my
+    guesses at a name for something getwalletinfo does not carry at all -- measured
+    against the real wallet, whose entire response was {'unlocked_until': 0}, and
+    against `help wallet`, which lists no RPC reporting staking state.
+
+    Rule 2: delete a dead guess rather than leave it looking authoritative. A reader
+    finding that tuple would reasonably take it for a list of names somebody had
+    seen. Pinned as a test because the tempting "fix" for the ambiguity above is to
+    reintroduce a field name and branch on it.
     """
-    state, detail = describe_wallet_lock({"unlocked_until": 0})
-
-    assert state == FAIL
-    assert "LOCKED" in detail
-    assert "unlocked_until" in detail, "the line must show the field it decided from"
-    assert "NOT yet established" in detail, "the open question must be visible to whoever reads it"
-
-
-def test_a_fully_unlocked_wallet_can_send_and_is_told_to_relock():
-    state, detail = describe_wallet_lock({"unlocked_until": 1790000000, "staking_only": False})
-
-    assert state == PASS
-    assert "re-lock for staking" in detail
+    source = Path(swap_readiness.__file__).read_text()
+    for invented in ("unlocked_for_staking_only", "staking_only", "walletunlockstakingonly"):
+        assert f'"{invented}"' not in source, f"{invented} is not a real Gridcoin field"
+    assert not hasattr(swap_readiness, "_STAKING_ONLY_FIELDS"), "the guessed tuple must stay deleted"
 
 
 def test_an_unrecognized_response_is_NOT_read_as_unlocked():

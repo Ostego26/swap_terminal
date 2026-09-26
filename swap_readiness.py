@@ -118,25 +118,35 @@ def check_xrp(account: str) -> None:
            f"<- must be > 0 to pay anything out")
 
 
-# Gridcoin's getwalletinfo fields for lock state.
+# Gridcoin's getwalletinfo fields for lock state, MEASURED rather than guessed.
 #
-# `unlocked_until` is CONFIRMED PRESENT, measured 2026-09-26 on the operator's
-# Gridcoin testnet GUI wallet (rpcport 25715): the check returned "wallet is
-# LOCKED" rather than "NOT ESTABLISHED", which it can only do when that field is
-# in the response. It follows the Bitcoin convention -- 0 or absent means locked,
-# a unix timestamp means unlocked until then.
+# Established 2026-09-26 from the wallet's own `help wallet` output and from a
+# live getwalletinfo on the operator's testnet GUI wallet (rpcport 25715):
 #
-# THE STAKING-ONLY FIELD IS STILL UNMEASURED and none of the three candidate
-# spellings has been seen. That distinction has no Bitcoin equivalent at all,
-# because Bitcoin has no staking, so the name is a guess and is treated as one:
-# read when present, and its absence never reported as "can send". What is not yet
-# known is whether Gridcoin reports unlocked_until=0 for a staking-only unlock as
-# well -- if it does, the two states are indistinguishable through this field, and
-# both cannot send, so the verdict stays correct while the wording would not.
-# Rule 17: a field name our code agrees on is still a guess until a server says it
-# back, and one of these two has now said it back while the other has not.
+#   * `unlocked_until` EXISTS and is the only lock-related field getwalletinfo
+#     returns. The live response was exactly {'unlocked_until': 0}.
+#   * `walletpassphrase <passphrase> <timeout> [stakingonly]` is the unlock, and
+#     that third parameter is the staking-only switch. So the STATE exists.
+#   * NO wallet-category RPC reports it back. The full command list is
+#     getwalletinfo, walletlock, walletpassphrase, walletpassphrasechange,
+#     walletdiagnose -- and only getwalletinfo introspects, with that one field.
+#
+# THREE INVENTED FIELD NAMES WERE DELETED FROM HERE: unlocked_for_staking_only,
+# staking_only, walletunlockstakingonly. None of them exists. They were a guess at
+# a name for a field that is not returned at all, and rule 2 says delete a dead
+# guess rather than leave it looking authoritative -- a reader would have taken
+# that tuple for a list of things somebody had seen.
+#
+# WHAT FOLLOWS FROM IT, and it is a limitation rather than a bug: a staking-only
+# unlock and a full unlock may be indistinguishable over RPC. If both set
+# `unlocked_until` to a timestamp, then this check cannot tell "can send" from
+# "staking only, cannot send", and the only way to learn which is to attempt the
+# send. That is why a timestamp is NOT reported as "can send" below -- it is
+# reported as "unlocked, but staking-only cannot be ruled out from here".
+#
+# Still open, and one unlock cycle on the operator's wallet would settle it:
+# whether a staking-only unlock leaves unlocked_until at 0 or sets a timestamp.
 _LOCK_FIELDS = ("unlocked_until",)
-_STAKING_ONLY_FIELDS = ("unlocked_for_staking_only", "staking_only", "walletunlockstakingonly")
 
 
 def describe_wallet_lock(info: dict) -> tuple[str, str]:
@@ -163,19 +173,18 @@ def describe_wallet_lock(info: dict) -> tuple[str, str]:
                       as unknown, never as "unlocked" -- guessing "fine" here
                       means a swap created against a wallet that cannot pay it.
     """
-    present = {key: info[key] for key in (*_LOCK_FIELDS, *_STAKING_ONLY_FIELDS) if key in info}
+    present = {key: info[key] for key in _LOCK_FIELDS if key in info}
     if not present:
         return SKIP, (
             "lock state NOT ESTABLISHED -- getwalletinfo reported none of "
-            f"{', '.join((*_LOCK_FIELDS, *_STAKING_ONLY_FIELDS))}. Keys it DID return: "
+            f"{', '.join(_LOCK_FIELDS)}. Keys it DID return: "
             f"{', '.join(sorted(info)) or '(none)'}  <- paste this line back; the field names are "
             "unconfirmed against a real Gridcoin daemon and this is how they get confirmed"
         )
 
     unlocked_until = info.get("unlocked_until")
-    staking_only = next((info[key] for key in _STAKING_ONLY_FIELDS if key in info), None)
 
-    if unlocked_until in (0, None) and staking_only is None:
+    if unlocked_until in (0, None):
         # Echoes what it READ, which the first version did not -- and that omission
         # cost a measurement. The operator's run 2026-09-26 printed this exact line
         # for a wallet they described as normally "regularly unlocked for staking",
@@ -190,12 +199,18 @@ def describe_wallet_lock(info: dict) -> tuple[str, str]:
             f"NOT yet established; if this line looks wrong for a staking wallet, that is the "
             f"thing to tell us"
         )
-    if staking_only:
-        return FAIL, (
-            f"wallet is unlocked FOR STAKING ONLY ({present}) -- staking-only cannot send. "
-            "A payout needs a full unlock, then re-lock and re-unlock for staking afterwards"
-        )
-    return PASS, f"wallet reports it can send ({present})  <- re-lock for staking when the swap is done"
+    # A timestamp is NOT reported as "can send", and that is the measured limitation
+    # rather than caution for its own sake. Gridcoin returns no field distinguishing
+    # a staking-only unlock from a full one, so if a staking-only unlock also sets
+    # unlocked_until, this state covers both -- and one of them cannot send. Saying
+    # PASS here would be a guess in the voice of a measurement about the one thing
+    # that decides whether a payout works.
+    return SKIP, (
+        f"wallet is UNLOCKED until {unlocked_until} ({present}) -- but Gridcoin returns no field "
+        f"saying whether that unlock was `walletpassphrase ... stakingonly`, and a staking-only "
+        f"unlock CANNOT send. So this is not confirmation it can pay. If the payout fails, unlock "
+        f"again with stakingonly omitted; re-lock and re-unlock for staking when the swap is done"
+    )
 
 
 def explain_grc_failure(error: Exception, port: int) -> str:
