@@ -393,14 +393,32 @@ It also refuses an **issued currency**: `delivered_amount` is a drop string for
 XRP and a JSON object for an IOU. Crediting the object as XRP would pay out real
 XRP for a token the depositor minted themselves.
 
-### Status: the address maths is measured, the wire format is not
+### Status: the wire format is now measured too
 
 | part | state |
 |---|---|
 | `chains/xrp_address.py` — base58 + checksum | **measured** against ACCOUNT_ZERO and ACCOUNT_ONE, 2,000 round trips, every single-character mutation rejected |
 | `chains/xrp_units.py` — drops, finality ladder | **measured**, tested directly |
-| `chains/xrp_payments.py` — what counts as a deposit | **rules measured**, response shape unverified |
-| `chains/xrp.py` — RPC method and field names | **partly confirmed against rippled 3.4.1** — see below |
+| `chains/xrp_payments.py` — what counts as a deposit | **rules measured**, and the response shape now **confirmed against rippled 3.4.1** |
+| `chains/xrp.py` — RPC method and field names | **confirmed against rippled 3.4.1**, all six fields — see below |
+
+Updated 2026-09-26. The heading above read "the wire format is not" until that
+day, when the last field was observed. All six fields in `PAYMENT_FIELDS` have
+now been seen on a real ledger:
+
+| field | how it was confirmed |
+|---|---|
+| `hash`, `TransactionType`, `Destination`, `TransactionResult`, `delivered_amount` | `account_tx` against a funded testnet account, 1 real Payment, 2026-09-26 |
+| `DestinationTag` | **9 tagged Payments of 38 in testnet ledger 21060800**, found by `--hunt-tag 200` after walking 13 ledgers / 50 Payments in 2.4µfn (2.9s) |
+
+`DestinationTag` was the last one and it took a different method, because
+ordinary faucet traffic is untagged — three separate runs reported it "absent
+from all 1". Rather than spend a dependency on sending one, `--hunt-tag N` reads
+**other people's** tagged traffic off the testnet: the wire spelling is the same
+fact whoever sent the payment. That confirms rippled sends a key named
+`DestinationTag` and that `deposit_events_from_transactions()` credits a real
+tagged Payment with the tag as `vout`. It does **not** confirm that *our* sender
+populates the field — see the sender section below.
 
 Probed 2026-09-25 against `s.altnet.rippletest.net` from the operator's host.
 Confirmed: the `params: [{...}]` request shape, that errors arrive in
@@ -445,15 +463,27 @@ Three exit codes:
 
 | exit | meaning |
 |---|---|
-| 0 | every field the adapter reads was observed over real Payments |
+| 0 | every **required** field was observed over real Payments, and nothing disagreed |
 | 1 | at least one is wrong, each named |
 | **3** | **inconclusive** — nothing failed, but there was nothing to look at |
 
-It closes the two gaps the first probe left: **`account_tx`** specifically,
-which is the method the adapter actually calls and whose entries may nest
-differently again, and a payment **carrying a `DestinationTag`** — none of the
-three sampled had one, which is normal wallet-to-wallet traffic and says
-nothing either way about deposits addressed to us.
+Exit 0 has two different summary lines and the distinction matters. The
+unqualified `PASSED: every field the adapter reads was observed` is printed only
+when that is true. When a field the adapter reads went unseen, the summary says
+so by name — `PASSED, WITH 1 FIELD(S) STILL UNOBSERVED: DestinationTag` — because
+until 2026-09-26 it printed the unqualified claim over a run whose own step 3,
+two screens above, said `DestinationTag absent from all 1`. The body was honest
+and the conclusion was not, and the conclusion is the line a human reads.
+
+`--hunt-tag N` walks N validated ledgers for anyone's tagged Payment, read-only,
+and stops at the first hit. Finding none is **not** a failure and is not counted
+as one: that is a fact about testnet traffic, not a defect in this code.
+
+It closed the two gaps the first probe left, and both are now closed:
+**`account_tx`** specifically, which is the method the adapter actually calls and
+whose entries nest differently from `ledger`; and a payment **carrying a
+`DestinationTag`**, which `--hunt-tag` found on 2026-09-26 after three runs had
+reported it absent.
 
 Step 4 runs the adapter's own scan over the real response, and an empty result
 there is treated as a **failure** when the response did contain inbound
@@ -469,6 +499,75 @@ is what every exchange on this ledger does — so the attribution question
 `get_new_address()` therefore **refuses**, and says why: what is needed is a tag
 allocator in `services/swap_service.py`, which is a change to how a swap is
 created rather than to the adapter.
+
+### Producing a tagged payment — `xrp_send_tagged.py`
+
+Dry run by default; `--send` submits. Testnet only: the endpoint is pinned in the
+file and `refuse_mainnet()` asks the server for its `network_id` before anything
+is signed, so reaching mainnet means editing the source.
+
+```
+python3 xrp_send_tagged.py                  # dry run, shows what it would send
+python3 xrp_send_tagged.py --send           # submit one tagged Payment
+python3 xrp_send_tagged.py --send --tag 7 --amount 5
+```
+
+It reads both funded faucet accounts out of `~/.config/swap_terminal/keys/` and
+pays the second from the first. **Where the secret lives was measured, not
+assumed** — the faucet writes it at top-level `seed`, and the first version of
+this script looked for `account.secret`, `payload.secret` and `account.seed`,
+three guesses none of which matched. It reported `saved faucet accounts: 0` and
+refused to send while two funded accounts sat in that directory, and the whole
+suite stayed green because every test fixture wrote the shape the code already
+handled. `ADDRESS_KEYS` / `SECRET_KEYS` are now searched as a union across both
+nesting levels, and each run prints which key name matched for each file — names
+only; the secret is never printed anywhere in this file.
+
+**Two signing paths, and the difference is where the key is used.** First it
+tries rippled's server-side `submit` with a `secret`. Public servers disable
+that, and `s.altnet.rippletest.net` answered `notSupported` on 2026-09-26 — an
+answer about the server, not a failure. It then falls back to signing locally
+with **`xrpl-py` (optional dependency, 5.2.0 measured)**, which is imported
+lazily: the dry run, the field survey and the server-side path all work without
+it, and a module-level import would make a signing library mandatory just to
+collect the test suite.
+
+**The derivation guard is why local signing is safe to add.** Server-side
+`submit` sends the secret and `Account` separately, so the server derives the key
+and rejects a mismatch. Signing here, *we* choose which account the transaction
+claims — so a seed paired with the wrong address would sign a Payment from an
+account the dry run never displayed: the operator reads one address and a
+different one is debited. Since `saved_faucet_accounts()` reads the address and
+the secret from separate key names over two nesting levels, nothing structurally
+guarantees they came from the same file. `derive_and_check()` therefore derives
+the address from the seed and **refuses** unless it equals the announced source.
+The refusal names both addresses, which are public, and never the seed.
+
+Submission uses `submit_and_wait()` rather than `submit()`, so a transaction the
+ledger rejected cannot be reported as sent.
+
+### What the sender does not prove
+
+`--hunt-tag` confirms rippled's wire spelling from other people's traffic. It
+cannot confirm that **our** sender populates `DestinationTag`, because it never
+reads a payment we produced. Only a `--send` run followed by
+`xrp_chain_check.py --account <destination>` closes that, and what it must show
+is step 3 reporting the tag **present** and step 4 **crediting** it with
+`vout` equal to the tag rather than deferring it.
+
+### Tag 0 is a real tag
+
+`0` is a legal `DestinationTag` and `if tag:` reads it as absent.
+`chains/xrp_payments.py` has always been correct here — it tests `tag is None`,
+and separately rejects `bool`, because `True == 1` would otherwise become tag 1.
+Neither was pinned by a test until 2026-09-26, so an edit to `if not tag:` would
+have passed all 689 tests while making every deposit tagged 0 arrive, be held
+back as unattributable, and wait for a hand match. Money arrives, the swap does
+not credit, nothing fails. Both are pinned now, mutation-checked by making that
+exact edit.
+
+Whether the allocator in `services/swap_service.py` ever *issues* 0 is a separate
+question and still open; a reader that drops a legal value is wrong either way.
 
 ### Two rippled quirks that bite
 

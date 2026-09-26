@@ -238,3 +238,65 @@ def test_a_file_with_neither_address_nor_secret_says_so_rather_than_vanishing(
 
     assert saved_faucet_accounts() == []
     assert "xrp-testnet-1.json" in capsys.readouterr().out
+
+
+# xrpl-py is an OPTIONAL dependency (see derive_and_check's import note), so these
+# SKIP rather than fail without it. A skip is honest here -- the suite is not
+# claiming the guard works, it is saying it could not be checked -- which is why
+# the skip reason names what went unchecked rather than just the missing module.
+xrpl = pytest.importorskip(
+    "xrpl.wallet", reason="xrpl-py absent, so the local-signing derivation guard is UNCHECKED"
+)
+
+
+def test_a_seed_that_derives_the_announced_address_is_accepted():
+    """The happy path, against real key derivation rather than a stub.
+
+    A stubbed Wallet would only prove the comparison operator works. The point
+    of this guard is that OUR derivation agrees with the faucet's, so it is
+    exercised against the real secp256k1/ed25519 path.
+    """
+    wallet = xrpl.Wallet.create()
+
+    derived = xrp_send_tagged.derive_and_check(wallet.seed, wallet.classic_address)
+
+    assert derived.classic_address == wallet.classic_address
+
+
+def test_a_seed_for_a_different_account_refuses_rather_than_signing():
+    """The guard, and the reason local signing is safe to add at all.
+
+    Server-side `submit` sends the secret and Account separately and the server
+    rejects a mismatch. Signing here, WE choose the account the transaction
+    claims -- so a seed paired with the wrong address would sign a Payment from
+    an account the dry run never displayed. The operator reads one address and a
+    different one is debited.
+
+    Not hypothetical: saved_faucet_accounts() reads the address and the secret
+    from separate key names over two nesting levels, so nothing structurally
+    guarantees they came from the same faucet file.
+    """
+    signing = xrpl.Wallet.create()
+    announced = xrpl.Wallet.create()
+
+    with pytest.raises(RuntimeError, match="REFUSING to sign"):
+        xrp_send_tagged.derive_and_check(signing.seed, announced.classic_address)
+
+
+def test_the_mismatch_message_names_both_addresses_and_never_the_seed():
+    """Diagnosable without leaking. Both halves asserted.
+
+    An error message is exactly where a secret leaks, because the impulse when
+    debugging a key mismatch is to print the key. Addresses are public and are
+    what the operator needs to see; the seed is never in the text.
+    """
+    signing = xrpl.Wallet.create()
+    announced = xrpl.Wallet.create()
+
+    with pytest.raises(RuntimeError) as caught:
+        xrp_send_tagged.derive_and_check(signing.seed, announced.classic_address)
+
+    message = str(caught.value)
+    assert signing.classic_address in message
+    assert announced.classic_address in message
+    assert signing.seed not in message, "the seed must never reach an error message"

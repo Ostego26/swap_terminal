@@ -213,6 +213,128 @@ def main() -> int:
 SIGNING_REFUSED = frozenset({"notSupported", "noPermission", "internal", "srcActNotFound"})
 
 
+def derive_and_check(secret: str, announced: str):
+    """Derive the signing wallet and REFUSE if it is not the account we announced.
+
+    This guard is the reason local signing is safe to add at all, and it has no
+    equivalent on the server-side path. `submit` with a `secret` sends the secret
+    and an `Account` field separately: the server derives the key, compares, and
+    rejects a mismatch. Signing here, WE choose which account the transaction
+    claims, so a seed paired with the wrong address would sign a Payment from an
+    account the dry run never showed -- the operator reads "from rnjG8..." and a
+    different account is debited.
+
+    That is not hypothetical bookkeeping. The lookup this file shipped two commits
+    ago read the address from one place and the secret from another, both searched
+    independently over two nesting levels. Nothing structurally guarantees the two
+    came from the same faucet file. So the derived address is compared against the
+    announced one and a mismatch refuses rather than warns.
+
+    Returns the wallet. Raises RuntimeError with the mismatch named -- the two
+    ADDRESSES are safe to print, the seed is not and is never in the message.
+    """
+    # Imported here, not at the top, and PLC0415 suppressed with the reason --
+    # matching the pattern already used in tests/test_gridcoin_rpc_is_configured.py.
+    # xrpl-py is an OPTIONAL dependency: the dry run, the field survey and the
+    # server-side submit path all work without it, and the test suite imports this
+    # module. A module-level import would make a signing library mandatory to
+    # collect the tests for a script whose default mode signs nothing.
+    from xrpl.wallet import Wallet  # noqa: PLC0415 -- checked: optional dependency; see above
+
+    wallet = Wallet.from_seed(secret)
+    if wallet.classic_address != announced:
+        raise RuntimeError(
+            f"the seed in that file derives {wallet.classic_address}, not the "
+            f"{announced} this run announced. REFUSING to sign: the address and the "
+            f"seed are read from separate keys and may not be the same account. "
+            f"Nothing was submitted."
+        )
+    return wallet
+
+
+def submit_locally_signed(source: str, destination: str, secret: str, tag: int, drops: int) -> int:
+    """Sign here with xrpl-py and submit the signed blob. Returns an exit code.
+
+    Reached only after the server refused to sign, and only after refuse_mainnet()
+    has already answered -- the order matters and is asserted by the caller, since
+    this is the one function in the tree that signs anything.
+
+    Kept separate from submit_payment() rather than merged into it. The two differ
+    in WHERE the key is used -- their machine versus ours -- which is the whole
+    security-relevant fact about them, and rule 8 says a genuine difference belongs
+    in a comment at both sites rather than collapsed into one function with a flag.
+
+    submit_and_wait() rather than submit(): it waits for validation and raises on a
+    failed final result, so "submitted" cannot be reported for a transaction the
+    ledger rejected. Rule 13's "a stop that cannot prove it worked is not a stop",
+    applied to a send.
+    """
+    try:
+        # Lazy for the same reason as in derive_and_check(); see the note there.
+        import httpx  # noqa: PLC0415 -- checked: optional dependency, arrives with xrpl-py
+        from xrpl.clients import JsonRpcClient  # noqa: PLC0415 -- checked: optional dependency
+        from xrpl.constants import XRPLException  # noqa: PLC0415 -- checked: optional dependency
+        from xrpl.models.transactions import Payment  # noqa: PLC0415 -- checked: optional dependency
+        from xrpl.transaction import submit_and_wait  # noqa: PLC0415 -- checked: optional dependency
+    except ImportError:
+        print("\nxrpl-py is not importable, so local signing is not available.", flush=True)
+        print("    pip install xrpl-py", flush=True)
+        return 1
+
+    print("\n    signing LOCALLY with xrpl-py; the seed does not leave this machine", flush=True)
+    try:
+        wallet = derive_and_check(secret, source)
+    except RuntimeError as error:
+        print(f"\nREFUSED: {error}", file=sys.stderr)
+        return 1
+    print(f"    derived address matches the announced source: {wallet.classic_address}", flush=True)
+
+    payment = Payment(
+        account=source,
+        destination=destination,
+        destination_tag=tag,
+        amount=str(drops),
+    )
+    print(f"    built Payment with destination_tag={tag}, autofilling fee and sequence", flush=True)
+    try:
+        response = submit_and_wait(payment, JsonRpcClient(TESTNET_URL), wallet)
+    except (XRPLException, httpx.HTTPError) as error:
+        # NAMED types rather than `except Exception`. The first draft of this
+        # caught Exception with a noqa: BLE001 explaining why breadth was
+        # necessary, which rule 19 answers directly -- fix the code, do not
+        # suppress the finding. Measured against the installed xrpl-py 5.2.0:
+        # XRPLReliableSubmissionException and XRPLRequestFailureException both
+        # subclass xrpl.constants.XRPLException, and the only other family that
+        # reaches here is transport failure from httpx, which xrpl-py's JSON-RPC
+        # client uses. Two names cover it, so no breadth is needed.
+        #
+        # Anything NOT in those two families now propagates, which is correct: a
+        # bug in this file must not be reported to the operator as "the submit
+        # failed" on a run that signs a real transaction.
+        print(f"\nFAILED during submit: {type(error).__name__}: {error}", file=sys.stderr)
+        print("  Nothing here retries. A tec* result already claimed a fee.", file=sys.stderr)
+        return 1
+
+    result = response.result or {}
+    meta = result.get("meta") or {}
+    outcome = str(meta.get("TransactionResult") or result.get("engine_result") or "(none)")
+    tx_hash = result.get("hash") or (result.get("tx_json") or {}).get("hash")
+    print(f"    TransactionResult  {outcome}", flush=True)
+    print(f"    hash               {tx_hash or '(none)'}", flush=True)
+    print(f"    validated          {result.get('validated')}", flush=True)
+
+    if outcome != "tesSUCCESS":
+        print(f"\nNOT delivered: {outcome} is not tesSUCCESS, so no value moved.", flush=True)
+        return 1
+
+    print("\nDELIVERED and validated. Now confirm the adapter reads it:", flush=True)
+    print(f"    python3 xrp_chain_check.py --account {destination}", flush=True)
+    print("  Step 3 should show DestinationTag PRESENT and step 4 should CREDIT it with", flush=True)
+    print(f"  vout={tag} -- which is the one thing --hunt-tag cannot prove, because it", flush=True)
+    print("  reads other people's payments and not ours.", flush=True)
+    return 0
+
+
 def submit_payment(source: str, destination: str, secret: str, tag: int, drops: int) -> int:
     """Submit via rippled's legacy server-side signing. Returns an exit code.
 
@@ -252,9 +374,8 @@ def submit_payment(source: str, destination: str, secret: str, tag: int, drops: 
 
     if status in SIGNING_REFUSED:
         print("\nThis server will not sign on your behalf; public servers usually disable it.", flush=True)
-        print("That is an answer, not a failure of this script. The fallback needs one dependency:", flush=True)
-        print("    pip install xrpl-py", flush=True)
-        print("  Say so rather than assuming -- adding a dependency is a decision.", flush=True)
+        print("That is an answer about the SERVER, not a failure of this script.", flush=True)
+        return submit_locally_signed(source, destination, secret, tag, drops)
     else:
         print(f"\nNot submitted, and `{status}` is not a known signing refusal either.", flush=True)
         print("  Read the message above before retrying: a tec* code means it REACHED the ledger", flush=True)
