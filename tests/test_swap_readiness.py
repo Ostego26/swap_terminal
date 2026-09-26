@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 
 from network_target import UNCONFIGURED_PORT
 
-from swap_readiness import FAIL, PASS, gridcoin_precheck
+from swap_readiness import FAIL, PASS, SKIP, describe_wallet_lock, gridcoin_precheck
 
 MAINNET_PORT = 15715
 TESTNET_PORT = 25779
@@ -85,3 +85,68 @@ def test_no_refusing_case_ever_returns_connect_true(port):
     refusal reason without adding it here shows up as a gap rather than passing.
     """
     assert gridcoin_precheck(port)[0] is False
+
+
+# --- the Gridcoin lock state, which is a precondition no other chain has ------
+
+def test_a_staking_only_unlock_is_reported_as_unable_to_send():
+    """The operator's own operational fact, 2026-09-26.
+
+    A Gridcoin wallet that stakes is normally left unlocked FOR STAKING ONLY, and
+    a staking-only unlock cannot send. Paying out needs a full unlock, and the
+    wallet is meant to be re-locked and re-unlocked for staking afterwards --
+    leaving it fully unlocked is a security regression on a live wallet.
+
+    So a GRC payout has a precondition nothing else here has, and an adapter
+    cannot satisfy it: a full unlock needs the passphrase, which this terminal
+    deliberately does not hold. What it can do is say so BEFORE a swap is
+    created, instead of letting sendtoaddress fail opaquely mid-payout with a
+    customer's deposit already taken.
+    """
+    state, detail = describe_wallet_lock({"unlocked_until": 1790000000, "staking_only": True})
+
+    assert state == FAIL
+    assert "STAKING ONLY" in detail
+    assert "full unlock" in detail
+    assert "re-unlock for staking" in detail, "the line must say how to put it back"
+
+
+def test_a_locked_wallet_is_reported_as_locked():
+    state, detail = describe_wallet_lock({"unlocked_until": 0})
+
+    assert state == FAIL
+    assert "LOCKED" in detail
+
+
+def test_a_fully_unlocked_wallet_can_send_and_is_told_to_relock():
+    state, detail = describe_wallet_lock({"unlocked_until": 1790000000, "staking_only": False})
+
+    assert state == PASS
+    assert "re-lock for staking" in detail
+
+
+def test_an_unrecognized_response_is_NOT_read_as_unlocked():
+    """Rule 17, and the reason this returns three answers rather than two.
+
+    These field names are NOT confirmed against a live Gridcoin daemon -- none is
+    reachable from the environment this was written in. Reporting an unrecognized
+    response as "unlocked" would be a guess in the voice of a measurement, and the
+    cost of being wrong is a swap created against a wallet that cannot pay it.
+
+    It also prints the keys the daemon DID return, which is how the real field
+    names get confirmed: the same way the Monero and XRP field names were, from
+    the operator's own run rather than from memory.
+    """
+    state, detail = describe_wallet_lock({"balance": 1.0, "walletversion": 130000})
+
+    assert state == SKIP, "unknown must not be PASS"
+    assert state != PASS
+    assert "NOT ESTABLISHED" in detail
+    assert "walletversion" in detail, "it must echo the keys it saw so the names can be confirmed"
+
+
+def test_an_empty_response_says_none_rather_than_printing_nothing():
+    """Rule 14: (none) is a result; a blank is ambiguous between zero and broken."""
+    _state, detail = describe_wallet_lock({})
+
+    assert "(none)" in detail

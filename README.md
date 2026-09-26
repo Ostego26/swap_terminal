@@ -366,6 +366,46 @@ first, and an ERC-20 transfer needs ETH the depositor never sent) and the
 Do the asset→decimals authority first; it is owed under rule 11 regardless of
 ETH, and it is the prerequisite for everything else here.
 
+## Gridcoin: a staking wallet cannot pay out
+
+Operator, 2026-09-26: *"for grc you always have to lock, fully unlock, and then
+lock the wallet and then leave it regularly unlocked for staking."*
+
+This is a precondition **no other chain here has**, and it is the one a GRC
+payout leg fails on. A Gridcoin wallet that stakes is normally left unlocked
+**for staking only**, and a staking-only unlock **cannot send**. So the sequence
+around a payout is:
+
+1. lock
+2. fully unlock (not staking-only)
+3. send
+4. lock again
+5. unlock for staking, which is the normal resting state
+
+Leaving it fully unlocked between payouts is a security regression on a live
+wallet, which is why step 5 is part of the sequence and not an afterthought.
+
+**This terminal does not automate any of it, deliberately.** A full unlock needs
+the wallet passphrase, and that is a secret the swap terminal does not hold and
+should not — automating the unlock means storing the passphrase somewhere the
+payout path can reach, which converts a compromised terminal into a drained
+wallet. `modules/htlc_rpc.py` already redacts `walletpassphrase` parameter 0 from
+every log line for the same reason.
+
+What it does instead is **tell you before a swap is created**, rather than
+letting `sendtoaddress` fail opaquely mid-payout with a customer's deposit
+already taken. `swap_readiness.py` reports the lock state as its own check,
+separate from the balance, because a funded wallet that cannot send is a
+different failure from an empty one.
+
+**The field names are NOT confirmed.** No Gridcoin daemon is reachable from the
+environment this was written in, so `unlocked_until` and the staking-only key are
+read *when present* and an unrecognized response is reported as **NOT
+ESTABLISHED** rather than as unlocked — guessing "fine" there means a swap
+created against a wallet that cannot pay it. The check echoes the keys
+`getwalletinfo` actually returned, which is how the real names get confirmed: the
+same way the Monero and XRP field names were, from a run on the operator's host.
+
 ## XRP
 
 Brokered deposits only, **and XRP is not a tradeable pair** — `Config.ALLOWED_PAIRS`

@@ -102,6 +102,66 @@ def check_xrp(account: str) -> None:
            f"<- must be > 0 to pay anything out")
 
 
+# Gridcoin's getwalletinfo fields for lock state. THE NAMES ARE NOT CONFIRMED
+# against a live Gridcoin daemon from this environment -- no daemon is reachable
+# here -- so every one of them is read WHEN PRESENT and their absence is reported
+# as "not established" rather than as "unlocked". Rule 17: a field name our code
+# agrees on is still a guess until a server says it back.
+#
+# `unlocked_until` is the Bitcoin-derived convention (0 or absent means locked, a
+# unix timestamp means unlocked until then). Gridcoin is Bitcoin-derived so it is
+# the likely spelling; the staking-only distinction is the part with no Bitcoin
+# equivalent at all, because Bitcoin has no staking.
+_LOCK_FIELDS = ("unlocked_until",)
+_STAKING_ONLY_FIELDS = ("unlocked_for_staking_only", "staking_only", "walletunlockstakingonly")
+
+
+def describe_wallet_lock(info: dict) -> tuple[str, str]:
+    """What state a Gridcoin wallet is in for PAYING. Returns (state, detail).
+
+    THE OPERATIONAL FACT this exists for, from the operator 2026-09-26: a
+    Gridcoin wallet that stakes is normally left unlocked FOR STAKING ONLY, and a
+    staking-only unlock cannot send. Paying out requires a full unlock, and the
+    wallet is then meant to be re-locked and re-unlocked for staking afterwards
+    -- leaving it fully unlocked is a security regression on a live wallet.
+
+    So a GRC payout has a precondition no other chain here has, and it is one an
+    adapter cannot satisfy for itself: a full unlock needs the passphrase, which
+    is a secret this terminal deliberately does not hold (rule 16). What it CAN
+    do is tell the operator which state the wallet is in before a swap is created,
+    instead of letting sendtoaddress fail opaquely mid-payout with a customer's
+    deposit already taken.
+
+    Three outcomes, and the third is the honest one rather than a fallback:
+
+      locked          cannot send. Unambiguous.
+      unlocked        can send, as far as this can tell.
+      NOT ESTABLISHED the daemon did not report a field this recognizes. Reported
+                      as unknown, never as "unlocked" -- guessing "fine" here
+                      means a swap created against a wallet that cannot pay it.
+    """
+    present = {key: info[key] for key in (*_LOCK_FIELDS, *_STAKING_ONLY_FIELDS) if key in info}
+    if not present:
+        return SKIP, (
+            "lock state NOT ESTABLISHED -- getwalletinfo reported none of "
+            f"{', '.join((*_LOCK_FIELDS, *_STAKING_ONLY_FIELDS))}. Keys it DID return: "
+            f"{', '.join(sorted(info)) or '(none)'}  <- paste this line back; the field names are "
+            "unconfirmed against a real Gridcoin daemon and this is how they get confirmed"
+        )
+
+    unlocked_until = info.get("unlocked_until")
+    staking_only = next((info[key] for key in _STAKING_ONLY_FIELDS if key in info), None)
+
+    if unlocked_until in (0, None) and staking_only is None:
+        return FAIL, "wallet is LOCKED -- a GRC payout cannot send until it is fully unlocked"
+    if staking_only:
+        return FAIL, (
+            f"wallet is unlocked FOR STAKING ONLY ({present}) -- staking-only cannot send. "
+            "A payout needs a full unlock, then re-lock and re-unlock for staking afterwards"
+        )
+    return PASS, f"wallet reports it can send ({present})  <- re-lock for staking when the swap is done"
+
+
 def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
     """Decide whether to OPEN A SOCKET to the Gridcoin wallet. Returns (connect?, state, detail).
 
@@ -166,6 +226,17 @@ def check_gridcoin() -> None:
     record(state, "GRC wallet",
            f"{balance} GRC on port {port} (test chain)  <- must be > 0 to pay a GRC leg  "
            f"in {format_duration(time.monotonic() - started)}")
+
+    # A SEPARATE CHECK, because a funded wallet that cannot send is a different
+    # failure from an empty one and rule 14 forbids rendering them the same way.
+    # This is the precondition no other chain here has.
+    try:
+        info = adapters["GRC"].call("getwalletinfo")
+    except Exception as error:  # noqa: BLE001 -- checked: the balance call above already succeeded, so any failure here is specifically about getwalletinfo -- an older daemon without it, or a changed response. Reported with its type and message, and as SKIP rather than PASS, so an unknown lock state never reads as a usable one.
+        record(SKIP, "GRC wallet lock", f"getwalletinfo failed: {type(error).__name__}: {str(error)[:90]}")
+        return
+    lock_state, lock_detail = describe_wallet_lock(info if isinstance(info, dict) else {})
+    record(lock_state, "GRC wallet lock", lock_detail)
 
 
 def check_pricing() -> None:
