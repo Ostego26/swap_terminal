@@ -323,6 +323,50 @@ def claim_scriptsig_hex(adapter, txid: str) -> tuple[str, list[str]]:
     return "", reasons
 
 
+def htlc_vout(adapter, txid: str, p2sh_script_hex: str) -> tuple[int | None, str]:
+    """Which output of the funding transaction IS the HTLC. Never assumed.
+
+    Returns (vout, explanation). A None vout with an explanation is a result the
+    caller reports; it is never defaulted to 0.
+
+    WHY THIS EXISTS, and it is the same defect this repository fixed on the
+    Bitcoin side on 2026-09-25. Gridcoin's `createhtlc` returns p2sh_address,
+    redeem_script, sender_pubkey, receiver_pubkey, hash, timeout and txid -- and
+    NO VOUT (read from src/rpc/htlc.cpp, 2026-09-26). It funds through
+    SendMoney(), which adds a CHANGE output, so the HTLC is at index 0 or 1
+    depending on coin selection. The first version of this file passed
+    `int(htlc.get("vout", 0))` to claimhtlc, which is a guess about which output
+    holds a real balance.
+
+    MATCHED ON THE scriptPubKey HEX, not on a rendered address. That is the other
+    half of the same 2026-09-25 lesson: `scriptPubKey.addresses` was removed in
+    Bitcoin Core 22.0 and daemons disagree about whether it exists, while the hex
+    is the same bytes everywhere. The hex here is derived from the redeem script
+    the daemon itself returned, so a mismatch means the funding transaction does
+    not pay the contract the daemon just described -- which is a refusal, not an
+    index to fall back on.
+    """
+    reasons: list[str] = []
+    for method, args in (("getrawtransaction", (txid, 1)), ("gettransaction", (txid,))):
+        try:
+            answer = adapter.call(method, *args) or {}
+        except Exception as error:  # noqa: BLE001 -- checked: getrawtransaction answers "No information available about transaction" without -txindex once mined, which is the signal to try the wallet route, not a failure. Reasons are collected and returned rather than discarded, and a failure of both yields a None vout that the caller reports as a FAIL -- never a vout of 0.
+            reasons.append(f"{method}: {type(error).__name__}")
+            continue
+        outputs = answer.get("vout")
+        if outputs is None and answer.get("hex"):
+            try:
+                outputs = (adapter.call("decoderawtransaction", answer["hex"]) or {}).get("vout")
+            except Exception as error:  # noqa: BLE001 -- checked: same; the wallet gave hex and the decode is the only step left. A failure is collected, not swallowed.
+                reasons.append(f"decoderawtransaction: {type(error).__name__}")
+                continue
+        for entry in outputs or []:
+            if ((entry.get("scriptPubKey") or {}).get("hex", "")).lower() == p2sh_script_hex.lower():
+                return int(entry.get("n", -1)), f"matched scriptPubKey {p2sh_script_hex} via {method}"
+        reasons.append(f"{method}: read {len(outputs or [])} outputs, none paying {p2sh_script_hex}")
+    return None, "; ".join(reasons) or "no route answered"
+
+
 def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is the swap's SEQUENCE, and every decision in it is extracted -- the timelocks and their ordering above, the preimage read in modules/htlc_spend, the condition in chains/xrp_crypto_condition, the payloads in xrp_htlc_escrow. What is left is the order of five acts on two chains, which is what rule 10 says a file at the root is for. Splitting it would put the order somewhere other than the file named after the thing being done, and the order IS the protocol.
     parser = argparse.ArgumentParser(
         description="A real atomic swap: XRP on the XRPL testnet against GRC on the Gridcoin testnet, "
@@ -438,22 +482,6 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
     wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
     console.say(f"OfferSequence={escrow_sequence} -- how the finish in step 9 names this escrow")
 
-    console.step(6, f"B funds the GRC leg: {GRC_AMOUNT} GRC, same hash, expiring FIRST")
-    try:
-        htlc = grc.call("createhtlc", a_grc, b_grc, secret_hash.hex(), grc_timeout, float(GRC_AMOUNT))
-    except Exception as error:  # noqa: BLE001 -- checked: createhtlc refuses for several named reasons (a locked wallet, a pubkey not in the wallet, insufficient funds) and the message says which. It is a FAIL rather than a raise because THE XRP LEG IS ALREADY FUNDED at this point, and the operator needs the recovery line below rather than a traceback.
-        console.check("GRC leg funded", f"{type(error).__name__}: {error}", "a funded HTLC", False)
-        console.say(f"THE XRP LEG IS FUNDED AND THE GRC LEG IS NOT. Nothing is lost: nobody has the secret, so "
-                    f"nobody can finish the escrow, and it returns to A at CancelAfter {xrp_cancel_after}. Do "
-                    f"NOT publish the secret.")
-        return console.summary()
-    console.check("GRC leg funded", f"p2sh={htlc.get('address') or htlc.get('p2sh')} txid={htlc.get('txid')}",
-                  "a funded HTLC", bool(htlc.get("txid")))
-    console.say(f"GRC redeem script={htlc.get('redeemScript') or htlc.get('redeem_script')}")
-
-    console.step(7, "A claims the GRC with the secret -- which PUBLISHES it")
-    console.say("this is the irreversible step for A: claiming requires pushing the secret into a scriptSig that "
-                "lands in a block. A cannot take the GRC without giving B what B needs.")
     # LAZY, and PLC0415 is suppressed for one checked reason written here rather
     # than on the line: the dry run must not touch the unlock path at all, and a
     # module-scope import would run gridcoin_wallet_lock's environment read on
@@ -461,17 +489,69 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
     # because the sorter re-wraps a long trailing comment and detaches it from
     # the line it is about, which is how a suppression's justification drifts.
     from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
+    from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415 -- checked: only the --run path needs it
+
+    console.step(6, f"B funds the GRC leg: {GRC_AMOUNT} GRC, same hash, expiring FIRST")
+    console.say("BOTH createhtlc AND claimhtlc need the wallet FULLY unlocked -- Gridcoin's htlc.cpp calls "
+                "EnsureWalletIsUnlocked() in each, and createhtlc also SENDS. So steps 6 and 7 run inside ONE "
+                "unlock, which walletlocks first and therefore clears a staking-only unlock (rpc -13, measured "
+                "on the operator's wallet 2026-09-26: `Wallet is unlocked for staking only.`).")
+    htlc = None
+    claim_txid = None
+    grc_vout = None
     try:
         with unlocked_for_payout(grc, passphrase):
-            claim = grc.call("claimhtlc", htlc["txid"], int(htlc.get("vout", 0)), secret.hex(), a_grc)
-    except Exception as error:  # noqa: BLE001 -- checked: claimhtlc refuses on a wrong preimage, a missing key or a script failure, and the unlock can fail on its own; both are reported with the recovery line below because BOTH legs are funded at this point, which is the state where an operator most needs to be told what is safe.
-        console.check("A claimed the GRC", f"{type(error).__name__}: {error}", "a broadcast txid", False)
-        console.say("BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret has NOT been published, so the "
-                    f"escrow cannot be finished by anyone: B recovers the GRC at height {grc_timeout} and A "
-                    f"recovers the XRP at CancelAfter {xrp_cancel_after}. Do NOT publish the secret.")
+            htlc = grc.call("createhtlc", a_grc, b_grc, secret_hash.hex(), grc_timeout, float(GRC_AMOUNT))
+            funding_txid = htlc.get("txid")
+            # THE KEYS ARE snake_case, read from src/rpc/htlc.cpp rather than
+            # guessed: p2sh_address, redeem_script, sender_pubkey,
+            # receiver_pubkey, hash, timeout, txid. An earlier version read
+            # `address` and `redeemScript` and printed p2sh=None on a successful
+            # call, which is rule 14's defect -- an instrument reporting less
+            # than the run established.
+            p2sh_address = htlc.get("p2sh_address")
+            redeem_script_hex = htlc.get("redeem_script")
+            console.check("GRC leg funded", f"p2sh={p2sh_address} txid={funding_txid}", "a funded HTLC",
+                          bool(funding_txid))
+            console.say(f"GRC redeem script={redeem_script_hex}")
+            if not funding_txid or not redeem_script_hex:
+                raise RuntimeError(
+                    f"createhtlc answered without a txid or a redeem_script (keys: {sorted(htlc)}). Nothing "
+                    "can be claimed from that, and nothing was."
+                )
+            expected_script = p2sh_script_for(bytes.fromhex(redeem_script_hex)).hex()
+            grc_vout, how = htlc_vout(grc, funding_txid, expected_script)
+            console.check("the HTLC's output index, located not assumed", grc_vout, "an output paying "
+                          f"{expected_script}", grc_vout is not None)
+            console.say(f"vout lookup: {how}")
+            if grc_vout is None:
+                raise RuntimeError(
+                    "the funding transaction's HTLC output could not be located, and claiming a GUESSED index "
+                    "would spend whichever output happened to be there -- createhtlc funds through SendMoney, "
+                    "which adds a change output, so index 0 is as likely to be the change. Nothing was claimed."
+                )
+
+            console.step(7, "A claims the GRC with the secret -- which PUBLISHES it")
+            console.say("this is the irreversible step for A: claiming requires pushing the secret into a "
+                        "scriptSig that lands in a block. A cannot take the GRC without giving B what B needs.")
+            claim = grc.call("claimhtlc", funding_txid, grc_vout, secret.hex(), a_grc)
+            claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
+            console.check("A claimed the GRC", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
+    except Exception as error:  # noqa: BLE001 -- checked: createhtlc and claimhtlc each refuse for several named reasons (a staking-only or locked wallet, a pubkey not in the wallet, insufficient funds, a wrong preimage, a script failure) and the unlock/restore can fail on its own. It is reported rather than raised because the XRP leg is ALREADY FUNDED here, and which recovery line applies depends on how far the block got -- an operator needs that sentence, not a traceback. The unlock context restores the wallet on the way out regardless.
+        console.check("the GRC leg", f"{type(error).__name__}: {error}",
+                      "a funded HTLC, its output located, and a claim", False)
+        if claim_txid:
+            console.say(f"the claim went out as {claim_txid} -- the secret IS public. B must finish the escrow "
+                        f"with it; read the secret out of that transaction. Do not let the escrow expire.")
+        elif htlc and htlc.get("txid"):
+            console.say(f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret has NOT been published, so "
+                        f"nobody can finish the escrow: B recovers the GRC at height {grc_timeout} and A "
+                        f"recovers the XRP at CancelAfter {xrp_cancel_after}. Do NOT publish the secret.")
+        else:
+            console.say(f"THE XRP LEG IS FUNDED AND THE GRC LEG IS NOT. Nothing is lost: nobody has the secret, "
+                        f"so nobody can finish the escrow, and it returns to A at CancelAfter "
+                        f"{xrp_cancel_after}. Do NOT publish the secret.")
         return console.summary()
-    claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
-    console.check("A claimed the GRC", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
 
     console.step(8, "B reads the secret OFF THE GRIDCOIN CHAIN -- never from A")
     console.say("this is the step that makes the swap atomic. B does not ask A for anything, and A cannot "
