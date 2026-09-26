@@ -51,6 +51,7 @@ the backstop for a cycle that wedges; it does not replace the handler.
 import signal
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from chains.monero import MoneroAdapter
 from chains.registry import build_adapters, missing_settings
@@ -222,18 +223,91 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
     print("  shutdown        SIGTERM/SIGINT finish the current cycle, then exit", flush=True)
 
 
+# Counts that report a STANDING CONDITION rather than work the cycle did.
+#
+# MEASURED 2026-09-26, the day after deposit_watcher gained HALTED_for_review.
+# That count is a total rather than a delta on purpose -- a halted swap has to
+# stay on screen for as long as it is halted, because a delta shows the
+# transition once and then reads as zero forever. But cycle_line() treated every
+# count as evidence of work, so one halted swap made EVERY cycle print:
+#
+#     deposit_watcher cycle=4 WORKED active_swaps=0 refreshed=0
+#     now_payout_pending=0 HALTED_for_review=1
+#
+# WORKED, with every count that describes work at zero, once every fifteen
+# seconds, for as long as the swap sat there. That is "skipped plus success in
+# the same output", which this project's rules call a defect in the OUTPUT
+# rather than a cosmetic complaint -- and it was happening on exactly the cycles
+# somebody was reading because something was wrong.
+#
+# Keyed by the COUNT's name rather than by the worker's, because the property
+# belongs to the count: a standing total is standing whoever prints it, so a
+# second worker reporting the same field gets the same treatment without anybody
+# remembering to ask for it. The one spelling here and the one in
+# workers/deposit_watcher.py's counts dict are pinned to each other by
+# tests/test_show_swap.py.
+STANDING_COUNTS = frozenset({"HALTED_for_review"})
+
+
 def cycle_line(worker_name: str, cycle: int, seconds: float, counts: dict[str, int], notes: str = "") -> str:
     """Render one cycle's result so that idle and productive cycles differ.
 
     Rule 14: "a poll that found nothing and a poll that paid someone must not
     share a success line." The IDLE/WORKED token is that difference, and it is
     the first thing on the line so it survives being skimmed.
+
+    A count named in STANDING_COUNTS still prints and still reads non-zero; it
+    just does not let the cycle claim it worked. See that constant for the
+    measurement behind it.
     """
-    did_work = any(value for value in counts.values())
+    did_work = any(value for key, value in counts.items() if key not in STANDING_COUNTS)
     marker = "WORKED" if did_work else "IDLE  "
     rendered = " ".join(f"{key}={value}" for key, value in counts.items()) or "(none)"
     line = f"{worker_name} cycle={cycle} {marker} {rendered} in {format_duration(seconds)}"
     return f"{line}  <- {notes}" if notes else line
+
+
+# The repository root, derived from this file's own location rather than from a
+# working directory. swap_terminal/workers/common.py -> workers -> swap_terminal
+# -> the root, which is where the operator's entry points live (rule 10).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# What a pasted command calls the interpreter.
+#
+# "python3" rather than sys.executable, and that is a decision rather than a
+# shortcut. sys.executable is the interpreter THIS PROCESS was started with --
+# under supervisor.py that is whatever launched the supervisor, which may be a
+# virtualenv path that is not on the operator's PATH and is not what README.md
+# tells them to type. The operator pastes this into their own shell, so it says
+# what their shell needs.
+PASTEABLE_INTERPRETER = "python3"
+
+
+def root_tool_command(script: str, *arguments: str) -> str:
+    """`python3 <repo root>/<script> <args>` -- a command that pastes from anywhere.
+
+    THE PATH IS ABSOLUTE ON PURPOSE, AND IT WAS MEASURED (rule 17). supervisor.py
+    starts every worker with `cwd=supervisor.BASE_DIR`, which is `swap_terminal/`
+    -- the package directory, NOT the repository root where the entry points are.
+    So a worker printing `python3 show_swap.py` would be naming a file that does
+    not exist relative to the directory that process is in, and the operator's own
+    shell may be somewhere else again. An absolute path resolves from anywhere,
+    which is the only property that matters for a line whose whole job is to be
+    copied.
+
+    Rule 14's "the operator reads the screen, not the source": a hint that cannot
+    be pasted is silence one step removed, which is exactly the defect this
+    function was added to fix -- workers/deposit_watcher.py used to end its halt
+    note with `query swaps WHERE status='under_review'`, a SQL fragment handed to
+    somebody sitting in a shell with nothing to run it in.
+
+    No existence check here. A command naming a script that is not on disk is a
+    deploy defect and it belongs to a test rather than to a runtime branch --
+    tests/test_show_swap.py asserts that the file the deposit watcher's note names
+    is really there, which catches a rename that no import graph would see
+    (rule 2).
+    """
+    return " ".join([PASTEABLE_INTERPRETER, str(REPO_ROOT / script), *arguments])
 
 
 def install_stop_handler() -> Callable[[], bool]:

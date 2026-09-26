@@ -36,6 +36,34 @@ def test_idle_and_working_cycles_do_not_share_a_line():
     assert "IDLE" not in worked
 
 
+def test_a_standing_condition_does_not_make_an_idle_cycle_claim_it_worked():
+    """A halted swap sits there. Every cycle that sees it did not therefore do work.
+
+    Measured 2026-09-26, the day after deposit_watcher gained HALTED_for_review:
+    one halted swap made every cycle print WORKED with every count that describes
+    work at zero, once every fifteen seconds, for as long as the swap sat there.
+    That is "skipped plus success in the same output" -- and it was happening on
+    exactly the cycles somebody was reading because something was wrong.
+
+    MUTATION: drop the `if key not in STANDING_COUNTS` filter from cycle_line()
+    and this test alone fails; the two assertions above it still pass, because
+    they use counts no worker has declared standing.
+    """
+    halted_only = cycle_line(
+        "deposit_watcher", 7, 0.04,
+        {"active_swaps": 0, "refreshed": 0, "now_payout_pending": 0, "HALTED_for_review": 1},
+    )
+    assert "IDLE" in halted_only, "no swap was refreshed and none was queued; the cycle did nothing"
+    assert "HALTED_for_review=1" in halted_only, "and the standing condition still has to be on screen"
+
+    # A cycle that BOTH holds a halt and does work still reads WORKED: the
+    # exclusion removes one count from the verdict, it does not suppress it.
+    assert "WORKED" in cycle_line(
+        "deposit_watcher", 8, 0.04,
+        {"active_swaps": 1, "refreshed": 1, "now_payout_pending": 0, "HALTED_for_review": 1},
+    )
+
+
 def test_a_cycle_line_carries_the_duration_in_microfortnights():
     line = cycle_line("deposit_watcher", 1, 2.8, {"active_swaps": 0})
     assert "2.3µfn (2.8s)" in line

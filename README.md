@@ -651,22 +651,152 @@ The reading end stays permissive on purpose: the tag on an incoming payment was
 chosen by the sender. `validate_destination_tag(tag, allocatable=...)` carries
 both questions as one flag so they cannot drift apart.
 
-**What is NOT wired, and XRP is still untradeable.** `XRP` is not in
-`Config.ALLOWED_PAIRS`, so nothing in the running application calls the
-allocator. Two things stand between it and a working XRP deposit path, both
-named in the module's docstring:
+**This paragraph used to say "XRP is still untradeable", and every clause of it
+is now out of date.** It is rewritten rather than deleted, because both of the
+things it named as blockers were real and knowing how each one closed is how a
+reader checks the claim rather than trusting it. Re-read against the tree
+2026-09-26:
 
-1. `swaps.deposit_address` is one column and an XRP deposit instruction is the
-   pair `(account, tag)`. Both halves are mandatory, so wiring this in means
-   deciding how the pair is stored and rendered.
-2. `services/deposit_service.py::refresh_swap_from_chain()` scans
-   `swap["deposit_address"]` and credits **every** returned event to that swap.
-   For a per-address chain the address *is* the swap; for XRP the account is
-   shared, so it would attribute every tagged payment to whichever swap is being
-   refreshed. The missing filter is the event's `vout` against the swap's own
-   tag, and `swap_id_for_tag()` is the function that answers it — but the change
-   is to the one function that decides, for every chain, that a deposit is
-   confirmed. That is fund movement, so it is reported rather than done.
+1. *"`swaps.deposit_address` is one column and an XRP deposit instruction is the
+   pair `(account, tag)`."* Closed by a second column: `swaps.deposit_tag
+   INTEGER`, NULL for every chain that attributes by address. `db.py` explains
+   at the column why it is an integer column rather than an X-address packing
+   both halves into the existing string — attribution is a join, and a join
+   against an opaque blob that Python has to decode first is the
+   gate-in-the-wrong-place this repo keeps paying for.
+2. *"`refresh_swap_from_chain()` credits **every** returned event to that swap."*
+   Closed by `services/deposit_service.py::attributable_events()`, which filters
+   an event's `vout` (where `chains/xrp_payments.py` puts the DestinationTag)
+   against the swap's own tag, and credits nothing — loudly — for a
+   tag-attributed swap that has no tag. `tests/test_xrp_swap_attribution.py`
+   pins it, including that BTC/LTC/GRC are untouched: `vout` there is an output
+   index, and filtering on it would silently stop crediting Bitcoin.
+
+`XRP<->GRC` is in `Config.ALLOWED_PAIRS` as of 2026-09-26, on the operator's
+explicit instruction and only after the payout leg had signed, submitted and
+validated a real testnet payment. **A pair being allowed still does not mean a
+swap can be created**: `create_swap()` refuses every XRP swap while
+`XRP_DEPOSIT_ACCOUNT` is unset, because which account customer deposits land in
+is a custody decision and has no safe default.
+
+### Opening a swap from the shell — `open_swap.py`
+
+Dry run by default; `--apply` writes the rows. It exists because the rest of the
+XRP loop is a terminal and creating the swap was a browser: on 2026-09-26 the
+operator pasted a four-command sequence twice, and both times the first two
+commands printed `REFUSED: no XRP swap is awaiting a deposit … create one in the
+web UI first`. Four commands, two runs, zero work. That refusal now names this
+tool instead of a GUI.
+
+```
+# GRC_ADDRESS is the one value no tool may invent: it is where the payout is
+# broadcast. Pasted unedited it is refused by the Gridcoin daemon's own address
+# check, before a tag is allocated or a row is written.
+python3 open_swap.py --pair XRP:GRC --amount 1 --payout-address GRC_ADDRESS
+python3 open_swap.py --pair XRP:GRC --amount 1 --payout-address GRC_ADDRESS --apply
+```
+
+The dry run prints the `--apply` command back with every value already in it,
+and the `--apply` run ends by printing `python3 xrp_send_tagged.py --swap
+s_<real id>` — **no placeholder in either**, which is the whole point: a
+placeholder in a pasted command has cost this project three mis-runs and twice
+put something in a shell that should not have been there.
+
+**It reimplements nothing.** It calls `create_quote()` and then `create_swap()`,
+the same two functions `POST /api/quotes` and `POST /api/swaps` call, so a swap
+opened from the terminal and one opened from the browser are the same rows
+written by the same code. There is no INSERT, no tag allocation, no address
+validation and no fee arithmetic in the file. Its refusals are the services'
+own, surfaced: `validate_pair()` for the pair, `unconfigured_chains()` /
+`why_unconfigured()` for a chain with no adapter in this process (the same two
+functions `create_swap()` uses, so the sentence cannot drift), the destination
+adapter's `validate_address()` for the payout address, and `deposit_account()`
+for an unset `XRP_DEPOSIT_ACCOUNT`.
+
+**Why `--apply` rather than doing it straight away.** A swap row is not a fund
+movement, but it allocates a destination tag that is never reused and that
+`db.py`'s triggers make immutable and undeletable, it fixes a payout address
+that cannot be changed afterward, and on BTC/LTC/GRC it derives a key in the hot
+wallet. The dry run reaches none of those — deliberately including
+`getnewaddress`, which is why it reports what will be derived instead of
+deriving it — and it does not even create the database file.
+
+**A second open swap warns rather than refuses.** `xrp_send_tagged.py --swap
+latest` refuses when more than one swap is awaiting a deposit, because "which
+one you meant is not knowable from here". It is knowable here, so `open_swap.py`
+lists the ones already open, says what `latest` will now do, and prints a
+`--swap <real id>` command that does not depend on `latest` at all.
+
+### Seeing a halted swap — `show_swap.py`
+
+Read-only, always. It changes no status, resolves nothing, writes no row and
+does not create the database file if it is missing. Run it with no arguments and
+it lists every swap waiting on a person; run it with `--swap <id>` and it shows
+one swap in full, whatever its status.
+
+```
+python3 show_swap.py                      # every halted swap, with the reason each halted
+python3 show_swap.py --swap s_<real id>   # one swap in full: deposit rows, payout rows, quote window
+python3 show_swap.py --db /path/to/other.db
+```
+
+**It exists because a counter reported a problem and then handed over half a
+query.** The deposit watcher's cycle line carries a halted count — added
+2026-09-26, the day before this tool, and it was doing its job, because before
+it a halt was invisible:
+
+```
+deposit_watcher cycle=4 WORKED active_swaps=0 refreshed=0 now_payout_pending=0
+HALTED_for_review=1 in 0.0µfn (0.0s)  <- … HALTED_for_review>0 means a swap is
+waiting on a PERSON and will never resolve by itself -- query swaps WHERE
+status='under_review'
+```
+
+That note ended by naming a SQL fragment to an operator sitting in a shell with
+nothing to run it in. It now ends with a command, absolute-pathed so it pastes
+from any directory — the workers run with `cwd=swap_terminal/` while the entry
+points are at the root — and the command appears only on cycles where something
+is actually halted, so it is not one more thing to skim past on the cycles where
+it is not.
+
+**There was nowhere else to look, and that was established by running the code
+rather than by reading it.** Against a seeded `under_review` swap,
+`services/admin_view.overview()` reported `under_review: 1` in its status chips,
+returned nothing at all from `swaps_in_flight()` — correctly, since a halt is a
+departure from the rail rather than a step along it — and `swaps.failed_reason`,
+the sentence saying which two amounts disagreed, appeared nowhere in the result.
+`/swap/<id>` shows the halt properly, but it needs the id first and it is a web
+page. No entry point at the root lists a swap at all, which was read out of every
+argument parser there rather than assumed.
+
+**It reimplements nothing.** `services/admin_view.halted_swaps()` is
+`swaps_with_status()` — the same SELECT, the same columns and the same
+`attention()` verdict the admin page's in-flight table uses, over a different
+status set. One swap comes from `get_swap()` and `swap_display()`, the identical
+pair `/swap/<id>` calls, so the terminal and that page cannot disagree about a
+swap. What counts as halted is `services/swap_view.HALTED_STATUSES`, derived from
+`STATUS_MEANINGS` rather than spelled again, and a test pins it against the status
+the watcher counts, so a count of 2 can never sit beside a list of 1.
+
+**It prints no command that writes.** There is no `--resolve`, no `--credit` and
+no `--refund`, and no ready-made `UPDATE` to paste. Every way out of a halt moves
+money — pay out at the quoted rate, pay out what the deposit is actually worth, or
+send the coins back — and which one is right depends on facts no program here has.
+The report puts the evidence on the screen and stops; the decision is the
+operator's.
+
+One line in it is worth knowing before you need it. `swaps.actual_input_amount` is
+the **seen** total over every deposit row, and the tolerance gate compared the
+**confirmed** total, which counts only rows at or past `min_confirmations`. The two
+are equal often enough that the difference is invisible until the one time it is
+not, and then the halt reads as arithmetic that does not add up. The report names
+both, and the per-row listing marks which rows the gate counted.
+
+The admin page does not yet render this. `/admin` still shows a halted swap only
+as a number in its status chips, which is the same gap on the web surface that
+the watcher's counter had in the terminal; closing it is one entry in
+`overview()` and one panel in `templates/admin.html`, both read-only, and it is
+named in `halted_swaps()`' own docstring as owed work.
 
 ### Producing a tagged payment — `xrp_send_tagged.py`
 

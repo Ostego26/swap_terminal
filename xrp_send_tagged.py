@@ -198,6 +198,16 @@ def pending_xrp_swap(db_path: str) -> str:
     picking one silently would send a payment to a tag the operator did not choose,
     and on a shared account with no checksum that money is attributed to the wrong
     swap. Listing them and stopping costs one command; guessing costs a deposit.
+
+    RULE 8, AND THE SECOND SITE IS NAMED BECAUSE THE TWO GENUINELY DIFFER.
+    open_swap.swaps_awaiting_deposit() runs the same SELECT and never refuses: it
+    is about to CREATE a swap and already knows the new id, so it warns and lists
+    the others, while this one is about to SEND to exactly one (account, tag) and
+    a tag carries no checksum. Same query, opposite decisions, and each site
+    points at the other. The merge both want is one reader in
+    services/swap_service.py, which owns the `swaps` table; it was not done on
+    2026-09-26 because another session held that file open, and it is named here
+    as owed work rather than left for somebody to rediscover.
     """
     if not Path(db_path).exists():
         raise SystemExit(f"REFUSED: no database at {db_path}. Nothing was sent.")
@@ -212,9 +222,36 @@ def pending_xrp_swap(db_path: str) -> str:
         connection.close()
 
     if not rows:
+        # IT USED TO SAY "create one in the web UI first", AND THAT WAS THE DEFECT
+        # RATHER THAN THE REMEDY: a terminal tool pointing at a GUI.
+        #
+        # Measured 2026-09-26: the operator pasted a four-command sequence twice --
+        # send the deposit, watch it credit, pay it out, verify. Both times the
+        # first two commands printed this refusal and the watcher and the payout
+        # worker then found nothing to do. Four commands, two runs, zero work,
+        # because creating the swap needed a browser while the rest of the loop is
+        # a terminal. open_swap.py exists to close that, so this names it.
+        #
+        # THE ONE PLACEHOLDER IS DELIBERATE AND IT FAILS CLOSED. This file's own
+        # docstring is emphatic that a placeholder in a pasted command has cost
+        # three mis-runs and twice exposed a secret -- and that ban is about values
+        # a person has to TRANSCRIBE from somewhere else, which is what
+        # deposit_target_for_swap() removed for the account, the tag and the
+        # amount. A payout address is not that: it is a value the operator owns and
+        # is the one thing no tool may invent, because it is where the payout is
+        # broadcast. Pasted unedited it reaches the destination chain's own
+        # validate_address() and is refused there, before a tag is allocated or a
+        # row is written, so the worst case is a second refusal rather than a swap
+        # pointing somewhere nobody holds a key for.
         raise SystemExit(
             f"REFUSED: no XRP swap is awaiting a deposit in {db_path}. (none) is the answer, not an "
-            f"error -- create one in the web UI first. Nothing was sent."
+            f"error -- open one from this terminal, no browser needed:\n"
+            f"      python3 open_swap.py --pair XRP:GRC --amount 1 --payout-address YOUR_GRC_ADDRESS\n"
+            f"  That is a dry run and writes nothing; add --apply to write the swap, and it prints the "
+            f"`--swap <id>` command back with the real id already in it. Replace YOUR_GRC_ADDRESS with a "
+            f"GRC address you hold the key for -- it is where the payout is broadcast and it is the one "
+            f"value no tool can fill in; left as-is it is refused by the Gridcoin daemon's own address "
+            f"check before anything is written. Nothing was sent."
         )
     if len(rows) > 1:
         listing = "\n".join(

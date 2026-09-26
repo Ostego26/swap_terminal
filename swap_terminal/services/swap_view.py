@@ -197,6 +197,33 @@ DEPOSIT_ACCEPTING_STATUSES = frozenset({"awaiting_deposit", "deposit_seen", "con
 # amount of elapsed time says anything about them, so they get no stall clock.
 TERMINAL_STATUSES = frozenset({"completed", "under_review", "failed"})
 
+# The statuses that are terminal because they are WAITING ON A PERSON.
+#
+# DERIVED from STATUS_MEANINGS rather than spelled a second time. A status is
+# halted exactly when its `kind` says so, which is the same field attention()
+# returns as `level` and the same one the templates style -- so a status added
+# to the vocabulary above with kind "halted" is picked up by every caller
+# without anybody remembering to edit a list. A hand-written second copy is
+# rule 8's bug with a delay on it, and this set had already begun to spread:
+# services/deposit_service.py writes the status, workers/deposit_watcher.py
+# counts it for the HALTED_for_review field on its cycle line, and show_swap.py
+# at the repository root lists the rows.
+#
+# `failed` is NOT in here, and that is the point rather than an oversight. A
+# failed swap is one whose PAYOUT could not be broadcast, and the operator
+# surface for it is services/admin_view.unresolved_payouts(), which reads the
+# `payouts` table -- where the evidence about a possibly-relayed transaction
+# lives. `under_review` is the deposit-side halt: nothing was sent, the coins
+# are in the deposit account, and what happens next is a decision about money.
+# Two different halts with two different pieces of evidence, so folding them
+# into one list would produce a report that cannot say what to look at.
+#
+# Non-empty is pinned by tests/test_show_swap.py. An empty tuple here would turn
+# the `IN ()` in admin_view.swaps_with_status() into a SQL syntax error rather
+# than a quiet lie, and a test failing is a cheaper way to find that out than an
+# operator running the tool during a halt.
+HALTED_STATUSES = tuple(status for status, meaning in STATUS_MEANINGS.items() if meaning["kind"] == "halted")
+
 # Seconds in a state before the page says "this has taken longer than expected".
 # A status absent from this mapping is never called slow -- see the module
 # docstring for why awaiting_deposit is absent on purpose.
@@ -391,9 +418,19 @@ def deposit_instruction(swap: dict) -> dict:
     allocator issues one. That state is reported as `tag_missing`, NOT papered
     over with the deposit_address or with a zero: `0` is a legal DestinationTag
     (README.md's "Tag 0 is a real tag"), so inventing one is how a real tag gets
-    shadowed. No XRP swap can exist today -- Config.ALLOWED_PAIRS contains no
-    XRP pair -- so this branch is exercised by seeded rows in
-    tests/test_swap_view.py and by nothing else.
+    shadowed.
+
+    THIS BRANCH IS LIVE, AND THIS DOCSTRING SAID THE OPPOSITE UNTIL 2026-09-26.
+    It read "No XRP swap can exist today -- Config.ALLOWED_PAIRS contains no XRP
+    pair -- so this branch is exercised by seeded rows in tests/test_swap_view.py
+    and by nothing else." Measured by reading config.Config.ALLOWED_PAIRS on
+    2026-09-26: it holds ("XRP","GRC") and ("GRC","XRP") alongside the four
+    Bitcoin-family pairs, XRP->GRC is the pair being tested, and a real halted
+    XRP swap was sitting in `under_review` in the operator's database on the day
+    this sentence was corrected. A reader who trusted the old wording would have
+    treated the tag branch as unreachable code -- which is rule 16's wrong
+    comment: it costs exactly as much as a wrong line of code and is one line to
+    fix.
     """
     asset = swap.get("from_asset", "")
     model = ATTRIBUTION_MODELS.get(asset, "unknown")

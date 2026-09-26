@@ -47,6 +47,7 @@ from workers.common import (
     cycle_line,
     get_config_dict,
     install_stop_handler,
+    root_tool_command,
     sleep_until_next_cycle,
 )
 
@@ -54,6 +55,54 @@ WORKER_NAME = "deposit_watcher"
 DEFAULT_POLL_SECONDS = 15
 
 _ACTIVE_PLACEHOLDERS = ",".join("?" for _ in ACTIVE_STATUSES)
+
+# THE TOOL THAT ANSWERS THE HALT, named as a command rather than as a query.
+#
+# This note used to end with `query swaps WHERE status='under_review'`. The
+# counter beside it was right -- the halt had been invisible before it, and the
+# operator now saw HALTED_for_review=1 on every cycle -- but a SQL FRAGMENT is
+# not a thing a person sitting in a shell can run. The instrument reported a
+# problem and handed over half a query, which by rule 14 is silence one step
+# removed: the operator reads the screen, not the source, and a hint they cannot
+# act on tells them only that something is wrong.
+#
+# Absolute path, because this process's cwd is swap_terminal/ and the tool is at
+# the repository root -- see workers/common.root_tool_command() for the
+# measurement. tests/test_show_swap.py asserts the named file exists, so a rename
+# fails a test rather than leaving the note pointing at nothing (rule 2: grep for
+# the NAME, not the import graph -- nothing imports this string).
+HALTED_REVIEW_COMMAND = root_tool_command("show_swap.py")
+
+# The standing explanation of the three counts, in one copy so that the halted
+# and unhalted forms below cannot drift apart.
+_CYCLE_NOTE = (
+    "active_swaps=0 is expected only when no swap is open; "
+    "now_payout_pending is what payout_worker acts on; "
+    "HALTED_for_review>0 means a swap is waiting on a PERSON and will never resolve by itself"
+)
+
+
+def halted_note(halted: int) -> str:
+    """The cycle line's note, which grows a command when a swap is actually halted.
+
+    Rule 14's "make 'did nothing' look different from 'did work'" applied to the
+    note rather than to the counts: a cycle with nothing halted does not need a
+    command, and printing one every fifteen seconds for a condition that is not
+    happening is how an operator learns to skim the tail of this line -- which is
+    where the command would be on the one cycle that mattered.
+
+    So the command appears exactly when it is actionable, and it carries the count
+    with it so the sentence stands alone in a pasted log a day later.
+
+    A function, not an f-string at the call site, because this is the decision the
+    whole change is about and it has to be callable with a seeded count (rule 10).
+    """
+    if not halted:
+        return _CYCLE_NOTE
+    return (
+        f"{_CYCLE_NOTE}. {halted} is waiting now -- see which one and why, read-only, writes nothing: "
+        f"{HALTED_REVIEW_COMMAND}"
+    )
 
 
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
@@ -101,6 +150,17 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
             # transition once and then reads as zero forever, so a swap sitting halted
             # for a day would be invisible to anyone who started watching after it
             # happened. The standing count keeps it on screen.
+            #
+            # THIS COUNT AND show_swap.py's LISTING MUST NAME THE SAME SET. The tool
+            # the note hands over reads services/swap_view.HALTED_STATUSES, which is
+            # derived from STATUS_MEANINGS; this is the literal. They are not one
+            # expression because an `IN (?)` built from a tuple's length needs SQL
+            # assembled by interpolation, and that needs an S608 suppression -- rule
+            # 19 does not allow buying a check pass with one. The guard is a test
+            # instead: tests/test_show_swap.py asserts the status this line counts is
+            # exactly the set the tool lists, so a second halted status added to the
+            # vocabulary fails there rather than producing a count of 2 beside a list
+            # of 1.
             halted = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'under_review'").fetchone()["n"]
         print(
             cycle_line(
@@ -113,12 +173,11 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     "now_payout_pending": pending,
                     "HALTED_for_review": halted,
                 },
-                notes=(
-                    "active_swaps=0 is expected only when no swap is open; "
-                    "now_payout_pending is what payout_worker acts on; "
-                    "HALTED_for_review>0 means a swap is waiting on a PERSON and will "
-                    "never resolve by itself -- query swaps WHERE status='under_review'"
-                ),
+                # HALTED_for_review is a STANDING CONDITION rather than work this
+                # cycle did, and workers/common.STANDING_COUNTS names it as one.
+                # Counted as work, it made every cycle print WORKED for as long as
+                # a single swap sat halted -- see that constant for the measurement.
+                notes=halted_note(halted),
             ),
             flush=True,
         )

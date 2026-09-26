@@ -57,7 +57,14 @@ from microfortnights import format_duration
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
 from .helpers import parse_iso, utc_now_iso
-from .swap_view import ATTRIBUTION_MODELS, STAGE_ORDER, TERMINAL_STATUSES, attention, threshold_note
+from .swap_view import (
+    ATTRIBUTION_MODELS,
+    HALTED_STATUSES,
+    STAGE_ORDER,
+    TERMINAL_STATUSES,
+    attention,
+    threshold_note,
+)
 
 # How old a wallet_inventory row may be before the page calls it stale.
 #
@@ -210,15 +217,31 @@ def status_counts(db) -> list[dict]:
     ).fetchall()
 
 
-def swaps_in_flight(db, now_iso: str, limit: int = 100) -> list[dict]:
-    """The swaps still moving, oldest first, each with how quiet it has been.
+def swaps_with_status(db, statuses: tuple[str, ...], now_iso: str, limit: int = 100) -> list[dict]:
+    """Swaps in any of `statuses`, oldest first, each carrying its attention verdict.
 
-    The status filter is bound as parameters; only the run of `?` is built from
-    the LENGTH of IN_FLIGHT_STATUSES, which is structure rather than input --
-    the same construction services/deposit_service.process_active_swaps() uses,
-    and the same thing its S608 suppression claims.
+    ONE query, two status sets. It was extracted from swaps_in_flight() on
+    2026-09-26 when a second caller needed the identical columns for a different
+    set -- show_swap.py at the repository root, listing the swaps that have
+    HALTED and are waiting on a person. The alternative was a second SELECT with
+    the same eleven columns and the same two correlated subqueries, which is
+    rule 8's shape exactly: the copies agree on the day they are written, and
+    the day someone adds a column to one of them the other quietly reports less
+    than it used to while still looking correct.
+
+    The statuses are the only thing that varies, so they are the parameter. The
+    status filter is BOUND; only the run of `?` is built from the LENGTH of the
+    tuple, which is structure rather than input -- the same construction
+    services/deposit_service.process_active_swaps() uses, and the same thing its
+    S608 suppression claims.
+
+    An empty `statuses` is deliberately NOT special-cased. `IN ()` is a syntax
+    error and SQLite raises, where returning [] would be a quiet "no such swaps"
+    for a caller whose status vocabulary had broken -- which is the failure this
+    whole surface exists to make impossible. The two callers pass module-level
+    constants and tests pin both as non-empty.
     """
-    placeholders = ",".join("?" for _ in IN_FLIGHT_STATUSES)
+    placeholders = ",".join("?" for _ in statuses)
     rows = db.execute(
         f"""
         SELECT s.id, s.status, s.from_asset, s.to_asset, s.expected_input_amount, s.actual_input_amount,
@@ -230,8 +253,8 @@ def swaps_in_flight(db, now_iso: str, limit: int = 100) -> list[dict]:
         WHERE s.status IN ({placeholders})
         ORDER BY s.created_at ASC
         LIMIT ?
-        """,  # noqa: S608 -- checked: `placeholders` is a run of '?' generated from len(IN_FLIGHT_STATUSES). No value is interpolated; the statuses and the limit are both bound below.
-        (*IN_FLIGHT_STATUSES, int(limit)),
+        """,  # noqa: S608 -- checked: `placeholders` is a run of '?' generated from len(statuses). No value is interpolated; the statuses and the limit are both bound below.
+        (*statuses, int(limit)),
     ).fetchall()
     for row in rows:
         # The SAME verdict the customer's page shows, from the same function.
@@ -239,6 +262,40 @@ def swaps_in_flight(db, now_iso: str, limit: int = 100) -> list[dict]:
         # staleness rule of the admin surface's own.
         row["attention"] = attention(row, now_iso)
     return rows
+
+
+def swaps_in_flight(db, now_iso: str, limit: int = 100) -> list[dict]:
+    """The swaps still moving, oldest first, each with how quiet it has been."""
+    return swaps_with_status(db, IN_FLIGHT_STATUSES, now_iso, limit)
+
+
+def halted_swaps(db, now_iso: str, limit: int = 100) -> list[dict]:
+    """The swaps that have HALTED and are waiting on a person. Oldest first.
+
+    The rows behind the `HALTED_for_review` count on workers/deposit_watcher.py's
+    cycle line, and the reason show_swap.py at the repository root exists: that
+    counter reports a number and the operator had no way to see WHICH swap it
+    was about or WHY it stopped. Measured 2026-09-26 by running overview()
+    against a seeded `under_review` swap -- status_counts() reported
+    `under_review: 1`, in_flight was EMPTY (the halt is not in flight, correctly),
+    and `swaps.failed_reason` -- the sentence services/deposit_service.py wrote
+    saying what the amounts were -- appeared nowhere in the result at all.
+
+    Oldest first because the swap that has been waiting longest is the one whose
+    customer has been waiting longest, and that is the order a queue of work is
+    read in.
+
+    NOT YET ON THE ADMIN PAGE, and that is named here rather than left for
+    somebody to rediscover. overview() does not call this function, so /admin
+    still shows a halted swap only as a number in the status chips -- the same
+    gap on the web surface that the deposit watcher's counter had in the
+    terminal. Closing it is one entry in overview()'s dict and one panel in
+    templates/admin.html, both read-only. It was left out of the change that
+    added this function because that change was scoped to the terminal path and
+    a web panel carries its own layout and its own tests; it is owed work, not a
+    decision that the page should stay as it is.
+    """
+    return swaps_with_status(db, HALTED_STATUSES, now_iso, limit)
 
 
 def recent_deposits(db, now_iso: str, limit: int = 25) -> list[dict]:
