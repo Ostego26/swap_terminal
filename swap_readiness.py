@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.registry import build_adapters
 from chains.xrp import XRPAdapter
+from chains.xrp_signing import reserve_drops
 from config import Config
 from db import SCHEMA
 from microfortnights import format_duration
@@ -94,11 +95,26 @@ def check_xrp(account: str) -> None:
         record(FAIL, "XRP deposit account",
                f"{type(error).__name__}: {str(error)[:110]}  <- an unfunded account does NOT exist on the ledger")
         return
-    reserve = parameters["reserve_base_drops"] + parameters["reserve_inc_drops"] * owner_count
-    spare = balance_drops - reserve
+    # reserve_drops() from chains/xrp_signing.py, NOT arithmetic of my own.
+    #
+    # The first version of this line read parameters["reserve_base_drops"] and
+    # ["reserve_inc_drops"] -- two key names that do not exist, invented rather
+    # than read. server_parameters() returns base_reserve_xrp and
+    # owner_reserve_xrp, in XRP and not in drops, so both the names and the UNIT
+    # were wrong. It crashed on the operator's host with a KeyError, four checks
+    # into a preflight, which is rule 17 exactly: a field name I agreed with
+    # myself about is still a guess until the code says it back.
+    #
+    # Reusing the payout path's own function is also the rule 8 answer: the
+    # reserve arithmetic exists once, and a preflight that computed it separately
+    # could report "fits" for a payment the payout path then refuses.
+    required_reserve, reserve_line = reserve_drops(
+        parameters.get("base_reserve_xrp"), parameters.get("owner_reserve_xrp"), owner_count
+    )
+    spare = balance_drops - required_reserve
     state = PASS if spare > 0 else FAIL
     record(state, "XRP deposit account",
-           f"balance {balance_drops} drops, reserve {reserve} -> {spare} spendable  "
+           f"balance {balance_drops} drops, {reserve_line} -> {spare} spendable  "
            f"<- must be > 0 to pay anything out")
 
 
@@ -265,12 +281,25 @@ def main() -> int:
     print("swap readiness -- XRP <-> GRC. Read-only: creates no swap, signs nothing.", flush=True)
     print("  6 preconditions, one line each, saying what it read and what the number means.\n", flush=True)
 
-    check_pair_is_allowed()
-    check_schema()
-    account = check_deposit_account()
-    check_xrp(account)
-    check_gridcoin()
-    check_pricing()
+    # EVERY check is wrapped, because a preflight that raises has failed at the
+    # one thing it exists to do. Measured 2026-09-26: a KeyError in check_xrp()
+    # killed the run four checks in, so the operator learned nothing about GRC,
+    # pricing, or the two checks after it -- from a defect in the preflight
+    # rather than in what it was inspecting. A crash here is a bug in this file
+    # and must be reported as one, not allowed to mask the report.
+    for name, check in (
+        ("pair allowed", check_pair_is_allowed),
+        ("schema", check_schema),
+        ("XRP", lambda: check_xrp(check_deposit_account())),
+        ("GRC", check_gridcoin),
+        ("pricing", check_pricing),
+    ):
+        try:
+            check()
+        except Exception as error:  # noqa: BLE001 -- checked: this is the outermost handler of a reporting tool, and it does not swallow -- it records a FAIL naming the check, the exception type and the message, which makes the run's exit code non-zero. The alternative is the traceback that already cost a run. Each check has its own narrow handlers inside it; this catches only what THEY missed, which by definition is a defect in this file.
+            record(FAIL, f"{name} (check crashed)",
+                   f"{type(error).__name__}: {str(error)[:100]}  <- a bug in swap_readiness.py, "
+                   f"not necessarily in what it was checking")
 
     failures = [(name, detail) for state, name, detail in _results if state == FAIL]
     print("\n" + "=" * 70, flush=True)

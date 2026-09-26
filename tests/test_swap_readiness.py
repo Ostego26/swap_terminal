@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 
 from network_target import UNCONFIGURED_PORT
 
+import swap_readiness
 from swap_readiness import FAIL, PASS, SKIP, describe_wallet_lock, gridcoin_precheck
 
 MAINNET_PORT = 15715
@@ -150,3 +151,43 @@ def test_an_empty_response_says_none_rather_than_printing_nothing():
     _state, detail = describe_wallet_lock({})
 
     assert "(none)" in detail
+
+
+# --- a preflight that raises has failed at the one thing it exists to do ------
+
+def test_a_crashing_check_is_reported_and_does_not_kill_the_run(monkeypatch, capsys):
+    """Measured on the operator's host 2026-09-26, and it was my defect, not theirs.
+
+    check_xrp() read parameters["reserve_base_drops"] -- a key that does not
+    exist. server_parameters() returns base_reserve_xrp and owner_reserve_xrp, in
+    XRP rather than drops, so both the NAME and the UNIT were invented instead of
+    read. The KeyError killed the run four checks in, so the operator learned
+    nothing about GRC, pricing, or anything after it.
+
+    A crash in a reporting tool masks the report. Every check is now wrapped, and
+    the wrapper is not a swallow: it records a FAIL naming the check, the
+    exception type and the message, so the exit code is non-zero and the line
+    says the bug is in swap_readiness.py rather than in what it inspected.
+
+    Asserted by making a check raise and requiring that the LATER checks still
+    ran -- the failure mode was never "no error shown", it was "the rest of the
+    report never happened".
+    """
+    def explode():
+        raise KeyError("reserve_base_drops")
+
+    monkeypatch.setattr(swap_readiness, "check_schema", explode)
+    monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda: swap_readiness.record(PASS, "GRC", "reached"))
+    monkeypatch.setattr(swap_readiness, "check_pricing", lambda: swap_readiness.record(PASS, "pricing", "reached"))
+    monkeypatch.setattr(swap_readiness, "check_xrp", lambda account: None)
+    monkeypatch.setattr(swap_readiness, "check_deposit_account", lambda: "")
+    swap_readiness._results.clear()
+
+    exit_code = swap_readiness.main()
+    out = capsys.readouterr().out
+
+    assert exit_code == 1, "a crashed check must not produce a READY verdict"
+    assert "check crashed" in out
+    assert "KeyError" in out
+    assert "swap_readiness.py" in out, "the line must say the bug is in the preflight, not the subject"
+    assert out.count("reached") == 2, "the checks AFTER the crash must still run -- that was the real cost"
