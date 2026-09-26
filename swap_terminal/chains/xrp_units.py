@@ -30,6 +30,46 @@ WHAT XRP DOES DIFFERENTLY FROM EVERY CHAIN ALREADY HERE
    amendment and would silently make sweeps fail or, worse, make the terminal
    believe it has spendable balance it does not. The adapter asks server_info.
    The figures below are labeled reference values for a banner, never a gate.
+
+4. THE DEPOSIT IDENTIFIER IS AN INTEGER, NOT AN ADDRESS. Every other chain in
+   this tree hands out a fresh deposit address per swap. XRP does not need to:
+   a `DestinationTag` on one shared account is the per-swap identifier, which
+   is why chains/xrp.py::get_new_address() REFUSES and names a tag allocator in
+   services/ as what is wanted instead. The tag's RANGE lives here, with the
+   rest of the protocol's arithmetic, and services/xrp_tag_service.py is the
+   only thing that allocates one -- one vocabulary, one place (rule 11).
+
+   MEASURED 2026-09-26, in this container, against the installed xrpl-py
+   (the reference implementation's own Python binding), because xrpl.org was
+   not reachable from here and prior knowledge is not a measurement (rule 17):
+
+       xrpl.core.binarycodec.types.uint32._WIDTH          4 bytes
+       UInt32.from_value(0)                               ACCEPTED
+       UInt32.from_value(4294967295)                      ACCEPTED
+       UInt32.from_value(4294967296)                      OverflowError
+       UInt32.from_value(-1)                              OverflowError
+
+   and end to end through a whole transaction, which is the stronger form --
+   a real Payment built between ACCOUNT_ZERO and ACCOUNT_ONE, serialized with
+   `encode()` and decoded back:
+
+       destination_tag=0            serialized, decoded back as DestinationTag=0
+       destination_tag=1            serialized, decoded back as 1
+       destination_tag=4294967295   serialized, decoded back as 4294967295
+       destination_tag=4294967296   OverflowError: int too big to convert
+
+   So MAX_DESTINATION_TAG below is 2**32 - 1 because that is what the
+   serializer accepts and not because the protocol is remembered as uint32.
+   tests/test_xrp_destination_tags.py re-runs that measurement against the
+   installed codec and skips if xrpl-py is absent, so the constant cannot
+   drift away from the thing it was measured from. xrpl-py stays OPTIONAL
+   here: nothing in this module imports it, and the constant is a plain
+   integer precisely so a signing library is not needed to allocate a tag.
+
+   The third line of that measurement is also the reason tag 0 is reserved
+   rather than used -- see RESERVED_DESTINATION_TAG below. 0 is a legal tag
+   that travels on the wire and decodes back as present, which is exactly what
+   makes it dangerous.
 """
 
 from decimal import ROUND_HALF_UP, Decimal
@@ -45,6 +85,45 @@ MAX_EXACT_XRP = MAX_EXACT_INTEGER / DROPS_PER_XRP
 LEDGER_UNVALIDATED = 0
 LEDGER_VALIDATED = 1
 MAX_LEDGER_RANK = LEDGER_VALIDATED
+
+# THE DESTINATION TAG RANGE. Point 4 of this module's docstring has the
+# measurement these two numbers came from; they are not recalled, they were run.
+#
+# MAX_DESTINATION_TAG is a hard protocol bound: a tag above it cannot be put on
+# the wire at all, so a value above it in this application is a bug in this
+# application and never something a ledger sent us.
+MAX_DESTINATION_TAG = 2**32 - 1
+
+# TAG 0 IS LEGAL AND IS DELIBERATELY NEVER ALLOCATED.
+#
+# The measurement above is explicit that 0 round-trips as `DestinationTag=0`,
+# which is a DIFFERENT wire state from the field being absent -- and
+# chains/xrp_payments.py::_classify() is correspondingly careful to test
+# `tag is None` rather than truthiness, with a test pinning it. So nothing here
+# may treat 0 as "no tag": a payment carrying 0 is a payment carrying a tag.
+#
+# What makes it unsafe to HAND OUT is the other side of that same fact. An
+# integration that has no tag to send, but whose field is a non-optional
+# integer, sends 0 -- that is the value an uninitialized int, an empty form
+# field and a "0 means none" convention all produce. Every one of those
+# payments is indistinguishable on the wire from a customer paying whichever
+# swap owns tag 0.
+#
+# Reserving it costs one integer out of 4,294,967,295 and converts that entire
+# class of mistaken payment from "credited to an unrelated swap" into "arrived
+# with a tag nothing owns", which is the case
+# chains/xrp_payments.py::deposit_events_from_transactions() already reports as
+# deferred for an operator to match by hand. A misattributed deposit pays the
+# wrong person and cannot be undone (see CLAUDE.md's opening section); an
+# unattributed one is a support ticket.
+#
+# NOT measured, and stated as the hypothesis it is (rule 17): that real senders
+# in the wild emit 0 as a placeholder. No traffic was surveyed for it here.
+# What is measured is only that 0 is a valid, allocatable, wire-visible tag --
+# which is enough, because the reservation costs nothing and the failure it
+# avoids is irreversible.
+RESERVED_DESTINATION_TAG = 0
+FIRST_ALLOCATABLE_TAG = RESERVED_DESTINATION_TAG + 1
 
 # REFERENCE VALUES ONLY, for a banner line. The live figures come from
 # server_info.validated_ledger.reserve_base_xrp / reserve_inc_xrp. See point 3.
@@ -63,6 +142,17 @@ class XRPThresholdError(ValueError):
     point. A threshold of 6 asks for a rung that does not exist on this ledger,
     so every XRP deposit would sit below it forever -- a swap stuck permanently,
     with nothing in any log saying why, because nothing failed.
+    """
+
+
+class XRPTagError(ValueError):
+    """A destination tag was not a value this ledger can carry, or must not be used.
+
+    Separate from XRPUnitError because the two are different failures with
+    different consequences. A bad amount is caught before anything leaves; a
+    bad TAG is an attribution failure, and attribution failures pay the wrong
+    person. Naming them apart is what lets a caller report which happened
+    instead of "something about this payment was wrong".
     """
 
 
@@ -138,6 +228,57 @@ def validate_min_confirmations(configured: int) -> int:
             f"nothing in any log saying why. Set it to {LEDGER_VALIDATED}."
         )
     return value
+
+
+def validate_destination_tag(tag, *, allocatable: bool = True) -> int:
+    """One destination tag, checked against the ledger and against our reservation.
+
+    TWO DIFFERENT QUESTIONS, and the flag is which one is being asked, because
+    conflating them would make one of the two answers wrong:
+
+      allocatable=True (the default)   may THIS APPLICATION hand this tag out?
+                                      Tag 0 is refused -- see
+                                      RESERVED_DESTINATION_TAG above.
+      allocatable=False               could a ledger have DELIVERED this tag?
+                                      Tag 0 is accepted, because it is legal
+                                      and real senders can set it.
+
+    Getting that backwards in the lenient direction would let the allocator
+    hand out 0. Getting it backwards in the strict direction would make the
+    application refuse to look up a payment the ledger genuinely delivered,
+    which loses a deposit rather than misattributing one.
+
+    `bool` is rejected explicitly, matching chains/xrp_payments.py::_classify()
+    and for the identical reason: `True == 1` in Python, so `isinstance(True,
+    int)` is True and a stray boolean would silently become tag 1 -- a tag some
+    real swap owns. There is a test pinning that in xrp_payments and there is
+    one here.
+    """
+    if isinstance(tag, bool) or not isinstance(tag, int):
+        raise XRPTagError(
+            f"destination tag {tag!r} is {type(tag).__name__}, not an int. NOT coerced: a `bool` is an "
+            f"int in Python (True == 1), so coercing would turn True into tag 1, which is a tag a real "
+            f"swap owns. chains/xrp_payments.py::_classify() rejects bool at the reading end for the "
+            f"same reason."
+        )
+    if tag < RESERVED_DESTINATION_TAG or tag > MAX_DESTINATION_TAG:
+        raise XRPTagError(
+            f"destination tag {tag} is outside the ledger's range "
+            f"{RESERVED_DESTINATION_TAG}..{MAX_DESTINATION_TAG}. That bound is MEASURED, not recalled -- "
+            f"see point 4 of this module's docstring: xrpl-py's own serializer raises OverflowError at "
+            f"{MAX_DESTINATION_TAG + 1}, so a tag above it cannot be put on the wire and cannot have "
+            f"come off it either."
+        )
+    if allocatable and tag == RESERVED_DESTINATION_TAG:
+        raise XRPTagError(
+            f"destination tag {RESERVED_DESTINATION_TAG} is LEGAL on the ledger and is deliberately "
+            f"never allocated by this terminal. It is the value every 'no tag to send' integration emits "
+            f"-- an uninitialized int, an empty form field, a 0-means-none convention -- and a payment "
+            f"carrying it would otherwise be credited to whichever swap owns it. Reserved so that such a "
+            f"payment arrives UNATTRIBUTED and reaches an operator instead. Pass allocatable=False to "
+            f"validate a tag that was RECEIVED rather than one being handed out."
+        )
+    return tag
 
 
 def describe_min_confirmations(configured: int) -> str:

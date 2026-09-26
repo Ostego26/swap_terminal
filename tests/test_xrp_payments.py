@@ -249,10 +249,15 @@ def test_destination_tag_zero_is_credited_because_zero_is_a_real_tag():
     silent-skip shape this module's other tests exist to prevent, and it is worse
     than a crash: the money arrives and the swap does not credit.
 
-    Whether the tag allocator ever ISSUES 0 is a separate question and belongs to
-    services/swap_service.py. This pins the reader, because a reader that drops a
-    legal value is wrong regardless of what our own allocator happens to emit --
-    and rule 17 says do not assume the allocator's range, test the field.
+    Whether the tag allocator ever ISSUES 0 is a separate question, and it now has
+    an answer: services/xrp_tag_service.py never does, because 0 is what every
+    "no tag to send" integration emits and reserving it makes such a payment
+    arrive unattributed instead of credited to whichever swap owned 0. That does
+    NOT license tightening this reader. A reader that drops a legal value is wrong
+    regardless of what our own allocator emits -- the tag on an incoming payment
+    was chosen by the SENDER, not by us -- and rule 17 says do not assume the
+    allocator's range, test the field. chains/xrp_units.validate_destination_tag()
+    carries both questions as one flag for exactly this reason.
     """
     scan = deposit_events_from_transactions([entry(tx={"DestinationTag": 0})], ADDRESS, 1)
 

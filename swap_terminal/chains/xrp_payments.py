@@ -61,6 +61,28 @@ refusal chains/monero_transfers.py makes for a transfer with no subaddress
 index, and for the same reason: the alternative is inventing an identifier,
 which is the fabrication chains/base.py:169 documents and migrate_deposit_
 vouts.py exists to clean up.
+
+WHO ISSUES THE TAGS THIS FILE READS, AND WHY THE TWO ENDS CHECK DIFFERENTLY
+
+services/xrp_tag_service.py is the allocating end, and
+chains/xrp_units.validate_destination_tag() holds the shared vocabulary, so the
+range lives in one place rather than being spelled here as well (rule 8).
+
+The two ends are deliberately NOT symmetric, and a reader who tightens this one
+to match the other would lose deposits:
+
+    allocating   1..4294967295. Tag 0 is legal on the ledger and is RESERVED
+                 unallocated, because it is the value every "no tag to send"
+                 integration emits.
+    reading      0..4294967295. The tag on an incoming payment was chosen by
+                 the SENDER. A payment tagged 0 is a real payment carrying a
+                 real tag, it resolves to no swap of ours, and it belongs in
+                 `deferred` for an operator -- which is what happens here
+                 already, because `tag is None` is the test and 0 is not None.
+
+Nothing in this file calls into services/, and it must stay that way: this is
+the function layer and the allocator reads a database. The relationship is a
+shared constant, not a call.
 """
 
 from __future__ import annotations
