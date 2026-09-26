@@ -82,6 +82,21 @@ CREATE TABLE IF NOT EXISTS swaps (
     from_asset TEXT NOT NULL,
     to_asset TEXT NOT NULL,
     deposit_address TEXT NOT NULL,
+    -- NULL for every chain that attributes a deposit BY ADDRESS, which is all of
+    -- them except XRP. For XRP the deposit instruction is a PAIR -- one shared
+    -- account plus an integer DestinationTag -- and both halves are mandatory:
+    -- the account alone is not an instruction, because every XRP swap shares it.
+    --
+    -- A second column rather than encoding the pair into deposit_address. The XRP
+    -- Ledger does have a single-string form for exactly this (an X-address, which
+    -- packs account and tag together), and it was rejected here on rule 5/20
+    -- grounds: attribution is a JOIN between a deposit event's tag and the swap
+    -- that owns it, and a join against an opaque string that must be decoded in
+    -- Python first is the gate-in-the-wrong-place this repo keeps paying for. As
+    -- an INTEGER column it is queryable, indexable and readable by anyone with a
+    -- sqlite3 prompt. deposit_address still holds the account, so an address
+    -- lookup keeps working unchanged for every chain.
+    deposit_tag INTEGER,
     payout_address TEXT NOT NULL,
     expected_input_amount REAL NOT NULL,
     actual_input_amount REAL,
@@ -104,6 +119,11 @@ CREATE TABLE IF NOT EXISTS swaps (
 
 CREATE INDEX IF NOT EXISTS idx_swaps_status ON swaps(status);
 CREATE INDEX IF NOT EXISTS idx_swaps_deposit_address ON swaps(deposit_address);
+-- The index attribution actually uses on a tag-attributed chain. Every XRP swap
+-- shares one deposit_address, so the address index above cannot narrow anything
+-- for XRP -- the pair (address, tag) is what identifies a swap, and this is the
+-- index that makes "which swap owns this tag" a lookup rather than a scan.
+CREATE INDEX IF NOT EXISTS idx_swaps_deposit_address_tag ON swaps(deposit_address, deposit_tag);
 
 CREATE TABLE IF NOT EXISTS deposit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -317,6 +337,44 @@ def duplicate_live_payouts(conn: sqlite3.Connection) -> list:
     ).fetchall()
 
 
+def add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> bool:
+    """ALTER TABLE ... ADD COLUMN, but only when the column is absent. Returns whether it added it.
+
+    SQLite has no "ADD COLUMN IF NOT EXISTS", so the presence check is a read of
+    PRAGMA table_info rather than a caught exception. Catching the error would
+    work and is worse: "duplicate column name" and a genuinely broken ALTER
+    arrive as the same OperationalError, so the handler could not tell an
+    already-migrated database from a failed migration -- which is rule 12's
+    BLE001 complaint in miniature, a broad catch whose caller cannot distinguish
+    the failure from a real answer.
+
+    Adding a column is the one schema change SQLite does cheaply and without
+    rewriting the table, and a NULLable one cannot fail on existing rows. The
+    identifiers are interpolated because parameters cannot bind an identifier;
+    both are literals from this module, never input.
+    """
+    # `table`, `column` and `declaration` are interpolated because a SQL parameter
+    # cannot bind an IDENTIFIER in SQLite. All three are literals from this
+    # module's own migration code and no VALUE is interpolated anywhere here, so
+    # there is nothing for a caller to inject. (S608 does not fire on these, so
+    # there is no suppression to add -- noting it because the interpolation looks
+    # like the thing that rule exists for.)
+    # Read by NAME, not by position. `row[1]` is the column name for a plain
+    # sqlite3 connection and for sqlite3.Row, and it raises KeyError on the dict
+    # row factory this module actually installs -- which is exactly what happened
+    # 2026-09-26: a standalone check with a plain connection passed, and the app's
+    # own connection broke collection of the whole suite. A positional read of a
+    # PRAGMA is a guess about the caller's row factory; a named one is not.
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {(row["name"] if hasattr(row, "keys") else row[1]) for row in rows}
+    if column in existing:
+        return False
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    conn.commit()
+    logger.info("migration: added %s.%s (%s)", table, column, declaration)
+    return True
+
+
 def apply_migrations(conn: sqlite3.Connection) -> dict:
     """Bring an EXISTING database up to the current constraints. Idempotent.
 
@@ -333,6 +391,12 @@ def apply_migrations(conn: sqlite3.Connection) -> dict:
     Returns a dict the caller can print or assert on:
         {"index_created": bool, "duplicates": [{"swap_id":…, "live_rows":…}, …]}
     """
+    # ADD COLUMN first, and before the payout-index work, because an early return
+    # below (a swap with two live payout rows) must not skip it: the column is
+    # what create_swap() writes on every XRP swap, and a database that has the
+    # constraint but not the column fails at swap creation rather than at start.
+    added_deposit_tag = add_column_if_missing(conn, "swaps", "deposit_tag", "INTEGER")
+
     duplicates = duplicate_live_payouts(conn)
     if duplicates:
         rows = ", ".join(f"{row['swap_id']}={row['live_rows']}" for row in duplicates)
@@ -344,10 +408,10 @@ def apply_migrations(conn: sqlite3.Connection) -> dict:
             len(duplicates),
             rows,
         )
-        return {"index_created": False, "duplicates": duplicates}
+        return {"index_created": False, "duplicates": duplicates, "deposit_tag_added": added_deposit_tag}
     conn.execute(PAYOUT_UNIQUE_INDEX_SQL)
     conn.commit()
-    return {"index_created": True, "duplicates": []}
+    return {"index_created": True, "duplicates": [], "deposit_tag_added": added_deposit_tag}
 
 
 def dict_factory(cursor, row):

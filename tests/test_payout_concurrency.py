@@ -88,7 +88,7 @@ import threading
 import time
 
 import pytest
-from db import SCHEMA, apply_migrations, connect_db
+from db import SCHEMA, add_column_if_missing, apply_migrations, connect_db
 from services.payout_service import claim_swap_for_payout, process_pending_payouts
 
 
@@ -544,10 +544,42 @@ def test_apply_migrations_refuses_to_destroy_evidence_of_a_past_double_payout(tm
 
 
 def test_apply_migrations_is_idempotent(db_path):
-    """Running it twice is a no-op, because the worker runs it on every start."""
+    """Running it twice is a no-op, because the worker runs it on every start.
+
+    `deposit_tag_added` is False on BOTH runs here and that is the interesting
+    part, not an omission: this fixture builds the database from the current
+    SCHEMA, which already declares swaps.deposit_tag, so the ALTER has nothing to
+    do. It returns True only for a database created before the column existed --
+    pinned separately in test_deposit_tag_migration_adds_the_column_to_an_old_db.
+    Asserting the whole dict rather than individual keys is deliberate: it is what
+    caught the added key when deposit_tag landed on 2026-09-26.
+    """
     conn = connect_db(db_path)
     first = apply_migrations(conn)
     second = apply_migrations(conn)
     conn.close()
-    assert first == {"index_created": True, "duplicates": []}
-    assert second == {"index_created": True, "duplicates": []}
+    assert first == {"index_created": True, "duplicates": [], "deposit_tag_added": False}
+    assert second == {"index_created": True, "duplicates": [], "deposit_tag_added": False}
+
+
+def test_deposit_tag_migration_adds_the_column_to_an_old_db(tmp_path):
+    """The case the fixture above cannot reach: a database predating the column.
+
+    Built by hand from a cut-down `swaps` table rather than from SCHEMA, because
+    SCHEMA now HAS the column -- so the only way to exercise the migration is to
+    construct the old shape. Asserts the existing row survives with NULL rather
+    than merely that the ALTER ran: a migration that added the column and lost a
+    swap would pass a column-presence check.
+    """
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE swaps (id TEXT PRIMARY KEY, deposit_address TEXT NOT NULL);")
+    conn.execute("INSERT INTO swaps VALUES ('s-old', 'rPreExisting')")
+    conn.commit()
+
+    assert add_column_if_missing(conn, "swaps", "deposit_tag", "INTEGER") is True
+    assert add_column_if_missing(conn, "swaps", "deposit_tag", "INTEGER") is False
+
+    row = conn.execute("SELECT id, deposit_address, deposit_tag FROM swaps").fetchone()
+    conn.close()
+    assert row == ("s-old", "rPreExisting", None), "the pre-existing swap must survive the ALTER"

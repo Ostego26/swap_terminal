@@ -25,10 +25,16 @@ _cache = {"data": None, "expires_at": 0.0}
 _lock = Lock()
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
+# One table, and everything below is DERIVED from it. It used to be paired with a
+# hand-written dict literal spelling BTC_USD, LTC_USD and GRC_USD a second time,
+# which is rule 8's shape: adding an asset meant editing two places, and editing
+# only one produced a KeyError at quote time rather than at import. XRP was added
+# 2026-09-26 and is the asset that would have hit it.
 IDS = {
     "BTC": "bitcoin",
     "LTC": "litecoin",
     "GRC": "gridcoin-research",
+    "XRP": "ripple",
 }
 
 
@@ -44,12 +50,19 @@ def fetch_usd_prices(ttl_seconds: int = 30) -> dict:
         )
         response.raise_for_status()
         raw = response.json()
-        data = {
-            "BTC_USD": float(raw[IDS["BTC"]]["usd"]),
-            "LTC_USD": float(raw[IDS["LTC"]]["usd"]),
-            "GRC_USD": float(raw[IDS["GRC"]]["usd"]),
-            "fetched_at": now,
-        }
+        # Derived from IDS rather than written out. A missing asset raises a
+        # KeyError naming WHICH one, here, instead of returning a dict that is
+        # quietly short one key and failing later inside derive_pair_rate()
+        # where the message would be about a rate rather than about a price.
+        missing = [asset for asset, cg_id in IDS.items() if cg_id not in raw]
+        if missing:
+            raise KeyError(
+                f"CoinGecko returned no price for {', '.join(sorted(missing))} "
+                f"(asked for {', '.join(sorted(IDS))}). No rate is derived from a "
+                f"partial response: a swap priced off a missing leg is a swap priced wrong."
+            )
+        data = {f"{asset}_USD": float(raw[cg_id]["usd"]) for asset, cg_id in IDS.items()}
+        data["fetched_at"] = now
         _cache["data"] = data
         _cache["expires_at"] = now + ttl_seconds
         return data

@@ -55,7 +55,7 @@ import logging
 from deposit_vout_artifact import multi_vout_groups
 
 from .helpers import utc_now_iso
-from .swap_service import set_swap_status
+from .swap_service import TAG_ATTRIBUTED_ASSETS, set_swap_status
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +137,71 @@ def warn_on_multi_vout_rows(swap_id: str, rows) -> None:
         )
 
 
+def attributable_events(events, swap: dict) -> list[dict]:
+    """The events that belong to THIS swap. Pure, so it is testable without a chain.
+
+    A no-op for an address-attributed chain: the address already identified the
+    swap, so every event is this swap's and the list comes back unchanged.
+
+    For a tag-attributed chain (services/swap_service.TAG_ATTRIBUTED_ASSETS) the
+    address identifies the TERMINAL, not the swap, and the event's `vout` carries
+    the DestinationTag. Only events whose tag equals this swap's deposit_tag are
+    this swap's.
+
+    A swap on a tag-attributed chain with NO deposit_tag credits NOTHING, rather
+    than falling back to crediting everything. That combination should be
+    impossible -- create_swap() allocates the tag inside the same transaction as
+    the INSERT -- but "should be impossible" is not a reason to make the failure
+    mode "credit every customer's deposit to this swap". The safe direction when
+    attribution is unknown is to attribute nothing: an uncredited deposit is a
+    support ticket, a misattributed one is somebody else's money.
+    """
+    events = list(events or [])
+    if swap["from_asset"] not in TAG_ATTRIBUTED_ASSETS:
+        return events
+
+    tag = swap.get("deposit_tag")
+    if tag is None:
+        logger.error(
+            "swap %s is on %s, which attributes deposits by tag, but has NO deposit_tag -- "
+            "crediting NOTHING rather than crediting every payment to the shared account. "
+            "%d event(s) were left unattributed.",
+            swap["id"], swap["from_asset"], len(events),
+        )
+        return []
+
+    # `is not None` and not truthiness: tag 0 is a legal DestinationTag, and
+    # `if event.get("vout")` would drop it. Same trap pinned in
+    # tests/test_xrp_payments.py.
+    return [event for event in events if event.get("vout") is not None and event["vout"] == tag]
+
+
 def refresh_swap_from_chain(db, config, adapters: dict, swap: dict) -> dict:
     asset = swap["from_asset"]
     adapter = adapters[asset]
     events = adapter.find_deposits_to_address(swap["deposit_address"])
+
+    # FILTER BY TAG BEFORE CREDITING, and this is a money bug that would only
+    # appear once XRP went live. For BTC, LTC and GRC the deposit ADDRESS is the
+    # swap -- every event the adapter returns for that address belongs to this
+    # swap by construction, so crediting them all is correct.
+    #
+    # For a tag-attributed chain it is not. Every XRP swap shares ONE account, so
+    # find_deposits_to_address() returns every tagged payment made to the whole
+    # terminal, and crediting them unfiltered would attribute all of them to
+    # whichever swap the worker happened to be refreshing. One customer's deposit
+    # credited to another customer's swap, and the ledger says the sender paid
+    # exactly what they were told to pay.
+    #
+    # The event's `vout` carries the DestinationTag -- see
+    # chains/xrp_payments.py::_classify(), which puts it there because `vout` is
+    # the integer discriminator in the adapter contract -- so the match is
+    # event["vout"] against this swap's own deposit_tag.
+    #
+    # Reported by the tag-allocator work on 2026-09-26 and deliberately left
+    # unfixed then, because this is the one function that decides, for every
+    # chain, that a deposit is confirmed. Fixed now that XRP is being taken live.
+    events = attributable_events(events, swap)
     for event in events:
         upsert_deposit_event(db, swap["id"], asset, event)
     rows = db.execute(

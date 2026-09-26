@@ -78,11 +78,35 @@ class Config:
     # app.py copies its uppercase attributes into app.config -- so the
     # mutable-default hazard RUF012 warns about does not arise, and saying
     # so in the type is better than suppressing the check.
+    # ENABLING A PAIR IS LIVE POSTURE and is the operator's call (rule 16).
+    # XRP<->GRC was added 2026-09-26 on their explicit instruction ("let's take
+    # ripple to grc"), after -- and only after -- the mechanism underneath it was
+    # measured rather than assumed:
+    #
+    #   deposits    XRP is attributed by DestinationTag on ONE shared account,
+    #               not by a per-swap address. The allocator's uniqueness is a
+    #               database constraint, tags are never reused, and
+    #               deposit_service.attributable_events() filters an event's tag
+    #               against the swap's own -- without which every customer's
+    #               payment would credit whichever swap was being refreshed.
+    #   payouts     chains/xrp.py::send_to_address() signed, submitted and had
+    #               validated a real testnet payment (hash E118CA96...,
+    #               tesSUCCESS) before this line changed.
+    #   pricing     services/pricing.py carries an XRP id; a partial CoinGecko
+    #               response raises rather than deriving a rate from a missing leg.
+    #
+    # WHAT THIS STILL DOES NOT DO, and the distinction matters: a pair being
+    # allowed does not mean a swap can be created. create_swap() refuses an XRP
+    # swap while XRP_DEPOSIT_ACCOUNT is unset, which is the custody decision and
+    # has no default. So this line opens the gate; the operator's account setting
+    # is what puts anything through it.
     ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]] = {
         ("GRC", "BTC"),
         ("BTC", "GRC"),
         ("GRC", "LTC"),
         ("LTC", "GRC"),
+        ("XRP", "GRC"),
+        ("GRC", "XRP"),
     }
     # Monero. No default port: monero-wallet-rpc binds wherever it was told to
     # with --rpc-bind-port, and there is no conventional value the way 8332 is
@@ -113,6 +137,20 @@ class Config:
     # chains/xrp_units.py REFUSES any other value at construction rather than
     # letting every XRP deposit sit below an unreachable threshold forever.
     XRP_MIN_CONFIRMATIONS = int(os.getenv("XRP_MIN_CONFIRMATIONS", "1"))
+
+    # THE ACCOUNT XRP DEPOSITS ARE PAID INTO, and it is a CUSTODY decision, which
+    # is why it has no default and why an empty value refuses rather than
+    # improvising. Every XRP swap shares this one account and is told apart by an
+    # integer DestinationTag, so getting it wrong does not misroute one deposit --
+    # it misroutes all of them, to an account this terminal may not hold the key
+    # for. There is no safe guess, so there is no default (the same reasoning as
+    # network_target.UNCONFIGURED_PORT, one level up: a value that decides where
+    # money lands is not something to infer).
+    #
+    # Set it to an account you control. services/swap_service.py refuses to create
+    # an XRP swap while it is empty, which is the failure you want: no swap, rather
+    # than a swap whose deposit instruction points nowhere.
+    XRP_DEPOSIT_ACCOUNT = os.getenv("XRP_DEPOSIT_ACCOUNT", "").strip()
 
     RPC: ClassVar[dict[str, dict[str, object]]] = {
         "BTC": {

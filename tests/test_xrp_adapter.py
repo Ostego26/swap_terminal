@@ -70,6 +70,7 @@ from chains.xrp_signing import (
     reserve_drops,
 )
 from config import Config
+from services.swap_service import deposit_account
 
 # The XRP Ledger's own reserved accounts, used here for the same reason
 # tests/test_xrp_address.py uses them: they are addresses whose checksums are
@@ -502,19 +503,44 @@ def test_the_banner_no_longer_claims_payouts_are_refused():
     assert "mainnet refused by server network_id, not by url" in line
 
 
-# --- XRP is still not tradeable ---------------------------------------------
+# --- XRP is tradeable, and what still gates it ------------------------------
 
 
-def test_xrp_is_still_not_a_tradeable_pair():
-    """The mechanism exists; the posture did not change (CLAUDE.md rule 16).
+def test_xrp_grc_is_a_tradeable_pair_in_both_directions():
+    """The posture change, made 2026-09-26 on the operator's explicit instruction.
 
-    Asserted over Config.ALLOWED_PAIRS itself rather than by reading the diff,
-    because "I did not change it" is a claim about intent and this is a
-    measurement. No XRP pair means quote_service cannot quote XRP and
-    swap_service cannot create an XRP swap, so the payout worker never reaches
-    send_to_address() with an XRP swap at all.
+    This test used to read test_xrp_is_still_not_a_tradeable_pair and assert the
+    opposite. It is CHANGED rather than deleted, per CLAUDE.md rule 2: a test
+    whose behavior is deliberately replaced changes to pin the stronger
+    invariant. It did its job on the way out -- enabling the pair failed this
+    test, which is exactly what a posture guard is for.
+
+    Both directions, because a one-way pair is a quote a customer cannot unwind.
     """
-    assert not any("XRP" in pair for pair in Config.ALLOWED_PAIRS)
+    assert ("XRP", "GRC") in Config.ALLOWED_PAIRS
+    assert ("GRC", "XRP") in Config.ALLOWED_PAIRS
+
+
+def test_an_allowed_pair_still_cannot_create_a_swap_without_a_custody_account():
+    """THE STRONGER INVARIANT, and the reason the guard above could be relaxed.
+
+    Allowing a pair opens the gate; it does not put anything through it. An XRP
+    swap needs a shared deposit account to attribute tags against, that account is
+    a custody decision, and it has no default -- so create_swap() refuses while
+    XRP_DEPOSIT_ACCOUNT is unset.
+
+    This is what makes enabling the pair safe rather than merely authorized: the
+    failure without custody configured is "no swap", not "a swap whose deposit
+    instruction points at an account nobody holds the key for". Asserted through
+    the real refusal rather than by reading the config, because the config being
+    empty is not the same as the code honoring it.
+    """
+    class StubXRP:
+        def validate_address(self, address):
+            return address.startswith("r")
+
+    with pytest.raises(ValueError, match="XRP_DEPOSIT_ACCOUNT is not set"):
+        deposit_account({"XRP_DEPOSIT_ACCOUNT": ""}, {"XRP": StubXRP()}, "XRP", "s-1")
 
 
 def test_xrp_min_confirmations_is_still_one():
