@@ -42,8 +42,26 @@ cannot check, deciding what a customer is offered. It happened to agree on
 enabled or disabled, one of the two copies is wrong, and the UI either hides a
 live pair or offers one the API will refuse. The select options are now rendered
 from the authority, and that copy is deleted.
+
+AND ALLOWED_PAIRS WAS NOT THE WHOLE AUTHORITY, MEASURED 2026-09-26.
+
+This section, and index.html's header beside it, both claimed that "a pair that is
+not in the set is not rendered at all, so the form cannot offer something the
+server would refuse." The first half was true and the second did not follow. The
+operator was offered six pairs, every one badged ENABLED, on a server whose
+process environment set no BTC_RPC_PORT, no LTC_RPC_PORT and no GRC_RPC_PORT --
+so chains/registry.build_adapters() had constructed exactly one adapter, XRP. They
+picked XRP -> GRC, got a priced quote, and got `No swap was created: 'GRC'`.
+
+ALLOWED_PAIRS says what this terminal is WILLING to swap. The adapters dict says
+what it can REACH. The page was reading the first and printing a claim about the
+second, which is the "instrument reporting more than the run established" shape
+this codebase keeps paying for. Both are now read, disabled pairs are LISTED with
+the reason rather than hidden (admin.html already did it that way), and the select
+offers only the pairs that could actually complete.
 """
 
+from chains.registry import unconfigured_chains, why_unconfigured
 from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from services.helpers import utc_now_iso
@@ -53,25 +71,68 @@ from services.swap_view import swap_display
 bp = Blueprint("ui", __name__)
 
 
-def allowed_pair_rows(config) -> list[dict]:
-    """The enabled pairs, as rows, read from the one authority.
+def allowed_pair_rows(config, adapters) -> list[dict]:
+    """Every allowed pair, as a row that says whether it can actually complete.
+
+    TWO AUTHORITIES, NOT ONE, and the difference is the whole reason this
+    function changed on 2026-09-26. config["ALLOWED_PAIRS"] is what the operator
+    is WILLING to swap; `adapters` is what this process can REACH. A pair needs
+    both, and the page used to read only the first -- see this module's header for
+    what that printed at the operator.
+
+    Returns rows for ALL allowed pairs, disabled ones included, because a pair
+    that is silently missing is indistinguishable from a pair that was never
+    configured: the operator would see five entries where they set up six and have
+    nothing to read. admin.html already lists disabled pairs rather than hiding
+    them; this follows it. index() passes the enabled SUBSET separately for the
+    select, so the form still cannot offer something the server would refuse.
+
+    `reason` is prose for a person and is the only part of the row that should
+    ever be shown next to DISABLED. It is built by chains/registry.why_unconfigured(),
+    which names the environment variable through network_target.configuring_variable()
+    -- so the page, the workers' startup banner and create_swap()'s refusal all
+    name the same variable from one place (rule 8).
 
     A function rather than an inline comprehension in the handler so it can be
-    called with a seeded config in a test (rule 10), and so there is exactly one
-    place that turns ALLOWED_PAIRS into something a template iterates.
+    called with a seeded config and a seeded adapters dict in a test (rule 10),
+    and so there is exactly one place that turns the two authorities into
+    something a template iterates.
     """
-    return [
-        {"from_asset": from_asset, "to_asset": to_asset, "label": f"{from_asset} -> {to_asset}"}
-        for from_asset, to_asset in sorted(config["ALLOWED_PAIRS"])
-    ]
+    rows = []
+    for from_asset, to_asset in sorted(config["ALLOWED_PAIRS"]):
+        missing = unconfigured_chains(adapters, from_asset, to_asset)
+        rows.append(
+            {
+                "from_asset": from_asset,
+                "to_asset": to_asset,
+                "label": f"{from_asset} -> {to_asset}",
+                "enabled": not missing,
+                "missing": missing,
+                # `(none)` is never right here: a row is either enabled, in which
+                # case the reason says both chains are reachable, or it names every
+                # missing chain. A blank reason beside DISABLED would be rule 14's
+                # empty gap.
+                "reason": (
+                    "in ALLOWED_PAIRS, and both chains have an adapter in this process"
+                    if not missing
+                    else " Also: ".join(why_unconfigured(asset) for asset in missing)
+                ),
+            }
+        )
+    return rows
 
 
 @bp.get("/")
 def index():
-    pairs = allowed_pair_rows(current_app.config)
+    pairs = allowed_pair_rows(current_app.config, current_app.config["ADAPTERS"])
+    # The select iterates `offerable`; the list iterates `pairs`. Two names for two
+    # jobs, computed here rather than filtered in the template, so the rule stays
+    # in Python where a test can call it.
+    offerable = [row for row in pairs if row["enabled"]]
     return render_template(
         "index.html",
         pairs=pairs,
+        offerable=offerable,
         quote_ttl_seconds=current_app.config["QUOTE_TTL_SECONDS"],
         fee_bps=current_app.config["DEFAULT_FEE_BPS"],
         tolerance_pct=current_app.config["AMOUNT_TOLERANCE_PCT"],

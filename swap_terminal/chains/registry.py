@@ -72,6 +72,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from network_target import configuring_variable
+
 from .bitcoin import BitcoinAdapter
 from .gridcoin import GridcoinAdapter
 from .litecoin import LitecoinAdapter
@@ -158,3 +160,55 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     if monero and monero.get("port"):
         adapters["XMR"] = MoneroAdapter(**monero)
     return adapters
+
+
+def unconfigured_chains(adapters: Mapping[str, object], *assets: str) -> list[str]:
+    """Which of these assets have no adapter in this process, in the order given.
+
+    ONE LINE, AND IT EXISTS BECAUSE THE ALTERNATIVE WAS MEASURED ON A PERSON.
+
+    2026-09-26, pasted back from the operator's browser. They had a Gridcoin
+    testnet daemon running on 25715, three workers that printed
+    `GRC rpc=127.0.0.1:25715` in their startup banners, a quote that priced
+    1 XRP -> 56.6 GRC, and this on the page when they pressed Create swap:
+
+        No swap was created: 'GRC'
+
+    That is `str(KeyError("GRC"))`. create_swap() did `adapters[to_asset]`, the
+    server process had no GRC_RPC_PORT in its environment, build_adapters()
+    therefore skipped Gridcoin, and the subscript raised. routes/swaps.py's HTTP
+    boundary caught it and returned `str(exc)`, which for a KeyError is the repr
+    of the key and nothing else -- no chain, no cause, no remedy, and
+    indistinguishable from a typo in a dictionary somewhere. The operator had no
+    way to get from that string to "export GRC_RPC_PORT before starting the
+    server", which is the entire content of the failure.
+
+    A membership test rather than a try/except around the subscript: the caller
+    needs the answer BEFORE it writes anything, and "which chains are missing" is
+    a list, not an exception.
+    """
+    return [asset for asset in assets if asset not in adapters]
+
+
+def why_unconfigured(asset: str) -> str:
+    """One sentence an operator can act on, for a chain with no adapter.
+
+    Names the variable via network_target.configuring_variable() rather than
+    spelling it here, so this cannot drift from the workers' startup banner or
+    from config.py (rule 8 -- three copies of a variable name is a typo waiting).
+
+    The .env sentence is the part that actually resolves the 2026-09-26 incident
+    and it is not incidental: config.py's own header says nothing in the serving
+    path loads a .env "because adding load_dotenv() to a module read at import is
+    the import-time side effect rule 12 names as a measured past defect". That is
+    a deliberate choice, so the consequence -- the variable must be in the
+    PROCESS environment of whatever starts the server, not merely in a file next
+    to it -- belongs in the message rather than in a docstring the operator will
+    never see.
+    """
+    return (
+        f"{asset} has no adapter in this process: {configuring_variable(asset)} is unset (or 0) in the "
+        f"environment this process was started with. Nothing in the serving path reads a .env, so it has "
+        f"to be exported in the shell that starts the server -- a value set only in a file, or only in "
+        f"another shell, does not reach here."
+    )

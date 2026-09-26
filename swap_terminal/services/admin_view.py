@@ -52,6 +52,7 @@ workers/common.py names this one.
 from __future__ import annotations
 
 from chains.base import RPCAdapter
+from chains.registry import unconfigured_chains, why_unconfigured
 from microfortnights import format_duration
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
@@ -325,19 +326,39 @@ def recent_transitions(db, limit: int = 25) -> list[dict]:
     ).fetchall()
 
 
-def pair_rows(config) -> list[dict]:
+def pair_rows(config, adapters: dict) -> list[dict]:
     """Every pair this application could name, and whether it may be swapped.
 
-    Config.ALLOWED_PAIRS is the authority and this READS it. Nothing here edits
-    it, and nothing here re-derives it: a pair is enabled if and only if it is
-    in that set, which is the same test services/quote_service.validate_pair()
-    applies before a quote can exist.
+    THREE STATES, NOT TWO, SINCE 2026-09-26. "In Config.ALLOWED_PAIRS" was the
+    only test here, and it produced the one thing a diagnostic page must never do:
+    it agreed with the defect. The operator's server had built exactly one adapter
+    (no BTC_RPC_PORT, no LTC_RPC_PORT, no GRC_RPC_PORT in its process
+    environment), the swap page offered six pairs badged ENABLED, Create swap
+    answered `No swap was created: 'GRC'`, and this page -- the page they would
+    open next to find out why -- would have said XRP -> GRC was ENABLED as well.
+    chain_rows() below already reported GRC as unconfigured, so the admin surface
+    contradicted itself two panels apart.
+
+      ENABLED      in ALLOWED_PAIRS, and both chains have an adapter here
+      UNREACHABLE  in ALLOWED_PAIRS, but a chain has no adapter in THIS process.
+                   A quote will price and create_swap() will refuse.
+      DISABLED     not in ALLOWED_PAIRS. Refused before anything else happens.
+
+    ALLOWED_PAIRS remains the authority for what this terminal is WILLING to swap,
+    and this still does not re-derive it; the adapters dict is the authority for
+    what it can REACH, exactly as chain_rows() already treats it. Two authorities,
+    both read, neither copied.
+
+    WHY THIS IS NOT routes/ui.allowed_pair_rows(), which is the sibling question.
+    That one builds the CUSTOMER's offer list: only the allowed pairs, and the
+    template offers just the reachable ones. This builds the OPERATOR's full
+    matrix: every ordered pair of every asset the tree knows, so a chain that was
+    wired and never enabled is visible rather than absent. Same two authorities,
+    different question, and each docstring names the other (rule 8) so a reader who
+    finds one knows the other exists.
 
     The disabled rows are shown rather than hidden, because "XRP is off" is the
-    answer to a question an operator will otherwise ask by reading source. The
-    candidate list is every ordered pair of assets that has an adapter class in
-    the tree, so a chain that was wired but never enabled shows up as disabled
-    instead of being invisible.
+    answer to a question an operator will otherwise ask by reading source.
     """
     allowed = set(config["ALLOWED_PAIRS"])
     assets = sorted({asset for pair in allowed for asset in pair} | set(ATTRIBUTION_MODELS) | {"SOL", "XMR"})
@@ -347,17 +368,33 @@ def pair_rows(config) -> list[dict]:
             if from_asset == to_asset:
                 continue
             enabled = (from_asset, to_asset) in allowed
+            missing = unconfigured_chains(adapters, from_asset, to_asset) if enabled else []
+            if not enabled:
+                state, detail = "disabled", (
+                    "NOT in Config.ALLOWED_PAIRS -- a quote for this pair is refused before anything else happens"
+                )
+            elif missing:
+                state, detail = "unreachable", (
+                    "in Config.ALLOWED_PAIRS, but not reachable from this process: "
+                    + " Also: ".join(why_unconfigured(asset) for asset in missing)
+                    + " A quote WILL price; create_swap() refuses."
+                )
+            else:
+                state, detail = "enabled", "in Config.ALLOWED_PAIRS, and both chains have an adapter here"
             rows.append(
                 {
                     "from_asset": from_asset,
                     "to_asset": to_asset,
                     "label": f"{from_asset} -> {to_asset}",
+                    # `enabled` still means exactly "in ALLOWED_PAIRS" so nothing
+                    # reading it changed meaning underneath. `state` is the field
+                    # to branch on; `reachable` is there for a caller that wants
+                    # the second half alone.
                     "enabled": enabled,
-                    "detail": (
-                        "in Config.ALLOWED_PAIRS -- quotes and swaps are accepted"
-                        if enabled
-                        else "NOT in Config.ALLOWED_PAIRS -- a quote for this pair is refused before anything else happens"
-                    ),
+                    "reachable": enabled and not missing,
+                    "state": state,
+                    "missing": missing,
+                    "detail": detail,
                 }
             )
     return rows
@@ -530,7 +567,7 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
         "unresolved_payouts": unresolved_payouts(db),
         "inventory": inventory_rows(db, now),
         "transitions": recent_transitions(db),
-        "pairs": pair_rows(config),
+        "pairs": pair_rows(config, adapters),
         "chains": chain_rows(config, adapters),
         "workers": worker_rows(run_dir),
         "thresholds": {

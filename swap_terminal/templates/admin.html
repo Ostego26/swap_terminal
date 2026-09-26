@@ -249,9 +249,16 @@
   {% if data.pairs %}
   <ul class="pair-grid">
     {% for row in data.pairs %}
-    <li class="pair {% if not row.enabled %}pair-off{% endif %}">
+    {# THREE STATES. This used to badge on `row.enabled` alone, so a pair that is
+       allowed but whose chain has no adapter in this process read ENABLED -- on the
+       page an operator opens to find out why a swap was refused, two panels above
+       chain_rows() reporting that same chain as unconfigured. See
+       services/admin_view.pair_rows() for the 2026-09-26 measurement. #}
+    <li class="pair {% if row.state != 'enabled' %}pair-off{% endif %}">
       <span class="pair-label mono">{{ row.label }}</span>
-      {{ badges.level_badge('ok' if row.enabled else 'halted', 'ENABLED' if row.enabled else 'DISABLED') }}
+      {% if row.state == 'enabled' %}{{ badges.level_badge('ok', 'ENABLED') }}
+      {% elif row.state == 'unreachable' %}{{ badges.level_badge('slow', 'UNREACHABLE') }}
+      {% else %}{{ badges.level_badge('halted', 'DISABLED') }}{% endif %}
       <span class="subtle">{{ row.detail }}</span>
     </li>
     {% endfor %}

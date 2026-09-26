@@ -95,6 +95,53 @@ CHAIN_PORTS: dict[str, ChainPorts] = {
 }
 
 
+# THE ONE VALUE PER CHAIN THAT CANNOT BE DEFAULTED, for the three chains that
+# are not in CHAIN_PORTS.
+#
+# CHAIN_PORTS holds the Bitcoin-derived three because they have a conventional
+# mainnet port to classify a configured one AGAINST. These three have no such
+# table and do not need one:
+#
+#   SOL  an endpoint URL; there is no port to compare
+#   XRP  an endpoint URL, for the same reason
+#   XMR  a port, but monero-wallet-rpc has no conventional one -- it is whatever
+#        the operator passed to --rpc-bind-port, so there is nothing to classify
+#        against and chains/registry.py says so at its construction site
+#
+# Kept next to CHAIN_PORTS rather than in a second file because the question
+# "what do I set to reach this chain?" has exactly one answer per chain and it is
+# asked from three places now: the workers' startup banner, the swap page's pair
+# list, and create_swap()'s refusal. Three copies of a variable NAME is rule 8's
+# shape with a typo waiting in it.
+_ENDPOINT_VARIABLES: dict[str, str] = {
+    "SOL": "SOL_RPC_URL",
+    "XRP": "XRP_RPC_URL",
+    "XMR": "XMR_RPC_PORT",
+}
+
+
+def configuring_variable(chain: str) -> str:
+    """The environment variable that makes this chain reachable. Never raises.
+
+    Verified against config.py 2026-09-26 rather than recalled: BTC/LTC/GRC read
+    <CHAIN>_RPC_PORT (config.py:204 for GRC), XMR reads XMR_RPC_PORT
+    (config.py:116), XRP reads XRP_RPC_URL (config.py:134) and SOL reads
+    SOL_RPC_URL (config.py:192). chains/registry.build_adapters() skips a chain
+    whose value is falsy, which is what makes this the variable that decides
+    whether an adapter exists at all.
+
+    The `<CHAIN>_RPC_PORT` fallback for an unknown chain matches what describe()
+    and require_configured() already do two functions below, so a chain added to
+    ALLOWED_PAIRS before it is added here produces a plausible name rather than a
+    KeyError -- which is the failure this whole function exists to stop being
+    printed at a person.
+    """
+    known = CHAIN_PORTS.get(chain)
+    if known:
+        return known.port_variable
+    return _ENDPOINT_VARIABLES.get(chain, f"{chain}_RPC_PORT")
+
+
 class NetworkTargetUnconfigured(RuntimeError):
     """No RPC port is set for a chain, so this process declines to guess one.
 

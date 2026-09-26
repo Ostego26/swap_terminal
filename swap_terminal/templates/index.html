@@ -6,8 +6,9 @@
   The customer's swap form.
 
   Role: template (rendering only; no decision)
-  Reads: `pairs` (rendered from Config.ALLOWED_PAIRS by routes/ui.py), the fee,
-         the tolerance and the quote TTL
+  Reads: `pairs` and `offerable` (both from routes/ui.allowed_pair_rows(), which
+         reads Config.ALLOWED_PAIRS AND the adapters dict), the fee, the
+         tolerance and the quote TTL
   Writes: nothing
   Can move funds: no. The two POSTs this form drives are /api/quotes and
          /api/swaps, which are unchanged; neither broadcasts anything.
@@ -19,10 +20,25 @@
   hand-written second copy of the same set, in a language the server cannot
   check, deciding what a customer is offered. It is deleted, not moved.
 
-  A pair that is not in the set is not rendered at all, so the form cannot offer
-  a direction the API will refuse. When the set is EMPTY the form says so in
-  words instead of rendering an empty select, because an empty dropdown reads as
-  a broken page rather than as "nothing is enabled".
+  BEING IN THE SET WAS NOT ENOUGH, AND THIS COMMENT USED TO SAY IT WAS. It read
+  "a pair that is not in the set is not rendered at all, so the form cannot offer
+  a direction the API will refuse." True about the set, false about the
+  conclusion: on 2026-09-26 the operator was offered six pairs, every one badged
+  ENABLED, on a server whose process environment set no BTC_RPC_PORT, no
+  LTC_RPC_PORT and no GRC_RPC_PORT -- so exactly one adapter existed. They picked
+  XRP -> GRC, the quote priced, and Create swap answered `No swap was created:
+  'GRC'`.
+
+  ALLOWED_PAIRS is what the terminal is WILLING to swap; the adapters dict is what
+  it can REACH. The select now iterates `offerable` (both chains reachable) while
+  the list above iterates `pairs` (everything allowed, with DISABLED and a reason
+  on the ones that are not reachable) -- listed rather than hidden, because five
+  entries where an operator configured six is a silence, and admin.html already
+  lists disabled pairs this way.
+
+  When NOTHING is offerable the form says so in words instead of rendering an
+  empty select, because an empty dropdown reads as a broken page rather than as
+  "nothing is enabled".
 #}
 
 {% block content %}
@@ -34,13 +50,23 @@
 
 <section class="panel" aria-labelledby="pairs-heading">
   <h2 id="pairs-heading">What can be swapped right now</h2>
-  <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code> on the server when this page was built. A pair
-     that is not on this list is refused before a quote is even priced &#8212; so the form below offers only these.</p>
+  <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code> <em>and</em> from the chain adapters this server
+     process actually built, when this page was built. A pair needs both: ALLOWED_PAIRS is what this terminal
+     is willing to swap, and an adapter is what it can reach. A pair marked DISABLED is allowed but
+     unreachable &#8212; the reason beside it says what to set. The form below offers only the enabled ones.</p>
   {% if pairs %}
   <ul class="pair-list">
     {% for pair in pairs %}
-    <li class="pair"><span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
-      {{ badges.level_badge('ok', 'ENABLED') }}</li>
+    {# The level was the literal 'ok' and the label the literal 'ENABLED' until
+       2026-09-26, so every allowed pair claimed to work whether or not a single
+       chain was configured. Both now come from the row. #}
+    {# `pair-off` and `subtle` rather than new class names: admin.html:252 already
+       renders a disabled pair exactly this way, and a second vocabulary for one
+       state is rule 8 with a stylesheet attached. #}
+    <li class="pair {% if not pair.enabled %}pair-off{% endif %}">
+      <span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
+      {{ badges.level_badge('ok' if pair.enabled else 'halted', 'ENABLED' if pair.enabled else 'DISABLED') }}
+      {% if not pair.enabled %}<span class="subtle">{{ pair.reason }}</span>{% endif %}</li>
     {% endfor %}
   </ul>
   {% else %}
@@ -65,8 +91,12 @@
   <form id="quote-form" class="form" method="post" action="/api/quotes" novalidate>
     <div class="field">
       <label for="pair">Direction</label>
-      <select id="pair" name="pair" {% if not pairs %}disabled{% endif %}>
-        {% for pair in pairs %}
+      {# `offerable`, not `pairs`: an allowed pair whose chain has no adapter in this
+         process cannot complete, and offering it produced `No swap was created:
+         'GRC'` at the operator on 2026-09-26. The disabled ones are still LISTED
+         in the panel above, with the reason. #}
+      <select id="pair" name="pair" {% if not offerable %}disabled{% endif %}>
+        {% for pair in offerable %}
         <option value="{{ pair.from_asset }}:{{ pair.to_asset }}">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</option>
         {% endfor %}
       </select>
@@ -74,9 +104,9 @@
     <div class="field">
       <label for="input_amount">Amount you will send</label>
       <input id="input_amount" name="input_amount" type="number" min="0" step="any" inputmode="decimal"
-             placeholder="1000" {% if not pairs %}disabled{% endif %}>
+             placeholder="1000" {% if not offerable %}disabled{% endif %}>
     </div>
-    <button type="submit" class="primary" {% if not pairs %}disabled{% endif %}>Get quote</button>
+    <button type="submit" class="primary" {% if not offerable %}disabled{% endif %}>Get quote</button>
   </form>
 
   {# Announce BEFORE, not only after (rule 14). This region starts by saying what

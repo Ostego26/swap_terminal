@@ -16,6 +16,8 @@ boundary, which is what lets create_swap() insert the swap and its first audit
 row atomically.
 """
 
+from chains.registry import unconfigured_chains, why_unconfigured
+
 from .helpers import new_id, parse_iso, utc_now_iso
 from .xrp_tag_service import allocate_destination_tag
 
@@ -148,6 +150,34 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     to_asset = quote["to_asset"]
     from_asset = quote["from_asset"]
     payout_address = payout_address.strip()
+    # BOTH CHAINS MUST HAVE AN ADAPTER IN THIS PROCESS, AND THE MESSAGE HAS TO SAY
+    # SO. Checked before the address validation below, because that line is where
+    # the failure used to happen and it happened as a subscript.
+    #
+    # 2026-09-26, from the operator's browser: `No swap was created: 'GRC'`. That
+    # is str(KeyError("GRC")) -- `adapters[to_asset]` raised, routes/swaps.py's
+    # HTTP boundary returned str(exc), and a KeyError's str is the repr of the key
+    # and nothing else. A running Gridcoin daemon on 25715, three workers printing
+    # `GRC rpc=127.0.0.1:25715`, a priced quote, and the page said `'GRC'`.
+    #
+    # The cause was that the SERVER process had no GRC_RPC_PORT (the workers were
+    # started from a shell that did), so build_adapters() skipped Gridcoin. The
+    # information needed to fix it was one env var name, and none of it reached the
+    # screen.
+    #
+    # from_asset is checked here as well, though deposit_account() below would
+    # raise on it a few lines later: one refusal naming both missing chains beats
+    # two consecutive single-chain failures, and a swap whose SOURCE chain has no
+    # adapter has no deposit watcher looking at it either.
+    missing = unconfigured_chains(adapters, from_asset, to_asset)
+    if missing:
+        raise ValueError(
+            "No swap was created, because "
+            + " Also: ".join(why_unconfigured(asset) for asset in missing)
+            + f" The {from_asset}->{to_asset} pair is in ALLOWED_PAIRS, which is why the quote priced -- "
+            f"ALLOWED_PAIRS says what this terminal is WILLING to swap and the adapters say what it can "
+            f"REACH, and those are different questions. Nothing was written."
+        )
     if not adapters[to_asset].validate_address(payout_address):
         raise ValueError(f"Invalid {to_asset} payout address")
     swap_id = new_id("s")

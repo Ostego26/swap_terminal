@@ -58,7 +58,7 @@ from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
 from config import Config
 from microfortnights import format_duration
-from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, classify
+from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, classify, configuring_variable
 
 
 def build_adapters_from_config() -> dict:
@@ -138,7 +138,10 @@ def endpoint_lines() -> list[str]:
     if Config.RPC.get("SOL", {}).get("url"):
         lines.append(SolanaAdapter(**Config.RPC["SOL"]).endpoint_line())
     else:
-        lines.append("  SOL  not configured (SOL_RPC_URL unset)  <- no Solana adapter is constructed; no SOL pair is allowed")
+        lines.append(
+            f"  SOL  not configured ({configuring_variable('SOL')} unset)  <- no Solana adapter "
+            f"is constructed; no SOL pair is allowed"
+        )
 
     # XMR, appended separately for a DIFFERENT reason than SOL's. Its threshold
     # genuinely is a count of blocks, so it is not the unit mismatch above --
@@ -152,12 +155,18 @@ def endpoint_lines() -> list[str]:
     if Config.RPC.get("XRP", {}).get("url"):
         lines.append(XRPAdapter(**Config.RPC["XRP"]).endpoint_line())
     else:
-        lines.append("  XRP  not configured (XRP_RPC_URL unset)  <- no XRP adapter is constructed; no XRP pair is allowed")
+        lines.append(
+            f"  XRP  not configured ({configuring_variable('XRP')} unset)  <- no XRP adapter "
+            f"is constructed; no XRP pair is allowed"
+        )
 
     if Config.RPC.get("XMR", {}).get("port"):
         lines.append(MoneroAdapter(**Config.RPC["XMR"]).endpoint_line())
     else:
-        lines.append("  XMR  not configured (XMR_RPC_PORT unset)  <- no Monero adapter is constructed; no XMR pair is allowed")
+        lines.append(
+            f"  XMR  not configured ({configuring_variable('XMR')} unset)  <- no Monero adapter "
+            f"is constructed; no XMR pair is allowed"
+        )
     return lines
 
 

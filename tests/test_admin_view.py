@@ -294,8 +294,12 @@ def test_pair_rows_read_allowed_pairs_and_mark_everything_else_disabled():
     "Is XRP on?" is then answered by an absence, and an absent row is
     indistinguishable from a row nobody rendered (rule 14). Disabled pairs are
     shown AS disabled.
+
+    Every chain is reachable here, so `enabled` and `reachable` agree and the
+    original assertion still reads as written. The two come apart in the next test.
     """
-    rows = pair_rows(seeded_config())
+    adapters = {asset: object() for asset in ("BTC", "GRC", "LTC", "XRP", "SOL", "XMR")}
+    rows = pair_rows(seeded_config(), adapters)
     enabled = {row["label"] for row in rows if row["enabled"]}
     assert enabled == {"GRC -> BTC", "BTC -> GRC"}
     disabled = {row["label"] for row in rows if not row["enabled"]}
@@ -303,6 +307,40 @@ def test_pair_rows_read_allowed_pairs_and_mark_everything_else_disabled():
     assert "GRC -> XRP" in disabled
     # Nothing here mutates the authority.
     assert seeded_config()["ALLOWED_PAIRS"] == {("GRC", "BTC"), ("BTC", "GRC")}
+    assert {row["state"] for row in rows} == {"enabled", "disabled"}
+
+
+def test_an_allowed_pair_whose_chain_has_no_adapter_reads_unreachable_not_enabled():
+    """The admin page must not agree with the defect it is opened to diagnose.
+
+    2026-09-26: the operator's server process had no GRC_RPC_PORT, so
+    build_adapters() skipped Gridcoin. The swap page offered GRC pairs badged
+    ENABLED and create_swap() answered `No swap was created: 'GRC'`. This page --
+    the one they would open next -- read `enabled` alone, so it would have said
+    ENABLED too, while chain_rows() two panels above reported GRC unconfigured.
+
+    MUTATION: badge on `row.enabled` again in admin.html, or drop the
+    unconfigured_chains() call here. Either restores the contradiction.
+    """
+    # BTC only: GRC -> BTC and BTC -> GRC are both allowed, and both need GRC.
+    rows = {row["label"]: row for row in pair_rows(seeded_config(), {"BTC": object()})}
+
+    for label in ("GRC -> BTC", "BTC -> GRC"):
+        row = rows[label]
+        assert row["enabled"] is True, "still in ALLOWED_PAIRS -- that half has not changed"
+        assert row["reachable"] is False
+        assert row["state"] == "unreachable"
+        assert row["missing"] == ["GRC"]
+        assert "GRC_RPC_PORT" in row["detail"], "the detail must name what to set"
+        assert "quote WILL price" in row["detail"], (
+            "the operator needs to know the quote is not the check -- that is how they got here"
+        )
+
+    # A pair that is not allowed at all is still DISABLED, not UNREACHABLE: the
+    # reason it is refused is the pair list, and naming a missing adapter instead
+    # would send the operator to configure a chain that would change nothing.
+    assert rows["GRC -> XRP"]["state"] == "disabled"
+    assert rows["GRC -> XRP"]["missing"] == []
 
 
 def test_chain_rows_report_an_unconfigured_chain_rather_than_omitting_it():

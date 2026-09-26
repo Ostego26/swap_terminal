@@ -36,6 +36,7 @@ from network_target import (
     UNCONFIGURED_PORT,
     NetworkTargetUnconfigured,
     classify,
+    configuring_variable,
     describe,
     mainnet_chains,
     require_configured,
@@ -211,3 +212,58 @@ def test_a_configured_test_chain_does_build_an_adapter():
     built = build_adapters({"GRC": bitcoin_shaped(25779)})
 
     assert sorted(built) == ["GRC"]
+
+
+# --- which variable makes a chain reachable -----------------------------------
+
+def test_configuring_variable_matches_what_config_py_actually_reads():
+    """Asserted against config.py's SOURCE, not against a list written here.
+
+    The point of configuring_variable() is that three places -- the workers'
+    startup banner, the swap page's pair list, and create_swap()'s refusal -- name
+    the same environment variable without three copies of the string. A test that
+    spelled the six names again would be a fourth copy, and would pass while the
+    real variable was renamed.
+
+    So this reads config.py and requires each returned name to appear there as an
+    os.getenv() call. Rule 17: the thing that would show it false is to go look.
+    """
+    config_source = (Path(__file__).resolve().parent.parent / "swap_terminal" / "config.py").read_text()
+
+    for asset in ("BTC", "LTC", "GRC", "XRP", "SOL", "XMR"):
+        variable = configuring_variable(asset)
+        assert f'os.getenv("{variable}"' in config_source, (
+            f"configuring_variable({asset!r}) returned {variable!r}, which config.py never reads"
+        )
+
+
+def test_the_three_bitcoin_derived_chains_come_from_chain_ports():
+    """Not a second table. CHAIN_PORTS already holds their variable names."""
+    for asset in ("BTC", "LTC", "GRC"):
+        assert configuring_variable(asset) == CHAIN_PORTS[asset].port_variable
+
+
+def test_the_two_url_chains_and_monero_are_not_port_variables_by_accident():
+    """SOL and XRP are configured by a URL, so <ASSET>_RPC_PORT would be wrong.
+
+    MUTATION: drop _ENDPOINT_VARIABLES and let the fallback answer. SOL and XRP
+    then read SOL_RPC_PORT and XRP_RPC_PORT, neither of which config.py contains,
+    and the page would tell an operator to set a variable that does nothing. XMR
+    IS a port and is in the same table only because monero-wallet-rpc has no
+    conventional port to classify against -- chains/registry.py says so at its
+    construction site.
+    """
+    assert configuring_variable("SOL") == "SOL_RPC_URL"
+    assert configuring_variable("XRP") == "XRP_RPC_URL"
+    assert configuring_variable("XMR") == "XMR_RPC_PORT"
+
+
+def test_an_unknown_chain_gets_a_plausible_name_rather_than_raising():
+    """A chain added to ALLOWED_PAIRS before it is added here must not raise.
+
+    Raising would put a KeyError on the page, which is the exact failure this
+    function was written to stop: `No swap was created: 'GRC'` was
+    str(KeyError("GRC")). The fallback matches what describe() and
+    require_configured() already do for an unknown chain.
+    """
+    assert configuring_variable("DOGE") == "DOGE_RPC_PORT"

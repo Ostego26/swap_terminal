@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from db import SCHEMA, dict_factory
+from network_target import configuring_variable
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
 # already pointed SWAP_DB_PATH at a temp file by the time this import runs.
@@ -97,19 +98,108 @@ def seed_swap(client, swap_id, status, **overrides):
 # --- the customer surface ---------------------------------------------------
 
 
-def test_the_swap_form_offers_exactly_the_pairs_the_server_allows(client):
-    """The form is rendered FROM Config.ALLOWED_PAIRS, not from a copy.
+def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(client, monkeypatch):
+    """The form reads BOTH authorities: what is allowed, and what has an adapter.
 
-    MUTATION: hardcode the option list in templates/index.html, which is what
-    static/script.js used to do with `const validTargets = {...}`. This test
-    then passes only by coincidence, and fails the moment the allowed set is
-    changed -- which is the whole failure mode: the page offering a pair the
-    API refuses, or hiding one it accepts.
+    THIS TEST USED TO ASSERT THE DEFECT. It was
+    test_the_swap_form_offers_exactly_the_pairs_the_server_allows, and it checked
+    that every pair in Config.ALLOWED_PAIRS appeared as an option -- which is
+    exactly what produced, on 2026-09-26, six pairs badged ENABLED on a server
+    that had built one adapter. The operator picked XRP -> GRC, the quote priced,
+    and Create swap answered `No swap was created: 'GRC'` -- str(KeyError("GRC")),
+    because create_swap() subscripted a dict that had no Gridcoin in it.
+
+    So it is rewritten rather than deleted, to pin the stronger invariant (rule 2):
+    the select offers an allowed pair only when BOTH of its chains have an adapter
+    in this process, and every allowed pair is still LISTED so an operator who
+    configured six does not silently see five.
+
+    MUTATION: make the select iterate `pairs` again instead of `offerable`, or
+    hardcode the option list in templates/index.html the way static/script.js
+    used to with `const validTargets = {...}`. Either fails here.
     """
     allowed = client.application.config["ALLOWED_PAIRS"]
+    # Exactly the operator's server on 2026-09-26, minus their missing GRC: the
+    # membership test is all allowed_pair_rows() performs, so sentinels are enough
+    # and no adapter is constructed (nothing here opens a socket).
+    reachable = {"XRP", "GRC"}
+    monkeypatch.setitem(
+        client.application.config, "ADAPTERS", {asset: object() for asset in reachable}
+    )
     body = client.get("/").get_data(as_text=True)
+
+    for from_asset, to_asset in allowed:
+        option = f'value="{from_asset}:{to_asset}"'
+        if from_asset in reachable and to_asset in reachable:
+            assert option in body, f"{from_asset}->{to_asset} is reachable and must be offered"
+        else:
+            assert option not in body, (
+                f"{from_asset}->{to_asset} was offered, but one of its chains has no adapter -- "
+                f"this is the shape that printed 'GRC' at the operator"
+            )
+
+    # LISTED, not hidden. An operator who configured six pairs and sees five has
+    # no way to tell which one vanished or why (rule 14).
+    listed = body.count('class="pair-label"')
+    assert listed == len(allowed), f"{len(allowed)} pairs allowed, {listed} listed on the page"
+    # The markup, not the bare word: the panel-note above the list explains what
+    # DISABLED means, so a substring test would pass on the explanation alone.
+    assert 'badge-word">DISABLED<' in body, "an unreachable pair must be badged DISABLED, not ENABLED"
+    assert 'badge-word">ENABLED<' in body, "a reachable pair must still be badged ENABLED"
+    assert "pair-off" in body, "a DISABLED pair must carry admin.html's own pair-off marker"
+
+
+def test_a_disabled_pair_names_the_variable_that_would_enable_it(client, monkeypatch):
+    """DISABLED with no reason is rule 14's blank gap wearing a badge.
+
+    The operator's whole problem on 2026-09-26 was that they could not get from
+    what the screen said to what to change. The reason comes from
+    chains/registry.why_unconfigured(), which names the variable through
+    network_target.configuring_variable() -- so this asserts the NAME reaches the
+    page, not that a particular sentence was written.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {"XRP": object()})
+    body = client.get("/").get_data(as_text=True)
+
+    # GRC is in an allowed pair and has no adapter here, so its variable must be
+    # on the page. Read from the authority rather than spelled, for the same
+    # reason the pair list is.
+    assert configuring_variable("GRC") in body, "the page must say what to set"
+    assert ".env" in body, (
+        "the reason must say the value has to be in the PROCESS environment -- a "
+        "value in a file only is the exact way this failed"
+    )
+
+
+def test_no_reachable_chain_means_no_option_and_a_disabled_form(client, monkeypatch):
+    """An empty select reads as a broken page. It must read as "nothing is enabled"."""
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+    body = client.get("/").get_data(as_text=True)
+
+    for from_asset, to_asset in client.application.config["ALLOWED_PAIRS"]:
+        assert f'value="{from_asset}:{to_asset}"' not in body
+    assert "disabled" in body, "the select, the amount field and the button must all be disabled"
+    # Still listed, still explained.
+    assert body.count('class="pair-label"') == len(client.application.config["ALLOWED_PAIRS"])
+
+
+def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, monkeypatch):
+    """The other direction, so the guard cannot pass by refusing everything.
+
+    A version of allowed_pair_rows() that marked every pair disabled would satisfy
+    all three tests above. This is the one it fails.
+    """
+    allowed = client.application.config["ALLOWED_PAIRS"]
+    every_asset = {asset for pair in allowed for asset in pair}
+    monkeypatch.setitem(
+        client.application.config, "ADAPTERS", {asset: object() for asset in every_asset}
+    )
+    body = client.get("/").get_data(as_text=True)
+
     for from_asset, to_asset in allowed:
         assert f'value="{from_asset}:{to_asset}"' in body, (from_asset, to_asset)
+    assert 'badge-word">DISABLED<' not in body, "nothing is unreachable here, so nothing may be badged DISABLED"
+    assert "pair-off" not in body, "no pair may be marked off when every pair is reachable"
 
     # And nothing else -- with the disabled set DERIVED, not written out.
     #

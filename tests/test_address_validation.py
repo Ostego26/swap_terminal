@@ -171,3 +171,78 @@ def test_a_good_address_still_creates_the_swap(db):
     assert swap["deposit_address"] == "grc_deposit_addr"
     assert swap["min_confirmations"] == 6  # GRC_MIN_CONFIRMATIONS, in blocks
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1
+
+
+# --- a chain with no adapter in this process ----------------------------------
+#
+# These sit beside the address tests because they guard the SAME line: create_swap()
+# reaches adapters[to_asset] to validate the payout address, and on 2026-09-26 that
+# subscript is what failed. The operator saw
+#
+#     No swap was created: 'GRC'
+#
+# on the page -- str(KeyError("GRC")) and nothing more. They had a Gridcoin testnet
+# daemon on 25715 and three workers printing `GRC rpc=127.0.0.1:25715`; the SERVER
+# process had no GRC_RPC_PORT, so build_adapters() skipped Gridcoin. Every fact
+# needed to fix it was one variable name, and none of it reached the screen.
+
+
+def test_a_chain_with_no_adapter_refuses_and_names_the_variable(db):
+    """MUTATION: delete the unconfigured_chains() guard. The message becomes 'LTC'."""
+    adapters = {"GRC": StubAdapter(responses={"getnewaddress": "Sgrcaddr"})}
+
+    with pytest.raises(ValueError) as caught:
+        create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+
+    message = str(caught.value)
+    assert "LTC" in message
+    assert "LTC_RPC_PORT" in message, "the operator needs the variable, not the key's repr"
+    assert ".env" in message, "and that a value in a file only does not reach the process"
+    assert message != "'LTC'", "this is the exact string the defect produced"
+
+
+def test_the_refusal_writes_no_swap_row(db):
+    """A refusal that leaves a row behind is worse than no refusal.
+
+    A tag-attributed swap with no deposit_tag credits NOTHING
+    (services/deposit_service.attributable_events), so a half-written row is a swap
+    that can be paid into and never advanced.
+    """
+    adapters = {"GRC": StubAdapter(responses={"getnewaddress": "Sgrcaddr"})}
+
+    with pytest.raises(ValueError):
+        create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
+    assert db.execute("SELECT COUNT(*) AS n FROM xrp_destination_tags").fetchone()["n"] == 0
+
+
+def test_both_missing_chains_are_named_in_one_refusal(db):
+    """One refusal naming both beats two consecutive single-chain failures.
+
+    The source chain matters as much as the destination: a swap whose FROM chain
+    has no adapter has no deposit watcher looking at it either, so it would sit at
+    awaiting_deposit forever with a deposit address nothing polls.
+    """
+    with pytest.raises(ValueError) as caught:
+        create_swap(db, CONFIG, {}, "q_v", "tltc1qgood")
+
+    message = str(caught.value)
+    assert "GRC_RPC_PORT" in message, "the source chain must be named too"
+    assert "LTC_RPC_PORT" in message
+    assert "Nothing was written." in message
+
+
+def test_the_refusal_says_why_the_quote_priced_anyway(db):
+    """The operator's actual confusion: the quote worked, so what changed?
+
+    ALLOWED_PAIRS is what the terminal is WILLING to swap and the adapters are what
+    it can REACH. create_quote() only consults the first, which is why 1 XRP priced
+    at 56.6 GRC on a server that could not reach Gridcoin at all.
+    """
+    with pytest.raises(ValueError) as caught:
+        create_swap(db, CONFIG, {}, "q_v", "tltc1qgood")
+
+    message = str(caught.value)
+    assert "ALLOWED_PAIRS" in message
+    assert "GRC->LTC" in message, "name the pair, so the message stands alone when pasted"
