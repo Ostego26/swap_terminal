@@ -1,69 +1,132 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GRC Swap Terminal</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-</head>
-<body>
-  <header>
-    <h1>GRC Swap Terminal</h1>
-    <p>Brokered hot-wallet swap MVP</p>
-  </header>
+{% extends "base.html" %}
+{% import "_badges.html" as badges %}
+{% set surface = 'user' %}
+{% block title %}Swap &#183; Swap Terminal{% endblock %}
+{#
+  The customer's swap form.
 
-  <section>
-    <div class="marquee-container">
-      <p id="crypto-marquee">Loading rates...</p>
-    </div>
-  </section>
+  Role: template (rendering only; no decision)
+  Reads: `pairs` (rendered from Config.ALLOWED_PAIRS by routes/ui.py), the fee,
+         the tolerance and the quote TTL
+  Writes: nothing
+  Can move funds: no. The two POSTs this form drives are /api/quotes and
+         /api/swaps, which are unchanged; neither broadcasts anything.
+  Mainnet-safe: yes
 
-  <section>
-    <h2>1. Request quote</h2>
-    <div class="grid-form">
-      <label for="from_asset">Send</label>
-      <select id="from_asset">
-        <option value="GRC">GRC</option>
-        <option value="BTC">BTC</option>
-        <option value="LTC">LTC</option>
+  THE PAIR LIST IS THE AUTHORITY'S, NOT A COPY. Each option below comes from
+  Config.ALLOWED_PAIRS via routes/ui.allowed_pair_rows(). The file this replaced
+  held `const validTargets = {GRC: ["BTC","LTC"], ...}` in static/script.js -- a
+  hand-written second copy of the same set, in a language the server cannot
+  check, deciding what a customer is offered. It is deleted, not moved.
+
+  A pair that is not in the set is not rendered at all, so the form cannot offer
+  a direction the API will refuse. When the set is EMPTY the form says so in
+  words instead of rendering an empty select, because an empty dropdown reads as
+  a broken page rather than as "nothing is enabled".
+#}
+
+{% block content %}
+<section class="hero">
+  <h1>Swap one chain for another</h1>
+  <p class="lede">Send the coin you have to an address derived for your swap alone. When it has enough
+     confirmations, the coin you want goes to your address. One quote, one deposit, one payout.</p>
+</section>
+
+<section class="panel" aria-labelledby="pairs-heading">
+  <h2 id="pairs-heading">What can be swapped right now</h2>
+  <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code> on the server when this page was built. A pair
+     that is not on this list is refused before a quote is even priced &#8212; so the form below offers only these.</p>
+  {% if pairs %}
+  <ul class="pair-list">
+    {% for pair in pairs %}
+    <li class="pair"><span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
+      {{ badges.level_badge('ok', 'ENABLED') }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    {{ badges.empty('trading pair is enabled', 'Config.ALLOWED_PAIRS on the server') }}
+    <p class="panel-note">Nothing can be swapped until an operator enables a pair. The form below is disabled
+       because there is no direction it could submit.</p>
+  {% endif %}
+</section>
+
+<div class="two-col">
+<section class="panel" aria-labelledby="quote-heading">
+  <h2 id="quote-heading"><span class="step-num">1</span> Get a quote</h2>
+  <p class="panel-note">A quote fixes the rate for
+     {{ (quote_ttl_seconds / 1.2096) | round(1) }}&#181;fn ({{ quote_ttl_seconds }}s). The fee is
+     {{ fee_bps }} bps, and a network fee is reserved out of the payout.</p>
+
+  {# A real form with a real action, so the page is usable before any script
+     runs. The script intercepts submit and fills the result region in place;
+     without it the browser posts and the API's JSON is what you see, which is
+     plain but TRUE. A page that does nothing when a script fails to load is
+     worse than one that is plain. #}
+  <form id="quote-form" class="form" method="post" action="/api/quotes" novalidate>
+    <div class="field">
+      <label for="pair">Direction</label>
+      <select id="pair" name="pair" {% if not pairs %}disabled{% endif %}>
+        {% for pair in pairs %}
+        <option value="{{ pair.from_asset }}:{{ pair.to_asset }}">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</option>
+        {% endfor %}
       </select>
-
-      <label for="to_asset">Receive</label>
-      <select id="to_asset">
-        <option value="BTC">BTC</option>
-        <option value="GRC">GRC</option>
-        <option value="LTC">LTC</option>
-      </select>
-
-      <label for="input_amount">Amount</label>
-      <input id="input_amount" type="number" min="0" step="any" placeholder="1000">
-
-      <button id="request_quote_btn">Get quote</button>
     </div>
-    <pre id="quote_output">No quote yet.</pre>
-  </section>
+    <div class="field">
+      <label for="input_amount">Amount you will send</label>
+      <input id="input_amount" name="input_amount" type="number" min="0" step="any" inputmode="decimal"
+             placeholder="1000" {% if not pairs %}disabled{% endif %}>
+    </div>
+    <button type="submit" class="primary" {% if not pairs %}disabled{% endif %}>Get quote</button>
+  </form>
 
-  <section>
-    <h2>2. Create swap</h2>
-    <div class="grid-form">
+  {# Announce BEFORE, not only after (rule 14). This region starts by saying what
+     asking will do and what it depends on, so the wait is never a blank box. #}
+  <div id="quote-result" class="result" aria-live="polite">
+    <p class="result-idle"><span class="empty-mark">(no quote yet)</span> Asking for one fetches a live USD price
+       per asset and derives the pair rate from the two. That is one outbound call to a price API, so it fails
+       loudly if the price feed is down rather than quoting you a stale number.</p>
+  </div>
+</section>
+
+<section class="panel" aria-labelledby="swap-heading">
+  <h2 id="swap-heading"><span class="step-num">2</span> Create the swap</h2>
+  <p class="panel-note">Creating a swap fixes <strong>where your payout goes</strong>. The address is checked with the
+     destination chain's own daemon first, and it cannot be changed afterward &#8212; a payout is final the moment it
+     is broadcast.</p>
+
+  <form id="swap-form" class="form" method="post" action="/api/swaps" novalidate>
+    <div class="field">
       <label for="payout_address">Your payout address</label>
-      <input id="payout_address" type="text" placeholder="Destination address">
-      <button id="create_swap_btn" disabled>Create swap</button>
+      <input id="payout_address" name="payout_address" type="text" autocomplete="off" spellcheck="false"
+             placeholder="the address you want to be paid at">
     </div>
-    <pre id="swap_output">No swap created yet.</pre>
-  </section>
+    <button type="submit" class="primary" id="create-swap" disabled>Create swap</button>
+  </form>
 
-  <section>
-    <h2>3. Deposit and status</h2>
-    <div class="grid-form">
-      <label for="swap_id_lookup">Swap ID</label>
-      <input id="swap_id_lookup" type="text" placeholder="s_xxx">
-      <button id="lookup_swap_btn">Lookup</button>
-      <button id="refresh_rates_btn">Refresh rates</button>
+  <div id="swap-result" class="result" aria-live="polite">
+    <p class="result-idle"><span class="empty-mark">(no swap yet)</span> A quote has to exist first, so the button
+       above stays disabled until one does. Creating the swap derives a deposit address and takes you to a page that
+       tracks it.</p>
+  </div>
+</section>
+</div>
+
+<section class="panel" aria-labelledby="find-heading">
+  <h2 id="find-heading">Already have a swap?</h2>
+  <p class="panel-note">Every swap has its own page at <code>/swap/&lt;id&gt;</code>. It is a plain link &#8212; bookmark
+     it, close the tab, come back hours later. Amounts outside the
+     {{ (tolerance_pct * 100) | round(2) }}% tolerance band are held for a human rather than paid out.</p>
+  <form class="form inline" method="get" action="{{ url_for('ui.swap_lookup') }}" id="lookup-form">
+    <div class="field">
+      <label for="swap_id">Swap ID</label>
+      <input id="swap_id" name="swap_id" type="text" placeholder="s_0123456789abcdef" autocomplete="off"
+             spellcheck="false">
     </div>
-    <pre id="status_output">Waiting for swap.</pre>
-  </section>
+    <button type="submit">Open it</button>
+  </form>
+</section>
+{% endblock %}
 
-  <script src="{{ url_for('static', filename='script.js') }}"></script>
-</body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='script.js') }}" defer></script>
+{% endblock %}

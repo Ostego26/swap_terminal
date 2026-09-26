@@ -1,0 +1,102 @@
+{% import "_badges.html" as badges %}
+{#
+  The part of the status page that changes while you watch it.
+
+  Role: template partial (rendering only)
+  Reads: the dict services/swap_view.swap_display() returned
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  THIS FRAGMENT IS RE-RENDERED BY THE SERVER, not by the browser. The poll in
+  static/script.js fetches /swap/<id>/fragment and swaps this block in whole.
+  That is what keeps the status vocabulary in Python: the browser never learns
+  what `confirming` means, it replaces a region. See routes/ui.py's header.
+
+  WAITING, SLOW, HALTED AND DONE MUST NOT LOOK ALIKE. `view.attention.level` was
+  decided by services/swap_view.attention() and each level gets its own badge
+  glyph, its own word and its own border treatment -- and the detail sentence
+  always names what is being waited ON, because "please wait" tells a customer
+  watching a blockchain nothing they did not already know.
+#}
+<div class="live" data-status="{{ view.status }}" data-level="{{ view.attention.level }}">
+
+  <div class="status-card level-{{ view.attention.level }}">
+    <div class="status-head">
+      {{ badges.level_badge(view.attention.level) }}
+      <h2 class="status-headline">{{ view.attention.headline }}</h2>
+    </div>
+    <p class="status-detail">{{ view.attention.detail }}</p>
+    <dl class="status-meta">
+      <div><dt>Raw status</dt><dd><code>{{ view.status }}</code>{% if not view.status_known %}
+        &#8592; this page has no description for that value{% endif %}</dd></div>
+      <div><dt>Unchanged for</dt><dd>{{ view.attention.waited or '(not applicable)' }}</dd></div>
+    </dl>
+  </div>
+
+  {# The rail. `state` per step was decided in Python; this only draws it. A
+     status off the rail (held for review, failed, unrecognized) marks every step
+     `skipped` and the caption says the sequence is not running -- rather than
+     drawing a half-full progress bar for a swap that has stopped. #}
+  <ol class="rail" aria-label="Swap progress">
+    {% for step in view.rail %}
+    <li class="rail-step rail-{{ step.state }}">
+      <span class="rail-dot" aria-hidden="true">{% if step.state == 'done' %}&#10003;{% elif step.state == 'current' %}&#9686;{% elif step.state == 'skipped' %}&#8212;{% else %}&#183;{% endif %}</span>
+      <span class="rail-label">{{ step.label }}</span>
+      <span class="rail-state">{{ step.state }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% if not view.on_rail %}
+  <p class="rail-caption">This swap is <strong>not on the sequence above</strong>. It left it, and no worker will
+     advance it &#8212; every step is shown as skipped rather than partly done.</p>
+  {% endif %}
+
+  {# Confirmations: a COUNT out of a COUNT, never a duration (rule 6). The
+     threshold and where it came from are printed next to the number, so the
+     screen answers "why that many?" without anyone opening a source file. #}
+  <section class="panel" aria-labelledby="conf-heading">
+    <h3 id="conf-heading">Confirmations</h3>
+    {% set conf = view.confirmations %}
+    <p class="bignum"><strong>{{ conf.seen }}</strong> of <strong>{{ conf.threshold }}</strong>
+      <span class="bignum-unit">confirmations</span>
+      {% if conf.met %}{{ badges.level_badge('ok', 'THRESHOLD MET') }}{% else %}{{ badges.level_badge('waiting', conf.remaining ~ ' TO GO') }}{% endif %}
+    </p>
+    <div class="meter" role="img" aria-label="{{ conf.seen }} of {{ conf.threshold }} confirmations">
+      <div class="meter-fill" style="width: {{ conf.percent }}%"></div>
+    </div>
+    {# The unit is PER CHAIN and comes from services/swap_view.threshold_note().
+       It used to read "these are blocks" for every chain, which is false for
+       XRP -- a validated ledger has no depth to accumulate -- and false for
+       Solana, whose number is a commitment rung. Rule 6's unit laundering,
+       arriving as a sentence rather than as a number. #}
+    <p class="panel-note">What the threshold means here: {{ conf.meaning }}.</p>
+    <p class="panel-note">Where it came from: {{ conf.source }}. This is a count, not a clock &#8212; nothing here
+       can predict when the next one arrives, and this page will not pretend to.</p>
+    {% if conf.rows == 0 %}
+      {{ badges.empty('deposit has been seen on chain yet', 'deposit_events rows for this swap') }}
+    {% else %}
+    <p class="panel-note">{{ conf.rows }} deposit row(s) recorded for this swap; the count above is the highest
+       confirmation depth among them.</p>
+    {% endif %}
+  </section>
+
+  {# Amounts. The estimate is labeled as an estimate, and the tolerance halt is
+     stated here rather than discovered later: a customer who sends a different
+     amount should be able to read, in advance, that it halts for a human
+     instead of being paid out at a rate nobody quoted. #}
+  <section class="panel" aria-labelledby="amount-heading">
+    <h3 id="amount-heading">Amounts</h3>
+    <dl class="kv">
+      <div><dt>Expected in</dt><dd>{{ '%.8f'|format(view.swap.expected_input_amount) }} {{ view.swap.from_asset }}</dd></div>
+      <div><dt>Actually seen</dt><dd>{% if view.swap.actual_input_amount is none %}<span class="empty-mark">(none yet)</span>{% else %}{{ '%.8f'|format(view.swap.actual_input_amount) }} {{ view.swap.from_asset }}{% endif %}</dd></div>
+      <div><dt>Payout estimate</dt><dd>{{ '%.8f'|format(view.swap.output_amount_estimate) }} {{ view.swap.to_asset }}</dd></div>
+      <div><dt>Payout address</dt><dd class="mono breakable">{{ view.swap.payout_address }}</dd></div>
+      <div><dt>Deposit txid</dt><dd class="mono breakable">{{ view.swap.deposit_txid or '(none seen)' }}</dd></div>
+      <div><dt>Payout txid</dt><dd class="mono breakable">{{ view.swap.payout_txid or '(not broadcast)' }}</dd></div>
+    </dl>
+    {% if view.swap.failed_reason %}
+    <p class="callout callout-failed"><strong>Recorded reason:</strong> {{ view.swap.failed_reason }}</p>
+    {% endif %}
+  </section>
+</div>

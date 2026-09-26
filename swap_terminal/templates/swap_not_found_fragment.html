@@ -1,0 +1,24 @@
+{% import "_badges.html" as badges %}
+{#
+  Role: template partial (rendering only)
+  Reads: the requested id
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  What the POLL gets when the swap it was tracking is no longer readable. It
+  replaces the live region with a statement rather than leaving the last good
+  render on screen: a page still showing "confirming" from four hours ago, while
+  every refresh since has failed, is the silent failure rule 14 is about.
+#}
+<div class="live" data-status="unreadable" data-level="unknown">
+  <div class="status-card level-unknown">
+    <div class="status-head">
+      {{ badges.level_badge('unknown', 'NOT READABLE') }}
+      <h2 class="status-headline">This swap could not be read just now</h2>
+    </div>
+    <p class="status-detail">The refresh asked for swap <code>{{ swap_id }}</code> and the server had no row for it.
+       Nothing was changed by asking, and any figures still on screen are from the last refresh that did answer
+       &#8212; they are not current. Reload the page.</p>
+  </div>
+</div>

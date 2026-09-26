@@ -93,7 +93,8 @@ line says otherwise.
      the identical P2SH with a plain sendtoaddress and then spends it, and
      `getreceivedbyaddress` -- the only thing in this tree that needs an address
      to be in the wallet -- is called only from get_address_balance(), whose six
-     call sites in atomic_swap_gui.py all pass an operator's own validated
+     call sites in atomic_swap_gui.py (deleted 2026-09-26, see
+     modules/atomic_btc_client.py) all passed an operator's own validated
      address and never a contract P2SH. So the import is not a precondition of
      anything here. It is KEPT, because "no caller in this tree" is not "no
      caller" (rule 2) and an operator may watch the address on their own node,
@@ -209,8 +210,10 @@ from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 # mechanism for a preimage leak: see describe_rpc_payload() in
 # modules/htlc_rpc.py for the measurement. modules/utils.py had exactly this
 # removed on 2026-09-24 for exactly this reason. The application owns logging
-# policy -- regtest_htlc_verify.py and atomic_swap_gui.py both call
-# logging.basicConfig().
+# policy -- regtest_htlc_verify.py calls logging.basicConfig(), and so did
+# atomic_swap_gui.py until it was deleted on 2026-09-26. One application-level
+# caller is still one more than this module may assume, which is why the
+# reasoning is about the rule and not about the count.
 logger = logging.getLogger(__name__)
 
 

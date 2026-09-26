@@ -76,9 +76,15 @@ line says otherwise.
      the identical P2SH with a plain sendtoaddress and then spends it, and
      `getreceivedbyaddress` -- the only thing in this tree that needs an address
      to be in the wallet -- is called only from get_address_balance(), whose six
-     call sites in atomic_swap_gui.py all pass an operator's own validated
+     call sites in atomic_swap_gui.py all passed an operator's own validated
      address and never a contract P2SH. So the import is not a precondition of
-     anything here. It is KEPT, because "no caller in this tree" is not "no
+     anything here. THAT FILE WAS DELETED ON 2026-09-26 as dead code (tkinter,
+     no importer anywhere in the tree), which means get_address_balance() now
+     has NO caller in this repository at all -- so the conclusion below holds
+     more strongly than when it was written, not less. It is still not a proof
+     that nobody calls it: rule 2's line is that "no caller in this tree" is not
+     "no caller", and an operator's own script is exactly the caller a grep
+     cannot see. It is KEPT, because "no caller in this tree" is not "no
      caller" (rule 2) and an operator may watch the address on their own node,
      but it is now best-effort: modules/htlc_rpc.ensure_watch_only_import()
      reads getwalletinfo.descriptors AT RUNTIME (never a version string), calls
@@ -191,8 +197,10 @@ from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 # mechanism for a preimage leak: see describe_rpc_payload() in
 # modules/htlc_rpc.py for the measurement. modules/utils.py had exactly this
 # removed on 2026-09-24 for exactly this reason. The application owns logging
-# policy -- regtest_htlc_verify.py and atomic_swap_gui.py both call
-# logging.basicConfig().
+# policy -- regtest_htlc_verify.py calls logging.basicConfig(), and so did
+# atomic_swap_gui.py until it was deleted on 2026-09-26. One application-level
+# caller is still one more than this module may assume, which is why the
+# reasoning is about the rule and not about the count.
 logger = logging.getLogger(__name__)
 
 

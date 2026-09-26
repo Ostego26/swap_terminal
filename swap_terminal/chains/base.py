@@ -17,10 +17,32 @@ Measured 2026-09-24: this family is 140 lines -- one base class plus three
 four-line subclasses -- and `modules/rpc_clients.py` plus the three
 `modules/atomic_*_client.py` files are 1001 lines doing the same JSON-RPC
 against the same three daemons. They share no code. A reader who finds one
-must be told the other exists, so: the other one is modules/, it is used by
-atomic_swap_gui.py, and the divergences between its three near-copies are
-written up in the enforcement report rather than silently merged, because
-merging them touches signing and broadcasting.
+must be told the other exists, so: the other one is modules/, and the
+divergences between its three near-copies are written up in the enforcement
+report rather than silently merged, because merging them touches signing and
+broadcasting.
+
+WHO USES THAT SECOND FAMILY, RE-MEASURED 2026-09-26. This sentence used to say
+"it is used by atomic_swap_gui.py", and that file has been deleted (it was
+tkinter, nothing in the tree imported it, and the operator asked for web
+surfaces instead). Measured by grepping every IMPORT of the three client
+classes across the tree, rather than by reasoning about who probably calls
+them -- the first attempt at this paragraph named the wrong files, from a
+grep for the class names that also matched prose:
+
+    regtest_htlc_verify.py:178-179   BTCClient, LTCClient -- the regtest
+                                     harness entry point at the repository root
+    tests/test_htlc_spend.py:72-79   BTCClient, GRCClient, LTCClient
+
+and nothing else imports them. So after the deletion the second RPC family is
+reached from ONE entry point -- a regtest harness -- plus one test file, and
+the Flask application reaches it from nowhere at all.
+
+That does NOT make it dead: the harness is a real caller, and rule 2's line
+holds anyway ("no caller in this tree" is not "no caller"). It is also not a
+licence to merge the families here, because merging them touches signing and
+broadcasting. It is worth knowing before anybody prices that work again,
+because the blast radius just got smaller.
 
 WHAT THE BROAD EXCEPTS HERE DO AND DO NOT HIDE. Each is annotated at its site
 with what was checked. The rule (12) is that a broad catch is never legitimate

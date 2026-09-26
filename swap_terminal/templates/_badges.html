@@ -1,0 +1,70 @@
+{#
+  The two badge macros, defined once and imported by every template.
+
+  Role: template partial (rendering only)
+  Reads: a level or state string that a services/ function already decided
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  WHY THESE ARE MACROS AND NOT COPIED MARKUP. Rule 8 applies to a badge exactly
+  as it does to a gate: the moment "stale" is spelled in two templates, one of
+  them stops matching the CSS and nobody notices, because a badge that renders
+  the wrong shape still renders.
+
+  THE GLYPH AND THE WORD BOTH CARRY THE MEANING. Color is the third channel, not
+  the first. In a grayscale paste of this page every state is still legible:
+
+    OK / DONE     check           a thing finished
+    WAITING       ellipsis        expected to take a while; nothing is wrong
+    WORKING       half circle     moving right now
+    SLOW          exclamation     taking longer than this page expects
+    HALTED        filled square   stopped on purpose, waiting on a human
+    FAILED        cross           stopped because something broke
+    UNKNOWN       question mark   this page has no mapping for the value
+    FRESH         filled circle   a reading younger than its threshold
+    STALE         triangle        a reading older than its threshold
+    NEVER         em dash         nothing was ever written here
+    UNREADABLE    question mark   something is written and it is not a timestamp
+#}
+
+{% macro level_badge(level, text=None) -%}
+{%- set glyphs = {
+      'ok': '&#10003;',
+      'waiting': '&#8943;',
+      'working': '&#9686;',
+      'slow': '&#33;',
+      'halted': '&#9632;',
+      'failed': '&#10007;',
+      'unknown': '&#63;'
+    } -%}
+{%- set words = {
+      'ok': 'OK',
+      'waiting': 'WAITING',
+      'working': 'WORKING',
+      'slow': 'SLOW',
+      'halted': 'HALTED',
+      'failed': 'FAILED',
+      'unknown': 'UNKNOWN'
+    } -%}
+<span class="badge badge-{{ level }}"><span class="badge-glyph" aria-hidden="true">{{ glyphs.get(level, '&#63;')|safe }}</span><span class="badge-word">{{ text or words.get(level, level|upper) }}</span></span>
+{%- endmacro %}
+
+{% macro freshness_badge(reading) -%}
+{%- set glyphs = {'fresh': '&#9679;', 'stale': '&#9650;', 'missing': '&#8212;', 'unreadable': '&#63;'} -%}
+{%- set words = {'fresh': 'FRESH', 'stale': 'STALE', 'missing': 'NEVER', 'unreadable': 'UNREADABLE'} -%}
+<span class="badge badge-fresh-{{ reading.state }}" title="{{ reading.note }}"><span class="badge-glyph" aria-hidden="true">{{ glyphs.get(reading.state, '&#63;')|safe }}</span><span class="badge-word">{{ words.get(reading.state, reading.state|upper) }}</span><span class="badge-age">{{ reading.age_display }}</span></span>
+{%- endmacro %}
+
+{#
+  `(none)` IS A RESULT AND A BLANK GAP IS NOT (rule 14).
+
+  Every region that can come back empty renders this instead of nothing, and it
+  says what was looked for and where. A blank area is ambiguous between "zero
+  rows" and "the query broke", and the operator cannot tell which from the
+  screen -- which is the exact defect CLAUDE.md records being shipped on the day
+  rule 14 was written.
+#}
+{% macro empty(what, parameters='') -%}
+<p class="empty"><span class="empty-mark">(none)</span> <span class="empty-what">no {{ what }}</span>{% if parameters %} <span class="empty-params">&#8592; looked for: {{ parameters }}</span>{% endif %}</p>
+{%- endmacro %}
