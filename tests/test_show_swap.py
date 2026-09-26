@@ -46,11 +46,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 # Both path inserts have to run first: the tool is at the repository root, which
 # conftest.py does not put on sys.path, and the tool's own imports are rootless
 # out of swap_terminal/.
+from config import Config
 from db import SCHEMA, dict_factory
 from report_block import LABEL_WIDTH
 from services.admin_view import halted_swaps, swaps_in_flight
 from services.swap_view import HALTED_STATUSES
-from workers.common import STANDING_COUNTS, root_tool_command
+from workers.common import (
+    STANDING_COUNTS,
+    get_config_dict,
+    root_tool_command,
+)
 from workers.deposit_watcher import HALTED_REVIEW_COMMAND, halted_note
 
 import show_swap
@@ -540,3 +545,75 @@ def test_every_printed_label_leaves_a_gap_before_its_value(halted, capsys):
         checked += 1
         assert line[LABEL_WIDTH + 1] == " ", f"the label column overflows: {line!r}"
     assert checked > 15, f"only {checked} label rows were checked, so this asserted almost nothing"
+
+
+# --- the ready-made command has to run as printed ------------------------------
+#
+# ANOTHER ONE I CHECKED BY HAND AND DID NOT TEST. Two reviewers flagged that
+# detail_command() dropped --db; I fixed it and the mutation run that put the bug
+# back failed NOTHING. Same shape as open_swap.py's apply_command(), which DOES have
+# this test -- so the defect and the gap in coverage were both duplicated.
+
+
+def test_the_detail_command_carries_db_when_one_was_given(tmp_path):
+    """Without it, the printed command answers about Config.DB_PATH instead -- a
+    different database, silently, from a line whose only job is to be copied.
+
+    tmp_path rather than a literal under /tmp: ruff's S108 flags the hardcoded form,
+    and the fixture is the answer rather than a noqa (rule 19). Nothing here touches
+    the filesystem; the path only has to be a path.
+
+    MUTATION: drop the db_path branch in detail_command(). This fails.
+    """
+    command = show_swap.detail_command("s_abc", str(tmp_path / "else.db"))
+
+    assert "--swap s_abc" in command
+    assert f"--db {tmp_path / 'else.db'}" in command
+    assert "<" not in command, "no placeholder may survive into a pasted command"
+
+
+def test_the_detail_command_omits_db_when_none_was_given():
+    """Paired with the test above, so "carry --db" cannot be satisfied by always
+    printing one -- which would name a path the operator never chose."""
+    command = show_swap.detail_command("s_abc")
+
+    assert "--swap s_abc" in command
+    assert "--db" not in command
+
+
+def test_a_database_path_with_a_space_survives_the_printed_command(tmp_path):
+    """shlex.quote, because a path is not guaranteed to be one shell word."""
+    spaced = tmp_path / "two words" / "swap.db"
+
+    command = show_swap.detail_command("s_abc", str(spaced))
+
+    assert f"'{spaced}'" in command, command
+
+
+def test_the_header_says_which_source_the_path_came_from(tmp_path):
+    """It annotated every path as SWAP_DB_PATH, which is false whenever --db won.
+
+    An operator comparing that line against their environment would find it
+    disagreeing and have no way to know the flag had taken precedence.
+    """
+    elsewhere = str(tmp_path / "elsewhere.db")
+
+    # The real config, because header_lines() reads several keys and a hand-built
+    # dict missing one fails as a KeyError rather than as the thing under test --
+    # which is the fixture-narrower-than-reality pattern this session has hit four
+    # times already, arriving here as a two-line test.
+    config = get_config_dict()
+
+    default = show_swap.header_lines(str(Config.DB_PATH), config)
+    flagged = show_swap.header_lines(elsewhere, config)
+
+    # THE ANNOTATION MARKER, not the bare word. Both lines mention SWAP_DB_PATH in
+    # their prose -- "The workers read whatever SWAP_DB_PATH names" is true either way
+    # -- so a substring test passes on the explanation and proves nothing. My first
+    # version of this assertion did exactly that and failed against correct code.
+    assert any("<- SWAP_DB_PATH." in line for line in default)
+    assert any("<- --db." in line for line in flagged)
+    assert not any("<- SWAP_DB_PATH." in line for line in flagged), (
+        "the path came from --db, so annotating it as SWAP_DB_PATH would disagree with the operator's "
+        "own environment and give them no way to know the flag had won"
+    )

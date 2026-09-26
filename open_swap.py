@@ -143,6 +143,7 @@ THE THREE JUDGMENT CALLS, AND WHAT DECIDED THEM.
 from __future__ import annotations
 
 import argparse
+import math
 import shlex
 import sqlite3
 import sys
@@ -161,6 +162,7 @@ from db import SCHEMA, apply_migrations, connect_db, db_session
 from microfortnights import format_duration
 from report_block import CONTINUATION, labeled
 from requests.exceptions import RequestException
+from services.pair_view import allowed_pair_rows
 from services.pricing import fetch_usd_prices
 from services.quote_service import create_quote, validate_pair
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, create_swap, deposit_account
@@ -262,15 +264,86 @@ def parse_pair(text: str) -> tuple[str, str]:
     )
 
 
-def pair_catalog(config: dict) -> str:
-    """Every allowed direction, as one sorted line. Never empty-prints.
+def swappable_amount(raw: str) -> float:
+    """An amount a swap can be created for, or an argparse refusal saying why not.
+
+    type=float ACCEPTED INFINITY. Flagged by review 2026-09-26: `--amount 1e400` is
+    a valid float literal that overflows to inf, and float("nan") parses too, so a
+    swap row was written with expected_input_amount = inf. Everything downstream
+    then compares a deposit against infinity -- the tolerance band is
+    inf * 0.01, which is inf -- so no deposit could ever match and the swap would sit
+    at awaiting_deposit forever with a deposit address the operator had already been
+    handed.
+
+    NOT a second copy of create_quote()'s own `input_amount <= 0` check, which still
+    runs and is still the authority. This refuses at the ARGUMENT, before a database
+    file is created or a price is fetched, and it refuses the two values that check
+    cannot see: inf passes `<= 0`, and so does nan (every comparison with nan is
+    False, so `nan <= 0` is False and it sails through).
+    """
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from error
+    if math.isnan(value):
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} is not-a-number. It would pass every `<= 0` check downstream, because every "
+            f"comparison with nan is False"
+        )
+    if math.isinf(value):
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} overflows to infinity. A swap expecting an infinite deposit can never be "
+            f"satisfied: the tolerance band around it is also infinite"
+        )
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not positive, and a swap deposits something")
+    return value
+
+
+def pair_catalog(config: dict, adapters: dict | None = None) -> str:
+    """Every allowed direction, marked with whether it can actually complete.
 
     Printed in the header of every run so that the terse refusal validate_pair()
-    raises -- "Unsupported trading pair" -- lands next to the list that answers
-    it. Rule 14: echo the parameters that decide the answer.
+    raises -- "Unsupported trading pair" -- lands next to the list that answers it.
+    Rule 14: echo the parameters that decide the answer.
+
+    IT READ ALLOWED_PAIRS ALONE, AND THE PAGE STOPPED DOING THAT HOURS EARLIER.
+    Flagged by review 2026-09-26. ALLOWED_PAIRS is what this terminal is WILLING to
+    swap; the adapters say what it can REACH, and whether the destination can PAY
+    OUT. The swap page learned both the same day -- a pair failing either test is
+    badged DISABLED there -- while this line went on listing all six as if they were
+    equivalent. So an operator reading `pairs allowed BTC->GRC, GRC->XRP, ...` was
+    being handed the same overclaim the page had just stopped making, from the tool
+    written to replace the page.
+
+    Through services/pair_view.allowed_pair_rows(), which is the function the page
+    itself calls, so the two cannot disagree (rule 8). `adapters` is optional only so
+    that a caller with nothing constructed still gets the allowed list rather than a
+    crash; when it is omitted the line says the reachability half was not checked
+    rather than implying it passed.
     """
-    pairs = sorted(f"{source}->{destination}" for source, destination in config["ALLOWED_PAIRS"])
-    return ", ".join(pairs) if pairs else "(none) -- Config.ALLOWED_PAIRS is empty, so no swap of any kind can be priced"
+    if adapters is None:
+        pairs = sorted(f"{source}->{destination}" for source, destination in config["ALLOWED_PAIRS"])
+        joined = ", ".join(pairs)
+        return (
+            f"{joined}  <- from ALLOWED_PAIRS only; whether each is REACHABLE was not checked here"
+            if pairs
+            else "(none) -- Config.ALLOWED_PAIRS is empty, so no swap of any kind can be priced"
+        )
+    rows = allowed_pair_rows(config, adapters)
+    if not rows:
+        return "(none) -- Config.ALLOWED_PAIRS is empty, so no swap of any kind can be priced"
+    marked = ", ".join(
+        f"{row['from_asset']}->{row['to_asset']}" + ("" if row["enabled"] else " (UNAVAILABLE)")
+        for row in rows
+    )
+    unavailable = [row for row in rows if not row["enabled"]]
+    if not unavailable:
+        return marked
+    return (
+        f"{marked}  <- UNAVAILABLE means allowed but not completable from this process: "
+        f"{unavailable[0]['reason']}"
+    )
 
 
 def check_pair(config: dict, from_asset: str, to_asset: str) -> None:
@@ -640,13 +713,18 @@ def apply_swap(args, config: dict, adapters: dict, pair: tuple[str, str], db_pat
     """Price a quote and create the swap. Returns (swap, quote) merged for reporting.
 
     The whole write, and every row in it is written by a service. The two calls
-    are inside ONE db_session so a refusal from create_swap() rolls back -- with
-    one exception worth stating rather than discovering: create_quote() commits
-    its own row before returning, so a swap refused after a successful quote
-    leaves that quote behind. It is inert (nothing reads `quotes` except
-    get_quote_or_raise() by id, and it expires), and the alternative -- holding
-    the quote open across the swap's validation -- would mean reimplementing
-    create_quote() without its commit. Named, not fixed.
+    are inside ONE db_session so a refusal from create_swap() rolls back -- except
+    that create_quote() commits its own row before returning, which db_session's
+    rollback cannot undo.
+
+    THAT USED TO SAY "Named, not fixed", and it is fixed now. Review 2026-09-26
+    pointed at what the note was tolerating: three refusal messages told the operator
+    "Nothing was committed" while an orphaned quotes row sat in the database. The row
+    is inert -- nothing reads `quotes` except get_quote_or_raise() by id, and it
+    expires -- so nothing broke. A message that is wrong about what is in the database
+    is still the failure this session kept paying for, twice in the payout path alone.
+    The quote is deleted in a `finally` when the swap is not created, rather than
+    reimplementing create_quote() without its commit.
     """
     from_asset, to_asset = pair
     print("\n" + labeled("writing to", db_path), flush=True)
@@ -673,7 +751,32 @@ def apply_swap(args, config: dict, adapters: dict, pair: tuple[str, str], db_pat
                                  f"estimated payout {quote['output_amount_estimate']} {to_asset}"),
                 flush=True,
             )
-            swap = create_swap(db, config, adapters, quote["id"], args.payout_address)
+            # THE ORPHAN QUOTE, AND IT WAS NAMED RATHER THAN FIXED.
+            #
+            # create_quote() commits its own row before returning, so every refusal
+            # from create_swap() used to leave that row behind -- and db_session's
+            # rollback cannot reach it, because the commit already happened. This
+            # function's docstring said "Named, not fixed", and review 2026-09-26
+            # pointed out the consequence: three refusal messages then told the
+            # operator "Nothing was committed" while a quotes row sat there.
+            #
+            # A `finally` rather than an except clause, so it covers KeyboardInterrupt
+            # and SystemExit too -- Ctrl-C between the quote and the swap is exactly
+            # when this happens -- and so nothing needs to catch and re-raise.
+            #
+            # The row is INERT (nothing reads `quotes` except get_quote_or_raise() by
+            # id, and it expires), which is why this was survivable. It is still a
+            # write the operator was told did not happen, and a message that is wrong
+            # about what is in the database is the kind of wrong this whole session
+            # has been paying for.
+            swap_created = False
+            try:
+                swap = create_swap(db, config, adapters, quote["id"], args.payout_address)
+                swap_created = True
+            finally:
+                if not swap_created:
+                    db.execute("DELETE FROM quotes WHERE id = ?", (quote["id"],))
+                    db.commit()
     except RequestException as error:
         # BEFORE the ValueError clause, and the order is load-bearing: requests'
         # JSONDecodeError subclasses BOTH RequestException and ValueError
@@ -681,7 +784,7 @@ def apply_swap(args, config: dict, adapters: dict, pair: tuple[str, str], db_pat
         # report a mangled price response as a service refusal.
         raise SwapRefused(
             f"the price feed failed while pricing the quote ({type(error).__name__}: {error}). Nothing was "
-            f"written, or -- if RATE_CACHE_SECONDS is 0 -- at most the quote row was."
+            f"written: the quote row is deleted when the swap is not created."
         ) from error
     except (ValueError, XRPTagAllocationError) as refusal:
         # The services' own refusals, surfaced verbatim. XRPTagAllocationError is
@@ -751,7 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="the direction, e.g. XRP:GRC. Must be in Config.ALLOWED_PAIRS; the header prints the list.",
     )
     parser.add_argument(
-        "--amount", required=True, type=float,
+        "--amount", required=True, type=swappable_amount,
         help="how much of the SOURCE asset you will deposit. This becomes swaps.expected_input_amount, and "
              "the deposit has to match it within AMOUNT_TOLERANCE_PCT or the swap is held for a person.",
     )
@@ -792,7 +895,11 @@ def run(args) -> int:
     print(labeled("amount", f"{args.amount} {from_asset}  <- what you will deposit"), flush=True)
     print(labeled("payout address", f"{args.payout_address}  <- where {to_asset} is sent; FINAL once the "
                                     f"swap exists"), flush=True)
-    print(labeled("pairs allowed", f"{pair_catalog(config)}  <- Config.ALLOWED_PAIRS"), flush=True)
+    print(
+        labeled("pairs allowed", f"{pair_catalog(config, adapters)}  <- ALLOWED_PAIRS, and whether this "
+                                 f"process can reach and pay out each"),
+        flush=True,
+    )
     print(labeled("adapters here", ", ".join(sorted(adapters))
                   or "(none) -- no chain is configured in this process"), flush=True)
 

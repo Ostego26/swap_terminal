@@ -19,6 +19,7 @@ end-to-end tests read the swap back out of SQLite and compare the printed block
 against THAT.
 """
 
+import argparse
 import sqlite3
 import sys
 from pathlib import Path
@@ -51,6 +52,7 @@ from open_swap import (
     pair_catalog,
     parse_pair,
     report_lines,
+    swappable_amount,
 )
 
 # A real XRP classic address (checksum valid) and a Gridcoin-shaped payout
@@ -211,9 +213,52 @@ def test_a_pair_that_does_not_name_exactly_two_assets_refuses(text):
 
 
 def test_the_allowed_pairs_are_listed_sorted_for_the_header():
+    """Sorted, and SAYING which question it answered.
+
+    With no adapters this can only read ALLOWED_PAIRS, and it now says so rather than
+    presenting the list as if reachability had been checked -- which is the overclaim
+    review found on 2026-09-26: the swap page had learned to mark a pair DISABLED when
+    its chain is unreachable or cannot pay out, and this line went on listing all six
+    as equivalent, from the tool written to replace that page.
+    """
     catalog = pair_catalog({"ALLOWED_PAIRS": {("XRP", "GRC"), ("GRC", "BTC")}})
 
-    assert catalog == "GRC->BTC, XRP->GRC"
+    assert catalog.startswith("GRC->BTC, XRP->GRC")
+    assert "not checked here" in catalog, "it must not imply the reachability half passed"
+
+
+def test_an_unreachable_pair_is_marked_unavailable_with_the_reason():
+    """The whole point of the fix. MUTATION: drop the adapters branch and this fails
+    while the no-adapters test above keeps passing, which is why both exist."""
+    class Payer:
+        can_spend = True
+        payout_refusal = ""
+
+    class ViewOnly:
+        can_spend = False
+        payout_refusal = "cannot pay out in this test"
+
+    config = {"ALLOWED_PAIRS": {("XRP", "GRC"), ("GRC", "XRP")}, "RPC": {}}
+
+    catalog = pair_catalog(config, {"XRP": ViewOnly(), "GRC": Payer()})
+
+    assert "XRP->GRC" in catalog
+    assert "GRC->XRP (UNAVAILABLE)" in catalog, catalog
+    assert "cannot pay out in this test" in catalog, "the reason must travel with the mark"
+
+
+def test_every_pair_reachable_prints_no_unavailable_note():
+    """So the mark cannot pass by always appearing."""
+    class Payer:
+        can_spend = True
+        payout_refusal = ""
+
+    config = {"ALLOWED_PAIRS": {("XRP", "GRC")}, "RPC": {}}
+
+    catalog = pair_catalog(config, {"XRP": Payer(), "GRC": Payer()})
+
+    assert catalog == "XRP->GRC"
+    assert "UNAVAILABLE" not in catalog
 
 
 def test_an_empty_pair_list_says_so_rather_than_printing_nothing():
@@ -795,3 +840,161 @@ def test_a_locked_database_is_reported_as_a_lock_and_not_a_traceback(monkeypatch
     error = capsys.readouterr().err
     assert "SQLite refused the write" in error
     assert "database is locked" in error
+
+
+# --- the orphan quote a refusal used to leave behind ---------------------------
+
+# A DEPOSIT THAT WOULD PAY OUT NOTHING, which is also the only refusal that reaches
+# create_swap() after create_quote() has committed -- every earlier check (the pair,
+# the chains, the payout address, the deposit account) runs before the quote is
+# priced, deliberately. So these two tests share one path: the zero-payout refusal
+# from item 3 is what exposes the orphan quote from item 1.
+TINY_AMOUNT = "0.0000001"
+
+
+def test_a_deposit_that_would_pay_out_nothing_is_refused(monkeypatch, tmp_path, capsys):
+    """create_quote() computes max(gross * (1 - fee) - reserve, 0.0), so a small enough
+    input prices to exactly 0.0 -- the GRC network fee reserve alone exceeds the whole
+    payout. This used to print "payout (est.) 0.0 GRC <- what payout_worker
+    broadcasts" and exit 0, handing out a deposit instruction for a swap that could
+    only ever deliver nothing.
+
+    Refused in create_swap() rather than here, because the web form reaches the same
+    arithmetic. MUTATION: remove that guard and this fails.
+    """
+    db_path = tmp_path / "zero.db"
+
+    stub_prices(monkeypatch)
+    code = run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", TINY_AMOUNT, "--payout-address", GRC_ADDRESS,
+         "--db", str(db_path), "--apply"],
+    )
+
+    assert code == 2
+    message = capsys.readouterr().err
+    assert "which is nothing" in message, message
+    assert "Deposit more XRP" in message, "say what to change"
+
+
+def test_a_refused_swap_leaves_no_quote_row(monkeypatch, tmp_path):
+    """create_quote() COMMITS before returning, so db_session's rollback cannot undo it.
+
+    Every refusal from create_swap() used to leave that row behind while three refusal
+    messages said "Nothing was committed". Flagged by review 2026-09-26; the docstring
+    had it as "Named, not fixed".
+
+    MUTATION: remove the `finally` that deletes it. This test alone fails, on the
+    quotes count -- the swaps count was already 0.
+    """
+    db_path = tmp_path / "orphan.db"
+
+    stub_prices(monkeypatch)
+    code = run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", TINY_AMOUNT, "--payout-address", GRC_ADDRESS,
+         "--db", str(db_path), "--apply"],
+    )
+
+    assert code == 2, "the swap must be refused"
+    connection = sqlite3.connect(db_path)
+    try:
+        quotes = connection.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
+        swaps = connection.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
+    finally:
+        connection.close()
+    assert swaps == 0, "no swap row, which was already true"
+    assert quotes == 0, (
+        "the quote row create_quote() committed must be deleted when the swap is not created -- "
+        "otherwise the refusal's claim that nothing was committed is false"
+    )
+
+
+def test_a_successful_swap_keeps_its_quote_row(monkeypatch, tmp_path):
+    """So the delete cannot pass by removing the quote every time."""
+    db_path = tmp_path / "kept.db"
+
+    stub_prices(monkeypatch)
+    code = run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+         "--db", str(db_path), "--apply"],
+    )
+
+    assert code == 0
+    connection = sqlite3.connect(db_path)
+    try:
+        quotes = connection.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
+    finally:
+        connection.close()
+    assert quotes == 1, "the quote that priced a created swap must survive"
+
+
+def test_the_refusal_does_not_claim_a_quote_row_survives(capsys):
+    """The message was the other half of the defect: it offered 'at most the quote row
+    was' written as a caveat. There is no such row any more, so the caveat would be a
+    new inaccuracy pointing the other way."""
+    source = (Path(__file__).resolve().parent.parent / "open_swap.py").read_text()
+
+    assert "at most the quote row was" not in source
+    assert "the quote row is deleted when the swap is not created" in source
+
+
+# --- an amount a swap can be created for ---------------------------------------
+#
+# type=float ACCEPTED INFINITY, and I checked that by hand in a shell and shipped it
+# without a test. The mutation run is what said so: putting `type=float` back failed
+# NOTHING. A fix verified only in a terminal is a fix that leaves with the terminal.
+
+
+@pytest.mark.parametrize(
+    ("raw", "needle"),
+    [
+        ("1e400", "overflows to infinity"),
+        ("-1e400", "overflows to infinity"),
+        ("inf", "overflows to infinity"),
+        ("nan", "not-a-number"),
+        ("-1", "is not positive"),
+        ("0", "is not positive"),
+        ("abc", "is not a number"),
+        ("", "is not a number"),
+    ],
+)
+def test_an_unswappable_amount_is_refused_at_the_argument(raw, needle):
+    """Before a database file is created or a price is fetched.
+
+    nan and inf are the two this exists for, and neither is caught by
+    create_quote()'s own `input_amount <= 0`: inf passes it, and every comparison
+    with nan is False so nan passes it too. A swap written with
+    expected_input_amount = inf can never be satisfied, because its tolerance band is
+    also infinite.
+    """
+    with pytest.raises(argparse.ArgumentTypeError, match=needle):
+        swappable_amount(raw)
+
+
+@pytest.mark.parametrize("raw", ["1", "1.0", "0.5", "1e-6", "1000000"])
+def test_an_ordinary_amount_is_accepted(raw):
+    """So the converter cannot pass by refusing everything."""
+    assert swappable_amount(raw) == float(raw)
+
+
+def test_the_parser_itself_refuses_an_infinite_amount(capsys):
+    """THROUGH THE PARSER, because testing the converter alone does not pin its use.
+
+    The mutation run made this necessary twice over: putting `type=float` back failed
+    nothing when the only tests called swappable_amount() directly, and it still
+    failed nothing when the replacement asserted on the exit code -- argparse exits 2
+    and so does every later refusal, so `1e400` reaching the checks as `inf` looks
+    identical from outside. The MESSAGE is what distinguishes them.
+    """
+    with pytest.raises(SystemExit) as caught:
+        open_swap.main(["--pair", "XRP:GRC", "--amount", "1e400", "--payout-address", GRC_ADDRESS])
+
+    assert caught.value.code == 2
+    message = capsys.readouterr().err
+    assert "--amount" in message, message
+    assert "overflows to infinity" in message, (
+        f"the parser is not using swappable_amount -- an infinite amount reached the checks as a "
+        f"number instead of being refused here. stderr was: {message!r}"
+    )

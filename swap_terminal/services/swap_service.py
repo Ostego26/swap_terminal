@@ -198,6 +198,27 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             f"ALLOWED_PAIRS and both chains are reachable -- but a swap that cannot be paid out takes "
             f"a deposit it can never settle. Nothing was written."
         )
+    # A SWAP THAT PAYS OUT ZERO TAKES A DEPOSIT AND DELIVERS NOTHING.
+    #
+    # create_quote() computes output_amount_estimate as
+    # max(gross * (1 - fee) - network_fee_reserve, 0.0), so a small enough input
+    # produces exactly 0.0 -- the reserve alone can exceed the whole payout. Flagged
+    # by review 2026-09-26: open_swap.py then printed
+    # "payout (est.) 0.0 GRC  <- what payout_worker broadcasts" and exited 0, so the
+    # deposit instruction went out for a swap that could only ever pay nothing.
+    #
+    # Refused HERE and not in the CLI, because the web form reaches the same
+    # arithmetic. This is not a pricing change: the estimate is already what
+    # create_quote() computed and nothing here alters a rate, a fee or a reserve. It
+    # declines to CREATE a swap whose own quote says the customer receives zero.
+    if float(quote["output_amount_estimate"]) <= 0:
+        raise ValueError(
+            f"No swap was created: {quote['input_amount']} {from_asset} prices to a payout of "
+            f"{quote['output_amount_estimate']} {to_asset}, which is nothing. The "
+            f"{quote['network_fee_reserve']} {to_asset} network fee reserve and the {quote['fee_bps']} bps "
+            f"fee together exceed the gross output at this rate. Deposit more {from_asset}. Nothing was "
+            f"written."
+        )
     if not adapters[to_asset].validate_address(payout_address):
         raise ValueError(f"Invalid {to_asset} payout address")
     swap_id = new_id("s")

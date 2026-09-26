@@ -95,6 +95,7 @@ prints is another run of this same read-only file.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sqlite3
 import sys
 import time
@@ -133,7 +134,7 @@ class ShowRefused(RuntimeError):
 SELF = "show_swap.py"
 
 
-def detail_command(swap_id: str) -> str:
+def detail_command(swap_id: str, db_path: str = "") -> str:
     """The command that shows ONE swap, with the real id already in it.
 
     No placeholder, ever. A `<swap id>` in a printed command has cost this
@@ -142,6 +143,17 @@ def detail_command(swap_id: str) -> str:
     open_swap.next_command() has its own test for the same property and why this
     has one too: a literal `<` in what this returns is a failure.
     """
+    # --db IS PART OF "pastes from anywhere", not an extra. Flagged by two reviewers
+    # 2026-09-26: this printed `show_swap.py --swap <id>` with no --db, so after a
+    # `--db <somewhere>` run the ready-made command answered about Config.DB_PATH
+    # instead -- a different database, silently, from a line whose only job is to be
+    # copied. open_swap.py's apply_command() and next_command() had the identical
+    # defect and were fixed in the same pass.
+    #
+    # Empty when the caller was not given one, so the common command stays short.
+    # shlex.quote because a database path may contain a space.
+    if db_path:
+        return root_tool_command(SELF, "--swap", swap_id, "--db", shlex.quote(db_path))
     return root_tool_command(SELF, "--swap", swap_id)
 
 
@@ -162,6 +174,17 @@ def amount_text(value, asset: str, absent: str) -> str:
     return f"{value} {asset}"
 
 
+def _db_source(db_path: str) -> str:
+    """Whether this path came from --db or from SWAP_DB_PATH. Says which, not both.
+
+    The header annotated every path as "SWAP_DB_PATH", which is false whenever --db
+    was passed -- flagged by review 2026-09-26. An operator comparing this line
+    against their environment would find it disagreeing and have no way to know the
+    flag had won.
+    """
+    return "--db" if db_path != str(Config.DB_PATH) else "SWAP_DB_PATH"
+
+
 def header_lines(db_path: str, config: dict) -> list[str]:
     """What this run is about to read, printed BEFORE it reads it (rule 14).
 
@@ -172,8 +195,8 @@ def header_lines(db_path: str, config: dict) -> list[str]:
     tolerance = float(config["AMOUNT_TOLERANCE_PCT"])
     return [
         "show swap -- READ-ONLY. It changes no status, resolves nothing, writes no row and creates no file.",
-        labeled("database", f"{db_path}  <- SWAP_DB_PATH. The workers read this same file; a swap in any "
-                            f"other database is invisible to both them and this"),
+        labeled("database", f"{db_path}  <- {_db_source(db_path)}. The workers read whatever SWAP_DB_PATH "
+                            f"names; a swap in any other database is invisible to both them and this"),
         labeled("halted means", f"{', '.join(HALTED_STATUSES)}  <- exactly what deposit_watcher's "
                                 f"HALTED_for_review counts, from services/swap_view.HALTED_STATUSES"),
         labeled("tolerance", f"AMOUNT_TOLERANCE_PCT={tolerance} -> {tolerance * 100:.2f}% either side of "
@@ -182,7 +205,7 @@ def header_lines(db_path: str, config: dict) -> list[str]:
     ]
 
 
-def halted_swap_block(row: dict, now_iso: str) -> list[str]:
+def halted_swap_block(row: dict, now_iso: str, db_path: str = "") -> list[str]:
     """One halted swap, as many lines as it takes to answer "why, and what now".
 
     Every figure comes from the row admin_view.halted_swaps() returned, so this
@@ -229,11 +252,11 @@ def halted_swap_block(row: dict, now_iso: str) -> list[str]:
                           f" was the estimate; NOTHING has been broadcast. No worker advances a swap in this "
                           f"status -- it is outside deposit_service.ACTIVE_STATUSES and payout_service only "
                           f"claims payout_pending"),
-        labeled("full detail", f"{detail_command(row['id'])}"),
+        labeled("full detail", f"{detail_command(row['id'], db_path)}"),
     ]
 
 
-def halted_lines(rows: list[dict], now_iso: str, counts: list[dict]) -> list[str]:
+def halted_lines(rows: list[dict], now_iso: str, counts: list[dict], db_path: str = "") -> list[str]:
     """The whole halted section, including the answer when there are none.
 
     "(none)" is a result and a blank gap is not (rule 14) -- but an empty
@@ -250,7 +273,7 @@ def halted_lines(rows: list[dict], now_iso: str, counts: list[dict]) -> list[str
             f"Oldest first.",
         ]
         for row in rows:
-            lines.extend(halted_swap_block(row, now_iso))
+            lines.extend(halted_swap_block(row, now_iso, db_path))
         return lines
 
     tally = ", ".join(f"{row['status']} {row['swaps']}" for row in counts) or "(no swaps at all in this database)"
@@ -421,7 +444,7 @@ def read_report(db_path: str, swap_id: str, now_iso: str) -> list[str]:
                 )
             return swap_lines(swap_display(swap, now_iso), now_iso)
         rows = halted_swaps(connection, now_iso)
-        return halted_lines(rows, now_iso, status_counts(connection)) + resolution_lines(rows)
+        return halted_lines(rows, now_iso, status_counts(connection), db_path) + resolution_lines(rows)
     except sqlite3.OperationalError as error:
         # NAMED, not broad. This is what a database file with no `swaps` table
         # raises ("no such table: swaps"), which is an ordinary state for a file
