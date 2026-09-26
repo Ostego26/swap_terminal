@@ -196,6 +196,12 @@ from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
 
+# The Console moved to swap_terminal/step_console.py on 2026-09-26, when
+# grc_htlc_verify.py became the third verifier wanting the same output
+# conventions. Two copies of rule 6's unit and rule 14's `(none)` would drift
+# and each would look right in its own file (rule 8).
+from step_console import Console  # noqa: E402 -- same
+
 # Ripple's epoch is 2000-01-01T00:00:00Z, which is this many seconds after the
 # Unix epoch. CancelAfter and FinishAfter are in RIPPLE seconds, and handing
 # XRPL a Unix timestamp instead produces an escrow whose timelock expired 30
@@ -242,52 +248,6 @@ def finish_fee_drops(fulfillment_hex: str) -> int:
 def ripple_time(unix_seconds: float) -> int:
     """A Unix timestamp as XRPL's own clock. See RIPPLE_EPOCH_OFFSET_SECONDS."""
     return int(unix_seconds) - RIPPLE_EPOCH_OFFSET_SECONDS
-
-
-class Console:
-    """Announce before acting, print what was expected beside what arrived.
-
-    A second small console rather than regtest/console.py's: that one is built
-    around nine steps on two chains with a spawned daemon, and importing it here
-    would drag its ChainConfig with it. The OUTPUT CONVENTIONS are the same on
-    purpose -- microfortnights with seconds in parentheses (rule 6), `(none)` for
-    an empty result (rule 14), and every assertion printing got beside expected.
-    """
-
-    def __init__(self) -> None:
-        self.started = time.monotonic()
-        self.results: list[tuple[str, bool]] = []
-
-    def _elapsed(self) -> str:
-        return format_duration(time.monotonic() - self.started)
-
-    def banner(self, text: str) -> None:
-        print("\n" + "=" * 78 + f"\n{text}\n" + "=" * 78, flush=True)
-
-    def step(self, number: int, title: str) -> None:
-        print(f"\nstep {number}/9  {title}   [{self._elapsed()}]", flush=True)
-
-    def say(self, text: str) -> None:
-        print(f"          {text}", flush=True)
-
-    def check(self, label: str, got: object, expected: object, ok: bool) -> bool:
-        shown = got if got not in (None, "", [], {}) else "(none)"
-        print(f"          {'OK  ' if ok else 'FAIL'}  {label}: got={shown}  expected={expected}  "
-              f"[{self._elapsed()}]", flush=True)
-        self.results.append((label, ok))
-        return ok
-
-    def summary(self) -> int:
-        self.banner("SUMMARY")
-        failures = [label for label, ok in self.results if not ok]
-        print(f"  OK={len(self.results) - len(failures)}  FAIL={len(failures)}", flush=True)
-        if failures:
-            print("\n  unexpected failures, in the order they happened:", flush=True)
-            for label in failures:
-                print(f"    - {label}", flush=True)
-        else:
-            print("\n  unexpected failures: (none)", flush=True)
-        return 1 if failures else 0
 
 
 def escrow_create_tx(sender: str, receiver: str, drops: int, condition: str, cancel_after: int) -> dict:

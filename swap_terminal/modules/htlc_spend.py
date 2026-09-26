@@ -129,6 +129,21 @@ OP_0 = b"\x00"
 # overestimating by one byte overpays a fee by half a satoshi and
 # UNDERestimating would size a fee from a transaction smaller than the one
 # actually broadcast.
+# A sha256 digest, in bytes. Named because preimage_from_scriptsig() refuses a
+# hash that is not this length: a hex string is 64 characters and would never
+# match a digest, so the caller would read "the counterparty has not revealed
+# the preimage" off a transaction that carries it.
+SHA256_DIGEST_BYTES = 32
+
+# The push opcodes, named because script_pushes() compares against all three and
+# a transposed pair silently changes which bytes it reads off a chain. 0x01..0x4b
+# is a direct length; OP_PUSHDATA1/2/4 carry a 1, 2 or 4 byte little-endian
+# length after the opcode. Everything above OP_PUSHDATA4 is an operation, not a
+# push.
+OP_PUSHDATA1 = 0x4C
+OP_PUSHDATA4 = 0x4E
+OP_PUSHDATA_LENGTH_WIDTH = {0x4C: 1, 0x4D: 2, 0x4E: 4}
+
 MAX_DER_SIGNATURE_WITH_HASHTYPE = 73
 
 # Base58Check WIF payload: 1 version byte + 32 key bytes, plus a trailing 0x01
@@ -618,3 +633,81 @@ def spend_key_matches_script(public_key: bytes, redeem_script: bytes) -> bool:
     authority on which branch the key is for.
     """
     return hash160(public_key) in redeem_script
+
+
+def script_pushes(script: bytes) -> list[bytes]:
+    """Every data push in a script, in order, ignoring opcodes.
+
+    Deliberately not a full script parser: it walks the push encodings (a direct
+    length byte below 0x4c, then OP_PUSHDATA1/2/4) and skips anything else. That
+    is enough to read a scriptSig, which is nothing but pushes and a branch
+    selector, and it is not enough to evaluate a script -- which is correct,
+    because nothing in this repository should be evaluating one.
+
+    A malformed or truncated script yields the pushes it could read rather than
+    raising. The caller here is reading somebody else's transaction off a public
+    chain, so the bytes are UNTRUSTED input: a length byte claiming more data
+    than remains is a thing an attacker can put on a chain for free, and the
+    answer to it is "no push was found", not an exception in a swap.
+    """
+    pushes: list[bytes] = []
+    index = 0
+    while index < len(script):
+        opcode = script[index]
+        index += 1
+        if opcode == 0 or opcode > OP_PUSHDATA4:  # OP_0 and every non-push opcode
+            continue
+        if opcode < OP_PUSHDATA1:
+            length = opcode
+        else:
+            width = OP_PUSHDATA_LENGTH_WIDTH[opcode]
+            if index + width > len(script):
+                break
+            length = int.from_bytes(script[index:index + width], "little")
+            index += width
+        if index + length > len(script):
+            break
+        pushes.append(script[index:index + length])
+        index += length
+    return pushes
+
+
+def preimage_from_scriptsig(script_sig: bytes, secret_hash: bytes) -> bytes | None:
+    """The preimage a counterparty revealed on chain, or None if it is not there.
+
+    THIS IS WHAT MAKES A CROSS-CHAIN SWAP ATOMIC RATHER THAN TRUSTING, and it is
+    the one piece that was missing while both legs' primitives were verified
+    separately. The sequence is: the initiator claims the participant's leg,
+    which REQUIRES pushing the preimage into a scriptSig that lands in a block;
+    the participant then reads it from that block and claims the initiator's leg
+    with it. Neither side ever sends the other a secret, and neither has to be
+    trusted to. Both legs commit to the same sha256 -- the BTC/LTC/GRC scripts
+    through OP_SHA256, the XRPL escrow through a PREIMAGE-SHA-256 condition -- so
+    the value read here opens the other chain unchanged.
+
+    IT VERIFIES THE HASH, which is the whole difference between this and "grab
+    the 32-byte push". A claim scriptSig is `<sig> <preimage> OP_TRUE
+    <redeemScript>`, and a signature is not 32 bytes, so a naive length filter
+    would usually be right -- usually. The redeem script, a compressed pubkey and
+    a DER signature are all attacker-influenced lengths on a public chain, and a
+    swap that claimed its leg with the wrong 32 bytes would burn its fee and
+    leave the real preimage unused while its own timelock ran down. So the hash
+    decides, not the length: every push is hashed and the one that matches is
+    returned.
+
+    Returns None rather than raising when no push matches. A transaction that
+    does not carry the preimage is an ordinary thing to encounter -- it may be a
+    refund, or an unrelated spend of a different output -- and a watcher polling
+    a chain must be able to say "not this one, keep looking" without an
+    exception per block.
+    """
+    if len(secret_hash) != SHA256_DIGEST_BYTES:
+        raise ValueError(
+            f"a secret hash is {SHA256_DIGEST_BYTES} bytes and this one is {len(secret_hash)}. Comparing against "
+            "a truncated or hex-encoded hash would never match, and the caller would conclude the counterparty "
+            "had not revealed a preimage that is sitting in front of it."
+        )
+    for push in script_pushes(script_sig):
+        if hashlib.sha256(push).digest() == secret_hash:
+            return push
+    return None
