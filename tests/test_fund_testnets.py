@@ -27,6 +27,7 @@ from fund_testnets import (
     XRP_FAUCET,
     block_subsidy,
     describe_regtest_yield,
+    regtest_yield,
     secret_destination,
     selected_chains,
 )
@@ -205,10 +206,10 @@ def test_the_subsidy_reproduces_the_btc_balance_the_operator_saw():
     exactly one coinbase. The reported balance was 12.5.
     """
     assert block_subsidy(391) == 12.5
+    assert regtest_yield(390, 101)[0] == 12.5
     line = describe_regtest_yield(390, 101)
     assert "12.50000000/block" in line
     assert "2 halving(s)" in line
-    assert "matures 1 reward(s)" in line
 
 
 def test_the_subsidy_reproduces_the_ltc_balance_the_operator_saw():
@@ -247,7 +248,6 @@ def test_a_wiped_chain_starts_at_the_full_subsidy():
     assert block_subsidy(0) == 50.0
     line = describe_regtest_yield(0, 200)
     assert "50.00000000/block" in line
-    assert "matures 100 reward(s)" in line
 
 
 def test_mining_fewer_than_maturity_matures_nothing():
@@ -256,9 +256,8 @@ def test_mining_fewer_than_maturity_matures_nothing():
     100 blocks leaves every coinbase one confirmation short, which is the most
     confusing possible outcome: the blocks exist and the balance is zero.
     """
-    line = describe_regtest_yield(0, 100)
-    assert "matures 0 reward(s)" in line
-    assert "= 0.00000000 spendable" in line
+    assert regtest_yield(0, 100) == (0.0, sum(block_subsidy(h) for h in range(1, 101)))
+    assert "0.00000000 spendable" in describe_regtest_yield(0, 100)
 
 
 def test_the_negligible_threshold_is_a_whole_coin():
@@ -319,3 +318,37 @@ def test_grc_mainnet_is_off_by_default_in_the_dispatch_table():
     assert callable(grc[2])
     # Args(all=True) leaves grc_mainnet False, which is what the runner closes over.
     assert Args(all=True).grc_mainnet is False
+
+
+def test_the_yield_reproduces_the_operators_200_block_run_exactly():
+    """THE MEASUREMENT THIS FUNCTION EXISTS TO MATCH.
+
+    Their wiped LTC chain mined 200 blocks and the daemon reported 5000.0
+    spendable and 3725.0 immature. Both must fall out of the arithmetic, not
+    just the first -- the first was right under the old multiply too, by the
+    accident that blocks 1-100 all predate the halving at 150.
+    """
+    assert regtest_yield(0, 200) == (5000.0, 3725.0)
+
+
+def test_summing_and_multiplying_diverge_once_the_matured_range_spans_a_halving():
+    """Where the old estimate would have LIED, and by how much.
+
+    400 blocks from a fresh chain matures heights 1-300, which crosses two
+    halvings. Summing gives 11212.5; multiplying 300 x 50 gives 15000.0 -- an
+    overstatement of 3787.5 told to someone choosing how many blocks to mine.
+    """
+    spendable, _ = regtest_yield(0, 400)
+    assert spendable == 11212.5
+    naive = 300 * block_subsidy(1)
+    assert naive == 15000.0
+    assert naive - spendable == 3787.5
+
+
+def test_the_immature_half_is_reported_not_just_the_spendable_half():
+    """100 fresh rewards are invisible in getbalance, which reads as failed mining."""
+    spendable, immature = regtest_yield(0, 200)
+    assert immature > 0
+    line = describe_regtest_yield(0, 200)
+    assert f"{spendable:.8f} spendable" in line
+    assert f"{immature:.8f} immature" in line

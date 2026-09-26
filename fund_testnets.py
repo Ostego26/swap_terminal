@@ -108,19 +108,45 @@ def block_subsidy(height: int) -> float:
     return REGTEST_INITIAL_SUBSIDY / (2 ** (int(height) // REGTEST_HALVING_INTERVAL))
 
 
+def regtest_yield(height_before: int, blocks: int) -> tuple[float, float]:
+    """(spendable, immature) that mining `blocks` from `height_before` produces.
+
+    SUMS the per-block subsidy rather than multiplying by the one at the start,
+    and that is not pedantry. The first version multiplied, which is correct
+    only while every matured block shares one subsidy -- true for the operator's
+    200-block run purely because blocks 1-100 all predate the halving at height
+    150, so it printed the right answer for the wrong reason.
+
+    Checked against that run: summing gives 5000.0 spendable and 3725.0
+    immature, and the daemon reported exactly those two figures. Checked
+    against where multiplying would have LIED: 400 blocks from a fresh chain
+    matures 11212.5, where multiplying claims 15000.0 -- an overstatement of
+    3787.5 told to an operator deciding how many blocks to mine.
+
+    A coinbase at height h is spendable once the tip reaches h + 100, so after
+    mining to `tip` the newly mined heights up to tip-100 are mature.
+    """
+    first = height_before + 1
+    tip = height_before + blocks
+    mature_through = tip - COINBASE_MATURITY_BLOCKS + 1
+    spendable = sum(block_subsidy(h) for h in range(first, min(mature_through, tip) + 1))
+    immature = sum(block_subsidy(h) for h in range(max(first, mature_through + 1), tip + 1))
+    return spendable, immature
+
+
 def describe_regtest_yield(height_before: int, blocks: int) -> str:
-    """What mining `blocks` from `height_before` will actually be worth, and why.
+    """What mining `blocks` from `height_before` will be worth, and why.
 
     Rule 14: state what the number means, next to the number. A bare
     "balance 0.00076293" after mining 101 blocks reads as a failure; the same
     figure beside "16 halvings" reads as a chain that needs wiping.
     """
     subsidy = block_subsidy(height_before + 1)
-    matured = max(0, blocks - COINBASE_MATURITY_BLOCKS + 1)
     halvings = (height_before + 1) // REGTEST_HALVING_INTERVAL
+    spendable, immature = regtest_yield(height_before, blocks)
     line = (
         f"subsidy {subsidy:.8f}/block after {halvings} halving(s) at height {height_before + 1}; "
-        f"{blocks} blocks matures {matured} reward(s) = {matured * subsidy:.8f} spendable"
+        f"{blocks} blocks yields {spendable:.8f} spendable + {immature:.8f} immature"
     )
     if subsidy < NEGLIGIBLE_SUBSIDY:
         line += (
