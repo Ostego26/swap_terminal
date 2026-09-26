@@ -44,6 +44,7 @@ and whether the debugger is on, BEFORE serving, because a Flask process that is
 listening and one that is wedged look identical from outside.
 """
 
+import logging
 import os
 from collections.abc import Mapping
 
@@ -52,6 +53,7 @@ from config import Config
 from db import close_db, init_db
 from flask import Flask
 from microfortnights import format_duration
+from network_target import CHAIN_PORTS, mainnet_chains, startup_lines
 from routes.health import bp as health_bp
 from routes.quotes import bp as quotes_bp
 from routes.rates import bp as rates_bp
@@ -125,6 +127,11 @@ def exposure_warnings(host: str, debug: bool) -> list[str]:
     return warnings
 
 
+# Named the same way services/deposit_service.py and payout_service.py do, so a
+# reader meets one convention rather than two.
+logger = logging.getLogger(__name__)
+
+
 def create_app() -> Flask:
     app = Flask(__name__, static_folder="static", template_folder="templates")
     for key in dir(Config):
@@ -135,6 +142,34 @@ def create_app() -> Flask:
     # exactly where that drifts: a SOL adapter added here and not there gives
     # an HTTP process that hands out deposit addresses no watcher is polling.
     app.config["ADAPTERS"] = build_adapters(app.config["RPC"])
+
+    # SAY WHICH CHAIN EACH ADAPTER IS ON, at startup, every time.
+    #
+    # Added 2026-09-26 after the operator reported "we're still pulling from grc
+    # mainnet wallet and not the testnet wallet." They were right, and the reason
+    # it went unnoticed for as long as it did is that nothing ever said. The
+    # mainnet default was written in config.py's module header, which is not
+    # somewhere anyone looks while a process boots, and refresh_wallet_inventory()
+    # polling a mainnet wallet every cycle produced no error at all -- it worked.
+    # Rule 14: announce before, not only after, and echo the parameters that
+    # decide the answer, because pasted output is read a day later.
+    #
+    # Logged rather than printed so it lands in the gunicorn log where an
+    # operator actually looks, and at WARNING for a mainnet chain so it is
+    # visible at the default log level. A mainnet endpoint is not an error -- the
+    # cost-basis tool needs one -- so it is not logged as one; it is logged as
+    # the thing you must have meant to do.
+    for line in startup_lines(app.config["RPC"]):
+        logger.info("chain target  %s", line)
+    on_mainnet = mainnet_chains(app.config["RPC"])
+    if on_mainnet:
+        logger.warning(
+            "MAINNET RPC configured for %s -- real money. Set %s to a test port if that was "
+            "not intended.",
+            ", ".join(on_mainnet),
+            ", ".join(CHAIN_PORTS[c].port_variable for c in on_mainnet),
+        )
+
     app.teardown_appcontext(close_db)
     app.register_blueprint(health_bp)
     app.register_blueprint(quotes_bp)

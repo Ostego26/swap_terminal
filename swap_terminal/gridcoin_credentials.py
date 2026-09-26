@@ -55,6 +55,8 @@ it rather than concluding it was missed.
 
 import os
 
+from network_target import CHAIN_PORTS
+
 # In resolution order, most specific first. The order is the decision: a host
 # that has both set is telling you the more explicit one is the one it means.
 GRIDCOIN_PASSWORD_VARIABLES = (
@@ -76,9 +78,24 @@ GRIDCOIN_URL_VARIABLES = (
 # Gridcoin's test chain. Mainnet is 15715. The two differ by four characters
 # and by whether the coins are real, which is why every message in this module
 # that names one names the other.
-TESTNET_RPC_URL = "http://127.0.0.1:25779"
-MAINNET_RPC_PORT = 15715
+#
+# DERIVED, not respelled (rule 8). `MAINNET_RPC_PORT = 15715` used to be written
+# out here AND in transactions.py, and the two files disagreed about what a test
+# chain is: transactions.py knew {25715, 25779, 9876} while this file knew only
+# 25779, so a wallet on 25715 was a recognized test chain to one and an unknown
+# port to the other. network_target.CHAIN_PORTS is now the one table and both
+# read from it. The names are kept because callers and tests use them.
 TESTNET_RPC_PORT = 25779
+MAINNET_RPC_PORT = CHAIN_PORTS["GRC"].mainnet_port
+TESTNET_RPC_URL = f"http://127.0.0.1:{TESTNET_RPC_PORT}"
+
+# Asserted at import rather than trusted: 25779 is the port the operator's
+# running testnet daemon uses, and this module hands it out as a default URL. If
+# the shared table ever stops calling it a test port, that is a contradiction
+# worth failing on here rather than discovering by sending to the wrong chain.
+assert TESTNET_RPC_PORT in CHAIN_PORTS["GRC"].test_ports, (  # noqa: S101 -- checked: an import-time invariant between two modules, not input validation; the alternative is a silent disagreement about which chain 25779 is
+    f"network_target.CHAIN_PORTS no longer lists {TESTNET_RPC_PORT} as a Gridcoin test port"
+)
 
 
 class GridcoinCredentialsMissing(RuntimeError):

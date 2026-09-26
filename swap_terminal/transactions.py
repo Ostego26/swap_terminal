@@ -56,6 +56,7 @@ import requests
 import yfinance as yf
 from dotenv import load_dotenv
 from gridcoin_credentials import gridcoin_rpc_password
+from network_target import CHAIN_PORTS
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -99,8 +100,19 @@ FORCE_REFRESH = False
 MIN_LOCAL_TX_COUNT = 50
 # Gridcoin's conventional RPC ports, so the banner below can say which chain it
 # is about to bill you for rather than printing a bare number.
-MAINNET_RPC_PORT = 15715
-KNOWN_TESTNET_RPC_PORTS = frozenset({25715, 25779, 9876})
+#
+# DERIVED from network_target.CHAIN_PORTS rather than written out here (rule 8).
+# Both numbers used to be literals in this file AND in gridcoin_credentials.py,
+# and the two copies disagreed: this file knew three test ports, that one knew
+# only 25779. Verified identical before substituting -- 15715, and
+# {9876, 25715, 25779} -- so this is a change of SOURCE, not of value, and the
+# banner says exactly what it said before.
+#
+# Nothing else in this file changes. It is the MAINNET cost-basis tool and its
+# own default of 25779 with a loud testnet warning is deliberate, not a defect to
+# tidy.
+MAINNET_RPC_PORT = CHAIN_PORTS["GRC"].mainnet_port
+KNOWN_TESTNET_RPC_PORTS = CHAIN_PORTS["GRC"].test_ports
 
 
 def describe_rpc_target() -> str:

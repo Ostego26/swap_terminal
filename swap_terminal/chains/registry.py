@@ -29,11 +29,27 @@ no deposit watcher is looking at.
 So the difference is now a PARAMETER (the mapping) rather than a second copy,
 and both callers pass their own source.
 
-WHY SOL IS CONDITIONAL AND THE OTHER THREE ARE NOT.
+WHY EVERY CHAIN IS CONDITIONAL, AND WHY THREE OF THEM WERE NOT UNTIL 2026-09-26.
 
-BTC, LTC and GRC are always constructed, because config.Config always has an
-entry for them -- defaults and all, pointing at mainnet ports, which
-config.py's own header says out loud.
+This section used to read "BTC, LTC and GRC are always constructed, because
+config.Config always has an entry for them -- defaults and all, pointing at
+mainnet ports, which config.py's own header says out loud." Every clause of that
+was true, and together they were the bug: the entry existed, the default was the
+MAINNET port, and so a checkout with nothing set built three adapters aimed at
+real-money daemons. Saying it out loud in a header is not the same as failing
+closed. The operator found it from the outside -- "we're still pulling from grc
+mainnet wallet and not the testnet wallet" -- which is the shape CLAUDE.md rule
+13 warns about: nothing crashed, nothing warned, and the only symptom was
+somebody noticing.
+
+All five are now conditional on the one value that cannot be defaulted, and the
+test is identical for each: a URL for SOL and XRP, a port for BTC, LTC, GRC and
+XMR. config.py defaults those ports to network_target.UNCONFIGURED_PORT.
+
+The reason a missing port must SKIP rather than guess is the one the Solana
+paragraph below already gives, plus a second one that only applies to the older
+three: guessing wrong here does not merely produce a useless adapter, it
+produces a WORKING adapter pointed at mainnet.
 
 SOL is constructed only when SOL_RPC_URL is set, and that is not tidiness. The
 adapters dict is walked by services/payout_service.refresh_wallet_inventory(),
@@ -92,7 +108,26 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     to one config entry without a matching parameter fails loudly at
     construction rather than being ignored.
     """
-    adapters = {asset: cls(**rpc[asset]) for asset, cls in _BITCOIN_DERIVED.items() if asset in rpc}
+    # `and rpc[asset].get("port")` is the fix for 2026-09-26. These three used to
+    # be constructed unconditionally, because config.Config always had an entry
+    # for them -- and that entry carried a MAINNET port default, so a checkout
+    # with nothing set built a Bitcoin adapter aimed at 8332, a Litecoin one at
+    # 9332 and a Gridcoin one at 15715. refresh_wallet_inventory() then called
+    # get_balance() on each every cycle, which is how the operator's live
+    # Gridcoin staking wallet came to be polled on a loop by a terminal that was
+    # supposed to be on testnet.
+    #
+    # The test is the same one SOL, XMR and XRP already use, three paragraphs
+    # below: "configured" means the operator supplied the one value that cannot
+    # be defaulted. For those it is a URL or a port; for these it is a port. The
+    # module header's old claim that these three are "always constructed" was
+    # accurate and is now wrong, so it has been rewritten rather than left to
+    # mislead the next reader.
+    adapters = {
+        asset: cls(**rpc[asset])
+        for asset, cls in _BITCOIN_DERIVED.items()
+        if asset in rpc and rpc[asset].get("port")
+    }
     solana = rpc.get("SOL")
     # Configured means "has a URL". See this module's header for why an
     # unconfigured Solana adapter is left out entirely rather than constructed

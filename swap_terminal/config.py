@@ -9,11 +9,31 @@ Can move funds: no by itself, but it CARRIES the values that decide what
        *_MIN_CONFIRMATIONS thresholds and ALLOWED_PAIRS. Changing any of those
        changes what gets sent or when, which makes them the operator's (rule
        16), not something to adjust in passing.
-Mainnet-safe: yes to import. Note the DEFAULTS POINT AT MAINNET: 8332 is
-       Bitcoin's mainnet RPC port, 9332 Litecoin's, 15715 Gridcoin's. A
-       checkout with no environment set is configured for mainnet daemons, not
-       for testnet ones -- set BTC_RPC_PORT=18332, LTC_RPC_PORT=19332 and
-       GRC_RPC_PORT=25779 to point it at test chains.
+Mainnet-safe: yes to import, and since 2026-09-26 yes to RUN with nothing set.
+       THE DEFAULTS USED TO POINT AT MAINNET -- 8332 Bitcoin, 9332 Litecoin,
+       15715 Gridcoin -- so a checkout with no environment was configured for
+       mainnet daemons. The operator reported the consequence on 2026-09-26:
+       "we're still pulling from grc mainnet wallet and not the testnet wallet."
+       They were right. Nothing in the serving path loads a .env (not wsgi.py,
+       not gunicorn.conf.py, not this file), so an unset GRC_RPC_PORT fell
+       through to 15715 and payout_service.refresh_wallet_inventory(), which
+       calls get_balance() on every adapter every cycle, polled the operator's
+       live staking wallet on a loop.
+
+       All three now default to UNCONFIGURED_PORT (0) and chains/registry.py
+       skips an unconfigured chain, so a missing setting REFUSES instead of
+       guessing the most expensive possible answer. This is not a new
+       convention: XMR_RPC_PORT already defaulted to 0 meaning "no Monero
+       wallet here", SOL is constructed only when SOL_RPC_URL is set, and XRP's
+       url defaults to empty. The three oldest chains were the three not
+       following the rule their own file states three times.
+
+       To reach a chain, set its port: BTC_RPC_PORT=18443 and LTC_RPC_PORT=19443
+       for regtest (18332/19332 for testnet), GRC_RPC_PORT=25779 for the
+       Gridcoin test chain. These must be in the PROCESS environment -- exported,
+       or supplied by whatever starts gunicorn -- because nothing here reads a
+       .env, and adding load_dotenv() to a module read at import is the
+       import-time side effect rule 12 names as a measured past defect.
 
 Everything here is evaluated when the module is imported, because `Config` is a
 class body. That is why tests/conftest.py sets SWAP_DB_PATH before importing
@@ -23,6 +43,8 @@ anything: setting it afterwards is too late, the value is already baked in.
 import os
 from pathlib import Path
 from typing import ClassVar
+
+from network_target import UNCONFIGURED_PORT
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -97,7 +119,7 @@ class Config:
             "user": os.getenv("BTC_RPC_USER", ""),
             "password": os.getenv("BTC_RPC_PASS", ""),
             "host": os.getenv("BTC_RPC_HOST", "127.0.0.1"),
-            "port": int(os.getenv("BTC_RPC_PORT", "8332")),
+            "port": int(os.getenv("BTC_RPC_PORT", str(UNCONFIGURED_PORT))),
             "wallet": os.getenv("BTC_RPC_WALLET", ""),
             "timeout": float(os.getenv("BTC_RPC_TIMEOUT", "30")),
         },
@@ -105,7 +127,7 @@ class Config:
             "user": os.getenv("LTC_RPC_USER", ""),
             "password": os.getenv("LTC_RPC_PASS", ""),
             "host": os.getenv("LTC_RPC_HOST", "127.0.0.1"),
-            "port": int(os.getenv("LTC_RPC_PORT", "9332")),
+            "port": int(os.getenv("LTC_RPC_PORT", str(UNCONFIGURED_PORT))),
             "wallet": os.getenv("LTC_RPC_WALLET", ""),
             "timeout": float(os.getenv("LTC_RPC_TIMEOUT", "30")),
         },
@@ -141,7 +163,7 @@ class Config:
             "user": os.getenv("GRC_RPC_USER", ""),
             "password": os.getenv("GRC_RPC_PASS", ""),
             "host": os.getenv("GRC_RPC_HOST", "127.0.0.1"),
-            "port": int(os.getenv("GRC_RPC_PORT", "15715")),
+            "port": int(os.getenv("GRC_RPC_PORT", str(UNCONFIGURED_PORT))),
             "wallet": os.getenv("GRC_RPC_WALLET", ""),
             "timeout": float(os.getenv("GRC_RPC_TIMEOUT", "30")),
         },
