@@ -711,10 +711,13 @@ def main() -> int:
     print("xrp adapter check -- read-only, submits nothing, signs nothing", flush=True)
     print(f"  endpoint   {args.url}", flush=True)
     print("  WHAT THIS PROVES: that the method and field names in chains/xrp.py and", flush=True)
-    print("  chains/xrp_payments.py match a real server. A probe on 2026-09-25 found", flush=True)
-    print("  the transaction body FLAT on the entry where the code looked only under", flush=True)
-    print("  `tx`, which silently skipped payments -- past 620 passing tests, because", flush=True)
-    print("  a seeded test cannot discover a wire format.", flush=True)
+    print("  chains/xrp_payments.py match a real server. A seeded test cannot discover", flush=True)
+    print("  a wire format -- 620 of them passed while the shape was unverified.", flush=True)
+    print("  MEASURED 2026-09-26: all six fields seen on real Payments, DestinationTag", flush=True)
+    print("  last and only via --hunt-tag. Two nestings are real and the method decides:", flush=True)
+    print("  `ledger` puts the body FLAT on the entry, `account_tx` nests it under `tx`.", flush=True)
+    print("  The adapter calls account_tx, so the flat shape never cost a deposit -- that", flush=True)
+    print("  was claimed here until this line was fixed, inferred from `ledger` alone.", flush=True)
 
     info = check_server(args.url)
     if info is None:

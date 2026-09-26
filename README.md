@@ -546,14 +546,38 @@ The refusal names both addresses, which are public, and never the seed.
 Submission uses `submit_and_wait()` rather than `submit()`, so a transaction the
 ledger rejected cannot be reported as sent.
 
-### What the sender does not prove
+### Confirmed end to end, 2026-09-26
 
-`--hunt-tag` confirms rippled's wire spelling from other people's traffic. It
-cannot confirm that **our** sender populates `DestinationTag`, because it never
-reads a payment we produced. Only a `--send` run followed by
-`xrp_chain_check.py --account <destination>` closes that, and what it must show
-is step 3 reporting the tag **present** and step 4 **crediting** it with
-`vout` equal to the tag rather than deferring it.
+`--hunt-tag` proves rippled's wire spelling from other people's traffic; it
+cannot prove that **our** sender populates the field, because it never reads a
+payment we produced. That last step is now done. Locally signed, submitted,
+validated:
+
+```
+TransactionResult  tesSUCCESS
+hash               5534F6CC68DB7AA7237519BC8BB01791172C23FB3E1B57D44E4CD0AD07E100BD
+validated          True
+```
+
+and read back through the adapter on the destination account:
+
+```
+[3] DestinationTag         present in 1/2   <- the NAME is confirmed
+[4] credited 1, deferred 1
+        10.0 XRP  tag=4242  rank=1
+        deferred  A233F36F...  NO DestinationTag
+```
+
+So the full loop holds: our sender sets the tag, `account_tx` returns it,
+`deposit_events_from_transactions()` credits the payment with the tag as `vout`
+and the amount from `delivered_amount`. The `deferred` row is the earlier
+untagged faucet payment, correctly held back rather than guessed at — both
+outcomes on one response, which is the pair worth seeing together.
+
+That leaves **no unverified field** in the XRP deposit path. What remains is not
+verification but construction: the destination-tag allocator in
+`services/swap_service.py`, and the payout side, where `send_to_address()` still
+refuses structurally.
 
 ### Tag 0 is a real tag
 
