@@ -92,6 +92,7 @@ import pytest
 from db import SCHEMA, add_column_if_missing, apply_migrations, connect_db
 from services.helpers import utc_now_iso
 from services.payout_service import (
+    WALLET_UNLOCK_ENV_VAR,
     claim_swap_for_payout,
     process_pending_payouts,
     refresh_wallet_inventory,
@@ -611,7 +612,7 @@ def seed_payout_pending_swap(conn, swap_id):
     conn.commit()
 
 
-def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog):
+def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog, monkeypatch):
     """The reason reached the database and nothing the operator was watching.
 
     Their run 2026-09-26 printed:
@@ -628,11 +629,25 @@ def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog):
     been paid.
     """
     caplog.set_level(logging.ERROR)
+    # The passphrase must be SET for this test to reach the wallet at all. Since the
+    # unlock sequence was wired in, an absent passphrase refuses before any call --
+    # which is a different failure with its own test. This one is about the DAEMON's
+    # message surviving, so it has to get as far as the daemon.
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
     conn = connect_db(db_path)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_locked")
 
     class LockedWallet:
+        """Accepts the unlock sequence and still refuses the send.
+
+        The real shape of a wrong passphrase: walletpassphrase is accepted at the
+        transport level and the wallet stays shut, so the send is what reports it.
+        """
+
+        def call(self, method, *params):
+            return {}
+
         def send_to_address(self, address, amount):
             raise RuntimeError("Error: Please enter the wallet passphrase with walletpassphrase first.")
 
@@ -648,7 +663,7 @@ def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog):
     assert "will NOT retry" in caplog.text, "it must say what happens next, not just what failed"
 
 
-def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path):
+def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path, monkeypatch):
     """MEASURED, and reported to the operator rather than changed here.
 
     A locked Gridcoin wallet is a TRANSIENT, operator-fixable condition — the
@@ -664,11 +679,15 @@ def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path):
     when — live posture, and the operator's call (rule 16). If they choose to make
     transient failures retryable, this test is the one to change, and it names why.
     """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
     conn = connect_db(db_path)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_locked")
 
     class LockedWallet:
+        def call(self, method, *params):
+            return {}
+
         def send_to_address(self, address, amount):
             raise RuntimeError("Error: Please enter the wallet passphrase with walletpassphrase first.")
 
@@ -742,3 +761,162 @@ def test_a_different_failure_for_the_same_asset_still_reports(db_path, caplog):
     conn.close()
 
     assert caplog.text.count("wallet inventory for LTC NOT refreshed") == 3
+
+
+# --- the system unlocks the wallet, not the operator -------------------------
+
+class GridcoinWalletStub:
+    """Refuses to send unless fully unlocked, like the real daemon.
+
+    Modeled on the daemon's MEASURED behavior rather than an invented one: on the
+    operator's host 2026-09-26 a send against a staking-only wallet answered
+    "Error: Wallet unlocked for staking only, unable to create transaction. (rpc
+    code -4)". A stub that accepted any send would let every test below pass against
+    a version that never unlocked anything.
+    """
+
+    def __init__(self):
+        self.fully_unlocked = False
+        self.calls = []
+        self.sends = 0
+
+    def call(self, method, *params):
+        self.calls.append(method)
+        if method == "walletlock":
+            self.fully_unlocked = False
+        elif method == "walletpassphrase":
+            # params[2] is `stakingonly`; omitted or false means a FULL unlock.
+            self.fully_unlocked = not (len(params) > 2 and params[2])
+        return {}
+
+    def send_to_address(self, address, amount):
+        self.sends += 1
+        if not self.fully_unlocked:
+            raise RuntimeError(
+                "Error: Wallet unlocked for staking only, unable to create transaction. (rpc code -4)"
+            )
+        return "grc-txid-1"
+
+    def get_balance(self):
+        return 4190.0
+
+
+def test_the_payout_unlocks_the_wallet_itself_and_completes(db_path, monkeypatch):
+    """Operator, 2026-09-26: "the system is supposed to unlock the wallet FULLY on
+    it's own not the user for now."
+
+    Before this, a GRC payout failed with rpc code -4 and the swap died because the
+    wallet was in its normal resting state. Now the worker performs the sequence.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_unlock")
+    wallet = GridcoinWalletStub()
+
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+    row = conn.execute("SELECT status, payout_txid FROM swaps WHERE id = 's_unlock'").fetchone()
+    conn.close()
+
+    assert row["status"] == "completed"
+    assert row["payout_txid"] == "grc-txid-1"
+
+
+def test_the_order_is_lock_then_full_unlock_then_lock_then_back_to_staking(db_path, monkeypatch):
+    """The operator's order, stated twice: "LOCK---UNLOCK past staking---LOCK---
+    return to unlocked for staking".
+
+    Asserted as a SEQUENCE, because the order is the behavior: a version making all
+    four calls in the wrong order would satisfy any per-call assertion while leaving
+    the wallet in the wrong state.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_order")
+    wallet = GridcoinWalletStub()
+
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+    conn.close()
+
+    assert wallet.calls == ["walletlock", "walletpassphrase", "walletlock", "walletpassphrase"]
+    assert wallet.fully_unlocked is False, "the wallet must NOT be left able to spend"
+
+
+def test_a_failed_send_still_returns_the_wallet_to_staking(db_path, monkeypatch):
+    """THE one that matters most. A wallet left fully unlocked is the real hazard.
+
+    The moment it is most likely is when the send RAISES: the unlock has happened,
+    the exception propagates, and nothing puts the wallet back. The restore is in the
+    context manager's `finally` precisely for this.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_boom")
+
+    class SendAlwaysFails(GridcoinWalletStub):
+        def send_to_address(self, address, amount):
+            raise RuntimeError("Insufficient funds (rpc code -6)")
+
+    wallet = SendAlwaysFails()
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+    row = conn.execute("SELECT status FROM swaps WHERE id = 's_boom'").fetchone()
+    conn.close()
+
+    assert row["status"] == "failed", "the swap failed, which is expected here"
+    assert wallet.calls[-2:] == ["walletlock", "walletpassphrase"], (
+        "the wallet must be re-locked and returned to staking even when the send raised"
+    )
+    assert wallet.fully_unlocked is False
+
+
+def test_a_missing_passphrase_refuses_without_touching_the_wallet(db_path, monkeypatch, caplog):
+    """Refusing BEFORE the send, and naming the variable.
+
+    Attempting it would fail with rpc code -4 and mark the swap terminally failed --
+    so the swap would die of a missing environment variable. Asserted on the wallet
+    having received NO calls at all: not a lock, not an unlock, not a send.
+    """
+    caplog.set_level(logging.ERROR)
+    monkeypatch.delenv(WALLET_UNLOCK_ENV_VAR, raising=False)
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    seed_payout_pending_swap(conn, "s_nokey")
+    wallet = GridcoinWalletStub()
+
+    process_pending_payouts(conn, {}, {"GRC": wallet})
+    conn.close()
+
+    assert wallet.calls == [], "nothing may touch the wallet when the passphrase is absent"
+    assert wallet.sends == 0
+    assert WALLET_UNLOCK_ENV_VAR in caplog.text, "the log must name the variable to set"
+
+
+def test_a_chain_that_needs_no_unlock_is_not_given_one(db_path, monkeypatch):
+    """Only Gridcoin is in WALLET_UNLOCK_ASSETS, and the rest must be untouched.
+
+    A version that unlocked for every chain would call walletpassphrase against a
+    Bitcoin daemon, which is a different command with different semantics -- and
+    would fail every BTC and LTC payout.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    conn.execute("UPDATE swaps SET to_asset = 'BTC' WHERE 1 = 0")  # keep the schema honest
+    seed_payout_pending_swap(conn, "s_btc")
+    conn.execute("UPDATE swaps SET to_asset = 'BTC' WHERE id = 's_btc'")
+    conn.commit()
+
+    class BitcoinStub(GridcoinWalletStub):
+        def send_to_address(self, address, amount):
+            self.sends += 1
+            return "btc-txid-1"
+
+    wallet = BitcoinStub()
+    process_pending_payouts(conn, {}, {"BTC": wallet})
+    row = conn.execute("SELECT status FROM swaps WHERE id = 's_btc'").fetchone()
+    conn.close()
+
+    assert row["status"] == "completed"
+    assert wallet.calls == [], "no lock or unlock may be sent to a chain that does not need it"

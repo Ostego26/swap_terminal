@@ -45,7 +45,11 @@ refreshed, and the consequence of swallowing it is stated there.
 """
 
 import logging
+import os
 import sqlite3
+from contextlib import nullcontext
+
+from chains.gridcoin_wallet_lock import unlocked_for_payout
 
 from .helpers import utc_now_iso
 from .swap_service import set_swap_status
@@ -216,7 +220,14 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
         db.commit()
 
         try:
-            txid = adapters[destination_asset].send_to_address(swap["payout_address"], amount)
+            # LOCK -> UNLOCK past staking -> send -> LOCK -> back to staking, for any
+            # chain in WALLET_UNLOCK_ASSETS; a no-op context for the rest. The
+            # re-lock is in the context manager's `finally`, so it runs even when
+            # the send raises -- a wallet left fully unlocked because a payout failed
+            # is the outcome that must not happen.
+            adapter = adapters[destination_asset]
+            with payout_unlock_context(destination_asset, adapter):
+                txid = adapter.send_to_address(swap["payout_address"], amount)
             db.execute(
                 "UPDATE payouts SET txid = ?, status = ?, sent_at = ? WHERE swap_id = ? AND status = 'created'",
                 (txid, "broadcast", utc_now_iso(), swap["id"]),
@@ -304,6 +315,77 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
 # Keyed on the asset AND the message, so a DIFFERENT failure for the same asset --
 # a daemon that was up and is now down -- still reports.
 _REPORTED_INVENTORY_FAILURES: set[tuple[str, str]] = set()
+
+
+# Chains whose wallet must be FULLY UNLOCKED to send, and which are left unlocked
+# for staking the rest of the time. Gridcoin is the only one here.
+#
+# Operator, 2026-09-26: "the system is supposed to unlock the wallet FULLY on it's
+# own not the user for now", and the order: "LOCK---UNLOCK past staking---LOCK---
+# return to unlocked for staking".
+#
+# WHAT THIS MEANS, SAID ONCE AND PLAINLY, because it is the security consequence of
+# what was asked for and it should not be discovered later: this process can now
+# spend the Gridcoin wallet. Before this change it could not -- a payout failed with
+# rpc code -4 and the wallet stayed shut. After it, anything that can run code in
+# this worker can move those coins, and the passphrase is in its environment.
+#
+# The narrowing that is available, and all of it is applied:
+#   - the passphrase is read from the ENVIRONMENT at use time, never stored in this
+#     repo, never written to a file by this code, never placed in argv, never logged
+#   - the full unlock lasts DEFAULT_UNLOCK_SECONDS (60) and not until shutdown
+#   - the wallet is RE-LOCKED and returned to staking in a `finally`, so it happens
+#     on success, on a failed send, and on Ctrl-C
+#   - a missing passphrase REFUSES the payout rather than attempting a send that
+#     would fail anyway, and says which variable to set
+WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
+
+# THE NAME OF the environment variable, which is not itself a secret -- and naming
+# it WALLET_UNLOCK_ENV_VAR rather than ..._PASSPHRASE_VARIABLE is the honest fix for
+# ruff's S105 rather than a suppression (rule 19). The first spelling made a
+# constant holding a variable NAME look like a constant holding a passphrase, which
+# is precisely the confusion that lint rule exists to catch.
+#
+# Read from the environment and never from Config. Config is echoed on the admin
+# page through an allowlist, and a passphrase must not be one key away from
+# something that gets rendered -- services/admin_view.py's own comment notes that
+# Config.RPC holds wallet credentials "one key away from these".
+WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
+
+
+def payout_unlock_context(asset: str, adapter):
+    """A context manager that holds the wallet open for ONE send, or explains why not.
+
+    Returns nullcontext() for every chain that does not need it, so the call site
+    reads the same for all of them and no chain grows a special case at the send.
+
+    Raises PayoutUnlockUnavailable when the chain needs a passphrase and none is
+    set. Raising BEFORE the send is deliberate: attempting it would fail with rpc
+    code -4 and mark the swap terminally failed, so the swap would die of a missing
+    environment variable. This way the reason is named and nothing is claimed.
+    """
+    if asset not in WALLET_UNLOCK_ASSETS:
+        return nullcontext()
+
+    passphrase = os.environ.get(WALLET_UNLOCK_ENV_VAR, "")
+    if not passphrase:
+        raise PayoutUnlockUnavailable(
+            f"{asset} payouts need the wallet fully unlocked, and {WALLET_UNLOCK_ENV_VAR} is "
+            f"not set in this process's environment. A {asset} wallet left unlocked for staking "
+            f"CANNOT send -- the daemon answers rpc code -4 -- so this refuses before attempting a "
+            f"send that would fail and mark the swap terminally failed. Set "
+            f"{WALLET_UNLOCK_ENV_VAR} for the worker process only."
+        )
+    return unlocked_for_payout(adapter, passphrase)
+
+
+class PayoutUnlockUnavailable(RuntimeError):
+    """The wallet cannot be unlocked, so no send was attempted.
+
+    Its own type because it is categorically different from a send that FAILED: no
+    transaction was created, nothing reached any daemon, and the fix is an
+    environment variable rather than an investigation.
+    """
 
 
 def refresh_wallet_inventory(db, adapters: dict):
