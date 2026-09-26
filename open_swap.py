@@ -340,10 +340,57 @@ def pair_catalog(config: dict, adapters: dict | None = None) -> str:
     unavailable = [row for row in rows if not row["enabled"]]
     if not unavailable:
         return marked
-    return (
-        f"{marked}  <- UNAVAILABLE means allowed but not completable from this process: "
-        f"{unavailable[0]['reason']}"
-    )
+    return f"{marked}  <- UNAVAILABLE = allowed but not completable here. {blocked_by(unavailable)}"
+
+
+def blocked_by(unavailable: list[dict]) -> str:
+    """Why each unavailable pair is unavailable, GROUPED BY CAUSE. Never one for all.
+
+    THIS FIXED A DEFECT I SHIPPED AN HOUR EARLIER. The first version of pair_catalog()
+    printed `unavailable[0]["reason"]` as THE reason, and the operator's own run showed
+    what that produces:
+
+        GRC->XRP (UNAVAILABLE) ... UNAVAILABLE means allowed but not completable from
+        this process: BTC has no adapter in this process: BTC_RPC_PORT ... unset
+
+    GRC -> XRP is unavailable because XRP cannot PAY OUT -- it holds no signing key --
+    and has nothing to do with BTC_RPC_PORT. One row's reason presented as every row's
+    is the same overclaim this whole day was spent removing, and I committed a fresh
+    one into the line that removes it.
+
+    Two causes, and they are different actions for the operator: a chain with no
+    adapter needs settings exported, and a chain that cannot pay out needs a signing
+    decision that is theirs (rule 16). Naming them separately is the whole point;
+    concatenating every full sentence instead would produce a paragraph nobody reads,
+    so each cause names its CHAINS and the fix is one clause.
+    """
+    no_adapter = sorted({asset for row in unavailable for asset in row.get("missing") or []})
+    # The adapters' OWN sentences, DEDUPLICATED -- not a paraphrase of them. An earlier
+    # draft of this function summarised the payout cause in its own words, which put a
+    # second copy of the explanation here (rule 8) and broke the test asserting the
+    # adapter's wording reaches the screen. chains/registry.why_cannot_pay_out() builds
+    # these from each adapter's payout_refusal, so the adapter stays the one place that
+    # says why it cannot pay. Deduplicated because two pairs can share one cause and
+    # printing it twice reads as two problems.
+    cannot_pay = sorted({row["cannot_pay"] for row in unavailable if row.get("cannot_pay")})
+    causes = []
+    if no_adapter:
+        # The FACT, and the remedy is not restated here: create_swap()'s refusal names
+        # the exact variables, the `adapters here` line one row above lists what this
+        # process built, and swap_readiness.py asks the daemons. Repeating
+        # why_unconfigured()'s full sentence for each of up to three chains would make
+        # this line unreadable and would be a third copy of it.
+        causes.append(
+            f"{', '.join(no_adapter)} ha{'s' if len(no_adapter) == 1 else 've'} no adapter in this "
+            f"process"
+        )
+    causes.extend(cannot_pay)
+    if not causes:
+        # Neither cause recognised. Say that rather than inventing one: a pair marked
+        # UNAVAILABLE with no explanation is a bug report, and a wrong explanation is
+        # worse than an absent one.
+        return "Cause NOT ESTABLISHED -- run swap_readiness.py; this is a defect in pair_catalog()"
+    return "Blocked by: " + "; ".join(causes)
 
 
 def check_pair(config: dict, from_asset: str, to_asset: str) -> None:

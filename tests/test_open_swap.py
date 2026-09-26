@@ -44,6 +44,7 @@ import open_swap
 from open_swap import (
     SwapRefused,
     apply_command,
+    blocked_by,
     check_payout_address,
     deposit_preview,
     fetch_prices_or_refuse,
@@ -1095,3 +1096,77 @@ def test_an_adapter_without_owns_address_is_not_an_error(monkeypatch, tmp_path, 
 
     assert code == 0
     assert "THIS WALLET'S OWN" not in capsys.readouterr().out
+
+
+# --- why each unavailable pair is unavailable ------------------------------------
+#
+# I SHIPPED THIS DEFECT AN HOUR AFTER FIXING ITS PARENT. pair_catalog() printed
+# unavailable[0]["reason"] as THE reason, and the operator's own run showed what that
+# produces: GRC->XRP marked UNAVAILABLE with BTC_RPC_PORT named as the cause. GRC->XRP
+# is unavailable because XRP cannot PAY OUT. One row's reason presented as every row's
+# is the overclaim this line exists to remove.
+
+
+class _Payer:
+    can_spend = True
+    payout_refusal = ""
+
+
+class _ViewOnly:
+    can_spend = False
+    payout_refusal = "holds no signing key in this test"
+
+
+def test_two_different_causes_are_both_named():
+    """MUTATION: return only the first cause, or any single row's reason. This fails.
+
+    BTC and LTC are missing entirely; XRP is present and cannot pay out. Those are
+    different ACTIONS -- export settings, versus a signing decision that is the
+    operator's -- so naming one for both sends them to do the wrong thing.
+    """
+    config = {
+        "ALLOWED_PAIRS": {("XRP", "GRC"), ("GRC", "XRP"), ("BTC", "GRC"), ("LTC", "GRC")},
+        "RPC": {},
+    }
+
+    catalog = pair_catalog(config, {"XRP": _ViewOnly(), "GRC": _Payer()})
+
+    assert "BTC, LTC have no adapter" in catalog, catalog
+    assert "holds no signing key in this test" in catalog, (
+        "the PAYOUT cause must be the ADAPTER's own sentence, not a paraphrase of it -- "
+        f"catalog was: {catalog}"
+    )
+    assert "XRP->GRC" in catalog and "XRP->GRC (UNAVAILABLE)" not in catalog, (
+        "XRP->GRC pays out to GRC, which can pay -- it must stay available"
+    )
+    assert "GRC->XRP (UNAVAILABLE)" in catalog
+
+
+def test_the_payout_cause_is_not_described_as_a_missing_setting():
+    """The specific wrong answer the operator was given: a variable to export, for a
+    chain whose settings are already correct and whose problem is a signing key."""
+    config = {"ALLOWED_PAIRS": {("GRC", "XRP")}, "RPC": {}}
+
+    catalog = pair_catalog(config, {"XRP": _ViewOnly(), "GRC": _Payer()})
+
+    assert "holds no signing key in this test" in catalog
+    assert "_RPC_PORT" not in catalog, (
+        "XRP is reachable; naming an environment variable would send the operator to check "
+        "configuration that is already right"
+    )
+
+
+def test_only_the_missing_adapter_cause_appears_when_that_is_all_there_is():
+    """So the payout clause cannot become boilerplate that always prints."""
+    config = {"ALLOWED_PAIRS": {("BTC", "GRC")}, "RPC": {}}
+
+    catalog = pair_catalog(config, {"GRC": _Payer()})
+
+    assert "BTC has no adapter" in catalog
+    assert "signing key" not in catalog, "no payout cause exists here, so none may be printed"
+
+
+def test_an_unrecognised_cause_says_so_rather_than_inventing_one():
+    """A pair marked UNAVAILABLE with no cause is a bug report. A WRONG cause is worse
+    than an absent one, which is the whole lesson of this line's history."""
+    assert "NOT ESTABLISHED" in blocked_by([{"to_asset": "GRC", "missing": [], "cannot_pay": ""}])
