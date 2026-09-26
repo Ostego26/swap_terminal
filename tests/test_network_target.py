@@ -22,6 +22,7 @@ pointed at. That absence is what this file is for.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -294,13 +295,21 @@ def test_configuring_variable_matches_what_config_py_actually_reads():
     real variable was renamed.
 
     So this reads config.py and requires each returned name to appear there as an
-    os.getenv() call. Rule 17: the thing that would show it false is to go look.
+    actual read. Rule 17: the thing that would show it false is to go look.
+
+    THE READER'S SPELLING IS MATCHED AS A PATTERN, NOT AS ONE LITERAL. This asserted
+    `os.getenv("NAME"` until 2026-09-26, when config.py's 51 reads moved to _env /
+    _env_int / _env_float so that a set-but-empty variable falls back instead of
+    raising. The test failed, correctly -- the name it was looking for was no longer
+    how the file reads anything -- and the fix is to follow the file rather than to
+    pin one spelling, since the claim being made is "config.py reads this variable"
+    and not "config.py reads it with that function".
     """
     config_source = (Path(__file__).resolve().parent.parent / "swap_terminal" / "config.py").read_text()
 
     for asset in ("BTC", "LTC", "GRC", "XRP", "SOL", "XMR"):
         variable = configuring_variable(asset)
-        assert f'os.getenv("{variable}"' in config_source, (
+        assert re.search(rf'_env(?:_int|_float)?\("{re.escape(variable)}"', config_source), (
             f"configuring_variable({asset!r}) returned {variable!r}, which config.py never reads"
         )
 

@@ -48,17 +48,59 @@ from network_target import UNCONFIGURED_PORT
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# A SET-BUT-EMPTY ENVIRONMENT VARIABLE MEANS ABSENT, NOT "".
+#
+# Measured 2026-09-26, on the operator's machine, from a command I gave them. They
+# ran a generator that wrote an env file from a shell that did not have the values,
+# so it wrote `export GRC_RPC_PORT=''` -- five empty exports. Sourcing that file
+# made things WORSE than having nothing set:
+#
+#     ValueError: invalid literal for int() with base 10: ''
+#
+# raised from line 204 of this file, at IMPORT time, so open_swap.py, both workers
+# and app.py all died on the traceback before any of them could say what was wrong.
+# os.getenv returns "" for a variable that is set to nothing, the two-argument
+# default never applies, and int("") raises.
+#
+# 51 reads in this file, 27 of them typed. Any single empty variable took down every
+# entry point -- and an empty variable is an ORDINARY thing: a generator like mine,
+# an `export FOO=` in a shell script, a CI template with a blank field, a .env line
+# with nothing after the `=`. The whole design of this file since this morning is
+# that a missing setting REFUSES legibly and names itself (chains/registry.py skips
+# the chain, the swap page badges the pair DISABLED and prints the variable). An
+# empty value was the one way to get a traceback instead of that sentence.
+#
+# .strip() as well as the emptiness test, because `export GRC_RPC_PORT=" "` is the
+# same mistake with a space in it, and int(" ") raises identically.
+def _env(name: str, default: str = "") -> str:
+    """os.getenv, except that a set-but-empty value falls back to `default`."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value
+
+
+def _env_int(name: str, default: str) -> int:
+    """_env, as an int. The default is a STRING so the call site reads like the
+    _env() it replaced, and so there is exactly one spelling of each default."""
+    return int(_env(name, default))
+
+
+def _env_float(name: str, default: str) -> float:
+    return float(_env(name, default))
+
+
 class Config:
-    SECRET_KEY = os.getenv("SECRET_KEY", "swap-terminal-dev")
-    DB_PATH = os.getenv("SWAP_DB_PATH", str(BASE_DIR / "swap_terminal.db"))
-    QUOTE_TTL_SECONDS = int(os.getenv("QUOTE_TTL_SECONDS", "600"))
-    RATE_CACHE_SECONDS = int(os.getenv("RATE_CACHE_SECONDS", "30"))
-    DEFAULT_FEE_BPS = int(os.getenv("DEFAULT_FEE_BPS", "150"))
-    AMOUNT_TOLERANCE_PCT = float(os.getenv("AMOUNT_TOLERANCE_PCT", "0.01"))
-    SMALL_SWAP_MANUAL_REVIEW_USD = float(os.getenv("SMALL_SWAP_MANUAL_REVIEW_USD", "5000"))
-    BTC_MIN_CONFIRMATIONS = int(os.getenv("BTC_MIN_CONFIRMATIONS", "2"))
-    LTC_MIN_CONFIRMATIONS = int(os.getenv("LTC_MIN_CONFIRMATIONS", "2"))
-    GRC_MIN_CONFIRMATIONS = int(os.getenv("GRC_MIN_CONFIRMATIONS", "6"))
+    SECRET_KEY = _env("SECRET_KEY", "swap-terminal-dev")
+    DB_PATH = _env("SWAP_DB_PATH", str(BASE_DIR / "swap_terminal.db"))
+    QUOTE_TTL_SECONDS = _env_int("QUOTE_TTL_SECONDS", "600")
+    RATE_CACHE_SECONDS = _env_int("RATE_CACHE_SECONDS", "30")
+    DEFAULT_FEE_BPS = _env_int("DEFAULT_FEE_BPS", "150")
+    AMOUNT_TOLERANCE_PCT = _env_float("AMOUNT_TOLERANCE_PCT", "0.01")
+    SMALL_SWAP_MANUAL_REVIEW_USD = _env_float("SMALL_SWAP_MANUAL_REVIEW_USD", "5000")
+    BTC_MIN_CONFIRMATIONS = _env_int("BTC_MIN_CONFIRMATIONS", "2")
+    LTC_MIN_CONFIRMATIONS = _env_int("LTC_MIN_CONFIRMATIONS", "2")
+    GRC_MIN_CONFIRMATIONS = _env_int("GRC_MIN_CONFIRMATIONS", "6")
     # SOL_MIN_CONFIRMATIONS IS NOT A COUNT OF BLOCKS. Solana has commitment
     # LEVELS -- processed / confirmed / finalized -- and this is a rung on the
     # ladder in chains/solana_units.COMMITMENT_RANKS, where 3 = finalized.
@@ -69,10 +111,10 @@ class Config:
     # SolanaAdapter.__init__ REFUSES a value that is not a rung -- an operator
     # who copies Gridcoin's 6 here would otherwise stall every SOL swap
     # forever, silently, because no deposit can reach rank 6.
-    SOL_MIN_CONFIRMATIONS = int(os.getenv("SOL_MIN_CONFIRMATIONS", "3"))
-    BTC_NETWORK_FEE_RESERVE = float(os.getenv("BTC_NETWORK_FEE_RESERVE", "0.00002"))
-    LTC_NETWORK_FEE_RESERVE = float(os.getenv("LTC_NETWORK_FEE_RESERVE", "0.001"))
-    GRC_NETWORK_FEE_RESERVE = float(os.getenv("GRC_NETWORK_FEE_RESERVE", "0.01"))
+    SOL_MIN_CONFIRMATIONS = _env_int("SOL_MIN_CONFIRMATIONS", "3")
+    BTC_NETWORK_FEE_RESERVE = _env_float("BTC_NETWORK_FEE_RESERVE", "0.00002")
+    LTC_NETWORK_FEE_RESERVE = _env_float("LTC_NETWORK_FEE_RESERVE", "0.001")
+    GRC_NETWORK_FEE_RESERVE = _env_float("GRC_NETWORK_FEE_RESERVE", "0.01")
     # ClassVar annotations: these are shared configuration read by every
     # request, not per-instance defaults. Config is never instantiated --
     # app.py copies its uppercase attributes into app.config -- so the
@@ -113,30 +155,30 @@ class Config:
     # Bitcoin's. XMR_RPC_PORT unset means "no Monero wallet here", and
     # chains/registry.py leaves the adapter unbuilt rather than pointing one at
     # a guess.
-    XMR_RPC_PORT = int(os.getenv("XMR_RPC_PORT", "0"))
+    XMR_RPC_PORT = _env_int("XMR_RPC_PORT", "0")
     # Clamped to Monero's ten-block consensus spend lock by
     # chains/monero_units.effective_min_confirmations(). The default is that
     # floor rather than a number chosen to look like the others: anything lower
     # would release a swap the wallet then refuses to pay.
-    XMR_MIN_CONFIRMATIONS = int(os.getenv("XMR_MIN_CONFIRMATIONS", "10"))
-    XMR_NETWORK_FEE_RESERVE = float(os.getenv("XMR_NETWORK_FEE_RESERVE", "0.0005"))
+    XMR_MIN_CONFIRMATIONS = _env_int("XMR_MIN_CONFIRMATIONS", "10")
+    XMR_NETWORK_FEE_RESERVE = _env_float("XMR_NETWORK_FEE_RESERVE", "0.0005")
     # FALSE BY DEFAULT, AND THIS IS THE ONE CHAIN THAT CAN AFFORD IT. Monero
     # splits the view key from the spend key, so the deposit watcher can run
     # against a wallet that is cryptographically unable to send. The other
     # three chains inherit send_to_address() unconditionally from
     # chains/base.py and have no equivalent. Setting this true is a deliberate
     # act that arms the payout path for XMR.
-    XMR_WALLET_CAN_SPEND = os.getenv("XMR_WALLET_CAN_SPEND", "").strip().lower() in {"1", "true", "yes"}
+    XMR_WALLET_CAN_SPEND = _env("XMR_WALLET_CAN_SPEND", "").strip().lower() in {"1", "true", "yes"}
 
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's
     # machine. Unset means no XRP adapter is constructed at all.
-    XRP_RPC_URL = os.getenv("XRP_RPC_URL", "")
+    XRP_RPC_URL = _env("XRP_RPC_URL", "")
     # Must be 1. The XRP Ledger does not reorganize, so a payment is either in
     # a validated ledger or it is not -- there is no depth to accumulate, and
     # chains/xrp_units.py REFUSES any other value at construction rather than
     # letting every XRP deposit sit below an unreachable threshold forever.
-    XRP_MIN_CONFIRMATIONS = int(os.getenv("XRP_MIN_CONFIRMATIONS", "1"))
+    XRP_MIN_CONFIRMATIONS = _env_int("XRP_MIN_CONFIRMATIONS", "1")
 
     # THE ACCOUNT XRP DEPOSITS ARE PAID INTO, and it is a CUSTODY decision, which
     # is why it has no default and why an empty value refuses rather than
@@ -150,24 +192,24 @@ class Config:
     # Set it to an account you control. services/swap_service.py refuses to create
     # an XRP swap while it is empty, which is the failure you want: no swap, rather
     # than a swap whose deposit instruction points nowhere.
-    XRP_DEPOSIT_ACCOUNT = os.getenv("XRP_DEPOSIT_ACCOUNT", "").strip()
+    XRP_DEPOSIT_ACCOUNT = _env("XRP_DEPOSIT_ACCOUNT", "").strip()
 
     RPC: ClassVar[dict[str, dict[str, object]]] = {
         "BTC": {
-            "user": os.getenv("BTC_RPC_USER", ""),
-            "password": os.getenv("BTC_RPC_PASS", ""),
-            "host": os.getenv("BTC_RPC_HOST", "127.0.0.1"),
-            "port": int(os.getenv("BTC_RPC_PORT", str(UNCONFIGURED_PORT))),
-            "wallet": os.getenv("BTC_RPC_WALLET", ""),
-            "timeout": float(os.getenv("BTC_RPC_TIMEOUT", "30")),
+            "user": _env("BTC_RPC_USER", ""),
+            "password": _env("BTC_RPC_PASS", ""),
+            "host": _env("BTC_RPC_HOST", "127.0.0.1"),
+            "port": _env_int("BTC_RPC_PORT", str(UNCONFIGURED_PORT)),
+            "wallet": _env("BTC_RPC_WALLET", ""),
+            "timeout": _env_float("BTC_RPC_TIMEOUT", "30"),
         },
         "LTC": {
-            "user": os.getenv("LTC_RPC_USER", ""),
-            "password": os.getenv("LTC_RPC_PASS", ""),
-            "host": os.getenv("LTC_RPC_HOST", "127.0.0.1"),
-            "port": int(os.getenv("LTC_RPC_PORT", str(UNCONFIGURED_PORT))),
-            "wallet": os.getenv("LTC_RPC_WALLET", ""),
-            "timeout": float(os.getenv("LTC_RPC_TIMEOUT", "30")),
+            "user": _env("LTC_RPC_USER", ""),
+            "password": _env("LTC_RPC_PASS", ""),
+            "host": _env("LTC_RPC_HOST", "127.0.0.1"),
+            "port": _env_int("LTC_RPC_PORT", str(UNCONFIGURED_PORT)),
+            "wallet": _env("LTC_RPC_WALLET", ""),
+            "timeout": _env_float("LTC_RPC_TIMEOUT", "30"),
         },
         # SOLANA'S ENTRY HAS DIFFERENT KEYS, AND THAT IS THE POINT.
         # The three above are Bitcoin JSON-RPC connections: user, password,
@@ -189,21 +231,21 @@ class Config:
         # here for a keypair path -- unlike the Node bridge's
         # SOLANA_PAYER_KEYPAIR_PATH, which is what signs over there.
         "SOL": {
-            "url": os.getenv("SOL_RPC_URL", ""),
-            "commitment": os.getenv("SOL_RPC_COMMITMENT", "processed"),
-            "timeout": float(os.getenv("SOL_RPC_TIMEOUT", "30")),
+            "url": _env("SOL_RPC_URL", ""),
+            "commitment": _env("SOL_RPC_COMMITMENT", "processed"),
+            "timeout": _env_float("SOL_RPC_TIMEOUT", "30"),
             # The SPL mint to operate on, e.g. wGRC. Empty means native SOL.
-            "mint": os.getenv("SOL_SPL_MINT", ""),
-            "hot_wallet": os.getenv("SOL_HOT_WALLET", ""),
-            "min_commitment_rank": int(os.getenv("SOL_MIN_CONFIRMATIONS", "3")),
+            "mint": _env("SOL_SPL_MINT", ""),
+            "hot_wallet": _env("SOL_HOT_WALLET", ""),
+            "min_commitment_rank": _env_int("SOL_MIN_CONFIRMATIONS", "3"),
         },
         "GRC": {
-            "user": os.getenv("GRC_RPC_USER", ""),
-            "password": os.getenv("GRC_RPC_PASS", ""),
-            "host": os.getenv("GRC_RPC_HOST", "127.0.0.1"),
-            "port": int(os.getenv("GRC_RPC_PORT", str(UNCONFIGURED_PORT))),
-            "wallet": os.getenv("GRC_RPC_WALLET", ""),
-            "timeout": float(os.getenv("GRC_RPC_TIMEOUT", "30")),
+            "user": _env("GRC_RPC_USER", ""),
+            "password": _env("GRC_RPC_PASS", ""),
+            "host": _env("GRC_RPC_HOST", "127.0.0.1"),
+            "port": _env_int("GRC_RPC_PORT", str(UNCONFIGURED_PORT)),
+            "wallet": _env("GRC_RPC_WALLET", ""),
+            "timeout": _env_float("GRC_RPC_TIMEOUT", "30"),
         },
         # A DIFFERENT SHAPE ON PURPOSE, matching MoneroAdapter.__init__ rather
         # than RPCAdapter's six. There is no `wallet` key because a
@@ -218,16 +260,16 @@ class Config:
         "XRP": {
             "url": XRP_RPC_URL,
             "min_confirmations": XRP_MIN_CONFIRMATIONS,
-            "timeout": float(os.getenv("XRP_RPC_TIMEOUT", "30")),
+            "timeout": _env_float("XRP_RPC_TIMEOUT", "30"),
         },
         "XMR": {
-            "host": os.getenv("XMR_RPC_HOST", "127.0.0.1"),
+            "host": _env("XMR_RPC_HOST", "127.0.0.1"),
             "port": XMR_RPC_PORT,
-            "user": os.getenv("XMR_RPC_USER", ""),
-            "password": os.getenv("XMR_RPC_PASS", ""),
-            "account_index": int(os.getenv("XMR_ACCOUNT_INDEX", "0")),
+            "user": _env("XMR_RPC_USER", ""),
+            "password": _env("XMR_RPC_PASS", ""),
+            "account_index": _env_int("XMR_ACCOUNT_INDEX", "0"),
             "min_confirmations": XMR_MIN_CONFIRMATIONS,
             "can_spend": XMR_WALLET_CAN_SPEND,
-            "timeout": float(os.getenv("XMR_RPC_TIMEOUT", "30")),
+            "timeout": _env_float("XMR_RPC_TIMEOUT", "30"),
         },
     }
