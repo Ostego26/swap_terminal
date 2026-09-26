@@ -1,0 +1,57 @@
+{#
+  The one page shell. Both surfaces extend it, so they read as one system.
+
+  Role: template (structure only; holds no decision)
+  Reads: whatever the route handler passed
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  NO LOGIC LIVES IN A TEMPLATE (CLAUDE.md rule 10). Every branch below is a
+  lookup on a value some function in services/ already decided -- a `level`
+  string chosen by services/swap_view.attention(), a `state` string chosen by
+  services/admin_view.freshness(). A template that decided which status counts
+  as stalled would be the decision buried where it cannot be called with seeded
+  inputs, which is the defect rule 10 is about.
+
+  THE STATE BADGE IS NEVER COLOR ALONE. Each badge carries a SHAPE and a WORD as
+  well as a color, because a red/green-only status is unreadable to roughly 8%
+  of men and unreadable entirely in a grayscale screenshot -- which is how these
+  pages get pasted into a conversation. Take the glyph out and the word still
+  says it; take the color out and both still do.
+#}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Swap Terminal{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="{{ url_for('ui.index') }}">
+        <span class="brand-mark" aria-hidden="true">&#8646;</span>
+        <span class="brand-text">Swap Terminal</span>
+      </a>
+      <nav class="topnav" aria-label="Surfaces">
+        <a href="{{ url_for('ui.index') }}"{% if surface == 'user' %} class="here" aria-current="page"{% endif %}>Swap</a>
+        <a href="{{ url_for('admin.admin_page') }}"{% if surface == 'admin' %} class="here" aria-current="page"{% endif %}>Operator</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    {# Rule 6: durations are microfortnights wherever this system reports one,
+       and the footer says so rather than leaving a reader to decode the unit. #}
+    <p>Durations on these pages are microfortnights: 1&#181;fn = 1.2096s, with the seconds in parentheses. Confirmation
+       counts, ledger indexes and block heights are counts and are never shown as a duration.</p>
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

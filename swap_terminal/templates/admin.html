@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+{% import "_badges.html" as badges %}
+{% set surface = 'admin' %}
+{% block title %}Operator &#183; Swap Terminal{% endblock %}
+{#
+  The operator's read-only picture.
+
+  Role: template (rendering only; every decision is services/admin_view.py)
+  Reads: the dict overview() returned
+  Writes: nothing
+  Can move funds: no. THERE IS NO FORM ON THIS PAGE THAT POSTS ANYWHERE, and
+        there is no route on the admin blueprint that accepts a POST -- see
+        routes/admin.py's header. The one control is a link-shaped button that
+        GETs a read-only chain probe.
+  Mainnet-safe: yes
+
+  STALE MUST NOT LOOK LIKE FRESH. Every time-bearing reading here goes through
+  services/admin_view.freshness() and renders a badge with a SHAPE, a WORD and
+  an age, plus the threshold that decided it. README.md records a staging file
+  that sat over 6000s stale while the system used it anyway and nothing said so
+  louder than a warning; a table that renders a four-hour-old balance in the
+  same type as a four-second-old one repeats that with better typography.
+
+  EVERY REGION RENDERS `(none)` WHEN EMPTY. A blank area cannot be told apart
+  from a query that broke, and on this page the difference between "no payouts
+  are stuck" and "the stuck-payout query is broken" is the difference between
+  going to bed and not.
+#}
+
+{% block content %}
+<section class="hero hero-tight">
+  <p class="eyebrow">Operator surface &#183; read-only</p>
+  <h1>System state</h1>
+  <p class="lede">Nothing on this page changes anything. There is no button that retries a payout, enables a pair,
+     cancels a swap or restarts a worker &#8212; every one of those moves funds or touches armed state, and those
+     belong to you at a shell, not to a web page.</p>
+  <dl class="echo">
+    <div><dt>Database</dt><dd class="mono breakable">{{ data.database }}</dd></div>
+    <div><dt>Rendered at</dt><dd class="mono">{{ data.generated_at }}</dd></div>
+    <div><dt>Stale thresholds</dt><dd>inventory {{ data.thresholds.inventory_stale_after }} &#183;
+      deposit quiet {{ data.thresholds.deposit_quiet_after }}</dd></div>
+  </dl>
+  <p class="panel-note warn"><strong>This page is not authenticated.</strong> Anyone who can reach this port can read
+     every swap id, deposit address, payout address and balance below. The default bind is 127.0.0.1; if that was
+     changed, this page went with it.</p>
+</section>
+
+{# The alarm goes at the top, and it is the one thing on this page that is an
+   alarm. A payout row stuck at 'created' means money possibly on chain with no
+   txid recorded, and nothing retries it on purpose. #}
+<section class="panel {% if data.unresolved_payouts %}panel-alarm{% endif %}" aria-labelledby="stuck-heading">
+  <h2 id="stuck-heading">Payouts claimed but never reported sent</h2>
+  {% if data.unresolved_payouts %}
+  <p class="callout callout-halted"><strong>{{ data.unresolved_payouts|length }} payout row(s) sit at
+     <code>status='created'</code>.</strong> That is the intent-to-pay written before the broadcast. Either a send is
+     in flight right now, or a process died between the broadcast and the UPDATE that records the txid &#8212; in which
+     case the money may be on chain with nothing recorded. Nothing retries these automatically, by design.</p>
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>payout</th><th>swap</th><th>asset</th><th>amount</th><th>created</th></tr></thead>
+    <tbody>
+      {% for row in data.unresolved_payouts %}
+      <tr class="row-alarm">
+        <td>{{ row.id }}</td>
+        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td>{{ row.asset }}</td>
+        <td>{{ '%.8f'|format(row.amount) }}</td>
+        <td>{{ row.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty("payout is stuck at status='created'", "payouts WHERE status = 'created'") }}
+    <p class="panel-note">This is the state you want. It means no payout has been claimed and left unrecorded.</p>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="workers-heading">
+  <h2 id="workers-heading">Workers</h2>
+  <p class="panel-note">Read from each worker's pid file and then confirmed against the operating system &#8212; the
+     recorded command is compared with the live process, so a recycled pid reports <code>unknown</code> rather than
+     <code>running</code>. This page starts and stops nothing; <code>supervisor.py</code> does that.</p>
+  {% if data.workers %}
+  <ul class="cards">
+    {% for worker in data.workers %}
+    <li class="card card-{{ worker.state }}">
+      <div class="card-head">
+        <span class="card-title mono">{{ worker.worker }}</span>
+        {{ badges.level_badge('ok' if worker.state == 'running' else ('unknown' if worker.state == 'unknown' else 'halted'), worker.state|upper) }}
+      </div>
+      <p class="card-body">pid {{ worker.pid if worker.pid is not none else '(none)' }}
+        {% if worker.detail %}&#183; {{ worker.detail }}{% endif %}</p>
+      {% if worker.state != 'running' %}
+      <p class="card-note">While this is not running, the work it does is not happening: a stopped payout worker
+         leaves credited swaps in <code>payout_pending</code> indefinitely and every HTTP response still says 200.</p>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    {{ badges.empty('supervised worker is defined', 'supervisor.worker_commands()') }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="flight-heading">
+  <h2 id="flight-heading">Swaps in flight</h2>
+  <p class="panel-note">Statuses counted as in flight:
+     <code>awaiting_deposit</code>, <code>deposit_seen</code>, <code>confirming</code>,
+     <code>payout_pending</code>, <code>paying</code> &#8212; derived from the display rail in
+     <code>services/swap_view.py</code>, minus the terminal statuses.</p>
+  {% if data.in_flight %}
+  {# The table's description lives OUTSIDE .scroll-x. A <caption> is laid out at
+     the TABLE's width, and this table is ~860px wide, so at phone width the
+     caption's text ran off the right edge and could only be read by scrolling
+     sideways -- measured in a 390px render on 2026-09-26. aria-describedby
+     keeps the association for a screen reader while letting the sentence wrap
+     like every other sentence in the panel. #}
+  <p class="panel-note" id="inflight-table-note">Oldest first. &ldquo;State&rdquo; is the SAME verdict the customer's
+     own page shows, from <code>services/swap_view.attention()</code> &#8212; per status, so a swap waiting on our
+     payout worker is judged against that worker's poll interval and a swap waiting on a customer is not judged at
+     all. &ldquo;Unchanged for&rdquo; is time since <code>updated_at</code>; confirmations are counts.</p>
+  <div class="scroll-x">
+  <table aria-describedby="inflight-table-note">
+    <thead><tr><th>swap</th><th>status</th><th>pair</th><th>expected in</th><th>seen in</th><th>confirmations</th>
+      <th>state</th><th>unchanged for</th></tr></thead>
+    <tbody>
+      {% for row in data.in_flight %}
+      <tr>
+        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.id) }}">{{ row.id }}</a></td>
+        <td><code>{{ row.status }}</code></td>
+        <td>{{ row.from_asset }}&#8594;{{ row.to_asset }}</td>
+        <td>{{ '%.8f'|format(row.expected_input_amount) }}</td>
+        <td>{% if row.actual_input_amount is none %}<span class="empty-mark">(none)</span>{% else %}{{ '%.8f'|format(row.actual_input_amount) }}{% endif %}</td>
+        <td>{{ row.max_confirmations if row.max_confirmations is not none else 0 }} / {{ row.min_confirmations }}</td>
+        <td>{{ badges.level_badge(row.attention.level) }}</td>
+        <td>{{ row.attention.waited or '(not applicable)' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('swap is in flight', 'swaps WHERE status IN (awaiting_deposit, deposit_seen, confirming, payout_pending, paying)') }}
+    <p class="panel-note">Zero in flight is a normal reading on a quiet system. It is <em>not</em> a statement that
+       the workers are running &#8212; read the worker panel above for that.</p>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="counts-heading">
+  <h2 id="counts-heading">Every swap status present</h2>
+  {% if data.status_counts %}
+  <ul class="chips">
+    {% for row in data.status_counts %}
+    <li class="chip"><span class="chip-key mono">{{ row.status }}</span><span class="chip-value">{{ row.swaps }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    {{ badges.empty('swap row exists at all', 'SELECT status, COUNT(*) FROM swaps GROUP BY status') }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="inventory-heading">
+  <h2 id="inventory-heading">Hot-wallet inventory</h2>
+  <p class="panel-note">Written by the reconcile worker, which polls every 60s. A row older than
+     {{ data.thresholds.inventory_stale_after }} is marked STALE, because at that age the refresh is not happening
+     rather than having happened recently. <strong>A stale balance is not a small balance</strong> &#8212; it is a
+     number nobody has checked.</p>
+  {% if data.inventory %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>asset</th><th>confirmed</th><th>reserved</th><th>available</th><th>updated</th><th>reading</th></tr></thead>
+    <tbody>
+      {% for row in data.inventory %}
+      <tr class="{% if row.fresh.state != 'fresh' %}row-warn{% endif %}">
+        <td>{{ row.asset }}</td>
+        <td>{{ '%.8f'|format(row.hot_confirmed) }}</td>
+        <td>{{ '%.8f'|format(row.hot_reserved) }}</td>
+        <td>{{ '%.8f'|format(row.hot_available) }}</td>
+        <td class="mono">{{ row.updated_at }}</td>
+        <td>{{ badges.freshness_badge(row.fresh) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('wallet inventory row has ever been written', 'wallet_inventory') }}
+    <p class="panel-note">Expected to hold one row per configured chain. Empty means the reconcile worker has never
+       completed a cycle against this database &#8212; not that the wallets are empty.</p>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="chains-heading">
+  <h2 id="chains-heading">Chains</h2>
+  <p class="panel-note">&ldquo;Configured&rdquo; means an adapter was constructed, which is what the workers mean by it
+     too. The threshold column says what its number MEANS per chain, because three different things share the name
+     <code>min_confirmations</code> and only one of them is a count of blocks.</p>
+  {% if data.chains %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>asset</th><th>configured</th><th>tradeable</th><th>deposit attribution</th><th>threshold</th>
+      <th>endpoint</th></tr></thead>
+    <tbody>
+      {% for row in data.chains %}
+      <tr>
+        <td>{{ row.asset }}</td>
+        <td>{{ badges.level_badge('ok' if row.configured else 'halted', 'YES' if row.configured else 'NO') }}</td>
+        <td>{{ badges.level_badge('ok' if row.tradeable else 'halted', 'YES' if row.tradeable else 'NO') }}</td>
+        <td class="breakable"><code>{{ row.attribution }}</code><br><span class="subtle">{{ row.attribution_note }}</span></td>
+        <td class="breakable">{{ row.threshold_note }}</td>
+        <td class="mono breakable subtle">{{ row.endpoint }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('chain is known to this application', 'the adapters dict and ATTRIBUTION_MODELS') }}
+  {% endif %}
+
+  <div class="probe">
+    <h3>Reachability</h3>
+    {# Announce BEFORE (rule 14): the cost and the scale of the probe are stated
+       before it is run, not after it finishes. It is not run on page load
+       because six chains at a 30s timeout is a three-minute page, and a page
+       like that is one an operator interrupts. #}
+    <p class="panel-note">Not probed on page load. Asking makes <strong>one read-only call per configured
+       chain</strong> &#8212; <code>getblockchaininfo</code> on a Bitcoin-style daemon,
+       <code>server_info</code> for XRP &#8212; and each can take up to its RPC timeout (30s by default), so the answer
+       can take a while. The network is taken from what the daemon reports, never from its port number.</p>
+    <p><a class="button" href="{{ url_for('admin.admin_chains_route') }}" id="probe-link">Probe
+       {{ data.chains | selectattr('configured') | list | length }} configured chain(s)</a></p>
+    <div id="probe-result" class="result" aria-live="polite">
+      <p class="result-idle"><span class="empty-mark">(not probed)</span> No chain has been contacted by this page
+         load. Nothing below is a claim about whether a daemon is up.</p>
+    </div>
+  </div>
+</section>
+
+<section class="panel" aria-labelledby="pairs-heading">
+  <h2 id="pairs-heading">Trading pairs</h2>
+  <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code>. Disabled pairs are listed rather than hidden,
+     because &ldquo;is XRP on?&rdquo; is a question that otherwise gets answered by reading source. Enabling one is a
+     configuration change and is not doable from this page.</p>
+  {% if data.pairs %}
+  <ul class="pair-grid">
+    {% for row in data.pairs %}
+    <li class="pair {% if not row.enabled %}pair-off{% endif %}">
+      <span class="pair-label mono">{{ row.label }}</span>
+      {{ badges.level_badge('ok' if row.enabled else 'halted', 'ENABLED' if row.enabled else 'DISABLED') }}
+      <span class="subtle">{{ row.detail }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    {{ badges.empty('pair is known', 'Config.ALLOWED_PAIRS') }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="deposits-heading">
+  <h2 id="deposits-heading">Deposits seen (most recent 25)</h2>
+  <p class="panel-note">New rows are the evidence a chain is being watched at all. If the newest row here is old,
+     nothing has polled since.</p>
+  {% if data.deposits %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>swap</th><th>asset</th><th>txid</th><th>vout</th><th>amount</th><th>confirmations</th>
+      <th>last seen</th></tr></thead>
+    <tbody>
+      {% for row in data.deposits %}
+      <tr>
+        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td>{{ row.asset }}</td>
+        <td class="mono breakable">{{ row.txid }}</td>
+        <td>{{ row.vout }}</td>
+        <td>{{ '%.8f'|format(row.amount) }}</td>
+        <td>{{ row.confirmations }}</td>
+        <td>{{ badges.freshness_badge(row.seen) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('deposit has ever been recorded', 'deposit_events') }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="payouts-heading">
+  <h2 id="payouts-heading">Payouts (most recent 25)</h2>
+  {% if data.payouts %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>id</th><th>swap</th><th>asset</th><th>amount</th><th>status</th><th>txid</th><th>sent</th></tr></thead>
+    <tbody>
+      {% for row in data.payouts %}
+      <tr class="{% if row.status == 'created' %}row-alarm{% endif %}">
+        <td>{{ row.id }}</td>
+        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td>{{ row.asset }}</td>
+        <td>{{ '%.8f'|format(row.amount) }}</td>
+        <td><code>{{ row.status }}</code></td>
+        <td class="mono breakable">{{ row.txid or '(none)' }}</td>
+        <td>{{ row.sent_at or '(not sent)' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('payout has ever been written', 'payouts') }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="audit-heading">
+  <h2 id="audit-heading">Status changes (most recent 25)</h2>
+  <p class="panel-note">The only movement on this page; everything above is state. An empty tail on a database with
+     swaps in it means nothing has changed status since those rows were written.</p>
+  {% if data.transitions %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>when</th><th>swap</th><th>from</th><th>to</th><th>message</th></tr></thead>
+    <tbody>
+      {% for row in data.transitions %}
+      <tr>
+        <td class="mono">{{ row.created_at }}</td>
+        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td><code>{{ row.old_status or '(new)' }}</code></td>
+        <td><code>{{ row.new_status }}</code></td>
+        <td>{{ row.message or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('status change has been recorded', 'swap_audit_log') }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="config-heading">
+  <h2 id="config-heading">Settings that decide the answers above</h2>
+  <p class="panel-note">An allowlist, not a dump. <code>Config</code> also holds the wallet RPC user and password one
+     key away from these, so this page names the keys it echoes rather than filtering a pattern.</p>
+  {% if data.config %}
+  <ul class="chips">
+    {% for row in data.config %}
+    <li class="chip"><span class="chip-key mono">{{ row.key }}</span><span class="chip-value mono">{{ row.value }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    {{ badges.empty('setting was echoed', 'services/admin_view.ECHOED_CONFIG_KEYS') }}
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='admin.js') }}" defer
+        data-probe-url="{{ url_for('admin.admin_chains_route') }}"></script>
+{% endblock %}

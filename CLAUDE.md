@@ -312,6 +312,15 @@ own GUI thread (`transactions.py:726`). Treat rule 10 as the direction for new
 code and for whatever you are already touching, not as license for a mass
 reorganization.
 
+Ten as of 2026-09-26: `atomic_swap_gui.py` was deleted. It was 518 lines of
+tkinter whose Swap button funded an HTLC with no confirmation step, nothing in
+the tree imported it -- checked by grepping the NAME across every .py, .sh,
+.toml, .txt and .md, not just the import graph (rule 2), which found only
+comments and a requirements.txt note -- and the operator's instruction was that
+the interface is web now, for both the end user and the administrator. The
+count is left as a correction rather than an overwrite, because the drift is the
+point (rule 1): the measurement above is what was true on 2026-09-24.
+
 ## 11. One vocabulary for assets and chains, derived in one place
 
 Mammon's rule 11 normalizes Kalshi settlement cadence across every ticker. The

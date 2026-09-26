@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% import "_badges.html" as badges %}
+{% set surface = 'user' %}
+{% block title %}Swap not found &#183; Swap Terminal{% endblock %}
+{#
+  Role: template (rendering only)
+  Reads: the requested id
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  IT SAYS NOTHING ABOUT WHY. A mistyped id and an id that was never issued get
+  the same answer, because there is nothing here worth disclosing about either,
+  and a page that distinguished them would let a stranger sort real ids from
+  invented ones. It also renders NO stack trace and NO configuration: an error
+  page is exactly where a secret leaks, because the debugging impulse is to dump
+  state.
+#}
+{% block content %}
+<section class="hero hero-tight">
+  <p class="eyebrow">Not found</p>
+  <h1>No swap with that ID</h1>
+</section>
+<section class="panel">
+  {{ badges.empty('swap exists with the ID you asked for', 'swaps WHERE id = the value you entered') }}
+  <p class="panel-note">Nothing was changed by asking. Check the ID for a missing character &#8212; it looks like
+     <code>s_</code> followed by 16 hexadecimal digits &#8212; or start again from the
+     <a href="{{ url_for('ui.index') }}">swap form</a>.</p>
+</section>
+{% endblock %}

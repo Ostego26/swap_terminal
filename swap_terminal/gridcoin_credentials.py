@@ -18,8 +18,11 @@ node_modules. One Gridcoin RPC password is read under four different spellings:
                             transactions.py:68
     RPC_PASS                server.js:97, as its own fallback
     GRIDCOIN_RPC_PASS       identity.py, chain_tx.sh
-    GRC_RPC_PASS            config.py:132, modules/atomic_grc_client.py:539,
-                            atomic_swap_gui.py:60
+    GRC_RPC_PASS            config.py:132, modules/atomic_grc_client.py:539
+                            (atomic_swap_gui.py:60 was a fourth reader of this
+                            spelling until that file was deleted on
+                            2026-09-26; the spelling problem it illustrates is
+                            unchanged)
 
 That is CLAUDE.md rule 8's "two copies of one rule is a bug with a delay on
 it", at four copies, and the delay already expired. The operator's live `.env`

@@ -54,10 +54,12 @@ from db import close_db, init_db
 from flask import Flask
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, mainnet_chains, startup_lines
+from routes.admin import bp as admin_bp
 from routes.health import bp as health_bp
 from routes.quotes import bp as quotes_bp
 from routes.rates import bp as rates_bp
 from routes.swaps import bp as swaps_bp
+from routes.ui import bp as ui_bp
 
 # The literal strings that turn a boolean environment variable on. Anything
 # else -- unset, empty, "0", "no", "False", a typo -- is off. The asymmetry is
@@ -124,6 +126,20 @@ def exposure_warnings(host: str, debug: bool) -> list[str]:
             f"binding {host} exposes this API beyond the local machine; the default is "
             "127.0.0.1 and nothing in this app authenticates a caller."
         )
+        # NAMED SEPARATELY FROM THE LINE ABOVE, on purpose (added 2026-09-26
+        # with routes/admin.py). "Nothing authenticates a caller" is true of
+        # every route and reads as a statement about the swap API; /admin is
+        # a different exposure in kind, because it lists every swap id, every
+        # deposit and payout address, the database path and the hot-wallet
+        # balances on one page -- and services/helpers.new_id() records that a
+        # swap id is "the only thing standing between a stranger and
+        # GET /api/swaps/<id>". An operator who binds an interface has to read
+        # that as its own sentence, not infer it from a general one.
+        warnings.append(
+            f"/admin and /api/admin/* are reachable from {host} with NO authentication: they list every "
+            "swap id, deposit address, payout address and hot-wallet balance this database holds. They are "
+            "read-only -- there is no POST on that surface -- but they are not private."
+        )
     return warnings
 
 
@@ -171,6 +187,13 @@ def create_app() -> Flask:
         )
 
     app.teardown_appcontext(close_db)
+    # routes/ui.py owns the customer pages (`/`, `/swap/<id>`) and
+    # routes/admin.py owns the read-only operator surface (`/admin`). They are
+    # separate blueprints rather than one "pages" module because the two have
+    # different audiences and different exposure: see routes/admin.py's header
+    # for the authentication question, which is named rather than solved.
+    app.register_blueprint(ui_bp)
+    app.register_blueprint(admin_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(quotes_bp)
     app.register_blueprint(rates_bp)
@@ -195,7 +218,8 @@ def startup_banner(host: str, port: int, debug: bool, db_path: str, startup_seco
         f"  bind            {host}:{port}  <- 127.0.0.1 is the default; anything else is reachable off-box",
         f"  database        {db_path}",
         f"  debugger        {'ON' if debug else 'off'}  <- off is the default; ON means a remote Python console",
-        f"  allowed pairs   {pairs or '(none)'}",
+        f"  allowed pairs   {pairs or '(none)'}  <- Config.ALLOWED_PAIRS; the swap form is rendered from this list",
+        f"  operator page   http://{host}:{port}/admin  <- READ-ONLY (no POST on that surface) and UNAUTHENTICATED",
         f"  setup took      {format_duration(startup_seconds)}",
     ]
     warnings = exposure_warnings(host, debug)

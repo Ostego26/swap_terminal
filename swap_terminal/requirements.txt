@@ -88,7 +88,11 @@ bech32>=1.2,<2.0
 # cannot be redeemed and is recoverable only by waiting out its timelock.
 ecdsa>=0.19,<1.0
 
-# --- Environment loading (atomic_swap_gui.py, modules/atomic_grc_client.py) ---
+# --- Environment loading (transactions.py, modules/atomic_grc_client.py) -----
+# atomic_swap_gui.py was the third reader and was deleted on 2026-09-26. The
+# dependency STAYS: transactions.py calls load_dotenv() at import and
+# modules/atomic_grc_client.py reads the same environment, so removing it
+# would break two live files. Only the list of readers changed.
 # Imported as `dotenv`, distributed as `python-dotenv`. CLAUDE.md rule 12 warns
 # about load_dotenv() at import time making later imports order-dependent;
 # declaring the package does not endorse where it is called.
@@ -104,7 +108,8 @@ pandas>=2.0,<4.0
 yfinance>=0.2,<2.0
 
 # --- Not installable with pip -------------------------------------------------
-# tkinter (transactions.py:49, atomic_swap_gui.py:34) ships with CPython but is
+# tkinter (transactions.py:49 -- the last user in this tree, now that
+# atomic_swap_gui.py has been deleted) ships with CPython but is
 # packaged separately on Debian and Ubuntu. If `import tkinter` fails:
 #
 #     sudo apt install python3-tk

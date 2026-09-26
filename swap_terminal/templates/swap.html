@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% import "_badges.html" as badges %}
+{% set surface = 'user' %}
+{% block title %}Swap {{ view.swap.id }} &#183; Swap Terminal{% endblock %}
+{#
+  One swap, tracked.
+
+  Role: template (rendering only; every decision is services/swap_view.py)
+  Reads: the dict swap_display() returned
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  THE DEPOSIT PANEL IS PER-CHAIN AND DOES NOT PAPER OVER THE DIFFERENCE. A
+  Bitcoin-style chain attributes a deposit by ADDRESS; the XRP Ledger attributes
+  it by an integer DESTINATION TAG on one shared account. Rendering an address
+  box for both would invite a customer to send XRP with no tag, which arrives
+  and cannot be matched to their swap. services/swap_view.deposit_instruction()
+  decides which model applies and this template draws whichever it returned --
+  including the case where a tag has not been issued, where it refuses to show a
+  send target at all.
+#}
+
+{% block content %}
+<section class="hero hero-tight">
+  <p class="eyebrow">Swap</p>
+  <h1 class="mono breakable">{{ view.swap.id }}</h1>
+  <p class="lede">{{ view.swap.from_asset }} &#8594; {{ view.swap.to_asset }} &#183; created {{ view.swap.created_at }}</p>
+  <p class="panel-note">This page reloads its own status every 15s while it is open. Nothing is decided in your
+     browser: each refresh asks the server what the status means.</p>
+</section>
+
+{# Deposit instructions come FIRST on this page, above the status, because until
+   a deposit is sent there is nothing else the customer can act on.
+
+   THE SEND TARGET IS SHOWN ONLY WHILE A DEPOSIT IS STILL WANTED
+   (services/swap_view.DEPOSIT_ACCEPTING_STATUSES). This panel used to render
+   the address for every status, which put "Send exactly 0.01 BTC to" directly
+   above a card explaining that the swap had been HALTED -- inviting a second
+   deposit into a swap no worker will advance. Caught by looking at a rendered
+   `under_review` swap on 2026-09-26, not by a test, which is why there is now
+   a test too. #}
+<section class="panel {% if view.accepting_deposit %}panel-accent{% endif %}" aria-labelledby="deposit-heading">
+  <h2 id="deposit-heading">{% if view.accepting_deposit %}What to send{% else %}Deposit target{% endif %}</h2>
+  {% set deposit = view.deposit %}
+
+  {% if not view.accepting_deposit %}
+  <p class="callout callout-halted"><strong>Do not send anything to this swap.</strong> It is no longer accepting a
+     deposit &#8212; its status is <code>{{ view.status }}</code>, and anything sent now would arrive against a swap
+     that is not being advanced. The address is shown below for reference only, so you can match it to a payment you
+     have already made.</p>
+  <p class="mono breakable subtle">{{ deposit.address or '(none recorded)' }}</p>
+  {% elif deposit.problem %}
+  <p class="callout callout-halted"><strong>Do not send anything yet.</strong> {{ deposit.problem }}</p>
+  {% endif %}
+
+  {% if not view.accepting_deposit %}
+    {# Nothing more: the reference line above is all a closed swap gets. #}
+  {% elif deposit.model == 'address' and not deposit.problem %}
+    <p class="panel-note">{{ deposit.note }}</p>
+    <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
+       {{ view.swap.from_asset }}</strong> to</p>
+    <p class="copyable mono breakable" id="deposit-target">{{ deposit.address }}</p>
+  {% elif deposit.model == 'destination_tag' and not deposit.problem %}
+    <p class="callout callout-working"><strong>{{ view.swap.from_asset }} works differently from the other chains
+       here.</strong> {{ deposit.note }}</p>
+    <p class="field-label">Account (shared by every swap)</p>
+    <p class="copyable mono breakable">{{ deposit.address }}</p>
+    <p class="field-label">Destination tag &#8212; <strong>this is what identifies your swap</strong></p>
+    <p class="copyable mono tag-value" id="deposit-target">{{ deposit.tag }}</p>
+    <p class="panel-note">A payment to that account without exactly this tag cannot be matched to your swap. The tag
+       is an integer, and <code>0</code> is a legal tag rather than a missing one.</p>
+  {% elif deposit.model == 'destination_tag' %}
+    <p class="panel-note">{{ deposit.note }}</p>
+  {% else %}
+    <p class="panel-note">{{ deposit.note }}</p>
+  {% endif %}
+
+  <p class="panel-note">Quote window: {{ view.window.display }} &#8212; {{ view.window.note }}</p>
+</section>
+
+{# The live region. Its id is what static/script.js replaces; everything inside
+   is rendered by the server, both now and on every poll. #}
+<div id="swap-live">
+  {% include "_swap_live.html" %}
+</div>
+
+<section class="panel" aria-labelledby="events-heading">
+  <h2 id="events-heading">Deposits recorded for this swap</h2>
+  {% if view.swap.deposit_events %}
+  <p class="panel-note" id="deposit-table-note">Each row is one output credited to this swap's deposit target.
+     Confirmations are counts.</p>
+  <div class="scroll-x">
+  <table aria-describedby="deposit-table-note">
+    <thead><tr><th>txid</th><th>vout</th><th>amount</th><th>confirmations</th><th>first seen</th><th>credited</th></tr></thead>
+    <tbody>
+      {% for event in view.swap.deposit_events %}
+      <tr>
+        <td class="mono breakable">{{ event.txid }}</td>
+        <td>{{ event.vout }}</td>
+        <td>{{ '%.8f'|format(event.amount) }} {{ event.asset }}</td>
+        <td>{{ event.confirmations }}</td>
+        <td>{{ event.first_seen_at }}</td>
+        <td>{{ event.credited_at or '(not credited)' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('deposit row exists for this swap', 'deposit_events WHERE swap_id = ' ~ view.swap.id) }}
+    <p class="panel-note">That is the expected state before you send anything. A row appears the first time a
+       watcher sees your transaction, even with zero confirmations.</p>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="payout-heading">
+  <h2 id="payout-heading">Payout attempts</h2>
+  {% if view.swap.payouts %}
+  <p class="panel-note" id="payout-table-note">One row per payout attempt. A row with no txid has not been
+     broadcast.</p>
+  <div class="scroll-x">
+  <table aria-describedby="payout-table-note">
+    <thead><tr><th>status</th><th>amount</th><th>txid</th><th>created</th><th>sent</th></tr></thead>
+    <tbody>
+      {% for payout in view.swap.payouts %}
+      <tr>
+        <td>{{ payout.status }}</td>
+        <td>{{ '%.8f'|format(payout.amount) }} {{ payout.asset }}</td>
+        <td class="mono breakable">{{ payout.txid or '(none)' }}</td>
+        <td>{{ payout.created_at }}</td>
+        <td>{{ payout.sent_at or '(not sent)' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('payout has been attempted', 'payouts WHERE swap_id = ' ~ view.swap.id) }}
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='script.js') }}" defer
+        data-swap-fragment="{{ url_for('ui.swap_fragment', swap_id=view.swap.id) }}"></script>
+{% endblock %}

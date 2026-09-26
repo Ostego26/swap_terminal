@@ -610,8 +610,12 @@ def ensure_watch_only_import(rpc_call, p2sh_address: str, label: str = "HTLC-wat
     What in this repository needs the address in the wallet? Grepped the whole
     tree by name, not by import graph: `getreceivedbyaddress` is called only
     from `get_address_balance()`, and every call site of THAT
-    (swap_terminal/atomic_swap_gui.py, six of them) passes an operator's own
-    validated address, never a contract P2SH. So nothing here needs it.
+    (swap_terminal/atomic_swap_gui.py, six of them) passed an operator's own
+    validated address, never a contract P2SH. So nothing here needs it -- and
+    since that file was DELETED on 2026-09-26 as dead code, get_address_balance()
+    now has no caller in this tree at all. The paragraph below is unchanged by
+    that and is the reason why: "no caller in this tree" is still not "no
+    caller".
 
     It is kept rather than deleted because "no caller in this tree" is not "no
     caller" (rule 2), and an operator running `listtransactions` or

@@ -129,8 +129,43 @@ def test_bind_port_raises_on_a_typo_rather_than_silently_using_5000():
 
 
 def test_exposure_warnings_are_empty_only_for_the_safe_default():
+    """The safe default warns about nothing; every unsafe setting warns.
+
+    THE COUNTS CHANGED ON 2026-09-26 AND THE ASSERTIONS CHANGED SHAPE WITH THEM.
+    This test used to assert `len(...) == 1` for a non-loopback bind and `== 2`
+    for a non-loopback bind with the debugger on. routes/admin.py added a second
+    warning for a non-loopback bind, because /admin is a different exposure in
+    kind from "the API is reachable" -- so the numbers are now 2 and 3.
+
+    Asserting on the CONTENT rather than only the count is the stronger
+    invariant, and is why this is not simply a count bumped by one: what matters
+    is that the debugger warning appears when the debugger is on, that the
+    exposure warning appears when the bind is not loopback, that the admin
+    surface is named BY PATH when it becomes reachable, and that a loopback bind
+    never mentions it. A count cannot tell those apart, and a count is exactly
+    what would keep passing if a future edit replaced the admin sentence with a
+    duplicate of the one above it.
+    """
     assert app.exposure_warnings("127.0.0.1", False) == []
     assert app.exposure_warnings("localhost", False) == []
-    assert len(app.exposure_warnings("127.0.0.1", True)) == 1
-    assert len(app.exposure_warnings(ALL_INTERFACES, False)) == 1
-    assert len(app.exposure_warnings(ALL_INTERFACES, True)) == 2
+    assert app.exposure_warnings("::1", False) == []
+
+    debug_only = app.exposure_warnings("127.0.0.1", True)
+    assert len(debug_only) == 1
+    assert "SWAP_TERMINAL_DEBUG" in debug_only[0]
+    # A loopback bind must NOT warn about /admin: it is not reachable off-box,
+    # so a warning there would be the log that cries wolf.
+    assert not any("/admin" in warning for warning in debug_only)
+
+    exposed = app.exposure_warnings(ALL_INTERFACES, False)
+    assert len(exposed) == 2
+    assert any(ALL_INTERFACES in warning and "authenticates" in warning for warning in exposed)
+    admin_warnings = [warning for warning in exposed if "/admin" in warning]
+    assert len(admin_warnings) == 1
+    assert "NO authentication" in admin_warnings[0]
+    assert "read-only" in admin_warnings[0]
+
+    both = app.exposure_warnings(ALL_INTERFACES, True)
+    assert len(both) == 3
+    assert sum("SWAP_TERMINAL_DEBUG" in warning for warning in both) == 1
+    assert sum("/admin" in warning for warning in both) == 1
