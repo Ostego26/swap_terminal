@@ -298,6 +298,17 @@ class ChainOutcome:
     cltv_activation_height: int | None = None
     height_at_refund_test: int | None = None
     refund_after_expiry: str = SKIP
+    # THE REAL refund_contract(), added 2026-09-26. Until then the timelock
+    # branch was only ever spent by the harness's own control spender, so a
+    # green step 9 said the SCRIPT was refundable while nothing in the product
+    # could refund it. These two say which spender actually did it: a control
+    # refund with the real one FAILED is a much weaker result than the summary
+    # used to imply, and the verdict now distinguishes them.
+    real_refund_contract: str = SKIP
+    real_refund_before_expiry_refused: str = SKIP
+    # Whether contract [B] -- the one the refund spends -- was created by the
+    # real create_contract() or funded by the harness. Same distinction as [A].
+    real_create_contract_b: str = SKIP
     notes: list[str] = field(default_factory=list)
 
     def note_signer_reached(self, attempt: RedeemAttempt) -> None:
@@ -1138,11 +1149,22 @@ def step_6_fund(run: Run, client, contract: Contract, outcome: ChainOutcome) -> 
     run.say(f"contract [A] was funded by {contract.funded_by}")
     _assert_output_on_chain(run, contract, contract_a, "A")
 
-    contract_b = _fund_directly(run, contract, "B")
-    run.say(
-        "contract [B] is funded by the harness in every run -- no code in this tree can create a contract for the "
-        "refund path, because no refund implementation exists to call."
-    )
+    # CONTRACT [B] GOES THROUGH THE REAL CLIENT TOO, as of 2026-09-26. This
+    # used to be an unconditional _fund_directly with a line saying "no code in
+    # this tree can create a contract for the refund path, because no refund
+    # implementation exists to call". Both halves of that sentence are now
+    # false: refund_contract() exists on both clients, and create_contract()
+    # does not care which branch will eventually spend its output -- it is the
+    # same script and the same P2SH address as [A], funded a second time.
+    real_b = _attempt_real_create_contract(run, client, contract)
+    outcome.real_create_contract_b = OK if real_b else FAIL
+    if real_b is not None:
+        _mine(run, 1)
+        contract_b = real_b
+        run.say("contract [B] was funded by the REAL create_contract(), the same call that funded [A]")
+    else:
+        contract_b = _fund_directly(run, contract, "B")
+        run.say("contract [B] was funded by the harness (the real create_contract() failed above)")
     _assert_output_on_chain(run, contract, contract_b, "B")
     contract.outpoint = contract_a
     return contract_a, contract_b
@@ -1637,6 +1659,45 @@ def _assert_spend_landed(run: Run, txid: str, key: RegtestKey, label: str, block
 # --------------------------------------------------------------------------
 
 
+def _attempt_real_refund(run: Run, client, contract: Contract, outpoint: Outpoint, nlocktime: int) -> tuple[str | None, str]:
+    """Drive the REAL refund_contract(). Returns (txid or None, the failure text).
+
+    ADDED 2026-09-26, and it is what steps 8 and 9 exist to exercise now. Before
+    it, both steps used the control spender only, so the harness could report
+    "both branches spend" about a tree in which nothing could refund anything --
+    the script was proven, the product was not. Step 7's shape is copied
+    deliberately: the real client goes first, the control runs only if the real
+    one could not, and a control-only success is scored as the weaker result it
+    is.
+
+    KEYWORD ARGUMENTS, always. refund_contract() is keyword-only on both
+    clients precisely because `refund_privkey` and the participant key are
+    interchangeable to a positional call and not to a chain.
+
+    The returned failure text is used to CLASSIFY the refusal in step 8, which
+    is the whole reason modules/atomic_*_client.py had to stop calling
+    raise_for_status() before reading the JSON error: `500 Server Error` cannot
+    be told apart from `non-mandatory-script-verify-flag`, and step 8's entire
+    finding is which of those two the node said.
+    """
+    run.say(
+        f"calling the REAL {type(client).__name__}.refund_contract(nLockTime={nlocktime}, "
+        f"script locktime={contract.locktime}) -- both heights, never durations"
+    )
+    try:
+        txid = client.refund_contract(
+            contract_txid=outpoint.txid,
+            contract_vout=outpoint.vout,
+            redeem_script=contract.redeem_script,
+            locktime=nlocktime,
+            refund_privkey=contract.refund.wif,
+            refund_address=contract.refund.address,
+        )
+    except Exception as exc:  # noqa: BLE001 -- checked: this is a harness, and the REASON is the measurement. The three clients raise a bare Exception for an RPC error, requests' own HTTPError for a transport failure and ValueError for a refused build, and step 8 needs the text of whichever it was in order to classify the refusal. Narrowing this would drop the case that has not happened yet, which on a nine-step harness means a bare traceback instead of a labeled FAIL. Nothing here treats the failure as a result: the caller gets None and says so.
+        return None, str(exc)
+    return txid, ""
+
+
 def _build_refund(contract: Contract, outpoint: Outpoint, nlocktime: int) -> tuple[str, bytes]:
     return build_branch_spend(
         outpoint=outpoint,
@@ -1746,7 +1807,7 @@ def _attempt_refund_into_a_block(run: Run, contract: Contract, outpoint: Outpoin
     )
 
 
-def step_8_refund_before_expiry(run: Run, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
+def step_8_refund_before_expiry(run: Run, client, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
     run.step(8, "refund BEFORE expiry must be REJECTED -- three times, for three different reasons")
 
     # [D] is funded FIRST, while mining a block for it cannot disturb the
@@ -1786,10 +1847,52 @@ def step_8_refund_before_expiry(run: Run, contract: Contract, outpoint: Outpoint
     )
     # 8b: the transaction is final for this block, so the script actually runs
     # and CLTV compares the script's larger locktime against this nLockTime.
-    second, refusal_kind = _attempt_refund_expecting_refusal(
-        run, contract, outpoint, height,
-        "8b refund with nLockTime = the current tip (final, so the script RUNS; this is the CLTV assertion)",
-    )
+    #
+    # THROUGH THE REAL refund_contract() as of 2026-09-26, with the control kept
+    # as a fallback. The real client is what a live refund would use, so a
+    # refusal it earns is the finding; the control's refusal only ever said the
+    # SCRIPT would be refused. The fallback is not ceremony: if the real client
+    # fails for a reason that is not a node refusal -- a build error, a bad key,
+    # an RPC that never reached the daemon -- then nothing was asked of the
+    # chain, and scoring that as "CLTV enforced" would be the overclaim this
+    # whole step exists to avoid. classify_refusal() returning OTHER is exactly
+    # that case, and the control then answers the CLTV question on its own.
+    label_8b = "8b refund with nLockTime = the current tip (final, so the script RUNS; this is the CLTV assertion)"
+    # INLINE rather than a helper beside _attempt_refund_expecting_refusal: it
+    # would have exactly one caller, and its sixth argument was the client --
+    # which is the shape rule 12 says to fix by extracting a decision, not by
+    # suppressing the count. An ACCEPTED early refund here is the loudest thing
+    # this harness can find, and louder than the control's version of it: it
+    # would mean the product's own refund can take coins out of a contract
+    # before the timelock expires, which on a live swap is theft from a
+    # counterparty still waiting to redeem.
+    real_txid, real_failure = _attempt_real_refund(run, client, contract, outpoint, height)
+    if real_txid is None:
+        refusal_kind = classify_refusal(real_failure)
+        second = run.check(
+            f"{label_8b} [REAL refund_contract()] is REFUSED",
+            f"[{refusal_kind}] {real_failure}",
+            "the node to refuse it",
+            OK,
+        )
+    else:
+        refusal_kind = REFUSAL_OTHER
+        second = run.check(
+            f"{label_8b} [REAL refund_contract()] is REFUSED",
+            f"the node ACCEPTED it: txid={real_txid}",
+            "the node to refuse it",
+            FAIL,
+        )
+    outcome.real_refund_before_expiry_refused = second
+    if refusal_kind == REFUSAL_OTHER:
+        run.say(
+            "the REAL refund_contract() did not produce a recognizable node refusal above, so the chain was not "
+            "actually asked whether it enforces the locktime. Falling back to the control spender for 8b, and the "
+            "CLTV verdict below comes from the control rather than from the real client."
+        )
+        second, refusal_kind = _attempt_refund_expecting_refusal(
+            run, contract, outpoint, height, f"{label_8b} [control]"
+        )
     outcome.refund_refusal_kind = refusal_kind
     _report_refusal_strength(run, refusal_kind)
 
@@ -1821,8 +1924,16 @@ def _report_refusal_strength(run: Run, kind: str) -> None:
     run.say(f"8b's refusal did not match any known shape ({kind}); read the message above before concluding anything.")
 
 
-def step_9_refund_after_expiry(run: Run, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
-    run.step(9, "refund AFTER expiry must SUCCEED")
+def step_9_refund_after_expiry(run: Run, client, contract: Contract, outpoint: Outpoint, outcome: ChainOutcome) -> None:
+    """The REAL refund_contract() first, the control only if it could not spend.
+
+    REWRITTEN 2026-09-26. This step used to call the control spender
+    unconditionally, which is why the summary could say "both branches spend"
+    about a tree whose clients had no refund method at all. The shape now
+    matches step 7's: real client, then control, and a control-only success is
+    reported as the weaker result rather than as the same one.
+    """
+    run.step(9, "refund AFTER expiry must SUCCEED -- the REAL refund_contract(), then the harness control")
     height = _mine(run, 1).height
     run.check(
         "height now reaches the locktime",
@@ -1830,13 +1941,45 @@ def step_9_refund_after_expiry(run: Run, contract: Contract, outpoint: Outpoint,
         contract.locktime,
         OK if height >= contract.locktime else FAIL,
     )
-    raw_hex, script_sig = _build_refund(contract, outpoint, contract.locktime)
-    run.say(f"refund scriptSig = {describe_script_sig(script_sig)}")
-    try:
-        txid = _broadcast(run, raw_hex)
-    except RPCError as exc:
-        outcome.refund_after_expiry = run.check("refund after expiry", f"RPCError: {exc}", "a broadcast txid", FAIL)
+
+    txid, failure = _attempt_real_refund(run, client, contract, outpoint, contract.locktime)
+    outcome.real_refund_contract = run.check(
+        "9a REAL refund_contract() after expiry",
+        f"txid={txid}" if txid else failure,
+        "a broadcast txid",
+        OK if txid else FAIL,
+    )
+    if txid is not None:
+        outcome.refund_after_expiry = outcome.real_refund_contract
+        mined = _mine(run, 1)
+        _assert_spend_landed(run, txid, contract.refund, "refund", mined.first_hash)
+        run.check(
+            "9b control refund spend",
+            "not attempted: the real client already refunded the contract",
+            "n/a",
+            SKIP,
+        )
+        run.say(
+            "9b is SKIPPED, and that is the good outcome: the control exists to say whether the timelock branch can "
+            "be spent when the CLIENT cannot spend it, and the client could."
+        )
         return
-    outcome.refund_after_expiry = run.check("refund after expiry", f"txid={txid}", "a broadcast txid", OK)
+
+    run.say(
+        "the REAL refund_contract() did not spend it, so the control spender runs below. A control-only refund says "
+        "the SCRIPT's timelock branch is spendable and says NOTHING good about the code that is supposed to spend it."
+    )
+    raw_hex, script_sig = _build_refund(contract, outpoint, contract.locktime)
+    run.say(f"9b control refund scriptSig = {describe_script_sig(script_sig)}")
+    try:
+        control_txid = _broadcast(run, raw_hex)
+    except RPCError as exc:
+        outcome.refund_after_expiry = run.check(
+            "9b control refund after expiry", f"RPCError: {exc}", "a broadcast txid", FAIL
+        )
+        return
+    outcome.refund_after_expiry = run.check(
+        "9b control refund after expiry", f"txid={control_txid}", "a broadcast txid", OK
+    )
     mined = _mine(run, 1)
-    _assert_spend_landed(run, txid, contract.refund, "refund", mined.first_hash)
+    _assert_spend_landed(run, control_txid, contract.refund, "refund", mined.first_hash)

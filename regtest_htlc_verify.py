@@ -42,12 +42,28 @@ spend the hashlock branch is now a FAIL that lands in the exit code. An
 assertion that accepted either outcome would pass whether or not the fix
 worked, which is worse than having no assertion at all.
 
-What remains inferred is the REFUND branch, and CLAUDE.md's verification rule
-is why that is still the outstanding work: "the only honest proof that a
-contract is correct is that both of its branches were exercised on a test
-chain: a redeem with the preimage, and a refund after the timelock expired."
-No client in this tree implements a refund at all, so steps 8 and 9 exercise it
-with the harness's own spender and every line about it says `control`.
+THE REFUND BRANCH IS NO LONGER INFERRED EITHER, as of 2026-09-26. CLAUDE.md's
+verification rule asks for both branches on a test chain -- "a redeem with the
+preimage, and a refund after the timelock expired" -- and until today only the
+first went through real code: no client implemented a refund at all, so steps 8
+and 9 used the harness's own spender and every line about them said `control`.
+A green run therefore said the SCRIPT was refundable while nothing in the
+product could refund anything, which is the worst of the three states a funded
+contract can be in.
+
+BTCClient.refund_contract() and LTCClient.refund_contract() exist now, both
+over modules/htlc_rpc.broadcast_refund(), and steps 8 and 9 drive them: 8b
+asserts the REAL client is refused before expiry and 9a asserts it succeeds
+after. The control spender is still here and still runs when the real one
+cannot -- 9b, scored as the weaker result it is, and SKIPPED when the client
+could spend, exactly as 7c is for the hashlock branch. Measured on LTC regtest
+the day it was written: 8b refused `[policy] code=-26 non-mandatory-script-
+verify-flag (Locktime requirement not satisfied)`, 9a broadcast
+98a5c5716ab0577d..., and 9b skipped.
+
+GRCClient still has no refund, which is named at that client's own redeem site:
+Gridcoin has no node in this harness, and whether its interpreter even enforces
+OP_CHECKLOCKTIMEVERIFY has never been measured here.
 
 WHERE THE TEST HAS TO RUN, WHICH IS NOT OBVIOUS AND COST A ROUND TRIP.
 
@@ -82,9 +98,12 @@ to mark have been fixed, so the same outcomes are now FAIL. Re-marking a
 failing redeem XFAIL to quiet a run would be exactly the move this file exists
 to prevent.
 
-It does not implement a refund either. `redeem_contract()` is fund-moving code
-and CLAUDE.md rule 16 puts that kind of decision with the operator; writing a
-`refund_contract()` is a change to the fund path, not a measurement of one.
+It does not implement a refund either -- one now EXISTS to be driven, written
+on 2026-09-26 on the operator's explicit instruction, in the clients where it
+belongs rather than in this file. Rule 16 is why it waited rather than arriving
+with the harness: refund_contract() is fund-moving code, and adding it was the
+operator's decision to make, not a measurement for a verifier to take on its
+own. The harness's job is still only to say whether it works.
 
 HOW TO RUN IT.
 
@@ -307,8 +326,8 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> steps.C
         contract = steps.step_5_build_contract(run, height)
         contract_a, contract_b = steps.step_6_fund(run, client, contract, outcome)
         steps.step_7_redeem(run, client, contract, contract_a, outcome)
-        steps.step_8_refund_before_expiry(run, contract, contract_b, outcome)
-        steps.step_9_refund_after_expiry(run, contract, contract_b, outcome)
+        steps.step_8_refund_before_expiry(run, client, contract, contract_b, outcome)
+        steps.step_9_refund_after_expiry(run, client, contract, contract_b, outcome)
     except RegtestSetupError as exc:
         # A named precondition failed and the message carries the fix. It is
         # printed as an assertion rather than raised, so the other chain still
@@ -354,6 +373,20 @@ def print_verdicts(console: Console, outcomes: list[steps.ChainOutcome]) -> None
             f"control hashlock spend={outcome.control_redeem}  "
             f"refund refused before expiry={outcome.refund_before_expiry_rejected}  "
             f"refund after expiry={outcome.refund_after_expiry}"
+        )
+        # THE REFUND PATH'S OWN ROW, added 2026-09-26 with refund_contract().
+        # It is separate from `refund after expiry` above for the same reason
+        # `preimage on chain` is separate from the redeem results: that field is
+        # OK when EITHER spender refunded the contract, and until this row
+        # existed a control-only refund and a real one printed identically. A
+        # green `refund after expiry` beside `REAL refund_contract()=FAIL` means
+        # the script is refundable and the product cannot refund it, which is
+        # the state this repository was in until today.
+        console.say(
+            f"{outcome.asset}:   the REFUND path, through the real client: "
+            f"create_contract() for the refund contract [B]={outcome.real_create_contract_b}  "
+            f"refund_contract() refused before expiry={outcome.real_refund_before_expiry_refused}  "
+            f"refund_contract() after expiry={outcome.real_refund_contract}"
         )
         # The four fixes, scored on one line, because that is the question this
         # run exists to answer and an operator should not have to assemble it

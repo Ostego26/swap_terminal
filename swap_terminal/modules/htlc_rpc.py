@@ -69,15 +69,15 @@ from modules.htlc_fee import (
     redeem_miner_fee,
 )
 from modules.htlc_spend import (
+    branch_script_sig,
     decode_wif,
     estimated_script_sig_length,
-    hashlock_script_sig,
     legacy_sighash,
     parse_transaction,
-    participant_key_matches_script,
     public_key_for,
     satoshis_to_coins,
     sign_digest,
+    spend_key_matches_script,
 )
 
 logger = logging.getLogger(__name__)
@@ -370,7 +370,7 @@ def _output_from_decoded(decoded: dict, vout: int, route: str) -> ContractOutput
 
 @dataclass(frozen=True)
 class SignedSpend:
-    """A signed hashlock spend, and every number the operator needs beside it."""
+    """A signed spend of one of the contract's two branches, and every number the operator needs beside it."""
 
     raw_hex: str
     script_sig: bytes
@@ -379,17 +379,75 @@ class SignedSpend:
     miner_fee: Decimal
     fee_rate_coin_per_kvb: Decimal
     destination_amount: Decimal
+    # Which branch, and for a refund the nLockTime it carries. Defaulted so the
+    # hashlock callers that existed before the refund path are unchanged, and
+    # printed because the two branches are indistinguishable in a log otherwise
+    # -- a refund and a redeem of the same contract differ by four bytes of
+    # scriptSig and a header field, and confusing them while reading an incident
+    # would be reading "the counterparty took it" as "we got it back".
+    branch: str = "hashlock"
+    locktime: int = 0
 
     def describe(self, asset: str) -> str:
         """One self-describing line for a log, echoing what decided the answer."""
+        timelock = "" if self.branch == "hashlock" else f", nLockTime={self.locktime} (a height, not a duration)"
         return (
-            f"{asset} hashlock spend: {self.size_bytes} bytes (sized from an upper bound of "
+            f"{asset} {self.branch} spend: {self.size_bytes} bytes (sized from an upper bound of "
             f"{self.estimated_size_bytes}), miner fee {self.miner_fee} = {self.fee_rate_coin_per_kvb} coin/kvB, "
-            f"paying {self.destination_amount} to the destination"
+            f"paying {self.destination_amount} to the destination{timelock}"
         )
 
 
-def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. Nine appear once each in the body and none can be defaulted -- the chain (which picks the fee rule), the RPC, the outpoint and its value, the script being satisfied, the preimage, the key, and where the coins go are independent inputs to one signature. Bundling them into a dataclass would add a type without removing an argument and would move the fund-path decisions away from the call site that makes them.
+def build_hashlock_spend(*, secret: bytes, **kwargs) -> SignedSpend:
+    """Build, size the fee for, and SIGN a spend of the contract's HASHLOCK branch.
+
+    A thin wrapper over build_branch_spend() that exists so the call sites which
+    reveal a preimage say so in the function name. `secret` is required here and
+    cannot be None: passing None would silently build a REFUND, which on the
+    redeem path is the one substitution that must never happen quietly -- it
+    would spend to the refund key instead of the participant and look, in a log,
+    like an ordinary spend. See build_refund_spend for the other branch.
+    """
+    if secret is None:
+        raise ValueError(
+            "build_hashlock_spend was given secret=None, which is how build_branch_spend selects the REFUND branch. "
+            "A redeem with no preimage is not a redeem. Call build_refund_spend explicitly if that is what you "
+            "meant. Nothing was built."
+        )
+    return build_branch_spend(secret=secret, **kwargs)
+
+
+def build_refund_spend(*, locktime: int, **kwargs) -> SignedSpend:
+    """Build, size the fee for, and SIGN a spend of the contract's TIMELOCK branch.
+
+    THE THREE THINGS A REFUND NEEDS THAT A REDEEM DOES NOT, all of which are
+    settled here rather than left to the caller:
+
+      the branch selector   OP_0 instead of <preimage> OP_1, which is
+                            `secret=None` through build_branch_spend.
+      nLockTime             at least the script's locktime, or
+                            CHECKLOCKTIMEVERIFY fails. Passed to
+                            createrawtransaction, which also sets the
+                            non-final sequence CLTV requires.
+      the refund key        `wif` must be the REFUND key, not the
+                            participant's. The script commits to both
+                            hash160s and spend_key_matches_script() accepts
+                            either, so a participant key here would pass that
+                            guard and then fail on chain at OP_EQUALVERIFY
+                            inside the else branch. That asymmetry is named
+                            in spend_key_matches_script's own docstring.
+
+    WHAT THIS DOES NOT DO, and it is the caller's to get right: it does not
+    check that the chain's tip has reached the locktime. Broadcasting a
+    correctly-built refund early is refused by the node -- measured on both
+    chains 2026-09-26, three ways, in regtest_htlc_verify.py step 8 -- so the
+    failure is loud rather than silent, and adding a tip read here would put a
+    second opinion about expiry in a module that has no business holding one.
+    """
+    return build_branch_spend(secret=None, locktime=locktime, **kwargs)
+
+
+def build_branch_spend(  # noqa: PLR0913 -- checked: these eleven ARE the spend. Ten appear once each in the body and none can be defaulted -- the chain (which picks the fee rule), the RPC, the outpoint and its value, the script being satisfied, the branch selector, the key, and where the coins go are independent inputs to one signature. Bundling them into a dataclass would add a type without removing an argument and would move the fund-path decisions away from the call site that makes them.
     *,
     asset: str,
     rpc_call,
@@ -397,12 +455,29 @@ def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. 
     contract_vout: int,
     contract_value: Decimal,
     redeem_script: bytes,
-    secret: bytes,
+    secret: bytes | None,
     wif: str,
     destination_address: str,
     extra_outputs: dict[str, Decimal] | None = None,
+    locktime: int = 0,
 ) -> SignedSpend:
-    """Build, size the fee for, and SIGN a spend of the contract's hashlock branch.
+    """Build, size the fee for, and SIGN a spend of EITHER of the contract's branches.
+
+    ONE implementation for both branches, which is the whole reason the refund
+    was added here rather than beside it (rule 8). Everything that makes a spend
+    correct and safe -- the output-pays-this-contract check in the caller, the
+    key/script match, the fee settling loop, the encoded-fee-versus-intended-fee
+    comparison, the dust refusal, the signed-size-versus-estimate check, the
+    broadcast ceiling -- is the same for a redeem and a refund, and a second
+    copy of it for the refund path would be seven guards that could drift. The
+    branch differs in exactly two places: which scriptSig is assembled, and
+    whether an nLockTime is set.
+
+    `secret=None` selects the refund; a preimage selects the hashlock. That is
+    regtest/txbuild.build_branch_spend's convention too, deliberately (rule 11).
+    Prefer build_hashlock_spend() or build_refund_spend() at a call site: they
+    name the branch, and the hashlock wrapper refuses a None that would have
+    quietly built the other one.
 
     THE NODE SERIALIZES, THIS SIGNS. `createrawtransaction` turns the addresses
     into output scripts and lays the transaction out in whatever shape its own
@@ -448,7 +523,7 @@ def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. 
 
     private_key, compressed = decode_wif(wif)
     public_key = public_key_for(private_key, compressed)
-    if not participant_key_matches_script(public_key, redeem_script):
+    if not spend_key_matches_script(public_key, redeem_script):
         raise ValueError(
             f"the supplied private key's hash160 ({'compressed' if compressed else 'uncompressed'} form) does not "
             "appear in the redeem script, so the spend could not satisfy OP_EQUALVERIFY. On chain this is "
@@ -473,6 +548,7 @@ def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. 
             extras_total=extras_total,
             miner_fee=miner_fee,
             script_sig_length=script_sig_length,
+            locktime=locktime,
         )
         settled = redeem_miner_fee(asset, estimated_size)
         if settled == miner_fee:
@@ -513,7 +589,7 @@ def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. 
     assert_no_output_is_dust(asset, parsed.outputs)
 
     digest = legacy_sighash(parsed, 0, redeem_script)
-    script_sig = hashlock_script_sig(sign_digest(private_key, digest), public_key, secret, redeem_script)
+    script_sig = branch_script_sig(sign_digest(private_key, digest), public_key, secret, redeem_script)
     raw = parsed.serialize({0: script_sig})
     size_bytes = len(raw)
     if size_bytes > estimated_size:
@@ -533,6 +609,8 @@ def build_hashlock_spend(  # noqa: PLR0913 -- checked: these ten ARE the spend. 
         miner_fee=miner_fee,
         fee_rate_coin_per_kvb=rate,
         destination_amount=contract_value - miner_fee - extras_total,
+        branch="hashlock" if secret is not None else "refund",
+        locktime=locktime,
     )
 
 
@@ -547,6 +625,7 @@ def _unsigned_transaction(  # noqa: PLR0913 -- checked: one caller, one call sit
     extras_total: Decimal,
     miner_fee: Decimal,
     script_sig_length: int,
+    locktime: int = 0,
 ):
     """Ask the node to lay out the unsigned spend, and measure what it will weigh.
 
@@ -562,9 +641,160 @@ def _unsigned_transaction(  # noqa: PLR0913 -- checked: one caller, one call sit
     for address, amount in extras.items():
         outputs[address] = float(amount)
     inputs = [{"txid": contract_txid, "vout": contract_vout}]
-    unsigned_hex = rpc_call("createrawtransaction", [inputs, outputs])
+    # THE THIRD PARAMETER IS nLockTime, AND IT ALSO SETS THE SEQUENCE. A refund
+    # needs both: nLockTime at least the script's locktime, so
+    # CHECKLOCKTIMEVERIFY passes, AND a non-final input sequence, because CLTV
+    # fails outright on an input whose sequence is 0xffffffff no matter what the
+    # heights are. Bitcoin Core's ConstructTransaction sets each input's
+    # sequence to SEQUENCE_FINAL-1 (0xfffffffe) whenever a non-zero locktime is
+    # given, so asking the node for the locktime gets the sequence with it, and
+    # this module never has to encode either field itself.
+    #
+    # It is appended only when non-zero so the hashlock path sends byte-for-byte
+    # the same request it sent before this argument existed. A hashlock spend
+    # wants nLockTime 0 and a final sequence, which is the two-argument default.
+    params = [inputs, outputs]
+    if locktime:
+        params.append(locktime)
+    unsigned_hex = rpc_call("createrawtransaction", params)
     parsed = parse_transaction(bytes.fromhex(unsigned_hex), contract_txid, contract_vout)
     return parsed, parsed.size_with_script_sig(0, script_sig_length)
+
+
+def rpc_result(response, error_prefix: str):
+    """The result from a daemon's JSON-RPC response, or an exception that says why not.
+
+    ONE implementation for all three clients, which each had these lines
+    separately and each had them in the WRONG ORDER until 2026-09-26 (rule 8:
+    one rule spelled three times is a bug with a delay on it).
+
+    THE ORDER IS THE WHOLE POINT. Bitcoin Core, Litecoin Core and Gridcoin all
+    answer a REJECTED rpc with HTTP 500 and a JSON body carrying the reason:
+
+        500 {"result":null,"error":{"code":-26,"message":
+             "non-mandatory-script-verify-flag (Locktime requirement not
+             satisfied)"},"id":"atomic-swap"}
+
+    Calling raise_for_status() first, which is what all three clients did, turns
+    that into `500 Server Error: Internal Server Error` and throws the message
+    away unread. On the refund path the message is the measurement:
+    `non-mandatory-script-verify-flag` means relay policy declined the
+    transaction and `mandatory-script-verify-flag-failed` means consensus
+    refused it, and those are different answers to "could a miner have included
+    an early refund". Both had been collapsing into the same four words.
+
+    So: the JSON error is read FIRST and raised with its code and message.
+    raise_for_status() is still called, but only once there is no JSON error to
+    report -- a non-2xx with no error field is a transport, auth or proxy
+    failure, and that is exactly what HTTPError describes well.
+
+    A body that is not JSON at all -- an HTML error page from something in
+    front of the daemon -- is the one case where the status is the only
+    information there is, so raise_for_status() runs and the JSON error is
+    re-raised only if the status was fine.
+    """
+    try:
+        parsed = response.json()
+    except ValueError:
+        # Not JSON. If the status is bad, IT is the diagnosis; if the status is
+        # fine, a 200 carrying unparseable content is its own defect and the
+        # ValueError says so.
+        response.raise_for_status()
+        raise
+    error = parsed.get("error")
+    if error:
+        raise Exception(f"{error_prefix}: {error}")
+    response.raise_for_status()
+    if "result" not in parsed:
+        # THE THREE CLIENTS DISAGREED HERE and the disagreement is resolved
+        # toward refusing. BTC did `js["result"]` and raised KeyError; LTC and
+        # GRC did `rj.get("result")` and returned None -- which a caller cannot
+        # tell from a daemon that legitimately answered null, so a malformed
+        # response became the same value as "no such transaction". That is the
+        # BLE001 shape rule 12 names as the most expensive habit here, reached
+        # without an except clause.
+        raise Exception(
+            f"{error_prefix}: the daemon answered with neither `error` nor `result` "
+            f"(keys present: {sorted(parsed) or '(none)'}). That is not a JSON-RPC response."
+        )
+    return parsed["result"]
+
+
+def broadcast_refund(  # noqa: PLR0913 -- checked: these eight are the refund. Seven appear once each in the body; none can be defaulted, and `asset` selects the fee rule.
+    *,
+    asset: str,
+    rpc_call,
+    contract_txid: str,
+    contract_vout: int,
+    redeem_script: bytes,
+    locktime: int,
+    refund_privkey: str,
+    refund_address: str,
+    contract_blockhash: str | None = None,
+) -> str:
+    """Read the contract back, sign the TIMELOCK branch, and broadcast it.
+
+    ONE implementation, called by every client's refund_contract(). The redeem
+    path deliberately keeps a per-client wrapper because the platform fee and
+    the wallet unlock differ between chains; the refund path has no such
+    divergence, so a per-client copy of these five statements would be rule 8's
+    "two copies of one rule" with nothing to justify it.
+
+    NO PLATFORM FEE IS CHARGED, on any chain, and that is a DECISION rather than
+    an omission. The LTC and GRC redeem paths take 0.25% of the contract; a
+    refund is the swap having FAILED, and billing a user 0.25% to recover their
+    own coins is a fund-path policy the operator sets, not a default this module
+    should quietly pick. It is named here so the next reader can see the
+    asymmetry was intended, and it is reversible by passing extra_outputs
+    through if the operator wants the other behavior (rule 16: this is the kind
+    of thing that comes back to them).
+
+    The miner fee still comes out of the refunded amount -- somebody has to pay
+    it, and the refund's own output is the only source.
+
+    Args:
+        locktime: the script's locktime, which becomes the transaction's
+            nLockTime. The chain's tip must already have reached it; a refund
+            built before expiry is refused by the node rather than by anything
+            here, which is measured in regtest_htlc_verify.py step 8 and is why
+            no second expiry check lives in this module.
+        refund_privkey: the REFUND key's WIF, not the participant's. The wrong
+            one of the two passes the local key/script guard -- the script
+            commits to both hash160s -- and fails on chain instead.
+
+    Returns:
+        The broadcast txid.
+    """
+    logger.info(
+        "refunding %s HTLC contract %s:%s at nLockTime %s (a height, not a duration)",
+        asset,
+        contract_txid,
+        contract_vout,
+        locktime,
+    )
+    found = lookup_contract_output(rpc_call, contract_txid, contract_vout, contract_blockhash)
+    logger.info(
+        "contract output read via %s: value=%s confirmations=%s (a count, never a duration)",
+        found.route,
+        found.value,
+        found.confirmations,
+    )
+    assert_output_pays_the_contract(found, redeem_script, f"{asset} refund")
+    spend = build_refund_spend(
+        asset=asset,
+        rpc_call=rpc_call,
+        contract_txid=contract_txid,
+        contract_vout=contract_vout,
+        contract_value=found.value,
+        redeem_script=redeem_script,
+        wif=refund_privkey,
+        destination_address=refund_address,
+        locktime=locktime,
+    )
+    logger.info("%s", spend.describe(asset))
+    txid = rpc_call("sendrawtransaction", [spend.raw_hex])
+    logger.info("refunded %s contract with TXID: %s", asset, txid)
+    return txid
 
 
 def assert_output_pays_the_contract(found: ContractOutput, redeem_script: bytes, label: str) -> None:

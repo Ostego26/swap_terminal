@@ -181,10 +181,12 @@ import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
+    broadcast_refund,
     build_hashlock_spend,
     describe_rpc_payload,
     ensure_watch_only_import,
     lookup_contract_output,
+    rpc_result,
     wait_for_tx_output,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
@@ -243,13 +245,7 @@ class BTCClient:
                 timeout=30
             )
             logger.debug(f"RPC response: {response.status_code} - {response.text}")
-            response.raise_for_status()  # Check for HTTP errors
-            js = response.json()
-            if js.get("error"):
-                logger.error(f"RPC Error: {js['error']}")
-                raise Exception(f"RPC Error: {js['error']}")
-            logger.debug(f"RPC response result: {js['result']}")
-            return js["result"]
+            return rpc_result(response, "RPC Error")
         except requests.exceptions.RequestException as ex:
             logger.exception(f"RPC request error: {ex}")
             raise
@@ -413,6 +409,49 @@ class BTCClient:
         txid = self.rpc_call("sendrawtransaction", [spend.raw_hex])
         logger.info(f"Redeemed contract with TXID: {txid}")
         return txid
+
+    def refund_contract(  # noqa: PLR0913 -- checked: the six after `self` ARE the refund -- the outpoint, the script, its locktime, the refund key and where the coins go. None can be defaulted and none is derivable from another. Grouping them into a Contract object is the better shape and is NOT done here for one reason: redeem_contract() directly above takes the same values flat and positionally, and an object on one of two sibling fund-path methods makes a reader check which convention they are in. The pair should move together or not at all, and reshaping the redeem path is fund movement (rule 16).
+        self,
+        *,
+        contract_txid: str,
+        contract_vout: int,
+        redeem_script: bytes,
+        locktime: int,
+        refund_privkey: str,
+        refund_address: str,
+        contract_blockhash: str | None = None,
+    ) -> str:
+        """Spend the contract's TIMELOCK branch, returning the coins to the refund key.
+
+        ADDED 2026-09-26, on the operator's instruction, because until then no
+        code in this tree could refund a contract at all. The harness had to
+        exercise the timelock branch with its own control spender, and every
+        line about it said `control` -- so the branch was proven to be
+        SPENDABLE without anything in the product being able to spend it. A
+        contract that can be funded and cannot be recovered is the worst of the
+        three states, and it was the state this repository shipped.
+
+        KEYWORD-ONLY, unlike redeem_contract(), which is positional because two
+        existing callers pass it that way. There is no such constraint here and
+        `refund_privkey` versus the participant key is exactly the confusion
+        positional arguments create on a fund path.
+
+        Everything it does lives in modules/htlc_rpc.broadcast_refund(): one
+        implementation for every chain, since the refund has none of the
+        per-chain divergence the redeem has. See that function for why no
+        platform fee is charged and why the expiry is not re-checked here.
+        """
+        return broadcast_refund(
+            asset="BTC",
+            rpc_call=self.rpc_call,
+            contract_txid=contract_txid,
+            contract_vout=contract_vout,
+            redeem_script=redeem_script,
+            locktime=locktime,
+            refund_privkey=refund_privkey,
+            refund_address=refund_address,
+            contract_blockhash=contract_blockhash,
+        )
 
     def get_address_balance(self, address: str) -> Decimal:
         """

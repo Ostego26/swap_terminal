@@ -69,6 +69,7 @@ from decimal import Decimal
 from json import dumps as json_dumps
 
 import pytest
+import requests as requests_module
 from modules import atomic_btc_client as btc_module
 from modules import atomic_grc_client as grc_module
 from modules import atomic_ltc_client as ltc_module
@@ -97,6 +98,7 @@ from modules.htlc_rpc import (
     find_output_by_script,
     lookup_contract_output,
     read_transaction_outputs,
+    rpc_result,
     wait_for_tx_output,
 )
 from modules.htlc_spend import (
@@ -107,10 +109,11 @@ from modules.htlc_spend import (
     estimated_script_sig_length,
     hashlock_script_sig,
     parse_transaction,
-    participant_key_matches_script,
     public_key_for,
+    refund_script_sig,
     satoshis_to_coins,
     sign_digest,
+    spend_key_matches_script,
 )
 from regtest.keys import generate_key
 from regtest.steps import _p2sh_script_for
@@ -581,7 +584,7 @@ def test_a_key_that_is_not_in_the_script_is_refused_before_signing(contract):
     also what a wrong preimage, a wrong branch selector and a wrong script produce.
     Four candidates and no way to choose. Refused here, where it can be named."""
     stranger = generate_key()
-    assert not participant_key_matches_script(stranger.public_key, contract["redeem_script"])
+    assert not spend_key_matches_script(stranger.public_key, contract["redeem_script"])
     node = _node_for(contract)
     with pytest.raises(ValueError, match="does not"):
         build_hashlock_spend(
@@ -606,7 +609,7 @@ def test_the_refund_key_is_accepted_by_the_guard_and_refused_by_the_script(contr
     refuses it. Pinned so that nobody later reads the guard as proof of which
     branch a key is for.
     """
-    assert participant_key_matches_script(contract["refund"].public_key, contract["redeem_script"])
+    assert spend_key_matches_script(contract["refund"].public_key, contract["redeem_script"])
     node = _node_for(contract)
     spend = build_hashlock_spend(
         asset="BTC",
@@ -1789,3 +1792,136 @@ def test_btc_is_absent_from_the_platform_fee_table_rather_than_zero():
     """
     with pytest.raises(ValueError, match="BTC is absent on purpose"):
         platform_fee_coin("BTC", Decimal("1.0"))
+
+
+# ---------------------------------------------------------------------------
+# THE REFUND BRANCH, added 2026-09-26 with refund_contract(). The harness
+# (regtest_htlc_verify.py steps 8 and 9) proves it against a real daemon, which
+# is the only proof that counts for "does the chain accept it". These cover the
+# parts a chain cannot isolate: which bytes the scriptSig carries, and the
+# error-reporting order that decides whether the harness can tell a policy
+# refusal from a consensus one.
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Just enough of requests.Response for rpc_result: a body and a status."""
+
+    def __init__(self, payload, status_code=200, text=""):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text or str(payload)
+
+    def json(self):
+        if self._payload is _NOT_JSON:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests_module.exceptions.HTTPError(f"{self.status_code} Server Error: for url: http://x")
+
+
+_NOT_JSON = object()
+
+
+def test_a_rejected_rpc_keeps_its_reason_even_though_the_status_is_500():
+    """THE ORDER OF TWO LINES, and the whole refund measurement rests on it.
+
+    Bitcoin Core, Litecoin Core and Gridcoin all answer a rejected
+    sendrawtransaction with HTTP 500 AND a JSON body naming the reason. All
+    three clients called raise_for_status() before reading that body until
+    2026-09-26, so every refusal arrived as `500 Server Error` with the message
+    discarded. regtest_htlc_verify.py step 8 exists to say WHICH layer refused
+    an early refund -- relay policy or consensus -- and it reads that from the
+    message, so the reorder is what makes the assertion possible at all.
+
+    Mutation check: move response.raise_for_status() back above the error read
+    in modules/htlc_rpc.rpc_result and this fails on the match, because the
+    HTTPError's text contains neither -26 nor the flag name.
+    """
+    refused = _FakeResponse(
+        {"result": None, "error": {"code": -26, "message": "non-mandatory-script-verify-flag (Locktime requirement not satisfied)"}, "id": "atomic-swap"},
+        status_code=500,
+    )
+    with pytest.raises(Exception, match="non-mandatory-script-verify-flag") as caught:
+        rpc_result(refused, "RPC Error")
+    # The CODE has to survive too: -26 is how a caller tells a rejected
+    # transaction from a missing method, and step 8 prints it.
+    assert "-26" in str(caught.value)
+    assert "500 Server Error" not in str(caught.value)
+
+
+def test_a_non_json_body_still_reports_the_http_status():
+    """The one case where the status IS the only information there is.
+
+    Something in front of the daemon answering with an HTML error page has no
+    JSON error to report, so raise_for_status() is the right diagnosis and must
+    not be skipped just because the body could not be parsed.
+    """
+    with pytest.raises(requests_module.exceptions.HTTPError, match="502"):
+        rpc_result(_FakeResponse(_NOT_JSON, status_code=502, text="<html>bad gateway</html>"), "RPC Error")
+
+
+def test_a_response_with_neither_error_nor_result_is_refused_not_returned_as_none():
+    """LTC and GRC used to return None here, which a caller cannot interpret.
+
+    `rj.get("result")` turned a malformed response into the same value a daemon
+    returns for "no such transaction". BTC raised KeyError on the same input.
+    The three are resolved toward refusing with a message that names what the
+    daemon actually sent.
+    """
+    with pytest.raises(Exception, match=r"neither `error` nor `result`"):
+        rpc_result(_FakeResponse({"id": "atomic-swap"}), "RPC Error")
+
+
+def test_the_refund_script_sig_takes_the_else_branch_and_carries_no_preimage(contract):
+    signature = b"\x30" + b"\x11" * 71
+    script_sig = refund_script_sig(signature, contract["refund"].public_key, contract["redeem_script"])
+    # OP_0 selects the timelock branch. It must be the single byte 0x00 -- a
+    # push of a one-byte zero (0x01 0x00) is a one-byte TRUE on the stack and
+    # would take the HASHLOCK branch with no preimage behind it.
+    assert script_sig.endswith(client_push_data(contract["redeem_script"]))
+    selector_at = len(client_push_data(signature)) + len(client_push_data(contract["refund"].public_key))
+    assert script_sig[selector_at : selector_at + 1] == b"\x00"
+    assert contract["secret"] not in script_sig
+
+
+def test_the_refund_script_sig_is_shorter_than_the_redeem_by_exactly_the_preimage_push(contract):
+    """33 bytes: the preimage's whole push, because the two selectors cancel.
+
+    A hashlock scriptSig carries push(32-byte secret) = 33 bytes plus OP_1; a
+    refund carries OP_0. Both selectors are one byte, so they cancel and the
+    difference is exactly the 33-byte push. This was written as 32 first, from
+    reasoning rather than measurement, and the assertion is what caught it --
+    which is the argument for asserting the exact difference instead of `<`:
+    the fee is sized from this estimate, so a branch mix-up must not merely
+    look plausible.
+    """
+    pubkey = contract["refund"].public_key
+    with_secret = estimated_script_sig_length(pubkey, contract["secret"], contract["redeem_script"])
+    without = estimated_script_sig_length(pubkey, None, contract["redeem_script"])
+    assert len(contract["secret"]) == 32
+    assert with_secret - without == 33
+
+
+def test_build_hashlock_spend_refuses_a_missing_preimage_rather_than_building_a_refund():
+    """secret=None is how the shared builder selects the OTHER branch.
+
+    Letting it through would sign a spend paying the REFUND key from a call site
+    whose name says hashlock, and in a log the two differ by four bytes. It is
+    refused before anything is built, and the message names the function to call
+    if a refund was actually meant.
+    """
+    with pytest.raises(ValueError, match="build_refund_spend"):
+        build_hashlock_spend(
+            secret=None,
+            asset="BTC",
+            rpc_call=lambda *a, **k: pytest.fail("nothing should have been asked of the daemon"),
+            contract_txid="00" * 32,
+            contract_vout=0,
+            contract_value=Decimal("1.0"),
+            redeem_script=b"\x00",
+            wif="unused",
+            destination_address="unused",
+        )

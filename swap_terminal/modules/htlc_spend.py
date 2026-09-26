@@ -112,6 +112,15 @@ SIGHASH_ALL = 0x01
 # in this repository implements a refund.
 OP_1 = b"\x51"
 
+# The REFUND branch's selector. OP_IF pops it, an empty byte string is false, so
+# the OP_ELSE branch runs -- where the locktime is pushed, CHECKLOCKTIMEVERIFY
+# compares it against the transaction's nLockTime, and the refund key signs.
+# b"\x00" is OP_0, which pushes that empty string; it is NOT a one-byte push of
+# the value zero, and writing push_data(b"\x00") instead would put 0x01 0x00 on
+# the stack -- a one-byte TRUE -- and silently take the hashlock branch with no
+# preimage, which fails on chain as a bare script error.
+OP_0 = b"\x00"
+
 # The largest a DER signature plus its one-byte sighash type can be. r and s
 # are each at most 32 bytes plus a possible leading zero pad, and the DER
 # envelope adds six: 0x30 <len> 0x02 <rlen> r 0x02 <slen> s. Low-S canonical
@@ -319,6 +328,38 @@ def hashlock_script_sig(signature: bytes, public_key: bytes, secret: bytes, rede
     return push_data(signature) + push_data(public_key) + push_data(secret) + OP_1 + push_data(redeem_script)
 
 
+def refund_script_sig(signature: bytes, public_key: bytes, redeem_script: bytes) -> bytes:
+    """<sig> <pubkey> OP_0 <redeemScript> -- the TIMELOCK branch.
+
+    No preimage appears, and that is the point: this branch is what the refund
+    key can spend when the counterparty never revealed one. The transaction
+    carrying it must ALSO set nLockTime to at least the script's locktime and
+    leave the input's sequence non-final, neither of which is visible in the
+    scriptSig -- see modules/htlc_rpc.build_refund_spend for both.
+
+    The same four pushes are what regtest/txbuild.refund_script_sig builds for
+    the harness's control spender. That duplication is deliberate and named at
+    both sites: the harness must not import the code under test, or a defect in
+    this line would be reproduced by the thing meant to detect it.
+    """
+    return push_data(signature) + push_data(public_key) + OP_0 + push_data(redeem_script)
+
+
+def branch_script_sig(signature: bytes, public_key: bytes, secret: bytes | None, redeem_script: bytes) -> bytes:
+    """Either branch's scriptSig, selected by whether a preimage was supplied.
+
+    ONE dispatch point rather than two call sites choosing for themselves, so
+    the branch selection and the fee estimator below cannot disagree about
+    which spend is being built -- a disagreement that would size a fee for the
+    wrong transaction and pay a miner the difference. `secret=None` means the
+    refund, matching regtest/txbuild.build_branch_spend's existing convention
+    (rule 11: one vocabulary).
+    """
+    if secret is None:
+        return refund_script_sig(signature, public_key, redeem_script)
+    return hashlock_script_sig(signature, public_key, secret, redeem_script)
+
+
 @dataclass(frozen=True)
 class ParsedTransaction:
     """A raw transaction taken apart just far enough to replace one scriptSig.
@@ -505,12 +546,18 @@ def legacy_sighash(parsed: ParsedTransaction, input_index: int, script_code: byt
     return double_sha256(parsed.serialize(substitutions) + struct.pack("<I", SIGHASH_ALL))
 
 
-def estimated_script_sig_length(public_key: bytes, secret: bytes, redeem_script: bytes) -> int:
-    """An exact UPPER BOUND on the hashlock scriptSig, before the signature exists.
+def estimated_script_sig_length(public_key: bytes, secret: bytes | None, redeem_script: bytes) -> int:
+    """An exact UPPER BOUND on EITHER branch's scriptSig, before the signature exists.
 
-    Built by assembling the real scriptSig around a dummy signature of the
-    maximum length, with the real push encoder, so the bound cannot drift from
-    what is actually produced: everything except the signature is known exactly.
+    `secret=None` bounds the refund scriptSig, which is shorter by the preimage
+    push: 33 bytes for a 32-byte secret, against OP_0's single byte. Both go
+    through branch_script_sig() so the bound is assembled by the same code that
+    will assemble the real thing.
+
+    It is built by assembling the real scriptSig around a dummy signature of
+    the maximum length, with the real push encoder, so the bound cannot drift
+    from what is actually produced: everything except the signature is known
+    exactly.
 
     HOW MUCH SHORTER THE SIGNATURE CAN BE, corrected 2026-09-26. This paragraph
     used to say "the signature's only freedom is to be one or two bytes shorter."
@@ -543,11 +590,19 @@ def estimated_script_sig_length(public_key: bytes, secret: bytes, redeem_script:
     failure that matters.
     """
     dummy_signature = b"\x00" * MAX_DER_SIGNATURE_WITH_HASHTYPE
-    return len(hashlock_script_sig(dummy_signature, public_key, secret, redeem_script))
+    return len(branch_script_sig(dummy_signature, public_key, secret, redeem_script))
 
 
-def participant_key_matches_script(public_key: bytes, redeem_script: bytes) -> bool:
+def spend_key_matches_script(public_key: bytes, redeem_script: bytes) -> bool:
     """Whether this key's hash160 is one of the two the redeem script commits to.
+
+    EITHER key: the participant's, which spends the hashlock branch, or the
+    refund key, which spends the timelock branch. It was named
+    `spend_key_matches_script` until 2026-09-26, when build_refund_spend
+    started calling it -- a name saying `participant` on the refund path reads
+    as a bug at the one call site where a reader most needs to be sure the
+    right key is being checked. tests/test_htlc_spend.py already asserted it
+    against the refund key, so the behavior is unchanged and only the name moved.
 
     A cheap local check that turns the single most confusing on-chain failure
     into a refusal with a name. Signing with the wrong key produces

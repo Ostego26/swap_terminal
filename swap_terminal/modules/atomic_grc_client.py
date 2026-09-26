@@ -198,6 +198,7 @@ from modules.htlc_rpc import (
     build_hashlock_spend,
     describe_rpc_payload,
     lookup_contract_output,
+    rpc_result,
     wait_for_tx_output,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
@@ -279,13 +280,7 @@ class GRCClient:
             # rather than made quietly.
             response = requests.post(self.rpc_url, json=payload, auth=(self.rpc_user, self.rpc_pass))  # noqa: S113
             logger.debug(f"RPC response: {response.status_code} - {response.text}")
-            response.raise_for_status()  # Check for HTTP errors
-            rj = response.json()
-            if rj.get("error"):
-                logger.error(f"GRC RPC Error: {rj['error']}")
-                raise Exception(f"GRC RPC Error: {rj['error']}")
-            logger.debug(f"RPC response result: {rj['result']}")
-            return rj.get("result")
+            return rpc_result(response, "GRC RPC Error")
         except requests.exceptions.RequestException as ex:
             logger.exception(f"RPC request error: {ex}")
             raise
@@ -439,6 +434,22 @@ class GRCClient:
             "secret_hash": secret_hash
         }
 
+    # NO refund_contract() ON THIS CLIENT, and that is a deliberate gap named
+    # here so the next reader does not take it for an oversight (rule 8: a
+    # genuine difference belongs in a comment at BOTH sites). BTCClient and
+    # LTCClient gained one on 2026-09-26 and both were verified against a real
+    # regtest daemon -- refused before expiry, spent after it. Gridcoin has no
+    # node in this tree's harness and none can be started in the session that
+    # wrote this, so a GRC refund would be untested fund-path code, which rule
+    # 16 makes a proposal rather than a fix.
+    #
+    # Adding it is two lines once a node exists, because everything it needs is
+    # already shared: modules/htlc_rpc.broadcast_refund() takes `asset="GRC"`
+    # and the fee rule in modules/htlc_fee.py already carries GRC. What is NOT
+    # established is the thing that decides whether it can work at all: whether
+    # Gridcoin's script interpreter enforces OP_CHECKLOCKTIMEVERIFY. Nothing in
+    # this tree has measured that, and the locktime in the redeem script this
+    # client builds is meaningless if it does not.
     def redeem_contract(self,  # noqa: PLR0913, PLR0917 -- checked: the seven are the spend's own inputs, and `secret` is the PREIMAGE, which is now pushed onto the stack rather than accepted and ignored (defect 1). They stay POSITIONAL because the two callers in this tree pass them positionally: swap_terminal/regtest/steps.py::_attempt_real_redeem and tests/test_htlc_spend.py::_drive_redeem. UNTIL 2026-09-25 THIS COMMENT NAMED modules/atomic_swapper.py AS A CALLER AND IT IS NOT ONE -- atomic_swapper has no redeem path at all, only start_swap(), which is the same file whose header says the counterparty's leg is redeemed by hand. Grepped by name across every .py, .sh and .js in the tree. Reordering a fund-path signature to satisfy a lint ceiling is the trade rule 12 refuses either way, but the reason has to be true. GRC has an extra reason to be careful: nothing in this tree calls GRCClient.redeem_contract() at all -- not even the harness, which has no Gridcoin node -- so this signature has no caller to break and no run to prove it.
                         contract_txid: str,
                         contract_vout: int,

@@ -178,10 +178,12 @@ from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_fo
 from modules.htlc_fee import platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
+    broadcast_refund,
     build_hashlock_spend,
     describe_rpc_payload,
     ensure_watch_only_import,
     lookup_contract_output,
+    rpc_result,
     wait_for_tx_output,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
@@ -255,13 +257,7 @@ class LTCClient:
             )
             logger.debug(f"LTC HTTP Status Code: {response.status_code}")
             logger.debug(f"LTC HTTP Response Text: {response.text}")
-            response.raise_for_status()
-            rj = response.json()
-            if rj.get("error"):
-                logger.error(f"RPC Error: {rj['error']}")
-                raise Exception(f"RPC Error: {rj['error']}")
-            logger.debug(f"RPC response result: {rj['result']}")
-            return rj.get("result")
+            return rpc_result(response, "RPC Error")
         except requests.exceptions.RequestException as e:
             # This used to be `... with params {params}` and so was a
             # SECOND copy of the payload leak -- on the failure path,
@@ -470,6 +466,50 @@ class LTCClient:
 
 
 # For testing purposes, this block is executed only when running this module directly.
+    def refund_contract(  # noqa: PLR0913 -- checked: the six after `self` ARE the refund -- the outpoint, the script, its locktime, the refund key and where the coins go. None can be defaulted and none is derivable from another. Grouping them into a Contract object is the better shape and is NOT done here for one reason: redeem_contract() directly above takes the same values flat and positionally, and an object on one of two sibling fund-path methods makes a reader check which convention they are in. The pair should move together or not at all, and reshaping the redeem path is fund movement (rule 16).
+        self,
+        *,
+        contract_txid: str,
+        contract_vout: int,
+        redeem_script: bytes,
+        locktime: int,
+        refund_privkey: str,
+        refund_address: str,
+        contract_blockhash: str | None = None,
+    ) -> str:
+        """Spend the contract's TIMELOCK branch, returning the coins to the refund key.
+
+        ADDED 2026-09-26, on the operator's instruction, because until then no
+        code in this tree could refund a contract at all. The harness had to
+        exercise the timelock branch with its own control spender, and every
+        line about it said `control` -- so the branch was proven to be
+        SPENDABLE without anything in the product being able to spend it. A
+        contract that can be funded and cannot be recovered is the worst of the
+        three states, and it was the state this repository shipped.
+
+        KEYWORD-ONLY, unlike redeem_contract(), which is positional because two
+        existing callers pass it that way. There is no such constraint here and
+        `refund_privkey` versus the participant key is exactly the confusion
+        positional arguments create on a fund path.
+
+        Everything it does lives in modules/htlc_rpc.broadcast_refund(): one
+        implementation for every chain, since the refund has none of the
+        per-chain divergence the redeem has. See that function for why no
+        platform fee is charged and why the expiry is not re-checked here.
+        """
+        return broadcast_refund(
+            asset="LTC",
+            rpc_call=self.rpc_call,
+            contract_txid=contract_txid,
+            contract_vout=contract_vout,
+            redeem_script=redeem_script,
+            locktime=locktime,
+            refund_privkey=refund_privkey,
+            refund_address=refund_address,
+            contract_blockhash=contract_blockhash,
+        )
+
+
 if __name__ == "__main__":
     try:
         client = LTCClient(
