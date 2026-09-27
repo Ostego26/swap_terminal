@@ -52,9 +52,34 @@ WHAT IS REACHABLE TODAY, and "any currency listed" IS NOT YET TRUE:
                      cross-curve discrete-log-equality proof. All four components are now
                      individually tested (modules/adaptor_ecdsa.py,
                      modules/ed25519_group.py, modules/dleq_helper.py, and
-                     chains/monero_keys.py, whose shared 2-of-2 key was swept live on
-                     stagenet on 2026-09-27) and NOTHING COMPOSES THEM. See
-                     docs/dleq_cross_curve_design.md section 6 stage 5.
+                     chains/monero_keys.py, whose shared 2-of-2 key really spends -- on
+                     REGTEST, txid f584606948f430bf..., which is what is recorded in that
+                     module's header). NOTHING COMPOSES THEM, and composing them is not
+                     enough either: see the note below. docs/dleq_cross_curve_design.md
+                     section 6 stage 5, and docs/monero_swap_protocol.md.
+
+                     THIS LINE SAID "swept live on STAGENET" UNTIL 2026-09-27 AND THAT WAS
+                     FALSE. Grepped every .py and .md in the tree: the stagenet txid it
+                     named appears ZERO times, and what is recorded is a REGTEST sweep.
+                     docs/monero_stagenet_funding.md says in its own words that the regtest
+                     result "does NOT settle anything about stagenet specifically." The
+                     CRYPTOGRAPHIC claim is settled either way -- regtest and stagenet
+                     derive keys identically, which is that document's own argument for
+                     using regtest -- but a network-specific claim was made from a
+                     measurement that was never taken. I wrote the wrong version, and it is
+                     corrected here rather than quietly replaced because a false txid is
+                     worse than no txid: it stops the next reader checking.
+
+                     AND FOUR COMPONENTS ARE NOT SUFFICIENT. Measured 2026-09-27 by reading
+                     build_htlc_redeem_script() and hashlock_script_sig(): BOTH branches of
+                     this repo's HTLC end in a single-key OP_CHECKSIG, and the claimer
+                     satisfies it with a signature under their own key that they can produce
+                     freely. AN ADAPTOR SIGNATURE HAS NO PURCHASE ON A SINGLE-KEY OUTPUT --
+                     the mechanism needs the spender to be UNABLE to sign alone, so that the
+                     only available signature is one they must complete with the scalar. The
+                     adaptor swap therefore cannot reuse this HTLC at all; the script chain
+                     needs five transactions that do not exist (lock 2-of-2, redeem, cancel,
+                     refund, punish). That is why nothing here is one composition away.
     ANY<->SOL        no HTLC. The one that existed was a stub that could not run, deleted
                      in c4ea027 for four independent reasons.
 
@@ -960,9 +985,12 @@ def print_pairs(console: Console) -> int:
     console.say("  XMR  NO SCRIPT AT ALL, so there is nowhere to put a hashlock. Every XMR pair")
     console.say("       -- xmr/btc, ltc/xmr, grc/xmr, xrp/xmr -- is blocked on ONE piece of")
     console.say("       protocol work, not four: the adaptor-signature swap. Its four components")
-    console.say("       are each tested (adaptor_ecdsa, ed25519_group, dleq_helper, monero_keys")
-    console.say("       whose shared 2-of-2 key was swept live on stagenet 2026-09-27) and")
-    console.say("       NOTHING COMPOSES THEM. docs/dleq_cross_curve_design.md section 6 stage 5.")
+    console.say("       are each tested (adaptor_ecdsa, ed25519_group, dleq_helper, monero_keys,")
+    console.say("       whose shared 2-of-2 key really spends on REGTEST: f584606948f430bf...).")
+    console.say("       Composing them is NOT sufficient: both branches of this repo's HTLC end")
+    console.say("       in a single-key OP_CHECKSIG, and an adaptor signature has no purchase on")
+    console.say("       one -- the script chain needs five transactions that do not exist yet.")
+    console.say("       docs/monero_swap_protocol.md, docs/dleq_cross_curve_design.md stage 5.")
     console.say("  SOL  no HTLC. The stub that existed could not run and was deleted (c4ea027).")
     return 0
 
