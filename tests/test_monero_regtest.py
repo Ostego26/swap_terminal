@@ -29,6 +29,7 @@ anyway: generateblocks is refused unless the nettype is FAKECHAIN
 
 from __future__ import annotations
 
+import inspect
 import os
 import pathlib
 import subprocess
@@ -52,11 +53,16 @@ from monero_regtest import (  # noqa: E402  same
     MONERO_ADDRESS_CHARS,
     PID_FILES,
     REGTEST_NETTYPE,
+    Daemon,
     RegtestError,
     build_parser,
+    create_wallet,
+    log_tail,
     process_is_alive,
     refuse_dangerous_data_dir,
+    start_daemon,
     stop_one,
+    wait_for_rpc,
     write_pid,
 )
 
@@ -255,3 +261,82 @@ def test_process_is_alive_says_yes_for_something_actually_running():
         child.kill()
         child.wait()
     assert process_is_alive(child.pid) is False
+
+
+def test_the_wallet_command_does_not_carry_regtest():
+    """THE BUG THE FIRST RUN ON THE OPERATOR'S HOST FOUND, pinned by reading the argv
+    this script builds.
+
+    monero-wallet-rpc has no --regtest option: `regtest` appears ZERO times in
+    wallet_rpc_server.cpp, wallet2.cpp and simplewallet.cpp (release-v0.18, grepped
+    2026-09-27). Passing it made the wallet reject its own command line and exit in
+    milliseconds, after which this script polled a dead process for sixty seconds and
+    reported a timeout -- a true and useless message two steps from the cause.
+
+    The authority for the correct argv is Monero's own functional test harness,
+    tests/functional_tests/functional_tests_rpc.py: the DAEMON gets the nettype flag,
+    the WALLET gets none. Asserted here by inspecting the source of create_wallet
+    rather than by running it, because running it needs monerod.
+    """
+    source = inspect.getsource(create_wallet)
+    argv_region = source.split("command = [", 1)[1].split("]", 1)[0]
+    assert '"--regtest"' not in argv_region, (
+        "monero-wallet-rpc has no --regtest option; it exits instead of binding"
+    )
+    for required in ("--wallet-dir", "--disable-rpc-login", "--allow-mismatched-daemon-version"):
+        assert f'"{required}"' in argv_region, f"{required} is in Monero's own wallet_base"
+
+
+def test_the_daemon_command_does_carry_regtest():
+    """The other half: the nettype flag belongs on monerod, and dropping it there
+    would silently start a MAINNET daemon."""
+    argv_region = inspect.getsource(start_daemon).split("command = [", 1)[1].split("]", 1)[0]
+    assert '"--regtest"' in argv_region
+    assert '"--offline"' in argv_region
+    assert '"--fixed-difficulty"' in argv_region
+
+
+def test_log_tail_carries_the_reason_rather_than_pointing_at_it(tmp_path):
+    """"Check the log in the data directory" is homework, not a diagnostic. The three
+    cases a failure message has to survive: a log with content, an empty log, and no
+    log at all -- the middle one being what a process that died before writing leaves."""
+    populated = tmp_path / "full.log"
+    populated.write_text("\n".join(f"line {index}" for index in range(50)))
+    tail = log_tail(populated, lines=5)
+    assert "line 49" in tail and "line 45" in tail
+    assert "line 44" not in tail, "only the requested number of lines"
+
+    empty = tmp_path / "empty.log"
+    empty.write_text("")
+    assert "wrote nothing at all" in log_tail(empty), "empty must not read as absent"
+
+    missing = log_tail(tmp_path / "does-not-exist.log")
+    assert "could not be read" in missing
+    assert str(tmp_path) in missing, "the message names the path it failed on"
+
+
+def test_wait_for_rpc_reports_an_exited_process_immediately_with_its_log(tmp_path):
+    """The diagnostic defect, pinned: a dead child must not be polled to the timeout.
+
+    A process that exits at once used to produce forty identical progress lines and
+    then "did not answer within 60s". Here the child exits with status 2 and writes a
+    reason, and the assertion is that the refusal arrives FAST, names the status, and
+    carries the log's own words.
+    """
+    log_path = tmp_path / "dead.log"
+    log_path.write_text("Unknown command: --regtest\n")
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(2)"])
+    child.wait()
+
+    console = Console(total_steps=1)
+    daemon = Daemon("test-daemon", 1, log_path, child)
+    started = time.monotonic()
+    with pytest.raises(RegtestError) as caught:
+        wait_for_rpc(console, daemon, "get_version", seconds=60)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5, f"took {elapsed:.1f}s; a dead process must not be polled to the timeout"
+    message = str(caught.value)
+    assert "EXITED with status 2" in message
+    assert "never bound port 1" in message
+    assert "Unknown command: --regtest" in message, "the log's own words, not a pointer to it"

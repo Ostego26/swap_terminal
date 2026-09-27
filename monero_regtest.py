@@ -80,6 +80,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -124,6 +125,24 @@ PID_FILES = {"monerod": "monerod.pid", "wallet": "monero-wallet-rpc.pid"}
 
 class RegtestError(RuntimeError):
     """A refusal, or a daemon that did not do what it was asked."""
+
+
+@dataclass(frozen=True)
+class Daemon:
+    """One spawned process: what to call it, where it listens, where it logs, and the
+    handle to ask whether it is still alive.
+
+    These four always travel together -- every caller that has one has all four --
+    and ruff's PLR0913 on the seven-argument wait_for_rpc was right that they wanted
+    to be one thing. Rule 12: "the fix is to extract the decision so it can be
+    called with seeded inputs, not to raise the ceiling." The `process` handle is
+    what makes the difference between waiting for a daemon and waiting for a corpse.
+    """
+
+    label: str
+    port: int
+    log_path: Path
+    process: subprocess.Popen
 
 
 def rpc(port: int, method: str, params: dict | None = None, timeout: int = 60) -> dict:
@@ -276,23 +295,64 @@ def stop_one(console: Console, data_dir: Path, which: str) -> bool:
     return console.check(f"{which} stopped", f"pid {pid} is gone", "absence", True)
 
 
-def wait_for_rpc(console: Console, port: int, method: str, label: str, seconds: int = 60) -> dict:
-    """Poll until the daemon answers, printing progress. Rule 14: a blinking cursor
-    is indistinguishable from a hang, and the operator's response to a hang is
-    Ctrl-C."""
+def log_tail(log_path: Path, lines: int = 25) -> str:
+    """The last lines of a daemon's log, for an error message to CARRY rather than
+    point at.
+
+    "Check the log in the data directory" is not a diagnostic -- it is homework, and
+    it is what this function replaces. Rule 14: state what the number means next to
+    the number; the same applies to a failure and its reason.
+    """
+    try:
+        text = log_path.read_text(errors="replace").strip()
+    except OSError as error:
+        return f"({log_path} could not be read: {error})"
+    if not text:
+        return f"({log_path} is empty -- the process wrote nothing at all)"
+    return "\n".join(f"          | {line}" for line in text.splitlines()[-lines:])
+
+
+def wait_for_rpc(console: Console, daemon: Daemon, method: str, seconds: int = 60) -> dict:
+    """Poll until the daemon answers -- and STOP THE MOMENT IT DIES.
+
+    THE SECOND HALF IS A DEFECT THIS FUNCTION USED TO HAVE. It polled for the full
+    sixty seconds regardless, so a wallet that rejected its own command line and
+    exited in 40ms produced forty identical progress lines and then "did not answer
+    within 60s". That message is true and useless: it describes the symptom of a
+    process that was never running, and it is two steps from the cause. Worse, it
+    made the operator wait a minute to be told nothing.
+
+    Now the child's exit status is checked every pass, and an exit is reported
+    immediately WITH the tail of its log. Rule 14's "announce before, not only
+    after" has a corollary: when the thing being waited for is already dead, say so
+    instead of continuing to announce waiting.
+
+    The progress lines stay, because a blinking cursor is indistinguishable from a
+    hang and the operator's response to a hang is Ctrl-C.
+    """
     started = time.monotonic()
     attempt = 0
     while time.monotonic() - started < seconds:
         attempt += 1
+        exit_code = daemon.process.poll()
+        if exit_code is not None:
+            raise RegtestError(
+                f"{daemon.label} EXITED with status {exit_code} after "
+                f"{time.monotonic() - started:.1f}s -- it never bound port {daemon.port}. Its "
+                f"log says:\n{log_tail(daemon.log_path)}"
+            )
         try:
-            return rpc(port, method, timeout=5)
+            return rpc(daemon.port, method, timeout=5)
         except RegtestError:
             elapsed = time.monotonic() - started
-            console.say(f"waiting for {label} on {port}: attempt {attempt}, {elapsed:.1f}s elapsed")
+            console.say(
+                f"waiting for {daemon.label} on {daemon.port}: attempt {attempt}, "
+                f"{elapsed:.1f}s elapsed"
+            )
             time.sleep(1.5)
     raise RegtestError(
-        f"{label} did not answer {method} on port {port} within {seconds}s. Check the log in "
-        f"the data directory"
+        f"{daemon.label} is still running but did not answer {method} on port {daemon.port} "
+        f"within {seconds}s. Its log says:\n{log_tail(daemon.log_path)}"
     )
 
 
@@ -360,11 +420,14 @@ def start_daemon(console: Console, args: argparse.Namespace, data_dir: Path) -> 
         "--log-level", "0",
     ]
     console.say(" ".join(command))
-    process = spawn(command, data_dir / "monerod.log")
+    log_path = data_dir / "monerod.log"
+    process = spawn(command, log_path)
     write_pid(data_dir, "monerod", process.pid)
     console.say(f"monerod pid {process.pid}, reaped by `--stop` via {PID_FILES['monerod']}")
 
-    info = wait_for_rpc(console, args.daemon_port, "get_info", "monerod")
+    info = wait_for_rpc(
+        console, Daemon("monerod", args.daemon_port, log_path, process), "get_info"
+    )
     nettype = str(info.get("nettype", "(not reported)"))
     console.check("monerod nettype", nettype, REGTEST_NETTYPE, nettype == REGTEST_NETTYPE)
     if nettype != REGTEST_NETTYPE:
@@ -389,22 +452,54 @@ def create_wallet(console: Console, args: argparse.Namespace, data_dir: Path) ->
             f"something is already listening on {args.wallet_port}. Run --stop first, or pick "
             f"another --wallet-port"
         )
+    # NO --regtest HERE, AND THAT WAS A REAL BUG. monero-wallet-rpc does not have
+    # that option: `regtest` appears ZERO times in wallet_rpc_server.cpp,
+    # wallet2.cpp and simplewallet.cpp (grepped against release-v0.18 on
+    # 2026-09-27). Passing it made the wallet reject its own command line and exit
+    # instantly, so this script then polled a dead process for sixty seconds and
+    # reported a timeout -- a symptom two steps removed from the cause.
+    #
+    # The authority for this argv is Monero's OWN functional test harness,
+    # tests/functional_tests/functional_tests_rpc.py, which starts a wallet against
+    # exactly this kind of regtest daemon:
+    #
+    #   monerod_base = [... "--regtest", "--fixed-difficulty", ...]
+    #   wallet_base  = ["monero-wallet-rpc", "--wallet-dir", ..., "--rpc-bind-port",
+    #                   ..., "--disable-rpc-login", "--rpc-ssl", "disabled",
+    #                   "--daemon-ssl", "disabled", "--log-level", "1",
+    #                   "--allow-mismatched-daemon-version"]
+    #
+    # The daemon gets the nettype flag; the wallet gets none. A regtest chain uses
+    # mainnet address prefixes, which is why the wallet needs no nettype at all and
+    # why the address printed below decodes as mainnet/primary -- expected, not a
+    # fault, and step 3 reports it rather than asserting a guess.
+    #
+    # --allow-mismatched-daemon-version is carried over from that harness for the
+    # same reason it is there: a regtest daemon's version handshake need not match,
+    # and refusing to talk to it is not a safety property on a private chain.
     command = [
         args.wallet_rpc,
-        "--regtest",
         "--trusted-daemon",
         "--daemon-address", f"127.0.0.1:{args.daemon_port}",
         "--wallet-dir", str(data_dir),
         "--rpc-bind-port", str(args.wallet_port),
         "--disable-rpc-login",
-        "--log-level", "0",
+        "--rpc-ssl", "disabled",
+        "--daemon-ssl", "disabled",
+        "--allow-mismatched-daemon-version",
+        "--log-level", "1",
     ]
     console.say(" ".join(command))
-    process = spawn(command, data_dir / "monero-wallet-rpc.log")
+    log_path = data_dir / "monero-wallet-rpc.log"
+    process = spawn(command, log_path)
     write_pid(data_dir, "wallet", process.pid)
     console.say(f"wallet rpc pid {process.pid}, reaped by `--stop` via {PID_FILES['wallet']}")
 
-    wait_for_rpc(console, args.wallet_port, "get_version", "monero-wallet-rpc")
+    wait_for_rpc(
+        console,
+        Daemon("monero-wallet-rpc", args.wallet_port, log_path, process),
+        "get_version",
+    )
 
     existing = data_dir / WALLET_NAME
     if existing.is_file():
