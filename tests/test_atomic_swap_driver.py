@@ -32,7 +32,11 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: E402  path shims above
-from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT  # noqa: E402  same
+from modules.htlc_timelock import (  # noqa: E402  same
+    ROLE_INITIATOR,
+    ROLE_PARTICIPANT,
+    contract_locktime,
+)
 from step_console import Console  # noqa: E402  same
 from valid_addresses import BTC_PARTICIPANT  # noqa: E402  conftest puts tests/ on sys.path
 
@@ -46,6 +50,7 @@ from atomic_swap import (  # noqa: E402  same
     FundedLeg,
     Leg,
     Party,
+    PlannedLeg,
     Step,
     SwapError,
     assert_ordering,
@@ -106,44 +111,138 @@ def test_xrp_and_xmr_are_absent_for_protocol_reasons_and_say_so():
     assert "section 6 stage 5" in doc, "and where the XMR work is tracked"
 
 
+def _planned(asset: str, role: str, tip: int, locktime: int) -> PlannedLeg:
+    """A PlannedLeg with only the fields the ordering check reads."""
+    return PlannedLeg(
+        leg=Leg(asset=asset, role=role, amount=Decimal(1),
+                participant_address="participant", refund_address="refund"),
+        tip=tip, locktime=locktime,
+    )
+
+
+def test_the_real_btc_ltc_swap_that_the_old_check_refused_is_accepted():
+    """THE REGRESSION, with the operator's own numbers from 2026-09-27.
+
+    First real run, BTC regtest tip 1358 and LTC regtest tip 3657. contract_locktime() derived
+    exactly what its policy says -- 48h for the initiator, 24h for the participant -- and the
+    ordering check REFUSED it:
+
+        initiator   BTC  288 blocks x 600s = 172800s = 48h
+        participant LTC  576 blocks x 150s =  86400s = 24h
+        old check: 288 - 576 = -288 blocks  -> REFUSED a correct swap
+        new check: 172800 - 86400 = +86400s -> accepted, with 24h of margin
+
+    Litecoin needs FOUR TIMES the blocks for HALF the time, so block counts across two chains
+    were never comparable. This is the live case, not a constructed one."""
+    initiator = _planned("BTC", ROLE_INITIATOR, tip=1358, locktime=1646)
+    participant = _planned("LTC", ROLE_PARTICIPANT, tip=3657, locktime=4233)
+
+    assert initiator.blocks_remaining == 288 and participant.blocks_remaining == 576
+    assert initiator.blocks_remaining < participant.blocks_remaining, (
+        "fewer BLOCKS, which is what the old check refused on"
+    )
+    assert initiator.seconds_remaining == 172800.0
+    assert participant.seconds_remaining == 86400.0
+    assert_ordering(_step(), initiator=initiator, participant=participant)
+
+
+def test_the_locktimes_the_real_authority_derives_always_order_correctly():
+    """Not just the one measured pair: EVERY directed pair of the three assets, with the
+    locktimes contract_locktime() actually derives. The bug was a disagreement between the
+    authority and the checker, so the checker is fed the authority's own output rather than
+    numbers chosen to pass."""
+    for from_asset, to_asset in ASSET_PAIRS:
+        initiator = _planned(from_asset, ROLE_INITIATOR, tip=1000,
+                             locktime=contract_locktime(from_asset, ROLE_INITIATOR, 1000))
+        participant = _planned(to_asset, ROLE_PARTICIPANT, tip=5000,
+                               locktime=contract_locktime(to_asset, ROLE_PARTICIPANT, 5000))
+        assert_ordering(_step(), initiator=initiator, participant=participant)
+
+
 def test_the_participant_leg_must_expire_first_or_it_refuses():
-    """THE SECURITY PROPERTY, and the reason it is a refusal rather than a warning.
-
-    If the participant's lock outlived the initiator's, the initiator could wait out their
-    OWN lock, refund their leg, and then claim the participant's with the secret they never
-    spent -- taking both. The participant has no counter: the secret is theirs to learn, not
-    to produce.
-    """
-    # Good: initiator has 100 blocks left, participant 50. Margin +50.
-    assert_ordering(_step(), initiator_lock=1100, initiator_tip=1000,
-                    participant_lock=2050, participant_tip=2000)
-
-    # Bad: participant outlives the initiator.
-    with pytest.raises(SwapError, match="blocks LATER than the initiator"):
-        assert_ordering(_step(), initiator_lock=1050, initiator_tip=1000,
-                        participant_lock=2100, participant_tip=2000)
-
-    # Bad: equal is not "first". A zero margin is a tie, and a tie is not an ordering.
-    with pytest.raises(SwapError, match=r"blocks LATER than the initiator|margin"):
-        assert_ordering(_step(), initiator_lock=1100, initiator_tip=1000,
-                        participant_lock=2100, participant_tip=2000)
+    """The security property. If the participant's lock outlives the initiator's, the
+    initiator waits out their own lock, refunds their leg, and THEN claims the participant's
+    with the secret -- taking both."""
+    with pytest.raises(SwapError, match=r"expires .* LATER"):
+        assert_ordering(
+            _step(),
+            initiator=_planned("BTC", ROLE_INITIATOR, tip=1000, locktime=1100),
+            participant=_planned("BTC", ROLE_PARTICIPANT, tip=1000, locktime=1200),
+        )
 
 
-def test_the_ordering_is_measured_in_blocks_remaining_not_raw_heights():
-    """Two chains have unrelated tips, so comparing locktimes directly compares numbers
-    that mean nothing to each other. Here the participant's LOCKTIME is far higher than the
-    initiator's and it is still correct, because its chain's tip is higher too."""
-    assert_ordering(_step(), initiator_lock=1200, initiator_tip=1000,
-                    participant_lock=900_000, participant_tip=899_900)
+def test_the_ordering_is_compared_in_time_and_not_in_blocks():
+    """THE TEST THIS REPLACED ASSERTED THE BUG, which is why it is called out here.
+
+    It was named `..._is_measured_in_blocks_remaining_not_raw_heights` and it pinned exactly
+    the comparison that refused a correct swap. Blocks remaining IS the comparable unit within
+    one chain; across two chains with different target intervals it is a category error.
+
+    Constructed so the two answers DISAGREE: the initiator has FEWER blocks and MORE time.
+    A check counting blocks refuses this; a check measuring time accepts it."""
+    initiator = _planned("BTC", ROLE_INITIATOR, tip=0, locktime=100)      # 100 x 600s = 60000s
+    participant = _planned("LTC", ROLE_PARTICIPANT, tip=0, locktime=200)  # 200 x 150s = 30000s
+    assert initiator.blocks_remaining < participant.blocks_remaining
+    assert initiator.seconds_remaining > participant.seconds_remaining
+    assert_ordering(_step(), initiator=initiator, participant=participant)
+
+    # And the reverse: MORE blocks but LESS time must still be refused.
+    with pytest.raises(SwapError, match=r"expires .* LATER"):
+        assert_ordering(
+            _step(),
+            initiator=_planned("LTC", ROLE_INITIATOR, tip=0, locktime=200),
+            participant=_planned("BTC", ROLE_PARTICIPANT, tip=0, locktime=100),
+        )
+
+
+def test_a_zero_margin_is_refused_because_simultaneous_expiry_is_a_race():
+    """STRICTLY first, and a mutation check is why this test exists.
+
+    Relaxing `margin <= 0` to `margin < 0` -- accepting two legs that expire at the same
+    instant -- killed no test. It is not a harmless boundary: at equal expiry both refund
+    branches open together, so whether the initiator refunds their own leg before the
+    participant refunds theirs is decided by block timing and relay, not by the protocol.
+    The initiator is the one holding the secret, so they are the only party who can profit
+    from winning that race.
+
+    Constructed ACROSS two chains, so it is the time margin being asserted and not a block
+    count that happens to be equal: 600 LTC blocks x 150s = 90000s = 150 BTC blocks x 600s."""
+    initiator = _planned("BTC", ROLE_INITIATOR, tip=0, locktime=150)
+    participant = _planned("LTC", ROLE_PARTICIPANT, tip=0, locktime=600)
+    assert initiator.seconds_remaining == participant.seconds_remaining == 90000.0
+    assert initiator.blocks_remaining != participant.blocks_remaining
+    with pytest.raises(SwapError, match=r"expires .* LATER"):
+        assert_ordering(_step(), initiator=initiator, participant=participant)
 
 
 def test_a_participant_leg_already_expired_at_funding_is_refused():
-    """A lock in the past is the ABSENCE of a timelock, not a short one: its refund branch
-    is spendable the moment it is funded. That is the 2026-09-24 `locktime=500000` defect,
-    which was a height already mined years earlier."""
+    """A lock in the past is the ABSENCE of a timelock, not a short one: its refund branch is
+    spendable the moment it is funded. That is the 2026-09-24 `locktime=500000` defect, a
+    height already mined years earlier."""
     with pytest.raises(SwapError, match="already expired at funding time"):
-        assert_ordering(_step(), initiator_lock=1100, initiator_tip=1000,
-                        participant_lock=1990, participant_tip=2000)
+        assert_ordering(
+            _step(),
+            initiator=_planned("BTC", ROLE_INITIATOR, tip=1000, locktime=1100),
+            participant=_planned("BTC", ROLE_PARTICIPANT, tip=2000, locktime=1990),
+        )
+
+
+def test_every_refusal_says_nothing_was_funded_and_means_it():
+    """The message used to be FALSE. On 2026-09-27 the check ran after both legs were funded
+    and printed "Nothing was funded" while two contracts existed on two chains.
+
+    Planning is now separate from funding, so the claim is structural: assert_ordering takes
+    PlannedLegs, which carry a tip and a locktime and no txid, because there is no funding to
+    carry. A leg that has been funded is a FundedLeg and this function cannot accept one."""
+    with pytest.raises(SwapError, match="Nothing was funded"):
+        assert_ordering(
+            _step(),
+            initiator=_planned("BTC", ROLE_INITIATOR, tip=1000, locktime=1100),
+            participant=_planned("BTC", ROLE_PARTICIPANT, tip=1000, locktime=1200),
+        )
+    assert set(PlannedLeg.__dataclass_fields__) == {"leg", "tip", "locktime"}, (
+        "a PlannedLeg carries no txid, because nothing has been funded when it is judged"
+    )
 
 
 def test_client_for_refuses_an_unset_password_rather_than_guessing_one():
@@ -352,6 +451,78 @@ def _seeded_swap(*, published: bytes | None = None):
         )
     return {"console": console, "parties": parties, "secret": secret, "order": order,
             "chains": chains, "funded_a": funded["GRC"], "funded_b": funded["LTC"]}
+
+
+class _StubContractClient:
+    """A client whose create_contract answers the way BTCClient's actually does.
+
+    The point of the stub is the ABSENCE: BTCClient returns no `p2sh_address` key at all, and
+    `contract.get("p2sh_address") or ""` therefore produced the empty string, which the driver
+    printed as if it were an address. `reports_address` flips that so both shapes are covered.
+    """
+
+    def __init__(self, redeem_script: bytes, *, reports_address: str | None = None) -> None:
+        self.redeem_script = redeem_script
+        self.reports_address = reports_address
+        self.calls: list[dict] = []
+
+    def create_contract(self, **kwargs):
+        self.calls.append(kwargs)
+        answer = {"txid": "a" * 64, "redeem_script": self.redeem_script.hex()}
+        if self.reports_address is not None:
+            answer["p2sh_address"] = self.reports_address
+        return answer
+
+
+def test_a_client_that_reports_no_address_still_prints_the_contract_it_built(capsys):
+    """THE BLANK LINE FROM THE OPERATOR'S FIRST RUN, 2026-09-27:
+
+        BTC contract at
+
+    with nothing after it. BTCClient returns no `p2sh_address`, so the driver printed an empty
+    string as if it were an answer. Rule 14: a blank gap cannot be told from a value that
+    broke, and this is the line an operator would copy to look the contract up.
+
+    It is DERIVED from the redeem script the daemon itself returned -- the same
+    p2sh_script_for() that find_vout() uses to locate the output on chain -- rather than
+    reported as missing, because the script determines the scriptPubKey completely."""
+    script = bytes([0x51] * 40)
+    client = _StubContractClient(script)
+    console = Console(total_steps=8)
+    leg = Leg(asset="BTC", role=ROLE_INITIATOR, amount=Decimal("0.01"),
+              participant_address="participant", refund_address="refund")
+    planned = atomic_swap.PlannedLeg(leg=leg, tip=1358, locktime=1646)
+
+    funded = atomic_swap.fund_leg(Step(console, 6), planned, "ab" * 32, client)
+
+    printed = capsys.readouterr().out
+    expected_hex = p2sh_script_for(script).hex()
+    assert expected_hex in printed, "the derived scriptPubKey must be printed"
+    assert "contract scriptPubKey \n" not in printed and "contract at \n" not in printed
+    assert "client reported no address" in printed, "say WHICH case this is, not just the hex"
+    assert funded["redeem_script"] == script.hex()
+    assert funded["locktime"] == 1646 and funded["tip"] == 1358
+    # The locktime that was PLANNED is the one sent to the daemon -- not one re-derived from a
+    # tip read again inside create_contract, which is what made the old ordering check late.
+    assert client.calls[0]["locktime"] == 1646
+
+
+def test_a_client_that_does_report_an_address_has_it_shown_beside_the_derivation(capsys):
+    """The other branch, so the function cannot pass by always printing the same thing. GRC's
+    createhtlc does return an address; it is shown, and the derivation is shown too, because a
+    disagreement between them means the daemon funded a contract other than the one it
+    described."""
+    script = bytes([0x52] * 44)
+    client = _StubContractClient(script, reports_address="2MxFF952zuNzXonkRW4uUWcCFvntkaTxGQ6")
+    console = Console(total_steps=8)
+    leg = Leg(asset="GRC", role=ROLE_PARTICIPANT, amount=Decimal(1000),
+              participant_address="participant", refund_address="refund")
+    atomic_swap.fund_leg(Step(console, 6), atomic_swap.PlannedLeg(leg=leg, tip=10, locktime=99),
+                         "cd" * 32, client)
+    printed = capsys.readouterr().out
+    assert p2sh_script_for(script).hex() in printed
+    assert "2MxFF952zuNzXonkRW4uUWcCFvntkaTxGQ6" in printed
+    assert "client reported no address" not in printed
 
 
 def test_mint_parties_makes_four_distinct_keys_and_prints_no_private_key(capsys):

@@ -105,6 +105,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from microfortnights import format_duration
 from modules.atomic_btc_client import BTCClient
 from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import p2sh_script_for
@@ -116,7 +117,12 @@ from modules.htlc_chain_read import (
     htlc_vout,
 )
 from modules.htlc_spend import preimage_from_scriptsig
-from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT, contract_locktime
+from modules.htlc_timelock import (
+    ROLE_INITIATOR,
+    ROLE_PARTICIPANT,
+    SECONDS_PER_BLOCK,
+    contract_locktime,
+)
 from regtest.keys import generate_key
 from step_console import Console
 
@@ -220,6 +226,47 @@ class Leg:
     amount: Decimal
     participant_address: str
     refund_address: str
+
+
+@dataclass(frozen=True)
+class PlannedLeg:
+    """A leg's chain tip and the absolute locktime derived from it -- BEFORE it is funded.
+
+    THIS TYPE EXISTS BECAUSE THE ORDERING CHECK RAN TOO LATE, and the run that proved it was
+    the operator's first real one (2026-09-27, BTC regtest 1358 / LTC regtest 3657). Both legs
+    were funded, and THEN step 6 refused -- while its own refusal message said "Nothing was
+    funded", which was false at the moment it printed. Two contracts existed on two chains and
+    both had to be refunded.
+
+    A locktime is an ABSOLUTE HEIGHT, so it can be computed from a tip read now and still be
+    the right value when the funding lands a moment later. That is what makes planning both
+    legs first, judging the ordering, and only then funding them, safe -- and it is what makes
+    "Nothing was funded" true rather than aspirational.
+    """
+
+    leg: Leg
+    tip: int
+    locktime: int
+
+    @property
+    def blocks_remaining(self) -> int:
+        return self.locktime - self.tip
+
+    @property
+    def seconds_remaining(self) -> float:
+        """Blocks converted to wall-clock USING THIS CHAIN'S OWN TARGET INTERVAL.
+
+        The whole point of the type. SECONDS_PER_BLOCK is imported from
+        modules/htlc_timelock rather than re-spelled here, because that table is the same
+        vocabulary contract_locktime() derives the locktime FROM -- a second copy would be
+        free to disagree with the numbers it is checking (rule 8).
+
+        An ESTIMATE, not a deadline the chain owes anybody: it is a target interval, and a
+        chain can run fast or slow. It is the right basis for the comparison anyway, because
+        the alternative -- comparing block COUNTS across two chains -- is not an estimate but
+        a category error.
+        """
+        return self.blocks_remaining * SECONDS_PER_BLOCK[self.leg.asset]
 
 
 @dataclass(frozen=True)
@@ -327,82 +374,158 @@ def chain_name(asset: str, client) -> str:
     )
 
 
-def assert_ordering(step: Step, initiator_lock: int, initiator_tip: int,
-                    participant_lock: int, participant_tip: int) -> None:
-    """The PARTICIPANT's leg must expire STRICTLY FIRST, with a positive margin.
+def assert_ordering(step: Step, initiator: PlannedLeg, participant: PlannedLeg) -> None:
+    """The PARTICIPANT's leg must expire STRICTLY FIRST -- compared in TIME, not in blocks.
 
     THIS IS THE SECURITY PROPERTY AND IT IS NOT A CONVENTION. If the participant's lock
     outlived the initiator's, the initiator could sit on the secret until their OWN refund
     became spendable, take their coins back, and then claim the participant's leg with the
-    secret they never used -- taking both legs. The participant has no counter to that
-    because the secret is theirs to learn, not to produce.
+    secret they never used -- taking both. The participant has no counter: the secret is
+    theirs to learn, not to produce.
 
-    Measured in BLOCKS REMAINING rather than raw heights, which is the only comparable
-    unit: the two chains have unrelated tips and unrelated block intervals, so
-    `initiator_lock > participant_lock` compares two numbers that mean nothing to each
-    other. Litecoin at 2.5 minutes a block and Bitcoin at 10 means the same block count is
-    four times the wall-clock, which is exactly why modules/htlc_timelock.py derives each
-    lock from its own chain's tip and role rather than from one constant.
+    THE UNIT IS SECONDS, AND THE PREVIOUS VERSION OF THIS FUNCTION GOT IT WRONG IN THE EXACT
+    WAY ITS OWN DOCSTRING WARNED ABOUT. It compared BLOCKS REMAINING and explained, correctly,
+    that "Litecoin at 2.5 minutes a block and Bitcoin at 10 means the same block count is four
+    times the wall-clock" -- and then subtracted one block count from the other anyway. Blocks
+    remaining is the comparable unit WITHIN one chain; across two it is a category error.
 
-    Refuses rather than warns. A warning on this is a warning nobody reads until a swap
-    has been taken.
+    Measured on the operator's first real run, 2026-09-27, BTC regtest tip 1358 / LTC regtest
+    tip 3657, and this is a correctly built swap that the old check REFUSED:
+
+        initiator   BTC  288 blocks x 600s = 172800s = 48h   <- INITIATOR_LOCK_HOURS
+        participant LTC  576 blocks x 150s =  86400s = 24h   <- PARTICIPANT_LOCK_HOURS
+        margin in blocks:   288 - 576 = -288   -> refused, wrongly
+        margin in seconds: 172800 - 86400 = +86400 = 24h -> correct, and safe
+
+    modules/htlc_timelock derives each leg from a policy stated in HOURS (48 and 24) and
+    converts through that chain's own SECONDS_PER_BLOCK, so the two legs were never meant to
+    have comparable block counts. Litecoin needs FOUR TIMES the blocks for half the time.
+    A false refusal is not a safe failure here: it refused after both legs were funded, so it
+    cost two refunds and could have cost a swap a counterparty was waiting on.
+
+    Refuses rather than warns. A warning on this is a warning nobody reads until a swap has
+    been taken.
     """
-    initiator_blocks = initiator_lock - initiator_tip
-    participant_blocks = participant_lock - participant_tip
-    margin = initiator_blocks - participant_blocks
-    step.say(f"initiator leg expires in {initiator_blocks} blocks (height {initiator_lock})")
-    step.say(f"participant leg expires in {participant_blocks} blocks (height {participant_lock})")
-    step.check("participant expires FIRST", f"margin {margin} blocks", "a positive margin",
-               margin > 0)
-    if margin <= 0:
-        raise SwapError(
-            f"REFUSING: the participant's leg expires {-margin} blocks LATER than the "
-            f"initiator's, not earlier. That lets the initiator wait out their own lock, "
-            f"refund their leg, and THEN claim the participant's with the secret -- taking "
-            f"both. Nothing was funded"
+    margin_seconds = initiator.seconds_remaining - participant.seconds_remaining
+    for label, planned in (("initiator", initiator), ("participant", participant)):
+        step.say(
+            f"{label} leg ({planned.leg.asset}) expires in {planned.blocks_remaining} blocks "
+            f"= {format_duration(planned.seconds_remaining)} at {planned.leg.asset}'s "
+            f"{SECONDS_PER_BLOCK[planned.leg.asset]}s target interval (height {planned.locktime})"
         )
-    if participant_blocks <= 0:
+    step.check("participant expires FIRST", f"margin {format_duration(margin_seconds)}",
+               "a positive margin", margin_seconds > 0)
+    if margin_seconds <= 0:
+        raise SwapError(
+            f"REFUSING: the participant's leg expires {format_duration(-margin_seconds)} LATER "
+            f"than the initiator's, not earlier. That lets the initiator wait out their own "
+            f"lock, refund their leg, and THEN claim the participant's with the secret -- "
+            f"taking both. Nothing was funded"
+        )
+    if participant.blocks_remaining <= 0:
         raise SwapError(
             f"REFUSING: the participant's leg is already expired at funding time "
-            f"({participant_blocks} blocks). Its refund branch would be spendable the moment "
-            f"it is funded, which is the absence of a timelock rather than a short one"
+            f"({participant.blocks_remaining} blocks). Its refund branch would be spendable "
+            f"the moment it is funded, which is the absence of a timelock rather than a short "
+            f"one. Nothing was funded"
         )
 
 
-def fund_leg(step: Step, leg: Leg, secret_hash: str, client) -> dict:
-    """Create and fund one leg, then find its vout ON CHAIN rather than assuming 0.
+def open_test_clients(step: Step, assets: tuple[str, ...]) -> dict:
+    """A client per asset, each REFUSED unless its daemon says it is on a test network.
 
-    The vout matters and is the defect this repository has now fixed three times -- on BTC
-    on 2026-09-25, on GRC on 2026-09-26, and it is why modules/htlc_chain_read.htlc_vout()
-    exists. Gridcoin's createhtlc returns no vout at all and funds through SendMoney(),
-    which adds a CHANGE output, so the contract sits at index 0 or 1 depending on coin
-    selection. A claim aimed at the wrong index spends nothing and burns a fee.
+    The network is ASKED, never inferred from a port number -- a regtest daemon on 18332 and a
+    mainnet daemon on 18443 are both one config line away, and a port is a convention while
+    `getblockchaininfo.chain` is the daemon's own answer.
+
+    Extracted from main() for ruff's statement ceiling, which rule 12 says to answer by
+    extracting the decision rather than raising the limit. The decision here is what counts as
+    a test network, and it is now callable with a seeded client.
+    """
+    clients = {}
+    for asset in assets:
+        clients[asset] = client_for(asset)
+        name = chain_name(asset, clients[asset])
+        step.check(f"{asset} network", name.upper(), "a test network",
+                   name.lower() in TEST_CHAIN_NAMES)
+        if name.lower() not in TEST_CHAIN_NAMES:
+            raise SwapError(
+                f"REFUSING: the {asset} daemon says its chain is {name!r}, which is not one of "
+                f"{sorted(TEST_CHAIN_NAMES)}. Nothing was funded"
+            )
+    return clients
+
+
+def plan_leg(step: Step, leg: Leg, client) -> PlannedLeg:
+    """Read this chain's tip and derive the leg's absolute locktime. FUNDS NOTHING.
+
+    Split out of fund_leg() so assert_ordering() can run before either chain is touched. The
+    old order was fund, fund, check -- which meant a refusal left two contracts on two chains
+    and a message claiming nothing had been funded.
     """
     tip = int(client_caller(client)("getblockcount"))
     locktime = contract_locktime(leg.asset, leg.role, tip)
-    step.announce(f"fund the {leg.role} leg: {leg.amount} {leg.asset}, locktime {locktime}")
-    step.say(f"{leg.asset} tip {tip}; role {leg.role}; hash {secret_hash}")
+    planned = PlannedLeg(leg=leg, tip=tip, locktime=locktime)
+    step.say(
+        f"{leg.asset} tip {tip}; role {leg.role}; locktime {locktime} "
+        f"({planned.blocks_remaining} blocks = {format_duration(planned.seconds_remaining)})"
+    )
+    return planned
+
+
+def fund_leg(step: Step, planned: PlannedLeg, secret_hash: str, client) -> dict:
+    """Fund a leg whose locktime was already decided, then find its vout ON CHAIN.
+
+    Takes a PlannedLeg rather than reading the tip itself, so the ordering check has already
+    passed by the time anything is funded. The locktime is an absolute height, so the value
+    planned a moment ago is still the right one now.
+
+    The vout matters and is the defect this repository has now fixed three times -- BTC
+    2026-09-25, GRC 2026-09-26 -- and it is why modules/htlc_chain_read.htlc_vout() exists.
+    Gridcoin's createhtlc returns no vout at all and funds through SendMoney(), which adds a
+    CHANGE output, so the contract sits at index 0 or 1 by coin selection. A claim aimed at
+    the wrong index spends nothing and burns a fee.
+    """
+    leg = planned.leg
+    step.announce(f"fund the {leg.role} leg: {leg.amount} {leg.asset}, locktime {planned.locktime}")
 
     contract = client.create_contract(**{
         AMOUNT_KEYWORD[leg.asset]: leg.amount,
         "participant_address": leg.participant_address,
         "refund_address": leg.refund_address,
-        "locktime": locktime,
+        "locktime": planned.locktime,
         "secret_hash": secret_hash,
     })
     txid = str(contract.get("txid") or contract.get("transaction_id") or "")
-    p2sh = str(contract.get("p2sh_address") or contract.get("address") or "")
     script_hex = str(contract.get("redeem_script") or contract.get("redeemScript") or "")
     step.check(f"{leg.asset} funding txid", txid[:16] + "..." if txid else None,
                "a txid", bool(txid))
-    step.say(f"{leg.asset} contract at {p2sh}")
     if not txid or not script_hex:
         raise SwapError(
             f"{leg.asset}: create_contract returned no txid or no redeem script. Keys present: "
             f"{sorted(contract)}"
         )
-    return {"txid": txid, "p2sh_address": p2sh, "redeem_script": script_hex,
-            "locktime": locktime, "tip": tip}
+
+    # THE P2SH ADDRESS IS DERIVED WHEN THE CLIENT DOES NOT RETURN ONE, rather than printed
+    # empty. The operator's 2026-09-27 run printed the bare line
+    #
+    #     BTC contract at
+    #
+    # with nothing after it, because BTCClient's create_contract returns no `p2sh_address`
+    # key -- so `contract.get(...) or ""` produced the empty string and it was printed as if
+    # it were an answer. Rule 14: a blank gap cannot be told from a value that broke.
+    #
+    # It is DERIVED rather than reported as missing because the redeem script the daemon just
+    # returned determines it completely -- p2sh_script_for() is the same function find_vout()
+    # already uses to locate the output on chain. A client that DOES return one is checked
+    # against the derivation instead of trusted, because a mismatch means the daemon funded a
+    # contract other than the one it described, which is a refusal and not a cosmetic note.
+    derived = p2sh_script_for(bytes.fromhex(script_hex)).hex()
+    reported = str(contract.get("p2sh_address") or contract.get("address") or "")
+    step.say(f"{leg.asset} contract scriptPubKey {derived}"
+             f"{f'  (client reported address {reported})' if reported else '  (client reported no address; derived from the redeem script it returned)'}")
+    return {"txid": txid, "p2sh_address": reported, "redeem_script": script_hex,
+            "locktime": planned.locktime, "tip": planned.tip}
 
 
 def claim_leg(step: Step, funded_leg: FundedLeg, secret: bytes, party: Party) -> str:
@@ -759,17 +882,7 @@ def main() -> int:
     try:
         console.banner(f"atomic swap {args.from_asset} -> {args.to_asset}, both legs, TEST networks only")
         console.step(1, "both daemons say which network they are on, and both must be a test one")
-        clients = {}
-        for asset in (args.from_asset, args.to_asset):
-            clients[asset] = client_for(asset)
-            name = chain_name(asset, clients[asset])
-            console.check(f"{asset} network", name.upper(), "a test network",
-                          name.lower() in TEST_CHAIN_NAMES)
-            if name.lower() not in TEST_CHAIN_NAMES:
-                raise SwapError(
-                    f"REFUSING: the {asset} daemon says its chain is {name!r}, which is not one of "
-                    f"{sorted(TEST_CHAIN_NAMES)}. Nothing was funded"
-                )
+        clients = open_test_clients(Step(console, 1), (args.from_asset, args.to_asset))
         assets = (args.from_asset, args.to_asset)
         parties = mint_parties(Step(console, 2), assets)
 
@@ -782,22 +895,24 @@ def main() -> int:
         leg_a, leg_b = build_legs(args.from_asset, args.to_asset,
                                   args.from_amount, args.to_amount, parties)
 
-        funded_a = FundedLeg(leg_a, fund_leg(Step(console, 4), leg_a, secret_hash,
-                                            clients[leg_a.asset]), clients[leg_a.asset])
-        funded_b = FundedLeg(leg_b, fund_leg(Step(console, 5), leg_b, secret_hash,
-                                            clients[leg_b.asset]), clients[leg_b.asset])
+        # PLAN BOTH LEGS, CHECK THE ORDERING, THEN FUND. The order used to be fund, fund,
+        # check -- and the operator's first real run (2026-09-27) hit exactly the failure
+        # that shape allows: both legs went onto two chains and the refusal printed
+        # "Nothing was funded" while two contracts existed. A locktime is an absolute
+        # height, so deciding it from a tip read now stays correct when the funding lands a
+        # moment later; nothing is gained by reading the tip later and a refund is lost.
+        console.step(4, "plan both legs from each chain's own tip -- nothing is funded yet")
+        planned_a = plan_leg(Step(console, 4), leg_a, clients[leg_a.asset])
+        planned_b = plan_leg(Step(console, 4), leg_b, clients[leg_b.asset])
 
-        # AFTER both are funded is too late to refuse, so the ordering is checked against the
-        # locktimes the two fund_leg calls DERIVED -- from each chain's own tip and role --
-        # before either claim is attempted. A bad ordering here means refund both legs and
-        # start again, which the message says, rather than proceeding into a swap the
-        # initiator could take both sides of.
-        console.step(6, "the participant's leg must expire FIRST -- the security property")
-        assert_ordering(
-            Step(console, 6),
-            initiator_lock=funded_a.funded["locktime"], initiator_tip=funded_a.funded["tip"],
-            participant_lock=funded_b.funded["locktime"], participant_tip=funded_b.funded["tip"],
-        )
+        console.step(5, "the participant's leg must expire FIRST -- the security property")
+        assert_ordering(Step(console, 5), initiator=planned_a, participant=planned_b)
+
+        console.step(6, "both legs are funded only now that the ordering is proven safe")
+        funded_a = FundedLeg(leg_a, fund_leg(Step(console, 6), planned_a, secret_hash,
+                                             clients[leg_a.asset]), clients[leg_a.asset])
+        funded_b = FundedLeg(leg_b, fund_leg(Step(console, 6), planned_b, secret_hash,
+                                             clients[leg_b.asset]), clients[leg_b.asset])
 
         claim_b, claim_a = claim_both_legs(console, funded_a, funded_b, parties, secret)
         console.say(f"both legs claimed: {claim_b[:16]}... and {claim_a[:16]}...")
