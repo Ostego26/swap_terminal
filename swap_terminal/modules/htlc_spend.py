@@ -176,6 +176,11 @@ VARINT_MARKER_WIDTHS = {0xFD: 2, 0xFE: 4, 0xFF: 8}
 #   8  Gridcoin and the Peercoin line: [version][nTime]
 CANDIDATE_PREFIX_LENGTHS = (4, 8)
 
+# Gridcoin v2's vContracts, empty: a varint count of zero. It sits AFTER nLockTime, so a
+# Gridcoin transaction is one byte longer than the Peercoin layout alone predicts -- see
+# _parse_with_prefix() for the bytes this was measured from and the source that confirms it.
+GRIDCOIN_EMPTY_CONTRACTS = b"\x00"
+
 # Sanity bounds used while deciding which layout a blob is in. They are
 # deliberately loose -- the decisive checks are the exact re-serialization and
 # the expected outpoint -- and exist so that a wrong guess fails fast instead of
@@ -494,10 +499,46 @@ def _parse_with_prefix(raw: bytes, prefix_length: int) -> ParsedTransaction:
         raise TransactionLayoutError(f"only {len(raw)} bytes, which is not even a {prefix_length}-byte prefix")
     inputs, offset = _parse_inputs(raw, prefix_length)
     outputs, offset = _parse_outputs(raw, offset)
-    if len(raw) - offset != LOCKTIME_LEN:
+    trailing = len(raw) - offset
+    # GRIDCOIN v2 SERIALIZES vContracts AFTER nLockTime, which is why this is not `!= 4`.
+    #
+    # MEASURED on the operator's Gridcoin testnet daemon, 2026-09-27, when a real GRC leg was
+    # funded and the claim could not be built. `createrawtransaction` returned 90 bytes for one
+    # input and one P2PKH output, and taken apart they are:
+    #
+    #      0..3   version        02000000
+    #      4..7   nTime          279ab96a   <- decodes to 22:35:19Z, the minute it was asked
+    #      8..49  one input      count, 32-byte txid, vout, empty scriptSig, sequence
+    #     50..84  one output     count, 8-byte value, 25-byte P2PKH scriptPubKey
+    #     85..88  nLockTime      00000000
+    #     89      vContracts     00        <- THE EXTRA BYTE
+    #
+    # Confirmed against Gridcoin-Research src/primitives/transaction.h rather than inferred
+    # from the byte: CTransaction's SerializationOp reads nVersion, nTime, vin, vout, nLockTime,
+    # and then `vContracts` (a std::vector<GRC::Contract>) when nVersion >= 2, or the legacy
+    # `hashBoinc` string otherwise. An empty vector serializes as a varint 0, which is that
+    # 0x00. The transaction above is version 2, so it carries vContracts.
+    #
+    # ONLY AN EMPTY vContracts IS ACCEPTED, and the refusal for a non-empty one is deliberate
+    # rather than laziness. A Gridcoin contract is a protocol message -- a beacon, a poll, a
+    # vote -- and this module's whole job is to sign a transaction. Carrying bytes we cannot
+    # read into something we then sign is the shape that has no version which can be taken
+    # back, which is the same sentence parse_transaction's docstring already refuses a best
+    # guess for. `createrawtransaction` emits an empty vector, so the accepted case is the only
+    # one this path can produce; a non-empty one means the transaction did not come from where
+    # we think it did.
+    if trailing == LOCKTIME_LEN + len(GRIDCOIN_EMPTY_CONTRACTS):
+        if raw[offset + LOCKTIME_LEN:] != GRIDCOIN_EMPTY_CONTRACTS:
+            raise TransactionLayoutError(
+                f"{trailing} bytes after the last output: a {LOCKTIME_LEN}-byte nLockTime plus "
+                f"{raw[offset + LOCKTIME_LEN:].hex()}, which is a NON-EMPTY Gridcoin vContracts. "
+                f"This module will not sign a transaction carrying contract bytes it cannot read"
+            )
+    elif trailing != LOCKTIME_LEN:
         raise TransactionLayoutError(
-            f"{len(raw) - offset} bytes left after the last output, and a transaction ends with a "
-            f"{LOCKTIME_LEN}-byte nLockTime"
+            f"{trailing} bytes left after the last output, and a transaction ends with a "
+            f"{LOCKTIME_LEN}-byte nLockTime (Gridcoin v2 adds one more byte for an empty "
+            f"vContracts)"
         )
     return ParsedTransaction(
         prefix=raw[:prefix_length],
