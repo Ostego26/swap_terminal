@@ -726,7 +726,7 @@ def main() -> int:
         network = refuse_mainnet_and_a_funded_wallet(
             console,
             target.wallet_port,
-            target.daemon_port,
+            target.daemon,
             args.allow_open_wallet,
             check_balance=bool(args.run),
         )

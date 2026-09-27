@@ -41,6 +41,7 @@ from monero_shared_key_verify import (  # noqa: E402  same
     DEFAULT_DAEMON_PORT,
     DEFAULT_WALLET_PORT,
     SHARE_UPPER_BOUND,
+    Target,
     VerifyError,
     address_for,
     build_parser,
@@ -267,3 +268,55 @@ def test_the_unreachable_endpoint_error_names_how_to_find_a_remote_daemon():
     doc = inspect.getsource(sys.modules["monero_shared_key_verify"].rpc)
     assert "ps aux | grep monero-wallet-rpc" in doc
     assert "--daemon-address" in doc
+
+
+@pytest.mark.parametrize("extra", [["--run"], ["--sweep", "537wxk1v"]])
+def test_both_paths_reach_the_rpc_rather_than_an_attribute_error(extra, tmp_path):
+    """THE TEST THAT WAS MISSING, AND THE BUG IT WOULD HAVE CAUGHT.
+
+    Renaming Target.daemon_port to Target.daemon left one stale `target.daemon_port` at
+    a call site whose formatting a search-and-replace did not match. ruff cannot catch
+    it -- a wrong attribute on a dataclass is not an undefined NAME -- and every test in
+    this file exercised pure functions, so nothing reached main()'s argument plumbing.
+    The operator hit it on the first real stagenet invocation:
+
+        AttributeError: 'Target' object has no attribute 'daemon_port'
+
+    This drives main() end to end against ports where nothing listens, on BOTH paths.
+    It needs no daemon and no wallet: the assertion is that the run gets as far as a
+    CONNECTION REFUSED and reports it as a refusal, which means every attribute access
+    and every argument on the way there resolved. Any AttributeError, TypeError or
+    NameError in that plumbing fails this instead of reaching the operator.
+
+    Both paths, because they diverge immediately after that call -- which is where
+    today's three guard-scoping bugs all lived.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable, str(REPOSITORY_ROOT / "monero_shared_key_verify.py"),
+            *extra,
+            "--port", "29998",
+            "--daemon", "29997",
+            "--shares-file", str(tmp_path / "shares.json"),
+        ],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    combined = completed.stdout + completed.stderr
+    assert "Traceback" not in combined, f"the plumbing raised instead of refusing:\n{combined}"
+    for forbidden in ("AttributeError", "TypeError", "NameError"):
+        assert forbidden not in combined, f"{forbidden} in the argument path:\n{combined}"
+    assert "Connection refused" in combined, (
+        f"expected to get as far as an unreachable endpoint, got:\n{combined}"
+    )
+    assert completed.returncode == 1, "a refusal is a failing summary, not a crash"
+
+
+def test_target_has_no_daemon_port_attribute(tmp_path):
+    """Belt to the braces above, and it names the old spelling so a revert is loud.
+    `daemon` is an int port on localhost OR a host:port string; `daemon_port` cannot
+    express the second, which is why it was renamed."""
+    path = tmp_path / "shares.json"
+    target = Target(wallet_port=1, daemon="host:2", shares_path=path)
+    assert not hasattr(target, "daemon_port")
+    assert target.daemon == "host:2"
+    assert Target(wallet_port=1, daemon=2, shares_path=path).daemon == 2
