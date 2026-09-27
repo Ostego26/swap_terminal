@@ -3,9 +3,9 @@
 Role: submodule (persistence; holds no decision of its own)
 Reads: swap_terminal.db
 Writes: swap_terminal.db -- creates quotes, swaps, deposit_events, payouts,
-       wallet_inventory, swap_audit_log and xrp_destination_tags if they are
-       absent, plus the two triggers that make an allocated XRP destination
-       tag immutable and undeletable
+       wallet_inventory, market_context, swap_audit_log and xrp_destination_tags
+       if they are absent, plus the two triggers that make an allocated XRP
+       destination tag immutable and undeletable
 Can move funds: no
 Mainnet-safe: yes
 
@@ -165,6 +165,84 @@ CREATE TABLE IF NOT EXISTS wallet_inventory (
     hot_available REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+-- THE MARKET CONTEXT BEHIND A PRICE. Added 2026-09-27 at the operator's
+-- instruction: "we should also keep track of the market cap and price comparison
+-- to better establish grc prices."
+--
+-- One row per asset per fetch, written by services/market_context.py from the
+-- snapshots services/pricing.py returns. It is EVIDENCE, and the reason it is a
+-- table rather than a log line is rule 7: a measurement that only exists in a log
+-- is not learning, and "better establish GRC prices" is a question about what
+-- GRC's price, cap and volume were doing an hour and a day ago -- which can only
+-- be asked of rows.
+--
+-- IT IS A BUFFER, NOT AN AUTHORITY, AND NOTHING READS IT TO DECIDE ANYTHING
+-- (rule 15). It lives in swap_terminal.db rather than in a second file because
+-- there is one authority and this is part of it; it earns no exemption. What it
+-- must not become is an input to a payout: services/market_context.py's
+-- price_confidence() is deliberately not wired into the quote path, and its
+-- docstring says what wiring it in would mean.
+--
+-- APPEND ONLY. There is no UPDATE and no DELETE anywhere in
+-- services/market_context.py, and no trigger enforcing that -- which is stated
+-- rather than glossed, because the xrp_destination_tags triggers below show what
+-- enforcement looks like when it matters. It is not enforced here because a
+-- misedited observation cannot pay anybody the wrong amount; a misedited
+-- destination tag can. If this table ever becomes an input to a decision, that
+-- asymmetry stops holding and the triggers should follow.
+--
+-- NO UNIQUE CONSTRAINT ON (asset, fetched_at), considered rather than forgotten.
+-- Two processes fetching inside the same RATE_CACHE_SECONDS window read the same
+-- process cache and therefore report the same fetched_at, so a unique index would
+-- turn a harmless duplicate observation into an IntegrityError on a diagnostic
+-- path. A duplicate row is deduplicated by whoever reads it; a failed write is
+-- lost evidence.
+--
+-- THE THREE NULLABLE COLUMNS ARE NULLABLE ON PURPOSE AND MUST NOT BE GIVEN
+-- DEFAULT 0. CoinGecko returns partial data for thin assets -- exactly the class
+-- GRC is in -- so "no market cap datum" is an ordinary response. DEFAULT 0 would
+-- make it indistinguishable from a real zero, and price_confidence() would then
+-- report a confident THIN verdict about a number nobody measured. NULL means
+-- nobody said; 0 means somebody said zero.
+--
+-- source_updated_at is CoinGecko's own unix second for the quote and fetched_at
+-- is when we asked. Both are kept because the GAP between them is how stale the
+-- feed itself was, and that is not derivable from either alone. They are REAL /
+-- INTEGER unix seconds rather than ISO text because they are arithmetic inputs
+-- (a subtraction), while recorded_at is ISO text like every other timestamp
+-- column in this schema, because it is only ever read.
+--
+-- THERE IS NO `verdict` COLUMN, and that is a rule 8 decision. The verdict is a
+-- pure function of these columns plus the config window, so storing it would put
+-- one rule in two places: change a threshold and every historical row would still
+-- assert the old answer, so the table would disagree with the code about a past
+-- that cannot be re-measured. Store what CoinGecko said; derive the verdict at
+-- read time.
+--
+-- The column names are the field names of services/pricing.MarketSnapshot, which
+-- is where the INSERT's column list is derived from. They are not derived INTO
+-- this DDL, because db.py is imported by every worker at startup and importing
+-- services/pricing.py here would pull `requests` into that path for the sake of a
+-- column list. tests/test_market_context.py closes the gap by asserting PRAGMA
+-- table_info against that tuple -- the schema as the database actually built it,
+-- not as this text spells it.
+CREATE TABLE IF NOT EXISTS market_context (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL,
+    coingecko_id TEXT NOT NULL,
+    price_usd REAL NOT NULL,
+    market_cap_usd REAL,
+    volume_24h_usd REAL,
+    change_24h_pct REAL,
+    source_updated_at INTEGER,
+    fetched_at REAL NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+
+-- The index the one read actually uses: recent_market_context() filters by asset
+-- and orders by fetched_at descending, which is this index read backwards.
+CREATE INDEX IF NOT EXISTS idx_market_context_asset_fetched_at ON market_context(asset, fetched_at);
 
 CREATE TABLE IF NOT EXISTS swap_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
