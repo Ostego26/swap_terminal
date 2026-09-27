@@ -67,10 +67,33 @@ REGTEST USES THE MAINNET PREFIXES: `case FAKECHAIN: return mainnet;`
 mainnet/primary, and it is why monero_shared_key_verify.py must build its shared
 address with mainnet prefixes when the daemon reports fakechain.
 
-NOT VERIFIED: that a shared address built here is spendable with the summed key.
-That needs a stagenet and a wallet, which this container's network policy denies
-(docs/monero_stagenet_funding.md). The arithmetic is checked; the settlement is
-not, so `shared_address` is a PROPOSAL in rule 16's sense.
+THE SHARED-ADDRESS ARITHMETIC IS CONFIRMED AGAINST MONERO'S OWN WALLET, 2026-09-27.
+
+This is the cross-check that was missing and it turned out to be free. `monero-wallet-rpc`'s
+`generate_from_keys` takes an address, a spend key and a view key and returns the
+address IT derives. Run on the operator's host against a regtest chain
+(monero_shared_key_verify.py --run), with four freshly sampled shares:
+
+    public spend key (sum)  2168ee3cb850808bf2bb431eab05e76f24e4ebac1851c566b92c33aa397f4895
+    public view  key (sum)  436874fa37511b9f66a9beebac062fb7be798bb579bc4a0dceab2b1dd2f63260
+
+    this repo computed  42tYMtaj4PRQQg1UPd3xr2KbEkqgwCjNcJBYcL112kDVRy3PHYgWvi6TfPbkmpAs3UXjYkNcEXwRb3JwzQXKuzXbBsPCKbZ
+    the wallet derived  42tYMtaj4PRQQg1UPd3xr2KbEkqgwCjNcJBYcL112kDVRy3PHYgWvi6TfPbkmpAs3UXjYkNcEXwRb3JwzQXKuzXbBsPCKbZ
+    IDENTICAL, and the wallet reported "Wallet has been generated successfully."
+
+So `shared_public_key()`, `shared_private_spend_key()` and `encode_address()` agree
+with Monero's own derivation end to end, on keys neither side had seen before. That
+is the same grade of evidence that made chains/xrp_crypto_condition.py defensible
+(byte-identical agreement with an independent implementation) and it is stronger than
+the earlier checks, which were against libsodium for the group law and against ONE
+pre-existing address for the encoding.
+
+WHAT IS STILL NOT VERIFIED, narrowed to one sentence: that the CHAIN lets the summed
+key spend an output paid to that address. The wallet agreeing on the address proves
+the keys and the encoding; it does not prove a spend relays and confirms. That is
+what `monero_shared_key_verify.py --sweep` answers, and until it has run once
+`shared_address` remains a proposal in rule 16's sense ON THAT POINT ALONE -- not on
+the arithmetic, which is now measured.
 
 KECCAK-256 IS NOT SHA3-256, AND hashlib HAS ONLY THE SECOND
 

@@ -340,6 +340,17 @@ rehearsal against a network with real peers and real timing is a different test.
 
 It does remove the faucet from the critical path today, which is the point.
 
+**AND IT DID, MEASURED 2026-09-27.** The full regtest run on the operator's host came
+back 9 OK / 0 FAIL: chain up, 80 blocks mined, a coinbase unlocked, one real transfer
+(txid 4f53f21f22e6f0c6...), and `get_transfers` returning 82 `in` entries carrying all
+seventeen fields -- the ten this adapter reads plus the seven it ignores. No faucet was
+involved in any of it.
+
+The same run then confirmed the 2-of-2 shared address against `generate_from_keys`:
+this repo's `shared_address()` and monero-wallet-rpc's own derivation produced the
+identical 95-character string from four freshly sampled shares. See
+chains/monero_keys.py's header for that measurement in full.
+
 ## The other way out
 
 If the operator would rather this session do it than do it themselves: the
