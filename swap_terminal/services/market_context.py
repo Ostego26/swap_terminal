@@ -619,5 +619,30 @@ def format_market_context_block(snapshots, window: QuoteWindow, db_path: str) ->
             f"  {snapshot.asset:<4} ${snapshot.price_usd:<14,.8f} cap={cap} vol24h={volume} chg24h={change} "
             f"feed_age={feed_age}  <- {confidence.verdict}"
         )
-        lines.append(f"       {confidence.reason}")
+        # EVERY FINDING THAT FIRED, NOT JUST THE WORST ONE, and this was measured wrong on
+        # the operator's first real run (2026-09-27, GRC live):
+        #
+        #     GRC  $0.02292385  cap=$11,601,617  vol24h=$960  chg24h=-17.77%   <- THIN
+        #          GRC: 24h volume $960 is 0.000083 of a $11,601,617 market cap
+        #
+        # GRC tripped BOTH checks at that instant. Turnover was 0.000083 against a 0.001
+        # threshold, AND the -17.77% day scaled to 151.7bps of expected drift over the 630s
+        # exposure window against a 150bps fee. The block printed one of them, because it
+        # printed `confidence.reason` -- which is the first message at the WORST severity, and
+        # THIN outranks STALE. The stale-price finding, the one that says the market can move
+        # further than the desk earns while the quote is still valid, was invisible.
+        #
+        # That is rule 14's defect: the operator reads the screen, not the source, and a check
+        # that fired and was not printed is worse than one that never ran. price_confidence()
+        # was always right and kept all of them; only the printer discarded them. So the
+        # headline verdict stays the worst (a reader needs one word), and every firing finding
+        # gets its own line under it, each labeled with its own severity so two at different
+        # severities cannot be read as one.
+        fired = [finding for finding in confidence.findings if finding.verdict != "OK"]
+        if not fired:
+            lines.append(f"       {confidence.reason}")
+        else:
+            lines.extend(f"       [{finding.verdict}] {finding.message}" for finding in fired)
+            if len(fired) > 1:
+                lines.append(f"       ^ {len(fired)} checks fired; the verdict above is the worst of them")
     return "\n".join(lines)

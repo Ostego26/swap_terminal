@@ -872,3 +872,59 @@ def test_a_missing_feed_timestamp_prints_none_rather_than_an_arithmetic_error():
     """
     block = format_market_context_block([snapshot(source_updated_at=None)], window(), DISPLAY_DB_PATH)
     assert "feed_age=(none)" in block
+
+
+def test_the_block_prints_every_firing_check_not_only_the_worst():
+    """FROM THE OPERATOR'S FIRST REAL RUN, 2026-09-27, with GRC's live numbers.
+
+        GRC  $0.02292385  cap=$11,601,617  vol24h=$960  chg24h=-17.77%   <- THIN
+             GRC: 24h volume $960 is 0.000083 of a $11,601,617 market cap
+
+    GRC tripped BOTH checks at that instant: turnover 0.000083 against a 0.001 threshold, and
+    a -17.77% day scaling to 151.7bps of expected drift over the 630s exposure window against
+    a 150bps fee. The block showed one, because it printed `confidence.reason` -- the first
+    message at the WORST severity -- and THIN outranks STALE. The finding that says the price
+    can move further than the desk earns while the quote is still valid was invisible.
+
+    price_confidence() was never wrong; it kept all three findings. Only the printer discarded
+    them, which is rule 14 exactly: a check that fired and was not printed is worse than one
+    that never ran, because the reader has the screen and not the source.
+
+    These are the real figures rather than synthetic ones, so the test fails if the thresholds
+    ever move far enough that this instant would no longer trip both -- which is a fact about
+    the thresholds worth being told."""
+    now = 1_759_000_000.0
+    grc = MarketSnapshot(
+        asset="GRC", coingecko_id="gridcoin-research", price_usd=0.02292385,
+        market_cap_usd=11_601_617.0, volume_24h_usd=960.0, change_24h_pct=-17.77,
+        source_updated_at=int(now) - 78, fetched_at=now,
+    )
+    window = QuoteWindow(quote_ttl_seconds=600.0, rate_cache_seconds=30.0, fee_bps=150.0)
+
+    confidence = price_confidence(grc, window)
+    fired = [finding.verdict for finding in confidence.findings if finding.verdict != "OK"]
+    assert sorted(fired) == ["STALE", "THIN"], "these live numbers must trip both checks"
+
+    block = format_market_context_block([grc], window, "swap_terminal.db")
+    assert "[THIN]" in block and "[STALE]" in block
+    assert "2 checks fired; the verdict above is the worst of them" in block
+    # The headline is still ONE word, because a reader needs one -- it is the worst.
+    assert "<- THIN" in block
+
+
+def test_a_clean_asset_prints_the_no_findings_line_and_no_severity_tags():
+    """The other side of the same change: an asset where nothing fired must not grow a list of
+    empty brackets. `(N checks)` is the statement that the checks RAN, which is a different
+    thing from an empty section (rule 14)."""
+    now = 1_759_000_000.0
+    btc = MarketSnapshot(
+        asset="BTC", coingecko_id="bitcoin", price_usd=84_574.0,
+        market_cap_usd=1.699099087804e12, volume_24h_usd=2.1919451587e10, change_24h_pct=0.61,
+        source_updated_at=int(now) - 78, fetched_at=now,
+    )
+    window = QuoteWindow(quote_ttl_seconds=600.0, rate_cache_seconds=30.0, fee_bps=150.0)
+    block = format_market_context_block([btc], window, "swap_terminal.db")
+    assert "<- OK" in block
+    assert "every check that could run, ran, and none fired (3 checks)" in block
+    assert "[OK]" not in block and "[THIN]" not in block and "[STALE]" not in block
+    assert "checks fired" not in block
