@@ -54,6 +54,7 @@ from dataclasses import dataclass
 import base58
 from ecdsa import SECP256k1, SigningKey
 from ecdsa.util import sigencode_der_canonize
+from modules import address_network as _address_network
 
 # The same testnet version bytes modules/atomic_htlc_scripts.py hardcodes.
 # They are spelled again here rather than imported because importing them
@@ -61,7 +62,11 @@ from ecdsa.util import sigencode_der_canonize
 # them -- and if they ever diverge, the round-trip assertion in
 # regtest.steps (address in == address out) is what catches it, loudly,
 # instead of a silent mismatch between a key and the hash160 in a script.
-TESTNET_P2PKH_VERSION = b"\x6f"
+# DERIVED from modules/address_network.py, which owns the version-byte vocabulary (rule 8).
+# This file and modules/atomic_htlc_scripts.py both declared this byte independently; a third
+# caller could have disagreed with either and nothing would have failed until an address went
+# out on the wrong chain.
+TESTNET_P2PKH_VERSION = _address_network.TESTNET_P2PKH_VERSION
 # WIF version byte for testnet and regtest on both Bitcoin and Litecoin
 # (SECRET_KEY = 239). The trailing 0x01 marks a COMPRESSED public key, which
 # must match the pubkey actually pushed in the scriptSig -- a WIF that says

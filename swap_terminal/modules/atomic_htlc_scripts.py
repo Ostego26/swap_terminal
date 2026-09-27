@@ -126,6 +126,7 @@ import sys
 
 import base58
 import bech32
+from modules import address_network as _address_network
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime, describe_locktime
 from modules.utils import hash160
 
@@ -135,8 +136,14 @@ logger = logging.getLogger(__name__)
 
 # Testnet version bytes. These are the reason this module's header says
 # Mainnet-safe: NO -- there is no mainnet path, only these.
-TESTNET_P2PKH_VERSION: bytes = b'\x6F'
-TESTNET_P2SH_VERSION: bytes = b'\xC4'
+# DERIVED, NOT SPELLED AGAIN (rule 8). These two bytes were declared here AND in
+# regtest/keys.py, agreeing on the day both were written, and that is the shape this
+# repository keeps paying for. modules/address_network.py owns the version-byte vocabulary
+# because it is the module whose whole job is knowing which byte means which network, and it
+# imports nothing from this tree, so there is no cycle. The values are unchanged -- this is a
+# re-point, not a behavior change, and the 1600-test suite covers the fund path that uses them.
+TESTNET_P2PKH_VERSION: bytes = _address_network.TESTNET_P2PKH_VERSION
+TESTNET_P2SH_VERSION: bytes = _address_network.TESTNET_P2SH_VERSION
 
 # Base58Check payload length for a versioned hash160: 1 version byte + 20.
 BASE58_VERSIONED_HASH160_LEN = 21

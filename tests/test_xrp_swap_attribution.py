@@ -20,19 +20,42 @@ deposit credited to another's swap, with the ledger recording that the sender
 paid exactly what they were told to pay.
 """
 
+import hashlib
 import sys
 from pathlib import Path
 
+import base58
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
 from db import SCHEMA, apply_migrations, connect_db
+from modules.address_network import is_testnet_address
 from services.deposit_service import attributable_events
 from services.helpers import utc_now_iso
 from services.swap_service import create_swap, deposit_account
 
 ACCOUNT = "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv"
+
+# A REAL TESTNET GRIDCOIN ADDRESS, derived deterministically, replacing a placeholder.
+#
+# This was `"S" + "x" * 30` (and `"SdzHNW1234567890abcdefghijklmnopq"` in test_open_swap.py):
+# strings that no Gridcoin daemon would accept -- wrong length, no valid checksum, and in the
+# `1234567890` case characters outside base58's alphabet. They passed because the stub beside
+# them only checked the first letter, so a fake address and a fake check agreed with each
+# other and neither matched the daemon they stood in for.
+#
+# That agreement is what made the pair invisible. Tightening the stub to decode the version
+# byte (2026-09-27, after `not startswith("S")` was measured to misclassify 13.08% of mainnet
+# GRC addresses) broke 17 tests in this file and test_xrp_swap_attribution.py -- not because
+# the stub became wrong, but because the fixtures always had been.
+#
+# Derived from a fixed phrase rather than written as a literal so the checksum cannot be
+# mistyped and the value cannot drift between runs.
+_FIXTURE_HASH160 = hashlib.new(
+    "ripemd160", hashlib.sha256(b"swap_terminal test fixture GRC payout").digest()
+).digest()
+GRC_TESTNET_ADDRESS = base58.b58encode_check(b"\x6f" + _FIXTURE_HASH160).decode()
 
 
 def event(tag, txid="a" * 64, amount=1.0):
@@ -184,7 +207,13 @@ class StubGRC:
     payout_refusal = ""
 
     def validate_address(self, address):
-        return isinstance(address, str) and address.startswith("S")
+        # THE VERSION BYTE, NOT THE FIRST LETTER. This stub stands in for a Gridcoin
+        # daemon's validate_address, and `startswith("S")` had it answering backwards:
+        # measured over 200,000 random hash160s, 13.08% of MAINNET GRC addresses start
+        # with R (so the stub accepted them) and NO testnet address starts with S (so it
+        # rejected every real one). modules/address_network.py decodes the byte that
+        # actually names the network.
+        return is_testnet_address(address)
 
 
 def seeded_db(tmp_path):
@@ -228,7 +257,7 @@ def test_xrp_swaps_share_one_account_and_get_distinct_tags(tmp_path):
     swaps = []
     for n in range(3):
         seed_quote(conn, f"q{n}")
-        swaps.append(create_swap(conn, config, adapters, f"q{n}", "S" + "x" * 30))
+        swaps.append(create_swap(conn, config, adapters, f"q{n}", GRC_TESTNET_ADDRESS))
 
     assert {s["deposit_address"] for s in swaps} == {ACCOUNT}, "all XRP swaps share one account"
     tags = [s["deposit_tag"] for s in swaps]
@@ -258,7 +287,7 @@ def test_a_refused_xrp_swap_leaves_no_row_behind(tmp_path):
 
     with pytest.raises(ValueError, match="XRP_DEPOSIT_ACCOUNT is not set"):
         create_swap(conn, {"XRP_DEPOSIT_ACCOUNT": "", "XRP_MIN_CONFIRMATIONS": 1},
-                    adapters, "q-doomed", "S" + "x" * 30)
+                    adapters, "q-doomed", GRC_TESTNET_ADDRESS)
 
     count = conn.execute("SELECT COUNT(*) AS c FROM swaps").fetchone()["c"]
     conn.close()

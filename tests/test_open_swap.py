@@ -20,10 +20,12 @@ against THAT.
 """
 
 import argparse
+import hashlib
 import sqlite3
 import sys
 from pathlib import Path
 
+import base58
 import pytest
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
@@ -36,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 # are rootless out of swap_terminal/.
 from chains.base import RPCError
 from db import connect_db
+from modules.address_network import is_testnet_address
 from report_block import LABEL_WIDTH
 from services import quote_service
 from workers.common import get_config_dict
@@ -60,7 +63,26 @@ from open_swap import (
 # address. Both are only ever handed to the stub adapters below, which is why a
 # fixed pair of strings is enough: no test here asks a daemon anything.
 XRP_ACCOUNT = "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv"
-GRC_ADDRESS = "SdzHNW1234567890abcdefghijklmnopq"
+# A REAL TESTNET GRIDCOIN ADDRESS, derived deterministically, replacing a placeholder.
+#
+# This was `"S" + "x" * 30` (and `"SdzHNW1234567890abcdefghijklmnopq"` in test_open_swap.py):
+# strings that no Gridcoin daemon would accept -- wrong length, no valid checksum, and in the
+# `1234567890` case characters outside base58's alphabet. They passed because the stub beside
+# them only checked the first letter, so a fake address and a fake check agreed with each
+# other and neither matched the daemon they stood in for.
+#
+# That agreement is what made the pair invisible. Tightening the stub to decode the version
+# byte (2026-09-27, after `not startswith("S")` was measured to misclassify 13.08% of mainnet
+# GRC addresses) broke 17 tests in this file and test_xrp_swap_attribution.py -- not because
+# the stub became wrong, but because the fixtures always had been.
+#
+# Derived from a fixed phrase rather than written as a literal so the checksum cannot be
+# mistyped and the value cannot drift between runs.
+_FIXTURE_HASH160 = hashlib.new(
+    "ripemd160", hashlib.sha256(b"swap_terminal test fixture GRC payout").digest()
+).digest()
+GRC_TESTNET_ADDRESS = base58.b58encode_check(b"\x6f" + _FIXTURE_HASH160).decode()
+GRC_ADDRESS = GRC_TESTNET_ADDRESS
 
 PRICES = {"XRP_USD": 2.5, "GRC_USD": 0.05, "BTC_USD": 60000.0, "LTC_USD": 100.0, "fetched_at": 0.0}
 
@@ -112,7 +134,13 @@ class StubGRC:
 
     def validate_address(self, address):
         self.asked.append(address)
-        return self.answer and isinstance(address, str) and address.startswith("S")
+        # THE VERSION BYTE, NOT THE FIRST LETTER. This stub stands in for a Gridcoin
+        # daemon's validate_address, and `startswith("S")` had it answering backwards:
+        # measured over 200,000 random hash160s, 13.08% of MAINNET GRC addresses start
+        # with R (so the stub accepted them) and NO testnet address starts with S (so it
+        # rejected every real one). modules/address_network.py decodes the byte that
+        # actually names the network.
+        return self.answer and is_testnet_address(address)
 
     def get_new_address(self, label):
         raise AssertionError(f"a dry run must not derive a GRC address (label={label})")

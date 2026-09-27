@@ -516,7 +516,9 @@ class GRCClient:
         # THE TESTNET DEFAULT IS GONE, and the comment that used to sit here
         # described the bug correctly without fixing it. It said: `mnTh...` is
         # base58 with the 0x6F testnet P2PKH version byte, a MAINNET Gridcoin
-        # address starts with S, so on mainnet with PLATFORM_FEE_GRC_ADDRESS unset
+        # address starts with S (WHICH WAS FALSE -- 13.08% of mainnet GRC addresses
+        # start with R, measured 2026-09-27; modules/address_network.py decodes the
+        # version byte instead), so on mainnet with PLATFORM_FEE_GRC_ADDRESS unset
         # the fee is "paid to an address on the wrong network: unspendable by
         # anyone, and gone" -- and then it said "setting the variable is the fix and
         # it is the operator's".

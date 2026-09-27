@@ -75,6 +75,7 @@ from config import Config
 from modules import atomic_btc_client as btc_module
 from modules import atomic_grc_client as grc_module
 from modules import atomic_ltc_client as ltc_module
+from modules.address_network import address_network
 from modules.atomic_btc_client import BTCClient
 from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
@@ -2050,11 +2051,15 @@ def test_the_testnet_literals_are_still_recorded_but_are_not_defaults():
     nobody -- and because an operator on testnet may legitimately want them. What
     they must not be is what happens when nobody chose."""
     assert PLATFORM_FEE_TESTNET_DEFAULT["LTC"].startswith("tltc1q"), "a Litecoin testnet bech32"
-    assert PLATFORM_FEE_TESTNET_DEFAULT["GRC"].startswith("m"), "base58 with the 0x6F testnet byte"
-    assert not PLATFORM_FEE_TESTNET_DEFAULT["GRC"].startswith("S"), (
-        "a MAINNET Gridcoin address starts with S -- if this one did, it would be spendable "
-        "and the burn would never have existed"
-    )
+    # DECODED, NOT SPELLED. This assertion used to read `not ...startswith("S")` with the
+    # comment "a MAINNET Gridcoin address starts with S", and that claim is false: measured
+    # over 200,000 random hash160s, 13.08% of mainnet GRC addresses start with R. So the old
+    # assertion would have PASSED for a mainnet address -- using a false premise as the
+    # evidence that this literal is unspendable, which is the one thing it existed to prove.
+    # The same day it was found, a real `getnewaddress` without -testnet produced
+    # RyyNX8E7tDRzACL47h8JKKDUXf9aMCz8YV in the operator's live staking wallet.
+    network, why = address_network(PLATFORM_FEE_TESTNET_DEFAULT["GRC"])
+    assert network == "testnet", f"the GRC burn literal must decode as testnet: {why}"
     # And they are not reachable through the resolver by any environment at all.
     for asset in PLATFORM_FEE_ADDRESS_VARIABLE:
         assert platform_fee_address(asset, environment={}) is None

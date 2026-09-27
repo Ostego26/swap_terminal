@@ -483,7 +483,11 @@ PLATFORM_FEE_ADDRESS_VARIABLE = {
 
 # THESE ARE TESTNET ADDRESSES AND THAT IS THE WHOLE POINT OF THIS BLOCK.
 # `tltc1q...` is a Litecoin TESTNET bech32 address; `mnTh...` is base58 with the
-# 0x6F testnet P2PKH version byte, where a mainnet Gridcoin address starts with S.
+# 0x6F testnet P2PKH version byte. (This line used to add "where a mainnet Gridcoin
+# address starts with S" -- false, and corrected 2026-09-27: measured over 200,000
+# random hash160s, mainnet 0x3E yields S 86.92% of the time and R the other 13.08%.
+# The version byte is the only field that names the network; see
+# modules/address_network.py, which exists because six places had believed the letter.)
 # Each was the inline default in its client, so on MAINNET with the variable unset,
 # the platform fee was paid to an address on the wrong network: unspendable by
 # anybody, and gone. Not stolen -- burned.
