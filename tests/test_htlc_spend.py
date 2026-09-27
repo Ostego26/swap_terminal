@@ -70,6 +70,7 @@ from json import dumps as json_dumps
 
 import pytest
 import requests as requests_module
+from config import Config
 from modules import atomic_btc_client as btc_module
 from modules import atomic_grc_client as grc_module
 from modules import atomic_ltc_client as ltc_module
@@ -80,6 +81,8 @@ from modules.atomic_htlc_scripts import push_data as client_push_data
 from modules.atomic_ltc_client import LTCClient
 from modules.htlc_fee import (
     BROADCAST_CEILING_COIN_PER_KVB,
+    PLATFORM_FEE_ADDRESS_VARIABLE,
+    PLATFORM_FEE_TESTNET_DEFAULT,
     assert_no_output_is_dust,
     assert_within_broadcast_ceiling,
     dust_threshold_satoshis,
@@ -87,6 +90,7 @@ from modules.htlc_fee import (
     fee_rate_coin_per_kvb,
     is_witness_program,
     minimum_fee_coin,
+    platform_fee_address,
     platform_fee_coin,
     redeem_miner_fee,
 )
@@ -1523,24 +1527,41 @@ def test_is_witness_program_reads_the_bytes(script, witness):
 def test_a_small_ltc_redeem_refuses_before_signing_because_the_platform_fee_is_dust(contract, monkeypatch):
     """THE MEASUREMENT, through the real LTCClient.redeem_contract().
 
-    A 0.01 LTC contract builds outputs of [986790, 2500] satoshis. The 2500 is
-    the 0.25% platform fee; PLATFORM_FEE_LTC_ADDRESS's shipped default is a
-    bech32 `tltc1q...`, so that output is P2WPKH and Litecoin Core 0.21.4's
-    dust limit for one is 2,940. Before 2026-09-25 this was signed and handed
-    to `sendrawtransaction`, which refuses the WHOLE transaction with
-    `code=-26 dust` -- and no client here implements a refund, so the redeemer
-    loses their own already-funded leg.
+    THE CONTRACT VALUE IN THIS TEST CHANGED ON 2026-09-27 BECAUSE THE RATE DID,
+    and the reason is worth reading before the assertions.
 
-    The assertion that matters is not the exception, it is
-    `node.broadcast == []` plus the absence of sendrawtransaction from the
-    call list: the refusal has to arrive while a different decision is still
-    possible, which means before a signature exists.
+    The fee output is P2WPKH (PLATFORM_FEE_LTC_ADDRESS is a bech32 `tltc1q...`) and
+    Litecoin Core 0.21.4's dust limit for one is 2,940 satoshis. So the dust
+    boundary is the contract value at which the platform fee equals 2,940:
+
+        at 0.25%   2940 / 0.0025 = 1,176,000 sat = 0.01176000 LTC
+        at 1.5%    2940 / 0.015  =   196,000 sat = 0.00196000 LTC
+
+    Raising the rate six-fold moved that boundary six-fold DOWN. This test used a
+    0.01 LTC contract, whose fee was 2,500 satoshis and therefore dust; at 1.5% the
+    same contract pays 15,000 and is nowhere near it, so the test stopped raising --
+    which is how the change was noticed rather than shipped.
+
+    THE BEHAVIORAL CONSEQUENCE, STATED PLAINLY: a redeem between 0.00196 and 0.01176
+    LTC used to be REFUSED before signing and now proceeds. That is strictly better
+    -- fewer redeems blocked, and the block was never desirable -- but it is a change
+    in what the code does, not just in what it charges, and it belongs in the record.
+
+    0.001 LTC is the new fixture: 1,500 satoshis of fee, comfortably under 2,940.
+
+    The assertion that matters is not the exception, it is `node.broadcast == []`
+    plus the absence of sendrawtransaction from the call list: the refusal has to
+    arrive while a different decision is still possible, which means before a
+    signature exists. Before 2026-09-25 this was signed and handed to
+    `sendrawtransaction`, which refuses the WHOLE transaction with `code=-26 dust`
+    -- and no client here implements a refund, so the redeemer loses their own
+    already-funded leg.
     """
     monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", contract["platform"].address)
     node = _node_for(
         contract,
         platform_script=p2wpkh_script(contract["platform"]),
-        value=Decimal("0.01"),
+        value=Decimal("0.001"),
     )
     client = LTCClient("http://127.0.0.1:19443/wallet/w", "u", "p")
     client.rpc_call = node.rpc_call
@@ -1550,7 +1571,7 @@ def test_a_small_ltc_redeem_refuses_before_signing_because_the_platform_fee_is_d
 
     message = str(raised.value)
     assert "DUST" in message
-    assert "2500 satoshis" in message, message
+    assert "1500 satoshis" in message, message
     assert "2940 satoshis" in message, message
     # The arithmetic, not just the verdict (rule 14).
     assert "31-byte output + 67-byte witness spend" in message, message
@@ -1765,20 +1786,36 @@ def test_both_platform_fee_clients_read_one_rate_from_one_place():
     expression computing 0.25% -- and that was caught only because somebody
     read the two side by side.
 
-    Asserted as equality between the chains and against the arithmetic, not
-    against a restated constant: `platform_fee_coin("LTC", x) == 0.0025 * x`
-    checked against a literal would pass if both the table and this line were
-    changed together, which is the failure mode a shared table is supposed to
-    make impossible.
+    UPDATED 2026-09-27, AND THE ASSERTION GOT STRONGER RATHER THAN JUST NEWER.
+    The rate moved from 0.25% to 1.5% at the operator's instruction, so the two
+    lines that restated the old constant had to go -- and rewriting them as
+    `== 0.015 * value` would have recreated exactly the weakness this docstring
+    already complained about: a literal here passes whenever the table and this
+    line are edited together, which is the drift a shared table exists to prevent.
+
+    So the invariant is now the one whose violation was the actual bug. The
+    brokered path charges DEFAULT_FEE_BPS (config.py) and the atomic path charges
+    PLATFORM_FEE_RATE, and until today those were 150 bps and 0.25% -- a SIX-FOLD
+    divergence in what the same customer pays for the same pair depending on which
+    route they took, with nothing in either file pointing at the other. That is
+    rule 8's shape across two subsystems rather than two files, and it is what this
+    test now pins: the two rates must be equal, whatever they are.
     """
+    brokered_rate = Decimal(int(Config.DEFAULT_FEE_BPS)) / Decimal(10000)
     for value in (Decimal("1.0"), Decimal("0.01"), Decimal("123.456789"), Decimal("0.00000001")):
         assert platform_fee_coin("LTC", value) == platform_fee_coin("GRC", value)
-        # The old LTC spelling and the old GRC spelling, both still true of the
-        # survivor. If either stops being true, one client's payout moved.
-        assert platform_fee_coin("LTC", value) == ((Decimal("0.25") / Decimal(100)) * value).quantize(
+        # The atomic rate IS the brokered rate. Not a restated literal: if either
+        # side moves alone, the two routes have diverged and this fails.
+        assert platform_fee_coin("LTC", value) == (brokered_rate * value).quantize(
             Decimal("0.00000001")
         )
-        assert platform_fee_coin("GRC", value) == (Decimal("0.0025") * value).quantize(Decimal("0.00000001"))
+
+    # And the rate is in the band the operator asked for, which is the one thing a
+    # literal IS the right check for -- a table edited to 15% or 0.15% would satisfy
+    # every equality above.
+    assert Decimal("0.01") <= brokered_rate <= Decimal("0.02"), (
+        f"the operator asked for 1-2%; the shared rate is {brokered_rate}"
+    )
 
 
 def test_btc_is_absent_from_the_platform_fee_table_rather_than_zero():
@@ -1925,3 +1962,100 @@ def test_build_hashlock_spend_refuses_a_missing_preimage_rather_than_building_a_
             wif="unused",
             destination_address="unused",
         )
+
+
+# ---------------------------------------------------------------------------
+# The platform fee ADDRESS, and the burn that used to be the default.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unset_fee_address_returns_none_rather_than_a_testnet_literal(monkeypatch):
+    """THE BURN THIS REPLACED, pinned so it cannot come back.
+
+    Until 2026-09-27 each client defaulted its fee address inline:
+
+        os.environ.get("PLATFORM_FEE_LTC_ADDRESS", "tltc1qzxllez2...")
+        os.environ.get("PLATFORM_FEE_GRC_ADDRESS", "mnTh582mZM12...")
+
+    `tltc1q...` is a Litecoin TESTNET bech32 address and `mnTh...` is base58 with
+    the 0x6F testnet P2PKH version byte, where a mainnet Gridcoin address starts
+    with S. So on MAINNET with the variable unset, the platform fee was paid to an
+    address nobody can spend: burned, on every redeem, silently. The GRC client's
+    comment DESCRIBED that exactly and then said fixing it was the operator's job,
+    which was the wrong division of labor -- naming a burn is not fixing one.
+
+    At 0.25% it was a leak. The rate is now 1.5%, so leaving it would have been six
+    times the leak. None means charge no fee, which costs the operator one swap's
+    fee and costs the redeemer nothing.
+    """
+    for asset, variable in PLATFORM_FEE_ADDRESS_VARIABLE.items():
+        monkeypatch.delenv(variable, raising=False)
+        assert platform_fee_address(asset) is None, f"{asset} fell back to a default"
+
+        # Empty and whitespace are unset too: an env var exported as "" is the
+        # shape a half-written deployment script leaves, and treating it as an
+        # address would put the fee nowhere at all.
+        for blank in ("", "   ", "\t"):
+            monkeypatch.setenv(variable, blank)
+            assert platform_fee_address(asset) is None, f"{asset} accepted {blank!r}"
+
+
+def test_the_testnet_literals_are_still_recorded_but_are_not_defaults():
+    """They stay NAMED, because a burn that is deleted without a trace teaches
+    nobody -- and because an operator on testnet may legitimately want them. What
+    they must not be is what happens when nobody chose."""
+    assert PLATFORM_FEE_TESTNET_DEFAULT["LTC"].startswith("tltc1q"), "a Litecoin testnet bech32"
+    assert PLATFORM_FEE_TESTNET_DEFAULT["GRC"].startswith("m"), "base58 with the 0x6F testnet byte"
+    assert not PLATFORM_FEE_TESTNET_DEFAULT["GRC"].startswith("S"), (
+        "a MAINNET Gridcoin address starts with S -- if this one did, it would be spendable "
+        "and the burn would never have existed"
+    )
+    # And they are not reachable through the resolver by any environment at all.
+    for asset in PLATFORM_FEE_ADDRESS_VARIABLE:
+        assert platform_fee_address(asset, environment={}) is None
+
+
+def test_a_configured_fee_address_is_returned_verbatim(monkeypatch):
+    """The other direction, so the function cannot pass the tests above by always
+    answering None."""
+    monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", "tltc1qexampleaddressforthistest")
+    assert platform_fee_address("LTC") == "tltc1qexampleaddressforthistest"
+    # Surrounding whitespace is stripped -- a trailing newline is what a `$(cat
+    # file)` in a deployment script leaves, and it would make an otherwise valid
+    # address unusable.
+    monkeypatch.setenv("PLATFORM_FEE_GRC_ADDRESS", "  SomeGridcoinAddress \n")
+    assert platform_fee_address("GRC") == "SomeGridcoinAddress"
+
+
+def test_an_asset_with_no_fee_address_rule_is_refused_by_name():
+    """BTC has no rule here for the same mechanical reason it has no rate: its
+    client passes no extra outputs, so a rule would be a claim no code collects."""
+    with pytest.raises(ValueError, match="no platform fee address rule for asset 'BTC'"):
+        platform_fee_address("BTC")
+
+
+def test_a_redeem_with_no_fee_address_still_broadcasts(contract, monkeypatch):
+    """THE PROPERTY THAT MAKES None SAFE, through the real LTCClient.redeem_contract().
+
+    A redeem is time-critical -- the hashlock branch has to be spent before the
+    counterparty's timelock expires, and no client in this package implements a
+    refund. So an unresolvable fee address must never block it. Refusing would
+    trade a 1.5% fee for the entire leg, which is the wrong direction by three
+    orders of magnitude.
+
+    Asserted on the real broadcast: the transaction goes out, and it carries ONE
+    output rather than two.
+    """
+    monkeypatch.delenv("PLATFORM_FEE_LTC_ADDRESS", raising=False)
+    node = _node_for(
+        contract,
+        platform_script=p2wpkh_script(contract["platform"]),
+        value=Decimal("0.01"),
+    )
+    client = LTCClient("http://127.0.0.1:19443/wallet/w", "u", "p")
+    client.rpc_call = node.rpc_call
+
+    _drive_redeem(client, node, contract)
+
+    assert len(node.broadcast) == 1, "the redeem must still go out with no fee address"
+    assert "sendrawtransaction" in node.methods

@@ -175,7 +175,7 @@ from typing import Any
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
-from modules.htlc_fee import platform_fee_coin
+from modules.htlc_fee import platform_fee_address, platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     broadcast_refund,
@@ -433,15 +433,28 @@ class LTCClient:
         )
         assert_output_pays_the_contract(found, redeem_script, "LTC redeem")
 
-        # 0.25% platform fee, from modules/htlc_fee.PLATFORM_FEE_RATE. This
-        # used to be `(Decimal("0.25") / Decimal(100)) * found.value` here and
-        # `Decimal("0.0025") * found.value` in the GRC client -- one rule,
-        # spelled twice, in two files (rule 8). The BTC client charges nothing
-        # and is deliberately absent from that table; see the divergence table
-        # in the module header. Taken off the TOTAL, so it does not move when
-        # the miner fee does, which is what both spellings did.
+        # 1.5% platform fee, from modules/htlc_fee.PLATFORM_FEE_RATE -- the
+        # operator's rate as of 2026-09-27, up from 0.25%, and the reasoning for
+        # both the number and the six-fold change is at that table. This used to be
+        # `(Decimal("0.25") / Decimal(100)) * found.value` here and
+        # `Decimal("0.0025") * found.value` in the GRC client -- one rule, spelled
+        # twice, in two files (rule 8). The BTC client charges nothing and is still
+        # absent from that table, for a mechanical reason stated there. Taken off
+        # the TOTAL, so it does not move when the miner fee does.
+        #
+        # THE ADDRESS IS NO LONGER DEFAULTED HERE, and that is a fix rather than a
+        # tidy-up. This line was
+        #   os.environ.get("PLATFORM_FEE_LTC_ADDRESS", "tltc1qzxllez2...")
+        # and that literal is a Litecoin TESTNET bech32 address, so on MAINNET with
+        # the variable unset the fee went to an address nobody can spend: burned, on
+        # every redeem, silently. At 0.25% that was a leak; at 1.5% it is six times
+        # the leak. platform_fee_address() returns None instead, and None means
+        # CHARGE NO FEE -- never block the redeem, because the hashlock branch has
+        # to be spent before the counterparty's timelock expires and no client here
+        # implements a refund. Losing the fee on one swap beats losing the leg.
         platform_fee = platform_fee_coin("LTC", found.value)
-        fee_address = os.environ.get("PLATFORM_FEE_LTC_ADDRESS", "tltc1qzxllez2nfy70rypyh3re0v4z8v0jp57egw6w4p")
+        fee_address = platform_fee_address("LTC")
+        extra_outputs = {fee_address: platform_fee} if fee_address else {}
 
         spend = build_hashlock_spend(
             asset="LTC",
@@ -453,9 +466,20 @@ class LTCClient:
             secret=secret,
             wif=participant_privkey,
             destination_address=destination_address,
-            extra_outputs={fee_address: platform_fee},
+            extra_outputs=extra_outputs,
         )
-        logger.info("%s; platform fee %s to %s", spend.describe("LTC"), platform_fee, fee_address)
+        if fee_address:
+            logger.info("%s; platform fee %s to %s", spend.describe("LTC"), platform_fee, fee_address)
+        else:
+            # Rule 14: "did nothing" must not look like "did work". A redeem that
+            # charged no fee reports differently from one that did, and it says which
+            # variable would have changed that.
+            logger.warning(
+                "%s; NO PLATFORM FEE CHARGED -- PLATFORM_FEE_LTC_ADDRESS is unset, so the "
+                "%s LTC that would have been collected stayed with the redeemer. The redeem "
+                "went through; set that variable to collect it on the next one.",
+                spend.describe("LTC"), platform_fee,
+            )
 
         # The preimage is on the stack of what is about to be broadcast and is
         # never logged; the secret hash in the redeem script is the public

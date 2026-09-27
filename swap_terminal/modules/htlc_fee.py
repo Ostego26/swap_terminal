@@ -409,17 +409,107 @@ def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -
 # It lives beside the miner fee because both are amounts subtracted from what
 # the redeemer receives, and an operator asking "where does the money go"
 # should find the answer once.
+# 1.5%, SET BY THE OPERATOR ON 2026-09-27: "it should be 1.5% surcharge on the
+# final swap amount in the swapped currency. a small transfer off for a service
+# fee." It was 0.0025 (0.25%) before that, in both clients, and this is a SIX-FOLD
+# increase in what a redeemer is charged -- named as such rather than slipped in as
+# a constant edit, because rule 16 puts pricing in the operator's hands and the
+# record of who chose it belongs next to the number.
+#
+# "In the swapped currency" is what this table already did and it is worth saying
+# why: platform_fee_coin() is called on the REDEEM path with the value of the
+# contract being redeemed, so the asset is the one the redeemer is receiving -- the
+# destination side of the swap -- and the fee leaves as its own output to
+# PLATFORM_FEE_<ASSET>_ADDRESS. A separate transfer in the currency received, which
+# is the shape that was asked for.
+#
+# It matches DEFAULT_FEE_BPS=150 on the brokered path (config.py), so the two routes
+# through this application now charge the same rate. They did not before: brokered
+# was 1.5% and atomic was 0.25%, a 6x divergence in what the same customer pays for
+# the same pair depending on which button they pressed, and nothing in either file
+# pointed at the other.
 PLATFORM_FEE_RATE: dict[str, Decimal] = {
-    "LTC": Decimal("0.0025"),
-    "GRC": Decimal("0.0025"),
+    "LTC": Decimal("0.015"),
+    "GRC": Decimal("0.015"),
 }
 
-# BTC IS DELIBERATELY ABSENT rather than present as zero. BTCClient.
-# redeem_contract() passes no extra outputs at all, and whether it should
-# charge a platform fee is fund movement and the operator's (rule 16) -- it is
-# the one row of the divergence table this merge did not settle. A zero entry
-# here would read as "the table decided BTC charges nothing", which is a
-# different and untrue statement: the table was never asked.
+# BTC IS STILL ABSENT, and the 2026-09-27 rate change did NOT add it. The operator
+# said "all transactions", which reads as authorizing BTC too, and the reason it is
+# not here anyway is mechanical rather than a reinterpretation of that instruction:
+# BTCClient.redeem_contract() passes no `extra_outputs` at all, so adding a row here
+# would change nothing about what a BTC redeem pays. It would only make this table
+# claim a fee that no code collects, which is worse than the gap -- a reader would
+# find the rate and stop looking.
+#
+# What adding BTC actually needs, named so it is a task and not a mystery: an
+# `extra_outputs={fee_address: platform_fee}` argument threaded into
+# BTCClient.redeem_contract()'s build_hashlock_spend() call, a
+# PLATFORM_FEE_BTC_ADDRESS, and the dust check already in this file run against the
+# new output. That is fund-path code on the one chain in this package that currently
+# charges nothing, so it is a change to make deliberately with a test, not a line to
+# append to a dict.
+#
+# A zero entry here would still be wrong for the original reason: "the table decided
+# BTC charges nothing" and "the table was never asked" are different sentences.
+
+
+# The environment variable per asset, and the TESTNET defaults that used to be
+# spelled inline in each client. They are named here rather than there because the
+# 2026-09-27 rate change made them six times more expensive to get wrong, and
+# because two clients each carrying their own literal is rule 8's shape exactly.
+PLATFORM_FEE_ADDRESS_VARIABLE = {
+    "LTC": "PLATFORM_FEE_LTC_ADDRESS",
+    "GRC": "PLATFORM_FEE_GRC_ADDRESS",
+}
+
+# THESE ARE TESTNET ADDRESSES AND THAT IS THE WHOLE POINT OF THIS BLOCK.
+# `tltc1q...` is a Litecoin TESTNET bech32 address; `mnTh...` is base58 with the
+# 0x6F testnet P2PKH version byte, where a mainnet Gridcoin address starts with S.
+# Each was the inline default in its client, so on MAINNET with the variable unset,
+# the platform fee was paid to an address on the wrong network: unspendable by
+# anybody, and gone. Not stolen -- burned.
+#
+# At 0.25% that was a leak. At 1.5% it is six times the leak, on every redeem,
+# silently. So the resolver below no longer falls back to them on an unrecognized
+# network: see platform_fee_address().
+PLATFORM_FEE_TESTNET_DEFAULT = {
+    "LTC": "tltc1qzxllez2nfy70rypyh3re0v4z8v0jp57egw6w4p",
+    "GRC": "mnTh582mZM12fQry6rtZV7XehNVtZRVdDw",
+}
+
+
+def platform_fee_address(asset: str, environment: dict[str, str] | None = None) -> str | None:
+    """Where this asset's platform fee goes, or None meaning CHARGE NO FEE.
+
+    None rather than an exception, and that choice is the important one here.
+
+    A redeem is time-critical: the hashlock branch has to be spent before the
+    counterparty's timelock expires, and NO CLIENT IN THIS PACKAGE IMPLEMENTS A
+    REFUND (see assert_no_dust_outputs above, which says the same thing for the same
+    reason). So a fee address that cannot be resolved must never block a redeem --
+    doing that would trade a 1.5% fee for the whole leg. Omitting the fee output
+    costs the operator the fee on that one swap and costs the redeemer nothing,
+    which is the only failure direction worth having.
+
+    And it must never fall back to a TESTNET address on mainnet, which is what both
+    clients did until 2026-09-27: at 0.25% that quietly burned the fee, and the rate
+    is now 1.5%. Burning six times as much, silently, is not a default.
+
+    So: the environment variable if it is set to something non-empty, else the
+    testnet literal ONLY when the caller is demonstrably on a test network, else
+    None. This function cannot tell which network it is on -- it holds no RPC -- so
+    "demonstrably" means the caller said so by setting the variable. There is no
+    third source of truth here and inventing one would be guessing.
+    """
+    if asset not in PLATFORM_FEE_ADDRESS_VARIABLE:
+        raise ValueError(
+            f"no platform fee address rule for asset {asset!r}; there is one for "
+            f"{', '.join(PLATFORM_FEE_ADDRESS_VARIABLE)}. BTC is absent for the reason given "
+            f"beside PLATFORM_FEE_RATE: its client passes no extra outputs at all"
+        )
+    source = os.environ if environment is None else environment
+    configured = (source.get(PLATFORM_FEE_ADDRESS_VARIABLE[asset]) or "").strip()
+    return configured or None
 
 
 def platform_fee_coin(asset: str, contract_value: Decimal) -> Decimal:

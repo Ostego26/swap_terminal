@@ -192,7 +192,7 @@ from decimal import Decimal
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
-from modules.htlc_fee import platform_fee_coin
+from modules.htlc_fee import platform_fee_address, platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     build_hashlock_spend,
@@ -512,14 +512,24 @@ class GRCClient:
         # a wrong comment could sit beside a right expression for as long as it
         # did is what two copies of one rule buy you.
         platform_fee = platform_fee_coin("GRC", found.value)
-        # THE DEFAULT IS A TESTNET ADDRESS, and this now says so where the LTC
-        # client's header always did. `mnTh...` is a base58 address with the
-        # 0x6F testnet P2PKH version byte -- a MAINNET Gridcoin address starts
-        # with S. So on mainnet, with PLATFORM_FEE_GRC_ADDRESS unset, 0.25% of
-        # every redeemed contract is paid to an address on the wrong network:
-        # unspendable by anyone, and gone. Setting the variable is the fix and
-        # it is the operator's; naming it here is this comment's job.
-        fee_address = os.environ.get("PLATFORM_FEE_GRC_ADDRESS", "mnTh582mZM12fQry6rtZV7XehNVtZRVdDw")
+        # THE TESTNET DEFAULT IS GONE, and the comment that used to sit here
+        # described the bug correctly without fixing it. It said: `mnTh...` is
+        # base58 with the 0x6F testnet P2PKH version byte, a MAINNET Gridcoin
+        # address starts with S, so on mainnet with PLATFORM_FEE_GRC_ADDRESS unset
+        # the fee is "paid to an address on the wrong network: unspendable by
+        # anyone, and gone" -- and then it said "setting the variable is the fix and
+        # it is the operator's".
+        #
+        # That was the wrong division of labor. Naming a burn is not fixing it, and
+        # the 2026-09-27 rate change to 1.5% made it six times more expensive to
+        # leave named. platform_fee_address() returns None when the variable is
+        # unset, and None means charge no fee -- the redeem still goes through,
+        # because the hashlock branch has to be spent before the counterparty's
+        # timelock expires and no client here implements a refund. The operator
+        # still has to set the variable to COLLECT the fee; they no longer have to
+        # set it to avoid destroying it.
+        fee_address = platform_fee_address("GRC")
+        extra_outputs = {fee_address: platform_fee} if fee_address else {}
 
         spend = build_hashlock_spend(
             asset="GRC",
@@ -531,9 +541,20 @@ class GRCClient:
             secret=secret,
             wif=participant_privkey,
             destination_address=destination_address,
-            extra_outputs={fee_address: platform_fee},
+            extra_outputs=extra_outputs,
         )
-        logger.info("%s; platform fee %s to %s", spend.describe("GRC"), platform_fee, fee_address)
+        if fee_address:
+            logger.info("%s; platform fee %s to %s", spend.describe("GRC"), platform_fee, fee_address)
+        else:
+            # The same branch the LTC client has, in the same shape, for the reason
+            # rule 8 gives: two clients doing one thing must not report it two ways.
+            # Rule 14: a redeem that charged no fee must not log like one that did.
+            logger.warning(
+                "%s; NO PLATFORM FEE CHARGED -- PLATFORM_FEE_GRC_ADDRESS is unset, so the "
+                "%s GRC that would have been collected stayed with the redeemer. The redeem "
+                "went through; set that variable to collect it on the next one.",
+                spend.describe("GRC"), platform_fee,
+            )
 
         # The preimage is on the stack of what is about to be broadcast and is
         # never logged.
