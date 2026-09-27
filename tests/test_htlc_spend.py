@@ -62,6 +62,7 @@ that the parser handles the shape -- not that Gridcoin's shape is that one.
 """
 
 import hashlib
+import inspect
 import logging
 import os
 import struct
@@ -82,6 +83,7 @@ from modules.atomic_ltc_client import LTCClient
 from modules.htlc_fee import (
     BROADCAST_CEILING_COIN_PER_KVB,
     PLATFORM_FEE_ADDRESS_VARIABLE,
+    PLATFORM_FEE_RATE,
     PLATFORM_FEE_TESTNET_DEFAULT,
     assert_no_output_is_dust,
     assert_within_broadcast_ceiling,
@@ -1818,17 +1820,60 @@ def test_both_platform_fee_clients_read_one_rate_from_one_place():
     )
 
 
-def test_btc_is_absent_from_the_platform_fee_table_rather_than_zero():
-    """"BTC charges nothing" and "BTC is missing from the table" are different sentences.
+def test_btc_now_charges_the_same_rate_as_the_other_two():
+    """THE OPERATOR SETTLED THE ROW THIS TEST USED TO PIN AS OPEN.
 
-    BTCClient.redeem_contract() passes no extra outputs, and whether it should
-    charge a platform fee is fund movement and the operator's (rule 16) -- the
-    one row of the divergence table this merge deliberately did not settle. A
-    zero entry would read as the table having decided, and this asserts that it
-    has not.
+    It asserted `platform_fee_coin("BTC", ...)` raises, on the grounds that "BTC charges
+    nothing" and "BTC is missing from the table" are different sentences and only the
+    operator could decide which. They decided on 2026-09-27: "take care of btc and ltc
+    deposit wallet accounts for fee collection."
+
+    So the test changes rather than being deleted, and it changes to the STRONGER
+    invariant (rule 2): not "BTC has a rate" but "BTC has the SAME rate as the others",
+    which is the property that would break silently. Three assets each with their own
+    literal is rule 8's shape, and a table where one drifts is exactly how the same
+    customer pays two prices.
+
+    The row and the collection landed together, which is the part worth insisting on: a
+    rate in a table that no code collects is worse than no rate, because a reader finds
+    it and stops looking. test_the_btc_client_threads_the_fee_output_through() below is
+    the other half.
     """
-    with pytest.raises(ValueError, match="BTC is absent on purpose"):
-        platform_fee_coin("BTC", Decimal("1.0"))
+    for value in (Decimal("1.0"), Decimal("0.01"), Decimal("123.456789")):
+        assert platform_fee_coin("BTC", value) == platform_fee_coin("LTC", value)
+        assert platform_fee_coin("BTC", value) == platform_fee_coin("GRC", value)
+    assert set(PLATFORM_FEE_RATE) == {"BTC", "LTC", "GRC"}, (
+        "all three chains this package can redeem on, and no fourth invented"
+    )
+
+
+def test_the_btc_client_threads_the_fee_output_through():
+    """The half that makes the rate real, asserted on the source of the call.
+
+    BTC was absent from the fee table for a MECHANICAL reason, not a policy one:
+    redeem_contract() passed no `extra_outputs` at all, so a row in the table would have
+    claimed a fee no code collected. Adding the row without this is the failure mode the
+    old comment warned about, so the presence of the argument is pinned here rather than
+    left to the rate test to imply.
+    """
+    source = inspect.getsource(BTCClient.redeem_contract)
+    assert "extra_outputs=extra_outputs" in source, "the fee output must reach the spend"
+    assert 'platform_fee_coin("BTC"' in source
+    assert 'platform_fee_address("BTC")' in source
+    # And the None case omits the output rather than blocking the redeem, same as the
+    # other two clients: a redeem is time-critical and no client here implements a refund.
+    assert "if fee_address else {}" in source
+    assert "NO PLATFORM FEE CHARGED" in source, "rule 14: charging nothing must log differently"
+
+
+def test_btc_has_no_shipped_testnet_default_and_must_not_gain_one():
+    """LTC and GRC shipped testnet defaults that BURNED the fee on mainnet. BTC was added
+    after that was found, so it never had one -- and inventing a third would be repeating
+    a documented mistake. An unset variable means charge no fee, which reaches the same
+    safe outcome without the defect."""
+    assert "BTC" in PLATFORM_FEE_ADDRESS_VARIABLE
+    assert "BTC" not in PLATFORM_FEE_TESTNET_DEFAULT
+    assert platform_fee_address("BTC", environment={}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2028,10 +2073,18 @@ def test_a_configured_fee_address_is_returned_verbatim(monkeypatch):
 
 
 def test_an_asset_with_no_fee_address_rule_is_refused_by_name():
-    """BTC has no rule here for the same mechanical reason it has no rate: its
-    client passes no extra outputs, so a rule would be a claim no code collects."""
-    with pytest.raises(ValueError, match="no platform fee address rule for asset 'BTC'"):
-        platform_fee_address("BTC")
+    """BTC used to be the example here and is not any more -- it has a rule as of
+    2026-09-27. XRP is the right example now and for a sharper reason: this package has
+    no XRP HTLC client at all, so there is no redeem to take a fee out of. An asset with
+    no rule must be refused BY NAME rather than silently returning None, because None
+    means "charge no fee" and would make a typo look like a policy."""
+    for absent in ("XRP", "XMR", "SOL", "DOGE"):
+        with pytest.raises(ValueError, match=f"no platform fee address rule for asset '{absent}'"):
+            platform_fee_address(absent)
+        assert absent not in PLATFORM_FEE_RATE, (
+            f"{absent} has no address rule, so it must not have a rate either -- the two "
+            f"going out of step is how a fee gets claimed and never collected"
+        )
 
 
 def test_a_redeem_with_no_fee_address_still_broadcasts(contract, monkeypatch):

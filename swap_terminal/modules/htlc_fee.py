@@ -431,9 +431,21 @@ def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -
 PLATFORM_FEE_RATE: dict[str, Decimal] = {
     "LTC": Decimal("0.015"),
     "GRC": Decimal("0.015"),
+    # BTC ADDED 2026-09-27 at the operator's instruction ("take care of btc and ltc
+    # deposit wallet accounts for fee collection"), and it is a BEHAVIOR change on the
+    # one chain in this package that charged nothing, not a table edit.
+    #
+    # It was absent for a mechanical reason rather than a policy one:
+    # BTCClient.redeem_contract() passed no `extra_outputs` at all, so a row here would
+    # have claimed a fee no code collected -- worse than the gap, because a reader finds
+    # the rate and stops looking. That call now threads the fee output through, so the
+    # row and the collection land together, which is the only order that is ever honest.
+    "BTC": Decimal("0.015"),
 }
 
-# BTC IS STILL ABSENT, and the 2026-09-27 rate change did NOT add it. The operator
+# HISTORICAL, kept because the reasoning is the argument for how BTC was finally added:
+#
+# "BTC IS STILL ABSENT, and the 2026-09-27 rate change did NOT add it. The operator
 # said "all transactions", which reads as authorizing BTC too, and the reason it is
 # not here anyway is mechanical rather than a reinterpretation of that instruction:
 # BTCClient.redeem_contract() passes no `extra_outputs` at all, so adding a row here
@@ -450,7 +462,13 @@ PLATFORM_FEE_RATE: dict[str, Decimal] = {
 # append to a dict.
 #
 # A zero entry here would still be wrong for the original reason: "the table decided
-# BTC charges nothing" and "the table was never asked" are different sentences.
+# BTC charges nothing" and "the table was never asked" are different sentences."
+#
+# That is exactly what was done, in the same change that added the row: the
+# `extra_outputs` argument threaded into BTCClient.redeem_contract()'s
+# build_hashlock_spend() call, PLATFORM_FEE_BTC_ADDRESS added to the resolver below, and
+# the dust check in this file run against the new output by build_hashlock_spend as it
+# already is for LTC and GRC.
 
 
 # The environment variable per asset, and the TESTNET defaults that used to be
@@ -460,6 +478,7 @@ PLATFORM_FEE_RATE: dict[str, Decimal] = {
 PLATFORM_FEE_ADDRESS_VARIABLE = {
     "LTC": "PLATFORM_FEE_LTC_ADDRESS",
     "GRC": "PLATFORM_FEE_GRC_ADDRESS",
+    "BTC": "PLATFORM_FEE_BTC_ADDRESS",
 }
 
 # THESE ARE TESTNET ADDRESSES AND THAT IS THE WHOLE POINT OF THIS BLOCK.
@@ -475,6 +494,11 @@ PLATFORM_FEE_ADDRESS_VARIABLE = {
 PLATFORM_FEE_TESTNET_DEFAULT = {
     "LTC": "tltc1qzxllez2nfy70rypyh3re0v4z8v0jp57egw6w4p",
     "GRC": "mnTh582mZM12fQry6rtZV7XehNVtZRVdDw",
+    # BTC HAS NO SHIPPED DEFAULT AND WILL NOT GET ONE. The two above are recorded because
+    # they WERE defaults and burned the fee on mainnet; inventing a third would be
+    # repeating a mistake this file exists to document. An unset
+    # PLATFORM_FEE_BTC_ADDRESS means charge no fee, which is the same safe outcome the
+    # other two now have, reached without ever having had the defect.
 }
 
 

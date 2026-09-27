@@ -179,6 +179,7 @@ from decimal import Decimal
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
+from modules.htlc_fee import platform_fee_address, platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     broadcast_refund,
@@ -386,8 +387,24 @@ class BTCClient:
 
         # NO PLATFORM FEE ON BTC. The LTC and GRC clients pay 0.25% to a fee
         # address here and this one pays nothing -- see the divergence table in
-        # the module header. That difference is fund movement and is the
-        # operator's to settle (rule 16); it is not resolved by this merge.
+        # the module header. That difference was fund movement and the operator's to
+        # settle (rule 16), and THEY SETTLED IT on 2026-09-27: "take care of btc and ltc
+        # deposit wallet accounts for fee collection". So BTC now charges the same 1.5%
+        # as LTC and GRC, from the same modules/htlc_fee.PLATFORM_FEE_RATE, and the
+        # divergence the module header describes is closed rather than documented.
+        #
+        # The fee is taken off the TOTAL, matching the other two clients exactly, so it
+        # does not move when the miner fee does. And the address resolves through
+        # platform_fee_address(), which returns None when PLATFORM_FEE_BTC_ADDRESS is
+        # unset -- None means charge NO fee, never block the redeem. That direction is
+        # not a preference: the hashlock branch has to be spent before the counterparty's
+        # timelock expires and no client here implements a refund, so refusing would
+        # trade 1.5% for the whole leg. BTC also never had a testnet default to burn to,
+        # which the other two did.
+        platform_fee = platform_fee_coin("BTC", found.value)
+        fee_address = platform_fee_address("BTC")
+        extra_outputs = {fee_address: platform_fee} if fee_address else {}
+
         spend = build_hashlock_spend(
             asset="BTC",
             rpc_call=self.rpc_call,
@@ -398,8 +415,19 @@ class BTCClient:
             secret=secret,
             wif=participant_privkey,
             destination_address=destination_address,
+            extra_outputs=extra_outputs,
         )
-        logger.info(spend.describe("BTC"))
+        if fee_address:
+            logger.info("%s; platform fee %s to %s", spend.describe("BTC"), platform_fee, fee_address)
+        else:
+            # Rule 14: a redeem that charged nothing must not log like one that did, and
+            # the message names the variable that would have changed it.
+            logger.warning(
+                "%s; NO PLATFORM FEE CHARGED -- PLATFORM_FEE_BTC_ADDRESS is unset, so the "
+                "%s BTC that would have been collected stayed with the redeemer. The redeem "
+                "went through; set that variable to collect it on the next one.",
+                spend.describe("BTC"), platform_fee,
+            )
 
         # The PREIMAGE is on the stack of what is about to be broadcast, and it
         # becomes public the moment this relays -- that is how an atomic swap

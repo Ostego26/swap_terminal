@@ -8,13 +8,45 @@ equal by `tests/test_htlc_spend.py::test_both_platform_fee_clients_read_one_rate
 ## Which assets need an address, and which do not
 
     asset  route     needs an address?   why
+    BTC    atomic    YES, as of 2026-09-27  PLATFORM_FEE_BTC_ADDRESS. It charged nothing
+                     until the operator settled it; redeem_contract() now threads the fee
+                     output through, so the rate and the collection landed together.
     LTC    atomic    YES                 the fee is a separate output; PLATFORM_FEE_LTC_ADDRESS
     GRC    atomic    YES                 the same; PLATFORM_FEE_GRC_ADDRESS
-    BTC    atomic    no -- charges nothing. BTCClient.redeem_contract() passes no
-                     extra outputs at all, so there is no fee to send anywhere. See
-                     the note beside PLATFORM_FEE_RATE for what adding it needs.
     XMR    brokered  NO, AND THIS IS NOT AN OVERSIGHT -- see below
     XRP    brokered  NO, same reason
+
+## MINTING THE THREE ADDRESSES, from the wallets that will hold the fees
+
+Each daemon makes its own. Run these against the TESTNET daemons, then export what they
+print. `getnewaddress` takes a label, which is what makes the fee output findable later
+in `listreceivedbyaddress` rather than being one of many:
+
+    # Bitcoin testnet (adjust the port if yours differs)
+    bitcoin-cli -testnet getnewaddress "swap_terminal platform fee"
+
+    # Litecoin testnet
+    litecoin-cli -testnet getnewaddress "swap_terminal platform fee"
+
+    # Gridcoin testnet
+    gridcoinresearchd -testnet getnewaddress "swap_terminal platform fee"
+
+A BTC or LTC testnet address from those will start `tb1`/`m`/`n`/`2` and `tltc1`/`m`/`n`/`Q`
+respectively; a Gridcoin testnet address starts `m` or `n`. On MAINNET they start `bc1`/`1`/`3`,
+`ltc1`/`L`/`M`, and `S`. The network is in the first characters, and the decoder at the
+bottom of this page prints it for any base58 form.
+
+Then, in the environment the application runs in:
+
+    export PLATFORM_FEE_BTC_ADDRESS=...   # from bitcoin-cli above
+    export PLATFORM_FEE_LTC_ADDRESS=...   # from litecoin-cli above
+    export PLATFORM_FEE_GRC_ADDRESS=moimRB7znV9FgZGKUmLHukYusVmzKiY5r6
+
+**SETTING THESE MOVES NOTHING BY ITSELF.** The fee is an output in a REDEEM transaction,
+so it is collected when an atomic swap completes and not before. An operator who sets
+these and sees no change in their wallet is seeing the correct behavior: there is nothing
+to collect until a swap redeems. Until then every redeem logs a WARNING naming the unset
+variable and the amount not collected.
 
 ## THERE IS NO XMR FEE DEPOSIT ADDRESS, BECAUSE THERE IS NOTHING TO DEPOSIT
 
@@ -73,7 +105,9 @@ reintroduce the burn deliberately.**
 So:
 
     on Gridcoin TESTNET   export PLATFORM_FEE_GRC_ADDRESS=moimRB7znV9FgZGKUmLHukYusVmzKiY5r6
-                          correct, and it collects.
+                          correct, and it collects. This is the operator's chosen address
+                          as of 2026-09-27 and is recorded here so it is not re-derived
+                          from a chat log.
     on Gridcoin MAINNET   DO NOT. Supply an address starting with S, from the wallet
                           that will hold the fees. Until then, leave the variable
                           unset: the rate stays 1.5%, the amount collected is zero,
