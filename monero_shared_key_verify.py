@@ -240,9 +240,27 @@ def address_for(shares: dict, network: str) -> str:
 
 
 def refuse_mainnet_and_a_funded_wallet(
-    console: Console, port: int, daemon_port: int, allow_open_wallet: bool = False
+    console: Console,
+    port: int,
+    daemon_port: int,
+    allow_open_wallet: bool = False,
+    check_balance: bool = True,
 ) -> str:
     """Step 1. Ask the DAEMON which network, and refuse two situations outright.
+
+    `check_balance` IS FALSE ON THE --sweep PATH, AND THAT WAS A BUG FOUND BY RUNNING
+    IT. The balance refusal exists because `generate_from_keys` switches the
+    wallet-rpc to a different wallet -- but --sweep NEVER CALLS generate_from_keys. It
+    operates on the shared wallet that --run already opened, and on that path a funded
+    open wallet is not a hazard, it is THE SUCCESS CONDITION: the mined coins are what
+    is about to be swept.
+
+    So the check refused the exact state it was waiting for, and it did it after
+    --run had printed the sweep command with the address filled in. Third instance
+    today of one shape: a guard written for one code path applied to a sibling that
+    does not do the dangerous thing. The guard is not weakened -- it is scoped to the
+    path that switches wallets, and --sweep gets a DIFFERENT and better check in
+    sweep_phase(): that the open wallet is the shared one the fixture describes.
 
     The nettype comes from the wallet's own view of its daemon rather than from the
     port, because a port number is a convention and a convention is not a check --
@@ -290,6 +308,13 @@ def refuse_mainnet_and_a_funded_wallet(
 
     balance = rpc(port, "get_balance", {"account_index": 0})
     total = int(balance.get("balance", 0))
+    if not check_balance:
+        console.say(
+            f"open wallet holds {total} atomic units -- expected on the --sweep path, which "
+            f"switches no wallets and is about to spend them"
+        )
+        return nettype.lower()
+
     console.check(
         "open wallet balance",
         f"{total} atomic units",
@@ -494,6 +519,7 @@ def load_shares(path: Path) -> dict:
             )
     shares["public_spend"] = str(payload.get("public_spend", ""))
     shares["public_view"] = str(payload.get("public_view", ""))
+    shares["shared_address"] = str(payload.get("shared_address", ""))
     return shares
 
 
@@ -560,10 +586,39 @@ def run_phase(console: Console, target: Target, network: str, mine_blocks: int) 
 
 
 def sweep_phase(console: Console, target: Target, destination: str, wait: int) -> int:
-    """Steps 2-4 of --sweep: reload the fixture, wait for the coins, spend them out."""
-    console.step(2, "reload the shares and re-derive the address")
-    load_shares(target.shares_path)
+    """Steps 2-4 of --sweep: reload the fixture, confirm the wallet, spend it out."""
+    console.step(2, "reload the shares and confirm the OPEN wallet is the shared one")
+    shares = load_shares(target.shares_path)
     console.say(f"loaded four shares from {target.shares_path}; both sums recomputed and agree")
+
+    # THE CHECK THAT MATTERS ON THIS PATH, and it replaces the balance refusal that
+    # used to fire here for no reason. What could go wrong on a sweep is not "the
+    # wallet has money" -- it is "this is the WRONG wallet", and sweeping the wrong
+    # one moves funds from somewhere nobody asked about. The fixture records the
+    # shared address; the wallet reports its own; they must be the same string.
+    #
+    # Re-derived from the SHARES as well as read from the file, so a fixture whose
+    # stored address does not match its own keys is caught here rather than producing
+    # a confident sweep of something else.
+    open_address = str(rpc(target.wallet_port, "get_address", {"account_index": 0})["address"])
+    recomputed = address_for(shares, decode_address(open_address).network)
+    console.check("open wallet == the fixture's shared address",
+                  "identical" if open_address == shares["shared_address"] else
+                  f"DIFFERENT (open {open_address[:12]}...)",
+                  "identical", open_address == shares["shared_address"])
+    console.check("and it is what the SHARES re-derive to",
+                  "identical" if recomputed == open_address else f"DIFFERENT ({recomputed[:12]}...)",
+                  "identical", recomputed == open_address)
+    if open_address != shares["shared_address"] or recomputed != open_address:
+        raise VerifyError(
+            f"REFUSING: the wallet open on port {target.wallet_port} is not the shared wallet "
+            f"this fixture describes. Sweeping it would move funds from somewhere nobody asked "
+            f"about.\n          open wallet  {open_address}\n"
+            f"          fixture      {shares['shared_address']}\n"
+            f"          shares give  {recomputed}\n"
+            f"          Run --run again to recreate the shared wallet, or point --port at the "
+            f"wallet-rpc that holds it"
+        )
 
     console.step(3, "refresh the shared wallet until the coins UNLOCK")
     report_balance(console, target.wallet_port, wait)
@@ -616,7 +671,11 @@ def main() -> int:
         console.banner("Monero 2-of-2 shared key -- the last untested claim in the GRC<->XMR work")
         console.step(1, "refuse mainnet, and refuse a wallet that holds anything")
         network = refuse_mainnet_and_a_funded_wallet(
-            console, target.wallet_port, target.daemon_port, args.allow_open_wallet
+            console,
+            target.wallet_port,
+            target.daemon_port,
+            args.allow_open_wallet,
+            check_balance=bool(args.run),
         )
         if args.run:
             return run_phase(console, target, network, args.mine)
