@@ -120,6 +120,16 @@ so nothing below was confirmed against a running cluster.
                          getFeeForMessage) rather than trusting them, and they
                          are here so a diagnostic can say what it EXPECTED
                          next to what the chain said.
+
+ONE OF THOSE REFERENCE VALUES HAS SINCE BEEN MEASURED, AND IT WAS WRONG. The
+operator ran solana_chain_check.py against devnet on 2026-09-26 and the two
+rent minimums came back 650_240 and 1_488_440 where this module said 890_880
+and 2_039_280. That is the only claim in this file a cluster has yet answered,
+and it answered NO -- which is the argument for having printed the expectation
+beside the chain's number in the first place. The rent section carries the
+measurement, the arithmetic identifying the changed cluster parameter, and
+which half is sourced rather than measured. Everything else above remains
+unconfirmed against a running cluster.
 """
 
 from __future__ import annotations
@@ -313,19 +323,102 @@ def validate_min_commitment_rank(minimum: int) -> int:
 
 # --- rent --------------------------------------------------------------------
 
-# REFERENCE VALUES, NOT MEASUREMENTS. See the docstring's last section: no
-# cluster was reachable from here. SolanaAdapter.rent_exempt_minimum() asks
+# REFERENCE VALUES, NOT AN AUTHORITY. SolanaAdapter.rent_exempt_minimum() asks
 # getMinimumBalanceForRentExemption, and these are what a diagnostic prints as
-# "expected" beside the chain's answer.
+# "expected" beside the chain's answer. Nothing here sizes a transfer: the
+# transfer plan in chains/solana.py:708 uses the CHAIN's number, so a wrong
+# constant here is a wrong line of diagnostic output and not a wrong amount.
 #
 # Solana charges rent for account storage and an account holding at least the
 # rent-exempt minimum for its size is exempt forever. An account that falls
 # BELOW it is collected by the runtime and its lamports are gone -- which is
 # the structural difference from dust, spelled out in the docstring.
+#
+# ==========================================================================
+# THESE WERE 890_880 AND 2_039_280 UNTIL 2026-09-26, AND THEY WERE STALE ON
+# EVERY CLUSTER -- NOT MERELY DIFFERENT ON DEVNET
+# ==========================================================================
+#
+# What the operator measured, 2026-09-26, running solana_chain_check.py with
+# SOL_RPC_URL=https://api.devnet.solana.com against a node the same run proved
+# was DEVNET by genesis hash EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG,
+# solana-core 4.3.0:
+#
+#     getMinimumBalanceForRentExemption(0)     650_240 lamports
+#     getMinimumBalanceForRentExemption(165) 1_488_440 lamports
+#
+# The first question asked was whether 890_880/2_039_280 were MAINNET-BETA
+# figures that devnet legitimately differs from, because "fixing" a correct
+# mainnet constant into a devnet one would be a worse defect than the stale
+# value. They are not. Both old and new figures fall out of ONE cluster
+# parameter, and the arithmetic identifies which value of it produced each:
+#
+#     minimum = (ACCOUNT_STORAGE_OVERHEAD_BYTES + space) * lamports_per_byte
+#
+#     lamports_per_byte = 6_960:  128 * 6_960 =   890_880   293 * 6_960 = 2_039_280
+#     lamports_per_byte = 5_080:  128 * 5_080 =   650_240   293 * 5_080 = 1_488_440
+#
+# so the devnet reading is not a devnet-shaped number at all -- it is 5_080
+# exactly, at BOTH sizes, with the same 128-byte overhead. 6_960 is the
+# long-standing value (3_480 lamports per byte-year times the 2.0 two-years-
+# in-advance exemption threshold), which is where 890_880 and 2_039_280 came
+# from and why they were right for years on every cluster.
+#
+# 6_960 -> 5_080 is SIMD-0437, which cuts lamports_per_byte 90% (6_960 -> 696)
+# in five separately feature-gated steps. Sources, and the second is the
+# primary one for the formula and the 6_960 baseline:
+#
+#   SIMD-0436 (the earlier 2x proposal, superseded in approach but it states
+#   the formula, the 128-byte overhead and 6_960 explicitly):
+#   https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0436-reduce-rent-exempt-minimum-by-2x.md
+#   https://solana.com/upgrades/reduced-rent  (Solana's own upgrade page)
+#   step 1, 6_960 -> 6_333, mainnet-beta epoch 1028, 2026-09-03
+#   step 2, 6_333 -> 5_080, mainnet-beta 2026-09-11; steps 3-5 wait for
+#   Agave 4.4, expected 2026-11.
+#
+# WHICH HALF IS MEASURED AND WHICH IS SOURCED, because rule 17 does not let
+# those share a voice: 5_080 on DEVNET is measured, by the run above. 5_080 on
+# MAINNET-BETA is SOURCED, not measured -- no RPC endpoint is reachable from
+# the environment this edit was made in (api.mainnet-beta.solana.com,
+# api.devnet.solana.com, solana-rpc.publicnode.com and rpc.ankr.com/solana all
+# failed to connect through the proxy, 2026-09-26). What IS established either
+# way is that 890_880/2_039_280 correspond to a lamports_per_byte no cluster
+# carried after 2026-09-03, so they were stale everywhere and the old values
+# could not have been "the mainnet figure devnet differs from".
+#
+# AND THEY WILL GO STALE AGAIN, three more times, by design. That is why the
+# derivation below is written out instead of two literals: the next step moves
+# one number, and why a diagnostic MISMATCH is expected rather than alarming is
+# now something solana_chain_check.py can say in words.
+ACCOUNT_STORAGE_OVERHEAD_BYTES = 128
+LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION = 5_080
 SYSTEM_ACCOUNT_SPACE = 0
 TOKEN_ACCOUNT_SPACE = 165
-RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS = 890_880
-RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS = 2_039_280
+
+
+def reference_rent_exempt_minimum_lamports(space: int) -> int:
+    """The rent-exempt minimum this module EXPECTS for `space` bytes of data.
+
+    Named "reference" in full because the near-identical
+    SolanaAdapter.rent_exempt_minimum() is the AUTHORITY -- it asks
+    getMinimumBalanceForRentExemption -- and rule 8 asks that two things with
+    one shape be told apart at both sites. This one computes; that one asks,
+    and where they disagree the chain is right.
+
+    The formula is Solana's own (SIMD-0436 states it, URL in the comment
+    above): a fixed 128-byte per-account storage overhead is added to the data
+    size and the total is priced at the cluster's lamports_per_byte.
+    """
+    if space < 0:
+        raise ValueError(f"an account's data size cannot be negative, got {space}")
+    return (ACCOUNT_STORAGE_OVERHEAD_BYTES + space) * LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION
+
+
+# 650_240 and 1_488_440 at lamports_per_byte = 5_080. Derived rather than typed
+# so the two cannot drift apart from each other or from the parameter that
+# produced them (rule 11: one vocabulary, derived in one place).
+RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS = reference_rent_exempt_minimum_lamports(SYSTEM_ACCOUNT_SPACE)
+RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS = reference_rent_exempt_minimum_lamports(TOKEN_ACCOUNT_SPACE)
 
 
 # --- fees --------------------------------------------------------------------

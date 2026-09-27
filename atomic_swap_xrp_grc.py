@@ -185,6 +185,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -203,6 +204,10 @@ from chains.xrp_crypto_condition import (  # noqa: E402 -- same
 )
 from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -- same
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
+
+# DROPS_PER_XRP is imported, not respelled: chains/xrp_units.py owns it and a
+# second copy of a unit conversion is rule 8's bug with a delay on it.
+from chains.xrp_units import DROPS_PER_XRP  # noqa: E402 -- same
 from config import Config  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
 from modules.htlc_spend import preimage_from_scriptsig  # noqa: E402 -- same
@@ -233,9 +238,48 @@ from xrp_htlc_escrow import (  # noqa: E402 -- same: the escrow payloads and the
 
 SECONDS_PER_HOUR = 3600
 
-# What each leg moves. Small, and both sides are testnet play money.
+# WHAT THE XRP LEG MOVES. Fixed, and small: two faucet accounts hold 100 XRP
+# each and XRPL's base reserve must stay free.
 XRP_DROPS = 1_000_000          # 1 XRP
-GRC_AMOUNT = "1.0"             # 1 GRC
+
+# THE GRC LEG IS PRICED, NOT FIXED, as of 2026-09-26. It used to be a hardcoded
+# "1.0" beside 1 XRP, which is a 1:1 swap at no rate at all -- and on testnet
+# that costs nothing, which is exactly why it would have survived into a place
+# where it costs something. A swap that does not price its legs is not a swap,
+# it is two transfers that happen to be interlocked.
+#
+# The rate comes from services/pricing.py, which is the same table the custodial
+# quote path uses (rule 8: one price source, not a second one written for this
+# file). --rate overrides it for a run where CoinGecko is unreachable or where
+# the operator wants a specific figure, and --grc-amount pins the amount outright
+# and skips pricing entirely.
+#
+# ROUNDED DOWN to 8 decimal places, toward the party who is NOT being asked to
+# trust the rounding: the GRC leg is what the XRP buyer receives, so rounding it
+# down favours the GRC holder, and a rate applied with no stated rounding
+# direction is a fee nobody agreed to.
+GRC_DECIMALS = 8
+DEFAULT_GRC_AMOUNT = "1.0"
+
+
+def grc_amount_for_rate(xrp_drops: int, xrp_per_grc: Decimal) -> Decimal:
+    """How much GRC one side of the swap is worth at this rate.
+
+    `xrp_per_grc` is how many XRP one GRC costs -- services/pricing's
+    derive_pair_rate("GRC", "XRP") -- so the GRC amount is the XRP amount divided
+    by it. Written as a division rather than folded into the caller so the
+    direction of the rate is visible in one place: inverting it silently makes a
+    swap off by the square of the price, which on testnet looks like a large
+    number and nothing else.
+
+    Decimal throughout. A float here would round at the 17th digit and the
+    quantize below would inherit it, and the amount is what a daemon is asked to
+    send.
+    """
+    if xrp_per_grc <= 0:
+        raise ValueError(f"a rate must be positive; got {xrp_per_grc}. Nothing was priced.")
+    xrp = Decimal(xrp_drops) / Decimal(DROPS_PER_XRP)
+    return (xrp / xrp_per_grc).quantize(Decimal(1).scaleb(-GRC_DECIMALS), rounding=ROUND_DOWN)
 
 # Chains whose daemon must NOT be mainnet. Gridcoin reports its network in
 # getblockchaininfo.chain on a modern build and getinfo.testnet on an old one;
@@ -502,6 +546,91 @@ def htlc_vout(adapter, txid: str, p2sh_script_hex: str) -> tuple[int | None, str
     return None, "; ".join(reasons) or "no route answered"
 
 
+def _pinned_grc_amount(console: Console, raw: str) -> tuple[Decimal | None, str]:
+    """--grc-amount, validated. Its own function so resolve_grc_amount() stays
+    under the return ceiling by SHAPE rather than by a suppression (rule 19)."""
+    try:
+        pinned = Decimal(raw)
+    except (ArithmeticError, ValueError):
+        console.check("the GRC leg's size", f"--grc-amount {raw!r} is not a number", "a decimal", False)
+        return None, ""
+    if pinned <= 0:
+        console.check("the GRC leg's size", f"--grc-amount {pinned}", "a positive amount", False)
+        return None, ""
+    return pinned, "--grc-amount, pinned by hand; NO rate was applied and the legs are not priced"
+
+
+def _rated_grc_amount(console: Console, raw: str) -> tuple[Decimal | None, str]:
+    """--rate, validated and applied. See grc_amount_for_rate for the direction."""
+    try:
+        rate = Decimal(raw)
+        amount = grc_amount_for_rate(XRP_DROPS, rate)
+    except (ArithmeticError, ValueError) as error:
+        console.check("the GRC leg's size", f"--rate {raw!r}: {error}", "a positive rate", False)
+        return None, ""
+    return amount, f"--rate {rate} XRP per GRC, supplied by hand and NOT checked against a market"
+
+
+def resolve_grc_amount(console: Console, args) -> tuple[Decimal | None, str]:
+    """How much GRC the swap moves, and WHERE that number came from.
+
+    Returns (amount, source_sentence). A None amount means the run must stop, and
+    the console already carries the failure.
+
+    THREE SOURCES, IN THIS ORDER, and the source is always printed:
+
+      --grc-amount   pinned outright, no pricing. For a run where the operator
+                     wants a specific size.
+      --rate         XRP per GRC, supplied by hand. For a run where CoinGecko is
+                     unreachable, or where a particular rate is being tested.
+      the live price  services/pricing.py, the SAME table the custodial quote path
+                     uses. Not a second price source written for this file (rule
+                     8) -- if the two ever disagreed, a swap and a quote for the
+                     same pair would price differently and nothing would say so.
+
+    IT REFUSES RATHER THAN FALLING BACK when the price cannot be fetched. A
+    silent default to 1:1 is how a swap comes to move a thousand dollars of one
+    thing for a dollar of another: the run would look identical, and on testnet it
+    LOOKS fine, which is exactly why it must not be the behavior. The refusal
+    names --rate as the way through.
+    """
+    # Each source is its own function, so this reads as the ORDER of three
+    # sources and the return count is structural rather than suppressed (rule 19).
+    if args.grc_amount:
+        return _pinned_grc_amount(console, args.grc_amount)
+    if args.rate:
+        return _rated_grc_amount(console, args.rate)
+
+    # LAZY, and PLC0415 is suppressed for one checked reason written here: importing
+    # services.pricing at module scope would make --help reach for `requests` and a
+    # config import on a machine with neither, and the dry run should be able to
+    # describe a swap without a price.
+    from services.pricing import IDS, derive_pair_rate, fetch_usd_prices  # noqa: PLC0415
+    if "GRC" not in IDS or "XRP" not in IDS:
+        console.check("the GRC leg's size", f"services/pricing.IDS covers {sorted(IDS)}",
+                      "both GRC and XRP priced", False)
+        return None, ""
+    try:
+        prices = fetch_usd_prices()
+        # derive_pair_rate("GRC", "XRP") is GRC_USD / XRP_USD = how many XRP one
+        # GRC costs, which is the direction grc_amount_for_rate divides by. Getting
+        # this backwards makes the swap off by the square of the price, and on
+        # testnet that looks like a large number and nothing else.
+        rate = Decimal(str(derive_pair_rate("GRC", "XRP", prices)))
+        amount = grc_amount_for_rate(XRP_DROPS, rate)
+    except Exception as error:  # noqa: BLE001 -- checked: fetch_usd_prices can fail on the network, on a non-200, on a partial response (it raises KeyError naming the missing asset), or on a rate of zero. EVERY one of those must stop the run rather than fall back to an unpriced amount, and the message names --rate as the way through. Nothing here treats a failure as a price.
+        console.check("the GRC leg's size", f"{type(error).__name__}: {error}", "a live XRP/GRC rate", False)
+        console.say("NOTHING WAS SUBMITTED. A swap will not be priced 1:1 by default -- that is how a thousand "
+                    "dollars of one thing moves for a dollar of another, and on testnet it looks fine. Pass "
+                    "--rate <XRP per GRC> to price it by hand, or --grc-amount to pin the size outright.")
+        return None, ""
+    return amount, (
+        f"services/pricing.py (CoinGecko): GRC ${prices['GRC_USD']}, XRP ${prices['XRP_USD']}, so "
+        f"{rate:.8f} XRP per GRC. {XRP_DROPS} drops buys {amount} GRC, rounded DOWN to "
+        f"{GRC_DECIMALS} places in the GRC holder's favour"
+    )
+
+
 @dataclass
 class SwapContext:
     """Everything steps 5 to 9 need, on either chain, in either direction.
@@ -529,6 +658,7 @@ class SwapContext:
     b_xrp_secret: str
     a_grc: str
     b_grc: str
+    grc_amount: Decimal
     grc_timeout: int
     xrp_cancel_after: int
     passphrase: str
@@ -540,7 +670,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     THE DIRECTION THAT RAN ON 2026-09-26 (OK=15) -- see the module header for the
     txids. Returns True when the swap completed.
     """
-    ctx.console.step(5, f"A funds the XRP leg: {XRP_DROPS} drops to B, hashlocked and timelocked")
+    ctx.console.step(6, f"A funds the XRP leg: {XRP_DROPS} drops to B, hashlocked and timelocked")
     b_before = balance_drops(ctx.b_xrp)
     created = ctx.submit_xrp(escrow_create_tx(ctx.a_xrp, ctx.b_xrp, XRP_DROPS, ctx.condition,
                                           ctx.xrp_cancel_after), ctx.a_xrp_secret)
@@ -560,7 +690,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
     from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415 -- checked: only the --run path needs it
 
-    ctx.console.step(6, f"B funds the GRC leg: {GRC_AMOUNT} GRC, same hash, expiring FIRST")
+    ctx.console.step(7, f"B funds the GRC leg: {ctx.grc_amount} GRC, same hash, expiring FIRST")
     ctx.console.say("BOTH createhtlc AND claimhtlc need the wallet FULLY unlocked -- Gridcoin's htlc.cpp calls "
                 "EnsureWalletIsUnlocked() in each, and createhtlc also SENDS. So steps 6 and 7 run inside ONE "
                 "unlock, which walletlocks first and therefore clears a staking-only unlock (rpc -13, measured "
@@ -570,7 +700,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     grc_vout = None
     try:
         with unlocked_for_payout(ctx.grc, ctx.passphrase):
-            htlc = ctx.grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(), ctx.grc_timeout, float(GRC_AMOUNT))
+            htlc = ctx.grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(), ctx.grc_timeout, float(ctx.grc_amount))
             funding_txid = htlc.get("txid")
             # THE KEYS ARE snake_case, read from src/rpc/htlc.cpp rather than
             # guessed: p2sh_address, redeem_script, sender_pubkey,
@@ -600,8 +730,8 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
                     "which adds a change output, so index 0 is as likely to be the change. Nothing was claimed."
                 )
 
-            ctx.console.step(7, "A claims the GRC with the ctx.secret -- which PUBLISHES it")
-            ctx.console.say("this is the irreversible step for A: claiming requires pushing the ctx.secret into a "
+            ctx.console.step(8, "A claims the GRC with the secret -- which PUBLISHES it")
+            ctx.console.say("this is the irreversible step for A: claiming requires pushing the secret into a "
                         "scriptSig that lands in a block. A cannot take the GRC without giving B what B needs.")
             claim = ctx.grc.call("claimhtlc", funding_txid, grc_vout, ctx.secret.hex(), ctx.a_grc)
             claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
@@ -610,21 +740,21 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
         ctx.console.check("the GRC leg", f"{type(error).__name__}: {error}",
                       "a funded HTLC, its output located, and a claim", False)
         if claim_txid:
-            ctx.console.say(f"the claim went out as {claim_txid} -- the ctx.secret IS public. B must finish the escrow "
-                        f"with it; read the ctx.secret out of that transaction. Do not let the escrow expire.")
+            ctx.console.say(f"the claim went out as {claim_txid} -- the secret IS public. B must finish the escrow "
+                        f"with it; read the secret out of that transaction. Do not let the escrow expire.")
         elif htlc and htlc.get("txid"):
-            ctx.console.say(f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The ctx.secret has NOT been published, so "
+            ctx.console.say(f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret has NOT been published, so "
                         f"nobody can finish the escrow: B recovers the GRC at height {ctx.grc_timeout} and A "
-                        f"recovers the XRP at CancelAfter {ctx.xrp_cancel_after}. Do NOT publish the ctx.secret.")
+                        f"recovers the XRP at CancelAfter {ctx.xrp_cancel_after}. Do NOT publish the secret.")
         else:
             ctx.console.say(f"THE XRP LEG IS FUNDED AND THE GRC LEG IS NOT. Nothing is lost: nobody has the ctx.secret, "
                         f"so nobody can finish the escrow, and it returns to A at CancelAfter "
-                        f"{ctx.xrp_cancel_after}. Do NOT publish the ctx.secret.")
+                        f"{ctx.xrp_cancel_after}. Do NOT publish the secret.")
         return False
 
-    ctx.console.step(8, "B reads the ctx.secret OFF THE GRIDCOIN CHAIN -- never from A")
+    ctx.console.step(9, "B reads the secret OFF THE GRIDCOIN CHAIN -- never from A")
     ctx.console.say("this is the step that makes the swap atomic. B does not ask A for anything, and A cannot "
-                "refuse: the ctx.secret is in A's own claim transaction.")
+                "refuse: the secret is in A's own claim transaction.")
     revealed = None
     for attempt in range(1, READ_ATTEMPTS + 1):
         script_sig_hex, reasons = claim_scriptsig_hex(ctx.grc, claim_txid)
@@ -642,10 +772,10 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
         else:
             ctx.console.say(f"attempt {attempt}: could not read the claim yet ({'; '.join(reasons) or '(none)'})")
         time.sleep(READ_POLL_SECONDS)
-    if not ctx.console.check("the ctx.secret was recovered from the chain", "yes" if revealed else None,
+    if not ctx.console.check("the secret was recovered from the chain", "yes" if revealed else None,
                          "a push whose sha256 matches the commitment", revealed is not None):
         ctx.console.say(f"B cannot finish the escrow without it and recovers the GRC at height {ctx.grc_timeout}... "
-                    f"except that A HAS ALREADY CLAIMED the GRC. Read {claim_txid} by hand; the ctx.secret is in it.")
+                    f"except that A HAS ALREADY CLAIMED the GRC. Read {claim_txid} by hand; the secret is in it.")
         return False
     # THE ASSERTION THAT THE READ IS REAL. `revealed` came from the chain and
     # `ctx.secret` from memory, and they must be equal -- if this file ever finished
@@ -653,7 +783,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     # nothing about atomicity, because a real B has no `ctx.secret` variable.
     ctx.console.check("what the chain gave B equals what A committed to", revealed == ctx.secret, "True", revealed == ctx.secret)
 
-    ctx.console.step(9, "B finishes the XRP escrow with the ctx.secret it read")
+    ctx.console.step(10, "B finishes the XRP escrow with the secret it read")
     fulfillment = preimage_fulfillment(revealed)
     fee = finish_fee_drops(fulfillment)
     finished = ctx.submit_xrp(escrow_finish_tx(ctx.a_xrp, ctx.a_xrp, escrow_sequence,
@@ -670,8 +800,8 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
                       b_after - b_before == XRP_DROPS)
 
     ctx.console.banner("WHAT CHANGED HANDS")
-    ctx.console.say(f"GRC: {GRC_AMOUNT} from B's wallet to {ctx.a_grc}, claimed with the ctx.secret (txid {claim_txid})")
-    ctx.console.say(f"XRP: {XRP_DROPS} drops from {ctx.a_xrp} to {ctx.b_xrp}, released by the same ctx.secret")
+    ctx.console.say(f"GRC: {ctx.grc_amount} from B's wallet to {ctx.a_grc}, claimed with the secret (txid {claim_txid})")
+    ctx.console.say(f"XRP: {XRP_DROPS} drops from {ctx.a_xrp} to {ctx.b_xrp}, released by the same secret")
     ctx.console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
     return False
     return True
@@ -710,7 +840,7 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
     from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
     from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415
 
-    console.step(5, f"B funds the GRC leg FIRST: {GRC_AMOUNT} GRC, hashlocked, expiring LAST")
+    console.step(6, f"B funds the GRC leg FIRST: {ctx.grc_amount} GRC, hashlocked, expiring LAST")
     console.say("the initiator funds first and takes the LONGER lock. Here that is the Gridcoin side, so the "
                 "GRC timeout is the one that outlives the XRP escrow -- the reverse of the other direction.")
     funding_txid = None
@@ -719,7 +849,7 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
     try:
         with unlocked_for_payout(grc, ctx.passphrase):
             htlc = grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(),
-                            ctx.grc_timeout, float(GRC_AMOUNT))
+                            ctx.grc_timeout, float(ctx.grc_amount))
             funding_txid = htlc.get("txid")
             redeem_script_hex = htlc.get("redeem_script")
             console.check("GRC leg funded", f"p2sh={htlc.get('p2sh_address')} txid={funding_txid}",
@@ -748,7 +878,7 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
                     f"height {ctx.grc_timeout}; no XRP was escrowed and the secret was never published.")
         return False
 
-    console.step(6, f"A funds the XRP leg: {XRP_DROPS} drops to B's counterparty, expiring FIRST")
+    console.step(7, f"A funds the XRP leg: {XRP_DROPS} drops to B's counterparty, expiring FIRST")
     a_before = balance_drops(ctx.a_xrp)
     created = ctx.submit_xrp(escrow_create_tx(ctx.b_xrp, ctx.a_xrp, XRP_DROPS, ctx.condition,
                                               ctx.xrp_cancel_after), ctx.b_xrp_secret)
@@ -763,7 +893,7 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
     wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
     console.say(f"OfferSequence={escrow_sequence}, Owner={escrow_owner} -- how the finish below names this escrow")
 
-    console.step(7, "A claims the XRP with the secret -- which PUBLISHES it in the Fulfillment")
+    console.step(8, "A claims the XRP with the secret -- which PUBLISHES it in the Fulfillment")
     console.say("the irreversible step for the initiator: an EscrowFinish carries the fulfillment, and the "
                 "fulfillment contains the preimage. A cannot take the XRP without giving B what B needs.")
     fulfillment = preimage_fulfillment(ctx.secret)
@@ -784,11 +914,28 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
     finish_hash = (finished.get("tx_json") or {}).get("hash", "")
     validated = wait_validated(console, finish_hash)
     a_after = balance_drops(ctx.a_xrp)
-    console.check("A's XRP balance rose by the escrowed amount",
-                  f"{a_before} -> {a_after} drops (+{a_after - a_before})", f"+{XRP_DROPS}",
-                  a_after - a_before == XRP_DROPS)
+    # THE CLAIMER PAYS THE FINISH FEE, AND HERE THE CLAIMER IS THE DESTINATION,
+    # so the fee comes out of the same account the escrow pays into and the net
+    # rise is the escrowed amount MINUS the fee. Measured on the first grc-first
+    # run, 2026-09-26: 81998800 -> 82998440, +999640 against a 1000000 escrow and
+    # a 360-drop fee, and the assertion said FAIL on a swap that had completed
+    # correctly.
+    #
+    # The other direction nets to exactly the escrowed amount because the
+    # CREATOR submits the finish there, so the fee leaves a different account
+    # from the one being credited. Asserting `+XRP_DROPS` in both places was one
+    # expectation covering two different arithmetics -- and the wrong half of it
+    # reported a successful swap as a failure, which is the instrument losing its
+    # reader (rule 14). It is written as an exact figure rather than loosened to
+    # `>=`, because a fee is a known number and a range would also pass a swap
+    # that paid the wrong amount.
+    expected_rise = XRP_DROPS - fee
+    console.check("A's XRP balance rose by the escrowed amount less the finish fee A itself paid",
+                  f"{a_before} -> {a_after} drops (+{a_after - a_before})",
+                  f"+{expected_rise} = {XRP_DROPS} escrowed - {fee} fee",
+                  a_after - a_before == expected_rise)
 
-    console.step(8, "B reads the secret OFF THE XRP LEDGER -- out of A's own EscrowFinish")
+    console.step(9, "B reads the secret OFF THE XRP LEDGER -- out of A's own EscrowFinish")
     console.say("B does not ask A for anything. The fulfillment is a field of the transaction A just submitted, "
                 "and it is public the moment that transaction validates.")
     revealed = None
@@ -822,7 +969,7 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
     console.check("what the ledger gave B equals what A committed to", revealed == ctx.secret, "True",
                   revealed == ctx.secret)
 
-    console.step(9, "B claims the GRC with the secret it read")
+    console.step(10, "B claims the GRC with the secret it read")
     claim_txid = None
     try:
         with unlocked_for_payout(grc, ctx.passphrase):
@@ -838,7 +985,7 @@ def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: 
 
     console.banner("WHAT CHANGED HANDS")
     console.say(f"XRP: {XRP_DROPS} drops from {ctx.b_xrp} to {ctx.a_xrp}, claimed with the secret ({finish_hash})")
-    console.say(f"GRC: {GRC_AMOUNT} from B's wallet to {ctx.a_grc}, released by the same secret (txid {claim_txid})")
+    console.say(f"GRC: {ctx.grc_amount} from B's wallet to {ctx.a_grc}, released by the same secret (txid {claim_txid})")
     console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
     return True
 
@@ -855,12 +1002,18 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
                              f"first, secret read from a Gridcoin scriptSig) or {GRC_FIRST} (GRC funded first, "
                              f"XRP claimed first, secret read from an XRPL Fulfillment). The initiator always "
                              f"takes the longer lock")
+    parser.add_argument("--rate", type=str, default="",
+                        help="XRP per GRC, overriding the live price. Use it when CoinGecko is unreachable or "
+                             "when a specific figure is wanted; the run prints which source was used")
+    parser.add_argument("--grc-amount", type=str, default="",
+                        help="pin the GRC leg outright and skip pricing entirely. Mutually exclusive in effect "
+                             "with --rate, which sizes it instead")
     parser.add_argument("--hours-scale", type=float, default=1.0,
                         help="shorten BOTH legs by this factor for a demonstration (default 1.0 = the real "
                              "48h/24h policy). It scales both, so the 2:1 ordering is preserved")
     args = parser.parse_args()
 
-    console = Console(total_steps=9)
+    console = Console(total_steps=10)
     console.banner("ATOMIC SWAP -- XRP (XRPL testnet) for GRC (Gridcoin testnet)")
     console.say(f"XRP endpoint={TESTNET_URL}")
     console.say(f"mode={'--run: BOTH LEGS WILL BE FUNDED' if args.run else 'DRY RUN: nothing is submitted'}")
@@ -915,7 +1068,15 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     console.say("the secret itself is never printed. Gridcoin's script commits to the sha256 above through "
                 "OP_SHA256; the XRPL condition's fingerprint is the same 32 bytes. One preimage, both legs.")
 
-    console.step(4, "the two timelocks, in the two chains' different clocks")
+    console.step(4, "what each leg is worth, at the real rate")
+    grc_amount, rate_source = resolve_grc_amount(console, args)
+    if grc_amount is None:
+        return console.summary()
+    console.check("the GRC leg's size", f"{grc_amount} GRC against {XRP_DROPS} drops", "a positive amount",
+                  grc_amount > 0)
+    console.say(f"rate source: {rate_source}")
+
+    console.step(5, "the two timelocks, in the two chains' different clocks")
     tip = int(grc.call("getblockcount"))
     now = time.time()
     xrp_cancel_after, grc_timeout, why = swap_timelocks(now, tip, hours_scale=args.hours_scale,
@@ -934,12 +1095,13 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
 
     if not args.run:
         console.banner("DRY RUN -- nothing was submitted")
-        console.say(f"step 5 would fund the XRP leg: Escrow of {XRP_DROPS} drops from {a_xrp} to {b_xrp}, "
+        console.say(f"step 6 would fund the XRP leg: Escrow of {XRP_DROPS} drops from {a_xrp} to {b_xrp}, "
                     f"Condition above, CancelAfter {xrp_cancel_after}.")
         console.say(f"step 6 would fund the GRC leg: createhtlc receiver={a_grc} sender={b_grc} "
-                    f"hash={secret_hash.hex()} timeout={grc_timeout} amount={GRC_AMOUNT}.")
-        console.say("step 7 would claim the GRC with the secret; step 8 would read the secret back OFF THE "
-                    "GRIDCOIN CHAIN; step 9 would finish the XRP escrow with what step 8 read.")
+                    f"hash={secret_hash.hex()} timeout={grc_timeout} amount={grc_amount}.")
+        console.say("step 8 would claim the GRC with the secret; step 9 would read the secret back OFF THE "
+                    "GRIDCOIN CHAIN; step 10 would finish the XRP escrow with what step 9 read. In the "
+                    "grc-first direction the same five acts run in the other order -- see --direction.")
         console.say("re-run with --run to perform the swap.")
         return console.summary()
 
@@ -970,7 +1132,8 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         secret=secret, secret_hash=secret_hash, condition=condition,
         a_xrp=a_xrp, a_xrp_secret=a_xrp_secret, b_xrp=b_xrp, b_xrp_secret=b_xrp_secret,
         a_grc=a_grc, b_grc=b_grc,
-        grc_timeout=grc_timeout, xrp_cancel_after=xrp_cancel_after, passphrase=passphrase,
+        grc_amount=grc_amount, grc_timeout=grc_timeout, xrp_cancel_after=xrp_cancel_after,
+        passphrase=passphrase,
     )
     runner = run_xrp_first if args.direction == XRP_FIRST else run_grc_first
     console.say(f"direction={args.direction}: running {runner.__name__}()")

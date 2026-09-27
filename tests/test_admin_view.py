@@ -42,7 +42,7 @@ from services.admin_view import (
     unresolved_payouts,
     worker_stopped_consequence,
 )
-from services.swap_view import STALL_AFTER_SECONDS
+from services.swap_view import ADDRESS_DERIVATIONS, ATTRIBUTION_MODELS, STALL_AFTER_SECONDS
 from supervisor import worker_commands
 from workers.reconcile_worker import DEFAULT_POLL_SECONDS as RECONCILE_POLL
 
@@ -352,6 +352,115 @@ def test_chain_rows_report_an_unconfigured_chain_rather_than_omitting_it():
     assert rows["XRP"]["attribution"] == "destination_tag"
     assert rows["XRP"]["tradeable"] is False
     assert rows["GRC"]["tradeable"] is True
+
+
+def test_the_monero_row_does_not_claim_get_new_address_refuses():
+    """MEASURED 2026-09-27, and this test fails without the fix.
+
+    Before the fix, `_attribution_note("XMR")` returned the default branch's
+    sentence verbatim:
+
+        "not decided in this application -- get_new_address() refuses and the
+         custody choice is the operator's"
+
+    Both halves are false about Monero. chains/monero.py:280
+    MoneroAdapter.get_new_address() does NOT refuse -- it calls the wallet's
+    `create_address` for the configured account and returns a real per-swap
+    SUBADDRESS -- and the custody choice is not open, because
+    monero-wallet-rpc holds the keys exactly as bitcoind does. XMR reached that
+    branch only because services/swap_view.ATTRIBUTION_MODELS listed four chains
+    and Monero was not one of them, while chain_rows() forces XMR into the table.
+    So the sentence rendered on the operator's chain page every time it was
+    opened, beside an `attribution` column reading "unknown" -- on the page an
+    operator would consult to learn how Monero deposits are told apart.
+
+    MUTATION: remove "XMR" from ATTRIBUTION_MODELS, and both assertions below
+    fail -- the first because the "refuses" sentence returns, the second because
+    the column goes back to "unknown". Removing only the XMR entry from
+    ADDRESS_DERIVATIONS fails the third: the note then admits it does not know
+    how the address is derived instead of inventing a `getnewaddress` that
+    monero-wallet-rpc does not have.
+
+    This asserts on the ROW, not on the function alone, because the row is what
+    renders (templates/admin.html:213 prints `attribution` and
+    `attribution_note` together).
+    """
+    rows = {row["asset"]: row for row in chain_rows(seeded_config(), {})}
+    note = rows["XMR"]["attribution_note"]
+
+    assert "refuses" not in note, (
+        "Monero's get_new_address() returns a subaddress; saying it refuses is false on the page an "
+        "operator reads to find out"
+    )
+    assert "not decided in this application" not in note
+    assert rows["XMR"]["attribution"] == "address", (
+        "a subaddress IS the attribution for XMR, the same question BTC/LTC/GRC answer -- see "
+        "ATTRIBUTION_MODELS for why this is not a fourth model name"
+    )
+    assert "subaddress" in note, "the DERIVATION differs from a daemon's getnewaddress and the note must say so"
+    assert "create_address" in note, "name the RPC method, so the claim can be checked against chains/monero.py"
+    assert "getnewaddress" not in note, (
+        "monero-wallet-rpc has no getnewaddress -- inheriting the Bitcoin clause is the second false sentence "
+        "this fix had to avoid"
+    )
+
+
+def test_the_solana_row_still_says_get_new_address_refuses():
+    """The companion, because the default sentence is TRUE of SOL and a careless fix breaks it.
+
+    MEASURED 2026-09-27: `_attribution_note("SOL")` returned the same string as
+    `_attribution_note("XMR")` before the fix, and for SOL it is correct.
+    chains/solana.py:597 get_new_address() raises NotImplementedError and its
+    message names the three custody options README.md leaves with the operator.
+
+    MUTATION: fix the XMR defect by editing the DEFAULT branch -- softening
+    "refuses" or adding "XMR" wording to it, or giving every unmapped chain the
+    address model -- and this test fails. That is the point: the default is right
+    for the chain it was written for, and the repair had to be an entry in
+    ATTRIBUTION_MODELS rather than a change to the sentence SOL depends on.
+    """
+    rows = {row["asset"]: row for row in chain_rows(seeded_config(), {})}
+    note = rows["SOL"]["attribution_note"]
+
+    assert "get_new_address() refuses" in note
+    assert "custody choice is the operator's" in note
+    assert rows["SOL"]["attribution"] == "unknown", (
+        "SOL genuinely has no attribution model yet -- README.md leaves the choice with the operator"
+    )
+
+
+def test_an_address_chain_with_no_recorded_derivation_says_so_rather_than_guessing():
+    """MUTATION: fall back to the Bitcoin clause for an unrecorded derivation.
+
+    That is the defect this fix existed to remove, one step later in time: the
+    address-model clause said "derived by the daemon's getnewaddress" for every
+    chain in the model, so the day a non-daemon chain joined, one true sentence
+    about three chains became a false sentence about a fourth. A chain admitted
+    to the address model with no ADDRESS_DERIVATIONS entry must therefore report
+    the gap, the same refusal worker_stopped_consequence() makes for an unknown
+    worker.
+
+    Monkeypatched rather than seeded with a real chain, because every asset in
+    the model today HAS a derivation -- verified by comparing the two tables.
+    """
+    assert {asset for asset, model in ATTRIBUTION_MODELS.items() if model == "address"} <= set(ADDRESS_DERIVATIONS), (
+        "every chain in the address model must have its derivation recorded"
+    )
+
+    note = admin_view._attribution_note("XMR")
+    assert "getnewaddress" not in note
+
+    original = dict(ADDRESS_DERIVATIONS)
+    ADDRESS_DERIVATIONS.pop("XMR")
+    try:
+        gap = admin_view._attribution_note("XMR")
+    finally:
+        ADDRESS_DERIVATIONS.clear()
+        ADDRESS_DERIVATIONS.update(original)
+
+    assert "not recorded here" in gap
+    assert "ADDRESS_DERIVATIONS" in gap, "say where to add it, so the reader does not have to find the table"
+    assert "getnewaddress" not in gap, "an unknown derivation must not borrow another chain's"
 
 
 def test_chain_rows_never_render_an_rpc_password():

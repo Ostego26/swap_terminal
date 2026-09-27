@@ -73,6 +73,8 @@ if str(APP_ROOT) not in sys.path:
 from chains.solana import SolanaAdapter, SolanaRPCError  # noqa: E402
 from chains.solana_address import describe_address  # noqa: E402
 from chains.solana_units import (  # noqa: E402
+    ACCOUNT_STORAGE_OVERHEAD_BYTES,
+    LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
     RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS,
     RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS,
     SYSTEM_ACCOUNT_SPACE,
@@ -168,10 +170,21 @@ def check_cluster(adapter: SolanaAdapter, run) -> None:
 
 
 def check_rent(adapter: SolanaAdapter, run) -> None:
-    print("\nRENT  (reference constants are NOT measurements -- this is what the chain says)", flush=True)
-    run("getMinimumBalanceForRentExemption(0)", f"expected about {RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS} lamports for a system account",
+    # Rule 14's "state what the number means, next to the number", and here the
+    # meaning is WHICH CLUSTER the reference describes. The 2026-09-26 devnet
+    # run printed "DIFFERS from the reference 890880" with no cluster named, so
+    # the operator could not tell a devnet-vs-mainnet difference (which would be
+    # expected) from a value stale everywhere (which is what it turned out to
+    # be). It says so now, in the header and in every mismatch line.
+    print(
+        f"\nRENT  (reference = {LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION} lamports/byte -- ONE cluster parameter, not a "
+        "per-cluster figure: mainnet-beta, devnet and testnet all reached it on SIMD-0437 step 2, 2026-09-11. "
+        "The chain is the authority; a mismatch means a further step activated, which is EXPECTED, not a defect.)",
+        flush=True,
+    )
+    run("getMinimumBalanceForRentExemption(0)", f"expected {RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS} lamports for a system account (0 bytes)",
         lambda: _rent_line(adapter, SYSTEM_ACCOUNT_SPACE, RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS))
-    run("getMinimumBalanceForRentExemption(165)", f"expected about {RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS} lamports for an SPL token account",
+    run("getMinimumBalanceForRentExemption(165)", f"expected {RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS} lamports for an SPL token account (165 bytes)",
         lambda: _rent_line(adapter, TOKEN_ACCOUNT_SPACE, RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS))
 
 
@@ -261,9 +274,35 @@ def _epoch_line(adapter: SolanaAdapter) -> str:
 
 
 def _rent_line(adapter: SolanaAdapter, space: int, expected: int) -> str:
+    """One rent reading, said so the operator does not have to carry it back.
+
+    WHAT THIS LINE USED TO LEAVE OUT. It read "DIFFERS from the reference N;
+    the chain is the authority, the constant is not" -- true, and unactionable:
+    it named neither the cluster the reference was for nor what a difference
+    would mean, so the 2026-09-26 devnet mismatch (650240 against a reference of
+    890880) read as possibly-normal-for-devnet when in fact the reference was
+    stale on every cluster. A mismatch now prints the implied lamports/byte,
+    which is the ONE parameter that moves (SIMD-0437's five steps) and is
+    therefore the number that identifies what happened.
+    """
     actual = adapter.rent_exempt_minimum(space)
-    agrees = "matches" if actual == expected else f"DIFFERS from the reference {expected}"
-    return f"{actual} lamports for {space} bytes  <- {agrees}; the chain is the authority, the constant is not"
+    if actual == expected:
+        return (
+            f"{actual} lamports for {space} bytes  <- matches the reference for "
+            f"{LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION} lamports/byte"
+        )
+    overhead = ACCOUNT_STORAGE_OVERHEAD_BYTES + space
+    implied = actual / overhead
+    implied_text = f"{int(implied)}" if actual % overhead == 0 else f"{implied:.2f} (not a whole number -- so the 128-byte overhead assumption is what to doubt first)"
+    return (
+        f"{actual} lamports for {space} bytes  <- DIFFERS from the reference {expected}, which is "
+        f"{LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION} lamports/byte: MEASURED on devnet 2026-09-26, and for mainnet-beta "
+        "and testnet sourced from solana.com/upgrades/reduced-rent rather than measured. "
+        f"This reading implies {implied_text} lamports/byte. THE CHAIN IS THE AUTHORITY and nothing sizes a "
+        "transfer from the constant. If the implied figure is one of SIMD-0437's steps (6960 -> 6333 -> "
+        "5080 -> ... -> 696) that cluster is on a different step and chains/solana_units.py wants the new number; if it is none of those, "
+        "this endpoint is not a public Solana cluster."
+    )
 
 
 def _ata_line(adapter: SolanaAdapter, address: str) -> str:

@@ -289,6 +289,44 @@ def test_xrp_attributes_by_destination_tag_and_refuses_without_one():
     assert "NO DESTINATION TAG" in wrong["problem"]
 
 
+def test_monero_attributes_by_its_per_swap_subaddress_and_renders_a_send_target():
+    """MEASURED 2026-09-27: XMR was absent from ATTRIBUTION_MODELS, so it rendered "unknown".
+
+    The visible defect was on the operator's page
+    (tests/test_admin_view.py::test_the_monero_row_does_not_claim_get_new_address_refuses),
+    but the same absence reached the CUSTOMER through this function: XMR fell to
+    the unknown branch, whose note says "how a XMR deposit is attributed to a
+    swap is not described in this application, so this page will not tell you
+    where to send anything." chains/monero.py:280 returns a real per-swap
+    subaddress, so that page would have refused to show a send target that exists.
+
+    No XMR swap can exist today -- config.Config.ALLOWED_PAIRS holds only the
+    four Bitcoin-family pairs and the two XRP/GRC pairs, read 2026-09-27 -- so
+    this branch is exercised by the seeded row below and by nothing else. That is
+    stated rather than left implied, because the same sentence was written falsely
+    about the destination_tag branch and cost a real defect.
+
+    THE MODEL IS "address", NOT A FOURTH NAME, and this test pins that on purpose.
+    templates/swap.html:59 branches on `deposit.model == 'address'` to render the
+    copyable send target; any other string routes XMR into the `{% else %}`
+    fallback at swap.html:75, which prints the note and NO address. A customer
+    would then read an explanation of Monero attribution and never see the
+    subaddress. The derivation difference that IS real lives in
+    ADDRESS_DERIVATIONS instead of in this key.
+
+    MUTATION: remove "XMR" from ATTRIBUTION_MODELS and the first two assertions
+    fail; give it its own model string and the first fails, which is the template
+    fallback arriving as a test failure rather than as a blank page.
+    """
+    deposit = deposit_instruction(make_swap(from_asset="XMR", deposit_address="8BsubaddressForThisSwapAlone"))
+
+    assert deposit["model"] == "address", "templates/swap.html renders a send target only for this exact string"
+    assert deposit["address"] == "8BsubaddressForThisSwapAlone"
+    assert deposit["tag"] is None, "Monero needs no tag -- the subaddress is the discriminator"
+    assert deposit["problem"] == ""
+    assert "not described in this application" not in deposit["note"]
+
+
 def test_a_chain_with_no_attribution_model_refuses_to_say_where_to_send():
     """MUTATION: make ATTRIBUTION_MODELS.get() default to "address".
 

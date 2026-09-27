@@ -58,6 +58,7 @@ from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
 from .helpers import parse_iso, utc_now_iso
 from .swap_view import (
+    ADDRESS_DERIVATIONS,
     ATTRIBUTION_MODELS,
     HALTED_STATUSES,
     STAGE_ORDER,
@@ -516,10 +517,51 @@ def _endpoint_text(asset: str, adapter) -> str:
 
 
 def _attribution_note(asset: str) -> str:
-    """One sentence on how a deposit is matched to a swap on this chain."""
+    """One sentence on how a deposit is matched to a swap on this chain.
+
+    BRANCHES ON THE MODEL, NAMES THE DERIVATION PER ASSET, and the second half is
+    the repair. Both tables live in services/swap_view.py and neither is restated
+    here -- the customer's page and this page answer "how is a deposit
+    attributed" from one place (rule 8), the same arrangement threshold_note()
+    already has.
+
+    THE DEFAULT BRANCH WAS BEING RENDERED FOR A CHAIN IT IS FALSE ABOUT.
+    Measured 2026-09-27, before the fix, by calling this function directly:
+
+        _attribution_note("XMR") == "not decided in this application --
+            get_new_address() refuses and the custody choice is the operator's"
+        _attribution_note("SOL") == the same string
+
+    It is TRUE of SOL -- chains/solana.py:597 get_new_address() raises
+    NotImplementedError at line 618 and its
+    message names the three custody options README.md leaves with the operator --
+    and FALSE of XMR, where chains/monero.py:280 calls the wallet's
+    `create_address` and returns a real per-swap subaddress. XMR reached the
+    default only because swap_view.ATTRIBUTION_MODELS did not list it, while
+    chain_rows() below forces XMR into the table, so the false sentence rendered
+    on the operator's chain page beside an `attribution` column reading
+    "unknown". The chain WAS decided; only this mapping had not heard.
+
+    The address-model clause was the other half. It said "derived by the daemon's
+    getnewaddress" for every chain in that model, which is right for the three
+    Bitcoin-derived daemons and wrong for monero-wallet-rpc -- so admitting XMR
+    to the model without splitting that clause per asset would have replaced one
+    false sentence with another. ADDRESS_DERIVATIONS is that split.
+
+    An asset in the address model with no derivation recorded says so rather than
+    borrowing the nearest chain's, which is the same refusal
+    worker_stopped_consequence() makes further down this file, and for the same reason:
+    a page that guesses is worse than a page that says it does not know.
+    """
     model = ATTRIBUTION_MODELS.get(asset, "unknown")
     if model == "address":
-        return "a fresh address per swap, derived by the daemon's getnewaddress"
+        derivation = ADDRESS_DERIVATIONS.get(asset)
+        if derivation is None:
+            return (
+                f"a fresh address per swap, and the address IS the attribution. HOW {asset} derives that address "
+                f"is not recorded here -- add it to ADDRESS_DERIVATIONS in services/swap_view.py"
+            )
+        return f"a fresh address per swap, and the address IS the attribution. Derived by {derivation}"
     if model == "destination_tag":
         return "one shared account, one integer destination tag per swap; get_new_address() refuses by design"
     return "not decided in this application -- get_new_address() refuses and the custody choice is the operator's"

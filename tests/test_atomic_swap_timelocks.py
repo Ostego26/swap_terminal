@@ -26,6 +26,7 @@ would catch:
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal
 
 import pytest
 from chains.xrp_crypto_condition import preimage_from_escrow_finish, preimage_fulfillment
@@ -42,6 +43,7 @@ from atomic_swap_xrp_grc import (
     GRC_FIRST,
     XRP_FIRST,
     assert_timelock_ordering,
+    grc_amount_for_rate,
     swap_timelocks,
 )
 from xrp_htlc_escrow import RIPPLE_EPOCH_OFFSET_SECONDS
@@ -267,3 +269,55 @@ def test_a_malformed_fulfillment_yields_none_and_does_not_index_off_the_end():
 def test_the_empty_preimage_fulfillment_round_trips():
     """A0028000 -- the vector where every length in the encoding is different."""
     assert preimage_from_escrow_finish({"Fulfillment": "A0028000"}, hashlib.sha256(b"").digest()) == b""
+
+
+# ---------------------------------------------------------------------------
+# PRICING, added 2026-09-26 on the operator's instruction: "we should atomic swap
+# at the known exchange rate even though it's just test net." The legs were 1 XRP
+# against 1.0 GRC, which is a 1:1 swap at no rate at all -- and on testnet that
+# costs nothing, which is exactly why it would have survived into somewhere it
+# costs something.
+# ---------------------------------------------------------------------------
+
+
+def test_the_grc_leg_is_sized_by_the_rate():
+    """1 XRP at 0.25 XRP per GRC buys 4 GRC. The rate divides, it does not multiply.
+
+    Inverting it makes the swap off by the SQUARE of the price, which on testnet
+    looks like a large number and nothing else -- so the direction is asserted
+    with a rate whose inverse is a different answer (0.25 -> 4, and 4 -> 0.25).
+    """
+    assert grc_amount_for_rate(1_000_000, Decimal("0.25")) == Decimal("4.00000000")
+    assert grc_amount_for_rate(1_000_000, Decimal(4)) == Decimal("0.25000000")
+
+
+def test_the_grc_leg_rounds_DOWN_in_the_grc_holders_favour():
+    """A rate applied with no stated rounding direction is a fee nobody agreed to.
+
+    1 XRP at 3 XRP per GRC is 0.333... GRC. It must round DOWN, because the GRC
+    leg is what the XRP buyer RECEIVES, so rounding down favours the party giving
+    up the GRC rather than silently taking a sliver from them.
+    """
+    assert grc_amount_for_rate(1_000_000, Decimal(3)) == Decimal("0.33333333")
+
+
+def test_a_non_positive_rate_is_refused_rather_than_producing_a_free_swap():
+    """A zero rate divides to infinity and a negative one to a negative amount.
+
+    Either would be handed to a daemon as an amount. Refused before anything is
+    priced.
+    """
+    for bad in ("0", "-1", "-0.5"):
+        with pytest.raises(ValueError, match="rate must be positive"):
+            grc_amount_for_rate(1_000_000, Decimal(bad))
+
+
+def test_the_rate_arithmetic_is_decimal_not_float():
+    """A float rate rounds at the 17th digit and the quantize inherits it.
+
+    The amount is what a daemon is asked to SEND, so the arithmetic is Decimal
+    end to end. 0.1 is the classic float: three of them do not sum to 0.3.
+    """
+    amount = grc_amount_for_rate(1_000_000, Decimal("0.1"))
+    assert amount == Decimal("10.00000000")
+    assert isinstance(amount, Decimal)

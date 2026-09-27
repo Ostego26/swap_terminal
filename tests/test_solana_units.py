@@ -28,17 +28,24 @@ from __future__ import annotations
 
 import pytest
 from chains.solana_units import (
+    ACCOUNT_STORAGE_OVERHEAD_BYTES,
     COMMITMENT_RANKS,
     FINALIZED_RANK,
     FLOAT_EXACT_INTEGER_LIMIT,
+    LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
     LAMPORTS_PER_SOL,
+    RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS,
+    RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS,
     SOL_DECIMALS,
+    SYSTEM_ACCOUNT_SPACE,
+    TOKEN_ACCOUNT_SPACE,
     amount_to_base_units,
     base_units_to_amount,
     commitment_rank,
     describe_commitment,
     float_is_exact_for,
     rank_name,
+    reference_rent_exempt_minimum_lamports,
     transfer_fee_lamports,
     validate_min_commitment_rank,
 )
@@ -183,3 +190,83 @@ def test_the_fee_is_per_signature_and_does_not_vary_with_size():
 def test_a_transaction_with_no_signature_is_refused():
     with pytest.raises(ValueError, match="at least one signature"):
         transfer_fee_lamports(0)
+
+
+# --- rent --------------------------------------------------------------------
+#
+# WHY THESE EXIST AT ALL, given the constants are only ever PRINTED. The
+# 2026-09-26 devnet run is the first time any Solana figure in this repository
+# was compared against a cluster, and two of them were wrong -- stale by one
+# SIMD-0437 step. Nothing failed, because nothing depends on their value; the
+# only cost was a diagnostic line that said "DIFFERS" without saying which of
+# "devnet is different" and "this constant is old" it meant. These tests pin
+# the arithmetic and the measured numbers so the NEXT step (5080 -> 696, over
+# three more feature gates) is a failing test here rather than a puzzle in a
+# pasted terminal block.
+
+
+def test_the_reference_minimum_is_the_overhead_plus_the_data_priced_per_byte():
+    """Solana's own formula, from SIMD-0436, which states the 128-byte
+    per-account storage overhead and the lamports_per_byte pricing:
+    https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0436-reduce-rent-exempt-minimum-by-2x.md
+    """
+    assert ACCOUNT_STORAGE_OVERHEAD_BYTES == 128
+    for space in (0, 1, 165, 10_000):
+        assert reference_rent_exempt_minimum_lamports(space) == (128 + space) * LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION
+
+
+def test_a_negative_account_size_is_refused_rather_than_priced():
+    """A negative size would price below the bare overhead, i.e. return a
+    minimum smaller than an empty account's -- a number that cannot be true."""
+    with pytest.raises(ValueError, match="cannot be negative"):
+        reference_rent_exempt_minimum_lamports(-1)
+
+
+def test_the_two_named_constants_match_the_2026_09_26_devnet_measurement():
+    """MEASURED, not published. The operator ran
+
+        SOL_RPC_URL=https://api.devnet.solana.com python3 solana_chain_check.py
+
+    on 2026-09-26 against a node the same run proved was devnet by genesis hash
+    EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG (solana-core 4.3.0), and
+    getMinimumBalanceForRentExemption answered 650240 for 0 bytes and 1488440
+    for 165. Those are the numbers, and they are what this module must expect.
+
+    The values these replaced -- 890880 and 2039280 -- were not mainnet figures
+    that devnet differs from. They are 6960 lamports/byte at the same 128-byte
+    overhead, and 6960 is the pre-SIMD-0437 parameter that mainnet-beta left
+    behind on 2026-09-03 (step 1, 6333) and again on 2026-09-11 (step 2, 5080).
+    So they were stale on every cluster, which is why replacing them is a fix
+    and not a devnet-shaped mistake. Mainnet-beta's 5080 is SOURCED
+    (https://solana.com/upgrades/reduced-rent), NOT measured: no RPC endpoint
+    was reachable from the environment this test was written in.
+    """
+    assert RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS == 650_240
+    assert RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS == 1_488_440
+
+
+def test_the_stale_pre_simd_0437_values_are_gone_and_their_parameter_is_named():
+    """Pins the DIRECTION of the 2026-09-26 correction, so a future edit cannot
+    quietly restore 890880/2039280 -- which is the likeliest wrong move, since
+    those two numbers are in years of Solana documentation and blog posts.
+
+    Stated as arithmetic rather than as two literals: the old figures are
+    exactly 6960 lamports/byte, the current ones exactly 5080, and it is the
+    lamports_per_byte parameter -- not the cluster and not the overhead -- that
+    changed.
+    """
+    assert LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION == 5_080
+    stale_rate = 6_960
+    assert (128 + SYSTEM_ACCOUNT_SPACE) * stale_rate == 890_880
+    assert (128 + TOKEN_ACCOUNT_SPACE) * stale_rate == 2_039_280
+    assert RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS != 890_880
+    assert RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS != 2_039_280
+
+
+def test_an_spl_token_account_is_165_bytes_and_a_system_account_is_zero():
+    """The two sizes the diagnostic asks about. 165 is the SPL Token account
+    layout's length, which is why it is the size worth a named constant."""
+    assert SYSTEM_ACCOUNT_SPACE == 0
+    assert TOKEN_ACCOUNT_SPACE == 165
+    assert reference_rent_exempt_minimum_lamports(TOKEN_ACCOUNT_SPACE) == RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS
+    assert reference_rent_exempt_minimum_lamports(SYSTEM_ACCOUNT_SPACE) == RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS
