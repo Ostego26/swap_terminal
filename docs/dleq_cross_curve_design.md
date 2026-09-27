@@ -251,8 +251,28 @@ Computed from `go-dleq`'s `serde.go` plus the two curves' `CompressedPointSize()
     252 bits                                     64,764
     claimed keys X_A 33 + X_B 32                     65
     bit count byte                                    1
-    two 64-byte signatures with length prefixes      130
-    TOTAL                                        64,960 bytes = 63.4 KiB
+    len(signatureA) byte + DER ECDSA signature   71 to 73
+    len(signatureB) byte + ed25519 signature           65
+    TOTAL                              64,966 to 64,968 bytes = 63.4 KiB
+
+**THE COMPUTED 64,960 IN THE LINE ABOVE WAS WRONG AND IS KEPT NOWHERE -- this
+table is the corrected one.** It read "two 64-byte signatures with length
+prefixes, 130", and both halves of that are false. `signatureA` is a
+**DER-encoded** ECDSA signature over secp256k1, so it is 70, 71 or 72 bytes
+depending on whether r and s each need a leading 0x00 to stay positive; only
+`signatureB` (ed25519) is a fixed 64. **The total is therefore not a constant.**
+
+Measured, not deduced: the three proofs captured from the Go implementation on
+2026-09-27 (tests/vectors/dleq_cross_curve_go.json) are 64,967, 64,968 and
+64,966 bytes, with `signatureA` lengths of 71, 72 and 70 -- each starting 0x30,
+DER's SEQUENCE tag. `swap_terminal/modules/dleq_proof_format.py` parses all
+three to the last byte with zero trailing, and
+`tests/test_dleq_proof_format.py::test_the_secp256k1_signature_is_der_and_its_length_varies`
+is the assertion that would have caught this: a format with two fixed 64-byte
+signatures cannot produce three different totals. A verifier written to 64,960
+would have rejected every real proof, and the one-byte length prefixes the
+format spends on each signature are themselves the tell that at least one of
+them is variable.
 
 For comparison, `serai`'s README publishes **measured** sizes and verification
 times for its four variants on an Intel i7-118567 with `k256`/`curve25519_dalek`
