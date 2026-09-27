@@ -260,104 +260,148 @@ def address_for(shares: dict, network: str) -> str:
     )
 
 
-def refuse_mainnet_and_a_funded_wallet(
-    console: Console,
-    port: int,
-    daemon: int | str,
-    allow_open_wallet: bool = False,
-    check_balance: bool = True,
-) -> str:
-    """Step 1. Ask the DAEMON which network, and refuse two situations outright.
+def daemon_nettype(console: Console, daemon: int | str) -> str:
+    """The network, from monerod. Refuses mainnet. Shared by both paths unchanged.
 
-    `check_balance` IS FALSE ON THE --sweep PATH, AND THAT WAS A BUG FOUND BY RUNNING
-    IT. The balance refusal exists because `generate_from_keys` switches the
-    wallet-rpc to a different wallet -- but --sweep NEVER CALLS generate_from_keys. It
-    operates on the shared wallet that --run already opened, and on that path a funded
-    open wallet is not a hazard, it is THE SUCCESS CONDITION: the mined coins are what
-    is about to be swept.
-
-    So the check refused the exact state it was waiting for, and it did it after
-    --run had printed the sweep command with the address filled in. Third instance
-    today of one shape: a guard written for one code path applied to a sibling that
-    does not do the dangerous thing. The guard is not weakened -- it is scoped to the
-    path that switches wallets, and --sweep gets a DIFFERENT and better check in
-    sweep_phase(): that the open wallet is the shared one the fixture describes.
-
-    The nettype comes from the wallet's own view of its daemon rather than from the
-    port, because a port number is a convention and a convention is not a check --
-    the same reason chains/monero.py asks rather than infers.
+    This is the ONE check both entry paths genuinely share, and it is the only thing
+    left in common. See the note above preflight_run/preflight_sweep for why the rest
+    was split.
     """
-    version = rpc(port, "get_version")
-    console.say(f"wallet rpc version {version.get('version')} on port {port}")
-
-    # THE NETWORK COMES FROM monerod's get_info, NOT FROM validate_address, AND THAT
-    # WAS A BUG THAT REFUSED THE CORRECT CASE.
-    #
-    # The first version asked the wallet to validate its own address and read the
-    # `nettype` out of the reply. On a REGTEST chain that answers "mainnet" -- measured
-    # on the operator's host 2026-09-27 -- because a regtest chain uses MAINNET ADDRESS
-    # PREFIXES. validate_address reports the network an address FORMAT belongs to,
-    # which is a different question from which network the daemon is on, and on regtest
-    # the two disagree. So this script refused a regtest wallet as mainnet: the exact
-    # inverse of the safety property it was written for, and it blocked the one
-    # configuration it was meant to run in.
-    #
-    # monerod's get_info reports the real thing and spells regtest "fakechain", the
-    # same FAKECHAIN that gates generateblocks. monero_regtest.py has always asked that
-    # way; this file asked the wallet because the wallet was already in hand, which is
-    # the whole mistake in one sentence.
     nettype = str(rpc(daemon, "get_info").get("nettype", "(not reported)"))
-    try:
-        current = str(rpc(port, "get_address", {"account_index": 0})["address"])
-        console.say(f"open wallet primary {current[:12]}...{current[-6:]}")
-    except VerifyError as error:
-        raise VerifyError(
-            f"could not read the open wallet's address ({error}). This script needs a "
-            f"monero-wallet-rpc started in --wallet-dir mode with a wallet open; "
-            f"`python3 monero_regtest.py --run` produces exactly that"
-        ) from error
     console.check("network, from monerod's get_info", nettype.upper(),
                   "fakechain (regtest), stagenet or testnet -- NOT mainnet",
                   nettype.lower() != "mainnet")
     if nettype.lower() == "mainnet":
         raise VerifyError(
-            "REFUSING: this wallet's daemon is on MAINNET. This script samples private key "
-            "shares and writes them to a file IN THE CLEAR, which is a test fixture on a test "
-            "network and a key-disclosure bug anywhere else. Point it at a stagenet or regtest "
-            "wallet-rpc"
+            "REFUSING: this daemon is on MAINNET. This script samples private key shares and "
+            "writes them to a file IN THE CLEAR, which is a correct test fixture on a test "
+            "network and a key-disclosure bug anywhere else"
         )
+    return nettype.lower()
 
-    balance = rpc(port, "get_balance", {"account_index": 0})
-    total = int(balance.get("balance", 0))
-    if not check_balance:
-        console.say(
-            f"open wallet holds {total} atomic units -- expected on the --sweep path, which "
-            f"switches no wallets and is about to spend them"
-        )
-        return nettype.lower()
 
-    console.check(
-        "open wallet balance",
-        f"{total} atomic units",
-        "0, or --allow-open-wallet" if total else "0 -- a throwaway wallet",
-        total == 0 or allow_open_wallet,
-    )
+def open_wallet_address(port: int) -> str | None:
+    """The open wallet's primary address, or None if NO WALLET IS OPEN.
+
+    None rather than an exception, because "no wallet open" is the NORMAL state of a
+    fresh `--wallet-dir` process and is a refusal on only one of the two paths. A
+    wallet-rpc with no wallet answers get_address with code -13 "No wallet file", which
+    is a state rather than a fault; any OTHER error is a real problem and propagates.
+    """
+    try:
+        return str(rpc(port, "get_address", {"account_index": 0})["address"])
+    except VerifyError as error:
+        if "No wallet file" in str(error) or "-13" in str(error):
+            return None
+        raise
+
+
+def wallet_balance(port: int) -> int:
+    """Total balance of the open wallet, in atomic units. Assumes one is open."""
+    return int(rpc(port, "get_balance", {"account_index": 0}).get("balance", 0))
+
+
+# WHY THERE ARE TWO PREFLIGHTS AND NOT ONE WITH FLAGS.
+#
+# There was one -- `refuse_mainnet_and_a_funded_wallet(console, port, daemon,
+# allow_open_wallet, check_balance)` -- and it produced FOUR bugs in one day, every one
+# of the same shape: a guard written for the state one entry path leaves behind, applied
+# to a sibling that does not produce that state.
+#
+#   1. --regtest passed to monero-wallet-rpc, which has no such flag (monerod does).
+#   2. generateblocks aimed at a subaddress, correct for the payee and refused for the
+#      miner.
+#   3. the funded-wallet refusal applied to --sweep, which switches no wallets and where
+#      a funded wallet is the SUCCESS condition.
+#   4. and this one: requiring a wallet to be OPEN on --run, when --run's whole job is
+#      to CREATE one and a fresh --wallet-dir process correctly has none.
+#
+# Each was patched by adding a parameter, and the third and fourth exist BECAUSE of the
+# patching: two booleans on one function is a function that does two different jobs and
+# is trusted to remember which. The accumulation was the defect.
+#
+# So the shared function is gone. What the two paths genuinely share is one check --
+# "which network is this" -- and that is `daemon_nettype()`. Everything else differs and
+# now says so in its own name. A future path adds a third preflight rather than a third
+# boolean.
+
+
+def preflight_run(console: Console, port: int, daemon: int | str, allow_open_wallet: bool) -> str:
+    """Step 1 for --run: refuse mainnet, and protect a wallet that is already open.
+
+    NO WALLET OPEN IS THE GOOD CASE HERE. --run's job is to CREATE the shared wallet
+    with generate_from_keys, so a fresh `--wallet-dir` process having nothing open is
+    exactly right -- there is nothing to protect and nothing to close.
+
+    When a wallet IS open, generate_from_keys will switch away from it, and doing that
+    to a process someone is using to watch deposits is not this script's call. That is
+    what --allow-open-wallet consents to, and it says what it costs: the wallet is
+    CLOSED and not reopened, because monero-wallet-rpc exposes no way to ask which file
+    was open.
+    """
+    version = rpc(port, "get_version")
+    console.say(f"wallet rpc version {version.get('version')} on port {port}")
+    nettype = daemon_nettype(console, daemon)
+
+    address = open_wallet_address(port)
+    if address is None:
+        console.check("open wallet", "none -- nothing to protect", "none, or a throwaway", True)
+        return nettype
+
+    console.say(f"open wallet primary {address[:12]}...{address[-6:]}")
+    total = wallet_balance(port)
+    console.check("open wallet balance", f"{total} atomic units",
+                  "0, or --allow-open-wallet" if total else "0 -- a throwaway wallet",
+                  total == 0 or allow_open_wallet)
     if total and not allow_open_wallet:
         raise VerifyError(
             f"REFUSING: the wallet currently open on port {port} holds {total} atomic units. "
-            f"`generate_from_keys` SWITCHES this wallet-rpc to a different wallet, and doing "
-            f"that to a process someone is using to watch deposits is not this script's call.\n"
+            f"`generate_from_keys` SWITCHES this wallet-rpc to a different wallet.\n"
             f"          If this IS a throwaway -- and a wallet left open by "
             f"`monero_regtest.py --run` is one, holding 80 blocks of regtest coinbase -- pass "
-            f"--allow-open-wallet. It will be CLOSED and not reopened: monero-wallet-rpc exposes "
-            f"no way to ask which file was open, so this script cannot put it back."
+            f"--allow-open-wallet. It will be CLOSED and not reopened."
         )
-    if total and allow_open_wallet:
+    if total:
         console.say(
             f"--allow-open-wallet: the wallet holding {total} atomic units is about to be "
             f"CLOSED and will not be reopened"
         )
-    return nettype.lower()
+    return nettype
+
+
+def preflight_sweep(console: Console, port: int, daemon: int | str) -> str:
+    """Step 1 for --sweep: refuse mainnet, and require the shared wallet to BE open.
+
+    The inverse of preflight_run on both counts, which is why they are two functions.
+    --sweep calls no generate_from_keys and switches no wallets; it spends what the
+    open wallet holds. So a wallet MUST be open, and its holding a balance is the
+    success condition rather than a hazard -- the coins about to be swept.
+
+    WHICH wallet it is gets checked in sweep_phase(), against the fixture's shared
+    address and against the address the fixture's shares re-derive to. That is the
+    check that matters here: sweeping the wrong wallet moves funds from somewhere
+    nobody asked about, and a balance check never detected that.
+    """
+    version = rpc(port, "get_version")
+    console.say(f"wallet rpc version {version.get('version')} on port {port}")
+    nettype = daemon_nettype(console, daemon)
+
+    address = open_wallet_address(port)
+    console.check("a wallet is open", "yes" if address else "NO WALLET OPEN",
+                  "yes -- --sweep spends from it", address is not None)
+    if address is None:
+        raise VerifyError(
+            f"REFUSING: no wallet is open on port {port}, so there is nothing to sweep. Run "
+            f"--run first: it creates the shared wallet from the summed keys and leaves it "
+            f"open on this same port. If --run was used against a DIFFERENT wallet-rpc, point "
+            f"--port at that one"
+        )
+    console.say(f"open wallet primary {address[:12]}...{address[-6:]}")
+    total = wallet_balance(port)
+    console.say(
+        f"open wallet holds {total} atomic units -- expected here, and what is about to be spent"
+    )
+    return nettype
 
 
 def create_shared_wallet(
@@ -723,15 +767,12 @@ def main() -> int:
     try:
         console.banner("Monero 2-of-2 shared key -- the last untested claim in the GRC<->XMR work")
         console.step(1, "refuse mainnet, and refuse a wallet that holds anything")
-        network = refuse_mainnet_and_a_funded_wallet(
-            console,
-            target.wallet_port,
-            target.daemon,
-            args.allow_open_wallet,
-            check_balance=bool(args.run),
-        )
         if args.run:
+            network = preflight_run(
+                console, target.wallet_port, target.daemon, args.allow_open_wallet
+            )
             return run_phase(console, target, network, args.mine)
+        network = preflight_sweep(console, target.wallet_port, target.daemon)
         return sweep_phase(console, target, args.sweep, args.wait)
     except VerifyError as error:
         console.check("run", str(error), "no refusal", False)

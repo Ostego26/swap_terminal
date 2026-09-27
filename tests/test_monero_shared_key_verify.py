@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from chains.monero_keys import decode_address  # noqa: E402  both shims above first
 from modules.ed25519_group import GROUP_ORDER  # noqa: E402  same
+from step_console import Console  # noqa: E402  same
 
 from monero_shared_key_verify import (  # noqa: E402  same
     DEFAULT_DAEMON_PORT,
@@ -48,7 +49,9 @@ from monero_shared_key_verify import (  # noqa: E402  same
     build_shares,
     load_shares,
     main,
-    refuse_mainnet_and_a_funded_wallet,
+    open_wallet_address,
+    preflight_run,
+    preflight_sweep,
     sample_share,
     save_shares,
 )
@@ -182,35 +185,64 @@ def test_a_bare_invocation_does_nothing():
     assert "NEEDS NO COINS" in completed.stdout, "the plan must say the cheap check is decisive"
 
 
-def test_the_balance_refusal_is_scoped_to_the_run_path(monkeypatch):
-    """THE DEFECT THE OPERATOR'S SWEEP FOUND, pinned.
+def test_the_two_paths_have_their_own_preflight_and_share_no_flags():
+    """THE STRUCTURAL FIX, replacing two tests that pinned the flag they removed.
 
-    The balance refusal exists because `generate_from_keys` switches the wallet-rpc to
-    a different wallet. --sweep never calls it: it operates on the shared wallet --run
-    already opened, where a funded wallet is not a hazard but THE SUCCESS CONDITION --
-    the mined coins are what is about to be swept. So the guard refused the exact state
-    it was waiting for, immediately after --run had printed the sweep command.
+    One shared `refuse_mainnet_and_a_funded_wallet(..., allow_open_wallet, check_balance)`
+    produced FOUR bugs in one day, all the same shape: a guard written for the state one
+    entry path leaves behind, applied to a sibling that does not produce it. Each was
+    patched by adding a parameter, and bugs three and four exist BECAUSE of the
+    patching -- two booleans on one function is a function doing two jobs and trusted to
+    remember which.
 
-    Asserted by inspecting how main() calls it, because exercising it needs a wallet:
-    check_balance must be tied to args.run and not passed unconditionally.
+    So it is two functions now, sharing exactly the one check that is genuinely common.
+    This asserts the shape rather than any single flag, because the shape is what
+    prevents instance five.
     """
-    # main()'s source specifically, not the module's: a first draft split the whole
-    # module on the function NAME and landed on the definition instead of the call,
-    # which passed nothing and failed loudly. The call site is what is being asserted.
-    call_site = inspect.getsource(main)
-    assert "refuse_mainnet_and_a_funded_wallet(" in call_site
-    assert "check_balance=bool(args.run)" in call_site, (
-        "the balance refusal must apply only to the path that switches wallets"
+    module = sys.modules["monero_shared_key_verify"]
+    assert not hasattr(module, "refuse_mainnet_and_a_funded_wallet"), (
+        "the shared preflight is gone; adding a path adds a preflight, not a boolean"
     )
 
+    # Neither preflight takes a flag that says "behave like the other one".
+    for function in (preflight_run, preflight_sweep):
+        names = set(inspect.signature(function).parameters)
+        assert "check_balance" not in names, f"{function.__name__} regrew a mode flag"
+        assert {"console", "port", "daemon"} <= names, f"{function.__name__} lost an input"
+    assert "allow_open_wallet" in inspect.signature(preflight_run).parameters, (
+        "consent to closing a funded wallet belongs on the path that closes one"
+    )
+    assert "allow_open_wallet" not in inspect.signature(preflight_sweep).parameters, (
+        "--sweep closes no wallet, so it has nothing to consent to"
+    )
 
-def test_check_balance_false_skips_the_refusal_and_says_why():
-    """The parameter's default is True -- the safe direction -- and the docstring names
-    the sibling-path bug so the next reader does not restore it."""
-    signature = inspect.signature(refuse_mainnet_and_a_funded_wallet)
-    assert signature.parameters["check_balance"].default is True
-    doc = refuse_mainnet_and_a_funded_wallet.__doc__ or ""
-    assert "--sweep" in doc and "SUCCESS CONDITION" in doc
+    # And main() routes to them per path rather than passing a mode.
+    call_site = inspect.getsource(main)
+    assert "preflight_run(" in call_site and "preflight_sweep(" in call_site
+
+
+def test_the_two_preflights_have_opposite_requirements_on_an_open_wallet():
+    """The inversion is the point, and it is what bug four was: --run CREATES the wallet
+    so none being open is the good case; --sweep SPENDS from one so a wallet must be
+    open and its balance is the success condition. Asserted from the docstrings, which
+    is where a reader will look before changing either."""
+    run_doc = preflight_run.__doc__ or ""
+    sweep_doc = preflight_sweep.__doc__ or ""
+    assert "NO WALLET OPEN IS THE GOOD CASE" in run_doc
+    assert "MUST be open" in sweep_doc
+    assert "success condition" in sweep_doc
+
+
+def test_open_wallet_address_returns_none_for_no_wallet_and_reraises_anything_else():
+    """BUG FOUR, pinned at its source. A fresh --wallet-dir process answers get_address
+    with code -13 "No wallet file" -- a STATE, not a fault, and the normal state for
+    --run. Any other error is a real problem and must not be swallowed into None, which
+    would make an unreachable wallet indistinguishable from an empty one."""
+    source = inspect.getsource(open_wallet_address)
+    assert '"No wallet file" in str(error)' in source
+    assert "raise" in source, "a different error must propagate rather than become None"
+    doc = open_wallet_address.__doc__ or ""
+    assert "-13" in doc and "state rather than a fault" in doc
 
 
 def test_load_shares_returns_the_shared_address_for_the_sweep_check(tmp_path):
@@ -320,3 +352,119 @@ def test_target_has_no_daemon_port_attribute(tmp_path):
     assert not hasattr(target, "daemon_port")
     assert target.daemon == "host:2"
     assert Target(wallet_port=1, daemon=2, shares_path=path).daemon == 2
+
+
+class _StubDaemonAndWallet:
+    """A stand-in for rpc(), so the two preflights can be driven with no daemon at all.
+
+    WHY THIS EXISTS: the first draft of the tests above asserted the DOCSTRINGS of
+    preflight_run and preflight_sweep -- "NO WALLET OPEN IS THE GOOD CASE" appears in
+    the text -- and a mutation that restored bug four (raising when no wallet is open)
+    PASSED, because the docstring still said the right thing while the code no longer
+    did. A test that reads prose cannot catch a change in behavior. This one calls the
+    functions.
+
+    It is deliberately a dumb dispatcher rather than a mock framework: what is under
+    test is which RPCs each preflight makes and how it reacts, so the stub records the
+    calls and answers from a dict, and a method nobody configured raises instead of
+    returning a plausible empty value.
+    """
+
+    def __init__(self, nettype="stagenet", wallet_address=None, balance=0):
+        self.nettype = nettype
+        self.wallet_address = wallet_address
+        self.balance = balance
+        self.calls: list[str] = []
+
+    def __call__(self, endpoint, method, params=None, timeout=120):
+        self.calls.append(method)
+        if method == "get_version":
+            return {"version": 65562}
+        if method == "get_info":
+            return {"nettype": self.nettype, "height": 2217113}
+        if method == "get_address":
+            if self.wallet_address is None:
+                raise VerifyError("get_address on 127.0.0.1:1: {'code': -13, 'message': 'No wallet file'}")
+            return {"address": self.wallet_address}
+        if method == "get_balance":
+            return {"balance": self.balance, "unlocked_balance": self.balance}
+        raise AssertionError(f"the stub was not configured for {method!r}")
+
+
+STAGENET_PRIMARY = (
+    "537wxk1vzCDembafqWxfTgNcZGoK6rAsbP1JHKiQkjYLLzNDtgMTUKACBguFzx2XnFf1FQVqogcjd9LXTQ52jGiVBV52C1V"
+)
+
+
+def _with_stub(monkeypatch, stub):
+    monkeypatch.setattr(sys.modules["monero_shared_key_verify"], "rpc", stub)
+    return stub
+
+
+def test_preflight_run_ACCEPTS_a_port_with_no_wallet_open(monkeypatch):
+    """BUG FOUR, pinned behaviorally this time.
+
+    A fresh `--wallet-dir` wallet-rpc has no wallet open and answers get_address with
+    code -13. --run's whole job is to CREATE the shared wallet, so that is the good case
+    and must not refuse -- it did, on the operator's first real stagenet invocation,
+    after every other check had passed.
+    """
+    stub = _with_stub(monkeypatch, _StubDaemonAndWallet(wallet_address=None))
+    console = Console(total_steps=1)
+    assert preflight_run(console, 38084, "node.example.org:38089", False) == "stagenet"
+    assert all(ok for _, ok in console.results), "no check may fail on the good case"
+    assert "get_balance" not in stub.calls, (
+        "with no wallet open there is no balance to read, and reading one would be the "
+        "same conflation bug in a new place"
+    )
+
+
+def test_preflight_run_refuses_a_funded_open_wallet_unless_consented(monkeypatch):
+    """The reason the guard exists at all: generate_from_keys switches wallets."""
+    stub = _StubDaemonAndWallet(wallet_address=STAGENET_PRIMARY, balance=10000000000)
+    _with_stub(monkeypatch, stub)
+    with pytest.raises(VerifyError, match="holds 10000000000 atomic units"):
+        preflight_run(Console(total_steps=1), 38083, 38081, False)
+
+    # And with consent it proceeds, saying what it costs.
+    _with_stub(monkeypatch, _StubDaemonAndWallet(wallet_address=STAGENET_PRIMARY, balance=10000000000))
+    assert preflight_run(Console(total_steps=1), 38083, 38081, True) == "stagenet"
+
+
+def test_preflight_run_accepts_an_open_wallet_that_is_empty(monkeypatch):
+    """Neither refusal applies: a wallet is open but holds nothing, which is what
+    monero_regtest.py leaves before any mining."""
+    _with_stub(monkeypatch, _StubDaemonAndWallet(wallet_address=STAGENET_PRIMARY, balance=0))
+    assert preflight_run(Console(total_steps=1), 28083, 28081, False) == "stagenet"
+
+
+def test_preflight_sweep_REFUSES_a_port_with_no_wallet_open(monkeypatch):
+    """The exact inverse, which is why they are two functions: --sweep spends from the
+    open wallet, so none being open is nothing to sweep."""
+    _with_stub(monkeypatch, _StubDaemonAndWallet(wallet_address=None))
+    with pytest.raises(VerifyError, match="no wallet is open"):
+        preflight_sweep(Console(total_steps=1), 38084, 38081)
+
+
+def test_preflight_sweep_accepts_a_funded_open_wallet(monkeypatch):
+    """BUG THREE, pinned behaviorally for the same reason as bug four: a funded wallet
+    here is the SUCCESS condition -- the coins about to be swept -- and the old shared
+    guard refused it."""
+    stub = _StubDaemonAndWallet(wallet_address=STAGENET_PRIMARY, balance=738741466321372)
+    _with_stub(monkeypatch, stub)
+    console = Console(total_steps=1)
+    assert preflight_sweep(console, 38084, 38081) == "stagenet"
+    assert all(ok for _, ok in console.results)
+
+
+@pytest.mark.parametrize("path", ["run", "sweep"])
+def test_both_preflights_refuse_mainnet(monkeypatch, path):
+    """The one check they genuinely share, asserted on both so a split cannot drop it
+    from one. The shares are written to a file in the clear; on mainnet that is a
+    key-disclosure bug rather than a fixture."""
+    _with_stub(monkeypatch, _StubDaemonAndWallet(nettype="mainnet", wallet_address=STAGENET_PRIMARY))
+    with pytest.raises(VerifyError, match="MAINNET"):
+        if path == "run":
+            preflight_run(Console(total_steps=1), 18083, 18081, True)
+        else:
+            preflight_sweep(Console(total_steps=1), 18083, 18081)
