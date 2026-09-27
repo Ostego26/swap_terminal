@@ -246,6 +246,7 @@ from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_ac
 from chains.xrp_units import DROPS_PER_XRP  # noqa: E402 -- same
 from config import Config  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
+from modules.htlc_chain_read import claim_scriptsig_hex, htlc_vout  # noqa: E402 -- same
 from modules.htlc_spend import preimage_from_scriptsig  # noqa: E402 -- same
 
 # SECONDS_PER_BLOCK is imported rather than respelled: it is the number that
@@ -490,96 +491,12 @@ def grc_network(adapter) -> str:
     return f"unknown ({'; '.join(reasons) or 'no route answered'})"
 
 
-def claim_scriptsig_hex(adapter, txid: str) -> tuple[str, list[str]]:
-    """The claim transaction's input scriptSig, by whichever route answers.
+# claim_scriptsig_hex() and htlc_vout() MOVED to modules/htlc_chain_read.py on
+# 2026-09-27, because a second driver (atomic_swap_grc_ltc.py) needs both on both of its
+# legs and copying them would be rule 8's shape exactly. Nothing about them changed: they
+# were already chain-generic, mention neither XRP nor Gridcoin, and take the same
+# `adapter` with a `.call`. They are imported below rather than re-spelled here.
 
-    Returns (hex, reasons_tried). An empty hex with reasons is a result, not an
-    exception -- the caller is polling and needs to say "not yet" per attempt.
-
-    TWO ROUTES, FOR THE REASON modules/htlc_rpc.lookup_contract_output() HAS
-    FOUR. `getrawtransaction` searches only the MEMPOOL unless the daemon runs
-    -txindex, which is the exact defect that killed the BTC redeem path on
-    2026-09-25 and cost a whole run to diagnose. Right after a broadcast the
-    claim is in the mempool and route 1 answers; once it is mined it may not be
-    findable that way at all, and this is the ONE step where failing is worst --
-    both legs are funded and the secret is already public, so a participant who
-    cannot read it has published nothing and lost the race to a timeout.
-
-    Route 2 is the wallet: `gettransaction` returns the raw hex for any
-    transaction the wallet knows, mined or not, with no -txindex, and
-    `decoderawtransaction` turns it into the same shape. It works here because
-    the claim was made by this wallet. A REAL participant is not the claimer and
-    would not have it in their wallet -- for them route 1 plus -txindex, or a
-    block scan, is the answer, and that is named here rather than discovered
-    later.
-    """
-    reasons: list[str] = []
-    try:
-        raw = adapter.call("getrawtransaction", txid, 1) or {}
-        script_sig = ((raw.get("vin") or [{}])[0].get("scriptSig") or {}).get("hex", "")
-        if script_sig:
-            return script_sig, reasons
-        reasons.append("getrawtransaction: answered with no vin[0].scriptSig.hex")
-    except Exception as error:  # noqa: BLE001 -- checked: the daemon answers "No information available about transaction" without -txindex once the claim is mined, which is not a failure but the signal to try the wallet. The reason is kept and printed rather than discarded, and a failure of BOTH routes returns "" which the caller reports as a FAIL -- never as "no preimage was revealed".
-        reasons.append(f"getrawtransaction: {type(error).__name__}")
-    try:
-        wallet_tx = adapter.call("gettransaction", txid) or {}
-        raw_hex = wallet_tx.get("hex")
-        if not raw_hex:
-            reasons.append("gettransaction: answered with no `hex`")
-            return "", reasons
-        decoded = adapter.call("decoderawtransaction", raw_hex) or {}
-        script_sig = ((decoded.get("vin") or [{}])[0].get("scriptSig") or {}).get("hex", "")
-        if script_sig:
-            return script_sig, reasons
-        reasons.append("decoderawtransaction: no vin[0].scriptSig.hex")
-    except Exception as error:  # noqa: BLE001 -- checked: same, and this is the last route. Returning "" is reported by the caller as a failure to READ, which is a different thing from reading successfully and finding no preimage -- the caller prints the reasons so an operator can tell them apart.
-        reasons.append(f"gettransaction/decoderawtransaction: {type(error).__name__}")
-    return "", reasons
-
-
-def htlc_vout(adapter, txid: str, p2sh_script_hex: str) -> tuple[int | None, str]:
-    """Which output of the funding transaction IS the HTLC. Never assumed.
-
-    Returns (vout, explanation). A None vout with an explanation is a result the
-    caller reports; it is never defaulted to 0.
-
-    WHY THIS EXISTS, and it is the same defect this repository fixed on the
-    Bitcoin side on 2026-09-25. Gridcoin's `createhtlc` returns p2sh_address,
-    redeem_script, sender_pubkey, receiver_pubkey, hash, timeout and txid -- and
-    NO VOUT (read from src/rpc/htlc.cpp, 2026-09-26). It funds through
-    SendMoney(), which adds a CHANGE output, so the HTLC is at index 0 or 1
-    depending on coin selection. The first version of this file passed
-    `int(htlc.get("vout", 0))` to claimhtlc, which is a guess about which output
-    holds a real balance.
-
-    MATCHED ON THE scriptPubKey HEX, not on a rendered address. That is the other
-    half of the same 2026-09-25 lesson: `scriptPubKey.addresses` was removed in
-    Bitcoin Core 22.0 and daemons disagree about whether it exists, while the hex
-    is the same bytes everywhere. The hex here is derived from the redeem script
-    the daemon itself returned, so a mismatch means the funding transaction does
-    not pay the contract the daemon just described -- which is a refusal, not an
-    index to fall back on.
-    """
-    reasons: list[str] = []
-    for method, args in (("getrawtransaction", (txid, 1)), ("gettransaction", (txid,))):
-        try:
-            answer = adapter.call(method, *args) or {}
-        except Exception as error:  # noqa: BLE001 -- checked: getrawtransaction answers "No information available about transaction" without -txindex once mined, which is the signal to try the wallet route, not a failure. Reasons are collected and returned rather than discarded, and a failure of both yields a None vout that the caller reports as a FAIL -- never a vout of 0.
-            reasons.append(f"{method}: {type(error).__name__}")
-            continue
-        outputs = answer.get("vout")
-        if outputs is None and answer.get("hex"):
-            try:
-                outputs = (adapter.call("decoderawtransaction", answer["hex"]) or {}).get("vout")
-            except Exception as error:  # noqa: BLE001 -- checked: same; the wallet gave hex and the decode is the only step left. A failure is collected, not swallowed.
-                reasons.append(f"decoderawtransaction: {type(error).__name__}")
-                continue
-        for entry in outputs or []:
-            if ((entry.get("scriptPubKey") or {}).get("hex", "")).lower() == p2sh_script_hex.lower():
-                return int(entry.get("n", -1)), f"matched scriptPubKey {p2sh_script_hex} via {method}"
-        reasons.append(f"{method}: read {len(outputs or [])} outputs, none paying {p2sh_script_hex}")
-    return None, "; ".join(reasons) or "no route answered"
 
 
 def _pinned_grc_amount(console: Console, raw: str) -> tuple[Decimal | None, str]:
