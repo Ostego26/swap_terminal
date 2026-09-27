@@ -358,6 +358,79 @@ and one spendability claim were blocked on getting coins. Both are settled -- th
 names by the faucet on stagenet, the shared key by regtest with no faucet at all. What
 is kept here is the route, for the next person who needs either.
 
+## THE STAGENET REHEARSAL, with the sender wallet never touched
+
+Established 2026-09-27 on the operator's host: there is NO local stagenet monerod. The
+stagenet wallet-rpc on 38083 talks to **node.monerodevs.org:38089** (192.99.8.110),
+read out of its own `--daemon-address` with `ps`, and confirmed by an ESTAB socket to
+that address. So every daemon call has to name that node; a port on localhost reaches
+nothing.
+
+The shape below runs a SECOND wallet-rpc rather than reusing 38083, because
+`generate_from_keys` switches a wallet-rpc to a different wallet and this way the
+sender is never closed, never reopened, and never at risk:
+
+    node.monerodevs.org:38089          the remote stagenet node
+      |
+      +-- wallet-rpc 38083   the funded wallet. 0.01 sXMR. UNTOUCHED THROUGHOUT.
+      |
+      +-- wallet-rpc 38084   NEW, --wallet-dir mode, holds the shared 2-of-2 wallet
+
+Note `--stagenet` on the wallet below. That flag DOES exist for monero-wallet-rpc,
+unlike `--regtest`, which does not -- the asymmetry that cost a debugging round on
+2026-09-27 and is recorded in monero_regtest.py's create_wallet().
+
+    mkdir -p "$HOME/xmr-stagenet-shared"
+    monero-wallet-rpc --stagenet --daemon-address node.monerodevs.org:38089 \
+        --wallet-dir "$HOME/xmr-stagenet-shared" \
+        --rpc-bind-port 38084 --disable-rpc-login \
+        --rpc-ssl disabled --daemon-ssl disabled \
+        --allow-mismatched-daemon-version --log-level 1 &
+
+Then, in the repository:
+
+    python3 monero_shared_key_verify.py --run --port 38084 \
+        --daemon node.monerodevs.org:38089 \
+        --shares-file "$HOME/xmr-stagenet-shared/shared-shares.json"
+
+No `--mine` (generateblocks is refused off regtest, by monerod, by design) and no
+`--allow-open-wallet` (a fresh --wallet-dir process has no wallet holding anything).
+It prints the shared address and the sweep command with that address filled in.
+
+**RESTORE HEIGHT IS WHY THIS IS PRACTICAL AT ALL.** The script creates the shared
+wallet with `restore_height` set to the daemon's current tip minus one, not 0.
+restore_height=0 means scan from genesis -- on stagenet that is ~2,217,000 blocks
+fetched from a remote node, and the first refresh would appear to hang. The keys were
+sampled seconds earlier by the same process, so no earlier block can hold a
+transaction for them; scanning them is waste, not caution. The one block of margin is
+deliberate: a restore height ABOVE the block a deposit lands in would make that
+deposit invisible, which would look exactly like the shared address not working.
+
+Fund it from the sender, which is still open on 38083, and sweep it back. Both amounts
+are in atomic units; 5000000000 is 0.005 XMR, half of what the faucet sent:
+
+    curl -sS http://127.0.0.1:38083/json_rpc -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":"0","method":"transfer","params":{"destinations":[{"amount":5000000000,"address":"PASTE_THE_SHARED_ADDRESS"}],"account_index":0,"get_tx_key":true}}'
+
+That is the ONE place a value has to be substituted, and it is a value the previous
+command printed rather than a description of one. Then:
+
+    python3 monero_shared_key_verify.py --sweep 537wxk1vzCDembafqWxfTgNcZGoK6rAsbP1JHKiQkjYLLzNDtgMTUKACBguFzx2XnFf1FQVqogcjd9LXTQ52jGiVBV52C1V \
+        --port 38084 --daemon node.monerodevs.org:38089 \
+        --shares-file "$HOME/xmr-stagenet-shared/shared-shares.json" --wait 900
+
+sweeping back to the sender's own address. `--wait 900` because a stagenet block is ~2
+minutes and an output is locked for 10 blocks, so twenty minutes is the honest figure
+-- the script prints a progress line every 5 seconds so a wait is distinguishable from
+a hang.
+
+**WHAT THIS ADDS OVER THE REGTEST RUN, AND WHAT IT DOES NOT.** It does not make the
+cryptography more true: regtest enforces the same consensus, so the sweep that already
+succeeded (txid f584606948f430bf...) is as valid a spend as any. What it adds is the
+OPERATIONAL rehearsal -- real peers, real propagation delay, real fee estimation
+against a live fee market, real exposure to a reorg, and a remote node that can be slow
+or wrong. Those are the things a live swap would meet and a private chain cannot show.
+
 ## The other way out
 
 If the operator would rather this session do it than do it themselves: the

@@ -360,7 +360,9 @@ def refuse_mainnet_and_a_funded_wallet(
     return nettype.lower()
 
 
-def create_shared_wallet(console: Console, port: int, shares: dict, address: str) -> str:
+def create_shared_wallet(
+    console: Console, port: int, daemon: int | str, shares: dict, address: str
+) -> str:
     """Step 2. THE DECISIVE CHECK, and it needs no coins.
 
     generate_from_keys is handed the address this repo computed and the two SUMMED
@@ -374,13 +376,38 @@ def create_shared_wallet(console: Console, port: int, shares: dict, address: str
     free.
     """
     console.say(f"this repo computed:  {address}")
+
+    # RESTORE HEIGHT IS THE CURRENT TIP, NOT 0, AND ON A REAL NETWORK THAT IS THE
+    # DIFFERENCE BETWEEN SECONDS AND HOURS.
+    #
+    # restore_height=0 tells the wallet to scan the chain from genesis. On regtest that
+    # is 160 blocks and invisible. On STAGENET it is ~2,217,000 blocks fetched from a
+    # remote node -- measured 2026-09-27, the operator's wallet reported height
+    # 2,217,113 against node.monerodevs.org:38089 -- and the first refresh would have
+    # sat there for a very long time with nothing to show for it.
+    #
+    # The keys were sampled seconds ago by this very process, so the wallet CANNOT have
+    # a transaction older than now: every block before the current tip is provably
+    # irrelevant to it. Scanning them is not caution, it is waste.
+    #
+    # One block of margin, because the tip can advance between this call and the
+    # wallet being created, and a restore height above the block a deposit lands in
+    # would make that deposit invisible -- which would look exactly like the shared
+    # address not working, the one wrong conclusion this script exists to prevent.
+    tip = int(rpc(daemon, "get_info").get("height", 0))
+    restore_height = max(0, tip - 1)
+    console.say(f"daemon tip {tip}; restoring the new wallet from height {restore_height}")
+    console.say("(not 0: these keys were sampled seconds ago, so no earlier block can")
+    console.say(" hold a transaction for them, and on stagenet scanning from genesis")
+    console.say(" would mean 2.2 million blocks from a remote node)")
+
     result = rpc(port, "generate_from_keys", {
         "filename": SHARED_WALLET_NAME,
         "address": address,
         "spendkey": scalar_to_bytes_le(shares["spend_summed"]).hex(),
         "viewkey": scalar_to_bytes_le(shares["view_summed"]).hex(),
         "password": SHARED_WALLET_PASSWORD,
-        "restore_height": 0,
+        "restore_height": restore_height,
     })
     reported = str(result.get("address", ""))
     console.say(f"the wallet derived: {reported}")
@@ -580,7 +607,7 @@ def run_phase(console: Console, target: Target, network: str, mine_blocks: int) 
                   "a standard address", True)
 
     console.step(3, "hand the SUMMED scalars to the wallet -- the decisive check")
-    create_shared_wallet(console, target.wallet_port, shares, address)
+    create_shared_wallet(console, target.wallet_port, target.daemon, shares, address)
     target.shares_path.parent.mkdir(parents=True, exist_ok=True)
     save_shares(target.shares_path, shares, address, network)
 
