@@ -1,7 +1,28 @@
 # Getting stagenet coins into the Monero wallet, and what it unblocks
 
-**Status 2026-09-27: BLOCKED, and the blocker is the network policy of the
-container this session runs in, not the wallet and not the code.**
+**Status 2026-09-27: BLOCKED ON FUNDING ONLY. The wallet works, the address is
+confirmed by the wallet itself, the balance is 0.0 XMR, and the one live faucet
+is rate limited until tomorrow.**
+
+RUN ON THE OPERATOR'S HOST, 2026-09-27, against `monero-wallet-rpc --stagenet`
+on port 38083. What it settled:
+
+    get_balance       ANSWERED. total 0.0 XMR, unlocked 0.0 XMR
+    validate_address  ANSWERED. nettype STAGENET, straight from the daemon, and
+                      it confirms the address below is that wallet's own primary
+                      address -- which until then rested only on the Keccak
+                      checksum computed offline in chains/monero_keys.py
+    get_transfers     ANSWERED with no `in` key, which is correct for a wallet
+                      with no incoming transfers and confirms nothing
+    exit status       3 = INCONCLUSIVE, so nothing can mistake it for a pass
+
+THE BALANCE OF 0.0 IS ITSELF A RESULT: the faucet's "you have reached request
+limit" did NOT mean it had already paid out. That was the cheap thing worth
+checking before waiting a day, and the answer is no.
+
+So the ten transfer field names are still unconfirmed and one transfer is still
+the whole remaining blocker. Everything else on the Monero path is now either
+confirmed or offline-verified.
 
 This is the one step on the GRC<->XMR path that cannot be done from here at all.
 Everything else in that work -- the ECDSA adaptor signatures, the ed25519 group
@@ -97,12 +118,35 @@ operator's machine, and only they can say so.
 
 ## Confirming it arrived, and what that proves
 
-Start the wallet against a stagenet daemon, then run the check:
+**A COMMAND WITH A <BRACKET> IN IT IS NOT A COMMAND.** An earlier version of this
+page wrote `--wallet-file <the stagenet wallet>`, and pasting it produced
+`bash: the: No such file or directory` on 2026-09-27 -- which is the failure mode
+of every placeholder in a pasted block, and CLAUDE.md's "Context that shapes all
+four" asks for a single pasteable block precisely to avoid it. So: find the wallet
+first, then start it, with nothing to substitute by hand.
 
+Find the wallet file (Monero's default directory, plus anywhere else it may be):
+
+    ls -la ~/.bitmonero/stagenet/ 2>/dev/null
+    find "$HOME" -maxdepth 4 -name "*.keys" -path "*stagenet*" 2>/dev/null
+
+A Monero wallet is a PAIR: `NAME` and `NAME.keys`. Pass the one WITHOUT the
+`.keys` suffix to `--wallet-file`. This starts the first stagenet wallet it finds
+and says which one it picked, so there is no placeholder and no guessing:
+
+    WALLET=$(find "$HOME" -maxdepth 4 -name "*.keys" -path "*stagenet*" 2>/dev/null | head -1)
+    WALLET="${WALLET%.keys}"
+    echo "using wallet: ${WALLET:-(none found -- name it yourself below)}"
     monero-wallet-rpc --stagenet --rpc-bind-port 38083 \
-        --wallet-file <the stagenet wallet> --prompt-for-password --disable-rpc-login
+        --wallet-file "$WALLET" --prompt-for-password --disable-rpc-login
+
+Then, in another terminal:
 
     python3 monero_chain_check.py --host 127.0.0.1 --port 38083
+
+If a wallet-rpc is ALREADY running on 38083, skip straight to the second command
+-- that is what happened on 2026-09-27, when the placeholder broke the first line
+and the check ran anyway against a wallet-rpc already up.
 
 `monero_chain_check.py` cannot spend: it builds its adapter with
 `can_spend=False` unconditionally, imports no signing path, and has no flag that

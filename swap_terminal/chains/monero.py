@@ -64,6 +64,46 @@ depends on was read out of the published request/response spec:
                       THIS CODE RELIES ON, CONFIRMED
     create_address    returns `address` and `address_index`    CONFIRMED
 
+CONFIRMED AGAINST A RUNNING WALLET ON 2026-09-27, AND THIS IS THE FIRST TIME
+ANY OF IT CAME FROM A DAEMON RATHER THAN A DOCUMENT.
+
+monero_chain_check.py was run on the operator's host against
+monero-wallet-rpc --stagenet on port 38083. Point 1 below said "documentation
+is not a daemon"; for two of the three methods it no longer applies:
+
+    get_balance       ANSWERED. 5 fields in the result, and `balance` and
+                      `unlocked_balance` both read -- so the two names
+                      get_balance() depends on are confirmed by a wallet.
+                      Reported 0.0 XMR total and 0.0 unlocked.
+    validate_address  ANSWERED, and the reply carried `nettype` as this code
+                      reads it. The daemon said STAGENET for the wallet's own
+                      primary address, which is the mechanism validate_address()
+                      exists for -- identifying the network FROM THE DAEMON
+                      rather than from a port number. It also independently
+                      confirms that
+                      537wxk1vzCDembafqWxfTgNcZGoK6rAsbP1JHKiQkjYLLzNDtgMTUKACBguFzx2XnFf1FQVqogcjd9LXTQ52jGiVBV52C1V
+                      is that wallet's primary address on stagenet, which
+                      chains/monero_keys.py had only established offline from
+                      its Keccak checksum.
+    get_transfers     ANSWERED, and returned NO `in` key at all, because the
+                      wallet has no incoming transfers. That is the documented
+                      behavior and this code already handles it
+                      (`result.get("in") or []`), so it is not a failure -- but
+                      it CONFIRMS NOTHING about the ten transfer field names.
+
+THE TEN TRANSFER FIELD NAMES REMAIN UNCONFIRMED, and the run said so in those
+words rather than printing a clean summary: `txid`, `amount`, `address`,
+`amounts`, `subaddr_index`, `confirmations`, `type`, `unlock_time`, `locked`
+and `double_spend_seen` were each marked `unconfirmed (no transfers to look
+at)`, the deposit scan in step 4 was skipped, and the script exited 3 --
+inconclusive -- so no wrapper can read that run as a pass. Rule 14's "make
+'did nothing' look different from 'did work'", working as intended.
+
+The funding is the blocker and nothing else is. stagenet-faucet.xmr-tw.org was
+rate limited on 2026-09-27 and the balance of 0.0 proves it had not already
+paid out, which was the cheap thing worth checking first. See
+docs/monero_stagenet_funding.md.
+
 So the wire format is no longer a guess. Three things are still NOT
 established, and they are the reason monero_chain_check.py still exists:
 
