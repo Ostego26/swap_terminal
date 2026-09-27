@@ -50,14 +50,43 @@ THE REFUSALS, AND WHY EACH ONE
                           than from a port number. The shares are written to a file
                           in the clear; on mainnet that is a key-disclosure bug, not
                           a test fixture.
-  a funded open wallet    refused. `generate_from_keys` switches the wallet-rpc to a
-                          different wallet, and doing that to a process someone is
-                          using to watch real deposits is rude at best. If the
-                          currently open wallet holds anything, this stops and says
-                          to point it at a throwaway instead.
+  a funded open wallet    refused UNLESS --allow-open-wallet. `generate_from_keys`
+                          switches the wallet-rpc to a different wallet, and doing
+                          that to a process someone is using to watch real deposits
+                          is rude at best.
+
+                          THIS REFUSAL MADE THE DOCUMENTED SEQUENCE IMPOSSIBLE and
+                          that was a defect, found by the operator running it on
+                          2026-09-27. `monero_regtest.py --run` leaves a wallet
+                          holding 80 blocks of coinbase open on port 28083 -- which
+                          is exactly the throwaway this script tells you to point at
+                          -- so the refusal fired on the one wallet it was meant to
+                          permit. Two scripts that cannot be used together as their
+                          own documentation says is worse than either refusal alone.
+
+                          The flag is the fix rather than weakening the check,
+                          because the check protects the case that matters (a
+                          stagenet wallet watching deposits) and the flag is an
+                          explicit statement that this wallet is disposable. It also
+                          says what it costs: the open wallet is CLOSED and this
+                          script does not reopen it, because monero-wallet-rpc
+                          exposes no way to ask which file was open.
   --sweep with no coins   refused before building a transaction, with the balance
                           printed. Rule 14: an empty result is a result and must not
                           read as a failure to look.
+
+FUNDING THE SHARED ADDRESS ON REGTEST NEEDS NO SECOND WALLET, which is the other
+half of the fix above. `--mine N` calls the DAEMON's generateblocks with the shared
+address as the miner, so the coins are created directly at the address under test.
+No faucet, no transfer from another wallet, and no need to reopen anything -- the
+shared wallet is already the open one.
+
+That is safe by construction rather than by care: generateblocks is refused inside
+monerod unless the nettype is FAKECHAIN
+(src/rpc/core_rpc_server.cpp:1956 -> CORE_RPC_ERROR_CODE_REGTEST_REQUIRED), so
+--mine cannot fund anything on stagenet or mainnet even if asked. On stagenet the
+route is a faucet or an ordinary transfer, and the script says so rather than
+failing obscurely.
   a destination that is   refused by chains/monero_keys.decode_address() before any
   not decodable           RPC call, so a typo costs nothing.
 """
@@ -71,6 +100,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -91,6 +121,11 @@ from step_console import Console
 # require an explicit --port to touch anything else.
 DEFAULT_WALLET_PORT = 28083
 
+# monerod's RPC port from monero_regtest.py, used only by --mine. Deliberately not
+# Monero's real 18081 or 38081, for the reason that file gives: a regtest daemon on a
+# real port is one typo away from a wallet that meant a real network.
+DEFAULT_DAEMON_PORT = 28081
+
 SHARED_WALLET_NAME = "shared-2of2"
 SHARED_WALLET_PASSWORD = ""
 
@@ -103,6 +138,26 @@ SHARE_UPPER_BOUND = 1 << 252
 
 class VerifyError(RuntimeError):
     """A refusal, or a wallet that disagreed with this repo's arithmetic."""
+
+
+@dataclass(frozen=True)
+class Target:
+    """Where everything this script talks to lives: two ports and the fixture path.
+
+    One object because they always travel together -- every phase needs all three --
+    and because ruff's PLR0913 on the six-argument run_phase() was right that they
+    wanted to be one. Rule 12: extract, do not raise the ceiling.
+
+    The two ports being separate ints is also the transposition worth designing out:
+    swapping `wallet_port` and `daemon_port` would point the miner at the wallet and
+    the wallet at the daemon, and it would fail obscurely rather than loudly. Named
+    fields make that impossible to write by accident, which a pair of positional ints
+    does not.
+    """
+
+    wallet_port: int
+    daemon_port: int
+    shares_path: Path
 
 
 def rpc(port: int, method: str, params: dict | None = None, timeout: int = 120) -> dict:
@@ -184,7 +239,9 @@ def address_for(shares: dict, network: str) -> str:
     )
 
 
-def refuse_mainnet_and_a_funded_wallet(console: Console, port: int) -> str:
+def refuse_mainnet_and_a_funded_wallet(
+    console: Console, port: int, allow_open_wallet: bool = False
+) -> str:
     """Step 1. Ask the DAEMON which network, and refuse two situations outright.
 
     The nettype comes from the wallet's own view of its daemon rather than from the
@@ -219,14 +276,26 @@ def refuse_mainnet_and_a_funded_wallet(console: Console, port: int) -> str:
 
     balance = rpc(port, "get_balance", {"account_index": 0})
     total = int(balance.get("balance", 0))
-    console.check("open wallet balance", f"{total} atomic units", "0 -- a throwaway wallet",
-                  total == 0)
-    if total:
+    console.check(
+        "open wallet balance",
+        f"{total} atomic units",
+        "0, or --allow-open-wallet" if total else "0 -- a throwaway wallet",
+        total == 0 or allow_open_wallet,
+    )
+    if total and not allow_open_wallet:
         raise VerifyError(
             f"REFUSING: the wallet currently open on port {port} holds {total} atomic units. "
             f"`generate_from_keys` SWITCHES this wallet-rpc to a different wallet, and doing "
-            f"that to a process someone is using to watch deposits is not this script's call. "
-            f"Point it at a throwaway -- `python3 monero_regtest.py --run` starts one"
+            f"that to a process someone is using to watch deposits is not this script's call.\n"
+            f"          If this IS a throwaway -- and a wallet left open by "
+            f"`monero_regtest.py --run` is one, holding 80 blocks of regtest coinbase -- pass "
+            f"--allow-open-wallet. It will be CLOSED and not reopened: monero-wallet-rpc exposes "
+            f"no way to ask which file was open, so this script cannot put it back."
+        )
+    if total and allow_open_wallet:
+        console.say(
+            f"--allow-open-wallet: the wallet holding {total} atomic units is about to be "
+            f"CLOSED and will not be reopened"
         )
     return nettype.lower()
 
@@ -268,6 +337,40 @@ def create_shared_wallet(console: Console, port: int, shares: dict, address: str
             "wrong and it is almost certainly ours. No coins were involved"
         )
     return reported
+
+
+def mine_to_shared_address(console: Console, daemon_port: int, address: str, blocks: int) -> int:
+    """Fund the shared address directly, by mining to it. REGTEST ONLY, by construction.
+
+    This is what removes the need for a second wallet. The alternative -- transfer
+    from the wallet that monero_regtest.py funded -- cannot work in one process,
+    because generate_from_keys has already CLOSED that wallet to open the shared one,
+    and monero-wallet-rpc exposes no way to ask which file was open so it cannot be
+    put back. Mining puts the coinbase straight at the address under test.
+
+    SAFE BY CONSTRUCTION RATHER THAN BY CARE: generateblocks is refused inside monerod
+    unless the nettype is FAKECHAIN (src/rpc/core_rpc_server.cpp:1956 returns
+    CORE_RPC_ERROR_CODE_REGTEST_REQUIRED), and regtest is its own nettype rather than
+    a mode over another one. So this cannot fund anything on stagenet or mainnet even
+    if asked, and the refusal that comes back is passed through verbatim rather than
+    reworded -- it is monerod's own sentence and it is clearer than a paraphrase.
+    """
+    console.say(f"mining {blocks} blocks to the shared address on daemon port {daemon_port}")
+    console.say("a coinbase output is locked for 60 confirmations, so this needs more than 60")
+    try:
+        result = rpc(daemon_port, "generateblocks",
+                     {"amount_of_blocks": blocks, "wallet_address": address}, timeout=300)
+    except VerifyError as error:
+        raise VerifyError(
+            f"generateblocks refused: {error}\n"
+            f"          If that says REGTEST REQUIRED, this daemon is not a regtest daemon and "
+            f"--mine cannot work here -- which is monerod protecting a real network, not a bug. "
+            f"On stagenet, fund the address with a faucet or an ordinary transfer instead and "
+            f"then run --sweep."
+        ) from error
+    height = int(result.get("height", 0))
+    console.check("height after mining", height, f"at least {blocks}", height >= blocks)
+    return height
 
 
 def report_balance(console: Console, port: int, seconds: int) -> int:
@@ -398,7 +501,7 @@ def print_plan(console: Console, port: int, shares_path: Path) -> int:
     return 0
 
 
-def run_phase(console: Console, port: int, network: str, shares_path: Path) -> int:
+def run_phase(console: Console, target: Target, network: str, mine_blocks: int) -> int:
     """Steps 2-4 of --run: compute the address, let the wallet confirm it, save the fixture."""
     console.step(2, "generate four shares and compute the shared address OFFLINE")
     shares = build_shares()
@@ -410,31 +513,43 @@ def run_phase(console: Console, port: int, network: str, shares_path: Path) -> i
                   "a standard address", True)
 
     console.step(3, "hand the SUMMED scalars to the wallet -- the decisive check")
-    create_shared_wallet(console, port, shares, address)
-    shares_path.parent.mkdir(parents=True, exist_ok=True)
-    save_shares(shares_path, shares, address, network)
+    create_shared_wallet(console, target.wallet_port, shares, address)
+    target.shares_path.parent.mkdir(parents=True, exist_ok=True)
+    save_shares(target.shares_path, shares, address, network)
 
-    console.step(4, "what to do next")
+    console.step(4, "fund the shared address, or say how to")
     console.say("THE ARITHMETIC IS CONFIRMED against monero-wallet-rpc's own derivation.")
-    console.say("Remaining: whether the chain lets the summed key spend it. To find out,")
-    console.say(f"send any amount to:\n          {address}")
-    console.say("then:")
-    console.say(f"  python3 monero_shared_key_verify.py --sweep <an address you control> --port {port}")
-    console.say(f"shares saved to {shares_path} (mode 0600, private keys in the clear)")
+    console.say("Remaining: whether the chain lets the summed key spend it.")
+    console.say(f"shares saved to {target.shares_path} (mode 0600, private keys in the clear)")
+    if mine_blocks:
+        mine_to_shared_address(console, target.daemon_port, address, mine_blocks)
+        console.say("")
+        console.say("funded. Now finish it -- the destination below is this same shared wallet's")
+        console.say("own address, which is a real spend and needs nothing else to exist:")
+        console.say(f"  python3 monero_shared_key_verify.py --sweep {address} "
+                    f"--port {target.wallet_port}")
+    else:
+        console.say("")
+        console.say(f"send any amount to:\n          {address}")
+        console.say("on REGTEST, add --mine 80 to this command instead and it funds itself.")
+        console.say("Then sweep it out. The destination can be this same address, which is a")
+        console.say("real spend and needs no other wallet to exist:")
+        console.say(f"  python3 monero_shared_key_verify.py --sweep {address} "
+                    f"--port {target.wallet_port}")
     return console.summary()
 
 
-def sweep_phase(console: Console, port: int, destination: str, shares_path: Path, wait: int) -> int:
+def sweep_phase(console: Console, target: Target, destination: str, wait: int) -> int:
     """Steps 2-4 of --sweep: reload the fixture, wait for the coins, spend them out."""
     console.step(2, "reload the shares and re-derive the address")
-    load_shares(shares_path)
-    console.say(f"loaded four shares from {shares_path}; both sums recomputed and agree")
+    load_shares(target.shares_path)
+    console.say(f"loaded four shares from {target.shares_path}; both sums recomputed and agree")
 
     console.step(3, "refresh the shared wallet until the coins UNLOCK")
-    report_balance(console, port, wait)
+    report_balance(console, target.wallet_port, wait)
 
     console.step(4, "spend it all out with the SUMMED key")
-    sweep_out(console, port, destination)
+    sweep_out(console, target.wallet_port, destination)
     console.say("")
     console.say("THE PROPOSAL IS NOW A TESTED CLAIM: XMR sent to an address built from two")
     console.say("public key shares was spent with the sum of the two private shares.")
@@ -450,6 +565,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sweep", metavar="DESTINATION",
                         help="finish the experiment: sweep the shared address to DESTINATION")
     parser.add_argument("--port", type=int, default=DEFAULT_WALLET_PORT)
+    parser.add_argument("--daemon-port", type=int, default=DEFAULT_DAEMON_PORT,
+                        help="monerod's RPC port, used only by --mine")
+    parser.add_argument("--mine", type=int, default=0, metavar="BLOCKS",
+                        help="REGTEST ONLY: mine this many blocks to the shared address, funding "
+                             "it directly. 80 clears the 60-block coinbase lock with margin")
+    parser.add_argument("--allow-open-wallet", action="store_true",
+                        help="proceed even though the open wallet holds funds. It will be CLOSED "
+                             "and not reopened -- for a throwaway only")
     parser.add_argument("--shares-file",
                         default=str(Path.home() / "xmr-regtest" / "shared-shares.json"))
     parser.add_argument("--wait", type=int, default=300,
@@ -460,18 +583,23 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     console = Console(total_steps=4)
-    shares_path = Path(args.shares_file).expanduser()
+    target = Target(
+        wallet_port=args.port,
+        daemon_port=args.daemon_port,
+        shares_path=Path(args.shares_file).expanduser(),
+    )
 
     if not args.run and not args.sweep:
-        return print_plan(console, args.port, shares_path)
+        return print_plan(console, target.wallet_port, target.shares_path)
 
     try:
         console.banner("Monero 2-of-2 shared key -- the last untested claim in the GRC<->XMR work")
         console.step(1, "refuse mainnet, and refuse a wallet that holds anything")
-        network = refuse_mainnet_and_a_funded_wallet(console, args.port)
+        network = refuse_mainnet_and_a_funded_wallet(console, target.wallet_port,
+                                                     args.allow_open_wallet)
         if args.run:
-            return run_phase(console, args.port, network, shares_path)
-        return sweep_phase(console, args.port, args.sweep, shares_path, args.wait)
+            return run_phase(console, target, network, args.mine)
+        return sweep_phase(console, target, args.sweep, args.wait)
     except VerifyError as error:
         console.check("run", str(error), "no refusal", False)
         return console.summary()
