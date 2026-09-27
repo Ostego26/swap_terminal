@@ -1,8 +1,29 @@
 # Getting stagenet coins into the Monero wallet, and what it unblocks
 
-**Status 2026-09-27: BLOCKED ON FUNDING ONLY. The wallet works, the address is
-confirmed by the wallet itself, the balance is 0.0 XMR, and the one live faucet
-is rate limited until tomorrow.**
+**STATUS 2026-09-27: DONE. FUNDED, AND THE EXPERIMENT PASSED.**
+
+cypherfaucet.com/xmr-stagenet sent 0.01 sXMR (txid
+63e58bb16a12bb3b51608a8b7d0367c06375778b5deb9ce82f3ab25fc93a7b4e) and
+monero_chain_check.py reported, over one real incoming transfer:
+
+    PASSED: every method and field the adapter depends on was observed,
+    over 1 real transfer(s).
+
+All ten transfer field names confirmed. The faucet's payment proof also verified
+independently through the wallet's own check_tx_proof -- `good: true`,
+confirmations 3, received 10000000000 atomic units -- which is a THIRD party's
+arithmetic agreeing that this address is the one that was paid, after this repo's
+offline Keccak decode and the wallet's own validate_address.
+
+See chains/monero.py's header for what that settled, what it narrowed, and the
+one thing it refuted: the published spec says `locked - boolean; Is the output
+spendable`, and the observed transfer had 3 confirmations, unlock_time=0 and
+locked=True with unlocked_balance 0.0. `locked` true means NOT spendable. The
+adapter already treated it that way; it is now measured rather than guessed.
+
+The rest of this page is kept because the routes still matter -- the faucet list
+for next time, and the regtest procedure, which remains the way to get a transfer
+with no faucet at all.
 
 RUN ON THE OPERATOR'S HOST, 2026-09-27, against `monero-wallet-rpc --stagenet`
 on port 38083. What it settled:

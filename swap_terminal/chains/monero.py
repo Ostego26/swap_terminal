@@ -104,23 +104,60 @@ rate limited on 2026-09-27 and the balance of 0.0 proves it had not already
 paid out, which was the cheap thing worth checking first. See
 docs/monero_stagenet_funding.md.
 
-So the wire format is no longer a guess. Three things are still NOT
-established, and they are the reason monero_chain_check.py still exists:
+ALL TEN TRANSFER FIELD NAMES CONFIRMED AGAINST A REAL WALLET, 2026-09-27.
 
-1. DOCUMENTATION IS NOT A DAEMON. A published spec can lag a release, and
-   nothing above was produced by a wallet answering a real call. Reading that
-   `txid` is documented is not watching one arrive.
-2. THE MULTI-OUTPUT AMOUNT. Every `amounts` example on that page has exactly
-   one element. See _reject_amount_disagreement() in
-   chains/monero_transfers.py -- the arithmetic relating `amount` to `amounts`
-   is checked at runtime precisely because the spec does not state it.
-3. `locked` IS DESCRIBED CONTRADICTORILY. The spec reads
-   `locked - boolean; Is the output spendable`, which is the opposite of what
-   the field NAME says, beside an example carrying `"locked": false` on a
-   transfer with one confirmation. This code treats truthy `locked` as
-   not-yet-creditable, which follows the name. If the description is the
-   accurate one, this defers deposits that were fine -- a delay, never a
-   wrong credit, and the deferral is printed rather than silent.
+This is the sentence this file has been waiting for since it was written. A
+stagenet faucet (cypherfaucet.com) sent 0.01 XMR to the wallet's primary
+address, txid 63e58bb16a12bb3b51608a8b7d0367c06375778b5deb9ce82f3ab25fc93a7b4e,
+and monero_chain_check.py ran on the operator's host against
+monero-wallet-rpc --stagenet on port 38083. Over one real incoming transfer:
+
+    txid  amount  address  amounts  subaddr_index  confirmations
+    type  unlock_time  locked  double_spend_seen      ALL PRESENT, all 10
+
+    exit status 0, and the script's own words: "PASSED: every method and field
+    the adapter depends on was observed, over 1 real transfer(s)."
+
+The three items this section used to list as NOT established are resolved,
+partly resolved, and resolved-against-the-spec, in that order:
+
+1. "DOCUMENTATION IS NOT A DAEMON" -- SETTLED. The names above came out of a
+   wallet answering a real call, not out of a page. Nothing here rests on the
+   published spec any more.
+2. THE MULTI-OUTPUT AMOUNT -- STILL OPEN, and narrowed. The observed transfer
+   carried a single-element `amounts`, so the relationship between `amount` and
+   a MULTI-element `amounts` is still unobserved and
+   _reject_amount_disagreement() in chains/monero_transfers.py still earns its
+   place as a runtime check. A transfer with several outputs to the same
+   subaddress is what would settle it.
+3. `locked` -- RESOLVED, AND THE SPEC IS THE THING THAT IS WRONG. The published
+   description reads `locked - boolean; Is the output spendable`. The observed
+   transfer had **3 confirmations, unlock_time=0, and locked=True**, while
+   get_balance reported total 0.01 and unlocked 0.0 -- so `locked` true means
+   NOT spendable, which is what the field's NAME says and the opposite of what
+   its description says. This code treats truthy `locked` as not-yet-creditable
+   and that is now MEASURED to be correct rather than a cautious guess. The
+   deposit scan deferred the transfer and printed why:
+
+     deferred 63e58bb1... 0.01 XMR unlock_time=0 locked=True
+       <- arrived, NOT creditable until it unlocks
+
+SEVEN FIELDS THE WALLET SENDS THAT THIS ADAPTER IGNORES, named because a list of
+what is ignored is the other half of a list of what is read:
+
+    fee  height  note  payment_id  subaddr_indices
+    suggested_confirmations_threshold  timestamp
+
+Two of those are worth something and neither is wired in. `fee` would let a
+deposit record what the sender paid, and `height` is a cheaper reorg check than
+re-reading `confirmations` every poll. `suggested_confirmations_threshold` is the
+wallet's own opinion about how many confirmations to wait for, which this code
+currently answers with a constant. None of that is a defect today; it is named
+so the next reader does not have to re-derive the gap.
+
+One smaller measurement, recorded because it moved: get_balance returned SIX
+fields on a funded wallet where the 2026-09-27 empty-wallet run saw five. The two
+names this code reads, `balance` and `unlocked_balance`, are in both.
 
 
 WHY THIS IS A SIBLING OF RPCAdapter AND NOT A SUBCLASS OF IT
