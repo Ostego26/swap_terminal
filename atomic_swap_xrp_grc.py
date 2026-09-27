@@ -67,7 +67,43 @@ and explains the asymmetry; this converts it into the two chains' different
 CLOCKS, which is where it can go wrong: XRPL's CancelAfter is a wall-clock
 instant and Gridcoin's timeout is a BLOCK HEIGHT.
 
-IT RAN, AND IT WORKED -- 2026-09-26, OK=15 FAIL=0, on both live testnets.
+BOTH DIRECTIONS RAN, PRICED, OK=16 FAIL=0 EACH. The state of this file as of
+2026-09-27, and the numbers below are the operator's runs rather than a
+description of what should happen:
+
+    xrp-first   XRP escrow 0DFBA6CBC71C6620..., GRC HTLC
+                4e7d1fa4fa2fbff1... at vout 1, GRC claimed
+                78472df347a91f31..., secret read off the scriptSig on attempt 1,
+                escrow finished 784CDE9E10A36470..., B +1000000 drops exactly.
+    grc-first   GRC HTLC fb6c2b2493dfc4f0... at vout 1, XRP escrow
+                D34AB1D50E4D6846..., XRP claimed 74B3DECC13BB12CD..., secret read
+                off the Fulfillment on attempt 1, GRC claimed
+                845315f4c2063670..., A +999640 = 1000000 less the 360-drop fee
+                A itself paid.
+
+AT THE MARKET RATE, which is the part that makes them swaps rather than two
+interlocked transfers: GRC $0.02299459 against XRP $1.52, so 0.01512802 XRP per
+GRC, and 1 XRP bought 66.10250498 GRC on both runs. The division direction is
+the thing to check if a run ever looks wrong -- 1.52 / 0.02299459 = 66.1025, and
+inverting it gives 0.0151, which is a plausible-looking number and wrong by the
+square of the price.
+
+THE FIRST RUN OF EACH DIRECTION, and what each one cost, kept because the
+failures are the evidence:
+
+xrp-first first completed 2026-09-26 at OK=15 (GRC claim b39897c6aa14970e...,
+escrow finished B9B856C23BB36FB0...), after three step-6 defects -- the unlock
+wrapped around the wrong call, snake_case response keys printing p2sh=None on a
+successful call, and an ASSUMED vout that the run then proved wrong by landing
+the HTLC at index 1 with the change at index 0.
+
+grc-first completed on its first run with one FAIL, and the FAIL was the
+assertion rather than the swap: +999640 against a +1000000 escrow is exactly the
+EscrowFinish fee, because in this direction the claimer IS the destination and
+pays it out of the account being credited. One expectation was covering two
+different arithmetics.
+
+IT RAN, AND IT WORKED -- the original xrp-first run, 2026-09-26, OK=15 FAIL=0.
 
 The first end-to-end atomic swap in this repository. XRPL testnet build 3.4.1
 against Gridcoin testnet at height 3294728, --hours-scale 0.02 (58 minutes
@@ -1021,8 +1057,9 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
                 "PARTICIPANT, shorter lock).")
     console.say("one operator plays both parties here, so counterparty misbehavior is NOT exercised -- the "
                 "mechanism is, on real chains. See this file's header.")
-    console.say("this completed end to end on 2026-09-26 (OK=15 FAIL=0): GRC claim b39897c6aa14970e..., XRP "
-                "escrow finished B9B856C23BB36FB0..., +1000000 drops exactly. A failure here is a regression.")
+    console.say("BOTH directions have completed at the market rate, OK=16 FAIL=0 each (2026-09-27): xrp-first "
+                "GRC claim 78472df347a91f31..., grc-first GRC claim 845315f4c2063670..., 1 XRP for "
+                "66.10250498 GRC both ways. A failure here is a regression, not a discovery.")
 
     console.step(1, "both networks are TEST networks, and each says which")
     try:
