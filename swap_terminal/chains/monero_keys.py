@@ -88,12 +88,34 @@ is the same grade of evidence that made chains/xrp_crypto_condition.py defensibl
 the earlier checks, which were against libsodium for the group law and against ONE
 pre-existing address for the encoding.
 
-WHAT IS STILL NOT VERIFIED, narrowed to one sentence: that the CHAIN lets the summed
-key spend an output paid to that address. The wallet agreeing on the address proves
-the keys and the encoding; it does not prove a spend relays and confirms. That is
-what `monero_shared_key_verify.py --sweep` answers, and until it has run once
-`shared_address` remains a proposal in rule 16's sense ON THAT POINT ALONE -- not on
-the arithmetic, which is now measured.
+AND THE CHAIN AGREED TOO, 2026-09-27. `shared_address` IS NO LONGER A PROPOSAL.
+
+`monero_shared_key_verify.py --sweep` ran on the operator's host against the regtest
+chain. The shared address was funded by mining to it, and then:
+
+    unlocked in the shared wallet   738741466321372 atomic units
+    sweep_all                       1 transaction
+    swept                           738723841921372 atomic units
+    txid                            f584606948f430bf4835eb399c4e5373a027ee91cfb139ddf8d972bf1f15eade
+
+So an output paid to an address built from two PUBLIC key shares was spent with the
+sum of the two PRIVATE shares, by a wallet reconstructed from nothing but those sums.
+That is the property a GRC<->XMR swap rests on, and it is measured rather than argued:
+the arithmetic (against libsodium and the homomorphism), the encoding (against a real
+wallet's address and against generate_from_keys' own derivation) and now the SPEND.
+
+The difference between the two amounts is the transaction fee, which is the ordinary
+reason a sweep moves slightly less than the balance and is noted so nobody reads it as
+a discrepancy.
+
+WHAT IS STILL NOT TESTED, AND IT IS NOT THIS FILE. The four components of a GRC<->XMR
+swap -- adaptor signatures, the ed25519 group law, the cross-curve DLEQ, and this
+shared key -- are each tested now. They have NEVER BEEN COMPOSED. There is no protocol
+driver: nothing sequences the two legs, nothing joins an adaptor signature on a
+Gridcoin transaction to the leak of a Monero key share, and nothing handles the refund
+branches or the timelock ordering between them. "Every piece works" and "the swap
+works" are different sentences, and docs/dleq_cross_curve_design.md section 6 stage 5
+is where that gap is named. Nothing in this file should be read as closing it.
 
 KECCAK-256 IS NOT SHA3-256, AND hashlib HAS ONLY THE SECOND
 

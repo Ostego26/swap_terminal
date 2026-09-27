@@ -348,8 +348,15 @@ involved in any of it.
 
 The same run then confirmed the 2-of-2 shared address against `generate_from_keys`:
 this repo's `shared_address()` and monero-wallet-rpc's own derivation produced the
-identical 95-character string from four freshly sampled shares. See
-chains/monero_keys.py's header for that measurement in full.
+identical 95-character string from four freshly sampled shares. And the sweep that
+followed spent it: txid f584606948f430bf..., 738723841921372 atomic units moved out of
+the shared address with the sum of the two private shares. See chains/monero_keys.py's
+header for both measurements in full.
+
+**So this page's original purpose is discharged.** It existed because ten field names
+and one spendability claim were blocked on getting coins. Both are settled -- the field
+names by the faucet on stagenet, the shared key by regtest with no faucet at all. What
+is kept here is the route, for the next person who needs either.
 
 ## The other way out
 
