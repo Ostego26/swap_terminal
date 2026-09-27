@@ -468,10 +468,95 @@ class _StubContractClient:
 
     def create_contract(self, **kwargs):
         self.calls.append(kwargs)
-        answer = {"txid": "a" * 64, "redeem_script": self.redeem_script.hex()}
+        # THE REAL SHAPE, deliberately: camelCase keys and the script as BYTES, exactly as
+        # atomic_btc_client.py:330 and its two siblings return it. A stub answering in hex
+        # under snake_case is how the driver came to assume a shape no client produces --
+        # it passed its tests and died on the operator's first real run.
+        answer = {"txid": "a" * 64, "redeemScript": self.redeem_script}
         if self.reports_address is not None:
-            answer["p2sh_address"] = self.reports_address
+            answer["p2shAddress"] = self.reports_address
         return answer
+
+
+def test_the_three_real_clients_answer_in_the_shape_read_contract_expects():
+    """READ FROM THE CLIENTS, NOT ASSUMED, and this is the test that would have caught it.
+
+    All three create_contract() implementations return
+
+        {"txid": str, "vout": int, "redeemScript": BYTES, "p2shAddress": str}
+
+    -- camelCase, script as bytes. The driver looked for "redeem_script" and "p2sh_address",
+    found neither, and fell through to `or ""`. That printed a bare "BTC contract at" with
+    nothing after it on the operator's 2026-09-27 run, and then died on
+    bytes.fromhex("b'\\x63\\xa8...") once the address was derived instead: str() of bytes is
+    its repr, so position 1 is the quote.
+
+    Asserted against the real classes' source keys via the constants, so adding a fourth client
+    that answers differently fails here rather than at funding time."""
+    assert "redeemScript" in atomic_swap.CONTRACT_SCRIPT_KEYS
+    assert "p2shAddress" in atomic_swap.CONTRACT_ADDRESS_KEYS
+    assert "vout" in atomic_swap.CONTRACT_VOUT_KEYS
+    # Both spellings, because accepting one and guessing is what produced the blank line.
+    assert "redeem_script" in atomic_swap.CONTRACT_SCRIPT_KEYS
+    assert "p2sh_address" in atomic_swap.CONTRACT_ADDRESS_KEYS
+
+
+def test_a_redeem_script_is_accepted_as_bytes_or_hex_and_refused_otherwise():
+    """bytes is the REAL case; hex is accepted because a future client may hand one over.
+
+    `str(b"\x63")` is "b'c'" rather than an error, which is why this conversion lives in one
+    function: a wrong conversion that raises is a good day, and this one produced a plausible
+    string that failed five lines later talking about hexadecimal."""
+    script = bytes([0x63, 0xA8, 0x20])
+    assert atomic_swap.script_hex_from(script) == "63a820"
+    assert atomic_swap.script_hex_from(bytearray(script)) == "63a820"
+    assert atomic_swap.script_hex_from("63a820") == "63a820"
+    assert atomic_swap.script_hex_from("  63a820  ") == "63a820"
+    # The exact failure from the live run: a bytes repr that reached fromhex as a string.
+    with pytest.raises(SwapError, match="neither bytes nor hex"):
+        atomic_swap.script_hex_from(str(script))
+    with pytest.raises(SwapError, match="neither bytes nor hex"):
+        atomic_swap.script_hex_from("not a script")
+
+
+def test_a_contract_missing_its_script_under_every_spelling_is_refused():
+    """A key absent under EVERY spelling is a refusal naming the keys that did arrive -- never
+    a default. Defaulting is what turned a missing key into an empty address that got printed
+    as though it were an answer."""
+    step = _step()
+    with pytest.raises(SwapError, match="Keys present"):
+        atomic_swap.read_contract(step, "BTC", {"txid": "a" * 64})
+    with pytest.raises(SwapError, match="Keys present"):
+        atomic_swap.read_contract(step, "BTC", {"redeemScript": b"\x51"})
+    # And the reason names the spellings it looked for, so an operator can see the mismatch.
+    try:
+        atomic_swap.read_contract(step, "BTC", {"txid": "a" * 64, "script": b"\x51"})
+    except SwapError as error:
+        assert "redeemScript" in str(error) and "script" in str(error)
+    else:
+        raise AssertionError("a contract with no recognized script key must refuse")
+
+
+def test_the_reported_vout_is_cross_checked_against_the_chain_and_a_mismatch_refuses():
+    """The clients DO return a vout and this driver ignored it. Matching the scriptPubKey on
+    chain is the stronger method -- but ignoring a second opinion throws away a free check.
+
+    The client derived its index from its own view of the funding transaction, so a
+    disagreement means the transaction on chain is not the one it thinks it funded. Neither
+    number is then usable, so it refuses: spending the wrong index spends nothing and burns a
+    fee, which is the defect this repository has fixed three times."""
+    seeded = _seeded_swap()
+    funded = seeded["funded_b"]          # its stub puts the contract at vout 1
+    agreeing = FundedLeg(funded.leg, {**funded.funded, "reported_vout": 1}, funded.client)
+    assert agreeing.find_vout(_step()) == 1
+
+    disagreeing = FundedLeg(funded.leg, {**funded.funded, "reported_vout": 0}, funded.client)
+    with pytest.raises(SwapError, match="cannot both be right"):
+        disagreeing.find_vout(_step())
+
+    # A client that reports nothing is not a disagreement -- the chain match stands alone.
+    silent = FundedLeg(funded.leg, {**funded.funded, "reported_vout": None}, funded.client)
+    assert silent.find_vout(_step()) == 1
 
 
 def test_a_client_that_reports_no_address_still_prints_the_contract_it_built(capsys):
@@ -499,7 +584,9 @@ def test_a_client_that_reports_no_address_still_prints_the_contract_it_built(cap
     expected_hex = p2sh_script_for(script).hex()
     assert expected_hex in printed, "the derived scriptPubKey must be printed"
     assert "contract scriptPubKey \n" not in printed and "contract at \n" not in printed
-    assert "client reported no address" in printed, "say WHICH case this is, not just the hex"
+    assert "(none reported; derived below)" in printed, (
+        "rule 14: say the address is ABSENT rather than printing a gap where one belongs"
+    )
     assert funded["redeem_script"] == script.hex()
     assert funded["locktime"] == 1646 and funded["tip"] == 1358
     # The locktime that was PLANNED is the one sent to the daemon -- not one re-derived from a
@@ -522,7 +609,7 @@ def test_a_client_that_does_report_an_address_has_it_shown_beside_the_derivation
     printed = capsys.readouterr().out
     assert p2sh_script_for(script).hex() in printed
     assert "2MxFF952zuNzXonkRW4uUWcCFvntkaTxGQ6" in printed
-    assert "client reported no address" not in printed
+    assert "(none reported" not in printed
 
 
 def test_mint_parties_makes_four_distinct_keys_and_prints_no_private_key(capsys):

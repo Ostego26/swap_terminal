@@ -317,6 +317,24 @@ class FundedLeg:
         if vout is None:
             raise SwapError(f"{self.asset}: could not find the contract output. {why}")
         step.say(why)
+
+        # THE CLIENT'S OWN vout IS CROSS-CHECKED, NOT TRUSTED AND NOT IGNORED.
+        #
+        # All three clients return one (atomic_btc_client.py:332 and its siblings), and this
+        # driver ignored it entirely -- which was defensible, because matching the scriptPubKey
+        # on chain is the stronger method and is why htlc_vout() exists. But ignoring a second
+        # opinion throws away a free check: the client derived its index from its own view of
+        # the funding transaction, so a DISAGREEMENT means the transaction on chain is not the
+        # one the client thinks it funded. That is a refusal, not a preference between two
+        # numbers. Spending the wrong index spends nothing and burns a fee.
+        reported = self.funded.get("reported_vout")
+        if reported is not None and reported != vout:
+            raise SwapError(
+                f"{self.asset}: the client reported the contract at vout {reported} and the "
+                f"chain says {vout}, matched on scriptPubKey {self.script_pubkey_hex()}. Those "
+                f"cannot both be right, so neither is used: the funding transaction "
+                f"{self.funded['txid']} is not the one the client believes it created"
+            )
         return vout
 
 
@@ -473,6 +491,83 @@ def plan_leg(step: Step, leg: Leg, client) -> PlannedLeg:
     return planned
 
 
+# WHAT create_contract() ACTUALLY RETURNS, read from the three clients rather than guessed.
+#
+# All three -- atomic_btc_client.py:330, atomic_ltc_client.py:388, atomic_grc_client.py:430 --
+# return the SAME shape, and it is not the shape this driver first assumed:
+#
+#     {"txid": str, "vout": int, "redeemScript": BYTES, "p2shAddress": str}
+#
+# camelCase, and the script is BYTES, not hex. The driver looked for "redeem_script" and
+# "p2sh_address", found neither, and fell through to its `or ""` defaults -- which is how the
+# operator's 2026-09-27 run printed a bare "BTC contract at" with nothing after it, and then
+# died on `bytes.fromhex("b'\x63\xa8...")` once the address was derived instead: str() of a
+# bytes object is its repr, so position 1 is the quote character.
+#
+# BOTH SPELLINGS ARE ACCEPTED because accepting one and guessing is what produced the blank
+# line; a key that is ABSENT under every spelling is a refusal, never a default (rule 2's "I
+# could not find a caller is not there is no caller", applied to a dict key).
+CONTRACT_TXID_KEYS = ("txid", "transaction_id")
+CONTRACT_SCRIPT_KEYS = ("redeemScript", "redeem_script", "redeemscript")
+CONTRACT_ADDRESS_KEYS = ("p2shAddress", "p2sh_address", "address")
+CONTRACT_VOUT_KEYS = ("vout", "n")
+
+
+def _first_present(contract: dict, keys: tuple[str, ...]):
+    """The first key of `keys` that the contract carries, or None. Never a default value."""
+    for key in keys:
+        if contract.get(key) is not None:
+            return contract[key]
+    return None
+
+
+def script_hex_from(value) -> str:
+    """A redeem script as HEX, whether the client handed back bytes or a hex string.
+
+    THE BYTES CASE IS THE REAL ONE -- all three clients return bytes -- and it is handled here
+    rather than at the call site because `str(b"\x63")` is "b'c'" and not an error. A wrong
+    conversion that raises is a good day; this one produces a plausible string that fails five
+    lines later with a message about hexadecimal, which is what happened on 2026-09-27.
+    """
+    if isinstance(value, bytes | bytearray):
+        return bytes(value).hex()
+    text = str(value).strip()
+    try:
+        bytes.fromhex(text)
+    except ValueError as error:
+        raise SwapError(
+            f"the redeem script is neither bytes nor hex: {text[:40]!r}... ({error}). A client "
+            f"returning something else is a contract this driver cannot spend"
+        ) from error
+    return text
+
+
+def read_contract(step: Step, asset: str, contract: dict) -> dict:
+    """Normalize one client's create_contract answer, or REFUSE naming what was missing.
+
+    One place, because three clients answer in one shape and a fourth would be free to differ
+    (rule 8). The refusal lists the keys the contract DID carry, so an operator can see the
+    spelling that arrived instead of the one expected.
+    """
+    txid = _first_present(contract, CONTRACT_TXID_KEYS)
+    script = _first_present(contract, CONTRACT_SCRIPT_KEYS)
+    if not txid or script is None:
+        raise SwapError(
+            f"{asset}: create_contract returned no txid or no redeem script. Keys present: "
+            f"{sorted(contract)}; txid looked for {CONTRACT_TXID_KEYS}, script "
+            f"{CONTRACT_SCRIPT_KEYS}"
+        )
+    script_hex = script_hex_from(script)
+    reported_vout = _first_present(contract, CONTRACT_VOUT_KEYS)
+    return {
+        "txid": str(txid),
+        "redeem_script": script_hex,
+        "p2sh_address": str(_first_present(contract, CONTRACT_ADDRESS_KEYS) or ""),
+        "reported_vout": None if reported_vout is None else int(reported_vout),
+        "script_pubkey": p2sh_script_for(bytes.fromhex(script_hex)).hex(),
+    }
+
+
 def fund_leg(step: Step, planned: PlannedLeg, secret_hash: str, client) -> dict:
     """Fund a leg whose locktime was already decided, then find its vout ON CHAIN.
 
@@ -482,49 +577,26 @@ def fund_leg(step: Step, planned: PlannedLeg, secret_hash: str, client) -> dict:
 
     The vout matters and is the defect this repository has now fixed three times -- BTC
     2026-09-25, GRC 2026-09-26 -- and it is why modules/htlc_chain_read.htlc_vout() exists.
-    Gridcoin's createhtlc returns no vout at all and funds through SendMoney(), which adds a
-    CHANGE output, so the contract sits at index 0 or 1 by coin selection. A claim aimed at
-    the wrong index spends nothing and burns a fee.
+    The clients DO return a vout, and it is kept as `reported_vout` and cross-checked rather
+    than trusted: find_vout() matches the scriptPubKey on chain, and a disagreement means the
+    funding transaction does not pay the contract the daemon described.
     """
     leg = planned.leg
     step.announce(f"fund the {leg.role} leg: {leg.amount} {leg.asset}, locktime {planned.locktime}")
 
-    contract = client.create_contract(**{
+    fields = read_contract(step, leg.asset, client.create_contract(**{
         AMOUNT_KEYWORD[leg.asset]: leg.amount,
         "participant_address": leg.participant_address,
         "refund_address": leg.refund_address,
         "locktime": planned.locktime,
         "secret_hash": secret_hash,
-    })
-    txid = str(contract.get("txid") or contract.get("transaction_id") or "")
-    script_hex = str(contract.get("redeem_script") or contract.get("redeemScript") or "")
-    step.check(f"{leg.asset} funding txid", txid[:16] + "..." if txid else None,
-               "a txid", bool(txid))
-    if not txid or not script_hex:
-        raise SwapError(
-            f"{leg.asset}: create_contract returned no txid or no redeem script. Keys present: "
-            f"{sorted(contract)}"
-        )
-
-    # THE P2SH ADDRESS IS DERIVED WHEN THE CLIENT DOES NOT RETURN ONE, rather than printed
-    # empty. The operator's 2026-09-27 run printed the bare line
-    #
-    #     BTC contract at
-    #
-    # with nothing after it, because BTCClient's create_contract returns no `p2sh_address`
-    # key -- so `contract.get(...) or ""` produced the empty string and it was printed as if
-    # it were an answer. Rule 14: a blank gap cannot be told from a value that broke.
-    #
-    # It is DERIVED rather than reported as missing because the redeem script the daemon just
-    # returned determines it completely -- p2sh_script_for() is the same function find_vout()
-    # already uses to locate the output on chain. A client that DOES return one is checked
-    # against the derivation instead of trusted, because a mismatch means the daemon funded a
-    # contract other than the one it described, which is a refusal and not a cosmetic note.
-    derived = p2sh_script_for(bytes.fromhex(script_hex)).hex()
-    reported = str(contract.get("p2sh_address") or contract.get("address") or "")
-    step.say(f"{leg.asset} contract scriptPubKey {derived}"
-             f"{f'  (client reported address {reported})' if reported else '  (client reported no address; derived from the redeem script it returned)'}")
-    return {"txid": txid, "p2sh_address": reported, "redeem_script": script_hex,
+    }))
+    step.check(f"{leg.asset} funding txid", fields["txid"][:16] + "...", "a txid",
+               bool(fields["txid"]))
+    address = fields["p2sh_address"] or "(none reported; derived below)"
+    step.say(f"{leg.asset} contract at {address}, scriptPubKey {fields['script_pubkey']}")
+    return {"txid": fields["txid"], "p2sh_address": fields["p2sh_address"],
+            "redeem_script": fields["redeem_script"], "reported_vout": fields["reported_vout"],
             "locktime": planned.locktime, "tip": planned.tip}
 
 
