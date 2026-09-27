@@ -312,6 +312,23 @@ def wait_for_wallet(console: Console, port: int, seconds: int = 300) -> dict:
         try:
             return rpc(port, "get_version", timeout=20)
         except VerifyError as error:
+            # A REFUSED CONNECTION IS NOT A BUSY WALLET, and retrying it is the same
+            # conflation this file keeps producing: two different failures treated as
+            # one. "Connection refused" means nothing is listening on that port -- no
+            # amount of waiting changes that -- while a TIMEOUT means something accepted
+            # the connection and has not answered, which is the busy case this function
+            # exists for.
+            #
+            # Retrying the refused case cost 300 seconds per invocation and was measured
+            # immediately: the two tests that drive main() against an unreachable port
+            # went from instant to hanging the whole suite. An operator who mistyped
+            # --port would have waited five minutes to be told nothing was there.
+            if "Connection refused" in str(error) or "refused" in str(error).lower():
+                raise VerifyError(
+                    f"nothing is listening on port {port} -- not a busy wallet, an absent one, "
+                    f"so waiting cannot help. Start a monero-wallet-rpc there, or check --port. "
+                    f"Original: {error}"
+                ) from error
             elapsed = time.monotonic() - started
             if elapsed >= seconds:
                 raise VerifyError(

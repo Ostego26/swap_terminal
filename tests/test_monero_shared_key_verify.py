@@ -526,3 +526,29 @@ def test_wait_for_wallet_retries_a_busy_wallet_and_then_gives_up_with_a_reason(m
     )
     with pytest.raises(VerifyError, match="did not answer get_version within"):
         wait_for_wallet(Console(total_steps=1), 38084, seconds=10)
+
+
+def test_a_refused_connection_is_not_retried_as_a_busy_wallet(monkeypatch):
+    """THE REGRESSION MY OWN FIX INTRODUCED, pinned.
+
+    wait_for_wallet() exists because a busy wallet times out and should be waited for.
+    Written first, it retried EVERY failure -- including "Connection refused", which
+    means nothing is listening and no amount of waiting changes that. Cost: 300 seconds
+    per invocation against a wrong port, and it took the full suite from 37 seconds to
+    275 with two failures.
+
+    Same conflation shape as the four before it: two different failures treated as one.
+    A timeout means something accepted the connection and has not answered; refused
+    means nothing is there.
+    """
+    calls = {"n": 0}
+
+    def refused(endpoint, method, params=None, timeout=120):
+        calls["n"] += 1
+        raise VerifyError("get_version on 127.0.0.1:29998: <urlopen error [Errno 111] Connection refused>")
+
+    monkeypatch.setattr(sys.modules["monero_shared_key_verify"], "rpc", refused)
+    monkeypatch.setattr(sys.modules["monero_shared_key_verify"].time, "sleep", lambda _s: None)
+    with pytest.raises(VerifyError, match="nothing is listening"):
+        wait_for_wallet(Console(total_steps=1), 29998, seconds=900)
+    assert calls["n"] == 1, f"refused must not be retried; it was tried {calls['n']} times"
