@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
+from chains.xrp_crypto_condition import preimage_from_escrow_finish, preimage_fulfillment
 from modules.htlc_spend import (
     hashlock_script_sig,
     preimage_from_scriptsig,
@@ -37,7 +38,12 @@ from modules.htlc_spend import (
 )
 from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT, SECONDS_PER_BLOCK, lock_hours_for_role
 
-from atomic_swap_xrp_grc import assert_timelock_ordering, swap_timelocks
+from atomic_swap_xrp_grc import (
+    GRC_FIRST,
+    XRP_FIRST,
+    assert_timelock_ordering,
+    swap_timelocks,
+)
 from xrp_htlc_escrow import RIPPLE_EPOCH_OFFSET_SECONDS
 
 NOW = 1_790_000_000.0      # a fixed instant; Date.now()-style drift has no place in an assertion
@@ -155,3 +161,109 @@ def test_a_hex_encoded_hash_is_refused_rather_than_never_matching():
     script_sig = hashlock_script_sig(b"\x30" + b"\x11" * 71, b"\x02" + b"\x03" * 32, secret, b"\x63")
     with pytest.raises(ValueError, match="32 bytes"):
         preimage_from_scriptsig(script_sig, hashlib.sha256(secret).hexdigest().encode())
+
+
+# ---------------------------------------------------------------------------
+# THE REVERSE DIRECTION, added 2026-09-26 after the xrp-first swap completed.
+# Both of these would be silent: the ordering one funds two legs whose expiries
+# are inverted and every transaction succeeds, and the reader one claims with
+# bytes that are not the secret.
+# ---------------------------------------------------------------------------
+
+
+def test_the_longer_lock_follows_the_ROLE_not_the_chain():
+    """Reversing the direction must move the 48 hours to the other chain.
+
+    The first version of swap_timelocks() gave XRP the initiator's hours
+    unconditionally. Running grc-first against that would have put the LONGER
+    lock on the participant's XRP leg and the shorter one on the initiator's GRC
+    leg -- expiries inverted, both legs funding fine, and the loss arriving hours
+    later. This asserts the hours swap over.
+    """
+    _, _, forward = swap_timelocks(NOW, TIP, direction=XRP_FIRST)
+    _, _, reverse = swap_timelocks(NOW, TIP, direction=GRC_FIRST)
+    assert forward["xrp_hours"] == 48 and forward["grc_hours"] == 24
+    assert reverse["xrp_hours"] == 24 and reverse["grc_hours"] == 48
+    # And the block count follows, since GRC is the initiator's leg now.
+    assert reverse["grc_blocks"] == int(48 * 3600 // SECONDS_PER_BLOCK["GRC"]) == 1920
+
+
+def test_both_directions_pass_their_own_ordering_check():
+    for direction in (XRP_FIRST, GRC_FIRST):
+        xrp_cancel_after, grc_timeout, _ = swap_timelocks(NOW, TIP, direction=direction)
+        sentence = assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW, direction=direction)
+        assert "ordering OK" in sentence
+        assert direction in sentence
+
+
+def test_the_ordering_check_is_not_hardcoded_to_GRC_expiring_first():
+    """The reverse direction's correct timelocks must FAIL the forward check.
+
+    This is the test that proves the check reads the direction rather than
+    asserting "GRC before XRP" unconditionally. grc-first's timelocks are
+    correct FOR grc-first and inverted for xrp-first, so scoring them under the
+    wrong direction has to refuse -- otherwise the check would have passed the
+    reverse direction while the expiries were the wrong way round.
+    """
+    xrp_cancel_after, grc_timeout, _ = swap_timelocks(NOW, TIP, direction=GRC_FIRST)
+    assert "ordering OK" in assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW, direction=GRC_FIRST)
+    with pytest.raises(SystemExit, match="REFUSED before funding anything"):
+        assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW, direction=XRP_FIRST)
+
+
+def test_an_unknown_direction_is_refused_rather_than_defaulted():
+    with pytest.raises(ValueError, match="unknown swap direction"):
+        swap_timelocks(NOW, TIP, direction="grc-to-xrp-ish")
+
+
+def test_the_participant_recovers_the_secret_from_an_escrow_finish():
+    """The XRPL half of the read, and the mirror of the scriptSig half.
+
+    When the XRP leg is the one CLAIMED, the secret is in the EscrowFinish's
+    Fulfillment field, not in a scriptSig. Without this reader the swap can only
+    run in one direction.
+    """
+    secret = bytes(range(32))
+    secret_hash = hashlib.sha256(secret).digest()
+    finish = {"TransactionType": "EscrowFinish", "Fulfillment": preimage_fulfillment(secret)}
+    assert preimage_from_escrow_finish(finish, secret_hash) == secret
+    # xrpl-py and rippled both nest the submitted fields under tx_json in some
+    # responses, so both shapes are read.
+    assert preimage_from_escrow_finish({"tx_json": finish}, secret_hash) == secret
+
+
+def test_a_fulfillment_for_a_different_secret_is_refused():
+    """THE HASH DECIDES HERE TOO. A well-formed fulfillment is not proof.
+
+    Anyone may submit an EscrowFinish carrying a valid fulfillment for a
+    different secret -- on a shared account two unrelated swaps do it without
+    anybody being adversarial. Claiming the other leg with the wrong 32 bytes
+    burns a fee and leaves the real secret unused while a timelock runs down.
+    """
+    ours = hashlib.sha256(bytes(range(32))).digest()
+    theirs = preimage_fulfillment(bytes(range(100, 132)))
+    assert preimage_from_escrow_finish({"Fulfillment": theirs}, ours) is None
+
+
+def test_a_cancel_or_a_plain_payment_yields_no_secret_rather_than_raising():
+    """A participant polling a ledger says "not this one" without an exception."""
+    secret_hash = hashlib.sha256(bytes(range(32))).digest()
+    assert preimage_from_escrow_finish({"TransactionType": "EscrowCancel"}, secret_hash) is None
+    assert preimage_from_escrow_finish({}, secret_hash) is None
+
+
+def test_a_malformed_fulfillment_yields_none_and_does_not_index_off_the_end():
+    """Read off a public ledger, so the bytes are untrusted input.
+
+    Truncated, non-hex, wrong tag, and a length byte claiming more than is there
+    all have to return None rather than raising -- a length an attacker controls
+    must not become an IndexError inside a swap.
+    """
+    secret_hash = hashlib.sha256(b"").digest()
+    for bad in ("", "A0", "zz", "A0FF8020" + "00" * 4, "B0028000", "A0028100"):
+        assert preimage_from_escrow_finish({"Fulfillment": bad}, secret_hash) is None
+
+
+def test_the_empty_preimage_fulfillment_round_trips():
+    """A0028000 -- the vector where every length in the encoding is different."""
+    assert preimage_from_escrow_finish({"Fulfillment": "A0028000"}, hashlib.sha256(b"").digest()) == b""

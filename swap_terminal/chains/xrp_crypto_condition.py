@@ -104,6 +104,14 @@ MAX_SHORT_FORM_LENGTH = 0x7F
 # leaving the shape the other chains' scripts expect.
 HTLC_PREIMAGE_BYTES = 32
 
+# A sha256 digest, in bytes. preimage_from_fulfillment() refuses a hash that is
+# not this length rather than never matching one.
+SHA256_DIGEST_BYTES = 32
+
+# The shortest possible fulfillment: A0 02 80 00, the empty preimage. Anything
+# shorter cannot carry two DER elements and is rejected before indexing into it.
+_MINIMUM_FULFILLMENT_BYTES = 4
+
 
 def _der(tag: int, body: bytes) -> bytes:
     """One DER element. The length is computed from the body, always."""
@@ -175,3 +183,79 @@ def condition_matches_preimage(condition: str, preimage: bytes) -> bool:
     a transaction fee to learn. Comparing here names the problem for free.
     """
     return condition.upper() == preimage_condition(preimage)
+
+
+def preimage_from_fulfillment(fulfillment: str, secret_hash: bytes) -> bytes | None:
+    """The preimage inside a PREIMAGE-SHA-256 fulfillment, or None if it is not there.
+
+    THE XRPL HALF OF AN ATOMIC SWAP'S SECRET READ, and the mirror of
+    modules/htlc_spend.preimage_from_scriptsig(). When the XRP leg is the one
+    CLAIMED -- which is the case whenever the XRP holder is the participant
+    rather than the initiator -- the secret becomes public in an EscrowFinish's
+    `Fulfillment` field, not in a scriptSig, and the counterparty reads it from
+    there to claim the other chain.
+
+    Without this, a swap can only run in the direction where the Bitcoin-style
+    chain is claimed second. The two readers together are what make the pairing
+    work in EITHER direction.
+
+    IT VERIFIES THE HASH rather than trusting the framing, for the same reason
+    the scriptSig reader hashes every push. A fulfillment is
+    `A0 <len> 80 <len> <preimage>` and this could simply slice the last bytes --
+    but the value is read off a public ledger, where anyone may submit a
+    transaction carrying a well-formed fulfillment for a DIFFERENT secret. That
+    is not even adversarial: on a shared account two unrelated swaps produce two
+    valid fulfillments, and claiming with the wrong one burns a fee and leaves
+    the real preimage unused while a timelock runs down. So the bytes are
+    extracted and then hashed, and a mismatch returns None.
+
+    Returns None rather than raising for anything malformed, absent or
+    non-matching, because a participant polling a ledger needs to say "not this
+    transaction" per attempt without an exception each time.
+    """
+    if len(secret_hash) != SHA256_DIGEST_BYTES:
+        raise ValueError(
+            f"a secret hash is {SHA256_DIGEST_BYTES} bytes and this one is {len(secret_hash)}. A hex string is "
+            "64 characters and would never match a digest, so the caller would read `the counterparty has not "
+            "revealed the preimage` off a transaction that carries it."
+        )
+    try:
+        raw = bytes.fromhex(fulfillment)
+    except ValueError:
+        return None
+    # Walk the two DER elements rather than slicing at fixed offsets: the outer
+    # and inner lengths both move with the preimage's size (the empty-preimage
+    # fulfillment is A0028000), so fixed offsets are correct for a 32-byte secret
+    # and silently wrong for anything else.
+    if len(raw) < _MINIMUM_FULFILLMENT_BYTES or raw[0] != TYPE_PREIMAGE_SHA_256:
+        return None
+    outer_length = raw[1]
+    body = raw[2:2 + outer_length]
+    if len(body) != outer_length or not body or body[0] != FIELD_FINGERPRINT_OR_PREIMAGE:
+        return None
+    inner_length = body[1]
+    preimage = body[2:2 + inner_length]
+    if len(preimage) != inner_length:
+        return None
+    if hashlib.sha256(preimage).digest() != secret_hash:
+        return None
+    return preimage
+
+
+def preimage_from_escrow_finish(transaction: dict, secret_hash: bytes) -> bytes | None:
+    """The preimage out of an EscrowFinish transaction as a ledger returns it.
+
+    Reads the `Fulfillment` field and verifies it against the commitment. A
+    transaction with no Fulfillment -- an EscrowCancel, an ordinary Payment, or
+    an EscrowFinish for a conditionless escrow -- yields None, which is the
+    ordinary case while polling and not an error.
+
+    Takes the transaction DICT rather than a client, deliberately: how the
+    caller obtained it (rippled's `tx`, a `transaction_entry`, an
+    `account_tx` row, or xrpl-py's response) is not this function's business,
+    and keeping it out means the decision can be tested without a ledger.
+    """
+    fulfillment = transaction.get("Fulfillment") or (transaction.get("tx_json") or {}).get("Fulfillment")
+    if not fulfillment:
+        return None
+    return preimage_from_fulfillment(str(fulfillment), secret_hash)

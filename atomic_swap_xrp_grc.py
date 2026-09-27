@@ -125,6 +125,46 @@ HOW TO RUN IT
     source ~/.config/swap_terminal/env.sh
     python3 atomic_swap_xrp_grc.py            # describes every step, submits nothing
     python3 atomic_swap_xrp_grc.py --run      # funds both legs and completes the swap
+    python3 atomic_swap_xrp_grc.py --run --direction grc-first   # the other way round
+
+BOTH DIRECTIONS RUN, and --direction names which chain the INITIATOR is on --
+not who wants what, because the initiator is the role the timelock policy in
+modules/htlc_timelock.py is written against, and naming it after the desire
+inverts on every reading.
+
+    xrp-first   A funds the XRP escrow, B funds the GRC HTLC, A claims the GRC
+                (publishing the secret in a scriptSig), B reads it there and
+                finishes the escrow. VERIFIED 2026-09-26, OK=15.
+    grc-first   B funds the GRC HTLC, A funds the XRP escrow, A claims the XRP
+                (publishing the secret in an EscrowFinish's Fulfillment), B
+                reads it there and claims the GRC.
+
+The reverse direction is not the same protocol with the labels swapped, and two
+things genuinely differ:
+
+  WHICH READER RECOVERS THE SECRET. Whichever leg is claimed FIRST is where the
+  secret becomes public, so xrp-first reads a Gridcoin scriptSig
+  (modules/htlc_spend.preimage_from_scriptsig) and grc-first reads an XRPL
+  Fulfillment (chains/xrp_crypto_condition.preimage_from_escrow_finish). The
+  second reader was written before the reverse direction, because without it the
+  swap simply cannot run that way. Both verify the sha256 rather than trusting
+  the framing: a well-formed fulfillment for somebody ELSE'S secret is a thing a
+  public ledger carries for free.
+
+  WHICH ACCOUNT SIGNS. In grc-first the escrow is CREATED by the XRP holder and
+  FINISHED by the GRC holder, so two XRP secrets are used in one run. submit_xrp
+  therefore takes the secret per call instead of closing over one account -- the
+  version that closed over A's secret would have signed the finish as the wrong
+  party, which the ledger answers with an invalid signature and no explanation.
+
+AND THE TIMELOCKS MOVE WITH THE ROLE, which is the part that can lose money. The
+initiator's 48 hours goes to whichever chain the initiator is on, and
+assert_timelock_ordering() reads the direction to decide which leg must expire
+first. A check hardcoded to "GRC before XRP" would have passed grc-first with the
+expiries inverted -- both legs funding, every transaction succeeding, and the
+loss arriving when a lock expired. tests/test_atomic_swap_timelocks.py scores
+grc-first's correct timelocks under the FORWARD direction and requires a refusal,
+which is what proves the check is not hardcoded.
 
 It needs two XRP faucet accounts, a Gridcoin TESTNET daemon with the HTLC RPCs
 (`gridcoinresearchd -testnet help createhtlc` must answer), and
@@ -144,6 +184,7 @@ import hashlib
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -157,10 +198,11 @@ from chains.registry import build_adapters  # noqa: E402 -- the sys.path line ab
 from chains.xrp_crypto_condition import (  # noqa: E402 -- same
     HTLC_PREIMAGE_BYTES,
     preimage_condition,
+    preimage_from_escrow_finish,
     preimage_fulfillment,
 )
 from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -- same
-from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, saved_faucet_accounts  # noqa: E402 -- same
+from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
 from config import Config  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
 from modules.htlc_spend import preimage_from_scriptsig  # noqa: E402 -- same
@@ -213,7 +255,32 @@ READ_ATTEMPTS = 30
 READ_POLL_SECONDS = 2.0
 
 
-def swap_timelocks(now_unix: float, grc_tip_height: int, *, hours_scale: float = 1.0) -> tuple[int, int, dict]:
+# WHICH CHAIN THE INITIATOR IS ON. The initiator picks the secret, funds first,
+# and takes the LONGER timelock; the participant funds second, takes the shorter
+# one, and claims last using the secret the initiator was forced to publish.
+#
+# Both directions run the same protocol. What changes is which chain is claimed
+# FIRST, and therefore which of the two preimage readers is used:
+#
+#   XRP_FIRST  the XRP leg is funded first and the GRC leg is CLAIMED first, so
+#              the secret appears in a Gridcoin scriptSig and the participant
+#              reads it with modules/htlc_spend.preimage_from_scriptsig().
+#   GRC_FIRST  the GRC leg is funded first and the XRP leg is CLAIMED first, so
+#              the secret appears in an XRPL EscrowFinish's Fulfillment and the
+#              participant reads it with
+#              chains/xrp_crypto_condition.preimage_from_escrow_finish().
+#
+# The direction names the INITIATOR's chain rather than "who wants what", because
+# the initiator is the role the timelock policy is written against
+# (modules/htlc_timelock.py) and naming it after the desire would invert on every
+# reading.
+XRP_FIRST = "xrp-first"
+GRC_FIRST = "grc-first"
+DIRECTIONS = (XRP_FIRST, GRC_FIRST)
+
+
+def swap_timelocks(now_unix: float, grc_tip_height: int, *, hours_scale: float = 1.0,
+                   direction: str = XRP_FIRST) -> tuple[int, int, dict]:
     """The two legs' timelocks, in the two chains' own clocks.
 
     Returns (xrp_cancel_after_ripple_seconds, grc_timeout_height, explanation).
@@ -240,20 +307,32 @@ def swap_timelocks(now_unix: float, grc_tip_height: int, *, hours_scale: float =
     flag that inverts the ordering, which is the one failure this file exists to
     prevent.
     """
+    if direction not in DIRECTIONS:
+        raise ValueError(f"unknown swap direction {direction!r}; expected one of {DIRECTIONS}")
     initiator_hours = lock_hours_for_role(ROLE_INITIATOR) * hours_scale
     participant_hours = lock_hours_for_role(ROLE_PARTICIPANT) * hours_scale
-    xrp_cancel_after = ripple_time(now_unix + initiator_hours * SECONDS_PER_HOUR)
-    grc_blocks = int(participant_hours * SECONDS_PER_HOUR // SECONDS_PER_BLOCK["GRC"])
+    # THE HOURS FOLLOW THE ROLE, NOT THE CHAIN. Whichever chain the initiator is
+    # on gets the longer lock. Hardcoding 48 to XRP is how the reverse direction
+    # would fund two legs whose expiries are the wrong way round -- both
+    # transactions succeeding, and the loss arriving when a timelock expires.
+    xrp_hours = initiator_hours if direction == XRP_FIRST else participant_hours
+    grc_hours = participant_hours if direction == XRP_FIRST else initiator_hours
+    xrp_cancel_after = ripple_time(now_unix + xrp_hours * SECONDS_PER_HOUR)
+    grc_blocks = int(grc_hours * SECONDS_PER_HOUR // SECONDS_PER_BLOCK["GRC"])
     grc_timeout = grc_tip_height + grc_blocks
     return xrp_cancel_after, grc_timeout, {
+        "direction": direction,
         "initiator_hours": initiator_hours,
         "participant_hours": participant_hours,
+        "xrp_hours": xrp_hours,
+        "grc_hours": grc_hours,
         "grc_blocks": grc_blocks,
         "grc_seconds_per_block": SECONDS_PER_BLOCK["GRC"],
     }
 
 
-def assert_timelock_ordering(xrp_cancel_after: int, grc_timeout_height: int, grc_tip: int, now_unix: float) -> str:
+def assert_timelock_ordering(xrp_cancel_after: int, grc_timeout_height: int, grc_tip: int, now_unix: float,
+                            *, direction: str = XRP_FIRST) -> str:
     """Refuse to fund anything unless B's leg expires strictly before A's.
 
     THE ONLY CHECK HERE THAT CAN PREVENT A LOSS, so it runs before either leg is
@@ -272,20 +351,34 @@ def assert_timelock_ordering(xrp_cancel_after: int, grc_timeout_height: int, grc
     """
     xrp_expiry_unix = xrp_cancel_after + RIPPLE_EPOCH_OFFSET_SECONDS
     grc_expiry_unix = now_unix + (grc_timeout_height - grc_tip) * SECONDS_PER_BLOCK["GRC"]
-    margin_seconds = xrp_expiry_unix - grc_expiry_unix
+    # THE PARTICIPANT'S LEG IS THE ONE THAT MUST EXPIRE FIRST, whichever chain
+    # that is. In XRP_FIRST the initiator is on XRP, so the GRC leg is the
+    # participant's; in GRC_FIRST it is the other way round. Asserting "GRC
+    # before XRP" unconditionally would pass the reverse direction while the
+    # expiries were inverted, which is the one failure this function exists for.
+    if direction == XRP_FIRST:
+        initiator_expiry, participant_expiry = xrp_expiry_unix, grc_expiry_unix
+        initiator_leg, participant_leg = "XRP", "GRC"
+    else:
+        initiator_expiry, participant_expiry = grc_expiry_unix, xrp_expiry_unix
+        initiator_leg, participant_leg = "GRC", "XRP"
+    margin_seconds = initiator_expiry - participant_expiry
     if margin_seconds <= 0:
         raise SystemExit(
-            "REFUSED before funding anything: the participant's GRC leg would expire at or after the "
-            f"initiator's XRP leg (GRC in {format_duration(grc_expiry_unix - now_unix)}, XRP in "
-            f"{format_duration(xrp_expiry_unix - now_unix)}). In that order the initiator can take the GRC and "
-            "then refund the XRP, and the participant has no recovery. Nothing was submitted."
+            f"REFUSED before funding anything: the participant's {participant_leg} leg would expire at or after "
+            f"the initiator's {initiator_leg} leg ({participant_leg} in "
+            f"{format_duration(participant_expiry - now_unix)}, {initiator_leg} in "
+            f"{format_duration(initiator_expiry - now_unix)}). In that order the initiator can take the "
+            f"participant's coins and then refund its own, and the participant has no recovery. Nothing was "
+            "submitted."
         )
     return (
-        f"timelock ordering OK: the GRC leg expires in {format_duration(grc_expiry_unix - now_unix)} "
-        f"(height {grc_timeout_height}, {grc_timeout_height - grc_tip} blocks at an ESTIMATED "
-        f"{SECONDS_PER_BLOCK['GRC']}s), the XRP leg in {format_duration(xrp_expiry_unix - now_unix)} "
-        f"(CancelAfter {xrp_cancel_after}), a margin of {format_duration(margin_seconds)} in the participant's "
-        "favour. The GRC figure rests on a target interval, not a guarantee."
+        f"timelock ordering OK ({direction}): the participant's {participant_leg} leg expires in "
+        f"{format_duration(participant_expiry - now_unix)}, the initiator's {initiator_leg} leg in "
+        f"{format_duration(initiator_expiry - now_unix)}, a margin of {format_duration(margin_seconds)} in the "
+        f"participant's favour. GRC is height {grc_timeout_height} ({grc_timeout_height - grc_tip} blocks at an "
+        f"ESTIMATED {SECONDS_PER_BLOCK['GRC']}s, a target interval and not a guarantee); XRP is CancelAfter "
+        f"{xrp_cancel_after}."
     )
 
 
@@ -409,13 +502,359 @@ def htlc_vout(adapter, txid: str, p2sh_script_hex: str) -> tuple[int | None, str
     return None, "; ".join(reasons) or "no route answered"
 
 
-def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is the swap's SEQUENCE, and every decision in it is extracted -- the timelocks and their ordering above, the preimage read in modules/htlc_spend, the condition in chains/xrp_crypto_condition, the payloads in xrp_htlc_escrow. What is left is the order of five acts on two chains, which is what rule 10 says a file at the root is for. Splitting it would put the order somewhere other than the file named after the thing being done, and the order IS the protocol.
+@dataclass
+class SwapContext:
+    """Everything steps 5 to 9 need, on either chain, in either direction.
+
+    A context object rather than fifteen parameters, and for the reason
+    regtest/steps.py's Run gives: a stage that takes (console, adapters, secret,
+    hash, condition, four addresses, two timelocks, a passphrase, a submitter) is
+    orchestration carrying its context by hand, and CLAUDE.md rule 12 says the
+    fix for an argument-count finding is to extract, never to suppress the count.
+
+    The two direction runners take exactly this and nothing else, which is what
+    makes them comparable side by side -- the only thing that differs between
+    them is the ORDER of the same five acts and which preimage reader is used.
+    """
+
+    console: Console
+    grc: object
+    submit_xrp: object
+    secret: bytes
+    secret_hash: bytes
+    condition: str
+    a_xrp: str
+    a_xrp_secret: str
+    b_xrp: str
+    b_xrp_secret: str
+    a_grc: str
+    b_grc: str
+    grc_timeout: int
+    xrp_cancel_after: int
+    passphrase: str
+
+
+def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- checked: this is the protocol's ORDER, five acts across two chains, and every decision inside it is extracted (the timelocks above, the preimage read in modules/htlc_spend, the payloads in xrp_htlc_escrow, the vout lookup in htlc_vout). Rule 10 puts the order in the file named after the thing being done; splitting it would hide the sequence, and the sequence IS the security property.
+    """A funds XRP first, B funds GRC, A claims GRC, B reads the scriptSig, B claims XRP.
+
+    THE DIRECTION THAT RAN ON 2026-09-26 (OK=15) -- see the module header for the
+    txids. Returns True when the swap completed.
+    """
+    ctx.console.step(5, f"A funds the XRP leg: {XRP_DROPS} drops to B, hashlocked and timelocked")
+    b_before = balance_drops(ctx.b_xrp)
+    created = ctx.submit_xrp(escrow_create_tx(ctx.a_xrp, ctx.b_xrp, XRP_DROPS, ctx.condition,
+                                          ctx.xrp_cancel_after), ctx.a_xrp_secret)
+    if not ctx.console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
+                         engine_result(created) == "tesSUCCESS"):
+        return False
+    escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
+    wait_validated(ctx.console, (created.get("tx_json") or {}).get("hash", ""))
+    ctx.console.say(f"OfferSequence={escrow_sequence} -- how the finish in step 9 names this escrow")
+
+    # LAZY, and PLC0415 is suppressed for one checked reason written here rather
+    # than on the line: the dry run must not touch the unlock path at all, and a
+    # module-scope import would run gridcoin_wallet_lock's environment read on
+    # every invocation including --help. The reason lives above the import
+    # because the sorter re-wraps a long trailing comment and detaches it from
+    # the line it is about, which is how a suppression's justification drifts.
+    from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
+    from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415 -- checked: only the --run path needs it
+
+    ctx.console.step(6, f"B funds the GRC leg: {GRC_AMOUNT} GRC, same hash, expiring FIRST")
+    ctx.console.say("BOTH createhtlc AND claimhtlc need the wallet FULLY unlocked -- Gridcoin's htlc.cpp calls "
+                "EnsureWalletIsUnlocked() in each, and createhtlc also SENDS. So steps 6 and 7 run inside ONE "
+                "unlock, which walletlocks first and therefore clears a staking-only unlock (rpc -13, measured "
+                "on the operator's wallet 2026-09-26: `Wallet is unlocked for staking only.`).")
+    htlc = None
+    claim_txid = None
+    grc_vout = None
+    try:
+        with unlocked_for_payout(ctx.grc, ctx.passphrase):
+            htlc = ctx.grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(), ctx.grc_timeout, float(GRC_AMOUNT))
+            funding_txid = htlc.get("txid")
+            # THE KEYS ARE snake_case, read from src/rpc/htlc.cpp rather than
+            # guessed: p2sh_address, redeem_script, sender_pubkey,
+            # receiver_pubkey, hash, timeout, txid. An earlier version read
+            # `address` and `redeemScript` and printed p2sh=None on a successful
+            # call, which is rule 14's defect -- an instrument reporting less
+            # than the run established.
+            p2sh_address = htlc.get("p2sh_address")
+            redeem_script_hex = htlc.get("redeem_script")
+            ctx.console.check("GRC leg funded", f"p2sh={p2sh_address} txid={funding_txid}", "a funded HTLC",
+                          bool(funding_txid))
+            ctx.console.say(f"GRC redeem script={redeem_script_hex}")
+            if not funding_txid or not redeem_script_hex:
+                raise RuntimeError(
+                    f"createhtlc answered without a txid or a redeem_script (keys: {sorted(htlc)}). Nothing "
+                    "can be claimed from that, and nothing was."
+                )
+            expected_script = p2sh_script_for(bytes.fromhex(redeem_script_hex)).hex()
+            grc_vout, how = htlc_vout(ctx.grc, funding_txid, expected_script)
+            ctx.console.check("the HTLC's output index, located not assumed", grc_vout, "an output paying "
+                          f"{expected_script}", grc_vout is not None)
+            ctx.console.say(f"vout lookup: {how}")
+            if grc_vout is None:
+                raise RuntimeError(
+                    "the funding transaction's HTLC output could not be located, and claiming a GUESSED index "
+                    "would spend whichever output happened to be there -- createhtlc funds through SendMoney, "
+                    "which adds a change output, so index 0 is as likely to be the change. Nothing was claimed."
+                )
+
+            ctx.console.step(7, "A claims the GRC with the ctx.secret -- which PUBLISHES it")
+            ctx.console.say("this is the irreversible step for A: claiming requires pushing the ctx.secret into a "
+                        "scriptSig that lands in a block. A cannot take the GRC without giving B what B needs.")
+            claim = ctx.grc.call("claimhtlc", funding_txid, grc_vout, ctx.secret.hex(), ctx.a_grc)
+            claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
+            ctx.console.check("A claimed the GRC", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
+    except Exception as error:  # noqa: BLE001 -- checked: createhtlc and claimhtlc each refuse for several named reasons (a staking-only or locked wallet, a pubkey not in the wallet, insufficient funds, a wrong preimage, a script failure) and the unlock/restore can fail on its own. It is reported rather than raised because the XRP leg is ALREADY FUNDED here, and which recovery line applies depends on how far the block got -- an operator needs that sentence, not a traceback. The unlock context restores the wallet on the way out regardless.
+        ctx.console.check("the GRC leg", f"{type(error).__name__}: {error}",
+                      "a funded HTLC, its output located, and a claim", False)
+        if claim_txid:
+            ctx.console.say(f"the claim went out as {claim_txid} -- the ctx.secret IS public. B must finish the escrow "
+                        f"with it; read the ctx.secret out of that transaction. Do not let the escrow expire.")
+        elif htlc and htlc.get("txid"):
+            ctx.console.say(f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The ctx.secret has NOT been published, so "
+                        f"nobody can finish the escrow: B recovers the GRC at height {ctx.grc_timeout} and A "
+                        f"recovers the XRP at CancelAfter {ctx.xrp_cancel_after}. Do NOT publish the ctx.secret.")
+        else:
+            ctx.console.say(f"THE XRP LEG IS FUNDED AND THE GRC LEG IS NOT. Nothing is lost: nobody has the ctx.secret, "
+                        f"so nobody can finish the escrow, and it returns to A at CancelAfter "
+                        f"{ctx.xrp_cancel_after}. Do NOT publish the ctx.secret.")
+        return False
+
+    ctx.console.step(8, "B reads the ctx.secret OFF THE GRIDCOIN CHAIN -- never from A")
+    ctx.console.say("this is the step that makes the swap atomic. B does not ask A for anything, and A cannot "
+                "refuse: the ctx.secret is in A's own claim transaction.")
+    revealed = None
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        script_sig_hex, reasons = claim_scriptsig_hex(ctx.grc, claim_txid)
+        if script_sig_hex:
+            revealed = preimage_from_scriptsig(bytes.fromhex(script_sig_hex), ctx.secret_hash)
+            if revealed is not None:
+                ctx.console.say(f"attempt {attempt}: read the claim's scriptSig ({len(script_sig_hex) // 2} bytes) and "
+                            f"one of its pushes hashes to the commitment")
+                break
+            # READ BUT NO MATCH is a different answer from COULD NOT READ, and
+            # the two must not print the same line (rule 14). This one means the
+            # transaction is there and does not carry the preimage.
+            ctx.console.say(f"attempt {attempt}: read the scriptSig, but NO push hashes to the commitment -- this is "
+                        f"not a claim of this contract")
+        else:
+            ctx.console.say(f"attempt {attempt}: could not read the claim yet ({'; '.join(reasons) or '(none)'})")
+        time.sleep(READ_POLL_SECONDS)
+    if not ctx.console.check("the ctx.secret was recovered from the chain", "yes" if revealed else None,
+                         "a push whose sha256 matches the commitment", revealed is not None):
+        ctx.console.say(f"B cannot finish the escrow without it and recovers the GRC at height {ctx.grc_timeout}... "
+                    f"except that A HAS ALREADY CLAIMED the GRC. Read {claim_txid} by hand; the ctx.secret is in it.")
+        return False
+    # THE ASSERTION THAT THE READ IS REAL. `revealed` came from the chain and
+    # `ctx.secret` from memory, and they must be equal -- if this file ever finished
+    # the escrow using `ctx.secret` directly it would still WORK here, while proving
+    # nothing about atomicity, because a real B has no `ctx.secret` variable.
+    ctx.console.check("what the chain gave B equals what A committed to", revealed == ctx.secret, "True", revealed == ctx.secret)
+
+    ctx.console.step(9, "B finishes the XRP escrow with the ctx.secret it read")
+    fulfillment = preimage_fulfillment(revealed)
+    fee = finish_fee_drops(fulfillment)
+    finished = ctx.submit_xrp(escrow_finish_tx(ctx.a_xrp, ctx.a_xrp, escrow_sequence,
+                                              condition=ctx.condition, fulfillment=fulfillment, fee=fee),
+                              ctx.a_xrp_secret)
+    if ctx.console.check("XRP leg claimed", describe_result(finished), "tesSUCCESS",
+                     engine_result(finished) == "tesSUCCESS"):
+        wait_validated(ctx.console, (finished.get("tx_json") or {}).get("hash", ""))
+        b_after = balance_drops(ctx.b_xrp)
+        # THE BALANCES, not the engine results. Two tesSUCCESS codes say two
+        # transactions applied; the balances say the swap happened.
+        ctx.console.check("B's XRP balance rose by the escrowed amount",
+                      f"{b_before} -> {b_after} drops (+{b_after - b_before})", f"+{XRP_DROPS}",
+                      b_after - b_before == XRP_DROPS)
+
+    ctx.console.banner("WHAT CHANGED HANDS")
+    ctx.console.say(f"GRC: {GRC_AMOUNT} from B's wallet to {ctx.a_grc}, claimed with the ctx.secret (txid {claim_txid})")
+    ctx.console.say(f"XRP: {XRP_DROPS} drops from {ctx.a_xrp} to {ctx.b_xrp}, released by the same ctx.secret")
+    ctx.console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
+    return False
+    return True
+
+
+def run_grc_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: same as run_xrp_first, and the two are deliberately parallel so a reader can diff them. The decisions are extracted; what is left is the order.
+    """B funds GRC first, A funds XRP, B claims XRP, A reads the Fulfillment, A claims GRC.
+
+    THE REVERSE DIRECTION, and it is not a mirror of the other one for free. Two
+    things genuinely change:
+
+      WHICH LEG IS CLAIMED FIRST. Here the initiator is on Gridcoin, so the
+      initiator claims the XRP escrow -- and an EscrowFinish carries the secret
+      in its `Fulfillment` field rather than in a scriptSig. The participant
+      therefore reads it with
+      chains/xrp_crypto_condition.preimage_from_escrow_finish(), the mirror of
+      modules/htlc_spend.preimage_from_scriptsig(). Without that reader this
+      direction cannot exist, which is why it was written before this function.
+
+      WHO SIGNS WHAT ON XRPL. The escrow is CREATED by the XRP holder and
+      FINISHED by the GRC holder, so two different XRP secrets are used in one
+      run -- unlike the other direction, where one account both created and
+      finished. An EscrowFinish may be submitted by anyone, but submitting it as
+      the claimer is what makes the roles legible on the ledger.
+
+    The GRC wallet is unlocked TWICE here, in two separate windows (createhtlc at
+    step 5, claimhtlc at step 9), because XRPL calls happen in between. The other
+    direction unlocks once because its two Gridcoin calls are adjacent.
+
+    Returns True when the swap completed.
+    """
+    console, grc = ctx.console, ctx.grc
+    # LAZY for the reason the other runner documents: the dry run must not touch
+    # the unlock path, and a module-scope import would read the environment on
+    # every invocation including --help.
+    from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
+    from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415
+
+    console.step(5, f"B funds the GRC leg FIRST: {GRC_AMOUNT} GRC, hashlocked, expiring LAST")
+    console.say("the initiator funds first and takes the LONGER lock. Here that is the Gridcoin side, so the "
+                "GRC timeout is the one that outlives the XRP escrow -- the reverse of the other direction.")
+    funding_txid = None
+    grc_vout = None
+    expected_script = ""
+    try:
+        with unlocked_for_payout(grc, ctx.passphrase):
+            htlc = grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(),
+                            ctx.grc_timeout, float(GRC_AMOUNT))
+            funding_txid = htlc.get("txid")
+            redeem_script_hex = htlc.get("redeem_script")
+            console.check("GRC leg funded", f"p2sh={htlc.get('p2sh_address')} txid={funding_txid}",
+                          "a funded HTLC", bool(funding_txid))
+            console.say(f"GRC redeem script={redeem_script_hex}")
+            if not funding_txid or not redeem_script_hex:
+                raise RuntimeError(
+                    f"createhtlc answered without a txid or a redeem_script (keys: {sorted(htlc)}). Nothing was "
+                    "funded on the XRP side yet, so nothing is at risk."
+                )
+            expected_script = p2sh_script_for(bytes.fromhex(redeem_script_hex)).hex()
+            grc_vout, how = htlc_vout(grc, funding_txid, expected_script)
+            console.check("the HTLC's output index, located not assumed", grc_vout,
+                          f"an output paying {expected_script}", grc_vout is not None)
+            console.say(f"vout lookup: {how}")
+            if grc_vout is None:
+                raise RuntimeError(
+                    "the HTLC output could not be located, and a guessed index would spend whichever output "
+                    "happened to be there -- createhtlc funds through SendMoney, which adds change. Nothing "
+                    "else was submitted."
+                )
+    except Exception as error:  # noqa: BLE001 -- checked: createhtlc and the unlock each refuse for named reasons and the message says which. Reported rather than raised because this is the FIRST leg: nothing else is funded, so the recovery line is short and the operator needs it rather than a traceback. The unlock context restores the wallet on the way out.
+        console.check("the GRC leg", f"{type(error).__name__}: {error}", "a funded HTLC with its output located",
+                      False)
+        console.say("NOTHING ELSE WAS SUBMITTED. If the createhtlc transaction did go out, B recovers the GRC at "
+                    f"height {ctx.grc_timeout}; no XRP was escrowed and the secret was never published.")
+        return False
+
+    console.step(6, f"A funds the XRP leg: {XRP_DROPS} drops to B's counterparty, expiring FIRST")
+    a_before = balance_drops(ctx.a_xrp)
+    created = ctx.submit_xrp(escrow_create_tx(ctx.b_xrp, ctx.a_xrp, XRP_DROPS, ctx.condition,
+                                              ctx.xrp_cancel_after), ctx.b_xrp_secret)
+    if not console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
+                         engine_result(created) == "tesSUCCESS"):
+        console.say(f"the GRC leg IS funded ({funding_txid}) and the XRP leg is not. Nobody has the secret, so "
+                    f"nobody can claim the GRC: it returns to B at height {ctx.grc_timeout}. Do NOT publish the "
+                    f"secret.")
+        return False
+    escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
+    escrow_owner = ctx.b_xrp
+    wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
+    console.say(f"OfferSequence={escrow_sequence}, Owner={escrow_owner} -- how the finish below names this escrow")
+
+    console.step(7, "A claims the XRP with the secret -- which PUBLISHES it in the Fulfillment")
+    console.say("the irreversible step for the initiator: an EscrowFinish carries the fulfillment, and the "
+                "fulfillment contains the preimage. A cannot take the XRP without giving B what B needs.")
+    fulfillment = preimage_fulfillment(ctx.secret)
+    fee = finish_fee_drops(fulfillment)
+    # SUBMITTED AS THE CLAIMER, with Owner still the account that created the
+    # escrow. Anyone may submit an EscrowFinish; doing it as A is what makes the
+    # roles readable on the ledger, and it is the only place in this file where
+    # two different XRP secrets are used in one run.
+    finished = ctx.submit_xrp(escrow_finish_tx(ctx.a_xrp, escrow_owner, escrow_sequence,
+                                               condition=ctx.condition, fulfillment=fulfillment, fee=fee),
+                              ctx.a_xrp_secret)
+    if not console.check("A claimed the XRP", describe_result(finished), "tesSUCCESS",
+                         engine_result(finished) == "tesSUCCESS"):
+        console.say("BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret was NOT published, so nobody can "
+                    f"claim either: A recovers the XRP at CancelAfter {ctx.xrp_cancel_after} and B recovers the "
+                    f"GRC at height {ctx.grc_timeout}. Do NOT publish the secret.")
+        return False
+    finish_hash = (finished.get("tx_json") or {}).get("hash", "")
+    validated = wait_validated(console, finish_hash)
+    a_after = balance_drops(ctx.a_xrp)
+    console.check("A's XRP balance rose by the escrowed amount",
+                  f"{a_before} -> {a_after} drops (+{a_after - a_before})", f"+{XRP_DROPS}",
+                  a_after - a_before == XRP_DROPS)
+
+    console.step(8, "B reads the secret OFF THE XRP LEDGER -- out of A's own EscrowFinish")
+    console.say("B does not ask A for anything. The fulfillment is a field of the transaction A just submitted, "
+                "and it is public the moment that transaction validates.")
+    revealed = None
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        source = validated if attempt == 1 and validated else None
+        if source is None:
+            try:
+                source = rpc("tx", {"transaction": finish_hash})
+            except Exception as error:  # noqa: BLE001 -- checked: a `tx` lookup can fail transiently right after submission, and a poll that died on the first miss would fail a swap proceeding correctly. The reason is printed each attempt and the failure below is the loop running out.
+                console.say(f"attempt {attempt}: could not read the finish yet ({type(error).__name__})")
+                time.sleep(READ_POLL_SECONDS)
+                continue
+        revealed = preimage_from_escrow_finish(source, ctx.secret_hash)
+        if revealed is not None:
+            console.say(f"attempt {attempt}: read the Fulfillment off the ledger and it hashes to the commitment")
+            break
+        # READ BUT NO MATCH is a different answer from COULD NOT READ (rule 14).
+        console.say(f"attempt {attempt}: read the transaction, but its Fulfillment does not hash to the "
+                    f"commitment -- this is not a finish of this escrow")
+        time.sleep(READ_POLL_SECONDS)
+    if not console.check("the secret was recovered from the XRP ledger", "yes" if revealed else None,
+                         "a Fulfillment whose sha256 matches the commitment", revealed is not None):
+        console.say(f"B cannot claim the GRC without it and the GRC returns to B at height {ctx.grc_timeout} -- "
+                    f"except that A HAS ALREADY TAKEN THE XRP. Read {finish_hash} by hand; the secret is in its "
+                    f"Fulfillment field.")
+        return False
+    # The same assertion the other direction makes: `revealed` came from the
+    # ledger and `secret` from memory. A version that claimed with `secret`
+    # directly would work here and prove nothing, because a real B has no such
+    # variable.
+    console.check("what the ledger gave B equals what A committed to", revealed == ctx.secret, "True",
+                  revealed == ctx.secret)
+
+    console.step(9, "B claims the GRC with the secret it read")
+    claim_txid = None
+    try:
+        with unlocked_for_payout(grc, ctx.passphrase):
+            claim = grc.call("claimhtlc", funding_txid, grc_vout, revealed.hex(), ctx.a_grc)
+            claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
+    except Exception as error:  # noqa: BLE001 -- checked: claimhtlc refuses on a wrong preimage, a missing key or a script failure, and the unlock can fail separately. Reported because A already has the XRP at this point, so the operator needs to know the GRC is still claimable with a secret that is now public rather than getting a traceback.
+        console.check("B claimed the GRC", f"{type(error).__name__}: {error}", "a broadcast txid", False)
+        console.say(f"A HAS THE XRP AND B HAS NOT CLAIMED THE GRC. The secret is PUBLIC (in {finish_hash}), so "
+                    f"the claim can be retried by hand before height {ctx.grc_timeout}, after which the GRC "
+                    f"returns to B anyway.")
+        return False
+    console.check("B claimed the GRC", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
+
+    console.banner("WHAT CHANGED HANDS")
+    console.say(f"XRP: {XRP_DROPS} drops from {ctx.b_xrp} to {ctx.a_xrp}, claimed with the secret ({finish_hash})")
+    console.say(f"GRC: {GRC_AMOUNT} from B's wallet to {ctx.a_grc}, released by the same secret (txid {claim_txid})")
+    console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
+    return True
+
+
+def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap's SEQUENCE, and every decision in it is extracted -- the timelocks and their ordering above, the preimage read in modules/htlc_spend, the condition in chains/xrp_crypto_condition, the payloads in xrp_htlc_escrow. What is left is the order of five acts on two chains, which is what rule 10 says a file at the root is for. Splitting it would put the order somewhere other than the file named after the thing being done, and the order IS the protocol.
     parser = argparse.ArgumentParser(
         description="A real atomic swap: XRP on the XRPL testnet against GRC on the Gridcoin testnet, "
                     "interlocked by one sha256 preimage. Testnet only, structurally.",
     )
     parser.add_argument("--run", action="store_true",
                         help="actually submit. Without it every step is described and nothing is sent")
+    parser.add_argument("--direction", choices=DIRECTIONS, default=XRP_FIRST,
+                        help=f"which chain the INITIATOR is on: {XRP_FIRST} (XRP funded first, GRC claimed "
+                             f"first, secret read from a Gridcoin scriptSig) or {GRC_FIRST} (GRC funded first, "
+                             f"XRP claimed first, secret read from an XRPL Fulfillment). The initiator always "
+                             f"takes the longer lock")
     parser.add_argument("--hours-scale", type=float, default=1.0,
                         help="shorten BOTH legs by this factor for a demonstration (default 1.0 = the real "
                              "48h/24h policy). It scales both, so the 2:1 ordering is preserved")
@@ -454,7 +893,7 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
     accounts = saved_faucet_accounts()
     if not console.check("XRP faucet accounts", len(accounts), f">= {XRP_ACCOUNTS_NEEDED}", len(accounts) >= XRP_ACCOUNTS_NEEDED):
         return console.summary()
-    (_, a_xrp, a_xrp_secret), (_, b_xrp, _b_secret) = accounts[0], accounts[1]
+    (_, a_xrp, a_xrp_secret), (_, b_xrp, b_xrp_secret) = accounts[0], accounts[1]
     console.say(f"A (initiator, pays XRP) = {a_xrp}")
     console.say(f"B (participant, receives XRP) = {b_xrp}")
     try:
@@ -479,16 +918,18 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
     console.step(4, "the two timelocks, in the two chains' different clocks")
     tip = int(grc.call("getblockcount"))
     now = time.time()
-    xrp_cancel_after, grc_timeout, why = swap_timelocks(now, tip, hours_scale=args.hours_scale)
+    xrp_cancel_after, grc_timeout, why = swap_timelocks(now, tip, hours_scale=args.hours_scale,
+                                                       direction=args.direction)
     console.say(f"GRC tip={tip} (a height, not a duration)")
     console.say(f"policy: initiator {why['initiator_hours']}h, participant {why['participant_hours']}h "
                 f"(scale={args.hours_scale}); GRC {why['grc_blocks']} blocks at an estimated "
                 f"{why['grc_seconds_per_block']}s")
     try:
-        console.check("timelock ordering", assert_timelock_ordering(xrp_cancel_after, grc_timeout, tip, now),
-                      "the GRC leg to expire first", True)
+        console.check("timelock ordering", assert_timelock_ordering(xrp_cancel_after, grc_timeout, tip, now,
+                                                                   direction=args.direction),
+                      "the participant's leg to expire first", True)
     except SystemExit as refusal:
-        console.check("timelock ordering", str(refusal), "the GRC leg to expire first", False)
+        console.check("timelock ordering", str(refusal), "the participant's leg to expire first", False)
         return console.summary()
 
     if not args.run:
@@ -510,143 +951,30 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 -- checked: this is 
 
     submitter = Submitter(console.say)
 
-    def submit_xrp(tx_json: dict) -> dict:
+    def submit_xrp(tx_json: dict, secret_for_this_tx: str) -> dict:
+        """One XRPL submission, signed with the secret the CALLER names.
+
+        The secret is a parameter rather than a closure over one account,
+        because the GRC_FIRST direction has the escrow CREATED by one account
+        and FINISHED by the other -- two secrets in one run. Closing over a
+        single secret worked for XRP_FIRST and would have signed the finish as
+        the wrong party here, which the ledger answers with a bare
+        `badSecret`/invalid signature rather than anything that names the cause.
+        """
         try:
-            return submitter.submit(tx_json, a_xrp_secret)
+            return submitter.submit(tx_json, secret_for_this_tx)
         except LocalSigningUnavailable as error:
             return {"error": "localSigningUnavailable", "error_message": str(error)}
-
-    console.step(5, f"A funds the XRP leg: {XRP_DROPS} drops to B, hashlocked and timelocked")
-    b_before = balance_drops(b_xrp)
-    created = submit_xrp(escrow_create_tx(a_xrp, b_xrp, XRP_DROPS, condition, xrp_cancel_after))
-    if not console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
-                         engine_result(created) == "tesSUCCESS"):
-        return console.summary()
-    escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
-    wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
-    console.say(f"OfferSequence={escrow_sequence} -- how the finish in step 9 names this escrow")
-
-    # LAZY, and PLC0415 is suppressed for one checked reason written here rather
-    # than on the line: the dry run must not touch the unlock path at all, and a
-    # module-scope import would run gridcoin_wallet_lock's environment read on
-    # every invocation including --help. The reason lives above the import
-    # because the sorter re-wraps a long trailing comment and detaches it from
-    # the line it is about, which is how a suppression's justification drifts.
-    from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
-    from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415 -- checked: only the --run path needs it
-
-    console.step(6, f"B funds the GRC leg: {GRC_AMOUNT} GRC, same hash, expiring FIRST")
-    console.say("BOTH createhtlc AND claimhtlc need the wallet FULLY unlocked -- Gridcoin's htlc.cpp calls "
-                "EnsureWalletIsUnlocked() in each, and createhtlc also SENDS. So steps 6 and 7 run inside ONE "
-                "unlock, which walletlocks first and therefore clears a staking-only unlock (rpc -13, measured "
-                "on the operator's wallet 2026-09-26: `Wallet is unlocked for staking only.`).")
-    htlc = None
-    claim_txid = None
-    grc_vout = None
-    try:
-        with unlocked_for_payout(grc, passphrase):
-            htlc = grc.call("createhtlc", a_grc, b_grc, secret_hash.hex(), grc_timeout, float(GRC_AMOUNT))
-            funding_txid = htlc.get("txid")
-            # THE KEYS ARE snake_case, read from src/rpc/htlc.cpp rather than
-            # guessed: p2sh_address, redeem_script, sender_pubkey,
-            # receiver_pubkey, hash, timeout, txid. An earlier version read
-            # `address` and `redeemScript` and printed p2sh=None on a successful
-            # call, which is rule 14's defect -- an instrument reporting less
-            # than the run established.
-            p2sh_address = htlc.get("p2sh_address")
-            redeem_script_hex = htlc.get("redeem_script")
-            console.check("GRC leg funded", f"p2sh={p2sh_address} txid={funding_txid}", "a funded HTLC",
-                          bool(funding_txid))
-            console.say(f"GRC redeem script={redeem_script_hex}")
-            if not funding_txid or not redeem_script_hex:
-                raise RuntimeError(
-                    f"createhtlc answered without a txid or a redeem_script (keys: {sorted(htlc)}). Nothing "
-                    "can be claimed from that, and nothing was."
-                )
-            expected_script = p2sh_script_for(bytes.fromhex(redeem_script_hex)).hex()
-            grc_vout, how = htlc_vout(grc, funding_txid, expected_script)
-            console.check("the HTLC's output index, located not assumed", grc_vout, "an output paying "
-                          f"{expected_script}", grc_vout is not None)
-            console.say(f"vout lookup: {how}")
-            if grc_vout is None:
-                raise RuntimeError(
-                    "the funding transaction's HTLC output could not be located, and claiming a GUESSED index "
-                    "would spend whichever output happened to be there -- createhtlc funds through SendMoney, "
-                    "which adds a change output, so index 0 is as likely to be the change. Nothing was claimed."
-                )
-
-            console.step(7, "A claims the GRC with the secret -- which PUBLISHES it")
-            console.say("this is the irreversible step for A: claiming requires pushing the secret into a "
-                        "scriptSig that lands in a block. A cannot take the GRC without giving B what B needs.")
-            claim = grc.call("claimhtlc", funding_txid, grc_vout, secret.hex(), a_grc)
-            claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
-            console.check("A claimed the GRC", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
-    except Exception as error:  # noqa: BLE001 -- checked: createhtlc and claimhtlc each refuse for several named reasons (a staking-only or locked wallet, a pubkey not in the wallet, insufficient funds, a wrong preimage, a script failure) and the unlock/restore can fail on its own. It is reported rather than raised because the XRP leg is ALREADY FUNDED here, and which recovery line applies depends on how far the block got -- an operator needs that sentence, not a traceback. The unlock context restores the wallet on the way out regardless.
-        console.check("the GRC leg", f"{type(error).__name__}: {error}",
-                      "a funded HTLC, its output located, and a claim", False)
-        if claim_txid:
-            console.say(f"the claim went out as {claim_txid} -- the secret IS public. B must finish the escrow "
-                        f"with it; read the secret out of that transaction. Do not let the escrow expire.")
-        elif htlc and htlc.get("txid"):
-            console.say(f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret has NOT been published, so "
-                        f"nobody can finish the escrow: B recovers the GRC at height {grc_timeout} and A "
-                        f"recovers the XRP at CancelAfter {xrp_cancel_after}. Do NOT publish the secret.")
-        else:
-            console.say(f"THE XRP LEG IS FUNDED AND THE GRC LEG IS NOT. Nothing is lost: nobody has the secret, "
-                        f"so nobody can finish the escrow, and it returns to A at CancelAfter "
-                        f"{xrp_cancel_after}. Do NOT publish the secret.")
-        return console.summary()
-
-    console.step(8, "B reads the secret OFF THE GRIDCOIN CHAIN -- never from A")
-    console.say("this is the step that makes the swap atomic. B does not ask A for anything, and A cannot "
-                "refuse: the secret is in A's own claim transaction.")
-    revealed = None
-    for attempt in range(1, READ_ATTEMPTS + 1):
-        script_sig_hex, reasons = claim_scriptsig_hex(grc, claim_txid)
-        if script_sig_hex:
-            revealed = preimage_from_scriptsig(bytes.fromhex(script_sig_hex), secret_hash)
-            if revealed is not None:
-                console.say(f"attempt {attempt}: read the claim's scriptSig ({len(script_sig_hex) // 2} bytes) and "
-                            f"one of its pushes hashes to the commitment")
-                break
-            # READ BUT NO MATCH is a different answer from COULD NOT READ, and
-            # the two must not print the same line (rule 14). This one means the
-            # transaction is there and does not carry the preimage.
-            console.say(f"attempt {attempt}: read the scriptSig, but NO push hashes to the commitment -- this is "
-                        f"not a claim of this contract")
-        else:
-            console.say(f"attempt {attempt}: could not read the claim yet ({'; '.join(reasons) or '(none)'})")
-        time.sleep(READ_POLL_SECONDS)
-    if not console.check("the secret was recovered from the chain", "yes" if revealed else None,
-                         "a push whose sha256 matches the commitment", revealed is not None):
-        console.say(f"B cannot finish the escrow without it and recovers the GRC at height {grc_timeout}... "
-                    f"except that A HAS ALREADY CLAIMED the GRC. Read {claim_txid} by hand; the secret is in it.")
-        return console.summary()
-    # THE ASSERTION THAT THE READ IS REAL. `revealed` came from the chain and
-    # `secret` from memory, and they must be equal -- if this file ever finished
-    # the escrow using `secret` directly it would still WORK here, while proving
-    # nothing about atomicity, because a real B has no `secret` variable.
-    console.check("what the chain gave B equals what A committed to", revealed == secret, "True", revealed == secret)
-
-    console.step(9, "B finishes the XRP escrow with the secret it read")
-    fulfillment = preimage_fulfillment(revealed)
-    fee = finish_fee_drops(fulfillment)
-    finished = submit_xrp(escrow_finish_tx(a_xrp, a_xrp, escrow_sequence,
-                                          condition=condition, fulfillment=fulfillment, fee=fee))
-    if console.check("XRP leg claimed", describe_result(finished), "tesSUCCESS",
-                     engine_result(finished) == "tesSUCCESS"):
-        wait_validated(console, (finished.get("tx_json") or {}).get("hash", ""))
-        b_after = balance_drops(b_xrp)
-        # THE BALANCES, not the engine results. Two tesSUCCESS codes say two
-        # transactions applied; the balances say the swap happened.
-        console.check("B's XRP balance rose by the escrowed amount",
-                      f"{b_before} -> {b_after} drops (+{b_after - b_before})", f"+{XRP_DROPS}",
-                      b_after - b_before == XRP_DROPS)
-
-    console.banner("WHAT CHANGED HANDS")
-    console.say(f"GRC: {GRC_AMOUNT} from B's wallet to {a_grc}, claimed with the secret (txid {claim_txid})")
-    console.say(f"XRP: {XRP_DROPS} drops from {a_xrp} to {b_xrp}, released by the same secret")
-    console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
+    ctx = SwapContext(
+        console=console, grc=grc, submit_xrp=submit_xrp,
+        secret=secret, secret_hash=secret_hash, condition=condition,
+        a_xrp=a_xrp, a_xrp_secret=a_xrp_secret, b_xrp=b_xrp, b_xrp_secret=b_xrp_secret,
+        a_grc=a_grc, b_grc=b_grc,
+        grc_timeout=grc_timeout, xrp_cancel_after=xrp_cancel_after, passphrase=passphrase,
+    )
+    runner = run_xrp_first if args.direction == XRP_FIRST else run_grc_first
+    console.say(f"direction={args.direction}: running {runner.__name__}()")
+    runner(ctx)
     return console.summary()
 
 
