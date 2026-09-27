@@ -76,11 +76,40 @@ two match. `monero_chain_check.py` answers all three in one run; see below.
 ## Getting coins
 
 These are ordinary web forms, so a browser on the operator's machine is the whole
-tool. **TRIED 2026-09-27, and only one of the three responded at all:**
+tool. **TRIED 2026-09-27, and only one of the first three responded at all:**
 
-    https://stagenet-faucet.xmr-tw.org/          the ONLY one that worked
+    https://stagenet-faucet.xmr-tw.org/          WORKED, 1 claim/day, rate limited
     https://community.rino.io/faucet/stagenet/   did not work
     https://melo.tools/faucet/stagenet           did not work
+
+FOUR MORE FOUND BY SEARCH on 2026-09-27, and the first is better than everything
+above because its limit is HOURLY rather than daily:
+
+    https://cypherfaucet.com/xmr-stagenet        0.01 sXMR once per HOUR, captcha.
+                                                 Its page reported a 1000.00 sXMR
+                                                 balance and 3,919 payouts made.
+                                                 Also runs BTC and LTC testnet
+                                                 faucets at cypherfaucet.com.
+    https://get.xmr.id/form.html                 XMR.ID's stagenet request form
+    https://monerica.com/site/stagenet-faucet    a directory entry, not a faucet --
+                                                 use it to find live ones when the
+                                                 list above has rotted
+    https://github.com/moneroexamples/monero-stagenet-services
+                                                 the community list of stagenet
+                                                 explorers, nodes and wallets; the
+                                                 place to look first in a year
+
+**NOT TRIED BY THIS SESSION.** They came from a web search, and this container's
+network policy denies every one of these hosts at the gateway, so nobody here has
+loaded any of them. That is the difference between a found URL and a working
+faucet, and rule 17 asks for it to be said rather than blurred.
+
+Also named by that search, and worth knowing for a different reason:
+`stagenet.xmrchain.net` is a stagenet block explorer. It does NOT answer the
+question this page is about -- Monero amounts and destinations are not public, so
+no explorer reports an address's balance -- but given a txid it can confirm a
+transaction exists and is in a block. The wallet remains the only thing that can
+say what arrived.
 
 The one that works answered, for the address above:
 
@@ -211,7 +240,25 @@ That last line is the safety property worth noticing: there is no way to call
 `generateblocks` against a real network, so nothing in this procedure can touch
 stagenet or mainnet state.
 
-### The procedure
+### The procedure: one command
+
+`monero_regtest.py` at the repository root does all of it. It needs `monerod` and
+`monero-wallet-rpc` on PATH and nothing else -- no faucet, no peers, no internet:
+
+    python3 monero_regtest.py                 # prints the plan, starts nothing
+    python3 monero_regtest.py --run           # daemon, wallet, 80 blocks, 1 transfer
+    python3 monero_chain_check.py --host 127.0.0.1 --port 28083
+    python3 monero_regtest.py --stop          # terminates both, asserts they are gone
+
+Ports are 28081/28080/28083 rather than Monero's real ones, deliberately: a regtest
+daemon on 18081 or 38081 is one typo away from a wallet that meant mainnet or
+stagenet. The data directory defaults to `~/xmr-regtest`, and the script REFUSES a
+`--data-dir` inside `~/.bitmonero` (where the real chains live) or inside the
+checkout.
+
+The steps it runs, and why each one is there rather than a shorter version:
+
+### The procedure, by hand
 
 Two terminals. Nothing to substitute by hand except a wallet password of your
 choosing. `--offline` is deliberate: it stops the daemon looking for peers, which
