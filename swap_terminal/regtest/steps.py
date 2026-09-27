@@ -1153,7 +1153,10 @@ def step_6_fund(run: Run, client, contract: Contract, outcome: ChainOutcome) -> 
     # used to be an unconditional _fund_directly with a line saying "no code in
     # this tree can create a contract for the refund path, because no refund
     # implementation exists to call". Both halves of that sentence are now
-    # false: refund_contract() exists on both clients, and create_contract()
+    # false: refund_contract() exists on ALL THREE clients as of 2026-09-27 -- it said
+    # "both" until GRC got one, and this harness drives BTC and LTC because it has no
+    # Gridcoin node, which is why the count in a comment here drifts from the tree --
+    # and create_contract()
     # does not care which branch will eventually spend its output -- it is the
     # same script and the same P2SH address as [A], funded a second time.
     real_b = _attempt_real_create_contract(run, client, contract)

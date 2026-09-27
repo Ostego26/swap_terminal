@@ -2112,3 +2112,81 @@ def test_a_redeem_with_no_fee_address_still_broadcasts(contract, monkeypatch):
 
     assert len(node.broadcast) == 1, "the redeem must still go out with no fee address"
     assert "sendrawtransaction" in node.methods
+
+
+# ---------------------------------------------------------------------------
+# GRC's refund, added 2026-09-27. The last hole in this package's atomicity.
+# ---------------------------------------------------------------------------
+
+
+def test_all_three_clients_can_create_redeem_AND_refund():
+    """THE ATOMICITY TRIANGLE, and GRC was missing a side until 2026-09-27.
+
+    LTC got a refund on 2026-09-26 and BTC with it. GRC could FUND a contract and REDEEM
+    one and had no way to get its own coins back. A contract that can be funded and
+    cannot be recovered is the WORST of the three states -- worse than one that cannot be
+    funded at all -- because the funding is the irreversible half.
+
+    It mattered most on the leg GRC usually is: in atomic_swap_xrp_grc.py's GRC-first
+    direction the Gridcoin leg carries the INITIATOR's longer timelock, so it is the leg
+    still locked when a counterparty walks away. That is exactly what a refund is for,
+    on the one chain that could not perform one.
+
+    Asserted as a matrix rather than three separate tests, because what matters is the
+    PARITY: a fourth client, or a fourth method, should fail this rather than be
+    discovered missing on a funded contract.
+    """
+    for client in (BTCClient, LTCClient, GRCClient):
+        for method in ("create_contract", "redeem_contract", "refund_contract"):
+            assert method in vars(client), f"{client.__name__} has no {method}"
+
+
+def test_the_grc_refund_is_keyword_only_like_its_ltc_sibling():
+    """`refund_privkey` versus the participant key is exactly the confusion positional
+    arguments create on a fund path, which is the reason LTC's is keyword-only. The two
+    are deliberately identical so a reader can diff them."""
+    for client in (LTCClient, GRCClient):
+        parameters = inspect.signature(client.refund_contract).parameters
+        for name in ("contract_txid", "contract_vout", "redeem_script", "locktime",
+                     "refund_privkey", "refund_address"):
+            assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, (
+                f"{client.__name__}.refund_contract's {name} must be keyword-only"
+            )
+
+
+def test_the_grc_refund_unlocks_the_wallet_before_it_signs():
+    """THE ONE GRC-SPECIFIC LINE, and leaving it out would fail at signing rather than
+    at a readable point.
+
+    broadcast_refund() is shared across all three chains because a refund has none of the
+    per-chain divergence a redeem has -- no platform fee, one output, one branch. What GRC
+    adds is an ENCRYPTED wallet: `signrawtransaction` needs it open. ensure_fully_unlocked()
+    is therefore called here exactly as redeem_contract() calls it, and BEFORE the output
+    lookup rather than just before signing, so a locked wallet fails at the same point on
+    both paths instead of one of them discovering it late.
+    """
+    source = inspect.getsource(GRCClient.refund_contract)
+    assert "self.ensure_fully_unlocked()" in source
+    assert 'asset="GRC"' in source
+    assert "broadcast_refund(" in source
+    # The unlock precedes the delegation, which is the ordering being pinned. Matched on
+    # `return broadcast_refund(` rather than `broadcast_refund(`: the docstring names the
+    # function too, and the first draft of this assertion compared against that mention
+    # and failed with 2389 < 2094 -- a test that looked at prose where it meant code, the
+    # same mistake made twice today in tests/test_monero_shared_key_verify.py.
+    assert source.index("self.ensure_fully_unlocked()") < source.index("return broadcast_refund(")
+
+    # And LTC deliberately does NOT unlock -- an unencrypted-by-default wallet needs no
+    # passphrase, and adding one there would be a call that can only fail.
+    assert "ensure_fully_unlocked" not in inspect.getsource(LTCClient.refund_contract)
+
+
+def test_no_platform_fee_is_charged_on_any_refund():
+    """A refund returns the funder's OWN coins after a counterparty failed to show. The
+    swap did not happen, so there is no service to charge for -- and charging one would
+    take a cut of a recovery. None of the three refunds mentions the fee at all, which is
+    asserted here rather than left as an absence nobody checks."""
+    for client in (BTCClient, LTCClient, GRCClient):
+        source = inspect.getsource(client.refund_contract)
+        assert "platform_fee" not in source, f"{client.__name__} charges a fee on a refund"
+        assert "extra_outputs" not in source, f"{client.__name__} adds an output to a refund"

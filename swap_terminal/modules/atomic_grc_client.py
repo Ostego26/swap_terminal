@@ -195,6 +195,7 @@ from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_fo
 from modules.htlc_fee import platform_fee_address, platform_fee_coin
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
+    broadcast_refund,
     build_hashlock_spend,
     describe_rpc_payload,
     lookup_contract_output,
@@ -561,6 +562,62 @@ class GRCClient:
         txid = self.rpc_call("sendrawtransaction", [spend.raw_hex])
         logger.info(f"Redeemed contract with TXID: {txid}")
         return txid
+
+
+    def refund_contract(  # noqa: PLR0913 -- checked: the six after `self` ARE the refund -- the outpoint, the script, its locktime, the refund key and where the coins go. None can be defaulted and none is derivable from another. This is the same claim, for the same six values, that LTCClient.refund_contract() carries; the two are deliberately identical so a reader can diff them, and grouping them into a Contract object is the better shape on BOTH or neither (see LTC's note).
+        self,
+        *,
+        contract_txid: str,
+        contract_vout: int,
+        redeem_script: bytes,
+        locktime: int,
+        refund_privkey: str,
+        refund_address: str,
+        contract_blockhash: str | None = None,
+    ) -> str:
+        """Spend the contract's TIMELOCK branch, returning the GRC to the refund key.
+
+        ADDED 2026-09-27, and it closes the last hole in this package's atomicity.
+        LTCClient has had a refund since 2026-09-26 and BTCClient's was added with it;
+        GRC could FUND a contract and REDEEM one and had no way to get its own coins
+        back. A contract that can be funded and cannot be recovered is the worst of the
+        three states -- worse than one that cannot be funded -- and on the GRC leg that
+        was the state.
+
+        It matters more here than on the other two chains because of which leg GRC tends
+        to be. In atomic_swap_xrp_grc.py's GRC-first direction the Gridcoin leg carries
+        the INITIATOR's longer timelock, so it is the leg that is still locked when the
+        counterparty walks away: exactly the case a refund exists for, on the one chain
+        that could not perform one.
+
+        KEYWORD-ONLY, matching LTCClient.refund_contract() rather than the positional
+        redeem_contract() beside it, and for the same reason that one gives:
+        `refund_privkey` versus the participant key is precisely the confusion positional
+        arguments create on a fund path, and there are no existing callers here forcing
+        the older convention.
+
+        THE WALLET UNLOCK IS THE ONE GRC-SPECIFIC LINE. broadcast_refund() is shared
+        across all three chains because a refund has none of the per-chain divergence a
+        redeem has -- no platform fee, one output, one branch. What GRC adds is that its
+        wallet is encrypted and `signrawtransaction` needs it open, which is why
+        ensure_fully_unlocked() is called here exactly as redeem_contract() calls it. It
+        is called BEFORE the output lookup rather than just before signing, matching the
+        redeem, so that a locked wallet fails at the same point on both paths instead of
+        one of them discovering it late.
+        """
+        logger.info(f"Refunding GRC HTLC contract with TXID {contract_txid}.")
+        self.ensure_fully_unlocked()
+        return broadcast_refund(
+            asset="GRC",
+            rpc_call=self.rpc_call,
+            contract_txid=contract_txid,
+            contract_vout=contract_vout,
+            redeem_script=redeem_script,
+            locktime=locktime,
+            refund_privkey=refund_privkey,
+            refund_address=refund_address,
+            contract_blockhash=contract_blockhash,
+        )
 
 
 # For testing purposes:
