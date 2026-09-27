@@ -92,7 +92,17 @@ const ENDPOINTS = {
 //     Transaction results in an account (0) with insufficient funds for rent
 //
 // A Solana system account must hold EITHER zero OR at least the rent-exempt
-// minimum -- about 890880 lamports for a zero-byte account. 25000 is neither,
+// minimum -- 650240 lamports for a zero-byte account as of 2026-09-27, MEASURED
+// on devnet by solana_chain_check.py (genesis EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+// wcaWoxPkrZBG, solana-core 4.3.0). This line said "about 890880" until then,
+// which was correct for years and is now wrong everywhere: 890880 is 128*6960
+// and 650240 is 128*5080, the same 128-byte account overhead with the rent rate
+// cut by SIMD-0437 step 2 (mainnet-beta 2026-09-11). Not a devnet quirk.
+//
+// The last sentence of this comment predicted exactly that and is why the
+// number was worth correcting rather than deleting: asking the cluster
+// "removes a constant that goes stale", and this constant went stale. 25000 is
+// neither zero nor the minimum under either figure,
 // so the runtime refused the whole transaction. Reserving a round number that
 // happens to be under the threshold is the same class of error as a dust
 // output on a Bitcoin chain: a value the network will not let an account sit
