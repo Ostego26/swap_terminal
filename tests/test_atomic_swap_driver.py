@@ -399,7 +399,21 @@ class _StubChain:
 
     def redeem_contract(self, txid, vout, redeem_script,  # noqa: PLR0913, PLR0917 -- checked: this signature is NOT mine to choose. It mirrors modules/atomic_{btc,ltc,grc}_client.redeem_contract(), which take the same six positionally and carry the same noqa with the same reason. A stub that grouped them into a dataclass to satisfy the ceiling would accept calls the real clients reject, which is the one thing a stub must never do -- it would make this file pass while the run path was broken.
                         secret_hex, privkey, destination):
-        self.claims.append({"txid": txid, "vout": vout, "secret_hex": secret_hex,
+        # THE TYPES ARE RECORDED, not just the values. All three clients declare
+        # `secret: bytes` and push it with push_data(); a hex STRING reaches
+        # `bytes([length]) + data` and dies with "can't concat str to bytes". That is exactly
+        # where the operator's 2026-09-27 run stopped, with both legs funded -- and the old
+        # stub accepted a str happily, because a stub that does not enforce its own signature
+        # cannot catch a caller that violates it.
+        if not isinstance(secret_hex, bytes):
+            raise TypeError(
+                f"redeem_contract's `secret` is declared bytes on all three clients; got "
+                f"{type(secret_hex).__name__}. push_data() concatenates it to bytes directly"
+            )
+        if not isinstance(redeem_script, bytes):
+            raise TypeError(f"`redeem_script` is declared bytes; got {type(redeem_script).__name__}")
+        self.claims.append({"txid": txid, "vout": vout, "secret_hex": secret_hex.hex(),
+                            "secret_bytes": secret_hex,
                             "privkey": privkey, "destination": destination})
         self.order.append(self.asset)
         return self.claim_txid

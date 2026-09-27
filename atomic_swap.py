@@ -609,9 +609,16 @@ def claim_leg(step: Step, funded_leg: FundedLeg, secret: bytes, party: Party) ->
     """
     step.announce(f"claim the {funded_leg.leg.role} leg with the secret -- this PUBLISHES it")
     vout = funded_leg.find_vout(step)
+    # `secret` GOES IN AS BYTES, NOT HEX. All three clients declare `secret: bytes` and push
+    # it straight onto the stack via push_data(), so a hex STRING reaches
+    # `bytes([length]) + data` and dies with "can't concat str to bytes" -- which is where the
+    # operator's 2026-09-27 run stopped, with both legs already funded. Passing `.hex()` here
+    # was the same mistake as reading `redeem_script` from the contract dict: an interface
+    # guessed rather than read. The types are checked against all three signatures now
+    # (atomic_{btc,ltc,grc}_client.redeem_contract): str, int, bytes, bytes, str, str.
     txid = funded_leg.client.redeem_contract(
         funded_leg.funded["txid"], vout, funded_leg.redeem_script(),
-        secret.hex(), party.privkey, party.destination,
+        secret, party.privkey, party.destination,
     )
     step.check(f"{funded_leg.asset} claim txid", str(txid)[:16] + "...", "a txid", bool(txid))
     return str(txid)
