@@ -360,7 +360,66 @@ def check_network(adapter, account_index: int) -> None:
     done(started)
 
 
-def check_transfer_fields(adapter, account_index: int) -> list[dict]:
+def incoming_transfers_findings(result: dict, total_balance: int) -> tuple[list[str], str]:
+    """Whether a missing `in` key is a DEFECT or just an empty wallet.
+
+    Returns (findings, explanation). A finding is a failure; the explanation is
+    the line to print when there is nothing wrong but also nothing confirmed,
+    because "nothing was found" and "nothing COULD be found" must not render
+    identically (rule 14).
+
+    CORRECTED 2026-09-27, on the first run of this script against a real wallet.
+    It used to call a missing `in` key a failure unconditionally:
+
+        FAIL  get_transfers returned no `in` key -- chains/monero.py reads result['in']
+
+    and it said that about a freshly created stagenet wallet, where it is the
+    EXPECTED answer: monero-wallet-rpc omits `in` entirely when there are no
+    incoming transfers rather than returning an empty list.
+
+    Three things were wrong with that, and the third is the expensive one:
+
+      IT CONTRADICTED ITSELF. The same step printed "(none) <- NOT a pass ...
+      every field name below is UNCONFIRMED" and then scored the run FAILED with
+      exit 1, when this script has an INCONCLUSIVE verdict and exit 3 for
+      precisely this case.
+
+      IT WAS STRICTER THAN THE CODE IT CHECKS. chains/monero.py reads
+      `result.get("in") or []`, which handles the absence correctly, so the
+      checker reported a defect in code that is right.
+
+      IT INVITED A BREAKING FIX. The failure line names a field and the summary
+      says "a wrong name is a one-line fix", so the obvious response is to point
+      chains/monero.py at some other key -- breaking a working adapter on the
+      strength of a diagnostic run against an empty wallet. A diagnostic that
+      argues for a wrong change is worse than one that says nothing.
+
+    THE BALANCE IS THE DISCRIMINATOR, and step 1 has already read it. A balance
+    with no `in` key IS a real name error: the transfers exist somewhere and the
+    adapter is looking in the wrong place. A zero balance with no `in` key is a
+    wallet nothing has been sent to, which confirms nothing either way.
+    """
+    if "in" in result:
+        return [], ""
+    if total_balance > 0:
+        return [
+            f"{_METHOD_GET_TRANSFERS} returned no `in` key, and yet this wallet holds "
+            f"{total_balance} atomic units. Incoming transfers must be reported under SOME key, so the one "
+            f"chains/monero.py reads -- result['in'] -- is wrong. THIS one is a real name error."
+        ], ""
+    return [], (
+        "no `in` key, and the balance is 0 -- monero-wallet-rpc omits `in` when there are no incoming "
+        "transfers, so this is EXPECTED and confirms nothing. NOT a failure: chains/monero.py reads "
+        "result.get('in') or [], which handles it. Fund the wallet and run again."
+    )
+
+
+def check_transfer_fields(adapter, account_index: int, total_balance: int = 0) -> list[dict]:
+    """Step 3, printed. Every decision it reports lives in a *_findings function:
+    incoming_transfers_findings() for the `in` key and transfer_field_report() for the
+    field names. `total_balance` comes from step 1 and is what lets an absent `in` key
+    be told apart from a wrong field name -- see incoming_transfers_findings.
+    """
     started = step(
         3, "check every transfer field name the adapter depends on",
         f"method={_METHOD_GET_TRANSFERS} in=true account_index={account_index}",
@@ -368,8 +427,12 @@ def check_transfer_fields(adapter, account_index: int) -> list[dict]:
     transfers: list[dict] = []
     try:
         result = adapter.call(_METHOD_GET_TRANSFERS, {"in": True, "account_index": account_index})
-        if "in" not in result:
-            fail(f"{_METHOD_GET_TRANSFERS} returned no `in` key -- chains/monero.py reads result['in']")
+        # The DECISION is incoming_transfers_findings(); this only reports it.
+        findings, explanation = incoming_transfers_findings(result, total_balance)
+        for finding in findings:
+            fail(finding)
+        if explanation:
+            print(f"    {explanation}", flush=True)
         transfers = result.get("in") or []
     except Exception as error:  # noqa: BLE001 -- checked: see check_balance; named, printed, counted.
         fail(f"{_METHOD_GET_TRANSFERS} failed: {error}")
@@ -450,11 +513,15 @@ def main() -> int:
     )
 
     announce(adapter, args)
-    if check_balance(adapter, args.account_index) is None:
+    balance = check_balance(adapter, args.account_index)
+    if balance is None:
         print("\nSTOPPING: nothing else can be checked without a wallet.", flush=True)
         return 1
     check_network(adapter, args.account_index)
-    transfers = check_transfer_fields(adapter, args.account_index)
+    # THE BALANCE IS PASSED IN, so step 3 can tell a legitimately-absent `in` key
+    # (an empty wallet) from a wrong field name (money present, transfers not
+    # where the adapter looks). See check_transfer_fields.
+    transfers = check_transfer_fields(adapter, args.account_index, int(balance.get("balance", 0) or 0))
     check_real_scan(adapter, transfers)
     check_derive(adapter, args.derive_address)
 

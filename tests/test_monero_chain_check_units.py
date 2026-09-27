@@ -28,6 +28,7 @@ from monero_chain_check import (
     address_findings,
     balance_findings,
     exit_code,
+    incoming_transfers_findings,
     network_banner,
     transfer_field_report,
     verdict_text,
@@ -206,3 +207,43 @@ def test_an_inconclusive_run_does_not_exit_like_a_pass():
     assert exit_code([], 4) == 0
     assert exit_code(["broken"], 4) == 1
     assert exit_code(["broken"], 0) == 1
+
+
+def test_a_missing_in_key_on_an_EMPTY_wallet_is_not_a_failure():
+    """MEASURED 2026-09-27 against a real stagenet wallet, and scored wrong.
+
+    monero-wallet-rpc omits `in` from get_transfers entirely when there are no
+    incoming transfers. The checker called that a FAILURE and exited 1, about a
+    wallet created four minutes earlier, while the same step printed "NOT a pass
+    ... every field name below is UNCONFIRMED" -- and this script has an
+    INCONCLUSIVE verdict with exit 3 for exactly that case.
+
+    The wrong exit code was not the expensive part. The failure line names a
+    field and the summary says a wrong name is a one-line fix, so the obvious
+    response was to point chains/monero.py at a different key -- breaking an
+    adapter that reads `result.get("in") or []` and handles the absence
+    correctly.
+    """
+    findings, explanation = incoming_transfers_findings({}, 0)
+    assert findings == []
+    assert "EXPECTED and confirms nothing" in explanation
+    assert "Fund the wallet and run again" in explanation
+
+
+def test_a_missing_in_key_WITH_a_balance_IS_a_failure():
+    """The discriminator, and the case the old code could not tell apart.
+
+    Money present and no `in` key means the transfers are reported under some
+    other key, so result['in'] genuinely is the wrong place to look.
+    """
+    findings, explanation = incoming_transfers_findings({}, 1_500_000_000_000)
+    assert len(findings) == 1
+    assert "real name error" in findings[0]
+    assert "1500000000000" in findings[0]
+    assert explanation == ""
+
+
+def test_an_in_key_that_is_present_yields_nothing_to_report():
+    """Present but empty is a wallet with an `in` list and no rows in it -- fine."""
+    assert incoming_transfers_findings({"in": []}, 0) == ([], "")
+    assert incoming_transfers_findings({"in": [{"txid": "ab"}]}, 9) == ([], "")
