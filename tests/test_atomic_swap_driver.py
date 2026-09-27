@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import sys
+from decimal import Decimal
 
 import pytest
 
@@ -30,6 +31,8 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: E402  path shims above
+from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT  # noqa: E402  same
 from step_console import Console  # noqa: E402  same
 
 import atomic_swap  # noqa: E402  both path shims above come first
@@ -226,3 +229,315 @@ def test_the_party_pairs_a_key_with_its_destination():
     party = Party(privkey="cWIF", destination="tb1qexample")
     assert party.privkey == "cWIF"
     assert set(Party.__dataclass_fields__) == {"privkey", "destination"}
+
+
+# ---------------------------------------------------------------------------------------
+# THE RUN PATH, WITH SEEDED CHAINS AND NO DAEMONS
+#
+# Everything above this line tests vocabulary and refusals. What follows tests the three
+# functions main() delegates its decisions to -- mint_parties, build_legs and
+# claim_both_legs -- because each of them can be WRONG IN A WAY THAT SUCCEEDS.
+#
+# The stub below is why these are behavioral rather than source-matching. Three tests
+# written earlier in this session asserted on inspect.getsource() output and PASSED while
+# the code under them was mutated: one matched a docstring sentence, one matched
+# "broadcast_refund(" inside prose, one matched a phrase that a line wrap had split. A test
+# that reads source proves the source says something. Only a test that runs the function
+# and asserts on what it DID proves the function does something, so each test below was
+# checked by breaking the thing it names and confirming it fails.
+# ---------------------------------------------------------------------------------------
+
+
+class _StubChain:
+    """One chain, answering only the RPCs the claim path actually calls.
+
+    It records every redeem_contract call in `claims`, and the two stubs share one
+    `order` list so a test can assert WHICH LEG WAS CLAIMED FIRST -- the security-relevant
+    ordering that a swap of two arguments would silently reverse.
+
+    `published` is the preimage this chain will hand back out of the claim's scriptSig. It
+    is a separate field from the secret passed in precisely so a test can make them
+    disagree, which is the one case where both legs are funded and the run must stop.
+    """
+
+    def __init__(self, asset: str, redeem_script: bytes, *, published: bytes,
+                 order: list, vout: int = 1) -> None:
+        self.asset = asset
+        self.redeem_script = redeem_script
+        self.published = published
+        self.order = order
+        self.vout = vout
+        self.claims: list[dict] = []
+        self.addresses_issued: list[str] = []
+        self.funding_txid = f"{asset.lower()}-funding-txid"
+        self.claim_txid = f"{asset.lower()}-claim-txid"
+
+    def _funding_outputs(self) -> list[dict]:
+        # The contract deliberately sits at index `vout` and NOT at 0, so a test fails if
+        # anything ever reintroduces the defaulted index this repository has fixed three
+        # times. Index 0 is a decoy paying something else.
+        outputs = [{"n": index, "scriptPubKey": {"hex": "00" * 22}} for index in range(self.vout)]
+        outputs.append({"n": self.vout,
+                        "scriptPubKey": {"hex": p2sh_script_for(self.redeem_script).hex()}})
+        return outputs
+
+    def rpc_call(self, method: str, args: list):
+        if method == "getnewaddress":
+            address = f"{self.asset}-wallet-{len(self.addresses_issued)}"
+            self.addresses_issued.append(args[0] if args else "")
+            return address
+        if method == "getrawtransaction":
+            txid = args[0]
+            if txid == self.funding_txid:
+                return {"vout": self._funding_outputs()}
+            if txid == self.claim_txid:
+                # A 32-byte push (0x20) of the preimage, which is the shape
+                # preimage_from_scriptsig scans for.
+                return {"vin": [{"scriptSig": {"hex": "20" + self.published.hex()}}]}
+            raise AssertionError(f"{self.asset}: unexpected txid {txid}")
+        raise AssertionError(f"{self.asset}: unexpected rpc {method}")
+
+    def redeem_contract(self, txid, vout, redeem_script,  # noqa: PLR0913, PLR0917 -- checked: this signature is NOT mine to choose. It mirrors modules/atomic_{btc,ltc,grc}_client.redeem_contract(), which take the same six positionally and carry the same noqa with the same reason. A stub that grouped them into a dataclass to satisfy the ceiling would accept calls the real clients reject, which is the one thing a stub must never do -- it would make this file pass while the run path was broken.
+                        secret_hex, privkey, destination):
+        self.claims.append({"txid": txid, "vout": vout, "secret_hex": secret_hex,
+                            "privkey": privkey, "destination": destination})
+        self.order.append(self.asset)
+        return self.claim_txid
+
+
+@pytest.fixture(autouse=True)
+def _no_polling_sleep(monkeypatch):
+    """read_secret_off_chain() polls with a 3-second sleep for up to 20 attempts, which is
+    right on a chain and wrong in a suite.
+
+    MEASURED, because the first mutation check of these tests is what found it: with the
+    real sleep in place, every mutation that makes the off-chain read look for the wrong
+    transaction spends 60 seconds per test in the poll loop, and five of the tests below
+    reach that path -- 300 seconds for ONE mutant, and a seven-mutant check that does not
+    finish. The polling BEHAVIOR is still exercised (the attempts still run, the reasons
+    are still collected); only the wall clock is removed, which is why this patches
+    time.sleep rather than shrinking `attempts`.
+    """
+    monkeypatch.setattr(atomic_swap.time, "sleep", lambda _seconds: None)
+
+
+def _seeded_swap(*, published: bytes | None = None):
+    """A funded two-leg swap over two stub chains: GRC out, LTC in.
+
+    Returns everything a test needs to assert on -- the console, the parties, the two
+    FundedLegs, the shared claim-order list and the secret.
+    """
+    secret = bytes(range(32))
+    console = Console(total_steps=8)
+    parties = atomic_swap.mint_parties(Step(console, 2), ("GRC", "LTC"))
+    leg_a, leg_b = atomic_swap.build_legs("GRC", "LTC", 1000, Decimal("0.05"), parties)
+
+    order: list[str] = []
+    scripts = {"GRC": bytes([0x51] * 40), "LTC": bytes([0x52] * 44)}
+    chains = {
+        asset: _StubChain(asset, scripts[asset],
+                          published=(published if published is not None else secret),
+                          order=order)
+        for asset in ("GRC", "LTC")
+    }
+    funded = {}
+    for leg in (leg_a, leg_b):
+        chain = chains[leg.asset]
+        funded[leg.asset] = FundedLeg(
+            leg,
+            {"txid": chain.funding_txid, "p2sh_address": f"2{leg.asset}", "tip": 100,
+             "redeem_script": chain.redeem_script.hex(), "locktime": 120},
+            chain,
+        )
+    return {"console": console, "parties": parties, "secret": secret, "order": order,
+            "chains": chains, "funded_a": funded["GRC"], "funded_b": funded["LTC"]}
+
+
+def test_mint_parties_makes_four_distinct_keys_and_prints_no_private_key(capsys):
+    """Four keys and not two, because each leg's two branches must hash to DIFFERENT keys
+    -- build_htlc_redeem_script() refuses a script whose branches resolve to one hash160,
+    and four distinct keys means that state cannot be constructed here at all.
+
+    The second assertion is the one that matters more than it looks: the WIFs exist in this
+    process and nothing may print them. swap_terminal's own rules forbid reading a key back
+    at all, and a debug line that echoes a party would put a spending key into the terminal
+    scrollback an operator pastes around."""
+    console = Console(total_steps=8)
+    parties = atomic_swap.mint_parties(Step(console, 2), ("GRC", "LTC"))
+
+    assert set(parties) == {("GRC", ROLE_INITIATOR), ("GRC", ROLE_PARTICIPANT),
+                            ("LTC", ROLE_INITIATOR), ("LTC", ROLE_PARTICIPANT)}
+    assert len({key.address for key in parties.values()}) == 4
+
+    printed = capsys.readouterr().out
+    assert parties[("GRC", ROLE_INITIATOR)].address in printed, (
+        "the addresses ARE printed, so this test is reading the right stream"
+    )
+    for key in parties.values():
+        assert key.wif not in printed
+
+
+def test_build_legs_inverts_the_roles_between_the_two_legs():
+    """THE INVERSION, asserted on the addresses rather than on the source.
+
+    Leg A (the --from asset, the initiator's) has its hashlock branch naming the
+    PARTICIPANT's key and its refund branch the initiator's own. Leg B inverts both,
+    because the initiator is the party who claims leg B with the secret.
+
+    Getting this backwards builds two contracts each claimable only by whoever funded it:
+    two self-payments that both report success. build_htlc_redeem_script() cannot catch it,
+    because a consistently swapped script is perfectly well formed -- so this assertion is
+    the only thing standing between that bug and a run."""
+    console = Console(total_steps=8)
+    parties = atomic_swap.mint_parties(Step(console, 2), ("GRC", "LTC"))
+    leg_a, leg_b = atomic_swap.build_legs("GRC", "LTC", 1000, Decimal("0.05"), parties)
+
+    assert leg_a.asset == "GRC" and leg_a.role == ROLE_INITIATOR
+    assert leg_a.participant_address == parties[("GRC", ROLE_PARTICIPANT)].address
+    assert leg_a.refund_address == parties[("GRC", ROLE_INITIATOR)].address
+
+    assert leg_b.asset == "LTC" and leg_b.role == ROLE_PARTICIPANT
+    assert leg_b.participant_address == parties[("LTC", ROLE_INITIATOR)].address
+    assert leg_b.refund_address == parties[("LTC", ROLE_PARTICIPANT)].address
+
+
+def test_build_legs_refuses_a_non_positive_amount_on_either_side():
+    """A zero or negative amount reaches create_contract as a transfer, and the flag named
+    in the message is the one the operator has to fix -- naming the wrong side of a
+    two-chain command costs a round trip."""
+    console = Console(total_steps=8)
+    parties = atomic_swap.mint_parties(Step(console, 2), ("GRC", "LTC"))
+    with pytest.raises(SwapError, match="--from-amount"):
+        atomic_swap.build_legs("GRC", "LTC", 0, Decimal("0.05"), parties)
+    with pytest.raises(SwapError, match="--to-amount"):
+        atomic_swap.build_legs("GRC", "LTC", 1000, Decimal(-1), parties)
+
+
+def test_wallet_destination_asks_the_wallet_and_never_returns_a_minted_address():
+    """The subtlety this function exists for: the contract's BRANCHES name the in-process
+    keys, but the claim's DESTINATION must be a wallet address. Paying a claim to a minted
+    address sends the swapped coins to a key discarded when the process exits -- a
+    successful swap whose proceeds nobody can spend, which reads as success and is a
+    total loss of that leg."""
+    seeded = _seeded_swap()
+    chain = seeded["chains"]["LTC"]
+    address = atomic_swap.wallet_destination(
+        Step(seeded["console"], 7), "LTC", chain, "atomic-swap initiator payout")
+
+    assert address == "LTC-wallet-0"
+    assert chain.addresses_issued == ["atomic-swap initiator payout"]
+    minted = {key.address for key in seeded["parties"].values()}
+    assert address not in minted
+
+
+def test_claim_both_legs_claims_the_participant_leg_first():
+    """WHICH LEG MOVES FIRST is the security property, and it is not symmetric.
+
+    The initiator holds the secret, so they are the only party who can move, and the leg
+    they move against is the PARTICIPANT's -- funded_b, the one with the shorter timelock.
+    Claiming funded_a first would publish the preimage on the initiator's own chain while
+    the participant's leg is still locked: the participant learns the secret, claims the
+    leg they were receiving anyway, and the initiator has given up their only leverage."""
+    seeded = _seeded_swap()
+    claim_b, claim_a = atomic_swap.claim_both_legs(
+        seeded["console"], seeded["funded_a"], seeded["funded_b"],
+        seeded["parties"], seeded["secret"])
+
+    assert seeded["order"] == ["LTC", "GRC"], "the participant's leg is claimed first"
+    assert claim_b == "ltc-claim-txid"
+    assert claim_a == "grc-claim-txid"
+
+
+def test_claim_both_legs_signs_each_claim_with_the_counterparty_key_on_that_chain():
+    """The inversion build_legs() encodes, one level on: leg B's claim is signed by the
+    INITIATOR's key on leg B's chain, leg A's by the PARTICIPANT's key on leg A's.
+
+    Swapping these produces no recognizable error -- it produces a signature that fails
+    script verification, surfacing as a rejected transaction on a chain where the other
+    leg is already funded and the secret may already be public."""
+    seeded = _seeded_swap()
+    atomic_swap.claim_both_legs(seeded["console"], seeded["funded_a"], seeded["funded_b"],
+                               seeded["parties"], seeded["secret"])
+    parties = seeded["parties"]
+
+    ltc_claim = seeded["chains"]["LTC"].claims[0]
+    grc_claim = seeded["chains"]["GRC"].claims[0]
+    assert ltc_claim["privkey"] == parties[("LTC", ROLE_INITIATOR)].wif
+    assert grc_claim["privkey"] == parties[("GRC", ROLE_PARTICIPANT)].wif
+    # And each pays OUT to that chain's wallet, not to the other chain's and not to a
+    # minted address.
+    assert ltc_claim["destination"] == "LTC-wallet-0"
+    assert grc_claim["destination"] == "GRC-wallet-0"
+
+
+def test_claim_both_legs_spends_the_vout_found_on_chain_and_not_index_zero():
+    """The stubs deliberately put the contract at index 1 behind a decoy at 0. The defect
+    fixed three times in this repository -- BTC 2026-09-25, GRC 2026-09-26 -- is a guess of
+    0, which spends a decoy and burns a fee while reporting a txid."""
+    seeded = _seeded_swap()
+    atomic_swap.claim_both_legs(seeded["console"], seeded["funded_a"], seeded["funded_b"],
+                               seeded["parties"], seeded["secret"])
+    assert seeded["chains"]["LTC"].claims[0]["vout"] == 1
+    assert seeded["chains"]["GRC"].claims[0]["vout"] == 1
+
+
+def test_leg_a_is_claimed_by_a_function_that_cannot_see_the_generated_secret():
+    """WHY THIS IS A SIGNATURE TEST AND NOT A BEHAVIORAL ONE, which is the interesting part.
+
+    The guarantee wanted here is "leg A is claimed with the bytes read off leg B's chain,
+    never with the copy in memory" -- and no behavioral test can check it. In a correct read
+    the two values are EQUAL by construction: read_secret_off_chain() returns the push whose
+    SHA-256 matches the committed hash, and the committed hash is sha256(secret). A mutation
+    on 2026-09-27 that swapped `recovered` for `secret` killed no test, and it never could.
+
+    So the guarantee was made structural. claim_initiator_leg() takes the preimage and has
+    no `secret` parameter, so the mutation is not a mistake to avoid -- it is a name that
+    does not exist. THAT is checkable, and this is the check. An earlier version of this
+    same function also ended with `if recovered != secret: raise`, which looked like the
+    safety net and was unreachable short of a SHA-256 collision; deleting it killed no test
+    either, which is how it was found."""
+    names = list(inspect.signature(atomic_swap.claim_initiator_leg).parameters)
+    assert names == ["console", "funded_a", "parties", "preimage"]
+    assert "secret" not in names
+    source = inspect.getsource(atomic_swap.claim_initiator_leg)
+    assert "secret" not in source.split('"""')[-1], (
+        "the body must not name a secret it was not given"
+    )
+
+
+def test_claim_initiator_leg_puts_the_bytes_it_was_given_on_the_chain():
+    """Behavioral half: whatever preimage reaches this function is what gets pushed. Seeded
+    with bytes that are NOT the swap's secret, so the assertion distinguishes the argument
+    from any value the function could reach for."""
+    seeded = _seeded_swap()
+    foreign = bytes([0xAB]) * 32
+    assert foreign != seeded["secret"]
+    atomic_swap.claim_initiator_leg(seeded["console"], seeded["funded_a"],
+                                    seeded["parties"], foreign)
+    assert seeded["chains"]["GRC"].claims[0]["secret_hex"] == foreign.hex()
+
+
+def test_a_published_preimage_that_is_not_ours_stops_before_claiming_leg_a():
+    """Both legs are funded at this point, so a scriptSig carrying no push that matches the
+    committed hash must stop -- and must NOT refund. The chain here publishes a well-formed
+    32-byte push whose SHA-256 is not the committed hash, which is what reading a DIFFERENT
+    transaction looks like.
+
+    The refusal comes from read_secret_off_chain(), which is where the hash is actually
+    compared. claim_both_legs() used to repeat the comparison afterwards and that copy was
+    unreachable; this test is what remains of it, and it is the reachable one."""
+    seeded = _seeded_swap(published=bytes([0xAB]) * 32)
+    with pytest.raises(SwapError, match="carries NO push"):
+        atomic_swap.claim_both_legs(seeded["console"], seeded["funded_a"], seeded["funded_b"],
+                                    seeded["parties"], seeded["secret"])
+    assert seeded["order"] == ["LTC"], "leg A must not be claimed without a matching preimage"
+    assert seeded["chains"]["GRC"].claims == []
+
+
+def test_claim_both_legs_derives_the_hash_rather_than_taking_it_as_an_argument():
+    """It began as a sixth parameter and the linter refused it, which was right for a
+    reason beyond the count: a caller passing both a secret and its hash can pass two that
+    do not correspond, and this function's whole job is checking the secret against the
+    hash the chain published. Taking both would be comparing one argument to another."""
+    names = list(inspect.signature(atomic_swap.claim_both_legs).parameters)
+    assert names == ["console", "funded_a", "funded_b", "parties", "secret"]

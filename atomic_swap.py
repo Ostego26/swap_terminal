@@ -94,7 +94,9 @@ the site.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -114,7 +116,8 @@ from modules.htlc_chain_read import (
     htlc_vout,
 )
 from modules.htlc_spend import preimage_from_scriptsig
-from modules.htlc_timelock import contract_locktime
+from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT, contract_locktime
+from regtest.keys import generate_key
 from step_console import Console
 
 # The assets whose legs this file can build: the three with a P2SH HTLC and a client
@@ -483,6 +486,214 @@ def refund_leg(step: Step, funded_leg: FundedLeg, party: Party) -> str:
     return str(txid)
 
 
+def mint_parties(step: Step, assets: tuple[str, str]) -> dict[tuple[str, str], object]:
+    """Four throwaway keypairs -- one per (chain, role) -- generated IN THIS PROCESS.
+
+    NOT `dumpprivkey`, AND THAT IS NOT A STYLE CHOICE. The obvious route is getnewaddress
+    followed by dumpprivkey, and swap_terminal/regtest/keys.py's header explains why this
+    repository forbids it: CLAUDE.md's chain-safety rules say never move, copy or read back
+    a key, and a tool that teaches the operator to type dumpprivkey is teaching the reflex
+    that leaked a live GRIDCOIN_RPC_PASSWORD into this repo's own history. It also happens
+    not to work: dumpprivkey is a legacy-wallet RPC and Bitcoin Core 28.1 creates
+    descriptor wallets by default, which refuse it.
+
+    So the keys are generated here, exist nowhere else, control nothing but the contract
+    branches built around them seconds later, and are never printed, logged or written.
+    regtest/keys.generate_key() already does exactly this and is reused rather than
+    re-spelled (rule 8) -- its testnet P2PKH version byte 0x6F is correct for BTC, LTC and
+    GRC testnet alike, which is what makes it chain-generic despite the `regtest` in its
+    module name. THAT NAME IS THE THING THAT IS WRONG, not the reuse: the module generates
+    testnet keys and says so in its own docstring, and renaming it is a separate change
+    that would touch the harness.
+
+    FOUR KEYS AND NOT TWO, because each leg's two branches must hash to DIFFERENT keys.
+    build_htlc_redeem_script() refuses a script whose branches resolve to the same hash160
+    -- the guard added after atomic_swapper.py passed one address as both for six
+    directions, making every contract unclaimable. Four distinct keys means that state
+    cannot be constructed here at all.
+
+        (chain A, initiator)    funds leg A; its address is leg A's REFUND branch
+        (chain A, participant)  claims leg A with the preimage
+        (chain B, initiator)    claims leg B with the preimage
+        (chain B, participant)  funds leg B; its address is leg B's REFUND branch
+    """
+    step.announce("mint four throwaway keypairs, in this process, never written to disk")
+    parties: dict[tuple[str, str], object] = {}
+    for asset in assets:
+        for role in (ROLE_INITIATOR, ROLE_PARTICIPANT):
+            key = generate_key()
+            parties[(asset, role)] = key
+            # The ADDRESS is safe to print; the WIF is not, and nothing here prints it.
+            step.say(f"{asset} {role}: {key.address}")
+    addresses = {key.address for key in parties.values()}
+    step.check("four distinct addresses", len(addresses), "4 -- no branch may share a key",
+               len(addresses) == len(parties))
+    if len(addresses) != len(parties):
+        raise SwapError(
+            "two generated keys collided, which is a 2^-160 event and therefore a bug in "
+            "generate_key() rather than luck. Nothing was funded"
+        )
+    return parties
+
+
+def wallet_destination(step: Step, asset: str, client, label: str) -> str:
+    """A WALLET address for a claim or refund to pay OUT to, from getnewaddress.
+
+    THE SUBTLETY THIS EXISTS FOR, and getting it wrong makes a rehearsal end with
+    unspendable coins.
+
+    The contract's two BRANCHES must name the in-process keys, because those keys are what
+    sign the claim and the refund. But the claim's and refund's DESTINATION is a separate
+    argument, and paying it to an in-process address would send the swapped coins to a key
+    that is discarded when this process exits -- a successful swap whose proceeds nobody
+    can spend, which reads as success and is a loss.
+
+    So: branches use the minted keys, destinations use the wallet. The coins come home.
+    """
+    address = str(client_caller(client)("getnewaddress", label))
+    step.say(f"{asset} payout destination (wallet): {address}")
+    return address
+
+
+def build_legs(from_asset: str, to_asset: str, from_amount, to_amount,
+               parties: dict) -> tuple[Leg, Leg]:
+    """The two legs, and THE ROLE INVERSION THAT IS EASY TO GET BACKWARDS.
+
+    Extracted out of main() because ruff's C901 said main was too complex, and rule 12 is
+    explicit about what that means: "a main() past the ceiling is orchestration that has
+    swallowed decisions ... the fix is to extract the decision so it can be called with
+    seeded inputs, not to raise the ceiling." This IS the decision, and it is one a reader
+    can get wrong in a way no chain would report.
+
+    Leg A is the INITIATOR's. They fund the --from asset with the LONGER lock. Its HASHLOCK
+    branch names the PARTICIPANT's key -- the counterparty is who claims it with the
+    preimage -- and its REFUND branch names the initiator's own.
+
+    Leg B is the PARTICIPANT's, the --to asset, expiring FIRST. THE ROLES INVERT: its
+    hashlock branch names the INITIATOR's key, because the initiator is the one who claims
+    leg B with the secret and thereby publishes it, and its refund branch names the
+    participant's.
+
+    Getting that inversion backwards builds two contracts each claimable only by the party
+    who funded it -- which is not a broken swap that errors, it is two self-payments that
+    both "succeed". build_htlc_redeem_script() catches the degenerate case where both
+    branches name the SAME key (the 2026-09-24 defect) but it cannot catch a consistent
+    swap of the two, because that script is perfectly well formed. Only this function's
+    correctness does, which is why it is a function with seeded inputs and a test rather
+    than four lines inside main().
+    """
+    legs = (
+        Leg(asset=from_asset, role=ROLE_INITIATOR, amount=from_amount,
+            participant_address=parties[(from_asset, ROLE_PARTICIPANT)].address,
+            refund_address=parties[(from_asset, ROLE_INITIATOR)].address),
+        Leg(asset=to_asset, role=ROLE_PARTICIPANT, amount=to_amount,
+            participant_address=parties[(to_asset, ROLE_INITIATOR)].address,
+            refund_address=parties[(to_asset, ROLE_PARTICIPANT)].address),
+    )
+    for leg, flag in zip(legs, ("--from-amount", "--to-amount"), strict=True):
+        if leg.amount is None or leg.amount <= 0:
+            raise SwapError(
+                f"{flag} must be a positive number; got {leg.amount!r}. Nothing was funded"
+            )
+        if leg.participant_address == leg.refund_address:
+            raise SwapError(
+                f"the {leg.asset} leg's two branches resolve to the same address "
+                f"({leg.participant_address}). build_htlc_redeem_script() would refuse it, and "
+                f"it means the minted keys collided or were assigned twice"
+            )
+    return legs
+
+
+def claim_both_legs(console: Console, funded_a: FundedLeg, funded_b: FundedLeg,
+                    parties: dict, secret: bytes) -> tuple[str, str]:
+    """Steps 4 and 5 of the protocol: claim the PARTICIPANT's leg first, read the preimage
+    back off that chain, and only then claim the initiator's.
+
+    WHY THIS IS A FUNCTION AND NOT SIX LINES INSIDE main(). Rule 12: a main() past the
+    statement ceiling is orchestration that has swallowed a decision, and the fix is to
+    extract the decision so it can be called with seeded inputs rather than to raise the
+    ceiling. There are three decisions in here, and every one of them is a way to lose
+    money that no amount of reading main() would have caught:
+
+      WHICH LEG IS CLAIMED FIRST. funded_b -- the participant's, the one with the SHORTER
+      timelock -- and it is not interchangeable with funded_a. The initiator is the party
+      holding the secret, so they are the only one who can move first, and the leg they
+      move against is the counterparty's. Claiming funded_a first would publish the
+      preimage on the initiator's OWN chain while the participant's leg is still locked:
+      the participant learns the secret, claims the leg they were going to receive anyway,
+      and the initiator has published their only leverage for nothing.
+
+      WHOSE KEY SIGNS EACH CLAIM. The claim on leg B is signed by the INITIATOR's key on
+      leg B's chain, and the claim on leg A by the PARTICIPANT's key on leg A's chain --
+      the same inversion build_legs() encodes, one level further on. Swapping these does
+      not produce an error a reader would recognize: it produces a signature that fails
+      script verification, which surfaces as a rejected transaction on a chain where the
+      other leg is already funded.
+
+      WHETHER THE PREIMAGE IS TRUSTED FROM MEMORY. It is not: the claim on leg A is made
+      from the bytes read out of leg B's scriptSig, in a function that cannot see the
+      generated secret. See below for why that is scope and not a comparison.
+
+    THE THIRD OF THOSE IS ENFORCED BY SCOPE RATHER THAN BY A CHECK, and the first version
+    of this function got it wrong in a way its own tests could not see.
+
+    It ended with `if recovered != secret: raise`, which read like the safety net for
+    exactly that defect. It is unreachable. read_secret_off_chain() finds the preimage by
+    scanning the scriptSig for a push whose SHA-256 equals the committed hash, and the
+    committed hash IS sha256(secret) -- so a `recovered` that differs from `secret` and
+    still gets returned is a SHA-256 collision. A mutation check on 2026-09-27 proved it
+    both ways: deleting the branch killed no test, and swapping `recovered` for `secret` on
+    the leg-A claim killed no test either, because in a correct read the two values are
+    equal by construction and NOTHING behavioral can separate them.
+
+    So the branch is gone (rule 2: a check that cannot fire is read, greped past and copied
+    from) and the guarantee is structural instead: the leg-A claim happens in
+    claim_initiator_leg() below, which takes the recovered bytes and has no access to
+    `secret` at all. Passing the in-memory copy there is not a mistake a reader has to avoid
+    -- it is a name that does not exist. That matters because in a real swap the participant
+    HAS no in-memory copy, so a rehearsal that quietly used one would pass while the
+    off-chain read was broken.
+    """
+    leg_b = funded_b.leg
+    secret_hash = hashlib.sha256(secret).hexdigest()
+
+    initiator_payout = Party(
+        privkey=parties[(leg_b.asset, ROLE_INITIATOR)].wif,
+        destination=wallet_destination(Step(console, 7), leg_b.asset,
+                                       funded_b.client, "atomic-swap initiator payout"),
+    )
+    claim_b = claim_leg(Step(console, 7), funded_b, secret, initiator_payout)
+
+    recovered = read_secret_off_chain(Step(console, 8), funded_b, claim_b, secret_hash)
+    console.say(f"{len(recovered)} bytes recovered from the {leg_b.asset} chain -- never messaged")
+    claim_a = claim_initiator_leg(console, funded_a, parties, recovered)
+    return claim_b, claim_a
+
+
+def claim_initiator_leg(console: Console, funded_a: FundedLeg, parties: dict,
+                        preimage: bytes) -> str:
+    """Claim the INITIATOR's leg with bytes that came off the other chain.
+
+    Separate from claim_both_legs() for one reason: `secret` is not in scope here. This is
+    the participant's move in a real swap, and the participant has only what they read out
+    of the initiator's claim -- so a function that cannot see the generated secret is a
+    function that cannot accidentally rehearse with it. See claim_both_legs()' docstring for
+    the mutation check that made this a structural guarantee instead of a comment.
+
+    The key is the PARTICIPANT's on leg A's chain, because leg A's hashlock branch names it
+    -- the inversion build_legs() encodes, two levels on. The destination is a wallet
+    address, never a minted one: the minted keys are discarded when this process exits, so
+    paying a claim to one is a successful swap whose proceeds nobody can spend.
+    """
+    leg_a = funded_a.leg
+    participant_payout = Party(
+        privkey=parties[(leg_a.asset, ROLE_PARTICIPANT)].wif,
+        destination=wallet_destination(Step(console, 8), leg_a.asset,
+                                       funded_a.client, "atomic-swap participant payout"),
+    )
+    return claim_leg(Step(console, 8), funded_a, preimage, participant_payout)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Drive both legs of an atomic swap between any two of "
@@ -559,17 +770,43 @@ def main() -> int:
                     f"REFUSING: the {asset} daemon says its chain is {name!r}, which is not one of "
                     f"{sorted(TEST_CHAIN_NAMES)}. Nothing was funded"
                 )
+        assets = (args.from_asset, args.to_asset)
+        parties = mint_parties(Step(console, 2), assets)
+
+        console.step(3, f"one {SECRET_BYTES}-byte secret, its SHA-256 committed on both chains")
+        secret = secrets.token_bytes(SECRET_BYTES)
+        secret_hash = hashlib.sha256(secret).hexdigest()
+        console.say(f"sha256 = {secret_hash}")
+        console.say("the preimage itself is NOT printed: whoever learns it can claim either leg")
+
+        leg_a, leg_b = build_legs(args.from_asset, args.to_asset,
+                                  args.from_amount, args.to_amount, parties)
+
+        funded_a = FundedLeg(leg_a, fund_leg(Step(console, 4), leg_a, secret_hash,
+                                            clients[leg_a.asset]), clients[leg_a.asset])
+        funded_b = FundedLeg(leg_b, fund_leg(Step(console, 5), leg_b, secret_hash,
+                                            clients[leg_b.asset]), clients[leg_b.asset])
+
+        # AFTER both are funded is too late to refuse, so the ordering is checked against the
+        # locktimes the two fund_leg calls DERIVED -- from each chain's own tip and role --
+        # before either claim is attempted. A bad ordering here means refund both legs and
+        # start again, which the message says, rather than proceeding into a swap the
+        # initiator could take both sides of.
+        console.step(6, "the participant's leg must expire FIRST -- the security property")
+        assert_ordering(
+            Step(console, 6),
+            initiator_lock=funded_a.funded["locktime"], initiator_tip=funded_a.funded["tip"],
+            participant_lock=funded_b.funded["locktime"], participant_tip=funded_b.funded["tip"],
+        )
+
+        claim_b, claim_a = claim_both_legs(console, funded_a, funded_b, parties, secret)
+        console.say(f"both legs claimed: {claim_b[:16]}... and {claim_a[:16]}...")
         console.say("")
-        console.say("NOT IMPLEMENTED BEYOND THIS POINT, and deliberately so rather than half-run:")
-        console.say("the remaining steps need four addresses and two spending keys -- the")
-        console.say("counterparty and refund address on each chain -- and this file will not")
-        console.say("invent them or reuse one address for two roles. That was defect three in")
-        console.say("modules/atomic_swapper.py: one address passed as both, which made every")
-        console.say("contract unclaimable. Supply them and the funding steps run.")
-        console.say("")
-        console.say("The machinery they drive is here and tested: fund_leg, assert_ordering,")
-        console.say("claim_leg, read_secret_off_chain and refund_leg, plus all three clients'")
-        console.say("create/redeem/refund. What is missing is the address plumbing, not the swap.")
+        console.say("BOTH SIDES WERE PLAYED BY THIS PROCESS, so this is a rehearsal of the")
+        console.say("protocol rather than a swap with a counterparty. The one step a real")
+        console.say("participant does differently is step 8: they are not the claimer, so")
+        console.say("`gettransaction` will not find the claim for them and they need -txindex")
+        console.say("or a block scan. claim_scriptsig_hex() says so at the site.")
         return console.summary()
     except SwapError as error:
         console.check("swap", str(error), "no refusal", False)
