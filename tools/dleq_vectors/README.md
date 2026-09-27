@@ -59,5 +59,12 @@ not: go-dleq samples blinders randomly, so a regenerated file differs from this
 one in the proof field while agreeing on every point. Compare points, and verify
 proofs; do not diff the proof hex.
 
-Each proof is ~64,967 bytes, which is the design document's projection of 64,960
-confirmed to within eight bytes.
+Each proof is ~64,967 bytes, and the three differ: 64,967, 64,968 and 64,966.
+That REFUTES the design document's projection of 64,960 rather than confirming it
+to within eight bytes, which is what this line used to say. The projection treated
+both signatures as fixed 64-byte values; `signatureA` is DER-encoded ECDSA, so it
+is 70-72 bytes and the total is not a constant at all. Three distinct lengths from
+three proofs is the evidence -- a format with two fixed-width signatures cannot
+produce them. `swap_terminal/modules/dleq_proof_format.py` is the parser that
+establishes the layout byte for byte, and a verifier written to 64,960 would have
+rejected all three of these files.

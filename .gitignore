@@ -33,3 +33,10 @@ swap_terminal/runtime/
 wgrc.json
 *.keypair.json
 id.json
+
+# The cross-curve DLEQ helper binary. Built with `cd tools/dleq_helper && go
+# build -o dleq_helper .`; go.sum pins the module versions so a build either
+# reproduces them or fails. A committed binary is a thing nobody can review and
+# everybody trusts, which is the wrong trade for the one component in this tree
+# whose failure mode is "the cryptography is wrong".
+tools/dleq_helper/dleq_helper

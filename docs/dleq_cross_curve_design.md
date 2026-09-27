@@ -866,9 +866,17 @@ verified: ed25519 `l = 2^252 + 27742317777372353535851937790883648493` (253 bits
 secp256k1 `n` is 256 bits, `n/l ~ 16.0`, and `2^252/l = 1 - 3.8e-39` (computed
 with python3 in this container).
 
-verified: go-dleq's serialized proof is 64,960 bytes = 63.4 KiB for 252 bits,
-computed from serde.go's field list, `CompressedPointSize()` 33/32, and
-`scalarLen = 32`.
+REFUTED, and it was written as "verified" here: go-dleq's serialized proof is NOT
+64,960 bytes and has no constant length. That figure was COMPUTED from serde.go's
+field list, `CompressedPointSize()` 33/32 and `scalarLen = 32`, and the
+computation treated both signatures as fixed 64-byte values. `signatureA` is a
+DER-encoded ECDSA signature, so it is 70-72 bytes and the total ranges over
+64,966-64,968. Measured 2026-09-27 on three captured proofs: 64,967 / 64,968 /
+64,966, with `signatureA` at 71 / 72 / 70. See section 2.2, which carries the
+corrected table. The lesson this section is the wrong place to bury: a figure
+derived by reading code belongs under "computed", not "verified", and the word
+this file used made a projection indistinguishable from a measurement for five
+days.
 
 verified: serai publishes measured sizes 44,607-65,145 bytes and verification
 times 122-157ms for four Rust variants on an i7-118567 (their README).
