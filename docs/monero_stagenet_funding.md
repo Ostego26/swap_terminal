@@ -54,21 +54,46 @@ two match. `monero_chain_check.py` answers all three in one run; see below.
 
 ## Getting coins
 
-Any one of these is enough. They are ordinary web forms, so a browser on the
-operator's machine is the whole tool:
+These are ordinary web forms, so a browser on the operator's machine is the whole
+tool. **TRIED 2026-09-27, and only one of the three responded at all:**
 
-- `https://community.rino.io/faucet/stagenet/` -- RINO's stagenet faucet.
-- `https://stagenet-faucet.xmr-tw.org/`
-- `https://melo.tools/faucet/stagenet`
+    https://stagenet-faucet.xmr-tw.org/          the ONLY one that worked
+    https://community.rino.io/faucet/stagenet/   did not work
+    https://melo.tools/faucet/stagenet           did not work
 
-Paste the address above. Amounts are small and that is fine: the experiment
-below needs *one* incoming transfer to exist, not a balance.
+The one that works answered, for the address above:
 
-The other route, if a faucet is down or rate-limits: sweep the old stagenet
-wallet. That wallet's keys were exposed in git history (see
-`docs/key_exposure_runbook.md`) so its coins are not worth protecting, but they
-are worth *moving* -- a sweep is both the funding and the cleanup, and it
-produces exactly the incoming transfer this needs.
+    已達領取限額，請明天再試。
+    You have reached request limit, please come tomorrow.
+
+    Current block height of faucet: 2217007
+
+So the faucet is alive and synced -- the tip is real -- and it is RATE LIMITED, not
+refusing the address. Two things follow, and the first is free:
+
+1. **CHECK THE WALLET BEFORE WAITING.** "Reached request limit" is keyed on the
+   claimer, so a payout may already have happened -- from an earlier attempt, or
+   from a shared address of some kind. Run the check below before assuming the
+   balance is zero.
+2. Otherwise the answer is literally tomorrow. Nothing in this repo can shorten
+   that, and the two alternate faucets did not respond today.
+
+AND THERE IS NO EXPLORER ROUTE. Monero amounts and destinations are not public, so
+no block explorer can report an address's balance. Only a wallet holding the view
+key can, which means the check below is not merely the confirmation step -- it is
+the ONLY way to learn whether coins arrived.
+
+A PREVIOUS VERSION OF THIS PAGE NAMED A THIRD ROUTE THAT DOES NOT EXIST, and it is
+recorded here rather than quietly deleted. It said to "sweep the old stagenet
+wallet", whose keys were "exposed in git history (see docs/key_exposure_runbook.md)".
+Checked 2026-09-27: `docs/key_exposure_runbook.md` is about **Solana** keys and says
+nothing about a Monero wallet, and a grep of the whole tree for a Monero address,
+mnemonic, spend key or view key finds exactly two hits -- the address above, in this
+file and in its test. **There is no second stagenet wallet established anywhere in
+this repository.** The sentence was written from a recollection of a conversation
+and presented in the same voice as the measurements around it, which is precisely
+what CLAUDE.md rule 17 forbids. If such a wallet exists it exists only on the
+operator's machine, and only they can say so.
 
 ## Confirming it arrived, and what that proves
 
