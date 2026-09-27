@@ -38,6 +38,7 @@ from chains.monero_keys import decode_address  # noqa: E402  both shims above fi
 from modules.ed25519_group import GROUP_ORDER  # noqa: E402  same
 
 from monero_shared_key_verify import (  # noqa: E402  same
+    DEFAULT_DAEMON_PORT,
     DEFAULT_WALLET_PORT,
     SHARE_UPPER_BOUND,
     VerifyError,
@@ -225,3 +226,44 @@ def test_load_shares_returns_the_shared_address_for_the_sweep_check(tmp_path):
     assert address_for(reloaded, "stagenet") == address, (
         "and the shares re-derive to it, which is the second half of the sweep check"
     )
+
+
+def test_a_bare_number_daemon_becomes_a_localhost_port_and_anything_else_is_passed_through():
+    """THE ASSUMPTION THIS REMOVED: that monerod is local.
+
+    Measured on the operator's host 2026-09-27: nothing on 38081, 38089 or 18081, while
+    the stagenet wallet-rpc on 38083 reported height 2,217,113 -- the real stagenet tip.
+    It was talking to a REMOTE node all along, so every daemon call this script makes
+    would have hit a port with nothing behind it.
+
+    One flag accepts both spellings so the local and remote cases read the same at the
+    call site, and the parsing is asserted here rather than only exercised by a run.
+    """
+    parser = build_parser()
+    assert parser.parse_args([]).daemon == str(DEFAULT_DAEMON_PORT)
+    for given, expected_kind in (
+        ("28081", int), ("38081", int),
+        ("stagenet.example.org:38081", str), ("127.0.0.1:38081", str),
+    ):
+        parsed = parser.parse_args(["--daemon", given]).daemon
+        resolved = int(parsed) if str(parsed).isdigit() else str(parsed)
+        assert isinstance(resolved, expected_kind), f"{given} resolved to {type(resolved)}"
+
+
+def test_the_rpc_url_is_localhost_for_a_port_and_the_given_host_otherwise():
+    """The two spellings must produce the two URLs, which is the whole point of
+    accepting both. Asserted by reading the source rather than by opening a socket:
+    the construction is one line and a test that needed a daemon would not run here."""
+    source = inspect.getsource(sys.modules["monero_shared_key_verify"].rpc)
+    assert 'f"127.0.0.1:{endpoint}" if isinstance(endpoint, int) else endpoint' in source
+    assert 'f"http://{host}/json_rpc"' in source
+    assert "http://127.0.0.1:{port}" not in source, "the hardcoded localhost URL is gone"
+
+
+def test_the_unreachable_endpoint_error_names_how_to_find_a_remote_daemon():
+    """Rule 14: the message has to carry the remedy. `ps aux | grep monero-wallet-rpc`
+    shows the --daemon-address the wallet is actually using, which is how this was
+    found in the first place."""
+    doc = inspect.getsource(sys.modules["monero_shared_key_verify"].rpc)
+    assert "ps aux | grep monero-wallet-rpc" in doc
+    assert "--daemon-address" in doc

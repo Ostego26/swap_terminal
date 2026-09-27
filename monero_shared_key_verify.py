@@ -148,29 +148,47 @@ class Target:
     and because ruff's PLR0913 on the six-argument run_phase() was right that they
     wanted to be one. Rule 12: extract, do not raise the ceiling.
 
-    The two ports being separate ints is also the transposition worth designing out:
-    swapping `wallet_port` and `daemon_port` would point the miner at the wallet and
-    the wallet at the daemon, and it would fail obscurely rather than loudly. Named
-    fields make that impossible to write by accident, which a pair of positional ints
-    does not.
+    The two being separate values is also the transposition worth designing out:
+    swapping the wallet and the daemon would point the miner at the wallet and the
+    wallet at the daemon, and it would fail obscurely rather than loudly. Named fields
+    make that impossible to write by accident, which a pair of positional ints does not.
+
+    `daemon` is an int port on 127.0.0.1 or a "host:port" string, because a STAGENET
+    wallet usually talks to a remote node -- see rpc()'s docstring for the measurement
+    that forced this.
     """
 
     wallet_port: int
-    daemon_port: int
+    daemon: int | str
     shares_path: Path
 
 
-def rpc(port: int, method: str, params: dict | None = None, timeout: int = 120) -> dict:
-    """One wallet-rpc call. Errors arrive as HTTP 200 with an `error` member, so the
-    error is read BEFORE anything else -- the same trap htlc_rpc.rpc_result() exists
-    for: calling raise_for_status() first discards the reason."""
+def rpc(
+    endpoint: int | str, method: str, params: dict | None = None, timeout: int = 120
+) -> dict:
+    """One JSON-RPC call to a wallet or a daemon. Errors arrive as HTTP 200 with an
+    `error` member, so the error is read BEFORE anything else -- the same trap
+    htlc_rpc.rpc_result() exists for: calling raise_for_status() first discards the
+    reason.
+
+    `endpoint` IS EITHER A PORT OR A host:port, AND THAT IS NOT LAZINESS. It was an int
+    port on 127.0.0.1 only, which assumed the daemon is local -- and on stagenet it
+    usually is not. Measured on the operator's host 2026-09-27: no monerod on 38081,
+    38089 or 18081, while the wallet-rpc on 38083 reported height 2,217,113, the real
+    stagenet tip. It was talking to a REMOTE node the whole time, so every daemon call
+    this file makes would have gone to a port with nothing behind it.
+
+    The wallet is still always local -- it is a process this operator runs -- so an int
+    remains the ordinary spelling for it.
+    """
     body = json.dumps(
         {"jsonrpc": "2.0", "id": "0", "method": method, "params": params or {}}
     ).encode()
     # The scheme and host are literal and only an integer port interpolates, which is
     # what S310 asks about; there is no scheme or host a caller can choose.
+    host = f"127.0.0.1:{endpoint}" if isinstance(endpoint, int) else endpoint
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/json_rpc",
+        f"http://{host}/json_rpc",
         data=body,
         headers={"Content-Type": "application/json"},
     )
@@ -179,14 +197,17 @@ def rpc(port: int, method: str, params: dict | None = None, timeout: int = 120) 
             payload = json.loads(response.read())
     except urllib.error.URLError as error:
         raise VerifyError(
-            f"{method} on port {port}: {error}. Is a monero-wallet-rpc running there? "
-            f"`python3 monero_regtest.py --run` starts one on {DEFAULT_WALLET_PORT}"
+            f"{method} on {host}: {error}. If that is a wallet port, is a "
+            f"monero-wallet-rpc running there? `python3 monero_regtest.py --run` starts one "
+            f"on {DEFAULT_WALLET_PORT}. If it is a daemon, check the address -- a stagenet "
+            f"wallet usually talks to a REMOTE node, and `ps aux | grep monero-wallet-rpc` "
+            f"shows which one in its --daemon-address"
         ) from error
     if "error" in payload:
-        raise VerifyError(f"{method}: {payload['error']}")
+        raise VerifyError(f"{method} on {host}: {payload['error']}")
     result = payload.get("result")
     if not isinstance(result, dict):
-        raise VerifyError(f"{method}: no `result` object in the reply")
+        raise VerifyError(f"{method} on {host}: no `result` object in the reply")
     return result
 
 
@@ -242,7 +263,7 @@ def address_for(shares: dict, network: str) -> str:
 def refuse_mainnet_and_a_funded_wallet(
     console: Console,
     port: int,
-    daemon_port: int,
+    daemon: int | str,
     allow_open_wallet: bool = False,
     check_balance: bool = True,
 ) -> str:
@@ -285,7 +306,7 @@ def refuse_mainnet_and_a_funded_wallet(
     # same FAKECHAIN that gates generateblocks. monero_regtest.py has always asked that
     # way; this file asked the wallet because the wallet was already in hand, which is
     # the whole mistake in one sentence.
-    nettype = str(rpc(daemon_port, "get_info").get("nettype", "(not reported)"))
+    nettype = str(rpc(daemon, "get_info").get("nettype", "(not reported)"))
     try:
         current = str(rpc(port, "get_address", {"account_index": 0})["address"])
         console.say(f"open wallet primary {current[:12]}...{current[-6:]}")
@@ -378,7 +399,7 @@ def create_shared_wallet(console: Console, port: int, shares: dict, address: str
     return reported
 
 
-def mine_to_shared_address(console: Console, daemon_port: int, address: str, blocks: int) -> int:
+def mine_to_shared_address(console: Console, daemon: int | str, address: str, blocks: int) -> int:
     """Fund the shared address directly, by mining to it. REGTEST ONLY, by construction.
 
     This is what removes the need for a second wallet. The alternative -- transfer
@@ -394,10 +415,10 @@ def mine_to_shared_address(console: Console, daemon_port: int, address: str, blo
     if asked, and the refusal that comes back is passed through verbatim rather than
     reworded -- it is monerod's own sentence and it is clearer than a paraphrase.
     """
-    console.say(f"mining {blocks} blocks to the shared address on daemon port {daemon_port}")
+    console.say(f"mining {blocks} blocks to the shared address on daemon {daemon}")
     console.say("a coinbase output is locked for 60 confirmations, so this needs more than 60")
     try:
-        result = rpc(daemon_port, "generateblocks",
+        result = rpc(daemon, "generateblocks",
                      {"amount_of_blocks": blocks, "wallet_address": address}, timeout=300)
     except VerifyError as error:
         raise VerifyError(
@@ -568,7 +589,7 @@ def run_phase(console: Console, target: Target, network: str, mine_blocks: int) 
     console.say("Remaining: whether the chain lets the summed key spend it.")
     console.say(f"shares saved to {target.shares_path} (mode 0600, private keys in the clear)")
     if mine_blocks:
-        mine_to_shared_address(console, target.daemon_port, address, mine_blocks)
+        mine_to_shared_address(console, target.daemon, address, mine_blocks)
         console.say("")
         console.say("funded. Now finish it -- the destination below is this same shared wallet's")
         console.say("own address, which is a real spend and needs nothing else to exist:")
@@ -640,8 +661,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sweep", metavar="DESTINATION",
                         help="finish the experiment: sweep the shared address to DESTINATION")
     parser.add_argument("--port", type=int, default=DEFAULT_WALLET_PORT)
-    parser.add_argument("--daemon-port", type=int, default=DEFAULT_DAEMON_PORT,
-                        help="monerod's RPC port, used only by --mine")
+    parser.add_argument("--daemon", default=str(DEFAULT_DAEMON_PORT),
+                        help="monerod's RPC endpoint: a port on localhost, or host:port for a "
+                             "REMOTE node, which is what a stagenet wallet normally uses")
     parser.add_argument("--mine", type=int, default=0, metavar="BLOCKS",
                         help="REGTEST ONLY: mine this many blocks to the shared address, funding "
                              "it directly. 80 clears the 60-block coinbase lock with margin")
@@ -658,9 +680,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     console = Console(total_steps=4)
+    # A bare number means a port on localhost; anything else is passed through as a
+    # host:port. Accepting both from one flag keeps the local and remote cases spelled
+    # the same way at the call site.
+    daemon: int | str = int(args.daemon) if str(args.daemon).isdigit() else str(args.daemon)
     target = Target(
         wallet_port=args.port,
-        daemon_port=args.daemon_port,
+        daemon=daemon,
         shares_path=Path(args.shares_file).expanduser(),
     )
 
