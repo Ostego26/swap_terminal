@@ -170,6 +170,108 @@ Until 1 is settled, the Monero 2-of-2 shared-spend-key path -- the fourth and
 last piece of a GRC<->XMR swap -- cannot be written against anything but
 documentation that this container also cannot open.
 
+## THE ROUTE THAT NEEDS NO FAUCET AND NO NETWORK: MONERO REGTEST
+
+**This is the recommended path, and it removes the faucet from the critical path
+entirely.** Added 2026-09-27 after asking whether test coins could be swapped for
+stagenet XMR in reverse -- they cannot, and the reason is worth stating because it
+generalizes: a swap MOVES coins, it does not create them, so the reverse direction
+needs a counterparty who already holds stagenet XMR. There is none. And using this
+repo's own swap machinery to obtain the coins needed to test that machinery is
+circular. The faucet is the only issuer on stagenet.
+
+But stagenet is not the only network that can answer the question.
+
+**THE TEN FIELD NAMES ARE A PROPERTY OF THE SOFTWARE, NOT OF THE NETWORK.**
+`txid`, `amount`, `address`, `amounts`, `subaddr_index`, `confirmations`, `type`,
+`unlock_time`, `locked` and `double_spend_seen` are the keys
+`monero-wallet-rpc` puts in a `get_transfers` reply. The same binary emits the same
+keys on regtest as on stagenet. So a regtest transfer confirms them exactly as well
+as a stagenet transfer would, and it can be had in seconds with no faucet, no peer
+and no internet.
+
+CONFIRMED FROM MONERO'S OWN SOURCE on 2026-09-27, read rather than recalled
+(`raw.githubusercontent.com/monero-project/monero/master`):
+
+    --regtest            src/cryptonote_core/cryptonote_core.cpp:84
+                         "Run in a regression testing mode."
+    --fixed-difficulty   same file, line 94, "Fixed difficulty used for testing."
+    --offline            same file, line 114
+    generateblocks       src/rpc/core_rpc_server_commands_defs.h:1113, taking
+                         amount_of_blocks, wallet_address, prev_block,
+                         starting_nonce and returning height and blocks
+    and it is GATED      src/rpc/core_rpc_server.cpp:1956 --
+                         `if (m_core.get_nettype() != FAKECHAIN)` returns
+                         CORE_RPC_ERROR_CODE_REGTEST_REQUIRED, so this RPC
+                         cannot be reached on stagenet or mainnet even by
+                         accident. Regtest is its own nettype (FAKECHAIN),
+                         not a mode over another one.
+
+That last line is the safety property worth noticing: there is no way to call
+`generateblocks` against a real network, so nothing in this procedure can touch
+stagenet or mainnet state.
+
+### The procedure
+
+Two terminals. Nothing to substitute by hand except a wallet password of your
+choosing. `--offline` is deliberate: it stops the daemon looking for peers, which
+on a private chain it should never find.
+
+Terminal 1 -- the daemon, on a data directory of its own so it cannot disturb the
+stagenet chain:
+
+    mkdir -p "$HOME/xmr-regtest"
+    monerod --regtest --offline --fixed-difficulty 1 \
+        --data-dir "$HOME/xmr-regtest" \
+        --rpc-bind-port 18081 --p2p-bind-port 18080 \
+        --log-level 0 --detach
+
+Terminal 2 -- a fresh wallet on that chain, then blocks paid to it. `--trusted-daemon`
+because it is our own, and the wallet's port is 38083 so
+`monero_chain_check.py --host 127.0.0.1 --port 38083` needs no change:
+
+    monero-wallet-cli --regtest --trusted-daemon \
+        --daemon-address 127.0.0.1:18081 \
+        --generate-new-wallet "$HOME/xmr-regtest/regwallet"
+    # note the address it prints, then exit the interactive wallet with: exit
+
+    ADDR=$(monero-wallet-cli --regtest --trusted-daemon \
+        --daemon-address 127.0.0.1:18081 \
+        --wallet-file "$HOME/xmr-regtest/regwallet" --password "" \
+        --command address 2>/dev/null | grep -oE '[0-9A-Za-z]{95,}' | head -1)
+    echo "regtest wallet address: ${ADDR:-(read it off the generate step above)}"
+
+    curl -sS http://127.0.0.1:18081/json_rpc -H 'Content-Type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"generateblocks\",\"params\":{\"amount_of_blocks\":80,\"wallet_address\":\"$ADDR\"}}"
+
+Eighty blocks because a coinbase output needs 60 confirmations before it unlocks;
+80 leaves margin and takes seconds at difficulty 1. Then start the wallet RPC and
+send a small amount to a SECOND address in the same wallet -- an ordinary transfer
+is what puts an `in` entry in `get_transfers`, which a coinbase alone does not:
+
+    monero-wallet-rpc --regtest --trusted-daemon \
+        --daemon-address 127.0.0.1:18081 \
+        --wallet-file "$HOME/xmr-regtest/regwallet" --password "" \
+        --rpc-bind-port 38083 --disable-rpc-login &
+
+    python3 monero_chain_check.py --host 127.0.0.1 --port 38083
+
+**WHAT THIS DOES AND DOES NOT SETTLE.** It settles the ten field names, the
+`amounts`-versus-`amount` arithmetic that `_reject_amount_disagreement()` checks at
+runtime, the contradictory `locked` semantics named in `chains/monero.py`'s header,
+and the real deposit scan in step 4 of the check. Those are the whole of what is
+currently unconfirmed about the Monero wire format, and they are the reason that
+script exists.
+
+It does NOT settle anything about stagenet specifically, and it does not settle
+whether a shared 2-of-2 address from `chains/monero_keys.py` is spendable -- that
+needs a transfer to such an address and a sweep out of it, which regtest can also
+do, and which is the next thing to try once the field names are confirmed. It also
+does not remove the reason to fund the stagenet wallet eventually: a swap
+rehearsal against a network with real peers and real timing is a different test.
+
+It does remove the faucet from the critical path today, which is the point.
+
 ## The other way out
 
 If the operator would rather this session do it than do it themselves: the
