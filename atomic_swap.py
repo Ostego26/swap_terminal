@@ -449,6 +449,39 @@ def assert_ordering(step: Step, initiator: PlannedLeg, participant: PlannedLeg) 
         )
 
 
+def report_completed_swap(console: Console, claim_a: str, claim_b: str) -> int:
+    """What a successful run did and did NOT establish. Extracted for rule 12's ceiling.
+
+    The caveat is the point, and it is the one an operator most easily reads past: both sides
+    were played by ONE process, so the cryptography and the chain behavior are proven while the
+    thing a counterparty actually depends on -- that they can READ the preimage off a claim they
+    did not make -- is not. That difference is a lookup route, not a protocol question, and it
+    is named at claim_scriptsig_hex() rather than left here as a footnote.
+    """
+    console.say(f"both legs claimed: {claim_b[:16]}... and {claim_a[:16]}...")
+    console.say("")
+    console.say("BOTH SIDES WERE PLAYED BY THIS PROCESS, so this is a rehearsal of the")
+    console.say("protocol rather than a swap with a counterparty. The one step a real")
+    console.say("participant does differently is step 8: they are not the claimer, so")
+    console.say("`gettransaction` will not find the claim for them and they need -txindex")
+    console.say("or a block scan. claim_scriptsig_hex() says so at the site.")
+    return console.summary()
+
+
+def report_dry_run(console: Console) -> int:
+    """Say what a dry run PROVED and what it did not, then stop. Extracted for rule 12's
+    statement ceiling, and it earns the name: the distinction it draws is the whole value of a
+    dry run, and a reader has to be able to find it."""
+    console.say("")
+    console.say("DRY RUN COMPLETE -- nothing was funded, and every check above was read-only.")
+    console.say("PROVEN: both daemons answered, both are on test networks, and the timelock")
+    console.say("ordering for this pair is safe.")
+    console.say("NOT PROVEN: that either wallet holds a spendable balance, that an encrypted")
+    console.say("wallet will unlock, or that create_contract will be accepted by the daemon.")
+    console.say("Add --run to fund both legs.")
+    return console.summary()
+
+
 def open_test_clients(step: Step, assets: tuple[str, ...]) -> dict:
     """A client per asset, each REFUSED unless its daemon says it is on a test network.
 
@@ -953,13 +986,17 @@ def main() -> int:
         console.say(f"--from and --to are both {args.from_asset}; a swap needs two chains")
         return 1
     if not args.run:
-        console.banner(f"PLAN ONLY: {args.from_asset} -> {args.to_asset}. Add --run to fund.")
+        console.banner(f"DRY RUN: {args.from_asset} -> {args.to_asset}. Nothing will be funded.")
         console.say(f"initiator funds {args.from_amount} {args.from_asset} with the LONGER lock")
         console.say(f"participant funds {args.to_amount} {args.to_asset}, expiring FIRST")
-        return 0
+        console.say("")
+        console.say("This contacts BOTH daemons -- read-only -- and stops before funding.")
 
     try:
-        console.banner(f"atomic swap {args.from_asset} -> {args.to_asset}, both legs, TEST networks only")
+        if args.run:
+            console.banner(
+                f"atomic swap {args.from_asset} -> {args.to_asset}, both legs, TEST networks only"
+            )
         console.step(1, "both daemons say which network they are on, and both must be a test one")
         clients = open_test_clients(Step(console, 1), (args.from_asset, args.to_asset))
         assets = (args.from_asset, args.to_asset)
@@ -987,6 +1024,24 @@ def main() -> int:
         console.step(5, "the participant's leg must expire FIRST -- the security property")
         assert_ordering(Step(console, 5), initiator=planned_a, participant=planned_b)
 
+        # A DRY RUN STOPS HERE, HAVING DONE EVERYTHING THAT DOES NOT MOVE MONEY.
+        #
+        # It used to stop before step 1 and print three lines from its own arguments, which is a
+        # plan that cannot fail -- and a check that cannot fail is the defect rule 13 names when
+        # it says "skipped" and "success" must not share an output. The operator's 2026-09-27
+        # GRC dry run printed a clean plan against a daemon nobody had contacted; two runs
+        # earlier the same clean plan preceded a connection-refused traceback on a chain the
+        # driver had never reached.
+        #
+        # Everything above this line is read-only: getblockchaininfo/getinfo to name each
+        # network, and getblockcount to derive each locktime. So a dry run now PROVES the two
+        # daemons answer, that both are on test networks, and that the timelock ordering this
+        # pair produces is safe -- which is every refusal the real run can hit before the first
+        # irreversible transfer. What it cannot prove is a balance, a wallet unlock, or a
+        # create_contract that the daemon refuses, and it says so rather than implying otherwise.
+        if not args.run:
+            return report_dry_run(console)
+
         console.step(6, "both legs are funded only now that the ordering is proven safe")
         funded_a = FundedLeg(leg_a, fund_leg(Step(console, 6), planned_a, secret_hash,
                                              clients[leg_a.asset]), clients[leg_a.asset])
@@ -994,14 +1049,7 @@ def main() -> int:
                                              clients[leg_b.asset]), clients[leg_b.asset])
 
         claim_b, claim_a = claim_both_legs(console, funded_a, funded_b, parties, secret)
-        console.say(f"both legs claimed: {claim_b[:16]}... and {claim_a[:16]}...")
-        console.say("")
-        console.say("BOTH SIDES WERE PLAYED BY THIS PROCESS, so this is a rehearsal of the")
-        console.say("protocol rather than a swap with a counterparty. The one step a real")
-        console.say("participant does differently is step 8: they are not the claimer, so")
-        console.say("`gettransaction` will not find the claim for them and they need -txindex")
-        console.say("or a block scan. claim_scriptsig_hex() says so at the site.")
-        return console.summary()
+        return report_completed_swap(console, claim_a, claim_b)
     except SwapError as error:
         console.check("swap", str(error), "no refusal", False)
         return console.summary()

@@ -814,3 +814,196 @@ def test_claim_both_legs_derives_the_hash_rather_than_taking_it_as_an_argument()
     hash the chain published. Taking both would be comparing one argument to another."""
     names = list(inspect.signature(atomic_swap.claim_both_legs).parameters)
     assert names == ["console", "funded_a", "funded_b", "parties", "secret"]
+
+
+# ---------------------------------------------------------------------------------------
+# NAMING THE NETWORK, AND THE GRIDCOIN ROUTE THAT HAD NEVER RUN.
+#
+# BTC and LTC answer getblockchaininfo with a `chain`. Gridcoin is an older fork with NO
+# getblockchaininfo at all -- it carries a `testnet` boolean on getinfo instead. That fallback
+# was written from reading Gridcoin's RPC surface and had never been exercised by anything when
+# the operator asked to test GRC pairs end to end (2026-09-27), which is rule 17's distinction
+# between a reason to believe and a check.
+# ---------------------------------------------------------------------------------------
+
+
+class _StubNetworkClient:
+    """A daemon that answers only the two network RPCs, in one of the three real shapes."""
+
+    def __init__(self, *, chain: str | None = None, testnet: bool | None = None,
+                 fail_blockchaininfo: bool = False) -> None:
+        self.chain = chain
+        self.testnet = testnet
+        self.fail_blockchaininfo = fail_blockchaininfo
+        self.asked: list[str] = []
+
+    def rpc_call(self, method: str, params=None):
+        self.asked.append(method)
+        if method == "getblockchaininfo":
+            if self.fail_blockchaininfo:
+                raise RuntimeError("Method not found")
+            return {} if self.chain is None else {"chain": self.chain}
+        if method == "getinfo":
+            return {} if self.testnet is None else {"testnet": self.testnet}
+        raise AssertionError(f"unexpected rpc {method}")
+
+
+def test_bitcoin_and_litecoin_are_named_from_getblockchaininfo():
+    """The route those two daemons answer on, and the values they really return."""
+    for chain in ("regtest", "test", "testnet3", "signet"):
+        client = _StubNetworkClient(chain=chain)
+        assert atomic_swap.chain_name("BTC", client) == chain
+        assert chain in TEST_CHAIN_NAMES
+
+
+def test_gridcoin_is_named_from_getinfos_testnet_boolean():
+    """THE GRIDCOIN ROUTE. No getblockchaininfo at all -- the daemon answers method-not-found,
+    which is the SIGNAL to try getinfo rather than a failure, and getinfo carries `testnet`.
+
+    Both values, because a route that only ever returns "testnet" would pass this test while
+    being unable to refuse a mainnet daemon -- and the operator has a MAINNET Gridcoin wallet
+    running on the same machine, holding their real staking balance, one port number away."""
+    testnet = _StubNetworkClient(testnet=True, fail_blockchaininfo=True)
+    assert atomic_swap.chain_name("GRC", testnet) == "testnet"
+    assert "getblockchaininfo" in testnet.asked and "getinfo" in testnet.asked
+    assert atomic_swap.chain_name("GRC", testnet).lower() in TEST_CHAIN_NAMES
+
+    mainnet = _StubNetworkClient(testnet=False, fail_blockchaininfo=True)
+    assert atomic_swap.chain_name("GRC", mainnet) == "main"
+    assert "main" not in TEST_CHAIN_NAMES, "the mainnet answer must not pass the gate"
+
+
+def test_a_daemon_that_names_no_network_is_refused_rather_than_assumed():
+    """Neither route answering is a REFUSAL, never a default. This file will not fund a contract
+    on a chain it cannot name -- which is the same shape as UNKNOWN in address_network: "I could
+    not tell" and "it is testnet" must never be one value."""
+    with pytest.raises(SwapError, match="could not determine the network"):
+        atomic_swap.chain_name("GRC", _StubNetworkClient(fail_blockchaininfo=True))
+    with pytest.raises(SwapError, match="could not determine the network"):
+        atomic_swap.chain_name("BTC", _StubNetworkClient())
+
+
+def test_open_test_clients_refuses_a_mainnet_daemon_and_names_it(monkeypatch):
+    """The gate, driven through the real function with a seeded client.
+
+    A MAINNET daemon must stop the run at step 1 -- before a key is minted, before a secret
+    exists, and long before anything is funded. On 2026-09-27 a `gridcoinresearchd getnewaddress`
+    without -testnet put an address in the operator's live staking wallet, so this is the exact
+    confusion the check exists for and it is one port number wide."""
+    monkeypatch.setenv("GRC_RPC_PASS", "not-a-real-credential")
+    monkeypatch.setitem(atomic_swap.CLIENTS, "GRC",
+                        lambda url, user, password: _StubNetworkClient(testnet=False,
+                                                                      fail_blockchaininfo=True))
+    with pytest.raises(SwapError, match="REFUSING"):
+        atomic_swap.open_test_clients(_step(), ("GRC",))
+
+    monkeypatch.setitem(atomic_swap.CLIENTS, "GRC",
+                        lambda url, user, password: _StubNetworkClient(testnet=True,
+                                                                      fail_blockchaininfo=True))
+    clients = atomic_swap.open_test_clients(_step(), ("GRC",))
+    assert set(clients) == {"GRC"}
+
+
+def test_a_dry_run_says_what_it_proved_and_what_it_did_not(capsys):
+    """A DRY RUN THAT CANNOT FAIL TEACHES NOTHING, which is what the old one was: it printed
+    three lines derived from its own arguments and never opened a socket. The operator's GRC dry
+    run printed a clean plan against a daemon nobody had contacted, and two runs earlier the
+    same clean plan preceded a connection-refused traceback.
+
+    The distinction between PROVEN and NOT PROVEN is the whole value, so it is asserted -- a
+    report claiming only the good half is how a dry run becomes a false reassurance."""
+    console = Console(total_steps=8)
+    assert atomic_swap.report_dry_run(console) == 0
+    printed = capsys.readouterr().out
+    assert "nothing was funded" in printed
+    assert "PROVEN: both daemons answered" in printed
+    assert "NOT PROVEN" in printed
+    for absent in ("spendable balance", "unlock", "create_contract"):
+        assert absent in printed, f"the report must name {absent!r} as unproven"
+
+
+class _RefusesToFund:
+    """A daemon that answers every READ the dry run makes and EXPLODES on any write.
+
+    The assertion is the absence: create_contract, sendtoaddress and sendrawtransaction raise,
+    so a dry run that funds anything fails loudly rather than being caught by a later check.
+    Rule 13's shape -- "a stop that cannot prove it worked is not a stop" -- applied to funding:
+    the proof is that the irreversible call was never reachable, not that a flag was read.
+    """
+
+    def __init__(self, *, chain: str, tip: int) -> None:
+        self.chain = chain
+        self.tip = tip
+        self.reads: list[str] = []
+
+    def rpc_call(self, method: str, params=None):
+        self.reads.append(method)
+        if method == "getblockchaininfo":
+            return {"chain": self.chain}
+        if method == "getblockcount":
+            return self.tip
+        if method == "getnewaddress":
+            return "a-wallet-address"
+        if method in ("sendtoaddress", "sendrawtransaction", "walletpassphrase", "walletlock"):
+            raise AssertionError(f"a dry run must not call {method}")
+        raise AssertionError(f"unexpected rpc {method}")
+
+    def create_contract(self, **kwargs):
+        raise AssertionError(f"a dry run must not create a contract: {sorted(kwargs)}")
+
+    def redeem_contract(self, *args, **kwargs):
+        raise AssertionError("a dry run must not redeem")
+
+
+def test_a_dry_run_reaches_the_ordering_check_and_funds_nothing(monkeypatch, capsys):
+    """THE PROPERTY THAT MATTERS, and a mutation check is why it exists: deleting the
+    `if not args.run: return` so a dry run funds both legs anyway killed no test.
+
+    Driven through main() with a real argv, because the defect class here is plumbing -- the
+    thing that has broken on the operator's first run three times today. The stubs raise on
+    every write, so this asserts the ABSENCE of funding rather than the presence of a flag."""
+    tips = {"BTC": 1647, "LTC": 3657}
+    made: dict[str, _RefusesToFund] = {}
+
+    def factory(asset):
+        def build(url, user, password):
+            made[asset] = _RefusesToFund(chain="regtest", tip=tips[asset])
+            return made[asset]
+        return build
+
+    for asset in ("BTC", "LTC"):
+        monkeypatch.setenv(f"{asset}_RPC_PASS", "not-a-real-credential")
+        monkeypatch.setitem(atomic_swap.CLIENTS, asset, factory(asset))
+    monkeypatch.setattr(sys, "argv", [
+        "atomic_swap.py", "--from", "BTC", "--to", "LTC",
+        "--from-amount", "0.01", "--to-amount", "0.5",
+    ])
+
+    assert atomic_swap.main() == 0
+    printed = capsys.readouterr().out
+
+    # It got far enough to be worth something: both networks named, both tips read, the
+    # ordering judged.
+    assert "BTC network" in printed and "LTC network" in printed
+    assert "participant expires FIRST" in printed
+    assert "DRY RUN COMPLETE" in printed
+    for asset in ("BTC", "LTC"):
+        assert "getblockcount" in made[asset].reads, f"{asset}'s tip was never read"
+    # And nothing was funded -- proven by the stubs never being asked to.
+    assert all("sendtoaddress" not in client.reads for client in made.values())
+
+
+def test_a_dry_run_still_refuses_a_mainnet_daemon_before_reading_a_tip(monkeypatch):
+    """A dry run is read-only, so it is tempting to let it look at mainnet. It must not: the
+    locktimes it reports would be derived from a mainnet tip and read as a rehearsal of
+    something safe. It stops at step 1, before a tip is read."""
+    client = _RefusesToFund(chain="main", tip=900_000)
+    monkeypatch.setenv("BTC_RPC_PASS", "not-a-real-credential")
+    monkeypatch.setenv("LTC_RPC_PASS", "not-a-real-credential")
+    monkeypatch.setitem(atomic_swap.CLIENTS, "BTC", lambda url, user, password: client)
+    monkeypatch.setattr(sys, "argv", [
+        "atomic_swap.py", "--from", "BTC", "--to", "LTC",
+        "--from-amount", "0.01", "--to-amount", "0.5",
+    ])
+    assert atomic_swap.main() == 1, "a mainnet daemon must make the run fail, not merely warn"
+    assert "getblockcount" not in client.reads, "it must refuse before deriving a locktime"
