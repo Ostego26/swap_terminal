@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: E402  path shims above
 from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT  # noqa: E402  same
 from step_console import Console  # noqa: E402  same
+from valid_addresses import BTC_PARTICIPANT  # noqa: E402  conftest puts tests/ on sys.path
 
 import atomic_swap  # noqa: E402  both path shims above come first
 from atomic_swap import (  # noqa: E402  same
@@ -226,7 +227,7 @@ def test_the_parser_only_offers_pairs_the_file_can_drive():
 def test_the_party_pairs_a_key_with_its_destination():
     """A claim signed by one party's key paying another party's address is the mistake this
     shape makes hard to write."""
-    party = Party(privkey="cWIF", destination="tb1qexample")
+    party = Party(privkey="cWIF", destination=BTC_PARTICIPANT)
     assert party.privkey == "cWIF"
     assert set(Party.__dataclass_fields__) == {"privkey", "destination"}
 

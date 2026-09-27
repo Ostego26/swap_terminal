@@ -544,8 +544,8 @@ if __name__ == "__main__":
         # Replace these with valid testnet addresses and values.
         contract = client.create_contract(
             amount_ltc=Decimal("0.1"),
-            participant_address="tltc1qexampleparticipantaddressxxxxxxxxxxxxxxxxxxx",
-            refund_address="tltc1qexamplerefundaddressxxxxxxxxxxxxxxxxxxxx",
+            participant_address="tltc1qnl8c6kecv8ltxm8q4hpj9vw842f0vc6r3aqhxm",
+            refund_address="tltc1qu3ksx4xz82ngf3my3pjm4aejkst40ay88ua93a",
             # Derived from the daemon's own tip, never a literal -- see the
             # BTC client's demo block for why a hardcoded 500000 is now
             # dangerous rather than merely wrong.

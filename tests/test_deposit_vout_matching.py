@@ -34,9 +34,14 @@ by a transaction the adapter can perfectly well read.
 import pytest
 from chains.base import RPCAdapter
 from script_pub_key import NO_ADDRESS_REPORTED, address_of, addresses_of, pays_address
+from valid_addresses import (
+    BTC_REGTEST_DEPOSIT,
+    BTC_REGTEST_SOMEBODY_ELSE,
+    LTC_P2SH_TESTNET,
+)
 
-DEPOSIT_ADDRESS = "bcrt1qdepositaddressexample00000000000000000"
-OTHER_ADDRESS = "bcrt1qsomebodyelse0000000000000000000000000"
+DEPOSIT_ADDRESS = BTC_REGTEST_DEPOSIT
+OTHER_ADDRESS = BTC_REGTEST_SOMEBODY_ELSE
 DEPOSIT_TXID = "ab" * 32
 
 
@@ -159,9 +164,9 @@ def test_an_output_that_names_no_address_is_not_credited():
     ("script_pub_key", "expected"),
     [
         # Core 22.0 and later.
-        ({"address": "bcrt1qexample"}, ["bcrt1qexample"]),
+        ({"address": BTC_REGTEST_DEPOSIT}, [BTC_REGTEST_DEPOSIT]),
         # Core 0.19 and earlier, and Litecoin 0.21.4.
-        ({"addresses": ["2NexampleLTC"]}, ["2NexampleLTC"]),
+        ({"addresses": [LTC_P2SH_TESTNET]}, [LTC_P2SH_TESTNET]),
         # Both, which no daemon does today and which a daemon in between might.
         ({"address": "a", "addresses": ["b"]}, ["a", "b"]),
         # The same value in both fields is one address, not two.
@@ -193,7 +198,7 @@ def test_pays_address_never_matches_an_empty_address():
 
 def test_address_of_never_prints_nothing():
     """`(none)` is a result; a blank gap is ambiguous between zero and broken (rule 14)."""
-    assert address_of({"address": "bcrt1qexample"}) == "bcrt1qexample"
+    assert address_of({"address": BTC_REGTEST_DEPOSIT}) == BTC_REGTEST_DEPOSIT
     assert address_of({"addresses": ["a", "b"]}) == "a, b"
     assert address_of({"asm": "OP_RETURN"}) == NO_ADDRESS_REPORTED
     assert address_of(None) == NO_ADDRESS_REPORTED

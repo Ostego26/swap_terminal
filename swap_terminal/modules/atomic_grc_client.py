@@ -636,8 +636,8 @@ if __name__ == "__main__":
             amount_grc=Decimal("1.0"),
             # Not a credential: a placeholder SHA-256 digest for the demo block.
             secret_hash="ff" * 32,
-            participant_address="tgrc1qexampleparticipantaddress0000000000000000000000",
-            refund_address="tgrc1qexamplerefundaddress000000000000000000000000",
+            participant_address="mjKMm7NbZ42D1JLsHG6fW7eETZ2VX6UzGX",
+            refund_address="mvbAng7R399T9vz81KiAVRobBNBfKnFrA2",
             # Derived from the daemon's own tip, never a literal -- see the
             # BTC client's demo block for why a hardcoded 500000 is now
             # dangerous rather than merely wrong.

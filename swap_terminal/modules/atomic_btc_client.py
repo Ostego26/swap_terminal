@@ -525,8 +525,8 @@ if __name__ == "__main__":
             # Not a credential: a placeholder SHA-256 DIGEST for the demo
             # block. The preimage that hashes to it does not exist.
             secret_hash="ff" * 32,
-            participant_address="tb1qexampleparticipantaddress0000000000000000000000",
-            refund_address="tb1qexamplerefundaddress000000000000000000000000",
+            participant_address="tb1qr4puj65adgmteex4qwnamtl3qv5k7qk90agsup",
+            refund_address="tb1q5kv4y4mf0ph3et7eyjstqcph0km4tt3wchxmz7",
             # Derived from the daemon's own tip, never a literal. This block
             # BROADCASTS, and a hardcoded 500000 -- a height BTC passed in
             # 2017 -- would now build a contract refundable the instant it is

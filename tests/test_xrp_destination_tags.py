@@ -63,6 +63,7 @@ from services.xrp_tag_service import (
     swap_id_for_tag,
     validate_account,
 )
+from valid_addresses import XRP_ACCOUNT_ZERO_WITH_TYPO
 
 # The ledger's own well-known constants, the same two tests/test_xrp_address.py
 # uses. Real addresses with real checksums, so validate_account() is exercised
@@ -534,13 +535,13 @@ def test_the_reference_serializer_carries_tag_zero():
 def test_a_malformed_account_is_refused_before_anything_is_written(db):
     """A typo would open a second sequence the PRIMARY KEY cannot see.
 
-    `account` is a TEXT column, so "rrrrrrrrrrrrrrrrrrrrrhoLvTq" inserts
+    `account` is a TEXT column, so XRP_ACCOUNT_ZERO_WITH_TYPO inserts
     happily and starts numbering from 1 again -- handing out tags that duplicate
     the real account's, with the constraint unable to object because the rows
     differ in the account column. The checksum check is what closes that, and it
     costs no network call.
     """
-    for bad in ("", "   ", "not-an-address", "rrrrrrrrrrrrrrrrrrrrrhoLvTq"):
+    for bad in ("", "   ", "not-an-address", XRP_ACCOUNT_ZERO_WITH_TYPO):
         with pytest.raises(XRPTagAllocationError):
             allocate_destination_tag(db, bad, "s_one")
     assert db.execute("SELECT COUNT(*) AS n FROM xrp_destination_tags").fetchone()["n"] == 0

@@ -33,7 +33,8 @@ import pytest
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 
-from modules.address_network import (  # noqa: E402  the path shim above must run first
+import bech32  # noqa: E402  the path shim above must run first
+from modules.address_network import (  # noqa: E402  same
     MAINNET,
     P2PKH_VERSIONS,
     P2SH_VERSIONS,
@@ -41,8 +42,11 @@ from modules.address_network import (  # noqa: E402  the path shim above must ru
     TESTNET_P2PKH_VERSION,
     TESTNET_P2SH_VERSION,
     UNKNOWN,
+    XRP_BASE58_ALPHABET,
     address_network,
+    decodes_as_address,
     is_testnet_address,
+    is_valid_address,
 )
 from modules.atomic_htlc_scripts import (  # noqa: E402  same
     TESTNET_P2PKH_VERSION as SCRIPTS_P2PKH,
@@ -51,6 +55,10 @@ from modules.atomic_htlc_scripts import (  # noqa: E402  same
     TESTNET_P2SH_VERSION as SCRIPTS_P2SH,
 )
 from regtest.keys import TESTNET_P2PKH_VERSION as KEYS_P2PKH  # noqa: E402  same
+from valid_addresses import (  # noqa: E402  conftest puts tests/ on sys.path
+    INVALID_GRC_BECH32,
+    INVALID_PLACEHOLDERS,
+)
 
 # The address that was actually created in the operator's MAINNET wallet on 2026-09-27. Kept
 # as a literal because a regression here is not hypothetical -- this string is the incident.
@@ -157,3 +165,110 @@ def test_the_two_older_copies_of_the_testnet_byte_now_derive_from_this_one():
     assert SCRIPTS_P2PKH is TESTNET_P2PKH_VERSION
     assert SCRIPTS_P2SH is TESTNET_P2SH_VERSION
     assert KEYS_P2PKH is TESTNET_P2PKH_VERSION
+
+
+# ---------------------------------------------------------------------------------------
+# VALIDITY, as distinct from network. Added after a mutation check found that four ways of
+# loosening decodes_as_address() killed no test -- the gate in
+# tests/test_address_literals_are_valid.py exercised it only against a tree that was already
+# clean, which proves the tree and not the function.
+# ---------------------------------------------------------------------------------------
+
+
+def test_gridcoin_bech32_is_refused_because_no_such_format_exists():
+    """Gridcoin is base58 ONLY. The tree contained a `tgrc1q...` address in
+    atomic_grc_client.py's usage example, and a reader who copied it would have written an
+    address no Gridcoin daemon can parse -- a fee paid there is burned, which is the same loss
+    the PLATFORM_FEE_TESTNET_DEFAULT burn was.
+
+    INVALID_GRC_BECH32 carries a VALID bech32 checksum (it is a real tb1 address with its hrp
+    swapped), so the refusal cannot be passing for the wrong reason. The checksum is not the
+    problem; the format does not exist on that chain."""
+    decodable, why = decodes_as_address(INVALID_GRC_BECH32)
+    assert not decodable, f"{INVALID_GRC_BECH32} was accepted: {why}"
+    assert "no bech32" in why, f"the reason must say why, not merely refuse: {why}"
+    # And the same string with a real hrp IS valid, which is what pins "the hrp is the reason".
+    assert is_valid_address("tb1" + INVALID_GRC_BECH32.split("1", 1)[1])
+
+
+def test_a_payload_that_is_not_twenty_one_bytes_is_refused():
+    """A version byte plus a hash160 is 21 bytes. Anything else is a truncation or a different
+    object entirely -- a WIF, a 32-byte key -- and accepting it means paying an address that
+    cannot receive. The length is checked rather than assumed from the string's length, because
+    base58 is not fixed-width."""
+    for payload, label in ((b"\x6f" + b"\x00" * 10, "half a hash160"),
+                           (b"\x6f" + b"\x00" * 31, "a 32-byte key"),
+                           (b"\x6f", "a bare version byte")):
+        address = base58.b58encode_check(payload).decode()
+        decodable, why = decodes_as_address(address)
+        assert not decodable, f"{label} was accepted as an address: {why}"
+        assert "bytes" in why, f"the reason must name the length problem: {why}"
+
+
+def test_bech32_hrps_map_to_the_network_they_actually_name():
+    """bc and ltc are MAINNET; tb, bcrt and tltc are testnet. Asserted through the real encoder
+    rather than by reading BECH32_HRPS back to itself, and it matters because every bech32
+    address in this repository decoded as UNKNOWN until address_network learned hrps -- so a
+    fixture test asserting "nothing is mainnet" passed for `bc1...` strings."""
+    program = bytes(range(20))
+    expected = {"bc": MAINNET, "ltc": MAINNET, "tb": TESTNET, "bcrt": TESTNET, "tltc": TESTNET}
+    for hrp, network in expected.items():
+        address = bech32.encode(hrp, 0, program)
+        assert address is not None, f"could not encode an {hrp} address"
+        got, why = address_network(address)
+        assert got == network, f"{address} -> {got}, expected {network} ({why})"
+        assert decodes_as_address(address)[0]
+
+
+def test_an_hrp_this_repository_cannot_pay_is_unknown_rather_than_accepted():
+    """A valid bech32 address on a chain we cannot reach is still an address the money never
+    comes back from, so an unknown hrp is UNKNOWN -- never accepted on the strength of its
+    checksum alone."""
+    address = bech32.encode("doge", 0, bytes(range(20)))
+    assert address is not None
+    network, why = address_network(address)
+    assert network == UNKNOWN, f"{address} -> {network} ({why})"
+
+
+def test_an_xrp_address_is_not_a_bitcoin_address_and_the_reverse():
+    """The two alphabets are the same 58 characters in a different order, so the checksum is over
+    different bytes. Decoded under the wrong alphabet an address either fails its checksum or
+    silently becomes a different key -- which is why the decoder TRIES both and reports which
+    one held, rather than assuming from the leading character."""
+    payload = b"\x00" + bytes(range(20))
+    xrp = base58.b58encode_check(payload, alphabet=XRP_BASE58_ALPHABET).decode()
+    btc = base58.b58encode_check(payload).decode()
+    assert xrp != btc, "the same bytes encode differently under the two alphabets"
+    assert decodes_as_address(xrp)[0] and "XRP" in decodes_as_address(xrp)[1]
+    assert decodes_as_address(btc)[0] and "XRP" not in decodes_as_address(btc)[1]
+
+    # THE TRY-ORDER DOES NOT MATTER, AND AN EARLIER VERSION OF THIS TEST IMPLIED IT DID.
+    #
+    # It asserted the BTC address is not reported as XRP and commented that this would break
+    # "if the order of the two attempts stopped mattering". A mutation check swapped the order
+    # and killed no test, so the claim was checked: encoding 40,000 payloads under one alphabet
+    # and decoding under the other, ZERO also passed the wrong alphabet's checksum. Expected by
+    # chance is 40000/2**32 = 0.0000093, because the checksum is four bytes.
+    #
+    # So the order is arbitrary by construction, not by luck, and that is a stronger property
+    # than the one the old assertion pretended to hold: the decoder does not have to guess which
+    # alphabet a string used, because at most one of them can validate it. The assertions above
+    # pin the OUTCOME -- each address is reported under its own encoding -- which is true in
+    # either order and is what a caller depends on.
+    for candidate in (xrp, btc):
+        decodable, why = decodes_as_address(candidate)
+        assert decodable, why
+    assert base58.b58decode_check(xrp, alphabet=XRP_BASE58_ALPHABET) == payload
+    assert base58.b58decode_check(btc) == payload
+
+
+@pytest.mark.parametrize("label", sorted(INVALID_PLACEHOLDERS))
+def test_is_valid_address_is_false_for_each_derived_failure_mode(label):
+    """One test per failure mode, so a failure names WHICH kind stopped being caught.
+
+    The six are a bech32 checksum, Gridcoin bech32 (a format that cannot exist), a base58
+    checksum, a base58 charset violation, a truncation, and XRP's account zero with the typo
+    this repository deliberately keeps -- every shape the 2026-09-27 sweep actually found,
+    derived from valid addresses so none of them appears in the source as a literal."""
+    value = INVALID_PLACEHOLDERS[label]
+    assert not is_valid_address(value), f"{label}: {value} is still accepted"

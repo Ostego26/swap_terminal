@@ -34,6 +34,7 @@ from services.swap_view import (
     swap_display,
     threshold_note,
 )
+from valid_addresses import BTC_PARTICIPANT, GRC_PAYOUT
 from workers.payout_worker import DEFAULT_POLL_SECONDS as PAYOUT_POLL
 
 NOW = "2026-09-26T12:00:00+00:00"
@@ -50,8 +51,8 @@ def make_swap(**overrides) -> dict:
         "status": "awaiting_deposit",
         "from_asset": "GRC",
         "to_asset": "BTC",
-        "deposit_address": "S8kKq2VrZ4mQvYtN6dWxJ3hLpB7cFgTnEu",
-        "payout_address": "bc1qexample",
+        "deposit_address": GRC_PAYOUT,
+        "payout_address": BTC_PARTICIPANT,
         "expected_input_amount": 1000.0,
         "actual_input_amount": None,
         "output_amount_estimate": 0.001,
@@ -235,7 +236,7 @@ def test_a_missing_threshold_says_so_rather_than_reading_as_zero():
 def test_a_bitcoin_style_chain_attributes_by_address():
     deposit = deposit_instruction(make_swap(from_asset="GRC"))
     assert deposit["model"] == "address"
-    assert deposit["address"] == "S8kKq2VrZ4mQvYtN6dWxJ3hLpB7cFgTnEu"
+    assert deposit["address"] == GRC_PAYOUT
     assert deposit["tag"] is None
     assert deposit["problem"] == ""
 

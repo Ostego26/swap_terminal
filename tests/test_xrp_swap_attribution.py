@@ -34,6 +34,7 @@ from modules.address_network import is_testnet_address
 from services.deposit_service import attributable_events
 from services.helpers import utc_now_iso
 from services.swap_service import create_swap, deposit_account
+from valid_addresses import BTC_PARTICIPANT
 
 ACCOUNT = "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv"
 
@@ -97,7 +98,7 @@ def test_an_address_attributed_chain_is_untouched():
     output index, not a swap identifier, and it would match nothing.
     """
     events = [event(0, "a" * 64), event(1, "b" * 64)]
-    swap = {"id": "s-1", "from_asset": "BTC", "deposit_address": "bc1qexample", "deposit_tag": None}
+    swap = {"id": "s-1", "from_asset": "BTC", "deposit_address": BTC_PARTICIPANT, "deposit_tag": None}
 
     assert attributable_events(events, swap) == events
 

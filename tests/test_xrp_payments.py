@@ -25,8 +25,9 @@ STATUS in chains/xrp.py), so these prove the rules, not the wire format.
 
 import pytest
 from chains.xrp_payments import XRPPaymentError, deposit_events_from_transactions
+from valid_addresses import XRP_HOT_ACCOUNT
 
-ADDRESS = "rSwapTerminalHotAccountAddressXXXXXXX"
+ADDRESS = XRP_HOT_ACCOUNT
 TXID = "A" * 64
 
 

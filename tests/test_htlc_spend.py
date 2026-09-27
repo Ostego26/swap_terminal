@@ -133,6 +133,7 @@ from regtest.txbuild import redeem_script_sig as harness_redeem_script_sig
 # stack interpreter in this repository, imported rather than copied (rule 8);
 # pytest puts tests/ on sys.path, which is what makes this importable.
 from test_regtest_harness_units import ScriptFailure, _eval_p2sh_spend
+from valid_addresses import LTC_PLATFORM_FEE
 
 CONTRACT_COINS = Decimal("1.0")
 # Not a credential: a literal handed to a FakeNode that has no wallet. It is
@@ -2068,8 +2069,8 @@ def test_the_testnet_literals_are_still_recorded_but_are_not_defaults():
 def test_a_configured_fee_address_is_returned_verbatim(monkeypatch):
     """The other direction, so the function cannot pass the tests above by always
     answering None."""
-    monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", "tltc1qexampleaddressforthistest")
-    assert platform_fee_address("LTC") == "tltc1qexampleaddressforthistest"
+    monkeypatch.setenv("PLATFORM_FEE_LTC_ADDRESS", LTC_PLATFORM_FEE)
+    assert platform_fee_address("LTC") == LTC_PLATFORM_FEE
     # Surrounding whitespace is stripped -- a trailing newline is what a `$(cat
     # file)` in a deployment script leaves, and it would make an otherwise valid
     # address unusable.

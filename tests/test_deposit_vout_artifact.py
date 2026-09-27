@@ -69,6 +69,10 @@ from deposit_vout_artifact import (
     suspect_rows,
 )
 from services.deposit_service import refresh_swap_from_chain, warn_on_multi_vout_rows
+from valid_addresses import (
+    BTC_REGTEST_DEPOSIT,
+    BTC_REGTEST_SOMEBODY_ELSE,
+)
 
 from migrate_deposit_vouts import (
     MigrationRefused,
@@ -81,8 +85,8 @@ from migrate_deposit_vouts import (
 
 SCRIPT = Path(__file__).resolve().parent.parent / "migrate_deposit_vouts.py"
 
-DEPOSIT_ADDRESS = "bcrt1qdepositaddressexample00000000000000000"
-OTHER_ADDRESS = "bcrt1qsomebodyelse0000000000000000000000000"
+DEPOSIT_ADDRESS = BTC_REGTEST_DEPOSIT
+OTHER_ADDRESS = BTC_REGTEST_SOMEBODY_ELSE
 TXID = "ab" * 32
 OTHER_TXID = "cd" * 32
 SEEDED_AT = "2026-09-20T08:00:00+00:00"
