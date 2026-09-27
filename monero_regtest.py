@@ -578,7 +578,9 @@ def wait_for_unlocked_balance(console: Console, args: argparse.Namespace, second
     )
 
 
-def make_one_transfer(console: Console, args: argparse.Namespace, unlocked: int) -> str:
+def make_one_transfer(
+    console: Console, args: argparse.Namespace, unlocked: int, miner_address: str
+) -> str:
     """Step 6: an ordinary transfer to a second address in the same wallet.
 
     THIS IS THE STEP THE WHOLE FILE EXISTS FOR, and the reason it is a transfer
@@ -606,11 +608,24 @@ def make_one_transfer(console: Console, args: argparse.Namespace, unlocked: int)
                   f"{TXID_HEX_CHARS} hex characters", len(txid) == TXID_HEX_CHARS)
     console.say(f"sent {amount} atomic units to index {created.get('address_index')}")
 
-    # One more block so the transfer confirms -- an unconfirmed transfer has
-    # confirmations=0 and `locked` true, which is a weaker thing to confirm the
-    # field names against than a settled one.
+    # Two more blocks so the transfer confirms -- an unconfirmed transfer has
+    # confirmations=0 and `locked` true, which is a weaker thing to confirm the field
+    # names against than a settled one.
+    #
+    # MINED TO THE PRIMARY ADDRESS, NOT THE SUBADDRESS, AND THAT WAS A BUG. The first
+    # version passed `destination` here, which is the subaddress created just above to
+    # RECEIVE the transfer, and monerod answered:
+    #
+    #     code -12  "Mining to subaddress is not supported yet"
+    #
+    # measured on the operator's host 2026-09-27, after every earlier step had passed.
+    # The miner address and the payee address are different roles and the first version
+    # conflated them because the same variable was in scope. Nothing about the transfer
+    # needed the blocks to be mined anywhere in particular -- they exist only to bury
+    # it -- so the primary address is both correct and arbitrary, which is exactly why
+    # reusing `destination` looked harmless.
     rpc(args.daemon_port, "generateblocks",
-        {"amount_of_blocks": 2, "wallet_address": destination}, timeout=120)
+        {"amount_of_blocks": 2, "wallet_address": miner_address}, timeout=120)
     rpc(args.wallet_port, "refresh")
 
     transfers = rpc(args.wallet_port, "get_transfers", {"in": True, "account_index": 0})
@@ -661,7 +676,7 @@ def run(console: Console, args: argparse.Namespace) -> int:
     unlocked = wait_for_unlocked_balance(console, args)
 
     console.step(6, "make ONE ordinary transfer -- a coinbase does not appear in `in`")
-    make_one_transfer(console, args, unlocked)
+    make_one_transfer(console, args, unlocked, address)
 
     console.step(7, "what to run next")
     console.say(f"python3 monero_chain_check.py --host 127.0.0.1 --port {args.wallet_port}")

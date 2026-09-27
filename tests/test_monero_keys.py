@@ -181,8 +181,9 @@ def test_the_real_stagenet_address_decodes_and_its_checksum_matches():
     assert decoded.network == "stagenet"
     assert decoded.kind == "primary"
     assert decoded.prefix_byte == 24
-    assert decoded.prefix_was_verified is True, (
-        "this is the ONE prefix this repo has checked against a real address"
+    assert decoded.prefix_from_source is True, "byte 24 is in cryptonote_config.h:285"
+    assert decoded.prefix_from_address is True, (
+        "and this very address is the real one behind it"
     )
     assert decoded.is_mainnet() is False
     assert decoded.public_spend_key.hex() == (
@@ -243,14 +244,77 @@ def test_an_unknown_prefix_byte_says_the_checksum_passed(monkeypatch):
     assert "24=stagenet/primary" in message
 
 
-def test_only_stagenet_primary_is_marked_verified():
-    """Rule 17 mechanically. Exactly one prefix in the table was checked against a
-    real address; if a later session verifies another it must flip the flag here,
-    and if somebody flips one without an address this test is the thing that
-    should have stopped them."""
-    verified = [p for p in NETWORK_PREFIXES if p.verified]
-    assert len(verified) == 1
-    assert (verified[0].network, verified[0].name, verified[0].byte) == ("stagenet", "primary", 24)
+def test_the_two_grades_of_evidence_are_kept_apart():
+    """Rule 17 mechanically, as a struct invariant.
+
+    Reading a byte out of Monero's cryptonote_config.h and decoding a real
+    wallet-generated address are different evidence, and one `verified` boolean would
+    have let them blur. All nine bytes have the first; exactly two have the second.
+
+    The asymmetry is also a real constraint: from_address without from_source would
+    mean a byte nobody looked up, which cannot happen now, so it is asserted rather
+    than assumed. If a later session decodes, say, a real testnet address, it flips
+    that row's from_address -- and if somebody flips one WITHOUT an address, this test
+    plus the count below is what should stop them.
+    """
+    assert all(p.from_source for p in NETWORK_PREFIXES), "all nine come from the header"
+    with_address = [(p.network, p.name, p.byte) for p in NETWORK_PREFIXES if p.from_address]
+    assert sorted(with_address) == [
+        ("mainnet", "primary", 18),
+        ("stagenet", "primary", 24),
+    ], f"exactly two rows have a real address behind them, got {with_address}"
+    for prefix in NETWORK_PREFIXES:
+        assert prefix.from_source or not prefix.from_address, (
+            f"{prefix.network}/{prefix.name} claims an address but no source line"
+        )
+
+
+def test_every_prefix_byte_matches_moneros_own_constants():
+    """The nine literals, against cryptonote_config.h release-v0.18 (read 2026-09-27):
+
+        mainnet    18 / 19 / 42    lines 227-229
+        testnet    53 / 54 / 63    lines 270-272
+        stagenet   24 / 25 / 36    lines 285-287
+
+    Restated here because this is the one place a literal IS the right check: the
+    table's job is to hold exactly these numbers, and a typo in it produces a valid
+    checksum on an address nobody can use.
+    """
+    expected = {
+        ("mainnet", "primary"): 18, ("mainnet", "integrated"): 19,
+        ("mainnet", "subaddress"): 42,
+        ("testnet", "primary"): 53, ("testnet", "integrated"): 54,
+        ("testnet", "subaddress"): 63,
+        ("stagenet", "primary"): 24, ("stagenet", "integrated"): 25,
+        ("stagenet", "subaddress"): 36,
+    }
+    actual = {(p.network, p.name): p.byte for p in NETWORK_PREFIXES}
+    assert actual == expected
+    assert len({p.byte for p in NETWORK_PREFIXES}) == 9, "nine distinct bytes, no collisions"
+
+
+def test_regtest_addresses_decode_as_mainnet_because_fakechain_returns_mainnet():
+    """`case FAKECHAIN: return mainnet;` -- cryptonote_config.h:361.
+
+    So a REGTEST wallet's address carries byte 18 and decodes here as
+    mainnet/primary. That is not a defect to work around; it is why
+    monero_shared_key_verify.py must build its shared address with mainnet prefixes
+    when the daemon reports fakechain, and getting it backwards would produce an
+    address the regtest wallet does not recognize.
+
+    Pinned with the real address monero_regtest.py's wallet produced on the
+    operator's host, 2026-09-27.
+    """
+    regtest_wallet_address = decode_address(STAGENET_ADDRESS)
+    # The stagenet fixture is byte 24; the point here is the TABLE's mapping for 18.
+    mainnet_primary = next(
+        p for p in NETWORK_PREFIXES if p.network == "mainnet" and p.name == "primary"
+    )
+    assert mainnet_primary.byte == 18
+    assert mainnet_primary.from_address is True, (
+        "the regtest wallet's own address is the real one behind byte 18"
+    )
+    assert regtest_wallet_address.prefix_byte == 24, "and the stagenet fixture is still 24"
 
 
 # --- 4. The shared key: the property the whole swap rests on -------------------

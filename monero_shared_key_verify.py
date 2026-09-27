@@ -240,7 +240,7 @@ def address_for(shares: dict, network: str) -> str:
 
 
 def refuse_mainnet_and_a_funded_wallet(
-    console: Console, port: int, allow_open_wallet: bool = False
+    console: Console, port: int, daemon_port: int, allow_open_wallet: bool = False
 ) -> str:
     """Step 1. Ask the DAEMON which network, and refuse two situations outright.
 
@@ -251,20 +251,34 @@ def refuse_mainnet_and_a_funded_wallet(
     version = rpc(port, "get_version")
     console.say(f"wallet rpc version {version.get('version')} on port {port}")
 
-    # `get_address` on the currently open wallet, then validate_address on it: the
-    # wallet reports the nettype of the daemon it is attached to.
+    # THE NETWORK COMES FROM monerod's get_info, NOT FROM validate_address, AND THAT
+    # WAS A BUG THAT REFUSED THE CORRECT CASE.
+    #
+    # The first version asked the wallet to validate its own address and read the
+    # `nettype` out of the reply. On a REGTEST chain that answers "mainnet" -- measured
+    # on the operator's host 2026-09-27 -- because a regtest chain uses MAINNET ADDRESS
+    # PREFIXES. validate_address reports the network an address FORMAT belongs to,
+    # which is a different question from which network the daemon is on, and on regtest
+    # the two disagree. So this script refused a regtest wallet as mainnet: the exact
+    # inverse of the safety property it was written for, and it blocked the one
+    # configuration it was meant to run in.
+    #
+    # monerod's get_info reports the real thing and spells regtest "fakechain", the
+    # same FAKECHAIN that gates generateblocks. monero_regtest.py has always asked that
+    # way; this file asked the wallet because the wallet was already in hand, which is
+    # the whole mistake in one sentence.
+    nettype = str(rpc(daemon_port, "get_info").get("nettype", "(not reported)"))
     try:
         current = str(rpc(port, "get_address", {"account_index": 0})["address"])
+        console.say(f"open wallet primary {current[:12]}...{current[-6:]}")
     except VerifyError as error:
         raise VerifyError(
             f"could not read the open wallet's address ({error}). This script needs a "
             f"monero-wallet-rpc started in --wallet-dir mode with a wallet open; "
             f"`python3 monero_regtest.py --run` produces exactly that"
         ) from error
-
-    validated = rpc(port, "validate_address", {"address": current})
-    nettype = str(validated.get("nettype", "(not reported)"))
-    console.check("network, from the daemon", nettype.upper(), "stagenet or regtest, NOT mainnet",
+    console.check("network, from monerod's get_info", nettype.upper(),
+                  "fakechain (regtest), stagenet or testnet -- NOT mainnet",
                   nettype.lower() != "mainnet")
     if nettype.lower() == "mainnet":
         raise VerifyError(
@@ -505,7 +519,13 @@ def run_phase(console: Console, target: Target, network: str, mine_blocks: int) 
     """Steps 2-4 of --run: compute the address, let the wallet confirm it, save the fixture."""
     console.step(2, "generate four shares and compute the shared address OFFLINE")
     shares = build_shares()
-    address = address_for(shares, "stagenet" if network == "stagenet" else "mainnet")
+    # A REGTEST ("fakechain") CHAIN USES MAINNET ADDRESS PREFIXES, which is the same
+    # fact that caused the nettype bug above and is load-bearing here: an address built
+    # with the stagenet prefix would not be one the regtest wallet recognizes. So
+    # fakechain maps to "mainnet" and everything else maps to itself.
+    address_network = "stagenet" if network == "stagenet" else "mainnet"
+    console.say(f"daemon says {network}; building the address with {address_network} prefixes")
+    address = address_for(shares, address_network)
     console.say(f"public spend key (sum) {shares['public_spend']}")
     console.say(f"public view  key (sum) {shares['public_view']}")
     decoded = decode_address(address)
@@ -595,8 +615,9 @@ def main() -> int:
     try:
         console.banner("Monero 2-of-2 shared key -- the last untested claim in the GRC<->XMR work")
         console.step(1, "refuse mainnet, and refuse a wallet that holds anything")
-        network = refuse_mainnet_and_a_funded_wallet(console, target.wallet_port,
-                                                     args.allow_open_wallet)
+        network = refuse_mainnet_and_a_funded_wallet(
+            console, target.wallet_port, target.daemon_port, args.allow_open_wallet
+        )
         if args.run:
             return run_phase(console, target, network, args.mine)
         return sweep_phase(console, target, args.sweep, args.wait)

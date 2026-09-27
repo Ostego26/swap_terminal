@@ -53,12 +53,19 @@ body layout and the Keccak-256 checksum together, against bytes this session did
 not produce. It is the strongest offline evidence available for this file, and it
 is why the stagenet address is embedded in the test rather than a synthetic one.
 
-NOT VERIFIED: the network bytes for anything except stagenet primary. Mainnet and
-testnet prefixes, and the integrated and subaddress variants, are written from
-Monero's `cryptonote_config.h` as understood, and no address of those kinds was
-available to check. They are marked in NETWORK_PREFIXES and a test asserts the
-distinction rather than letting it blur -- because "I have a reason to believe it"
-and "I checked it" must not be written in the same voice.
+ALL NINE NETWORK BYTES ARE NOW READ OUT OF MONERO'S SOURCE rather than recalled --
+cryptonote_config.h lines 227-229, 270-272 and 285-287 on release-v0.18, fetched
+2026-09-27 -- and every one matched what this table already said. Two of the nine
+additionally have a real wallet-generated address behind them. The two grades are
+kept as separate fields (`from_source`, `from_address`) rather than one `verified`
+boolean, because reading a constant out of a header and decoding a real address are
+different evidence and "I have a reason to believe it" must not be written in the
+same voice as "I checked it". A test asserts the split.
+
+REGTEST USES THE MAINNET PREFIXES: `case FAKECHAIN: return mainnet;`
+(cryptonote_config.h:361). That is why a regtest wallet's address decodes here as
+mainnet/primary, and it is why monero_shared_key_verify.py must build its shared
+address with mainnet prefixes when the daemon reports fakechain.
 
 NOT VERIFIED: that a shared address built here is spendable with the summed key.
 That needs a stagenet and a wallet, which this container's network policy denies
@@ -126,36 +133,65 @@ STANDARD_BODY_BYTES = 1 + PUBLIC_KEY_BYTES + PUBLIC_KEY_BYTES
 
 @dataclass(frozen=True)
 class NetworkPrefix:
-    """One address kind on one network, and whether its byte was actually checked.
+    """One address kind on one network, and the TWO GRADES of evidence for its byte.
 
-    `verified` is not decoration and it is not a TODO. It records whether this
-    session decoded a real address of this kind, and `decode_address` puts it in
-    the refusal when an address matches nothing -- so a reader debugging a
-    mainnet address is told plainly that the mainnet byte here was never checked
-    against one, rather than concluding their address is malformed.
+    Two booleans rather than one `verified`, because the two things they record are
+    different and collapsing them would be rule 17's failure in a struct field:
+
+      from_source   the byte was read out of Monero's own cryptonote_config.h.
+                    Authoritative for what the software does, and available for every
+                    network without running anything.
+      from_address  a real address of this kind, produced by a real wallet, was
+                    decoded here and its Keccak checksum reproduced. That is evidence
+                    about the whole pipeline -- base58 blocks, body layout, checksum
+                    -- and not only about one byte.
+
+    `decode_address` reports both in its refusal when an address matches nothing, so a
+    reader debugging an address is told exactly which kind of check is missing rather
+    than concluding their address is malformed.
     """
 
     name: str
     network: str
     byte: int
-    verified: bool
+    from_source: bool
+    from_address: bool
 
 
-# From Monero's cryptonote_config.h as understood. ONLY the first is verified: a
-# real stagenet primary address decoded to byte 24 with a matching Keccak
-# checksum on 2026-09-27 (see the module docstring). The other five are written
-# from the same source but no address of those kinds was available here, and
-# rule 17 forbids writing the two in the same voice.
+# ALL NINE READ OUT OF MONERO'S OWN cryptonote_config.h on release-v0.18, 2026-09-27,
+# at the line numbers below. They were previously "as understood" -- written from
+# recollection and marked unverified -- and every one of them turned out to match,
+# which is worth recording precisely because it might not have:
+#
+#     mainnet    18 / 19 / 42    cryptonote_config.h:227-229
+#     testnet    53 / 54 / 63    cryptonote_config.h:270-272
+#     stagenet   24 / 25 / 36    cryptonote_config.h:285-287
+#
+# AND REGTEST USES THE MAINNET PREFIXES, which is not a guess either:
+# `get_config(network_type)` at cryptonote_config.h:321 has
+# `case FAKECHAIN: return mainnet;` at line 361. That is why a regtest wallet's
+# address decodes here as mainnet/primary, and it is load-bearing for
+# monero_shared_key_verify.py, which has to build a shared address with mainnet
+# prefixes when the daemon says fakechain.
+#
+# TWO of the nine additionally have a real address behind them (from_address), which is
+# the stronger grade because it exercises the base58 block decoder, the body layout and
+# the Keccak checksum together rather than one byte:
+#
+#     stagenet/primary  the operator's faucet-funded wallet, 537wxk1v...  (byte 24)
+#     mainnet/primary   the regtest wallet monero_regtest.py created, 4AFtXcb8...
+#                       (byte 18) -- decoded with a verified checksum during the
+#                       2026-09-27 run on the operator's host
 NETWORK_PREFIXES: tuple[NetworkPrefix, ...] = (
-    NetworkPrefix("primary", "stagenet", 24, verified=True),
-    NetworkPrefix("primary", "mainnet", 18, verified=False),
-    NetworkPrefix("integrated", "mainnet", 19, verified=False),
-    NetworkPrefix("subaddress", "mainnet", 42, verified=False),
-    NetworkPrefix("primary", "testnet", 53, verified=False),
-    NetworkPrefix("integrated", "testnet", 54, verified=False),
-    NetworkPrefix("subaddress", "testnet", 63, verified=False),
-    NetworkPrefix("integrated", "stagenet", 25, verified=False),
-    NetworkPrefix("subaddress", "stagenet", 36, verified=False),
+    NetworkPrefix("primary", "stagenet", 24, from_source=True, from_address=True),
+    NetworkPrefix("primary", "mainnet", 18, from_source=True, from_address=True),
+    NetworkPrefix("integrated", "mainnet", 19, from_source=True, from_address=False),
+    NetworkPrefix("subaddress", "mainnet", 42, from_source=True, from_address=False),
+    NetworkPrefix("primary", "testnet", 53, from_source=True, from_address=False),
+    NetworkPrefix("integrated", "testnet", 54, from_source=True, from_address=False),
+    NetworkPrefix("subaddress", "testnet", 63, from_source=True, from_address=False),
+    NetworkPrefix("integrated", "stagenet", 25, from_source=True, from_address=False),
+    NetworkPrefix("subaddress", "stagenet", 36, from_source=True, from_address=False),
 )
 
 _PREFIX_BY_BYTE = {prefix.byte: prefix for prefix in NETWORK_PREFIXES}
@@ -275,7 +311,8 @@ class MoneroAddress:
     prefix_byte: int
     public_spend_key: bytes
     public_view_key: bytes
-    prefix_was_verified: bool
+    prefix_from_source: bool
+    prefix_from_address: bool
 
     def is_mainnet(self) -> bool:
         return self.network == "mainnet"
@@ -322,16 +359,17 @@ def decode_address(address: str) -> MoneroAddress:
     prefix_byte = body[0]
     prefix = _PREFIX_BY_BYTE.get(prefix_byte)
     if prefix is None:
-        unverified = ", ".join(
+        known = ", ".join(
             f"{candidate.byte}={candidate.network}/{candidate.name}"
             for candidate in NETWORK_PREFIXES
-            if not candidate.verified
         )
         raise MoneroAddressError(
             f"prefix byte {prefix_byte} is not one this file knows. The checksum VERIFIED, "
             f"so the address is internally consistent and the gap is this table rather than "
-            f"your address. Known-and-checked: 24=stagenet/primary. Known-but-unchecked "
-            f"here: {unverified}"
+            f"your address. All nine bytes here were read out of Monero's own "
+            f"cryptonote_config.h: {known}. An integrated address is 8 bytes longer than a "
+            f"standard one and is not handled at all, which is the most likely reason to land "
+            f"here"
         )
 
     return MoneroAddress(
@@ -341,7 +379,8 @@ def decode_address(address: str) -> MoneroAddress:
         prefix_byte=prefix_byte,
         public_spend_key=body[1 : 1 + PUBLIC_KEY_BYTES],
         public_view_key=body[1 + PUBLIC_KEY_BYTES :],
-        prefix_was_verified=prefix.verified,
+        prefix_from_source=prefix.from_source,
+        prefix_from_address=prefix.from_address,
     )
 
 
