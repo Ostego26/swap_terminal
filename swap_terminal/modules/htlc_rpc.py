@@ -247,6 +247,23 @@ def lookup_contract_output(rpc_call, txid: str, vout: int, block_hash: str | Non
          index and no wallet, it sees both the mempool and the chain, and it
          answers null for an output that has already been SPENT -- which is a
          far better thing to learn before signing than after broadcasting.
+
+         GRIDCOIN DOES NOT HAVE THIS METHOD, measured on the operator's testnet
+         daemon 2026-09-27: `help gettxout` answers "unknown command: gettxout"
+         while `getrawtransaction`, `gettransaction` and `signrawtransaction` all
+         exist. So every GRC spend prints
+
+             GRC RPC call failed: GRC RPC Error: {'code': -32601, 'message': 'Method not found'}
+
+         with a stack trace, and then succeeds via route 4. That output is a
+         DEFECT IN THE OUTPUT and not in the path (rule 14: the thing that worked
+         must not look broken) -- the log line belongs at debug, naming the chains
+         the method is expected on, and it lives in
+         modules/atomic_grc_client.rpc_call rather than here. Recorded at this
+         site because this is where a reader chasing that traceback arrives.
+
+         Gridcoin also lacks `signrawtransactionwithkey`, so it is on the
+         pre-0.17 Bitcoin RPC surface: `signrawtransaction` is the only signer.
       2. `getrawtransaction txid true <blockhash>`, when the caller knows the
          block. This is the route the daemon's own error message asks for.
       3. `gettransaction txid`, the wallet's own record, whose raw hex is
