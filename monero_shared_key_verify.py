@@ -195,7 +195,18 @@ def rpc(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             payload = json.loads(response.read())
-    except urllib.error.URLError as error:
+    # OSError, NOT urllib.error.URLError. THIS ESCAPED AS A RAW TRACEBACK.
+    #
+    # urllib wraps a failure to CONNECT in URLError, but a READ that times out raises
+    # TimeoutError straight out of socket.recv_into, and TimeoutError is not a URLError.
+    # So a wallet-rpc that accepted the connection and then went quiet -- which is
+    # exactly what a freshly created wallet scanning a remote chain does -- produced
+    # fourteen frames of traceback instead of a sentence. Measured on stagenet
+    # 2026-09-27; it never happened on regtest, where the wallet answers instantly.
+    #
+    # Both are OSError subclasses, which is the one except clause that covers the whole
+    # class rather than the two members I happened to think of.
+    except OSError as error:
         raise VerifyError(
             f"{method} on {host}: {error}. If that is a wallet port, is a "
             f"monero-wallet-rpc running there? `python3 monero_regtest.py --run` starts one "
@@ -280,6 +291,42 @@ def daemon_nettype(console: Console, daemon: int | str) -> str:
     return nettype.lower()
 
 
+def wait_for_wallet(console: Console, port: int, seconds: int = 300) -> dict:
+    """get_version, retried, because a freshly created wallet is legitimately BUSY.
+
+    monero-wallet-rpc runs its RPC on one thread ("Run net_service loop( 1 threads)" in
+    its own banner). A wallet created by generate_from_keys against a REMOTE node then
+    starts refreshing, and while it does it accepts connections and answers nothing --
+    so the first call after --run can block for minutes. On regtest this never appears,
+    because the daemon is local and the chain is 160 blocks.
+
+    Treating that as "unreachable" would be wrong twice over: the wallet is there, and
+    the right response is to wait rather than to refuse. So this retries with a progress
+    line, which is also rule 14's requirement -- a blinking cursor for two minutes is
+    indistinguishable from a hang, and the operator's answer to a hang is Ctrl-C.
+    """
+    started = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return rpc(port, "get_version", timeout=20)
+        except VerifyError as error:
+            elapsed = time.monotonic() - started
+            if elapsed >= seconds:
+                raise VerifyError(
+                    f"the wallet on port {port} did not answer get_version within {seconds}s "
+                    f"({attempt} attempts). A wallet created against a remote node refreshes "
+                    f"before it answers, so this can legitimately take minutes -- raise --wait, "
+                    f"or check the wallet's own log for a sync failure. Last error: {error}"
+                ) from error
+            console.say(
+                f"wallet on {port} is busy (attempt {attempt}, {elapsed:.0f}s of {seconds}s) "
+                f"-- a new wallet refreshes against the remote node before it answers"
+            )
+            time.sleep(5.0)
+
+
 def open_wallet_address(port: int) -> str | None:
     """The open wallet's primary address, or None if NO WALLET IS OPEN.
 
@@ -339,7 +386,7 @@ def preflight_run(console: Console, port: int, daemon: int | str, allow_open_wal
     CLOSED and not reopened, because monero-wallet-rpc exposes no way to ask which file
     was open.
     """
-    version = rpc(port, "get_version")
+    version = wait_for_wallet(console, port)
     console.say(f"wallet rpc version {version.get('version')} on port {port}")
     nettype = daemon_nettype(console, daemon)
 
@@ -382,7 +429,7 @@ def preflight_sweep(console: Console, port: int, daemon: int | str) -> str:
     check that matters here: sweeping the wrong wallet moves funds from somewhere
     nobody asked about, and a balance check never detected that.
     """
-    version = rpc(port, "get_version")
+    version = wait_for_wallet(console, port)
     console.say(f"wallet rpc version {version.get('version')} on port {port}")
     nettype = daemon_nettype(console, daemon)
 

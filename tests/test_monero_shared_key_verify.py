@@ -27,6 +27,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import urllib.error
 
 import pytest
 
@@ -54,6 +55,7 @@ from monero_shared_key_verify import (  # noqa: E402  same
     preflight_sweep,
     sample_share,
     save_shares,
+    wait_for_wallet,
 )
 
 
@@ -468,3 +470,59 @@ def test_both_preflights_refuse_mainnet(monkeypatch, path):
             preflight_run(Console(total_steps=1), 18083, 18081, True)
         else:
             preflight_sweep(Console(total_steps=1), 18083, 18081)
+
+
+def test_rpc_catches_a_read_timeout_and_not_only_a_connect_failure():
+    """THE RAW TRACEBACK THE OPERATOR GOT, pinned at its cause.
+
+    urllib wraps a failure to CONNECT in URLError, but a READ that times out raises
+    TimeoutError straight out of socket.recv_into -- and TimeoutError is NOT a URLError.
+    So a wallet-rpc that accepted the connection and then went quiet, which is exactly
+    what a freshly created wallet scanning a remote chain does, produced fourteen frames
+    of traceback instead of a sentence. It never happened on regtest, where the wallet
+    answers instantly; stagenet is what surfaced it.
+
+    Both are OSError subclasses, so the assertion is that the one clause covering the
+    whole class is what is caught -- not the two members I happened to think of.
+    """
+    source = inspect.getsource(sys.modules["monero_shared_key_verify"].rpc)
+    assert "except OSError as error:" in source
+    assert "except urllib.error.URLError as error:" not in source, (
+        "URLError alone misses a read timeout, which is the failure that reached the operator"
+    )
+    # The relationship the fix depends on, asserted rather than assumed.
+    assert issubclass(TimeoutError, OSError)
+    assert issubclass(urllib.error.URLError, OSError)
+
+
+def test_wait_for_wallet_retries_a_busy_wallet_and_then_gives_up_with_a_reason(monkeypatch):
+    """A new wallet is BUSY, not absent, and the difference decides whether to wait.
+
+    monero-wallet-rpc serves RPC on one thread; a wallet created by generate_from_keys
+    against a remote node refreshes before it answers anything. Treating that as
+    unreachable is wrong twice: the wallet is there, and waiting is the right response.
+    """
+    attempts = {"n": 0}
+
+    def busy_then_ready(endpoint, method, params=None, timeout=120):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise VerifyError("get_version on 127.0.0.1:38084: timed out")
+        return {"version": 65562}
+
+    monkeypatch.setattr(sys.modules["monero_shared_key_verify"], "rpc", busy_then_ready)
+    monkeypatch.setattr(sys.modules["monero_shared_key_verify"].time, "sleep", lambda _s: None)
+    console = Console(total_steps=1)
+    assert wait_for_wallet(console, 38084, seconds=300)["version"] == 65562
+    assert attempts["n"] == 3, "it retried rather than failing on the first timeout"
+
+    def always_busy(endpoint, method, params=None, timeout=120):
+        raise VerifyError("timed out")
+
+    monkeypatch.setattr(sys.modules["monero_shared_key_verify"], "rpc", always_busy)
+    monkeypatch.setattr(
+        sys.modules["monero_shared_key_verify"].time, "monotonic",
+        lambda _c=[0]: (_c.__setitem__(0, _c[0] + 100), _c[0])[1],
+    )
+    with pytest.raises(VerifyError, match="did not answer get_version within"):
+        wait_for_wallet(Console(total_steps=1), 38084, seconds=10)
