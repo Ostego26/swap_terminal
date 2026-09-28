@@ -494,3 +494,108 @@ def test_recover_REFUSES_BEFORE_THE_LOCKTIME_rather_than_broadcasting_a_doomed_r
     assert "38 more block(s)" in printed, printed
     assert "µfn" in printed, "and how long that is, in this repo's unit (rule 6)"
     assert "Nothing was signed or broadcast" in printed
+
+
+def test_recover_search_FINDS_a_contract_from_the_seed_alone(monkeypatch):
+    """A RUN HAPPENED IN A TERMINAL THAT WAS GONE, 2026-09-28: 1.00 GRC spent by a transaction
+    nobody could account for.
+
+    `--recover` needs the locktime and the txid from that run's screen. A recovery tool that
+    only works when you still have the output is a recovery tool for the case that does not
+    need one.
+
+    THIS IS A SEARCH OVER A DERIVATION, NOT A GUESS. Every contract the seed can build is a
+    function of (seed, locktime), so rebuilding the candidates for a window of locktimes is
+    arithmetic. A match proves the contract was ours, because only this seed produces that
+    script -- which is why the test seeds the block with a script it asks the REAL derivation
+    for rather than an arbitrary one.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+    wanted_locktime = 3296364
+    script = entry.p2sh_script_for(
+        entry.rebuild_redeem_script(_A_SEED_FOR_TESTS, wanted_locktime)).hex()
+    handed = {}
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "getblockhash":
+                return f"hash-of-{params[0]}"
+            if method == "getblock":
+                height = int(str(params[0]).rsplit("-", 1)[1])
+                if height == 3296359:
+                    return {"tx": [{"txid": "cc" * 32, "vout": [
+                        {"n": 0, "value": "0.99", "scriptPubKey": {"hex": script}}]}]}
+                return {"tx": [{"txid": "cb", "vout": []}]}
+            raise AssertionError(method)
+
+    class _Run:
+        asset = "GRC"
+        console = None
+
+        def say(self, *a):
+            pass
+
+        def step(self, *a):
+            pass
+
+        def check(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return _Node()
+
+    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 3296381)
+    monkeypatch.setattr(entry, "recover",
+                        lambda run, console, locktime, txid: handed.update(
+                            locktime=locktime, txid=txid) or 0)
+
+    stream = io.StringIO()
+    code = entry.recover_by_search(_Run(), Console(entry.TOTAL_STEPS, stream=stream))
+
+    assert code == 0
+    assert handed == {"locktime": wanted_locktime, "txid": "cc" * 32}, handed
+    printed = stream.getvalue()
+    assert "FOUND a contract of ours in block 3296359" in printed, printed
+    assert "0.99" in printed, "and how much is in it"
+
+
+def test_recover_search_SAYS_WHAT_IT_DID_NOT_SEARCH_rather_than_claiming_there_is_none(monkeypatch):
+    """"nothing in the last N blocks" and "there is none" are different claims (rule 14).
+
+    And a contract funded by a DIFFERENT seed is invisible to this search by construction, not
+    by accident -- an operator who changed seeds would otherwise read "none found" as "none
+    exists" and stop looking for coins that are still there.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "getblockhash":
+                return "h"
+            if method == "getblock":
+                return {"tx": []}
+            raise AssertionError(method)
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return _Node()
+
+    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 500)
+    monkeypatch.setattr(entry, "recover",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("nothing to recover")))
+    stream = io.StringIO()
+
+    code = entry.recover_by_search(_Run(), Console(entry.TOTAL_STEPS, stream=stream))
+
+    assert code == 1
+    printed = stream.getvalue()
+    assert "is NOT 'there is none'" in printed, printed
+    assert "DIFFERENT seed is invisible" in printed
+    assert "Nothing was signed or broadcast" in printed

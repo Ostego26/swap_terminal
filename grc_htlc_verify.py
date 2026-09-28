@@ -78,6 +78,7 @@ from pathlib import Path
 # rootlessly, which is CLAUDE.md rule 10's layout gap. E402 is ignored repo-wide for this idiom.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from chains.base import RPCError
 from microfortnights import format_duration
 from modules import adaptor_swap_chain as chain
 from modules.atomic_grc_client import GRCClient
@@ -161,6 +162,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--contract-txid", default="", metavar="TXID",
         help="with --recover: the contract funding txid that run printed at step 4",
     )
+    parser.add_argument(
+        "--recover-search", action="store_true",
+        help=("recover WITHOUT knowing the locktime or the txid: rebuild every contract this "
+              "seed could have made in the recent past and walk the chain for one that was "
+              "funded. For a run whose terminal is gone."),
+    )
     return parser.parse_args(argv)
 
 
@@ -229,12 +236,11 @@ def build_contract(run: Run, tip: int) -> dict:
     locktime = tip + LOCKTIME_BLOCKS_AHEAD
     preimage = contract_preimage(seed, locktime)
     secret_hash = hashlib.sha256(preimage).digest()
-    redeem_script = build_htlc_redeem_script(
-        secret_hash=secret_hash.hex(),
-        participant_address=participant.address,
-        refund_address=refund.address,
-        locktime=locktime,
-    )
+    # ONE DERIVATION, SHARED WITH --recover-search. Building the script here and again in the
+    # search would be two spellings of "which contract does this locktime name", and the day
+    # they diverged the search would quietly stop finding anything -- a recovery tool that
+    # reports "no contract found" while looking at one (rule 8).
+    redeem_script = rebuild_redeem_script(seed, locktime)
     run.say(f"secret_hash={secret_hash.hex()} (public by construction; it goes in the script). "
             f"The PREIMAGE is never printed and this run never uses it -- the hashlock branch is "
             f"already established by three live swaps; the REFUND branch is what is not")
@@ -299,6 +305,108 @@ def _refund_bytes(run: Run, contract: dict, outpoint: chain.Outpoint, nlocktime:
         locktime=nlocktime,
     )
     return spend.raw_hex
+
+
+#: How far back --recover-search looks, in blocks, for both candidate locktimes and funded
+#: outputs. 2000 blocks is about fifty hours at Gridcoin's 90s target -- past any run an
+#: operator is still thinking about, and bounded so a recovery cannot become a chain walk.
+RECOVERY_SEARCH_BLOCKS = 2000
+
+
+def recover_by_search(run: Run, console: Console) -> int:
+    """Find a contract this seed funded, without being told the locktime or the txid.
+
+    WHY THIS EXISTS AND `--recover` WAS NOT ENOUGH. `--recover` needs two numbers from the
+    screen of the run that crashed, and on 2026-09-28 a run happened in a terminal that was
+    gone by the time anyone looked: 1.00 GRC was spent by a transaction nobody could account
+    for. A recovery tool that only works when you still have the output is a recovery tool for
+    the case that does not need one.
+
+    IT IS A SEARCH OVER A DERIVATION, NOT A GUESS. Every contract this seed can build is a
+    function of (seed, locktime), so rebuilding the candidates for every locktime in a window
+    is arithmetic, not chance -- a few thousand hash160s, computed locally in under a second.
+    Each candidate's P2SH script goes into a SET, and one walk of the same window asks every
+    output in every block whether it pays one of them. Finding a match proves the contract was
+    ours, because only this seed could have produced that script.
+
+    THE WINDOW IS THE SAME FOR BOTH HALVES, and that is not an accident: a contract funded
+    inside the window has a locktime inside it too, because the locktime is the funding tip
+    plus six. Anything older than the window is reported as unsearched rather than as absent
+    (rule 14: "no spender found in the last N blocks" and "no spender exists" are different
+    claims).
+
+    IT FINDS, IT DOES NOT SPEND. The refund itself goes through `recover`, which re-derives the
+    contract from the locktime it found and checks the P2SH against the transaction again
+    before signing. Two independent arrivals at the same script, which is what makes the second
+    one worth doing.
+    """
+    console.banner("SEARCH FOR A CONTRACT THIS SEED FUNDED AND NEVER SPENT")
+    tip = adaptor_steps.current_height(run)
+    floor = max(0, tip - RECOVERY_SEARCH_BLOCKS + 1)
+    seed = _seed_or_refuse()
+
+    candidates = {}
+    # FROM 1, NOT FROM `floor`. On a chain whose tip is below the window, floor is 0 -- and
+    # build_htlc_redeem_script refuses a locktime of zero, correctly: zero encodes to an empty
+    # script number and would make the refund branch spendable immediately. The search would
+    # then die on its first candidate rather than searching, which a test found at the boundary
+    # before any operator did.
+    for locktime in range(max(1, floor), tip + LOCKTIME_BLOCKS_AHEAD + 1):
+        script = p2sh_script_for(rebuild_redeem_script(seed, locktime)).hex()
+        candidates[script] = locktime
+    console.say(f"GRC: rebuilt {len(candidates)} candidate contracts for locktimes {floor}"
+                f"-{tip + LOCKTIME_BLOCKS_AHEAD}. Every one is derived from your seed, so a "
+                f"match on chain could only have come from this harness")
+    console.say(f"GRC: walking blocks {tip} down to {floor} for an output paying any of them")
+
+    node = run.node(wallet=False)
+    for scanned, height in enumerate(range(tip, floor - 1, -1), start=1):
+        try:
+            block = node.call("getblock", node.call("getblockhash", height), True)
+        except RPCError as error:
+            console.say(f"GRC: could not read block {height} ({error}); stopping after "
+                        f"{scanned} block(s). Nothing was signed or broadcast.")
+            return 1
+        for transaction in block.get("tx", []):
+            if not isinstance(transaction, dict):
+                continue
+            for output in transaction.get("vout", []):
+                script = (output.get("scriptPubKey") or {}).get("hex", "")
+                if script not in candidates:
+                    continue
+                locktime = candidates[script]
+                txid = str(transaction.get("txid", ""))
+                console.say(
+                    f"GRC: FOUND a contract of ours in block {height}: {txid}:{output.get('n')} "
+                    f"holds {output.get('value')} GRC, locktime {locktime}"
+                )
+                return recover(run, console, locktime, txid)
+        if scanned % 100 == 0:
+            console.say(f"GRC: scanned {scanned} block(s), now at height {height}, nothing yet")
+
+    console.say(
+        f"GRC: no output in the last {tip - floor + 1} block(s) pays any contract this seed "
+        f"could have built. That is NOT 'there is none': the search stops at {floor}, and a "
+        f"contract funded by a DIFFERENT seed is invisible to it by construction. Nothing was "
+        f"signed or broadcast."
+    )
+    return 1
+
+
+def rebuild_redeem_script(seed: str, locktime: int) -> bytes:
+    """The redeem script this seed produces for this locktime. No daemon, no run, no output.
+
+    THE DERIVATION IN ONE PLACE, called by build_contract's search and by the search above, so
+    the two cannot disagree about what contract a locktime names. Spelled twice, they would
+    agree on the day they were written and the search would quietly stop finding things (rule 8).
+    """
+    preimage = contract_preimage(seed, locktime)
+    return build_htlc_redeem_script(
+        secret_hash=hashlib.sha256(preimage).hexdigest(),
+        participant_address=key_from_seed(seed, PARTICIPANT_ROLE).address,
+        refund_address=key_from_seed(seed, REFUND_ROLE).address,
+        locktime=locktime,
+    )
 
 
 def recover(run: Run, console: Console, locktime: int, contract_txid: str) -> int:
@@ -482,6 +590,8 @@ def main(argv: list[str], console: Console | None = None) -> int:
         adaptor_steps.step_1_reachable(run)
         adaptor_steps.assert_test_network(run)
 
+        if args.recover_search:
+            return recover_by_search(run, console)
         if args.recover:
             if not args.contract_txid:
                 raise RegtestSetupError(
