@@ -77,6 +77,40 @@ ORDINARY 2-of-2 spend as FAIL rather than as a pass.
 NOTHING HERE MAKES IT MAINNET-SAFE. It is wired into a REGTEST/TESTNET harness
 and nowhere else. `atomic_swap.py` and `monero_swap.py` still do not call it.
 
+**AND POINT 3 IS NOW HALF FALSE TOO, MEASURED THE SAME DAY.** It said the
+property that matters -- "that a Gridcoin transaction carrying an adapted
+signature relays and confirms, and that the leaked scalar really is the
+counterparty's Monero key share" -- "cannot be tested from here". The first
+clause is now tested and the second is tested in a weaker form than it reads:
+
+    adaptor_regtest_verify.py --chain grc, Gridcoin testnet v5.5.1.0, 2026-09-28
+    OK=48 FAIL=0 XFAIL=1 SKIP=2, exit code 0
+
+    Tx_redeem  ccacc0614e34af7acd69a7941092b906d687fbc6bf6f7061492f868de16607ec
+               Bob's signature is a pre-signature under Y_a, completed with
+               Alice's Monero spend share. Relayed, accepted, confirmed.
+    Tx_refund  8fd143103ed91b36ff8d64aafb403cb3c5369800003128fe5367bb9dc6d21e0d
+               the mirror, under Y_b.
+
+    and from the scriptSig READ BACK OFF THE DAEMON, for both:
+      a scalar recovered; the ordinary signature beside it yielded nothing;
+      its ed25519 public key equals the share captured at setup; and
+      s_a + s_b reconstructs a key whose public key is the one decoded out of
+      the Monero lock address.
+
+    docs/gridcoin_adaptor_join_2026_09_28.md carries the full record.
+
+THE WEAKER FORM, SAID PLAINLY: no Monero moved. "The leaked scalar really is
+the counterparty's Monero key share" is established as a KEY MATCH against an
+address, not as a spend of coins at it. The spend is established separately on
+a Monero regtest chain (monero_shared_key_verify.py --sweep, txid
+f584606948f430bf4835eb399c4e5373a027ee91cfb139ddf8d972bf1f15eade) and the two
+halves have never been run as one swap.
+
+AND NONE OF THIS TOUCHES POINT 1. A chain accepting this module's output says
+the ENCODING is right. It says nothing whatever about whether the scheme is
+secure, and no number of green runs will. Unaudited is unaudited.
+
 WHAT THIS IS NOT ALLOWED TO BE USED FOR, AND WHY THE SPECIFICATION ITSELF SAYS SO
 
 The DLC specification carries a warning in capitals, and it is not boilerplate:

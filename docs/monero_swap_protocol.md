@@ -265,6 +265,35 @@ recorded above and in `docs/gridcoin_2of2_spend_2026_09_28.md` are the ORDINARY
 version of those transactions. What changed is that the harness can now tell the
 two apart, which it could not before.
 
+**THAT RUN HAPPENED THE SAME DAY AND THE PARAGRAPH ABOVE IS NOW OUT OF DATE.**
+It is kept because it states exactly what was missing, and because the gap
+between "there is now something to run" and "it ran" was about four hours --
+which is the timescale at which a measurement in prose ages (rule 1).
+
+    adaptor_regtest_verify.py --chain grc, Gridcoin testnet v5.5.1.0, 2026-09-28
+    OK=48  FAIL=0  XFAIL=1  SKIP=2  --  exit code 0, ESTABLISHED
+
+    Tx_redeem  ccacc0614e34af7acd69a7941092b906d687fbc6bf6f7061492f868de16607ec
+    Tx_refund  8fd143103ed91b36ff8d64aafb403cb3c5369800003128fe5367bb9dc6d21e0d
+
+Both carry an adaptor pre-signature completed with a Monero spend share, both
+were relayed and confirmed, and for both the scalar came back out of the
+scriptSig FETCHED FROM THE DAEMON -- with the ordinary signature beside it
+yielding nothing, and the recovered scalar's ed25519 public key equal to the
+share captured at setup. `s_a + s_b` then reconstructed a private spend key
+whose public key is the one decoded out of the lock address. The plain-signature
+`Tx_cancel` published nothing, asserted over its 218 published bytes.
+
+**AND THE SWAP STILL HAS NOT HAPPENED.** No Monero moved. The cross-curve close
+is a KEY MATCH against an address, not a spend of coins at it; the spend is
+established separately on a Monero regtest chain and the two halves have never
+been run as one. The consensus half of the timelock is still a reading, because
+Gridcoin has no `generateblock`. And `modules/adaptor_ecdsa.py` is still
+unaudited -- a chain accepting its output says the encoding is right and says
+nothing about whether the scheme is secure.
+
+`docs/gridcoin_adaptor_join_2026_09_28.md` is the full record.
+
 UPDATE 2026-09-28: THE FIVE TRANSACTIONS NOW EXIST AND FOUR OF THEM HAVE BEEN
 SPENT ON A CHAIN. `swap_terminal/modules/adaptor_swap_chain.py` builds Tx_lock,
 Tx_redeem, Tx_cancel, Tx_refund and Tx_punish, and
