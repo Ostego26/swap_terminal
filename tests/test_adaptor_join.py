@@ -630,6 +630,42 @@ def test_a_daemon_that_says_YES_then_REFUSES_the_send_is_EXPLAINED_not_traceback
     assert "reclaim_funding.py" in message, "and how to get back what is already out there"
 
 
+def test_the_gate_SAYS_WHAT_THE_DAEMON_ANSWERED_even_when_it_does_not_refuse(monkeypatch):
+    """A check that prints nothing on the way past is indistinguishable from one that did not run.
+
+    That difference was the whole 2026-09-28 investigation. The gate asked testmempoolaccept,
+    did not refuse, printed nothing, and the send then failed -- so there was no way to tell,
+    from the operator's pasted output, whether the daemon had said "I would accept this" or
+    whether the question had never reached it. Both produce the same blank.
+
+    THREE DISTINCT SENTENCES AND NOT ONE, because the three empty cases are three different
+    facts and only the first is evidence of anything (rule 17):
+
+      allowed          the daemon ran AcceptToMemoryPool and would accept it.
+      call failed      including a daemon with no `testmempoolaccept`, whose own
+                       `code=-32601 Method not found` says so in the text.
+      unmodeled shape  something answered, in a shape this code does not model.
+
+    Asserting they DIFFER, rather than asserting three fixed strings, is deliberate: the wording
+    is free to improve, and what must not happen is two of them collapsing back into one.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=350_000_000)
+    printed = []
+    for answer in ([{"allowed": True}], "not a list", [{"vsize": 200}]):
+        run = _funding_run(monkeypatch, answer)
+        stream = io.StringIO()
+        run.console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+        adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+        text = stream.getvalue()
+        assert text.strip(), f"{answer!r} printed nothing at all"
+        assert "BEFORE broadcasting" in text, text
+        printed.append(text)
+
+    assert len(set(printed)) == 3, f"the three cases must not read alike: {printed}"
+    assert "WOULD accept" in printed[0], printed[0]
+
+
 def test_split_operator_funding_EXPLAINS_A_REFUSED_SEND_rather_than_tracebacking(monkeypatch):
     """PINS THE CALL SITE, not just the explainer.
 
