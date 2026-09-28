@@ -34,6 +34,7 @@ import pytest
 from chains.base import RPCAdapter, RPCError
 from db import SCHEMA, connect_db
 from services.swap_service import create_swap
+from valid_addresses import GRC_PAYOUT, LTC_PARTICIPANT
 
 
 class StubAdapter(RPCAdapter):
@@ -133,11 +134,11 @@ def test_an_unreachable_daemon_still_refuses_the_swap(db):
     unreachable = ConnectionError("Connection refused")
     adapters = {
         "LTC": StubAdapter(raises={"validateaddress": unreachable, "getaddressinfo": unreachable}),
-        "GRC": StubAdapter(responses={"getnewaddress": "grc_deposit_addr"}),
+        "GRC": StubAdapter(responses={"getnewaddress": GRC_PAYOUT}),
     }
 
     with pytest.raises((RPCError, ValueError)):
-        create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+        create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
 
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
     # And nothing derived a deposit address either, so no wallet key was burned
@@ -149,11 +150,17 @@ def test_a_genuinely_invalid_address_also_refuses_the_swap(db):
     """The control: the refusal path that already worked still works."""
     adapters = {
         "LTC": StubAdapter(responses={"validateaddress": {"isvalid": False}}),
-        "GRC": StubAdapter(responses={"getnewaddress": "grc_deposit_addr"}),
+        "GRC": StubAdapter(responses={"getnewaddress": GRC_PAYOUT}),
     }
 
+    # THE ADDRESS IS DECODABLE AND THE DAEMON STILL SAYS NO, which is the case this test
+    # exists for. It used to pass the literal "nonsense", and as of 2026-09-27 that string
+    # never reaches a daemon: create_swap() decodes locally first and refuses it with its own
+    # message. Rewritten rather than deleted (rule 2) so the invariant survives on an input
+    # that still exercises it -- a well-formed LTC testnet address that this wallet rejects
+    # is what an address on another network looks like to a network-scoped validateaddress.
     with pytest.raises(ValueError, match="Invalid LTC payout address"):
-        create_swap(db, CONFIG, adapters, "q_v", "nonsense")
+        create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
 
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
 
@@ -162,13 +169,13 @@ def test_a_good_address_still_creates_the_swap(db):
     """And the permissive path is genuinely unchanged, not merely narrowed."""
     adapters = {
         "LTC": StubAdapter(responses={"validateaddress": {"isvalid": True}}),
-        "GRC": StubAdapter(responses={"getnewaddress": "grc_deposit_addr"}),
+        "GRC": StubAdapter(responses={"getnewaddress": GRC_PAYOUT}),
     }
 
-    swap = create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+    swap = create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
 
     assert swap["status"] == "awaiting_deposit"
-    assert swap["deposit_address"] == "grc_deposit_addr"
+    assert swap["deposit_address"] == GRC_PAYOUT
     assert swap["min_confirmations"] == 6  # GRC_MIN_CONFIRMATIONS, in blocks
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1
 
@@ -192,7 +199,7 @@ def test_a_chain_with_no_adapter_refuses_and_names_the_variable(db):
     adapters = {"GRC": StubAdapter(responses={"getnewaddress": "Sgrcaddr"})}
 
     with pytest.raises(ValueError) as caught:
-        create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+        create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
 
     message = str(caught.value)
     assert "LTC" in message
@@ -211,7 +218,7 @@ def test_the_refusal_writes_no_swap_row(db):
     adapters = {"GRC": StubAdapter(responses={"getnewaddress": "Sgrcaddr"})}
 
     with pytest.raises(ValueError):
-        create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+        create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
 
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
     assert db.execute("SELECT COUNT(*) AS n FROM xrp_destination_tags").fetchone()["n"] == 0
@@ -290,7 +297,14 @@ class PayingAdapter:
         return bool(address)
 
     def get_new_address(self, label):
-        return f"fresh-address-for-{label}"
+        # A REAL, DECODABLE testnet address rather than f"fresh-address-for-{label}".
+        # services/swap_service._refuse_unusable_deposit_address() refuses a deposit
+        # address that cannot receive a deposit (2026-09-27), and a stub whose
+        # `getnewaddress` returns a sentence is a daemon that cannot exist. Derived from a
+        # phrase in tests/valid_addresses.py, never spelled -- the label is discarded
+        # because these tests are about payout CAPABILITY, not about per-swap uniqueness.
+        assert label, "get_new_address() is always called with a label naming the swap"
+        return GRC_PAYOUT
 
 
 class ViewOnlyAdapter:
@@ -352,7 +366,7 @@ def test_a_destination_that_can_pay_out_is_not_refused_by_this_check(db):
     """
     adapters = {"GRC": PayingAdapter(), "LTC": PayingAdapter()}
 
-    swap = create_swap(db, CONFIG, adapters, "q_v", "tltc1qgood")
+    swap = create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
 
     assert swap["to_asset"] == "LTC"
     assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1

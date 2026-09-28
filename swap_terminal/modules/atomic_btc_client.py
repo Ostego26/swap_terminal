@@ -179,7 +179,7 @@ from decimal import Decimal
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
-from modules.htlc_fee import platform_fee_address, platform_fee_coin
+from modules.htlc_fee import platform_fee_coin, usable_platform_fee_address
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     broadcast_refund,
@@ -191,6 +191,7 @@ from modules.htlc_rpc import (
     wait_for_tx_output,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
+from modules.rpc_method_support import rpc_failure_report
 
 # No setLevel and no handler. A library module that forces DEBUG on its own
 # logger and attaches a StreamHandler AT IMPORT decides logging policy for
@@ -254,7 +255,21 @@ class BTCClient:
             logger.error(f"Invalid JSON response: {ex}")
             raise
         except Exception as ex:
-            logger.exception(f"RPC call failed: {ex}")
+            # RULE 14, BACKWARDS, FIXED 2026-09-28. This was
+            #     logger.exception("... RPC call failed: ...")
+            # which is ERROR *plus* a stack for every exception reaching here -- including a
+            # `-32601` on `gettxout`, which GRIDCOIN DOES NOT HAVE AT ALL. That miss is route 1
+            # of modules/htlc_rpc.lookup_contract_output()'s four, it happens on EVERY GRC
+            # spend, and route 4 covers it -- so ~40 lines of traceback printed in front of a
+            # spend that SUCCEEDED. An operator cannot read that as anything but a failure.
+            #
+            # The decision about WHICH misses are routine is not made here: it is
+            # modules/rpc_method_support.rpc_failure_report(), one table for both clients that
+            # have this handler, and it quiets a method-not-found ONLY for a method some caller
+            # already falls back from. A 401, a refused connection, a rejected transaction and a
+            # -32601 on a method this repository needs are all still ERROR with a stack.
+            level, note, with_traceback = rpc_failure_report("BTC", method, ex)
+            logger.log(level, "%s", note, exc_info=with_traceback)
             raise
 
     # NO SUPPRESSION HERE ANY MORE. This line carried a PLR0913 and PLR0917
@@ -402,8 +417,27 @@ class BTCClient:
         # trade 1.5% for the whole leg. BTC also never had a testnet default to burn to,
         # which the other two did.
         platform_fee = platform_fee_coin("BTC", found.value)
-        fee_address = platform_fee_address("BTC")
-        extra_outputs = {fee_address: platform_fee} if fee_address else {}
+        # RESOLVED AND VALIDATED IN ONE CALL since 2026-09-27. This was
+        #     fee_address = platform_fee_address("BTC")
+        # which returns whatever the variable holds, non-empty, unexamined -- so a
+        # truncated paste or an address from another chain went straight into a
+        # transaction output and the fee was burned on every redeem, silently. That is
+        # the same failure the testnet-literal default had; only the source of the bad
+        # string changed.
+        #
+        # usable_platform_fee_address() returns None for an unusable address exactly as it
+        # does for an unset one, and that direction is fixed: an invalid FEE address must
+        # NEVER block the redeem. The hashlock branch has to be spent before the
+        # counterparty's timelock expires and no client in this package implements a
+        # refund, so refusing here would trade our 1.5% for the customer's whole leg.
+        # Skip the fee output, warn loudly, let the redeem proceed.
+        #
+        # The RETURNED VALUE carries WHY, because after this change the old warning text
+        # ("is unset") would be false three times out of four (rule 14, rule 16's wrong
+        # comment). It also carries whether the address was actually CHECKED -- see the log
+        # line below and modules/htlc_fee.PlatformFeeOutput.
+        fee = usable_platform_fee_address("BTC")
+        extra_outputs = {fee.address: platform_fee} if fee.address else {}
 
         spend = build_hashlock_spend(
             asset="BTC",
@@ -417,17 +451,20 @@ class BTCClient:
             destination_address=destination_address,
             extra_outputs=extra_outputs,
         )
-        if fee_address:
-            logger.info("%s; platform fee %s to %s", spend.describe("BTC"), platform_fee, fee_address)
-        else:
-            # Rule 14: a redeem that charged nothing must not log like one that did, and
-            # the message names the variable that would have changed it.
-            logger.warning(
-                "%s; NO PLATFORM FEE CHARGED -- PLATFORM_FEE_BTC_ADDRESS is unset, so the "
-                "%s BTC that would have been collected stayed with the redeemer. The redeem "
-                "went through; set that variable to collect it on the next one.",
-                spend.describe("BTC"), platform_fee,
-            )
+        # Rule 14 and rule 8, rewritten 2026-09-28. This was a three-line branch --
+        #     if fee_address: logger.info(...)  else: logger.warning(...)
+        # -- spelled identically in all three clients, and it was WRONG in one case that
+        # the review found and a live run had already produced: an UNDETERMINED address
+        # (a valid address this repository's tables cannot place, which Litecoin's `rltc`
+        # and 0x3A both were on 2026-09-27) passes through WITH the address, so the
+        # truthiness test took the INFO branch and printed the sentence a VERIFIED
+        # address gets. Nothing had been checked and the log could not say so.
+        #
+        # Both the level and the sentence now come from modules/htlc_fee.py, which is the
+        # one place that knows which of the four outcomes happened. A fourth state added
+        # there cannot leave one of three clients behind -- which is exactly what had
+        # just happened when a fourth state was added.
+        logger.log(fee.log_level, "%s; %s", spend.describe("BTC"), fee.outcome("BTC", platform_fee))
 
         # The PREIMAGE is on the stack of what is about to be broadcast, and it
         # becomes public the moment this relays -- that is how an atomic swap

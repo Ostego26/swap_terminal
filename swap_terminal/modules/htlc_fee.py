@@ -114,15 +114,18 @@ without a deploy.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Sequence
 from decimal import ROUND_UP, Decimal, InvalidOperation
+from typing import NamedTuple
 
 # varint_length is imported rather than re-implemented (rule 8). It is three
 # lines, and spelling it again here is exactly how one encoding rule becomes
 # two that agree on the day they are written. modules/htlc_spend does not
 # import this file, so there is no cycle; modules/htlc_rpc already imports
 # both, so nothing gains a dependency it did not already have.
+from modules.address_authority import check_address
 from modules.htlc_spend import varint_length
 
 # Coin per kvB, per chain. Chosen so that the FLOOR below -- which is each
@@ -538,6 +541,151 @@ def platform_fee_address(asset: str, environment: dict[str, str] | None = None) 
     source = os.environ if environment is None else environment
     configured = (source.get(PLATFORM_FEE_ADDRESS_VARIABLE[asset]) or "").strip()
     return configured or None
+
+
+class PlatformFeeOutput(NamedTuple):
+    """Whether to add a platform fee output, and the one sentence that says why. (address, why, verified)
+
+    THREE FIELDS AND NOT TWO, AND THE THIRD IS A DEFECT FOUND IN REVIEW, 2026-09-28.
+
+    This returned `(address|None, why)` when it landed on 2026-09-27, and all three clients
+    read it as `if fee_address: logger.info(...) else: logger.warning(...)`. That branch is
+    wrong in exactly one case, and it is the case the whole area exists for:
+
+        UNDETERMINED   a validator ran, the address IS well-formed, and this repository's
+                       tables could not place it -- Litecoin's regtest hrp `rltc` and its
+                       second P2SH byte 0x3A were both this, live, on 2026-09-27.
+
+    An UNDETERMINED fee address passes through WITH THE ADDRESS INTACT, deliberately, because
+    a gap in our tables is not evidence against an address (see modules/address_authority.py's
+    header). But `if fee_address:` then took the INFO branch and printed
+
+        platform fee 0.00150000 to QYqEyFb1v76QraQ3uo5wVkGtJrC4Rf5vU3
+
+    which is the sentence a VERIFIED address gets. Rule 14's exact defect: nothing was
+    checked and the output was indistinguishable from output that was. The same applies to
+    NO_VALIDATOR. `verified` is False for both, so an unchecked fee output cannot be logged
+    as a checked one.
+
+    `log_level` and `outcome()` are HERE rather than at the three call sites for rule 8's
+    reason and rule 10's. Rule 8: the three clients each carried the identical
+    resolve-then-branch, and a fourth state added to one of three is the bug with a delay on
+    it -- this is the second time that shape has bitten in this function's short life.
+    Rule 10: "which level, and what sentence" is a decision, so it belongs in a function that
+    can be called with seeded inputs, not inside a redeem.
+    """
+
+    address: str | None
+    why: str
+    verified: bool
+
+    @property
+    def log_level(self) -> int:
+        """INFO only when a fee is being paid to an address that was actually checked.
+
+        WARNING for all three of the other cases -- unset, unusable, and passed-through
+        unverified -- because each is something an operator wants to see in a log they are
+        skimming, and only one of them is what they expect.
+        """
+        return logging.INFO if (self.address is not None and self.verified) else logging.WARNING
+
+    def outcome(self, asset: str, fee: Decimal) -> str:
+        """The whole sentence for the redeem log, so three clients cannot word it three ways.
+
+        `fee` is the amount that WOULD have been collected when there is no address, which is
+        the number an operator needs to decide whether to go fix the variable. Rule 14: state
+        what the number means next to the number.
+        """
+        if self.address is None:
+            return f"NO PLATFORM FEE CHARGED ({fee} {asset}) -- {self.why}"
+        if not self.verified:
+            return (
+                f"platform fee {fee} {asset} to {self.address}, WHICH WAS NOT CHECKED -- {self.why}. The "
+                f"output was added anyway, because refusing a fee address this repository cannot place "
+                f"would be a gap in our own tables overruling a real address"
+            )
+        return f"platform fee {fee} {asset} to {self.address}"
+
+
+def usable_platform_fee_address(asset: str, environment: dict[str, str] | None = None) -> PlatformFeeOutput:
+    """platform_fee_address(), plus "and can it actually receive money".
+
+    THE BURN THIS CLOSES, and why it is a different burn from the one above.
+
+    platform_fee_address() already fixed the case where the variable was UNSET: a testnet
+    literal used to be the fallback, so on mainnet the fee went to an address nobody can
+    spend -- 1.5% of every redeem, silently. What it cannot fix is the variable being SET TO
+    SOMETHING THAT IS NOT AN ADDRESS. A truncated paste, a `ltc1...` in PLATFORM_FEE_GRC_
+    ADDRESS, an `export` that captured a shell prompt: every one of those is a non-empty
+    string, so it passes `configured or None` and goes straight into a transaction output.
+    The coins in that output are unspendable by anybody the moment the redeem relays.
+
+    THE DIRECTION OF FAILURE IS FIXED AND IS NOT NEGOTIABLE, and it is the same one the
+    unset case already has: **an unusable fee address must NEVER block a redeem.** The
+    hashlock branch has to be spent before the counterparty's timelock expires, and NO
+    CLIENT IN THIS PACKAGE IMPLEMENTS A REFUND. Refusing a customer's redeem because OUR
+    fee address is malformed would strand their whole leg to protect our 1.5%. So this
+    returns address=None -- charge no fee, log loudly, let the redeem through -- exactly as
+    an unset variable does.
+
+    BOTH DIRECTIONS ARE TESTED, AND THIS PARAGRAPH USED TO NAME A FILE THAT DOES NOT EXIST.
+    Until 2026-09-28 it read "tests/test_platform_fee_address_guard.py asserts BOTH
+    directions"; grepped across the tree, the only occurrence of that path was this
+    sentence. The wrong-comment bug (rule 16) in the docstring of the guard it describes.
+    The two directions are really covered, in two files, and they have to be in two because
+    they are two different claims:
+
+      tests/test_address_authority.py          this function's four returns, with seeded
+                                               environment values -- unusable, usable,
+                                               wrong-chain, and unset
+      tests/test_htlc_spend.py::test_an_unusable_platform_fee_address_does_not_block_the_redeem
+                                               THE REDEEM ITSELF, driven through the real
+                                               LTC and GRC clients against a fake node:
+                                               the transaction was broadcast, and it has
+                                               ONE output rather than two
+
+    The second is the one that matters and could not be written here: "the fee output was
+    dropped" and "the redeem still went out" are claims about a transaction, and only
+    driving a client produces one.
+
+    ONE FUNCTION FOR THREE CLIENTS (rule 8). atomic_btc_client.py, atomic_ltc_client.py and
+    atomic_grc_client.py each carried the identical two lines -- resolve, then branch on
+    truthiness -- and a validity check added to one of the three is rule 8's bug with a
+    delay on it. Since 2026-09-28 the LOG LINE comes back from here too, as
+    PlatformFeeOutput.outcome(), because the truthiness branch those three shared was wrong
+    for the UNDETERMINED case: see that class's docstring.
+
+    NO_VALIDATOR and UNDETERMINED both pass through with the address INTACT and verified
+    False, for the reason modules/address_authority.py's header gives at length: refusing a
+    chain or a format this repository cannot place is the false-refusal outage, and here it
+    would also lose a fee that is probably fine. NO_VALIDATOR is unreachable today -- BTC,
+    LTC and GRC all have validators, and a test holds that. UNDETERMINED is NOT unreachable
+    and was reached live.
+    """
+    configured = platform_fee_address(asset, environment)
+    if configured is None:
+        return PlatformFeeOutput(
+            None,
+            f"{PLATFORM_FEE_ADDRESS_VARIABLE[asset]} is unset, so no fee output was added and the "
+            f"{asset} that would have been collected stayed with the redeemer",
+            verified=False,
+        )
+    verdict = check_address(asset, configured)
+    if verdict.refuses:
+        return PlatformFeeOutput(
+            None,
+            f"{PLATFORM_FEE_ADDRESS_VARIABLE[asset]} is set to {configured!r}, which IS NOT A USABLE "
+            f"{asset} ADDRESS -- {verdict.why}. NO FEE OUTPUT WAS ADDED and the redeem went through "
+            f"anyway, deliberately: paying that output would have BURNED the fee, and refusing the "
+            f"redeem over it would have stranded the whole leg. Fix the variable to collect the fee "
+            f"on the next one",
+            verified=False,
+        )
+    return PlatformFeeOutput(
+        configured,
+        f"{PLATFORM_FEE_ADDRESS_VARIABLE[asset]} -> {verdict.why}",
+        verified=not verdict.unchecked,
+    )
 
 
 def platform_fee_coin(asset: str, contract_value: Decimal) -> Decimal:

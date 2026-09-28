@@ -8,6 +8,11 @@ Writes: swap_terminal.db (swaps, swap_audit_log)
 Can move funds: no broadcast. It DERIVES a deposit address in the hot wallet
        and fixes the payout address, and it sets min_confirmations from
        config -- the threshold that later decides when a payout is released.
+       Since 2026-09-27 it also REFUSES both of those addresses when they
+       cannot receive money, which is the cheapest moment either can be
+       stopped: nothing has been written and nothing has been taken. See
+       _refuse_unusable_deposit_address() below and the payout check inside
+       create_swap().
 Mainnet-safe: yes
 
 set_swap_status() writes the status and the audit row together, so every
@@ -16,10 +21,18 @@ boundary, which is what lets create_swap() insert the swap and its first audit
 row atomically.
 """
 
+import logging
+
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
+from modules.address_authority import check_address, check_receive_address, expected_network
 
 from .helpers import new_id, parse_iso, utc_now_iso
 from .xrp_tag_service import allocate_destination_tag
+
+# No handler and no setLevel: a library module that configures logging decides policy for
+# every program that imports it, which is the import-time side effect rule 12 names. The
+# three atomic_*_client.py files carry the same note for the same reason.
+logger = logging.getLogger(__name__)
 
 
 def get_min_confirmations(config, asset: str) -> int:
@@ -113,7 +126,9 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
     deposit it cannot see costs the deposit.
     """
     if from_asset not in TAG_ATTRIBUTED_ASSETS:
-        return adapters[from_asset].get_new_address(f"swap_{swap_id}"), False
+        derived = adapters[from_asset].get_new_address(f"swap_{swap_id}")
+        _refuse_unusable_deposit_address(config, from_asset, derived, "the wallet's own get_new_address()")
+        return derived, False
 
     account = (config.get("XRP_DEPOSIT_ACCOUNT") or "").strip()
     if not account:
@@ -130,6 +145,13 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
             f"created. Checked BEFORE allocating a tag: a tag is never reused, so allocating one "
             f"against a bad account would burn it permanently for a swap that cannot exist."
         )
+    # AND THE SAME LOCAL DECODE THE ADDRESS CHAINS GET, one line below the adapter's own
+    # check rather than instead of it. The adapter is XRPAdapter, whose validate_address()
+    # accepts ANY X-address without verifying its checksum -- its own docstring carries that
+    # review finding -- so on this one chain the adapter's yes is the weaker of the two
+    # answers. Keeping both is not duplication (rule 8): they answer different questions and
+    # the difference is named here and at chains/xrp.py.
+    _refuse_unusable_deposit_address(config, from_asset, account, "XRP_DEPOSIT_ACCOUNT")
 
     # The tag is NOT allocated here, and the split is not stylistic. It is a
     # WRITE with a FOREIGN KEY into swaps(id), so it cannot run until the swap row
@@ -143,6 +165,67 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
     # So this function stays a pure read that can be tested without a database,
     # and create_swap() allocates after the INSERT, inside the same transaction.
     return account, True
+
+
+
+def _refuse_unusable_deposit_address(config, asset: str, address: str, source: str) -> None:
+    """Raise unless `address` can actually receive `asset` on the network we believe we are on.
+
+    THE RECEIVE PATH IS NOT THE SEND PATH, AND THIS IS THE DIFFERENCE. Operator, 2026-09-27:
+    "make the receive path burn proof too."
+
+    On the payout side a bad address burns OUR fee or a customer's payout, and the address
+    came from a stranger typing it. Here we HAND A CUSTOMER an address and they pay into it
+    with their own money, so the loss is THEIRS and they cannot detect it before paying. It
+    is the worse of the two failures, which is why this one REFUSES where
+    services/payout_service.py's guard is careful not to.
+
+    WHAT CAN ACTUALLY GO WRONG HERE, since a typo is not it -- the string comes from our own
+    daemon:
+
+      - A DAEMON ON THE WRONG NETWORK. `gridcoinresearchd getnewaddress` with no `-testnet`
+        put RyyNX8E7tDRzACL47h8JKKDUXf9aMCz8YV into the operator's live MAINNET staking
+        wallet on 2026-09-27. Handed to a customer by a terminal that believes it is on
+        testnet, that is real money paid onto a chain nothing here is watching. This is why
+        the check is check_receive_address() and not check_address(): the NETWORK half is
+        the half that catches the accident that actually happened.
+      - A wallet answering with an error string, or a truncated RPC response, reaching
+        `swaps.deposit_address` as a non-address.
+      - XRP_DEPOSIT_ACCOUNT set by hand to something that is not an account.
+
+    WHY REFUSING IS SAFE HERE AND NOT ON THE PAYOUT PATH. At this point in create_swap()
+    NOTHING HAS MOVED: no deposit taken, no swap row written (the INSERT is still ahead of
+    us), no tag allocated, no instruction shown to anyone. A refusal costs a retry. Letting
+    it through costs a customer's entire deposit. tests/test_xrp_swap_attribution.py::
+    test_a_refused_xrp_swap_leaves_no_row_behind already pins the "no row behind" half, and
+    raising from here -- a pure function called before the INSERT -- keeps it true by
+    construction rather than by cleanup.
+
+    WHAT IT DOES NOT DO. NO_VALIDATOR does not refuse: see modules/address_authority.py's
+    header. And `expected_network()` returns None for XRP, XMR and SOL, and for any chain on
+    a port network_target.py has no convention for, so on those the network half is SKIPPED
+    rather than guessed -- rule 17: "I could not tell" must never be written as "it is
+    wrong". The decode half still runs everywhere.
+    """
+    verdict = check_receive_address(asset, address, expected_network(asset, config.get("RPC")))
+    if verdict.refuses:
+        raise ValueError(
+            f"NO SWAP WAS CREATED, and nothing was written. The {asset} deposit address from {source} "
+            f"cannot receive a deposit: {verdict.why}. A customer paying into it would lose the money "
+            f"with nothing to show for it, so the swap is refused before the row exists rather than "
+            f"after they have paid."
+        )
+    if verdict.unchecked:
+        # Rule 14: an unchecked deposit address must not be indistinguishable from a checked
+        # one. Not an exception, because it is not a refusal -- see the docstring. `.unchecked`
+        # covers BOTH ways of passing unverified (no validator for the chain, and a validator
+        # that could not place the address); the second is the one the operator's 2026-09-27
+        # regtest run actually produced, via a missing bech32 hrp.
+        logger.warning(
+            "deposit address for %s from %s was NOT CHECKED (%s): %s  <- the swap is being created anyway, "
+            "because refusing an address we cannot place would break a working chain.",
+            asset, source, verdict.state, verdict.why,
+        )
 
 
 def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) -> dict:
@@ -218,6 +301,36 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             f"{quote['network_fee_reserve']} {to_asset} network fee reserve and the {quote['fee_bps']} bps "
             f"fee together exceed the gross output at this rate. Deposit more {from_asset}. Nothing was "
             f"written."
+        )
+    # THE PAYOUT ADDRESS, DECODED LOCALLY BEFORE THE DAEMON IS ASKED. Added 2026-09-27.
+    #
+    # This is the EARLIEST point at which a burn can be stopped on the send side, and it is
+    # the only one the web form reaches: open_swap.py's CLI carries the same local decode,
+    # and routes/swaps.py POSTs straight here. services/payout_service.py guards the send
+    # itself as a last resort, but by the time a swap reaches that worker the customer's
+    # deposit has already been taken and credited -- a refusal there strands them. Here,
+    # nothing has been written and nothing has been taken, so a refusal costs a retry.
+    #
+    # BEFORE the daemon, not instead of it, and the two are kept because they differ:
+    # this one needs no daemon and cannot be fooled by an adapter that answers loosely,
+    # and the daemon's answers whether THAT wallet on THAT network will accept it.
+    #
+    # DECODE ONLY -- deliberately NOT check_receive_address(). A payout address belongs to
+    # the CUSTOMER's wallet, and refusing it for being on the wrong network would be this
+    # process's own configuration overruling theirs. The daemon's validate_address() below
+    # is network-scoped and is the right authority for that half.
+    payout_verdict = check_address(to_asset, payout_address)
+    if payout_verdict.refuses:
+        raise ValueError(
+            f"No swap was created: {payout_address!r} cannot receive a {to_asset} payout -- "
+            f"{payout_verdict.why}. Refused here, before any daemon was asked and before any row was "
+            f"written, because money sent to it would be unspendable by anybody. Nothing was written."
+        )
+    if payout_verdict.unchecked:
+        logger.warning(
+            "payout address for a new %s swap was NOT CHECKED locally (%s): %s  <- proceeding to the "
+            "daemon's own validate_address(), which is the authority this could not stand in for.",
+            to_asset, payout_verdict.state, payout_verdict.why,
         )
     if not adapters[to_asset].validate_address(payout_address):
         raise ValueError(f"Invalid {to_asset} payout address")

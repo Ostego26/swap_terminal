@@ -8,7 +8,10 @@ Writes: nothing
 Can move funds: no. Nothing here writes a row, and nothing here is read back by
        the deposit watcher or the payout worker. It decides what a HUMAN sees;
        whether a payout is released is decided in services/deposit_service.py
-       and services/payout_service.py and is not re-derived here.
+       and services/payout_service.py and is not re-derived here. It does decide
+       whether a deposit ADDRESS is rendered at all (_address_problem(), added
+       2026-09-27), which is a customer-money decision even though no row moves:
+       a rendered address is one somebody pays into.
 Mainnet-safe: yes -- pure functions over dicts.
 
 WHY THIS FILE EXISTS AT ALL, AND WHY NONE OF IT IS IN JAVASCRIPT.
@@ -89,6 +92,7 @@ fails instead of the page quietly calling every healthy swap stalled.
 from __future__ import annotations
 
 from microfortnights import format_duration
+from modules.address_authority import check_address
 
 from .helpers import parse_iso
 from .swap_service import DEPOSIT_TAG_COLUMN
@@ -498,6 +502,46 @@ def confirmation_progress(swap: dict) -> dict:
     }
 
 
+def _address_problem(asset: str, address: str | None) -> str:
+    """"" when this deposit address can receive money, else the sentence saying it cannot.
+
+    THE LAST BOUNDARY, AND DELIBERATELY THE WEAKEST OF THE THREE. Added 2026-09-27.
+
+    services/swap_service.py refuses an unusable deposit address at CREATION, which is where
+    the real guard belongs -- nothing has been written and nothing has been paid. This runs
+    much later, over a row that already exists, so it cannot refuse anything: the money may
+    already be on its way. What it can do is stop the page RENDERING an address a customer
+    would then pay into, and say why.
+
+    Why that is not redundant with the creation guard (rule 8 asks; they differ): a row can
+    reach this function that never went through create_swap() -- a database written by an
+    older version of this code, a row edited by hand, a restored backup. The creation guard
+    protects the future; this protects what is already in the table.
+
+    DECODE ONLY. The NETWORK is deliberately not checked here, and that is the one place this
+    module disagrees with the creation guard on purpose. A wrong-network address still
+    decodes, so a customer may ALREADY HAVE PAID it -- and blanking it off the page at that
+    point hides the only string that would let them find their own transaction. An
+    undecodable address cannot have received anything, by construction, so hiding it costs
+    nothing and showing it invites a paste into a wallet that will refuse it anyway.
+
+    NO_VALIDATOR renders normally. An unvalidatable chain must not have its deposit page
+    broken; modules/address_authority.py's header gives the argument at length.
+    """
+    if not address:
+        return "No deposit address is recorded for this swap."
+    verdict = check_address(asset, address)
+    if not verdict.refuses:
+        return ""
+    # Rule 14: the reason is what the reader needs, not the word "invalid". It names the
+    # address so an operator reading a pasted page a day later can act on it.
+    return (
+        f"The {asset} deposit address recorded for this swap CANNOT RECEIVE A DEPOSIT: {verdict.why}. "
+        f"Do not send anything. Anything paid to it would be unspendable by anybody -- including you. "
+        f"This swap has to be reopened with a working deposit address."
+    )
+
+
 def deposit_instruction(swap: dict) -> dict:
     """WHAT the customer must send, and HOW it gets attributed to this swap.
 
@@ -533,7 +577,7 @@ def deposit_instruction(swap: dict) -> dict:
             "address": swap.get("deposit_address") or "",
             "tag": None,
             "note": f"This {asset} address belongs to this swap alone. Sending to it is what identifies your deposit.",
-            "problem": "" if swap.get("deposit_address") else "No deposit address is recorded for this swap.",
+            "problem": _address_problem(asset, swap.get("deposit_address")),
         }
     if model == "destination_tag":
         # The MODEL is called destination_tag (the XRP Ledger's term, and what the
@@ -553,13 +597,31 @@ def deposit_instruction(swap: dict) -> dict:
                 f"{asset} deposits are attributed by DESTINATION TAG, not by address. The account below is shared by "
                 f"every swap, so a payment without the exact tag cannot be matched to yours."
             ),
+            # TWO WAYS THIS PAGE CAN SEND MONEY NOWHERE, AND IT ONLY CHECKED ONE UNTIL
+            # 2026-09-28. The missing tag was checked; THE ACCOUNT ITSELF WAS NOT.
+            #
+            # `_address_problem()` landed on 2026-09-27 on the `address` branch above and
+            # this branch was left rendering `deposit_address` unexamined -- so a swap with
+            # a tag and an undecodable shared account printed the account, printed the tag,
+            # and printed no problem at all. That is the worse half of the two: an XRP
+            # payment to a non-account is rejected by the ledger if the string is malformed,
+            # but a WELL-FORMED account on the wrong ledger, or a truncated one that still
+            # decodes, takes the money. And unlike the per-swap address branch, this account
+            # is SHARED BY EVERY SWAP -- one bad XRP_DEPOSIT_ACCOUNT is every customer, not
+            # one.
+            #
+            # The tag is reported FIRST when both are wrong. A customer with no tag must not
+            # send even to a perfect account (the payment cannot be attributed and the money
+            # is ours-but-unclaimable), so it is the instruction that has to reach them;
+            # burying it under an address complaint would answer the wrong question.
+            # services/swap_service.py still refuses a bad account at creation, which is
+            # where the real guard belongs -- this covers the row that is already in the
+            # table, exactly as _address_problem()'s own docstring argues for its branch.
             "problem": (
-                ""
-                if tag is not None
-                else (
-                    "NO DESTINATION TAG HAS BEEN ISSUED for this swap, so there is nothing safe to send yet. Do not "
-                    "send to the account without one."
-                )
+                "NO DESTINATION TAG HAS BEEN ISSUED for this swap, so there is nothing safe to send yet. Do not "
+                "send to the account without one."
+                if tag is None
+                else _address_problem(asset, swap.get("deposit_address"))
             ),
         }
     return {

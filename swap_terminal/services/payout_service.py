@@ -50,6 +50,7 @@ import sqlite3
 from contextlib import nullcontext
 
 from chains.gridcoin_wallet_lock import GridcoinLockError, unlocked_for_payout
+from modules.address_authority import check_address
 
 from .helpers import utc_now_iso
 from .swap_service import set_swap_status
@@ -189,6 +190,81 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
                 swap["id"],
             )
             continue
+
+        # THE BURN GUARD. Added 2026-09-27 at the operator's instruction ("make this burn
+        # proof"), and it is the LAST place a bad address can be stopped: the next fund-path
+        # statement in this function is adapter.send_to_address(), after which the money is
+        # on a chain and nobody -- not us, not the customer, not the miner -- can spend it.
+        # Not stolen. Not recoverable. Gone.
+        #
+        # The defect being closed: modules/address_network.is_valid_address() landed in
+        # f805efa and NOTHING ON THE FUND PATH CALLED IT. An undecodable payout address went
+        # straight through to the daemon.
+        #
+        # WHY NOT THAT FUNCTION, AND WHY THIS IS A TABLE LOOKUP INSTEAD. is_valid_address()
+        # understands bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check.
+        # Config.ALLOWED_PAIRS carries ("GRC","XMR") and ("XMR","GRC"), and a Monero address
+        # is a DIFFERENT base58 with a Keccak checksum -- measured 2026-09-27, every valid
+        # XMR and SOL fixture in tests/valid_addresses.py returns False from it. So the
+        # one-line version of this guard would have refused every Monero payout, on a swap
+        # whose deposit is ALREADY OURS and already credited. That is a worse outcome than
+        # the burn: the burn costs one payout, the false refusal costs every customer of
+        # that chain while their money sits in our wallet. modules/address_authority.py is
+        # the per-asset table that avoids it.
+        #
+        # NO_VALIDATOR PASSES THROUGH, LOUDLY, for the same reason: refusing a chain we
+        # cannot check IS that outage, arriving by the door a future chain comes in by.
+        # tests/test_address_authority.py closes the hole at the other end by asserting
+        # every asset this terminal can reach HAS a validator, so the gap fails the suite
+        # instead of either burning money or stranding a payout.
+        #
+        # PLACED AFTER THE CLAIM AND BEFORE reserve_inventory(), which is not arbitrary.
+        # Claiming first means exactly one worker owns this swap, so the refusal is written
+        # once. Refusing before the reserve and before the INSERT means a refused payout
+        # leaves NO reserved-inventory row and NO payouts row in 'created' -- the two
+        # dangling states this function's own docstring is about. The swap lands in 'failed'
+        # by the same route a failed send does (set_swap_status + failed_reason + audit),
+        # because 'payout_pending' would be re-read and re-refused on every cycle forever,
+        # which is rule 14's "did nothing must not look like did work" turned into a loop.
+        verdict = check_address(destination_asset, swap["payout_address"])
+        if verdict.refuses:
+            db.execute(
+                "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
+                (f"payout address refused before send: {verdict.why}", utc_now_iso(), swap["id"]),
+            )
+            set_swap_status(
+                db, swap["id"], "failed",
+                f"NOTHING WAS SENT. Payout address refused: {verdict.why}", old_status="paying",
+            )
+            db.commit()
+            # Rule 14: the refusal names the address AND the reason, on the screen the
+            # operator is actually looking at. `swaps.failed_reason` reached nothing they
+            # were watching on 2026-09-26, which is the measurement recorded at the
+            # send-failure logger.error() further down this function.
+            logger.error(
+                "payout REFUSED BEFORE SENDING for swap %s (%s -> %s, %s %s): address %r is not a valid "
+                "%s address -- %s  <- NOTHING was sent, no inventory was reserved, no payouts row was "
+                "written, and the swap is now 'failed' and will NOT be retried. Money sent to this string "
+                "would be unspendable by anybody.",
+                swap["id"], swap["from_asset"], swap["to_asset"], amount, destination_asset,
+                swap["payout_address"], destination_asset, verdict.why,
+            )
+            continue
+        if verdict.unchecked:
+            # Rule 14 again. `.unchecked` rather than `state == NO_VALIDATOR` since
+            # 2026-09-27: there are TWO ways to pass without being verified, and the second
+            # one is the one that actually happened. NO_VALIDATOR is "no validator for this
+            # chain"; UNDETERMINED is "a validator ran and could not place the address",
+            # which is what Litecoin's regtest hrp `rltc` and its second P2SH byte 0x3A both
+            # produced on the operator's live regtest swap. Both proceed, for the same reason
+            # -- a gap in our tables is not evidence against a customer's address -- and both
+            # must say out loud that nothing was checked.
+            logger.warning(
+                "payout for swap %s is going to a %s address that was NOT CHECKED (%s): %s  <- the send is "
+                "proceeding, because refusing an address we cannot place would break a working chain, which "
+                "is worse than the burn this guard prevents.",
+                swap["id"], destination_asset, verdict.state, verdict.why,
+            )
 
         reserve_inventory(db, destination_asset, amount)
         try:

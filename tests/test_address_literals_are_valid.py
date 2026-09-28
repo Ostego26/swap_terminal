@@ -55,11 +55,17 @@ import pytest
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 
+from modules.address_authority import (  # noqa: E402  the path shim above must run first
+    INVALID,
+    NOT_EXPRESSED,
+    VALIDATORS,
+    check_address,
+)
 from modules.address_network import (  # noqa: E402  the path shim above must run first
     BITCOIN_BASE58_ALPHABET,
+    MAINNET,
     TESTNET,
     XRP_BASE58_ALPHABET,
-    address_network,
     decodes_as_address,
 )
 from valid_addresses import (  # noqa: E402  conftest puts tests/ on sys.path
@@ -68,6 +74,39 @@ from valid_addresses import (  # noqa: E402  conftest puts tests/ on sys.path
 )
 
 _B58 = BITCOIN_BASE58_ALPHABET.decode()
+
+
+def fixture_asset(name: str) -> str:
+    """Which chain a fixture name belongs to: everything before the first underscore.
+
+    ADDED 2026-09-27, AND THE REASON IS THE DEFECT THIS WHOLE DAY IS ABOUT. The two fixture
+    tests below used to call modules/address_network.decodes_as_address(), which understands
+    bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check -- and NOTHING ELSE.
+    So the moment XMR_PAYOUT and SOL_PAYOUT were added to valid_addresses.py, this gate
+    failed on three valid addresses:
+
+        XMR_PAYOUT         "not decodable as base58check"   (Monero: 11-char blocks, Keccak)
+        XMR_SECOND_PAYOUT  "not decodable as base58check"
+        SOL_PAYOUT         accepted/refused by length alone (Solana has NO checksum)
+
+    That is exactly the trap modules/address_authority.py exists to name, arriving in a
+    TEST instead of on the fund path: a blanket check over every chain calls two working
+    chains invalid. Had the same blanket check been put at payout_service's send site, every
+    valid Monero payout would have been refused -- on a swap whose deposit was already taken.
+
+    So the gate now asks the AUTHORITY, per asset, which is the same thing the fund path
+    asks (rule 8: one question, one answer, one place).
+
+    An UNPREFIXED name, or one naming a chain with no validator, raises rather than defaults
+    -- a fixture silently skipped is a fixture nobody is checking.
+    """
+    asset = name.split("_", 1)[0]
+    assert asset in VALIDATORS, (
+        f"fixture {name!r} names asset {asset!r}, which has no validator in "
+        f"modules/address_authority.VALIDATORS ({', '.join(sorted(VALIDATORS))}). Name it after its "
+        f"chain, or add the validator -- a fixture no validator covers is unchecked."
+    )
+    return asset
 _XRP = XRP_BASE58_ALPHABET.decode()
 
 # Solana keys are 32 raw bytes in base58 with no checksum and no version byte.
@@ -314,7 +353,15 @@ def test_a_planted_valid_address_is_not_a_violation(tmp_path):
     planted.write_text("\n".join(f'X{i} = "{a}"' for i, a in enumerate(sorted(ALL_VALID.values()))))
     found = list(_candidates([planted]))
     assert len(found) >= 10, f"only {len(found)} of {len(ALL_VALID)} valid fixtures matched"
-    assert [v for _p, _n, v in found if not decodes_as_address(v)[0]] == []
+    # Asked per asset, via the reverse lookup, for the reason fixture_asset() gives: a
+    # blanket decoder refuses the Monero and Solana fixtures, which are valid.
+    by_value = {value: name for name, value in ALL_VALID.items()}
+    refused = [
+        f"{by_value[v]}={v}: {check_address(fixture_asset(by_value[v]), v).why}"
+        for _p, _n, v in found
+        if v in by_value and check_address(fixture_asset(by_value[v]), v).state == INVALID
+    ]
+    assert refused == [], refused
 
 
 def test_every_address_shaped_literal_in_the_tree_decodes():
@@ -336,18 +383,32 @@ def test_every_address_shaped_literal_in_the_tree_decodes():
 
 @pytest.mark.parametrize("name", sorted(ALL_VALID))
 def test_every_shared_fixture_address_decodes(name):
-    """The fixtures themselves, one test each so a failure names which one."""
-    decodable, why = decodes_as_address(ALL_VALID[name])
-    assert decodable, f"{name} = {ALL_VALID[name]} does not decode: {why}"
+    """The fixtures themselves, one test each so a failure names which one.
+
+    Through the per-asset authority rather than the three-encoding decoder; see
+    fixture_asset() for the measurement that forced the change.
+    """
+    verdict = check_address(fixture_asset(name), ALL_VALID[name])
+    assert verdict.state != INVALID, f"{name} = {ALL_VALID[name]} does not decode: {verdict.why}"
 
 
-@pytest.mark.parametrize("name", sorted(n for n in ALL_VALID if not n.startswith("XRP")))
+@pytest.mark.parametrize("name", sorted(ALL_VALID))
 def test_no_shared_fixture_is_a_mainnet_address(name):
     """A mainnet address in a fixture is one copy-paste from a real payout.
 
-    XRP is excluded and the reason is in valid_addresses.py: XRP has no separate testnet
-    address format, so "is this testnet" is not a question its encoding can answer -- the
-    network is a property of the server you submit to.
+    NO NAME-PREFIX EXCLUSION ANY MORE, and that is a strengthening rather than a tidy-up.
+    This used to skip every fixture starting with "XRP", because XRP has no testnet address
+    format -- true, and it meant a rule enforced by SPELLING: a fixture named XRP_anything
+    was exempt, including one that should not have been. SOL_PAYOUT would have needed a
+    second such exemption and XMR_PAYOUT must not get one.
+
+    So the exemption is now read off the ENCODING instead. address_authority reports
+    NOT_EXPRESSED for a format that carries no network at all (XRP, Solana), which is an
+    absent question rather than a failed measurement, and every other fixture must say
+    TESTNET. A future XRP fixture that somehow decoded as mainnet would now fail, where the
+    old spelling-based skip would have waved it through.
     """
-    network, why = address_network(ALL_VALID[name])
-    assert network == TESTNET, f"{name} = {ALL_VALID[name]} is not testnet: {why}"
+    verdict = check_address(fixture_asset(name), ALL_VALID[name])
+    assert verdict.network != MAINNET, f"{name} = {ALL_VALID[name]} is MAINNET: {verdict.why}"
+    if verdict.network != NOT_EXPRESSED:
+        assert verdict.network == TESTNET, f"{name} = {ALL_VALID[name]} is not testnet: {verdict.why}"

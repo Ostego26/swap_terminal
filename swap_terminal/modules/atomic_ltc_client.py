@@ -175,7 +175,7 @@ from typing import Any
 
 import requests
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
-from modules.htlc_fee import platform_fee_address, platform_fee_coin
+from modules.htlc_fee import platform_fee_coin, usable_platform_fee_address
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     broadcast_refund,
@@ -453,8 +453,27 @@ class LTCClient:
         # to be spent before the counterparty's timelock expires and no client here
         # implements a refund. Losing the fee on one swap beats losing the leg.
         platform_fee = platform_fee_coin("LTC", found.value)
-        fee_address = platform_fee_address("LTC")
-        extra_outputs = {fee_address: platform_fee} if fee_address else {}
+        # RESOLVED AND VALIDATED IN ONE CALL since 2026-09-27. This was
+        #     fee_address = platform_fee_address("LTC")
+        # which returns whatever the variable holds, non-empty, unexamined -- so a
+        # truncated paste or an address from another chain went straight into a
+        # transaction output and the fee was burned on every redeem, silently. That is
+        # the same failure the testnet-literal default had; only the source of the bad
+        # string changed.
+        #
+        # usable_platform_fee_address() returns None for an unusable address exactly as it
+        # does for an unset one, and that direction is fixed: an invalid FEE address must
+        # NEVER block the redeem. The hashlock branch has to be spent before the
+        # counterparty's timelock expires and no client in this package implements a
+        # refund, so refusing here would trade our 1.5% for the customer's whole leg.
+        # Skip the fee output, warn loudly, let the redeem proceed.
+        #
+        # The RETURNED VALUE carries WHY, because after this change the old warning text
+        # ("is unset") would be false three times out of four (rule 14, rule 16's wrong
+        # comment). It also carries whether the address was actually CHECKED -- see the log
+        # line below and modules/htlc_fee.PlatformFeeOutput.
+        fee = usable_platform_fee_address("LTC")
+        extra_outputs = {fee.address: platform_fee} if fee.address else {}
 
         spend = build_hashlock_spend(
             asset="LTC",
@@ -468,18 +487,20 @@ class LTCClient:
             destination_address=destination_address,
             extra_outputs=extra_outputs,
         )
-        if fee_address:
-            logger.info("%s; platform fee %s to %s", spend.describe("LTC"), platform_fee, fee_address)
-        else:
-            # Rule 14: "did nothing" must not look like "did work". A redeem that
-            # charged no fee reports differently from one that did, and it says which
-            # variable would have changed that.
-            logger.warning(
-                "%s; NO PLATFORM FEE CHARGED -- PLATFORM_FEE_LTC_ADDRESS is unset, so the "
-                "%s LTC that would have been collected stayed with the redeemer. The redeem "
-                "went through; set that variable to collect it on the next one.",
-                spend.describe("LTC"), platform_fee,
-            )
+        # Rule 14 and rule 8, rewritten 2026-09-28. This was a three-line branch --
+        #     if fee_address: logger.info(...)  else: logger.warning(...)
+        # -- spelled identically in all three clients, and it was WRONG in one case that
+        # the review found and a live run had already produced: an UNDETERMINED address
+        # (a valid address this repository's tables cannot place, which Litecoin's `rltc`
+        # and 0x3A both were on 2026-09-27) passes through WITH the address, so the
+        # truthiness test took the INFO branch and printed the sentence a VERIFIED
+        # address gets. Nothing had been checked and the log could not say so.
+        #
+        # Both the level and the sentence now come from modules/htlc_fee.py, which is the
+        # one place that knows which of the four outcomes happened. A fourth state added
+        # there cannot leave one of three clients behind -- which is exactly what had
+        # just happened when a fourth state was added.
+        logger.log(fee.log_level, "%s; %s", spend.describe("LTC"), fee.outcome("LTC", platform_fee))
 
         # The preimage is on the stack of what is about to be broadcast and is
         # never logged; the secret hash in the redeem script is the public

@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 from db import SCHEMA, dict_factory
 from network_target import configuring_variable
+from valid_addresses import GRC_PAYOUT
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
 # already pointed SWAP_DB_PATH at a temp file by the time this import runs.
@@ -63,6 +64,7 @@ def iso(seconds_ago: float) -> str:
     return (datetime.now(UTC) - timedelta(seconds=seconds_ago)).isoformat()
 
 
+
 def seed_swap(client, swap_id, status, **overrides):
     """Insert one swap and its quote. Optional columns arrive as `overrides`.
 
@@ -73,7 +75,13 @@ def seed_swap(client, swap_id, status, **overrides):
     """
     asset = overrides.get("asset", "GRC")
     updated_ago = overrides.get("updated_ago", 30.0)
-    deposit_address = overrides.get("deposit_address", "Saddr")
+    # GRC_PAYOUT, not "Saddr". services/swap_view._address_problem() (2026-09-27) reports a
+    # deposit address that cannot receive money, and templates/swap.html:59 then renders the
+    # "Do not send anything yet" callout INSTEAD of the send target -- so a placeholder here
+    # silently turned "does this page show where to send coins" into "does this page show a
+    # warning", and three parameterized cases failed on it. Derived, never spelled: see
+    # tests/valid_addresses.py.
+    deposit_address = overrides.get("deposit_address", GRC_PAYOUT)
     min_conf = overrides.get("min_conf", 6)
     write(
         client,

@@ -69,6 +69,7 @@ import struct
 from decimal import Decimal
 from json import dumps as json_dumps
 
+import base58
 import pytest
 import requests as requests_module
 from config import Config
@@ -133,7 +134,7 @@ from regtest.txbuild import redeem_script_sig as harness_redeem_script_sig
 # stack interpreter in this repository, imported rather than copied (rule 8);
 # pytest puts tests/ on sys.path, which is what makes this importable.
 from test_regtest_harness_units import ScriptFailure, _eval_p2sh_spend
-from valid_addresses import LTC_PLATFORM_FEE
+from valid_addresses import INVALID_PLACEHOLDERS, LTC_PLATFORM_FEE
 
 CONTRACT_COINS = Decimal("1.0")
 # Not a credential: a literal handed to a FakeNode that has no wallet. It is
@@ -1221,6 +1222,182 @@ def test_every_client_redeems_a_confirmed_contract_without_asking_the_wallet_to_
     )
 
 
+def _client_for(asset: str):
+    """An LTC or GRC client pointed at a loopback URL no socket is ever opened on.
+
+    ONE constructor for the three platform-fee tests below. They each spelled the same
+    two-branch `if asset == "LTC": LTCClient(...) else: GRCClient(...)`, which is rule 8's
+    shape at the smallest possible scale -- and the GRC branch carries a keyword the LTC one
+    does not (`wallet_passphrase=""`, which skips the unlock), so the two are not
+    interchangeable and a reader has to be told that once rather than three times.
+
+    BTC is here too, though the two UNUSABLE-address tests below do not parameterize it in:
+    its client adds no fee output when the variable is unset, so an assertion on output COUNT
+    would hold there for the wrong reason. It IS driven by
+    test_the_btc_client_threads_the_fee_output_through(), which sets the variable and therefore
+    measures the output rather than its absence.
+    """
+    if asset == "BTC":
+        return BTCClient("http://127.0.0.1:18443/wallet/w", "u", "p")
+    if asset == "LTC":
+        return LTCClient("http://127.0.0.1:19443/wallet/w", "u", "p")
+    return GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase="")
+
+@pytest.mark.parametrize("asset", ["LTC", "GRC"])
+def test_an_unusable_platform_fee_address_does_not_block_the_redeem(asset, contract, monkeypatch, caplog):
+    """THE DIRECTION THAT MATTERS, DRIVEN THROUGH THE REAL CLIENT. Added 2026-09-27.
+
+    A redeem is time-critical: the hashlock branch has to be spent before the counterparty's
+    timelock expires, and NO CLIENT IN THIS PACKAGE IMPLEMENTS A REFUND. So refusing a
+    customer's redeem because OUR fee address is malformed would strand their whole leg to
+    protect our 1.5%. The right answer is to drop the fee output, warn loudly, and let the
+    redeem through -- which is exactly what an UNSET variable already did.
+
+    THREE ASSERTIONS AND THE ORDER IS THE ARGUMENT:
+      1. the transaction WAS broadcast -- the redeem is not blocked
+      2. it has ONE output -- the unpayable fee output was dropped, not paid
+      3. the warning names the variable and the reason (rule 14)
+
+    Without (1) this would pass for a client that raised; without (2) it would pass for a
+    client that burned the fee; without (3) the operator never learns which of two Nones
+    they got.
+
+    BTC is not parameterized in: its client adds no fee output when the variable is unset and
+    the assertion `len(outputs) == 1` would hold for the wrong reason.
+
+    MUTATION: revert either client to platform_fee_address() and assertion (2) fails -- the
+    transaction grows a second output paying an address nobody can spend.
+    """
+    monkeypatch.setenv(PLATFORM_FEE_ADDRESS_VARIABLE[asset], INVALID_PLACEHOLDERS["base58 checksum"])
+    prefix = GRIDCOIN_PREFIX if asset == "GRC" else VERSION_2_PREFIX
+    node = _node_for(contract, prefix=prefix)
+    client = _client_for(asset)
+    client.rpc_call = node.rpc_call
+
+    with caplog.at_level(logging.WARNING):
+        txid = _drive_redeem(client, node, contract)
+
+    assert txid == "dd" * 32, f"{asset}: the redeem was BLOCKED by our own fee address"
+    assert len(node.broadcast) == 1
+    parsed = parse_transaction(bytes.fromhex(node.broadcast[0]), contract["txid"], contract["vout"])
+    assert len(parsed.outputs) == 1, (
+        f"{asset}: the transaction still pays a fee output to an address that cannot be spent -- the fee "
+        f"was burned"
+    )
+    assert "NO PLATFORM FEE CHARGED" in caplog.text
+    assert PLATFORM_FEE_ADDRESS_VARIABLE[asset] in caplog.text
+    assert "NOT A USABLE" in caplog.text, "the warning must say WHICH failure: unset and unusable differ"
+
+
+@pytest.mark.parametrize("asset", ["LTC", "GRC"])
+def test_a_fee_address_this_repository_CANNOT_PLACE_is_paid_and_says_it_was_not_checked(
+    asset, contract, monkeypatch, caplog
+):
+    """THE HOLE REVIEW FOUND, 2026-09-28, AND IT IS RULE 14 EXACTLY.
+
+    modules/htlc_fee.usable_platform_fee_address() has FOUR outcomes and the three clients
+    branched on TWO of them -- `if fee_address: info() else: warning()`. An UNDETERMINED
+    address (valid, and unplaceable by this repository's tables) passes through WITH the
+    address, deliberately, because a gap in our tables is not evidence against an address.
+    The truthiness branch then printed
+
+        platform fee 0.00150000 to <address>
+
+    which is the sentence a CHECKED address gets. Nothing had been checked. An operator
+    skimming a log had no way to tell the two apart, which is the defect rule 14 names:
+    "did nothing" and "did work" must not share a line, and here "verified" and "not
+    verified" shared one.
+
+    THIS IS NOT A HYPOTHETICAL STATE. Litecoin's regtest hrp `rltc` and its second P2SH
+    version byte 0x3A were both UNDETERMINED on the operator's live 2026-09-27 regtest swap,
+    on addresses litecoind itself produced. The table entries exist now; the next missing
+    entry is what this pins.
+
+    THE FIXTURE IS THE SHAPE THE INCIDENT HAD, and building it any other way would measure
+    the wrong thing. The fee address is the contract's OWN platform key re-encoded under
+    version 0x7B, and the fake node is given a script for it -- i.e. a DAEMON THAT ACCEPTS
+    THE ADDRESS while this repository's tables cannot place it. That is precisely what
+    litecoind's `Q...` form was: the daemon produced it, the daemon would have paid it, and
+    only our table was missing. An address no daemon accepts is a different test, the one
+    directly above.
+
+    THREE ASSERTIONS, AND THE FIRST TWO ARE WHY THE FIX IS NOT "REFUSE IT":
+      1. the redeem was broadcast
+      2. it HAS TWO OUTPUTS -- the fee WAS paid, because refusing our own table gap would
+         lose a fee that is probably fine, and refusing the redeem would lose the leg
+      3. the log says NOT CHECKED, at WARNING
+
+    MUTATION (run 2026-09-28, both killed): drop `self.verified` from
+    PlatformFeeOutput.log_level and (3)'s level assertion fails; delete the unverified branch
+    of outcome() and (3)'s text assertion fails -- while (1) and (2) stay green, which is the
+    asymmetry the state exists for, since the money moved correctly and only the reporting
+    lied.
+    """
+    unplaceable = base58.b58encode_check(bytes([0x7B]) + contract["platform"].hash160).decode()
+    assert address_network(unplaceable)[0] == "unknown", (
+        "0x7B has been assigned in modules/address_network.py, so this fixture no longer "
+        "exercises UNDETERMINED -- pick another unassigned byte"
+    )
+    monkeypatch.setenv(PLATFORM_FEE_ADDRESS_VARIABLE[asset], unplaceable)
+    prefix = GRIDCOIN_PREFIX if asset == "GRC" else VERSION_2_PREFIX
+    node = _node_for(contract, prefix=prefix)
+    # The daemon accepts it. That is the whole point: our table is the thing that is missing.
+    node.scripts[unplaceable] = contract["platform"].p2pkh_script
+    client = _client_for(asset)
+    client.rpc_call = node.rpc_call
+
+    with caplog.at_level(logging.INFO):
+        txid = _drive_redeem(client, node, contract)
+
+    assert txid == "dd" * 32, f"{asset}: the redeem was BLOCKED by an address we merely could not place"
+    parsed = parse_transaction(bytes.fromhex(node.broadcast[0]), contract["txid"], contract["vout"])
+    assert len(parsed.outputs) == 2, (
+        f"{asset}: the fee output was DROPPED for an address that is well-formed and merely "
+        f"unplaceable -- that is the false refusal, and it loses a fee that is probably fine"
+    )
+    unchecked = [r for r in caplog.records if "NOT CHECKED" in r.getMessage()]
+    assert unchecked, (
+        f"{asset}: a fee output was paid to an UNVERIFIED address and no line said so -- the log reads "
+        f"exactly like one paid to a verified address (rule 14). Lines seen: "
+        f"{[r.getMessage()[:80] for r in caplog.records] or '(none)'}"
+    )
+    assert all(r.levelno == logging.WARNING for r in unchecked), (
+        f"{asset}: an unverified fee output was reported at "
+        f"{sorted({r.levelname for r in unchecked})}; INFO is the level a VERIFIED one gets"
+    )
+
+
+@pytest.mark.parametrize("asset", ["LTC", "GRC"])
+def test_a_verified_fee_address_is_reported_at_info_and_not_as_unchecked(asset, contract, monkeypatch, caplog):
+    """The other direction, so the assertion above cannot pass by the log always saying it.
+
+    Without this, a mutation that hard-coded "NOT CHECKED" into every fee line -- or set the
+    level to WARNING unconditionally -- would leave the test above green. Both assertions
+    below go red on that mutation, which is the pair working as one measurement. This is the
+    lesson from the four tests that passed while the code was mutated: one direction is not
+    a measurement, it is half of one.
+
+    The fee address is the contract's own platform key, which the fake node already knows and
+    which decodes as an ordinary testnet address on all three chains.
+    """
+    monkeypatch.setenv(PLATFORM_FEE_ADDRESS_VARIABLE[asset], contract["platform"].address)
+    prefix = GRIDCOIN_PREFIX if asset == "GRC" else VERSION_2_PREFIX
+    node = _node_for(contract, prefix=prefix)
+    client = _client_for(asset)
+    client.rpc_call = node.rpc_call
+
+    with caplog.at_level(logging.INFO):
+        _drive_redeem(client, node, contract)
+
+    fee_lines = [r for r in caplog.records if "platform fee" in r.getMessage()]
+    assert fee_lines, f"{asset}: the redeem reported no platform fee at all"
+    assert "NOT CHECKED" not in caplog.text, f"{asset}: a VERIFIED fee address was reported as unchecked"
+    assert all(r.levelno == logging.INFO for r in fee_lines), (
+        f"{asset}: a verified fee output was reported at {sorted({r.levelname for r in fee_lines})}, not "
+        f"INFO -- a warning on the ordinary case is how a real warning stops being read"
+    )
+
+
 class _FakeHTTPResponse:
     """What `requests.post` hands back, carrying only what rpc_call reads off it.
 
@@ -1270,6 +1447,137 @@ def _post_through(node):
         return _FakeHTTPResponse(result=result)
 
     return post
+
+
+def _requests_module_for(asset: str):
+    """The `requests` binding to stub for one client: each imports its own.
+
+    All three clients do `import requests` at module scope, so monkeypatching
+    `requests.post` globally would work too -- and would also silently stub the other two,
+    which is how a test starts passing because of a sibling. Naming the module makes the
+    stub reach exactly one client.
+    """
+    return {"BTC": btc_module, "LTC": ltc_module, "GRC": grc_module}[asset].requests
+
+@pytest.mark.parametrize("asset", ["BTC", "GRC"])
+def test_a_probe_for_a_method_the_chain_does_not_have_is_quiet_and_names_the_chains(
+    asset, caplog, monkeypatch
+):
+    """RULE 14 BACKWARDS: THE THING THAT WORKED LOOKED BROKEN. Fixed 2026-09-28.
+
+    Gridcoin has no `gettxout` -- measured on the operator's testnet daemon 2026-09-27 with
+    `help gettxout`, which answered "unknown command: gettxout" while `getrawtransaction`,
+    `gettransaction` and `signrawtransaction` all existed. It is route 1 of
+    modules/htlc_rpc.lookup_contract_output()'s four routes, so it misses on EVERY GRC spend,
+    and route 4 covers it.
+
+    What that cost was output, not correctness: `except Exception: logger.exception(...)` is
+    ERROR plus a full stack, so ~40 lines of traceback printed in front of a spend that
+    SUCCEEDED (a 401 printed ~100). An operator reading that pastes it back and asks what
+    broke. Nothing broke.
+
+    DRIVEN THROUGH THE REAL rpc_call, via requests.post, for the reason _post_through()
+    already spells out: rpc_call IS the method that does the printing, so replacing it deletes
+    the code under test. The daemon's answer here is the exact body a real one sends --
+    HTTP 200 with an `error` object carrying code -32601 -- because
+    modules/htlc_rpc.rpc_result() reads the body before the status and that is the shape it
+    reads.
+
+    BTC is parameterized in even though bitcoind HAS gettxout: the handler is the same shape
+    in both clients, and the rule must not be one client's local quirk (rule 8). Litecoin is
+    absent because its rpc_call catches RequestException only -- measured 2026-09-28 -- so a
+    -32601 there propagates with no logging at all, which is a third behavior and is named in
+    the report rather than changed here.
+
+    MUTATION: return logging.ERROR unconditionally from rpc_failure_report() and assertion (2)
+    fails; drop the OPTIONAL_PROBE_METHODS check so any -32601 is quieted and
+    test_a_method_not_found_on_a_method_this_repository_NEEDS_stays_loud below fails instead.
+    """
+    client = _client_for(asset)
+    monkeypatch.setattr(
+        _requests_module_for(asset), "post",
+        lambda *_a, **_k: _FakeHTTPResponse(error={"code": -32601, "message": "Method not found"}),
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception, match="-32601"):
+        client.rpc_call("gettxout", ["ab" * 32, 1, True])
+
+    # (1) the miss is still reported -- silence would be its own rule 14 defect
+    reports = [r for r in caplog.records if "gettxout" in r.getMessage() and "no `gettxout`" in r.getMessage()]
+    assert reports, (
+        f"{asset}: the probe miss was reported by no line at all. Lines seen: "
+        f"{[r.getMessage()[:70] for r in caplog.records] or '(none)'}"
+    )
+    # (2) at DEBUG, with no traceback. Both halves: the stack was the expensive part.
+    assert all(r.levelno == logging.DEBUG for r in reports), (
+        f"{asset}: a routine probe miss reported at {sorted({r.levelname for r in reports})} -- this is the "
+        f"~40 lines in front of a successful spend"
+    )
+    # `not r.exc_info` rather than `is None`: logging stores exc_info=False verbatim on the
+    # record, so `is None` would fail for a record that carries no traceback at all. Measured
+    # while writing this -- the first version of this assertion was wrong in the safe
+    # direction, which is still wrong.
+    assert all(not r.exc_info for r in reports), f"{asset}: a routine probe miss still carries a traceback"
+    # (3) rule 14: it names the chains the method IS expected on, so nobody goes installing it
+    assert "expected on BTC and LTC" in reports[0].getMessage()
+    assert "NOTHING IS WRONG" in reports[0].getMessage()
+
+
+@pytest.mark.parametrize("asset", ["BTC", "GRC"])
+def test_a_method_not_found_on_a_method_this_repository_NEEDS_stays_loud(asset, caplog, monkeypatch):
+    """The control, and it is the reason the quieting is a table rather than an error code.
+
+    A bare `-32601` check would quiet EVERY missing method, including one whose absence means
+    the daemon cannot do the job: `signrawtransaction` missing on Gridcoin would mean nothing
+    can sign a refund, and that must stay as loud as it has ever been.
+
+    Without this test, deleting the OPTIONAL_PROBE_METHODS lookup and quieting all -32601s
+    would leave the test above green -- which is the single-direction measurement this session
+    was told to stop producing.
+    """
+    client = _client_for(asset)
+    monkeypatch.setattr(
+        _requests_module_for(asset), "post",
+        lambda *_a, **_k: _FakeHTTPResponse(error={"code": -32601, "message": "Method not found"}),
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception, match="-32601"):
+        client.rpc_call("signrawtransaction", ["deadbeef"])
+
+    loud = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert loud, (
+        f"{asset}: a daemon that cannot sign was reported at "
+        f"{sorted({r.levelname for r in caplog.records}) or '(none)'} -- below ERROR, which is where the "
+        f"routine probe miss lives, so the two are now indistinguishable"
+    )
+    assert any(r.exc_info is not None for r in loud), f"{asset}: a real failure lost its traceback"
+    assert all("NOTHING IS WRONG" not in r.getMessage() for r in loud)
+
+
+@pytest.mark.parametrize("asset", ["BTC", "GRC"])
+def test_an_ordinary_rpc_failure_is_still_loud_with_its_traceback(asset, caplog, monkeypatch):
+    """A rejected transaction, which is the failure that actually matters on the spend path.
+
+    `-26 non-mandatory-script-verify-flag` is the answer a daemon gives when relay policy
+    declines a refund, and modules/htlc_rpc.rpc_result() exists to keep that message readable.
+    Quieting it would undo that work, so it is pinned alongside the two -32601 cases.
+    """
+    client = _client_for(asset)
+    monkeypatch.setattr(
+        _requests_module_for(asset), "post",
+        lambda *_a, **_k: _FakeHTTPResponse(
+            error={"code": -26, "message": "non-mandatory-script-verify-flag (Locktime requirement not satisfied)"}
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception, match="non-mandatory-script-verify-flag"):
+        client.rpc_call("sendrawtransaction", ["deadbeef"])
+
+    loud = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert loud, f"{asset}: a REJECTED TRANSACTION was reported below ERROR"
+    assert any("non-mandatory-script-verify-flag" in r.getMessage() for r in loud), (
+        "the daemon's own reason is what tells a policy refusal from a consensus one -- it must reach the log"
+    )
 
 
 @pytest.mark.parametrize("asset", ["BTC", "LTC", "GRC"])
@@ -1849,23 +2157,85 @@ def test_btc_now_charges_the_same_rate_as_the_other_two():
     )
 
 
-def test_the_btc_client_threads_the_fee_output_through():
-    """The half that makes the rate real, asserted on the source of the call.
+def test_the_btc_client_threads_the_fee_output_through(contract, monkeypatch, caplog):
+    """The half that makes the rate real -- asserted on the TRANSACTION, not on the source.
 
     BTC was absent from the fee table for a MECHANICAL reason, not a policy one:
     redeem_contract() passed no `extra_outputs` at all, so a row in the table would have
-    claimed a fee no code collected. Adding the row without this is the failure mode the
-    old comment warned about, so the presence of the argument is pinned here rather than
-    left to the rate test to imply.
+    claimed a fee no code collected. Adding the row without this is the failure mode the old
+    comment warned about, so the fee output is pinned here rather than left to the rate test
+    to imply.
+
+    REWRITTEN 2026-09-28, AND THE OLD VERSION IS WHY THE HOUSE RULE EXISTS. It read
+
+        source = inspect.getsource(BTCClient.redeem_contract)
+        assert "extra_outputs=extra_outputs" in source
+        assert 'platform_fee_address("BTC")' in source
+        assert "if fee_address else {}" in source
+
+    -- five assertions about the TEXT of a method, and they fail in both directions:
+
+      FALSE NEGATIVE, observed. Renaming the local `fee_address` to `fee` and moving the log
+      sentence into modules/htlc_fee.py changed no behavior whatsoever -- same outputs, same
+      amounts, same address -- and this test went red on the rename. A test that fails on a
+      refactor teaches a reader to edit the test, which is how the next real break gets
+      edited away with it.
+
+      FALSE POSITIVE, and worse. `platform_fee_address("BTC")` appearing in the source proves
+      nothing about whether the RESULT reaches an output: the line could compute it and
+      discard it, or the whole branch could be unreachable, and every assertion would still
+      pass. Three tests in this repository passed that way on 2026-09-27 while the code under
+      them was mutated.
+
+    So all five claims are now asserted on the broadcast transaction, which is the only thing
+    that can be wrong in a way that costs money:
+
+      1. TWO outputs -- the fee output reached the spend
+      2. one of them pays exactly platform_fee_coin("BTC", contract value)
+      3. and pays it to the script of the address in PLATFORM_FEE_BTC_ADDRESS
+      4. with the variable UNSET, ONE output and the redeem still broadcasts (the None case
+         omits the output rather than blocking the redeem -- a redeem is time-critical and no
+         client here implements a refund)
+      5. and that case says NO PLATFORM FEE CHARGED (rule 14)
     """
-    source = inspect.getsource(BTCClient.redeem_contract)
-    assert "extra_outputs=extra_outputs" in source, "the fee output must reach the spend"
-    assert 'platform_fee_coin("BTC"' in source
-    assert 'platform_fee_address("BTC")' in source
-    # And the None case omits the output rather than blocking the redeem, same as the
-    # other two clients: a redeem is time-critical and no client here implements a refund.
-    assert "if fee_address else {}" in source
-    assert "NO PLATFORM FEE CHARGED" in source, "rule 14: charging nothing must log differently"
+    fee_key = contract["platform"]
+    monkeypatch.setenv("PLATFORM_FEE_BTC_ADDRESS", fee_key.address)
+    node = _node_for(contract)
+    client = _client_for("BTC")
+    client.rpc_call = node.rpc_call
+
+    txid = _drive_redeem(client, node, contract)
+
+    assert txid == "dd" * 32
+    parsed = parse_transaction(bytes.fromhex(node.broadcast[0]), contract["txid"], contract["vout"])
+    assert len(parsed.outputs) == 2, (
+        f"the BTC fee output never reached the spend: {len(parsed.outputs)} output(s). A rate in "
+        f"PLATFORM_FEE_RATE that no code collects is worse than no rate, because a reader finds it "
+        f"and stops looking"
+    )
+    expected = coins_to_satoshis(platform_fee_coin("BTC", CONTRACT_COINS))
+    # ParsedTransaction.outputs is a tuple of (value_satoshis, script_pubkey) pairs.
+    fee_outputs = [value for value, script in parsed.outputs if script == fee_key.p2pkh_script]
+    assert len(fee_outputs) == 1, "no output pays the address PLATFORM_FEE_BTC_ADDRESS names"
+    assert fee_outputs[0] == expected, (
+        f"the fee output pays {fee_outputs[0]} satoshis where platform_fee_coin('BTC') says "
+        f"{expected} -- the table and the collection disagree, which is the same customer paying two prices"
+    )
+
+    # (4) and (5): the SAME client, with the variable unset.
+    monkeypatch.delenv("PLATFORM_FEE_BTC_ADDRESS", raising=False)
+    unset_node = _node_for(contract)
+    unset_client = _client_for("BTC")
+    unset_client.rpc_call = unset_node.rpc_call
+    with caplog.at_level(logging.WARNING):
+        unset_txid = _drive_redeem(unset_client, unset_node, contract)
+
+    assert unset_txid == "dd" * 32, "an unset fee variable BLOCKED the redeem, which is the wrong trade"
+    unset_parsed = parse_transaction(
+        bytes.fromhex(unset_node.broadcast[0]), contract["txid"], contract["vout"]
+    )
+    assert len(unset_parsed.outputs) == 1, "with no fee address the redeem must pay one output, not two"
+    assert "NO PLATFORM FEE CHARGED" in caplog.text, "rule 14: charging nothing must log differently"
 
 
 def test_btc_has_no_shipped_testnet_default_and_must_not_gain_one():

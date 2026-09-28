@@ -58,6 +58,8 @@ from regtest.keys import TESTNET_P2PKH_VERSION as KEYS_P2PKH  # noqa: E402  same
 from valid_addresses import (  # noqa: E402  conftest puts tests/ on sys.path
     INVALID_GRC_BECH32,
     INVALID_PLACEHOLDERS,
+    LTC_P2SH_SCRIPT_ADDRESS2,
+    LTC_REGTEST_DEPOSIT,
 )
 
 # The address that was actually created in the operator's MAINNET wallet on 2026-09-27. Kept
@@ -272,3 +274,81 @@ def test_is_valid_address_is_false_for_each_derived_failure_mode(label):
     derived from valid addresses so none of them appears in the source as a literal."""
     value = INVALID_PLACEHOLDERS[label]
     assert not is_valid_address(value), f"{label}: {value} is still accepted"
+
+
+# ---------------------------------------------------------------------------------------
+# THE 2026-09-27 REGTEST SWAP. Three addresses off two real daemons, two of them refused.
+# ---------------------------------------------------------------------------------------
+
+# LITERALS ON PURPOSE, AND THE ONLY ONES IN THIS BLOCK. Everywhere else in this repository an
+# address is derived from a phrase, because a mistyped checksum in a literal goes unnoticed
+# until something tries to pay it. These three are the exception for the same reason
+# GRC_MAINNET_ACCIDENT above is: they are not examples of a format, they are the RECORD of a
+# specific run, and deriving them would lose exactly what makes them evidence.
+#
+# The operator ran a BTC->LTC atomic swap on regtest against bitcoind 28.1 and litecoind
+# 0.21.4 on 2026-09-27. These came off those daemons. Measured through
+# modules/address_network.address_network() at the time, before the fix:
+#
+#     rltc1q7u6dnat...   ('unknown', 'not decodable as base58check')   <- hrp `rltc` absent
+#     QYqEyFb1v76Q...    ('unknown', 'version byte 0x3a is in no table this module knows')
+#     2MxYyFprP15u...    ('testnet', ok)                               <- the one that worked
+#
+# Two of three. Both were Litecoin formats this module CLAIMED to support, and an UNKNOWN
+# verdict on the payout path is how a valid customer payout gets refused -- an outage, and
+# worse than the burn the validity checker exists to prevent.
+LIVE_LTC_REGTEST_BECH32 = "rltc1q7u6dnatxpsds4wvq2svx3h64v8s03cf69xg52q"
+LIVE_LTC_REGTEST_P2SH_SCRIPT_ADDRESS2 = "QYqEyFb1v76QraQ3uo5wVkGtJrC4Rf5vU3"
+LIVE_LTC_REGTEST_P2SH_BITCOIN_COMPATIBLE = "2MxYyFprP15ub2bQwPwCRFa8LqDifxG2gee"
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        LIVE_LTC_REGTEST_BECH32,
+        LIVE_LTC_REGTEST_P2SH_SCRIPT_ADDRESS2,
+        LIVE_LTC_REGTEST_P2SH_BITCOIN_COMPATIBLE,
+    ],
+)
+def test_every_address_from_the_live_regtest_swap_decodes_as_testnet(address):
+    """THE REGRESSION. Each of these was produced by a running daemon, so each must decode.
+
+    TESTNET rather than merely "not UNKNOWN": regtest is a test network, and a payout guard
+    that reads UNKNOWN cannot tell a regtest address from a mainnet one -- which is the whole
+    question the receive-path network check asks.
+
+    MUTATION: remove `rltc` from BECH32_HRPS_BY_ASSET["LTC"] and the first case fails; remove
+    0x3A from P2SH_VERSIONS and the second fails.
+    """
+    network, why = address_network(address)
+
+    assert network == TESTNET, f"{address} reads as {network}: {why}"
+
+
+def test_litecoin_has_two_live_p2sh_version_bytes_per_network():
+    """NOT a migration: SCRIPT_ADDRESS and SCRIPT_ADDRESS2 are both declared and both decode.
+
+    Read off litecoin-project/litecoin src/chainparams.cpp on master, fetched 2026-09-27
+    rather than recalled -- mainnet declares SCRIPT_ADDRESS 5 and SCRIPT_ADDRESS2 50,
+    testnet and regtest declare 196 and 58. litecoind ENCODES with the second and DECODES
+    both, so a table holding one of each pair rejects half of every Litecoin P2SH address in
+    existence.
+
+    Asserted as a property of the table rather than of one address, because the failure was a
+    missing ENTRY and the next one will be too.
+    """
+    assert P2SH_VERSIONS[0xC4] == TESTNET, "196, SCRIPT_ADDRESS -- shared with BTC and GRC"
+    assert P2SH_VERSIONS[0x3A] == TESTNET, "58, Litecoin's SCRIPT_ADDRESS2 -- `Q...` addresses"
+    assert P2SH_VERSIONS[0x05] == MAINNET, "5, SCRIPT_ADDRESS -- Bitcoin AND Litecoin declare it"
+    assert P2SH_VERSIONS[0x32] == MAINNET, "50, Litecoin's mainnet SCRIPT_ADDRESS2 -- `M...`"
+
+
+def test_litecoin_regtest_has_its_own_bech32_hrp():
+    """`rltc`, not `tltc`. Regtest is its own network with its own hrp, as `bcrt` is for BTC.
+
+    Both derived fixtures are asserted, so the clean gate and this test cannot disagree about
+    which formats are covered.
+    """
+    assert address_network(LTC_REGTEST_DEPOSIT) == (TESTNET, "bech32 hrp 'rltc' is testnet")
+    assert is_valid_address(LTC_REGTEST_DEPOSIT)
+    assert is_testnet_address(LTC_P2SH_SCRIPT_ADDRESS2)

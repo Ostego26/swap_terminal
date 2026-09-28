@@ -34,7 +34,7 @@ from services.swap_view import (
     swap_display,
     threshold_note,
 )
-from valid_addresses import BTC_PARTICIPANT, GRC_PAYOUT
+from valid_addresses import BTC_PARTICIPANT, GRC_PAYOUT, XMR_PAYOUT, XRP_HOT_ACCOUNT
 from workers.payout_worker import DEFAULT_POLL_SECONDS as PAYOUT_POLL
 
 NOW = "2026-09-26T12:00:00+00:00"
@@ -266,7 +266,13 @@ def test_xrp_attributes_by_destination_tag_and_refuses_without_one():
     Seeding through the constant means a future rename breaks this test at the
     rename rather than at the customer.
     """
-    swap = make_swap(from_asset="XRP", deposit_address="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe")
+    # XRP_HOT_ACCOUNT, not a spelled-out `r...` literal, and not make_swap()'s GRC default.
+    # Since 2026-09-28 this branch reports an account that cannot receive a deposit (the
+    # `address` branch has since 2026-09-27), and make_swap()'s default deposit_address is
+    # GRC_PAYOUT -- a base58 testnet address, which is not an XRP account at all. Every
+    # assertion below about `problem` would otherwise have been reading an ADDRESS complaint
+    # while claiming to measure the TAG. Derived in tests/valid_addresses.py.
+    swap = make_swap(from_asset="XRP", deposit_address=XRP_HOT_ACCOUNT)
     deposit = deposit_instruction(swap)
     assert deposit["model"] == "destination_tag", "the MODEL keeps the XRP Ledger's own term"
     assert deposit["tag"] is None
@@ -274,18 +280,18 @@ def test_xrp_attributes_by_destination_tag_and_refuses_without_one():
     assert "NO DESTINATION TAG" in deposit["problem"]
 
     # The shape services/swap_service.allocate_destination_tag() actually writes.
-    with_tag = deposit_instruction(make_swap(from_asset="XRP", **{DEPOSIT_TAG_COLUMN: 4242}))
+    with_tag = deposit_instruction(make_swap(from_asset="XRP", deposit_address=XRP_HOT_ACCOUNT, **{DEPOSIT_TAG_COLUMN: 4242}))
     assert with_tag["tag"] == 4242
     assert with_tag["problem"] == ""
 
     # Tag 0 is a REAL tag and must not be reported as missing.
-    zero = deposit_instruction(make_swap(from_asset="XRP", **{DEPOSIT_TAG_COLUMN: 0}))
+    zero = deposit_instruction(make_swap(from_asset="XRP", deposit_address=XRP_HOT_ACCOUNT, **{DEPOSIT_TAG_COLUMN: 0}))
     assert zero["tag"] == 0
     assert zero["problem"] == ""
 
     # And the wrong spelling must NOT work, or this test would pass again the day
     # somebody reintroduces it.
-    wrong = deposit_instruction(make_swap(from_asset="XRP", destination_tag=4242))
+    wrong = deposit_instruction(make_swap(from_asset="XRP", deposit_address=XRP_HOT_ACCOUNT, destination_tag=4242))
     assert wrong["tag"] is None, "only the real column may satisfy the reader"
     assert "NO DESTINATION TAG" in wrong["problem"]
 
@@ -319,10 +325,15 @@ def test_monero_attributes_by_its_per_swap_subaddress_and_renders_a_send_target(
     fail; give it its own model string and the first fails, which is the template
     fallback arriving as a test failure rather than as a blank page.
     """
-    deposit = deposit_instruction(make_swap(from_asset="XMR", deposit_address="8BsubaddressForThisSwapAlone"))
+    # A REAL, DECODABLE Monero testnet address rather than "8Bsubaddress...". Since
+    # 2026-09-27 deposit_instruction() reports a deposit address that cannot receive money
+    # in its `problem` field, and templates/swap.html:59 hides the send target when that
+    # field is set -- so a placeholder here would have made the third assertion below pass
+    # for the wrong reason and the first one fail. Derived in tests/valid_addresses.py.
+    deposit = deposit_instruction(make_swap(from_asset="XMR", deposit_address=XMR_PAYOUT))
 
     assert deposit["model"] == "address", "templates/swap.html renders a send target only for this exact string"
-    assert deposit["address"] == "8BsubaddressForThisSwapAlone"
+    assert deposit["address"] == XMR_PAYOUT
     assert deposit["tag"] is None, "Monero needs no tag -- the subaddress is the discriminator"
     assert deposit["problem"] == ""
     assert "not described in this application" not in deposit["note"]

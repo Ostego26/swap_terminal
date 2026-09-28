@@ -41,6 +41,7 @@ from db import connect_db
 from modules.address_network import is_testnet_address
 from report_block import LABEL_WIDTH
 from services import quote_service
+from valid_addresses import INVALID_PLACEHOLDERS, XMR_PAYOUT
 from workers.common import get_config_dict
 
 import open_swap
@@ -303,11 +304,66 @@ def test_a_valid_payout_address_reports_valid():
     assert state == "VALID"
 
 
-def test_a_rejected_payout_address_reports_invalid():
-    state, detail = check_payout_address({"GRC": StubGRC()}, "GRC", "not-a-gridcoin-address")
+def test_a_daemon_rejection_is_still_reported_as_the_daemons():
+    """The DAEMON's no, on an address this process could not fault itself.
+
+    This test used to pass `"not-a-gridcoin-address"` and assert the message said "rejects".
+    As of 2026-09-27 that string never reaches a daemon: check_payout_address() decodes
+    locally first and refuses it without a round trip. Rewritten rather than deleted, per
+    rule 2 -- the invariant it was protecting is that a DAEMON's refusal is reported AS the
+    daemon's, and that invariant is still live and is now pinned on an input that actually
+    exercises it. `StubGRC(answer=False)` is a daemon that says no to a perfectly decodable
+    testnet address, which is what an address on another wallet's network looks like.
+    """
+    state, detail = check_payout_address({"GRC": StubGRC(answer=False)}, "GRC", GRC_ADDRESS)
 
     assert state == "INVALID"
     assert "rejects" in detail
+    assert "refused locally" not in detail
+
+
+def test_an_undecodable_payout_address_is_refused_without_asking_any_daemon():
+    """THE BURN GUARD, at the CLI. Added 2026-09-27.
+
+    The string below decodes as nothing -- not bech32, not base58check under either
+    alphabet -- so a payout to it is unspendable by anybody. What makes this a guard rather
+    than a message change is the second assertion: the adapter is NEVER ASKED. An operator
+    on a host with no Gridcoin daemon running previously got UNASKABLE and no information
+    about the address they had actually mistyped.
+
+    The address is DERIVED from a valid one (INVALID_PLACEHOLDERS), never written out --
+    tests/test_address_literals_are_valid.py is a clean gate with no baseline, and a
+    deliberately-broken literal here would fail it.
+    """
+    adapter = StubGRC()
+
+    state, detail = check_payout_address({"GRC": adapter}, "GRC", INVALID_PLACEHOLDERS["base58 checksum"])
+
+    assert state == "INVALID"
+    assert adapter.asked == [], f"the daemon was asked anyway: {adapter.asked}"
+    assert "refused locally" in detail
+    # Rule 14: the reason has to be on the screen, not merely computed.
+    assert "base58check" in detail or "version byte" in detail
+
+
+def test_a_valid_monero_payout_address_is_not_refused_by_the_cli_check():
+    """THE CENTRAL TRAP, pinned where it would have been walked into.
+
+    A blanket `is_valid_address()` here refuses every valid Monero address, because that
+    function understands three encodings and Monero's base58 is none of them. XMR is a live
+    destination: Config.ALLOWED_PAIRS carries ("GRC","XMR").
+
+    The stub accepts, so a VALID state proves the LOCAL check did not refuse first -- an
+    INVALID would mean the local decode overrode a working chain.
+    """
+    class StubXMR(StubGRC):
+        def validate_address(self, address):
+            self.asked.append(address)
+            return True
+
+    state, detail = check_payout_address({"XMR": StubXMR()}, "XMR", XMR_PAYOUT)
+
+    assert state == "VALID", detail
 
 
 def test_a_daemon_that_cannot_be_asked_is_unaskable_and_not_invalid():

@@ -160,6 +160,7 @@ from chains.xrp import XRPRPCError
 from config import Config
 from db import SCHEMA, apply_migrations, connect_db, db_session
 from microfortnights import format_duration
+from modules.address_authority import check_address
 from report_block import CONTINUATION, labeled
 from requests.exceptions import RequestException
 from services.pair_view import allowed_pair_rows
@@ -437,7 +438,7 @@ def check_payout_address(adapters: dict, to_asset: str, payout_address: str) -> 
     THREE states, not two, and the third is the point:
 
         VALID       the daemon said yes
-        INVALID     the daemon said no
+        INVALID     the daemon said no, OR the string does not decode here
         UNASKABLE   the daemon could not be asked at all
 
     Collapsing the third into the second is the defect chains/base.py's
@@ -446,11 +447,48 @@ def check_payout_address(adapters: dict, to_asset: str, payout_address: str) -> 
     and the operator's response to a down daemon was to go and check the
     customer's address. Returned rather than printed so a test can assert the
     state directly, and so main() decides what a state means.
+
+    A LOCAL DECODE RUNS FIRST, added 2026-09-27, and it is strictly better than the
+    daemon call it precedes rather than a duplicate of it (rule 8 asks which, and the
+    answer is "they differ and the difference is the point"):
+
+      - it needs NO DAEMON. A typo'd address is refused with a reason on a host with
+        nothing running, where the round trip returns UNASKABLE and tells the operator
+        nothing about the address they actually mistyped.
+      - it CANNOT BE FOOLED BY A LOOSE ANSWER. chains/xrp.XRPAdapter.validate_address()
+        accepts any X-address without verifying its checksum -- that adapter's own
+        docstring carries the review finding -- and a stub, a future adapter, or a daemon
+        answering `isvalid` from a cached table can all say yes to a string that decodes
+        as nothing.
+      - it knows which CHAIN. `ltc1...` handed in as a BTC payout is a real, well-formed
+        mainnet address, and a Bitcoin daemon asked about it says no -- but so does it for
+        a typo, and the two want different fixes.
+
+    The daemon is still asked whenever the local check does not refuse, because it
+    answers a question this cannot: whether THAT wallet, on THAT network, will accept it.
+    Neither replaces the other.
+
+    NO_VALIDATOR and UNDETERMINED both fall through to the daemon rather than refusing. See
+    modules/address_authority.py's header for why an address we cannot place must not be an
+    outage; here it costs nothing, because the daemon is about to be asked anyway -- and the
+    daemon is the better authority in exactly that case, since it is the one holding the
+    chain's real address tables.
     """
+    local = check_address(to_asset, payout_address)
+    if local.refuses:
+        return "INVALID", (
+            f"refused locally, before any daemon was asked -- {local.why}. Money sent to this string "
+            f"would be unspendable by anybody, so no swap is worth creating against it"
+        )
+    # Rule 14: an UNCHECKED address must not report like a checked one, even when the daemon
+    # is about to answer. Carried in the RETURNED detail rather than printed here, because
+    # this function's contract (see above) is that it returns and main() prints -- a print
+    # inside it would be the one thing a test of it could not assert on.
+    unchecked = f"NOT CHECKED LOCALLY ({local.state}: {local.why}); " if local.unchecked else ""
     try:
         answered = adapters[to_asset].validate_address(payout_address)
     except ADAPTER_ERRORS as error:
-        return "UNASKABLE", f"{type(error).__name__}: {error}"
+        return "UNASKABLE", unchecked + f"{type(error).__name__}: {error}"
     # NOT EVERY ADAPTER ASKS A DAEMON, and saying it did was a false claim about
     # where the answer came from. chains/xrp.py validates LOCALLY against the
     # ledger's own checksum constants and opens no socket -- deliberately, since
@@ -460,9 +498,9 @@ def check_payout_address(adapters: dict, to_asset: str, payout_address: str) -> 
     # was asked.
     how = "checked locally against the ledger's checksum" if to_asset == "XRP" else f"the {to_asset} daemon"
     if not answered:
-        return "INVALID", how if to_asset == "XRP" else f"{how} rejects it"
+        return "INVALID", unchecked + (how if to_asset == "XRP" else f"{how} rejects it")
     detail = how if to_asset == "XRP" else f"{how} accepts it"
-    return "VALID", detail + payout_destination_note(adapters[to_asset], payout_address, to_asset)
+    return "VALID", unchecked + detail + payout_destination_note(adapters[to_asset], payout_address, to_asset)
 
 
 def payout_destination_note(adapter, payout_address: str, to_asset: str) -> str:

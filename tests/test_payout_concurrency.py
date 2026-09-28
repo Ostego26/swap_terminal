@@ -97,6 +97,7 @@ from services.payout_service import (
     process_pending_payouts,
     refresh_wallet_inventory,
 )
+from valid_addresses import GRC_PAYOUT, LTC_PARTICIPANT, XRP_HOT_ACCOUNT
 
 
 class RecordingAdapter:
@@ -180,11 +181,11 @@ def _seed_one_pending_swap(
             network_fee_reserve, output_amount_estimate, status, min_confirmations,
             deposit_txid, payout_txid, created_at, updated_at, credited_at,
             completed_at, expires_at, failed_reason
-        ) VALUES (?, 'q_double', 'GRC', 'LTC', 'grc_deposit_addr', 'ltc_payout_addr',
+        ) VALUES (?, 'q_double', 'GRC', 'LTC', ?, ?,
                   100.0, 100.0, 0.001, 150, 0.001, 0.0975, 'payout_pending', 6,
                   'grc_txid', NULL, ?, ?, ?, NULL, ?, NULL)
         """,
-        (swap_id, now, now, now, now),
+        (swap_id, GRC_PAYOUT, LTC_PARTICIPANT, now, now, now, now),
     )
     if with_inventory_row:
         conn.execute(
@@ -398,7 +399,8 @@ def test_the_guard_read_that_used_to_go_stale_still_goes_stale(db_path):
     conn_a = connect_db(db_path)
     conn_a.execute(
         "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
-        "VALUES ('s_double', 'LTC', 'ltc_payout_addr', 0.0975, NULL, 'created', '2026-09-24T00:00:00+00:00', NULL)"
+        "VALUES ('s_double', 'LTC', ?, 0.0975, NULL, 'created', '2026-09-24T00:00:00+00:00', NULL)",
+        (LTC_PARTICIPANT,),
     )
     # Deliberately NOT committed: this is A mid-send.
 
@@ -493,18 +495,18 @@ def test_the_partial_unique_index_is_in_place_and_is_partial(db_path):
 
     insert = (
         "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
-        "VALUES ('s_double', 'LTC', 'ltc_payout_addr', 0.0975, ?, ?, '2026-09-24T00:00:00+00:00', NULL)"
+        "VALUES ('s_double', 'LTC', ?, 0.0975, ?, ?, '2026-09-24T00:00:00+00:00', NULL)"
     )
-    conn.execute(insert, ("txid-a", "broadcast"))
+    conn.execute(insert, (LTC_PARTICIPANT, "txid-a", "broadcast"))
     conn.commit()
 
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(insert, ("txid-b", "created"))
+        conn.execute(insert, (LTC_PARTICIPANT, "txid-b", "created"))
     conn.rollback()
 
     # A failed payout does not block a retry: that is why the index is partial.
     conn.execute("UPDATE payouts SET status = 'failed' WHERE swap_id = 's_double'")
-    conn.execute(insert, ("txid-retry", "created"))
+    conn.execute(insert, (LTC_PARTICIPANT, "txid-retry", "created"))
     conn.commit()
     live = conn.execute(
         "SELECT COUNT(*) AS n FROM payouts WHERE swap_id = 's_double' AND status IN ('created','broadcast','completed')"
@@ -527,10 +529,10 @@ def test_apply_migrations_refuses_to_destroy_evidence_of_a_past_double_payout(tm
     conn = connect_db(path)
     insert = (
         "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
-        "VALUES ('s_double', 'LTC', 'ltc_payout_addr', 0.0975, ?, 'broadcast', '2026-09-24T00:00:00+00:00', NULL)"
+        "VALUES ('s_double', 'LTC', ?, 0.0975, ?, 'broadcast', '2026-09-24T00:00:00+00:00', NULL)"
     )
-    conn.execute(insert, ("txid-a",))
-    conn.execute(insert, ("txid-b",))
+    conn.execute(insert, (LTC_PARTICIPANT, "txid-a"))
+    conn.execute(insert, (LTC_PARTICIPANT, "txid-b"))
     conn.commit()
 
     result = apply_migrations(conn)
@@ -605,9 +607,9 @@ def seed_payout_pending_swap(conn, swap_id):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address, "
         "expected_input_amount, quoted_rate, fee_bps, network_fee_reserve, output_amount_estimate, "
         "status, min_confirmations, created_at, updated_at, expires_at) "
-        "VALUES (?, 'q_seed','XRP','GRC','rAcct','mPayTo',1.0,56.0,150,0.01,55.43,"
+        "VALUES (?, 'q_seed','XRP','GRC',?,?,1.0,56.0,150,0.01,55.43,"
         "'payout_pending',1,?,?,'2099-01-01T00:00:00+00:00')",
-        (swap_id, now, now),
+        (swap_id, XRP_HOT_ACCOUNT, GRC_PAYOUT, now, now),
     )
     conn.commit()
 
