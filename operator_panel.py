@@ -109,19 +109,25 @@ PAGE = r"""<!doctype html>
   button:hover:not(:disabled) { border-color:var(--fg); }
   button:disabled { opacity:.45; cursor:not-allowed; }
   button.stop { border-color:var(--bad); color:var(--bad); }
+  nav { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; border-bottom:1px solid var(--line); padding-bottom:10px; }
+  nav button { margin:0; }
+  nav button.on { border-color:var(--fg); font-weight:700; }
+  nav button .dot { font-size:11px; margin-left:6px; }
   pre { margin:0; padding:10px; background:var(--bg); border:1px solid var(--line);
         border-radius:6px; max-height:52vh; overflow:auto; white-space:pre-wrap; font-size:12.5px; }
   .what { color:var(--dim); font-size:12.5px; margin:-4px 0 10px; }
 </style></head><body>
-<h1>Operator Panel &mdash; Gridcoin testnet</h1>
-<p class="sub">127.0.0.1 only, by construction. The daemon said this is a test network before
+<h1>Operator Panel &mdash; swap terminal harnesses</h1>
+<p class="sub">127.0.0.1 only, by construction. The GRC daemon said this is a test network before
 this port was bound. The seed is never shown here and never leaves the server's environment.</p>
 
+<nav id="tabs">loading the chain list from the server&hellip;</nav>
+
 <section>
-  <h2>Funding</h2>
-  <div id="funding">asking the daemon&hellip;</div>
-  <button id="refresh">Re-check funding</button>
-  <span class="what">walks blocks per payment, so it takes a few seconds &mdash; not on a timer</span>
+  <h2 id="chainname">Chain</h2>
+  <div id="chain">pick a chain above&hellip;</div>
+  <button id="refresh">Re-check this chain</button>
+  <span class="what">reads the daemon, and on GRC walks blocks per payment &mdash; a few seconds, not on a timer</span>
 </section>
 
 <section>
@@ -138,7 +144,7 @@ this port was bound. The seed is never shown here and never leaves the server's 
 
 <script>
 const $ = id => document.getElementById(id);
-let pinned = true;
+let pinned = true, current = "";   // set from /api/state's chain list, never spelled here
 $("out").addEventListener("scroll", () => {
   const el = $("out");
   pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
@@ -146,40 +152,69 @@ $("out").addEventListener("scroll", () => {
 
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
-async function refreshFunding() {
-  $("funding").textContent = "asking the daemon…";
-  let d;
-  try { d = await (await fetch("/api/funding")).json(); }
-  catch (e) { $("funding").innerHTML = '<span class="bad">could not reach the panel: ' + esc(e) + "</span>"; return; }
-  let h = "";
-  if (d.address) {
-    h += "<p>fund <b>" + esc(d.address) + "</b> with <b>" + esc(d.needed || "?") + " " + esc(d.asset || "") + "</b>, then wait for ONE confirmation</p>";
+function methodsTable(methods) {
+  if (!methods || !methods.length) { return ""; }
+  let h = "<table><tr><th>daemon has</th><th>&nbsp;</th><th>what its absence costs</th></tr>";
+  for (const m of methods) {
+    h += "<tr><td>" + esc(m.method) + '</td><td class="' + (m.present ? "ok" : "bad") + '">' +
+         (m.present ? "yes" : "NO") + "</td><td>" + esc(m.matters) + "</td></tr>";
   }
-  if (d.error) { h += '<p class="bad">' + esc(d.error) + "</p>"; }
-  if (d.methods && d.methods.length) {
-    h += "<table><tr><th>daemon has</th><th>&nbsp;</th><th>what its absence costs</th></tr>";
-    for (const m of d.methods) {
-      h += "<tr><td>" + esc(m.method) + '</td><td class="' + (m.present ? "ok" : "bad") + '">' +
-           (m.present ? "yes" : "NO") + "</td><td>" + esc(m.matters) + "</td></tr>";
-    }
-    h += "</table>";
+  return h + "</table>";
+}
+
+function fundingBlock(f) {
+  if (!f) { return ""; }
+  let h = "<h2>Funding</h2>";
+  if (f.address) {
+    h += "<p>fund <b>" + esc(f.address) + "</b> with <b>" + esc(f.needed || "?") + " " + esc(f.asset || "") + "</b>, then wait for ONE confirmation</p>";
   }
-  if (d.rows && d.rows.length) {
+  if (f.error) { h += '<p class="bad">' + esc(f.error) + "</p>"; }
+  if (f.rows && f.rows.length) {
     h += "<table><tr><th>payment</th><th>value</th><th>conf</th><th>state</th></tr>";
-    for (const r of d.rows) {
+    for (const r of f.rows) {
       h += "<tr><td>" + esc(r.txid) + "</td><td>" + esc(r.value) + "</td><td>" + esc(r.confirmations) +
            '</td><td class="' + (r.usable ? "ok" : "bad") + '">' + (r.usable ? "USABLE" : "spent") +
            '</td></tr><tr><td colspan="4" class="sub">' + esc(r.note) +
            (r.spender ? " &mdash; by " + esc(r.spender) : "") + "</td></tr>";
     }
     h += "</table>";
-    if (!d.rows.some(r => r.usable)) {
+    if (!f.rows.some(r => r.usable)) {
       h += '<p class="bad">NO USABLE PAYMENT. Every one above is spent &mdash; each run consumes its funding by design. Send another and re-check.</p>';
     }
-  } else if (!d.error) {
+  } else if (!f.error) {
     h += '<p class="warn">(none) &mdash; the wallet remembers no payment to this address at all, which is the ordinary state before you have funded it.</p>';
   }
-  $("funding").innerHTML = h;
+  return h;
+}
+
+async function loadChain(asset) {
+  current = asset;
+  for (const b of $("tabs").querySelectorAll("button")) {
+    b.className = b.dataset.asset === asset ? "on" : "";
+  }
+  $("chainname").textContent = asset;
+  $("chain").textContent = "asking " + asset + "…";
+  let d;
+  try { d = await (await fetch("/api/chain/" + encodeURIComponent(asset))).json(); }
+  catch (e) { $("chain").innerHTML = '<span class="bad">could not reach the panel: ' + esc(e) + "</span>"; return; }
+  let h = '<p class="sub">' + esc(d.note || "") + "</p>";
+  if (d.kind === "none") {
+    h += '<p class="warn">Not probed by this panel.</p>';
+  } else if (d.reachable) {
+    const netClass = d.network === "MAINNET" ? "bad" : (d.network === "unknown" ? "warn" : "ok");
+    h += '<p><span class="ok">REACHABLE</span> at ' + esc(d.endpoint || "?") +
+         ' &mdash; height ' + esc(d.height) + ', the daemon says <span class="' + netClass + '">' +
+         esc(d.network) + "</span></p>";
+    h += methodsTable(d.methods);
+    h += fundingBlock(d.funding);
+  } else {
+    h += '<p class="bad">NOT REACHABLE' + (d.endpoint ? " at " + esc(d.endpoint) : "") + "</p>";
+    if (d.error) { h += '<p class="sub">' + esc(d.error) + "</p>"; }
+    if (d.kind === "regtest") {
+      h += '<p class="sub">That is the ordinary state: this daemon only exists while regtest_htlc_verify.py is running, and this panel never starts one.</p>';
+    }
+  }
+  $("chain").innerHTML = h;
 }
 
 async function tick() {
@@ -191,6 +226,17 @@ async function tick() {
     (r.dropped ? ' <span class="bad">(' + r.dropped + " further lines were DROPPED at the line cap)</span>" : "");
   $("out").textContent = r.lines.length ? r.lines.join("\n") : "(none)";
   if (pinned) { $("out").scrollTop = $("out").scrollHeight; }
+  if (!$("tabs").dataset.built) {
+    $("tabs").innerHTML = d.chains.map(c =>
+      '<button data-asset="' + esc(c.asset) + '">' + esc(c.asset) +
+      '<span class="dot">' + (c.kind === "operator" ? "●" : (c.kind === "regtest" ? "○" : "·")) +
+      "</span></button>").join("");
+    $("tabs").dataset.built = "1";
+    for (const b of $("tabs").querySelectorAll("button")) {
+      b.onclick = () => loadChain(b.dataset.asset);
+    }
+    loadChain(current || d.chains[0].asset);
+  }
   if (!$("buttons").dataset.built) {
     $("buttons").innerHTML = d.runnable.map(x =>
       '<div><button data-key="' + esc(x.key) + '">' + esc(x.key) + '</button><span class="what">' + esc(x.what) + "</span></div>").join("");
@@ -208,13 +254,12 @@ async function tick() {
   $("stop").disabled = !r.alive;
 }
 
-$("refresh").onclick = refreshFunding;
+$("refresh").onclick = () => loadChain(current);
 $("stop").onclick = async () => {
   const res = await (await fetch("/api/stop", {method:"POST"})).json();
   alert(res.said);
   tick();
 };
-refreshFunding();
 tick();
 setInterval(tick, 1000);
 </script></body></html>"""
@@ -280,6 +325,10 @@ def state_payload(run: adaptor_steps.Run, runner: HarnessRunner) -> dict:
             "verdict": live.verdict,
         },
         "runnable": [{"key": key, "what": what} for key, (what, _) in decisions.RUNNABLE.items()],
+        # THE NAV IS BUILT FROM THE SERVER'S LIST, never hard-coded in the page. A chain added
+        # to decisions.CHAINS and not to the page would be a chain that exists in one half of
+        # this file and not the other -- rule 8's duplicate with a delay on it, in HTML.
+        "chains": [{"asset": c.asset, "kind": c.kind} for c in decisions.CHAINS],
     }
     return payload
 
@@ -313,6 +362,61 @@ def funding_payload(run: adaptor_steps.Run) -> dict:
     }
 
 
+def guarded(answer, path: str, *rest) -> tuple[bytes, str, int]:
+    """Run a route and return its answer, turning ANY failure into a readable 500.
+
+    THE DEFECT, 2026-09-28: the funding region read "could not reach the panel: TypeError:
+    Failed to fetch" while the rest of the page kept polling happily. That message is the
+    browser's, and it is all a browser CAN say -- a handler that raises inside
+    BaseHTTPRequestHandler never writes a status line, so the connection closes with no response
+    and every reason for it stays on the server. The one thing the operator needed, which route
+    and which exception, was the one thing that could not reach them.
+
+    A BROAD CATCH, AND THIS IS THE CASE RULE 12 ALLOWS. "A broad catch is legitimate when a
+    diagnostic must not die on a bad row. It is never legitimate when the caller cannot tell the
+    failure from a real answer." Here the caller is told, loudly and specifically: the body IS
+    the failure, carrying the route, the exception type and its message. Nothing is swallowed
+    and nothing is mistaken for success -- the status is 500 and the page renders it in red.
+
+    The exception TYPE is included because "RPCError" and "AttributeError" ask for completely
+    different reactions from whoever reads it, and a bare message often names neither.
+    """
+    try:
+        return answer(path, *rest)
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value, as a 500 naming the route and the exception type
+        detail = f"{type(error).__name__}: {error}"
+        return (
+            json.dumps({"error": f"{path} failed on the server -- {detail}", "rows": [],
+                        "methods": []}).encode(),
+            "application/json",
+            500,
+        )
+
+
+def chain_payload(asset: str, grc_run: adaptor_steps.Run) -> dict:
+    """One tab's contents, by asset. An unknown asset is a 200 saying so, not a 404.
+
+    NOT A 404, and that is deliberate. The browser only ever asks for an asset the page itself
+    listed, so a 404 here would mean the page and the server disagree about what exists -- and
+    the operator would see a fetch failure with no text. A named refusal in the tab's own body
+    puts the disagreement where it can be read.
+
+    THE GRC TAB REUSES THE RUN THIS PROCESS ALREADY GATED. Its network was asked three ways
+    before the port was bound, so rebuilding it here would be a second, ungated connection to
+    the one chain that matters -- and the funding walk is the expensive part, which belongs to
+    the tab the operator actually funds.
+    """
+    tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
+    if tab is None:
+        return {"asset": asset, "kind": "none", "reachable": False, "methods": [],
+                "note": f"{asset!r} is not a chain this panel knows about.", "error": "",
+                "funding": None}
+    state = decisions.chain_state(tab, grc_run.console)
+    if asset == "GRC" and state["reachable"]:
+        state["funding"] = funding_payload(grc_run)
+    return state
+
+
 def answer_a_get(path: str, run: adaptor_steps.Run, runner: HarnessRunner,
                  page: str) -> tuple[bytes, str, int]:
     """Which of the three GETs this is, and its bytes. The routing decision, out of the handler.
@@ -331,7 +435,28 @@ def answer_a_get(path: str, run: adaptor_steps.Run, runner: HarnessRunner,
         return json.dumps(state_payload(run, runner)).encode(), "application/json", 200
     if path == "/api/funding":
         return json.dumps(funding_payload(run)).encode(), "application/json", 200
+    if path.startswith("/api/chain/"):
+        return json.dumps(chain_payload(path.rsplit("/", 1)[-1], run)).encode(), "application/json", 200
     return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
+
+
+def answer_a_post(path: str, raw: bytes, runner: HarnessRunner) -> tuple[bytes, str, int]:
+    """The two POSTs, as a function of a path and a body. No socket, no handler, no server.
+
+    SAME ARGUMENT AS answer_a_get, and the same shape so `guarded` can wrap either: a decision
+    reachable only by making a request is a decision nobody tests (rule 10). Here it means a
+    test can post a malformed body, or a body for a route that does not exist, by calling this.
+    """
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return json.dumps({"error": "the request body was not JSON"}).encode(), "application/json", 400
+    if path == "/api/stop":
+        return json.dumps({"said": runner.stop()}).encode(), "application/json", 200
+    if path != "/api/run":
+        return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
+    answer, code = start_named_run(runner, body)
+    return json.dumps(answer).encode(), "application/json", code
 
 
 def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:
@@ -388,24 +513,14 @@ def build_handler(run: adaptor_steps.Run, runner: HarnessRunner, page: str):
             self._send(code, json.dumps(payload).encode(), "application/json")
 
         def do_GET(self) -> None:
-            body, content_type, code = answer_a_get(self.path, run, runner, page)
+            body, content_type, code = guarded(answer_a_get, self.path, run, runner, page)
             self._send(code, body, content_type)
 
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except ValueError:
-                self._json({"error": "the request body was not JSON"}, 400)
-                return
-            if self.path == "/api/stop":
-                self._json({"said": runner.stop()})
-                return
-            if self.path != "/api/run":
-                self._json({"error": f"no such route: {self.path}"}, 404)
-                return
-            answer, code = start_named_run(runner, body)
-            self._json(answer, code)
+            raw = self.rfile.read(length) or b"{}"
+            body, content_type, code = guarded(answer_a_post, self.path, raw, runner)
+            self._send(code, body, content_type)
 
     return Handler
 

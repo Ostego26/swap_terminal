@@ -15,6 +15,7 @@ diverged an operator would fund an address the harness refuses to spend from (ru
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import time
 from pathlib import Path
@@ -347,3 +348,130 @@ def test_the_checker_ACTUALLY_CATCHES_the_defect_it_was_written_for():
 def javascript_strings_are_closed_of(entry):
     """Named rather than inlined, so the two tests above cannot drift onto different functions."""
     return entry.javascript_strings_are_closed
+
+
+# ---------------------------------------------------------------------------
+# THE TABS. One per chain, including the ones this panel cannot reach.
+# ---------------------------------------------------------------------------
+
+
+def test_every_chain_gets_a_tab_including_the_ones_with_no_adapter():
+    """A missing tab reads as "that chain does not exist here". Saying so beats omitting it.
+
+    routes/admin.py's pair table already made this argument: disabled pairs are listed rather
+    than hidden, "because 'is XRP on?' is a question that otherwise gets answered by reading
+    source". The same applies to a nav bar -- and the three `kind` values are the honest part,
+    because the three sorts of chain are reached in genuinely different ways.
+    """
+    kinds = {c.asset: c.kind for c in decisions.CHAINS}
+    assert kinds["GRC"] == "operator", "the operator runs it; this panel only reads it"
+    assert kinds["BTC"] == kinds["LTC"] == "regtest"
+    assert kinds["XMR"] == kinds["XRP"] == kinds["SOL"] == "none"
+    for chain in decisions.CHAINS:
+        assert chain.note, f"{chain.asset} must say what it is, even when unreachable"
+
+
+def test_a_chain_with_no_adapter_is_a_RESULT_and_never_an_outage(monkeypatch):
+    """Five of the six are expected to be unreachable on an ordinary day.
+
+    The regtest daemons only exist while a harness is running and three have no adapter at all,
+    so if any of that could raise, the page would be blank exactly when an operator opened it to
+    find out why something was down. `resolve_config` is made to explode here to prove the tab
+    survives it.
+    """
+    none_tab = next(c for c in decisions.CHAINS if c.asset == "XMR")
+    state = decisions.chain_state(none_tab, None)
+    assert state["reachable"] is False and state["error"] == ""
+    assert "no adapter in this panel" in state["note"]
+
+    def _explodes(asset):
+        raise RuntimeError("no connection parameters for you")
+
+    monkeypatch.setattr(adaptor_steps, "resolve_config", _explodes)
+    btc = next(c for c in decisions.CHAINS if c.asset == "BTC")
+    state = decisions.chain_state(btc, None)
+    assert state["reachable"] is False
+    assert "RuntimeError" in state["error"], "and it names the exception TYPE, not just a message"
+
+
+def test_an_unknown_asset_is_a_NAMED_REFUSAL_rather_than_a_404():
+    """The browser only asks for an asset the page listed, so a 404 means they disagree.
+
+    And a 404 reaches the operator as a fetch failure with no text -- the exact shape of the
+    "Failed to fetch" that cost an evening. A named refusal in the tab's own body puts the
+    disagreement somewhere it can be read.
+    """
+    entry = _entry()
+    state = entry.chain_payload("DOGE", None)
+    assert state["reachable"] is False
+    assert "'DOGE' is not a chain this panel knows about" in state["note"]
+
+
+def test_the_nav_is_built_from_the_SERVERS_list_and_not_hard_coded_in_the_page():
+    """A chain in decisions.CHAINS but not in the page would exist in one half of one file.
+
+    That is rule 8's duplicate with a delay on it, written in HTML -- and the drift would be
+    invisible, because a nav bar missing one button looks exactly like a nav bar.
+    """
+    entry = _entry()
+    payload = entry.state_payload(None, HarnessRunner())
+    assert [c["asset"] for c in payload["chains"]] == [c.asset for c in decisions.CHAINS]
+    # SCOPED TO THE NAV AND THE SCRIPT, not the whole page. "GRC" legitimately appears in the
+    # subtitle, which is prose about the gate this process passed at startup; what must not
+    # appear is an asset name the navigation or its default selection depends on.
+    nav = entry.PAGE.split("<nav", 1)[1].split("</nav>", 1)[0]
+    script = entry.PAGE.split("<script>", 1)[1].split("</script>", 1)[0]
+    for chain in decisions.CHAINS:
+        assert chain.asset not in nav, f"{chain.asset} is baked into the nav element"
+        assert f'"{chain.asset}"' not in script, (
+            f"{chain.asset} is a literal in the page's script -- the tab list AND the default "
+            f"selection must both come from /api/state, or a chain added to decisions.CHAINS "
+            f"exists in one half of this file and not the other"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A ROUTE THAT DIES CLOSES THE CONNECTION, AND THE BROWSER CAN ONLY SAY "Failed to fetch"
+# ---------------------------------------------------------------------------
+
+
+def test_a_route_that_RAISES_answers_500_with_the_route_and_the_exception_type():
+    """THE DEFECT, 2026-09-28: "could not reach the panel: TypeError: Failed to fetch".
+
+    That sentence is the browser's, and it is all a browser CAN say -- a handler that raises
+    inside BaseHTTPRequestHandler never writes a status line, so the connection closes with no
+    response and every reason for it stays on the server. The one thing the operator needed,
+    which route and which exception, was the one thing that could not reach them.
+
+    The exception TYPE is asserted as well as the message because "RPCError" and
+    "AttributeError" ask for completely different reactions, and a bare message often names
+    neither.
+    """
+    entry = _entry()
+
+    def _explodes(path, *rest):
+        raise ValueError("the daemon said something unexpected")
+
+    body, content_type, code = entry.guarded(_explodes, "/api/funding")
+    assert code == 500 and content_type == "application/json"
+    answer = json.loads(body)
+    assert "/api/funding failed on the server" in answer["error"]
+    assert "ValueError" in answer["error"], "the exception TYPE, not just its message"
+    assert "unexpected" in answer["error"]
+    assert answer["rows"] == [] and answer["methods"] == [], (
+        "and the shape the page expects, so rendering it does not throw a SECOND error"
+    )
+
+
+def test_a_POST_with_a_broken_body_is_refused_without_reaching_the_allowlist():
+    """The POST routes are a function of a path and bytes, callable without a socket."""
+    entry = _entry()
+    runner = HarnessRunner()
+    body, _, code = entry.answer_a_post("/api/run", b"{not json", runner)
+    assert code == 400 and b"not JSON" in body
+
+    body, _, code = entry.answer_a_post("/api/nope", b"{}", runner)
+    assert code == 404
+
+    body, _, code = entry.answer_a_post("/api/stop", b"{}", runner)
+    assert code == 200 and b"nothing was running" in body

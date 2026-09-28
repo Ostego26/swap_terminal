@@ -994,6 +994,21 @@ def report_recent_payments(run: Run, funding_key: RegtestKey | None) -> None:
         # produced it, and that is a recovery route rather than a diagnosis.
         run.say("  WHICH OF THESE DID YOU FUND? No address was derived, because the seed above "
                 "was refused -- but the wallet remembers where it has been sending:")
+    elif run.skipped_funding_payments:
+        # IT SAID "has made no payment to <address>" IN BOTH CASES UNTIL 2026-09-28, and on that
+        # day it printed exactly that beneath twenty lines listing THREE payments to that very
+        # address, each read off the chain and skipped as spent. The operator then has to decide
+        # which half of one screen to believe, which is the defect this harness spends its whole
+        # output budget avoiding elsewhere.
+        #
+        # THE THIRD COPY OF ONE SENTENCE. `prepare_operator_funding` and `reclaim_funding.py`
+        # carried the same claim and were fixed earlier the same day; this one was missed twice
+        # because each fix was made where the failure was seen rather than by grepping for the
+        # claim (rule 8: "when you touch a rule, grep for it"). Measured cost: two more runs.
+        run.say(f"  YOU HAVE PAID {funding_key.address} -- {len(run.skipped_funding_payments)} "
+                f"time(s) -- AND EVERY ONE IS SPENT. That is the ordinary state after a run, "
+                f"not a wrong seed. Send another payment to it. For reference, this is where "
+                f"the wallet has been sending recently:")
     else:
         run.say(f"  DID YOU ALREADY PAY A DIFFERENT ADDRESS? The wallet has made no payment to "
                 f"{funding_key.address}, and this is where it HAS been sending recently:")

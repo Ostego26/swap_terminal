@@ -135,11 +135,29 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     console.step(4, asset, "find the payment the wallet made to it")
     txid = args.funding_txid or adaptor_steps.discover_operator_funding_txid(run, key)
     if not txid:
+        # IT USED TO SAY "the wallet remembers no payment to <address>" IN EVERY CASE, and on
+        # 2026-09-28 it said that directly beneath twenty lines listing THREE payments it had
+        # just found, read off the chain, and skipped as spent. A refusal that contradicts the
+        # output above it is worse than no refusal: the operator has to decide which half of
+        # one screen to believe.
+        #
+        # The cause is that `discover_operator_funding_txid` changed meaning earlier the same
+        # day -- None went from "nothing was found" to "nothing USABLE was found" -- and this
+        # message did not follow. prepare_operator_funding had the identical sentence and was
+        # fixed; this second copy was missed, which is rule 8's failure with a delay on it,
+        # measured at about four hours.
+        #
+        # `no_usable_funding_message` is now the ONE implementation, and it reads
+        # run.skipped_funding_payments to tell "all spent" from "none at all". The
+        # seed-fingerprint hint stays, because it is the one thing this tool knows that the
+        # shared message does not: a reclaim is usually run BECAUSE the operator suspects they
+        # used a different seed.
         raise RegtestSetupError(
-            f"{asset}: the wallet remembers no payment to {key.address}. Either this is not the "
-            f"seed that derived the address you funded -- the address above is its fingerprint, "
-            f"so compare it -- or the payment came from somewhere this wallet has no record of, "
-            f"in which case pass --funding-txid."
+            adaptor_steps.no_usable_funding_message(run, key)
+            + f"\n  If you expected a payment here and there is none, check that this is the "
+              f"seed that derived the address you funded -- {key.address} is its fingerprint, so "
+              f"compare it -- or pass --funding-txid if the payment came from somewhere this "
+              f"wallet has no record of."
         )
     source = adaptor_steps.find_operator_funding(run, key, txid)
 

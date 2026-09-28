@@ -75,6 +75,121 @@ RUNNABLE: dict[str, tuple[str, list[str]]] = {
 }
 
 
+class ChainTab(NamedTuple):
+    """One chain the panel shows, and what it is honestly able to say about it."""
+
+    asset: str
+    kind: str          # "operator" | "regtest" | "none"
+    reachable_by_this_panel: bool
+    note: str
+
+
+#: EVERY CHAIN GETS A TAB, INCLUDING THE ONES THIS PANEL CANNOT REACH. A tab that is absent
+#: reads as "that chain does not exist here"; a tab that says "no adapter in this panel" reads
+#: as what it is. Rule 14's "(none) is a result" applied to a navigation bar -- and the question
+#: "is XRP on?" is exactly the one routes/admin.py's pair table already refuses to answer by
+#: omission.
+#:
+#: THE `kind` IS THE HONEST PART, because the three are reached in genuinely different ways and
+#: pretending otherwise would be the panel's first lie:
+#:
+#:   operator   a daemon the OPERATOR runs and this panel only ever reads. GRC. The panel starts
+#:              and stops nothing, so an unreachable one is reported, never launched.
+#:   regtest    a daemon regtest_htlc_verify.py starts and stops for itself (daemons.py owns
+#:              that spawn and its reaper, rule 13). The panel probes it if it happens to be up
+#:              and says so if it is not -- it must NOT start one, because a process this panel
+#:              spawned outside HarnessRunner would have no reaper here.
+#:   none       no adapter in this panel. XMR, XRP and SOL are swapped by other entry points
+#:              with their own clients; saying so beats an empty tab or a missing one.
+CHAINS = (
+    ChainTab("GRC", "operator", True,
+             "your own testnet daemon. This panel reads it and starts and stops nothing."),
+    ChainTab("BTC", "regtest", True,
+             "a regtest daemon that regtest_htlc_verify.py starts and stops for itself. This "
+             "panel probes it and never launches one -- a process spawned outside "
+             "HarnessRunner would have no reaper here (rule 13)."),
+    ChainTab("LTC", "regtest", True,
+             "a regtest daemon that regtest_htlc_verify.py starts and stops for itself. Same "
+             "rule as BTC: probed, never launched."),
+    ChainTab("XMR", "none", False,
+             "no adapter in this panel. Monero is reached by monero_regtest.py and "
+             "monero_shared_key_verify.py, which speak monero-wallet-rpc rather than a "
+             "Bitcoin-style JSON-RPC, so nothing here can probe it without a second client."),
+    ChainTab("XRP", "none", False,
+             "no adapter in this panel. The XRP Ledger is reached by xrp_chain_check.py and "
+             "xrp_htlc_escrow.py through chains/xrp.py."),
+    ChainTab("SOL", "none", False,
+             "no adapter in this panel, and get_new_address() refuses on Solana by design -- "
+             "the custody choice there is the operator's and is not decided in this tree."),
+)
+
+
+def chain_state(tab: ChainTab, console) -> dict:
+    """What one tab shows. NEVER RAISES -- an unreachable chain is a RESULT, not an outage.
+
+    A PANEL THAT DIES ON ONE TAB IS WORSE THAN NO PANEL. Five of these six chains are expected
+    to be unreachable on an ordinary day: the regtest daemons only exist while a harness is
+    running, and three have no adapter at all. If any of that could raise, the page would be
+    blank exactly when the operator opened it to find out why something was down.
+
+    WHAT IT WILL NOT DO IS START ANYTHING. `daemons.py` owns every spawn in this tree and its
+    reaper sits in the same file so neither can be edited without the other in view (rule 13).
+    A panel that launched a bitcoind would be a spawn with no reaper on this side of the wall.
+
+    THE NETWORK IS WHAT THE DAEMON SAYS, never what its port implies -- the same rule
+    assert_test_network() enforces, applied to a read-only probe. A chain that will not say is
+    reported as unknown rather than assumed to be a test one.
+    """
+    if tab.kind == "none":
+        return {"asset": tab.asset, "kind": tab.kind, "note": tab.note,
+                "reachable": False, "network": "", "error": "", "methods": [], "funding": None}
+    try:
+        config = adaptor_steps.resolve_config(tab.asset)
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the tab's contents, named below
+        return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
+                "network": "", "error": f"no connection parameters: {type(error).__name__}: {error}",
+                "methods": [], "funding": None}
+    run = adaptor_steps.Run(console=console, config=config, wallet="")
+    try:
+        height = adaptor_steps.current_height(run)
+    except Exception as error:  # noqa: BLE001 -- checked: an unreachable daemon is the ordinary case and is reported as one
+        return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
+                "network": "", "error": f"{type(error).__name__}: {error}",
+                "endpoint": config.base_url, "methods": [], "funding": None}
+    return {
+        "asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": True,
+        "endpoint": config.base_url, "height": height, "network": network_the_daemon_says(run),
+        "error": "", "methods": [{"method": m.method, "present": m.present, "matters": m.matters}
+                                 for m in probe_methods(run)],
+        "funding": None,
+    }
+
+
+def network_the_daemon_says(run: adaptor_steps.Run) -> str:
+    """"testnet", "regtest", "MAINNET" or "unknown" -- from the daemon, never from the port.
+
+    UNKNOWN IS ITS OWN ANSWER and is not folded into mainnet here, because this function only
+    REPORTS. The gate that refuses -- assert_test_network() -- treats an absence of evidence as
+    mainnet, which is right for a gate and wrong for a label: a tab reading "MAINNET" for a
+    daemon that merely did not answer would send an operator looking for a problem they do not
+    have, and would make the real thing unremarkable when it appeared.
+    """
+    node = run.node(wallet=False)
+    for method, key in (("getblockchaininfo", "chain"), ("getblockchaininfo", "testnet"),
+                        ("getinfo", "testnet")):
+        try:
+            answer = node.call(method)
+        except (RPCError, OSError):
+            continue
+        if not isinstance(answer, dict) or key not in answer:
+            continue
+        value = answer[key]
+        if key == "chain":
+            return str(value) if value != "main" else "MAINNET"
+        return "testnet" if value else "MAINNET"
+    return "unknown"
+
+
 class Missing(NamedTuple):
     """One RPC the daemon does not have, and what its absence costs this repository."""
 
