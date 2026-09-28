@@ -513,8 +513,19 @@ def check_address(asset: str, address: str) -> AddressVerdict:
     """The verdict for `address` on `asset`. The one entry point every guard calls.
 
     An empty or non-string address is INVALID before any validator is consulted, and that is
-    not defensive padding: `swaps.payout_address` is a nullable column and a row read back
-    with NULL in it would otherwise reach a validator that was written to expect a string.
+    not defensive padding -- but THE REASON GIVEN HERE WAS WRONG. It said
+    "`swaps.payout_address` is a nullable column"; db.py's schema declares it
+    `payout_address TEXT NOT NULL`. Checked, not recalled.
+
+    The guard stays, for the reasons that are actually true. NOT NULL does not exclude the
+    EMPTY STRING, which is what a daemon returning an error where an address was expected
+    writes -- the 2026-09-27 accident's neighbour. And this function is not reached only from
+    that column: services/, modules/htlc_fee.py's PLATFORM_FEE_<ASSET>_ADDRESS (an environment
+    variable, absent by default) and the regtest harness all call it, and an environment
+    variable really can be None. A guard justified by a fact that is false is one a future
+    reader deletes after checking the schema (rule 16: a wrong comment is a bug, fixed with
+    the same seriousness as the code).
+
     Rule 14 wants the reason printable, so it names what it actually got.
 
     An asset with no entry is NO_VALIDATOR, never INVALID and never VALID. See the module

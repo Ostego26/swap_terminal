@@ -856,15 +856,41 @@ def step_4_build_scripts(run: Run) -> tuple[LockSetup, LockSetup]:
 #
 #   -4   src/wallet/wallet.cpp:4325-4330. `SendMoney()` checks IsUnlockedForStakingOnly() and
 #        RETURNS AN ERROR STRING -- "Error: Wallet unlocked for staking only, unable to create
-#        transaction." -- which the RPC layer wraps as RPC_WALLET_ERROR. This is the one
+#        transaction." -- which rpcwallet.cpp rethrows as RPC_WALLET_ERROR. This is the one
 #        `sendtoaddress` takes, and it is what the operator's daemon actually returned:
 #        `code=-4 message=Error: Wallet unlocked for staking only, unable to create
 #        transaction. (HTTP 500)`. The message string matches wallet.cpp's byte for byte.
-#   -13  src/wallet/rpcwallet.cpp:102-109. `EnsureWalletIsUnlocked()` THROWS
+#
+#        AND `sendtoaddress` NEVER CALLS EnsureWalletIsUnlocked AT ALL, which is why it
+#        cannot be the -13 site: its own guard (rpcwallet.cpp:847) tests IsLocked() only,
+#        and that is FALSE during a staking-only unlock -- the wallet genuinely is unlocked.
+#        It falls through to SendMoneyToDestination and the -4 above.
+#   -13  src/wallet/rpcwallet.cpp:102-108. `EnsureWalletIsUnlocked()` THROWS
 #        JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Wallet is unlocked for staking only.")
 #        -- note the different wording, "Wallet IS unlocked" rather than "Wallet unlocked ...
-#        unable to create transaction". 43 call sites at master, including
-#        signrawtransaction's no-keys branch and fundrawtransaction.
+#        unable to create transaction". 36 call sites in .cpp files at master, including
+#        signrawtransaction's no-keys branch, fundrawtransaction, and all three of
+#        src/rpc/htlc.cpp's (createhtlc's is at :121, BEFORE its own SendMoney at :129, so
+#        the HTLC RPCs really do give -13 and not -4).
+#
+# THE MESSAGE IS THE DISCRIMINATOR, NOT THE CODE, and that is why is_staking_only_refusal()
+# below matches on both. The two guards emit DIFFERENT SENTENCES for the same condition, and
+# only the wording says which one fired. There is also a second -4 producer for this same
+# condition -- CreateTransaction's own staking-only guard at wallet.cpp:3905, which surfaces
+# through SendMoney as "Error: Transaction creation failed  " -- so even within -4 the code
+# alone does not identify the site. Ordering rules it out here (SendMoney:4325 runs first),
+# but the wording rules it out without needing to know that.
+#
+# BOTH NUMBERS IN THIS BLOCK WERE WRONG WHEN FIRST WRITTEN, 2026-09-28, AND THEY ARE THE
+# REASON THE METHOD IS NOW STATED BESIDE THEM. It said "rpcwallet.cpp:102-109" for a function
+# that ends at :108, and "43 call sites" -- which was
+# `grep -rn EnsureWalletIsUnlocked src --include=*.cpp | wc -l`, i.e. every OCCURRENCE in .cpp
+# files including six comments and the definition. A count reported without saying what was
+# counted out of what is rule 3's defect, written into a comment whose whole job is to save
+# the next reader a grep. The 36 is
+# `grep -rn "EnsureWalletIsUnlocked();" src --include=*.cpp` minus the one forward declaration
+# at rpcdump.cpp:21, and it distributes as blockchain 10, rpcwallet 10, rpcdump 5, and 3 each
+# in voting, rawtransaction, htlc and psgt.
 #
 # THIS FILE PREVIOUSLY SAID "a staking-only unlock CANNOT send (rpc -13)" AND THE DAEMON GAVE
 # -4. The comment was not wrong about -13 existing; it was wrong about which site this path

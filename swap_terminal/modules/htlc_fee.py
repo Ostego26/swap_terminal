@@ -165,9 +165,14 @@ MINIMUM_FEE_COIN: dict[str, Decimal] = {
 # contract builds outputs of [986880, 2500] satoshis. The 2500 is the platform
 # fee, and PLATFORM_FEE_LTC_ADDRESS's shipped default is a bech32 `tltc1q...`
 # -- P2WPKH, whose dust limit on Litecoin Core 0.21.4 is 2,940 satoshis. So the
-# whole transaction would be refused with code=-26 dust, and NO CLIENT HERE
-# IMPLEMENTS A REFUND: a redeemer whose broadcast is refused has no recovery
-# path and loses their own already-funded leg. The harness could not see it --
+# whole transaction would be refused with code=-26 dust, and A REDEEMER WHOSE
+# BROADCAST IS REFUSED HAS NO RECOVERY PATH FROM THE REDEEM SIDE: they lose
+# their own already-funded leg. (This said "NO CLIENT HERE IMPLEMENTS A
+# REFUND"; false since 0a1cf51 gave all three clients refund_contract(). The
+# refund branch is not a recovery from THIS -- it needs the locktime to pass
+# and the swap abandoned -- so the conclusion holds and the reason did not.
+# See dust-check's docstring below for the full correction.) The harness could
+# not see it --
 # CONTRACT_AMOUNT is "1.0", which puts the platform fee 85x over the limit, and
 # regtest does not enforce standardness anyway. BTC has the same hole with no
 # platform fee at all: a contract under 0.00010546 leaves a sub-546 destination.
@@ -375,9 +380,24 @@ def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -
     `code=-26 dust` arriving after the spend is signed and submitted, and on a
     chain whose sendrawtransaction applies no such policy at all (Gridcoin's
     IsStandardTx has no dust branch -- see the table above) no refusal arrives.
-    More to the point: NO CLIENT IN THIS PACKAGE IMPLEMENTS A REFUND. A
-    redeemer whose broadcast is refused cannot recover their own funded leg, so
-    the refusal has to arrive while a different decision is still possible.
+    More to the point: A REDEEMER WHOSE BROADCAST IS REFUSED CANNOT RECOVER
+    THEIR OWN FUNDED LEG FROM HERE, so the refusal has to arrive while a
+    different decision is still possible.
+
+    THIS SAID "NO CLIENT IN THIS PACKAGE IMPLEMENTS A REFUND" AND THAT IS
+    FALSE. All three -- atomic_btc_client, atomic_ltc_client and
+    atomic_grc_client -- have had `refund_contract()` since `0a1cf51`
+    ("refund_contract(): the timelock branch now spends through real code"),
+    and the harness exercises both branches. The sentence was true when it was
+    written and nobody came back to it, which is the drift rule 1 is about.
+
+    THE CHECK IS STILL RIGHT, and that is why this is a comment fix rather than
+    a logic change. A refund is not a recovery from THIS failure: it spends the
+    REFUND branch after the locktime, which means waiting out the timelock and
+    abandoning the swap, and the counterparty has by then either claimed or
+    walked. So the redeemer still cannot get their leg back by redeeming, which
+    is the property the paragraph needed -- it simply overstated how, by
+    claiming a whole mechanism was absent instead of saying it does not apply.
     """
     for index, (satoshis, script_pubkey) in enumerate(outputs):
         threshold = dust_threshold_satoshis(asset, script_pubkey)
