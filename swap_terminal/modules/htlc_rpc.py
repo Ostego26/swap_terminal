@@ -78,6 +78,7 @@ from modules.htlc_spend import (
     satoshis_to_coins,
     sign_digest,
     spend_key_matches_script,
+    with_locktime,
 )
 
 logger = logging.getLogger(__name__)
@@ -658,23 +659,32 @@ def _unsigned_transaction(  # noqa: PLR0913 -- checked: one caller, one call sit
     for address, amount in extras.items():
         outputs[address] = float(amount)
     inputs = [{"txid": contract_txid, "vout": contract_vout}]
-    # THE THIRD PARAMETER IS nLockTime, AND IT ALSO SETS THE SEQUENCE. A refund
-    # needs both: nLockTime at least the script's locktime, so
-    # CHECKLOCKTIMEVERIFY passes, AND a non-final input sequence, because CLTV
-    # fails outright on an input whose sequence is 0xffffffff no matter what the
-    # heights are. Bitcoin Core's ConstructTransaction sets each input's
-    # sequence to SEQUENCE_FINAL-1 (0xfffffffe) whenever a non-zero locktime is
-    # given, so asking the node for the locktime gets the sequence with it, and
-    # this module never has to encode either field itself.
+    # TWO ARGUMENTS, ON EVERY CHAIN, AND THE LOCKTIME IS SET HERE INSTEAD.
     #
-    # It is appended only when non-zero so the hashlock path sends byte-for-byte
-    # the same request it sent before this argument existed. A hashlock spend
-    # wants nLockTime 0 and a final sequence, which is the two-argument default.
-    params = [inputs, outputs]
-    if locktime:
-        params.append(locktime)
-    unsigned_hex = rpc_call("createrawtransaction", params)
+    # This used to append a THIRD argument -- Bitcoin Core's `locktime`, which also makes Core
+    # set each input's sequence to SEQUENCE_FINAL-1. The reasoning was sound and the premise was
+    # not: GRIDCOIN'S createrawtransaction TAKES EXACTLY TWO ARGUMENTS. Measured on the
+    # operator's daemon 2026-09-28, which answered `code=-1` and printed its own help text:
+    #
+    #     1. "transactions"  (string, required) A json array of json objects
+    #     2. "outputs"       (string, required) a json object with outputs
+    #
+    # So the three-argument call could NEVER succeed on Gridcoin, and
+    # `GRCClient.refund_contract()` could not build a transaction at all. The refund branch of a
+    # Gridcoin HTLC has never executed, and this is the reason -- it failed at the first RPC,
+    # before any script ran, which is why it never looked like a script problem.
+    #
+    # Asking a daemon for a field this module can set itself made the refund path depend on
+    # which Bitcoin release a chain forked from. `with_locktime` sets nLockTime AND the
+    # non-final sequence together, so the request shape is now identical everywhere and the two
+    # fields that decide whether CLTV passes are set where a test can assert on them (rule 10).
+    #
+    # The hashlock path is untouched: it wants nLockTime 0 and a final sequence, which is what
+    # the two-argument call already returns, so `with_locktime` is not applied at all.
+    unsigned_hex = rpc_call("createrawtransaction", [inputs, outputs])
     parsed = parse_transaction(bytes.fromhex(unsigned_hex), contract_txid, contract_vout)
+    if locktime:
+        parsed = with_locktime(parsed, locktime)
     return parsed, parsed.size_with_script_sig(0, script_sig_length)
 
 

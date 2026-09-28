@@ -101,6 +101,7 @@ from modules.htlc_fee import (
 from modules.htlc_rpc import (
     assert_output_pays_the_contract,
     build_hashlock_spend,
+    build_refund_spend,
     describe_rpc_payload,
     ensure_watch_only_import,
     find_output_by_script,
@@ -111,6 +112,7 @@ from modules.htlc_rpc import (
 )
 from modules.htlc_spend import (
     MAX_DER_SIGNATURE_WITH_HASHTYPE,
+    ParsedTransaction,
     TransactionLayoutError,
     coins_to_satoshis,
     decode_wif,
@@ -122,10 +124,11 @@ from modules.htlc_spend import (
     satoshis_to_coins,
     sign_digest,
     spend_key_matches_script,
+    with_locktime,
 )
 from regtest.keys import generate_key
 from regtest.steps import _p2sh_script_for
-from regtest.txbuild import Outpoint
+from regtest.txbuild import SEQUENCE_FINAL, Outpoint
 from regtest.txbuild import legacy_sighash as harness_legacy_sighash
 from regtest.txbuild import push_data as harness_push_data
 from regtest.txbuild import redeem_script_sig as harness_redeem_script_sig
@@ -150,6 +153,8 @@ LOCKTIME = 400_000
 # by the harness's independent one.
 VERSION_2_PREFIX = struct.pack("<i", 2)
 SEQUENCE_NON_FINAL_BYTES = struct.pack("<I", 0xFFFFFFFE)
+#: What a two-argument createrawtransaction returns on every chain.
+SEQUENCE_FINAL_BYTES = struct.pack("<I", 0xFFFFFFFF)
 # A Peercoin-line prefix: the same 4-byte version, then a 4-byte nTime. This is
 # the layout Gridcoin is believed to use. Synthetic -- see the module docstring.
 GRIDCOIN_PREFIX = VERSION_2_PREFIX + struct.pack("<I", 1_700_000_000)
@@ -169,7 +174,7 @@ ONLY_LEGACY_WALLETS = "RPC Error: {'code': -4, 'message': 'Only legacy wallets a
 
 
 def _manual_unsigned_transaction(
-    txid: str, vout: int, outputs: list[tuple[int, bytes]], prefix: bytes, locktime: int = 0
+    txid: str, vout: int, outputs: list[tuple[int, bytes]], prefix: bytes, final: bool = False
 ) -> str:
     """Lay out an unsigned one-input transaction BY HAND, in this test file.
 
@@ -178,16 +183,21 @@ def _manual_unsigned_transaction(
     produce, or a round-trip assertion proves only that a function is its own
     inverse.
 
-    `locktime` DEFAULTS TO 0 AND WAS ADDED 2026-09-28. Until then this laid out a hardcoded
-    zero and `_rpc_createrawtransaction` took no locktime argument at all -- so the fake node
-    raised TypeError the moment anything asked for one, and the REFUND path is the only path
-    that asks. That is why no refund was ever driven through this node: the node could not
-    express one, and the GRC refund's only test read the client's SOURCE for a substring
-    instead. A fake that cannot represent the case is a fake that quietly scopes the suite.
+    THERE IS NO `locktime` PARAMETER, AND THAT IS THE POINT. A two-argument
+    `createrawtransaction` returns nLockTime 0 on every chain; only Bitcoin Core's optional
+    third argument changes it, and Gridcoin does not have one. A fixture that could emit a
+    non-zero nLockTime would be modelling a daemon the product cannot rely on. A spend that
+    needs one gets it from htlc_spend.with_locktime(), which is the code under test.
+
+    `final` exists for the other half of the same fact. This emitted SEQUENCE_NON_FINAL_BYTES
+    unconditionally until 2026-09-28, which handed the refund path the very property it exists
+    to establish -- a fake supplying the answer is a test that cannot fail.
     """
     body = prefix
     body += b"\x01"
-    body += bytes.fromhex(txid)[::-1] + struct.pack("<I", vout) + b"\x00" + SEQUENCE_NON_FINAL_BYTES
+    sequence = SEQUENCE_FINAL_BYTES if final else SEQUENCE_NON_FINAL_BYTES
+    locktime = 0
+    body += bytes.fromhex(txid)[::-1] + struct.pack("<I", vout) + b"\x00" + sequence
     body += bytes([len(outputs)])
     for satoshis, script in outputs:
         body += struct.pack("<q", satoshis) + bytes([len(script)]) + script
@@ -335,10 +345,26 @@ class FakeNode:
         self.sent_to.append((address, amount))
         return "cc" * 32
 
-    def _rpc_createrawtransaction(self, inputs, outputs, locktime=0):
-        """`locktime` is the third positional argument every daemon takes, and this fake did
-        not. A refund passes it -- it is what CLTV compares against -- so the node raised
-        TypeError and no refund could be driven through it at all."""
+    def _rpc_createrawtransaction(self, inputs, outputs, *refused):
+        """TWO ARGUMENTS, AND A THIRD IS REFUSED THE WAY GRIDCOIN REFUSES IT.
+
+        This took `locktime=0` as a third positional until 2026-09-28, which is Bitcoin Core's
+        signature. Gridcoin's takes exactly two -- measured on the operator's daemon, which
+        answered `code=-1` and printed its own help text -- so a fake that accepted three could
+        not express the chain the product actually runs on, and the three-argument call that
+        could never work there passed every test in this file.
+
+        IT ALSO EMITS A FINAL SEQUENCE AND A ZERO nLockTime NOW, which is the stronger half of
+        the fixture. It used to return SEQUENCE_NON_FINAL_BYTES unconditionally, so a refund
+        looked correctly non-final whether the code under test had set that field or not --
+        the fake was supplying the very property the refund path exists to get right. Now those
+        bytes can only come from htlc_spend.with_locktime(), which is the code being tested.
+        """
+        if refused:
+            raise Exception(
+                "RPC Error: createrawtransaction takes exactly 2 arguments -- Gridcoin has no "
+                "locktime parameter (measured on the operator's daemon 2026-09-28)"
+            )
         entry = inputs[0]
         laid_out = []
         for address, amount in outputs.items():
@@ -346,7 +372,7 @@ class FakeNode:
                 raise Exception(f"RPC Error: Invalid address {address}")
             laid_out.append((coins_to_satoshis(Decimal(str(amount))), self.scripts[address]))
         return _manual_unsigned_transaction(
-            entry["txid"], int(entry["vout"]), laid_out, self.prefix, int(locktime)
+            entry["txid"], int(entry["vout"]), laid_out, self.prefix, final=True
         )
 
     def _rpc_sendrawtransaction(self, raw_hex, *_rest):
@@ -478,6 +504,7 @@ def test_the_real_clients_scriptsig_satisfies_the_real_redeem_script(contract):
         contract["redeem_script"],
         [(CONTRACT_SATOSHIS - fee_satoshis, contract["destination"].p2pkh_script)],
         0,
+        SEQUENCE_FINAL,
     )
     assert _eval_p2sh_spend(spend.script_sig, digest, tx_locktime=0) is True
 
@@ -577,6 +604,7 @@ def test_a_wrong_preimage_is_refused_by_the_script(contract):
         contract["redeem_script"],
         [(CONTRACT_SATOSHIS - fee_satoshis, contract["destination"].p2pkh_script)],
         0,
+        SEQUENCE_FINAL,
     )
     with pytest.raises(ScriptFailure):
         _eval_p2sh_spend(spend.script_sig, digest, tx_locktime=0)
@@ -669,6 +697,7 @@ def test_the_refund_key_is_accepted_by_the_guard_and_refused_by_the_script(contr
         contract["redeem_script"],
         [(CONTRACT_SATOSHIS - fee_satoshis, contract["destination"].p2pkh_script)],
         0,
+        SEQUENCE_FINAL,
     )
     with pytest.raises(ScriptFailure):
         _eval_p2sh_spend(spend.script_sig, digest, tx_locktime=0)
@@ -2670,3 +2699,133 @@ def test_no_platform_fee_is_charged_on_any_refund():
         source = inspect.getsource(client.refund_contract)
         assert "platform_fee" not in source, f"{client.__name__} charges a fee on a refund"
         assert "extra_outputs" not in source, f"{client.__name__} adds an output to a refund"
+
+
+# ---------------------------------------------------------------------------
+# GRIDCOIN'S createrawtransaction TAKES TWO ARGUMENTS, AND THE REFUND PATH ASKED FOR THREE
+# ---------------------------------------------------------------------------
+
+
+def test_the_refund_builder_NEVER_asks_for_a_third_createrawtransaction_argument(contract):
+    """MEASURED ON THE OPERATOR'S DAEMON 2026-09-28, which answered with its own help text:
+
+        createrawtransaction: code=-1
+        Arguments:
+        1. "transactions"  (string, required) A json array of json objects
+        2. "outputs"       (string, required) a json object with outputs
+
+    The refund builder appended a THIRD argument -- Bitcoin Core's `locktime`, which also makes
+    Core set each input's sequence to SEQUENCE_FINAL-1. That call can never succeed on
+    Gridcoin, so `GRCClient.refund_contract()` could not build a transaction AT ALL. The refund
+    branch of a Gridcoin HTLC had never executed, and this is why: it failed at the first RPC,
+    before any script ran, which is why it never looked like a script problem.
+
+    The assertion is on the ARGUMENT COUNT rather than on the outcome, because a daemon that
+    ignored the extra argument would let a wrong call pass unnoticed -- and the Bitcoin and
+    Litecoin daemons do exactly that, which is how this survived for as long as it did.
+    """
+    calls = []
+
+    def _rpc(method, params=None):
+        calls.append((method, list(params or [])))
+        if method == "createrawtransaction":
+            inputs, outputs = params[0], params[1]
+            entry = inputs[0]
+            laid = [(coins_to_satoshis(Decimal(str(v))), contract["destination"].p2pkh_script)
+                    for v in outputs.values()]
+            return _manual_unsigned_transaction(entry["txid"], int(entry["vout"]), laid, b"\x02\x00\x00\x00",
+                                                final=True)
+        raise AssertionError(f"{method} must not be reached")
+
+    # THE WHOLE REFUND IS BUILT FROM THAT ONE RPC, which is worth asserting rather than
+    # stopping at the call shape: `createrawtransaction` is the only daemon call on this path,
+    # so a test that reached it and gave up would leave the signing and the locktime unchecked.
+    spend = build_refund_spend(
+            asset="GRC",
+            rpc_call=_rpc,
+            contract_txid=contract["txid"],
+            contract_vout=contract["vout"],
+            contract_value=Decimal("1.0"),
+            redeem_script=contract["redeem_script"],
+            wif=contract["refund"].wif,
+            destination_address=contract["destination"].address,
+            locktime=3296338,
+        )
+
+    created = [params for method, params in calls if method == "createrawtransaction"]
+    assert created, "createrawtransaction was never called"
+    assert len(created[0]) == 2, (
+        f"createrawtransaction was called with {len(created[0])} arguments. Gridcoin takes "
+        f"exactly 2 and answers code=-1 to a third; the locktime is set by "
+        f"htlc_spend.with_locktime() instead"
+    )
+    assert [method for method, _ in calls] == ["createrawtransaction"], (
+        f"and it is the ONLY daemon call the refund build makes, so nothing else can be the "
+        f"reason a chain refuses it. Calls were {[m for m, _ in calls]}"
+    )
+
+    # AND THE BYTES CARRY BOTH FIELDS. The argument count alone would pass for a build that
+    # dropped the locktime entirely, which is a refund that CLTV refuses for the right reason
+    # at the wrong time -- indistinguishable, on a chain answering `-22`, from the refusal the
+    # refund exists to avoid.
+    built = parse_transaction(bytes.fromhex(spend.raw_hex), contract["txid"], contract["vout"])
+    assert built.suffix[:4] == struct.pack("<I", 3296338), "the nLockTime reached the bytes"
+    assert built.inputs[0][2] == struct.pack("<I", 0xFFFFFFFE), (
+        "and so did the non-final sequence -- CLTV fails outright without it"
+    )
+
+
+def test_with_locktime_sets_BOTH_the_nlocktime_and_the_sequence():
+    """A correct nLockTime with a FINAL sequence is refused by the script, and looks identical
+    to a refund that is merely too early.
+
+    CLTV fails outright on an input whose sequence is 0xffffffff no matter what the heights
+    say, so setting one field and not the other produces a refusal that means something else
+    entirely -- which on a chain answering `-22 TX rejected` is indistinguishable from the
+    refusal the refund is trying to avoid. They are set together, and asserted together.
+    """
+    script = b"\x76\xa9\x14" + b"\x22" * 20 + b"\x88\xac"
+    raw = bytes.fromhex(_manual_unsigned_transaction(
+        "cd" * 32, 1, [(100_000, script)], b"\x02\x00\x00\x00", final=True))
+    parsed = parse_transaction(raw, "cd" * 32, 1)
+
+    assert parsed.inputs[0][2] == SEQUENCE_FINAL_BYTES, "the daemon's answer is final"
+    assert parsed.suffix[:4] == b"\x00\x00\x00\x00", "and carries nLockTime 0"
+
+    timelocked = with_locktime(parsed, 3296338)
+
+    assert timelocked.inputs[0][2] == struct.pack("<I", 0xFFFFFFFE), "non-final, or CLTV fails"
+    assert timelocked.suffix[:4] == struct.pack("<I", 3296338)
+    assert timelocked.outputs == parsed.outputs, "and nothing else moves"
+    assert timelocked.prefix == parsed.prefix
+
+
+def test_with_locktime_keeps_GRIDCOINS_TRAILING_CONTRACTS_BYTE():
+    """The suffix is four bytes on Bitcoin and FIVE on Gridcoin v2, which adds an empty
+    vContracts vector after the nLockTime.
+
+    Replacing the whole suffix would drop that byte, and the transaction would then fail to
+    re-serialize to what any daemon expects -- silently, because only the leading four bytes
+    look like a locktime. Only those four are replaced; the rest is carried verbatim, which is
+    the rule ParsedTransaction already follows for everything it does not interpret.
+    """
+    script = b"\x76\xa9\x14" + b"\x33" * 20 + b"\x88\xac"
+    gridcoin_prefix = b"\x02\x00\x00\x00" + struct.pack("<I", 1790622817)
+    raw = bytes.fromhex(_manual_unsigned_transaction(
+        "ef" * 32, 0, [(100_000, script)], gridcoin_prefix, final=True)) + b"\x00"
+    parsed = parse_transaction(raw, "ef" * 32, 0)
+    assert len(parsed.suffix) == 5, f"a Gridcoin v2 suffix is 5 bytes, got {len(parsed.suffix)}"
+
+    timelocked = with_locktime(parsed, 3296338)
+
+    assert timelocked.suffix == struct.pack("<I", 3296338) + b"\x00"
+    assert timelocked.serialize()[-1:] == b"\x00", "the empty vContracts byte survives"
+
+
+def test_with_locktime_REFUSES_a_suffix_too_short_to_hold_one():
+    """It signs what it builds, and there is no version of guessing that can be taken back."""
+    stub = ParsedTransaction(prefix=b"\x02\x00\x00\x00", inputs=(), outputs=(), suffix=b"\x00\x00")
+    with pytest.raises(TransactionLayoutError) as raised:
+        with_locktime(stub, 1)
+    assert "cannot hold" in str(raised.value)
+    assert "Nothing was modified" in str(raised.value)

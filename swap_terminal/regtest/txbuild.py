@@ -94,6 +94,10 @@ from regtest.keys import RegtestKey, double_sha256
 # input, so a refund built with 0xFFFFFFFF fails for a reason that has nothing
 # to do with the locktime, and reads on screen as if the timelock were wrong.
 SEQUENCE_NON_FINAL = 0xFFFFFFFE
+#: What a two-argument `createrawtransaction` returns on every chain. A spend that
+#: does not need a timelock carries this, and CLTV fails outright on an input that
+#: does -- which is why the two values are named rather than written as literals.
+SEQUENCE_FINAL = 0xFFFFFFFF
 SIGHASH_ALL = 0x01
 TX_VERSION = 2
 
@@ -175,7 +179,8 @@ class Outpoint:
     value_satoshis: int
 
 
-def _serialize_input(outpoint: Outpoint, script_sig: bytes) -> bytes:
+def _serialize_input(outpoint: Outpoint, script_sig: bytes,
+                     sequence: int = SEQUENCE_NON_FINAL) -> bytes:
     # txids are printed big-endian and serialized little-endian. Getting this
     # backwards produces a transaction that references an outpoint nobody has,
     # and the node says "bad-txns-inputs-missingorspent" -- which reads like
@@ -185,7 +190,7 @@ def _serialize_input(outpoint: Outpoint, script_sig: bytes) -> bytes:
         + struct.pack("<I", outpoint.vout)
         + varint(len(script_sig))
         + script_sig
-        + struct.pack("<I", SEQUENCE_NON_FINAL)
+        + struct.pack("<I", sequence)
     )
 
 
@@ -194,10 +199,25 @@ def serialize_transaction(
     script_sig: bytes,
     outputs: list[tuple[int, bytes]],
     locktime: int,
+    sequence: int = SEQUENCE_NON_FINAL,
 ) -> bytes:
-    """One-input, N-output legacy transaction. No witness, because P2SH-HTLC has none."""
+    """One-input, N-output legacy transaction. No witness, because P2SH-HTLC has none.
+
+    THE SEQUENCE IS A PARAMETER SINCE 2026-09-28, and defaults to what every existing caller
+    already assumed. It was hardcoded to SEQUENCE_NON_FINAL, which is correct for the
+    timelocked spends this harness builds itself -- and it made this module unable to model any
+    OTHER transaction, which matters because legacy_sighash() is used as an INDEPENDENT check
+    against the bytes the product code produces.
+
+    The sequence is part of the sighash preimage. An independent implementation that can only
+    express one value verifies the product only when the product happens to pick that value,
+    and silently agrees with itself the rest of the time. A hashlock spend built through a
+    two-argument `createrawtransaction` carries a FINAL sequence on every chain, so the check
+    for it was comparing against bytes no daemon emits -- and passed, because the test's fake
+    node was hardcoded the same way.
+    """
     body = struct.pack("<i", TX_VERSION)
-    body += varint(1) + _serialize_input(outpoint, script_sig)
+    body += varint(1) + _serialize_input(outpoint, script_sig, sequence)
     body += varint(len(outputs))
     for value_satoshis, script_pubkey in outputs:
         body += struct.pack("<q", value_satoshis) + varint(len(script_pubkey)) + script_pubkey
@@ -210,6 +230,7 @@ def legacy_sighash(
     script_code: bytes,
     outputs: list[tuple[int, bytes]],
     locktime: int,
+    sequence: int = SEQUENCE_NON_FINAL,
 ) -> bytes:
     """The SIGHASH_ALL digest for the single input, pre-segwit rules.
 
@@ -219,7 +240,7 @@ def legacy_sighash(
     and fails as `Signature must be zero for failed CHECK(MULTI)SIG` or a bare
     script failure, with no hint about which of the two scripts was wrong.
     """
-    preimage = serialize_transaction(outpoint, script_code, outputs, locktime)
+    preimage = serialize_transaction(outpoint, script_code, outputs, locktime, sequence)
     preimage += struct.pack("<I", SIGHASH_ALL)
     return double_sha256(preimage)
 

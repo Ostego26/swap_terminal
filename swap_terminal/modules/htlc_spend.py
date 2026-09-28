@@ -442,6 +442,62 @@ class ParsedTransaction:
         return sum(value for value, _ in self.outputs)
 
 
+#: The input sequence a timelocked spend must carry. CLTV fails outright on an input whose
+#: sequence is 0xffffffff no matter what the heights say, so a refund with a correct nLockTime
+#: and a final sequence is refused by the script and looks exactly like a refund that is simply
+#: too early. Bitcoin Core's ConstructTransaction picks the same value whenever a non-zero
+#: locktime is given; this module now picks it itself, for the reason with_locktime() states.
+NON_FINAL_SEQUENCE = b"\xfe\xff\xff\xff"
+
+#: The largest value a 4-byte little-endian nLockTime can hold.
+MAX_LOCKTIME = 0xFFFFFFFF
+
+
+def with_locktime(parsed: ParsedTransaction, locktime: int) -> ParsedTransaction:
+    """The same transaction with nLockTime set and every input made non-final.
+
+    WHY THIS EXISTS RATHER THAN ASKING THE DAEMON, measured on Gridcoin testnet 2026-09-28. The
+    refund builder used to append a THIRD argument to `createrawtransaction`, which is Bitcoin
+    Core's `locktime` and which also makes Core set each input's sequence to SEQUENCE_FINAL-1.
+    Gridcoin's `createrawtransaction` takes exactly TWO arguments -- the daemon answered with
+    its own help text and `code=-1` -- so that call could never succeed on Gridcoin, and
+    `GRCClient.refund_contract()` could not build a transaction at all. The refund branch of a
+    Gridcoin HTLC had never executed, and this is why.
+
+    Asking a daemon for a field this module can set itself made the refund path depend on which
+    Bitcoin release a chain forked from. Setting both fields here removes that dependency: the
+    request shape is now identical on every chain, and the two fields that decide whether CLTV
+    passes are set where a test can assert on them (rule 10).
+
+    BOTH FIELDS, ALWAYS TOGETHER, and that is the part worth not splitting. A correct nLockTime
+    with a final sequence is refused by the script and is indistinguishable from a refund that
+    is merely too early -- so a caller that set one and forgot the other would get a refusal
+    that means something else entirely.
+
+    THE SUFFIX IS NOT ASSUMED TO BE FOUR BYTES. Gridcoin v2 carries an empty `vContracts` after
+    the nLockTime, so the suffix is five bytes there and four on Bitcoin and Litecoin. Only the
+    leading four are replaced and the remainder is carried verbatim -- the same rule
+    ParsedTransaction already follows for everything it does not interpret. A suffix too short
+    to hold an nLockTime is refused rather than padded: this module signs what it builds, and
+    there is no version of guessing that can be taken back.
+    """
+    if len(parsed.suffix) < LOCKTIME_LEN:
+        raise TransactionLayoutError(
+            f"this transaction ends with {len(parsed.suffix)} byte(s) after its last output, "
+            f"which cannot hold a {LOCKTIME_LEN}-byte nLockTime. Nothing was modified"
+        )
+    if locktime < 0 or locktime > MAX_LOCKTIME:
+        raise ValueError(f"nLockTime {locktime} does not fit in {LOCKTIME_LEN} bytes")
+    return ParsedTransaction(
+        prefix=parsed.prefix,
+        inputs=tuple((outpoint, script_sig, NON_FINAL_SEQUENCE)
+                     for outpoint, script_sig, _ in parsed.inputs),
+        outputs=parsed.outputs,
+        suffix=struct.pack("<I", locktime) + parsed.suffix[LOCKTIME_LEN:],
+    )
+
+
+
 def parse_transaction(raw: bytes, expected_txid: str | None = None, expected_vout: int | None = None) -> ParsedTransaction:
     """Take a raw transaction apart, deciding its layout by proof rather than by guess.
 
