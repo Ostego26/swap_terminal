@@ -127,6 +127,9 @@ PAGE = r"""<!doctype html>
   input { width:min(420px, 60vw); }
   .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 8px; }
   nav button .dot { font-size:11px; margin-left:6px; }
+  nav button[data-up="yes"] .dot { color:var(--ok); }
+  nav button[data-up="no"]  .dot { color:var(--bad); }
+  nav button[data-up=""]    .dot { color:var(--dim); }
   pre { margin:0; padding:10px; background:var(--bg); border:1px solid var(--line);
         border-radius:6px; max-height:52vh; overflow:auto; white-space:pre-wrap; font-size:12.5px; }
   .what { color:var(--dim); font-size:12.5px; margin:-4px 0 10px; }
@@ -136,6 +139,10 @@ PAGE = r"""<!doctype html>
 this port was bound. The seed is never shown here and never leaves the server's environment.</p>
 
 <nav id="tabs">loading the chain list from the server&hellip;</nav>
+<p class="what" style="margin-top:-8px">A dot is <span class="ok">green</span> when that daemon
+answered the LAST time this panel asked, <span class="bad">red</span> when it did not, and grey
+when nobody has asked yet &mdash; which is not the same as down.
+<button id="checkall" style="margin-left:8px">Check every chain</button></p>
 
 <section>
   <div class="chainhead"><div class="mark" id="mark"></div>
@@ -178,14 +185,18 @@ const THEMES = {}, KINDS = {};
 // THE COIN MARKS, AS INLINE SVG. No image file and no network: the page has to render on a
 // machine with no route to the internet, which is exactly when an operator opens it.
 //
-// GRIDCOIN'S IS THE REAL ONE -- the hexagon and purple gradient from
-// src/qt/res/images/gridcoin.svg in the Gridcoin wallet's own MIT-licensed source, simplified
-// to the outline and the two gradient stops (#753eef -> #3c1b7b). The others are DRAWN here,
+// GRIDCOIN'S IS THE REAL ONE, PATH FOR PATH -- all three <path> elements of
+// src/qt/res/images/gridcoin.svg in the Gridcoin wallet's own MIT-licensed source, with its
+// gradient stops (#753eef -> #3c1b7b). It was a hexagon with a letter "G" set in it until the
+// operator pointed out that Gridcoin's symbol is a G WITH A LINE THROUGH IT -- which is what
+// that middle path draws, and which a typed letter cannot be. Drawing an approximation of a
+// logo whose exact source was already checked out in this container was the lazy half of
+// "recognisable rather than official". The others are DRAWN here,
 // faithfully but not lifted: a disc in the published brand color carrying the currency's
 // letterform, which is what each of those logos is. They are recognisable rather than official,
 // and saying so beats implying this repository ships anyone's trademark files.
 const MARKS = {
-  GRC: '<svg viewBox="0 0 500 500"><defs><linearGradient id="g" x1="250" y1="4" x2="250" y2="501" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#753eef"/><stop offset="1" stop-color="#3c1b7b"/></linearGradient></defs><path fill="url(#g)" d="M36 126L250 3 464 126 464 374 250 497 36 374z"/><path fill="#fff" d="M250 92l138 79v158l-138 79-138-79V171z" opacity=".15"/><text x="250" y="322" font-size="230" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">G</text></svg>',
+  GRC: '<svg viewBox="0 0 500 500"><defs><linearGradient id="grcg" x1="250" y1="4.4" x2="250" y2="501" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#753eef"/><stop offset="1" stop-color="#3c1b7b"/></linearGradient></defs><path fill="#FFF" d="M36 126L250 3 464 126 464 374 250 497 36 374z"/><path fill="url(#grcg)" d="M342.4571533,82.0932159 c-12.408783,10.3809509-26.0314331,19.7608719-40.1398315,28.4434967 c-13.3031616,8.1872635-26.9657898,15.8179779-40.2628479,23.2341766 c-4.1065063,2.2906342-8.1234894,4.545517-12.0531769,6.7746277 c-60.6791687,34.4177551-99.7171478,62.3633118-99.7171478,109.4564972 c0,39.7861938,28.00354,65.7119751,73.3935699,93.4388428c5.184845,3.1673279,10.6189728,6.3630066,16.2405548,9.6005554 c-1.9994812,1.1159973-3.9625549,2.2197876-6.0084076,3.3525391 c-13.6059265,7.5360107-27.6746826,15.3290405-41.6046295,23.8873596 c-1.3804321,0.8483582-2.7618256,1.7079773-4.1429138,2.5733948c-4.9149323-3.2008057-9.7763977-6.464447-14.4964752-9.8739929 c-39.9571991-28.8599548-71.5206833-65.9264832-71.5206833-122.9786987 c0-68.0834351,44.9352646-108.0003815,95.539772-139.4653015 c14.1238251-8.7821426,28.6885986-16.9062805,42.8417358-24.7998123 c3.2188721-1.7952652,6.3662262-3.5631638,9.4746246-5.3181763 c16.2530975-9.1776581,30.8288116-17.8519058,43.64534-26.5065079L250,28.713028l-43.6598206,25.2069168 c5.4856567,3.7084274,11.2283325,7.419426,17.3894043,11.173912 c5.1780701,3.1550903,10.6041412,6.3456116,16.2154236,9.5825119c-1.3984833,0.7842636-2.7663422,1.557579-4.1902618,2.3515015 c-14.2117615,7.9267044-28.9079285,16.1226654-43.2446594,25.0375061 c-1.3884888,0.8631744-2.7357483,1.7218323-4.0875244,2.5814667c-4.9133148-3.1815033-9.7754364-6.423233-14.5000153-9.8047485 c-5.6724701-4.059494-11.1181946-8.3292999-16.3871002-12.7446899l-99.1757202,57.2589951v221.2870636l98.5814972,56.9159851 c12.4892731-10.5368347,26.2388611-20.020813,40.4944153-28.7791138 c13.6072235-8.3598938,27.6054535-16.1217041,41.2207184-23.6631775 c3.8627014-2.1395874,7.6390839-4.2460022,11.3449402-6.3311462 c29.0390167-16.3413391,53.1170502-31.2046814,70.3386383-47.4100952H217.1192169l30.946701-53.7019653h101.2637634h48.3248291 c-1.0419312,20.3467407-6.2425537,38.0404968-14.3995361,53.7019653 c-17.2377014,33.0959167-47.750885,57.0625-80.6883545,77.4044189 c-14.0143433,8.6552429-28.4612122,16.6592407-42.5016174,24.4361877 c-3.4214478,1.8954163-6.7665863,3.7612305-10.0637054,5.6125488 c-16.5384674,9.285553-31.3435059,18.0715637-44.3159027,26.8727112L250,471.2868347l44.3294373-25.5934143 c-5.6479797-3.8363037-11.5762024-7.6700134-17.9485474-11.5430298 c-5.197052-3.1586304-10.64505-6.3488159-16.2801514-9.5834656c1.571106-0.8757324,3.1096802-1.7402039,4.7113953-2.6271973 c14.0916138-7.805603,28.663147-15.8772583,42.904541-24.6722717c1.3601379-0.8399963,2.748291-1.7134705,4.1361389-2.5875854 c4.8911133,3.1663513,9.7300415,6.3935852,14.4304504,9.7628784 c5.8161316,4.1686707,11.3942261,8.5618286,16.781311,13.1131592l98.5753784-56.9124451V139.3563995L342.4571533,82.0932159z M347.3257141,230.8228302c-7.64328-29.6464691-33.3977356-51.6412811-71.1728516-74.8993073 c-5.1552124-3.1740875-10.5493774-6.3762054-16.1303711-9.6195526 c2.2609863-1.2718811,4.4859009-2.5312195,6.8035889-3.8240509 c12.6351929-7.0467682,26.9551697-15.0340271,40.6280823-23.4483566 c1.3669128-0.8412704,2.7344666-1.6938171,4.1020203-2.5511932c4.8988342,3.2111359,9.743866,6.4847488,14.4491272,9.9010468 c35.446167,25.7380295,64.2961121,57.873848,70.5473633,104.4414139H347.3257141z"/><path fill="url(#grcg)" d="M249.9994812,500L33.4943619,374.9989624V125L249.9994812,0l216.5061646,125 v249.9989624L249.9994812,500z M43.9522095,368.9616089l206.0472717,118.9616394l206.0483093-118.9616394V131.0373535 L249.9994812,12.0767651L43.9522095,131.0373535V368.9616089z"/></svg>',
   BTC: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#f7931a"/><text x="32" y="46" font-size="40" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace" transform="rotate(-14 32 32)">\u20bf</text></svg>',
   LTC: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#345d9d"/><text x="32" y="45" font-size="38" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">\u0141</text></svg>',
   XMR: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#f26822"/><path fill="#fff" d="M14 42V22l18 17 18-17v20h-9V33l-9 9-9-9v9z"/></svg>',
@@ -276,6 +287,20 @@ async function loadChain(asset) {
     }
   }
   $("chain").innerHTML = h;
+  // THE NAV REMEMBERS WHAT THIS TAB FOUND, so "which daemons are up" stops being a question
+  // you answer by clicking six tabs. The dot says LAST TIME WE ASKED, never "is up" -- a stale
+  // green is a lie an operator acts on, and grey for "nobody has asked" is its own answer
+  // rather than an optimistic guess (rule 14).
+  const tab = $("tabs").querySelector('[data-asset="' + asset + '"]');
+  if (tab) { tab.dataset.up = (d.kind === "none") ? "" : (d.reachable ? "yes" : "no"); }
+}
+
+async function checkEveryChain() {
+  const was = current;
+  for (const b of $("tabs").querySelectorAll("button")) {
+    await loadChain(b.dataset.asset);
+  }
+  await loadChain(was);
 }
 
 async function tick() {
@@ -349,6 +374,7 @@ $("callrpc").onclick = async () => {
   else { $("rpcout").textContent = "the daemon answered:\n\n" + d.error; }
 };
 
+$("checkall").onclick = checkEveryChain;
 $("refresh").onclick = () => loadChain(current);
 $("stop").onclick = async () => {
   const res = await (await fetch("/api/stop", {method:"POST"})).json();

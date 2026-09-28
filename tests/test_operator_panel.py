@@ -816,3 +816,40 @@ def test_gridcoin_is_PURPLE_and_the_value_is_gridcoins_own():
     theme = decisions.theme_for("GRC")
     assert theme["accent"] == "#753eef", "the light stop of Gridcoin's own logo gradient"
     assert theme["dark"] != theme["accent"], "and a lighter variant, readable on a dark page"
+
+
+def test_the_gridcoin_mark_is_the_REAL_logo_path_and_not_a_typed_letter():
+    """Gridcoin's symbol is a G WITH A LINE THROUGH IT, and a font cannot draw one.
+
+    The mark was a hexagon with the letter "G" set in it, which is close enough to look right
+    and wrong in the one detail that identifies the currency. The operator said so; the exact
+    source was already checked out in this container, which makes "recognisable rather than
+    official" the lazy half of that phrase rather than the honest one.
+
+    All three <path> elements of src/qt/res/images/gridcoin.svg are inlined now, with its own
+    gradient stops. The assertions are about SHAPE rather than about the bytes: a <text> element
+    anywhere in this mark means somebody replaced a drawing with a letter again, and fewer than
+    three paths means the stroked G is the one that went missing -- it is the middle path, and
+    the one a simplification drops first.
+    """
+    entry = _entry()
+    mark = entry.PAGE.split("GRC: '", 1)[1].split("',", 1)[0]
+    assert mark.count("<path") == 3, f"the real logo is three paths, this has {mark.count('<path')}"
+    assert "<text" not in mark, "a typed letter cannot draw a G with a line through it"
+    assert "#753eef" in mark and "#3c1b7b" in mark, "and it carries Gridcoin's own gradient"
+    assert "viewBox=\"0 0 500 500\"" in mark, "at the source's own coordinate system"
+
+
+def test_every_mark_renders_without_a_network_or_a_file():
+    """The page has to render on a machine with no route to the internet, which is exactly when
+    an operator opens it.
+
+    That is the same constraint that made the whole page inline, and it is worth an assertion
+    because an image URL is the most natural thing in the world to reach for when adding a logo.
+    """
+    entry = _entry()
+    marks = entry.PAGE.split("const MARKS", 1)[1].split("};", 1)[0]
+    for forbidden in ("<img", "http://", "https://", "url(http", ".png", ".svg\"", "src="):
+        assert forbidden not in marks, f"{forbidden!r} in the marks: this page fetches nothing"
+    for asset in ("GRC", "BTC", "LTC", "XMR", "XRP", "SOL"):
+        assert f"{asset}: '<svg" in marks, f"{asset} has no mark"
