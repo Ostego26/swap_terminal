@@ -364,6 +364,11 @@ class Run:
     # because the two locks need two distinct outputs and popping them is what guarantees the
     # second lock cannot be handed the first one's outpoint.
     operator_funding: list = field(default_factory=list)
+    # A funding payment step 5 already located, so prepare_operator_funding() builds the split
+    # from the SAME payment that let the run carry on. Two independent lookups could disagree
+    # if the operator funded the address again in between, and the run would then be proceeding
+    # on one basis and spending another.
+    discovered_funding_txid: str = ""
 
     @property
     def asset(self) -> str:
@@ -779,6 +784,74 @@ def step_5_spendable_coins(run: Run) -> int:
     return current_height(run)
 
 
+def offer_funding_route(run: Run, signing: str) -> RegtestKey | None:
+    """Print the address for the operator to fund, and return the key behind it.
+
+    THE DIFFERENCE BETWEEN TELLING SOMEBODY THEIR WALLET IS IN THE WAY AND TELLING THEM WHAT TO
+    DO INSTEAD. Extracted from _report_gridcoin_lock_state(), which ruff put one over the
+    complexity ceiling -- rule 12 answers that by pulling the decision out, never by raising the
+    ceiling or suppressing.
+
+    Returns the key so the caller can tell the three cases apart: a seed is set and the route is
+    open (an address was printed), no seed (instructions to set one were printed), or the probe
+    did not come back open (nothing printed here, because the route is not available).
+    """
+    funding_key = operator_funding_key(run)
+    if signing != "open":
+        return funding_key
+    run.say("")
+    if funding_key is None:
+        run.say(f"TO USE THAT ROUTE, set {FUNDING_SEED_VARIABLE} to something only you know and "
+                f"re-run. The harness will print an address for you to fund once.")
+        return None
+    needed = (Decimal(LOCK_COIN[run.asset]) * 2
+              + Decimal(FUNDING_HEADROOM_COIN[run.asset]) * 2 + Decimal("0.1"))
+    run.say(f"SO FUND THIS ADDRESS ONCE, FROM YOUR GUI: {funding_key.address}")
+    run.say(
+        f"  send at least {needed} {run.asset} to it, then RE-RUN THIS EXACT COMMAND. There is "
+        f"nothing to copy and no txid to find: your wallet made the payment, so the harness "
+        f"asks it (listtransactions) and picks the payment up by itself. The address is DERIVED "
+        f"from {FUNDING_SEED_VARIABLE} -- keep that set and it is the same address every run. "
+        f"Your wallet is never asked to create or sign anything: the harness signs this input "
+        f"itself and only sendrawtransaction touches the daemon."
+    )
+    run.say("  THE ADDRESS IS NOT A SECRET. The key behind it never leaves this process and the "
+            "seed is never printed.")
+    return funding_key
+
+
+def already_funded(run: Run, signing: str) -> bool:
+    """True when the operator has ALREADY funded the harness, so the wallet is not needed.
+
+    THE ABSENCE OF THIS CHECK MADE THE WHOLE OPERATOR-FUNDED ROUTE UNREACHABLE. run_chain()
+    calls step_5_spendable_coins() BEFORE prepare_operator_funding(), so the staking-only
+    refusal fired first -- every time, funded or not. The operator sent 3.50 GRC to the address
+    this harness printed, re-ran exactly as instructed, and got the same refusal back with
+    their payment sitting on the chain. The evidence was in that run's own output: the balance
+    line read 3875.90844485 where the run before it read 3879.40944485, exactly 3.501 GRC
+    lighter. The funding existed and nothing looked for it.
+
+    A route that cannot be reached is worse than one that was never built, because the build
+    looks like progress. The wallet being unable to CREATE a transaction is only a reason to
+    stop if nothing else can fund the run.
+    """
+    funding_key = operator_funding_key(run)
+    if funding_key is None or signing != "open":
+        return False
+    discovered = discover_operator_funding_txid(run, funding_key)
+    if not discovered:
+        return False
+    run.discovered_funding_txid = discovered
+    run.check(
+        "GRC the operator has ALREADY funded this harness, so the wallet is not needed",
+        f"{discovered[:16]}.. pays {funding_key.address}",
+        "a payment this harness can spend without the wallet", OK,
+    )
+    run.say("carrying on: this run funds itself from that payment and will not ask the wallet "
+            "to create or sign anything")
+    return True
+
+
 def _report_gridcoin_lock_state(run: Run) -> None:
     """Say what `unlocked_until` is, and say what it CANNOT tell us.
 
@@ -841,6 +914,12 @@ def _report_gridcoin_lock_state(run: Run) -> None:
             signing, "open -- then only the funding hop needs the wallet",
             OK if signing == "open" else SKIP if signing == "undetermined" else XFAIL,
         )
+        # AND IF THEY HAVE ALREADY PAID, DO NOT REFUSE AT ALL. This must come after the probe,
+        # because whether the funded route is usable is exactly what the probe answers -- and
+        # before the remedy, because printing a page about unlocking a wallet that is not
+        # needed is the defect this whole block has been correcting all day.
+        if already_funded(run, signing):
+            return
         if signing == "open":
             run.say("")
             for line in SUPPLIED_KEY_ROUTE.splitlines():
@@ -852,28 +931,7 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         # `note:`, and once again in the SUMMARY's unexpected-failures list. Rule 14 asks for
         # output that says something; a wall of identical text repeated three times is how a
         # reader learns to skim past the part that matters.
-        # THE ADDRESS TO PAY, WHEN A SEED IS CONFIGURED. This is the difference between telling
-        # the operator their wallet is in the way and telling them what to do instead.
-        funding_key = operator_funding_key(run)
-        if funding_key is not None and signing == "open":
-            run.say("")
-            run.say(f"SO FUND THIS ADDRESS ONCE, FROM YOUR GUI: {funding_key.address}")
-            run.say(
-                f"  send at least {Decimal(LOCK_COIN[run.asset]) * 2 + Decimal(FUNDING_HEADROOM_COIN[run.asset]) * 2 + Decimal('0.1')} "
-                f"{run.asset} to it from your GUI, then RE-RUN THIS EXACT COMMAND. There is "
-                f"nothing to copy and no txid to find: your wallet made the payment, so the "
-                f"harness asks it (listtransactions) and picks the payment up by itself. The "
-                f"address is DERIVED from {FUNDING_SEED_VARIABLE} -- keep that set and it is "
-                f"the same address every run. Your wallet is never asked to create or sign "
-                f"anything: the harness signs this input itself and only sendrawtransaction "
-                f"touches the daemon."
-            )
-            run.say("  THE ADDRESS IS NOT A SECRET. The key behind it never leaves this process "
-                    "and the seed is never printed.")
-        elif funding_key is None and signing == "open":
-            run.say("")
-            run.say(f"TO USE THAT ROUTE, set {FUNDING_SEED_VARIABLE} to something only you know "
-                    f"and re-run. The harness will print an address for you to fund once.")
+        funding_key = offer_funding_route(run, signing)
         state = ("unlocked FOR STAKING ONLY" if scope == "staking-only"
                  else "LOCKED, so it can neither stake nor send")
         run.console.say("")
@@ -2180,6 +2238,10 @@ def prepare_operator_funding(run: Run, funding_txid: str, destinations: list[Reg
             f"which output of that transaction is its own. Nothing was funded, signed or "
             f"broadcast."
         )
+    if not funding_txid:
+        # WHAT STEP 5 ALREADY FOUND. Reusing its answer is not an optimization: step 5 decided
+        # to carry on BECAUSE of that payment, so the split must be built from the same one.
+        funding_txid = run.discovered_funding_txid
     if not funding_txid:
         # ASK THE WALLET BEFORE ASKING THE OPERATOR. It made the payment, so it knows the txid;
         # see discover_operator_funding_txid(). No payment yet is the ordinary state and falls

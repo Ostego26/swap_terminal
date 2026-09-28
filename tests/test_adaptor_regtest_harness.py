@@ -1551,3 +1551,105 @@ def test_an_explicit_funding_txid_still_OVERRIDES_discovery(console, monkeypatch
     found = adaptor_steps.find_operator_funding(run, key, "99" * 32)
     assert found.txid == "99" * 32, "the explicit txid is used, not the discovered one"
     assert "listtransactions" not in node.methods_called()
+
+
+def _gridcoin_staking_only_signrawtransaction(*params):
+    """The operator's daemon, on the two probes this harness makes.
+
+    THE TWO PROBES HIT DIFFERENT BRANCHES AND A STUB THAT ANSWERS THE SAME FOR BOTH IS NOT THIS
+    DAEMON. src/rpc/rawtransaction.cpp:2769 selects the keystore on ARGUMENT PRESENCE:
+
+        with a keys array  -> tempKeystore, no unlock check -> "Invalid private key" for a non-key
+        without one       -> EnsureWalletIsUnlocked()       -> "Wallet is unlocked for staking only."
+
+    My first version of this stub raised the staking-only error for both, so
+    probe_supplied_key_signing() read "closed" and the test failed for a reason that has nothing
+    to do with the code under test. Measured on the operator's run 2026-09-28: the scope probe
+    returned staking-only and the supplied-key probe returned open, in the same run, seconds
+    apart. That is the behavior encoded here.
+    """
+    supplied_keys = len(params) > 2 and params[2]
+    raise RPCError(
+        "signrawtransaction: code=-5 message=Invalid private key" if supplied_keys
+        else "signrawtransaction: code=-13 message=Error: Wallet is unlocked for staking only."
+    )
+
+
+def test_an_ALREADY_FUNDED_harness_does_not_refuse_at_the_unlock(console, monkeypatch):
+    """THE BUG THAT MADE THE WHOLE ROUTE UNREACHABLE, AND NOTHING COVERED IT.
+
+    run_chain() calls step_5_spendable_coins() BEFORE prepare_operator_funding(), so the
+    staking-only refusal fired first -- every time, funded or not. The operator sent 3.50 GRC to
+    the address this harness printed, re-ran exactly as instructed, and got the same refusal
+    back with their payment sitting on the chain. The evidence was in that run's own output: the
+    balance read 3875.90844485 where the previous run read 3879.40944485, exactly 3.501 lighter.
+
+    Every piece was tested -- key derivation, discovery, the split, the vout search -- and the
+    ORDER they run in was not. A route that cannot be reached is worse than one never built,
+    because the build looks like progress.
+    """
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "seed for the reachability test")
+    key = key_from_seed("seed for the reachability test", "funding")
+    run, _ = _run_with(
+        console, monkeypatch,
+        {
+            "getwalletinfo": {"unlocked_until": 1822086129},
+            # The wallet cannot CREATE a transaction, but it will sign with OUR keys -- the
+            # two answers the operator's daemon actually gave, seconds apart.
+            "signrawtransaction": _gridcoin_staking_only_signrawtransaction,
+            # And the operator has already paid the funding address.
+            "listtransactions": [
+                {"address": key.address, "category": "send", "txid": "ab" * 32, "confirmations": 0},
+            ],
+        },
+        asset="GRC",
+    )
+
+    # It must NOT raise: the wallet is blocked and the run can still fund itself.
+    adaptor_steps._report_gridcoin_lock_state(run)
+
+    assert run.discovered_funding_txid == "ab" * 32, (
+        "and it must carry the payment forward, so the split is built from the SAME one that "
+        "justified carrying on"
+    )
+
+
+def test_an_UNFUNDED_harness_still_refuses(console, monkeypatch):
+    """The other direction, or the fix above would pass by never refusing at all -- which would
+    let a run with no coins anywhere march on to a confusing failure several steps later."""
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "seed for the unfunded test")
+    run, _ = _run_with(
+        console, monkeypatch,
+        {
+            "getwalletinfo": {"unlocked_until": 1822086129},
+            "signrawtransaction": _gridcoin_staking_only_signrawtransaction,
+            "listtransactions": [],
+        },
+        asset="GRC",
+    )
+    with pytest.raises(RegtestSetupError, match="STAKING ONLY"):
+        adaptor_steps._report_gridcoin_lock_state(run)
+    assert run.discovered_funding_txid == ""
+
+
+def test_the_split_is_built_from_the_payment_that_justified_carrying_on(console, monkeypatch):
+    """Two independent lookups could disagree if the operator funded the address again in
+    between, and the run would then proceed on one basis and spend another."""
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "seed for the carry-forward test")
+    key = key_from_seed("seed for the carry-forward test", "funding")
+    decoded = {"vout": [{"n": 0, "value": "3.5", "scriptPubKey": {"hex": key.p2pkh_script.hex()}}]}
+    run, node = _run_with(
+        console, monkeypatch,
+        {"getrawtransaction": decoded, "decoderawtransaction": decoded,
+         # If prepare_operator_funding asked AGAIN it would get this newer, different payment.
+         "listtransactions": [{"address": key.address, "category": "send", "txid": "cd" * 32}]},
+        asset="GRC",
+    )
+    run.discovered_funding_txid = "ab" * 32
+
+    found = adaptor_steps.find_operator_funding(run, key, run.discovered_funding_txid)
+
+    assert found.txid == "ab" * 32
+    assert "listtransactions" not in node.methods_called(), (
+        "step 5's answer is reused, not re-derived"
+    )
