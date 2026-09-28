@@ -71,7 +71,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "and sends NOTHING unless --send is given."
         ),
     )
-    parser.add_argument("--to", required=True, help="the P2PKH address to pay -- get one from your wallet")
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--to", help="the P2PKH address to pay -- one from your wallet")
+    destination.add_argument(
+        "--to-wallet", action="store_true",
+        help=(
+            "pay an address the wallet ALREADY OWNS, found via listunspent. Needs no unlock and "
+            "creates no new key. Use this when you do not have an address to hand."
+        ),
+    )
     parser.add_argument("--chain", choices=("btc", "ltc", "grc"), default="grc", help="which chain")
     parser.add_argument(
         "--send", action="store_true",
@@ -125,9 +133,10 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     source = adaptor_steps.find_operator_funding(run, key, txid)
 
     console.step(4, asset, "build and sign the spend -- IN THIS PROCESS, and broadcast nothing yet")
-    raw, predicted, value = adaptor_steps.reclaim_p2pkh(run, key, source, args.to)
+    destination = args.to or adaptor_steps.wallet_owned_address(run)
+    raw, predicted, value = adaptor_steps.reclaim_p2pkh(run, key, source, destination)
     console.check(
-        f"{asset} built and signed", f"{satoshis_to_coins(value)} to {args.to}",
+        f"{asset} built and signed", f"{satoshis_to_coins(value)} to {destination}",
         f"the whole output less the fee ({satoshis_to_coins(source.value_satoshis - value)})", OK,
     )
     console.say(f"{asset}: predicted txid {predicted}; {len(raw) // 2} bytes")
@@ -136,7 +145,9 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     console.step(5, asset, "broadcast -- ONLY with --send")
     if not args.send:
         console.say(f"{asset}: NOTHING WAS BROADCAST. Re-run with --send to move it:")
-        console.say(f"{asset}:   python3 reclaim_funding.py --to {args.to} --chain {args.chain} --send")
+        console.say(f"{asset}:   python3 reclaim_funding.py --to {destination} --chain {args.chain} --send")
+        console.say(f"{asset}:   (--to with the address above, so the SECOND run pays exactly what "
+                    f"the first one showed you -- --to-wallet could pick a different one)")
         console.say(f"{asset}: the seed stays in the environment; it is never an argument")
         return 0
     try:
@@ -149,7 +160,7 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     matched = sent == predicted
     console.check(f"{asset} BROADCAST", f"predicted={predicted} daemon={sent}", "the same txid",
                   OK if matched else FAIL)
-    console.say(f"{asset}: {satoshis_to_coins(value)} is on its way to {args.to}")
+    console.say(f"{asset}: {satoshis_to_coins(value)} is on its way to {destination}")
     return 0 if matched else 1
 
 

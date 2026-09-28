@@ -226,3 +226,97 @@ def test_the_seed_is_never_an_argument(monkeypatch):
     assert "seed" not in vars(entry.parse_args(["--to", "x"])), (
         "no argument may carry the seed. It goes in the environment or nowhere"
     )
+
+
+# ---------------------------------------------------------------------------
+# --to-wallet: "i don't know what the wallet address was", and you should not have to.
+# ---------------------------------------------------------------------------
+
+
+def test_an_address_the_wallet_already_owns_is_found_from_listunspent(monkeypatch):
+    """listunspent RATHER THAN getnewaddress, and that is the whole point.
+
+    The operator's wallet is unlocked FOR STAKING ONLY. `getnewaddress` writes a new key into
+    the wallet, which a locked or staking-only wallet may refuse -- and whether Gridcoin
+    v5.5.1.0 refuses it is NOT established anywhere, so this does not find out the hard way.
+    listunspent only reads, and every address it returns is one the wallet demonstrably
+    controls, because it is holding coins at it.
+    """
+    owned = generate_key().address
+
+    class _Wallet:
+        def call(self, method, *params):
+            assert method == "listunspent", (
+                f"{method} must not be reached: getnewaddress would write a key into a wallet "
+                f"that may be unlocked for staking only"
+            )
+            return [{"txid": "ab" * 32, "vout": 0, "amount": 1.0, "address": owned}]
+
+    run, _stream = _run(monkeypatch, _Wallet())
+    assert adaptor_steps.wallet_owned_address(run) == owned
+
+
+def test_a_wallet_with_no_unspent_outputs_says_so_rather_than_paying_nowhere(monkeypatch):
+    class _Empty:
+        def call(self, method, *params):
+            return []
+
+    run, _stream = _run(monkeypatch, _Empty())
+    with pytest.raises(RegtestSetupError) as raised:
+        adaptor_steps.wallet_owned_address(run)
+    assert "--to" in str(raised.value), "and it names the way round it"
+
+
+def test_rows_without_an_address_are_skipped_rather_than_paying_an_empty_string(monkeypatch):
+    """A row with no `address` field is not an address. Paying "" would be refused downstream by
+    p2pkh_script_for_address, but four frames from the cause and as a base58 error."""
+    owned = generate_key().address
+
+    class _Mixed:
+        def call(self, method, *params):
+            return [{"txid": "ab" * 32, "vout": 0}, {"address": ""}, {"address": owned}]
+
+    run, _stream = _run(monkeypatch, _Mixed())
+    assert adaptor_steps.wallet_owned_address(run) == owned
+
+
+def test_to_and_to_wallet_are_mutually_exclusive_and_one_is_required():
+    """A destination is never defaulted. Two ways to name one, and naming none is an error --
+    a reclaim tool that guessed where to send would be the defect it exists to prevent."""
+    entry = _entry()
+    for argv in ([], ["--to", "x", "--to-wallet"]):
+        with pytest.raises(SystemExit):
+            entry.parse_args(argv)
+    assert entry.parse_args(["--to-wallet"]).to is None
+    assert entry.parse_args(["--to", "x"]).to_wallet is False
+
+
+def test_the_dry_run_tells_you_to_re_run_with_the_EXACT_address_it_used(monkeypatch):
+    """--to-wallet picks from listunspent, and that set changes as coins move. So the line the
+    operator copies must name the address the dry run ACTUALLY used -- otherwise the --send run
+    could pay a different one than the one they just read and approved."""
+    entry = _entry()
+    key, owned = generate_key(), generate_key().address
+    node = _Node({"listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}]})
+    for name, value in (
+        ("resolve_config", lambda asset: ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid")),
+        ("step_1_reachable", lambda run: None),
+        ("assert_test_network", lambda run: None),
+        ("operator_funding_key", lambda run: key),
+        ("discover_operator_funding_txid", lambda run, k: "cd" * 32),
+        ("find_operator_funding", lambda run, k, txid: _source()),
+        ("adapter_for", lambda config, wallet="": node),
+    ):
+        monkeypatch.setattr(entry.adaptor_steps, name, value)
+
+    stream = io.StringIO()
+    assert entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream)) == 0
+
+    printed = stream.getvalue()
+    assert f"--to {owned}" in printed, (
+        "the re-run line must carry the address actually used, not --to-wallet again"
+    )
+    assert node.sent == []

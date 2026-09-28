@@ -2873,6 +2873,45 @@ def step_11_punish_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
     _corroborate_payout(run, txid, built.setup.alice.p2pkh_script, "the punish")
 
 
+def wallet_owned_address(run: Run) -> str:
+    """An address the WALLET ALREADY OWNS, so a reclaim has somewhere to go without being told.
+
+    THE QUESTION THIS REMOVES, asked by the operator 2026-09-28: "i don't know what the wallet
+    address was." They should not have to. A tool that empties an address into a wallet needs a
+    destination in that wallet, and the wallet is right there -- being asked for one is the tool
+    making somebody look up something it can see, which is the same defect as requiring a txid
+    that `listtransactions` already held.
+
+    `listunspent` RATHER THAN `getnewaddress`, and the reason is the whole reason this harness
+    exists in its current shape: the operator's wallet is unlocked FOR STAKING ONLY.
+    `getnewaddress` writes a new key into the wallet, which a locked or staking-only wallet may
+    refuse -- and whether Gridcoin v5.5.1.0 refuses it is NOT established here, so this does not
+    find out the hard way. `listunspent` only reads, needs no unlock, and every address it
+    returns is one the wallet demonstrably controls because it is holding coins at it.
+
+    Reusing an address the wallet already used is a privacy cost on a real chain and is not one
+    here: this is testnet, and the alternative is a tool that cannot run on the wallet it exists
+    to serve. An operator who wants a fresh address passes --to and names one.
+    """
+    try:
+        rows = run.node().call("listunspent")
+    except RPCError as exc:
+        raise RegtestSetupError(
+            f"{run.asset}: could not read the wallet's own outputs to find somewhere to send to "
+            f"({exc}). Pass --to with an address from your wallet instead"
+        ) from exc
+    for row in rows if isinstance(rows, list) else []:
+        address = isinstance(row, dict) and str(row.get("address") or "")
+        if address:
+            run.say(f"paying an address the wallet already owns: {address} "
+                    f"(from listunspent -- no new key was created and no unlock was needed)")
+            return address
+    raise RegtestSetupError(
+        f"{run.asset}: the wallet reports no unspent outputs, so this could not find an address "
+        f"it owns. Pass --to with one from your wallet"
+    )
+
+
 def p2pkh_script_for_address(asset: str, address: str) -> bytes:
     """The scriptPubKey that pays `address`, refusing one encoded for the wrong network.
 
