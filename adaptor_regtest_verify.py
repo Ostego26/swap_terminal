@@ -291,6 +291,59 @@ def configure_logging(verbose_clients: bool) -> None:
         logging.getLogger(name).setLevel(level)
 
 
+def drive_locks(run, setups, monero, tip: int, outcome: ChainOutcome) -> None:
+    """Fund and drive each lock through the branch it exists for. ONE lock per terminal branch.
+
+    Extracted from run_chain() when lock C pushed it past ruff's statement ceiling. Rule 12
+    answers that by pulling the sequence out, never by raising the ceiling or suppressing --
+    and here the extraction was owed anyway, because A, B and C share a shape (fund, build,
+    broadcast) and differed only in what runs afterwards.
+
+    THE BRANCHES, and why each needs its own output:
+
+      A   the two footgun REFUSALS, then the happy-path redeem. The refusals run BEFORE the
+          spend on purpose: they spend the same output, and a refusal that arrives because the
+          output is already gone proves nothing about the script.
+      B   the cancel path through to the refund.
+      C   the punish. It cannot share B's lock, because B's refund SPENDS the cancel output
+          the punish would take -- the same argument A makes one level further down.
+
+    Five parameters and not seven: `console` comes off `run` (which owns it) and `args` is not
+    needed at all once `prepare_operator_funding` stays in run_chain, where the flag it reads
+    lives. Both were in the first draft and ruff refused it -- correctly, because a parameter
+    that is only passed along is a parameter a caller has to think about for nothing.
+    """
+    setup_a, setup_b, setup_c = setups
+    funding_a = adaptor_steps.fund_and_prepare(run, setup_a)
+    built_a = adaptor_steps.step_6_build_and_hold(run, setup_a, funding_a, tip, monero)
+    adaptor_steps.step_7_broadcast_lock(run, built_a, outcome)
+    adaptor_steps.step_8_refusals(run, built_a, outcome)
+    adaptor_steps.step_9_happy_path(run, built_a, outcome)
+
+    run.console.banner(f"{run.asset} -- lock B, for the cancel path")
+    built_b = _fund_build_broadcast(run, setup_b, monero, outcome)
+    adaptor_steps.step_10_cancel_path(run, built_b, outcome)
+
+    run.console.banner(f"{run.asset} -- lock C, for the punish path")
+    built_c = _fund_build_broadcast(run, setup_c, monero, outcome)
+    adaptor_steps.step_11_punish_path(run, built_c, outcome)
+
+
+def _fund_build_broadcast(run, setup, monero, outcome: ChainOutcome):
+    """The three steps every lock after the first takes, at the CURRENT tip.
+
+    The tip is read here rather than passed, because each lock's T1 and T2 are relative to the
+    height at which THAT lock confirms -- reusing lock A's tip would put lock C's T2 in the
+    past by the time it is reached, and a timelock already satisfied tests nothing.
+    """
+    funding = adaptor_steps.fund_and_prepare(run, setup)
+    built = adaptor_steps.step_6_build_and_hold(
+        run, setup, funding, adaptor_steps.current_height(run), monero
+    )
+    adaptor_steps.step_7_broadcast_lock(run, built, outcome)
+    return built
+
+
 def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOutcome:
     """Run all ten steps against one chain. Always tears down what THIS HARNESS started.
 
@@ -322,33 +375,16 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
         adaptor_steps.assert_test_network(run)
         adaptor_steps.step_3_capabilities(run)
 
-        setup_a, setup_b = adaptor_steps.step_4_build_scripts(run)
-        # ONE Monero side for BOTH locks, because they are two branches of ONE swap -- lock A
-        # takes the redeem and lock B the cancel path, and in reality those are exclusive.
+        setups = adaptor_steps.step_4_build_scripts(run)
+        # ONE Monero side for ALL THREE locks, because they are three branches of ONE swap --
+        # A takes the redeem, B the refund, C the punish, and in reality those are exclusive.
         # MoneroSide's docstring carries the argument.
         monero = adaptor_steps.build_monero_side(run)
         tip = adaptor_steps.step_5_spendable_coins(run)
-
-        # LOCK A: funded, located, then the two refusals, then the happy-path spend. The
-        # refusals come BEFORE the spend on purpose -- they spend the same output, and a
-        # refusal that arrives because the output is already gone proves nothing.
         adaptor_steps.prepare_operator_funding(
-            run, args.funding_txid, [setup_a.alice, setup_b.alice],
+            run, args.funding_txid, [setup.alice for setup in setups],
         )
-        funding_a = adaptor_steps.fund_and_prepare(run, setup_a)
-        built_a = adaptor_steps.step_6_build_and_hold(run, setup_a, funding_a, tip, monero)
-        adaptor_steps.step_7_broadcast_lock(run, built_a, outcome)
-        adaptor_steps.step_8_refusals(run, built_a, outcome)
-        adaptor_steps.step_9_happy_path(run, built_a, outcome)
-
-        # LOCK B: an unspent 2-of-2 for the cancel path, because lock A's output is gone.
-        console.banner(f"{asset} -- lock B, for the cancel path")
-        funding_b = adaptor_steps.fund_and_prepare(run, setup_b)
-        built_b = adaptor_steps.step_6_build_and_hold(
-            run, setup_b, funding_b, adaptor_steps.current_height(run), monero
-        )
-        adaptor_steps.step_7_broadcast_lock(run, built_b, outcome)
-        adaptor_steps.step_10_cancel_path(run, built_b, outcome)
+        drive_locks(run, setups, monero, tip, outcome)
     except RegtestSetupError as exc:
         record_setup_refusal(console, asset, exc, outcome)
     except Exception as exc:  # noqa: BLE001 -- checked: an unexpected exception must not skip the teardown below, which is this harness's only reaper for a daemon it spawned (rule 13). It is recorded as a FAIL with its type and message, never swallowed into a pass, and the exit code reflects it.

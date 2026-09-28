@@ -23,6 +23,7 @@ with no adaptor anywhere -- and asserts the harness now scores it FAIL and says 
 
 from __future__ import annotations
 
+import importlib.util
 import io
 from pathlib import Path
 
@@ -1037,3 +1038,119 @@ def test_the_punish_publishes_NOTHING(parties, side, monkeypatch):
     adaptor_steps.step_11_punish_path(run, built, outcome)
 
     assert outcome.punish_leaks_nothing == OK
+
+
+# ---------------------------------------------------------------------------
+# THE DRIVER'S CALL SEQUENCE. 2154 tests passed against a driver that could not run.
+# ---------------------------------------------------------------------------
+
+
+def _entry_module():
+    """adaptor_regtest_verify.py, imported as a module so its functions can be driven."""
+    spec = importlib.util.spec_from_file_location(
+        "adaptor_regtest_verify_under_test", Path(__file__).resolve().parents[1] / "adaptor_regtest_verify.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_driver_drives_EVERY_lock_through_its_own_branch(monkeypatch, side):
+    """THE TEST THAT DID NOT EXIST, AND THE FAILURE IT WOULD HAVE CAUGHT.
+
+    On 2026-09-28 step_4_build_scripts started returning THREE setups and the driver still
+    unpacked two. The suite passed -- 2154 tests, ruff clean -- and the operator's run died at
+    step 4 with `ValueError: too many values to unpack (expected 2)` after they had funded
+    4.60 GRC and waited for a confirmation.
+
+    Nothing tested the driver's call sequence. Every step was covered in isolation and the
+    ORDER and ARITY that compose them were not, which is the same defect as the three
+    call-site gaps already recorded in this file -- the function is pinned and the wiring is
+    not. This is that gap at the top level, where it costs a real run rather than a rerun.
+
+    Every step is replaced with a recorder, so what is asserted is the SEQUENCE: each lock
+    reaches the branch it exists for, and lock C reaches the punish.
+    """
+    entry = _entry_module()
+    calls: list[str] = []
+
+    funded: list[str] = []
+
+    def record(name, result=None):
+        def recorded(*args, **kwargs):
+            calls.append(name)
+            if name == "fund_and_prepare":
+                # WHICH lock, not just how many. A mutant handing lock C the setup for lock B
+                # kept every count right and SURVIVED until this line existed -- and on a real
+                # chain it means the punish runs against an output the refund already spent,
+                # which is the one answer that proves nothing about T2.
+                funded.append(args[1].label)
+            return result
+        return recorded
+
+    fake_setups = tuple(
+        adaptor_steps.LockSetup(label=f"{n}", alice=generate_key(), bob=generate_key(),
+                                lock_script=b"\x01", cancel_script=b"\x01")
+        for n in "ABC"
+    )
+    built = object()
+    for name, result in (
+        ("fund_and_prepare", None), ("step_6_build_and_hold", built),
+        ("step_7_broadcast_lock", None), ("step_8_refusals", None),
+        ("step_9_happy_path", None), ("step_10_cancel_path", None),
+        ("step_11_punish_path", None), ("current_height", 100),
+    ):
+        monkeypatch.setattr(entry.adaptor_steps, name, record(name, result))
+
+    class _Run:
+        asset = "GRC"
+        console = Console(adaptor_steps.TOTAL_STEPS, stream=io.StringIO())
+
+    outcome = adaptor_steps.ChainOutcome(asset="GRC")
+    entry.drive_locks(_Run(), fake_setups, side, 100, outcome)
+
+    assert calls.count("fund_and_prepare") == adaptor_steps.LOCKS_PER_RUN, (
+        "every lock must be funded, or one branch runs against an output another already spent"
+    )
+    assert funded == ["A", "B", "C"], (
+        f"each branch must be driven on its OWN lock, in order; got {funded}. A lock spends "
+        f"once, so two branches sharing one means the second is refused because the output is "
+        f"gone -- which proves nothing about the branch"
+    )
+    assert calls.count("step_6_build_and_hold") == adaptor_steps.LOCKS_PER_RUN
+    assert calls.count("step_7_broadcast_lock") == adaptor_steps.LOCKS_PER_RUN
+    for terminal in ("step_8_refusals", "step_9_happy_path", "step_10_cancel_path", "step_11_punish_path"):
+        assert calls.count(terminal) == 1, f"{terminal} must run exactly once, on its own lock"
+    assert calls.index("step_9_happy_path") < calls.index("step_10_cancel_path") < calls.index("step_11_punish_path")
+    assert calls.index("step_8_refusals") < calls.index("step_9_happy_path"), (
+        "the footgun refusals spend the SAME output as the happy path, so a refusal that "
+        "arrived after it would be 'already spent' and would prove nothing about the script"
+    )
+
+
+def test_the_driver_unpacks_exactly_what_step_4_returns(monkeypatch, side):
+    """THE ARITY, pinned against the real function rather than a fixture.
+
+    `drive_locks` unpacks the setups tuple. The real `step_4_build_scripts` is what fills it,
+    so this drives one into the other -- which is precisely the seam that broke, and the
+    seam a test using its own three-element fixture would have stepped straight over.
+    """
+    entry = _entry_module()
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=io.StringIO())
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    real_setups = adaptor_steps.step_4_build_scripts(run)
+
+    for name in ("fund_and_prepare", "step_6_build_and_hold", "step_7_broadcast_lock",
+                 "step_8_refusals", "step_9_happy_path", "step_10_cancel_path",
+                 "step_11_punish_path", "current_height"):
+        monkeypatch.setattr(entry.adaptor_steps, name, lambda *a, **k: 100)
+
+    entry.drive_locks(run, real_setups, side, 100, adaptor_steps.ChainOutcome(asset="GRC"))
