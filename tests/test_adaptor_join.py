@@ -477,6 +477,11 @@ def _funding_run(monkeypatch, testmempoolaccept):
 
     class _Node:
         def call(self, method, *params):
+            # listtransactions is allowed because a refused seed now prints the wallet's recent
+            # payments before raising -- the recovery route. Anything that SENDS is still
+            # refused, which is what this stub is for.
+            if method == "listtransactions":
+                return []
             assert method == "testmempoolaccept", f"nothing may be BROADCAST here, got {method}"
             return testmempoolaccept
 
@@ -585,6 +590,51 @@ def test_the_seed_that_was_actually_pasted_is_REFUSED(monkeypatch):
     assert "PLACEHOLDER" in message
     assert "WRONG address" in message, "it has to say the seed WORKS and is wrong, not that it is invalid"
     assert adaptor_steps.FUNDING_SEED_VARIABLE in message, "and name the variable to change"
+
+
+def test_a_refused_seed_still_shows_WHERE_THE_MONEY_WENT(monkeypatch):
+    """THE DEAD END THE REFUSAL USED TO BE, measured on the operator's host 2026-09-28.
+
+    The placeholder guard fired -- correctly, on a placeholder I had put in their command for
+    the fourth time -- and stopped BEFORE the funding offer. So the screen said "set the seed"
+    and named no way to find out WHICH seed: the operator had 4.60 GRC at an address derived
+    from a seed no longer in that shell, and nothing on screen mentioned it.
+
+    A refusal that names no way back is half a diagnosis. The wallet knows where it has been
+    sending, and the address the operator recognizes is the one whose seed they want -- and
+    their shell remembers them setting it.
+    """
+    paid = "mxRi6srjTKAVrfTvVHo1Lp2kjMoESbfQzz"
+    stream = io.StringIO()
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+
+    class _Wallet:
+        def call(self, method, *params):
+            assert method == "listtransactions"
+            return [{"category": "send", "address": paid, "amount": "-4.60", "confirmations": 2}]
+
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Wallet())
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "<your real seed>")
+
+    with pytest.raises(adaptor_steps.RegtestSetupError):
+        adaptor_steps.operator_funding_key(run)
+
+    printed = stream.getvalue()
+    assert paid in printed, "the address they funded has to be on the screen that refuses them"
+    assert "WHICH OF THESE DID YOU FUND" in printed
+    assert f"history | grep {adaptor_steps.FUNDING_SEED_VARIABLE}" in printed, (
+        "and the one place the lost seed actually is: the shell that set it"
+    )
+    assert "stranded" in printed, "with the fallback when it is not in history"
 
 
 def test_an_unset_seed_is_still_None_and_not_a_refusal(monkeypatch):

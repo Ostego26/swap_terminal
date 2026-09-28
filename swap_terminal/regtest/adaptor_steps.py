@@ -932,7 +932,7 @@ def recent_payments(entries: list, exclude: str) -> list[tuple[str, str, str]]:
     return found
 
 
-def report_recent_payments(run: Run, funding_key: RegtestKey) -> None:
+def report_recent_payments(run: Run, funding_key: RegtestKey | None) -> None:
     """"Did you mean one of these?" -- the line that would have saved three runs.
 
     MEASURED, 2026-09-28, THREE TIMES IN ONE EVENING, and every one of them was the same
@@ -968,14 +968,34 @@ def report_recent_payments(run: Run, funding_key: RegtestKey) -> None:
         return
     if not isinstance(entries, list):
         return
-    found = recent_payments(entries, funding_key.address)
+    found = recent_payments(entries, funding_key.address if funding_key else "")
     run.say("")
-    run.say(f"  DID YOU ALREADY PAY A DIFFERENT ADDRESS? The wallet has made no payment to "
-            f"{funding_key.address}, and this is where it HAS been sending recently:")
+    if funding_key is None:
+        # NO KEY MEANS THE SEED WAS REFUSED, so there is no derived address to compare against
+        # and nothing to leave out. The list is then the only thing on screen that can tell the
+        # operator which seed they want: the address they recognize is the one whose seed
+        # produced it, and that is a recovery route rather than a diagnosis.
+        run.say("  WHICH OF THESE DID YOU FUND? No address was derived, because the seed above "
+                "was refused -- but the wallet remembers where it has been sending:")
+    else:
+        run.say(f"  DID YOU ALREADY PAY A DIFFERENT ADDRESS? The wallet has made no payment to "
+                f"{funding_key.address}, and this is where it HAS been sending recently:")
     if not found:
         run.say("    (none: this wallet has no recent outgoing payments at all)")
     for address, amount, confirmations in found:
         run.say(f"    {address}  {amount} {run.asset}  {confirmations} confirmation(s)")
+    if found and funding_key is None:
+        run.say(
+            "    THE SEED THAT DERIVES THE ONE YOU RECOGNIZE IS THE SEED YOU WANT, and your "
+            "shell remembers you setting it:"
+        )
+        run.say(f"      history | grep {FUNDING_SEED_VARIABLE}")
+        run.say(
+            "    If it is not there, the coins at that address are stranded -- they are TEST "
+            "coins, so set any new seed, fund the address this harness then prints, and carry "
+            "on. There is no way to recover a seed from an address."
+        )
+        return
     if found:
         run.say(
             f"    IF ONE OF THOSE IS WHERE YOU MEANT TO SEND, THE SEED IS WHAT CHANGED, not the "
@@ -2878,6 +2898,11 @@ def operator_funding_key(run: Run) -> RegtestKey | None:
     try:
         return key_from_seed(seed, FUNDING_ROLE)
     except ValueError as exc:
+        # AND SHOW WHERE THE MONEY WENT BEFORE REFUSING. A seed this harness will not use is
+        # exactly when the operator most needs to know which address they funded -- the
+        # refusal is otherwise a dead end that names no way back. It prints the wallet's
+        # recent payments with NOTHING excluded, because no address was derived to exclude.
+        report_recent_payments(run, None)
         raise RegtestSetupError(
             f"{run.asset}: {FUNDING_SEED_VARIABLE} is set but cannot be used. {exc}"
         ) from exc
