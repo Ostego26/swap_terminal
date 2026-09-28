@@ -55,6 +55,7 @@ from monero_shared_key_verify import (  # noqa: E402  same
     preflight_sweep,
     sample_share,
     save_shares,
+    shared_wallet_name,
     wait_for_wallet,
 )
 
@@ -552,3 +553,49 @@ def test_a_refused_connection_is_not_retried_as_a_busy_wallet(monkeypatch):
     with pytest.raises(VerifyError, match="nothing is listening"):
         wait_for_wallet(Console(total_steps=1), 29998, seconds=900)
     assert calls["n"] == 1, f"refused must not be retried; it was tried {calls['n']} times"
+
+
+
+# ---------------------------------------------------------------------------
+# THE WALLET FILENAME. A fixed one meant the script worked exactly once.
+# ---------------------------------------------------------------------------
+
+_ADDRESS_A = "42tYMtaj4PRQQg1UPd3xr2KbEkqgwCjNcJBYcL112kDVRy3PHYgWvi6TfPbkmpAs3UXjYkNcEXwRb3JwzQXKuzXbBsPCKbZ"
+_ADDRESS_B = "47L9GEy71w83v2kFYAjoLsCj5YrBGGg2rBTJh3ZGJJidLMLSBqcQXLsXYMAYBwvwRMSNYYVAJ97aW3Emp5NLqBy2KcpFQAy"
+
+
+def test_two_runs_do_not_collide_on_the_wallet_file():
+    """MEASURED ON THE OPERATOR'S HOST, 2026-09-28, and it is the whole reason this exists.
+
+    The filename was the fixed string "shared-2of2". Every --run samples FRESH shares and so
+    computes a FRESH address, then asked monero-wallet-rpc to write it to the file the previous
+    run had already made:
+
+        FAIL  run: generate_from_keys: {'code': -1, 'message': 'Wallet already exists.'}
+
+    So the script worked exactly once per wallet directory. These are the two real addresses
+    from that host -- the one on disk and the one the failing run computed.
+    """
+    assert shared_wallet_name(_ADDRESS_A) != shared_wallet_name(_ADDRESS_B)
+
+
+def test_the_same_shares_DO_collide_and_that_is_the_useful_case():
+    """Deterministic on the address, so "Wallet already exists" stops being spurious and starts
+    meaning "you already built this exact wallet" -- which is a thing worth being told."""
+    assert shared_wallet_name(_ADDRESS_A) == shared_wallet_name(_ADDRESS_A)
+
+
+def test_the_name_carries_the_address_so_ls_matches_what_the_script_printed():
+    """A prefix and not a hash. A reader in the wallet directory can match the file against the
+    address on screen; a hash would make that a lookup. Nothing reads the name back -- step 3
+    asserts the wallet's identity from the address the daemon derives."""
+    name = shared_wallet_name(_ADDRESS_A)
+    assert name.startswith("shared-2of2-")
+    assert _ADDRESS_A.startswith(name.removeprefix("shared-2of2-"))
+
+
+def test_an_empty_address_is_refused_rather_than_naming_a_file_after_nothing():
+    """It would produce "shared-2of2-", a name that collides with every other empty-address run,
+    and it would mean the arithmetic above produced nothing -- which is worth a sentence."""
+    with pytest.raises(VerifyError):
+        shared_wallet_name("")

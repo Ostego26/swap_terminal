@@ -126,8 +126,16 @@ DEFAULT_WALLET_PORT = 28083
 # real port is one typo away from a wallet that meant a real network.
 DEFAULT_DAEMON_PORT = 28081
 
+# THE PREFIX of the wallet file, not the whole name. `shared_wallet_name()` below appends a
+# slice of the shared address, and that is a fix rather than decoration -- see its docstring.
 SHARED_WALLET_NAME = "shared-2of2"
 SHARED_WALLET_PASSWORD = ""
+
+# How much of the shared address goes into the filename. Enough to be unique in practice
+# (58^16 is about 10^28, against a wallet directory holding tens of files) and short enough
+# that the name is still readable in an `ls`. It is a LABEL, not a checksum: nothing reads it
+# back, and the wallet's real identity is asserted from its address in step 3.
+WALLET_NAME_ADDRESS_CHARS = 16
 
 # A share must be a non-zero scalar below l. Sampling below 2^252 keeps every share
 # and their sum inside the range the cross-curve DLEQ also needs (see
@@ -289,6 +297,41 @@ def daemon_nettype(console: Console, daemon: int | str) -> str:
             "network and a key-disclosure bug anywhere else"
         )
     return nettype.lower()
+
+
+def shared_wallet_name(address: str) -> str:
+    """The wallet file to create, DERIVED FROM THE ADDRESS so two runs cannot collide.
+
+    THE DEFECT THIS FIXES, measured on the operator's host 2026-09-28. The filename was the
+    fixed string "shared-2of2". Every `--run` samples FRESH shares, so it computes a fresh
+    shared address -- and then asked monero-wallet-rpc to write it to the same file the last
+    run had already written:
+
+        FAIL  run: generate_from_keys on 127.0.0.1:28083:
+              {'code': -1, 'message': 'Wallet already exists.'}
+
+    So the script worked exactly once per wallet directory, and every run after that died at
+    step 3 with a message about a wallet rather than about shares. Worse, the failure cascades:
+    `--sweep` then finds the OLD wallet open (or the throwaway regtest one), compares it against
+    the shares file, and refuses -- correctly, and for a reason three steps removed from the
+    cause. The operator sees two failures and neither names the filename.
+
+    Deriving the name from the address makes the collision impossible where it was spurious and
+    MEANINGFUL where it is real: the same share set derives the same address derives the same
+    filename, so "Wallet already exists" now says "you already built this exact wallet", which
+    is a thing worth being told. Different shares get a different file and simply work.
+
+    Not a hash of the address, just a prefix of it: a reader doing `ls` in the wallet directory
+    can match the file against the address the script printed, and a hash would make that a
+    lookup. The name is a LABEL and nothing reads it back -- step 3 asserts the wallet's
+    identity from the address the daemon itself derives, which is the check that matters.
+    """
+    if not address:
+        raise VerifyError(
+            "cannot name a wallet file: the shared address is empty, which means the arithmetic "
+            "above produced nothing and this call should not have been reached"
+        )
+    return f"{SHARED_WALLET_NAME}-{address[:WALLET_NAME_ADDRESS_CHARS]}"
 
 
 def wait_for_wallet(console: Console, port: int, seconds: int = 300) -> dict:
@@ -509,8 +552,10 @@ def create_shared_wallet(
     console.say(" hold a transaction for them, and on stagenet scanning from genesis")
     console.say(" would mean 2.2 million blocks from a remote node)")
 
+    filename = shared_wallet_name(address)
+    console.say(f"creating wallet file {filename!r} in the wallet-rpc's --wallet-dir")
     result = rpc(port, "generate_from_keys", {
-        "filename": SHARED_WALLET_NAME,
+        "filename": filename,
         "address": address,
         "spendkey": scalar_to_bytes_le(shares["spend_summed"]).hex(),
         "viewkey": scalar_to_bytes_le(shares["view_summed"]).hex(),
