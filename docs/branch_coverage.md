@@ -136,6 +136,24 @@ locktime, and `contract_locktime("GRC", ROLE_INITIATOR, tip)` is tip+1920, which
 Gridcoin's 90s target on a chain with no `generateblock`. The separate file is the answer to
 that, not an oversight.
 
+**c-bis. IT HAPPENED AGAIN, ON 2026-09-28, IN THE HARNESS WRITTEN THAT DAY.** Recorded here
+rather than only in the commit, because the interesting part is not the loss -- 1.50 GRC
+testnet, `e1f8ae8f961d8591:0` -- but that gap (c) was written down, read, and reproduced within
+hours by somebody who had just read it. `grc_htlc_verify.py` minted its contract's refund key
+with `generate_key()`, funded it, died at step 4 on an unrelated defect, and exited. The key
+existed only in that process. Nobody can spend that output now, and nothing about the HTLC
+under test was at fault.
+
+Fixed in the harness the same day: the refund key is derived from
+`ST_ADAPTOR_FUNDING_SEED` under its own role, so its address is stable and a failed run leaves
+its coins where the next run can spend them. The participant key stays random on purpose --
+nothing is ever paid to it, and a key that never RECEIVES cannot strand anything. That is the
+general rule the two incidents share, and it is cheaper to state than to rediscover: **only
+keys that receive have to be recoverable.**
+
+`atomic_swap.py` is NOT fixed by any of that, and the fix there is still live posture and still
+the operator's (below).
+
 **c. A CRASH BETWEEN FUNDING AND CLAIMING DESTROYS THE LEG, AND THE FIX IS LIVE POSTURE.**
 Already found, already handed over, still open since 2026-09-27. `atomic_swap.py` mints four
 keypairs IN PROCESS and never persists them; BOTH branches of each contract name those keys, so
