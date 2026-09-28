@@ -3666,6 +3666,10 @@ def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
     # matches. `build_unsigned` refuses to read a clock itself for exactly this reason.
     ntime = int(time.time()) if run.asset == "GRC" else None
     outputs = [(per_lock, destination.p2pkh_script) for destination in destinations]
+    # THE FEE IS SIZED AGAINST THESE OUTPUTS AND THE SURPLUS IS ADDED AFTERWARDS, which is safe
+    # only because changing an output's VALUE cannot change the transaction's size: a value is
+    # eight bytes whatever it holds. Adding an output would, which is why the surplus rides on
+    # an existing one rather than becoming its own.
     fee = chain.fee_satoshis_for(
         run.asset,
         chain.build_unsigned(asset=run.asset, spends=source, outputs=outputs,
@@ -3698,20 +3702,34 @@ def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
     # network and refusing here would strand the operator's funding behind a second reclaim for
     # no safety gained. What it needs is to be VISIBLE, which is what the surplus line does.
     surplus = source.value_satoshis - needed - fee
+    # THE LAST OUTPUT TAKES THE SURPLUS RATHER THAN THE MINER. There is still no change output
+    # -- the reasoning above holds, and change returning to the funding address would be
+    # indistinguishable on chain from the operator's next payment -- but an existing output can
+    # simply be larger, and that costs nothing and loses nothing.
+    #
+    # MEASURED 2026-09-28, TWICE, AND THE SECOND TIME IS WHY THIS EXISTS. First a 4.60 payment
+    # against a 1.51 requirement burned 3.09. That was reported loudly and left alone, because
+    # "a burned test coin costs less than a stranded one" and the surplus was a third of the
+    # payment. Then LOCK_COIN["GRC"] dropped to 0.1, the ask became 0.16 -- and the operator's
+    # next payment of 1.00 would have burned 0.84, five times the requirement. Lowering the ask
+    # made overfunding the NORMAL case, and a note about it is not a fix.
+    #
+    # WHERE IT GOES AFTERWARDS DEPENDS ON THE CALLER, and both are better than a miner having
+    # it. grc_htlc_verify's single destination passes the whole value into the contract, which
+    # the refund returns. The adaptor harness's three locks each pay LOCK_COIN to a 2-of-2 and
+    # leave the rest as Tx_lock's fee, so there the burn moves one hop rather than disappearing
+    # -- no worse than it was, and it stops the split itself from being the thief.
+    if surplus > 0 and outputs:
+        value, script = outputs[-1]
+        outputs[-1] = (value + surplus, script)
     run.say(
         f"splitting the operator's {satoshis_to_coins(source.value_satoshis)} into "
-        f"{len(destinations)} funding output(s) of {satoshis_to_coins(per_lock)} each. "
-        f"THE MINER TAKES {satoshis_to_coins(source.value_satoshis - needed)} -- "
-        f"{satoshis_to_coins(fee)} of that is the size-based fee and "
-        f"{satoshis_to_coins(surplus)} is overfunding burned for want of a change output. "
+        f"{len(destinations)} funding output(s) of {satoshis_to_coins(per_lock)} each"
+        + (f", and the LAST one also takes the {satoshis_to_coins(surplus)} of overfunding "
+           f"rather than the miner" if surplus > 0 else "")
+        + f". THE MINER TAKES {satoshis_to_coins(fee)}, which is the size-based fee. "
         f"Signed in THIS process -- the wallet is not asked"
     )
-    if surplus > coins_to_satoshis(str(Decimal(LOCK_COIN[run.asset]))):
-        run.say(
-            f"NOTE: the burn above is larger than one whole funding output. Sending closer to "
-            f"{satoshis_to_coins(needed + fee)} {run.asset} next time keeps it; this run does "
-            f"not refuse over it, because a burned test coin costs less than a stranded one"
-        )
     unsigned = chain.build_unsigned(asset=run.asset, spends=source, outputs=outputs,
                                     locktime=0, ntime=ntime)
     script_sig = _sign_p2pkh(key, _p2pkh_sighash(unsigned, key))

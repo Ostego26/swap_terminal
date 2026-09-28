@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import importlib.util
 import io
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -985,10 +984,18 @@ def test_the_split_reports_the_fee_it_ACTUALLY_PAYS(monkeypatch):
     operator's 2026-09-28 run the difference was 3.08 GRC -- two thirds of their funding,
     reported as a hundredth. Rule 14 says state what the number means next to the number.
 
-    NOT A REFUSAL, and that is measured rather than assumed: Gridcoin's AcceptToMemoryPool has
-    no absurd-high-fee rejection (src/validation.cpp, read 2026-09-28), so the chain takes an
-    overpaid fee rather than refusing it. Burning a test coin costs less than stranding one
-    behind a second reclaim, so this says it loudly and carries on.
+    AND SINCE THE SAME DAY IT IS NOT BURNED AT ALL. Saying it loudly was the first answer, and
+    it survived exactly as long as the requirement was large: a 4.60 payment against a 1.51 ask
+    wastes a third of itself, which is a note. Then LOCK_COIN["GRC"] dropped to 0.1, the ask
+    became 0.16, and the operator's next payment of 1.00 would have burned 0.84 -- five times
+    the requirement. Lowering the ask made overfunding the NORMAL case, and a note about the
+    normal case is not a fix (rule 19).
+
+    The surplus now rides on the last funding output. There is still no change output -- change
+    returning to the funding address would be indistinguishable on chain from the operator's
+    next payment -- but an existing output can simply be larger, which costs nothing, loses
+    nothing, and cannot change the transaction's size, because a value is eight bytes whatever
+    it holds.
     """
     key = generate_key()
     source = chain.Outpoint(txid="ef" * 32, vout=0, value_satoshis=460_000_000)
@@ -1012,12 +1019,12 @@ def test_the_split_reports_the_fee_it_ACTUALLY_PAYS(monkeypatch):
         adaptor_steps.split_operator_funding(run, key, source, [generate_key()])
 
     printed = stream.getvalue()
-    # 4.60 in, one funding output out, and the miner takes the difference. Computed from the
-    # same constants the code uses, so this asserts the ARITHMETIC rather than a snapshot of it.
-    per_lock = Decimal(adaptor_steps.LOCK_COIN["GRC"]) + Decimal(adaptor_steps.FUNDING_HEADROOM_COIN["GRC"])
-    burned = adaptor_steps.satoshis_to_coins(source.value_satoshis - adaptor_steps.coins_to_satoshis(str(per_lock)))
-    assert f"THE MINER TAKES {burned}" in printed, printed
-    assert "larger than one whole funding output" in printed, printed
+    # THE MINER TAKES ONLY THE FEE, and the surplus rides on the funding output. 4.60 in
+    # against a 0.15 requirement used to burn 4.44; the miner now gets the size-based fee and
+    # the rest stays spendable.
+    assert "THE MINER TAKES 0.01000000, which is the size-based fee" in printed, printed
+    assert "the LAST one also takes the 4.44000000 of overfunding" in printed, printed
+    assert "burned" not in printed, "nothing is burned any more, so nothing may say it is"
 
 
 # ---------------------------------------------------------------------------
