@@ -34,19 +34,58 @@ working XMR swap.
 docs/monero_swap_protocol.md section 2 specifies the five transactions; this file builds
 the scripts and signature assembly they are made of.
 
-GRIDCOIN ACCEPTS THESE SCRIPTS, and that was the gating question. Read from
-Gridcoin-Research src/script.cpp on 2026-09-28: OP_CHECKMULTISIG is fully implemented in
-EvalScript (not disabled or reserved), TX_MULTISIG is a Solver template, the P2SH path
-recurses into the subscript so a redeem script may contain multisig, and no P2SH-specific
-sigop cap appears. OP_CHECKLOCKTIMEVERIFY is implemented under
-SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY -- and that flag is not merely present in the source:
-three swaps on 2026-09-27 proved CLTV is CONSENSUS-enforced on Gridcoin, because the daemon
-refused to MINE an early refund into a block (generateblock answered
-"TestBlockValidity failed"), which is the chain refusing rather than a relay policy.
+THESE SCRIPTS FUND AND SPEND ON A REAL CHAIN. MEASURED 2026-09-28 on Litecoin Core 0.21.4
+regtest, by `adaptor_regtest_verify.py` at the project root, 40 checks OK and 0 FAIL:
 
-That is a source reading plus a measurement, and they answer different halves. What is NOT
-yet established is a 2-of-2 P2SH actually spending on Gridcoin; that needs a chain and is
-named as such in the test file rather than assumed here.
+    a 2-of-2 P2SH funded and was located by scriptPubKey match     a9149618b1ec..
+    it SPENT with both signatures in the redeem script's key order  txid 0a193fd6..
+    TRANSPOSED signatures were REFUSED                              code=-26
+        mandatory-script-verify-flag-failed (Signature must be zero for failed
+        CHECK(MULTI)SIG operation)
+    the leading OP_0 MISSING was REFUSED                            code=-26
+        mandatory-script-verify-flag-failed (Operation not valid with the current stack size)
+    nLockTime T1 was refused before T1 by RELAY (code=-26 non-final) AND by CONSENSUS
+        (generateblock: code=-25 TestBlockValidity failed: bad-txns-nonfinal), and the same
+        transaction was ACCEPTED at T1
+    the SECOND 2-of-2 -- the cancel output -- also spent: the punish was refused before T2
+        and the refund was accepted                                 txid 43accc9c..
+
+The transposed scriptSig was 302 bytes and the correct one was 302: the same length and the
+same shape, which is why no local assertion can distinguish them and why this had to be a
+chain. The docstrings below are no longer the evidence for any of it.
+
+TWO CORRECTIONS TO WHAT THIS HEADER USED TO SAY, both of them mine and both weaker than they
+read. They are kept as corrections rather than deleted, because each was plausible:
+
+  1. It said "three swaps on 2026-09-27 proved CLTV is CONSENSUS-enforced on Gridcoin,
+     because the daemon refused to MINE an early refund (generateblock answered
+     TestBlockValidity failed)". The generateblock measurement is
+     `regtest_htlc_verify.py`'s step 8c, whose --chain flag offers `btc`, `ltc` and `both`
+     only -- Gridcoin has no node in that harness at all. NO generateblock call has ever
+     been made against a Gridcoin daemon from this tree. The wording above is now from an
+     LTC run, where it is what actually happened.
+  2. `docs/monero_swap_protocol.md` said the same three swaps established CLTV on GRC. They
+     took the HASHLOCK branch -- docs/atomic_swap_runs_2026_09_27.md records a GRC claim
+     txid for each and no GRC refund anywhere -- and OP_CHECKLOCKTIMEVERIFY sits in the
+     OP_ELSE branch, which a hashlock spend never executes. What they establish is that
+     Gridcoin ACCEPTS a script CONTAINING that opcode in a branch that does not run.
+
+Neither correction touches the chain below, because THIS chain uses no
+OP_CHECKLOCKTIMEVERIFY: T1 and T2 are plain nLockTime fields on transactions that cannot
+move without both parties.
+
+WHAT IS STILL A SOURCE READING, AND IT IS THE ONE THAT MATTERS COMMERCIALLY. Gridcoin.
+Read from Gridcoin-Research src/script.cpp on 2026-09-28: OP_CHECKMULTISIG is fully
+implemented in EvalScript (not disabled or reserved), TX_MULTISIG is a Solver template, the
+P2SH path recurses into the subscript so a redeem script may contain multisig, and no
+P2SH-specific sigop cap appears. That is a reading. `adaptor_regtest_verify.py --chain grc`
+is written and drives a Gridcoin TESTNET daemon; it has not been run, because no
+gridcoinresearchd exists in the container this was written in. Until it has, no 2-of-2 P2SH
+has been spent on Gridcoin from this repository.
+
+BITCOIN IS ALSO UNMEASURED, for a duller reason: bitcoincore.org is blocked by the egress
+proxy here and the bitcoin/bitcoin GitHub release carries no binaries, so Bitcoin Core could
+not be downloaded. The harness takes --chain btc and has never been pointed at bitcoind.
 """
 
 from __future__ import annotations

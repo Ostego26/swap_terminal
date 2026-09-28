@@ -23,11 +23,32 @@ different halves --
   READ from Gridcoin-Research src/script.cpp, 2026-09-28: OP_CHECKMULTISIG is fully
   implemented in EvalScript, TX_MULTISIG is a Solver template, the P2SH path recurses into
   the subscript, and no P2SH sigop cap appears.
-  MEASURED on 2026-09-27: CLTV is CONSENSUS-enforced on Gridcoin, because the daemon refused
-  to MINE an early refund (generateblock: "TestBlockValidity failed") rather than merely
-  declining to relay it.
+  NOT MEASURED, AND THIS FILE CLAIMED OTHERWISE UNTIL 2026-09-28. It said "MEASURED on
+  2026-09-27: CLTV is CONSENSUS-enforced on Gridcoin, because the daemon refused to MINE an
+  early refund (generateblock: TestBlockValidity failed)". That is false, and I wrote it.
+  Established by grep, three ways:
 
-Neither is a 2-of-2 spending. That wants a regtest chain with both branches exercised, which
+    regtest_htlc_verify.py's --chain flag offers `btc`, `ltc` and `both`. There is no
+    Gridcoin node in that harness at all, so its step 8c generateblock -- the only
+    generateblock call in this tree -- has never been made against a Gridcoin daemon.
+    docs/atomic_swap_runs_2026_09_27.md records a GRC CLAIM txid for each of the three
+    completed GRC swaps and NO GRC REFUND anywhere.
+    OP_CHECKLOCKTIMEVERIFY sits in build_htlc_redeem_script's OP_ELSE branch, which a
+    hashlock spend never executes.
+
+  So what those three swaps established is that Gridcoin ACCEPTS A SCRIPT CONTAINING that
+  opcode in a branch that does not run. That is worth having and it is not CLTV enforcement.
+  The measurement was real -- it was taken on Bitcoin and Litecoin regtest -- and attributing
+  it to Gridcoin is the failure rule 17 names: a reason to believe written in the voice of a
+  measurement, which stops the next reader checking.
+
+  MEASURED on Litecoin Core 0.21.4 regtest, 2026-09-28, by adaptor_regtest_verify.py: a
+  2-of-2 P2SH funds, is located by scriptPubKey match, SPENDS with both signatures in key
+  order, and is REFUSED both transposed and without the OP_0 dummy -- and nLockTime on it is
+  CONSENSUS-enforced, the daemon refusing to mine an early cancel and accepting the same
+  transaction at T1. 40 checks, 0 FAIL. THAT is a spend.
+
+Neither the source reading nor the Litecoin run is a 2-of-2 spending ON GRIDCOIN. That wants a regtest chain with both branches exercised, which
 is the same standard "Verify by behavior, never by SQL text" holds gate logic to, and it is
 named work rather than an assumption.
 """
