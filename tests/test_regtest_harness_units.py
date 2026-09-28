@@ -56,17 +56,22 @@ from modules.atomic_htlc_scripts import (
     script_to_p2sh_address,
 )
 from modules.htlc_timelock import ROLE_INITIATOR, timelock_blocks
+from regtest import daemons as daemons_module
 from regtest import steps
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console, redact, value
 from regtest.daemons import (
     COINBASE_MATURITY_HEIGHT,
+    LIVENESS_PROBES,
     RegtestRPC,
     RegtestSetupError,
     cltv_activation_height,
     describe_rpc_exception,
+    liveness_probe_results,
     mweb_override_args,
     mweb_state_line,
+    probe_capabilities,
     resolve_chain_config,
+    wait_for_rpc,
 )
 from regtest.keys import RegtestKey, generate_key, hash160
 from regtest.steps import (
@@ -1440,3 +1445,173 @@ def test_the_real_lock_length_is_not_shortened_to_make_this_cheaper():
     """1152 blocks is what a 48-hour LTC lock derives to, and the harness uses that number."""
     assert timelock_blocks("LTC", ROLE_INITIATOR) == 1152
     assert timelock_blocks("BTC", ROLE_INITIATOR) == 288
+
+
+# ---------------------------------------------------------------------------------------
+# A METHOD OR FIELD A DAEMON FAMILY SIMPLY DOES NOT HAVE, REPORTED AS THOUGH SOMETHING WENT
+# WRONG. Two remaining instances of that class, both found by auditing the 2026-09-28 GRC
+# run and both in regtest/daemons.py.
+#
+# The class, stated once so neither test has to restate it: Gridcoin sits on the pre-0.17
+# Bitcoin RPC surface, so `uptime` and `gettxout` were never there and `getnetworkinfo` uses
+# a different field name for the build string. An absence is a FACT ABOUT THE FAMILY. Printed
+# as a failure, a crash, or a bare `None`, it sends the operator to check credentials that are
+# fine -- which is exactly what happened at step 1 on 2026-09-28, and what
+# `subversion=None` did for the whole of step 3 in the same run.
+#
+# Both are asserted BEHAVIORALLY, against a stub daemon that answers the way the measured one
+# did, rather than by matching the source text: "seeding condition X produced outcome Y" is
+# the only evidence this repository accepts for a gate, and a report is a gate on what the
+# operator believes.
+# ---------------------------------------------------------------------------------------
+
+
+class _GridcoinShapedDaemon:
+    """A daemon with Gridcoin's measured RPC surface: no `uptime`, and no `subversion`.
+
+    Both behaviors are taken from the 2026-09-28 run rather than from a version table.
+    `uptime` raises RPCError carrying the daemon's own -32601, which is the text
+    regtest/daemons.RegtestRPC.call() produces. `getnetworkinfo` ANSWERS -- that is the part
+    that makes this the field case and not the method case -- and its dict has `version`
+    where Core has `subversion`.
+    """
+
+    def __init__(self, *, network_info=None) -> None:
+        self.asked: list[str] = []
+        self.network_info = (
+            {"version": "6.1.0.0-unk-testnet", "protocolversion": 180332, "connections": 8}
+            if network_info is None else network_info
+        )
+
+    def call(self, method, *params):
+        self.asked.append(method)
+        if method == "getblockcount":
+            return 3295729
+        if method == "getnetworkinfo":
+            if isinstance(self.network_info, Exception):
+                raise self.network_info
+            return self.network_info
+        if method == "help":
+            return f"help: unknown command: {params[0]}"
+        raise RPCError(f"{method}: code=-32601 message=Method not found (HTTP 200)")
+
+
+def test_wait_for_rpc_finds_a_daemon_that_has_no_uptime(monkeypatch):
+    """THE ONE THAT WOULD HAVE COST A WHOLE READINESS TIMEOUT.
+
+    wait_for_rpc() polled `uptime` ALONE until 2026-09-28, three functions below the
+    LIVENESS_PROBES table that already knew Gridcoin does not have it -- two answers to one
+    question in one file, and only one of them knew about the gap (rule 8). Seeded with the
+    measured surface, the old code would have looped to its deadline and then raised a
+    refusal about rpcuser and a `[regtest]` section, for a daemon that answered a height on
+    the first alternative asked.
+    """
+    daemon = _GridcoinShapedDaemon()
+    monkeypatch.setattr(daemons_module, "adapter_for", lambda _config: daemon)
+    console = Console(total_steps=10, stream=StringIO())
+    wait_for_rpc(console, resolve_chain_config("BTC"))
+    printed = console.stream.getvalue()
+    assert "RPC answered by `getblockcount`" in printed, printed
+    assert daemon.asked == ["uptime", "getblockcount"], (
+        "uptime is still tried first, and its miss falls through instead of deciding"
+    )
+    # THE MISS IS REPORTED, NOT HIDDEN. Quieting it would be the other half of the same
+    # defect: an operator who cannot see that uptime missed cannot learn what family this is.
+    assert "uptime" in printed and "-32601" in printed, printed
+    assert "does not have them" in printed, "the line must say the miss is expected, not a fault"
+
+
+def test_wait_for_rpc_still_fails_when_every_probe_misses(monkeypatch):
+    """The real failure still fails, and its message names EVERY probe rather than the last.
+
+    A closed port, a wrong rpcpassword and a dead daemon all land here. Without this the fix
+    above could have been written as "treat a -32601 as success", which would report a
+    daemon that answers nothing at all as ready.
+    """
+    class _AnswersNothing:
+        def call(self, method, *_params):
+            raise RPCError(f"{method}: HTTP 401 with a non-JSON body")
+
+    monkeypatch.setattr(daemons_module, "adapter_for", lambda _config: _AnswersNothing())
+    monkeypatch.setattr(daemons_module, "RPC_READY_TIMEOUT_SECONDS", 0.0)
+    console = Console(total_steps=10, stream=StringIO())
+    with pytest.raises(RegtestSetupError) as raised:
+        wait_for_rpc(console, resolve_chain_config("BTC"))
+    message = str(raised.value)
+    for probe in LIVENESS_PROBES:
+        assert probe in message, f"{probe} missing from {message}"
+    assert "401" in message, "the daemon's own words survive to the refusal"
+
+
+def test_liveness_probe_results_returns_the_reason_each_miss_gave(monkeypatch):
+    """The reasons are part of the return value, which is what let the second copy be deleted.
+
+    A bare bool is why wait_for_rpc() kept its own `last_error` and therefore its own probe.
+    """
+    daemon = _GridcoinShapedDaemon()
+    monkeypatch.setattr(daemons_module, "adapter_for", lambda _config: daemon)
+    answered, failures = liveness_probe_results(resolve_chain_config("BTC"))
+    assert answered == "getblockcount"
+    assert len(failures) == 1 and failures[0].startswith("uptime: ")
+    assert "-32601" in failures[0], "the type alone cannot be told from a wrong rpcpassword"
+
+
+def test_a_daemon_with_version_instead_of_subversion_reports_its_build(monkeypatch):
+    """`subversion=None` FOR A WHOLE RUN, WITH THE ANSWER IN THE SAME RESPONSE.
+
+    Measured 2026-09-28: step 3 printed `subversion=None`. That is not a failed call -- the
+    RPCError branch writes a sentence -- so getnetworkinfo answered and simply has no
+    `subversion` key. Gridcoin pushes `version` instead. Same shape as
+    `getblockchaininfo.chain`, one method over.
+    """
+    daemon = _GridcoinShapedDaemon()
+    monkeypatch.setattr(daemons_module, "adapter_for",
+                        lambda _config, wallet="": daemon)
+    console = Console(total_steps=10, stream=StringIO())
+    capabilities = probe_capabilities(console, resolve_chain_config("BTC"))
+    assert capabilities["subversion"] == "6.1.0.0-unk-testnet (getnetworkinfo.version)", (
+        "the build string AND the field it came from, because two families use two names"
+    )
+    assert capabilities["subversion"] != "None"
+    assert "getnetworkinfo.version" in console.stream.getvalue()
+
+
+def test_a_daemon_with_neither_field_says_so_rather_than_printing_none(monkeypatch):
+    """A blank is ambiguous between "no such field" and "the probe broke" (rule 14).
+
+    This is the outcome the old `.get("subversion")` produced, and the whole point of the fix
+    is that it now reads as a sentence about the daemon instead of as a null.
+    """
+    daemon = _GridcoinShapedDaemon(network_info={"connections": 8})
+    monkeypatch.setattr(daemons_module, "adapter_for",
+                        lambda _config, wallet="": daemon)
+    console = Console(total_steps=10, stream=StringIO())
+    capabilities = probe_capabilities(console, resolve_chain_config("BTC"))
+    reported = capabilities["subversion"]
+    assert reported.startswith("(none: getnetworkinfo answered 1 field(s)")
+    assert "does not report a build string there" in reported
+    assert "connections" in reported, "the fields it DID return are named, so a reader can check"
+
+
+def test_a_getnetworkinfo_that_fails_is_still_reported_as_a_failure(monkeypatch):
+    """The four outcomes must stay four. A call that did not answer is not an absent field."""
+    daemon = _GridcoinShapedDaemon(network_info=RPCError("getnetworkinfo: HTTP 401"))
+    monkeypatch.setattr(daemons_module, "adapter_for",
+                        lambda _config, wallet="": daemon)
+    console = Console(total_steps=10, stream=StringIO())
+    capabilities = probe_capabilities(console, resolve_chain_config("BTC"))
+    assert capabilities["subversion"].startswith("(none: getnetworkinfo failed:")
+    assert "401" in capabilities["subversion"]
+
+
+def test_a_getnetworkinfo_answering_a_non_object_does_not_crash_the_run(monkeypatch):
+    """`.get()` on a non-dict raises AttributeError, which run_chain() scores as
+    `FAIL <asset> run: got=AttributeError` -- a version-string probe reported as the whole
+    harness crashing. Not measured on any daemon; guarded because the cost of the guard is a
+    line and the cost of the crash is a ten-step run."""
+    daemon = _GridcoinShapedDaemon(network_info="not an object")
+    monkeypatch.setattr(daemons_module, "adapter_for",
+                        lambda _config, wallet="": daemon)
+    console = Console(total_steps=10, stream=StringIO())
+    capabilities = probe_capabilities(console, resolve_chain_config("BTC"))
+    assert capabilities["subversion"].startswith("(none: getnetworkinfo answered str, not an object")

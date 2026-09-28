@@ -92,7 +92,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
-import bech32
 from chains import monero_keys, solana_address, xrp_address
 from modules.address_network import (
     BASE58_VERSION_ASSETS,
@@ -105,6 +104,7 @@ from modules.address_network import (
     UNKNOWN,
     base58check_payload,
     bech32_hrp,
+    decode_segwit_address,
 )
 from network_target import classify
 
@@ -245,9 +245,14 @@ def _unknown_hrp_but_valid_bech32(address: str) -> AddressVerdict | None:
     """
     if not isinstance(address, str) or "1" not in address:
         return None
-    hrp, data = bech32.bech32_decode(address.strip())
-    if data is None:
+    # decode_segwit_address(), not bech32.bech32_decode(). The library decoder
+    # verifies BIP-173's checksum constant only, so it answered None for every bech32m address
+    # and this UNDETERMINED net -- the whole point of which is "unrecognized is not refused" --
+    # could never catch a taproot address under an unknown hrp either.
+    decoded = decode_segwit_address(address.strip())
+    if not decoded.ok:
         return None
+    hrp = decoded.hrp
     return AddressVerdict(
         UNDETERMINED,
         f"{address!r} is VALID bech32 -- its checksum holds -- under hrp {hrp!r}, which is in no table this "
@@ -281,17 +286,35 @@ def _bitcoin_bech32(asset: str, address: str) -> AddressVerdict:
             f"address is well-formed, just not on this chain",
             UNKNOWN,
         )
-    _hrp, data = bech32.bech32_decode(address.strip())
-    if data is None:
+    # THE SITE THAT CAUSED THE OUTAGE. `bech32.bech32_decode()` here refused every Taproot
+    # address with the sentence below -- "the checksum or the character set is wrong" -- which
+    # is a confident, false statement about a perfectly spendable address, and this module's own
+    # header says a false refusal is WORSE than the burn it was written to prevent. Measured
+    # consequence before the fix: services/swap_service.py raised ValueError so no swap paying
+    # out to bc1p... could be created at all, and services/payout_service.py set an ALREADY
+    # CREDITED swap to status='failed' -- terminal, never retried, customer's coin in our wallet.
+    #
+    # decode_segwit_address() implements BIP-350: the checksum constant is chosen by the witness
+    # version, so this now accepts v1+ under 0x2BC830A3 while still refusing a v0 address that
+    # carries the bech32m constant (a corruption, not a spelling). Verified against every
+    # published BIP-350 vector, valid and invalid, with the decoded programs compared byte for
+    # byte against the spec's expected scriptPubKeys.
+    decoded = decode_segwit_address(address.strip())
+    if not decoded.ok:
         return AddressVerdict(
             INVALID,
-            f"{address!r} claims hrp {claimed!r}, which IS a {asset} prefix, but it is not valid bech32 -- "
-            f"the checksum or the character set is wrong. This is the shape a typo or a truncated "
-            f"copy-paste makes",
+            f"{address!r} claims hrp {claimed!r}, which IS a {asset} prefix, but {decoded.why}",
             UNKNOWN,
         )
     return AddressVerdict(
-        VALID, f"{address!r}: valid {asset} bech32, hrp={claimed} ({hrps[claimed]})", hrps[claimed]
+        # THE ENCODING IS NAMED, not assumed to be "bech32". An operator reading a payout log
+        # needs to know a P2TR address was recognized AS one -- "valid LTC bech32" beside a
+        # ltc1p... address is the kind of near-miss that makes a reader doubt the whole line.
+        # decoded.why carries the witness version and program length too (rule 14: state what
+        # the value means, next to the value).
+        VALID,
+        f"{address!r}: valid {asset} {decoded.encoding}, hrp={claimed} ({hrps[claimed]}) -- {decoded.why}",
+        hrps[claimed],
     )
 
 

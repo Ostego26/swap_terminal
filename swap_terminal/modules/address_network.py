@@ -71,6 +71,8 @@ the reason written at length in its own header.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import base58
 import bech32
 
@@ -297,6 +299,273 @@ def address_network(address: str) -> tuple[str, str]:
     return UNKNOWN, f"version byte {version:#04x} is in no table this module knows"
 
 
+# =======================================================================================
+# BIP-350 / bech32m, AND THE OUTAGE ITS ABSENCE WAS CAUSING.
+# =======================================================================================
+#
+# `bech32.bech32_decode()` -- the installed BIP-173 reference decoder -- verifies ONE checksum
+# constant, 1. Read from the installed package:
+#
+#     def bech32_verify_checksum(hrp, data):
+#         return bech32_polymod(bech32_hrp_expand(hrp) + list(data)) == 1
+#
+# BIP-350 changed the constant to 0x2BC830A3 for witness version 1 and above, which is every
+# Taproot address. So that decoder returns (None, None) for EVERY `bc1p...`, `tb1p...`,
+# `bcrt1p...`, `ltc1p...`, `tltc1p...` and `rltc1p...` address ever issued, and every caller
+# in this tree read that as "the checksum or the character set is wrong".
+#
+# MEASURED 2026-09-28, against the published BIP-350 test vectors, before this was written:
+#
+#     INVALID   BTC  bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0
+#     INVALID   BTC  BC1SW50QGDZ25J
+#     INVALID   BTC  bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs
+#     INVALID   BTC  tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy
+#     VALID     LTC  ltc1qw508d6qejxtdg4y5r3zarvary0c5xw7kgmn4n9      <- v0 control
+#
+# WHAT THAT COST, and it is the exact outage modules/address_authority.py's own header says is
+# WORSE than the burn it was written to prevent. A confident INVALID on a perfectly spendable
+# address, in five places, because `bech32_decode` was called five times across three modules
+# instead of once:
+#
+#   services/swap_service.py     a swap paying out to a taproot address CANNOT BE CREATED --
+#                                ValueError, no row written. Taproot is the default receive
+#                                type in Sparrow, Muun, Phoenix and `bitcoin-cli getnewaddress
+#                                "" bech32m`, so this is not an edge case.
+#   services/payout_service.py   worse, and this is the blocking half: a swap that ALREADY
+#                                EXISTS and whose deposit has ALREADY BEEN CREDITED is set to
+#                                status='failed' with a failed_reason, before reserve_inventory
+#                                and before the payouts INSERT. Nothing is sent. 'failed' is
+#                                terminal by design -- correctly, for a genuinely bad address --
+#                                so it is never retried. The customer's coin is in our wallet
+#                                and their swap is permanently dead.
+#   modules/htlc_fee.py          a valid taproot PLATFORM_FEE_<ASSET>_ADDRESS silently drops the
+#                                fee output. 1.5% of every redeem stays with the redeemer.
+#   modules/atomic_htlc_scripts  refuses to build a script to a taproot destination at all.
+#
+# Six independent review dimensions found this same root cause separately, which is what a
+# single decision copied to five call sites produces (rule 8).
+#
+# ONE DECODER, HERE, BECAUSE THIS MODULE ALREADY OWNS THE VOCABULARY. Rule 8's survivor owns
+# the concept: BECH32_HRPS_BY_ASSET is here, so the segwit decoding rule is here too, and the
+# other four sites call it. Built on the library's OWN primitives -- bech32_polymod,
+# bech32_hrp_expand, CHARSET, convertbits -- rather than on a second copy of the charset and
+# the generator polynomial, which is the mistake this whole comment is about.
+BECH32_CHECKSUM_CONSTANT = 1
+BECH32M_CHECKSUM_CONSTANT = 0x2BC830A3
+
+# BIP-141/BIP-350's program-length rules. v0 is EXACTLY 20 (P2WPKH) or 32 (P2WSH); v1+ is
+# 2..40 inclusive, which is what lets a future witness version be forwarded to without this
+# file being changed -- the "refuse only what is CONTRADICTED" principle applied to a version
+# nobody has defined yet.
+WITNESS_V0_PROGRAM_LENGTHS = (20, 32)
+WITNESS_PROGRAM_MIN_LEN = 2
+WITNESS_PROGRAM_MAX_LEN = 40
+MAX_BECH32_LENGTH = 90
+
+
+class SegwitAddress(NamedTuple):
+    """A decoded segwit address, or the reason it is not one.
+
+    `hrp` is None exactly when this is not a segwit address at all. `why` is ALWAYS populated,
+    because every caller here reports a reason to an operator or a customer (rule 14), and a
+    bare False has sent somebody to check a wallet that was fine.
+    """
+
+    hrp: str | None
+    witness_version: int | None
+    program: bytes | None
+    encoding: str | None          # "bech32" | "bech32m" | None
+    why: str
+
+    @property
+    def ok(self) -> bool:
+        return self.program is not None
+
+
+# BIP-173's own bounds on the string itself, named so no comparison below is a bare number.
+PRINTABLE_ASCII_LOW = 33
+PRINTABLE_ASCII_HIGH = 126
+MAX_WITNESS_VERSION = 16
+TAPROOT_PROGRAM_LEN = 32
+TAPROOT_WITNESS_VERSION = 1
+
+
+def bech32_string_refusal(raw: str) -> str | None:
+    """Why this string cannot be bech32 AS TEXT, before any hrp or checksum is considered.
+
+    A SEPARATE FUNCTION because these are facts about the characters, not about the address:
+    emptiness, mixed case, length and the printable-ASCII range. Extracting them is rule 12's
+    answer to a complexity finding -- pull the decision out where it can be called with seeded
+    inputs, never raise the ceiling and never add a noqa (rule 19 forbids both).
+    """
+    if not raw:
+        return "empty string is not an address"
+    # Mixed case is invalid per BIP-173: the checksum is computed over ONE case, so a mixed
+    # string is ambiguous rather than merely ugly.
+    if raw.lower() != raw and raw.upper() != raw:
+        return "mixed case, which BIP-173 forbids"
+    if len(raw) > MAX_BECH32_LENGTH:
+        return f"{len(raw)} characters, over BIP-173's {MAX_BECH32_LENGTH} limit"
+    if any(not PRINTABLE_ASCII_LOW <= ord(char) <= PRINTABLE_ASCII_HIGH for char in raw):
+        return "contains a character outside printable ASCII"
+    return None
+
+
+def _segwit_split(raw: str) -> tuple[str, list[int]] | SegwitAddress:
+    """The hrp and the 5-bit values, or the SegwitAddress explaining why this is not one.
+
+    "Is this bech32-shaped" only. Which checksum it satisfies is segwit_encoding_of(), and
+    whether its witness program is legal is witness_program_refusal(); three questions, three
+    functions, each assertable on its own.
+    """
+    text_refusal = bech32_string_refusal(raw)
+    if text_refusal is not None:
+        return SegwitAddress(None, None, None, None, text_refusal)
+    lowered = raw.lower()
+    separator = lowered.rfind("1")
+    if separator < 1 or separator + 7 > len(lowered):
+        return SegwitAddress(
+            None, None, None, None,
+            "no bech32 separator with an hrp before it and a checksum after it",
+        )
+    hrp = lowered[:separator]
+    body = lowered[separator + 1:]
+    if not all(char in bech32.CHARSET for char in body):
+        return SegwitAddress(
+            hrp, None, None, None,
+            f"claims hrp {hrp!r} but the data part uses characters outside bech32's charset",
+        )
+    return hrp, [bech32.CHARSET.find(char) for char in body]
+
+
+def segwit_encoding_of(hrp: str, values: list[int]) -> str | None:
+    """"bech32", "bech32m", or None when the string satisfies NEITHER constant.
+
+    THE ONE DECISION BIP-350 IS ABOUT, as a function, so it can be asserted directly against
+    the published vectors rather than only through a whole address. The polymod is computed
+    once over hrp-expansion plus every value INCLUDING the six checksum characters -- that is
+    what makes the result a constant rather than a comparison.
+    """
+    polymod = bech32.bech32_polymod(bech32.bech32_hrp_expand(hrp) + values)
+    if polymod == BECH32_CHECKSUM_CONSTANT:
+        return "bech32"
+    if polymod == BECH32M_CHECKSUM_CONSTANT:
+        return "bech32m"
+    return None
+
+
+def witness_program_refusal(witness_version: int, program: bytes, encoding: str) -> str | None:
+    """Why this witness version / program / encoding triple is illegal, or None if it is legal.
+
+    THE VERSION-TO-ENCODING BINDING IS THE POINT, and it is why this cannot be "try bech32,
+    then try bech32m". BIP-350 ties v0 to bech32 and v1+ to bech32m, so a v0 address carrying a
+    bech32m checksum is a CORRUPTION, not an alternative spelling -- accepting it would accept
+    exactly the class of malformed address the constant change exists to separate.
+
+    v1+ accepts any 2..40 byte program, so a witness version nobody has defined yet is
+    forwarded to without editing this file. That is "refuse only what is CONTRADICTED" applied
+    to the future, and it is the principle modules/address_authority.py's header is built on.
+    """
+    if witness_version == 0:
+        return _witness_v0_refusal(program, encoding)
+    return _witness_v1_plus_refusal(witness_version, program, encoding)
+
+
+def _witness_v0_refusal(program: bytes, encoding: str) -> str | None:
+    """v0's rules: bech32 exactly, and a program of exactly 20 or 32 bytes."""
+    if encoding != "bech32":
+        return (
+            "witness version 0 with a bech32m checksum. BIP-350 ties v0 to bech32, so this "
+            "is a corrupted address rather than another spelling of a valid one"
+        )
+    if len(program) not in WITNESS_V0_PROGRAM_LENGTHS:
+        return (
+            f"witness version 0 with a {len(program)}-byte program, which is neither 20 "
+            f"(P2WPKH) nor 32 (P2WSH)"
+        )
+    return None
+
+
+def _witness_v1_plus_refusal(witness_version: int, program: bytes, encoding: str) -> str | None:
+    """v1 and above: bech32m exactly, version at most 16, program 2..40 bytes.
+
+    DELIBERATELY PERMISSIVE ON THE VERSION. Any 2..40 byte program at any version up to 16 is
+    accepted, so a witness version nobody has defined yet is forwarded to without editing this
+    file. Refusing an unrecognized-but-well-formed version would be refusing what is merely
+    UNRECOGNIZED rather than what is CONTRADICTED, which is the principle
+    modules/address_authority.py's header is built on -- and the failure that principle exists
+    to prevent is exactly the one bech32m's absence was causing.
+    """
+    if encoding != "bech32m":
+        return (
+            f"witness version {witness_version} with a bech32 checksum. BIP-350 ties v1 and "
+            f"above to bech32m, so this is a corrupted address"
+        )
+    if witness_version > MAX_WITNESS_VERSION:
+        return (
+            f"witness version {witness_version} is above {MAX_WITNESS_VERSION}, which no "
+            f"opcode can express"
+        )
+    if not WITNESS_PROGRAM_MIN_LEN <= len(program) <= WITNESS_PROGRAM_MAX_LEN:
+        return (
+            f"witness version {witness_version} with a {len(program)}-byte program, outside "
+            f"BIP-141's {WITNESS_PROGRAM_MIN_LEN}..{WITNESS_PROGRAM_MAX_LEN} range"
+        )
+    return None
+
+
+def decode_segwit_address(address: str) -> SegwitAddress:
+    """Decode a bech32 OR bech32m address per BIP-173 and BIP-350. THE one copy.
+
+    Three decisions, each its own function above so each is callable with seeded inputs: is this
+    bech32-shaped (_segwit_split), which constant does it satisfy (segwit_encoding_of), and is
+    the version/program/encoding triple legal (witness_program_refusal). This function only
+    sequences them, which is rule 10's shape -- the thing that decides is the smallest piece.
+
+    Returns the program as BYTES so a caller can build a scriptPubKey without a second
+    convertbits, and names the encoding so a diagnostic can say which rule the address met.
+    """
+    split = _segwit_split(address.strip())
+    if isinstance(split, SegwitAddress):
+        return split
+    hrp, values = split
+
+    encoding = segwit_encoding_of(hrp, values)
+    if encoding is None:
+        return SegwitAddress(
+            hrp, None, None, None,
+            f"claims hrp {hrp!r} but matches NEITHER bech32's checksum constant nor bech32m's. "
+            f"This is the shape a typo or a truncated copy-paste makes",
+        )
+
+    data = values[:-6]
+    if not data:
+        return SegwitAddress(hrp, None, None, encoding, f"valid {encoding} but carries no witness version")
+    witness_version = data[0]
+    program_list = bech32.convertbits(data[1:], 5, 8, False)
+    if program_list is None:
+        return SegwitAddress(
+            hrp, witness_version, None, encoding,
+            f"valid {encoding} but the witness program has leftover bits -- a padding error, "
+            f"which BIP-173 rejects rather than truncating",
+        )
+    program = bytes(program_list)
+
+    refusal = witness_program_refusal(witness_version, program, encoding)
+    if refusal is not None:
+        return SegwitAddress(hrp, witness_version, None, encoding, refusal)
+
+    kind = (
+        "P2TR"
+        if witness_version == TAPROOT_WITNESS_VERSION and len(program) == TAPROOT_PROGRAM_LEN
+        else f"witness v{witness_version}"
+    )
+    return SegwitAddress(
+        hrp, witness_version, program, encoding,
+        f"valid {encoding}, hrp={hrp!r}, {kind}, {len(program)}-byte program",
+    )
+
+
 def _bech32_network(raw: str) -> tuple[str, str] | None:
     """The network an hrp names, or None when this string does not claim to be bech32.
 
@@ -308,10 +577,13 @@ def _bech32_network(raw: str) -> tuple[str, str] | None:
     hrp = _claimed_hrp(raw)
     if hrp is None:
         return None
-    _decoded_hrp, data = bech32.bech32_decode(raw)
-    if data is None:
-        return UNKNOWN, f"claims hrp {hrp} but is not valid bech32"
-    return BECH32_HRPS[hrp], f"bech32 hrp {hrp!r} is {BECH32_HRPS[hrp]}"
+    # decode_segwit_address(), NOT bech32.bech32_decode(): the library's decoder knows only
+    # BIP-173's checksum constant, so it answered None for every Taproot address and this
+    # function reported a perfectly good bc1p... as UNKNOWN. See the BIP-350 block above.
+    decoded = decode_segwit_address(raw)
+    if not decoded.ok:
+        return UNKNOWN, f"claims hrp {hrp} but {decoded.why}"
+    return BECH32_HRPS[hrp], f"{decoded.encoding} hrp {hrp!r} is {BECH32_HRPS[hrp]} ({decoded.why})"
 
 
 def is_testnet_address(address: str) -> bool:
@@ -367,10 +639,13 @@ def _bech32_result(raw: str) -> tuple[bool, str] | None:
     hrp = _claimed_hrp(raw)
     if hrp is None:
         return None
-    decoded_hrp, data = bech32.bech32_decode(raw)
-    if data is None:
-        return False, f"starts with {hrp}1 but is not valid bech32 (checksum or charset)"
-    return True, f"valid bech32, hrp={decoded_hrp} ({BECH32_HRPS[hrp]})"
+    # Same substitution, same reason. This is the site services/swap_service.py reaches
+    # through is_valid_address(), so before this a taproot deposit or payout address made a
+    # swap uncreatable.
+    decoded = decode_segwit_address(raw)
+    if not decoded.ok:
+        return False, f"starts with {hrp}1 but {decoded.why}"
+    return True, f"{decoded.why}, network {BECH32_HRPS[hrp]}"
 
 
 def _base58_result(raw: str) -> tuple[bool, str] | None:

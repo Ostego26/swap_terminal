@@ -819,11 +819,20 @@ def test_claim_both_legs_derives_the_hash_rather_than_taking_it_as_an_argument()
 # ---------------------------------------------------------------------------------------
 # NAMING THE NETWORK, AND THE GRIDCOIN ROUTE THAT HAD NEVER RUN.
 #
-# BTC and LTC answer getblockchaininfo with a `chain`. Gridcoin is an older fork with NO
-# getblockchaininfo at all -- it carries a `testnet` boolean on getinfo instead. That fallback
-# was written from reading Gridcoin's RPC surface and had never been exercised by anything when
-# the operator asked to test GRC pairs end to end (2026-09-27), which is rule 17's distinction
-# between a reason to believe and a check.
+# BTC and LTC answer getblockchaininfo with a `chain`. Gridcoin carries a `testnet` boolean on
+# getinfo instead. That fallback was written from reading Gridcoin's RPC surface and had never
+# been exercised by anything when the operator asked to test GRC pairs end to end (2026-09-27),
+# which is rule 17's distinction between a reason to believe and a check.
+#
+# THIS BLOCK USED TO SAY GRIDCOIN HAS "NO getblockchaininfo at all", AND THE STUB BELOW WAS
+# BUILT TO MATCH -- `fail_blockchaininfo=True` raising method-not-found. Measured 2026-09-28
+# against the operator's testnet daemon, that is the wrong shape: the method ANSWERS and simply
+# has no `chain` key (adaptor_regtest_verify step 2 printed `got=(none)` with no exception
+# text, which is the successful-call-missing-key rendering, and Gridcoin master registers the
+# command). So the one route GRC actually takes had never been exercised either -- the test
+# passed through a branch the daemon does not use. Both shapes are pinned below now: the
+# measured one FIRST, and the method-not-found one kept because a build older than the
+# operator's may well produce it and the fallback must survive both.
 # ---------------------------------------------------------------------------------------
 
 
@@ -857,8 +866,11 @@ def test_bitcoin_and_litecoin_are_named_from_getblockchaininfo():
 
 
 def test_gridcoin_is_named_from_getinfos_testnet_boolean():
-    """THE GRIDCOIN ROUTE. No getblockchaininfo at all -- the daemon answers method-not-found,
-    which is the SIGNAL to try getinfo rather than a failure, and getinfo carries `testnet`.
+    """A BUILD WHOSE getblockchaininfo IS ABSENT -- method-not-found is the SIGNAL to try
+    getinfo rather than a failure, and getinfo carries `testnet`. Kept alongside the measured
+    shape above rather than replaced by it: the operator's build answers False for
+    signrawtransactionwithkey which master has, so builds in this family differ, and the
+    fallback has to survive either answer.
 
     Both values, because a route that only ever returns "testnet" would pass this test while
     being unable to refuse a mainnet daemon -- and the operator has a MAINNET Gridcoin wallet
@@ -871,6 +883,44 @@ def test_gridcoin_is_named_from_getinfos_testnet_boolean():
     mainnet = _StubNetworkClient(testnet=False, fail_blockchaininfo=True)
     assert atomic_swap.chain_name("GRC", mainnet) == "main"
     assert "main" not in TEST_CHAIN_NAMES, "the mainnet answer must not pass the gate"
+
+
+def test_gridcoins_measured_shape_is_getblockchaininfo_answering_without_a_chain_key():
+    """THE SHAPE THE OPERATOR'S DAEMON ACTUALLY PRODUCES, which nothing exercised until now.
+
+    `chain=None` makes the stub return `{}` from getblockchaininfo -- the method answering with
+    no `chain` key, which is what was measured on 2026-09-28 -- and the naming must fall
+    through to getinfo exactly as it does for a method-not-found. Without this test the GRC
+    route was only ever driven through an exception branch that daemon never takes, so a
+    refactor that handled the raise and dropped the missing-key case would have gone green and
+    then refused every real Gridcoin daemon at step 1.
+    """
+    testnet = _StubNetworkClient(chain=None, testnet=True)
+    assert atomic_swap.chain_name("GRC", testnet) == "testnet"
+    assert testnet.asked == ["getblockchaininfo", "getinfo"], (
+        "getblockchaininfo is asked and ANSWERS; the fall-through is on the key, not on a raise"
+    )
+    mainnet = _StubNetworkClient(chain=None, testnet=False)
+    assert atomic_swap.chain_name("GRC", mainnet) == "main", (
+        "and the mainnet answer still comes back as mainnet through the same route"
+    )
+
+
+def test_a_failed_probe_carries_the_daemons_own_words_into_the_refusal():
+    """The MESSAGE, not just the exception type, so a -32601 can be told from a 401.
+
+    `getblockchaininfo: RPCError` was all the refusal used to carry. That is the same
+    ambiguity that sent the operator to check credentials which were fine when the real cause
+    was a method the family does not have -- so the text of the error is now part of the
+    reason, and this pins it.
+    """
+    class _Raises:
+        def rpc_call(self, method, params=None):
+            raise RuntimeError(f"{method}: code=-32601 message=Method not found")
+
+    with pytest.raises(SwapError, match="code=-32601") as raised:
+        atomic_swap.chain_name("GRC", _Raises())
+    assert "RuntimeError" in str(raised.value), "the type is kept as well as the message"
 
 
 def test_a_daemon_that_names_no_network_is_refused_rather_than_assumed():

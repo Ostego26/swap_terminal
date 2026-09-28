@@ -42,8 +42,12 @@ guessed. `probe_capabilities()` asks the daemon itself:
 
   chain                from getblockchaininfo -- the refusal above depends on
                        this and nothing else.
-  subversion           from getnetworkinfo, printed so a pasted run says which
-                       builds produced it.
+  build string         from getnetworkinfo, printed so a pasted run says which
+                       builds produced it -- and WHICH FIELD it came from, because
+                       Core pushes `subversion` and Gridcoin pushes `version`
+                       instead. A daemon with neither says so in a sentence; see
+                       _build_string(), which exists because `subversion=None`
+                       read as a broken probe for the whole of one GRC run.
   descriptor wallet    from getwalletinfo's `descriptors` field. Absent on
                        daemons that predate descriptor wallets, which is itself
                        the answer: a wallet that does not know the word is a
@@ -561,6 +565,35 @@ def adapter_for(config: ChainConfig, wallet: str = "") -> RegtestRPC:
 LIVENESS_PROBES = ("uptime", "getblockcount")
 
 
+def liveness_probe_results(config: ChainConfig) -> tuple[str | None, list[str]]:
+    """(the first probe that answered, what each earlier one said). ONE OWNER OF "IS IT UP".
+
+    THIS IS THE FUNCTION EVERY READINESS QUESTION IN THIS FILE GOES THROUGH, and it is
+    shaped to return both halves because the two callers need different ones and a caller
+    that computed either locally would be the second answer to one question -- which is the
+    duplication this repository keeps paying for (CLAUDE.md rule 8).
+
+      the NAME    so a caller can print WHICH probe worked. "uptime missed but getblockcount
+                  answered" is a fact about the daemon FAMILY, and a bare True hides it.
+      the REASONS verbatim, per probe, so a total miss can be reported with what each one
+                  actually said instead of a guess at why.
+
+    WHY THE REASONS ARE PART OF THE RETURN AND NOT LEFT TO THE CALLER. wait_for_rpc() used
+    to poll `uptime` ALONE and keep its own `last_error`, three functions below the table
+    that already knew `uptime` is absent on Gridcoin -- so this one file held two different
+    answers to "is this daemon answering", and only one of them knew about the gap that cost
+    the 2026-09-28 GRC run its step 1. Folding the reason in is what let that second
+    implementation be deleted rather than merely corrected.
+    """
+    failures: list[str] = []
+    for method in LIVENESS_PROBES:
+        reason = _probe_failure(config, method)
+        if reason is None:
+            return method, failures
+        failures.append(f"{method}: {reason}")
+    return None, failures
+
+
 def liveness_probe_that_answers(config: ChainConfig) -> str | None:
     """The name of the first probe this daemon answers, or None if none of them do.
 
@@ -568,30 +601,36 @@ def liveness_probe_that_answers(config: ChainConfig) -> str | None:
     matters because "uptime failed but getblockcount worked" is a fact about the daemon
     FAMILY, and a reader who sees only True learns nothing about why the first one missed.
     """
-    for method in LIVENESS_PROBES:
-        if _probe_answers(config, method):
-            return method
-    return None
+    return liveness_probe_results(config)[0]
 
 
-def _probe_answers(config: ChainConfig, method: str) -> bool:
-    """Does this daemon answer this one method? Extracted so the broad catch sits in a
-    function whose entire contract is "False means it did not", rather than inside a loop
-    where ruff's S112 is right that a bare try/except/continue hides which iteration failed.
+def _probe_failure(config: ChainConfig, method: str) -> str | None:
+    """Why this one method did not answer, or None when it DID. Note which way round.
+
+    None means success, which is the opposite of the usual convention and is deliberate:
+    the alternative is returning a bool AND the text, and then every caller has to keep the
+    two in step. "There is no failure to report" is exactly what None says.
+
+    The text is the exception's type AND its message, never the type alone. A bare
+    `RPCError` cannot be told apart from a wrong rpcpassword, and "nothing answered" sent
+    the operator to check credentials that were fine on 2026-09-28 -- the daemon simply had
+    no `uptime`. The message carries the daemon's own `code=-32601`, which is the one thing
+    that distinguishes the two.
     """
     try:
         adapter_for(config).call(method)
-    except Exception:  # noqa: BLE001 -- checked: this function's ONLY question is "did this method answer", and False says no. A method absent from an older daemon family, a wallet that is not loaded, and a closed port all mean the same thing to the caller: try the next probe. A caller that needs the REASON for a total miss calls wait_for_rpc(), which reports the last error verbatim.
-        return False
-    return True
+    except Exception as exc:  # noqa: BLE001 -- checked: this function's ONLY question is "did this method answer", and it returns the reason it did not rather than swallowing it. A method absent from an older daemon family, a wallet that is not loaded and a closed port are three different sentences here, all reported verbatim to whoever asked; nothing can return a value a caller would mistake for a connected daemon.
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 def rpc_answers(config: ChainConfig) -> bool:
     """True if something on the configured port answers ANY of the liveness probes.
 
-    Kept as a bool for the readiness polling in wait_for_rpc() and start_daemon(), which only
+    Kept as a bool for the readiness polling in start_daemon() and stop_daemon(), which only
     ever branch on yes/no. A caller that wants to report WHICH method answered calls
-    liveness_probe_that_answers() directly.
+    liveness_probe_that_answers(), and one that wants the reasons for a miss calls
+    liveness_probe_results().
     """
     return liveness_probe_that_answers(config) is not None
 
@@ -664,37 +703,76 @@ def _spawn(console: Console, config: ChainConfig, argv: list[str]):
 
 
 def wait_for_rpc(console: Console, config: ChainConfig) -> None:
-    """Poll until the daemon answers, printing progress. Never a fixed sleep.
+    """Poll until the daemon answers ANY liveness probe, printing progress. Never a fixed sleep.
 
     A fixed sleep is wrong in both directions: too short and the harness
     reports a connection failure for a daemon that was still reindexing, too
     long and every run pays for the worst case. Polling also lets the wait
     SAY something, which a sleep cannot (rule 14).
+
+    IT POLLED `uptime` ALONE UNTIL 2026-09-28, AND THAT IS THE SAME DEFECT `c2c2041` FIXED
+    ONE FUNCTION AWAY IN THIS FILE. `uptime` arrived in Bitcoin Core 0.15 and Gridcoin
+    forked long before it -- measured on the operator's testnet daemon, `help uptime`
+    answers "unknown command: uptime" while `getblockcount` on the same port with the same
+    credentials returns a height. Pointed at that daemon, this loop would have spent the
+    whole of RPC_READY_TIMEOUT_SECONDS printing `code=-32601 Method not found` and then
+    raised a refusal telling the operator to put a `[regtest]` section and an rpcuser in a
+    config file that is already correct, for a daemon that has no regtest mode at all. A
+    method this family never had, reported as a credential problem: the exact shape the
+    LIVENESS_PROBES table above exists to refuse.
+
+    NOT REACHED ON TODAY'S GRC PATH, and that is not a reason to leave it. adaptor_steps.
+    step_1_reachable() returns before this line for GRC, and fund_testnets.py's GRC branch
+    never enters fund_regtest_chain() -- so this was a live break waiting for the first
+    caller who pointed a readiness wait at Gridcoin, while `rpc_answers()` forty lines up
+    already knew better. Two answers to one question in one file is rule 8 with a delay on
+    it; the second one is deleted here rather than corrected, so there is nothing left to
+    drift.
+
+    The reasons come back from liveness_probe_results() verbatim -- every probe, not just
+    the last one tried -- because "uptime missed AND getblockcount missed" and "uptime
+    missed" are different diagnoses and only the first one means the daemon is not up.
     """
     started = time.monotonic()
     deadline = started + RPC_READY_TIMEOUT_SECONDS
     attempts = 0
-    last_error = "(none: never got far enough to fail)"
-    while time.monotonic() < deadline:
+    last_errors = ["(none: never got far enough to fail)"]
+    console.say(
+        f"{config.asset}: waiting for RPC on {config.base_url}, trying {list(LIVENESS_PROBES)} each "
+        f"attempt; up to {format_duration(RPC_READY_TIMEOUT_SECONDS)}"
+    )
+    # AT LEAST ONE ATTEMPT, ALWAYS, which is why this is a do-while and not a while.
+    # `while time.monotonic() < deadline` alone can make ZERO attempts -- a zero or already
+    # elapsed timeout raises the refusal below having asked the daemon nothing, and then the
+    # message lists placeholder reasons as though they were the daemon's. A test seeded with
+    # RPC_READY_TIMEOUT_SECONDS=0 found exactly that. Rule 14: a check that did not run must
+    # not report like one that did, and here it would have reported worse than that -- it
+    # would have named the wrong cause.
+    while True:
         attempts += 1
-        try:
-            adapter_for(config).call("uptime")
-        except Exception as exc:  # noqa: BLE001 -- checked: every failure is kept in `last_error` and reported verbatim if the deadline passes. Nothing here can return a value the caller would mistake for a connected daemon.
-            last_error = f"{type(exc).__name__}: {exc}"
+        answered, failures = liveness_probe_results(config)
+        if answered is not None:
             console.say(
-                f"{config.asset}: waiting for RPC on {config.base_url}, attempt {attempts}, "
-                f"{format_duration(time.monotonic() - started)} of {format_duration(RPC_READY_TIMEOUT_SECONDS)} -- {last_error}"
+                f"{config.asset}: RPC answered by `{answered}` after "
+                f"{format_duration(time.monotonic() - started)} ({attempts} attempt(s))"
+                + (f"; earlier probes missed: {'; '.join(failures)} -- which is expected on a daemon "
+                   f"family that does not have them" if failures else "")
             )
-            time.sleep(POLL_INTERVAL_SECONDS)
-            continue
+            return
+        last_errors = failures
         console.say(
-            f"{config.asset}: RPC answered after {format_duration(time.monotonic() - started)} "
-            f"({attempts} attempt(s))"
+            f"{config.asset}: waiting for RPC on {config.base_url}, attempt {attempts}, "
+            f"{format_duration(time.monotonic() - started)} of {format_duration(RPC_READY_TIMEOUT_SECONDS)} "
+            f"-- {'; '.join(failures)}"
         )
-        return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
     raise RegtestSetupError(
-        f"{config.asset} daemon did not answer RPC at {config.base_url} within "
-        f"{format_duration(RPC_READY_TIMEOUT_SECONDS)} ({attempts} attempts). Last error: {last_error}. "
+        f"{config.asset} daemon did not answer any of {list(LIVENESS_PROBES)} at {config.base_url} within "
+        f"{format_duration(RPC_READY_TIMEOUT_SECONDS)} ({attempts} attempts). Last errors, one per probe: "
+        f"{'; '.join(last_errors)}. A `code=-32601 Method not found` on ONE probe is that daemon family not "
+        f"having it and is not the problem; every probe missing is. "
         f"Check that {config.conf_path} has server=1 and a [regtest] section with rpcuser={config.rpc_user}, "
         f"rpcpassword=<yours> and rpcport={config.port}, and that "
         f"ST_REGTEST_{config.asset}_RPC_USER / _RPC_PASSWORD match it."
@@ -891,10 +969,7 @@ def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") 
     """
     node = adapter_for(config)
     capabilities: dict[str, object] = {}
-    try:
-        capabilities["subversion"] = node.call("getnetworkinfo").get("subversion")
-    except RPCError as exc:
-        capabilities["subversion"] = f"(none: getnetworkinfo failed: {exc})"
+    capabilities["subversion"] = _build_string(node)
 
     for method in ("signrawtransactionwithwallet", "signrawtransactionwithkey", "signrawtransaction",
                    "importaddress", "importprivkey", "importdescriptors", "generatetoaddress",
@@ -917,12 +992,107 @@ def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") 
     return capabilities
 
 
+# WHICH FIELD OF `getnetworkinfo` CARRIES THE BUILD STRING, LONGEST-STANDING FIRST.
+#
+# `subversion` FIRST because that is the BIP14 field Bitcoin Core and Litecoin Core both
+# push ("/Satoshi:28.1.0/"), and `version` second because Gridcoin pushes that instead --
+# an integer on Core, but a STRING on Gridcoin (src/rpc/net.cpp: res.pushKV("version",
+# FormatFullVersion())). Order matters for exactly the reason rule 11 gives for
+# _HORIZON_SUFFIXES: both names exist on some family, so the more specific one is asked
+# first rather than whichever happens to be present.
+#
+# MEASURED 2026-09-28 on the operator's Gridcoin testnet daemon, and it is why this is a
+# table rather than one `.get()`. The run printed
+#
+#     subversion=None
+#
+# for the whole of step 3. That `None` is NOT a failed call -- the RPCError branch below
+# writes a sentence, so a bare None proves getnetworkinfo ANSWERED and simply has no
+# `subversion` key. Gridcoin master's getnetworkinfo pushes eleven fields and `subversion`
+# is not among them at any version, while the answer the line wanted was in the SAME
+# RESPONSE under `version`. That is `getblockchaininfo.chain` again, one method over: the
+# right method asked for a key this family does not have, with the value sitting beside it.
+#
+# A source reading about MASTER is not a measurement of the operator's build (their daemon
+# answers False for signrawtransactionwithkey, which master has), which is why this reads
+# both names off the response it actually got and PRINTS WHICH ONE ANSWERED rather than
+# assuming either.
+_BUILD_STRING_FIELDS = ("subversion", "version")
+
+
+def _build_string(node: RegtestRPC) -> str:
+    """The daemon's build string, naming the field it came from -- or why there is none.
+
+    FOUR OUTCOMES, ALL DISTINGUISHABLE IN ONE LINE OF PASTED OUTPUT, because collapsing any
+    two of them is what made `subversion=None` unreadable (rule 14: an absent thing must not
+    print the same as a broken one):
+
+      "/Satoshi:28.1.0/ (getnetworkinfo.subversion)"   the field was there
+      "6.1.0.0-... (getnetworkinfo.version)"           the sibling field was there instead
+      "(none: getnetworkinfo answered ... no ... )"     the method works, neither field exists
+      "(none: getnetworkinfo failed: ...)"              the call itself did not answer
+
+    Only the LAST of those is something being wrong. The third is a fact about the daemon
+    family and reads as one.
+
+    Returns a str always. `node.call()` returning a non-dict is handled rather than allowed
+    to raise AttributeError: this is step 3 of a ten-step run, and an unhandled
+    AttributeError here is scored `FAIL <asset> run: got=AttributeError` by
+    adaptor_regtest_verify.run_chain() -- a version-string probe reported as a crash of the
+    whole harness.
+    """
+    try:
+        info = node.call("getnetworkinfo")
+    except RPCError as exc:
+        return f"(none: getnetworkinfo failed: {exc})"
+    if not isinstance(info, dict):
+        return f"(none: getnetworkinfo answered {type(info).__name__}, not an object: {info!r})"
+    for name in _BUILD_STRING_FIELDS:
+        value = info.get(name)
+        if value not in (None, ""):
+            return f"{value} (getnetworkinfo.{name})"
+    return (
+        f"(none: getnetworkinfo answered {len(info)} field(s) and none of {list(_BUILD_STRING_FIELDS)} "
+        f"is among them -- this daemon family does not report a build string there. "
+        f"The fields it did return: {sorted(info)})"
+    )
+
+
 def method_exists(node: RegtestRPC, method: str) -> bool:
     """Whether the daemon recognizes an RPC name, via `help <method>`.
 
-    `help` returns a STRING for an unknown command rather than raising, on both
-    daemon families, so the test is on the text. Calling the method itself to
-    find out would mean calling `importprivkey` to learn whether it exists.
+    `help` returns a STRING for an unknown command rather than raising, on all
+    three daemon families, so the test is on the text. Verified against
+    Gridcoin's own source as well as measured: src/rpc/server.cpp builds
+    `"help: unknown command: %s\n"` and strips the newline, and Bitcoin Core
+    builds the same sentence -- which is why the prefix, not an exception, is
+    what this reads. Calling the method itself to find out would mean calling
+    `importprivkey` to learn whether it exists.
+
+    THE SECOND PLACE THIS REPOSITORY ANSWERS "DOES THIS DAEMON HAVE METHOD X",
+    AND THE DIFFERENCE IS THE POINT (CLAUDE.md rule 8, which asks for a comment
+    at BOTH sites naming the other). The other is
+    modules/rpc_method_support.rpc_failure_report(), and they ask at opposite
+    ends of a call:
+
+      this function          BEFORE. A proactive probe, one extra round trip,
+                             so a step can decide not to attempt something --
+                             _mine_early_cancel() SKIPs on no `generateblock`
+                             rather than scoring its absence as a refusal.
+      rpc_failure_report()   AFTER. It is handed an exception that already
+                             happened and decides how loudly to report it, from
+                             a table of methods a caller has a FALLBACK for
+                             (`gettxout`, which Gridcoin does not have).
+
+    Neither can replace the other: a probe cannot quiet an error that has
+    already been raised four routes deep, and an error-code table cannot stop a
+    harness attempting something it should skip. They must not disagree about
+    which absences are expected, which is why each names the other here.
+
+    A THIRD reader of the same fact is regtest/steps._WALLET_CAPABILITY_MARKERS,
+    which folds "method not found" into a redeem-stage classification. That one
+    is a per-stage diagnosis rather than a capability question, and it is named
+    here so a reader who changes what a -32601 means finds all three.
     """
     try:
         text = node.call("help", method)

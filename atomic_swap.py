@@ -387,21 +387,51 @@ def client_for(asset: str):
 def chain_name(asset: str, client) -> str:
     """Which network this daemon is on, ASKED rather than inferred from its port.
 
-    Three routes because the three daemons differ: Bitcoin and Litecoin answer
-    `getblockchaininfo` with a `chain`; Gridcoin is an older fork whose `getinfo` carries a
-    `testnet` boolean instead. Inferring from the port is what this refuses to do -- a port
-    is a convention and a convention is not a check, and config.py records what happened
-    the last time one was trusted.
+    Two routes because the two daemon families keep the answer in different places: Bitcoin
+    and Litecoin answer `getblockchaininfo` with a `chain`; Gridcoin does not have that KEY
+    and carries a `testnet` boolean on `getinfo` instead. Inferring from the port is what
+    this refuses to do -- a port is a convention and a convention is not a check, and
+    config.py records what happened the last time one was trusted.
+
+    GRIDCOIN DOES HAVE `getblockchaininfo`. THIS FUNCTION USED TO SAY IT DOES NOT, AND THAT
+    IS THE DEFECT WORTH RECORDING HERE, because the claim decided which branch a reader
+    thought GRC took. Measured 2026-09-28 on the operator's testnet daemon, through
+    adaptor_regtest_verify.py's step 2:
+
+        FAIL  GRC getblockchaininfo.chain: got=(none)  expected=one of ('regtest','test',...)
+
+    `got=(none)` with no exception text is what a SUCCESSFUL call with a missing key prints;
+    the failed-call branch prints the error. So the method answered. Gridcoin master registers
+    it (src/rpc/server.cpp) and its response pushes eight fields -- blocks, in_sync,
+    moneysupply, difficulty, testnet, errors -- with no `chain` among them at any version.
+
+    THE OUTCOME WAS ALWAYS RIGHT AND THE REASON WAS WRONG, which is the only reason this is a
+    comment change and not a logic change: GRC falls through on the missing key rather than on
+    a method-not-found, reaches `getinfo`, and is named from its `testnet` boolean either way.
+    A future reader trusting the old sentence would have gone looking for a -32601 that never
+    arrives (rule 16: a wrong comment is a bug, and fix it with the same seriousness).
+
+    NOT CHANGED HERE, and named as work rather than done: `getblockchaininfo` carries
+    `testnet` in the SAME response this function already reads, so the GRC answer could come
+    from one round trip instead of two -- and Gridcoin's own command table marks `getinfo`
+    heritage_removed_upstream, so this file's only GRC route is the deprecated one. That is a
+    change to the gate that refuses a mainnet daemon, on the file that funds legs, so it is
+    the operator's call rather than a tidy-up (rule 16).
     """
     call = client_caller(client)
     try:
         info = call("getblockchaininfo") or {}
         if info.get("chain"):
             return str(info["chain"])
-    except Exception as error:  # noqa: BLE001 -- checked: Gridcoin has no getblockchaininfo and answers with a method-not-found, which is the signal to try getinfo rather than a failure. The reason is folded into the refusal below if every route fails.
-        first = f"getblockchaininfo: {type(error).__name__}"
+    except Exception as error:  # noqa: BLE001 -- checked: this is a PROBE for one of two places the answer lives, and any failure of it is the signal to try `getinfo` rather than a verdict. A daemon older than the caller's assumptions, a method this family never had, and a transport failure all mean the same thing here: ask the other way. Nothing is swallowed -- the reason is carried in `first` and folded into the refusal below if BOTH routes fail, and neither route can return a value a caller would mistake for a named network.
+        # THE MESSAGE, NOT JUST THE TYPE. `getblockchaininfo: RPCError` cannot be told apart
+        # from a wrong rpcpassword, and "nothing answered" is what sent the operator to check
+        # credentials that were fine on 2026-09-28 when the real cause was a method this
+        # family does not have. The daemon's own `code=-32601` is the one thing that separates
+        # the two, and it is inside the message.
+        first = f"getblockchaininfo: {type(error).__name__}: {error}"
     else:
-        first = "getblockchaininfo: answered with no `chain`"
+        first = "getblockchaininfo: answered, with no `chain` key -- which is Gridcoin's shape, not a fault"
     try:
         info = call("getinfo") or {}
     except Exception as error:

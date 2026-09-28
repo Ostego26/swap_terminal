@@ -125,8 +125,8 @@ import struct
 import sys
 
 import base58
-import bech32
 from modules import address_network as _address_network
+from modules.address_network import decode_segwit_address
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime, describe_locktime
 from modules.utils import hash160
 
@@ -244,16 +244,47 @@ def parse_and_reencode_as_testnet_p2pkh(address: str) -> str:
         # to testnet without looking at it. Checking it is a fund-path change
         # (it would start rejecting addresses this accepts today), so it is
         # reported, not made.
-        _hrp, data = bech32.bech32_decode(raw)
-        if data:
-            program = bech32.convertbits(data[1:], 5, 8, False)
-            if program and len(program) == WITNESS_V0_KEYHASH_LEN:
-                reencoded = base58.b58encode_check(TESTNET_P2PKH_VERSION + bytes(program)).decode()
+        # decode_segwit_address() rather than bech32.bech32_decode(), for the reason in
+        # modules/address_network.py's BIP-350 block: the library decoder knows only BIP-173's
+        # checksum constant and returned None for every bech32m address, so a Taproot address
+        # reached the ValueError below and was reported as an INVALID FORMAT. It is not: it is
+        # a valid address this CONVERSION cannot serve, and those are different facts.
+        decoded = decode_segwit_address(raw)
+        if decoded.ok:
+            if decoded.witness_version != 0:
+                # THE REFUSAL IS RIGHT AND THE OLD MESSAGE WAS WRONG. A witness v1 output key is
+                # 32 bytes of x-only public key, not a HASH160, so there is NO P2PKH equivalent
+                # to re-encode it to -- this is a fact about the encodings, not a gap in this
+                # function, and no amount of work here would produce one. Saying "invalid
+                # address format" about a spendable Taproot address is the confident-false
+                # sentence modules/address_authority.py's header calls worse than the burn.
+                raise ValueError(
+                    f"{address} is a VALID {decoded.encoding} witness v{decoded.witness_version} "
+                    f"address ({decoded.why}), but this function converts to a testnet P2PKH and a "
+                    f"{len(decoded.program)}-byte witness v{decoded.witness_version} program is not "
+                    f"a HASH160. There is no P2PKH equivalent of a Taproot output, so this is a "
+                    f"refusal about THE CONVERSION and not about the address. The address itself "
+                    f"passes modules/address_authority.check_address()"
+                )
+            if len(decoded.program) == WITNESS_V0_KEYHASH_LEN:
+                reencoded = base58.b58encode_check(TESTNET_P2PKH_VERSION + decoded.program).decode()
                 logger.debug(f"Successfully re-encoded Bech32 address to Base58: {reencoded}")
                 return reencoded
-    except Exception as e:  # noqa: BLE001 -- checked: same probe. Falling out of this block reaches the `raise ValueError` below, so an undecodable address is an error, never a silent pass-through.
+            raise ValueError(
+                f"{address} is a valid witness v0 address with a {len(decoded.program)}-byte "
+                f"program (P2WSH), and a script hash has no P2PKH equivalent either. Same "
+                f"distinction as the Taproot case above: the address is fine, the conversion is "
+                f"not available"
+            )
+    except ValueError:
+        # A NAMED REFUSAL FROM THE BLOCK ABOVE, RE-RAISED RATHER THAN SWALLOWED. Without this
+        # clause the broad `except Exception` below would catch the very messages just written,
+        # log them at DEBUG, and fall through to the generic "Invalid address format" -- turning
+        # a precise refusal back into the vague one this change exists to remove.
+        raise
+    except Exception as e:  # noqa: BLE001 -- checked: same FORMAT PROBE as the base58 block above. A failure here means "not decodable as segwit either", and the `raise ValueError` below turns that into an error rather than a value the caller could mistake for an address. The named ValueErrors raised inside the block are re-raised by the clause above and never reach here.
         logger.debug(f"Bech32 decode failed: {e}")
-    
+
     raise ValueError(f"Invalid address format: {address}")
 
 def _extract_hash160_from_testnet_p2pkh(address: str) -> bytes:

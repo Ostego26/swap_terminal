@@ -55,6 +55,12 @@ import pytest
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 
+import valid_addresses  # noqa: E402  same
+from bip350_vectors import (  # noqa: E402  same
+    BIP350_INVALID,
+    BIP350_VALID,
+    WITNESS_VERSION_OPCODE,
+)
 from modules.address_authority import (  # noqa: E402  the path shim above must run first
     INVALID,
     NOT_EXPRESSED,
@@ -66,10 +72,12 @@ from modules.address_network import (  # noqa: E402  the path shim above must ru
     MAINNET,
     TESTNET,
     XRP_BASE58_ALPHABET,
+    decode_segwit_address,
     decodes_as_address,
 )
 from valid_addresses import (  # noqa: E402  conftest puts tests/ on sys.path
     ALL_VALID,
+    DELIBERATELY_MAINNET,
     INVALID_PLACEHOLDERS,
 )
 
@@ -124,6 +132,25 @@ BASE58_LITERAL = re.compile(
 )
 
 SKIP_DIRECTORIES = {".git", "__pycache__", "node_modules", ".venv", "grc-sol-swap"}
+
+# THE ONE FILE ALLOWED TO HOLD ADDRESS LITERALS, AND IT IS A CATEGORY RATHER THAN AN EXEMPTION.
+#
+# `tests/bip350_vectors.py` holds BIP-350's PUBLISHED test vectors, byte-exact. Deriving them
+# would destroy the only property they have: they were produced by neither this repository's
+# decoder nor tests/valid_addresses.py's encoder, so if both carry the same sign error these
+# catch it and nothing else in the suite can.
+#
+# Added 2026-09-28, and NOT as a ratchet or a baseline line -- rule 19 forbids both, and
+# forbids them most strongly for code being written now. It is the same shape as this file's
+# existing `_is_an_alphabet()` and `_is_a_solana_pubkey()` exclusions: a named class of string
+# that is not an address somebody typed, with the reason stated at the exclusion.
+#
+# AND IT IS NOT A HOLE. test_the_published_vectors_are_not_a_place_to_hide_an_address() below
+# runs every valid vector through check_address() and every invalid one through the decoder, so
+# an invented address could not survive in there either -- it would fail as loudly as a literal
+# in any other file. One file, named exactly, by relative path: a directory would let the next
+# file slip in beside it.
+LITERALS_ALLOWED_IN = {"tests/bip350_vectors.py"}
 
 
 def _is_a_dict_key(match: re.Match) -> bool:
@@ -185,6 +212,7 @@ def _source_files() -> list[pathlib.Path]:
         path
         for path in sorted(REPOSITORY_ROOT.rglob("*.py"))
         if not SKIP_DIRECTORIES & set(path.parts)
+        and path.relative_to(REPOSITORY_ROOT).as_posix() not in LITERALS_ALLOWED_IN
     ]
 
 
@@ -412,3 +440,69 @@ def test_no_shared_fixture_is_a_mainnet_address(name):
     assert verdict.network != MAINNET, f"{name} = {ALL_VALID[name]} is MAINNET: {verdict.why}"
     if verdict.network != NOT_EXPRESSED:
         assert verdict.network == TESTNET, f"{name} = {ALL_VALID[name]} is not testnet: {verdict.why}"
+
+
+# ---------------------------------------------------------------------------------------
+# THE EXEMPTED FILE IS ITSELF CHECKED, so LITERALS_ALLOWED_IN is a category and not a hole.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_exempted_file_is_the_only_one_and_it_exists():
+    """A skip entry naming a file that has been moved or renamed silently stops exempting
+    anything AND silently stops being checked. Rule 2's guard: grep for the NAME."""
+    assert {"tests/bip350_vectors.py"} == LITERALS_ALLOWED_IN, (
+        "the exemption is one named file with a stated reason; widening it needs its own argument"
+    )
+    for relative in LITERALS_ALLOWED_IN:
+        assert (REPOSITORY_ROOT / relative).is_file(), f"{relative} is named in the skip list but is not there"
+
+
+def test_the_published_vectors_are_not_a_place_to_hide_an_address():
+    """EVERY literal in the exempted file goes through the real authority anyway.
+
+    This is what makes the exemption safe. The gate no longer walks that file, so without this
+    an invented address dropped into it would be checked by nothing -- which is exactly the
+    "a gate with nothing to find and a gate that cannot find anything look identical" failure
+    this file's own _candidates() docstring records.
+
+    The valid vectors must be VALID under check_address for the asset their hrp names; the
+    invalid ones must be refused by the decoder. Both directions, because a table that only
+    asserted the valid half would pass with the whole invalid half deleted.
+    """
+    for address, expected_script in BIP350_VALID:
+        asset = "BTC"  # every BIP-350 vector uses Bitcoin's bc/tb hrps
+        verdict = check_address(asset, address)
+        assert verdict.state != INVALID, f"{address} is a published VALID vector: {verdict.why}"
+        decoded = decode_segwit_address(address)
+        script = bytes([WITNESS_VERSION_OPCODE[decoded.witness_version], len(decoded.program)])
+        assert (script + decoded.program).hex() == expected_script, (
+            f"{address} decoded to a program BIP-350's table does not predict"
+        )
+
+    for address, why in BIP350_INVALID:
+        assert not decode_segwit_address(address).ok, (
+            f"{address} is a published INVALID vector ({why}) and was accepted"
+        )
+
+
+@pytest.mark.parametrize("name", sorted(DELIBERATELY_MAINNET))
+def test_the_deliberately_mainnet_fixtures_really_are_mainnet(name):
+    """WHAT MAKES `DELIBERATELY_MAINNET` A CLAIM AND NOT AN ESCAPE HATCH.
+
+    Those names are excluded from ALL_VALID, so the two sweeps above no longer see them. This
+    asserts the exclusion was earned: each one must be a VALID address AND actually resolve to
+    MAINNET. A name listed there that turned out to be testnet would be a fixture quietly
+    removed from the gate for no reason, and one that turned out to be invalid would be an
+    invented address hidden behind a comment -- both fail here.
+
+    The reason string is required too, because "why does this have to be mainnet" is the whole
+    justification and a blank one means nobody wrote it down.
+    """
+    address = getattr(valid_addresses, name)
+    verdict = check_address(fixture_asset(name), address)
+    assert verdict.state != INVALID, f"{name} is exempted from the sweep but does not decode: {verdict.why}"
+    assert verdict.network == MAINNET, (
+        f"{name} is listed as deliberately MAINNET but resolves to {verdict.network!r}. If it is "
+        f"a testnet address it belongs in the ordinary sweep, not the exemption"
+    )
+    assert DELIBERATELY_MAINNET[name].strip(), f"{name} has no stated reason for being mainnet"

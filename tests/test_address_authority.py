@@ -38,6 +38,7 @@ from __future__ import annotations
 import base58
 import bech32
 import pytest
+from bip350_vectors import CORRUPTED_TAPROOT
 from chains.registry import build_adapters
 from config import Config
 from conftest import RPC_FIXTURE_AUTH
@@ -63,17 +64,25 @@ from modules.address_network import (
     TESTNET,
     is_valid_address,
 )
+from modules.atomic_htlc_scripts import parse_and_reencode_as_testnet_p2pkh
 from modules.htlc_fee import usable_platform_fee_address
 from services.payout_service import process_pending_payouts
 from services.swap_service import DEPOSIT_TAG_COLUMN, create_swap
 from services.swap_view import deposit_instruction
 from valid_addresses import (
+    BTC_FUTURE_WITNESS_V5,
     BTC_PARTICIPANT,
+    BTC_REGTEST_TAPROOT,
+    BTC_TAPROOT_MAINNET,
+    BTC_TAPROOT_PAYOUT,
     GRC_PAYOUT,
     INVALID_PLACEHOLDERS,
     LTC_P2SH_SCRIPT_ADDRESS2,
     LTC_PARTICIPANT,
     LTC_REGTEST_DEPOSIT,
+    LTC_REGTEST_TAPROOT,
+    LTC_TAPROOT_PAYOUT,
+    LTC_TAPROOT_PLATFORM_FEE,
     SOL_PAYOUT,
     XMR_PAYOUT,
     XRP_HOT_ACCOUNT,
@@ -1097,3 +1106,170 @@ def test_an_unset_fee_variable_still_charges_nothing_and_says_so(monkeypatch):
 
     assert fee.address is None
     assert "is unset" in fee.why
+
+
+# =======================================================================================
+# TAPROOT ON THE MONEY PATHS. THE OUTAGE, ASSERTED AT THE SITES WHERE IT COST SOMETHING.
+#
+# tests/test_address_network.py holds the BIP-350 vectors and the decoder. This holds the
+# VERDICTS, because the decoder being right is not the same claim as the guards using it --
+# and the guards are where a credited swap was being killed.
+# =======================================================================================
+
+
+@pytest.mark.parametrize(("asset", "fixture"), [
+    ("BTC", BTC_TAPROOT_PAYOUT),
+    ("BTC", BTC_TAPROOT_MAINNET),
+    ("BTC", BTC_REGTEST_TAPROOT),
+    ("LTC", LTC_TAPROOT_PAYOUT),
+    ("LTC", LTC_REGTEST_TAPROOT),
+])
+def test_a_taproot_address_is_VALID_and_not_refused(asset, fixture):
+    """THE BLOCKING DEFECT. Every one of these was INVALID before 2026-09-28, with the reason
+    "the checksum or the character set is wrong" -- a confident, false sentence about a
+    spendable address. This module's own header says a false refusal is WORSE than the burn it
+    was written to prevent, and it was right: a burn loses one payout, this refused every
+    Taproot customer and terminally failed the ones already credited."""
+    verdict = check_address(asset, fixture)
+    assert verdict.state == VALID, verdict.why
+    assert not verdict.refuses, "refuses must be False or every guard on the money path stops"
+    assert "bech32m" in verdict.why, (
+        "and the verdict must NAME the encoding: 'valid LTC bech32' beside a ltc1p... address "
+        "is the near-miss that makes an operator doubt the whole line"
+    )
+
+
+def test_the_network_check_still_refuses_a_MAINNET_taproot_on_a_testnet_process():
+    """THE FIX MUST NOT BE A LOOSENING. The 2026-09-27 accident -- a daemon started without
+    -testnet putting a MAINNET address where a testnet deposit was expected -- is caught for
+    Taproot exactly as it is for base58 and bech32 v0. Accepting bech32m without this would
+    have traded one live-money defect for another."""
+    assert check_receive_address("BTC", BTC_TAPROOT_PAYOUT, TESTNET).state == VALID
+    refused = check_receive_address("BTC", BTC_TAPROOT_MAINNET, TESTNET)
+    assert refused.state == INVALID
+    assert refused.refuses
+    assert "mainnet" in refused.why and "testnet" in refused.why
+
+
+def test_a_corrupted_taproot_address_is_still_INVALID():
+    """The other half, and the reason this is a fix rather than a shortcut. Accepting anything
+    whose checksum matches EITHER constant would accept a v1 address carrying a bech32 checksum
+    -- a corruption, not another spelling. BIP-350's own invalid table includes it."""
+    verdict = check_address("BTC", CORRUPTED_TAPROOT)
+    assert verdict.state == INVALID
+    assert verdict.refuses
+
+
+def test_a_taproot_address_pasted_under_the_wrong_asset_is_still_refused():
+    """A BTC taproot address in an LTC field decodes perfectly and pays a chain we are not
+    watching. The hrp is what separates them, and it still does."""
+    verdict = check_address("LTC", BTC_TAPROOT_MAINNET)
+    assert verdict.state == INVALID, verdict.why
+
+
+def test_a_taproot_address_is_refused_for_gridcoin_which_has_no_bech32_at_all():
+    """Gridcoin's chainparams sets no bech32_hrp, so there is no such thing as a GRC segwit
+    address. bech32m does not change that and must not be read as widening it."""
+    verdict = check_address("GRC", BTC_TAPROOT_MAINNET.replace("bc1", "grc1"))
+    assert verdict.state == INVALID, verdict.why
+
+
+def test_a_future_witness_version_is_NOT_refused():
+    """REFUSE ONLY WHAT IS CONTRADICTED, on the guard rather than in the decoder. A well-formed
+    witness v5 address is a version this repository has not heard of, which is the same
+    category the unknown hrp `rltc` was in until 2026-09-27 -- and bech32m's absence WAS this
+    failure. Refusing v5 would be committing it again one door along."""
+    verdict = check_address("BTC", BTC_FUTURE_WITNESS_V5)
+    assert not verdict.refuses, verdict.why
+
+
+def test_the_platform_fee_is_collected_to_a_taproot_address_again():
+    """1.5% OF EVERY REDEEM. modules/htlc_fee.usable_platform_fee_address() asks check_address,
+    so a valid Taproot PLATFORM_FEE_<ASSET>_ADDRESS silently produced NO fee output and the fee
+    stayed with the redeemer. Silently, because dropping the output is the deliberate and
+    correct behavior for a genuinely bad address -- burning the fee or stranding the leg are
+    both worse -- which is exactly why a FALSE refusal here was invisible."""
+    output = usable_platform_fee_address(
+        "LTC", {"PLATFORM_FEE_LTC_ADDRESS": LTC_TAPROOT_PLATFORM_FEE}
+    )
+    assert output.address == LTC_TAPROOT_PLATFORM_FEE, output.why
+    assert output.verified, "and it is CHECKED, not merely unrefused"
+
+
+def test_a_corrupted_taproot_fee_address_still_drops_the_output_rather_than_burning_it():
+    """The guard that makes the line above safe: the fee is dropped, the redeem still goes
+    through, and the reason says which variable to fix."""
+    output = usable_platform_fee_address(
+        "BTC",
+        {"PLATFORM_FEE_BTC_ADDRESS": CORRUPTED_TAPROOT},
+    )
+    assert output.address is None
+    assert not output.verified
+    assert "NO FEE OUTPUT WAS ADDED" in output.why
+
+
+def test_the_p2pkh_converter_refuses_taproot_by_naming_the_CONVERSION_not_the_address():
+    """A DIFFERENT KIND OF FIX: here the refusal was always RIGHT and the MESSAGE was wrong.
+    A witness v1 output key is 32 bytes of x-only public key, not a HASH160, so there is no
+    P2PKH equivalent -- no work in that function could produce one. But it said "Invalid
+    address format", which is false about the address and sends the reader to check a wallet
+    that is fine. A wrong message is a bug (rule 16)."""
+    with pytest.raises(ValueError) as caught:
+        parse_and_reencode_as_testnet_p2pkh(BTC_TAPROOT_MAINNET)
+    message = str(caught.value)
+    assert "VALID bech32m" in message, "it must concede the address is good"
+    assert "no P2PKH equivalent" in message
+    assert "Invalid address format" not in message, "the false sentence must be gone"
+    # And the v0 path it exists for is untouched.
+    assert parse_and_reencode_as_testnet_p2pkh(
+        "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+    ).startswith("m")
+
+
+def test_a_credited_swap_paying_out_to_TAPROOT_is_actually_SENT(tmp_path):
+    """THE BLOCKING DEFECT, ASSERTED WHERE IT COST MONEY RATHER THAN WHERE IT WAS DECIDED.
+
+    A swap in `payout_pending` has already had its deposit taken and credited. Before
+    2026-09-28 a Taproot payout address made `check_address` refuse, so this function set
+    status='failed', wrote a failed_reason, and `continue`d -- no send, no payouts row, no
+    reserved inventory. 'failed' is terminal BY DESIGN and correctly so, because a
+    'payout_pending' swap would be re-read and re-refused on every cycle forever. Which means
+    the customer's GRC was in our wallet and their swap was permanently dead, with no retry
+    path and nothing wrong with their address.
+
+    That is strictly the outage this module's header calls WORSE than the burn it replaced, and
+    it is why the decoder test in test_address_network.py is not sufficient on its own: the
+    decoder being right and the guard using it are two claims.
+
+    MUTATION: revert address_authority to bech32.bech32_decode() and `sends` is empty again.
+    """
+    adapter = RecordingAdapter()
+    conn = _seed_pending(tmp_path / "taproot.db", to_asset="LTC",
+                         payout_address=LTC_TAPROOT_PAYOUT)
+
+    process_pending_payouts(conn, {}, {"LTC": adapter})
+
+    assert adapter.sends == [(LTC_TAPROOT_PAYOUT, 0.0975)], (
+        f"a credited swap to a valid Taproot address sent nothing: {adapter.sends}"
+    )
+    swap = conn.execute("SELECT status, failed_reason FROM swaps WHERE id='s1'").fetchone()
+    assert swap["status"] == "completed", swap["failed_reason"]
+    assert conn.execute("SELECT COUNT(*) AS n FROM payouts").fetchone()["n"] == 1
+
+
+def test_a_swap_paying_out_to_TAPROOT_can_be_CREATED(tmp_path):
+    """THE OTHER END. services/swap_service.create_swap() refused outright -- ValueError, zero
+    rows written -- so no customer using a Taproot receive address could open a swap at all.
+    Not an edge case: bech32m is the default receive type in Sparrow, Muun, Phoenix and
+    `bitcoin-cli getnewaddress "" bech32m`."""
+    conn = _quote_db(tmp_path, "create_taproot.db")
+    source = StubSourceChain(GRC_PAYOUT)
+    swap = create_swap(
+        conn, CONFIG_TESTNET_GRC,
+        {"GRC": source, "LTC": StubDestination()}, "q1", LTC_TAPROOT_PAYOUT,
+    )
+    assert swap is not None
+    assert conn.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1
+    assert conn.execute(
+        "SELECT payout_address AS a FROM swaps"
+    ).fetchone()["a"] == LTC_TAPROOT_PAYOUT
