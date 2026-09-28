@@ -184,8 +184,24 @@ def test_the_cancel_verdict_separates_relay_from_consensus():
         asset="GRC", cancel_accepted_at_t1=OK,
         cancel_refused_before_t1_by_relay=OK, cancel_refused_before_t1_by_consensus=SKIP,
     )
-    assert "RELAY-refused" in relay_only.cancel_verdict()
-    assert "NOT measured" in relay_only.cancel_verdict()
+    verdict = relay_only.cancel_verdict()
+    assert "RELAY-refused" in verdict
+    # CASE-INSENSITIVE, because the property is that the verdict SAYS the stronger claim was
+    # not measured -- not how it capitalizes it. This pinned "NOT measured" and went red when
+    # the sentence was rewritten to "NOT MEASURED", which is a test asserting a spelling.
+    assert "not measured" in verdict.lower()
+
+    # AND IT MUST NOT LEAVE THE ANSWER AS SIMPLY UNKNOWN. "We could not run the check" and
+    # "nobody knows" are different states, and reporting the second when the first is true errs
+    # the same way reporting a SKIP as a pass does -- just in the other direction. Gridcoin's
+    # rule is at an exact line and the reader is entitled to it.
+    assert "src/validation.cpp:1777" in verdict, "the consensus rule is cited"
+    assert "READ IN GRIDCOIN'S SOURCE" in verdict, "and labeled a reading, every time"
+    assert "not a substitute for measuring" in verdict
+
+    # The measured half is what isolates nLockTime, and the verdict has to say why.
+    assert "SAME BYTES" in verdict
+    assert "only the height did" in verdict
     both = adaptor_steps.ChainOutcome(
         asset="BTC", cancel_accepted_at_t1=OK,
         cancel_refused_before_t1_by_relay=OK, cancel_refused_before_t1_by_consensus=OK,
@@ -1653,3 +1669,43 @@ def test_the_split_is_built_from_the_payment_that_justified_carrying_on(console,
     assert "listtransactions" not in node.methods_called(), (
         "step 5's answer is reused, not re-derived"
     )
+
+
+def test_the_source_reading_never_claims_to_be_a_measurement():
+    """rule 17's line, held on a string an operator reads off a screen. The reading upgrades
+    "nobody knows" to "here is the rule and where it lives" -- it must never upgrade a SKIP to
+    a pass, and the words that would do that are the ones checked for here."""
+    reading = adaptor_steps.GRIDCOIN_FINALITY_SOURCE_READING
+    assert "not measured here" in reading.lower()
+    assert "why this stays a reading" in reading.lower()
+    for overclaim in ("MEASURED on", "we measured", "established on this chain", "CONSENSUS-enforced:"):
+        assert overclaim.lower() not in reading.lower(), (
+            f"{overclaim!r} would read as a measurement of the operator's chain"
+        )
+    # It names the three things checked in the RPC table, so nobody re-derives the absence.
+    for absent in ("generateblock", "getblocktemplate", "submitblock"):
+        assert absent in reading, f"{absent} is named as checked-and-absent"
+
+
+def test_the_reject_reason_probe_never_becomes_a_verdict(console, monkeypatch):
+    """testmempoolaccept is a diagnostic here, not evidence. A daemon without the method, a
+    differently-shaped answer, or an ALLOWED transaction must all yield "" rather than
+    something a caller could print as a finding."""
+    for answer in (
+        {},                                        # not a list
+        [],                                        # empty
+        [{"allowed": True}],                       # it would be accepted -- says nothing
+        [{"allowed": False}],                      # refused, but no reason given
+        ["not-a-dict"],
+    ):
+        run, _ = _run_with(console, monkeypatch, {"testmempoolaccept": answer}, asset="GRC")
+        assert adaptor_steps.mempool_reject_reason(run, "00") == "", f"{answer!r} must yield no reason"
+
+    run, _ = _run_with(console, monkeypatch, {}, asset="GRC")  # method absent entirely
+    assert adaptor_steps.mempool_reject_reason(run, "00") == ""
+
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"testmempoolaccept": [{"allowed": False, "reject-reason": "tx-nonstandard"}]}, asset="GRC",
+    )
+    assert adaptor_steps.mempool_reject_reason(run, "00") == "tx-nonstandard"

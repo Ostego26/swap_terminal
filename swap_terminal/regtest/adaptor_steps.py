@@ -342,9 +342,11 @@ class ChainOutcome:
             )
         if self.cancel_refused_before_t1_by_relay == OK:
             return (
-                "nLockTime on the 2-of-2 is RELAY-refused before T1 and accepted at T1. The stronger "
-                "claim -- that a miner could not have included it -- was NOT measured; see the "
-                "generateblock line above for why"
+                "nLockTime on the 2-of-2 is RELAY-refused before T1 and the SAME BYTES are "
+                "accepted at T1 -- which isolates nLockTime as the cause, because nothing about "
+                "the transaction changed and only the height did. That a MINER could not have "
+                "included it is NOT MEASURED here (no generateblock on this chain), but it is "
+                "not unknown either: " + GRIDCOIN_FINALITY_SOURCE_READING
             )
         return "nLockTime on the 2-of-2: accepted at T1, but the early refusal was never measured"
 
@@ -850,6 +852,47 @@ def already_funded(run: Run, signing: str) -> bool:
     run.say("carrying on: this run funds itself from that payment and will not ask the wallet "
             "to create or sign anything")
     return True
+
+
+# WHERE GRIDCOIN ACTUALLY ENFORCES nLockTime, read 2026-09-28 at master after the first GRC
+# run reported `10b CONSENSUS` as a SKIP and left it at "NOT ESTABLISHED".
+#
+# A SKIP IS STILL NOT A PASS AND THIS DOES NOT MAKE IT ONE. Nothing below is a measurement on
+# the operator's chain, and it is labeled as a reading every time it is printed. But "we could
+# not run the check" and "nobody knows the answer" are different states, and reporting the
+# second when the first is true is the same defect as reporting a SKIP as a pass -- it just
+# errs in the other direction. The rule is at an exact line and a reader is entitled to it.
+#
+# THREE INDEPENDENT BARRIERS, one measured and two read:
+#
+#   MEASURED  the mempool refuses it, and the same bytes are accepted at T1. Finality is
+#             checked inside IsStandardTx (src/policy/policy.cpp:57) and reported by
+#             AcceptToMemoryPool as `tx-nonstandard` (src/validation.cpp:2176) -- a reason that
+#             covers dust and odd scripts too, which is exactly why the same-bytes control at
+#             T1 is what carries the argument rather than the reason string.
+#   READ      the block ASSEMBLER skips non-final transactions outright
+#             (src/miner.cpp:413: `if (tx.IsCoinBase() || tx.IsCoinStake() || !IsFinalTx(tx,
+#             nHeight)) continue;`), so an honest Gridcoin staker never puts one in a block.
+#   READ      and a block that contained one anyway is REJECTED BY CONSENSUS. AcceptBlock()
+#             (src/validation.cpp:1680) walks every transaction and at :1777 does
+#             `if (!IsFinalTx(tx, nHeight, block.GetBlockTime())) return state.DoS(10, ... "contains
+#             a non-final transaction")`. DoS(10) is a peer-banning score on an INVALID block --
+#             the network rejects it, so forcing the transaction in does not help an attacker.
+#
+# WHAT WOULD TURN THE SECOND AND THIRD INTO MEASUREMENTS: an RPC that runs block validation
+# without mining. Bitcoin has two (`generateblock`, and `getblocktemplate` in proposal mode);
+# Gridcoin's RPC table has neither -- checked, not assumed, by grepping src/rpc/server.cpp for
+# getblocktemplate, submitblock, testblockvalidity and generateblock. `testmempoolaccept` is
+# there and is a MEMPOOL check, so it cannot reach this rule either.
+GRIDCOIN_FINALITY_SOURCE_READING = (
+    "READ IN GRIDCOIN'S SOURCE (not measured here, and not a substitute for measuring): "
+    "AcceptBlock() rejects a block containing a non-final transaction -- src/validation.cpp:1777, "
+    "`state.DoS(10, \"contains a non-final transaction\")` -- so nLockTime IS a consensus rule on "
+    "this chain, not merely relay policy. The block assembler also skips non-final transactions "
+    "(src/miner.cpp:413), so an honest staker never includes one. Gridcoin has no RPC that runs "
+    "block validation without mining -- no generateblock, no getblocktemplate proposal mode, no "
+    "submitblock -- which is why this stays a reading."
+)
 
 
 def _report_gridcoin_lock_state(run: Run) -> None:
@@ -1875,19 +1918,56 @@ def step_10_cancel_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
     run.say(f"tip={tip}, T1={built.t1}, T2={built.t2} -- the cancel is not final until height {built.t1}")
     run.check("we are genuinely before T1", tip < built.t1, True, OK if tip < built.t1 else FAIL)
 
+    # THE REASON, WHEN THE DAEMON WILL GIVE ONE. `sendrawtransaction` answers `code=-22 message=TX
+    # rejected` and nothing else, which is why the check below cannot say WHY it was refused.
+    # testmempoolaccept exists on Gridcoin (src/rpc/server.cpp:640) and returns a structured
+    # `reject-reason`, so ask it first -- and it moves nothing, which sendrawtransaction cannot
+    # promise.
+    reason = mempool_reject_reason(run, cancel_hex)
+    if reason:
+        run.say(f"testmempoolaccept on the early cancel: reject-reason={reason!r}")
+
     txid, message = _broadcast(run, cancel_hex, f"Tx_cancel EARLY (nLockTime {built.cancel.locktime})")
     refused = txid is None
     run.check(
-        "10a RELAY refuses the early cancel", message if refused else f"ACCEPTED as {txid}",
+        "10a RELAY refuses the early cancel",
+        f"{message}{f' [reject-reason={reason}]' if reason else ''}" if refused
+        else f"ACCEPTED as {txid}",
         "a non-final refusal from the mempool", OK if refused else FAIL,
     )
     outcome.cancel_refused_before_t1_by_relay = OK if refused else FAIL
+    if reason:
+        # AND THE REASON ALONE CANNOT ISOLATE NON-FINALITY ON THIS CHAIN, which is worth saying
+        # rather than letting a specific-looking string imply more than it does. Gridcoin checks
+        # finality inside IsStandardTx (src/policy/policy.cpp:57), and
+        # AcceptToMemoryPool reports that failure as `tx-nonstandard`
+        # (src/validation.cpp:2176-2177) -- the same reason a dust output or an odd script gives.
+        # What isolates it is the control below: the SAME BYTES at T1.
+        run.say("that reason is not specific to nLockTime -- Gridcoin folds finality into "
+                "IsStandardTx, so `tx-nonstandard` covers dust and odd scripts too. The control "
+                "is 10c: the SAME BYTES, accepted once the height moves")
 
     _mine_early_cancel(run, built, cancel_hex, outcome)
 
     _wait_or_mine_to(run, built.t1)
+    early_hex = cancel_hex
     txid, message = _broadcast(run, cancel_hex, f"Tx_cancel AT T1 (height {current_height(run)} >= {built.t1})")
     accepted = txid is not None
+    # THE BYTES ARE ASSERTED IDENTICAL, AND THAT IS THE WHOLE ARGUMENT. Neither refusal message
+    # on this chain names nLockTime -- `-22 TX rejected` from sendrawtransaction, at best
+    # `tx-nonstandard` from testmempoolaccept -- so on their own they prove only "refused for
+    # some reason", which a bad signature or a dust output would satisfy equally. What isolates
+    # nLockTime is that the SAME TRANSACTION, byte for byte, was refused at one height and
+    # accepted at another. Nothing about the transaction changed; only the chain did.
+    #
+    # It was already true -- both broadcasts read the same `cancel_hex` -- and nothing said so,
+    # so the pair read as two independent checks instead of one controlled experiment.
+    run.check(
+        "the early and at-T1 broadcasts are the SAME BYTES (this is what isolates nLockTime)",
+        f"{len(early_hex) // 2} bytes, identical" if early_hex == cancel_hex else "DIFFERENT",
+        "identical -- otherwise the pair proves nothing about finality",
+        OK if early_hex == cancel_hex else FAIL,
+    )
     run.check(
         "10c the cancel is ACCEPTED at T1", txid if accepted else f"REFUSED: {message}",
         "the same transaction, now final", OK if accepted else FAIL,
@@ -1900,6 +1980,32 @@ def step_10_cancel_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
               "the same txid", OK if txid == cancel_txid else FAIL)
     _mine(run, 1)
     _spend_the_cancel_output(run, built, cancel_txid, outcome)
+
+
+def mempool_reject_reason(run: Run, raw_hex: str) -> str:
+    """The daemon's own reject-reason for this transaction, or "" if it will not say.
+
+    `sendrawtransaction` answers `code=-22 message=TX rejected` and nothing more, so every
+    refusal in this harness has looked identical regardless of cause. `testmempoolaccept`
+    (src/rpc/server.cpp:640 on Gridcoin) runs the same AcceptToMemoryPool and returns
+    {allowed, reject-reason} WITHOUT broadcasting -- so it is both more informative and
+    strictly safer than the send it supplements.
+
+    "" ON ANY SURPRISE, never a guess. A daemon without the method, a differently-shaped
+    response, or an allowed transaction all return "" and the caller falls back to what the
+    broadcast said. The reason is a diagnostic here, not a verdict: what the run ASSERTS is
+    still the refusal and the same-bytes acceptance at T1.
+    """
+    try:
+        results = run.node(wallet=False).call("testmempoolaccept", [raw_hex])
+    except RPCError:
+        return ""
+    if not isinstance(results, list) or not results:
+        return ""
+    first = results[0]
+    if not isinstance(first, dict) or first.get("allowed"):
+        return ""
+    return str(first.get("reject-reason", "") or "")
 
 
 def _mine_early_cancel(run: Run, built: BuiltChain, cancel_hex: str, outcome: ChainOutcome) -> None:
