@@ -82,13 +82,19 @@ Both branches. This is the most completely exercised leg in the tree.
 | Branch | Evidence | note |
 |---|---|---|
 | shared address derivation | SPENT | checked against `monero-wallet-rpc generate_from_keys`, byte-identical |
-| sweep with `s_a + s_b` | SPENT | Monero REGTEST, `f584606948f430bf…`, 738,723,841,921,372 atomic units |
+| sweep with `s_a + s_b` | SPENT | Monero REGTEST, `bb85f7fa10759077…` (2026-09-28) and `f584606948f430bf…` (2026-09-27), 738,723,841,921,372 atomic units each. Two runs, two independent share sets, the same answer -- `python3 monero_shared_key_verify.py --run --allow-open-wallet --mine 80` then `--sweep <address>` |
 | the same on STAGENET | **NONE** | `docs/monero_stagenet_funding.md` says in its own words the regtest result "does NOT settle anything about stagenet specifically" |
 | a funded GRC↔XMR swap, end to end | **NONE** | the script half and the Monero half have never been run as one. The cross-curve close is a KEY MATCH against an address, not a spend of coins at it |
 
 ---
 
 ## 5. THE GAPS, IN THE ORDER THEY COST SOMETHING
+
+**RUN 2026-09-28, and these rows moved:** commands 0, 3 and 4 of the operator's list all
+passed -- the offline suite (2154), the BTC and LTC HTLC with both branches through the real
+client (`regtest_htlc_verify.py --chain both --wipe`, OK=76 FAIL=0, CLTV refused by CONSENSUS on
+both chains via `generateblock`), and the Monero shared-key sweep. Commands 1 (GRC adaptor
+chain, including the new punish branch) and 2 (XRP escrow) are still outstanding.
 
 **a. Tx_punish at T2 has never spent.** Lock C and step 11 are built, tested offline and
 pushed; the run costs one GRC payment of 4.6 and about 40 minutes of block waiting. This is
