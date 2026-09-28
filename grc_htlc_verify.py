@@ -84,7 +84,7 @@ from modules import adaptor_swap_chain as chain
 from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
 from modules.htlc_rpc import build_refund_spend
-from modules.htlc_spend import coins_to_satoshis, satoshis_to_coins
+from modules.htlc_spend import coins_to_satoshis, parse_transaction, satoshis_to_coins
 from modules.htlc_timelock import SECONDS_PER_BLOCK
 from regtest import adaptor_steps
 from regtest.adaptor_steps import Run
@@ -378,7 +378,9 @@ def recover_by_search(run: Run, console: Console) -> int:
                 txid = str(transaction.get("txid", ""))
                 console.say(
                     f"GRC: FOUND a contract of ours in block {height}: {txid}:{output.get('n')} "
-                    f"holds {output.get('value')} GRC, locktime {locktime}"
+                    f"holds {output.get('value')} GRC, locktime {locktime}. Found after "
+                    f"{scanned} block(s) -- said here because a search that prints nothing "
+                    f"while it walks is a search an operator cannot tell from a hang (rule 14)"
                 )
                 return recover(run, console, locktime, txid)
         if scanned % 100 == 0:
@@ -514,6 +516,42 @@ def step_6_cltv(run: Run, contract: dict, outpoint: chain.Outpoint, outcome: dic
         )
 
 
+def explain_a_refused_refund(run: Run, contract: dict, outpoint: chain.Outpoint) -> None:
+    """Print the bytes the chain refused, and where the reason is. NEVER raises.
+
+    WHAT THIS PATH LOST, 2026-09-28. Every other broadcast in this repository goes through
+    `adaptor_steps.broadcast_and_report`, which since that morning prints the refused hex and
+    the `grep ERROR ... debug.log` line -- because Gridcoin answers `-22 TX rejected` and names
+    nothing, and the reason is written to the daemon's log where nobody was looking.
+
+    The refund does NOT go through it: `GRCClient.refund_contract()` raises, so the one broadcast
+    that matters most -- the acceptance this whole harness exists to demonstrate -- was the one
+    path with no diagnosis. The operator got a Python traceback and a `-22`, and the log showed
+    TWO errors in the same second with no way to tell which was ours.
+
+    THE BYTES ARE REBUILT, NOT CAPTURED, and that is honest rather than convenient: this calls
+    the same `build_refund_spend` the client just called, with the same arguments, so it is the
+    same transaction -- but it is a SECOND construction, and if the two ever differed this would
+    print bytes the chain never saw. The txid is printed so that claim can be checked against
+    the daemon's log rather than trusted.
+
+    NEVER RAISES, because it runs inside a failure handler. A diagnostic that throws while
+    explaining a failure replaces the failure with itself.
+    """
+    try:
+        raw = _refund_bytes(run, contract, outpoint, contract["locktime"])
+        parsed = parse_transaction(bytes.fromhex(raw), outpoint.txid, outpoint.vout)
+        txid = hashlib.sha256(hashlib.sha256(parsed.serialize()).digest()).digest()[::-1].hex()
+    except Exception as exc:  # noqa: BLE001 -- checked: this runs inside a failure handler; its own failure is printed, never raised
+        run.say(f"could not rebuild the refused refund to show you its bytes ({exc})")
+        return
+    run.say(f"the refused refund is txid {txid} -- match that against the daemon's log, which "
+            f"logs a reason for every refusal even though the RPC does not return one:")
+    run.say(f"  grep -a ERROR {run.config.datadir}/testnet/debug.log | tail -5")
+    run.say(f"the refused bytes, which carry no key and can be decoded anywhere: {raw}")
+    run.say(f"decode them with: gridcoinresearchd -testnet decoderawtransaction {raw}")
+
+
 def step_8_accepted(run: Run, contract: dict, outpoint: chain.Outpoint, destination: str, outcome: dict) -> None:
     """9: the REAL client's refund, at the locktime. The control that says the rest is good."""
     run.step(8, "the REAL GRCClient.refund_contract() at the locktime -- it must SPEND")
@@ -532,6 +570,7 @@ def step_8_accepted(run: Run, contract: dict, outpoint: chain.Outpoint, destinat
                   "a txid", FAIL)
         outcome["refund_accepted"] = FAIL
         outcome["notes"].append(f"the real client could not refund: {exc}")
+        explain_a_refused_refund(run, contract, outpoint)
         return
     run.check("8 the REAL refund_contract() SPENDS the timelock branch", txid,
               "a txid -- mempool acceptance IS a full script verification", OK)
