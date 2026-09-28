@@ -187,11 +187,36 @@ the S-chain:
     Tx_punish   spends the cancel output to ALICE, nLockTime T2 > T1. Both plain
                 signatures exchanged at setup.
 
-None of those five exist. What exists and is reusable: `htlc_spend.legacy_sighash`
-(the digest an adaptor signature has to be over), `parse_transaction`,
-`varint`, `push_data`, `encode_script_number`, `decode_wif`, `public_key_for`,
-`coins_to_satoshis`. What is missing is the 2-of-2 script builder, the four-way
-pre-signed transaction chain, and the fee arithmetic across it.
+**ALL FIVE NOW EXIST, AND FOUR OF THEM HAVE BEEN SPENT ON A CHAIN.** This
+paragraph said "None of those five exist" and listed the 2-of-2 script builder,
+the four-way pre-signed chain and the fee arithmetic as missing. That was written
+against the tree as of `5b5109a` and was already false: `988bd6c` added
+`modules/adaptor_swap_scripts.py` (the 2-of-2 redeem script,
+`two_of_two_p2sh_script`, the OP_0-dummy `two_of_two_script_sig`, and
+`two_of_two_sighash`), `modules/adaptor_swap_chain.py` builds `build_redeem`,
+`build_cancel`, `build_refund` and `build_punish` plus `fee_satoshis_for` across
+them, and `16a4644` funded and spent the lock on Litecoin Core 0.21.4 regtest --
+40 checks OK, 0 FAIL, 0 SKIP, both `OP_CHECKMULTISIG` footguns refused by the
+daemon, nLockTime refused at CONSENSUS (`generateblock: -25 TestBlockValidity
+failed: bad-txns-nonfinal`) and not merely at relay, the cancel txid predicted
+before broadcast and matched, and the second 2-of-2 spent by the refund.
+
+What was reused rather than rebuilt, as this paragraph correctly anticipated:
+`htlc_spend.legacy_sighash` (the digest an adaptor signature has to be over),
+`parse_transaction`, `varint`, `push_data`, `encode_script_number`, `decode_wif`,
+`public_key_for`, `coins_to_satoshis`.
+
+**WHAT IS STILL MISSING IS NARROWER AND HARDER: THE JOIN.** Measured 2026-09-28
+by grepping `adaptor_ecdsa`, `pre_sign`, `complete_signature` and `recover` across
+`adaptor_regtest_verify.py` and `swap_terminal/regtest/adaptor_steps.py` -- ZERO
+occurrences. That chain spend used two ORDINARY 2-of-2 signatures, so the single
+property an adaptor signature exists for (the spender cannot sign alone, and
+completing the signature is what publishes the scalar) has never been exercised
+against a consensus rule. Nothing hands a `ChainTransaction.digest` to
+`adaptor_ecdsa.pre_sign`; `modules/monero_swap_protocol.py` has exactly one
+importer and it is `monero_swap.py`. And the chain was LITECOIN: nothing above is
+established on Gridcoin, where `adaptor_regtest_verify.py --chain grc` has not
+completed.
 
 **This is named work, not a baseline (rule 19), and it is the next stage.** It is
 also the stage that cannot be honestly written blind: a consensus script whose

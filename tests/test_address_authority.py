@@ -544,8 +544,26 @@ def test_a_chain_whose_addresses_carry_no_network_says_the_check_was_skipped():
     """
     verdict = check_receive_address("XRP", XRP_HOT_ACCOUNT, TESTNET)
 
-    assert verdict.state == VALID
-    assert "NETWORK NOT CHECKED" in verdict.why
+    # THE `why` IS IN THE ASSERTION MESSAGE BECAUSE THIS TEST FAILED ONCE WITHOUT IT AND THE
+    # FAILURE WAS NOT DIAGNOSABLE. 2026-09-28, one full-suite run out of 15: `verdict.state`
+    # came back INVALID here while the same test passed 60 consecutive times run alone and
+    # passed under every PYTHONHASHSEED tried (0,1,2,3,7,42,12345). A bare
+    # `assert verdict.state == VALID` prints "assert 'INVALID' == 'VALID'" and nothing else,
+    # so the hour that followed was spent reading source to work out WHICH refusal fired --
+    # `_xrp`'s checksum branch and `check_address`'s empty-string branch produce the identical
+    # state and are told apart only by `why`. That is rule 14 inside a test: a value with no
+    # statement of what it means next to it costs the reader the measurement.
+    #
+    # The root cause is NOT established (rule 17) and this comment is not a claim that it is.
+    # What is established: the address itself is deterministic (`_hash160` of a fixed phrase),
+    # `_xrp` and `chains/xrp_address` hold no cache or global, nothing in the suite
+    # monkeypatches them or `VALIDATORS`, and the file passes alone. Next occurrence, the
+    # message names the branch.
+    assert verdict.state == VALID, (
+        f"XRP classic address {XRP_HOT_ACCOUNT!r} was refused. state={verdict.state} "
+        f"network={verdict.network} why={verdict.why!r}"
+    )
+    assert "NETWORK NOT CHECKED" in verdict.why, verdict.why
 
 
 def test_xrp_xmr_and_sol_have_no_port_convention_to_compare_against():

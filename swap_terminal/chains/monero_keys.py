@@ -494,8 +494,19 @@ def shared_private_spend_key(share_a: int, share_b: int) -> int:
     return scalar_add(_checked_share(share_a, "share_a"), _checked_share(share_b, "share_b"))
 
 
-def _checked_public_share(key: bytes, name: str) -> Point:
-    """A public share must be canonical, on the curve, and torsion-free.
+def require_public_share(key: bytes, name: str = "share") -> Point:
+    """A public share must be canonical, on the curve, torsion-free and not the identity.
+
+    PUBLIC, and named rather than underscored, because a SECOND caller needs exactly this
+    check and rule 8 says the survivor owns the concept.
+    `modules/monero_swap_protocol.verify_share_commitment()` validates ONE counterparty
+    share at the moment it arrives -- before any address is built from it and before any
+    funding -- and a second copy of these four refusals over there would be rule 8's bug
+    with a delay on it: the copies agree on the day they are written and drift from then
+    on, invisibly, because each looks correct in its own file. It was
+    `_checked_public_share` until 2026-09-27 and had only the two in-file callers in
+    `shared_public_key`; nothing else in the tree referenced the private name, checked by
+    grepping the NAME across every .py rather than the import graph (rule 2).
 
     The torsion check is the one that would be tempting to skip and must not be.
     A share with a small-order component lets a counterparty submit several
@@ -532,8 +543,8 @@ def shared_public_key(share_a: bytes, share_b: bytes) -> bytes:
     commutativity rather than leaving it to the reader, because the whole protocol
     rests on the two sides agreeing on one address.
     """
-    return _checked_public_share(share_a, "share_a").add(
-        _checked_public_share(share_b, "share_b")
+    return require_public_share(share_a, "share_a").add(
+        require_public_share(share_b, "share_b")
     ).compress()
 
 
@@ -549,23 +560,40 @@ def shared_address(
     view_share_a: bytes,
     view_share_b: bytes,
 ) -> str:
-    """The address a GRC<->XMR swap locks its Monero to. A PROPOSAL, not a tested fix.
+    """The address a GRC<->XMR swap locks its Monero to. PROVEN ON A CHAIN, on regtest.
 
     Both the spend and the view key are summed. Summing the VIEW key too is what
     lets each party watch for the lock without either being able to spend, and it
     is why there are four arguments rather than two: a shared spend key with one
     party's view key would let that party alone see the funds arrive.
 
-    NOT TESTED AGAINST A CHAIN (rule 16). The arithmetic here is checked -- point
-    addition against libsodium, the encoding against a real wallet-generated
-    stagenet address -- but that XMR sent to the result is spendable with
-    `shared_private_spend_key` of the corresponding private shares has never been
-    demonstrated, because this container cannot reach a stagenet
-    (docs/monero_stagenet_funding.md). Until it has been, this is a proposal.
+    THIS DOCSTRING SAID "A PROPOSAL, not a tested fix" UNTIL 2026-09-27, AND THE
+    MODULE HEADER TWENTY LINES UP SAID THE OPPOSITE IN CAPITALS: "AND THE CHAIN
+    AGREED TOO, 2026-09-27. `shared_address` IS NO LONGER A PROPOSAL." One file
+    saying both things is the exact defect CLAUDE.md rule 19 cites from Mammon --
+    "four daemons' docstrings each said 'this daemon's own staging SQLite DB' [...]
+    One of those files said both things twenty lines apart" -- and a reader who
+    opens the function rather than the header gets the stale half, which is the
+    half that would stop somebody using a component that works. The header is the
+    correct one; this paragraph records the drift rather than overwriting it,
+    because the drift is the point (rule 1) and this one aged in hours.
 
-    The check that WILL settle it, when a daemon is reachable, is one call:
-    monero-wallet-rpc's `validate_address` on the output, then a transfer to it and
-    a sweep out with the summed key. `chains/monero.py` already has the first.
+    WHAT IS ACTUALLY ESTABLISHED, and it is regtest rather than stagenet. The
+    arithmetic was checked against libsodium; the derivation was checked against
+    monero-wallet-rpc's own `generate_from_keys`, which returned a byte-identical
+    address; and the SPEND was demonstrated by `monero_shared_key_verify.py --sweep`
+    on the operator's host against a regtest chain -- 738,723,841,921,372 atomic
+    units swept out of this address with the sum of the two private shares, txid
+    f584606948f430bf4835eb399c4e5373a027ee91cfb139ddf8d972bf1f15eade. The header
+    carries the full figures.
+
+    A STAGENET sweep is sometimes described as having happened as well. It is NOT
+    recorded anywhere in this tree -- no txid, no amount -- and
+    docs/monero_stagenet_funding.md states in its own words that the regtest result
+    "does NOT settle anything about stagenet specifically". Regtest and stagenet
+    derive keys identically (that document's own argument for using regtest at all),
+    so the cryptographic claim is settled; the network-specific one is not, and the
+    two are not written here in the same voice (rule 17).
     """
     return encode_address(
         network,
@@ -590,6 +618,7 @@ __all__ = [
     "encode_address",
     "keccak256",
     "public_key_for_share",
+    "require_public_share",
     "shared_address",
     "shared_private_spend_key",
     "shared_public_key",
