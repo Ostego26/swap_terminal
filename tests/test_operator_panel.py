@@ -370,7 +370,7 @@ def test_every_chain_gets_a_tab_including_the_ones_with_no_adapter():
     kinds = {c.asset: c.kind for c in decisions.CHAINS}
     assert kinds["GRC"] == "operator", "the operator runs it; this panel only reads it"
     assert kinds["BTC"] == kinds["LTC"] == "regtest"
-    assert kinds["XMR"] == kinds["XRP"] == kinds["SOL"] == "none"
+    assert kinds["XMR"] == kinds["XRP"] == kinds["SOL"] == "foreign"
     for chain in decisions.CHAINS:
         assert chain.note, f"{chain.asset} must say what it is, even when unreachable"
 
@@ -383,10 +383,10 @@ def test_a_chain_with_no_adapter_is_a_RESULT_and_never_an_outage(monkeypatch):
     find out why something was down. `resolve_config` is made to explode here to prove the tab
     survives it.
     """
-    none_tab = next(c for c in decisions.CHAINS if c.asset == "XMR")
-    state = decisions.chain_state(none_tab, None)
+    foreign = next(c for c in decisions.CHAINS if c.asset == "XMR")
+    state = decisions.chain_state(foreign, None)
     assert state["reachable"] is False and state["error"] == ""
-    assert "no adapter in this panel" in state["note"]
+    assert "does not probe it directly" in state["note"]
 
     def _explodes(asset):
         raise RuntimeError("no connection parameters for you")
@@ -853,3 +853,47 @@ def test_every_mark_renders_without_a_network_or_a_file():
         assert forbidden not in marks, f"{forbidden!r} in the marks: this page fetches nothing"
     for asset in ("GRC", "BTC", "LTC", "XMR", "XRP", "SOL"):
         assert f"{asset}: '<svg" in marks, f"{asset} has no mark"
+
+
+def test_a_foreign_chain_says_whether_it_is_CONFIGURED_rather_than_just_unprobed(monkeypatch):
+    """"XMR does nothing" was the report, and it was accurate.
+
+    The tab said "no adapter in this panel" and stopped, which is a statement about THIS PANEL
+    dressed as a statement about the chain -- and the thing the operator could act on was one
+    environment variable away. Gridcoin is the only daemon they keep running; the rest are not
+    broken, they are unconfigured, and those read identically until something says so.
+
+    ASKED OF THE ENVIRONMENT, not of a network, so it costs nothing and cannot hang. It answers
+    "does the button below have somewhere to connect TO", which is a different question from
+    "does that endpoint answer" -- and the tab says which one it answered (rule 17).
+    """
+    foreign = next(c for c in decisions.CHAINS if c.asset == "XRP")
+
+    monkeypatch.delenv("XRP_RPC_URL", raising=False)
+    state = decisions.chain_state(foreign, None)
+    assert state["configured"] is False
+    assert state["missing_env"] == ["XRP_RPC_URL"], state["missing_env"]
+
+    monkeypatch.setenv("XRP_RPC_URL", "http://127.0.0.1:5005")
+    state = decisions.chain_state(foreign, None)
+    assert state["configured"] is True and state["missing_env"] == []
+    assert state["env"] == ["XRP_RPC_URL"], (
+        "and it names what it CHECKED, so a variable renamed in config.py shows up here as a "
+        "stale name rather than as a silently wrong answer"
+    )
+
+
+def test_every_foreign_chain_names_the_variables_its_own_entry_point_reads():
+    """A chain with no entry in FOREIGN_ENV would report "configured" unconditionally, because
+    an empty list of required variables has nothing missing from it.
+
+    That is the shape where a tab reads green on a chain nobody can reach, which is the one
+    failure worse than the "does nothing" this replaced.
+    """
+    for chain in decisions.CHAINS:
+        if chain.kind != "foreign":
+            continue
+        assert decisions.FOREIGN_ENV.get(chain.asset), (
+            f"{chain.asset} is foreign and names no environment variable, so it would report "
+            f"itself configured whatever the environment holds"
+        )

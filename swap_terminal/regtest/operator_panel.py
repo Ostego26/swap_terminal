@@ -43,6 +43,7 @@ autofill, and the server's request log.
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 
 from chains.base import RPCError
@@ -192,6 +193,19 @@ class ChainTab(NamedTuple):
 #:              spawned outside HarnessRunner would have no reaper here.
 #:   none       no adapter in this panel. XMR, XRP and SOL are swapped by other entry points
 #:              with their own clients; saying so beats an empty tab or a missing one.
+#: What each foreign chain's own entry point reads to find its endpoint. Checking these costs
+#: nothing and cannot hang, and it answers the question a "no adapter" note left open: whether
+#: pressing that chain's button has anywhere to connect to at all.
+#:
+#: THESE NAMES ARE READ FROM THE SAME PLACE THE CLIENTS READ THEM, swap_terminal/config.py, so
+#: a rename there makes this stale rather than wrong -- and the tab prints the names it checked,
+#: so a stale one is visible rather than silent.
+FOREIGN_ENV = {
+    "XMR": ("XMR_RPC_PORT",),
+    "XRP": ("XRP_RPC_URL",),
+    "SOL": ("SOL_RPC_URL",),
+}
+
 CHAINS = (
     ChainTab("GRC", "operator", True,
              "your own testnet daemon. This panel reads it and starts and stops nothing."),
@@ -202,16 +216,17 @@ CHAINS = (
     ChainTab("LTC", "regtest", True,
              "a regtest daemon that regtest_htlc_verify.py starts and stops for itself. Same "
              "rule as BTC: probed, never launched."),
-    ChainTab("XMR", "none", False,
-             "no adapter in this panel. Monero is reached by monero_regtest.py and "
-             "monero_shared_key_verify.py, which speak monero-wallet-rpc rather than a "
-             "Bitcoin-style JSON-RPC, so nothing here can probe it without a second client."),
-    ChainTab("XRP", "none", False,
-             "no adapter in this panel. The XRP Ledger is reached by xrp_chain_check.py and "
-             "xrp_htlc_escrow.py through chains/xrp.py."),
-    ChainTab("SOL", "none", False,
-             "no adapter in this panel, and get_new_address() refuses on Solana by design -- "
-             "the custody choice there is the operator's and is not decided in this tree."),
+    ChainTab("XMR", "foreign", False,
+             "monero-wallet-rpc speaks JSON-RPC 2.0 with a different shape from a "
+             "Bitcoin-style daemon, so this panel does not probe it directly. Its own "
+             "read-only check is the button below."),
+    ChainTab("XRP", "foreign", False,
+             "the XRP Ledger has its own JSON-RPC shape, reached through chains/xrp.py. This "
+             "panel does not probe it directly; its own read-only check is the button below."),
+    ChainTab("SOL", "foreign", False,
+             "Solana is reached through chains/solana.py, and get_new_address() refuses there "
+             "by design -- the custody choice is the operator's and is not decided in this "
+             "tree. Its own read-only check is the button below."),
 )
 
 
@@ -231,9 +246,22 @@ def chain_state(tab: ChainTab, console) -> dict:
     assert_test_network() enforces, applied to a read-only probe. A chain that will not say is
     reported as unknown rather than assumed to be a test one.
     """
-    if tab.kind == "none":
-        return {"asset": tab.asset, "kind": tab.kind, "note": tab.note,
-                "reachable": False, "network": "", "error": "", "methods": [], "funding": None}
+    if tab.kind == "foreign":
+        # A CHAIN THIS PANEL CANNOT SPEAK TO STILL HAS A CONFIGURED-OR-NOT ANSWER, and that is
+        # the one an operator actually needs. "XMR does nothing" was the report on 2026-09-28,
+        # and it was accurate: the tab said "no adapter" and stopped, which is a statement about
+        # this panel dressed as a statement about the chain. What the operator could act on was
+        # sitting one environment variable away.
+        #
+        # ASKED OF THE ENVIRONMENT, not of a network, so it costs nothing and cannot hang. It
+        # says whether the entry point behind the button has somewhere to connect TO -- which
+        # is a different question from whether that endpoint answers, and the tab says which
+        # question it answered (rule 17).
+        missing = [name for name in FOREIGN_ENV.get(tab.asset, ()) if not os.environ.get(name)]
+        return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
+                "network": "", "error": "", "methods": [], "funding": None,
+                "configured": not missing, "missing_env": missing,
+                "env": list(FOREIGN_ENV.get(tab.asset, ()))}
     try:
         config = adaptor_steps.resolve_config(tab.asset)
     except Exception as error:  # noqa: BLE001 -- checked: the failure IS the tab's contents, named below

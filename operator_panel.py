@@ -130,6 +130,7 @@ PAGE = r"""<!doctype html>
   nav button[data-up="yes"] .dot { color:var(--ok); }
   nav button[data-up="no"]  .dot { color:var(--bad); }
   nav button[data-up=""]    .dot { color:var(--dim); }
+  nav button[data-up="cfg"] .dot { color:var(--warn); }
   pre { margin:0; padding:10px; background:var(--bg); border:1px solid var(--line);
         border-radius:6px; max-height:52vh; overflow:auto; white-space:pre-wrap; font-size:12.5px; }
   .what { color:var(--dim); font-size:12.5px; margin:-4px 0 10px; }
@@ -141,7 +142,8 @@ this port was bound. The seed is never shown here and never leaves the server's 
 <nav id="tabs">loading the chain list from the server&hellip;</nav>
 <p class="what" style="margin-top:-8px">A dot is <span class="ok">green</span> when that daemon
 answered the LAST time this panel asked, <span class="bad">red</span> when it did not, and grey
-when nobody has asked yet &mdash; which is not the same as down.
+when nobody has asked yet &mdash; which is not the same as down. <span class="warn">Amber</span>
+is a chain this panel cannot speak to but which IS configured: its own check is the button.
 <button id="checkall" style="margin-left:8px">Check every chain</button></p>
 
 <section>
@@ -270,8 +272,22 @@ async function loadChain(asset) {
   try { d = await (await fetch("/api/chain/" + encodeURIComponent(asset))).json(); }
   catch (e) { $("chain").innerHTML = '<span class="bad">could not reach the panel: ' + esc(e) + "</span>"; return; }
   let h = '<p class="sub">' + esc(d.note || "") + "</p>";
-  if (d.kind === "none") {
-    h += '<p class="warn">Not probed by this panel.</p>';
+  if (d.kind === "foreign") {
+    // CONFIGURED OR NOT IS THE QUESTION AN OPERATOR CAN ACT ON. "Not probed by this panel" was
+    // accurate and useless -- a statement about this panel dressed as one about the chain.
+    if (d.configured) {
+      h += '<p class="ok">CONFIGURED &mdash; ' + esc((d.env || []).join(", ")) +
+           " is set in the environment this panel was started with, so the button below has " +
+           "somewhere to connect to. Whether it ANSWERS is what pressing it finds out.</p>";
+    } else {
+      h += '<p class="bad">NOT CONFIGURED &mdash; ' + esc((d.missing_env || []).join(", ")) +
+           " is unset in the environment this panel was started with. Nothing reads a .env " +
+           "here, so it has to be exported in the shell that starts the panel; a value set " +
+           "only in a file, or only in another shell, does not reach this process.</p>";
+    }
+    h += '<p class="sub">This panel speaks a Bitcoin-style JSON-RPC and this chain does not, ' +
+         'so it does not probe the endpoint itself &mdash; that chain\u2019s own read-only ' +
+         'check does, and it is the button below.</p>';
   } else if (d.reachable) {
     const netClass = d.network === "MAINNET" ? "bad" : (d.network === "unknown" ? "warn" : "ok");
     h += '<p><span class="ok">REACHABLE</span> at ' + esc(d.endpoint || "?") +
