@@ -3202,6 +3202,46 @@ def operator_funding_key(run: Run) -> RegtestKey | None:
 FUNDING_SEARCH_DEPTH = 200
 
 
+class FundingPayment(NamedTuple):
+    """One payment the wallet remembers making to the funding address."""
+
+    txid: str
+    confirmations: object   # an int from the daemon, or "?" when it did not say
+
+
+def payments_to_the_funding_address(entries: object, address: str) -> list[FundingPayment]:
+    """The wallet's payments to `address`, NEWEST FIRST. A pure function over listtransactions.
+
+    EXTRACTED SO TWO CALLERS SHARE ONE ANSWER (rule 8). `discover_operator_funding_txid` walks
+    this to pick a usable payment; the operator panel walks the same list to SHOW every payment
+    and which of them are spent. Written twice, those two would agree on the day they were
+    written -- the same "bug with a delay on it" this repository keeps paying for.
+
+    NEWEST FIRST because listtransactions returns oldest-first and every caller wants the other
+    order. Reversing at each call site is the kind of detail that gets it right in one place and
+    wrong in the next.
+
+    NO DAEMON, NO RUN, NO SIDE EFFECT. The decision -- which rows count as a payment to this
+    address -- is a function of the rows and the address alone, so a test hands it rows (rule 10).
+    The `category` filter keeps both "send" and "receive": the wallet made the payment, so it is
+    a send from its point of view, and the receive case covers a wallet that also owns the
+    address.
+    """
+    rows = entries if isinstance(entries, list) else []
+    found = []
+    for entry in reversed(rows):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("address") != address:
+            continue
+        if entry.get("category") not in ("send", "receive"):
+            continue
+        txid = entry.get("txid")
+        if txid:
+            found.append(FundingPayment(str(txid), entry.get("confirmations", "?")))
+    return found
+
+
 def discover_operator_funding_txid(run: Run, key: RegtestKey) -> str | None:
     """The txid of the operator's payment to `key.address`, found by ASKING THE WALLET.
 
@@ -3250,26 +3290,20 @@ def discover_operator_funding_txid(run: Run, key: RegtestKey) -> str | None:
     # walks blocks, and a payment with N confirmations needs exactly N of them looked at,
     # because nothing mined before it can spend its output. The operator's stale funding was
     # found in 111 blocks and 3.3s; a payment made five minutes ago costs three blocks.
-    for entry in reversed(entries):
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("address") != key.address:
-            continue
-        if entry.get("category") not in ("send", "receive"):
-            continue
-        txid = entry.get("txid")
-        if not txid:
-            continue
-        confirmations = entry.get("confirmations", "?")
-        run.say(f"the wallet remembers paying {key.address} in {txid} ({confirmations} confirmations)")
-        spender = _spender_of_the_payment(run, key, str(txid), confirmations)
-        if spender is None:
-            run.say(f"using {txid} -- no --funding-txid needed")
-            return str(txid)
-        run.skipped_funding_payments.append((str(txid), spender))
+    for payment in payments_to_the_funding_address(entries, key.address):
         run.say(
-            f"SKIPPING {txid}: its output was already spent by {spender}. Looking further back "
-            f"-- a completed run consumes its funding, so the newest payment is often the used one"
+            f"the wallet remembers paying {key.address} in {payment.txid} "
+            f"({payment.confirmations} confirmations)"
+        )
+        spender = _spender_of_the_payment(run, key, payment.txid, payment.confirmations)
+        if spender is None:
+            run.say(f"using {payment.txid} -- no --funding-txid needed")
+            return payment.txid
+        run.skipped_funding_payments.append((payment.txid, spender))
+        run.say(
+            f"SKIPPING {payment.txid}: its output was already spent by {spender}. Looking further "
+            f"back -- a completed run consumes its funding, so the newest payment is often the "
+            f"used one"
         )
     return None
 
