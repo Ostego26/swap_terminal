@@ -2118,7 +2118,7 @@ def _p2pkh_sighash(parsed, key: RegtestKey) -> bytes:
     return legacy_sighash(parsed, 0, key.p2pkh_script)
 
 
-def _broadcast(run: Run, raw_hex: str, label: str) -> tuple[str | None, str]:
+def broadcast_and_report(run: Run, raw_hex: str, label: str) -> tuple[str | None, str]:
     """sendrawtransaction, returning (txid or None, the daemon's own words).
 
     Both halves matter and this is why it is not a bare call. A refusal is a RESULT here --
@@ -2152,7 +2152,7 @@ def step_7_broadcast_lock(run: Run, built: BuiltChain, outcome: ChainOutcome) ->
     byte. An address comparison is the wrong key in two independent ways.
     """
     run.step(7, "broadcast Tx_lock, then FIND the 2-of-2 output by scriptPubKey match")
-    txid, message = _broadcast(run, built.lock_raw_hex, f"Tx_lock for lock {built.setup.label}")
+    txid, message = broadcast_and_report(run, built.lock_raw_hex, f"Tx_lock for lock {built.setup.label}")
     if txid is None:
         run.check("Tx_lock accepted", f"REFUSED: {message}", "a txid", FAIL)
         outcome.notes.append(f"Tx_lock refused for lock {built.setup.label}: {message}")
@@ -2199,7 +2199,7 @@ def step_8_refusals(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
         f"the transposed scriptSig is {len(bytes.fromhex(transposed_hex))} bytes and the correct one is "
         f"{len(bytes.fromhex(correct_hex))} -- identical, which is why only a chain can tell them apart"
     )
-    txid, message = _broadcast(run, transposed_hex, "Tx_redeem with the signatures TRANSPOSED")
+    txid, message = broadcast_and_report(run, transposed_hex, "Tx_redeem with the signatures TRANSPOSED")
     refused = txid is None
     run.check(
         "transposed signatures are REFUSED", message if refused else f"ACCEPTED as {txid}",
@@ -2215,7 +2215,7 @@ def step_8_refusals(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
         )
 
     no_dummy_hex = _script_sig_without_op0(built, alice_sig, bob_sig)
-    txid, message = _broadcast(run, no_dummy_hex, "Tx_redeem with the leading OP_0 MISSING")
+    txid, message = broadcast_and_report(run, no_dummy_hex, "Tx_redeem with the leading OP_0 MISSING")
     refused = txid is None
     run.check(
         "a missing OP_0 dummy is REFUSED", message if refused else f"ACCEPTED as {txid}",
@@ -2372,7 +2372,7 @@ def step_9_happy_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> Non
     )
     run.check("the real size is at or under the fee's bound", real_size <= built.redeem.unsigned_size_bound,
               True, OK if real_size <= built.redeem.unsigned_size_bound else FAIL)
-    txid, message = _broadcast(run, raw_hex, "Tx_redeem with both signatures in key order")
+    txid, message = broadcast_and_report(run, raw_hex, "Tx_redeem with both signatures in key order")
     accepted = txid is not None
     run.check(
         "the 2-of-2 SPENDS", txid if accepted else f"REFUSED: {message}",
@@ -2482,7 +2482,7 @@ def step_10_cancel_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
     if reason:
         run.say(f"testmempoolaccept on the early cancel: reject-reason={reason!r}")
 
-    txid, message = _broadcast(run, cancel_hex, f"Tx_cancel EARLY (nLockTime {built.cancel.locktime})")
+    txid, message = broadcast_and_report(run, cancel_hex, f"Tx_cancel EARLY (nLockTime {built.cancel.locktime})")
     refused = txid is None
     run.check(
         "10a RELAY refuses the early cancel",
@@ -2504,9 +2504,9 @@ def step_10_cancel_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
 
     _mine_early_cancel(run, built, cancel_hex, outcome)
 
-    _wait_or_mine_to(run, built.t1)
+    wait_or_mine_to(run, built.t1)
     early_hex = cancel_hex
-    txid, message = _broadcast(run, cancel_hex, f"Tx_cancel AT T1 (height {current_height(run)} >= {built.t1})")
+    txid, message = broadcast_and_report(run, cancel_hex, f"Tx_cancel AT T1 (height {current_height(run)} >= {built.t1})")
     accepted = txid is not None
     # THE BYTES ARE ASSERTED IDENTICAL, AND THAT IS THE WHOLE ARGUMENT. Neither refusal message
     # on this chain names nLockTime -- `-22 TX rejected` from sendrawtransaction, at best
@@ -2631,7 +2631,7 @@ def _mine_early_cancel(run: Run, built: BuiltChain, cancel_hex: str, outcome: Ch
     )
 
 
-def _wait_or_mine_to(run: Run, target: int) -> None:
+def wait_or_mine_to(run: Run, target: int) -> None:
     """Advance to `target`: mine the difference, or WAIT for it on a chain that cannot mine."""
     tip = current_height(run)
     run.say(f"advancing from tip={tip} to height {target} so the cancel becomes final")
@@ -2696,7 +2696,7 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
     punish_hex, _ = chain.assemble(punish, *_signatures_in_key_order(built.setup, punish.digest))
     tip = current_height(run)
     run.check("we are genuinely before T2", tip < built.t2, True, OK if tip < built.t2 else FAIL)
-    txid, message = _broadcast(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
+    txid, message = broadcast_and_report(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
     refused = txid is None
     run.check(
         "10d-i the early punish is REFUSED", message if refused else f"ACCEPTED as {txid}",
@@ -2720,7 +2720,7 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
     # report "leaks nothing" for a transaction it never saw, which is the one answer worse than
     # no answer at all.
     cancel_script_sig = published_script_sig(run, cancel_txid)
-    txid, message = _broadcast(run, refund_hex, "Tx_refund (no locktime -- publishable as soon as the cancel confirms)")
+    txid, message = broadcast_and_report(run, refund_hex, "Tx_refund (no locktime -- publishable as soon as the cancel confirms)")
     accepted = txid is not None
     run.check(
         "10d-ii the refund SPENDS the second 2-of-2", txid if accepted else f"REFUSED: {message}",
@@ -2800,8 +2800,8 @@ def step_11_punish_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
     run.step(11, "the punish path: the cancel, then WAIT TO T2, and the fifth transaction spends")
     cancel_sigs = _signatures_in_key_order(built.setup, built.cancel.digest)
     cancel_hex, cancel_txid = chain.assemble(built.cancel, *cancel_sigs)
-    _wait_or_mine_to(run, built.t1)
-    txid, message = _broadcast(run, cancel_hex, f"Tx_cancel AT T1 for the punish path (nLockTime {built.cancel.locktime})")
+    wait_or_mine_to(run, built.t1)
+    txid, message = broadcast_and_report(run, cancel_hex, f"Tx_cancel AT T1 for the punish path (nLockTime {built.cancel.locktime})")
     if txid is None:
         run.check("11a the cancel is accepted at T1 (the punish path needs its output)",
                   f"REFUSED: {message}", "a txid", FAIL)
@@ -2819,15 +2819,15 @@ def step_11_punish_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
 
     tip = current_height(run)
     run.check("11b we are genuinely before T2", tip < built.t2, True, OK if tip < built.t2 else FAIL)
-    early_txid, early_message = _broadcast(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
+    early_txid, early_message = broadcast_and_report(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
     run.check(
         "11b the early punish is REFUSED (the control for 11d)",
         early_message if early_txid is None else f"ACCEPTED as {early_txid}",
         "a non-final refusal: T2 has not arrived", OK if early_txid is None else FAIL,
     )
 
-    _wait_or_mine_to(run, built.t2)
-    txid, message = _broadcast(run, punish_hex, f"Tx_punish AT T2 (height {current_height(run)} >= {built.t2})")
+    wait_or_mine_to(run, built.t2)
+    txid, message = broadcast_and_report(run, punish_hex, f"Tx_punish AT T2 (height {current_height(run)} >= {built.t2})")
     accepted = txid is not None
     # THE SAME BYTES, ASSERTED IDENTICAL, and that is the whole argument -- the same one step
     # 10c makes for the cancel. Gridcoin's refusal message names nothing (`-22 TX rejected`), so
@@ -2948,6 +2948,20 @@ def p2pkh_script_for_address(asset: str, address: str) -> bytes:
 
 
 def reclaim_p2pkh(run: Run, key: RegtestKey, source: chain.Outpoint, destination: str) -> tuple[str, str, int]:
+    """`reclaim_p2pkh_to_script` with the destination given as an ADDRESS. See that function.
+
+    Split 2026-09-28 when grc_htlc_verify.py needed to pay a P2SH -- a contract's scriptPubKey,
+    which has no address form this repository will encode. The whole body was about building
+    and signing a one-input spend and exactly one line of it cared that the destination was an
+    address, so the address decode moved up here and the rest became reusable (rule 8: the
+    second caller is what shows which half was the decision).
+    """
+    return reclaim_p2pkh_to_script(run, key, source, p2pkh_script_for_address(run.asset, destination))
+
+
+def reclaim_p2pkh_to_script(
+    run: Run, key: RegtestKey, source: chain.Outpoint, destination_script: bytes
+) -> tuple[str, str, int]:
     """Build and SIGN a spend of one P2PKH outpoint, entirely to `destination`. Broadcasts NOTHING.
 
     RETURNS THE BYTES RATHER THAN SENDING THEM, so the caller decides. `reclaim_funding.py`
@@ -2962,7 +2976,6 @@ def reclaim_p2pkh(run: Run, key: RegtestKey, source: chain.Outpoint, destination
     wallet is never asked to sign and a staking-only unlock is irrelevant here exactly as it is
     everywhere else in this harness.
     """
-    destination_script = p2pkh_script_for_address(run.asset, destination)
     ntime = int(time.time()) if run.asset == "GRC" else None
     sizing = chain.build_unsigned(
         asset=run.asset, spends=source, outputs=[(source.value_satoshis, destination_script)],
@@ -3278,7 +3291,7 @@ def prepare_operator_funding(run: Run, funding_txid: str, destinations: list[Reg
     run.operator_funding = split_operator_funding(run, funding_key, source, destinations)
 
 
-def fund_and_prepare(run: Run, setup: LockSetup) -> chain.Outpoint:
+def fund_and_prepare(run: Run, label: str, key: RegtestKey) -> chain.Outpoint:
     """Prepare a P2PKH input this process holds the key for, sized for the lock plus a fee.
 
     TWO ROUTES, and the second exists because the first is closed on a staking-only wallet.
@@ -3294,10 +3307,10 @@ def fund_and_prepare(run: Run, setup: LockSetup) -> chain.Outpoint:
     if run.operator_funding:
         outpoint = run.operator_funding.pop(0)
         run.say(
-            f"lock {setup.label} is funded from the operator's own payment at "
+            f"lock {label} is funded from the operator's own payment at "
             f"{outpoint.txid[:16]}..:{outpoint.vout} -- the wallet was not asked"
         )
         return outpoint
     coin = str(Decimal(LOCK_COIN[run.asset]) + Decimal(FUNDING_HEADROOM_COIN[run.asset]))
-    run.say(f"preparing the input for lock {setup.label}: {coin} {run.asset}")
-    return _send_to_self(run, setup.alice, coin)
+    run.say(f"preparing the input for lock {label}: {coin} {run.asset}")
+    return _send_to_self(run, key, coin)

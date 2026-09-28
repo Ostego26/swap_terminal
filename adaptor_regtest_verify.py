@@ -314,7 +314,7 @@ def drive_locks(run, setups, monero, tip: int, outcome: ChainOutcome) -> None:
     that is only passed along is a parameter a caller has to think about for nothing.
     """
     setup_a, setup_b, setup_c = setups
-    funding_a = adaptor_steps.fund_and_prepare(run, setup_a)
+    funding_a = adaptor_steps.fund_and_prepare(run, setup_a.label, setup_a.alice)
     built_a = adaptor_steps.step_6_build_and_hold(run, setup_a, funding_a, tip, monero)
     adaptor_steps.step_7_broadcast_lock(run, built_a, outcome)
     adaptor_steps.step_8_refusals(run, built_a, outcome)
@@ -336,7 +336,7 @@ def _fund_build_broadcast(run, setup, monero, outcome: ChainOutcome):
     height at which THAT lock confirms -- reusing lock A's tip would put lock C's T2 in the
     past by the time it is reached, and a timelock already satisfied tests nothing.
     """
-    funding = adaptor_steps.fund_and_prepare(run, setup)
+    funding = adaptor_steps.fund_and_prepare(run, setup.label, setup.alice)
     built = adaptor_steps.step_6_build_and_hold(
         run, setup, funding, adaptor_steps.current_height(run), monero
     )

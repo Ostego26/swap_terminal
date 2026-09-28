@@ -120,6 +120,22 @@ operator needs when a counterparty vanishes -- has never been executed, and the 
 would do it does not offer the chain. `OP_CHECKLOCKTIMEVERIFY` has never executed on Gridcoin
 from this tree at all.
 
+**2026-09-28: `grc_htlc_verify.py` now EXISTS and is unit-tested and mutation-checked, and IT
+HAS NOT YET RUN ON THE CHAIN.** Those are two different facts and this line keeps them apart
+deliberately (rule 17): the harness is written, its ten tests pass offline, and a mutant that
+made its measurement step build a NON-FINAL refund -- which would have degraded the CLTV proof
+into a duplicate of the non-finality control while still printing a pass -- was killed. None of
+that is evidence about Gridcoin. This gap closes when the operator runs
+
+    export ST_ADAPTOR_FUNDING_SEED='...'
+    python3 grc_htlc_verify.py
+
+and the line `6 CLTV REFUSES A FINAL REFUND BEFORE THE LOCKTIME` reads OK. `--chain grc` is
+still not offered by `regtest_htlc_verify.py`, and deliberately so: that harness MINES to the
+locktime, and `contract_locktime("GRC", ROLE_INITIATOR, tip)` is tip+1920, which is 48 hours at
+Gridcoin's 90s target on a chain with no `generateblock`. The separate file is the answer to
+that, not an oversight.
+
 **c. A CRASH BETWEEN FUNDING AND CLAIMING DESTROYS THE LEG, AND THE FIX IS LIVE POSTURE.**
 Already found, already handed over, still open since 2026-09-27. `atomic_swap.py` mints four
 keypairs IN PROCESS and never persists them; BOTH branches of each contract name those keys, so

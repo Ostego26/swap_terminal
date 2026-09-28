@@ -975,6 +975,17 @@ def _raises(exc: BaseException):
     return answer
 
 
+def _grc_setup_args() -> tuple[str, object]:
+    """(label, key) -- what fund_and_prepare takes since it stopped taking a whole LockSetup.
+
+    It only ever used two of the five fields, and grc_htlc_verify.py funds an HTLC rather than
+    a 2-of-2 -- there is no LockSetup to hand it. A parameter list that names what it uses is
+    what let a second caller exist at all (rule 10: the decision, with its own inputs).
+    """
+    setup = _grc_setup()
+    return setup.label, setup.alice
+
+
 def _grc_setup() -> adaptor_steps.LockSetup:
     """A real LockSetup with distinct keys, built by the real key generator."""
     alice, bob = generate_key(), generate_key()
@@ -1050,7 +1061,7 @@ def test_the_funding_send_raises_a_NAMED_precondition_not_a_bare_RPCError(consol
         asset="GRC",
     )
     with pytest.raises(RegtestSetupError) as caught:
-        adaptor_steps.fund_and_prepare(run, _grc_setup())
+        adaptor_steps.fund_and_prepare(run, *_grc_setup_args())
     message = str(caught.value)
     assert "STAKING-ONLY" in message
     assert "walletpassphrase" in message, "the remedy names the command"
@@ -1076,7 +1087,7 @@ def test_a_real_send_failure_is_still_an_unhandled_exception(console, monkeypatc
         asset="GRC",
     )
     with pytest.raises(RPCError, match="Insufficient funds"):
-        adaptor_steps.fund_and_prepare(run, _grc_setup())
+        adaptor_steps.fund_and_prepare(run, *_grc_setup_args())
 
 
 def test_the_remedy_never_contains_a_passphrase_or_a_command_carrying_one():
@@ -1496,8 +1507,8 @@ def test_the_two_locks_get_DIFFERENT_outpoints(console, monkeypatch):
         chain.Outpoint(txid="cc" * 32, vout=0, value_satoshis=150_000_000),
         chain.Outpoint(txid="cc" * 32, vout=1, value_satoshis=150_000_000),
     ]
-    first = adaptor_steps.fund_and_prepare(run, _grc_setup())
-    second = adaptor_steps.fund_and_prepare(run, _grc_setup())
+    first = adaptor_steps.fund_and_prepare(run, *_grc_setup_args())
+    second = adaptor_steps.fund_and_prepare(run, *_grc_setup_args())
 
     assert (first.txid, first.vout) != (second.txid, second.vout)
     assert run.operator_funding == [], "both were consumed; a third lock would fall back to the wallet"

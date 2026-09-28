@@ -913,7 +913,7 @@ class _Chain:
 
     `accept` decides per raw transaction hex, so a test can say "refuse this one, accept that
     one" -- which is what the punish path is: the SAME BYTES refused at one height and accepted
-    at another. `height` is mutable so `_wait_or_mine_to` can be satisfied without a chain.
+    at another. `height` is mutable so `wait_or_mine_to` can be satisfied without a chain.
     """
 
     def __init__(self, accept, height: int, decoded: dict | None = None) -> None:
@@ -942,7 +942,7 @@ def _txid_of(raw_hex: str) -> str:
 def _punish_run(monkeypatch, node) -> tuple[adaptor_steps.Run, io.StringIO, list[int]]:
     """A run whose chain advance is RECORDED rather than merely stubbed out.
 
-    The first version replaced `_wait_or_mine_to` with a no-op, and a mutant that DELETED the
+    The first version replaced `wait_or_mine_to` with a no-op, and a mutant that DELETED the
     wait to T2 then survived: the stub had already made the wait invisible, so the test could
     not tell a step that waits from one that does not. On a real chain that mutant broadcasts
     the punish before T2 and it is refused -- so the defect would surface, thirty minutes into a
@@ -965,7 +965,7 @@ def _punish_run(monkeypatch, node) -> tuple[adaptor_steps.Run, io.StringIO, list
     )
     monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": node)
     monkeypatch.setattr(adaptor_steps, "_mine", lambda run, count: None)
-    monkeypatch.setattr(adaptor_steps, "_wait_or_mine_to", lambda run, target: waited.append(target))
+    monkeypatch.setattr(adaptor_steps, "wait_or_mine_to", lambda run, target: waited.append(target))
     return run, stream, waited
 
 
@@ -1134,7 +1134,11 @@ def test_the_driver_drives_EVERY_lock_through_its_own_branch(monkeypatch, side):
                 # kept every count right and SURVIVED until this line existed -- and on a real
                 # chain it means the punish runs against an output the refund already spent,
                 # which is the one answer that proves nothing about T2.
-                funded.append(args[1].label)
+                #
+                # args[1] is the LABEL since fund_and_prepare stopped taking a whole LockSetup:
+                # it used two of the five fields, and grc_htlc_verify.py funds an HTLC with no
+                # LockSetup to hand it.
+                funded.append(args[1])
             return result
         return recorded
 
