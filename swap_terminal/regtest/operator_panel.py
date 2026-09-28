@@ -239,7 +239,7 @@ def probe_methods(run: adaptor_steps.Run) -> list[Missing]:
     return found
 
 
-def payment_rows(run: adaptor_steps.Run, key) -> list[PaymentRow]:
+def payment_rows(run: adaptor_steps.Run, key, known_spent: dict | None = None) -> list[PaymentRow]:
     """Every payment to the funding address, newest first, each marked usable or spent.
 
     THIS IS THE PANEL'S WHOLE REASON TO EXIST. Six runs on 2026-09-28 failed or refused because
@@ -274,13 +274,36 @@ def payment_rows(run: adaptor_steps.Run, key) -> list[PaymentRow]:
             rows.append(PaymentRow(payment.txid, payment.confirmations, "?", "", False,
                                    f"could not be read off the chain: {error}"))
             continue
-        depth = (payment.confirmations + 1 if isinstance(payment.confirmations, int)
-                 and payment.confirmations >= 0 else adaptor_steps.MAX_SPEND_SCAN_BLOCKS)
-        spender, description = adaptor_steps.find_the_spender(run, outpoint, max_depth=depth)
+        # A SPENT OUTPUT IS SPENT FOREVER, so the answer is worth remembering. Measured on the
+        # operator's screen 2026-09-28: opening the panel walked 85, 208 and 259 blocks -- three
+        # payments, every one of them long spent -- and did it again on every reload, because
+        # the tab recomputes what the run recomputes. Rule 3 prefers REMOVING work to doing it
+        # faster, and this removes all of it after the first look.
+        #
+        # ONLY THE POSITIVE ANSWER IS CACHED, and the asymmetry is the whole correctness
+        # argument. "Spent by X" is monotone: no reorganization this harness cares about can
+        # unspend it, and if one did, the outpoint would be gone rather than usable. "Not
+        # spent" is NOT monotone -- the very next block can spend it, and caching that would
+        # have the panel cheerfully offering a payment the harness then refuses. The cache may
+        # therefore only ever turn a slow correct answer into a fast one.
+        cached = (known_spent or {}).get((outpoint.txid, outpoint.vout))
+        if cached:
+            spender, description = cached, "SPENT ALREADY -- remembered from an earlier look, not re-walked"
+        else:
+            depth = (payment.confirmations + 1 if isinstance(payment.confirmations, int)
+                     and payment.confirmations >= 0 else adaptor_steps.MAX_SPEND_SCAN_BLOCKS)
+            spender, description = adaptor_steps.find_the_spender(run, outpoint, max_depth=depth)
+            if spender and known_spent is not None:
+                known_spent[(outpoint.txid, outpoint.vout)] = spender
         value = adaptor_steps.satoshis_to_coins(outpoint.value_satoshis)
         if spender:
+            # THE DESCRIPTION IS CARRIED, not replaced. It is the only thing that says whether
+            # this answer was measured just now or remembered from an earlier look, and rule 17
+            # is exactly that a reader must be able to tell which they are holding. Dropping it
+            # made both read identically -- which the cache's own test caught.
             rows.append(PaymentRow(payment.txid, payment.confirmations, value, spender, False,
-                                   "SPENT -- a completed run consumes its funding by design"))
+                                   f"SPENT -- a completed run consumes its funding by design. "
+                                   f"{description}"))
         else:
             rows.append(PaymentRow(payment.txid, payment.confirmations, value, "", True,
                                    description))

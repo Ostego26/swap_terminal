@@ -475,3 +475,94 @@ def test_a_POST_with_a_broken_body_is_refused_without_reaching_the_allowlist():
 
     body, _, code = entry.answer_a_post("/api/stop", b"{}", runner)
     assert code == 200 and b"nothing was running" in body
+
+
+def test_a_SPENT_answer_is_remembered_and_an_UNSPENT_one_is_never_cached(monkeypatch):
+    """The asymmetry IS the correctness argument, and it is the whole reason this is safe.
+
+    Measured on the operator's screen 2026-09-28: opening the panel walked 85, 208 and 259
+    blocks -- three payments, every one long spent -- and did it again on every reload. Rule 3
+    prefers removing work to doing it faster, and remembering "spent by X" removes all of it
+    after the first look.
+
+    "Spent by X" is MONOTONE: nothing this harness cares about can unspend an outpoint, and a
+    reorganization deep enough to try would take the outpoint with it rather than hand it back
+    usable. "Not spent" is NOT monotone -- the very next block can spend it -- so caching that
+    would have the panel offering a payment the harness then refuses, which is the exact failure
+    the spend scan was written to end. The cache may only ever turn a slow correct answer into a
+    fast one.
+    """
+    walks = []
+    spent, fresh = "22" * 32, "33" * 32
+
+    class _Key:
+        address = "ours"
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *params):
+            if method == "listtransactions":
+                return [{"address": "ours", "category": "send", "txid": spent, "confirmations": 9},
+                        {"address": "ours", "category": "send", "txid": fresh, "confirmations": 2}]
+            raise AssertionError(method)
+
+    monkeypatch.setattr(adaptor_steps, "find_operator_funding",
+                        lambda run, key, txid: _Outpoint(txid))
+
+    def _walk(run, outpoint, max_depth=0):
+        walks.append(outpoint.txid)
+        return (("what-consumed-it", "SPENT ALREADY") if outpoint.txid == spent
+                else (None, "no transaction in the last 3 block(s) spends this outpoint"))
+
+    monkeypatch.setattr(adaptor_steps, "find_the_spender", _walk)
+
+    cache: dict = {}
+    first = decisions.payment_rows(_Run(), _Key(), cache)
+    assert walks == [fresh, spent], "the first look walks both"
+    assert [r.usable for r in first] == [True, False]
+
+    second = decisions.payment_rows(_Run(), _Key(), cache)
+    assert walks == [fresh, spent, fresh], (
+        "the SPENT one must not be walked again, and the UNSPENT one must be -- it can become "
+        f"spent at any block. walks were {walks}"
+    )
+    assert [r.usable for r in second] == [True, False], "and the answer is unchanged"
+    assert "remembered from an earlier look" in second[1].note, (
+        "and it SAYS the answer was remembered rather than re-measured (rule 17: a reader must "
+        "be able to tell which they are holding)"
+    )
+
+
+def test_the_cache_is_OPTIONAL_so_every_other_caller_is_unaffected(monkeypatch):
+    """`None` means no cache, and nothing is remembered. The harnesses pass nothing."""
+    walks = []
+
+    class _Key:
+        address = "ours"
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *params):
+            return [{"address": "ours", "category": "send", "txid": "44" * 32, "confirmations": 9}]
+
+    monkeypatch.setattr(adaptor_steps, "find_operator_funding", lambda run, key, txid: _Outpoint(txid))
+    monkeypatch.setattr(adaptor_steps, "find_the_spender",
+                        lambda run, outpoint, max_depth=0: walks.append(1) or ("x", "SPENT"))
+
+    decisions.payment_rows(_Run(), _Key())
+    decisions.payment_rows(_Run(), _Key())
+    assert len(walks) == 2, "with no cache, both looks walk"
