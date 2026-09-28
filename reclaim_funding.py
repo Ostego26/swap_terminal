@@ -58,7 +58,16 @@ from regtest.adaptor_steps import Run
 from regtest.console import FAIL, OK, Console
 from regtest.daemons import RegtestSetupError
 
-TOTAL_STEPS = 5
+# SIX, not five, and this is a correction rather than a count. The first run printed two
+# `step 1/5` lines and two `step 2/5` lines, because `step_1_reachable` and
+# `assert_test_network` print their OWN headers -- they are borrowed whole from
+# adaptor_regtest_verify's step 1 and step 2 -- and this file then printed its own on top.
+#
+# A numbering that repeats itself is worse than no numbering: the operator reads "step 2/5",
+# sees another "step 2/5", and now has to work out whether something re-ran. Rule 14 is about
+# exactly that -- the operator reads the screen, not the source. So the borrowed steps keep
+# their numbers and this file's own start at 3.
+TOTAL_STEPS = 6
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -106,11 +115,13 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     run = Run(console=console, config=config, wallet="")
     console.say(f"{asset}: endpoint {config.base_url}")
 
-    console.step(1, asset, "the daemon answers, and it SAYS which network it is on")
+    # Steps 1 and 2 are printed by the two calls themselves, borrowed whole from
+    # adaptor_regtest_verify: the daemon answering, and the daemon SAYING which network it is
+    # on. Printing a header here as well is what produced the duplicate numbering.
     adaptor_steps.step_1_reachable(run)
     adaptor_steps.assert_test_network(run)
 
-    console.step(2, asset, "derive the funding address from the seed in the environment")
+    console.step(3, asset, "derive the funding address from the seed in the environment")
     key = adaptor_steps.operator_funding_key(run)
     if key is None:
         raise RegtestSetupError(
@@ -121,7 +132,7 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     console.check(f"{asset} funding address derived from the seed", key.address,
                   "the address you funded", OK)
 
-    console.step(3, asset, "find the payment the wallet made to it")
+    console.step(4, asset, "find the payment the wallet made to it")
     txid = args.funding_txid or adaptor_steps.discover_operator_funding_txid(run, key)
     if not txid:
         raise RegtestSetupError(
@@ -132,7 +143,7 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
         )
     source = adaptor_steps.find_operator_funding(run, key, txid)
 
-    console.step(4, asset, "build and sign the spend -- IN THIS PROCESS, and broadcast nothing yet")
+    console.step(5, asset, "build and sign the spend -- IN THIS PROCESS, and broadcast nothing yet")
     destination = args.to or adaptor_steps.wallet_owned_address(run)
     raw, predicted, value = adaptor_steps.reclaim_p2pkh(run, key, source, destination)
     console.check(
@@ -142,7 +153,7 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     console.say(f"{asset}: predicted txid {predicted}; {len(raw) // 2} bytes")
     console.say(f"{asset}: spending {source.txid}:{source.vout}")
 
-    console.step(5, asset, "broadcast -- ONLY with --send")
+    console.step(6, asset, "broadcast -- ONLY with --send")
     if not args.send:
         console.say(f"{asset}: NOTHING WAS BROADCAST. Re-run with --send to move it:")
         console.say(f"{asset}:   python3 reclaim_funding.py --to {destination} --chain {args.chain} --send")

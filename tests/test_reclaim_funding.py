@@ -320,3 +320,44 @@ def test_the_dry_run_tells_you_to_re_run_with_the_EXACT_address_it_used(monkeypa
         "the re-run line must carry the address actually used, not --to-wallet again"
     )
     assert node.sent == []
+
+
+def test_no_step_number_is_printed_twice(monkeypatch):
+    """THE FIRST REAL RUN PRINTED TWO `step 1/5` LINES AND TWO `step 2/5` LINES.
+
+    `step_1_reachable` and `assert_test_network` are borrowed whole from
+    adaptor_regtest_verify and print their OWN headers, and this file printed its own on top.
+    A numbering that repeats is worse than none: the operator reads "step 2/5", sees another
+    "step 2/5", and has to work out whether something re-ran.
+
+    Asserted over the REAL step headers rather than by counting console.step() calls, because
+    the duplicates came from a function this file calls, not from a call it makes.
+    """
+    entry = _entry()
+    key, owned = generate_key(), generate_key().address
+    node = _Node({
+        "listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}],
+        "getblockcount": 100,
+        "getblockchaininfo": {"testnet": True},
+    })
+    for name, value in (
+        ("resolve_config", lambda asset: ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid")),
+        ("operator_funding_key", lambda run: key),
+        ("discover_operator_funding_txid", lambda run, k: "cd" * 32),
+        ("find_operator_funding", lambda run, k, txid: _source()),
+        ("adapter_for", lambda config, wallet="": node),
+    ):
+        monkeypatch.setattr(entry.adaptor_steps, name, value)
+
+    stream = io.StringIO()
+    entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
+
+    numbers = [line.split()[1] for line in stream.getvalue().splitlines() if line.startswith("step ")]
+    assert numbers == sorted(numbers, key=lambda n: int(n.split("/")[0])), "in order"
+    assert len(numbers) == len(set(numbers)), f"each step number printed once; got {numbers}"
+    assert all(n.endswith(f"/{entry.TOTAL_STEPS}") for n in numbers), (
+        f"and the denominator must be the real total, not a stale one: {numbers}"
+    )
