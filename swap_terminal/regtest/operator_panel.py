@@ -171,7 +171,7 @@ class ChainTab(NamedTuple):
     """One chain the panel shows, and what it is honestly able to say about it."""
 
     asset: str
-    kind: str          # "operator" | "regtest" | "none"
+    kind: str          # "operator" | "regtest" | "foreign"
     reachable_by_this_panel: bool
     note: str
 
@@ -191,8 +191,18 @@ class ChainTab(NamedTuple):
 #:              that spawn and its reaper, rule 13). The panel probes it if it happens to be up
 #:              and says so if it is not -- it must NOT start one, because a process this panel
 #:              spawned outside HarnessRunner would have no reaper here.
-#:   none       no adapter in this panel. XMR, XRP and SOL are swapped by other entry points
-#:              with their own clients; saying so beats an empty tab or a missing one.
+#:   foreign    no Bitcoin-style adapter in this panel. XMR, XRP and SOL are swapped by other
+#:              entry points with their own clients; saying so beats an empty tab or a missing
+#:              one.
+#:
+#: THE WORD WAS `none` IN THIS COMMENT AND IN ChainTab's TYPE LINE UNTIL 2026-09-28, AND NO TAB
+#: HAS EVER CARRIED IT. CHAINS below has said "foreign" since the tabs were written, so both
+#: the comment and the annotation described a fourth kind that does not exist -- and two live
+#: branches were written against the name: `main()` skipped console construction on
+#: `kind == "none"` (so it never skipped, and printed `KeyError: 'XMR'` three times at startup
+#: on 2026-09-28), and the page set a nav dot on `d.kind === "none"` (so it never set grey, and
+#: painted every foreign chain RED for a probe this panel never makes). A wrong comment is a
+#: bug, rule 16, and this one was read as documentation by two pieces of code.
 #: What each foreign chain's own entry point reads to find its endpoint. Checking these costs
 #: nothing and cannot hang, and it answers the question a "no adapter" note left open: whether
 #: pressing that chain's button has anywhere to connect to at all.
@@ -461,6 +471,56 @@ def refuse_daemon_control(tab: ChainTab, action: str) -> str:
             f"anything that merely reaches this port."
         )
     return ""
+
+
+def refuse_an_rpc_console(tab: ChainTab) -> str:
+    """"" if this tab gets the read-only RPC console, else why it does not.
+
+    THE CONSOLE SPEAKS ONE PROTOCOL. Every method in READ_ONLY_RPCS is a Bitcoin-style JSON-RPC
+    call, sent as {"method": ..., "params": [...]} to a daemon that answers that shape. Monero,
+    XRP and Solana each answer a DIFFERENT shape -- monero-wallet-rpc is JSON-RPC 2.0 with the
+    call nested under `params`, the XRP Ledger takes a single-element `params` array of objects,
+    Solana takes named parameters -- so `getblockcount` is not a method any of them has, and a
+    console pointed at one would not fail usefully, it would fail confusingly.
+
+    ASKED HERE RATHER THAN DISCOVERED AT THE SOCKET, which is the whole point of it being a
+    function. Before this existed, `main()` tried to build a connection for every tab and the
+    three foreign ones printed `no RPC console (KeyError: 'XMR')` at startup -- a Python
+    exception class in an operator's terminal, for a condition that is by design and known
+    before anything is asked of a network (rule 14: the panel should say what it is doing in
+    words the operator can act on, and an exception name is not one).
+    """
+    if tab.kind == "foreign":
+        return (f"{tab.asset} does not speak the Bitcoin-style JSON-RPC this console sends, so "
+                f"there is nothing here to point at it. That chain has its own client in this "
+                f"tree, and its own read-only check is the button under Run.")
+    return ""
+
+
+#: What one nav dot may say. NAMED, because the page has a CSS rule per value and a typo in
+#: either half is a dot that silently renders as nothing.
+DOT_ANSWERED = "yes"      # green: it answered the last time this panel asked
+DOT_SILENT = "no"         # red:   it did not answer the last time this panel asked
+DOT_CONFIGURED = "cfg"    # amber: this panel cannot ask, but the endpoint IS configured
+DOT_UNASKED = ""          # grey:  nobody has asked, which is NOT the same as down
+
+
+def dot_state(state: dict) -> str:
+    """The nav dot for one chain, from that chain's own payload.
+
+    RED MUST MEAN "WE ASKED AND IT DID NOT ANSWER", and until 2026-09-28 it did not. The page
+    computed the dot as `d.reachable ? "yes" : "no"` with a grey branch guarded by a kind that
+    no tab carries, so the three chains this panel never probes at all were painted red -- the
+    exact stale-lie-an-operator-acts-on the dot's own comment forbids. `cfg` had a CSS rule and
+    the legend under the nav promised amber, and nothing in the tree ever set it.
+
+    A FOREIGN CHAIN IS NEVER RED HERE, because this panel has no evidence to be red with. It is
+    amber when its endpoint is configured -- meaning the button under Run has somewhere to
+    connect to -- and grey when it is not, meaning nothing has been asked and nothing could be.
+    """
+    if state.get("kind") == "foreign":
+        return DOT_CONFIGURED if state.get("configured") else DOT_UNASKED
+    return DOT_ANSWERED if state.get("reachable") else DOT_SILENT
 
 
 class Missing(NamedTuple):

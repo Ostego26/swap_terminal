@@ -992,3 +992,125 @@ def test_the_switch_route_refuses_before_it_reaches_a_daemon():
 
     answer, code = entry.answer_a_daemon_switch("not an object", {})
     assert code == 400
+
+
+def test_NO_TAB_HAS_EVER_CARRIED_THE_KIND_TWO_LIVE_BRANCHES_TESTED_FOR():
+    """The defect under every fix in this group, 2026-09-28.
+
+    `ChainTab.kind`'s type comment and the block above CHAINS both named a kind `none`, and
+    CHAINS has said `foreign` since the tabs were written. Nothing failed, because a comment
+    cannot fail -- but two pieces of code were written against the comment rather than against
+    the data, and both were dead the moment they were typed:
+
+      main()            skipped building an RPC console on `kind == "none"`, so it never
+                        skipped, and printed `XMR: no RPC console (KeyError: 'XMR')` three
+                        times at startup -- a Python exception class in an operator's terminal.
+      the nav dot       set grey on `d.kind === "none"`, so it never set grey, and painted
+                        every foreign chain RED for a probe this panel never makes.
+
+    This test pins the DATA, so the next person to write a branch against a kind finds out here
+    whether that kind exists. It is the assertion that would have failed on the day.
+    """
+    kinds = {c.kind for c in decisions.CHAINS}
+    assert "none" not in kinds, (
+        "if a `none` kind is ever introduced, the two branches above have to be revisited "
+        "together -- they are what this name meant last time"
+    )
+    assert kinds == {"operator", "regtest", "foreign"}, sorted(kinds)
+
+
+def test_a_CHAIN_THIS_PANEL_CANNOT_SPEAK_TO_IS_NEVER_RED():
+    """Red means "we asked and it did not answer". This panel never asks a foreign chain.
+
+    Until this function existed the page computed `d.reachable ? "yes" : "no"` with its grey
+    branch guarded by a kind no tab carries, so XMR, XRP and SOL were red on a page whose own
+    legend says red means the daemon did not answer. That is the stale-green-an-operator-acts-on
+    the dot's comment forbids, running the other way: a red dot for a question nobody asked
+    sends someone looking for a daemon that may be up and fine.
+
+    AMBER HAD A CSS RULE AND NO WRITER. `nav button[data-up="cfg"]` has been in the stylesheet
+    and in the legend under the nav since the tabs were themed, and nothing in the tree ever set
+    the value -- so the sentence the operator reads above the tabs described a color the page
+    could not produce.
+    """
+    assert decisions.dot_state({"kind": "foreign", "configured": True}) == decisions.DOT_CONFIGURED
+    assert decisions.dot_state({"kind": "foreign", "configured": False}) == decisions.DOT_UNASKED
+    assert decisions.DOT_CONFIGURED == "cfg" and decisions.DOT_UNASKED == ""
+
+    # and a chain this panel DOES probe still answers the original question
+    assert decisions.dot_state({"kind": "operator", "reachable": True}) == decisions.DOT_ANSWERED
+    assert decisions.dot_state({"kind": "regtest", "reachable": False}) == decisions.DOT_SILENT
+
+    page = _entry().PAGE
+    # COMMENTS STRIPPED FIRST. The comment at the fix QUOTES the dead branch, because rule 1
+    # wants the reason the obvious version was wrong kept next to the code -- so a naive
+    # substring check over the whole page fails on the explanation rather than on the defect.
+    code = "\n".join(line for line in page.splitlines() if not line.strip().startswith("//"))
+    assert 'd.kind === "none"' not in code, "the dead branch, gone rather than left beside the fix"
+    assert 'tab.dataset.up = d.dot' in code, "and the page takes the server's answer"
+    for value in ("yes", "no", "cfg", ""):
+        assert f'nav button[data-up="{value}"]' in page, (
+            f"every value dot_state can return needs the CSS rule that colors it -- {value!r} "
+            f"has none, so it would render as an uncolored dot with no way to tell"
+        )
+
+
+def test_a_FOREIGN_TAB_IS_NOT_OFFERED_A_CONSOLE_IT_CANNOT_USE():
+    """The operator pressed Call on the XMR tab and got REFUSED BY THIS PANEL.
+
+    A dropdown of twenty-five Bitcoin-style methods was rendered for a chain that has none of
+    them, and the refusal arrived after the click. Offering a control that cannot work and
+    explaining afterwards is rule 14's defect-in-the-output: the page should say so where the
+    control would have been.
+
+    AND THE REFUSAL NAMED THE WRONG REASON. It said XMR "has no reachable daemon in this panel",
+    which is not established -- the operator's monero-wallet-rpc may be answering perfectly
+    well. What is true is that this console sends one protocol and XMR does not speak it.
+    """
+    entry = _entry()
+    xmr = next(c for c in decisions.CHAINS if c.asset == "XMR")
+    grc = next(c for c in decisions.CHAINS if c.asset == "GRC")
+
+    refusal = decisions.refuse_an_rpc_console(xmr)
+    assert refusal and "does not speak" in refusal
+    assert "unreachable" not in refusal and "not reachable" not in refusal, (
+        "it must not claim anything about whether that daemon is up -- nothing asked it"
+    )
+    assert decisions.refuse_an_rpc_console(grc) == "", "GRC speaks it, so GRC keeps its console"
+
+    answer, code = entry.answer_an_rpc({"asset": "XMR", "method": "getblockcount"}, {})
+    assert code == 403 and answer["refused"] is True
+    assert answer["error"] == refusal, (
+        "the route gives the same sentence the tab does, from the same function -- two copies "
+        "of one refusal is rule 8's bug with a delay on it"
+    )
+
+    page = entry.PAGE
+    assert 'd.console ? "none" : ""' in page, "and the row is hidden rather than left to refuse"
+
+
+def test_STARTUP_SAYS_WHY_A_CHAIN_HAS_NO_CONSOLE_IN_WORDS_NOT_IN_A_KeyError():
+    """`XMR: no RPC console (KeyError: 'XMR')`, printed three times, on 2026-09-28.
+
+    Two defects in one line. The condition was knowable before anything was asked of anything
+    -- this console speaks a protocol XMR does not -- so the try/except was reached at all only
+    because the skip above it tested a kind that does not exist. And what it printed was a
+    Python exception class, for a design decision, in the terminal of an operator deciding
+    whether the panel came up correctly (rule 14).
+
+    A CONNECTION FAILURE IS STILL ITS OWN LINE, and deliberately reads differently: one says
+    this panel will never have a console here, the other says it could not build one this time.
+    """
+    entry = _entry()
+    for tab in decisions.CHAINS:
+        if tab.kind != "foreign":
+            continue
+        refusal = decisions.refuse_an_rpc_console(tab)
+        assert refusal, f"{tab.asset} is foreign and must refuse before resolve_config is called"
+        assert "KeyError" not in refusal and "Error" not in refusal
+
+    source = Path(entry.__file__).read_text(encoding="utf-8")
+    assert 'if tab.kind == "none"' not in source and 'tab.kind == "none"' not in source, (
+        "the skip that never skipped"
+    )
+    assert "decisions.refuse_an_rpc_console(tab)" in source

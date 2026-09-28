@@ -155,9 +155,10 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <span class="what">reads the daemon, and on GRC walks blocks per payment &mdash; a few seconds, not on a timer</span>
 </section>
 
-<section>
+<section id="rpcsection">
   <h2>RPC console &mdash; read-only</h2>
-  <div class="row">
+  <p class="warn" id="rpcwhynot" style="display:none"></p>
+  <div class="row" id="rpcrow">
     <select id="method"></select>
     <input id="rpcargs" placeholder='arguments as JSON, e.g. ["txid", true] &mdash; blank for none'>
     <button id="callrpc">Call</button>
@@ -304,6 +305,14 @@ async function loadChain(asset) {
     }
   }
   $("chain").innerHTML = h;
+  // A CONSOLE THAT CAN ONLY REFUSE IS WORSE THAN NO CONSOLE. The operator pressed Call on the
+  // XMR tab on 2026-09-28 and got "REFUSED BY THIS PANEL" -- a dropdown of twenty-five methods
+  // was offered for a chain that has none of them. Offering a control that cannot work, and
+  // explaining afterwards, is the shape rule 14 calls a defect in the output.
+  $("rpcwhynot").textContent = d.console || "";
+  $("rpcwhynot").style.display = d.console ? "" : "none";
+  $("rpcrow").style.display = d.console ? "none" : "";
+  $("rpcout").textContent = d.console ? "(no console on this tab)" : "(nothing called yet)";
   // THE SWITCH SAYS WHY IT IS OFF, rather than being absent or greyed with no reason. Three
   // different refusals live behind these buttons and they are not interchangeable: one says
   // this panel does not know your command line, one says an environment variable arms it, one
@@ -337,7 +346,10 @@ async function loadChain(asset) {
   // green is a lie an operator acts on, and grey for "nobody has asked" is its own answer
   // rather than an optimistic guess (rule 14).
   const tab = $("tabs").querySelector('[data-asset="' + asset + '"]');
-  if (tab) { tab.dataset.up = (d.kind === "none") ? "" : (d.reachable ? "yes" : "no"); }
+  // THE SERVER DECIDES WHAT THE DOT SAYS (decisions.dot_state). This read `d.kind === "none"`,
+  // a kind no tab has ever carried, so every foreign chain went RED for a probe this panel
+  // never makes -- and the amber the legend promises had a CSS rule and no writer.
+  if (tab) { tab.dataset.up = d.dot || ""; }
 }
 
 async function checkEveryChain() {
@@ -581,12 +593,21 @@ def chain_payload(asset: str, grc_run: adaptor_steps.Run, known_spent: dict | No
     """
     tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
     if tab is None:
-        return {"asset": asset, "kind": "none", "reachable": False, "methods": [],
+        return {"asset": asset, "kind": "unknown", "reachable": False, "methods": [],
                 "note": f"{asset!r} is not a chain this panel knows about.", "error": "",
-                "funding": None, "theme": decisions.theme_for(asset)}
+                "funding": None, "theme": decisions.theme_for(asset),
+                "dot": decisions.DOT_UNASKED,
+                "console": f"{asset!r} is not a chain this panel knows about."}
     state = decisions.chain_state(tab, grc_run.console)
     state["theme"] = decisions.theme_for(asset)
     state["control"] = {a: decisions.refuse_daemon_control(tab, a) for a in ("start", "stop")}
+    # BOTH OF THESE ARE DECISIONS AND NEITHER IS THE PAGE'S. What colour the nav dot is, and
+    # whether this tab gets an RPC console, were both computed in JavaScript against
+    # `kind === "none"` -- a value no tab carries -- so both branches were dead and both told
+    # the operator something false on 2026-09-28. A decision a test can call is rule 10's whole
+    # argument, and these two are now called with a dict in tests/test_operator_panel.py.
+    state["dot"] = decisions.dot_state(state)
+    state["console"] = decisions.refuse_an_rpc_console(tab)
     if asset == "GRC" and state["reachable"]:
         state["funding"] = funding_payload(grc_run, known_spent)
     return state
@@ -774,8 +795,15 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     asset = body.get("asset")
     run = (chains or {}).get(asset) if isinstance(asset, str) else None
     if run is None:
+        # WHY THERE IS NO CONSOLE, not merely that there is none. "'XMR' has no reachable
+        # daemon in this panel" was what this said on 2026-09-28 and it is not true: the
+        # operator's monero-wallet-rpc may be answering perfectly well. What is true is that
+        # this console speaks one protocol and XMR is not it, and only the tab knows which of
+        # those two it is.
+        tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
+        reason = decisions.refuse_an_rpc_console(tab) if tab is not None else ""
         return {"ok": False, "refused": True,
-                "error": f"{asset!r} has no reachable daemon in this panel"}, 403
+                "error": reason or f"{asset!r} has no reachable daemon in this panel"}, 403
     args = body.get("args")
     if not isinstance(args, list):
         args = []
@@ -910,13 +938,23 @@ def main(argv: list[str], console: Console | None = None) -> int:
     # built lazily and may be unreachable, which their tab already says.
     chains = {"GRC": run}
     for tab in decisions.CHAINS:
-        if tab.asset == "GRC" or tab.kind == "none":
+        if tab.asset == "GRC":
+            continue
+        # ASK BEFORE TRYING. `kind == "none"` stood here and matched nothing (no tab has ever
+        # carried that kind), so the three foreign chains fell through to resolve_config() and
+        # printed `XMR: no RPC console (KeyError: 'XMR')` at startup on 2026-09-28 -- a Python
+        # exception class in an operator's terminal, for a design decision that is knowable
+        # without asking anything. The refusal now says which, in words.
+        refusal = decisions.refuse_an_rpc_console(tab)
+        if refusal:
+            console.say(f"{tab.asset}: no RPC console -- {refusal}")
             continue
         try:
             chains[tab.asset] = adaptor_steps.Run(
                 console=console, config=adaptor_steps.resolve_config(tab.asset), wallet="")
         except Exception as exc:  # noqa: BLE001 -- checked: a chain with no connection parameters simply gets no console, which its tab already reports; the panel must still serve the others
-            console.say(f"{tab.asset}: no RPC console ({type(exc).__name__}: {exc})")
+            console.say(f"{tab.asset}: no RPC console -- no connection parameters "
+                        f"({type(exc).__name__}: {exc})")
     server = ThreadingHTTPServer((HOST, args.port),
                                  build_handler(run, runner, PAGE, {}, chains))
     console.say(f"the panel is at http://{HOST}:{args.port}/ -- loopback only, by construction")
