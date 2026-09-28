@@ -91,16 +91,19 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
+import base58
 from chains.base import RPCError
 from chains.monero_keys import decode_address, public_key_for_share, shared_address
 from microfortnights import format_duration
 from modules import adaptor_swap_chain as chain
+from modules import network_selection
 from modules.adaptor_swap_scripts import (
     OP_0,
     two_of_two_p2sh_script,
     two_of_two_redeem_script,
     two_of_two_script_sig,
 )
+from modules.address_network import BASE58_VERSIONED_HASH160_LEN
 from modules.htlc_rpc import lookup_contract_output
 from modules.htlc_spend import (
     SIGHASH_ALL,
@@ -2868,6 +2871,82 @@ def step_11_punish_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
         outcome.punish_leaks_nothing = OK if quiet else FAIL
     _mine(run, 1)
     _corroborate_payout(run, txid, built.setup.alice.p2pkh_script, "the punish")
+
+
+def p2pkh_script_for_address(asset: str, address: str) -> bytes:
+    """The scriptPubKey that pays `address`, refusing one encoded for the wrong network.
+
+    THE VERSION BYTE IS CHECKED AGAINST THE CONFIGURED NETWORK rather than assumed, and this is
+    the first caller of `modules/network_selection`. It is the right first one: paying an
+    address is exactly where a network mismatch costs coins, and the check is one comparison.
+    An address carrying a mainnet byte while this engine is on testnet is not a typo to correct
+    -- it is somebody about to send test coins to a mainnet address, or the reverse, and both
+    are refused by name.
+
+    P2PKH only. A P2SH or bech32 destination is refused rather than half-handled: this exists to
+    return a stranded funding output to an ordinary wallet address, and a reclaim tool that
+    silently built the wrong script for a fancier destination would strand it again somewhere
+    harder to reach.
+    """
+    expected = network_selection.base58_version(asset, network_selection.P2PKH)
+    try:
+        decoded = base58.b58decode_check(address)
+    except ValueError as exc:
+        raise RegtestSetupError(f"{asset}: {address!r} is not valid base58check: {exc}") from exc
+    if len(decoded) != BASE58_VERSIONED_HASH160_LEN:
+        raise RegtestSetupError(
+            f"{asset}: {address} decodes to {len(decoded)} bytes, not "
+            f"{BASE58_VERSIONED_HASH160_LEN}. A P2PKH address is a version byte and a hash160"
+        )
+    if decoded[:1] != expected:
+        raise RegtestSetupError(
+            f"{asset}: {address} carries version byte 0x{decoded[0]:02x} and this engine is on "
+            f"{network_selection.selected_network()}, whose {asset} P2PKH byte is "
+            f"0x{expected[0]:02x}. That is not a typo to correct -- paying it would send coins "
+            f"to an address on the other network. Nothing was built, signed or broadcast"
+        )
+    return b"\x76\xa9" + bytes([len(decoded) - 1]) + decoded[1:] + b"\x88\xac"
+
+
+def reclaim_p2pkh(run: Run, key: RegtestKey, source: chain.Outpoint, destination: str) -> tuple[str, str, int]:
+    """Build and SIGN a spend of one P2PKH outpoint, entirely to `destination`. Broadcasts NOTHING.
+
+    RETURNS THE BYTES RATHER THAN SENDING THEM, so the caller decides. `reclaim_funding.py`
+    defaults to printing them and needs `--send` to broadcast, which is the shape rule 16 asks
+    for when something moves money: the thing that moves it is a separate, explicit act.
+
+    One input, one output, no change: the whole output goes to `destination` less the fee. There
+    is nothing to keep back -- the point is to empty a stranded address -- and a change output
+    returning to the same address would leave a second outpoint there to be stranded again.
+
+    Signed in THIS process with `_sign_p2pkh`, the same call Tx_lock's own input uses, so the
+    wallet is never asked to sign and a staking-only unlock is irrelevant here exactly as it is
+    everywhere else in this harness.
+    """
+    destination_script = p2pkh_script_for_address(run.asset, destination)
+    ntime = int(time.time()) if run.asset == "GRC" else None
+    sizing = chain.build_unsigned(
+        asset=run.asset, spends=source, outputs=[(source.value_satoshis, destination_script)],
+        locktime=0, ntime=ntime,
+    )
+    fee = chain.fee_satoshis_for(run.asset, sizing, chain.p2pkh_script_sig_upper_bound(key.public_key))
+    value = source.value_satoshis - fee
+    if value <= 0:
+        raise RegtestSetupError(
+            f"{run.asset}: the output holds {satoshis_to_coins(source.value_satoshis)} and the "
+            f"fee for spending it is {satoshis_to_coins(fee)}, so nothing would be left. This "
+            f"address cannot be emptied at this fee rate"
+        )
+    # ONE ntime FOR BOTH BUILDS, as split_operator_funding's comment argues at length: reading
+    # the clock twice sizes the fee against different bytes than the ones signed, and makes the
+    # predicted txid wrong.
+    unsigned = chain.build_unsigned(
+        asset=run.asset, spends=source, outputs=[(value, destination_script)],
+        locktime=0, ntime=ntime,
+    )
+    script_sig = _sign_p2pkh(key, _p2pkh_sighash(unsigned, key))
+    raw = unsigned.serialize({0: script_sig}).hex()
+    return raw, chain.predicted_txid(unsigned, {0: script_sig}), value
 
 
 FUNDING_SEED_VARIABLE = "ST_ADAPTOR_FUNDING_SEED"

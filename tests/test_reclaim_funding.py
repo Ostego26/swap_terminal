@@ -1,0 +1,228 @@
+"""Emptying a seed-derived funding address, and the two refusals that make it safe.
+
+Role: tests (offline; no daemon, no network)
+Reads: reclaim_funding.py, regtest/adaptor_steps.py, modules/network_selection.py
+Writes: nothing
+Can move funds: no
+Mainnet-safe: yes -- nothing here opens a socket
+Live-safe: yes
+
+MEASURED ON THE OPERATOR'S HOST, 2026-09-28: two addresses funded from two different seeds
+across one evening, holding 3.499 and 4.60 GRC, and nothing in this tree could reach either.
+The wallet does not own them, `importaddress` is False on Gridcoin v5.5.1.0 and `gettxout` is
+False too -- so the coins were invisible to the harness and to the wallet alike. The seeds were
+in the shell history, which is the only reason recovery is possible at all.
+
+The two properties worth pinning are not "it builds a transaction". They are:
+
+  --send is SEPARATE      everything but the broadcast runs by default, so the operator reads
+                          the destination, the amount and the fee before anything moves.
+  the network is CHECKED  the destination's version byte is compared against the configured
+                          network before a byte is built. Paying an address is exactly where a
+                          network mismatch costs coins.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+from pathlib import Path
+
+import base58
+import pytest
+from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
+from modules import adaptor_swap_chain as chain
+from modules import network_selection
+from regtest import adaptor_steps
+from regtest.console import Console
+from regtest.daemons import ChainConfig, RegtestSetupError
+from regtest.keys import generate_key
+
+
+def _entry():
+    spec = importlib.util.spec_from_file_location(
+        "reclaim_funding_under_test", Path(__file__).resolve().parents[1] / "reclaim_funding.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run(monkeypatch, node=None) -> tuple[adaptor_steps.Run, io.StringIO]:
+    stream = io.StringIO()
+    run = adaptor_steps.Run(
+        console=Console(adaptor_steps.TOTAL_STEPS, stream=stream),
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    if node is not None:
+        monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": node)
+    return run, stream
+
+
+# ---------------------------------------------------------------------------
+# The destination's network is checked BEFORE anything is built.
+# ---------------------------------------------------------------------------
+
+
+def test_a_testnet_address_gives_the_p2pkh_script_that_pays_it():
+    key = generate_key()
+    assert adaptor_steps.p2pkh_script_for_address("GRC", key.address) == key.p2pkh_script
+
+
+def test_a_MAINNET_address_is_REFUSED_while_this_engine_is_on_testnet():
+    """THE REFUSAL THAT MATTERS. Paying an address is exactly where a network mismatch costs
+    coins, and the two directions are both losses: test coins to a mainnet address are gone to
+    somewhere nobody can pay from, and real coins to a testnet address likewise.
+
+    Built here by re-encoding a real testnet hash160 under GRC's MAINNET version byte, taken
+    from the authority rather than written as 0x3E -- so this test cannot disagree with the
+    module it is testing about what mainnet's byte is.
+    """
+    key = generate_key()
+    mainnet_byte = network_selection.base58_version("GRC", network_selection.P2PKH, network_selection.MAINNET)
+    mainnet_address = base58.b58encode_check(mainnet_byte + key.hash160).decode()
+
+    with pytest.raises(RegtestSetupError) as raised:
+        adaptor_steps.p2pkh_script_for_address("GRC", mainnet_address)
+
+    message = str(raised.value)
+    assert "other network" in message, "it has to say what paying it would do, not just refuse"
+    assert "Nothing was built, signed or broadcast" in message
+
+
+@pytest.mark.parametrize("bad", ["not base58 at all", "", "1111111111111111111114oLvT2"])
+def test_a_destination_that_is_not_a_P2PKH_address_is_refused(bad):
+    """P2SH and bech32 are refused rather than half-handled: this exists to return a stranded
+    output to an ordinary wallet address, and a reclaim tool that silently built the wrong
+    script for a fancier destination would strand it again somewhere harder to reach."""
+    with pytest.raises(RegtestSetupError):
+        adaptor_steps.p2pkh_script_for_address("GRC", bad)
+
+
+# ---------------------------------------------------------------------------
+# Building the spend.
+# ---------------------------------------------------------------------------
+
+
+def _source(value: int = 350_000_000) -> chain.Outpoint:
+    return chain.Outpoint(txid="ab" * 32, vout=1, value_satoshis=value)
+
+
+def test_the_whole_output_goes_to_the_destination_less_the_fee(monkeypatch):
+    """One input, one output, NO CHANGE. The point is to empty the address, and a change output
+    returning to it would leave a second outpoint there to be stranded again."""
+    run, _stream = _run(monkeypatch)
+    key, destination = generate_key(), generate_key()
+    source = _source()
+
+    raw, predicted, value = adaptor_steps.reclaim_p2pkh(run, key, source, destination.address)
+
+    assert 0 < value < source.value_satoshis, "the fee comes out of it, and something is left"
+    assert len(predicted) == 64
+    assert raw, "signed bytes, ready to broadcast and not broadcast"
+
+
+def test_an_output_too_small_to_cover_its_own_fee_is_refused_by_name(monkeypatch):
+    """Rather than building a transaction with a zero or negative output, which the daemon would
+    refuse with a message about amounts that says nothing about why."""
+    run, _stream = _run(monkeypatch)
+    key, destination = generate_key(), generate_key()
+
+    with pytest.raises(RegtestSetupError) as raised:
+        adaptor_steps.reclaim_p2pkh(run, key, _source(value=1), destination.address)
+    assert "cannot be emptied" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# --send IS SEPARATE. The default builds everything and moves nothing.
+# ---------------------------------------------------------------------------
+
+
+class _Node:
+    """A daemon that refuses to be asked for a broadcast, so the default path can be asserted."""
+
+    def __init__(self, answers: dict) -> None:
+        self.answers, self.sent = answers, []
+
+    def call(self, method, *params):
+        if method == "sendrawtransaction":
+            self.sent.append(params[0])
+            raise AssertionError("sendrawtransaction must NOT be reached without --send")
+        if method in self.answers:
+            answer = self.answers[method]
+            return answer(*params) if callable(answer) else answer
+        raise RPCErrorStub(f"{method}: no answer configured")
+
+
+class RPCErrorStub(Exception):
+    pass
+
+
+def test_without_send_the_transaction_is_BUILT_AND_SIGNED_and_never_broadcast(monkeypatch):
+    """THE PROPERTY THAT MAKES THIS SAFE TO RUN. Everything except the broadcast happens by
+    default, so the operator reads the destination, the amount and the fee BEFORE anything
+    moves -- and the transaction they then approve is the one that goes.
+
+    The stub RAISES on sendrawtransaction rather than counting it, so what is asserted is that
+    the call never happens, not that a counter stayed at zero.
+    """
+    entry = _entry()
+    key, destination = generate_key(), generate_key()
+    node = _Node({})
+    monkeypatch.setattr(entry.adaptor_steps, "resolve_config", lambda asset: ChainConfig(
+        asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+        host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+        conf_name="c.conf", pid_name="c.pid",
+    ))
+    monkeypatch.setattr(entry.adaptor_steps, "step_1_reachable", lambda run: None)
+    monkeypatch.setattr(entry.adaptor_steps, "assert_test_network", lambda run: None)
+    monkeypatch.setattr(entry.adaptor_steps, "operator_funding_key", lambda run: key)
+    monkeypatch.setattr(entry.adaptor_steps, "discover_operator_funding_txid", lambda run, k: "cd" * 32)
+    monkeypatch.setattr(entry.adaptor_steps, "find_operator_funding", lambda run, k, txid: _source())
+    monkeypatch.setattr(entry.adaptor_steps, "adapter_for", lambda config, wallet="": node)
+
+    stream = io.StringIO()
+    code = entry.main(["--to", destination.address, "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
+
+    assert code == 0
+    assert node.sent == [], "nothing may reach the daemon without --send"
+    printed = stream.getvalue()
+    assert "NOTHING WAS BROADCAST" in printed
+    assert "--send" in printed, "and it says how to actually move it"
+    assert destination.address in printed, "and names where it would go, before it goes"
+
+
+def test_an_unset_seed_says_where_the_seed_usually_is(monkeypatch):
+    """The refusal has to name the recovery route, or it is the dead end this whole tool exists
+    because of: the operator's shell history is the only place a lost seed actually is."""
+    entry = _entry()
+    monkeypatch.setattr(entry.adaptor_steps, "resolve_config", lambda asset: ChainConfig(
+        asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+        host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+        conf_name="c.conf", pid_name="c.pid",
+    ))
+    monkeypatch.setattr(entry.adaptor_steps, "step_1_reachable", lambda run: None)
+    monkeypatch.setattr(entry.adaptor_steps, "assert_test_network", lambda run: None)
+    monkeypatch.setattr(entry.adaptor_steps, "operator_funding_key", lambda run: None)
+
+    stream = io.StringIO()
+    assert entry.main(["--to", generate_key().address], Console(entry.TOTAL_STEPS, stream=stream)) == 1
+    printed = stream.getvalue()
+    assert "history | grep" in printed
+    assert "Nothing was built, signed or broadcast" in printed
+
+
+def test_the_seed_is_never_an_argument(monkeypatch):
+    """A value on the command line is world-readable through /proc and `ps`, and lands in the
+    shell history of whoever runs it. The seed derives a key that controls coins."""
+    entry = _entry()
+    with pytest.raises(SystemExit):
+        entry.parse_args(["--to", "x", "--seed", "anything"])
+    assert "seed" not in vars(entry.parse_args(["--to", "x"])), (
+        "no argument may carry the seed. It goes in the environment or nowhere"
+    )
