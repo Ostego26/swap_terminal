@@ -1,4 +1,4 @@
-# An ADAPTOR signature spends a 2-of-2 on Gridcoin, and spending it publishes the Monero share
+# An ADAPTOR signature spends a 2-of-2 on Gridcoin, and all five transactions move a coin
 
     Role: record (what one run established, and what it did not)
     Reads: nothing
@@ -42,6 +42,47 @@ Monero spend share. Bob's key never signed that digest.
 
 Seven broadcasts, seven txids predicted before a byte was sent, seven matches -- including both
 adaptor spends, whose bytes depend on a randomized nonce and so could not have been guessed.
+
+## RUN 2, the same day: LOCK C, AND THE FIFTH TRANSACTION SPENDS
+
+The run above left one thing untouched, and the operator named it: *"i want to test each branch
+first."* Of the five transactions the protocol specifies, FOUR had moved a coin. `Tx_punish` had
+been broadcast once per run, before T2, and asserted REFUSED -- the timelock HOLDING, which is
+the opposite measurement from the branch working.
+
+Lock C was added for it (a lock spends once, and lock B's refund takes the cancel output the
+punish would have). Re-run with `LOCKS_PER_RUN = 3`:
+
+    OK=63  FAIL=0  XFAIL=1  SKIP=2  --  exit code 0, ESTABLISHED
+
+    split of the operator's 4.60 GRC   00573228e61a76474a8c07dfa85085b31c07f30cf810f08ae8ee0043a90e7805
+    lock A                             f6f766e494c68d6a3c8a267ee4b056a8a7e448945e1d663dfffcfda8eaa88927
+    Tx_redeem  ADAPTOR, under Y_a      b15f63b3704f405b8490d54e79cb23a7fb94c148b7d5b03e242f300b09d581a6
+    lock B                             2c9e3b7c5e152ee711dba3a00722be581b3475bc65a48b5ee145e21ce6cdf3df
+    Tx_cancel  plain, at T1            e1c9ff34cee6f0eaaed402d33bf0902b3100552cd4bb3e39fe672ebee8e0cd9c
+    Tx_refund  ADAPTOR, under Y_b      5fcd1fe0e828d23c18ea9120652103b1b9fccb507d409d2e138eb85e72dc775f
+    lock C                             44768ac10a994178562dd352da1ca25299c0210acdd7c70db92ccbbc375e0a1d
+    Tx_cancel  plain, at T1 (lock C)   7466fd1ad7a746f5bd3cdafd0a019a9f730d6d8ec024d1a2d9d0fe1ce720183d
+    Tx_punish  plain, AT T2            db8c2e9456456fb65a5ec82218c8de54b129a72bf36cd463006b7e91b2a85de5
+
+    Y_a  0392418ecacefcb5..    Y_b  03e067fb0e30e76b..
+    Monero lock address
+      5AijqQuSXQaPr9pz3XfgcMF4dfrmJcUooJP2H7wyJ5n2DCoX98dYQMFUVBWrw88YgqL2538WgfmGi1tYp99SJsEtVPiB5jS
+
+**NINE broadcasts, nine txids predicted before a byte was sent, nine matches** -- including both
+adaptor spends, whose bytes depend on a randomized nonce.
+
+The punish was measured the way the cancel is, and for the same reason: the SAME 308 bytes were
+refused at height 3296126 and accepted at 3296131. Gridcoin's refusal names nothing (`-22 TX
+rejected`), so a refusal alone proves only "refused for some reason" -- what isolates nLockTime
+is that nothing about the transaction changed and only the height did. Its scriptSig was then
+read back (218 bytes) and published NOTHING, which is what taking the punish branch must tell a
+counterparty.
+
+**THE FIVE TRANSACTIONS docs/monero_swap_protocol.md SPECIFIES HAVE NOW ALL MOVED A COIN ON
+GRIDCOIN.** Everything under "WHAT THIS RUN DOES NOT ESTABLISH" below is unchanged by it: no
+Monero moved, the consensus half of the timelock is still a reading, and the cryptography is
+still unaudited.
 
 ## The six decisive outcomes
 

@@ -50,7 +50,7 @@ v5.5.1.0. Full record: `docs/gridcoin_adaptor_join_2026_09_28.md`.
 | Tx_cancel at T1 | SPENT | `843b5fa64e1b91aa…`, SAME BYTES as the refusal |
 | Tx_refund, ADAPTOR under Y_b | SPENT | `8fd143103ed91b36…` and the scalar recovered |
 | Tx_punish before T2 | REFUSED | the control |
-| **Tx_punish at T2** | **NONE** | **lock C is built and has never run.** See §5 |
+| Tx_punish at T2 | SPENT | `db8c2e9456456fb6…` on its own lock C, 2026-09-28. The SAME 308 bytes refused at height 3296126 and accepted at 3296131, and its scriptSig publishes nothing |
 | the cancel publishes nothing | SPENT | asserted over 218 published bytes |
 | nLockTime is CONSENSUS, not relay | READ | `src/validation.cpp:1777`. Gridcoin has no `generateblock`, so this cannot be measured from here |
 
@@ -106,12 +106,13 @@ machine.
 passed -- the offline suite (2154), the BTC and LTC HTLC with both branches through the real
 client (`regtest_htlc_verify.py --chain both --wipe`, OK=76 FAIL=0, CLTV refused by CONSENSUS on
 both chains via `generateblock`), the Monero shared-key sweep, and the XRP escrow (OK=11 FAIL=0,
-both branches on the live testnet). **Command 1 -- the GRC adaptor chain, including the punish
-branch that has still never spent -- is the only one outstanding.**
+both branches on the live testnet). and the GRC adaptor chain with the punish branch (OK=63 FAIL=0). **All five of the
+operator's commands have now passed.**
 
-**a. Tx_punish at T2 has never spent.** Lock C and step 11 are built, tested offline and
-pushed; the run costs one GRC payment of 4.6 and about 40 minutes of block waiting. This is
-purely owed work with nothing blocking it.
+**a. ~~Tx_punish at T2 has never spent.~~ DONE 2026-09-28**, `db8c2e9456456fb6…`. All five
+transactions the protocol specifies have now moved a coin on Gridcoin. Kept struck through
+rather than deleted, because what it says about the other four gaps is that they are the same
+kind of work and equally closable.
 
 **b. The HTLC refund branch has never run on Gridcoin, and `--chain` cannot ask for it.** Three
 GRC swaps completed, all through the hashlock. The refund branch of a GRC HTLC -- the one an
