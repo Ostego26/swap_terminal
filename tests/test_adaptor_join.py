@@ -774,6 +774,66 @@ def test_a_daemon_that_cannot_say_WHO_OWNS_IT_does_not_block_the_signing(monkeyp
     assert raw and predicted and value > 0
 
 
+def test_EXHAUSTED_FUNDING_says_send_more_rather_than_lecturing_about_the_wallet_unlock(monkeypatch):
+    """THE WRONG ANSWER, DELIVERED CORRECTLY, 2026-09-28.
+
+    The picker skipped three payments it had proved were spent, found nothing usable, returned
+    None -- and `prepare_operator_funding` fell straight through to the WALLET route. On this
+    operator's daemon that produced a full screen about staking-only unlocks, `ElevateToFull`,
+    the GUI's RAII scope, and passphrases landing in argv. Every sentence of it was true.
+
+    None of it was the thing to fix. They needed to send 1.51 GRC to an address that message
+    never mentioned. An accurate answer to a question nobody asked is worse than silence,
+    because the reader goes and does the thing it describes -- here, relocking a staking wallet.
+
+    THE SEED'S PRESENCE IS WHAT MAKES IT UNAMBIGUOUS: an operator who set it asked for the
+    funded route, and the wallet route is not a fallback for it. So the assertion is on BOTH
+    halves -- the address and the amount are named, AND no wallet-unlock advice appears.
+    """
+    key = generate_key()
+    run = _funding_run(monkeypatch, [])
+    run.skipped_funding_payments = [("aa" * 32, "what-consumed-it"), ("bb" * 32, "and-this-one")]
+    monkeypatch.setattr(adaptor_steps, "operator_funding_key", lambda r: key)
+    monkeypatch.setattr(adaptor_steps, "discover_operator_funding_txid", lambda r, k: None)
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.prepare_operator_funding(run, "", [generate_key()])
+
+    message = str(raised.value)
+    assert key.address in message, "it names the address to pay"
+    assert "1.51000000" in message, "and how much, so nobody has to work it out"
+    assert "aa" * 32 in message and "what-consumed-it" in message, (
+        "and it shows the spent payments it already checked, so the operator can see the run "
+        "did not simply fail to look"
+    )
+    for wrong in ("staking", "walletpassphrase", "ElevateToFull", "passphrase"):
+        assert wrong not in message, (
+            f"{wrong!r} is true of this daemon and IRRELEVANT here -- the wallet was never asked "
+            f"to create anything, and sending them to relock a staking wallet is a real cost"
+        )
+
+
+def test_a_FIRST_run_with_a_seed_and_no_payment_yet_gets_the_same_answer(monkeypatch):
+    """Nothing skipped is a different sentence, not a different remedy.
+
+    "Every payment is spent" and "you have not funded it yet" are genuinely different facts and
+    an operator reads them differently -- the first says a run completed, the second says none
+    has started. Both end at the same line: send this much to this address.
+    """
+    key = generate_key()
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "operator_funding_key", lambda r: key)
+    monkeypatch.setattr(adaptor_steps, "discover_operator_funding_txid", lambda r, k: None)
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.prepare_operator_funding(run, "", [generate_key()])
+
+    message = str(raised.value)
+    assert "no payment to it at all" in message
+    assert "before you have funded it" in message
+    assert key.address in message and "1.51000000" in message
+
+
 # A CHAIN WITH NOTHING IN IT. `refuse_if_the_funding_is_already_spent` walks blocks whenever
 # testmempoolaccept cannot answer, so every stub that reaches that gate has to serve the walk --
 # and a stub that serves it with no blocks is the "not spent, carry on" case, which is what the

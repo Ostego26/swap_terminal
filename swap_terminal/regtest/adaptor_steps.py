@@ -167,6 +167,13 @@ LOCK_COIN = {"BTC": "0.01", "LTC": "0.01", "GRC": "1.0"}
 # needs, so Tx_lock's own fee comes out of it with room to spare.
 FUNDING_HEADROOM_COIN = {"BTC": "0.004", "LTC": "0.004", "GRC": "0.5"}
 
+# What to ask the operator to add on top, so the split transaction's own fee comes out of their
+# payment rather than out of the lock. One flat figure rather than a per-asset table: it is the
+# fee for ONE 1-in-N-out transaction on a chain with a 0.01/kB floor, and the amount this asks
+# for only has to be ENOUGH -- split_operator_funding computes the real fee from the real bytes
+# and refuses by name if what arrived does not cover it.
+SPLIT_FEE_ALLOWANCE_COIN = "0.01"
+
 # How long to wait for a Gridcoin block, and how often to say so. SECONDS, because both
 # are compared against time.monotonic() and passed to sleep -- an interface, not a
 # report (rule 6). They are printed in microfortnights.
@@ -453,6 +460,12 @@ class Run:
     # if the operator funded the address again in between, and the run would then be proceeding
     # on one basis and spending another.
     discovered_funding_txid: str = ""
+    #: Payments to the funding address that WERE found and were already spent, as
+    #: (txid, spender). Kept so the refusal can say "all of these are used, send another" --
+    #: without it, a seeded run whose funding is exhausted falls through to the wallet route and
+    #: reports a staking-only unlock problem, which on 2026-09-28 was an accurate sentence about
+    #: something the operator did not need to fix (rule 14: say what the number means).
+    skipped_funding_payments: list = field(default_factory=list)
 
     @property
     def asset(self) -> str:
@@ -3253,6 +3266,7 @@ def discover_operator_funding_txid(run: Run, key: RegtestKey) -> str | None:
         if spender is None:
             run.say(f"using {txid} -- no --funding-txid needed")
             return str(txid)
+        run.skipped_funding_payments.append((str(txid), spender))
         run.say(
             f"SKIPPING {txid}: its output was already spent by {spender}. Looking further back "
             f"-- a completed run consumes its funding, so the newest payment is often the used one"
@@ -3648,6 +3662,63 @@ def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
             for index in range(len(destinations))]
 
 
+def funding_needed_coins(run: Run) -> str:
+    """What one lock costs, fee included, as the operator should send it.
+
+    ONE PLACE FOR THE NUMBER. The same arithmetic already lives in split_operator_funding's
+    sufficiency check; a second hand-written copy is rule 8's failure with a delay on it, and
+    this one would drift the first time LOCK_COIN changed.
+    """
+    total = (Decimal(LOCK_COIN[run.asset])
+             + Decimal(FUNDING_HEADROOM_COIN[run.asset])
+             + Decimal(SPLIT_FEE_ALLOWANCE_COIN))
+    return satoshis_to_coins(coins_to_satoshis(str(total)))
+
+
+def no_usable_funding_message(run: Run, funding_key: RegtestKey) -> str:
+    """Why the funded route cannot proceed, and the one thing that fixes it.
+
+    WHAT THIS REPLACES, and the replacement is the point. On 2026-09-28 the picker correctly
+    skipped three spent payments, found nothing usable, and fell through to the WALLET route --
+    which on this daemon produced a page about staking-only unlocks, `ElevateToFull`, the GUI's
+    RAII scope and passphrases in argv. Every sentence of it was true. None of it was the thing
+    to fix: the operator needed to send 1.51 GRC to an address that message never mentioned.
+
+    An accurate answer to a question nobody asked is rule 14's "state what the number means"
+    failing at the scale of a whole screen, and it is worse than silence, because the reader
+    goes and does the thing it describes.
+
+    THE SEED'S PRESENCE IS WHAT MAKES THIS UNAMBIGUOUS. An operator who set the seed asked for
+    the funded route; the wallet route is not a fallback for it, and on the daemon this exists
+    for it cannot work at all.
+    """
+    lines = [f"{run.asset}: no USABLE payment to {funding_key.address} was found."]
+    if run.skipped_funding_payments:
+        lines.append(
+            f"  {len(run.skipped_funding_payments)} payment(s) to it were found and every one is "
+            f"already spent:"
+        )
+        lines += [f"    {txid}  spent by {spender}"
+                  for txid, spender in run.skipped_funding_payments]
+        lines.append(
+            "  Each run consumes its funding by design, so this is the ordinary state after a "
+            "run rather than anything going wrong."
+        )
+    else:
+        lines.append(
+            "  The wallet remembers no payment to it at all, which is the ordinary state before "
+            "you have funded it."
+        )
+    lines += [
+        f"  THE FIX: send {funding_needed_coins(run)} {run.asset} to {funding_key.address} and "
+        f"wait for ONE confirmation. That address is derived from {FUNDING_SEED_VARIABLE} and "
+        f"does not change between runs.",
+        "  The wallet was NOT asked to create anything, so nothing here is about your unlock. "
+        "Nothing was funded, signed or broadcast.",
+    ]
+    return "\n".join(lines)
+
+
 def prepare_operator_funding(run: Run, funding_txid: str, destinations: list[RegtestKey]) -> None:
     """Find the operator's payment and split it into one input per lock, or do nothing.
 
@@ -3681,7 +3752,20 @@ def prepare_operator_funding(run: Run, funding_txid: str, destinations: list[Reg
         # through to the wallet route, which then refuses and prints the address to fund.
         funding_txid = discover_operator_funding_txid(run, funding_key) or ""
     if not funding_txid:
-        return
+        # A SEED IS CONFIGURED AND THERE IS NOTHING LEFT TO SPEND. Refuse HERE, naming the
+        # address, rather than falling through to the wallet route.
+        #
+        # WHAT FALLING THROUGH ACTUALLY PRINTED, 2026-09-28, after the picker correctly skipped
+        # three spent payments: a page about staking-only unlocks, ElevateToFull, the GUI's RAII
+        # scope and passphrases in argv. Every sentence of it true, and none of it the thing to
+        # fix -- the operator needed to send 1.51 GRC to an address the message did not even
+        # mention. An accurate answer to a question nobody asked is rule 14's "state what the
+        # number means" failing at the level of the whole message.
+        #
+        # The seed's presence is what makes this unambiguous: an operator who set
+        # ST_ADAPTOR_FUNDING_SEED asked for the funded route, and the wallet route is not a
+        # fallback for it -- on the daemon this exists for, the wallet route cannot work at all.
+        raise RegtestSetupError(no_usable_funding_message(run, funding_key))
     run.say(
         f"funding from the operator's payment {funding_txid} to {funding_key.address} -- the "
         f"wallet will NOT be asked to create or sign anything"
