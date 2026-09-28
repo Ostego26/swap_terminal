@@ -460,8 +460,38 @@ def refuse_daemon_control(tab: ChainTab, action: str) -> str:
                 f"manager. Inventing a command line for the process that stakes your wallet is "
                 f"a guess, and 'it did not come back up' is the worst time to find that out."
             )
-        return (f"this panel has no daemon lifecycle for {tab.asset} -- it cannot even probe "
-                f"that endpoint, let alone run it.")
+        if action == "start":
+            # NOT "THERE IS NO LIFECYCLE", WHICH WAS A CLAIM ABOUT MONERO AND WAS FALSE.
+            # Until 2026-09-28 both buttons on a foreign tab said "this panel has no daemon
+            # lifecycle for XMR -- it cannot even probe that endpoint, let alone run it", and
+            # the operator read it beside a tab that had just told them exactly which variable
+            # was unset. Monero has daemons; so does rippled; so does a Solana validator. What
+            # is true is the same thing that is true of GRC one branch up -- THIS PANEL DOES
+            # NOT KNOW YOUR COMMAND LINE -- and it is true here for a stronger reason: nothing
+            # in this tree has ever started one. `grep -rn "monero-wallet-rpc" --include=*.py`
+            # over the tree on 2026-09-28 found the string in eleven files and a spawn of it in
+            # none; `regtest/daemons.py` owns every Popen here and knows bitcoind and litecoind
+            # only.
+            return (
+                f"this panel will not START {tab.asset}: nothing in this tree has ever started "
+                f"one, so it has no binary, no wallet file, no port and no network flag to "
+                f"start it with. On {tab.asset} that command line would choose WHICH WALLET is "
+                f"opened, which is a custody decision and is yours -- start it in a shell and "
+                f"this tab will say so."
+            )
+        # A STOP NEEDS A HANDLE, AND THERE IS NONE. Rule 13 prefers a pid file to a `pgrep -f`
+        # pattern for exactly the case this is: the only way to find a monero-wallet-rpc this
+        # panel did not spawn is to match its command line, and that pattern matches EVERY
+        # monero-wallet-rpc on the host -- including one serving a different wallet the
+        # operator is mid-transfer on. A kill that cannot say which process it hit is not a
+        # stop, it is a guess with a signal attached.
+        return (
+            f"this panel will not STOP {tab.asset}: it did not start that process, so it holds "
+            f"no pid for it. The only way to find one is to match a command line, and that "
+            f"pattern hits every {tab.asset} daemon on this host -- including one serving a "
+            f"different wallet. Rule 13 wants a pid file, and there is not even a pattern worth "
+            f"having here."
+        )
     if tab.kind == "operator" and action == "stop" and not os.environ.get(MAY_STOP_VARIABLE):
         return (
             f"stopping {tab.asset} is armed by {MAY_STOP_VARIABLE} in the environment that "

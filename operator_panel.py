@@ -287,9 +287,13 @@ async function loadChain(asset) {
            "here, so it has to be exported in the shell that starts the panel; a value set " +
            "only in a file, or only in another shell, does not reach this process.</p>";
     }
-    h += '<p class="sub">This panel speaks a Bitcoin-style JSON-RPC and this chain does not, ' +
-         'so it does not probe the endpoint itself &mdash; that chain\u2019s own read-only ' +
-         'check does, and it is the button below.</p>';
+    // THE SENTENCE THAT USED TO BE HERE SAID WHAT `d.note` ALREADY SAYS, four lines above it
+    // on the same tab, and both ended by pointing at the same button. The operator pasted the
+    // XMR tab on 2026-09-28 with the protocol statement in it twice -- once per chain and
+    // accurate ("monero-wallet-rpc speaks JSON-RPC 2.0 with a different shape"), once generic
+    // and redundant. Rule 8 is about two copies of a RULE; this is two copies of a sentence,
+    // and the cheaper half of the same defect: the generic one is deleted and the per-chain
+    // one, which is the one that tells the operator something specific, survives.
   } else if (d.reachable) {
     const netClass = d.network === "MAINNET" ? "bad" : (d.network === "unknown" ? "warn" : "ok");
     h += '<p><span class="ok">REACHABLE</span> at ' + esc(d.endpoint || "?") +

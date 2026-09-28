@@ -952,31 +952,59 @@ def test_STOPPING_the_operators_own_daemon_is_armed_OUTSIDE_the_browser(monkeypa
     assert decisions.refuse_daemon_control(_tab("GRC"), "stop") == ""
 
 
-def test_a_foreign_chain_has_no_daemon_lifecycle_at_all(monkeypatch):
-    """And arming the stop must not conjure one. This panel cannot even probe those endpoints."""
+def test_a_foreign_chains_SWITCH_IS_REFUSED_FOR_A_REASON_ABOUT_THIS_PANEL(monkeypatch):
+    """"this panel has no daemon lifecycle for XMR" was a claim about MONERO, and it was false.
+
+    Both buttons on a foreign tab said it until 2026-09-28, and the operator read it directly
+    beneath a tab that had just named the one variable that was unset. Monero has daemons. So
+    does rippled, so does a Solana validator. What is true is what is true of GRC one branch up
+    -- THIS PANEL DOES NOT KNOW YOUR COMMAND LINE -- and it is true here for a stronger reason:
+    nothing in this tree has ever started one. On 2026-09-28 the string "monero-wallet-rpc"
+    appeared in eleven Python files in this tree and a spawn of it in none; regtest/daemons.py
+    owns every Popen here and knows bitcoind and litecoind only.
+
+    THE TWO ACTIONS REFUSE FOR DIFFERENT REASONS and must not share a sentence. A start would
+    have to invent a command line that chooses WHICH WALLET is opened, which is a custody
+    decision. A stop cannot find a process it did not spawn without matching a command line,
+    and that pattern hits every daemon of that kind on the host -- rule 13's "prefer a pid file
+    to a pgrep pattern", in the case where there is not even a pattern worth having.
+    """
     monkeypatch.setenv(decisions.MAY_STOP_VARIABLE, "yes")
     for asset in ("XMR", "XRP", "SOL"):
-        for action in ("start", "stop"):
-            refusal = decisions.refuse_daemon_control(_tab(asset), action)
-            assert refusal, f"{asset} {action} must be refused"
-            assert "no daemon lifecycle" in refusal
+        start = decisions.refuse_daemon_control(_tab(asset), "start")
+        stop = decisions.refuse_daemon_control(_tab(asset), "stop")
+        assert start and stop, f"{asset} must refuse both -- arming the stop conjures no daemon"
+        assert start != stop, (
+            f"{asset} refuses start and stop for genuinely different reasons and a shared "
+            f"sentence teaches neither"
+        )
+        assert "no daemon lifecycle" not in start + stop, (
+            "the claim about the CHAIN, which was never this panel's to make"
+        )
+        assert "will not START" in start and "will not STOP" in stop
+        assert "pid" in stop, "rule 13: the missing handle is the reason, and it is named"
 
 
-def test_the_three_refusals_are_NOT_interchangeable(monkeypatch):
+def test_the_four_refusals_are_NOT_interchangeable(monkeypatch):
     """Each sends the operator somewhere different, and a shared "not allowed" sends them
     nowhere.
 
-    One says this panel does not know your command line, one says an environment variable arms
-    it, one says there is no lifecycle here. A disabled button with no text teaches none of them,
+    One says this panel does not know your GRC command line, one says an environment variable
+    arms the GRC stop, one says a foreign start would choose a wallet, one says a foreign stop
+    has no pid to aim at. A disabled button with no text teaches none of them,
     which is why the page renders the reason beside every switch it greys out.
     """
     monkeypatch.delenv(decisions.MAY_STOP_VARIABLE, raising=False)
     said = {
         "grc_start": decisions.refuse_daemon_control(_tab("GRC"), "start"),
         "grc_stop": decisions.refuse_daemon_control(_tab("GRC"), "stop"),
+        "xmr_start": decisions.refuse_daemon_control(_tab("XMR"), "start"),
         "xmr_stop": decisions.refuse_daemon_control(_tab("XMR"), "stop"),
     }
-    assert len(set(said.values())) == 3, said
+    # FOUR NOW, NOT THREE. The foreign start and the foreign stop shared one sentence until
+    # 2026-09-28 and the sentence was wrong for both of them; splitting it is what made this
+    # count move, and the count is here so a later edit that collapses them back fails.
+    assert len(set(said.values())) == 4, said
     assert decisions.refuse_daemon_control(_tab("GRC"), "restart"), "only start and stop exist"
 
 
@@ -988,7 +1016,12 @@ def test_the_switch_route_refuses_before_it_reaches_a_daemon():
     assert code == 403 and answer["refused"] is True
 
     answer, code = entry.answer_a_daemon_switch({"asset": "XMR", "action": "stop"}, {})
-    assert code == 403 and "no daemon lifecycle" in answer["error"]
+    # THE ROUTE GIVES THE DECISION'S OWN SENTENCE, asserted by deriving it rather than by
+    # quoting it. This pinned the literal "no daemon lifecycle" and so had to be edited when
+    # that sentence was found to be a false claim about Monero -- a test that pins a constant
+    # fails on a wording change and passes on a behavior one, which is backwards.
+    assert code == 403
+    assert answer["error"] == decisions.refuse_daemon_control(_tab("XMR"), "stop")
 
     answer, code = entry.answer_a_daemon_switch("not an object", {})
     assert code == 400
