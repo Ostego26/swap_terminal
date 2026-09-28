@@ -37,7 +37,7 @@ from modules.htlc_spend import SIGHASH_ALL, parse_transaction
 from regtest import adaptor_join, adaptor_steps
 from regtest.console import FAIL, OK, Console
 from regtest.daemons import ChainConfig
-from regtest.keys import generate_key
+from regtest.keys import generate_key, key_from_seed
 
 
 @pytest.fixture
@@ -554,3 +554,55 @@ def test_split_operator_funding_ASKS_BEFORE_IT_SENDS(monkeypatch):
         adaptor_steps.split_operator_funding(run, key, source, [generate_key(), generate_key()])
 
     assert sent == [], f"nothing may reach the daemon beyond the question, but {sent} did"
+
+
+# ---------------------------------------------------------------------------
+# A PLACEHOLDER SEED. Twice in two days, through two different doors.
+# ---------------------------------------------------------------------------
+
+
+def test_the_seed_that_was_actually_pasted_is_REFUSED(monkeypatch):
+    """THE EXACT STRING FROM THE OPERATOR'S TERMINAL, 2026-09-28.
+
+        export ST_ADAPTOR_FUNDING_SEED='<the same seed as yesterday>'
+
+    Single-quoted, so bash passed it through verbatim: a perfectly good non-empty seed that
+    derived `msuGYPvo3Fyv64Fvzeg35f6jwN9gThSuwi` where the previous day's real seed had derived
+    `msxA9RajhxTvJ4EgPwuiza1VJEYJqdsNqw`. The harness then looked for a payment to an address the
+    wallet had never made and refused the run -- correct, and a dead end, because the address it
+    offered to be funded was the placeholder's.
+
+    Nothing on that screen was wrong, which is what made it undiagnosable: the only symptom was
+    an address differing from last run's, and nobody compares addresses between runs.
+    """
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "<the same seed as yesterday>")
+    run = _funding_run(monkeypatch, [])
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.operator_funding_key(run)
+    message = str(raised.value)
+    assert "PLACEHOLDER" in message
+    assert "WRONG address" in message, "it has to say the seed WORKS and is wrong, not that it is invalid"
+    assert adaptor_steps.FUNDING_SEED_VARIABLE in message, "and name the variable to change"
+
+
+def test_an_unset_seed_is_still_None_and_not_a_refusal(monkeypatch):
+    """No seed at all is the ORDINARY case on BTC and LTC, where the wallet funds the harness.
+    A refusal there would break two working chains to diagnose a third."""
+    monkeypatch.delenv(adaptor_steps.FUNDING_SEED_VARIABLE, raising=False)
+    assert adaptor_steps.operator_funding_key(_funding_run(monkeypatch, [])) is None
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "   ")
+    assert adaptor_steps.operator_funding_key(_funding_run(monkeypatch, [])) is None
+
+
+def test_a_real_seed_is_NOT_refused_and_is_stable_across_calls(monkeypatch):
+    """The refusal is narrow on purpose: locking an operator out of their own funding address is
+    strictly worse than the failure it prevents. Anything that is not literally `<...>` passes,
+    including seeds that merely CONTAIN an angle bracket."""
+    for seed in ("hunter2-not-really", "a<b>c", "<open-only", "close-only>", "<", "<>"):
+        monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, seed)
+        key = adaptor_steps.operator_funding_key(_funding_run(monkeypatch, []))
+        assert key is not None, f"{seed!r} is a legitimate seed and must not be refused"
+        assert key.address == key_from_seed(seed, adaptor_steps.FUNDING_ROLE).address, (
+            "and the same seed must derive the same address every run -- that stability is the "
+            "entire reason the funded route exists"
+        )

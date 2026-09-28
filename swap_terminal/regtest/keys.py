@@ -164,6 +164,73 @@ class RegtestKey:
         )
 
 
+# A value still wrapped in the angle brackets of the instruction it was copied out of.
+# Exactly the two characters, at the two ends, after stripping -- not a guess at what a weak
+# seed looks like. Nobody types a secret that begins with "<" and ends with ">"; what produces
+# one is a copy-paste of somebody else's example.
+PLACEHOLDER_OPEN = "<"
+PLACEHOLDER_CLOSE = ">"
+
+
+def looks_like_an_unsubstituted_placeholder(seed: str) -> bool:
+    """Is this the instruction rather than the answer to it?
+
+    The decision is its own function so it can be called with seeded inputs (rule 10) and so the
+    rule is stated once. It is deliberately NARROW: `<...>` and nothing else. A refusal that
+    fired on a legitimate seed would lock an operator out of their own funding address, which is
+    strictly worse than the failure it prevents, so this does not guess at "weak" or "obviously
+    fake" -- those are speculation, and rule 17 asks for the thing that was measured.
+    """
+    stripped = seed.strip()
+    return (
+        len(stripped) > len(PLACEHOLDER_OPEN) + len(PLACEHOLDER_CLOSE)
+        and stripped.startswith(PLACEHOLDER_OPEN)
+        and stripped.endswith(PLACEHOLDER_CLOSE)
+    )
+
+
+def refuse_unsubstituted_placeholder(seed: str) -> None:
+    """Refuse a seed that is somebody's placeholder, because it derives a REAL and WRONG address.
+
+    MEASURED ON THE OPERATOR'S HOST, 2026-09-28, AND IT IS THE SECOND TIME. The run before this
+    one was `--funding-txid <that txid>`, where bash read the `<` as a redirect and the operator
+    answered "i don't know the fucking tx id" -- correct, and the response was to remove the need
+    for a txid entirely. Then the same placeholder shape came back through a different door:
+
+        export ST_ADAPTOR_FUNDING_SEED='<the same seed as yesterday>'
+
+    Single-quoted, so bash passed it through verbatim, so it is a perfectly good non-empty seed
+    and `key_from_seed` had no complaint. It derived `msuGYPvo3Fyv64Fvzeg35f6jwN9gThSuwi`, and
+    the previous day's real seed had derived `msxA9RajhxTvJ4EgPwuiza1VJEYJqdsNqw`. The harness
+    then looked for a payment to an address the wallet had never paid, found none, and printed
+    "SO FUND THIS ADDRESS ONCE" -- correct behavior, and a complete dead end, because funding it
+    would have funded the placeholder.
+
+    WHAT MADE IT UNDIAGNOSABLE FROM THE SCREEN is that every line was right. There is no wrong
+    number to notice. The only visible symptom is that the address differs from last run's, and
+    an operator has no reason to be comparing addresses between runs -- so the failure presents
+    as "the funded route stopped working" and sends somebody looking at the funding code.
+
+    The empty-seed check above already establishes that this function is the right place for the
+    rule: an empty seed is refused because it derives a key anybody could derive, and a
+    placeholder is refused because it derives a key that is real, is yours, and is not the one
+    you funded. Both are "the seed is not what you think it is", one function apart.
+    """
+    if looks_like_an_unsubstituted_placeholder(seed):
+        raise ValueError(
+            "the funding seed is still a PLACEHOLDER -- it begins with '<' and ends with '>', so "
+            "it is the instruction rather than your answer to it. It would work: a placeholder is "
+            "a valid seed and derives a real address. It would just be the WRONG address, and "
+            "nothing on screen would say so, because every line would be correct.\n"
+            "  Set ST_ADAPTOR_FUNDING_SEED to the actual value, with no angle brackets. If you do "
+            "not remember the one you used before, any new value is fine -- a completed run spends "
+            "its funding, so there is nothing at the old address to lose. Keep the new one set and "
+            "it is the same address every run.\n"
+            "  THE ADDRESS IS THE SEED'S FINGERPRINT: if the address this harness prints is not "
+            "the one you funded, the seed is not the one you funded it from."
+        )
+
+
 def key_from_seed(seed: str, role: str) -> RegtestKey:
     """A keypair derived DETERMINISTICALLY from an operator-supplied seed, so its address is
     stable across runs.
@@ -204,6 +271,7 @@ def key_from_seed(seed: str, role: str) -> RegtestKey:
             "an empty funding seed derives one fixed key that anybody reading this source could "
             "also derive. Set ST_ADAPTOR_FUNDING_SEED to something only you know."
         )
+    refuse_unsubstituted_placeholder(seed)
     counter = 0
     while True:
         material = f"swap_terminal/adaptor-funding/v1/{role}/{counter}/{seed}".encode()

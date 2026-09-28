@@ -2528,11 +2528,27 @@ def operator_funding_key(run: Run) -> RegtestKey | None:
     None rather than a raise, because "no seed set" is the ordinary case on BTC and LTC where
     the wallet funds the harness itself. It only becomes a problem on a chain whose wallet has
     refused, and that is where it is reported.
+
+    A SEED THAT IS PRESENT AND WRONG IS NOT THAT CASE, and it gets a RegtestSetupError instead
+    of None. `key_from_seed` refuses two kinds -- an empty one, and one still wrapped in the
+    angle brackets of the instruction it was copied from -- and both mean the operator asked for
+    the funded route and will not get it. Returning None there would fall through to "no seed
+    configured", which is a different sentence with a different remedy, and the one thing this
+    harness must not do is answer a specific question with a general message.
+
+    Translated to RegtestSetupError HERE rather than raised as one in regtest/keys.py, because
+    that module decides about keys and knows nothing about runs -- a precondition class belongs
+    at the seam where preconditions are reported, which is this one (rule 10).
     """
     seed = os.environ.get(FUNDING_SEED_VARIABLE, "")
     if not seed.strip():
         return None
-    return key_from_seed(seed, FUNDING_ROLE)
+    try:
+        return key_from_seed(seed, FUNDING_ROLE)
+    except ValueError as exc:
+        raise RegtestSetupError(
+            f"{run.asset}: {FUNDING_SEED_VARIABLE} is set but cannot be used. {exc}"
+        ) from exc
 
 
 # How far back to look for the operator's funding payment. 200 covers a staking wallet's recent
