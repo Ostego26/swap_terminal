@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import secrets
 import sys
 from decimal import Decimal
@@ -87,12 +88,17 @@ from regtest import adaptor_steps
 from regtest.adaptor_steps import Run
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import RegtestSetupError
-from regtest.keys import generate_key
+from regtest.keys import generate_key, key_from_seed
 
 TOTAL_STEPS = 9
 
 # SIX BLOCKS, NOT contract_locktime()'s 1920. The module docstring carries the argument; the
 # short version is that CLTV does the same thing with any locktime, and 1920 is 48 hours.
+#: The role string that separates the contract's refund key from the funding key. Both are
+#: derived from ST_ADAPTOR_FUNDING_SEED, so a run that dies after funding leaves its coins at an
+#: address the next run -- or reclaim_funding.py -- can still spend. See build_contract().
+REFUND_ROLE = "grc_htlc_refund"
+
 LOCKTIME_BLOCKS_AHEAD = 6
 
 # What to put in the contract. Well clear of Gridcoin's 0.01 fee floor, which the refund pays
@@ -120,10 +126,47 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _seed_or_refuse() -> str:
+    """The funding seed, or a refusal that says why this file cannot run without one.
+
+    SEPARATE FROM operator_funding_key() because that one returns None for "no seed", which is
+    the ordinary state on BTC and LTC where the wallet funds the harness itself. Here there is
+    no such state: the refund key is derived from the seed, so a run with no seed would mint a
+    fresh one, pay it, and strand the coin if anything failed -- which is precisely what this
+    constant exists to stop.
+    """
+    seed = os.environ.get(adaptor_steps.FUNDING_SEED_VARIABLE, "")
+    if not seed.strip():
+        raise RegtestSetupError(
+            f"{adaptor_steps.FUNDING_SEED_VARIABLE} is not set. This harness derives BOTH the "
+            f"address you fund AND the contract's refund key from it, so that a run which dies "
+            f"after funding leaves its coins somewhere recoverable rather than at a key that "
+            f"existed only in a process that has exited. Nothing was built or broadcast."
+        )
+    return seed
+
+
 def build_contract(run: Run, tip: int) -> dict:
     """The HTLC, from the REAL builder, with a SHORT test locktime that is named as one."""
     run.step(3, "build a real HTLC with the REAL script builder and a SHORT test locktime")
-    participant, refund = generate_key(), generate_key()
+    # THE REFUND KEY IS DERIVED FROM THE SEED, NOT MINTED FRESH, AND 1.50 GRC PAID FOR THAT.
+    #
+    # It was `generate_key()` until 2026-09-28. That key lives in this process and is never
+    # written anywhere, so when the run below died at step 4 the funding output it owned --
+    # e1f8ae8f961d8591:0, 1.50 GRC -- became unspendable the moment python exited. Not lost to a
+    # bug in what was being tested; lost because the harness minted a key, paid it, and threw it
+    # away. docs/branch_coverage.md gap (c) says atomic_swap.py does exactly this and has
+    # already cost 310.72 GRC, and this file reproduced it on its first real run.
+    #
+    # A seed-derived key has a stable address across runs, so a failed run leaves coins at an
+    # address the NEXT run can spend -- and reclaim_funding.py can sweep it in between. The role
+    # string is what separates it from the funding address; both come from the same seed.
+    #
+    # The PARTICIPANT key stays random on purpose, and the asymmetry is the point: it is the
+    # hashlock side, this harness never spends through it, and nothing is ever paid to it. A key
+    # that never receives cannot strand anything. Only keys that RECEIVE need to be recoverable.
+    participant = generate_key()
+    refund = key_from_seed(_seed_or_refuse(), REFUND_ROLE)
     preimage = secrets.token_bytes(PREIMAGE_BYTES)
     secret_hash = hashlib.sha256(preimage).digest()
     locktime = tip + LOCKTIME_BLOCKS_AHEAD

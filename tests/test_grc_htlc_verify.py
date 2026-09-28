@@ -23,10 +23,11 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
 from modules import adaptor_swap_chain as chain
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 from regtest.console import FAIL, OK, SKIP
-from regtest.keys import generate_key
+from regtest.keys import generate_key, key_from_seed
 
 
 class _SilentRun:
@@ -209,10 +210,71 @@ def test_the_test_locktime_is_short_and_the_production_one_is_not():
     )
 
 
-def test_the_preimage_is_generated_but_never_used_and_never_returned():
+#: A SEED FOR THE TESTS, and it has to be set because build_contract now derives the refund key
+#: from it. That is not test scaffolding working around the code: it is the property under test
+#: in test_the_refund_key_is_RECOVERABLE_rather_than_minted_and_thrown_away below, which is
+#: there because a fresh key stranded 1.50 GRC on this harness's first real run.
+_A_SEED_FOR_TESTS = "a seed that is not the operator's"
+
+
+def _with_seed(monkeypatch):
+    monkeypatch.setenv("ST_ADAPTOR_FUNDING_SEED", _A_SEED_FOR_TESTS)
+
+
+def test_the_refund_key_is_RECOVERABLE_rather_than_minted_and_thrown_away(monkeypatch):
+    """1.50 GRC, STRANDED ON THIS FILE'S FIRST REAL RUN, and not by the thing under test.
+
+    `refund` was `generate_key()`: a keypair living only in this process and written nowhere.
+    The run funded it, died at step 4, and python exited -- and e1f8ae8f961d8591:0 became
+    unspendable by anyone, forever. docs/branch_coverage.md gap (c) records atomic_swap.py doing
+    exactly this and already costing 310.72 GRC testnet. This file reproduced it immediately.
+
+    A seed-derived key has a stable address, so a failed run leaves its coins where the NEXT run
+    can spend them and reclaim_funding.py can sweep them in between.
+
+    THE PARTICIPANT KEY STAYS RANDOM and the asymmetry is the point: it is the hashlock side,
+    nothing is ever paid to it, and a key that never receives cannot strand anything. Asserting
+    they DIFFER pins that too -- deriving both from one role would silently make the hashlock
+    and refund branches the same key, which would make the whole contract meaningless.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+    built = {}
+    monkeypatch.setattr(entry, "build_htlc_redeem_script",
+                        lambda **kw: built.update(kw) or b"\x51")
+
+    first = entry.build_contract(_SilentRun(), 100)
+    second = entry.build_contract(_SilentRun(), 100)
+
+    assert first["refund"].address == second["refund"].address, (
+        "two runs must reach the same refund address, or a failed run strands its funding"
+    )
+    assert first["refund"].address == key_from_seed(_A_SEED_FOR_TESTS, entry.REFUND_ROLE).address
+    assert built["participant_address"] != first["refund"].address, (
+        "the hashlock and refund branches must not be the same key"
+    )
+
+
+def test_running_WITHOUT_A_SEED_is_refused_before_anything_is_built(monkeypatch):
+    """No seed used to mean "mint a fresh refund key", which is the stranding above by default.
+
+    There is no sensible no-seed mode for this file: the address the operator funds comes from
+    the seed too, so a run without one could not be funded anyway. It refuses by name rather
+    than failing later with something about a missing payment.
+    """
+    entry = _entry()
+    monkeypatch.delenv("ST_ADAPTOR_FUNDING_SEED", raising=False)
+    with pytest.raises(entry.RegtestSetupError) as raised:
+        entry.build_contract(_SilentRun(), 100)
+    assert "ST_ADAPTOR_FUNDING_SEED is not set" in str(raised.value)
+    assert "Nothing was built or broadcast" in str(raised.value)
+
+
+def test_the_preimage_is_generated_but_never_used_and_never_returned(monkeypatch):
     """The hashlock branch is already established by three live swaps; the REFUND is the gap.
     A preimage in the returned dict is a preimage that can be printed by a caller reporting on
     the contract, and this repository's rule is that it never appears anywhere."""
+    _with_seed(monkeypatch)
     entry = _entry()
 
     class _QuietRun:
@@ -229,7 +291,8 @@ def test_the_preimage_is_generated_but_never_used_and_never_returned():
     assert set(contract) == {"participant", "refund", "locktime", "redeem_script", "secret_hash"}
 
 
-def test_the_contract_locktime_is_the_tip_plus_the_named_constant():
+def test_the_contract_locktime_is_the_tip_plus_the_named_constant(monkeypatch):
+    _with_seed(monkeypatch)
     entry = _entry()
 
     class _QuietRun:
