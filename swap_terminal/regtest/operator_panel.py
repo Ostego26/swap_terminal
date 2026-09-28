@@ -75,6 +75,51 @@ RUNNABLE: dict[str, tuple[str, list[str]]] = {
 }
 
 
+#: HOW EACH CHAIN'S TAB LOOKS. An accent for light and dark, a one-glyph mark, and the unit.
+#:
+#: WHY THEME AT ALL, on an operator tool nobody else sees. This panel now shows six chains that
+#: are reached in three different ways and refuse in three different vocabularies, and every one
+#: of them renders as the same grey table. The failure that costs something here is acting on
+#: the wrong tab -- reading GRC's funding while looking at BTC's, or running a harness against a
+#: chain you thought was the other one. Color and a mark are the cheapest possible defense
+#: against that, and they work at a glance rather than after reading.
+#:
+#: THE COLORS ARE APPROXIMATED FROM PUBLIC BRAND USAGE and are NOT claimed to be official.
+#: Bitcoin's orange and Monero's orange are the widely published ones; Litecoin's blue, XRP's
+#: near-black and Solana's purple-to-green pair likewise; Gridcoin's green is the closest match
+#: to its logo that is readable on both backgrounds. If any is wrong it is wrong as decoration,
+#: and nothing here reads a color to decide anything.
+#:
+#: THE GLYPH IS THE CURRENCY LETTERFORM, not a logo: a character, set in the page's own font.
+#: That keeps the page free of any image, which is what lets it render on a machine with no
+#: route to the internet -- the same constraint that made the whole page inline.
+#:
+#: A DARK VARIANT IS CARRIED SEPARATELY because several brand colors fail against a dark
+#: background: XRP's near-black is invisible on it, and Litecoin's blue is close behind. A theme
+#: that is unreadable half the time is worse than none, since the reader stops looking at it and
+#: the glance-level defense above is what was being bought.
+CHAIN_THEME = {
+    "GRC": {"accent": "#1f7a3d", "dark": "#6ee7a0", "glyph": "G", "unit": "GRC"},
+    "BTC": {"accent": "#f7931a", "dark": "#f7931a", "glyph": "\u20bf", "unit": "BTC"},
+    "LTC": {"accent": "#345d9d", "dark": "#7aa7e0", "glyph": "\u0141", "unit": "LTC"},
+    "XMR": {"accent": "#f26822", "dark": "#ff8a4c", "glyph": "\u0271", "unit": "XMR"},
+    "XRP": {"accent": "#23292f", "dark": "#9fb3c8", "glyph": "\u2715", "unit": "XRP"},
+    "SOL": {"accent": "#7b3fe4", "dark": "#c4a6ff", "glyph": "\u25ce", "unit": "SOL"},
+}
+
+
+def theme_for(asset: str) -> dict:
+    """The tab's colors and glyph, with a readable fallback for a chain nobody has themed.
+
+    A FALLBACK RATHER THAN A KeyError, because a chain added to CHAINS and not to CHAIN_THEME is
+    a cosmetic omission and must not blank the page that would have told the operator about it.
+    The fallback is deliberately plain: an unthemed chain LOOKS unthemed, which is the honest
+    rendering of "nobody has decided what this one looks like" rather than a guess at it.
+    """
+    return CHAIN_THEME.get(asset, {"accent": "#6b6763", "dark": "#9b96a3", "glyph": "?",
+                                   "unit": asset})
+
+
 class ChainTab(NamedTuple):
     """One chain the panel shows, and what it is honestly able to say about it."""
 
@@ -188,6 +233,87 @@ def network_the_daemon_says(run: adaptor_steps.Run) -> str:
             return str(value) if value != "main" else "MAINNET"
         return "testnet" if value else "MAINNET"
     return "unknown"
+
+
+#: THE ONLY RPC METHODS THIS PANEL WILL CALL. An allowlist, not a denylist, and the difference
+#: is the whole safety argument: a denylist is a list of the ways to lose money that somebody
+#: thought of, and it is wrong the first time a daemon adds a method.
+#:
+#: EVERY ONE OF THESE READS. None creates a transaction, none signs, none touches a lock, none
+#: writes to a wallet. `getnewaddress` is NOT here even though it looks harmless -- it writes a
+#: key into wallet.dat, which a staking-only wallet may refuse and which changes a file the
+#: operator backs up.
+#:
+#: WHAT IS DELIBERATELY ABSENT AND WHY, because the omissions are the design:
+#:
+#:   sendtoaddress, sendrawtransaction, signrawtransaction
+#:       these move or authorize money. The panel already has buttons that run HARNESSES, which
+#:       spend -- but those are three named, reviewed entry points from RUNNABLE, not an
+#:       arbitrary transaction an operator can compose in a browser with no confirmation step.
+#:   walletpassphrase, walletlock, encryptwallet
+#:       walletpassphrase takes the passphrase as an ARGUMENT. Serving a form that collects it
+#:       would put it in a POST body, the browser's autofill, and this process's memory --
+#:       against swap_terminal/CLAUDE.md's "never move, copy, or read back a key", and against
+#:       the rule this session has held all day that a passphrase never appears in anything this
+#:       repository emits. Nothing on this page may be able to ask for one.
+#:   stop
+#:       the operator's Gridcoin daemon is staking their live wallet. Rule 13 and the live-safety
+#:       rules: this harness starts and stops NOTHING.
+#:   dumpprivkey, dumpwallet, importprivkey
+#:       a key read back out is a key that has left the wallet.
+#:
+#: The page offers these as a dropdown, but the allowlist is enforced HERE, on the server, and
+#: the dropdown is only a convenience: a request naming anything else is refused whatever the
+#: page sends.
+READ_ONLY_RPCS = (
+    "getblockchaininfo", "getinfo", "getmininginfo", "getnetworkinfo", "getwalletinfo",
+    "getblockcount", "getbestblockhash", "getdifficulty", "getconnectioncount", "getpeerinfo",
+    "getbalance", "listunspent", "listtransactions", "listaddressgroupings", "listlockunspent",
+    "getrawtransaction", "decoderawtransaction", "decodescript", "validateaddress",
+    "getblock", "getblockhash", "getrawmempool", "gettxoutsetinfo", "uptime", "help",
+)
+
+
+def refuse_unless_read_only(method: object) -> str:
+    """"" if this method may be called, else the reason it may not. THE decision, on its own.
+
+    A FUNCTION RATHER THAN AN `in` CHECK AT THE ROUTE, because this is the single decision that
+    decides whether a browser can make this process move money, and a decision reachable only by
+    making an HTTP request is a decision nobody tests (rule 10). This one is called with a
+    string, including hostile ones.
+
+    THE REFUSAL NAMES THE RULE rather than just saying no. An operator who is refused
+    `sendtoaddress` needs to know it is a deliberate boundary and where the capability lives
+    instead, or they will go looking for a flag that does not exist.
+    """
+    if not isinstance(method, str) or not method:
+        return f"{method!r} is not a method name"
+    if method in READ_ONLY_RPCS:
+        return ""
+    return (
+        f"{method!r} is not on this panel's read-only allowlist. Every method it will call "
+        f"READS -- nothing here creates a transaction, signs, touches a wallet lock, or writes "
+        f"a key. Spending goes through the named harnesses in the Run section, or through your "
+        f"own shell; a passphrase never goes through this page at all."
+    )
+
+
+def call_read_only(run: adaptor_steps.Run, method: str, args: list) -> dict:
+    """Make one allowlisted call and return {ok, result} or {ok: false, error}. NEVER raises.
+
+    A REFUSAL AND A FAILURE ARE DIFFERENT and both are results. "That method is not allowed" is
+    the panel's own boundary; "the daemon said -1" is the chain answering. Collapsing them would
+    leave an operator unable to tell a policy they can read from a problem they must fix
+    (rule 14), so the two carry different text and the daemon's own words are never paraphrased.
+    """
+    refusal = refuse_unless_read_only(method)
+    if refusal:
+        return {"ok": False, "refused": True, "error": refusal}
+    try:
+        return {"ok": True, "result": run.node().call(method, *args)}
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value, named with its type, and a panel that dies on a bad argument is a panel that cannot be used to explore
+        return {"ok": False, "refused": False,
+                "error": f"{type(error).__name__}: {error}"}
 
 
 class Missing(NamedTuple):

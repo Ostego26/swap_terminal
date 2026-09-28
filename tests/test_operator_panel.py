@@ -576,3 +576,178 @@ def test_the_cache_is_OPTIONAL_so_every_other_caller_is_unaffected(monkeypatch):
     decisions.payment_rows(_Run(), _Key())
     decisions.payment_rows(_Run(), _Key())
     assert len(walks) == 2, "with no cache, both looks walk"
+
+
+# ---------------------------------------------------------------------------
+# A WEB PAGE THE OPERATOR MERELY VISITS MUST NOT BE ABLE TO SPEND THEIR COIN
+# ---------------------------------------------------------------------------
+
+
+def test_a_POST_from_ANOTHER_ORIGIN_is_refused():
+    """THE REAL HOLE IN A LOOPBACK PANEL, and binding 127.0.0.1 does not close it.
+
+    Nothing on the network can reach this port -- but the operator's own BROWSER can, and any
+    page they visit can issue requests to 127.0.0.1. Nothing here authenticates a caller, so
+    without this check a page on any site could POST /api/run and start a harness that SPENDS
+    COIN, and the operator would see only a run they did not start.
+    """
+    entry = _entry()
+    for hostile in ("https://example.com", "http://evil.test:8765", "null",
+                    "http://127.0.0.1.attacker.com"):
+        refusal = entry.refuse_a_cross_origin_post({"Origin": hostile, "Host": "127.0.0.1:8765"}, 8765)
+        assert refusal, f"{hostile} must be refused"
+        assert "not this machine" in refusal
+        assert "spend coin" in refusal, "and it says WHY, or it reads as a bug to work around"
+
+
+def test_a_REBOUND_DNS_NAME_is_refused_even_though_it_is_same_origin():
+    """An attacker's domain can be made to resolve to 127.0.0.1.
+
+    That makes their page SAME-ORIGIN with this one, so the Origin check above sees its own
+    address and waves it through -- the whole point of DNS rebinding. The Host header still
+    carries their domain, and that is what gives them away.
+    """
+    entry = _entry()
+    refusal = entry.refuse_a_cross_origin_post(
+        {"Origin": "http://rebind.attacker.test", "Host": "rebind.attacker.test:8765"}, 8765)
+    assert refusal, "a rebound name must be refused"
+
+    # Same attack with the Origin stripped, which is the shape that defeats an Origin-only check.
+    refusal = entry.refuse_a_cross_origin_post({"Host": "rebind.attacker.test:8765"}, 8765)
+    assert "DNS-rebinding" in refusal, refusal
+
+
+def test_the_OPERATORS_OWN_PAGE_is_not_obstructed():
+    """A guard that refuses the good case too is an outage, and a test that only checks the
+    refusal cannot see it.
+
+    A MISSING Origin is allowed on purpose: curl and these tests send none, and a page-driven
+    request always carries one, so the check is aimed at browsers -- which is where the threat
+    is. The content-type lock at the call site is what covers the rest.
+    """
+    entry = _entry()
+    for good in ({"Origin": "http://127.0.0.1:8765", "Host": "127.0.0.1:8765"},
+                 {"Origin": "http://localhost:8765", "Host": "localhost:8765"},
+                 {"Host": "127.0.0.1:8765"},
+                 {}):
+        assert entry.refuse_a_cross_origin_post(good, 8765) == "", good
+
+
+# ---------------------------------------------------------------------------
+# THE RPC CONSOLE. An allowlist, not a denylist.
+# ---------------------------------------------------------------------------
+
+
+def test_only_READ_ONLY_methods_are_allowed_and_the_refusal_names_the_rule():
+    """A denylist is a list of the ways to lose money somebody thought of. This is an allowlist.
+
+    The four groups asserted here are the ones whose absence IS the design: spending, the
+    passphrase, stopping the operator's staking daemon, and reading a key back out. A panel that
+    could reach any of them would not be a read-only console with exceptions -- it would be a
+    wallet with a browser form in front of it.
+    """
+    for forbidden in ("sendtoaddress", "sendrawtransaction", "signrawtransaction",
+                      "walletpassphrase", "walletlock", "encryptwallet", "stop",
+                      "dumpprivkey", "dumpwallet", "importprivkey", "getnewaddress",
+                      "", None, 42, ["getbalance"]):
+        refusal = decisions.refuse_unless_read_only(forbidden)
+        assert refusal, f"{forbidden!r} must be refused"
+
+    assert "passphrase never goes through this page" in decisions.refuse_unless_read_only("walletpassphrase")
+
+    for allowed in ("getblockchaininfo", "getbalance", "listunspent", "getrawtransaction"):
+        assert decisions.refuse_unless_read_only(allowed) == "", allowed
+
+    # AND NOTHING THAT WRITES IS ON THE LIST, asserted over the LIST rather than over a sample
+    # of it -- a write method added later would otherwise slip in unremarked.
+    #
+    # MATCHED AS A VERB AT THE START, not as a substring anywhere. The first version of this
+    # assertion looked for "set" anywhere in the name and rejected `gettxoutsetinfo`, which
+    # reads. A check that fires on correct entries is a check somebody edits until it stops
+    # firing, and by then it has stopped meaning anything (rule 19).
+    writes = ("send", "sign", "wallet", "dump", "import", "encrypt", "create", "stop", "add",
+              "set", "generate", "backup", "move")
+    for name in decisions.READ_ONLY_RPCS:
+        assert not any(name.startswith(verb) for verb in writes), name
+    assert "getnewaddress" not in decisions.READ_ONLY_RPCS, (
+        "it looks harmless and it WRITES a key into wallet.dat, which a staking-only wallet may "
+        "refuse and which changes a file the operator backs up"
+    )
+
+
+def test_a_REFUSED_call_and_a_FAILED_call_read_differently(monkeypatch):
+    """One is a boundary this panel holds on purpose; the other is the chain answering.
+
+    Collapsing them would leave an operator unable to tell a policy they can read from a problem
+    they must fix -- and the deliberate one would look like a bug worth routing around (rule 14).
+    """
+    class _Run:
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *args):
+            raise RuntimeError("the daemon said -1")
+
+    refused = decisions.call_read_only(_Run(), "sendtoaddress", [])
+    assert refused["ok"] is False and refused["refused"] is True
+
+    failed = decisions.call_read_only(_Run(), "getbalance", [])
+    assert failed["ok"] is False and failed["refused"] is False
+    assert "RuntimeError" in failed["error"], "and the exception TYPE, not just its message"
+
+    class _Works(_Run):
+        def call(self, method, *args):
+            return {"blocks": 3296406}
+
+    ok = decisions.call_read_only(_Works(), "getblockchaininfo", [])
+    assert ok == {"ok": True, "result": {"blocks": 3296406}}
+
+
+def test_the_rpc_route_refuses_an_asset_it_serves_no_daemon_for():
+    """The dropdown is a convenience; both gates are on the server.
+
+    A request naming any other asset or method is refused whatever the page sends, which is what
+    makes the page's contents irrelevant to the panel's safety.
+    """
+    entry = _entry()
+    answer, code = entry.answer_an_rpc({"asset": "DOGE", "method": "getbalance"}, {})
+    assert code == 403 and answer["refused"] is True
+
+    answer, code = entry.answer_an_rpc("not an object", {})
+    assert code == 400
+
+
+def test_host_of_is_not_fooled_by_a_prefix_or_a_suffix():
+    """THE VULNERABILITY THIS FUNCTION EXISTS FOR, live for four minutes on 2026-09-28.
+
+    The first guard asked whether the Origin STARTED WITH "http://127.0.0.1" -- and
+    `http://127.0.0.1.attacker.com` starts with exactly that. Anyone who controls any domain
+    can register that subdomain and pass a check that looks obviously correct. The mirror-image
+    hole defeats an endswith against a suffix, which is why this parses rather than matching at
+    either end, and why both shapes are pinned here.
+    """
+    entry = _entry()
+    assert entry.host_of("http://127.0.0.1:8765") == "127.0.0.1"
+    assert entry.host_of("127.0.0.1:8765") == "127.0.0.1"
+    assert entry.host_of("http://[::1]:8765") == "::1"
+    assert entry.host_of("[::1]:8765") == "::1"
+    assert entry.host_of("http://localhost") == "localhost"
+    assert entry.host_of("http://127.0.0.1.attacker.com") == "127.0.0.1.attacker.com"
+    assert entry.host_of("http://evil-localhost") == "evil-localhost"
+    assert entry.host_of("http://attacker.com/127.0.0.1") == "attacker.com"
+
+
+def test_every_chain_has_a_theme_and_a_dark_variant():
+    """Several brand colors are unreadable on a dark background -- XRP's near-black is invisible
+    on it -- and a theme that is unreadable half the time is worse than none, because the reader
+    stops looking at it and the glance-level defense it buys is gone.
+
+    The fallback is deliberately plain rather than a guess: an unthemed chain LOOKS unthemed.
+    """
+    for chain in decisions.CHAINS:
+        theme = decisions.theme_for(chain.asset)
+        for key in ("accent", "dark", "glyph", "unit"):
+            assert theme.get(key), f"{chain.asset} has no {key}"
+        for key in ("accent", "dark"):
+            assert theme[key].startswith("#") and len(theme[key]) == 7, f"{chain.asset}.{key}"
+    assert decisions.theme_for("DOGE")["glyph"] == "?", "an unthemed chain looks unthemed"

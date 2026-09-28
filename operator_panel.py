@@ -89,7 +89,7 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Operator Panel</title>
 <style>
-  :root { --bg:#faf9f7; --fg:#1a1917; --dim:#6b6763; --line:#ddd9d4; --ok:#1f7a3d; --bad:#b3261e; --warn:#8a6d00; --card:#fff; }
+  :root { --accent:#6b6763; --bg:#faf9f7; --fg:#1a1917; --dim:#6b6763; --line:#ddd9d4; --ok:#1f7a3d; --bad:#b3261e; --warn:#8a6d00; --card:#fff; }
   @media (prefers-color-scheme: dark) { :root { --bg:#16151a; --fg:#eceaf0; --dim:#9b96a3; --line:#33313a; --ok:#6ee7a0; --bad:#ff9a92; --warn:#e8c55a; --card:#1e1d24; } }
   * { box-sizing:border-box; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
@@ -111,7 +111,22 @@ PAGE = r"""<!doctype html>
   button.stop { border-color:var(--bad); color:var(--bad); }
   nav { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; border-bottom:1px solid var(--line); padding-bottom:10px; }
   nav button { margin:0; }
-  nav button.on { border-color:var(--fg); font-weight:700; }
+  nav button.on { border-color:var(--accent); color:var(--accent); font-weight:700;
+                  box-shadow:inset 0 -3px 0 var(--accent); }
+  .chainhead { display:flex; align-items:center; gap:12px; margin:-2px 0 12px;
+               padding:10px 12px; border-radius:8px; border:1px solid var(--line);
+               background:linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent); }
+  .mark { width:38px; height:38px; flex:0 0 38px; border-radius:9px; display:grid;
+          place-items:center; font-size:21px; font-weight:700; color:#fff;
+          background:var(--accent); }
+  .chainhead h3 { margin:0; font-size:15px; letter-spacing:.04em; }
+  .chainhead .kind { color:var(--dim); font-size:12.5px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11.5px;
+          border:1px solid currentColor; margin-left:8px; }
+  input, select { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px;
+                  background:var(--card); color:var(--fg); }
+  input { width:min(420px, 60vw); }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 8px; }
   nav button .dot { font-size:11px; margin-left:6px; }
   pre { margin:0; padding:10px; background:var(--bg); border:1px solid var(--line);
         border-radius:6px; max-height:52vh; overflow:auto; white-space:pre-wrap; font-size:12.5px; }
@@ -124,10 +139,24 @@ this port was bound. The seed is never shown here and never leaves the server's 
 <nav id="tabs">loading the chain list from the server&hellip;</nav>
 
 <section>
-  <h2 id="chainname">Chain</h2>
+  <div class="chainhead"><div class="mark" id="mark">&middot;</div>
+    <div><h3 id="chainname">Chain</h3><div class="kind" id="chainkind">&nbsp;</div></div></div>
   <div id="chain">pick a chain above&hellip;</div>
   <button id="refresh">Re-check this chain</button>
   <span class="what">reads the daemon, and on GRC walks blocks per payment &mdash; a few seconds, not on a timer</span>
+</section>
+
+<section>
+  <h2>RPC console &mdash; read-only</h2>
+  <div class="row">
+    <select id="method"></select>
+    <input id="rpcargs" placeholder='arguments as JSON, e.g. ["txid", true] &mdash; blank for none'>
+    <button id="callrpc">Call</button>
+  </div>
+  <p class="what">Every method offered here READS. Nothing on this page can create a
+  transaction, sign one, touch a wallet lock, or ask for a passphrase &mdash; the allowlist is
+  enforced on the server, not in this dropdown.</p>
+  <pre id="rpcout">(nothing called yet)</pre>
 </section>
 
 <section>
@@ -145,6 +174,7 @@ this port was bound. The seed is never shown here and never leaves the server's 
 <script>
 const $ = id => document.getElementById(id);
 let pinned = true, current = "";   // set from /api/state's chain list, never spelled here
+const THEMES = {}, KINDS = {};
 $("out").addEventListener("scroll", () => {
   const el = $("out");
   pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
@@ -187,12 +217,25 @@ function fundingBlock(f) {
   return h;
 }
 
+function applyTheme(t) {
+  if (!t) { return; }
+  // DARK GETS ITS OWN COLOR. Several brand colors are unreadable on a dark background -- XRP's
+  // near-black is invisible on it -- and a theme that is unreadable half the time is worse than
+  // none, because the reader stops looking at it.
+  const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.style.setProperty("--accent", dark ? t.dark : t.accent);
+  $("mark").textContent = t.glyph || "?";
+}
+
 async function loadChain(asset) {
   current = asset;
   for (const b of $("tabs").querySelectorAll("button")) {
     b.className = b.dataset.asset === asset ? "on" : "";
+    if (b.dataset.asset === asset) { applyTheme(THEMES[asset]); }
   }
   $("chainname").textContent = asset;
+  $("chainkind").textContent = KINDS[asset] === "operator" ? "your own daemon \u2014 read only"
+    : (KINDS[asset] === "regtest" ? "a regtest daemon another harness starts" : "no adapter here");
   $("chain").textContent = "asking " + asset + "…";
   let d;
   try { d = await (await fetch("/api/chain/" + encodeURIComponent(asset))).json(); }
@@ -227,6 +270,8 @@ async function tick() {
   $("out").textContent = r.lines.length ? r.lines.join("\n") : "(none)";
   if (pinned) { $("out").scrollTop = $("out").scrollHeight; }
   if (!$("tabs").dataset.built) {
+    for (const c of d.chains) { THEMES[c.asset] = c; KINDS[c.asset] = c.kind; }
+    $("method").innerHTML = (d.rpcs || []).map(m => '<option>' + esc(m) + '</option>').join("");
     $("tabs").innerHTML = d.chains.map(c =>
       '<button data-asset="' + esc(c.asset) + '">' + esc(c.asset) +
       '<span class="dot">' + (c.kind === "operator" ? "●" : (c.kind === "regtest" ? "○" : "·")) +
@@ -253,6 +298,28 @@ async function tick() {
   for (const b of $("buttons").querySelectorAll("button")) { b.disabled = r.alive; }
   $("stop").disabled = !r.alive;
 }
+
+$("callrpc").onclick = async () => {
+  let args = [];
+  const typed = $("rpcargs").value.trim();
+  if (typed) {
+    try { args = JSON.parse(typed); }
+    catch (e) { $("rpcout").textContent = "the arguments are not JSON: " + e; return; }
+    if (!Array.isArray(args)) { args = [args]; }
+  }
+  $("rpcout").textContent = "calling " + $("method").value + " on " + current + "\u2026";
+  let d;
+  try {
+    d = await (await fetch("/api/rpc", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({asset: current, method: $("method").value, args})})).json();
+  } catch (e) { $("rpcout").textContent = "could not reach the panel: " + e; return; }
+  // A REFUSAL AND A FAILURE READ DIFFERENTLY. One is a boundary this panel holds on purpose;
+  // the other is the chain answering. Rendering both as "error" would make the deliberate one
+  // look like a bug worth working around.
+  if (d.ok) { $("rpcout").textContent = JSON.stringify(d.result, null, 2); }
+  else if (d.refused) { $("rpcout").textContent = "REFUSED BY THIS PANEL\n\n" + d.error; }
+  else { $("rpcout").textContent = "the daemon answered:\n\n" + d.error; }
+};
 
 $("refresh").onclick = () => loadChain(current);
 $("stop").onclick = async () => {
@@ -328,7 +395,12 @@ def state_payload(run: adaptor_steps.Run, runner: HarnessRunner) -> dict:
         # THE NAV IS BUILT FROM THE SERVER'S LIST, never hard-coded in the page. A chain added
         # to decisions.CHAINS and not to the page would be a chain that exists in one half of
         # this file and not the other -- rule 8's duplicate with a delay on it, in HTML.
-        "chains": [{"asset": c.asset, "kind": c.kind} for c in decisions.CHAINS],
+        "chains": [{"asset": c.asset, "kind": c.kind, **decisions.theme_for(c.asset)}
+                   for c in decisions.CHAINS],
+        # THE DROPDOWN COMES FROM THE SERVER'S ALLOWLIST, so the page cannot offer a method the
+        # server would refuse, and cannot fail to offer one it would allow. Spelled in the page
+        # as well, the two would drift and the drift would look like a broken panel.
+        "rpcs": list(decisions.READ_ONLY_RPCS),
     }
     return payload
 
@@ -410,8 +482,9 @@ def chain_payload(asset: str, grc_run: adaptor_steps.Run, known_spent: dict | No
     if tab is None:
         return {"asset": asset, "kind": "none", "reachable": False, "methods": [],
                 "note": f"{asset!r} is not a chain this panel knows about.", "error": "",
-                "funding": None}
+                "funding": None, "theme": decisions.theme_for(asset)}
     state = decisions.chain_state(tab, grc_run.console)
+    state["theme"] = decisions.theme_for(asset)
     if asset == "GRC" and state["reachable"]:
         state["funding"] = funding_payload(grc_run, known_spent)
     return state
@@ -440,7 +513,8 @@ def answer_a_get(path: str, run: adaptor_steps.Run, runner: HarnessRunner, page:
     return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
 
 
-def answer_a_post(path: str, raw: bytes, runner: HarnessRunner) -> tuple[bytes, str, int]:
+def answer_a_post(path: str, raw: bytes, runner: HarnessRunner,
+                  chains: dict | None = None) -> tuple[bytes, str, int]:
     """The two POSTs, as a function of a path and a body. No socket, no handler, no server.
 
     SAME ARGUMENT AS answer_a_get, and the same shape so `guarded` can wrap either: a decision
@@ -453,10 +527,112 @@ def answer_a_post(path: str, raw: bytes, runner: HarnessRunner) -> tuple[bytes, 
         return json.dumps({"error": "the request body was not JSON"}).encode(), "application/json", 400
     if path == "/api/stop":
         return json.dumps({"said": runner.stop()}).encode(), "application/json", 200
+    if path == "/api/rpc":
+        answer, code = answer_an_rpc(body, chains)
+        return json.dumps(answer).encode(), "application/json", code
     if path != "/api/run":
         return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
     answer, code = start_named_run(runner, body)
     return json.dumps(answer).encode(), "application/json", code
+
+
+#: The only host names a browser on this machine will put in an Origin for this page. HOSTS,
+#: not URL prefixes -- see host_of() for the vulnerability that distinction closes.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def host_of(url_or_authority: str) -> str:
+    """The bare host from an Origin or a Host header, with any scheme, port and brackets gone.
+
+    WRITTEN BECAUSE MATCHING A PREFIX IS A VULNERABILITY, and this one was live for about four
+    minutes before its own test caught it. The first version of the guard asked whether the
+    Origin STARTED WITH "http://127.0.0.1" -- and
+
+        http://127.0.0.1.attacker.com
+
+    starts with exactly that. An attacker who controls any domain can register that subdomain,
+    serve a page from it, and pass an Origin check that looks obviously correct. The same shape
+    defeats endswith against a suffix (`evil-localhost`), which is why this parses instead of
+    pattern-matching at either end.
+
+    IPv6 brackets are stripped because a Host header writes the loopback address as `[::1]:8765`
+    while an Origin writes `http://[::1]`, and a comparison that handled one and not the other
+    would refuse the operator's own browser on a v6-preferring machine.
+    """
+    authority = url_or_authority.split("://", 1)[-1]
+    authority = authority.split("/", 1)[0]
+    if authority.startswith("["):
+        return authority[1:].split("]", 1)[0]
+    return authority.rsplit(":", 1)[0] if ":" in authority else authority
+
+
+def refuse_a_cross_origin_post(headers, port: int) -> str:
+    """"" if this POST may proceed, else why not. THE defense against a web page driving this.
+
+    THE HOLE THIS CLOSES, and it is a real one rather than a formality. This panel binds
+    loopback so nothing on the network can reach it -- but the operator's own BROWSER can, and
+    any page they visit can issue requests to 127.0.0.1. Nothing here authenticates a caller, so
+    without this, a page on any site could POST /api/run and start a harness that SPENDS COIN,
+    and the operator would see only a run they did not start.
+
+    TWO CHECKS, AND THEY FAIL DIFFERENTLY ON PURPOSE:
+
+      Origin      a browser sends it on every cross-origin POST. Anything that is not this
+                  machine is refused. A MISSING Origin is allowed, because curl and the tests
+                  send none and a page-driven request always carries one -- the check is aimed
+                  at browsers, which is where the threat is.
+      Host        must be loopback. This is the DNS-rebinding defense: an attacker's domain can
+                  be made to resolve to 127.0.0.1, which makes their page SAME-ORIGIN with this
+                  one and silences the Origin check entirely. The Host header still carries
+                  their domain, and that is what gives them away.
+
+    THE CONTENT TYPE IS THE THIRD LOCK and it lives at the call site rather than here: requiring
+    `application/json` means a browser cannot reach these routes with a simple form POST at all,
+    because that content type forces a CORS preflight this server never answers.
+
+    A FUNCTION, CALLED WITH A HEADERS MAPPING, so the tests hand it hostile values without a
+    socket (rule 10). It is the single decision that says whether a stranger's web page can
+    spend this operator's coin.
+    """
+    origin = (headers.get("Origin") or "").strip()
+    if origin and host_of(origin) not in LOOPBACK_HOSTS:
+        return (f"refused: this request came from {origin}, which is not this machine. The "
+                f"panel has buttons that spend coin and nothing authenticates a caller, so a "
+                f"page you merely VISITED must not be able to drive it.")
+    host = (headers.get("Host") or "").strip()
+    if host and host_of(host) not in LOOPBACK_HOSTS:
+        return (f"refused: this request names host {host!r}. The panel serves 127.0.0.1 only, "
+                f"and a name that resolves here is how a DNS-rebinding attack makes its own "
+                f"page same-origin with this one.")
+    return ""
+
+
+def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
+    """One read-only RPC against one chain's daemon, or a named refusal.
+
+    TWO GATES, AND BOTH ARE HERE RATHER THAN IN THE HANDLER. The asset must be one this panel
+    already serves a tab for, and the method must be on the read-only allowlist. Neither is
+    checked in the browser: the dropdown the page renders is a convenience, and a request
+    naming anything else is refused whatever the page sends (rule 10 -- the decision is a
+    function, called with hostile input in the tests).
+
+    403 FOR A REFUSAL AND 400 FOR A MALFORMED REQUEST, because they mean different things to
+    whoever is reading: one is a boundary this panel holds on purpose and the other is a
+    mistake in the request. A single status for both would make the deliberate one look like a
+    bug worth working around.
+    """
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "the request body was not an object"}, 400
+    asset = body.get("asset")
+    run = (chains or {}).get(asset) if isinstance(asset, str) else None
+    if run is None:
+        return {"ok": False, "refused": True,
+                "error": f"{asset!r} has no reachable daemon in this panel"}, 403
+    args = body.get("args")
+    if not isinstance(args, list):
+        args = []
+    answer = decisions.call_read_only(run, body.get("method"), args)
+    return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
 
 
 def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:
@@ -482,7 +658,7 @@ def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:
 
 
 def build_handler(run: adaptor_steps.Run, runner: HarnessRunner, page: str,
-                  known_spent: dict | None = None):
+                  known_spent: dict | None = None, chains: dict | None = None):
     """The HTTP surface, closed over the objects it serves. Four routes and no others.
 
     A CLOSURE RATHER THAN CLASS ATTRIBUTES because BaseHTTPRequestHandler is instantiated per
@@ -506,6 +682,12 @@ def build_handler(run: adaptor_steps.Run, runner: HarnessRunner, page: str,
             # The page is served to one browser on one machine and embeds no third-party
             # anything; these say so rather than relying on it staying true.
             self.send_header("X-Frame-Options", "DENY")
+            # NOTHING HERE MAY BE CACHED OR REFERRED ONWARDS. The bodies carry addresses, txids
+            # and balances; a cached copy outlives the run and a Referer leaks the panel's
+            # existence and port to anything a link ever reaches.
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
             self.end_headers()
             self.wfile.write(body)
@@ -518,9 +700,19 @@ def build_handler(run: adaptor_steps.Run, runner: HarnessRunner, page: str,
             self._send(code, body, content_type)
 
         def do_POST(self) -> None:
+            refusal = refuse_a_cross_origin_post(self.headers, self.server.server_address[1])
+            if not refusal and "json" not in (self.headers.get("Content-Type") or ""):
+                # THE THIRD LOCK. `application/json` cannot be sent by a browser's simple form
+                # POST -- it forces a CORS preflight, which this server never answers -- so a
+                # page cannot reach a state-changing route even without script access.
+                refusal = ("refused: POSTs here must be application/json, which a browser form "
+                           "cannot send without a preflight this server does not answer.")
+            if refusal:
+                self._json({"ok": False, "refused": True, "error": refusal}, 403)
+                return
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) or b"{}"
-            body, content_type, code = guarded(answer_a_post, self.path, raw, runner)
+            body, content_type, code = guarded(answer_a_post, self.path, raw, runner, chains)
             self._send(code, body, content_type)
 
     return Handler
@@ -564,7 +756,21 @@ def main(argv: list[str], console: Console | None = None) -> int:
     # ONE CACHE FOR THE PROCESS, held here rather than at module level so a test builds its own
     # and two panels in one process could not share one. It only ever holds "this outpoint was
     # spent by that transaction", which is true forever once true.
-    server = ThreadingHTTPServer((HOST, args.port), build_handler(run, runner, PAGE, {}))
+    # ONE Run PER CHAIN, BUILT ONCE. The RPC console needs a connection per asset, and building
+    # one per request would open a new session on every keystroke-driven call. GRC reuses the
+    # run whose network was already gated three ways before this port was bound; the others are
+    # built lazily and may be unreachable, which their tab already says.
+    chains = {"GRC": run}
+    for tab in decisions.CHAINS:
+        if tab.asset == "GRC" or tab.kind == "none":
+            continue
+        try:
+            chains[tab.asset] = adaptor_steps.Run(
+                console=console, config=adaptor_steps.resolve_config(tab.asset), wallet="")
+        except Exception as exc:  # noqa: BLE001 -- checked: a chain with no connection parameters simply gets no console, which its tab already reports; the panel must still serve the others
+            console.say(f"{tab.asset}: no RPC console ({type(exc).__name__}: {exc})")
+    server = ThreadingHTTPServer((HOST, args.port),
+                                 build_handler(run, runner, PAGE, {}, chains))
     console.say(f"the panel is at http://{HOST}:{args.port}/ -- loopback only, by construction")
     console.say(f"it can start: {', '.join(decisions.RUNNABLE)}")
     console.say("Ctrl-C stops the panel AND reaps any run it started (rule 13)")
