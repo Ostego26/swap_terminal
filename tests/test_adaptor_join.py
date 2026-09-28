@@ -755,6 +755,18 @@ def test_the_diagnostic_names_the_seed_variable_as_the_thing_that_changed(monkey
     assert adaptor_steps.FUNDING_SEED_VARIABLE in printed
     assert "THE SEED IS WHAT CHANGED" in printed
     assert "nothing to re-send" in printed, "or the next move is another payment to a third address"
+    assert key.address in printed, (
+        "AND THE WAY OUT WHEN THE SEED IS NOT REMEMBERED. Telling somebody to set a seed they no "
+        "longer have is a dead end: there is no way to recover one from an address, and this "
+        "repository deliberately cannot read one back. The escape is to pay the address THIS "
+        "shell derives and carry on -- the stranded coins are test coins and the hunt costs more "
+        "than they do"
+    )
+    assert "DO NOT GO LOOKING" in printed
+    assert "new terminal" in printed, (
+        "and the recurrence has to be named: an export that does not survive a new shell is how "
+        "this happens again next week"
+    )
 
 
 def test_a_wallet_with_no_recent_sends_prints_none_rather_than_a_gap(monkeypatch):

@@ -944,6 +944,18 @@ def report_recent_payments(run: Run, funding_key: RegtestKey) -> None:
             f"the seed back to the one that produced the address you paid, and re-run -- there is "
             f"nothing to re-send."
         )
+        run.say(
+            f"    AND IF YOU DO NOT REMEMBER THAT SEED, DO NOT GO LOOKING. Pay "
+            f"{funding_key.address} -- the address above, the one THIS shell's seed derives -- "
+            f"and carry on. The coins at the other address are stranded, and they are TEST coins: "
+            f"the hunt costs more than they do. There is no way to recover a seed from an address "
+            f"and there is deliberately no way to read one back out of this repository."
+        )
+        run.say(
+            f"    KEEP THE EXPORT IN THE SHELL YOU RUN THIS FROM. A new terminal has no "
+            f"{FUNDING_SEED_VARIABLE}, so it derives a different address and you land here again "
+            f"-- which is how you got here. Put it in your shell profile and it stops happening."
+        )
 
 
 def already_funded(run: Run, signing: str) -> bool:
