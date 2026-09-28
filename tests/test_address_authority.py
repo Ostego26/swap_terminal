@@ -39,6 +39,7 @@ import base58
 import bech32
 import pytest
 from bip350_vectors import CORRUPTED_TAPROOT
+from chains import monero_keys
 from chains.registry import build_adapters
 from config import Config
 from conftest import RPC_FIXTURE_AUTH
@@ -77,6 +78,8 @@ from valid_addresses import (
     BTC_TAPROOT_PAYOUT,
     GRC_PAYOUT,
     INVALID_PLACEHOLDERS,
+    INVALID_XMR_INTEGRATED_PREFIX_STANDARD_LENGTH,
+    INVALID_XMR_PRIMARY_PREFIX_INTEGRATED_LENGTH,
     LTC_P2SH_SCRIPT_ADDRESS2,
     LTC_PARTICIPANT,
     LTC_REGTEST_DEPOSIT,
@@ -84,7 +87,10 @@ from valid_addresses import (
     LTC_TAPROOT_PAYOUT,
     LTC_TAPROOT_PLATFORM_FEE,
     SOL_PAYOUT,
+    XMR_INTEGRATED_STAGENET,
+    XMR_INTEGRATED_TESTNET,
     XMR_PAYOUT,
+    XMR_SUBADDRESS_TESTNET,
     XRP_HOT_ACCOUNT,
 )
 
@@ -1273,3 +1279,82 @@ def test_a_swap_paying_out_to_TAPROOT_can_be_CREATED(tmp_path):
     assert conn.execute(
         "SELECT payout_address AS a FROM swaps"
     ).fetchone()["a"] == LTC_TAPROOT_PAYOUT
+
+
+# =======================================================================================
+# MONERO INTEGRATED ADDRESSES. THE SECOND BLOCKING FALSE REFUSAL, SAME CLASS AS bech32m.
+#
+# chains/monero_keys.decode_address() compared the decoded length against the STANDARD form
+# only and raised for anything else; _monero() reported that as INVALID. So every INTEGRATED
+# address -- the form an EXCHANGE issues, where the 8-byte payment ID is how they know whose
+# account to credit -- was refused. "Paste the address your exchange gave you" is the single
+# most likely thing a customer does with an XMR payout field.
+#
+# The old refusal's own words were "a swap has no use for one -- the shared address is
+# generated per swap, so there is nothing to disambiguate". Sound about the address THIS
+# REPOSITORY GENERATES for a swap's XMR leg; wrong about the one a CUSTOMER SUPPLIES as a
+# payout destination. Two different addresses, one function, and only one of them is ours.
+# =======================================================================================
+
+
+@pytest.mark.parametrize(("fixture", "network"), [
+    (XMR_INTEGRATED_TESTNET, "testnet"),
+    (XMR_INTEGRATED_STAGENET, "stagenet"),
+    (XMR_SUBADDRESS_TESTNET, "testnet"),
+])
+def test_an_integrated_or_sub_monero_address_is_VALID(fixture, network):
+    """All three non-primary forms. 106 characters for integrated, 95 for the rest."""
+    verdict = check_address("XMR", fixture)
+    assert verdict.state == VALID, verdict.why
+    assert not verdict.refuses
+    assert verdict.network == network, verdict.why
+
+
+def test_the_payment_id_is_carried_rather_than_discarded():
+    """A caller reporting "we are paying an integrated address" to an operator needs to be able
+    to say so, and a future caller that must NOT accept one can ask instead of re-decoding."""
+    decoded = monero_keys.decode_address(XMR_INTEGRATED_TESTNET)
+    assert decoded.is_integrated
+    assert decoded.payment_id == bytes.fromhex("a1b2c3d4e5f60718")
+    assert len(decoded.public_spend_key) == 32, "and the payment ID did not leak into a key"
+    assert len(decoded.public_view_key) == 32, (
+        "THE MUTATION THAT MATTERS: slicing the view key as body[33:] instead of "
+        "body[33:STANDARD_BODY_BYTES] gives a 40-byte 'view key' with the payment ID glued on, "
+        "and every downstream key comparison then fails for a reason nobody could find"
+    )
+    assert not monero_keys.decode_address(XMR_SUBADDRESS_TESTNET).is_integrated
+
+
+@pytest.mark.parametrize("fixture", [
+    INVALID_XMR_INTEGRATED_PREFIX_STANDARD_LENGTH,
+    INVALID_XMR_PRIMARY_PREFIX_INTEGRATED_LENGTH,
+])
+def test_a_prefix_and_length_that_DISAGREE_are_still_refused(fixture):
+    """WHAT MAKES THIS A FIX RATHER THAN JUST ACCEPTING A LONGER STRING. Both of these have a
+    VALID Keccak checksum -- they are internally consistent -- so the checksum cannot catch
+    them and only the kind/length comparison can. Same shape as BIP-350 tying a checksum
+    constant to a witness version: an `integrated` prefix on a 65-byte body is a corruption,
+    not a shorter spelling.
+
+    MUTATION: delete the `len(body) != expected_body` check and both of these become VALID,
+    with the payment ID read out of a body that has none."""
+    verdict = check_address("XMR", fixture)
+    assert verdict.state == INVALID, verdict.why
+    assert "disagree" in verdict.why, "and the reason says which two facts conflict"
+
+
+def test_a_credited_swap_paying_out_to_an_INTEGRATED_monero_address_is_SENT(tmp_path):
+    """THE MONEY PATH, not the decoder. Before this an already-credited GRC->XMR swap whose
+    payout address was exchange-issued went to status='failed' terminally: nothing sent, no
+    retry, customer's GRC in our wallet."""
+    adapter = RecordingAdapter()
+    conn = _seed_pending(tmp_path / "xmr_integrated.db", to_asset="XMR",
+                         payout_address=XMR_INTEGRATED_TESTNET)
+
+    process_pending_payouts(conn, {}, {"XMR": adapter})
+
+    assert adapter.sends == [(XMR_INTEGRATED_TESTNET, 0.0975)], (
+        f"an exchange-issued Monero address sent nothing: {adapter.sends}"
+    )
+    swap = conn.execute("SELECT status, failed_reason FROM swaps WHERE id='s1'").fetchone()
+    assert swap["status"] == "completed", swap["failed_reason"]

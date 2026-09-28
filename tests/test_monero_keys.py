@@ -225,8 +225,22 @@ def test_one_mistyped_character_is_caught_by_the_checksum():
 
 
 def test_a_truncated_address_is_refused_before_the_checksum_is_consulted():
-    with pytest.raises(MoneroAddressError, match=r"standard form|standard address"):
+    """THE INVARIANT IS THE ORDER, WHICH IS WHAT THIS TEST'S NAME SAYS. It matched on the words
+    "standard form|standard address" instead, and went red when the message changed to name BOTH
+    valid lengths -- a test pinning a spelling rather than the fact. A length refusal must fire
+    before Keccak is computed, because a truncated address has no meaningful checksum to report
+    on and "checksum mismatch" would send the reader looking for a typo.
+    """
+    with pytest.raises(MoneroAddressError) as caught:
         decode_address(STAGENET_ADDRESS[:88])
+    message = str(caught.value)
+    assert "checksum mismatch" not in message, (
+        "the length check must come FIRST -- a truncation is not a mistyped character"
+    )
+    assert "69" in message and "77" in message, (
+        "and the refusal names both valid lengths, so a reader can tell which form they meant "
+        "to paste (rule 14: state what the number means, next to the number)"
+    )
 
 
 def test_an_unknown_prefix_byte_says_the_checksum_passed(monkeypatch):

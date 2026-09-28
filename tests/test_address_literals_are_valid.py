@@ -70,7 +70,7 @@ from modules.address_authority import (  # noqa: E402  the path shim above must 
 from modules.address_network import (  # noqa: E402  the path shim above must run first
     BITCOIN_BASE58_ALPHABET,
     MAINNET,
-    TESTNET,
+    TEST_NETWORKS,
     XRP_BASE58_ALPHABET,
     decode_segwit_address,
     decodes_as_address,
@@ -439,7 +439,16 @@ def test_no_shared_fixture_is_a_mainnet_address(name):
     verdict = check_address(fixture_asset(name), ALL_VALID[name])
     assert verdict.network != MAINNET, f"{name} = {ALL_VALID[name]} is MAINNET: {verdict.why}"
     if verdict.network != NOT_EXPRESSED:
-        assert verdict.network == TESTNET, f"{name} = {ALL_VALID[name]} is not testnet: {verdict.why}"
+        # TEST_NETWORKS, not `== TESTNET`. This demanded exactly "testnet" and was satisfiable
+        # only because no fixture had ever decoded as anything else -- the first Monero
+        # STAGENET fixture failed it, on a network where losing a coin costs nothing. Refusing
+        # stagenet for not being the test network this gate happened to know is the same shape
+        # as bech32m being refused for not being bech32, and the assertion above -- the one
+        # this test is actually for -- is unchanged and is what keeps a mainnet address out.
+        assert verdict.network in TEST_NETWORKS, (
+            f"{name} = {ALL_VALID[name]} is on {verdict.network!r}, which is not one of "
+            f"{sorted(TEST_NETWORKS)}: {verdict.why}"
+        )
 
 
 # ---------------------------------------------------------------------------------------

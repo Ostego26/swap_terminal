@@ -233,6 +233,48 @@ BTC_FUTURE_WITNESS_V5 = segwit_address("tb", 5, hashlib.sha256(b"a witness versi
 
 
 
+def monero_address_with_prefix(prefix_byte: int, phrase: str, payment_id: bytes = b"") -> str:
+    """A Monero address under any prefix byte, INTEGRATED when a payment ID is given.
+
+    Built here rather than through chains/monero_keys.encode_address(), which only emits primary
+    addresses -- and deliberately so: nothing in this repository should CREATE an integrated
+    address, because the payment ID's whole purpose is for the receiver to disambiguate their own
+    deposits. What the repository has to do is ACCEPT one a customer supplies, which is what
+    these fixtures exercise.
+
+    ADDED 2026-09-28. Until then chains/monero_keys.decode_address() refused every integrated
+    address outright on its length, and modules/address_authority._monero() reported that as
+    INVALID -- so a GRC->XMR payout to an EXCHANGE-ISSUED address (which is what an integrated
+    address is: the payment ID is how the exchange credits your account) was refused at swap
+    creation, and terminally failed an already-credited swap. Same false-refusal class as
+    bech32m's absence, on a different chain.
+    """
+    body = bytes([prefix_byte]) + _hash160(phrase + " spend").ljust(32, b"\x00") + \
+        _hash160(phrase + " view").ljust(32, b"\x00") + payment_id
+    return monero_keys.base58_encode(body + monero_keys.keccak256(body)[:4])
+
+
+# The two forms a customer actually pastes, per network. Nobody holds a key for either: the
+# public keys are hash160 output zero-padded to 32 bytes, which is a point nobody can invert.
+XMR_INTEGRATED_TESTNET = monero_address_with_prefix(
+    54, "xmr testnet integrated payout", bytes.fromhex("a1b2c3d4e5f60718")
+)
+XMR_INTEGRATED_STAGENET = monero_address_with_prefix(
+    25, "xmr stagenet integrated payout", bytes.fromhex("0f1e2d3c4b5a6978")
+)
+XMR_SUBADDRESS_TESTNET = monero_address_with_prefix(63, "xmr testnet subaddress payout")
+
+# The two CORRUPTIONS the kind/length cross-check exists to catch: an integrated prefix on a
+# standard-length body, and a primary prefix on an integrated-length one. Both have a VALID
+# Keccak checksum, so the checksum cannot catch them and only the comparison can.
+INVALID_XMR_INTEGRATED_PREFIX_STANDARD_LENGTH = monero_address_with_prefix(
+    54, "integrated prefix but no payment id"
+)
+INVALID_XMR_PRIMARY_PREFIX_INTEGRATED_LENGTH = monero_address_with_prefix(
+    53, "primary prefix with a payment id", bytes.fromhex("dead0000beef0000")
+)
+
+
 def monero_testnet_address(spend_share: int, view_share: int) -> str:
     """A Monero TESTNET primary address, derived -- not a literal, and not a hash160.
 

@@ -175,6 +175,40 @@ CHECKSUM_BYTES = 4
 # key. 65 bytes, confirmed by decoding a real stagenet address.
 STANDARD_BODY_BYTES = 1 + PUBLIC_KEY_BYTES + PUBLIC_KEY_BYTES
 
+# AN INTEGRATED ADDRESS CARRIES AN 8-BYTE PAYMENT ID between the view key and the checksum, and
+# until 2026-09-28 this file refused one OUTRIGHT -- decode_address() compared the decoded
+# length against STANDARD_BODY_BYTES + CHECKSUM_BYTES and raised MoneroAddressError for
+# anything else, which modules/address_authority._monero() then reported as INVALID.
+#
+# THAT WAS A FALSE REFUSAL OF A VALID, SPENDABLE ADDRESS, and it is the same class of defect as
+# bech32m's absence one module over. An integrated address is what EXCHANGES ISSUE: the payment
+# ID is how they know whose account to credit, so "paste the address your exchange gave you" is
+# the single most likely thing a customer does. Refused at swap creation, and -- worse -- an
+# already-credited GRC->XMR swap was set to status='failed' terminally, with the customer's GRC
+# in our wallet and nothing wrong with their address.
+#
+# The refusal's own message said "a swap has no use for one -- the shared address is generated
+# per swap, so there is nothing to disambiguate". That reasoning is sound about the address THIS
+# REPOSITORY GENERATES for the XMR leg of a swap, and wrong about the address a CUSTOMER SUPPLIES
+# as a payout destination. Two different addresses, one function, and only one of them is ours.
+#
+# SENDING TO ONE NEEDS NOTHING FROM US, checked rather than assumed: chains/monero.py's
+# send_to_address() passes the address string straight into monero-wallet-rpc's `transfer` as
+# `destinations: [{"address": address, ...}]`, and the wallet extracts and applies the payment
+# ID itself. There is no code path here that could drop it.
+PAYMENT_ID_BYTES = 8
+INTEGRATED_BODY_BYTES = STANDARD_BODY_BYTES + PAYMENT_ID_BYTES
+
+# Which body length each KIND must have. Cross-checked against the prefix byte after the
+# checksum verifies, for the same reason BIP-350 ties a checksum constant to a witness version:
+# an `integrated` prefix on a standard-length body is a CORRUPTION, not a shorter spelling, and
+# accepting either length for either kind would wave it through.
+BODY_BYTES_BY_KIND = {
+    "primary": STANDARD_BODY_BYTES,
+    "subaddress": STANDARD_BODY_BYTES,
+    "integrated": INTEGRATED_BODY_BYTES,
+}
+
 
 @dataclass(frozen=True)
 class NetworkPrefix:
@@ -358,9 +392,18 @@ class MoneroAddress:
     public_view_key: bytes
     prefix_from_source: bool
     prefix_from_address: bool
+    # None for primary and subaddress forms; the 8 bytes for an integrated one. Carried rather
+    # than discarded because a caller reporting "we are paying an integrated address" to an
+    # operator needs to be able to say so, and because a future caller that must NOT accept one
+    # (a shared-address check, say) can ask instead of re-decoding.
+    payment_id: bytes | None = None
 
     def is_mainnet(self) -> bool:
         return self.network == "mainnet"
+
+    @property
+    def is_integrated(self) -> bool:
+        return self.payment_id is not None
 
 
 def decode_address(address: str) -> MoneroAddress:
@@ -377,18 +420,14 @@ def decode_address(address: str) -> MoneroAddress:
         raise MoneroAddressError(f"address must be a string, got {type(address).__name__}")
 
     raw = base58_decode(address.strip())
-    if len(raw) < STANDARD_BODY_BYTES + CHECKSUM_BYTES:
+    if len(raw) - CHECKSUM_BYTES not in set(BODY_BYTES_BY_KIND.values()):
         raise MoneroAddressError(
-            f"decoded to {len(raw)} bytes, and a standard address is "
-            f"{STANDARD_BODY_BYTES + CHECKSUM_BYTES} (1 prefix + 32 spend + 32 view + 4 "
-            f"checksum). An integrated address is 8 bytes longer and is not handled here"
-        )
-    if len(raw) != STANDARD_BODY_BYTES + CHECKSUM_BYTES:
-        raise MoneroAddressError(
-            f"decoded to {len(raw)} bytes; only the {STANDARD_BODY_BYTES + CHECKSUM_BYTES}-byte "
-            f"standard form is handled. An integrated address carries an 8-byte payment ID "
-            f"and a swap has no use for one -- the shared address is generated per swap, so "
-            f"there is nothing to disambiguate"
+            f"decoded to {len(raw)} bytes, which is neither of the two lengths a Monero address "
+            f"has: {STANDARD_BODY_BYTES + CHECKSUM_BYTES} for a primary or subaddress "
+            f"(1 prefix + 32 spend + 32 view + 4 checksum), or "
+            f"{INTEGRATED_BODY_BYTES + CHECKSUM_BYTES} for an integrated address (the same plus "
+            f"an 8-byte payment ID). This is a truncation or a paste that picked up extra "
+            f"characters"
         )
 
     body, checksum = raw[:-CHECKSUM_BYTES], raw[-CHECKSUM_BYTES:]
@@ -417,15 +456,31 @@ def decode_address(address: str) -> MoneroAddress:
             f"here"
         )
 
+    # THE KIND AND THE LENGTH MUST AGREE. Same shape as BIP-350 tying a checksum constant to a
+    # witness version: an `integrated` prefix on a 65-byte body, or a `primary` prefix on a
+    # 73-byte one, is a corrupted address rather than a variant spelling -- and because the
+    # Keccak checksum has already VERIFIED at this point, the only thing left that can catch it
+    # is this comparison.
+    expected_body = BODY_BYTES_BY_KIND[prefix.name]
+    if len(body) != expected_body:
+        raise MoneroAddressError(
+            f"prefix byte {prefix_byte} says this is a {prefix.network} {prefix.name} address, "
+            f"which has a {expected_body}-byte body, but the body is {len(body)} bytes. The "
+            f"checksum VERIFIED, so this is internally consistent and still wrong: the prefix "
+            f"and the length disagree about which form of address this is"
+        )
+
+    payment_id = body[STANDARD_BODY_BYTES:] if prefix.name == "integrated" else None
     return MoneroAddress(
         address=address.strip(),
         network=prefix.network,
         kind=prefix.name,
         prefix_byte=prefix_byte,
         public_spend_key=body[1 : 1 + PUBLIC_KEY_BYTES],
-        public_view_key=body[1 + PUBLIC_KEY_BYTES :],
+        public_view_key=body[1 + PUBLIC_KEY_BYTES : STANDARD_BODY_BYTES],
         prefix_from_source=prefix.from_source,
         prefix_from_address=prefix.from_address,
+        payment_id=payment_id,
     )
 
 
