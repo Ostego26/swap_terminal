@@ -635,6 +635,41 @@ def rpc_answers(config: ChainConfig) -> bool:
     return liveness_probe_that_answers(config) is not None
 
 
+def apply_mweb_override(console: Console, config: ChainConfig) -> None:
+    """Ask THIS litecoind whether it can hold MWEB inactive, and set the flag on `config` if so.
+
+    MOVED HERE FROM regtest/steps.py ON 2026-09-28, BECAUSE A SECOND STARTER APPEARED AND DID
+    NOT KNOW ABOUT IT. The operator pressed the panel's new Start daemon button on the LTC tab
+    and got
+
+        LTC: starting /usr/local/bin/litecoind -datadir=... -regtest -daemon
+
+    with no -vbparams at all, because the override lived in a step of the nine-step harness and
+    the panel does not run steps. `ltc_htlc_verify` then ADOPTED that daemon -- correctly, it
+    was answering -- and died at height 288 with bad-txns-vin-empty, which is the failure this
+    flag exists to prevent. Rule 8, in its most literal form: one rule about how a daemon must
+    be started, and a second way to start one that had never heard of it.
+
+    IT MUST RUN BEFORE THE DAEMON STARTS AND AFTER THE BINARY IS FOUND, because it works by
+    reading that binary's own `-help` output. Calling it on a chain that is not LTC, or on a
+    build with no -vbparams, is a no-op that says so rather than a silent one.
+
+    See mweb_override_args() for the reproduction and for why the flag is discovered from the
+    binary rather than remembered.
+    """
+    args, explanation = mweb_override_args(daemon_help_text(config.daemon_path))
+    console.say(f"{config.asset}: MWEB deployment override: {explanation}")
+    if args:
+        config.extra_args.extend(args)
+        console.say(f"{config.asset}: MWEB deployment override: passing {' '.join(args)} to the daemon")
+    else:
+        console.say(
+            f"{config.asset}: MWEB deployment override: none applied. If mining toward the locktime fails with "
+            "bad-txns-vin-empty, that is the failure this would have prevented, and the softfork listing after "
+            "the daemon answers says whether MWEB is why."
+        )
+
+
 def start_daemon(console: Console, config: ChainConfig) -> bool:
     """Start the daemon if nothing is answering yet. Returns True if we spawned it.
 
@@ -779,7 +814,7 @@ def wait_for_rpc(console: Console, config: ChainConfig) -> None:
     )
 
 
-def assert_regtest(console: Console, config: ChainConfig) -> dict:
+def assert_regtest(console: Console, config: ChainConfig, *, we_started_it: bool) -> dict:
     """THE UNCONDITIONAL REFUSAL. Nothing in this harness runs before it passes.
 
     This is the first call made after every connection, on every chain, on
@@ -803,11 +838,11 @@ def assert_regtest(console: Console, config: ChainConfig) -> dict:
             "network, and there is no flag to override this."
         )
     console.check(f"{config.asset} network", chain, "regtest", OK)
-    report_softforks(console, config, info)
+    report_softforks(console, config, info, we_started_it=we_started_it)
     return info
 
 
-def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
+def report_softforks(console: Console, config: ChainConfig, info: dict, *, we_started_it: bool) -> None:
     """Print each deployment and its status, from the daemon's own mouth.
 
     This exists for one measured reason. Mining toward the LTC locktime died
@@ -849,10 +884,11 @@ def report_softforks(console: Console, config: ChainConfig, info: dict) -> None:
             )
         else:
             console.say(f"{config.asset}: softfork {name}: {detail}")
-    console.say(f"{config.asset}: {mweb_state_line(config.asset, softforks, config.extra_args)}")
+    console.say(f"{config.asset}: "
+                f"{mweb_state_line(config.asset, softforks, config.extra_args, we_started_it=we_started_it)}")
 
 
-def mweb_state_line(asset: str, softforks: dict, extra_args: list[str]) -> str:
+def mweb_state_line(asset: str, softforks: dict, extra_args: list[str], *, we_started_it: bool) -> str:
     """One sentence on MWEB's state, reading the table the daemon just printed.
 
     Separated from the printing loop so it can be asserted on without a daemon
@@ -861,14 +897,49 @@ def mweb_state_line(asset: str, softforks: dict, extra_args: list[str]) -> str:
     die at height 288, and no `mweb` row means either the override took or the
     build has none -- which is decided by whether the override was passed, not
     by the table.
+
+    `we_started_it` IS THE WHOLE POINT OF THE 2026-09-28 REVISION, and it is
+    keyword-only and required so that no caller can forget to answer it. This
+    line said
+
+        MWEB IS LISTED ... Deployment override passed: -vbparams=mweb:-2:0
+
+    on a run that adopted an already-running daemon. `-vbparams` IS A STARTUP
+    FLAG. On an adopted daemon the harness computed it, printed it, and never
+    handed it to anything -- so the sentence reported an action that did not
+    happen, and the step 8 failure text downstream then told the operator "the
+    fix is -vbparams=mweb:-2:0" directly underneath a line claiming it had
+    already been passed. An operator reading that has been sent in a circle by
+    their own tooling.
+
+    Measured on the operator's host, 2026-09-28: LTC adopted a daemon at
+    height 2504, the mweb row was present, and mining died at exactly the
+    predicted height with the predicted `bad-txns-vin-empty`. The diagnosis was
+    right and the remedy was unreachable, because the flag cannot be applied to
+    a process that is already running.
     """
     if asset != "LTC":
         return "MWEB is a Litecoin deployment and does not apply to this chain"
     override = [arg for arg in extra_args if "mweb" in arg]
+    if "mweb" in softforks and not we_started_it:
+        # THE CASE THAT USED TO LIE. Say what could not have happened, and what
+        # the operator can actually do about it -- this harness will not stop a
+        # daemon it did not start (rule 13's other half: a reaper reaps what it
+        # spawned), so the restart is theirs to make.
+        return (
+            f"MWEB IS LISTED, so it is live on this daemon and mining will fail at height 288. "
+            f"THE OVERRIDE WAS NOT APPLIED AND COULD NOT HAVE BEEN: this run ADOPTED a daemon "
+            f"that was already running, and -vbparams is a startup flag. The harness computed "
+            f"{' '.join(override) or '(none)'} and had nothing to hand it to. To get past 288, "
+            f"stop that daemon yourself and re-run so this harness starts one -- it will not "
+            f"stop a daemon it did not start."
+        )
     if "mweb" in softforks:
         return (
             f"MWEB IS LISTED, so it is live on this daemon and mining will fail at height 288. "
-            f"Deployment override passed: {' '.join(override) or '(none)'}"
+            f"This harness STARTED this daemon and passed: {' '.join(override) or '(none)'} -- "
+            f"so either the build ignored the flag or it is not the right one. That is a defect "
+            f"in mweb_override_args(), not something a restart fixes."
         )
     if override:
         return (

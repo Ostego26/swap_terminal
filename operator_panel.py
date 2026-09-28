@@ -768,6 +768,15 @@ def answer_a_daemon_switch(body: object, chains: dict | None) -> tuple[dict, int
                 "error": f"{asset} has no connection parameters in this panel"}, 403
     try:
         if action == "start":
+            # THE SAME PREPARATION THE HARNESS DOES, and this call is the fix for a defect this
+            # button CAUSED on 2026-09-28. Pressing it on the LTC tab ran
+            #     litecoind -datadir=... -regtest -daemon
+            # with no -vbparams, because the MWEB override was a step of the nine-step harness
+            # and this panel runs no steps. ltc_htlc_verify then adopted that daemon -- rightly,
+            # it was answering -- and died at height 288 on bad-txns-vin-empty, the exact
+            # failure the flag exists to prevent. Two ways to start one daemon and only one of
+            # them knew the rule (rule 8).
+            daemons.apply_mweb_override(run.console, run.config)
             spawned = daemons.start_daemon(run.console, run.config)
             said = (f"{asset}: started" if spawned
                     else f"{asset}: already answering -- nothing was started")
@@ -932,6 +941,11 @@ def main(argv: list[str], console: Console | None = None) -> int:
         console.say(str(exc))
         return 1
 
+    # FROM HERE ON THE PANEL IS SERVING PAGES, and a page draw re-reads the funding. The
+    # startup gate above ran against the real console -- every OK line of it is printed in full
+    # -- and this wraps the console the request handlers use so the same five payment lines
+    # stop being restated on every draw. See decisions.SaysEachLineOnce for the measurement.
+    run.console = decisions.SaysEachLineOnce(console)
     runner = HarnessRunner()
     # ONE CACHE FOR THE PROCESS, held here rather than at module level so a test builds its own
     # and two panels in one process could not share one. It only ever holds "this outpoint was

@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
-from regtest import adaptor_steps
+from regtest import adaptor_steps, daemons, steps
 from regtest import operator_panel as decisions
 from regtest.daemons import RegtestSetupError
 from regtest.harness_runner import HarnessRunner
@@ -1147,3 +1147,122 @@ def test_STARTUP_SAYS_WHY_A_CHAIN_HAS_NO_CONSOLE_IN_WORDS_NOT_IN_A_KeyError():
         "the skip that never skipped"
     )
     assert "decisions.refuse_an_rpc_console(tab)" in source
+
+
+def test_THE_START_BUTTON_PREPARES_THE_DAEMON_THE_WAY_THE_HARNESS_WOULD(monkeypatch):
+    """The defect this button CAUSED on its first day, 2026-09-28.
+
+    The operator pressed Start daemon on the LTC tab and the panel ran
+
+        LTC: starting /usr/local/bin/litecoind -datadir=... -regtest -daemon
+
+    with no -vbparams. The MWEB override lived in a numbered step of the nine-step harness and
+    this panel runs no steps, so it started a plain litecoind; `ltc_htlc_verify` then ADOPTED
+    that daemon -- correctly, it was answering -- and died at height 288 on bad-txns-vin-empty,
+    the exact failure the flag exists to prevent. Two ways to start one daemon, one rule about
+    how it must be started, and only one of them had heard of it (rule 8).
+
+    THE ORDER IS THE ASSERTION, not merely that both were called: the override sets a flag on
+    the config and -vbparams cannot be given to a process that is already running, which is the
+    same reason the adopted-daemon line above it had to stop claiming it had been.
+    """
+    entry = _entry()
+    called: list[str] = []
+    monkeypatch.setattr(entry.daemons, "apply_mweb_override",
+                        lambda console, config: called.append("override"))
+    monkeypatch.setattr(entry.daemons, "start_daemon",
+                        lambda console, config: called.append("start") or True)
+
+    class _Run:
+        console = None
+        config = None
+
+    answer, code = entry.answer_a_daemon_switch({"asset": "LTC", "action": "start"}, {"LTC": _Run()})
+    assert code == 200 and answer["ok"] is True
+    assert called == ["override", "start"], (
+        "the override must be applied BEFORE the spawn -- it sets a startup flag, and afterwards "
+        "there is nothing left to give it to"
+    )
+
+
+def test_THE_OVERRIDE_HAS_ONE_IMPLEMENTATION_AND_BOTH_STARTERS_REACH_IT():
+    """Rule 8: the merge, and the cull that goes with it (rule 9).
+
+    `steps.apply_mweb_override` held the body until 2026-09-28. It is now a call into
+    `daemons.apply_mweb_override`, beside start_daemon, where the other starter can reach it --
+    and the two names it used to import for that body, `daemon_help_text` and
+    `mweb_override_args`, came off steps.py's import list in the same pass, because a merge
+    that leaves the old helpers looking authoritative is rule 9's four-implementations-where-
+    there-were-three.
+    """
+    assert callable(daemons.apply_mweb_override)
+    body = Path(steps.__file__).read_text(encoding="utf-8")
+    start = body.index("def apply_mweb_override(run: Run)")
+    end = body.index("def step_2_daemon(")
+    step_body = body[start:end]
+    assert "daemons.apply_mweb_override(run.console, run.config)" in step_body
+    assert "mweb_override_args(" not in step_body, "the second copy, gone rather than left beside it"
+    assert "daemon_help_text" not in body, "and the import it needed went with it"
+
+
+def test_A_PAGE_DRAW_DOES_NOT_RESTATE_THE_SAME_FIVE_LINES_FOREVER():
+    """Forty copies of five lines, from the operator's terminal on 2026-09-28.
+
+    Serving the GRC tab walks the funding payments and says one line per payment. Six tab
+    loads and a few daemon switches later their terminal held forty copies of the same five
+    `found the operator's funding at ...` lines, in five-line bursts, with the BTC and LTC
+    harness output they were actually watching buried between them. Nothing was wrong and
+    nothing was slow -- the same five facts were restated every time a page was drawn.
+
+    AND IT IS NOT A SILENCE, which rule 14 forbids outright. Every line is printed in full the
+    first time. The first suppression says so, once, and names where the table actually lives,
+    so an operator who notices the lines stopped is told they stopped on purpose. A line never
+    said before is never suppressed, so a new payment or a refusal still arrives at once.
+    """
+    class _Recorder:
+        def __init__(self):
+            self.lines = []
+
+        def say(self, line):
+            self.lines.append(line)
+
+        def check(self, *args):
+            self.lines.append(("check", *args))
+
+    under = _Recorder()
+    console = decisions.SaysEachLineOnce(under)
+
+    console.say("found payment A")
+    console.say("found payment B")
+    assert under.lines == ["found payment A", "found payment B"], "both are new, both are said"
+
+    console.say("found payment A")
+    assert len(under.lines) == 3 and under.lines[2] == decisions.SaysEachLineOnce.NOTICE, (
+        "the first suppression explains itself rather than going quiet"
+    )
+    console.say("found payment B")
+    assert len(under.lines) == 3, "and it explains itself ONCE, not per line"
+
+    console.say("a NEW payment nobody has seen")
+    assert under.lines[-1] == "a NEW payment nobody has seen", (
+        "a line never said before is never suppressed -- that is the whole safety property"
+    )
+
+    # EVERYTHING ELSE IS THE REAL CONSOLE'S. `check` tallies into the counts the panel's startup
+    # gate reads, and a wrapper that swallowed one would change what that gate saw.
+    console.check("a check", "got", "expected", "OK")
+    assert under.lines[-1] == ("check", "a check", "got", "expected", "OK")
+
+
+def test_THE_STARTUP_GATE_IS_NOT_THE_THING_BEING_QUIETED():
+    """The wrap happens AFTER the network gate, never before.
+
+    Those OK lines -- the liveness probe and the three-way test-network assertion -- are the
+    ones that say this panel is pointed at testnet and not at the operator's staking wallet.
+    They run once, they are never repeated, and wrapping them would buy nothing and risk the
+    one output on this screen that must never be conditional.
+    """
+    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    wrapped = source.index("run.console = decisions.SaysEachLineOnce(console)")
+    gated = source.index("adaptor_steps.assert_test_network(run)")
+    assert gated < wrapped, "the gate prints through the real console, unwrapped"

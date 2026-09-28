@@ -1207,13 +1207,48 @@ def test_the_override_value_is_never_active_and_not_a_zero_width_window():
 
 
 def test_a_listed_mweb_row_is_reported_as_live_and_names_the_failure_height():
-    line = mweb_state_line("LTC", {"mweb": {"type": "bip9", "active": False}}, [])
+    line = mweb_state_line("LTC", {"mweb": {"type": "bip9", "active": False}}, [],
+                           we_started_it=True)
     assert "MWEB IS LISTED" in line
     assert "288" in line
 
 
+def test_AN_ADOPTED_DAEMON_IS_NEVER_TOLD_THE_OVERRIDE_WAS_PASSED():
+    """The line that sent the operator in a circle, measured on their host 2026-09-28.
+
+    LTC adopted an already-running daemon at height 2504, and step 2 printed
+
+        MWEB IS LISTED, so it is live on this daemon and mining will fail at height 288.
+        Deployment override passed: -vbparams=mweb:-2:0
+
+    `-vbparams` IS A STARTUP FLAG. The harness computed it, printed it, and had nothing to
+    hand it to, because the daemon was already running. Mining then died at exactly 288 with
+    exactly the predicted bad-txns-vin-empty, and the failure text underneath said "the fix is
+    -vbparams=mweb:-2:0" -- directly beneath a line claiming it had already been passed. The
+    diagnosis was right and the remedy was unreachable.
+
+    THE TWO CASES MUST NOT SHARE A SENTENCE, because the remedy differs: an adopted daemon
+    needs the operator to restart it (this harness will not stop what it did not start), and a
+    daemon we started ourselves that is STILL listing mweb means the flag is wrong, which no
+    restart fixes.
+    """
+    softforks = {"mweb": {"type": "bip9", "active": False}}
+    adopted = mweb_state_line("LTC", softforks, ["-vbparams=mweb:-2:0"], we_started_it=False)
+    ours = mweb_state_line("LTC", softforks, ["-vbparams=mweb:-2:0"], we_started_it=True)
+
+    assert adopted != ours, "the remedies differ, so the sentences must"
+    assert "NOT APPLIED AND COULD NOT HAVE BEEN" in adopted
+    assert "ADOPTED" in adopted and "startup flag" in adopted
+    assert "stop that daemon yourself" in adopted, "the one thing the operator can actually do"
+    assert "override passed" not in adopted.lower(), (
+        "it must not claim an action that did not happen -- that is the whole defect"
+    )
+    assert "STARTED this daemon and passed" in ours
+
+
 def test_a_missing_mweb_row_with_an_override_is_reported_as_the_override_working():
-    line = mweb_state_line("LTC", {"bip65": {"height": 1351}}, ["-vbparams=mweb:-2:0"])
+    line = mweb_state_line("LTC", {"bip65": {"height": 1351}}, ["-vbparams=mweb:-2:0"],
+                           we_started_it=True)
     assert "NOT listed" in line
     assert "-vbparams=mweb:-2:0" in line
     assert "NEVER_ACTIVE" in line
@@ -1225,13 +1260,13 @@ def test_a_missing_mweb_row_with_no_override_is_not_credited_to_the_override():
     Absence of the row is the only evidence the override took, so absence
     WITHOUT an override has to read differently or the line proves nothing.
     """
-    line = mweb_state_line("LTC", {"bip65": {"height": 1351}}, [])
+    line = mweb_state_line("LTC", {"bip65": {"height": 1351}}, [], we_started_it=True)
     assert "no override was passed" in line
     assert "NEVER_ACTIVE" not in line
 
 
 def test_mweb_state_is_not_reported_for_bitcoin():
-    assert "does not apply" in mweb_state_line("BTC", {}, [])
+    assert "does not apply" in mweb_state_line("BTC", {}, [], we_started_it=False)
 
 
 def test_no_mweb_override_is_invented_when_the_binary_does_not_offer_one():

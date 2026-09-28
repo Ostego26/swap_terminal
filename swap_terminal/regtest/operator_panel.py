@@ -240,6 +240,61 @@ CHAINS = (
 )
 
 
+class SaysEachLineOnce:
+    """A Console wrapper that prints a given line once and then stops repeating it.
+
+    THE NOISE THIS EXISTS FOR, measured from the operator's own terminal 2026-09-28. Serving
+    the GRC tab walks the funding payments, and every walk says one line per payment. Six tab
+    loads and a few daemon switches later their terminal held FORTY copies of
+
+        GRC: found the operator's funding at 3f2ad97a1f61f629...:1 worth 1.00000000 GRC
+
+    in five-line bursts, with the BTC and LTC harness lines they were actually watching buried
+    between them. Nothing was wrong and nothing was slow: the same five facts were restated
+    every time a page was drawn.
+
+    THIS IS NOT A SILENCE, WHICH RULE 14 FORBIDS. The first occurrence of every line is printed
+    in full, and the first time anything is suppressed the wrapper says so, once, naming why --
+    so an operator who notices the lines stopped is told they stopped on purpose and that the
+    page, not this terminal, is where the funding table lives. A line that has never been said
+    is never suppressed, so a NEW payment, a new scan, or a refusal still arrives immediately.
+
+    WRAPPED RATHER THAN FILTERED INSIDE Console, because this rule is true only here. A harness
+    run repeating a line is a harness making progress -- `scanned 100 block(s)` means something
+    different each time even when the text matches -- and quieting that would be the defect
+    this class is fixing, pointed the other way.
+    """
+
+    NOTICE = ("further exact repeats of the lines above are not printed again -- the panel "
+              "re-reads them every time a page is drawn, and the page is where they are shown. "
+              "Anything NEW still appears here immediately")
+
+    def __init__(self, console) -> None:
+        self._console = console
+        self._said: set[str] = set()
+        self._explained = False
+
+    def should_say(self, line: str) -> bool:
+        """THE decision, separated so it is asserted on without a terminal (rule 10)."""
+        if line in self._said:
+            return False
+        self._said.add(line)
+        return True
+
+    def say(self, line: str) -> None:
+        if self.should_say(line):
+            self._console.say(line)
+            return
+        if not self._explained:
+            self._explained = True
+            self._console.say(self.NOTICE)
+
+    def __getattr__(self, name):
+        # EVERYTHING ELSE IS THE REAL CONSOLE'S. `check` tallies into counts the panel's startup
+        # gate already uses, and a wrapper that swallowed one would change what that gate saw.
+        return getattr(self._console, name)
+
+
 def chain_state(tab: ChainTab, console) -> dict:
     """What one tab shows. NEVER RAISES -- an unreachable chain is a RESULT, not an outage.
 

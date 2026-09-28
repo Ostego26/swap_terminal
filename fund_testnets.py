@@ -210,7 +210,7 @@ def fund_regtest_chain(console: Console, asset: str, blocks: int, wipe: bool = F
     we_started = start_daemon(console, config)
     wait_for_rpc(console, config)
 
-    info = assert_regtest(console, config)
+    info = assert_regtest(console, config, we_started_it=we_started)
     console.say(f"{asset}: chain={info.get('chain')} blocks={info.get('blocks')}")
 
     ensure_wallet(console, config, WALLET_NAME)

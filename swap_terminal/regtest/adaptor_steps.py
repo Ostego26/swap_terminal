@@ -654,7 +654,9 @@ def assert_test_network(run: Run) -> dict:
     run.step(2, "WHICH NETWORK -- asked of the daemon, never inferred from a port")
     if run.asset != "GRC":
         run.say("BTC and LTC go through daemons.assert_regtest(), which demands chain=='regtest' exactly")
-        return daemons.assert_regtest(run.console, run.config)
+        # THIS HARNESS STARTS NO BTC/LTC DAEMON -- it adopts whatever is answering, which is
+        # what the MWEB line downstream has to know before it claims a startup flag was applied.
+        return daemons.assert_regtest(run.console, run.config, we_started_it=False)
 
     node = run.node(wallet=False)
     run.say(f"port {run.config.port} is not Gridcoin mainnet's {GRC_MAINNET_PORT}, but a PORT IS NOT PROOF")

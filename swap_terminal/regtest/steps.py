@@ -111,9 +111,7 @@ from regtest.daemons import (
     ChainConfig,
     RegtestSetupError,
     cltv_activation_height,
-    daemon_help_text,
     describe_rpc_exception,
-    mweb_override_args,
 )
 from regtest.keys import RegtestKey, generate_key, hash160
 from regtest.txbuild import Outpoint, build_branch_spend, coins_to_satoshis, describe_script_sig, push_data
@@ -567,27 +565,15 @@ def step_1_binaries(run: Run) -> None:
 
 
 def apply_mweb_override(run: Run) -> None:
-    """Ask THIS litecoind whether it can hold MWEB inactive, and set it if so.
+    """Run the MWEB override between steps 1 and 2. The decision lives in daemons.py.
 
-    Runs between steps 1 and 2 -- after the binary is confirmed present, before
-    it is started -- because it works by reading the binary's own `-help`
-    output. See regtest.daemons.mweb_override_args for the measurement that
-    made this necessary and for why the flag is discovered rather than
-    remembered.
-
-    Everything it decides is printed. An override that could not be applied is
-    a result and says so; it is not a silent no-op.
+    THE BODY MOVED TO daemons.apply_mweb_override ON 2026-09-28 and this is the harness's call
+    into it, kept because the harness announces it as a numbered step and the panel does not.
+    It moved because the operator panel grew a Start daemon button, started a litecoind with no
+    -vbparams, and the harness then adopted it and died at height 288 -- one rule about how a
+    daemon must be started, and a second starter that had never heard of it (rule 8).
     """
-    args, explanation = mweb_override_args(daemon_help_text(run.config.daemon_path))
-    run.say(f"MWEB deployment override: {explanation}")
-    if args:
-        run.config.extra_args.extend(args)
-        run.say(f"MWEB deployment override: passing {' '.join(args)} to the daemon")
-    else:
-        run.say(
-            "MWEB deployment override: none applied. If mining toward the locktime fails with bad-txns-vin-empty, "
-            "that is the failure this would have prevented, and step 2's softfork listing says whether MWEB is why."
-        )
+    daemons.apply_mweb_override(run.console, run.config)
 
 
 def step_2_daemon(run: Run) -> bool:
@@ -602,7 +588,7 @@ def step_2_daemon(run: Run) -> bool:
     daemons.wait_for_rpc(run.console, run.config)
     # THE UNCONDITIONAL REFUSAL, and it is the first thing asserted after the
     # connection exists. Everything below this line mines or broadcasts.
-    info = daemons.assert_regtest(run.console, run.config)
+    info = daemons.assert_regtest(run.console, run.config, we_started_it=we_started_it)
     run.say(f"chain={info.get('chain')} blocks={info.get('blocks')} (a height, not a duration)")
 
     # BIP65 IS CHECKLOCKTIMEVERIFY, and where it activates decides whether the
