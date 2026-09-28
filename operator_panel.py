@@ -57,7 +57,7 @@ from pathlib import Path
 # rootlessly, which is CLAUDE.md rule 10's layout gap. E402 is ignored repo-wide for this idiom.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from regtest import adaptor_steps
+from regtest import adaptor_steps, daemons
 from regtest import operator_panel as decisions
 from regtest.console import Console
 from regtest.daemons import RegtestSetupError
@@ -150,6 +150,7 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <div class="chainhead"><div class="mark" id="mark"></div>
     <div><h3 id="chainname">Chain</h3><div class="kind" id="chainkind">&nbsp;</div></div></div>
   <div id="chain">pick a chain above&hellip;</div>
+  <div class="row" id="switch"></div>
   <button id="refresh">Re-check this chain</button>
   <span class="what">reads the daemon, and on GRC walks blocks per payment &mdash; a few seconds, not on a timer</span>
 </section>
@@ -303,6 +304,34 @@ async function loadChain(asset) {
     }
   }
   $("chain").innerHTML = h;
+  // THE SWITCH SAYS WHY IT IS OFF, rather than being absent or greyed with no reason. Three
+  // different refusals live behind these buttons and they are not interchangeable: one says
+  // this panel does not know your command line, one says an environment variable arms it, one
+  // says there is no lifecycle here at all. A disabled button with no text teaches none of them.
+  const c = d.control || {};
+  $("switch").innerHTML = ["start", "stop"].map(a => {
+    const why = c[a];
+    const label = a === "start" ? "Start daemon" : "Stop daemon";
+    return '<button data-action="' + a + '"' + (why ? " disabled" : "") + ' class="' +
+           (a === "stop" ? "stop" : "") + '">' + label + "</button>" +
+           (why ? '<span class="what">' + esc(why) + "</span>" : "");
+  }).join("");
+  for (const b of $("switch").querySelectorAll("button:not([disabled])")) {
+    b.onclick = async () => {
+      // A STOP IS CONFIRMED IN THE PAGE AS WELL AS ARMED IN THE SHELL. The environment
+      // variable says this operator meant to have the button; this says they meant to press
+      // it now. Neither replaces the other -- one defends against a page they did not open,
+      // the other against a click they did not mean.
+      if (b.dataset.action === "stop" &&
+          !confirm("Stop the " + current + " daemon?\n\nOn GRC that stops staking until you " +
+                   "start it again, and this panel cannot start it for you.")) { return; }
+      const res = await (await fetch("/api/daemon", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({asset: current, action: b.dataset.action})})).json();
+      alert(res.ok ? res.said : res.error);
+      loadChain(current);
+    };
+  }
   // THE NAV REMEMBERS WHAT THIS TAB FOUND, so "which daemons are up" stops being a question
   // you answer by clicking six tabs. The dot says LAST TIME WE ASKED, never "is up" -- a stale
   // green is a lie an operator acts on, and grey for "nobody has asked" is its own answer
@@ -557,6 +586,7 @@ def chain_payload(asset: str, grc_run: adaptor_steps.Run, known_spent: dict | No
                 "funding": None, "theme": decisions.theme_for(asset)}
     state = decisions.chain_state(tab, grc_run.console)
     state["theme"] = decisions.theme_for(asset)
+    state["control"] = {a: decisions.refuse_daemon_control(tab, a) for a in ("start", "stop")}
     if asset == "GRC" and state["reachable"]:
         state["funding"] = funding_payload(grc_run, known_spent)
     return state
@@ -599,6 +629,9 @@ def answer_a_post(path: str, raw: bytes, runner: HarnessRunner,
         return json.dumps({"error": "the request body was not JSON"}).encode(), "application/json", 400
     if path == "/api/stop":
         return json.dumps({"said": runner.stop()}).encode(), "application/json", 200
+    if path == "/api/daemon":
+        answer, code = answer_a_daemon_switch(body, chains)
+        return json.dumps(answer).encode(), "application/json", code
     if path == "/api/rpc":
         answer, code = answer_an_rpc(body, chains)
         return json.dumps(answer).encode(), "application/json", code
@@ -677,6 +710,49 @@ def refuse_a_cross_origin_post(headers, port: int) -> str:
                 f"and a name that resolves here is how a DNS-rebinding attack makes its own "
                 f"page same-origin with this one.")
     return ""
+
+
+def answer_a_daemon_switch(body: object, chains: dict | None) -> tuple[dict, int]:
+    """Start or stop one chain's daemon, or say why this panel will not.
+
+    IT REUSES daemons.start_daemon AND daemons.stop_daemon rather than spawning anything of its
+    own, and that is the whole reason this is safe to offer at all. Those two are a spawn and
+    its named reaper living in one file so neither can be edited without the other in view
+    (rule 13), and stop_daemon PROVES the process is gone rather than trusting an exit code --
+    it reads the pid BEFORE asking, because the daemon deletes its pid file on the way out.
+    A second implementation here would be a spawn whose reaper is somewhere else.
+
+    `we_started_it=True` IS PASSED ON PURPOSE AND IS NOT A LIE ABOUT HISTORY. That flag exists
+    so a harness leaves an ADOPTED daemon alone on its way out; here the operator has pressed a
+    button that says stop, which is the case the flag is meant to except, not enforce. The
+    refusal above is what decides whether they may, and it has already run by this point.
+    """
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "the request body was not an object"}, 400
+    asset, action = body.get("asset"), body.get("action")
+    tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
+    if tab is None:
+        return {"ok": False, "refused": True, "error": f"{asset!r} is not a chain here"}, 403
+    refusal = decisions.refuse_daemon_control(tab, action)
+    if refusal:
+        return {"ok": False, "refused": True, "error": refusal}, 403
+
+    run = (chains or {}).get(asset)
+    if run is None:
+        return {"ok": False, "refused": True,
+                "error": f"{asset} has no connection parameters in this panel"}, 403
+    try:
+        if action == "start":
+            spawned = daemons.start_daemon(run.console, run.config)
+            said = (f"{asset}: started" if spawned
+                    else f"{asset}: already answering -- nothing was started")
+        else:
+            daemons.stop_daemon(run.console, run.config, we_started_it=True)
+            said = f"{asset}: stop requested, and daemons.stop_daemon PROVED the process is gone"
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value; a panel that dies on a daemon that will not start is a panel that cannot report it
+        return {"ok": False, "refused": False,
+                "error": f"{type(error).__name__}: {error}"}, 200
+    return {"ok": True, "said": said}, 200
 
 
 def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:

@@ -390,6 +390,79 @@ def call_read_only(run: adaptor_steps.Run, method: str, args: list) -> dict:
                 "error": f"{type(error).__name__}: {error}"}
 
 
+#: Whether this panel may START or STOP each chain's daemon, and the reason either way.
+#:
+#: THE OPERATOR ASKED FOR AN ON/OFF SWITCH PER TAB on 2026-09-28, which is a posture change and
+#: theirs to make (rule 16). It is not the same decision for all six, and giving them one switch
+#: with one meaning would be the "six tabs, one set of controls" defect again in a place where
+#: it costs more than a wasted click.
+#:
+#:   regtest   BTC and LTC. Throwaway chains whose daemons regtest_htlc_verify.py already starts
+#:             and stops, through daemons.start_daemon/stop_daemon -- a spawn with a named
+#:             reaper that PROVES the process is gone (rule 13). Nothing is at stake: the coins
+#:             are minted on demand and the datadir is disposable. Full control.
+#:
+#:   operator  GRC. This is the operator's own daemon, STAKING THEIR WALLET. The whole harness
+#:             has said "this harness starts and stops NOTHING" all day for that reason, and a
+#:             stop from a browser button is a different thing from a stop they typed: this page
+#:             is unauthenticated behind a loopback bind, and a tab they left open is a tab
+#:             something else can reach.
+#:
+#:             STOP IS AVAILABLE AND REQUIRES AN OPT-IN OUTSIDE THE BROWSER --
+#:             ST_PANEL_MAY_STOP_DAEMONS in the environment that starts the panel. That is not
+#:             a nag: it means the decision to arm this was made in a shell, deliberately, and
+#:             cannot be made by anything that merely reaches the port.
+#:
+#:             START IS REFUSED OUTRIGHT, and not out of caution -- this panel does not KNOW how
+#:             that daemon is started. It never started it, so it has no binary, no datadir
+#:             flags and no idea whether it runs under a service manager. Inventing a command
+#:             line for the process that stakes the operator's wallet is exactly the guess rule
+#:             17 forbids, and "it did not come back up" is the worst time to discover a guess.
+#:
+#:   foreign   XMR, XRP, SOL. No daemon lifecycle here at all; this panel cannot even probe them.
+DAEMON_CONTROL = {
+    "regtest": {"start": True, "stop": True},
+    "operator": {"start": False, "stop": True},
+    "foreign": {"start": False, "stop": False},
+}
+
+#: The environment variable that arms stopping a daemon this panel did not start.
+MAY_STOP_VARIABLE = "ST_PANEL_MAY_STOP_DAEMONS"
+
+
+def refuse_daemon_control(tab: ChainTab, action: str) -> str:
+    """"" if this switch may be thrown, else why not. THE decision, apart from the plumbing.
+
+    THREE REFUSALS AND THEY ARE NOT INTERCHANGEABLE, which is why each carries its own sentence
+    rather than a shared "not allowed". An operator refused a START on GRC needs to know this
+    panel does not know their command line, because they will otherwise look for a flag. One
+    refused a STOP needs to know an environment variable arms it. One on XMR needs to know
+    there is no lifecycle here at all.
+    """
+    if action not in ("start", "stop"):
+        return f"{action!r} is not start or stop"
+    policy = DAEMON_CONTROL.get(tab.kind, {"start": False, "stop": False})
+    if not policy.get(action):
+        if tab.kind == "operator" and action == "start":
+            return (
+                f"this panel will not START {tab.asset}: it never started that daemon, so it "
+                f"has no binary, no datadir flags and no idea whether it runs under a service "
+                f"manager. Inventing a command line for the process that stakes your wallet is "
+                f"a guess, and 'it did not come back up' is the worst time to find that out."
+            )
+        return (f"this panel has no daemon lifecycle for {tab.asset} -- it cannot even probe "
+                f"that endpoint, let alone run it.")
+    if tab.kind == "operator" and action == "stop" and not os.environ.get(MAY_STOP_VARIABLE):
+        return (
+            f"stopping {tab.asset} is armed by {MAY_STOP_VARIABLE} in the environment that "
+            f"starts this panel, and it is not set. That daemon is STAKING YOUR WALLET, and "
+            f"this page is unauthenticated behind a loopback bind -- so the decision to arm a "
+            f"browser button that stops it should be made in a shell, deliberately, and not by "
+            f"anything that merely reaches this port."
+        )
+    return ""
+
+
 class Missing(NamedTuple):
     """One RPC the daemon does not have, and what its absence costs this repository."""
 

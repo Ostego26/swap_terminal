@@ -897,3 +897,98 @@ def test_every_foreign_chain_names_the_variables_its_own_entry_point_reads():
             f"{chain.asset} is foreign and names no environment variable, so it would report "
             f"itself configured whatever the environment holds"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE ON/OFF SWITCH. Not the same decision for all six chains.
+# ---------------------------------------------------------------------------
+
+
+def _tab(asset):
+    return next(c for c in decisions.CHAINS if c.asset == asset)
+
+
+def test_a_regtest_daemon_may_be_started_and_stopped_freely():
+    """Throwaway chains whose daemons regtest_htlc_verify.py already starts and stops.
+
+    Nothing is at stake: the coins are minted on demand and the datadir is disposable. This is
+    the case where a switch is simply a switch.
+    """
+    for asset in ("BTC", "LTC"):
+        for action in ("start", "stop"):
+            assert decisions.refuse_daemon_control(_tab(asset), action) == "", f"{asset} {action}"
+
+
+def test_STARTING_the_operators_own_daemon_is_refused_because_we_do_not_know_how(monkeypatch):
+    """Not caution -- ignorance, stated as such.
+
+    This panel never started that daemon, so it has no binary, no datadir flags and no idea
+    whether it runs under a service manager. Inventing a command line for the process that
+    stakes the operator's wallet is the guess rule 17 forbids, and "it did not come back up" is
+    the worst possible time to discover one.
+    """
+    monkeypatch.setenv(decisions.MAY_STOP_VARIABLE, "yes")
+    refusal = decisions.refuse_daemon_control(_tab("GRC"), "start")
+    assert refusal, "arming the STOP must not arm the start"
+    assert "never started that daemon" in refusal
+    assert "guess" in refusal, "and it says why, or an operator goes looking for a flag"
+
+
+def test_STOPPING_the_operators_own_daemon_is_armed_OUTSIDE_the_browser(monkeypatch):
+    """That daemon is STAKING THEIR WALLET, and this page is unauthenticated behind a loopback
+    bind -- so a tab they left open is a tab something else can reach.
+
+    The environment variable means the decision to have the button was made in a shell,
+    deliberately, and cannot be made by anything that merely reaches the port. It is not a nag:
+    a confirm() in the page defends against a click they did not mean, and this defends against
+    a page they did not open. Neither replaces the other.
+    """
+    monkeypatch.delenv(decisions.MAY_STOP_VARIABLE, raising=False)
+    refusal = decisions.refuse_daemon_control(_tab("GRC"), "stop")
+    assert refusal and decisions.MAY_STOP_VARIABLE in refusal
+    assert "STAKING YOUR WALLET" in refusal
+
+    monkeypatch.setenv(decisions.MAY_STOP_VARIABLE, "yes")
+    assert decisions.refuse_daemon_control(_tab("GRC"), "stop") == ""
+
+
+def test_a_foreign_chain_has_no_daemon_lifecycle_at_all(monkeypatch):
+    """And arming the stop must not conjure one. This panel cannot even probe those endpoints."""
+    monkeypatch.setenv(decisions.MAY_STOP_VARIABLE, "yes")
+    for asset in ("XMR", "XRP", "SOL"):
+        for action in ("start", "stop"):
+            refusal = decisions.refuse_daemon_control(_tab(asset), action)
+            assert refusal, f"{asset} {action} must be refused"
+            assert "no daemon lifecycle" in refusal
+
+
+def test_the_three_refusals_are_NOT_interchangeable(monkeypatch):
+    """Each sends the operator somewhere different, and a shared "not allowed" sends them
+    nowhere.
+
+    One says this panel does not know your command line, one says an environment variable arms
+    it, one says there is no lifecycle here. A disabled button with no text teaches none of them,
+    which is why the page renders the reason beside every switch it greys out.
+    """
+    monkeypatch.delenv(decisions.MAY_STOP_VARIABLE, raising=False)
+    said = {
+        "grc_start": decisions.refuse_daemon_control(_tab("GRC"), "start"),
+        "grc_stop": decisions.refuse_daemon_control(_tab("GRC"), "stop"),
+        "xmr_stop": decisions.refuse_daemon_control(_tab("XMR"), "stop"),
+    }
+    assert len(set(said.values())) == 3, said
+    assert decisions.refuse_daemon_control(_tab("GRC"), "restart"), "only start and stop exist"
+
+
+def test_the_switch_route_refuses_before_it_reaches_a_daemon():
+    """The gate runs on the server, before any connection, and a request naming a chain this
+    panel does not serve is refused whatever the page sends."""
+    entry = _entry()
+    answer, code = entry.answer_a_daemon_switch({"asset": "DOGE", "action": "stop"}, {})
+    assert code == 403 and answer["refused"] is True
+
+    answer, code = entry.answer_a_daemon_switch({"asset": "XMR", "action": "stop"}, {})
+    assert code == 403 and "no daemon lifecycle" in answer["error"]
+
+    answer, code = entry.answer_a_daemon_switch("not an object", {})
+    assert code == 400
