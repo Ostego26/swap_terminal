@@ -2629,6 +2629,52 @@ def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoin
     )
 
 
+def refuse_if_the_funding_is_already_spent(
+    run: Run, key: RegtestKey, source: chain.Outpoint, raw_hex: str
+) -> None:
+    """ASK BEFORE SENDING whether this split can be accepted, and name the likely cause if not.
+
+    THE GAP THIS CLOSES WAS ALREADY WRITTEN DOWN ONE FUNCTION UP, in
+    `discover_operator_funding_txid`: "an earlier one is most likely already spent by a previous
+    run, and spending it again would fail as a double-spend several steps later with no clue
+    why." Picking the NEWEST payment makes that unlikely -- and it does not make it impossible,
+    because the newest payment IS the spent one on the second run of a harness the operator has
+    not re-funded. That is the ordinary case after a successful run, not an exotic one: the first
+    Gridcoin run consumed its funding by design.
+
+    What the operator would otherwise see is `code=-22 message=TX rejected` and nothing else,
+    which is every Gridcoin refusal (measured 2026-09-28) and says nothing about which of the
+    dozen possible causes it was. `testmempoolaccept` runs the same AcceptToMemoryPool WITHOUT
+    broadcasting and returns a structured reject-reason, so the question can be asked for free
+    before anything moves.
+
+    A `RegtestSetupError` and not a FAIL, deliberately: an unfunded run is a precondition the
+    operator can fix in thirty seconds, not the code under test breaking, and the two need
+    different things from whoever is reading the screen (rule 14).
+
+    A daemon that will not answer gets "" from `mempool_reject_reason` and this function does
+    NOTHING -- the send proceeds exactly as before. An absent diagnostic must never become a
+    refusal of its own; it is a diagnostic, not a gate.
+    """
+    reason = mempool_reject_reason(run, raw_hex)
+    if not reason:
+        return
+    raise RegtestSetupError(
+        f"{run.asset}: the daemon will not accept the split of the operator's funding -- "
+        f"reject-reason={reason!r}, asked via testmempoolaccept so NOTHING was broadcast.\n"
+        f"  The output being spent is {source.txid}:{source.vout}, worth "
+        f"{satoshis_to_coins(source.value_satoshis)} {run.asset}, at {key.address}.\n"
+        f"  THE LIKELIEST CAUSE IS THAT A PREVIOUS RUN ALREADY SPENT IT. Each run consumes its "
+        f"funding by design, and this daemon has no way to say what is unspent at an address it "
+        f"does not own (importaddress and gettxout are both absent on v5.5.1.0), so the harness "
+        f"picks the NEWEST payment the wallet remembers and cannot tell a fresh one from a "
+        f"spent one.\n"
+        f"  THE FIX: send another payment to {key.address} from your wallet, wait for one "
+        f"confirmation, and run this again. The address is derived from "
+        f"{FUNDING_SEED_VARIABLE} and does not change between runs."
+    )
+
+
 def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
                            destinations: list[RegtestKey]) -> list[chain.Outpoint]:
     """One operator payment -> one P2PKH output per lock, signed HERE and broadcast.
@@ -2689,6 +2735,7 @@ def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
     script_sig = _sign_p2pkh(key, _p2pkh_sighash(unsigned, key))
     raw = unsigned.serialize({0: script_sig}).hex()
     predicted = chain.predicted_txid(unsigned, {0: script_sig})
+    refuse_if_the_funding_is_already_spent(run, key, source, raw)
     txid = run.node(wallet=False).call("sendrawtransaction", raw)
     run.check("the split txid PREDICTED before broadcast equals the daemon's",
               f"predicted={predicted} daemon={txid}", "the same txid",

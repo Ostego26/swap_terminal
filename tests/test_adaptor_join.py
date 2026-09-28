@@ -454,3 +454,70 @@ def _built(alice, bob, side, make_leg) -> adaptor_steps.BuiltChain:
         cancel=chain.build_cancel(context, lock, 1_500), t1=1_500, t2=1_650,
         monero=side, redeem_leg=make_leg(redeem.digest),
     )
+
+
+# ---------------------------------------------------------------------------
+# A SECOND RUN ON THE SAME FUNDING. The ordinary case after a successful one.
+# ---------------------------------------------------------------------------
+
+
+def _funding_run(monkeypatch, testmempoolaccept):
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=io.StringIO())
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+
+    class _Node:
+        def call(self, method, *params):
+            assert method == "testmempoolaccept", f"nothing may be BROADCAST here, got {method}"
+            return testmempoolaccept
+
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+    return run
+
+
+def test_a_funding_output_a_previous_run_already_spent_is_REFUSED_with_the_remedy(monkeypatch):
+    """THE ORDINARY SECOND RUN, and until now it failed with `-22 TX rejected` and nothing else.
+
+    Each run consumes its funding by design, and Gridcoin v5.5.1.0 has neither `importaddress`
+    nor `gettxout`, so nothing can say what is unspent at an address the wallet does not own --
+    the harness picks the newest payment it remembers and cannot tell a fresh one from a spent
+    one. `discover_operator_funding_txid` already wrote that gap down in a comment; this is the
+    part that turns it into a sentence the operator can act on.
+
+    A RegtestSetupError and not a FAIL: an unfunded run is a precondition, not the code under
+    test breaking, and the two need different things from whoever reads the screen.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=1, value_satoshis=350_000_000)
+    run = _funding_run(monkeypatch, [{"allowed": False, "reject-reason": "bad-txns-inputs-missingorspent"}])
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+
+    message = str(raised.value)
+    assert "bad-txns-inputs-missingorspent" in message, "the daemon's own words, not a guess"
+    assert "NOTHING was broadcast" in message
+    assert key.address in message, "and it names the address to pay, or the remedy is unusable"
+    assert f"{source.txid}:{source.vout}" in message
+
+
+def test_a_daemon_that_will_not_say_does_NOT_turn_into_a_refusal(monkeypatch):
+    """An absent diagnostic must never become a gate of its own.
+
+    `testmempoolaccept` is missing on some daemons and answers oddly on others, and every one of
+    those cases returns "" from `mempool_reject_reason`. A funded run must proceed exactly as it
+    did before this check existed -- otherwise a diagnostic added to make one failure legible has
+    made a working run impossible.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=350_000_000)
+    for answer in ([{"allowed": True}], [], "not a list", [{"allowed": False}]):
+        run = _funding_run(monkeypatch, answer)
+        adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
