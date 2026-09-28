@@ -1632,6 +1632,43 @@ def test_the_latest_payment_is_SKIPPED_when_a_previous_run_already_spent_it(cons
     )
 
 
+def test_the_scan_STOPS_AT_THE_PAYMENT_rather_than_walking_the_blind_cap(console, monkeypatch):
+    """THE BOUND IS EXACT, NOT A HEURISTIC, and without it this costs 2000 blocks every run.
+
+    Nothing mined BEFORE a transaction can spend its output, so a payment with N confirmations
+    needs exactly N blocks looked at. That is the whole reason the picker can afford to ask the
+    same question of every candidate: a payment made five minutes ago costs three getblock
+    calls, against MAX_SPEND_SCAN_BLOCKS = 2000 for the blind cap.
+
+    Replacing the floor with the cap leaves every test above still green -- the answer does not
+    change, only what it costs -- which is exactly the kind of regression a correctness suite
+    waves through. So this one counts the calls (rule 3: measure, and state the denominator).
+    """
+    key = key_from_seed("seed for the bounded-scan test", "funding")
+    run, node = _run_with(
+        console, monkeypatch,
+        {
+            "listtransactions": [
+                {"address": key.address, "category": "send", "txid": "cc" * 32, "confirmations": 2},
+            ],
+            "getrawtransaction": lambda txid, *_: {
+                "vout": [{"n": 1, "value": "1.51", "scriptPubKey": {"hex": key.p2pkh_script.hex()}}],
+            },
+            "getblockcount": 100,
+            "getblockhash": lambda height, *_: f"hash-of-{height}",
+            "getblock": lambda *_: {"tx": [{"txid": "cb", "vin": [{"coinbase": "00"}]}]},
+        },
+        asset="GRC",
+    )
+
+    assert adaptor_steps.discover_operator_funding_txid(run, key) == "cc" * 32
+    blocks_read = sum(1 for method, _ in node.calls if method == "getblock")
+    assert blocks_read == 3, (
+        f"2 confirmations means 3 blocks (the payment's own and the two after it); "
+        f"{blocks_read} of a possible {adaptor_steps.MAX_SPEND_SCAN_BLOCKS} were read"
+    )
+
+
 def test_a_daemon_that_cannot_be_SCANNED_still_picks_the_newest_payment(console, monkeypatch):
     """No regression when the chain cannot be walked. The scan is a diagnostic, not a gate.
 
