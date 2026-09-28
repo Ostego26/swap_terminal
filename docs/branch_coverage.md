@@ -63,7 +63,8 @@ v5.5.1.0. Full record: `docs/gridcoin_adaptor_join_2026_09_28.md`.
 | refund after expiry, BTC/LTC | SPENT | `step_9_refund_after_expiry`, real `refund_contract()` |
 | hashlock spend, GRC | SPENT | three live swaps, `docs/atomic_swap_runs_2026_09_27.md` |
 | **refund after expiry, GRC** | **NONE** | `--chain` offers `btc`, `ltc`, `both`. **Gridcoin is not an option and never has been.** See §5 |
-| CLTV executes on GRC | **NONE** | the three GRC swaps took the HASHLOCK branch; `OP_CHECKLOCKTIMEVERIFY` sits in the `OP_ELSE` and never ran. What is established is that Gridcoin ACCEPTS a script CONTAINING it |
+| CLTV executes on GRC | **SPENT 2026-09-28** | `9495082ef304c4ca…` spends the P2SH `8468aa40f9:0` with nLockTime 3296363 and sequence 0xfffffffe, paying 0.13 GRC to the wallet. The REFUSAL side (steps 5 and 6) is still untested |
+| ~~CLTV executes on GRC~~ (the old grade) | ~~NONE~~ | the three GRC swaps took the HASHLOCK branch; `OP_CHECKLOCKTIMEVERIFY` sits in the `OP_ELSE` and never ran. What is established is that Gridcoin ACCEPTS a script CONTAINING it |
 
 ## 3. XRP escrow -- `xrp_htlc_escrow.py --run`
 
@@ -119,6 +120,28 @@ GRC swaps completed, all through the hashlock. The refund branch of a GRC HTLC -
 operator needs when a counterparty vanishes -- has never been executed, and the harness that
 would do it does not offer the chain. `OP_CHECKLOCKTIMEVERIFY` has never executed on Gridcoin
 from this tree at all.
+
+**2026-09-28, LATE: THE REFUND BRANCH SPENT.** `9495082ef304c4cab39d83dcabd28512c2800f8f60acaf6ed1e00ca01d79163b`,
+51 confirmations, spends `8468aa40f94e6c81:0` -- a P2SH output -- carrying nLockTime 3296363
+and nSequence 0xfffffffe, and pays 0.13 GRC to `mjhEmpAUU5p7NU2PZTyV4ayTr8U15fczPt`. That
+address's hash160 is `2dd26b1d0fdceeeca05b499bbde58519a7684e8f`, which is the one this harness's
+`--recover` chose, so the transaction is ours rather than a coincidence on the same outpoint.
+
+WHAT THIS ESTABLISHES, exactly and no more: a coin came OUT of a Gridcoin HTLC through the
+timelock branch. The script ran, `OP_CHECKLOCKTIMEVERIFY` did not refuse it at a height past the
+locktime, and the two fields it needs -- a non-final sequence and an nLockTime at least the
+script's -- were carried correctly by `htlc_spend.with_locktime`.
+
+WHAT IT DOES NOT ESTABLISH, and the distinction is the whole reason grc_htlc_verify.py has a
+step 5 and a step 6: that CLTV REFUSES an early refund. An opcode that never refuses anything
+is indistinguishable from a no-op, and a no-op here means every HTLC this repository funds on
+Gridcoin can be refunded by its funder at any time. Steps 5 and 6 have still never run.
+
+THE RUN WE WATCHED REPORTED `-22 TX rejected` AND THIS TRANSACTION EXISTS, and those two facts
+have not been reconciled. The daemon logged two errors in the same second -- `nonstandard
+transaction type` and `VerifySignature failed` -- and there is no evidence yet saying which, if
+either, was this transaction. It is recorded as unexplained rather than resolved (rule 17): a
+success that nobody can account for is not the same as a success.
 
 **2026-09-28: `grc_htlc_verify.py` now EXISTS and is unit-tested and mutation-checked, and IT
 HAS NOT YET RUN ON THE CHAIN.** Those are two different facts and this line keeps them apart
