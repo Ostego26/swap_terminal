@@ -1764,12 +1764,29 @@ def test_the_source_reading_never_claims_to_be_a_measurement():
 def test_the_reject_reason_probe_never_becomes_a_verdict(console, monkeypatch):
     """testmempoolaccept is a diagnostic here, not evidence. A daemon without the method, a
     differently-shaped answer, or an ALLOWED transaction must all yield "" rather than
-    something a caller could print as a finding."""
+    something a caller could print as a finding.
+
+    `[{"allowed": False}]` USED TO BE IN THIS LIST and was moved out on 2026-09-28, which is a
+    behavior change and not a tidy-up. The old comment beside it read "refused, but no reason
+    given", and it scored that as "no reason" -- so a daemon that plainly said it would NOT
+    accept the operator's funding split was treated as a daemon that had said nothing, and the
+    harness broadcast anyway. That is half of how the 2026-09-28 traceback happened.
+
+    The shape is synthetic in any case. src/rpc/mempool.cpp, read that day, fills the field in
+    itself when validation named nothing: `if (reason.empty()) reason = missing_inputs ?
+    "missing-inputs" : "rejected";`. So Gridcoin never sends `allowed: false` with no reason,
+    and the name this code gives it is the same one Gridcoin would have.
+
+    What stays in the list is an object with NO `allowed` key at all. That one is a shape this
+    code does not model rather than a refusal, because mempool.cpp pushes `allowed` first and
+    unconditionally -- so reading a missing key as False would let a stub or a proxy refuse an
+    operator's funding, which is the strongest thing this harness says about anybody's money.
+    """
     for answer in (
         {},                                        # not a list
         [],                                        # empty
         [{"allowed": True}],                       # it would be accepted -- says nothing
-        [{"allowed": False}],                      # refused, but no reason given
+        [{"vsize": 200}],                          # no `allowed` at all: unmodeled, not refused
         ["not-a-dict"],
     ):
         run, _ = _run_with(console, monkeypatch, {"testmempoolaccept": answer}, asset="GRC")
@@ -1783,3 +1800,7 @@ def test_the_reject_reason_probe_never_becomes_a_verdict(console, monkeypatch):
         {"testmempoolaccept": [{"allowed": False, "reject-reason": "tx-nonstandard"}]}, asset="GRC",
     )
     assert adaptor_steps.mempool_reject_reason(run, "00") == "tx-nonstandard"
+
+    # A REFUSAL IS A REFUSAL EVEN UNNAMED. Gridcoin's own fallback word, from mempool.cpp.
+    run, _ = _run_with(console, monkeypatch, {"testmempoolaccept": [{"allowed": False}]}, asset="GRC")
+    assert adaptor_steps.mempool_reject_reason(run, "00") == "rejected"

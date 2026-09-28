@@ -522,12 +522,35 @@ def test_a_daemon_that_will_not_say_does_NOT_turn_into_a_refusal(monkeypatch):
     those cases returns "" from `mempool_reject_reason`. A funded run must proceed exactly as it
     did before this check existed -- otherwise a diagnostic added to make one failure legible has
     made a working run impossible.
+
+    `[{"allowed": False}]` LEFT THIS LIST ON 2026-09-28 and the swap is the point of the change:
+    a daemon saying it would not accept the split is the one case here that IS evidence, and
+    letting it through is half of how the operator got a bare traceback that day. It is replaced
+    by an object with no `allowed` key, which is genuinely unmodeled -- src/rpc/mempool.cpp
+    pushes that key first and unconditionally, so its absence means the answer did not come from
+    the code this harness models, and refusing an operator's funding on it would be a guess.
     """
     key = generate_key()
     source = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=350_000_000)
-    for answer in ([{"allowed": True}], [], "not a list", [{"allowed": False}]):
+    for answer in ([{"allowed": True}], [], "not a list", [{"vsize": 200}]):
         run = _funding_run(monkeypatch, answer)
         adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+
+
+def test_a_daemon_that_says_NO_without_saying_why_still_refuses(monkeypatch):
+    """`allowed: false` and no reject-reason is a refusal, and used to be read as silence.
+
+    This is the case the test above gave up, held here so the change is pinned in both
+    directions rather than merely removed from one list. Gridcoin's own mempool.cpp substitutes
+    `"rejected"` when validation named nothing, so the word this harness prints is the word the
+    daemon would have printed.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=350_000_000)
+    run = _funding_run(monkeypatch, [{"allowed": False}])
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+    assert "rejected" in str(raised.value)
 
 
 def test_split_operator_funding_ASKS_BEFORE_IT_SENDS(monkeypatch):
@@ -561,6 +584,92 @@ def test_split_operator_funding_ASKS_BEFORE_IT_SENDS(monkeypatch):
         adaptor_steps.split_operator_funding(run, key, source, [generate_key(), generate_key()])
 
     assert sent == [], f"nothing may reach the daemon beyond the question, but {sent} did"
+
+
+def test_a_daemon_that_says_YES_then_REFUSES_the_send_is_EXPLAINED_not_tracebacked(monkeypatch):
+    """THE 2026-09-28 TRACEBACK, held so it cannot come back.
+
+    What the operator actually got, after `grc_htlc_verify.py` located their funding:
+
+        chains.base.RPCError: sendrawtransaction: code=-22 message=TX rejected (HTTP 500)
+
+    preceded by forty lines of Python frames and nothing about the chain. The outpoint, its
+    value, the address it sits at and the daemon's own answer to the same question asked without
+    broadcasting were all in scope, and none of them reached the screen. Rule 14: pasted output
+    has to be self-describing a day later, and a traceback is self-describing about Python.
+
+    THE COMBINATION THIS STUB PRODUCES -- testmempoolaccept says allowed, sendrawtransaction
+    refuses -- is not supposed to be possible. Gridcoin's src/validation.cpp runs the identical
+    checks either way and `test_only` skips only the pool insertion (read 2026-09-28). So this
+    test pins the behavior for the case that is the MOST confusing and the LEAST expected, which
+    is the one where an unreadable failure costs the most.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="cd" * 32, vout=3, value_satoshis=460_000_000)
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "testmempoolaccept":
+                return [{"allowed": True, "vsize": 226}]
+            if method == "sendrawtransaction":
+                raise adaptor_steps.RPCError("sendrawtransaction: code=-22 message=TX rejected")
+            raise AssertionError(f"{method} must not be reached")
+
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.send_the_split_or_explain_the_refusal(run, key, source, "00")
+
+    message = str(raised.value)
+    assert "code=-22" in message, "the daemon's own words survive"
+    assert "WOULD accept" in message, "and so does what it said when asked without sending"
+    assert f"{source.txid}:{source.vout}" in message, "which output"
+    assert "4.60000000" in message, "and what it was worth"
+    assert key.address in message, "and where to pay, or the remedy is unusable"
+    assert "reclaim_funding.py" in message, "and how to get back what is already out there"
+
+
+def test_the_split_reports_the_fee_it_ACTUALLY_PAYS(monkeypatch):
+    """4.60 in, 1.50 out, and the line said `fee 0.01000000`. It paid 3.09.
+
+    `split_operator_funding` writes NO CHANGE OUTPUT on purpose -- change returning to the
+    funding address would be indistinguishable on chain from the operator's next funding
+    payment, and `find_operator_funding` would pick it up. The consequence is that the fee is
+    input minus outputs, not the size-based number computed for the sufficiency check.
+
+    With the adaptor harness's three destinations the two agree to within a few hundredths and
+    nobody looked. grc_htlc_verify.py is the first caller with ONE destination, and on the
+    operator's 2026-09-28 run the difference was 3.08 GRC -- two thirds of their funding,
+    reported as a hundredth. Rule 14 says state what the number means next to the number.
+
+    NOT A REFUSAL, and that is measured rather than assumed: Gridcoin's AcceptToMemoryPool has
+    no absurd-high-fee rejection (src/validation.cpp, read 2026-09-28), so the chain takes an
+    overpaid fee rather than refusing it. Burning a test coin costs less than stranding one
+    behind a second reclaim, so this says it loudly and carries on.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ef" * 32, vout=0, value_satoshis=460_000_000)
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "testmempoolaccept":
+                return [{"allowed": True}]
+            if method == "sendrawtransaction":
+                raise adaptor_steps.RegtestSetupError("stop here -- the reporting is what is under test")
+            raise AssertionError(f"{method} must not be reached")
+
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+    stream = io.StringIO()
+    run.console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+
+    with pytest.raises(adaptor_steps.RegtestSetupError):
+        adaptor_steps.split_operator_funding(run, key, source, [generate_key()])
+
+    printed = stream.getvalue()
+    assert "THE MINER TAKES 3.10000000" in printed, printed
+    assert "larger than one whole funding output" in printed, printed
 
 
 # ---------------------------------------------------------------------------

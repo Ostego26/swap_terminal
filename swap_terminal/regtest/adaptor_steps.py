@@ -90,6 +90,7 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
 
 import base58
 from chains.base import RPCError
@@ -2537,30 +2538,96 @@ def step_10_cancel_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> N
     _spend_the_cancel_output(run, built, cancel_txid, outcome)
 
 
-def mempool_reject_reason(run: Run, raw_hex: str) -> str:
-    """The daemon's own reject-reason for this transaction, or "" if it will not say.
+class MempoolAnswer(NamedTuple):
+    """What `testmempoolaccept` said, in BOTH the forms a caller needs.
+
+    TWO FIELDS BECAUSE "NO REASON" IS FOUR DIFFERENT FACTS, and collapsing them to "" is what
+    cost a live run on 2026-09-28. `split_operator_funding` asked, got "", proceeded, and
+    `sendrawtransaction` then answered `-22 TX rejected` -- so the operator saw a bare Python
+    traceback and the one thing that could have named the cause had already been thrown away.
+    The daemon had been asked and its answer discarded.
+
+      reason       the reject-reason, or "" when there is no refusal to act on. This is the
+                   DECISION: a caller refuses on a non-empty reason and on nothing else.
+      description  what happened, ALWAYS non-empty, for a human. Rule 14: an empty result must
+                   never print nothing, because a blank is ambiguous between "allowed" and
+                   "the question did not get asked".
+
+    The three ways `reason` comes back empty, which `description` tells apart:
+
+      allowed              the daemon ran AcceptToMemoryPool and would accept it.
+      call failed          the call raised -- including a daemon with no `testmempoolaccept`,
+                           whose `code=-32601 Method not found` says so in the error text. No
+                           evidence either way.
+      unexpected shape     something answered, in a shape this code does not model.
+
+    Only the first is evidence of anything, and a caller that treats the other two as
+    "fine, proceed" is asserting a fact it does not hold (rule 17).
+    """
+
+    reason: str
+    description: str
+
+
+def mempool_answer(run: Run, raw_hex: str) -> MempoolAnswer:
+    """Ask the daemon whether it would accept this transaction, WITHOUT broadcasting it.
 
     `sendrawtransaction` answers `code=-22 message=TX rejected` and nothing more, so every
-    refusal in this harness has looked identical regardless of cause. `testmempoolaccept`
-    (src/rpc/server.cpp:640 on Gridcoin) runs the same AcceptToMemoryPool and returns
-    {allowed, reject-reason} WITHOUT broadcasting -- so it is both more informative and
-    strictly safer than the send it supplements.
+    refusal in this harness looks identical regardless of cause. `testmempoolaccept` runs the
+    same AcceptToMemoryPool and returns {allowed, reject-reason} without broadcasting -- so it
+    is both more informative and strictly safer than the send it supplements.
 
-    "" ON ANY SURPRISE, never a guess. A daemon without the method, a differently-shaped
-    response, or an allowed transaction all return "" and the caller falls back to what the
-    broadcast said. The reason is a diagnostic here, not a verdict: what the run ASSERTS is
-    still the refusal and the same-bytes acceptance at T1.
+    READ OUT OF GRIDCOIN'S OWN SOURCE 2026-09-28 rather than assumed, because the shape of the
+    answer is what this function models. `src/rpc/mempool.cpp` calls AcceptToMemoryPool with
+    `test_only=true` and fills in `reject-reason` from `state.GetRejectReason()`, falling back
+    to `"missing-inputs"` when the input fetch failed and `"rejected"` when neither said
+    anything. `src/validation.cpp`'s `test_only` branch skips ONLY the pool insertion and the
+    wallet signals -- every validation check above it is the same one the real send runs. So an
+    `allowed` answer here and a refusal from the send are not supposed to be possible, and if
+    the operator ever sees both, THAT is the finding.
+
+    The raw answer is carried into `description` verbatim for the same reason: a shape this
+    code does not model is exactly the case where guessing is worst.
     """
+    # NO `method_exists` PROBE FIRST, and that is a decision rather than an omission. It would
+    # cost a second RPC round trip on every call to distinguish "no such method" from "the call
+    # failed" -- and it does not distinguish them, because the RPCError already carries
+    # `code=-32601 Method not found` in its own text. A probe that buys a fact the error message
+    # already states is a round trip spent on nothing (rule 3), and it made four existing test
+    # stubs answer a `help` call that has nothing to do with what they are testing.
     try:
         results = run.node(wallet=False).call("testmempoolaccept", [raw_hex])
-    except RPCError:
-        return ""
-    if not isinstance(results, list) or not results:
-        return ""
-    first = results[0]
-    if not isinstance(first, dict) or first.get("allowed"):
-        return ""
-    return str(first.get("reject-reason", "") or "")
+    except RPCError as error:
+        return MempoolAnswer("", f"asked, and the call failed (a daemon without the method says so here): {error}")
+    # ONE UNMODELED-SHAPE BRANCH RATHER THAN TWO. An answer that is not a non-empty list and an
+    # answer whose first element is not an object are the same fact to the reader -- "something
+    # replied and it is not what this code models" -- and they print the same sentence, so
+    # asking the question once keeps them from drifting into two different sentences (rule 8).
+    first = results[0] if isinstance(results, list) and results else results
+    # `allowed` MUST BE PRESENT, and its absence is a shape problem rather than a refusal.
+    # src/rpc/mempool.cpp pushes it unconditionally before anything else, so an object without
+    # it did not come from the code this function models -- and reading a missing key as False
+    # would turn a stub, a proxy, or a future Gridcoin into "the daemon refuses your funding",
+    # which is the strongest thing this harness says about an operator's money.
+    if not isinstance(first, dict) or "allowed" not in first:
+        return MempoolAnswer("", f"asked, and the answer had a shape this code does not model: {first!r}")
+    if first.get("allowed"):
+        return MempoolAnswer("", f"the daemon says it WOULD accept this transaction: {first!r}")
+    reason = str(first.get("reject-reason", "") or "")
+    if not reason:
+        # allowed is false and the daemon named nothing. That is a refusal, and treating it as
+        # "no reason, carry on" is how the 2026-09-28 traceback happened. Give it a name.
+        return MempoolAnswer("rejected", f"the daemon REFUSES it and names no reason: {first!r}")
+    return MempoolAnswer(reason, f"the daemon REFUSES it: reject-reason={reason!r}")
+
+
+def mempool_reject_reason(run: Run, raw_hex: str) -> str:
+    """The daemon's reject-reason for this transaction, or "" if it will not name one.
+
+    ONE IMPLEMENTATION, kept as a wrapper because three call sites want only the decision and
+    reading `.reason` at each of them would put the field name in four places (rule 8).
+    """
+    return mempool_answer(run, raw_hex).reason
 
 
 def _mine_early_cancel(run: Run, built: BuiltChain, cancel_hex: str, outcome: ChainOutcome) -> None:
@@ -3160,9 +3227,15 @@ def refuse_if_the_funding_is_already_spent(
     NOTHING -- the send proceeds exactly as before. An absent diagnostic must never become a
     refusal of its own; it is a diagnostic, not a gate.
     """
-    reason = mempool_reject_reason(run, raw_hex)
-    if not reason:
+    answer = mempool_answer(run, raw_hex)
+    # SAY IT EVEN WHEN IT DOES NOT REFUSE. Rule 14: a check that prints nothing on the way past
+    # is indistinguishable from a check that did not run, and on 2026-09-28 that difference was
+    # the whole investigation -- the gate passed silently and the send then failed, so nobody
+    # could tell whether the daemon had said "fine" or had not been asked at all.
+    run.say(f"asked the daemon whether the split is acceptable BEFORE broadcasting -- {answer.description}")
+    if not answer.reason:
         return
+    reason = answer.reason
     raise RegtestSetupError(
         f"{run.asset}: the daemon will not accept the split of the operator's funding -- "
         f"reject-reason={reason!r}, asked via testmempoolaccept so NOTHING was broadcast.\n"
@@ -3177,6 +3250,57 @@ def refuse_if_the_funding_is_already_spent(
         f"confirmation, and run this again. The address is derived from "
         f"{FUNDING_SEED_VARIABLE} and does not change between runs."
     )
+
+
+def send_the_split_or_explain_the_refusal(
+    run: Run, key: RegtestKey, source: chain.Outpoint, raw_hex: str
+) -> str:
+    """Broadcast the split, and turn a bare `-22 TX rejected` into something readable.
+
+    WHAT THE OPERATOR SAW ON 2026-09-28, and the reason this function exists: a forty-line
+    Python traceback ending in `RPCError: sendrawtransaction: code=-22 message=TX rejected`.
+    Every fact needed to diagnose it -- which output was being spent, what it was worth, what
+    the daemon had said thirty microseconds earlier when asked the same question without
+    broadcasting -- was in scope and none of it reached the screen. Rule 14 is explicit that
+    pasted output has to be self-describing a day later, and a traceback is self-describing
+    about Python rather than about the chain.
+
+    RAISES RegtestSetupError AND NOT A FAIL, for the same reason the sufficiency check does: a
+    refused split is a precondition the operator fixes, not the code under test breaking, and
+    the two need different things from whoever is reading (rule 14 again).
+
+    THE CANDIDATE CAUSES ARE NAMED RATHER THAN RANKED. Read out of Gridcoin's own source on
+    2026-09-28, `AcceptToMemoryPool` returns false with NO reject reason in two places that
+    matter here -- `txdb.ContainsTx(hash)` ("do we already have it?") and a failed
+    `FetchInputs` -- and `sendrawtransaction` passes `nullptr` for `pfMissingInputs`, so it
+    cannot distinguish them even internally. Guessing which one it was would be rule 17's
+    failure exactly: a reason to believe is not a measurement. What this does instead is print
+    the daemon's own answer to the same question and let the reader see which they have.
+    """
+    try:
+        return str(run.node(wallet=False).call("sendrawtransaction", raw_hex))
+    except RPCError as error:
+        answer = mempool_answer(run, raw_hex)
+        raise RegtestSetupError(
+            f"{run.asset}: the daemon REFUSED the split of the operator's funding.\n"
+            f"  the daemon said:            {error}\n"
+            f"  asked again without sending: {answer.description}\n"
+            f"  the output being spent:     {source.txid}:{source.vout}, worth "
+            f"{satoshis_to_coins(source.value_satoshis)} {run.asset}, at {key.address}\n"
+            f"  NOTHING ELSE WAS BROADCAST. The candidate causes, none of which this harness "
+            f"can tell apart from a -22 alone:\n"
+            f"    already spent   a previous run consumed this output. The likeliest, because "
+            f"every run consumes its funding by design and this daemon has no `gettxout` or "
+            f"`importaddress` to ask what is unspent at an address it does not own. "
+            f"`testmempoolaccept` names this one `missing-inputs`.\n"
+            f"    already mined   these exact bytes are already in a block, which Gridcoin's "
+            f"AcceptToMemoryPool refuses with no reason at all.\n"
+            f"    not yet mature  the funding payment is too recent for its output to be spent.\n"
+            f"  THE FIX FOR THE FIRST TWO IS THE SAME: send another payment to {key.address} "
+            f"from your wallet, wait for one confirmation, and run this again. The address is "
+            f"derived from {FUNDING_SEED_VARIABLE} and does not change between runs. To recover "
+            f"what is already out there, `python3 reclaim_funding.py --to-wallet` sweeps it."
+        ) from error
 
 
 def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
@@ -3229,18 +3353,43 @@ def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
             f"txid. Nothing was funded, signed or broadcast."
         )
 
+    # THE FEE THIS PRINTS IS THE FEE IT PAYS, and until 2026-09-28 it was not. The line used to
+    # report `fee` -- the SIZE-BASED fee computed above for the sufficiency check -- while the
+    # transaction actually pays input minus outputs, because there is no change output. With the
+    # adaptor harness's three destinations the two numbers are within a few hundredths and
+    # nobody noticed. grc_htlc_verify.py is the first caller with ONE destination, and on the
+    # operator's run it printed `fee 0.01000000` for a transaction paying 3.09 GRC to the miner:
+    # 4.60 in, 1.50 out, and 3.09 burned. Rule 14 says state what the number means next to the
+    # number; a number that is not the quantity it is labeled with is worse than no number.
+    #
+    # NOT A REFUSAL, deliberately, and the reason is measured rather than assumed. Gridcoin's
+    # AcceptToMemoryPool (src/validation.cpp, read 2026-09-28) has NO absurd-high-fee rejection
+    # -- Bitcoin Core's `maxfeerate` / "max-fee-exceeded" has no counterpart on this chain -- so
+    # an overpaid fee is accepted and burned rather than refused. It is test coin on a test
+    # network and refusing here would strand the operator's funding behind a second reclaim for
+    # no safety gained. What it needs is to be VISIBLE, which is what the surplus line does.
+    surplus = source.value_satoshis - needed - fee
     run.say(
         f"splitting the operator's {satoshis_to_coins(source.value_satoshis)} into "
-        f"{len(destinations)} funding output(s) of {satoshis_to_coins(per_lock)} each, fee "
-        f"{satoshis_to_coins(fee)}. Signed in THIS process -- the wallet is not asked"
+        f"{len(destinations)} funding output(s) of {satoshis_to_coins(per_lock)} each. "
+        f"THE MINER TAKES {satoshis_to_coins(source.value_satoshis - needed)} -- "
+        f"{satoshis_to_coins(fee)} of that is the size-based fee and "
+        f"{satoshis_to_coins(surplus)} is overfunding burned for want of a change output. "
+        f"Signed in THIS process -- the wallet is not asked"
     )
+    if surplus > coins_to_satoshis(str(Decimal(LOCK_COIN[run.asset]))):
+        run.say(
+            f"NOTE: the burn above is larger than one whole funding output. Sending closer to "
+            f"{satoshis_to_coins(needed + fee)} {run.asset} next time keeps it; this run does "
+            f"not refuse over it, because a burned test coin costs less than a stranded one"
+        )
     unsigned = chain.build_unsigned(asset=run.asset, spends=source, outputs=outputs,
                                     locktime=0, ntime=ntime)
     script_sig = _sign_p2pkh(key, _p2pkh_sighash(unsigned, key))
     raw = unsigned.serialize({0: script_sig}).hex()
     predicted = chain.predicted_txid(unsigned, {0: script_sig})
     refuse_if_the_funding_is_already_spent(run, key, source, raw)
-    txid = run.node(wallet=False).call("sendrawtransaction", raw)
+    txid = send_the_split_or_explain_the_refusal(run, key, source, raw)
     run.check("the split txid PREDICTED before broadcast equals the daemon's",
               f"predicted={predicted} daemon={txid}", "the same txid",
               OK if txid == predicted else FAIL)
