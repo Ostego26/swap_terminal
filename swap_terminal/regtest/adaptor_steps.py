@@ -821,6 +821,20 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         OK if scope == "can-sign" else SKIP if scope == "undetermined" else XFAIL,
     )
     if scope in ("staking-only", "locked"):
+        # BEFORE THE REFUSAL, ASK WHETHER THE WALLET IS NEEDED AT ALL. The remedy below costs
+        # the operator their unlock deadline and stops their node staking, so establishing that
+        # there may be a route around it is worth one more read-only call -- and this is the
+        # only moment we know the wallet is blocked, which is exactly when the answer matters.
+        signing = probe_supplied_key_signing(run)
+        run.check(
+            "GRC signrawtransaction with OUR keys (does it bypass the wallet's unlock?)",
+            signing, "open -- then only the funding hop needs the wallet",
+            OK if signing == "open" else SKIP if signing == "undetermined" else XFAIL,
+        )
+        if signing == "open":
+            run.say("")
+            for line in SUPPLIED_KEY_ROUTE.splitlines():
+                run.say(line) if line.strip() else run.console.say("")
         # THE REMEDY IS PRINTED ONCE, HERE, AND THE EXCEPTION CARRIES A ONE-LINE SUMMARY.
         #
         # Measured on the operator's run, 2026-09-28: raising with the full remedy embedded put
@@ -973,6 +987,40 @@ STAKING_ONLY_MESSAGE_MARK = "staking only"
 # command line. `walletpassphrase` is named but the operator types it themselves, because argv
 # is world-readable through /proc and `ps`, and because this repo never moves, copies or reads
 # back a credential.
+# WHAT THE SUPPLIED-KEY PROBE MEANS WHEN IT COMES BACK "open", written beside the remedy it
+# qualifies so no reader finds one without the other (rule 8).
+#
+# NOT IMPLEMENTED, AND SAYING SO IS THE POINT. This is a measured statement about the daemon,
+# plus a design that follows from it -- not a feature this harness has. Announcing a route as
+# though it were available would be worse than the unlock advice it replaces, because the
+# operator would go looking for a flag. Rule 16 draws the line and this is on the proposal side:
+# it changes how a fund path gets its coins, and it is the operator's call.
+SUPPLIED_KEY_ROUTE = (
+    "BUT THE WALLET MAY NOT BE NEEDED AT ALL, and that was just MEASURED on this daemon rather "
+    "than read from source. `signrawtransaction` chooses its keystore on argument presence "
+    "before it checks any lock (rawtransaction.cpp:2769-2788), so a caller that brings its own "
+    "keys never reaches EnsureWalletIsUnlocked -- and the probe above confirms that branch is "
+    "reachable HERE, on v5.5.1.0, not just at master.\n\n"
+
+    "THE WALLET IS THEN NEEDED FOR EXACTLY ONE THING: moving coins to an address this harness "
+    "holds the key for. Everything after that -- build, sign, broadcast -- runs with "
+    "createrawtransaction, signrawtransaction-with-keys and sendrawtransaction, none of which "
+    "consult the unlock. Your staking would never stop and your deadline would never be "
+    "discarded.\n\n"
+
+    "AND THAT ONE HOP IS SOMETHING THE GUI CAN DO. A plain Send from the testnet GUI elevates "
+    "in place and hands the elevation straight back (walletmodel.cpp:615, :704) -- the scoping "
+    "that makes the GUI useless for serving RPC is exactly right for one manual payment.\n\n"
+
+    "WHAT IS MISSING IS A STABLE ADDRESS TO SEND TO. This harness generates its keys per run "
+    "and never prints them, so the address changes every time. Deriving them from a seed in an "
+    "environment variable would fix that: the harness prints the ADDRESS (not a secret), you "
+    "fund it once from the GUI, and every later run reuses it with the wallet untouched.\n\n"
+
+    "THAT IS A PROPOSAL AND IT IS NOT BUILT. It changes how a fund path gets its coins, so it "
+    "is yours to decide, not this harness's to ship. Nothing above is available as a flag today."
+)
+
 STAKING_ONLY_REMEDY = (
     "A staking-only unlock cannot CREATE a transaction, and every route around it is closed: "
     "`sendtoaddress` goes through SendMoney() (wallet.cpp:4325, the -4 path), "
@@ -1092,6 +1140,80 @@ def is_staking_only_refusal(exc: RPCError) -> bool:
         return False
     code = rpc_code_of(exc)
     return code is None or code in STAKING_ONLY_RPC_CODES
+
+
+# A STRING THAT CANNOT BE A PRIVATE KEY, used to find out which BRANCH signrawtransaction
+# takes without ever creating or transmitting one. See probe_supplied_key_signing().
+#
+# Deliberately not a corrupted WIF: it has to fail DecodeSecret for a reason no reader could
+# mistake for "we nearly sent a key". Nothing on any chain could decode this to a scalar.
+NOT_A_PRIVATE_KEY = "this-string-is-not-a-private-key-and-cannot-decode-to-one"
+
+
+def probe_supplied_key_signing(run: Run) -> str:
+    """Can this daemon sign with keys WE supply, bypassing the wallet's unlock entirely?
+
+    "open", "closed", or "undetermined".
+
+    WHY THIS IS THE QUESTION THAT MATTERS. Read at Gridcoin master, src/rpc/rawtransaction.cpp
+    2769-2788: signrawtransaction chooses its keystore on ARGUMENT PRESENCE ALONE, before any
+    lock check --
+
+        if (params.size() > 2 && !params[2].isNull()) {
+            CBasicKeyStore tempKeystore;                               <- our keys
+            ... DecodeSecret, AddKey ...
+            return SignRawTransactionHelper(..., tempKeystore, ...);   <- NO unlock check
+        } else {
+            EnsureWalletIsUnlocked();                    <- the -13 the operator keeps hitting
+            return SignRawTransactionHelper(..., *pwalletMain, ...);
+        }
+
+    So a caller that brings its own keys never reaches the unlock check. If that holds on the
+    operator's build, THE WALLET IS ONLY NEEDED FOR ONE THING -- moving coins to an address this
+    harness holds the key for -- and everything after that (build, sign, broadcast) runs against
+    a staking-only wallet untouched. Their staking never stops and their unlock deadline is
+    never discarded, which is what the whole STAKING_ONLY_REMEDY above is apologising for.
+
+    AND IT IS PROBED WITH A STRING THAT IS NOT A KEY. The branch is selected before the key is
+    validated, so an obviously-invalid one separates the two paths by which error comes back:
+
+        "Invalid private key"      the with-keys branch was taken -> the route is OPEN
+        "...staking only..."       the else branch was taken -> CLOSED on this build
+
+    Nothing is generated, nothing that could ever hold value crosses the socket, and nothing is
+    signed or broadcast. That matters more than the convenience: this repository does not move,
+    copy or read back keys, and a probe that had to mint a real one to ask a question would be
+    buying its answer with the thing the rule protects.
+
+    UNDETERMINED IS A REAL ANSWER (rule 17). Their v5.5.1.0 is older than the source above, so a
+    build whose signrawtransaction has a different shape lands here rather than being guessed at.
+    """
+    try:
+        probe = chain.build_unsigned(
+            asset=run.asset,
+            spends=chain.Outpoint(txid="ff" * 32, vout=0, value_satoshis=100_000_000),
+            outputs=[(99_000_000, bytes([0x6A]))],
+            locktime=0,
+            ntime=PROBE_NTIME if run.asset == "GRC" else None,
+        )
+        probe_hex = probe.serialize().hex()
+    except Exception as exc:  # noqa: BLE001 -- checked: failing to BUILD the probe means "could not ask", which is the "undetermined" this function documents. It never becomes a verdict about the daemon, and it is reported on screen rather than swallowed.
+        run.say(f"supplied-key probe could not be built ({type(exc).__name__}: {exc}); undetermined")
+        return "undetermined"
+    try:
+        run.node().call("signrawtransaction", probe_hex, [], [NOT_A_PRIVATE_KEY])
+    except RPCError as exc:
+        text = str(exc).lower()
+        if "invalid private key" in text:
+            return "open"
+        if is_staking_only_refusal(exc):
+            return "closed"
+        run.say(f"supplied-key probe answered something else ({exc}); undetermined")
+        return "undetermined"
+    # No error at all means the daemon accepted a string that cannot be a key, which says
+    # nothing about the branch and must not be read as either answer.
+    run.say("supplied-key probe: the daemon accepted a non-key without complaint; undetermined")
+    return "undetermined"
 
 
 def probe_wallet_unlock_scope(run: Run) -> str:

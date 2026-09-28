@@ -39,6 +39,7 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
+import base58
 import pytest
 from chains.base import RPCError
 from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
@@ -1223,3 +1224,91 @@ def test_a_precondition_refusal_is_NOT_listed_among_unexpected_failures():
     assert outcome.setup_refusal, "and the chain must still be marked as having established nothing"
     assert not outcome.established()
     assert "STAKING ONLY" in stream.getvalue(), "while still being printed, loudly (rule 14)"
+
+
+# ---------------------------------------------------------------------------------------
+# THE SUPPLIED-KEY BRANCH: is the wallet needed at all?
+#
+# signrawtransaction picks its keystore on ARGUMENT PRESENCE, before any lock check
+# (rawtransaction.cpp:2769-2788). A caller bringing its own keys never reaches
+# EnsureWalletIsUnlocked -- so if that branch is reachable on the operator's build, the wallet
+# is needed only to move coins to an address the harness holds, and the whole staking-only
+# problem shrinks to one manual payment their GUI can make safely.
+#
+# Probed with a string that CANNOT be a key, because the branch is chosen before the key is
+# validated. Nothing is generated and nothing that could hold value crosses the socket.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_probe_reads_INVALID_PRIVATE_KEY_as_the_route_being_open(console, monkeypatch):
+    """The with-keys branch was reached: DecodeSecret rejected our non-key, which it can only
+    have done AFTER choosing that branch. EnsureWalletIsUnlocked was never consulted."""
+    run, node = _run_with(
+        console, monkeypatch,
+        {"signrawtransaction": _raises(_rpc_error(
+            "signrawtransaction: code=-5 message=Invalid private key"))},
+        asset="GRC",
+    )
+    assert adaptor_steps.probe_supplied_key_signing(run) == "open"
+    method, params = node.calls[-1]
+    assert method == "signrawtransaction"
+    assert params[2] == [adaptor_steps.NOT_A_PRIVATE_KEY], (
+        "the third argument is what selects the branch; without it the probe asks nothing"
+    )
+
+
+def test_the_probe_transmits_NOTHING_that_could_ever_be_a_key(console, monkeypatch):
+    """THE PROPERTY THAT MAKES THIS PROBE ACCEPTABLE AT ALL. swap_terminal does not move, copy
+    or read back keys. A probe that minted a real one to ask a question would be buying its
+    answer with the thing that rule protects -- so the string is asserted to be undecodable,
+    not merely 'a throwaway'."""
+    candidate = adaptor_steps.NOT_A_PRIVATE_KEY
+    with pytest.raises(ValueError):
+        base58.b58decode_check(candidate)
+    assert len(candidate) != 51 and len(candidate) != 52, (
+        "and it is not even WIF-shaped, so no reader can mistake it for a near-miss"
+    )
+    assert "-" in candidate, "it reads as prose, not as an encoding"
+
+
+def test_the_probe_reads_the_staking_only_refusal_as_the_route_being_closed(console, monkeypatch):
+    """If the else branch was taken despite keys being supplied, this build does not have the
+    shape read at master and the route is not available."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"signrawtransaction": _raises(_rpc_error(
+            "signrawtransaction: code=-13 message=Error: Wallet is unlocked for staking only."))},
+        asset="GRC",
+    )
+    assert adaptor_steps.probe_supplied_key_signing(run) == "closed"
+
+
+@pytest.mark.parametrize("answer", [
+    "signrawtransaction: code=-22 message=TX decode failed",
+    "signrawtransaction: code=-32601 message=Method not found",
+])
+def test_any_other_answer_is_UNDETERMINED_and_never_a_verdict(console, monkeypatch, answer):
+    """rule 17: their v5.5.1.0 is older than the source this was read from, so a build with a
+    different shape must land on 'I could not tell' rather than on either answer."""
+    run, _ = _run_with(console, monkeypatch, {"signrawtransaction": _raises(_rpc_error(answer))},
+                       asset="GRC")
+    assert adaptor_steps.probe_supplied_key_signing(run) == "undetermined"
+
+
+def test_a_daemon_that_accepts_a_non_key_without_complaining_is_UNDETERMINED(console, monkeypatch):
+    """Silence says nothing about which branch ran, and must not be read as success. Without
+    this the probe would report 'open' for a stub that answered anything at all."""
+    run, _ = _run_with(console, monkeypatch, {"signrawtransaction": {"hex": "00", "complete": False}},
+                       asset="GRC")
+    assert adaptor_steps.probe_supplied_key_signing(run) == "undetermined"
+
+
+def test_the_route_text_says_plainly_that_it_is_NOT_BUILT():
+    """The worst outcome here is an operator reading a measured possibility as a feature and
+    going to look for the flag. Rule 16: this changes how a fund path gets its coins, so it is
+    a proposal and has to say so."""
+    route = adaptor_steps.SUPPLIED_KEY_ROUTE
+    assert "NOT IMPLEMENTED" in route or "is not built" in route.lower()
+    assert "proposal" in route.lower()
+    assert "yours to decide" in route.lower(), "and whose call it is"
+    assert "not available as a flag" in route.lower() or "as a flag today" in route.lower()
