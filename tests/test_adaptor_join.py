@@ -521,3 +521,36 @@ def test_a_daemon_that_will_not_say_does_NOT_turn_into_a_refusal(monkeypatch):
     for answer in ([{"allowed": True}], [], "not a list", [{"allowed": False}]):
         run = _funding_run(monkeypatch, answer)
         adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+
+
+def test_split_operator_funding_ASKS_BEFORE_IT_SENDS(monkeypatch):
+    """PINS THE CALL SITE, not just the gate.
+
+    Removing the `refuse_if_the_funding_is_already_spent(...)` line from
+    `split_operator_funding` killed no test when it was tried with tools/mutate.py -- the gate
+    was covered and the wiring was not, which is the same shape as the adaptor mutant that
+    survived earlier in this file.
+
+    The stub here REFUSES to answer `sendrawtransaction` at all, so the assertion is that the
+    broadcast never happens rather than that an exception happened to be raised first. That
+    distinction is the whole point of asking testmempoolaccept: a check that runs after the send
+    is not a check, it is a report.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=350_000_000)
+    sent: list[str] = []
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "testmempoolaccept":
+                return [{"allowed": False, "reject-reason": "bad-txns-inputs-missingorspent"}]
+            sent.append(method)
+            raise AssertionError(f"{method} must not be reached -- the funding is already spent")
+
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+
+    with pytest.raises(adaptor_steps.RegtestSetupError):
+        adaptor_steps.split_operator_funding(run, key, source, [generate_key(), generate_key()])
+
+    assert sent == [], f"nothing may reach the daemon beyond the question, but {sent} did"
