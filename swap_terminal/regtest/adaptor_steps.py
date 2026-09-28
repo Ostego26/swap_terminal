@@ -2133,6 +2133,21 @@ def broadcast_and_report(run: Run, raw_hex: str, label: str) -> tuple[str | None
     try:
         txid = run.node().call("sendrawtransaction", raw_hex)
     except RPCError as exc:
+        # THE BYTES AND WHERE THE REASON IS. Gridcoin answers `-22 TX rejected` and names
+        # nothing, and `testmempoolaccept` -- which would name it -- does not exist on this
+        # daemon (measured 2026-09-28, `code=-32601 Method not found`). But every refusal path
+        # in AcceptToMemoryPool goes through `error(...)`, and src/logging.h writes that to
+        # debug.log as "ERROR: ..." unconditionally, with no debug category to enable. So the
+        # answer already exists on the operator's disk and nothing here was telling them to look.
+        #
+        # The raw hex is printed too. It carries no key -- a signed transaction is public by
+        # construction, which is the whole point of broadcasting it -- and it is the only way to
+        # decode elsewhere what this daemon refused. A refusal that cannot be reproduced off the
+        # host is a refusal that has to be re-provoked to be studied.
+        run.say("REFUSED. The daemon logged the reason even though it did not return it. Look with:")
+        run.say(f"  grep -a ERROR {run.config.datadir}/testnet/debug.log | tail -20")
+        run.say(f"  (or {run.config.datadir}/debug.log if that path does not exist)")
+        run.say(f"the refused bytes, which carry no key and can be decoded anywhere: {raw_hex}")
         return None, str(exc)
     return txid, "accepted"
 
