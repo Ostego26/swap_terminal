@@ -260,18 +260,122 @@ def test_one_positive_signal_is_enough_and_it_says_which(console, monkeypatch):
     assert "getinfo" in node.methods_called()
 
 
-@pytest.mark.parametrize("chain_value", ["test", "testnet", "regtest", "signet"])
-def test_every_accepted_chain_value_is_a_test_network(console, monkeypatch, chain_value):
-    run, _ = _run_with(console, monkeypatch, {"getblockchaininfo": {"chain": chain_value}}, asset="GRC")
+# ---------------------------------------------------------------------------
+# THE NETWORK SIGNALS, AFTER 2026-09-28.
+#
+# Two tests here used to seed {"getblockchaininfo": {"chain": "test"}} and assert it was
+# accepted. THAT RESPONSE SHAPE DOES NOT EXIST ON GRIDCOIN AT ANY VERSION, so they were
+# testing a fiction and they passed. Gridcoin's getblockchaininfo pushes exactly eight fields
+# -- blocks, in_sync, moneysupply, difficulty{current,target}, testnet, errors -- and `chain`
+# is not among them; `grep '"chain"' src/rpc/blockchain.cpp` over Gridcoin master finds
+# nothing. The live run proved it from the other end: `FAIL getblockchaininfo.chain:
+# got=(none)` with no RPCError attached, which means the call SUCCEEDED and the key was
+# simply absent.
+#
+# Deleted rather than adapted (rule 2: git history is the archive), and replaced by tests of
+# what is now true -- the key that exists, the absence that must not be a FAIL, and the
+# contradiction that must refuse.
+# ---------------------------------------------------------------------------
+
+
+def test_the_field_gridcoin_actually_carries_is_the_one_probed(console, monkeypatch):
+    """getblockchaininfo.testnet -- field 13 of Gridcoin's own getblockchaininfo,
+    `res.pushKV("testnet", OnTestnet())`. Probing `.chain` asked the right METHOD for a key
+    this family does not have while the same response carried the answer."""
+    run, node = _run_with(
+        console, monkeypatch, {"getblockchaininfo": {"testnet": True}}, asset="GRC"
+    )
     adaptor_steps.assert_test_network(run)
+    assert "getblockchaininfo" in node.methods_called()
+    assert console.counts[FAIL] == 0, "a daemon on testnet must produce no FAIL here"
+    assert "chain" not in [key for _, key, _ in adaptor_steps.TEST_NETWORK_SIGNALS], (
+        "`chain` came back into the signal table; Gridcoin's getblockchaininfo has no such key"
+    )
+
+
+def test_a_field_the_daemon_does_not_carry_is_SKIP_and_never_FAIL(console, monkeypatch):
+    """THE DEFECT THAT ENDED THE FIRST GRC RUN'S EXIT CODE AT 1 ON A CORRECT DAEMON. The
+    method answers, the key is absent, nothing failed and nothing was learned -- that is a
+    third outcome, and collapsing it into FAIL puts a non-problem in the operator's
+    "unexpected failures" list. Rule 14 in the other direction: a reader who learns to skim
+    past FAILs is how twelve `exit_code=0` cycles beside "skipping" survived a deploy."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        # getblockchaininfo answers, WITHOUT the probed key. getinfo carries the positive.
+        {"getblockchaininfo": {"blocks": 3295729, "in_sync": True}, "getinfo": {"testnet": True}},
+        asset="GRC",
+    )
+    adaptor_steps.assert_test_network(run)
+    assert console.counts[FAIL] == 0, (
+        "an absent field is not a failure; this is the getblockchaininfo.chain defect"
+    )
+    assert console.counts[SKIP] >= 1, "and it must still be REPORTED -- silence is a defect"
+
+
+def test_a_response_that_is_not_a_dict_is_also_SKIP(console, monkeypatch):
+    """Same class, different shape: a daemon answering a scalar where a dict was expected has
+    told us nothing, not told us we are on mainnet."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"getblockchaininfo": 3295729, "getmininginfo": {"testnet": True}},
+        asset="GRC",
+    )
+    adaptor_steps.assert_test_network(run)
+    assert console.counts[FAIL] == 0
+
+
+def test_a_daemon_that_says_MAINNET_is_refused_even_while_saying_testnet(console, monkeypatch):
+    """THE HOLE THIS CLOSES IS A LIVE-MONEY ONE. The aggregate check passes when any signal is
+    positive, so before this a daemon whose getblockchaininfo said testnet=False while its
+    getinfo said testnet=True would have scored one FAIL, one OK, AND PROCEEDED TO BROADCAST.
+    The three signals read three different code paths and a proxied or half-migrated daemon
+    can disagree with itself. Gridcoin MAINNET holds the operator's live staking balance, so
+    "something said testnet" and "nothing said mainnet" are different claims and only the
+    second one makes it safe to send."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"getblockchaininfo": {"testnet": False}, "getinfo": {"testnet": True}},
+        asset="GRC",
+    )
+    with pytest.raises(RegtestSetupError, match="POSITIVELY STATED MAINNET"):
+        adaptor_steps.assert_test_network(run)
+
+
+def test_the_mainnet_refusal_names_the_contradiction_not_just_the_mainnet_signal(console, monkeypatch):
+    """An operator who sees only "said mainnet" checks the port. One who sees "said mainnet
+    while also saying testnet" knows the daemon itself is the problem. Rule 14: the message
+    has to carry what the reader needs to act, and these are different actions."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"getblockchaininfo": {"testnet": False}, "getinfo": {"testnet": True}},
+        asset="GRC",
+    )
+    with pytest.raises(RegtestSetupError) as caught:
+        adaptor_steps.assert_test_network(run)
+    message = str(caught.value)
+    assert "contradicts itself" in message
+    assert "getinfo.testnet=True" in message, "the conflicting positive is named"
+    assert "getblockchaininfo.testnet=False" in message, "and so is the mainnet statement"
+
+
+def test_a_daemon_that_ONLY_says_mainnet_is_refused_without_a_contradiction_claim(console, monkeypatch):
+    """And the other half: with no positive to contradict, the message must not claim one."""
+    run, _ = _run_with(
+        console, monkeypatch, {"getblockchaininfo": {"testnet": False}}, asset="GRC"
+    )
+    with pytest.raises(RegtestSetupError) as caught:
+        adaptor_steps.assert_test_network(run)
+    assert "contradicts itself" not in str(caught.value)
+    assert "Nothing was built" in str(caught.value)
 
 
 def test_the_gridcoin_path_never_demands_chain_equals_regtest(console, monkeypatch):
     """Gridcoin has NO regtest mode, so daemons.assert_regtest() could never pass there. The
     second refusal exists because weakening the one that already guards BTC and LTC would be
-    the wrong fix."""
-    run, _ = _run_with(console, monkeypatch, {"getblockchaininfo": {"chain": "test"}}, asset="GRC")
+    the wrong fix. Re-seeded with the field Gridcoin actually carries."""
+    run, _ = _run_with(console, monkeypatch, {"getinfo": {"testnet": True}}, asset="GRC")
     adaptor_steps.assert_test_network(run)
+    assert console.counts[FAIL] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +646,19 @@ def test_the_gridcoin_lock_state_is_REPORTED_and_never_asserted(console, monkeyp
         console.counts[OK] = 0
         run, _ = _run_with(console, monkeypatch, {"getwalletinfo": {"unlocked_until": unlocked_until}}, asset="GRC")
         adaptor_steps._report_gridcoin_lock_state(run)
-        assert console.counts[SKIP] == 1, f"unlocked_until={unlocked_until} must still be SKIP"
+        # THE INVARIANT IS ABOUT THE VALUE, NOT THE CHECK COUNT. This line read `== 1`
+        # because the value's SKIP was the only check in this function. Since 2026-09-28 a
+        # SECOND check follows it -- probe_wallet_unlock_scope(), which asks BEHAVIORALLY what
+        # the docstring above correctly says no state query can report. Against this stub
+        # (which has no signrawtransaction answer) the probe returns "undetermined", itself a
+        # SKIP, so the count is 2. The invariant the test exists for is untouched and is
+        # asserted on the next line: `unlocked_until` is never scored OK, because a non-zero
+        # value is exactly as consistent with a staking-only unlock that CANNOT send as with a
+        # full one that can.
+        assert console.counts[SKIP] >= 1, (
+            f"unlocked_until={unlocked_until} must still be REPORTED -- rule 14, a value "
+            f"nobody prints is a value nobody can act on"
+        )
         assert console.counts[OK] == 0, "an unlocked wallet must not be reported as a pass"
 
 
@@ -750,3 +866,160 @@ def test_the_announcement_reaches_a_gridcoin_run_in_a_mixed_chain_set():
     _entry_point()._announce_wall_clock(console, ["LTC", "GRC"])
 
     assert "CANNOT BE TOLD TO PRODUCE A BLOCK" in stream.getvalue()
+
+
+# ---------------------------------------------------------------------------------------
+# THE STAKING-ONLY UNLOCK: A DIAGNOSED CONDITION MUST NOT ARRIVE AS AN UNHANDLED EXCEPTION.
+#
+# Measured on the operator's Gridcoin testnet daemon, 2026-09-28. The harness printed the
+# hazard in prose at step 5 --
+#
+#   "a staking-only unlock CANNOT send (rpc -13) ... the funding send in step 6 is the test"
+#
+# -- and then, when exactly that occurred, reported it as
+#
+#   FAIL  GRC run: got=RPCError: sendtoaddress: code=-4 message=Error: Wallet unlocked for
+#         staking only, unable to create transaction. (HTTP 500)  expected=no unhandled exception
+#
+# "No unhandled exception" is the wrong thing to have expected: the harness itself predicted
+# this one. Eight decisive 2-of-2 outcomes went to SKIP and the operator's summary named a
+# stack-trace class instead of the remedy.
+#
+# The -13 in that prose was also the wrong site. BOTH codes are real:
+#   -4  RPC_WALLET_ERROR, from SendMoney() returning an error string (wallet/wallet.cpp) --
+#       this is the one sendtoaddress takes, and the one the daemon actually gave.
+#   -13 RPC_WALLET_UNLOCK_NEEDED, thrown by EnsureWalletIsUnlocked() (wallet/rpcwallet.cpp),
+#       with DIFFERENT wording: "Wallet is unlocked for staking only."
+# ---------------------------------------------------------------------------------------
+
+
+def _rpc_error(message: str) -> RPCError:
+    """An RPCError shaped the way the harness's own client raises them.
+
+    NO `.code` ATTRIBUTE IS SET, and that is the point rather than laziness:
+    `chains/base.RPCError` is a bare `class RPCError(Exception)` with no fields, so a real one
+    never has one and the code lives inside the message string. A test that attached a `.code`
+    would be testing a shape the tree does not produce -- the same defect as the two tests
+    above that seeded a `getblockchaininfo.chain` Gridcoin never returns.
+    """
+    return RPCError(message)
+
+
+def _raises(exc: BaseException):
+    """A StubNode answer that RAISES. The stub returns a value or calls a callable, so an
+    exception object handed to it straight would be RETURNED, and the test would pass while
+    never exercising the handler it exists for."""
+    def answer(*_params):
+        raise exc
+    return answer
+
+
+def _grc_setup() -> adaptor_steps.LockSetup:
+    """A real LockSetup with distinct keys, built by the real key generator."""
+    alice, bob = generate_key(), generate_key()
+    script = two_of_two_redeem_script(alice.public_key, bob.public_key)
+    return adaptor_steps.LockSetup(
+        label="S -- staking-only test", alice=alice, bob=bob,
+        lock_script=script, cancel_script=script,
+    )
+
+
+def test_both_rpc_error_spellings_yield_the_same_code():
+    """TWO PRODUCERS, TWO SPELLINGS, ONE VALUE. regtest/daemons.py:437 writes `code=-4` and
+    chains/base.py:119 writes `(rpc code -4)`. A reader that knew one would silently return
+    None for the other, and None means "undetermined" -- so half the surface would have fallen
+    through to the message-only branch without anyone noticing."""
+    assert adaptor_steps.rpc_code_of(_rpc_error(
+        "sendtoaddress: code=-4 message=Error: something (HTTP 500)")) == -4
+    assert adaptor_steps.rpc_code_of(_rpc_error("Error: something (rpc code -4)")) == -4
+    assert adaptor_steps.rpc_code_of(_rpc_error("Error: something (rpc code -13)")) == -13
+
+
+def test_an_error_stating_no_code_reads_as_UNDETERMINED_not_zero():
+    """rule 17 in a helper: "it does not say" and "it says 0" are different facts and must not
+    share a value."""
+    assert adaptor_steps.rpc_code_of(_rpc_error("Connection refused")) is None
+    assert adaptor_steps.rpc_code_of(_rpc_error("code=0 message=x")) == 0, (
+        "and a stated zero really is zero"
+    )
+
+
+def test_the_code_the_daemon_ACTUALLY_returned_is_recognized():
+    """-4, verbatim from the operator's daemon on 2026-09-28. A handler that knew only -13
+    would have let this through as an unhandled exception, which is precisely what happened."""
+    assert adaptor_steps.is_staking_only_refusal(_rpc_error(
+        "sendtoaddress: code=-4 message=Error: Wallet unlocked for staking only, "
+        "unable to create transaction. (HTTP 500)"))
+
+
+def test_the_other_site_is_recognized_too():
+    """-13 from EnsureWalletIsUnlocked, with its own different wording. Both sites exist and a
+    handler that knows one knows half the surface."""
+    assert adaptor_steps.is_staking_only_refusal(_rpc_error(
+        "signrawtransaction: code=-13 message=Error: Wallet is unlocked for staking only."))
+
+
+def test_an_unrelated_wallet_error_is_NOT_called_a_staking_only_unlock():
+    """WHY THE MESSAGE IS MATCHED AND NOT JUST THE CODE. -4 is RPC_WALLET_ERROR, documented in
+    Gridcoin's protocol.h as "Unspecified problem with wallet (key not found etc.)" -- it
+    covers far more than this. Keying off -4 alone would tell an operator to unlock a wallet
+    that is already unlocked, while the real fault went unnamed."""
+    assert not adaptor_steps.is_staking_only_refusal(_rpc_error(
+        "sendtoaddress: code=-4 message=Error: Insufficient funds"))
+    assert not adaptor_steps.is_staking_only_refusal(_rpc_error(
+        "sendtoaddress: code=-4 message=Error: Private key not found"))
+
+
+def test_a_locked_wallet_is_not_mistaken_for_a_staking_only_one():
+    """Different condition, different remedy sentence, and the same -13 code. The message is
+    what separates them."""
+    assert not adaptor_steps.is_staking_only_refusal(_rpc_error(
+        "code=-13 message=Error: Please enter the wallet passphrase with walletpassphrase first."))
+
+
+def test_the_funding_send_raises_a_NAMED_precondition_not_a_bare_RPCError(console, monkeypatch):
+    """THE FIX, ASSERTED BEHAVIORALLY. run_chain() has two handlers: RegtestSetupError is "a
+    named precondition failed and the message carries the fix", and a bare Exception becomes
+    `FAIL ... expected=no unhandled exception`. A staking-only unlock belongs in the first."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"sendtoaddress": _raises(_rpc_error(
+            "sendtoaddress: code=-4 message=Error: Wallet unlocked for staking only, "
+            "unable to create transaction. (HTTP 500)"))},
+        asset="GRC",
+    )
+    with pytest.raises(RegtestSetupError) as caught:
+        adaptor_steps.fund_and_prepare(run, _grc_setup())
+    message = str(caught.value)
+    assert "STAKING-ONLY" in message
+    assert "walletpassphrase" in message, "the remedy names the command"
+    assert "NO third argument" in message, "and the part that actually matters about it"
+    assert "TESTNET" in message and "mainnet" in message, (
+        "the operator has two wallets and only one of them is in scope; the message must say so"
+    )
+    assert "Nothing was funded" in message, "rule 14: say what did NOT happen, too"
+
+
+def test_a_real_send_failure_is_still_an_unhandled_exception(console, monkeypatch):
+    """THE MUTANT THIS KILLS: catching every RPCError at the send site and calling it
+    staking-only. Insufficient funds is a genuine defect in the run's setup and must NOT be
+    dressed up as a wallet-lock remedy -- it would send the operator to unlock a wallet that
+    is already unlocked while the real fault went unreported."""
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"sendtoaddress": _raises(_rpc_error("sendtoaddress: code=-6 message=Insufficient funds"))},
+        asset="GRC",
+    )
+    with pytest.raises(RPCError, match="Insufficient funds"):
+        adaptor_steps.fund_and_prepare(run, _grc_setup())
+
+
+def test_the_remedy_never_contains_a_passphrase_or_a_command_carrying_one():
+    """swap_terminal's standing rule: never move, copy or read back a credential, and never put
+    one where argv can be read -- /proc and `ps` are world-readable. The remedy names
+    `walletpassphrase` and leaves the secret to the operator to type, with a placeholder."""
+    remedy = adaptor_steps.STAKING_ONLY_REMEDY
+    assert "<your passphrase>" in remedy, "a placeholder, never a value"
+    assert "stakingonly" in remedy, "and it says which argument to leave OFF"
+    for leak in ("dumpprivkey", "walletpassphrase <pass>", "--rpcpassword", "rpcpassword="):
+        assert leak not in remedy, f"the remedy must not contain {leak!r}"

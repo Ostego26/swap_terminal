@@ -85,6 +85,7 @@ hashlock, so the most dangerous value in the HTLC path does not exist here at al
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -173,10 +174,50 @@ def expected_grc_seconds() -> float:
 # reported -- a pasted run has to show which answered, because "the daemon said testnet"
 # and "nothing contradicted testnet" are different claims and only the first is evidence.
 TEST_NETWORK_SIGNALS = (
-    ("getblockchaininfo", "chain", ("regtest", "test", "testnet", "signet")),
+    ("getblockchaininfo", "testnet", (True,)),
     ("getinfo", "testnet", (True,)),
     ("getmininginfo", "testnet", (True,)),
 )
+
+# A POSITIVE STATEMENT OF MAINNET, per signal. Not the complement of the accepted values:
+# an ABSENT field says nothing, and `None not in ("test",...)` would read absence as mainnet.
+# These are the values that mean the daemon SAID mainnet, and any one of them refuses the run
+# even when another signal says testnet -- see step_2's contradiction refusal.
+#
+# The strings are Gridcoin's own, read off chainparamsbase.cpp:13-15 rather than recalled:
+# CBaseChainParams::MAIN is "main", TESTNET is "test", REGTEST is "regtest". `OnTestnet()`
+# returns a bool, so False is the mainnet statement for the two `testnet` keys.
+MAINNET_STATEMENTS = {
+    ("getblockchaininfo", "testnet"): (False,),
+    ("getinfo", "testnet"): (False,),
+    ("getmininginfo", "testnet"): (False,),
+}
+
+# `getblockchaininfo.chain` WAS THE FIRST SIGNAL IN THAT TABLE AND IT COULD NEVER ANSWER.
+# It is deleted rather than left to report SKIP forever (rule 2: git history is the archive; a
+# probe kept "for reference" is one every reader has to reason about).
+#
+# Measured 2026-09-28 against the operator's Gridcoin testnet daemon, and then explained by
+# reading Gridcoin's own source:
+#
+#   FAIL  GRC getblockchaininfo.chain: got=(none)  expected=one of ('regtest','test','testnet','signet')
+#
+# `got=(none)` rather than `got=(none: <RPCError>)` proves the call SUCCEEDED and the response
+# simply had no `chain` key. Gridcoin master's getblockchaininfo (src/rpc/blockchain.cpp)
+# pushes exactly eight fields -- blocks, in_sync, moneysupply, difficulty{current,target},
+# testnet, errors -- and `chain` is not among them at any version. `grep '"chain"'` over that
+# whole file finds nothing.
+#
+# So the harness was asking the right METHOD for a key this family does not have, WHILE THE
+# SAME RESPONSE CARRIED THE ANSWER: field 13 of that function is
+# `res.pushKV("testnet", OnTestnet())`. Probing `.testnet` instead turns a permanent FAIL into
+# a third genuine positive signal, which is strictly better than reporting it as SKIP.
+#
+# That FAIL was one of the two lines in the run's "unexpected failures" list and part of why it
+# exited 1 -- on a daemon that was correctly on testnet and said so twice. A non-problem
+# reported as FAIL is rule 14's defect running in the other direction: it trains the reader to
+# skim past FAILs, which is exactly how the twelve `exit_code=0` cycles beside "skipping" went
+# unnoticed for a deploy.
 
 # Gridcoin's own GUI/daemon environment names, which this tree already reads in
 # config.py. Reused rather than a fourth set invented, and there is NO DEFAULT PORT:
@@ -459,17 +500,56 @@ def assert_test_network(run: Run) -> dict:
     run.say(f"port {run.config.port} is not Gridcoin mainnet's {GRC_MAINNET_PORT}, but a PORT IS NOT PROOF")
     run.say(f"asking the daemon itself, {len(TEST_NETWORK_SIGNALS)} ways; at least one must SAY a test network")
     positives: list[str] = []
+    mainnet_statements: list[str] = []
     for method, key, accepted in TEST_NETWORK_SIGNALS:
         try:
             answer = node.call(method)
         except RPCError as exc:
+            # The method does not exist on this daemon family, or the call failed. SKIP, not
+            # FAIL: `uptime` taught this repository the difference on 2026-09-28 and it cost a
+            # run against a daemon that was up (see daemons.LIVENESS_PROBES).
             run.check(f"{method}.{key}", f"(none: {exc})", f"one of {accepted}", SKIP)
             continue
-        value = answer.get(key) if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or key not in answer:
+            # THE METHOD ANSWERED AND THE FIELD IS ABSENT. That is a third outcome and it is
+            # neither of the other two: nothing failed, and nothing was learned. SKIP says so.
+            # Collapsing it into FAIL is what put `getblockchaininfo.chain` in the run's
+            # "unexpected failures" list on a correctly-configured testnet daemon.
+            shape = "not a dict" if not isinstance(answer, dict) else f"no {key!r} key"
+            run.check(f"{method}.{key}", f"(absent: {shape})", f"one of {accepted}", SKIP)
+            continue
+        value = answer[key]
+        if value in MAINNET_STATEMENTS.get((method, key), ()):
+            # A POSITIVE STATEMENT OF MAINNET, and it refuses the run below even if another
+            # signal says testnet. Recorded as FAIL here so the line is in the summary too.
+            run.check(f"{method}.{key}", value, f"one of {accepted}", FAIL)
+            mainnet_statements.append(f"{method}.{key}={value!r}")
+            continue
         good = value in accepted
         run.check(f"{method}.{key}", value, f"one of {accepted}", OK if good else FAIL)
         if good:
             positives.append(f"{method}.{key}={value!r}")
+    if mainnet_statements:
+        # A CONTRADICTION REFUSES, AND THIS IS NOT BELT-AND-BRACES. Before this, the aggregate
+        # below passed whenever `positives` was non-empty -- so a daemon whose
+        # getblockchaininfo said mainnet while its getinfo said testnet=True would have
+        # recorded one FAIL, one OK, AND PROCEEDED TO BROADCAST. That is reachable: the three
+        # signals read three different code paths, and a half-migrated or proxied daemon can
+        # disagree with itself. This harness broadcasts, and Gridcoin mainnet holds the
+        # operator's live staking balance, so the two claims "something said testnet" and
+        # "nothing said mainnet" are not interchangeable here -- and only the SECOND one makes
+        # it safe to send. There is no flag to override this either.
+        raise RegtestSetupError(
+            f"REFUSING TO RUN: the Gridcoin daemon at {run.config.base_url} POSITIVELY STATED "
+            f"MAINNET through {mainnet_statements}"
+            + (f", while also stating a test network through {positives}. A daemon that "
+               f"contradicts itself about which network it is on is refused rather than "
+               f"resolved: this harness broadcasts, and one of the two answers is wrong."
+               if positives else
+               ". Nothing was built, nothing was funded and nothing was broadcast.")
+            + f" Gridcoin MAINNET is port {GRC_MAINNET_PORT} and holds the operator's staking "
+              f"balance; this run was pointed at port {run.config.port}."
+        )
     if not positives:
         raise RegtestSetupError(
             f"REFUSING TO RUN: the Gridcoin daemon at {run.config.base_url} did not SAY it is on a test "
@@ -682,9 +762,30 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         SKIP,
     )
     run.say(
-        "a staking-only unlock CANNOT send (rpc -13). Nothing available over RPC separates it from a "
-        "full unlock, so this is reported and not asserted; the funding send in step 6 is the test"
+        "no Gridcoin RPC reports the unlock SCOPE back -- getwalletinfo pushes ten fields and "
+        "unlocked_until is the only lock field among them (verified against Gridcoin's source "
+        "2026-09-28, src/wallet/rpcwallet.cpp) -- so the value above cannot say whether this "
+        "unlock may send. Asking behaviorally instead:"
     )
+    scope = probe_wallet_unlock_scope(run)
+    run.check(
+        "GRC unlock scope, probed by an unsignable transaction that is never broadcast",
+        scope, "can-sign (staking-only cannot fund; undetermined means ask again at the send)",
+        OK if scope == "can-sign" else SKIP if scope == "undetermined" else FAIL,
+    )
+    if scope == "staking-only":
+        raise RegtestSetupError(
+            f"GRC: this wallet is unlocked FOR STAKING ONLY. {STAKING_ONLY_REMEDY}"
+        )
+    if scope == "locked":
+        raise RegtestSetupError(
+            f"GRC: this wallet is LOCKED, so it can neither stake nor send. {STAKING_ONLY_REMEDY}"
+        )
+    if scope == "undetermined":
+        run.say(
+            "the probe could not tell, which is a real answer and not a pass (rule 17). Carrying "
+            "on: the funding send below is the test, and it names the remedy if it refuses"
+        )
 
 
 @dataclass
@@ -744,6 +845,211 @@ def step_4_build_scripts(run: Run) -> tuple[LockSetup, LockSetup]:
     return setups[0], setups[1]
 
 
+# THE STAKING-ONLY UNLOCK, WHICH IS THE CONDITION THAT ENDED THE 2026-09-28 GRC RUN, AND THE
+# TWO ERROR CODES IT ARRIVES AS. Read off Gridcoin's source, not recalled:
+#
+#   RPC_WALLET_ERROR         = -4   src/rpc/protocol.h:131
+#   RPC_WALLET_UNLOCK_NEEDED = -13  src/rpc/protocol.h:135
+#
+# BOTH are reachable for this one condition, from two different sites, and a handler that knows
+# only one of them misses half the surface:
+#
+#   -4   src/wallet/wallet.cpp:4325-4330. `SendMoney()` checks IsUnlockedForStakingOnly() and
+#        RETURNS AN ERROR STRING -- "Error: Wallet unlocked for staking only, unable to create
+#        transaction." -- which the RPC layer wraps as RPC_WALLET_ERROR. This is the one
+#        `sendtoaddress` takes, and it is what the operator's daemon actually returned:
+#        `code=-4 message=Error: Wallet unlocked for staking only, unable to create
+#        transaction. (HTTP 500)`. The message string matches wallet.cpp's byte for byte.
+#   -13  src/wallet/rpcwallet.cpp:102-109. `EnsureWalletIsUnlocked()` THROWS
+#        JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Wallet is unlocked for staking only.")
+#        -- note the different wording, "Wallet IS unlocked" rather than "Wallet unlocked ...
+#        unable to create transaction". 43 call sites at master, including
+#        signrawtransaction's no-keys branch and fundrawtransaction.
+#
+# THIS FILE PREVIOUSLY SAID "a staking-only unlock CANNOT send (rpc -13)" AND THE DAEMON GAVE
+# -4. The comment was not wrong about -13 existing; it was wrong about which site this path
+# hits, which is the kind of near-miss that sends a reader to the wrong function. Both are named
+# now, with their sites, and both are matched.
+#
+# MATCHED ON THE MESSAGE AS WELL AS THE CODE, and deliberately: -4 is
+# "Unspecified problem with wallet (key not found etc.)" and covers much more than this. Keying
+# the diagnosis off -4 alone would label an unrelated wallet failure a staking-only unlock and
+# send the operator to unlock a wallet that is already unlocked.
+RPC_WALLET_ERROR = -4
+RPC_WALLET_UNLOCK_NEEDED = -13
+STAKING_ONLY_RPC_CODES = (RPC_WALLET_ERROR, RPC_WALLET_UNLOCK_NEEDED)
+STAKING_ONLY_MESSAGE_MARK = "staking only"
+
+# THE REMEDY, WRITTEN ONCE. Step 5's pre-flight refusal and the funding send's own handler both
+# print it, and two copies of an operator instruction is rule 8's bug with a delay on it -- the
+# copies agree the day they are written and drift after, and the one that drifts is the one
+# somebody follows.
+#
+# WHAT IS NOT IN HERE, deliberately: any passphrase, and any command that would take one on a
+# command line. `walletpassphrase` is named but the operator types it themselves, because argv
+# is world-readable through /proc and `ps`, and because this repo never moves, copies or reads
+# back a credential.
+STAKING_ONLY_REMEDY = (
+    "A staking-only unlock cannot CREATE a transaction, so the funding send is impossible and "
+    "so is every route around it: Gridcoin's `signrawtransaction` refuses the same way when it "
+    "has no keys of its own to use (src/wallet/rpcwallet.cpp EnsureWalletIsUnlocked, and "
+    "src/wallet/wallet.cpp SendMoney). This harness cannot fix that from here and will not try: "
+    "changing a wallet's unlock scope is the OPERATOR'S decision, not this file's. "
+    "To run this, unlock the TESTNET wallet WITHOUT the stakingonly flag -- "
+    "`walletpassphrase \"<your passphrase>\" <seconds>` with NO third argument, on the "
+    "TESTNET daemon only -- and re-run. Your mainnet wallet is a different daemon on a "
+    "different port and is not involved. Nothing was funded, signed or broadcast."
+)
+
+# The nTime the probe transaction carries on Gridcoin, which serializes nTime in its prefix.
+# A FIXED value, not time.time(): a probe built twice must be the same bytes, and this one is
+# never broadcast so no node ever judges its timestamp. 1 rather than 0 because 0 reads as
+# "unset" to anyone debugging a hex dump.
+PROBE_NTIME = 1
+
+
+# THE RPC CODE IS IN THE MESSAGE STRING, IN TWO DIFFERENT SPELLINGS, AND `RPCError` CARRIES NO
+# `.code` ATTRIBUTE AT ALL. Measured by reading both producers:
+#
+#   regtest/daemons.py:437     f"{method}: code={code} message={message} (HTTP {status})"
+#   chains/base.py:119         f"{message} (rpc code {code})"
+#
+# `chains/base.RPCError` is a bare `class RPCError(Exception)` with no fields, so
+# `getattr(exc, "code", None)` is ALWAYS None on a real one -- a first version of this function
+# compared it against -13 and that branch could never have run. The operator's 2026-09-28 run
+# went through the first spelling: `sendtoaddress: code=-4 message=Error: Wallet unlocked for
+# staking only, unable to create transaction. (HTTP 500)`.
+#
+# Two spellings of one value is rule 8's shape and the right fix is a typed error carrying an
+# int -- which is already named work from the burn-proofing pass ("rpc_result() should raise a
+# typed error carrying code as int; atomic_ltc_client.rpc_call is a third behavior"). That is a
+# change across the client surface and is NOT made from inside this harness. This parser reads
+# both spellings, in ONE place, and says so; it is the reader, not a third spelling.
+_RPC_CODE_SPELLINGS = (
+    re.compile(r"\bcode=(-?\d+)"),
+    re.compile(r"\(rpc code (-?\d+)\)"),
+)
+
+
+def rpc_code_of(exc: BaseException) -> int | None:
+    """The JSON-RPC code inside an RPCError's message, or None if it does not carry one.
+
+    None means "this error does not state a code", which is a THIRD answer and not a zero
+    (rule 17: "I could not tell" and "it is not that" must never be the same value). A caller
+    that needs certainty about the code must treat None as undetermined.
+
+    Prefers an explicit `.code` attribute if one ever appears, so this keeps working unchanged
+    the day the typed-error work lands.
+    """
+    typed = getattr(exc, "code", None)
+    if isinstance(typed, int):
+        return typed
+    text = str(exc)
+    for pattern in _RPC_CODE_SPELLINGS:
+        found = pattern.search(text)
+        if found:
+            return int(found.group(1))
+    return None
+
+
+def is_staking_only_refusal(exc: RPCError) -> bool:
+    """Is this RPCError the wallet refusing because its unlock is staking-only?
+
+    MESSAGE AND CODE, and the message is the load-bearing half. -4 is RPC_WALLET_ERROR,
+    documented in Gridcoin's protocol.h as "Unspecified problem with wallet (key not found
+    etc.)" -- keying off the code alone would label an insufficient-funds or missing-key
+    failure a staking-only unlock and send the operator to unlock a wallet that is already
+    unlocked, while the real fault went unnamed.
+
+    An error with NO code stated is judged on its message alone rather than refused: the
+    message is the specific half, and a client that omits the code has not said this is a
+    different condition.
+
+    Returns a BOOL rather than raising, because the caller knows what it was trying to do and
+    therefore what the remedy is -- rule 10: the decision is a function, the message belongs to
+    the step that called it.
+    """
+    if STAKING_ONLY_MESSAGE_MARK not in str(exc).lower():
+        return False
+    code = rpc_code_of(exc)
+    return code is None or code in STAKING_ONLY_RPC_CODES
+
+
+def probe_wallet_unlock_scope(run: Run) -> str:
+    """"staking-only", "can-sign", "locked", or "undetermined" -- asked BEHAVIORALLY.
+
+    WHY THIS EXISTS, AND WHY IT IS NOT A STATE QUERY. Verified against Gridcoin's source
+    2026-09-28: `getwalletinfo` pushes ten fields and the only lock field among them is
+    `unlocked_until` (src/wallet/rpcwallet.cpp), and NOTHING in that whole file exposes the
+    unlock SCOPE -- the single mention of IsUnlockedForStakingOnly() in it is the guard at line
+    106 that refuses. So this repository's standing note that "no Gridcoin RPC reports a
+    staking-only unlock back" is CORRECT for every state query, and it is now checked rather
+    than believed.
+
+    But a state query is not the only way to ask. `signrawtransaction`'s no-keys branch calls
+    EnsureWalletIsUnlocked() BEFORE it attempts any signing (src/rpc/rawtransaction.cpp:2785-
+    2787), so handing it a decodable transaction the wallet cannot sign separates the three
+    states and moves NOTHING:
+
+        staking-only   -13 "Error: Wallet is unlocked for staking only."
+        locked         -13 "Error: Please enter the wallet passphrase ... first."
+        can sign       returns {hex, complete: false} -- it tried, found no key, said so
+
+    It writes no key, creates no transaction, broadcasts nothing and touches no balance. That
+    matters more than the diagnosis: the alternative pre-flight probes all have a cost --
+    `getnewaddress` writes a key into the operator's wallet.dat, and the funding send itself is
+    the thing we are trying not to have to do blind.
+
+    ADVISORY, NEVER AUTHORITATIVE. "undetermined" is a real answer and the caller must treat it
+    as one (rule 17: "I could not tell" and "it is wrong" are not the same value). The operator's
+    build is older than the source read above -- it answers False for
+    signrawtransactionwithkey, which master has -- so the ORDER of the check inside
+    signrawtransaction is a source reading about master, not a measurement of their daemon. The
+    funding send in step 6 remains the real test, exactly as it was.
+    """
+    # A transaction the wallet CANNOT sign, spending an outpoint that does not exist, paying an
+    # OP_RETURN. Three properties, each deliberate: it decodes (so signrawtransaction reaches
+    # the unlock check rather than throwing a parse error first), the wallet holds no key for
+    # its input (so a full unlock returns complete:false instead of a signed transaction), and
+    # nothing here is ever broadcast -- only signrawtransaction is called, never
+    # sendrawtransaction.
+    #
+    # OP_RETURN (0x6a) as the destination rather than a P2PKH to a real address: if this
+    # transaction ever escaped this function it would be unspendable by anyone, which is the
+    # safest thing a probe's output can be. The value is a round 1.0 coin so a reader who finds
+    # the hex in a log can tell at a glance it is a fixture and not a payment.
+    try:
+        probe = chain.build_unsigned(
+            asset=run.asset,
+            # NOT all zeros: that is the COINBASE outpoint, and chain.Outpoint refuses it --
+            # "A transaction claiming to spend it is a coinbase, and no swap transaction is one".
+            # Found by that refusal firing on the first version of this probe, which is the
+            # guard working. 0xff throughout instead: a txid that cannot plausibly exist and
+            # reads as a fixture in a hex dump.
+            spends=chain.Outpoint(txid="ff" * 32, vout=0, value_satoshis=100_000_000),
+            outputs=[(99_000_000, bytes([0x6A]))],
+            locktime=0,
+            ntime=PROBE_NTIME if run.asset == "GRC" else None,
+        )
+        probe_hex = probe.serialize().hex()
+    except Exception as exc:  # noqa: BLE001 -- checked: this is a PROBE and a failure to BUILD it means "could not ask", which is the "undetermined" answer this function is documented to return. It never becomes a verdict about the wallet, the funding send remains the real test either way, and it is reported on screen rather than swallowed.
+        run.say(f"unlock-scope probe could not be built ({type(exc).__name__}: {exc}); treating as undetermined")
+        return "undetermined"
+    try:
+        run.node().call("signrawtransaction", probe_hex)
+    except RPCError as exc:
+        if is_staking_only_refusal(exc):
+            return "staking-only"
+        # "Please enter the wallet passphrase" rather than the code, for the same reason
+        # is_staking_only_refusal() matches on the message: -13 is shared between a locked
+        # wallet and a staking-only one, and the wording is what separates them.
+        if "passphrase" in str(exc).lower() and rpc_code_of(exc) in (None, RPC_WALLET_UNLOCK_NEEDED):
+            return "locked"
+        run.say(f"unlock-scope probe answered something else ({exc}); treating as undetermined")
+        return "undetermined"
+    return "can-sign"
+
+
 def _send_to_self(run: Run, key: RegtestKey, coin: str) -> chain.Outpoint:
     """Put a known amount into a P2PKH output THIS PROCESS holds the key for.
 
@@ -760,7 +1066,26 @@ def _send_to_self(run: Run, key: RegtestKey, coin: str) -> chain.Outpoint:
     """
     address = key.address
     run.say(f"sendtoaddress {coin} {run.asset} to an address this process holds the key for")
-    txid = run.node().call("sendtoaddress", address, float(coin))
+    try:
+        txid = run.node().call("sendtoaddress", address, float(coin))
+    except RPCError as exc:
+        # A DIAGNOSED CONDITION IS NOT AN UNHANDLED EXCEPTION. On 2026-09-28 this raised
+        # straight past run_chain()'s broad catch and the operator's summary read
+        #
+        #   FAIL  GRC run: got=RPCError: sendtoaddress: code=-4 ...  expected=no unhandled exception
+        #
+        # for a condition the harness had NAMED IN PROSE one screen earlier. "No unhandled
+        # exception" is the wrong thing to have expected: this exception was predicted. Raising
+        # RegtestSetupError instead routes it to run_chain()'s named-precondition branch, whose
+        # own comment already says "the message carries the fix" -- so the remedy reaches the
+        # summary instead of a stack-trace class. Rule 14: a skipped run and a broken one must
+        # not report the same way.
+        if is_staking_only_refusal(exc):
+            raise RegtestSetupError(
+                f"GRC: the funding send was refused because this wallet's unlock is "
+                f"STAKING-ONLY. The daemon's own words: {exc}. {STAKING_ONLY_REMEDY}"
+            ) from exc
+        raise
     run.check("funding send accepted", txid, "a txid", OK if txid else FAIL)
     _mine(run, 1)
     found = lookup_contract_output(lambda method, params: run.node().call(method, *params), txid, 0)

@@ -145,10 +145,21 @@ arrives about every 90 seconds whether anybody is waiting or not.
      one is a live action nobody asked for, and CLAUDE.md's live-safety rules forbid it.
      It must already be answering.
   -  It needs a SPENDABLE testnet balance, which means a FULL unlock rather than a
-     staking-only one. A staking-only unlock cannot send (rpc -13) and NO Gridcoin RPC
-     reports it back -- measured 2026-09-26: `getwalletinfo` returns exactly one lock
-     field, `unlocked_until`, and nothing separates the two states. So the harness PRINTS
-     the lock state and does not assert on it, and the funding send is the real test.
+     staking-only one. A staking-only unlock cannot send, and THE CODE IS -4, NOT -13 --
+     this line said -13 until 2026-09-28, when the operator's daemon answered
+     `sendtoaddress: code=-4 message="Error: Wallet unlocked for staking only, unable to
+     create transaction."`. Both codes are real for this one condition and they come from
+     two different guards: -4 is RPC_WALLET_ERROR, produced as a RETURN STRING inside
+     CWallet::SendMoney and rethrown by sendtoaddress, and -13 is
+     RPC_WALLET_UNLOCK_NEEDED, THROWN by EnsureWalletIsUnlocked() with the different
+     wording "Error: Wallet is unlocked for staking only." sendtoaddress never calls
+     EnsureWalletIsUnlocked, which is why the send path is the -4 one.
+     regtest/adaptor_steps.py's STAKING_ONLY_RPC_CODES carries both, with the source
+     lines; naming only one here is what sent a reader to the wrong function.
+     NO Gridcoin RPC reports the unlock SCOPE back either -- measured 2026-09-26:
+     `getwalletinfo` returns exactly one lock field, `unlocked_until`, and nothing
+     separates the two states. So the harness PROBES the scope behaviorally, and the
+     funding send is still the real test.
   -  Every wait is a real wait. T1 is six blocks out and T2 twelve, so a full GRC run is
      roughly eighteen blocks -- call it half an hour, and the harness prints a progress
      line with an elapsed time every thirty seconds rather than leaving a blinking cursor.
