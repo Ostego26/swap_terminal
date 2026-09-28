@@ -630,6 +630,42 @@ def test_a_daemon_that_says_YES_then_REFUSES_the_send_is_EXPLAINED_not_traceback
     assert "reclaim_funding.py" in message, "and how to get back what is already out there"
 
 
+def test_split_operator_funding_EXPLAINS_A_REFUSED_SEND_rather_than_tracebacking(monkeypatch):
+    """PINS THE CALL SITE, not just the explainer.
+
+    The same gap as `test_split_operator_funding_ASKS_BEFORE_IT_SENDS` one function up, and it
+    was found the same way: replacing the `send_the_split_or_explain_the_refusal(...)` line with
+    the bare `run.node(wallet=False).call("sendrawtransaction", raw)` it used to be killed NO
+    test, because the explainer was covered and the wiring was not. A wrapper nothing calls is
+    the defect it was written to fix, still present, with a test suite saying otherwise.
+
+    The assertion is on the TYPE as much as the text: a RegtestSetupError is the harness saying
+    "your funding needs attention", an RPCError escaping to the top is the harness crashing, and
+    the operator reads those two very differently off a screen.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ef" * 32, vout=2, value_satoshis=460_000_000)
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "testmempoolaccept":
+                return [{"allowed": True}]
+            if method == "sendrawtransaction":
+                raise adaptor_steps.RPCError("sendrawtransaction: code=-22 message=TX rejected")
+            raise AssertionError(f"{method} must not be reached")
+
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.split_operator_funding(run, key, source, [generate_key()])
+
+    message = str(raised.value)
+    assert "code=-22" in message, "the daemon's own words reach the operator"
+    assert f"{source.txid}:{source.vout}" in message, "and so does the outpoint it refused"
+    assert "reclaim_funding.py" in message, "and the way back to the money"
+
+
 def test_the_split_reports_the_fee_it_ACTUALLY_PAYS(monkeypatch):
     """4.60 in, 1.50 out, and the line said `fee 0.01000000`. It paid 3.09.
 
