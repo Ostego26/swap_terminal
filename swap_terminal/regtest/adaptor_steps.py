@@ -3145,9 +3145,21 @@ def discover_operator_funding_txid(run: Run, key: RegtestKey) -> str | None:
         return None
     if not isinstance(entries, list):
         return None
-    # NEWEST FIRST. listtransactions returns oldest-first, and a re-funded address should use
-    # the LATEST payment: an earlier one is most likely already spent by a previous run, and
-    # spending it again would fail as a double-spend several steps later with no clue why.
+    # NEWEST FIRST, AND SKIP THE ONES ALREADY SPENT. listtransactions returns oldest-first, and
+    # a re-funded address should use the LATEST payment -- but "latest" is not "usable", which is
+    # what three failed runs on 2026-09-28 cost the operator. Every run consumes its funding by
+    # design, so after a successful one the newest payment IS the spent one, and this function
+    # handed it back three times in a row with a cheerful "no --funding-txid needed".
+    #
+    # The comment this replaces already knew: "an earlier one is most likely already spent by a
+    # previous run, and spending it again would fail as a double-spend several steps later with
+    # no clue why." It drew the wrong conclusion from it -- that picking the newest avoids the
+    # problem -- when the newest is exactly the one a completed run just ate.
+    #
+    # ASKING IS CHEAP NOW, and it was not when that comment was written: `find_the_spender`
+    # walks blocks, and a payment with N confirmations needs exactly N of them looked at,
+    # because nothing mined before it can spend its output. The operator's stale funding was
+    # found in 111 blocks and 3.3s; a payment made five minutes ago costs three blocks.
     for entry in reversed(entries):
         if not isinstance(entry, dict):
             continue
@@ -3156,13 +3168,43 @@ def discover_operator_funding_txid(run: Run, key: RegtestKey) -> str | None:
         if entry.get("category") not in ("send", "receive"):
             continue
         txid = entry.get("txid")
-        if txid:
-            run.say(
-                f"the wallet remembers paying {key.address} in {txid} "
-                f"({entry.get('confirmations', '?')} confirmations) -- no --funding-txid needed"
-            )
+        if not txid:
+            continue
+        confirmations = entry.get("confirmations", "?")
+        run.say(f"the wallet remembers paying {key.address} in {txid} ({confirmations} confirmations)")
+        spender = _spender_of_the_payment(run, key, str(txid), confirmations)
+        if spender is None:
+            run.say(f"using {txid} -- no --funding-txid needed")
             return str(txid)
+        run.say(
+            f"SKIPPING {txid}: its output was already spent by {spender}. Looking further back "
+            f"-- a completed run consumes its funding, so the newest payment is often the used one"
+        )
     return None
+
+
+def _spender_of_the_payment(run: Run, key: RegtestKey, txid: str, confirmations) -> str | None:
+    """Whatever spent this payment's output to `key.address`, or None. NEVER RAISES.
+
+    SEPARATE FROM THE LOOP ABOVE so the loop reads as the decision it is -- newest usable
+    payment -- rather than as four levels of error handling with a choice buried in it (rule 10).
+
+    NONE ON EVERY UNCERTAINTY, and that is the safe direction here rather than the optimistic
+    one. A payment this cannot resolve or cannot scan is treated as usable, which is exactly
+    what this function's absence used to do, so a daemon that will not serve `getblock` behaves
+    as it did before the scan existed. The gate in `refuse_if_the_funding_is_already_spent`
+    still runs before anything is broadcast, so an unspendable output refuses there instead of
+    being silently sent -- one uncertainty does not become a strand.
+    """
+    try:
+        outpoint = find_operator_funding(run, key, txid)
+    except (RegtestSetupError, RPCError) as error:
+        run.say(f"could not read {txid} to check whether it is spent ({error}); treating it as usable")
+        return None
+    depth = confirmations + 1 if isinstance(confirmations, int) and confirmations >= 0 else MAX_SPEND_SCAN_BLOCKS
+    spender, description = find_the_spender(run, outpoint, max_depth=depth)
+    run.say(f"is it still there? {description}")
+    return spender
 
 
 def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoint:
@@ -3236,7 +3278,8 @@ def spender_in_block(block: dict, txid: str, vout: int) -> str | None:
     return None
 
 
-def find_the_spender(run: Run, source: chain.Outpoint) -> tuple[str | None, str]:
+def find_the_spender(run: Run, source: chain.Outpoint,
+                     max_depth: int = MAX_SPEND_SCAN_BLOCKS) -> tuple[str | None, str]:
     """Walk the chain backward from the tip looking for whatever spent `source`. Reads only.
 
     THIS EXISTS BECAUSE THE OPERATOR'S DAEMON ANSWERS NONE OF THE EASY QUESTIONS, measured
@@ -3270,7 +3313,12 @@ def find_the_spender(run: Run, source: chain.Outpoint) -> tuple[str | None, str]
     except RPCError as error:
         return None, f"could not scan the chain for a spender: {error}"
 
-    floor = max(0, tip - MAX_SPEND_SCAN_BLOCKS + 1)
+    # THE CALLER MAY KNOW A TIGHTER FLOOR, AND IT IS EXACT RATHER THAN A HEURISTIC. Nothing
+    # mined BEFORE the funding transaction can spend its output, so a payment with N
+    # confirmations needs exactly N blocks looked at -- three for one made five minutes ago,
+    # against 2000 for the blind cap. That is what makes this affordable on the happy path,
+    # where discover_operator_funding_txid asks the same question of every candidate.
+    floor = max(0, tip - max(1, max_depth) + 1)
     scanned = 0
     started = time.monotonic()
     run.say(

@@ -1580,6 +1580,78 @@ def test_the_harness_finds_the_funding_txid_ITSELF_from_the_wallet(console, monk
     assert adaptor_steps.discover_operator_funding_txid(run, key) == "22" * 32
 
 
+def test_the_latest_payment_is_SKIPPED_when_a_previous_run_already_spent_it(console, monkeypatch):
+    """THREE FAILED RUNS ON 2026-09-28, and the comment this fixes already knew why.
+
+    It read: "an earlier one is most likely already spent by a previous run, and spending it
+    again would fail as a double-spend several steps later with no clue why." True, and it drew
+    the wrong conclusion -- that picking the NEWEST avoids the problem. Every run consumes its
+    funding by design, so after a successful run the newest payment IS the spent one. The
+    operator got `-22 TX rejected` three times while this function cheerfully reported "no
+    --funding-txid needed" for an output that had been gone for eleven blocks.
+
+    ASKING IS CHEAP, and it was not when that comment was written. `find_the_spender` walks
+    blocks, and a payment with N confirmations needs exactly N of them looked at -- nothing
+    mined before a transaction can spend its output. The operator's stale funding was found in
+    111 blocks and 3.3s; a payment made five minutes ago costs three.
+    """
+    key = key_from_seed("seed for the spent-latest test", "funding")
+    spent, fresh = "bb" * 32, "aa" * 32
+
+    def _decoded(txid, *_):
+        return {"vout": [{"n": 1, "value": "4.6",
+                          "scriptPubKey": {"hex": key.p2pkh_script.hex()}}], "txid": txid}
+
+    run, node = _run_with(
+        console, monkeypatch,
+        {
+            "listtransactions": [
+                {"address": key.address, "category": "send", "txid": fresh, "confirmations": 2},
+                {"address": key.address, "category": "send", "txid": spent, "confirmations": 9},
+            ],
+            "getrawtransaction": _decoded,
+            "getblockcount": 100,
+            "getblockhash": lambda height, *_: f"hash-of-{height}",
+            # Only the NEWER payment has been consumed. The older one is untouched, which is the
+            # state an operator lands in when they funded twice and one run completed.
+            "getblock": lambda block_hash, *_: (
+                {"tx": [{"txid": "what-consumed-it", "vin": [{"txid": spent, "vout": 1}]}]}
+                if block_hash.endswith("-95") else {"tx": [{"txid": "cb", "vin": [{"coinbase": "00"}]}]}
+            ),
+        },
+        asset="GRC",
+    )
+
+    assert adaptor_steps.discover_operator_funding_txid(run, key) == fresh, (
+        "the newest payment is spent, so the older usable one must be chosen"
+    )
+    # IT ACTUALLY WALKED THE CHAIN rather than guessing from the confirmation count. An
+    # assertion that cannot fail is worse than none (rule 19), so this names the call.
+    assert any(method == "getblock" for method, _ in node.calls), (
+        f"the chain must be asked, not inferred; calls were {[m for m, _ in node.calls]}"
+    )
+
+
+def test_a_daemon_that_cannot_be_SCANNED_still_picks_the_newest_payment(console, monkeypatch):
+    """No regression when the chain cannot be walked. The scan is a diagnostic, not a gate.
+
+    A daemon that will not serve `getblock` leaves this knowing exactly what it knew before the
+    scan existed, so it behaves exactly as it did: newest payment, spent-ness unknown. What
+    catches an unusable one then is `refuse_if_the_funding_is_already_spent`, which still runs
+    before anything is broadcast -- so an uncertainty here does not become a stranded coin.
+    """
+    key = key_from_seed("seed for the unscannable test", "funding")
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"listtransactions": [
+            {"address": key.address, "category": "send", "txid": "aa" * 32, "confirmations": 9},
+            {"address": key.address, "category": "send", "txid": "bb" * 32, "confirmations": 2},
+        ]},
+        asset="GRC",
+    )
+    assert adaptor_steps.discover_operator_funding_txid(run, key) == "bb" * 32
+
+
 def test_the_LATEST_payment_wins_when_the_address_was_funded_twice(console, monkeypatch):
     """An earlier payment is most likely already spent by a previous run, and spending it again
     would fail as a double-spend several steps later with no clue why. listtransactions returns
