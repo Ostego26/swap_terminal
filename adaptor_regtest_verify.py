@@ -417,6 +417,13 @@ def print_verdicts(console: Console, outcomes: list[ChainOutcome]) -> None:
             f"refund accepted after the cancel={outcome.refund_accepted_after_cancel}"
         )
         console.say(
+            f"{outcome.asset}:   THE FIFTH TRANSACTION, on its own lock C -- "
+            f"the punish SPENDS at T2={outcome.punish_accepted_after_t2}  "
+            f"and it leaks NOTHING={outcome.punish_leaks_nothing}  "
+            f"<- until 2026-09-28 the punish had only ever been REFUSED: four of the five "
+            f"transactions had moved a coin and this one had moved none"
+        )
+        console.say(
             f"{outcome.asset}:   and the property the whole protocol needs: "
             f"the txid PREDICTED before broadcast matched the daemon's={outcome.predicted_txid_matched}  "
             f"<- this is what `sendtoaddress` cannot give you, and step 0 requires it"

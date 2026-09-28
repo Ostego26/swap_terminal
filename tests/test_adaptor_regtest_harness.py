@@ -563,17 +563,28 @@ def test_a_generateblock_that_refuses_is_the_consensus_result(console, monkeypat
 
 
 # ---------------------------------------------------------------------------
-# The two locks must not share a scriptPubKey, or outcome 1 means nothing.
+# No two locks may share a scriptPubKey, or outcome 1 means nothing.
 # ---------------------------------------------------------------------------
 
 
-def test_the_two_locks_get_different_scriptpubkeys(console, monkeypatch):
-    """Outcome 1 is "located by scriptPubKey match". If both locks hashed to the same P2SH,
-    a match could not say which output it found and the outcome would be vacuous."""
+def test_one_lock_per_terminal_branch_and_none_share_a_scriptpubkey(console, monkeypatch):
+    """Outcome 1 is "located by scriptPubKey match". If two locks hashed to the same P2SH, a
+    match could not say which output it found and the outcome would be vacuous.
+
+    THREE, not two, since 2026-09-28: a lock spends once, so each terminal branch needs its own
+    -- A takes the redeem, B the refund, C the punish. Lock C exists because the refund on B
+    SPENDS the cancel output the punish would have taken, and a punish refused because the
+    output is already gone proves nothing about T2.
+
+    The count is read off LOCKS_PER_RUN rather than written as 3 here, so a fourth branch
+    cannot be added to the step while this test goes on checking three of four.
+    """
     run, _ = _run_with(console, monkeypatch, {})
-    setup_a, setup_b = adaptor_steps.step_4_build_scripts(run)
-    assert setup_a.lock_script_pubkey != setup_b.lock_script_pubkey
-    assert setup_a.alice.public_key != setup_b.alice.public_key
+    setups = adaptor_steps.step_4_build_scripts(run)
+    assert len(setups) == adaptor_steps.LOCKS_PER_RUN
+    assert len({setup.lock_script_pubkey for setup in setups}) == len(setups)
+    assert len({setup.alice.public_key for setup in setups}) == len(setups)
+    assert len({setup.bob.public_key for setup in setups}) == len(setups)
 
 
 def test_within_one_lock_the_cancel_script_matches_the_protocol(console, monkeypatch):
@@ -581,8 +592,11 @@ def test_within_one_lock_the_cancel_script_matches_the_protocol(console, monkeyp
     the same {A_pk, B_pk}. So the two scripts ARE identical here, and the harness says so on
     screen and locates the cancel output by txid:vout instead of by a script match."""
     run, _ = _run_with(console, monkeypatch, {})
-    setup_a, _ = adaptor_steps.step_4_build_scripts(run)
-    assert setup_a.lock_script == setup_a.cancel_script
+    for setup in adaptor_steps.step_4_build_scripts(run):
+        assert setup.lock_script == setup.cancel_script, (
+            f"{setup.label}: the protocol says the cancel is a second 2-of-2 over the SAME two "
+            f"keys, so this holds for every lock and not just the first"
+        )
 
 
 # ---------------------------------------------------------------------------

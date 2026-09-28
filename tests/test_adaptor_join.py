@@ -38,7 +38,7 @@ from modules.htlc_spend import SIGHASH_ALL, parse_transaction
 from regtest import adaptor_join, adaptor_steps
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import ChainConfig
-from regtest.keys import generate_key, key_from_seed
+from regtest.keys import double_sha256, generate_key, key_from_seed
 
 
 @pytest.fixture
@@ -850,3 +850,190 @@ def test_offer_funding_route_ACTUALLY_CALLS_the_diagnostic(monkeypatch):
     assert key.address in printed, "the address to fund"
     assert paid in printed, "and, on the SAME screen, where the money actually went"
     assert "DID YOU ALREADY PAY" in printed
+
+
+# ---------------------------------------------------------------------------
+# THE FIFTH TRANSACTION. Four of the five had moved a coin; the punish had moved none.
+# ---------------------------------------------------------------------------
+
+
+class _Chain:
+    """A daemon that accepts or refuses on a rule the test supplies, and remembers what it saw.
+
+    `accept` decides per raw transaction hex, so a test can say "refuse this one, accept that
+    one" -- which is what the punish path is: the SAME BYTES refused at one height and accepted
+    at another. `height` is mutable so `_wait_or_mine_to` can be satisfied without a chain.
+    """
+
+    def __init__(self, accept, height: int, decoded: dict | None = None) -> None:
+        self.accept, self.height, self.decoded = accept, height, decoded
+        self.broadcast: list[str] = []
+
+    def call(self, method, *params):
+        if method == "getblockcount":
+            return self.height
+        if method == "sendrawtransaction":
+            self.broadcast.append(params[0])
+            if not self.accept(params[0]):
+                raise RPCError("sendrawtransaction: code=-22 message=TX rejected (HTTP 500)")
+            return _txid_of(params[0])
+        if method == "getrawtransaction":
+            if self.decoded is None:
+                raise RPCError("getrawtransaction: code=-5 No information available")
+            return self.decoded
+        raise RPCError(f"{method}: code=-32601 Method not found")
+
+
+def _txid_of(raw_hex: str) -> str:
+    return double_sha256(bytes.fromhex(raw_hex))[::-1].hex()
+
+
+def _punish_run(monkeypatch, node) -> tuple[adaptor_steps.Run, io.StringIO, list[int]]:
+    """A run whose chain advance is RECORDED rather than merely stubbed out.
+
+    The first version replaced `_wait_or_mine_to` with a no-op, and a mutant that DELETED the
+    wait to T2 then survived: the stub had already made the wait invisible, so the test could
+    not tell a step that waits from one that does not. On a real chain that mutant broadcasts
+    the punish before T2 and it is refused -- so the defect would surface, thirty minutes into a
+    run, as the branch appearing broken.
+
+    Recording the targets makes the wait an assertion instead of an assumption, which is the
+    same move `nothing_leaks` makes against published bytes: a stub that swallows the thing
+    under test is a test of the stub.
+    """
+    stream = io.StringIO()
+    waited: list[int] = []
+    run = adaptor_steps.Run(
+        console=Console(adaptor_steps.TOTAL_STEPS, stream=stream),
+        config=ChainConfig(
+            asset="LTC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": node)
+    monkeypatch.setattr(adaptor_steps, "_mine", lambda run, count: None)
+    monkeypatch.setattr(adaptor_steps, "_wait_or_mine_to", lambda run, target: waited.append(target))
+    return run, stream, waited
+
+
+def _punish_built(parties, side) -> adaptor_steps.BuiltChain:
+    alice, bob = parties
+    return _built(alice, bob, side, lambda digest: _leg(bob, side, digest))
+
+
+def test_a_chain_where_the_punish_NEVER_SPENDS_is_scored_FAIL_and_says_what_it_costs(
+    parties, side, monkeypatch
+):
+    """THE MEASUREMENT THAT DID NOT EXIST UNTIL 2026-09-28.
+
+    Tx_punish was broadcast exactly once per run, before T2, and asserted REFUSED. That is the
+    timelock holding, and it is the opposite of the branch working -- it says the branch is
+    closed when it should be closed and nothing about whether it opens. Four of the five
+    transactions the protocol names had moved a coin and this one had moved none.
+
+    Here the chain refuses it at both heights. The run must say so, and must say what a broken
+    punish costs: without it a counterparty publishes the cancel and sits on it, and the output
+    is locked forever -- T2 is the thing that makes the cancel safe to publish at all.
+    """
+    built = _punish_built(parties, side)
+    cancel_hex, _ = chain.assemble(
+        built.cancel, *adaptor_steps._signatures_in_key_order(built.setup, built.cancel.digest)
+    )
+    node = _Chain(accept=lambda raw: raw == cancel_hex, height=built.t2 + 1)
+    run, _stream, waited = _punish_run(monkeypatch, node)
+    outcome = adaptor_steps.ChainOutcome(asset="LTC")
+
+    adaptor_steps.step_11_punish_path(run, built, outcome)
+
+    assert waited == [built.t1, built.t2], "T1 for the cancel, then T2 for the punish"
+    assert outcome.punish_accepted_after_t2 == FAIL
+    note = " ".join(outcome.notes)
+    assert "PUNISH BRANCH DOES NOT WORK" in note
+    assert "locked forever" in note, "the note has to say what it costs, not just that it failed"
+
+
+def test_the_punish_SPENDING_at_T2_is_scored_OK(parties, side, monkeypatch):
+    """The other direction, or the test above would pass with `= FAIL` hard-coded.
+
+    The chain accepts everything here, which also makes the early-punish control FAIL -- and
+    that is correct and asserted: a chain that accepts a non-final transaction has a broken
+    timelock, and the run must not report the branch as working on the strength of a daemon
+    that would have accepted it at any height.
+    """
+    built = _punish_built(parties, side)
+    node = _Chain(accept=lambda raw: True, height=built.t2 + 1)
+    run, stream, waited = _punish_run(monkeypatch, node)
+    outcome = adaptor_steps.ChainOutcome(asset="LTC")
+
+    adaptor_steps.step_11_punish_path(run, built, outcome)
+
+    assert waited == [built.t1, built.t2], (
+        "the step must ADVANCE THE CHAIN to T2 between the two punish broadcasts. A mutant that "
+        "deleted the wait survived until this was asserted -- on a real chain it broadcasts "
+        "before T2, is refused, and the branch reads as broken thirty minutes into a run"
+    )
+    assert outcome.punish_accepted_after_t2 == OK
+    printed = stream.getvalue()
+    assert "11b the early punish is REFUSED" in printed and FAIL in printed, (
+        "a daemon that accepts the EARLY punish too has a broken timelock, and the run must "
+        "score that rather than being satisfied by the late acceptance"
+    )
+
+
+def test_the_early_and_at_T2_punish_are_asserted_to_be_the_SAME_BYTES(parties, side, monkeypatch):
+    """WHAT ISOLATES nLockTime, and it is the only thing that does on this chain family.
+
+    Gridcoin's refusal names nothing -- `-22 TX rejected` -- so a refusal alone proves only
+    "refused for some reason", which a bad signature satisfies equally. The pair is a controlled
+    experiment only if the transaction is byte-identical across it, so the harness broadcasts
+    the same hex twice and this asserts it did.
+    """
+    built = _punish_built(parties, side)
+    cancel_hex, _ = chain.assemble(
+        built.cancel, *adaptor_steps._signatures_in_key_order(built.setup, built.cancel.digest)
+    )
+    node = _Chain(accept=lambda raw: raw != _last_punish_hex(built), height=built.t2 + 1)
+    del cancel_hex
+    run, _stream, waited = _punish_run(monkeypatch, node)
+    adaptor_steps.step_11_punish_path(run, built, adaptor_steps.ChainOutcome(asset="LTC"))
+    assert waited == [built.t1, built.t2]
+
+    punishes = [raw for raw in node.broadcast if raw == _last_punish_hex(built)]
+    assert len(punishes) == 2, "broadcast twice -- before T2 and at T2"
+    assert punishes[0] == punishes[1], (
+        "and identical, or the pair is two transactions rather than one controlled experiment"
+    )
+
+
+def _last_punish_hex(built: adaptor_steps.BuiltChain) -> str:
+    """The punish the step will build, rebuilt here from the same inputs.
+
+    Rebuilt rather than captured because the step owns its construction; what this test is for
+    is that the step broadcasts ONE transaction twice, and comparing its two broadcasts to each
+    other is what establishes that regardless of what this helper returns.
+    """
+    cancel_sigs = adaptor_steps._signatures_in_key_order(built.setup, built.cancel.digest)
+    _, cancel_txid = chain.assemble(built.cancel, *cancel_sigs)
+    cancel_output = chain.Outpoint(txid=cancel_txid, vout=0, value_satoshis=built.cancel.output_satoshis)
+    punish = chain.build_punish(built.context, cancel_output, built.t2)
+    punish_hex, _ = chain.assemble(punish, *adaptor_steps._signatures_in_key_order(built.setup, punish.digest))
+    return punish_hex
+
+
+def test_the_punish_publishes_NOTHING(parties, side, monkeypatch):
+    """Plain signatures on both sides, so taking the punish branch must tell the counterparty
+    nothing. Measured against the PUBLISHED bytes rather than argued from this file not calling
+    `adapt` on that path (rule 17)."""
+    built = _punish_built(parties, side)
+    published = bytes.fromhex(_last_punish_hex(built))
+    _outpoint, script_sig, _sequence = parse_transaction(published).inputs[0]
+    node = _Chain(accept=lambda raw: True, height=built.t2 + 1,
+                  decoded=_decoded_with(script_sig))
+    run, _stream, _waited = _punish_run(monkeypatch, node)
+    outcome = adaptor_steps.ChainOutcome(asset="LTC")
+
+    adaptor_steps.step_11_punish_path(run, built, outcome)
+
+    assert outcome.punish_leaks_nothing == OK

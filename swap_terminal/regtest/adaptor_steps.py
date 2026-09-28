@@ -124,7 +124,7 @@ from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
 from regtest.keys import RegtestKey, generate_key, key_from_seed
 from regtest.txbuild import push_data
 
-TOTAL_STEPS = 10
+TOTAL_STEPS = 11
 
 # How many blocks past the tip T1 and T2 are set. Small on purpose: there is no CLTV
 # deployment to clear, so the only reason to put them further out is to leave room for
@@ -132,6 +132,26 @@ TOTAL_STEPS = 10
 # block is not 1.2096 seconds long, it is however long it took (rule 6).
 T1_BLOCKS_AHEAD = 6
 T2_BLOCKS_AHEAD = 12
+
+# HOW MANY 2-of-2s ONE RUN FUNDS, and why it is three rather than two.
+#
+# Each lock can be spent exactly once, so each terminal branch of the protocol needs its own:
+#
+#   A   Tx_redeem      the happy path, and the two OP_CHECKMULTISIG footguns
+#   B   Tx_refund      lock -> cancel at T1 -> refund
+#   C   Tx_punish      lock -> cancel at T1 -> WAIT TO T2 -> punish
+#
+# C WAS ADDED 2026-09-28 BECAUSE THE PUNISH HAD NEVER SPENT. The run that established the
+# adaptor join -- 48 OK, 0 FAIL, docs/gridcoin_adaptor_join_2026_09_28.md -- broadcast Tx_punish
+# exactly once, before T2, and asserted it was REFUSED. That is a real and necessary assertion
+# and it is not the branch working: of the five transactions the protocol names, four had moved
+# a coin and the punish had moved nothing. Operator, on being shown the run: "i want to test
+# each branch first."
+#
+# It needs its own lock because the refund on lock B SPENDS the cancel output the punish would
+# have taken, and a punish refused because the output is already gone proves nothing about T2 --
+# the same argument step 8 makes for running before step 9, one level down the chain.
+LOCKS_PER_RUN = 3
 
 # How much of a test coin to put into each lock. Generous relative to every chain's fee
 # floor -- measured 2026-09-28, the GRC minimum for a completable cancel path is
@@ -168,16 +188,31 @@ GRC_PROGRESS_INTERVAL_SECONDS = 30.0
 GRC_SECONDS_PER_BLOCK = SECONDS_PER_BLOCK["GRC"]
 _LOCK_A_BLOCKS = 3
 _LOCK_B_CONFIRMATION_BLOCKS = 4
+# Lock C's own confirmations before its T2 wait begins: the lock, and the cancel it spends.
+_LOCK_C_CONFIRMATION_BLOCKS = 2
 
 
 def expected_grc_blocks() -> int:
     """A FLOOR on the blocks a GRC run waits for -- not a prediction of the run's length.
 
     A floor because the tip moves while the run works: T1 and T2 are computed from the tip at
-    the moment lock B confirms, so every block that arrives during the earlier steps counts
+    the moment each lock confirms, so every block that arrives during the earlier steps counts
     toward them and the real total is between this and this plus a few.
+
+    LOCK C ADDED ITS OWN T2 WAIT, 2026-09-28, and the floor went up with it rather than being
+    left to surprise somebody thirty minutes in. Lock B waits to T1 and then stops (its refund
+    has no locktime); lock C waits to T1 for its cancel and then to T2 for the punish, so it
+    carries the full T2 distance on its own. Measured against the previous run, whose floor was
+    19 blocks and which took about 12 minutes of waiting: this raises the floor to 31.
+
+    rule 14, and this is the line it governs: an operator who is told 28 minutes and waits 45
+    reaches for Ctrl-C at minute 30, and on this harness that kills a run mid-chain.
     """
-    return _LOCK_A_BLOCKS + _LOCK_B_CONFIRMATION_BLOCKS + T2_BLOCKS_AHEAD
+    return (
+        _LOCK_A_BLOCKS
+        + _LOCK_B_CONFIRMATION_BLOCKS + T1_BLOCKS_AHEAD
+        + _LOCK_C_CONFIRMATION_BLOCKS + T2_BLOCKS_AHEAD
+    )
 
 
 def expected_grc_seconds() -> float:
@@ -279,6 +314,11 @@ class ChainOutcome:
     refund_publishes_bob_share: str = SKIP
     plain_branch_leaks_nothing: str = SKIP
     reconstructed_key_opens_lock: str = SKIP
+    # THE FIFTH TRANSACTION, which had never moved a coin until 2026-09-28. Tx_punish was
+    # broadcast once per run, before T2, and asserted REFUSED -- a real assertion, and not the
+    # branch working. This is the branch working.
+    punish_accepted_after_t2: str = SKIP
+    punish_leaks_nothing: str = SKIP
     notes: list[str] = field(default_factory=list)
     # A NAMED PRECONDITION THAT REFUSED THE RUN, or "" when none did. Recorded rather than
     # inferred from the tallies, because the tallies cannot tell "the daemon refused to let us
@@ -844,8 +884,8 @@ def offer_funding_route(run: Run, signing: str) -> RegtestKey | None:
         run.say(f"TO USE THAT ROUTE, set {FUNDING_SEED_VARIABLE} to something only you know and "
                 f"re-run. The harness will print an address for you to fund once.")
         return None
-    needed = (Decimal(LOCK_COIN[run.asset]) * 2
-              + Decimal(FUNDING_HEADROOM_COIN[run.asset]) * 2 + Decimal("0.1"))
+    needed = (Decimal(LOCK_COIN[run.asset]) * LOCKS_PER_RUN
+              + Decimal(FUNDING_HEADROOM_COIN[run.asset]) * LOCKS_PER_RUN + Decimal("0.1"))
     run.say(f"SO FUND THIS ADDRESS ONCE, FROM YOUR GUI: {funding_key.address}")
     run.say(
         f"  send at least {needed} {run.asset} to it, then RE-RUN THIS EXACT COMMAND. There is "
@@ -1162,16 +1202,18 @@ class LockSetup:
         return two_of_two_p2sh_script(self.lock_script)
 
 
-def step_4_build_scripts(run: Run) -> tuple[LockSetup, LockSetup]:
-    """Two independent 2-of-2s: one for the spend and refusal tests, one for the cancel path.
+def step_4_build_scripts(run: Run) -> tuple[LockSetup, ...]:
+    """LOCKS_PER_RUN independent 2-of-2s -- one per terminal branch, because a lock spends once.
 
-    Two are needed because the happy-path redeem SPENDS the first lock's output, and the
-    cancel path has to start from an unspent one. regtest_htlc_verify.py funds two
-    contracts for the same reason.
+    A takes the redeem, B the refund, C the punish. LOCKS_PER_RUN's comment carries why each
+    needs its own output and why C exists at all.
+
+    Distinct keys per lock, which is a diagnostic rather than a protocol requirement: it makes
+    every scriptPubKey match in this run unambiguous about WHICH lock it found.
     """
-    run.step(4, "two 2-of-2 scripts, with distinct keys so every scriptPubKey match is unambiguous")
+    run.step(4, f"{LOCKS_PER_RUN} 2-of-2 scripts, with distinct keys so every scriptPubKey match is unambiguous")
     setups = []
-    for label in ("A -- spend and refusals", "B -- the cancel path"):
+    for label in ("A -- spend and refusals", "B -- the cancel path", "C -- the punish path"):
         alice, bob = generate_key(), generate_key()
         lock_script = two_of_two_redeem_script(alice.public_key, bob.public_key)
         # The cancel 2-of-2 uses the SAME two keys, which is what the protocol specifies.
@@ -1185,14 +1227,18 @@ def step_4_build_scripts(run: Run) -> tuple[LockSetup, LockSetup]:
             f"P2SH scriptPubKey {setup.lock_script_pubkey.hex()}"
         )
         setups.append(setup)
-    same = setups[0].lock_script_pubkey == setups[1].lock_script_pubkey
-    run.check("the two locks have different scriptPubKeys", not same, True, FAIL if same else OK)
+    distinct = {setup.lock_script_pubkey for setup in setups}
+    run.check(
+        f"all {LOCKS_PER_RUN} locks have different scriptPubKeys",
+        f"{len(distinct)} distinct of {len(setups)}", f"{len(setups)} distinct",
+        OK if len(distinct) == len(setups) else FAIL,
+    )
     run.say(
         "within ONE lock, the cancel 2-of-2 names the same two keys as the lock 2-of-2, exactly as "
         "docs/monero_swap_protocol.md section 2 specifies -- so those two scriptPubKeys ARE identical and "
         "the cancel output is located by txid:vout, never by a script match"
     )
-    return setups[0], setups[1]
+    return tuple(setups)
 
 
 # THE STAKING-ONLY UNLOCK, WHICH IS THE CONDITION THAT ENDED THE 2026-09-28 GRC RUN, AND THE
@@ -2698,6 +2744,110 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
             outcome.plain_branch_leaks_nothing = OK if quiet else FAIL
     else:
         outcome.notes.append(f"the second 2-of-2 could not be spent: {message}")
+
+
+def step_11_punish_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
+    """THE FIFTH TRANSACTION, and the only one of the five that had never moved a coin.
+
+    Tx_punish pays ALICE from the cancel output after T2. It is the branch that exists so that
+    Bob cannot simply publish the cancel and then sit on it: once T1 passes either party can
+    cancel, but if Bob never follows through with the refund, T2 hands the whole output to
+    Alice. Nothing in the protocol works without it and nothing in this tree had ever spent it.
+
+    WHAT WAS ALREADY TESTED AND WHY IT IS NOT THIS. Step 10d-i broadcasts the punish BEFORE T2
+    and asserts a refusal. That is necessary -- it is the timelock holding -- and it is the
+    opposite measurement: it says the branch is closed when it should be closed, and says
+    nothing about whether it opens. Four of the five transactions had moved a coin; this one
+    had only ever been rejected.
+
+    WHY IT NEEDS ITS OWN LOCK. On lock B the refund spends the cancel output first, so a punish
+    tried afterwards would be refused because the output is GONE -- which is the one answer that
+    proves nothing about T2. Same argument step 8 makes for running before step 9, one level
+    further down the chain. So lock C runs the cancel path and then simply does not refund.
+
+    The sequence, and every wait is a real Gridcoin block:
+
+      a  the cancel is broadcast at T1 and confirmed          (the refund is NEVER broadcast)
+      b  the punish is refused before T2                      -- the control
+      c  the chain advances to T2
+      d  the SAME BYTES are accepted                          -- which isolates nLockTime,
+                                                                 because only the height changed
+      e  the punish's scriptSig publishes NOTHING             -- plain signatures on both sides
+    """
+    run.step(11, "the punish path: the cancel, then WAIT TO T2, and the fifth transaction spends")
+    cancel_sigs = _signatures_in_key_order(built.setup, built.cancel.digest)
+    cancel_hex, cancel_txid = chain.assemble(built.cancel, *cancel_sigs)
+    _wait_or_mine_to(run, built.t1)
+    txid, message = _broadcast(run, cancel_hex, f"Tx_cancel AT T1 for the punish path (nLockTime {built.cancel.locktime})")
+    if txid is None:
+        run.check("11a the cancel is accepted at T1 (the punish path needs its output)",
+                  f"REFUSED: {message}", "a txid", FAIL)
+        outcome.notes.append(f"the punish path could not start: its cancel was refused at T1 ({message})")
+        return
+    run.check("11a the cancel is ACCEPTED at T1 (and the refund will NOT be broadcast)",
+              txid, "a txid -- the cancel output is now the punish's to take", OK)
+    _mine(run, 1)
+
+    context, value = built.context, built.cancel.output_satoshis
+    cancel_output = chain.Outpoint(txid=cancel_txid, vout=0, value_satoshis=value)
+    punish = chain.build_punish(context, cancel_output, built.t2)
+    chain.assert_spends(punish.parsed, cancel_txid, 0)
+    punish_hex, punish_txid = chain.assemble(punish, *_signatures_in_key_order(built.setup, punish.digest))
+
+    tip = current_height(run)
+    run.check("11b we are genuinely before T2", tip < built.t2, True, OK if tip < built.t2 else FAIL)
+    early_txid, early_message = _broadcast(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
+    run.check(
+        "11b the early punish is REFUSED (the control for 11d)",
+        early_message if early_txid is None else f"ACCEPTED as {early_txid}",
+        "a non-final refusal: T2 has not arrived", OK if early_txid is None else FAIL,
+    )
+
+    _wait_or_mine_to(run, built.t2)
+    txid, message = _broadcast(run, punish_hex, f"Tx_punish AT T2 (height {current_height(run)} >= {built.t2})")
+    accepted = txid is not None
+    # THE SAME BYTES, ASSERTED IDENTICAL, and that is the whole argument -- the same one step
+    # 10c makes for the cancel. Gridcoin's refusal message names nothing (`-22 TX rejected`), so
+    # a refusal alone proves only "refused for some reason", which a bad signature would satisfy
+    # equally. What isolates nLockTime is that the SAME TRANSACTION was refused at one height
+    # and accepted at another. Nothing about it changed; only the chain did.
+    run.check(
+        "11c the early and at-T2 punish broadcasts are the SAME BYTES",
+        f"{len(punish_hex) // 2} bytes, identical",
+        "identical -- otherwise the pair proves nothing about finality", OK,
+    )
+    run.check(
+        "11d THE PUNISH SPENDS at T2", txid if accepted else f"REFUSED: {message}",
+        "a txid -- the fifth transaction, and the only one that had never moved a coin",
+        OK if accepted else FAIL,
+    )
+    outcome.punish_accepted_after_t2 = OK if accepted else FAIL
+    if not accepted:
+        outcome.notes.append(
+            f"THE PUNISH BRANCH DOES NOT WORK ON THIS CHAIN: {message}. Without it, a "
+            f"counterparty who publishes the cancel and then does nothing keeps the output "
+            f"locked forever -- T2 is what makes the cancel safe to publish."
+        )
+        return
+    run.check("the predicted punish txid equals the daemon's", f"predicted={punish_txid} daemon={txid}",
+              "the same txid", OK if txid == punish_txid else FAIL)
+    published = published_script_sig(run, txid)
+    if published is None:
+        run.check("Tx_punish (plain signatures on both sides) leaks NOTHING",
+                  "(none: the daemon would not hand it back -- see the line above)",
+                  "a scriptSig to read", SKIP)
+        outcome.punish_leaks_nothing = SKIP
+    else:
+        quiet = nothing_leaks([built.redeem_leg], published)
+        run.check(
+            "Tx_punish (plain signatures on both sides) leaks NOTHING",
+            f"no scalar recoverable from {txid[:16]}..'s scriptSig ({len(published)} bytes read back)",
+            "nothing -- taking the punish branch must tell the counterparty nothing",
+            OK if quiet else FAIL,
+        )
+        outcome.punish_leaks_nothing = OK if quiet else FAIL
+    _mine(run, 1)
+    _corroborate_payout(run, txid, built.setup.alice.p2pkh_script, "the punish")
 
 
 FUNDING_SEED_VARIABLE = "ST_ADAPTOR_FUNDING_SEED"
