@@ -70,7 +70,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import secrets
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -79,16 +78,18 @@ from pathlib import Path
 # rootlessly, which is CLAUDE.md rule 10's layout gap. E402 is ignored repo-wide for this idiom.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from microfortnights import format_duration
 from modules import adaptor_swap_chain as chain
 from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
 from modules.htlc_rpc import build_refund_spend
-from modules.htlc_spend import satoshis_to_coins
+from modules.htlc_spend import coins_to_satoshis, satoshis_to_coins
+from modules.htlc_timelock import SECONDS_PER_BLOCK
 from regtest import adaptor_steps
 from regtest.adaptor_steps import Run
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import RegtestSetupError
-from regtest.keys import generate_key, key_from_seed
+from regtest.keys import key_from_seed
 
 TOTAL_STEPS = 9
 
@@ -98,6 +99,33 @@ TOTAL_STEPS = 9
 #: derived from ST_ADAPTOR_FUNDING_SEED, so a run that dies after funding leaves its coins at an
 #: address the next run -- or reclaim_funding.py -- can still spend. See build_contract().
 REFUND_ROLE = "grc_htlc_refund"
+
+#: The participant (hashlock) key's role. IT IS DERIVED TOO, AND THE REASON IS NOT THE ONE THE
+#: REFUND KEY HAS. Nothing is ever paid to this key, so by the rule stated when the refund key
+#: was fixed -- "only keys that RECEIVE have to be recoverable" -- it could stay random. That
+#: rule is WRONG FOR P2SH and cost another 1.49 GRC on 2026-09-28, hours after it was written.
+#:
+#: A P2SH output is spent by presenting the WHOLE REDEEM SCRIPT, and this key's hash160 is
+#: inside it. Lose the key and the script cannot be rebuilt; lose the script and NO branch can
+#: be spent -- not the hashlock, and not the refund, however recoverable the refund key is. The
+#: refund key was made recoverable and the contract stayed unspendable, which is the most
+#: misleading version of this defect: everything looks fixed.
+#:
+#: THE CORRECTED RULE: every input to the redeem script must be reconstructible, not just the
+#: keys that receive. That is the secret hash, both addresses, and the locktime.
+PARTICIPANT_ROLE = "grc_htlc_participant"
+
+#: The preimage is derived too, for the same reason, and this is the part that makes a crashed
+#: run RECOVERABLE rather than merely diagnosable. With it, the entire contract is a function of
+#: (seed, locktime) -- and the locktime is printed on every run, in the line that explains it is
+#: a test value. So `--recover <locktime>` can rebuild a contract this harness funded and never
+#: spent, without anything having been written to disk.
+#:
+#: A DETERMINISTIC PREIMAGE WOULD BE WRONG IN A REAL SWAP, where the whole point is that only
+#: one party knows it until the redeem publishes it. It is right HERE because this harness is
+#: both parties, on a test network, and the alternative is what happened twice today: a funded
+#: contract nobody can spend. It is still never printed.
+PREIMAGE_ROLE = "grc_htlc_preimage"
 
 LOCKTIME_BLOCKS_AHEAD = 6
 
@@ -123,6 +151,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--funding-txid", default="",
         help="a payment to the seed-derived funding address, when the wallet does not remember it",
     )
+    parser.add_argument(
+        "--recover", type=int, default=0, metavar="LOCKTIME",
+        help=("recover a contract a CRASHED run funded and never spent, instead of running the "
+              "measurement. Give the locktime that run printed; the whole contract is derived "
+              "from it and the seed. Needs --contract-txid too."),
+    )
+    parser.add_argument(
+        "--contract-txid", default="", metavar="TXID",
+        help="with --recover: the contract funding txid that run printed at step 4",
+    )
     return parser.parse_args(argv)
 
 
@@ -146,6 +184,26 @@ def _seed_or_refuse() -> str:
     return seed
 
 
+def contract_preimage(seed: str, locktime: int) -> bytes:
+    """The hashlock preimage for a contract at this locktime. Never printed, always rebuildable.
+
+    DERIVED RATHER THAN RANDOM so a crashed run can be recovered. `secrets.token_bytes` made the
+    contract a function of nothing but chance, so a run that funded the P2SH and then died left
+    coins behind a script that could not be rebuilt -- which happened twice on 2026-09-28 and
+    cost 2.99 GRC in total.
+
+    THE LOCKTIME IS IN THE DERIVATION, so two runs never share a preimage, and it is the one
+    piece an operator already has: every run prints it in the line explaining it is a test
+    value. That is what makes recovery need nothing from disk.
+
+    SHA-256 OVER A DOMAIN-SEPARATED STRING rather than the seed alone, so this value and
+    key_from_seed's private keys cannot collide even in principle -- the role string is what
+    keeps derivations from the one seed apart, exactly as it does for the two addresses.
+    """
+    material = f"{PREIMAGE_ROLE}:{seed}:{locktime}".encode()
+    return hashlib.sha256(material).digest()[:PREIMAGE_BYTES]
+
+
 def build_contract(run: Run, tip: int) -> dict:
     """The HTLC, from the REAL builder, with a SHORT test locktime that is named as one."""
     run.step(3, "build a real HTLC with the REAL script builder and a SHORT test locktime")
@@ -165,11 +223,12 @@ def build_contract(run: Run, tip: int) -> dict:
     # The PARTICIPANT key stays random on purpose, and the asymmetry is the point: it is the
     # hashlock side, this harness never spends through it, and nothing is ever paid to it. A key
     # that never receives cannot strand anything. Only keys that RECEIVE need to be recoverable.
-    participant = generate_key()
-    refund = key_from_seed(_seed_or_refuse(), REFUND_ROLE)
-    preimage = secrets.token_bytes(PREIMAGE_BYTES)
-    secret_hash = hashlib.sha256(preimage).digest()
+    seed = _seed_or_refuse()
+    participant = key_from_seed(seed, PARTICIPANT_ROLE)
+    refund = key_from_seed(seed, REFUND_ROLE)
     locktime = tip + LOCKTIME_BLOCKS_AHEAD
+    preimage = contract_preimage(seed, locktime)
+    secret_hash = hashlib.sha256(preimage).digest()
     redeem_script = build_htlc_redeem_script(
         secret_hash=secret_hash.hex(),
         participant_address=participant.address,
@@ -240,6 +299,67 @@ def _refund_bytes(run: Run, contract: dict, outpoint: chain.Outpoint, nlocktime:
         locktime=nlocktime,
     )
     return spend.raw_hex
+
+
+def recover(run: Run, console: Console, locktime: int, contract_txid: str) -> int:
+    """Refund a contract a crashed run funded and never spent. Broadcasts one transaction.
+
+    WHY THIS IS NOT A LUXURY. Two runs on 2026-09-28 died between funding the P2SH and spending
+    it, and each left its coins behind a redeem script that could not be rebuilt -- 1.50 GRC,
+    then 1.49 more hours after the "fix". Making the contract a function of (seed, locktime)
+    is what turns that from a loss into a command, and this is the command. Without it the
+    derivation would be a property nothing exercised.
+
+    IT REBUILDS RATHER THAN REMEMBERS. Nothing was written to disk by the run that crashed --
+    that is the point of rule 5's "no decision is read from a file" applied to a harness -- so
+    this derives the participant key, the refund key and the preimage from the seed and the
+    locktime, and asks the chain for the rest. The operator supplies two numbers they already
+    have on screen.
+
+    THE P2SH IS CHECKED BEFORE ANYTHING IS SIGNED. If the rebuilt script does not hash to an
+    output of the named transaction, the derivation is wrong -- a different seed, a mistyped
+    locktime -- and signing would produce a transaction refused with `-22` and no reason. It
+    says which of the two it is instead.
+    """
+    console.banner("RECOVER A CONTRACT A CRASHED RUN LEFT BEHIND")
+    contract = build_contract(run, locktime - LOCKTIME_BLOCKS_AHEAD)
+    wanted = p2sh_script_for(contract["redeem_script"]).hex()
+    console.say(f"GRC: rebuilt the contract for locktime {locktime}; its P2SH is {wanted}")
+
+    decoded = adaptor_steps._decoded(run, contract_txid)
+    outpoint = None
+    for output in decoded.get("vout", []):
+        if (output.get("scriptPubKey") or {}).get("hex", "") == wanted:
+            outpoint = chain.Outpoint(txid=contract_txid, vout=int(output["n"]),
+                                      value_satoshis=coins_to_satoshis(str(output["value"])))
+            break
+    if outpoint is None:
+        paid = [(o.get("scriptPubKey") or {}).get("hex", "?") for o in decoded.get("vout", [])]
+        console.say(
+            f"GRC: {contract_txid} has NO output paying the rebuilt contract. Its outputs pay "
+            f"{paid}. Either the locktime is not the one that run printed, or "
+            f"{adaptor_steps.FUNDING_SEED_VARIABLE} is not the seed it ran with -- the P2SH "
+            f"above is the fingerprint of both together. Nothing was signed or broadcast."
+        )
+        return 1
+
+    tip = adaptor_steps.current_height(run)
+    console.say(f"GRC: found {satoshis_to_coins(outpoint.value_satoshis)} GRC at "
+                f"{contract_txid}:{outpoint.vout}. Tip is {tip}, the locktime is {locktime}")
+    if tip < locktime:
+        # COMPUTED BEFORE THE f-STRING, not inlined. A dict lookup with double quotes inside a
+        # double-quoted f-string is a syntax error on this interpreter, and it is the kind that
+        # only shows up when the branch is reached -- which here is the branch an operator hits
+        # when they are already waiting on a timelock.
+        remaining = locktime - tip
+        waiting = format_duration(remaining * SECONDS_PER_BLOCK["GRC"])
+        console.say(f"GRC: TOO EARLY -- CLTV will refuse this for {remaining} more block(s), "
+                    f"about {waiting}. Nothing was signed or broadcast; run this again then.")
+        return 1
+
+    destination = adaptor_steps.wallet_owned_address(run)
+    step_8_accepted(run, contract, outpoint, destination, {"refund_accepted": SKIP, "notes": []})
+    return 0
 
 
 def step_5_non_final(run: Run, contract: dict, outpoint: chain.Outpoint, outcome: dict) -> None:
@@ -361,6 +481,15 @@ def main(argv: list[str], console: Console | None = None) -> int:
                     "path does not touch the wallet's lock -- your staking wallet is left as found")
         adaptor_steps.step_1_reachable(run)
         adaptor_steps.assert_test_network(run)
+
+        if args.recover:
+            if not args.contract_txid:
+                raise RegtestSetupError(
+                    "--recover needs --contract-txid too: the locktime rebuilds the CONTRACT, "
+                    "and the txid says which transaction funded it. Both were printed by the "
+                    "run that crashed. Nothing was signed or broadcast."
+                )
+            return recover(run, console, args.recover, args.contract_txid)
 
         tip = adaptor_steps.current_height(run)
         contract = build_contract(run, tip)

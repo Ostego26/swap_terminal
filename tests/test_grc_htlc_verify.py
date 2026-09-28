@@ -20,13 +20,15 @@ pass, would be worse than no harness.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 from pathlib import Path
 
 import pytest
 from modules import adaptor_swap_chain as chain
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
-from regtest.console import FAIL, OK, SKIP
+from regtest.console import FAIL, OK, SKIP, Console
 from regtest.keys import generate_key, key_from_seed
 
 
@@ -365,3 +367,130 @@ def test_the_contract_is_funded_with_the_key_that_OWNS_the_output(monkeypatch):
         "the coin belongs to the REFUND key by the time this runs -- the funding key's output "
         "was consumed one step earlier, when it was split into this one"
     )
+
+
+def test_THE_WHOLE_CONTRACT_is_reconstructible_from_the_seed_and_the_locktime(monkeypatch):
+    """1.49 GRC, STRANDED HOURS AFTER THE REFUND KEY WAS "FIXED", 2026-09-28.
+
+    The earlier fix made the refund KEY seed-derived and stated the rule as "only keys that
+    RECEIVE have to be recoverable". The participant key receives nothing, so it stayed random
+    -- and that is wrong for P2SH in a way that is easy to miss and expensive to learn.
+
+    A P2SH output is spent by presenting the WHOLE REDEEM SCRIPT, and the participant key's
+    hash160 is inside it. Lose that key and the script cannot be rebuilt; lose the script and NO
+    branch can be spent -- not the hashlock, and not the refund, however recoverable the refund
+    key is. `8cd8531b675b66b3…` holds 1.49 GRC behind a script nobody can reproduce, and it was
+    funded by a run whose refund key was perfectly recoverable. Everything looked fixed.
+
+    THE CORRECTED RULE, which this test is the mechanical form of: every input to the redeem
+    script must be reconstructible. That is the secret hash, BOTH addresses and the locktime --
+    so the contract is a function of (seed, locktime), and the locktime is printed on every run.
+
+    The preimage is asserted too, and its determinism would be WRONG in a real swap, where the
+    point is that only one party knows it until the redeem publishes it. It is right here
+    because this harness is both parties on a test network, and the alternative is a funded
+    contract nobody can spend. It is still never printed.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+    built = []
+    monkeypatch.setattr(entry, "build_htlc_redeem_script",
+                        lambda **kw: built.append(kw) or b"\x51")
+
+    first = entry.build_contract(_SilentRun(), 100)
+    second = entry.build_contract(_SilentRun(), 100)
+
+    assert built[0] == built[1], (
+        "two runs at the same tip must build the IDENTICAL redeem script, or a crashed run "
+        f"leaves coins behind one that cannot be rebuilt. Got {built[0]} then {built[1]}"
+    )
+    assert first["refund"].address == second["refund"].address
+    assert built[0]["participant_address"] == built[1]["participant_address"], (
+        "the participant address is INSIDE the script -- random here is what stranded 1.49 GRC"
+    )
+    assert built[0]["secret_hash"] == built[1]["secret_hash"], (
+        "and so is the secret hash, so the preimage behind it has to be derived too"
+    )
+
+    # A DIFFERENT LOCKTIME MUST BE A DIFFERENT CONTRACT, or two runs would share a preimage and
+    # the second would be spendable by anyone who watched the first one's redeem.
+    entry.build_contract(_SilentRun(), 200)
+    assert built[2]["secret_hash"] != built[0]["secret_hash"]
+    assert built[2]["locktime"] != built[0]["locktime"]
+
+    # AND THE PREIMAGE IS THE ONE THE HASH COMMITS TO -- a derivation that did not round-trip
+    # would rebuild an unspendable hashlock branch and look correct doing it.
+    preimage = entry.contract_preimage(_A_SEED_FOR_TESTS, 106)
+    assert hashlib.sha256(preimage).hexdigest() == built[0]["secret_hash"]
+    assert len(preimage) == entry.PREIMAGE_BYTES
+
+
+def test_the_participant_and_refund_keys_are_DIFFERENT_keys(monkeypatch):
+    """Deriving both from one role would make the hashlock and refund branches the same key,
+    and the contract would mean nothing -- either branch would be spendable by either party.
+
+    The roles are what keep derivations from a single seed apart, which is the same mechanism
+    the funding address already relies on.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+    built = []
+    monkeypatch.setattr(entry, "build_htlc_redeem_script", lambda **kw: built.append(kw) or b"\x51")
+    contract = entry.build_contract(_SilentRun(), 100)
+    assert built[0]["participant_address"] != contract["refund"].address
+    assert entry.PARTICIPANT_ROLE != entry.REFUND_ROLE != entry.PREIMAGE_ROLE
+
+
+def test_recover_REFUSES_when_the_rebuilt_contract_does_not_match_the_named_transaction(monkeypatch):
+    """A wrong seed or a mistyped locktime rebuilds a DIFFERENT contract, and signing for it
+    would produce a transaction the chain refuses with `-22` and no reason at all.
+
+    That is the whole shape of today: four runs whose real cause sat in a daemon log. The P2SH
+    is the fingerprint of the seed and the locktime together, so comparing it against the named
+    transaction's outputs says which of the two is wrong BEFORE anything is signed.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+    console = Console(entry.TOTAL_STEPS, stream=io.StringIO())
+    monkeypatch.setattr(entry.adaptor_steps, "_decoded",
+                        lambda run, txid: {"vout": [{"n": 0, "value": "1.0",
+                                                     "scriptPubKey": {"hex": "deadbeef"}}]})
+    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 999_999)
+    monkeypatch.setattr(entry, "step_8_accepted",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("must not sign")))
+
+    code = entry.recover(_SilentRun(), console, 3296338, "ab" * 32)
+
+    assert code == 1
+    printed = console.text() if hasattr(console, "text") else ""
+    assert code == 1, printed
+
+
+def test_recover_REFUSES_BEFORE_THE_LOCKTIME_rather_than_broadcasting_a_doomed_refund(monkeypatch):
+    """CLTV would refuse it, and on this chain that refusal says `-22` and names nothing.
+
+    Saying how many blocks are left, and how long that is, is the difference between "try
+    again later" and an operator re-running every few minutes to see whether it took.
+    """
+    entry = _entry()
+    _with_seed(monkeypatch)
+    stream = io.StringIO()
+    console = Console(entry.TOTAL_STEPS, stream=stream)
+    built = {}
+    monkeypatch.setattr(entry, "build_htlc_redeem_script", lambda **kw: built.update(kw) or b"\x51")
+    wanted = entry.p2sh_script_for(b"\x51").hex()
+    monkeypatch.setattr(entry.adaptor_steps, "_decoded",
+                        lambda run, txid: {"vout": [{"n": 1, "value": "1.49",
+                                                     "scriptPubKey": {"hex": wanted}}]})
+    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 3296300)
+    monkeypatch.setattr(entry, "step_8_accepted",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("must not sign")))
+
+    code = entry.recover(_SilentRun(), console, 3296338, "ab" * 32)
+
+    assert code == 1
+    printed = stream.getvalue()
+    assert "TOO EARLY" in printed
+    assert "38 more block(s)" in printed, printed
+    assert "µfn" in printed, "and how long that is, in this repo's unit (rule 6)"
+    assert "Nothing was signed or broadcast" in printed
