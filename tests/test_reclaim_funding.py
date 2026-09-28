@@ -146,8 +146,19 @@ def test_an_output_too_small_to_cover_its_own_fee_is_refused_by_name(monkeypatch
 class _Node:
     """A daemon that refuses to be asked for a broadcast, so the default path can be asserted."""
 
+    #: A CHAIN WITH NOTHING IN IT, served to every stub that does not override it. The dry run
+    #: now WALKS BLOCKS to decide whether the output is still there -- Gridcoin answers
+    #: `testmempoolaccept: code=-32601 message=Method not found`, measured 2026-09-28, so the
+    #: check this tool used to rely on had never once executed. A stub serving no blocks is the
+    #: "nothing spent it, carry on" case, which is what most of these tests are about.
+    AN_EMPTY_CHAIN = {  # noqa: RUF012 -- a fixture table, read-only, never mutated
+        "getblockcount": 0,
+        "getblockhash": lambda height, *_: f"hash-of-{height}",
+        "getblock": lambda *_: {"tx": []},
+    }
+
     def __init__(self, answers: dict) -> None:
-        self.answers, self.sent = answers, []
+        self.answers, self.sent = {**self.AN_EMPTY_CHAIN, **answers}, []
 
     def call(self, method, *params):
         if method == "sendrawtransaction":
@@ -159,8 +170,15 @@ class _Node:
         raise RPCErrorStub(f"{method}: no answer configured")
 
 
-class RPCErrorStub(Exception):
-    pass
+class RPCErrorStub(adaptor_steps.RPCError):
+    """An unconfigured method, raised as the DAEMON would raise it.
+
+    Subclassing the real `RPCError` rather than `Exception` on 2026-09-28, because the code
+    under test catches `RPCError` to mean "the daemon would not answer that" -- which is the
+    ordinary case for `testmempoolaccept` on Gridcoin, a method it does not have. A stub raising
+    some other type escapes that handler, so the test exercises a path no daemon can produce and
+    passes or fails for reasons unrelated to the code.
+    """
 
 
 def test_without_send_the_transaction_is_BUILT_AND_SIGNED_and_never_broadcast(monkeypatch):
@@ -406,8 +424,63 @@ def test_a_dry_run_over_an_ALREADY_SPENT_output_refuses_instead_of_looking_healt
     printed = stream.getvalue()
     assert "bad-txns-inputs-missingorspent" in printed, "the daemon's own words"
     assert "ALREADY SPENT" in printed
-    assert "NOTHING was broadcast" in printed
-    assert "NOTHING WAS BROADCAST. Re-run with --send" not in printed, (
+    assert "NOTHING WILL BE" in printed, (
+        "and it says so in its own words -- a run that CANNOT proceed must not read like one "
+        "that is merely waiting to be told to (rule 13)"
+    )
+    assert "Re-run with --send" not in printed, (
         "and it must NOT go on to offer a --send line for a transaction that cannot be accepted"
     )
+    assert node.sent == []
+
+
+def test_the_dry_run_WALKS_THE_CHAIN_when_the_daemon_has_no_testmempoolaccept(monkeypatch):
+    """THE CASE THAT ACTUALLY HAPPENS, and until 2026-09-28 the check for it had never run.
+
+    The test above hands the daemon a testmempoolaccept answer. The operator's Gridcoin has no
+    such method -- `code=-32601 Method not found`, measured -- so the guard written to stop a
+    dry run looking healthy over a spent output returned "the daemon will not say" every single
+    time, and this tool read that as acceptance. A check that cannot execute is not a weaker
+    check, it is the absence of one, and it had been reporting as passing for a day.
+
+    `getblock(hash, true)` carries every transaction's inputs, so walking blocks answers the
+    same question with only calls this daemon actually has.
+    """
+    entry = _entry()
+    key, owned = generate_key(), generate_key().address
+    source = _source()
+    node = _Node({
+        "listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}],
+        "getblockcount": 4,
+        "getblock": lambda block_hash, *_: (
+            {"tx": [{"txid": "what-consumed-it",
+                     "vin": [{"txid": source.txid, "vout": source.vout}]}]}
+            if block_hash.endswith("-3") else {"tx": [{"txid": "cb", "vin": [{"coinbase": "00"}]}]}
+        ),
+    })
+    for name, value in (
+        ("resolve_config", lambda asset: ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid")),
+        ("step_1_reachable", lambda run: None),
+        ("assert_test_network", lambda run: None),
+        ("operator_funding_key", lambda run: key),
+        ("discover_operator_funding_txid", lambda run, k: "cd" * 32),
+        ("find_operator_funding", lambda run, k, txid: source),
+        ("adapter_for", lambda config, wallet="": node),
+    ):
+        monkeypatch.setattr(entry.adaptor_steps, name, value)
+
+    stream = io.StringIO()
+    code = entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
+
+    assert code == 1, "a dry run over a spent output must not exit 0"
+    printed = stream.getvalue()
+    assert "the call failed" in printed and "testmempoolaccept" in printed, (
+        "it says WHY the chain had to be walked, naming the method that could not answer"
+    )
+    assert "what-consumed-it" in printed, "and names the transaction that took it"
+    assert "ALREADY SPENT" in printed
+    assert "Re-run with --send" not in printed
     assert node.sent == []

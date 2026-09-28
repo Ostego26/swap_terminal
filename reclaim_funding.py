@@ -166,19 +166,37 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     # costs nothing and is asked here rather than discovered by --send. A dry run whose whole
     # purpose is "see it before it moves" must not show a healthy-looking spend of an output
     # that is gone.
-    reason = adaptor_steps.mempool_reject_reason(run, raw)
-    if reason:
-        console.check(f"{asset} the daemon would accept this", f"reject-reason={reason!r}",
-                      "accepted", FAIL)
-        console.say(f"{asset}: asked via testmempoolaccept, so NOTHING was broadcast.")
-        console.say(f"{asset}: THE LIKELIEST CAUSE IS THAT THIS OUTPUT IS ALREADY SPENT -- a "
-                    f"completed adaptor_regtest_verify.py run splits and spends its funding, and "
-                    f"neither this tool nor the daemon can tell a spent output from an unspent "
-                    f"one on a chain with no gettxout. Nothing is stranded at "
-                    f"{key.address} if a run consumed it; it was used.")
+    #
+    # AND IT NEVER RAN. MEASURED 2026-09-28, one day later, on the same host: Gridcoin answers
+    # `testmempoolaccept: code=-32601 message=Method not found`. The check written above to stop
+    # a dry run looking healthy over a spent output had itself never executed -- it returned
+    # "the daemon will not say" every single time and this code read that as acceptance. The
+    # comment above is kept exactly as written because that is the defect: it describes a check
+    # that does not run on the only chain this tool is used against.
+    #
+    # `find_the_spender` walks blocks instead, which needs only `getblockhash` and `getblock`.
+    # Same question, answered from the chain rather than from a method the daemon does not have.
+    answer = adaptor_steps.mempool_answer(run, raw)
+    console.say(f"{asset}: asked the daemon whether it would accept this -- {answer.description}")
+    reason = answer.reason
+    spender = None
+    if not reason:
+        spender, description = adaptor_steps.find_the_spender(run, source)
+        console.say(f"{asset}: asked the chain instead -- {description}")
+    if reason or spender:
+        console.check(f"{asset} the output is still there",
+                      f"reject-reason={reason!r}" if reason else f"spent by {spender}",
+                      "an unspent output", FAIL)
+        # DELIBERATELY NOT THE SAME SENTENCE as the --send offer below, which also opens
+        # "NOTHING WAS BROADCAST". Rule 13: a run that did nothing because it CANNOT proceed
+        # must not read like a run that did nothing because it is waiting to be told to.
+        console.say(f"{asset}: NOTHING WAS BROADCAST, AND NOTHING WILL BE -- there is nothing left to spend.")
+        console.say(f"{asset}: THIS OUTPUT IS ALREADY SPENT -- a completed "
+                    f"adaptor_regtest_verify.py run splits and spends its funding. Nothing is "
+                    f"stranded at {key.address} if a run consumed it; it was used.")
         return 1
-    console.check(f"{asset} the daemon would accept this", "accepted",
-                  "accepted -- asked via testmempoolaccept, and nothing was broadcast", OK)
+    console.check(f"{asset} the output is still there", "no spender found",
+                  "an unspent output -- asked without broadcasting anything", OK)
 
     console.step(6, asset, "broadcast -- ONLY with --send")
     if not args.send:

@@ -463,7 +463,7 @@ def _built(alice, bob, side, make_leg) -> adaptor_steps.BuiltChain:
 # ---------------------------------------------------------------------------
 
 
-def _funding_run(monkeypatch, testmempoolaccept):
+def _funding_run(monkeypatch, testmempoolaccept, blocks=None):
     console = Console(adaptor_steps.TOTAL_STEPS, stream=io.StringIO())
     run = adaptor_steps.Run(
         console=console,
@@ -475,6 +475,12 @@ def _funding_run(monkeypatch, testmempoolaccept):
         wallet="",
     )
 
+    # A CHAIN TO SCAN, because `refuse_if_the_funding_is_already_spent` now walks blocks when
+    # testmempoolaccept cannot answer -- which on the operator's Gridcoin is ALWAYS, the method
+    # being absent. `blocks` maps height -> decoded block; the default is an empty chain, so the
+    # scan runs, finds nothing, and the gate proceeds exactly as it did before it could scan.
+    chain_blocks = dict(blocks or {})
+
     class _Node:
         def call(self, method, *params):
             # listtransactions is allowed because a refused seed now prints the wallet's recent
@@ -482,7 +488,19 @@ def _funding_run(monkeypatch, testmempoolaccept):
             # refused, which is what this stub is for.
             if method == "listtransactions":
                 return []
+            if method == "getblockcount":
+                return max(chain_blocks) if chain_blocks else 0
+            if method == "getblockhash":
+                return f"hash-of-{params[0]}"
+            if method == "getblock":
+                height = int(str(params[0]).rsplit("-", 1)[1])
+                return chain_blocks.get(height, {"tx": []})
             assert method == "testmempoolaccept", f"nothing may be BROADCAST here, got {method}"
+            # AN EXCEPTION IS A LEGITIMATE ANSWER, and on the operator's Gridcoin it is the only
+            # one: the method does not exist and the daemon says `code=-32601 Method not found`.
+            # A stub that could only RETURN could not express the case that actually happens.
+            if isinstance(testmempoolaccept, Exception):
+                raise testmempoolaccept
             return testmempoolaccept
 
     monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
@@ -586,6 +604,113 @@ def test_split_operator_funding_ASKS_BEFORE_IT_SENDS(monkeypatch):
     assert sent == [], f"nothing may reach the daemon beyond the question, but {sent} did"
 
 
+def test_spender_in_block_FINDS_THE_SPEND_and_ignores_a_coinbase(monkeypatch):
+    """The decision, called with seeded inputs and no daemon anywhere near it (rule 10).
+
+    THE COINBASE CASE IS NOT DECORATION. Every Gridcoin block's first transaction has an input
+    with no `txid` key at all -- src/rpc/rawtransaction.cpp pushes `coinbase` instead -- so a
+    lookup written as `spend["txid"]` raises KeyError on the first input of every block and the
+    scan dies before it reaches anything. A crash here would be read as "the daemon will not
+    scan" and the gate would wave the spend through, which is the failure this whole function
+    exists to stop.
+
+    THE VOUT MUST MATCH TOO. A transaction spending output 0 of the funding payment says nothing
+    about output 1, and the operator's funding has consistently been vout 1 -- their GUI puts
+    the change first. Matching on txid alone would refuse a perfectly good run.
+    """
+    block = {"tx": [
+        {"txid": "coinbase-tx", "vin": [{"coinbase": "0403", "sequence": 0}]},
+        {"txid": "unrelated", "vin": [{"txid": "ff" * 32, "vout": 0}]},
+        {"txid": "the-spender", "vin": [{"txid": "ab" * 32, "vout": 1}]},
+    ]}
+    assert adaptor_steps.spender_in_block(block, "ab" * 32, 1) == "the-spender"
+    assert adaptor_steps.spender_in_block(block, "ab" * 32, 0) is None, "a different vout is a different outpoint"
+    assert adaptor_steps.spender_in_block({"tx": []}, "ab" * 32, 1) is None
+    assert adaptor_steps.spender_in_block({}, "ab" * 32, 1) is None, "a block with no tx key is not a crash"
+
+    # txinfo=false gives bare txid strings, which cannot be judged. Refusing beats guessing.
+    with pytest.raises(adaptor_steps.RegtestSetupError):
+        adaptor_steps.spender_in_block({"tx": ["just-a-txid"]}, "ab" * 32, 1)
+
+
+def test_an_ALREADY_SPENT_funding_output_is_REFUSED_by_walking_the_chain(monkeypatch):
+    """THE MEASURED CASE, 2026-09-28: the operator's daemon answers none of the easy questions.
+
+        gettxout            absent
+        importaddress       absent
+        testmempoolaccept   absent -- `code=-32601 Method not found`
+
+    That last one is the finding that forced the scan. Every pre-broadcast check in this repo
+    went through `testmempoolaccept` and NONE of them had ever run on this daemon; they returned
+    "the daemon will not say" and every caller read that as permission to proceed. A check that
+    cannot execute is not a weaker check, it is the absence of one, and it was reporting as
+    passing.
+
+    So the chain is asked instead. `getblock(hash, true)` carries every transaction's inputs, so
+    one call per block settles it with certainty rather than inference (rule 17).
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=1, value_satoshis=460_000_000)
+    chain_blocks = {
+        7: {"tx": [{"txid": "coinbase-7", "vin": [{"coinbase": "00"}]}]},
+        6: {"tx": [{"txid": "what-consumed-it", "vin": [{"txid": "ab" * 32, "vout": 1}]}]},
+    }
+    run = _funding_run(monkeypatch, adaptor_steps.RPCError("testmempoolaccept: code=-32601 message=Method not found"),
+                       blocks=chain_blocks)
+    stream = io.StringIO()
+    run.console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+
+    message = str(raised.value)
+    assert "ALREADY BEEN SPENT" in message
+    assert "what-consumed-it" in message, "and it names the transaction, not just the verdict"
+    assert f"{source.txid}:{source.vout}" in message
+    assert key.address in message, "and where to pay, or the remedy is unusable"
+    assert "Method not found" in stream.getvalue(), "the reason the chain had to be walked is said out loud"
+
+
+def test_a_daemon_that_cannot_be_SCANNED_does_not_become_a_refusal(monkeypatch):
+    """A diagnostic must never become a gate of its own -- the same rule the probe above follows.
+
+    `getblock` failing leaves the harness knowing exactly what it knew before the scan existed,
+    which is nothing, and a funded run has to proceed. What it must NOT do is stay quiet about
+    it: "no spender found" and "the scan did not happen" are different facts and print
+    differently (rule 14).
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=1, value_satoshis=460_000_000)
+    run = _funding_run(monkeypatch, adaptor_steps.RPCError("testmempoolaccept: code=-32601 message=Method not found"))
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "getblockcount":
+                return 9
+            raise adaptor_steps.RPCError(f"{method}: code=-32601 message=Method not found")
+
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+    stream = io.StringIO()
+    run.console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+
+    adaptor_steps.refuse_if_the_funding_is_already_spent(run, key, source, "00")
+
+    printed = stream.getvalue()
+    assert "could not scan" in printed, printed
+    assert "no transaction in the last" not in printed, "an aborted scan must not read as a clean one"
+
+
+# A CHAIN WITH NOTHING IN IT. `refuse_if_the_funding_is_already_spent` walks blocks whenever
+# testmempoolaccept cannot answer, so every stub that reaches that gate has to serve the walk --
+# and a stub that serves it with no blocks is the "not spent, carry on" case, which is what the
+# tests below are about. Kept as one table rather than three copies (rule 8).
+_AN_EMPTY_CHAIN = {
+    "getblockcount": lambda *_: 0,
+    "getblockhash": lambda height, *_: f"hash-of-{height}",
+    "getblock": lambda *_: {"tx": []},
+}
+
+
 def test_a_daemon_that_says_YES_then_REFUSES_the_send_is_EXPLAINED_not_tracebacked(monkeypatch):
     """THE 2026-09-28 TRACEBACK, held so it cannot come back.
 
@@ -613,6 +738,8 @@ def test_a_daemon_that_says_YES_then_REFUSES_the_send_is_EXPLAINED_not_traceback
                 return [{"allowed": True, "vsize": 226}]
             if method == "sendrawtransaction":
                 raise adaptor_steps.RPCError("sendrawtransaction: code=-22 message=TX rejected")
+            if method in _AN_EMPTY_CHAIN:
+                return _AN_EMPTY_CHAIN[method](*params)
             raise AssertionError(f"{method} must not be reached")
 
     run = _funding_run(monkeypatch, [])
@@ -688,6 +815,8 @@ def test_split_operator_funding_EXPLAINS_A_REFUSED_SEND_rather_than_tracebacking
                 return [{"allowed": True}]
             if method == "sendrawtransaction":
                 raise adaptor_steps.RPCError("sendrawtransaction: code=-22 message=TX rejected")
+            if method in _AN_EMPTY_CHAIN:
+                return _AN_EMPTY_CHAIN[method](*params)
             raise AssertionError(f"{method} must not be reached")
 
     run = _funding_run(monkeypatch, [])
@@ -729,6 +858,8 @@ def test_the_split_reports_the_fee_it_ACTUALLY_PAYS(monkeypatch):
                 return [{"allowed": True}]
             if method == "sendrawtransaction":
                 raise adaptor_steps.RegtestSetupError("stop here -- the reporting is what is under test")
+            if method in _AN_EMPTY_CHAIN:
+                return _AN_EMPTY_CHAIN[method](*params)
             raise AssertionError(f"{method} must not be reached")
 
     run = _funding_run(monkeypatch, [])

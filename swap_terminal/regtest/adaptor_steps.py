@@ -3200,6 +3200,109 @@ def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoin
     )
 
 
+# HOW FAR BACK THE SPEND SCAN LOOKS, in blocks. Gridcoin's target is 90s, so 2000 blocks is
+# about fifty hours -- comfortably past any funding payment an operator is still waiting on, and
+# bounded so a harness run cannot turn into a chain walk. The cap is REPORTED when it bites
+# rather than silently truncating the answer: "no spender found in the last 2000 blocks" and "no
+# spender exists" are different claims, and only the first one is ever established here.
+MAX_SPEND_SCAN_BLOCKS = 2000
+
+
+def spender_in_block(block: dict, txid: str, vout: int) -> str | None:
+    """Does any transaction in this block spend `txid:vout`? Its txid, or None.
+
+    THE DECISION, AT THE BOTTOM, WHERE IT CAN BE CALLED WITH SEEDED INPUTS (rule 10). The
+    walking, the progress line and the RPC belong to the caller; this is a pure question about
+    one decoded block, so a test can hand it a block and assert on the answer without a daemon.
+
+    `getblock(hash, true)` returns every transaction with its full `vin`, each entry carrying
+    `txid` and `vout` (src/rpc/blockchain.cpp blockToJSON -> TxToJSON, read 2026-09-28). A
+    coinbase input has no `txid` at all, so `.get` rather than `[]`: an input that names nothing
+    cannot be spending anything, and raising a KeyError on every block's first transaction would
+    make this function useless.
+    """
+    for transaction in block.get("tx", []):
+        if not isinstance(transaction, dict):
+            # txinfo=false was passed, or a daemon answered with bare txid strings. The caller
+            # asked for detail; without it this block cannot be judged, and saying "not spent"
+            # would be a guess dressed as an answer (rule 17).
+            raise RegtestSetupError(
+                "the daemon returned a block without transaction detail, so no spend could be "
+                "looked for. `getblock(hash, true)` is what this needs"
+            )
+        for spend in transaction.get("vin", []):
+            if spend.get("txid") == txid and int(spend.get("vout", -1)) == vout:
+                return str(transaction.get("txid", "an unnamed transaction"))
+    return None
+
+
+def find_the_spender(run: Run, source: chain.Outpoint) -> tuple[str | None, str]:
+    """Walk the chain backward from the tip looking for whatever spent `source`. Reads only.
+
+    THIS EXISTS BECAUSE THE OPERATOR'S DAEMON ANSWERS NONE OF THE EASY QUESTIONS, measured
+    2026-09-28 on Gridcoin testnet rather than assumed:
+
+        gettxout            absent
+        importaddress       absent -- so the address cannot even be watched
+        testmempoolaccept   absent, `code=-32601 Method not found`
+
+    That last one is the finding that forced this function. Every pre-broadcast check in this
+    repository went through `testmempoolaccept`, including the one `reclaim_funding.py` added on
+    2026-09-28 to stop a dry run reporting a healthy spend of an output that was already gone.
+    None of them ever ran on this daemon. They returned "" -- "the daemon will not say" -- and
+    every caller read that as permission to continue. A check that cannot execute is not a
+    weaker check, it is the absence of one, and it had been reported as passing.
+
+    WHAT IS LEFT IS THE CHAIN ITSELF, and it is enough. `getblock(hash, true)` returns every
+    transaction's inputs, so one call per block answers "did anything spend this outpoint" with
+    certainty rather than inference. Bounded by MAX_SPEND_SCAN_BLOCKS, newest block first
+    because a funding output is almost always consumed within a run or two of being made.
+
+    RETURNS (spender, description) AND NEVER RAISES ON A DAEMON THAT WILL NOT PLAY. A daemon
+    that cannot serve `getblock` leaves this returning (None, "could not scan: ...") and the
+    caller proceeds exactly as it did before this existed -- a diagnostic must not become a gate
+    of its own. The description is always non-empty for the same reason `mempool_answer`'s is:
+    "no spender found" and "the scan did not happen" are different facts (rule 14).
+    """
+    node = run.node(wallet=False)
+    try:
+        tip = int(node.call("getblockcount"))
+    except RPCError as error:
+        return None, f"could not scan the chain for a spender: {error}"
+
+    floor = max(0, tip - MAX_SPEND_SCAN_BLOCKS + 1)
+    scanned = 0
+    started = time.monotonic()
+    run.say(
+        f"scanning blocks {tip} down to {floor} for anything that spends "
+        f"{source.txid[:16]}…:{source.vout}. This daemon has no gettxout, no importaddress and "
+        f"no testmempoolaccept, so the chain itself is the only thing left that can answer"
+    )
+    for height in range(tip, floor - 1, -1):
+        try:
+            block = node.call("getblock", node.call("getblockhash", height), True)
+        except RPCError as error:
+            return None, (
+                f"could not scan the chain for a spender: stopped at block {height} after "
+                f"{scanned} block(s), {error}"
+            )
+        spender = spender_in_block(block, source.txid, source.vout)
+        scanned += 1
+        if spender:
+            elapsed = format_duration(time.monotonic() - started)
+            return spender, (
+                f"SPENT ALREADY: block {height} contains {spender}, which spends this exact "
+                f"outpoint. Found after {scanned} block(s), {elapsed}"
+            )
+        if scanned % 100 == 0:
+            run.say(f"scanned {scanned} block(s), now at height {height}, no spender yet")
+    elapsed = format_duration(time.monotonic() - started)
+    return None, (
+        f"no transaction in the last {scanned} block(s) spends this outpoint ({elapsed}). That "
+        f"is NOT the same as 'unspent': the scan stops at {floor} and anything older is unseen"
+    )
+
+
 def refuse_if_the_funding_is_already_spent(
     run: Run, key: RegtestKey, source: chain.Outpoint, raw_hex: str
 ) -> None:
@@ -3234,7 +3337,29 @@ def refuse_if_the_funding_is_already_spent(
     # could tell whether the daemon had said "fine" or had not been asked at all.
     run.say(f"asked the daemon whether the split is acceptable BEFORE broadcasting -- {answer.description}")
     if not answer.reason:
-        return
+        # THE DAEMON DID NOT REFUSE, WHICH IS NOT THE SAME AS SAYING IT IS FINE. On Gridcoin
+        # testnet it cannot say anything at all -- `testmempoolaccept` is absent -- so the line
+        # above reads "the call failed" and the check above this one has established nothing.
+        # The chain is asked instead, and only when the cheap question came back empty: a
+        # daemon that DID answer has already given a better answer than a block walk can.
+        spender, description = find_the_spender(run, source)
+        run.say(f"asked the chain instead -- {description}")
+        if spender is None:
+            return
+        raise RegtestSetupError(
+            f"{run.asset}: the operator's funding output has ALREADY BEEN SPENT.\n"
+            f"  the output:   {source.txid}:{source.vout}, worth "
+            f"{satoshis_to_coins(source.value_satoshis)} {run.asset}, at {key.address}\n"
+            f"  spent by:     {spender}\n"
+            f"  found by:     walking the chain, because this daemon has no gettxout, no "
+            f"importaddress and no testmempoolaccept to ask directly\n"
+            f"  Every run consumes its funding by design, and the harness picks the NEWEST "
+            f"payment the wallet remembers -- which after a successful run IS the spent one.\n"
+            f"  THE FIX: send another payment to {key.address} from your wallet, wait for one "
+            f"confirmation, and run this again. The address is derived from "
+            f"{FUNDING_SEED_VARIABLE} and does not change between runs.\n"
+            f"  Nothing was funded, signed or broadcast."
+        )
     reason = answer.reason
     raise RegtestSetupError(
         f"{run.asset}: the daemon will not accept the split of the operator's funding -- "
