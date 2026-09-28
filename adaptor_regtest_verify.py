@@ -226,7 +226,8 @@ if str(APP_ROOT) not in sys.path:
     # to close it would be a large diff with no behavioral gain.
     sys.path.insert(0, str(APP_ROOT))
 
-from regtest import adaptor_steps, daemons  # noqa: E402 -- the sys.path line above must run first
+from microfortnights import format_duration  # noqa: E402 -- the sys.path line above must run first
+from regtest import adaptor_steps, daemons  # noqa: E402 -- same
 from regtest.adaptor_steps import ChainOutcome, Run  # noqa: E402 -- same
 from regtest.console import FAIL, OK, SKIP, Console  # noqa: E402 -- same
 from regtest.daemons import RegtestSetupError  # noqa: E402 -- same
@@ -406,6 +407,46 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _announce_wall_clock(console: Console, assets: tuple[str, ...] | list[str]) -> None:
+    """Say how long this will take BEFORE it starts, and only where the answer is minutes.
+
+    RULE 14, AND THE SPECIFIC ACCIDENT IT EXISTS TO PREVENT HERE. A BTC or LTC regtest run of
+    this harness finishes in single-digit seconds -- the LTC run on 2026-09-28 took 6.6µfn
+    (8s) for 40 checks -- because `generatetoaddress` produces a block on demand. A Gridcoin
+    run cannot do that: it WAITS for real testnet blocks, and the progress line fires only
+    every 30s. So the operator sits in front of a 30-second gap, on a run driven against a
+    STAKING WALLET, with nothing on screen saying that is normal. CLAUDE.md rule 14 records
+    the operator's own words for what happens next: "i cannot stand to wait who knows how the
+    fuck long on a blinking cursor. how do i know it's not hung or broken?"
+
+    Printed only for GRC because a number attached to a run that takes eight seconds is noise,
+    and rule 14 asks for output that distinguishes cases rather than output everywhere.
+
+    Membership rather than equality on `assets`: CHAIN_SETS is data, and an `assets == ["GRC"]`
+    check would go silent the day a grc+ltc set is added.
+    """
+    if "GRC" not in assets:
+        return
+    blocks = adaptor_steps.expected_grc_blocks()
+    seconds = adaptor_steps.expected_grc_seconds()
+    console.say(
+        f"GRC CANNOT BE TOLD TO PRODUCE A BLOCK, so this run WAITS for real testnet blocks: at "
+        f"least {blocks} of them at Gridcoin's {adaptor_steps.GRC_SECONDS_PER_BLOCK:.0f}s target "
+        f"interval, so EXPECT AT LEAST {format_duration(seconds)} and possibly more -- "
+        f"{blocks} is a floor, not a prediction (adaptor_steps.expected_grc_blocks)"
+    )
+    console.say(
+        f"  progress prints every {format_duration(adaptor_steps.GRC_PROGRESS_INTERVAL_SECONDS)} "
+        f"while waiting, so a gap LONGER than that is the thing to worry about -- not a gap "
+        f"shorter. Per-wait timeout {format_duration(adaptor_steps.GRC_BLOCK_WAIT_TIMEOUT_SECONDS)} "
+        f"(ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS)"
+    )
+    console.say(
+        "  this harness NEVER starts or stops a Gridcoin daemon and sends no `stop`: your staking "
+        "wallet is left exactly as it was found"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
     configure_logging(args.verbose_clients)
@@ -426,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         "no OP_CHECKLOCKTIMEVERIFY is used anywhere here, so no BIP65 activation height is mined -- T1 "
         "and T2 are plain nLockTime fields on transactions that cannot move without both parties"
     )
+    _announce_wall_clock(console, assets)
 
     outcomes = [run_chain(console, asset, args) for asset in assets]
     print_verdicts(console, outcomes)

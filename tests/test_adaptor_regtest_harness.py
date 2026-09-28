@@ -33,6 +33,8 @@ fields and the recorded calls.
 
 from __future__ import annotations
 
+import importlib.util
+import io
 from decimal import Decimal
 from pathlib import Path
 
@@ -42,6 +44,7 @@ from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 from modules import adaptor_swap_chain as chain
 from modules.adaptor_swap_chain import LOCKTIME_THRESHOLD, assert_timelocks_ordered
 from modules.adaptor_swap_scripts import OP_0, two_of_two_redeem_script
+from modules.htlc_timelock import SECONDS_PER_BLOCK as TIMELOCK_SECONDS_PER_BLOCK
 from regtest import (
     adaptor_steps,
     daemons,
@@ -648,3 +651,102 @@ def test_getblockcount_is_in_the_probe_list_because_it_is_measured_to_work():
     assert daemons.LIVENESS_PROBES[0] == "uptime", (
         "uptime stays first: it needs no wallet and the two families that have it answer it"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# THE WALL-CLOCK ANNOUNCEMENT, WHICH IS RULE 14 ON THE ONE RUN THAT NEEDS IT.
+#
+# A BTC or LTC run of this harness finishes in seconds because `generatetoaddress` makes a
+# block on demand -- 6.6µfn (8s) for 40 checks on LTC, 2026-09-28. A GRC run WAITS for real
+# testnet blocks and prints progress only every 30s, so the operator faces repeated
+# 30-second gaps on a run driven against a staking wallet. CLAUDE.md rule 14 records what
+# happens then, in the operator's words: "i cannot stand to wait who knows how the fuck long
+# on a blinking cursor. how do i know it's not hung or broken?"
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_grc_block_interval_is_read_off_the_timelock_authority_not_written_again():
+    """rule 8. `modules/htlc_timelock.SECONDS_PER_BLOCK` has owned the per-chain target
+    interval since it was written, and this file had 90 as a bare literal in two message
+    strings. Two copies of one number agree the day they are written and drift after."""
+    assert TIMELOCK_SECONDS_PER_BLOCK["GRC"] == adaptor_steps.GRC_SECONDS_PER_BLOCK
+    source = Path(adaptor_steps.__file__).read_text()
+    assert "90s a block" not in source, "the literal came back; read it off SECONDS_PER_BLOCK"
+
+
+def test_the_expected_block_floor_moves_with_the_timelock_constant():
+    """DERIVED, not a number somebody typed. If T2_BLOCKS_AHEAD changes -- and it is the
+    constant that decides how long a GRC run takes -- the announced floor has to change with
+    it, or the announcement becomes the stale-measurement defect rule 1 is about."""
+    floor = adaptor_steps.expected_grc_blocks()
+    assert floor > adaptor_steps.T2_BLOCKS_AHEAD, (
+        "the floor must exceed T2 alone: lock A and lock B's own confirmations come first"
+    )
+    assert adaptor_steps.expected_grc_seconds() == floor * adaptor_steps.GRC_SECONDS_PER_BLOCK
+
+
+def _entry_point():
+    """Import `adaptor_regtest_verify.py` -- the ROOT entry point -- by path.
+
+    By path rather than by name because the repository root is not on sys.path during a test
+    run: tests/conftest.py adds `swap_terminal/` (the application imports its own modules
+    rootlessly, which is CLAUDE.md rule 10's layout gap) and nothing adds the root. Importing
+    it is safe: everything runnable in it is behind `if __name__ == "__main__"`.
+    """
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "adaptor_regtest_verify_under_test", root / "adaptor_regtest_verify.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _recording_console() -> tuple[Console, io.StringIO]:
+    """A Console writing to a StringIO, and the StringIO.
+
+    NOT a `.written` list on Console, because Console has no such attribute -- it prints to
+    `self.stream` and flushes every line on purpose (rule 14: a buffered progress line is the
+    same as no progress line). Earlier in this session I wrote a test that asserted against a
+    `console.lines` that does not exist; it compared four values against "" and passed, and
+    would have passed with a debug line echoing every private key. `stream=` is the interface
+    Console actually offers, read rather than guessed.
+    """
+    stream = io.StringIO()
+    return Console(total_steps=adaptor_steps.TOTAL_STEPS, stream=stream), stream
+
+
+def test_a_gridcoin_run_is_told_how_long_it_will_take_before_it_starts():
+    """The announcement fires for GRC, names a duration, and says the floor is a floor."""
+    console, stream = _recording_console()
+    _entry_point()._announce_wall_clock(console, ["GRC"])
+    printed = stream.getvalue()
+
+    assert "CANNOT BE TOLD TO PRODUCE A BLOCK" in printed
+    assert "\u00b5fn" in printed, "rule 6: the duration is reported in microfortnights, with a real \u00b5"
+    assert "ufn" not in printed.replace("\u00b5fn", ""), "rule 6: never an ASCII u for the unit"
+    assert "floor, not a prediction" in printed, (
+        "rule 17: a floor stated as a prediction is a hypothesis in a measurement's voice"
+    )
+    assert "NEVER starts or stops a Gridcoin daemon" in printed
+    assert str(adaptor_steps.expected_grc_blocks()) in printed, "the block count itself is printed"
+
+
+def test_a_litecoin_run_is_not_given_a_duration_it_does_not_need():
+    """Rule 14 asks for output that DISTINGUISHES cases. An eight-second run does not get a
+    wall-clock warning, because a warning attached to everything stops being read."""
+    console, stream = _recording_console()
+    _entry_point()._announce_wall_clock(console, ["LTC"])
+
+    assert stream.getvalue() == "", f"nothing should be printed for LTC, got {stream.getvalue()!r}"
+
+
+def test_the_announcement_reaches_a_gridcoin_run_in_a_mixed_chain_set():
+    """`--chain both` is BTC+LTC today, but CHAIN_SETS is data and a set containing GRC must
+    still announce. Membership, not equality -- an `assets == ["GRC"]` check would go quiet
+    the day somebody adds a grc+ltc set, which is the silent-regression shape rule 14 is
+    about."""
+    console, stream = _recording_console()
+    _entry_point()._announce_wall_clock(console, ["LTC", "GRC"])
+
+    assert "CANNOT BE TOLD TO PRODUCE A BLOCK" in stream.getvalue()

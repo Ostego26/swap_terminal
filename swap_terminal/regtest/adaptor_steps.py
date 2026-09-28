@@ -101,6 +101,7 @@ from modules.adaptor_swap_scripts import (
 )
 from modules.htlc_rpc import lookup_contract_output
 from modules.htlc_spend import SIGHASH_ALL, legacy_sighash, satoshis_to_coins
+from modules.htlc_timelock import SECONDS_PER_BLOCK
 from regtest import daemons
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
@@ -132,6 +133,40 @@ FUNDING_HEADROOM_COIN = {"BTC": "0.004", "LTC": "0.004", "GRC": "0.5"}
 GRC_BLOCK_WAIT_TIMEOUT_SECONDS = float(os.environ.get("ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS", "1800"))
 GRC_POLL_INTERVAL_SECONDS = 10.0
 GRC_PROGRESS_INTERVAL_SECONDS = 30.0
+
+# HOW LONG A GRIDCOIN RUN TAKES, DERIVED RATHER THAN RECALLED, AND ANNOUNCED BEFORE IT STARTS.
+#
+# The number 90 was written as a bare literal in two message strings in this file and nowhere
+# else, while `modules/htlc_timelock.SECONDS_PER_BLOCK` has owned the per-chain target interval
+# since it was written -- rule 8's shape exactly, and the copies would have drifted the moment
+# anyone re-measured Gridcoin's stake interval. It is read off that table now.
+#
+# expected_grc_blocks() is a FLOOR and says so. The waits a GRC run actually makes, traced
+# through this file: lock A costs a block to confirm the funding send, one to confirm Tx_lock
+# and one to confirm the redeem; lock B costs the same two, then T2_BLOCKS_AHEAD past its own
+# tip to get through the cancel at T1 and the refund after T2, with a block spent confirming
+# each of those two spends. Nothing shortens that on a chain that cannot be told to produce a
+# block, which is why rule 14 wants it said UP FRONT: an operator who does not know the run is
+# half an hour long reads a 30-second gap as a hang, and the thing they would Ctrl-C is a
+# staking wallet.
+GRC_SECONDS_PER_BLOCK = SECONDS_PER_BLOCK["GRC"]
+_LOCK_A_BLOCKS = 3
+_LOCK_B_CONFIRMATION_BLOCKS = 4
+
+
+def expected_grc_blocks() -> int:
+    """A FLOOR on the blocks a GRC run waits for -- not a prediction of the run's length.
+
+    A floor because the tip moves while the run works: T1 and T2 are computed from the tip at
+    the moment lock B confirms, so every block that arrives during the earlier steps counts
+    toward them and the real total is between this and this plus a few.
+    """
+    return _LOCK_A_BLOCKS + _LOCK_B_CONFIRMATION_BLOCKS + T2_BLOCKS_AHEAD
+
+
+def expected_grc_seconds() -> float:
+    """The floor above in seconds, at Gridcoin's target stake interval."""
+    return expected_grc_blocks() * GRC_SECONDS_PER_BLOCK
 
 # The fields, in order, that count as a daemon SAYING it is on a test network. Each is
 # (method, key, accepted values). The order is the order they are tried, and every one is
@@ -570,7 +605,8 @@ def _mine(run: Run, count: int) -> None:
     target = tip + count
     run.say(
         f"this chain cannot be told to produce a block, so WAITING for {count} more "
-        f"(tip {tip} -> {target}). Gridcoin testnet averages about 90s a block; the timeout is "
+        f"(tip {tip} -> {target}). Gridcoin testnet targets {GRC_SECONDS_PER_BLOCK:.0f}s a block "
+        f"(modules/htlc_timelock.SECONDS_PER_BLOCK); the timeout is "
         f"{format_duration(GRC_BLOCK_WAIT_TIMEOUT_SECONDS)} and it is set by "
         f"ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS"
     )
@@ -590,7 +626,8 @@ def _wait_for_height(run: Run, target: int) -> int:
             raise RegtestSetupError(
                 f"{run.asset}: waited {GRC_BLOCK_WAIT_TIMEOUT_SECONDS}s for the tip to reach {target} and it "
                 f"is {height}. Nothing was left broadcast that was not already broadcast. Either the chain is "
-                f"not advancing or ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS is too small for a 90s block target."
+                f"not advancing or ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS is too small for a "
+                f"{GRC_SECONDS_PER_BLOCK:.0f}s block target."
             )
         if waited - last_said >= GRC_PROGRESS_INTERVAL_SECONDS:
             last_said = waited
