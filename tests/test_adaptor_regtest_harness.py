@@ -48,6 +48,7 @@ from modules.adaptor_swap_chain import LOCKTIME_THRESHOLD, assert_timelocks_orde
 from modules.adaptor_swap_scripts import OP_0, two_of_two_redeem_script
 from modules.htlc_timelock import SECONDS_PER_BLOCK as TIMELOCK_SECONDS_PER_BLOCK
 from regtest import (
+    adaptor_join,
     adaptor_steps,
     daemons,
 )
@@ -143,16 +144,31 @@ def test_the_verdict_says_NOT_ESTABLISHED_when_a_decisive_check_was_skipped():
     assert "SPENDABLE" not in verdict
 
 
-def test_the_verdict_is_a_pass_only_when_all_four_decisive_checks_are_green():
-    outcome = adaptor_steps.ChainOutcome(
-        asset="GRC",
-        located_by_script_match=OK,
-        spends_in_correct_order=OK,
-        refused_when_transposed=OK,
-        refused_without_op0=OK,
-    )
-    assert "IS SPENDABLE ON THIS CHAIN" in outcome.verdict()
-    assert "not a source reading" in outcome.verdict()
+def test_the_verdict_and_established_never_disagree():
+    """PINS THE PROPERTY, NOT THE SPELLING. This test used to assert the substring "IS SPENDABLE
+    ON THIS CHAIN", and that sentence stopped being the verdict on 2026-09-28 when the adaptor
+    join raised what a pass means -- so it was pinning a phrasing rather than a fact, and it went
+    red for a change that made the harness stricter. What it is for is that the sentence the
+    operator reads and the boolean the exit code uses cannot contradict each other, and that is
+    what it now says.
+
+    Both directions, over every one-field-short combination, because a verdict that hedged on a
+    green run and one that claimed a pass on a SKIP are different defects and only the second is
+    dangerous.
+    """
+    green = dict.fromkeys(DECISIVE_FIELDS, OK)
+    outcome = adaptor_steps.ChainOutcome(asset="GRC", **green)
+    assert outcome.established()
+    assert "NOT ESTABLISHED" not in outcome.verdict()
+    assert "DID NOT WORK" not in outcome.verdict()
+
+    for missing in DECISIVE_FIELDS:
+        short = adaptor_steps.ChainOutcome(asset="GRC", **{**green, missing: SKIP})
+        assert not short.established()
+        assert "NOT ESTABLISHED" in short.verdict(), (
+            f"{missing}=SKIP is not established, so the sentence the operator reads must not "
+            f"claim it is"
+        )
 
 
 def test_a_single_FAIL_dominates_every_other_result():
@@ -402,7 +418,14 @@ def test_the_gridcoin_path_never_demands_chain_equals_regtest(console, monkeypat
 
 
 def _built_chain(asset: str = "LTC"):
-    """A real BuiltChain, built by the real builders, spending an outpoint that does not exist."""
+    """A real BuiltChain, built by the real builders, spending an outpoint that does not exist.
+
+    The Monero side and the redeem's adaptor pre-signature are built by the REAL functions too
+    -- `build_monero_side` samples shares and encodes an address, `pre_sign_leg` makes and
+    verifies a pre-signature -- because every test below that touches a redeem scriptSig is now
+    touching a completed adaptor signature, and a stubbed one would make those tests pass over
+    bytes no chain would ever see.
+    """
     alice, bob = generate_key(), generate_key()
     script = two_of_two_redeem_script(alice.public_key, bob.public_key)
     setup = adaptor_steps.LockSetup(
@@ -413,11 +436,17 @@ def _built_chain(asset: str = "LTC"):
         alice_script=alice.p2pkh_script, bob_script=bob.p2pkh_script,
     )
     lock = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=1_000_000)
+    redeem = chain.build_redeem(context, lock)
+    monero = adaptor_steps.monero_side()
     return adaptor_steps.BuiltChain(
         setup=setup, context=context, lock_raw_hex="00", lock_txid=lock.txid, lock_vout=0,
         lock_satoshis=lock.value_satoshis, lock_fee=10_000,
-        redeem=chain.build_redeem(context, lock),
+        redeem=redeem,
         cancel=chain.build_cancel(context, lock, 1_500), t1=1_500, t2=1_650,
+        monero=monero,
+        redeem_leg=adaptor_join.pre_sign_leg(
+            "redeem", bob.private_key, redeem.digest, monero.alice_spend, monero.alice_spend_public,
+        ),
     )
 
 
@@ -455,7 +484,7 @@ def test_the_transposed_and_correct_scriptsigs_are_the_SAME_LENGTH(console, monk
     Both are built from the SAME two signatures, produced once and swapped, so a difference
     here could only come from the assembler."""
     built = _built_chain()
-    alice_sig, bob_sig = adaptor_steps._signatures_in_key_order(built.setup, built.redeem.digest)
+    alice_sig, bob_sig = adaptor_steps._redeem_signatures(built)
     correct, _ = chain.assemble(built.redeem, alice_sig, bob_sig)
     transposed, _ = chain.assemble(built.redeem, bob_sig, alice_sig)
     assert len(correct) == len(transposed)
@@ -466,7 +495,7 @@ def test_the_missing_OP_0_variant_differs_by_exactly_one_byte(console, monkeypat
     """Built by REMOVING the byte from the real assembler's output rather than by writing a
     second assembler, so the harness measures one change and not two."""
     built = _built_chain()
-    alice_sig, bob_sig = adaptor_steps._signatures_in_key_order(built.setup, built.redeem.digest)
+    alice_sig, bob_sig = adaptor_steps._redeem_signatures(built)
     correct, _ = chain.assemble(built.redeem, alice_sig, bob_sig)
     without = adaptor_steps._script_sig_without_op0(built, alice_sig, bob_sig)
     assert len(bytes.fromhex(correct)) - len(bytes.fromhex(without)) == len(OP_0)
@@ -1141,10 +1170,33 @@ def test_a_chain_refused_at_a_precondition_has_established_NOTHING():
     )
 
 
-def test_all_four_decisive_outcomes_OK_is_the_ONLY_thing_that_establishes():
-    """MUTATION: drop any one of the four from established() and this goes red on that one."""
-    fields = ("located_by_script_match", "spends_in_correct_order",
-              "refused_when_transposed", "refused_without_op0")
+# THE DECISIVE FIELDS, SPELLED OUT HERE AND NOT READ OFF `decisive()`. Deriving them from
+# the method under test would make every assertion below vacuous: `decisive()` returning an
+# empty tuple, or dropping the two adaptor outcomes, would still pass. This list is the
+# independent statement of what a pass means, and the length assertion in
+# `test_the_decisive_list_and_this_test_agree_on_its_length` is what stops the two drifting.
+DECISIVE_FIELDS = (
+    "located_by_script_match",
+    "spends_in_correct_order",
+    "refused_when_transposed",
+    "refused_without_op0",
+    # Added 2026-09-28 with the adaptor join. Before these, a run could spend a 2-of-2 with two
+    # ORDINARY signatures and be scored a pass -- which is exactly what the 2026-09-28 Gridcoin
+    # run was, and the reason the join had to be measured rather than read.
+    "redeem_publishes_alice_share",
+    "reconstructed_key_opens_lock",
+)
+
+
+def test_the_decisive_list_and_this_test_agree_on_its_length():
+    """Rule 8, mechanically: a seventh decisive outcome added to `ChainOutcome.decisive()` and
+    not to `DECISIVE_FIELDS` above would leave the test below silently checking six of seven."""
+    assert len(adaptor_steps.ChainOutcome(asset="LTC").decisive()) == len(DECISIVE_FIELDS)
+
+
+def test_every_decisive_outcome_OK_is_the_ONLY_thing_that_establishes():
+    """MUTATION: drop any one of them from established() and this goes red on that one."""
+    fields = DECISIVE_FIELDS
     green = dict.fromkeys(fields, OK)
     assert adaptor_steps.ChainOutcome(asset="LTC", **green).established()
 
@@ -1186,15 +1238,12 @@ def test_the_exit_code_is_NON_ZERO_when_every_decisive_check_merely_SKIPPED(monk
     assert "SKIP is not a pass" in stream.getvalue()
 
 
-def test_the_exit_code_is_ZERO_only_when_every_chain_established_its_four(monkeypatch):
+def test_the_exit_code_is_ZERO_only_when_every_chain_established_everything(monkeypatch):
     """And the harness can still succeed, or the two tests above would pass with
     `return 1` hard-coded."""
     entry = _entry_point()
     console, stream = _recording_console()
-    green = adaptor_steps.ChainOutcome(
-        asset="LTC", located_by_script_match=OK, spends_in_correct_order=OK,
-        refused_when_transposed=OK, refused_without_op0=OK,
-    )
+    green = adaptor_steps.ChainOutcome(asset="LTC", **dict.fromkeys(DECISIVE_FIELDS, OK))
 
     assert entry.exit_code_for(console, [green]) == 0
     assert "ESTABLISHED on every chain" in stream.getvalue()

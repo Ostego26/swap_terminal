@@ -225,6 +225,46 @@ reading the code" exists to refuse. It wants a regtest chain and both branches
 exercised, which is the same standard the HTLC refund branch is still measured
 against.
 
+**THE JOIN IS BUILT AS OF 2026-09-28, AND WHAT THAT DOES AND DOES NOT SETTLE.**
+The two paragraphs above are kept because the measurement in them -- zero
+occurrences of `adaptor_ecdsa` in the harness, a chain spend made with two
+ORDINARY signatures -- is what the work was aimed at, and a measurement in prose
+ages (rule 1).
+
+WHAT EXISTS NOW. `swap_terminal/regtest/adaptor_join.py` holds the decisions:
+pre-sign a `ChainTransaction.digest` under an adaptor point, DER-encode the
+completed `(r, s)` with the SIGHASH byte, walk a scriptSig's pushes back into
+signatures, and recover the scalar from bytes fetched back off a chain.
+`regtest/adaptor_steps.py` uses it in both places section 2 specifies:
+
+    Tx_redeem   Bob's signature is a pre-signature under Y_a, completed by
+                Alice with s_a. Bob's key NEVER signs that digest.
+    Tx_refund   Alice's is a pre-signature under Y_b, completed by Bob with s_b.
+    Tx_cancel   plain both sides -- and `nothing_leaks()` asserts against the
+                PUBLISHED cancel that it tells neither party anything, rather
+                than arguing it from the absence of an `adapt` call (rule 17).
+
+and the run now closes the cross-curve loop: the scalar recovered from the
+redeem is added to the other share on ed25519 by
+`monero_swap_protocol.reconstruct_spend_key`, and the result's public key is
+compared against the public spend key DECODED BACK OUT OF THE LOCK ADDRESS. Two
+of `ChainOutcome`'s six decisive outcomes are those two facts, so a run that
+spends a 2-of-2 with ordinary signatures and publishes nothing now scores FAIL
+and says what it would have cost -- which is precisely what the 2026-09-28
+Gridcoin run was, scored 40 OK / 0 FAIL.
+`tests/test_adaptor_join.py::test_an_ordinary_2of2_spend_is_NOT_scored_as_having_published_anything`
+rebuilds that exact state and asserts the new answer.
+
+WHAT IS STILL NOT SETTLED, AND IT IS THE HALF THAT NEEDS A DAEMON. Everything
+above is measured OFFLINE -- 14 tests, no network. No run of
+`adaptor_regtest_verify.py --chain grc` has yet driven the adaptor version
+against the operator's Gridcoin testnet daemon, so "a Gridcoin transaction
+carrying an ADAPTED signature relays and confirms" is still a proposal in rule
+16's sense and not a fix. The `e75f257a` redeem and the `91e096f5` refund
+recorded above and in `docs/gridcoin_2of2_spend_2026_09_28.md` are the ORDINARY
+version of those transactions. What changed is that the harness can now tell the
+two apart, which it could not before.
+
 UPDATE 2026-09-28: THE FIVE TRANSACTIONS NOW EXIST AND FOUR OF THEM HAVE BEEN
 SPENT ON A CHAIN. `swap_terminal/modules/adaptor_swap_chain.py` builds Tx_lock,
 Tx_redeem, Tx_cancel, Tx_refund and Tx_punish, and

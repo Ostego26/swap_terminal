@@ -20,7 +20,12 @@ Mainnet-safe: NO. Not because it can reach a chain -- it cannot, even if asked
       question a reader of this field is asking on a key-holding host. See the
       next section, which is the most important paragraph in the file.
 
-UNAUDITED. NOT WIRED IN. NOT FOR MAINNET.
+UNAUDITED. WIRED INTO A TESTNET HARNESS ONLY. NOT FOR MAINNET.
+
+(This heading read "NOT WIRED IN" until 2026-09-28. It was true when written and was
+false the moment regtest/adaptor_join.py imported this module -- and leaving it would
+be the defect CLAUDE.md rule 19 cites by name, a file saying two things twenty lines
+apart, with the stale half at the top where a skimming reader stops.)
 
 Three statements, each measured rather than hedged, on 2026-09-27:
 
@@ -43,6 +48,34 @@ Three statements, each measured rather than hedged, on 2026-09-27:
      from here. It needs a Gridcoin testnet, a Monero stagenet, and the other
      two components (the cross-curve discrete-log-equality proof, and the
      Monero 2-of-2 spend path) that do not exist yet.
+
+**POINTS 2 AND 3 WERE TRUE ON 2026-09-27 AND ARE FALSE AS OF 2026-09-28.** They
+are kept above rather than overwritten because the drift is the point (rule 1)
+and this one aged in a day. The heading above has been corrected with
+them; what has NOT moved is unaudited and not-for-mainnet. Re-measured with the same NAME
+grep, same five strings, same exclusions:
+
+    swap_terminal/regtest/adaptor_join.py     the join: pre-sign, DER-encode,
+                                              parse a scriptSig back, recover
+    swap_terminal/regtest/adaptor_steps.py    Tx_redeem's second signature and
+                                              Tx_refund's first are now
+                                              pre-signatures completed with a
+                                              Monero spend share
+    swap_terminal/modules/monero_swap_protocol.py
+    tests/test_adaptor_join.py                14 tests over the join
+    tests/test_adaptor_regtest_harness.py
+
+So there IS a path: `adaptor_regtest_verify.py` drives it, and two of its six
+decisive outcomes are now the recovery and the cross-curve close. What point 3
+said could not be tested from here still cannot be tested from here -- it needs
+the operator's Gridcoin testnet daemon, which is exactly where
+`adaptor_regtest_verify.py --chain grc` runs. Until that run is recorded with
+txids, the claim "the scalar leaked on a chain" remains a proposal; what has
+changed is that there is now something to run, and a harness that scores an
+ORDINARY 2-of-2 spend as FAIL rather than as a pass.
+
+NOTHING HERE MAKES IT MAINNET-SAFE. It is wired into a REGTEST/TESTNET harness
+and nowhere else. `atomic_swap.py` and `monero_swap.py` still do not call it.
 
 WHAT THIS IS NOT ALLOWED TO BE USED FOR, AND WHY THE SPECIFICATION ITSELF SAYS SO
 

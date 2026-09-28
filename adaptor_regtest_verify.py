@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove -- or refute -- that a 2-of-2 P2SH actually funds and SPENDS, both branches.
+"""Prove -- or refute -- that an ADAPTOR signature spends a 2-of-2 and publishes the scalar.
 
 Role: file (the entry point; it runs the stages in swap_terminal/regtest/adaptor_steps.py
       and holds no decision of its own)
@@ -37,14 +37,28 @@ WHAT IT SETTLES, EACH AS A ROW-LEVEL OUTCOME ON A REAL CHAIN.
     2  it SPENDS with both signatures in the redeem script's key order
     3  it is REFUSED with the signatures TRANSPOSED
     4  it is REFUSED with the leading OP_0 dummy MISSING
-    5  a spend with nLockTime before T1 is refused and at T1 accepted -- sought from
+    5  the redeem's second signature is an ADAPTOR PRE-SIGNATURE completed with a Monero
+       spend share, and reading that scriptSig BACK OFF THE CHAIN yields the share
+    6  that share plus the other one reconstructs a private spend key whose public key is
+       the one DECODED OUT OF the Monero lock address
+    7  a spend with nLockTime before T1 is refused and at T1 accepted -- sought from
        CONSENSUS (the daemon is asked to MINE it) as well as from relay
-    6  the same on Gridcoin testnet, or a stated reason why not
+    8  the refund publishes the OTHER party's share, and the plain-signature cancel
+       publishes nothing
+    9  the same on Gridcoin testnet, or a stated reason why not
 
 Three and four are the ones nothing local can answer. A transposed pair of signatures
 produces a scriptSig of the SAME LENGTH and the SAME SHAPE as a correct one; there is no
 assertion available off-chain that distinguishes them, which is why
 tests/test_adaptor_swap_chain.py says so rather than pretending.
+
+FIVE AND SIX ARE WHY THE TITLE OF THIS FILE CHANGED ON 2026-09-28. Until then it said
+"that a 2-of-2 P2SH actually funds and SPENDS", and that is exactly what the first
+Gridcoin run established -- 40 OK, 0 FAIL, txids in docs/gridcoin_2of2_spend_2026_09_28.md
+-- using two ORDINARY signatures. The chain cannot tell an ordinary 2-of-2 spend from an
+adaptor one, so acceptance was never going to be the measurement; the RECOVERY is.
+Five and six are now decisive, which means a run that spends the lock with ordinary
+signatures scores FAIL where it used to score a clean pass.
 
 It also settles, as a side effect of doing the above at all:
 
@@ -309,6 +323,10 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
         adaptor_steps.step_3_capabilities(run)
 
         setup_a, setup_b = adaptor_steps.step_4_build_scripts(run)
+        # ONE Monero side for BOTH locks, because they are two branches of ONE swap -- lock A
+        # takes the redeem and lock B the cancel path, and in reality those are exclusive.
+        # MoneroSide's docstring carries the argument.
+        monero = adaptor_steps.build_monero_side(run)
         tip = adaptor_steps.step_5_spendable_coins(run)
 
         # LOCK A: funded, located, then the two refusals, then the happy-path spend. The
@@ -318,7 +336,7 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
             run, args.funding_txid, [setup_a.alice, setup_b.alice],
         )
         funding_a = adaptor_steps.fund_and_prepare(run, setup_a)
-        built_a = adaptor_steps.step_6_build_and_hold(run, setup_a, funding_a, tip)
+        built_a = adaptor_steps.step_6_build_and_hold(run, setup_a, funding_a, tip, monero)
         adaptor_steps.step_7_broadcast_lock(run, built_a, outcome)
         adaptor_steps.step_8_refusals(run, built_a, outcome)
         adaptor_steps.step_9_happy_path(run, built_a, outcome)
@@ -326,7 +344,9 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
         # LOCK B: an unspent 2-of-2 for the cancel path, because lock A's output is gone.
         console.banner(f"{asset} -- lock B, for the cancel path")
         funding_b = adaptor_steps.fund_and_prepare(run, setup_b)
-        built_b = adaptor_steps.step_6_build_and_hold(run, setup_b, funding_b, adaptor_steps.current_height(run))
+        built_b = adaptor_steps.step_6_build_and_hold(
+            run, setup_b, funding_b, adaptor_steps.current_height(run), monero
+        )
         adaptor_steps.step_7_broadcast_lock(run, built_b, outcome)
         adaptor_steps.step_10_cancel_path(run, built_b, outcome)
     except RegtestSetupError as exc:
@@ -361,7 +381,7 @@ def print_verdicts(console: Console, outcomes: list[ChainOutcome]) -> None:
     failed" are different results and a row that omitted the skips would read as a shorter,
     cleaner pass (rule 14).
     """
-    console.banner("DID A 2-of-2 P2SH ACTUALLY FUND AND SPEND, AND WAS THE FOOTGUN REFUSED")
+    console.banner("DID AN ADAPTOR SIGNATURE SPEND A 2-of-2, AND DID SPENDING IT PUBLISH THE MONERO SHARE")
     if not outcomes:
         console.say("(none: no chain was run)")
         return
@@ -369,11 +389,21 @@ def print_verdicts(console: Console, outcomes: list[ChainOutcome]) -> None:
         console.say(f"{outcome.asset}: {outcome.verdict()}")
         console.say(f"{outcome.asset}: {outcome.cancel_verdict()}")
         console.say(
-            f"{outcome.asset}:   THE FOUR DECISIVE OUTCOMES -- "
+            f"{outcome.asset}:   THE SIX DECISIVE OUTCOMES -- "
             f"1 funded and located by scriptPubKey match={outcome.located_by_script_match}  "
             f"2 spends in key order={outcome.spends_in_correct_order}  "
             f"3 REFUSED transposed={outcome.refused_when_transposed}  "
-            f"4 REFUSED without OP_0={outcome.refused_without_op0}"
+            f"4 REFUSED without OP_0={outcome.refused_without_op0}  "
+            f"5 the redeem PUBLISHES Alice's Monero spend share={outcome.redeem_publishes_alice_share}  "
+            f"6 the recovered share reconstructs a key that opens the lock ADDRESS="
+            f"{outcome.reconstructed_key_opens_lock}"
+        )
+        console.say(
+            f"{outcome.asset}:   the adaptor's OTHER branches -- "
+            f"the refund publishes Bob's share={outcome.refund_publishes_bob_share}  "
+            f"the plain-signature cancel leaks NOTHING={outcome.plain_branch_leaks_nothing}  "
+            f"<- these ride on the cancel path, so a chain that cannot be mined to T1 SKIPs them; "
+            f"a SKIP here is not a pass and is not counted as one"
         )
         console.say(
             f"{outcome.asset}:   the nLockTime outcomes -- "
