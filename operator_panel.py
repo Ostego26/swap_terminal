@@ -77,7 +77,14 @@ REPO_ROOT = Path(__file__).resolve().parent
 #: SERVER-RENDERED STRUCTURE, FETCHED VALUES. Every region has its text before any script runs,
 #: so a failed fetch leaves "asking..." rather than an empty box -- rule 14's "an empty result
 #: must never print nothing", applied to a page instead of a terminal.
-PAGE = """<!doctype html>
+#:
+#: THE `r` PREFIX IS LOAD-BEARING AND IS NOT STYLE. Without it Python reads the JavaScript's own
+#: escapes: `r.lines.join("\n")` became a join on a REAL newline, which is an unterminated
+#: string literal, which stops the whole inline script from parsing. The panel then served a
+#: perfectly valid page whose every region sat at its placeholder text forever -- and the smoke
+#: test that fetched the bytes and checked for element ids could not see it, because bytes are
+#: not execution. `javascript_strings_are_closed()` below is the check that can.
+PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Operator Panel</title>
@@ -211,6 +218,50 @@ refreshFunding();
 tick();
 setInterval(tick, 1000);
 </script></body></html>"""
+
+
+def javascript_strings_are_closed(page: str) -> str:
+    """"" if every JS string literal in the page closes on its own line, else the offending line.
+
+    THE DEFECT THIS EXISTS FOR, 2026-09-28. `PAGE` was a plain triple-quoted string, so Python
+    read the JavaScript's own escapes and turned `r.lines.join("\\n")` into a join on a REAL
+    newline. That is an unterminated string literal; the browser refuses the whole inline script;
+    and the panel then served a perfectly valid page whose every region sat at its placeholder
+    text forever. No error anywhere -- the server logged a 200, the HTML was complete, and the
+    operator saw "asking the daemon..." that never became anything.
+
+    WHY THE EXISTING TEST COULD NOT SEE IT. It fetched the page over a real socket and asserted
+    the element ids were present. They were. Bytes are not execution, and a check that reads
+    bytes can only ever prove the bytes. This is the cheapest check that is about the SCRIPT.
+
+    WHAT IT IS AND IS NOT. A line scanner, not a JavaScript parser: it tracks single and double
+    quotes, honours backslash escapes, and stops at a `//` comment. It does NOT understand
+    template literals, regex literals containing quotes, or a string deliberately continued with
+    a trailing backslash -- so it would false-positive on those, and the page must not use them.
+    That is a real constraint and it is stated rather than discovered: this page is small and
+    hand-written, and a checker that is exactly right about the subset in use beats a parser
+    dependency nobody would install to serve three routes.
+    """
+    inside = page.split("<script>", 1)[-1].split("</script>", 1)[0]
+    for number, line in enumerate(inside.splitlines(), 1):
+        quote = ""
+        escaped = False
+        for index, character in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\":
+                escaped = True
+            elif quote:
+                if character == quote:
+                    quote = ""
+            elif character in "\"'":
+                quote = character
+            elif character == "/" and line[index + 1:index + 2] == "/":
+                break
+        if quote:
+            return f"line {number} of the page's script ends inside a {quote} string: {line.strip()}"
+    return ""
 
 
 def state_payload(run: adaptor_steps.Run, runner: HarnessRunner) -> dict:

@@ -298,3 +298,52 @@ def test_the_panel_reads_the_SAME_payment_list_the_harness_picks_from(monkeypatc
 class _Outpoint:
     def __init__(self, txid):
         self.txid, self.vout, self.value_satoshis = txid, 1, 151_000_000
+
+
+# ---------------------------------------------------------------------------
+# THE PAGE'S SCRIPT. Bytes are not execution.
+# ---------------------------------------------------------------------------
+
+
+def test_the_pages_script_has_no_unterminated_string_literal():
+    """THE PANEL SHIPPED BROKEN AND EVERY TEST PASSED, 2026-09-28.
+
+    `PAGE` was a plain triple-quoted Python string, so Python read the JavaScript's own escapes
+    and turned `r.lines.join("\\n")` into a join on a REAL newline. That is an unterminated
+    string literal, the browser refuses the whole inline script, and the panel then served a
+    complete, valid, 200-OK page whose every region sat at its placeholder text forever. The
+    operator saw "asking the daemon..." that never became anything, with no error anywhere.
+
+    The smoke test in place at the time fetched the page over a real socket and asserted the
+    element ids were present. They were. A check that reads bytes can only prove the bytes.
+    """
+    entry = _entry()
+    assert javascript_strings_are_closed_of(entry)(entry.PAGE) == ""
+
+
+def test_the_checker_ACTUALLY_CATCHES_the_defect_it_was_written_for():
+    """A checker nobody has seen fail is a checker nobody knows works.
+
+    The first case is the exact shape of the 2026-09-28 defect -- a Python-unescaped `\\n`
+    splitting a JS string across two lines. The others pin that it does not simply return "" for
+    everything, and the last two pin that ordinary correct code is NOT flagged, because a
+    checker that cries wolf gets deleted (rule 19's note about a ratchet that fails on ordinary
+    work).
+    """
+    entry = _entry()
+    check = javascript_strings_are_closed_of(entry)
+
+    broken = '<script>\nconst s = out.join("\n");\n</script>'
+    assert "ends inside a" in check(broken), check(broken)
+    assert check('<script>\nconst s = "oops;\n</script>')
+    assert check("<script>\nconst s = 'oops;\n</script>")
+
+    assert check('<script>\nconst s = out.join("\\n");\n</script>') == ""
+    assert check('<script>\nconst s = "a // not a comment";\n</script>') == ""
+    assert check('<script>\nconst s = "he said \\"hi\\"";\n</script>') == ""
+    assert check('<script>\nfoo(); // a "quote" in a comment\n</script>') == ""
+
+
+def javascript_strings_are_closed_of(entry):
+    """Named rather than inlined, so the two tests above cannot drift onto different functions."""
+    return entry.javascript_strings_are_closed
