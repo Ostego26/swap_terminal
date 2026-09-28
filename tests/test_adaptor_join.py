@@ -27,6 +27,7 @@ import io
 from pathlib import Path
 
 import pytest
+from chains.base import RPCError
 from chains.monero_keys import decode_address, public_key_for_share
 from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 from ecdsa import SECP256k1, VerifyingKey
@@ -35,7 +36,7 @@ from modules import adaptor_swap_chain as chain
 from modules.adaptor_swap_scripts import two_of_two_redeem_script, two_of_two_script_sig
 from modules.htlc_spend import SIGHASH_ALL, parse_transaction
 from regtest import adaptor_join, adaptor_steps
-from regtest.console import FAIL, OK, Console
+from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import ChainConfig
 from regtest.keys import generate_key, key_from_seed
 
@@ -606,3 +607,74 @@ def test_a_real_seed_is_NOT_refused_and_is_stable_across_calls(monkeypatch):
             "and the same seed must derive the same address every run -- that stability is the "
             "entire reason the funded route exists"
         )
+
+
+# ---------------------------------------------------------------------------
+# UNMEASURED IS NOT REFUTED. A daemon that will not answer must not read as a broken swap.
+# ---------------------------------------------------------------------------
+
+
+class _MuteNode:
+    """A daemon that accepts transactions and will not hand any of them back.
+
+    Not hypothetical: Gridcoin v5.5.1.0 without `-txindex` searches the mempool and the WALLET
+    for `getrawtransaction`, and every transaction this harness builds pays keys the wallet has
+    never heard of. Once one confirms there is nothing left to find it in.
+    """
+
+    def call(self, method, *params):
+        raise RPCError(f"{method}: code=-5 No information available about transaction")
+
+
+def test_a_daemon_that_will_not_hand_the_redeem_back_is_SKIP_and_says_the_spend_was_fine(
+    parties, side, monkeypatch
+):
+    """THE FAILURE MODE THAT WOULD HAVE COST HALF AN HOUR AND POINTED AT THE WRONG THING.
+
+    An unreadable transaction and a transaction that published no scalar are different findings
+    with different causes -- a node configuration versus the swap being broken -- and scoring the
+    first as FAIL would send somebody into the cryptography for a `-txindex` problem, after
+    twenty-eight minutes of waiting for Gridcoin blocks.
+
+    So: SKIP on the decisive outcome, which `established()` already refuses to count as a pass,
+    plus a note saying in as many words that the spend itself verified.
+    """
+    alice, bob = parties
+    built = _built(alice, bob, side, lambda digest: _leg(bob, side, digest))
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _MuteNode())
+    outcome = adaptor_steps.ChainOutcome(asset="GRC")
+
+    adaptor_steps._recover_from_the_redeem(run, built, "ab" * 32, outcome)
+
+    assert outcome.redeem_publishes_alice_share == SKIP, "unmeasured, and a SKIP is not a FAIL"
+    assert outcome.reconstructed_key_opens_lock == SKIP
+    assert not outcome.established(), "and a SKIP is not a pass either"
+    note = " ".join(outcome.notes)
+    assert "UNMEASURED" in note and "not refuted" in note
+    assert "sendrawtransaction runs the interpreter" in note, (
+        "it has to say the spend itself verified, or the reader chases the cryptography"
+    )
+
+
+def test_a_scriptsig_the_daemon_omits_is_None_rather_than_empty_bytes(parties, side, monkeypatch):
+    """Empty bytes would parse to zero signatures and render as 'published nothing', which is
+    the wrong answer wearing the right shape. Three ways a daemon can decline, all None."""
+    for decoded in ({"vin": []}, {"vin": [{}]}, {"vin": [{"scriptSig": {}}]}):
+        run = _funding_run(monkeypatch, [])
+        monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="", d=decoded: _Node(d))
+        assert adaptor_steps.published_script_sig(run, "ab" * 32) is None
+
+
+def test_a_scriptsig_the_daemon_DOES_return_still_comes_back(parties, side, monkeypatch):
+    """Or the three above would pass with `return None` hard-coded."""
+    alice, bob = parties
+    leg = _leg(bob, side)
+    expected = _script_sig(
+        alice, bob,
+        alice.sign_digest(DIGEST) + bytes([SIGHASH_ALL]),
+        adaptor_join.complete_leg(leg, side.alice_spend, SIGHASH_ALL),
+    )
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node(_decoded_with(expected)))
+    assert adaptor_steps.published_script_sig(run, "ab" * 32) == expected

@@ -2080,8 +2080,8 @@ def _script_sig_without_op0(built: BuiltChain, first_signature: bytes, second_si
     return built.redeem.parsed.serialize({0: full[len(OP_0):]}).hex()
 
 
-def published_script_sig(run: Run, txid: str) -> bytes:
-    """The scriptSig of input 0 of `txid`, AS THE DAEMON HOLDS IT.
+def published_script_sig(run: Run, txid: str) -> bytes | None:
+    """The scriptSig of input 0 of `txid`, AS THE DAEMON HOLDS IT -- or None if it will not say.
 
     Fetched rather than remembered, and that is the entire reason this function exists rather
     than the caller passing the hex it just broadcast. The claim being measured is that
@@ -2089,18 +2089,49 @@ def published_script_sig(run: Run, txid: str) -> bytes:
     chain. Recovering from bytes this process still has in a local variable would measure
     nothing about publication -- it would measure that Python remembers what it was assigned.
 
+    CALL THIS WHILE THE TRANSACTION IS STILL IN THE MEMPOOL, which is what every caller now
+    does. Without `-txindex` a Gridcoin daemon's `getrawtransaction` searches the MEMPOOL and
+    the wallet, and these transactions pay keys this process generated, so once one confirms
+    the wallet does not know it and there is no index to find it in. The moment straight after
+    `sendrawtransaction` returns is therefore the RELIABLE one, and it is also the faithful one:
+    a counterparty watching for their scalar reads it out of the mempool, not out of a block --
+    waiting for a confirmation is what they do AFTER they have it.
+
+    Nothing about the claim weakens. The daemon has the bytes, ran the script interpreter over
+    them to accept them, and will relay them to every peer. That is publication.
+
+    NONE, NEVER AN EXCEPTION, and the distinction is the point. "The daemon would not give it
+    back" and "the transaction published no scalar" are different findings with different
+    causes -- one is a node configuration, the other is the swap being broken -- and folding
+    them together would report a read-back quirk as a cryptographic failure after half an hour
+    of waiting for blocks. Every caller renders None as SKIP with the reason, and a SKIP is not
+    a pass either (rule 14).
+
     `_decoded` is the one route-finder (rule 8): it already handles a daemon without -txindex,
     a wallet-only `gettransaction`, and the block-hash fallback, and a second fetch written here
     would rediscover each of those one failed run at a time.
     """
-    decoded = _decoded(run, txid)
+    try:
+        decoded = _decoded(run, txid)
+    except (RegtestSetupError, RPCError) as exc:
+        run.say(f"could not read {txid[:16]}.. back from the daemon ({exc}) -- so the recovery "
+                f"below is UNMEASURED, which is not the same as a transaction that leaked nothing")
+        return None
     inputs = decoded.get("vin") or []
     if not inputs:
-        raise RegtestSetupError(f"{run.asset}: the daemon's decoding of {txid} has no inputs at all")
-    return bytes.fromhex(inputs[0].get("scriptSig", {}).get("hex", ""))
+        run.say(f"the daemon's decoding of {txid[:16]}.. has no inputs at all; it returned keys "
+                f"{sorted(decoded)} <- expected a 'vin' list. The recovery below is UNMEASURED")
+        return None
+    script_sig_hex = (inputs[0].get("scriptSig") or {}).get("hex", "")
+    if not script_sig_hex:
+        run.say(f"the daemon's decoding of {txid[:16]}.. input 0 carries no scriptSig hex; it "
+                f"returned keys {sorted(inputs[0])} <- expected 'scriptSig' with a 'hex'. The "
+                f"recovery below is UNMEASURED, NOT failed")
+        return None
+    return bytes.fromhex(script_sig_hex)
 
 
-def _report_recovery(run: Run, leg: AdaptorLeg, script_sig: bytes, who: str) -> int | None:
+def _report_recovery(run: Run, leg: AdaptorLeg, script_sig: bytes | None, who: str) -> tuple[int | None, str]:
     """Recover the scalar from a published scriptSig and print all four facts about it.
 
     FOUR CHECKS AND NOT ONE, because "a scalar came out" is the weakest of them and the other
@@ -2120,7 +2151,20 @@ def _report_recovery(run: Run, leg: AdaptorLeg, script_sig: bytes, who: str) -> 
     THE RECOVERED SCALAR IS NEVER PRINTED. It is a Monero spend share; printing it would put
     half a private key on a screen an operator pastes into a terminal window. What is printed is
     the public key it derives to, which is already public by construction.
+
+    Returns `(scalar, outcome)` rather than a bare scalar so that UNREADABLE and REFUTED do not
+    collapse into the same None. A daemon that will not hand the transaction back leaves the
+    question unanswered, which is a SKIP; a scriptSig that yields no scalar answers it NO, which
+    is a FAIL. Those need different things from whoever is reading the screen, and the caller
+    cannot tell them apart from a None.
     """
+    if script_sig is None:
+        run.check(
+            f"{who} PUBLISHES the Monero spend share (the join)",
+            "(none: the daemon would not hand the transaction back -- see the line above)",
+            "a scriptSig to read", SKIP,
+        )
+        return None, SKIP
     evidence = recover_published_scalar(leg, script_sig, public_key_for_share)
     run.say(
         f"{who}'s published scriptSig parsed to {evidence.signatures_seen} signature(s) "
@@ -2140,7 +2184,7 @@ def _report_recovery(run: Run, leg: AdaptorLeg, script_sig: bytes, who: str) -> 
         "the lock address was built from",
         OK if good else FAIL,
     )
-    return evidence.recovered if good else None
+    return (evidence.recovered, OK) if good else (None, FAIL)
 
 
 def step_9_happy_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
@@ -2173,9 +2217,15 @@ def step_9_happy_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> Non
         return
     run.check("the predicted spend txid equals the daemon's", f"predicted={predicted} daemon={txid}",
               "the same txid", OK if txid == predicted else FAIL)
+    # READ IT BACK BEFORE MINING. Without -txindex the daemon searches the mempool and the
+    # wallet, and this transaction pays keys this process generated -- so once it confirms, the
+    # wallet does not know it and there is no index to find it in. published_script_sig()'s
+    # docstring carries the argument, including why the mempool is the FAITHFUL moment and not
+    # merely the convenient one: a counterparty watching for their scalar reads it there.
+    # On GRC this also puts the answer on screen before a ~90s block wait rather than after it.
+    _recover_from_the_redeem(run, built, txid, outcome)
     _mine(run, 1)
     _corroborate_payout(run, txid, built.setup.alice.p2pkh_script, "the redeem")
-    _recover_from_the_redeem(run, built, txid, outcome)
 
 
 def _recover_from_the_redeem(run: Run, built: BuiltChain, txid: str, outcome: ChainOutcome) -> None:
@@ -2191,8 +2241,20 @@ def _recover_from_the_redeem(run: Run, built: BuiltChain, txid: str, outcome: Ch
     whether the result opens it -- which is the only form of the claim that is about money
     rather than about arithmetic.
     """
-    recovered = _report_recovery(run, built.redeem_leg, published_script_sig(run, txid), "Tx_redeem")
-    outcome.redeem_publishes_alice_share = OK if recovered is not None else FAIL
+    recovered, verdict = _report_recovery(run, built.redeem_leg, published_script_sig(run, txid), "Tx_redeem")
+    outcome.redeem_publishes_alice_share = verdict
+    if verdict == SKIP:
+        # UNMEASURED, and it must not be dressed as either answer. The decisive outcome stays
+        # SKIP, which established() already refuses to count as a pass, and the note says the
+        # spend itself was fine so nobody chases the cryptography for a read-back problem.
+        outcome.reconstructed_key_opens_lock = SKIP
+        outcome.notes.append(
+            "the redeem was ACCEPTED and the daemon then would not hand the transaction back, so "
+            "whether it published the scalar is UNMEASURED -- not refuted. That is a node "
+            "configuration (no -txindex, and these keys are not the wallet's), not a fact about "
+            "the adaptor. The spend itself verified: sendrawtransaction runs the interpreter."
+        )
+        return
     if recovered is None:
         outcome.notes.append(
             "the redeem was accepted by the chain and published NO recoverable scalar. The script "
@@ -2485,6 +2547,12 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
         OK,
     )
     refund_hex, refund_txid = chain.assemble(refund, *_refund_signatures(built, refund, refund_leg))
+    # The cancel's own scriptSig, read back while IT was still fetchable. Captured here rather
+    # than after the refund confirms for the reason published_script_sig() gives, and it is what
+    # the plain-branch check below reads -- a check that could not fetch its subject would
+    # report "leaks nothing" for a transaction it never saw, which is the one answer worse than
+    # no answer at all.
+    cancel_script_sig = published_script_sig(run, cancel_txid)
     txid, message = _broadcast(run, refund_hex, "Tx_refund (no locktime -- publishable as soon as the cancel confirms)")
     accepted = txid is not None
     run.check(
@@ -2495,10 +2563,17 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
     if accepted:
         run.check("the predicted refund txid equals the daemon's", f"predicted={refund_txid} daemon={txid}",
                   "the same txid", OK if txid == refund_txid else FAIL)
+        # The scalar itself is discarded here on purpose. On the redeem it is carried into
+        # reconstruction_opens_lock() because that is BOB closing the loop with a share he did
+        # not have; the refund's scalar closes it for ALICE, who in this harness is the same
+        # process and already holds it, so reconstructing from it would assert nothing a
+        # variable in memory did not already guarantee. What the refund establishes is the
+        # PUBLICATION, and that is the outcome recorded.
+        _, outcome.refund_publishes_bob_share = _report_recovery(
+            run, refund_leg, published_script_sig(run, txid), "Tx_refund"
+        )
         _mine(run, 1)
         _corroborate_payout(run, txid, built.setup.bob.p2pkh_script, "the refund")
-        recovered = _report_recovery(run, refund_leg, published_script_sig(run, txid), "Tx_refund")
-        outcome.refund_publishes_bob_share = OK if recovered is not None else FAIL
         # AND THE PLAIN BRANCH MUST LEAK NOTHING, asserted against the CANCEL -- the one
         # plain-signature transaction in this run that actually reaches a chain. Tx_punish is the
         # other plain one and it is never published here, because 10d-i requires it to be REFUSED
@@ -2506,14 +2581,23 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
         # ever sees. `nothing_leaks` is a measurement rather than an argument about this file:
         # "we did not call adapt here" is a reason to believe it, not a check of the bytes
         # (rule 17).
-        quiet = nothing_leaks([built.redeem_leg, refund_leg], published_script_sig(run, cancel_txid))
-        run.check(
-            "Tx_cancel (plain signatures on both sides) leaks NOTHING",
-            f"no scalar recoverable for either leg from {cancel_txid[:16]}..:0's scriptSig",
-            "nothing -- the cancel is publishable by either party and must tell neither anything",
-            OK if quiet else FAIL,
-        )
-        outcome.plain_branch_leaks_nothing = OK if quiet else FAIL
+        if cancel_script_sig is None:
+            run.check(
+                "Tx_cancel (plain signatures on both sides) leaks NOTHING",
+                "(none: the daemon would not hand the cancel back -- see the line above)",
+                "a scriptSig to read", SKIP,
+            )
+            outcome.plain_branch_leaks_nothing = SKIP
+        else:
+            quiet = nothing_leaks([built.redeem_leg, refund_leg], cancel_script_sig)
+            run.check(
+                "Tx_cancel (plain signatures on both sides) leaks NOTHING",
+                f"no scalar recoverable for either leg from {cancel_txid[:16]}..:0's scriptSig "
+                f"({len(cancel_script_sig)} bytes read back)",
+                "nothing -- the cancel is publishable by either party and must tell neither anything",
+                OK if quiet else FAIL,
+            )
+            outcome.plain_branch_leaks_nothing = OK if quiet else FAIL
     else:
         outcome.notes.append(f"the second 2-of-2 could not be spent: {message}")
 
