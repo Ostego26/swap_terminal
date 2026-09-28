@@ -33,7 +33,7 @@ from ecdsa import SECP256k1, VerifyingKey
 from ecdsa.util import sigdecode_der
 from modules import adaptor_swap_chain as chain
 from modules.adaptor_swap_scripts import two_of_two_redeem_script, two_of_two_script_sig
-from modules.htlc_spend import SIGHASH_ALL
+from modules.htlc_spend import SIGHASH_ALL, parse_transaction
 from regtest import adaptor_join, adaptor_steps
 from regtest.console import FAIL, OK, Console
 from regtest.daemons import ChainConfig
@@ -272,6 +272,78 @@ def _run(monkeypatch, decoded: dict) -> tuple[adaptor_steps.Run, Console]:
     )
     monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node(decoded))
     return run, console
+
+
+def test_the_scriptsig_the_harness_ACTUALLY_BROADCASTS_yields_the_scalar(parties, side):
+    """MUTATION TARGET, and the one that was missing until it was checked for.
+
+    Every other test in this file builds its own scriptSig and hands it to the recovery. That
+    tests the recovery and says nothing about whether the harness puts an adaptor signature in
+    the transaction it sends -- and a mutant replacing `_redeem_signatures`' body with
+    `_signatures_in_key_order(...)` (two ordinary signatures, exactly the 2026-09-28 run)
+    SURVIVED the whole suite when it was tried. Nothing pinned the wiring.
+
+    So this one goes through the real assembler on the real BuiltChain, takes the bytes that
+    would leave the process, and asserts the scalar comes back out of them.
+    """
+    alice, bob = parties
+    built = _built(alice, bob, side, lambda digest: _leg(bob, side, digest))
+    raw_hex, _txid = chain.assemble(built.redeem, *adaptor_steps._redeem_signatures(built))
+    published = _script_sig_of(raw_hex)
+    evidence = adaptor_join.recover_published_scalar(built.redeem_leg, published, public_key_for_share)
+    assert evidence.recovered == side.alice_spend, (
+        "the transaction the harness would BROADCAST does not publish the share -- the recovery "
+        "works and the wiring does not, which is the shape of the defect this file exists for"
+    )
+    assert evidence.other_signatures_leaked_nothing
+    assert evidence.matches_setup_commitment
+
+
+def test_the_refund_the_harness_ACTUALLY_BROADCASTS_yields_the_OTHER_share(parties, side):
+    """The mirror, for the same reason, on the branch that pays Bob.
+
+    Alice pre-signs under Y_b and Bob completes with s_b, so the refund publishes BOB's share
+    and not Alice's -- and getting that backwards produces something that looks symmetric and
+    hands the wrong party a scalar they already had. Asserted both ways.
+    """
+    alice, bob = parties
+    built = _built(alice, bob, side, lambda digest: _leg(bob, side, digest))
+    cancel_output = chain.Outpoint(txid="ef" * 32, vout=0, value_satoshis=built.cancel.output_satoshis)
+    refund = chain.build_refund(built.context, cancel_output)
+    leg = adaptor_join.pre_sign_leg(
+        "refund", alice.private_key, refund.digest, side.bob_spend, side.bob_spend_public
+    )
+    raw_hex, _txid = chain.assemble(refund, *adaptor_steps._refund_signatures(built, refund, leg))
+    evidence = adaptor_join.recover_published_scalar(leg, _script_sig_of(raw_hex), public_key_for_share)
+    assert evidence.recovered == side.bob_spend
+    assert evidence.recovered != side.alice_spend, "the refund publishes BOB's share, not Alice's"
+    assert evidence.other_signatures_leaked_nothing
+    assert evidence.matches_setup_commitment
+
+
+def test_the_cancel_the_harness_ACTUALLY_BROADCASTS_publishes_NOTHING(parties, side):
+    """Tx_cancel carries plain signatures on both sides, so either party may publish it and it
+    tells neither anything. Measured against the bytes the assembler produces, not argued from
+    this file not calling `adapt` (rule 17)."""
+    alice, bob = parties
+    built = _built(alice, bob, side, lambda digest: _leg(bob, side, digest))
+    raw_hex, _txid = chain.assemble(
+        built.cancel, *adaptor_steps._signatures_in_key_order(built.setup, built.cancel.digest)
+    )
+    assert adaptor_join.nothing_leaks([built.redeem_leg], _script_sig_of(raw_hex))
+
+
+def _script_sig_of(raw_hex: str) -> bytes:
+    """Input 0's scriptSig, parsed out of a serialized transaction with the repo's own parser.
+
+    `htlc_spend.parse_transaction` rather than a second parser here (rule 8), and it stands in
+    for the daemon's `getrawtransaction` decoding in the offline tests: the bytes are the ones
+    the harness would have sent, which is the half these tests are about.
+    """
+    # (outpoint, script_sig, sequence) -- ParsedTransaction.inputs is a tuple of triples, and
+    # serialize() above is the definition of that order.
+    _outpoint, script_sig, _sequence = parse_transaction(bytes.fromhex(raw_hex)).inputs[0]
+    return script_sig
 
 
 def test_an_ordinary_2of2_spend_is_NOT_scored_as_having_published_anything(parties, side, monkeypatch):
