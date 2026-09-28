@@ -127,7 +127,11 @@ def test_a_SECOND_run_is_refused_while_one_is_alive():
         def start(self, name, argv, cwd):
             return "grc_htlc_verify is still running. Stop it first -- one run at a time."
 
-    answer, code = entry.start_named_run(_Busy(), {"key": "reclaim_dry_run"})
+    # THE KEY IS TAKEN FROM THE TABLE, not spelled. Renaming reclaim_dry_run ->
+    # grc_reclaim_dry_run when the runs became per-chain broke this test, which had nothing to
+    # do with renames -- the same "pinned the constant, not the behavior" the funding amounts
+    # taught earlier today (rule 8).
+    answer, code = entry.start_named_run(_Busy(), {"key": next(iter(decisions.RUNNABLE))})
     assert code == 409
     assert "one run at a time" in answer["error"]
 
@@ -416,11 +420,20 @@ def test_the_nav_is_built_from_the_SERVERS_list_and_not_hard_coded_in_the_page()
     entry = _entry()
     payload = entry.state_payload(None, HarnessRunner())
     assert [c["asset"] for c in payload["chains"]] == [c.asset for c in decisions.CHAINS]
+    assert set(payload["runnable"]) == {c.asset for c in decisions.CHAINS}, (
+        "every chain gets its own run list, including the empty ones -- a tab with no entry "
+        "would fall back to another chain's buttons, which is what made six tabs into one"
+    )
     # SCOPED TO THE NAV AND THE SCRIPT, not the whole page. "GRC" legitimately appears in the
     # subtitle, which is prose about the gate this process passed at startup; what must not
     # appear is an asset name the navigation or its default selection depends on.
     nav = entry.PAGE.split("<nav", 1)[1].split("</nav>", 1)[0]
     script = entry.PAGE.split("<script>", 1)[1].split("</script>", 1)[0]
+    # THE MARKS TABLE IS THE ONE EXCEPTION, and it is named rather than skirted: the coin logos
+    # are keyed by asset in the page because they are drawings, not data, and a chain with no
+    # mark falls back to a plain disc rather than breaking. What must still come from the server
+    # is the tab LIST and the DEFAULT selection, which is what this asserts.
+    script = script.split("const MARKS", 1)[0] + script.split("};", 1)[-1]
     for chain in decisions.CHAINS:
         assert chain.asset not in nav, f"{chain.asset} is baked into the nav element"
         assert f'"{chain.asset}"' not in script, (
@@ -751,3 +764,55 @@ def test_every_chain_has_a_theme_and_a_dark_variant():
         for key in ("accent", "dark"):
             assert theme[key].startswith("#") and len(theme[key]) == 7, f"{chain.asset}.{key}"
     assert decisions.theme_for("DOGE")["glyph"] == "?", "an unthemed chain looks unthemed"
+
+
+def test_each_chain_offers_ITS_OWN_runs_and_never_another_chains():
+    """THE OPERATOR'S REPORT, 2026-09-28: "doesn't matter which tab you click, it's all GRC
+    controls too. it doesn't switch per chain."
+
+    It was not a rendering bug. RUNNABLE had no idea which chain each entry belonged to, so
+    every tab rendered the whole table -- and a panel with six tabs and one set of controls is a
+    panel with one tab and five decorations. Worse: the buttons shown under BTC would have
+    spent GRC.
+
+    THE ASSET IS PART OF THE ENTRY rather than inferred from its name. A "grc_" prefix rule
+    would work until the first entry that did not follow it, and the failure would be a button
+    appearing under the wrong chain, which is the thing being fixed.
+    """
+    for key, (_what, argv, owner) in decisions.RUNNABLE.items():
+        assert owner in {c.asset for c in decisions.CHAINS}, f"{key} claims chain {owner!r}"
+        mine = [r["key"] for r in decisions.runs_for(owner)]
+        assert key in mine, f"{key} is not offered by its own chain"
+        for other in {c.asset for c in decisions.CHAINS} - {owner}:
+            assert key not in [r["key"] for r in decisions.runs_for(other)], (
+                f"{key} is offered under {other}, and running it would touch {owner}"
+            )
+        # AND THE ARGV MATCHES THE CHAIN IT CLAIMS. An entry filed under LTC whose command says
+        # --chain btc would pass every check above and spend on the wrong chain.
+        flat = " ".join(argv).lower()
+        if "--chain" in flat:
+            assert f"--chain {owner.lower()}" in flat, f"{key} is filed under {owner}: {argv}"
+
+
+def test_a_chain_with_no_harness_gets_an_empty_list_rather_than_someone_elses():
+    """An absent entry is what made the tabs fall back to another chain's buttons.
+
+    Every chain is a key, including the ones with nothing to run, so the page renders "(none)"
+    for them instead of whatever it rendered last (rule 14).
+    """
+    for chain in decisions.CHAINS:
+        assert isinstance(decisions.runs_for(chain.asset), list)
+    assert decisions.runs_for("DOGE") == [], "an unknown chain offers nothing, not everything"
+
+
+def test_gridcoin_is_PURPLE_and_the_value_is_gridcoins_own():
+    """It was green until the operator said otherwise: a guess presented as a theme, which is
+    rule 17's failure wearing a colour.
+
+    #753eef and #3c1b7b are the two gradient stops in src/qt/res/images/gridcoin.svg in the
+    Gridcoin wallet's own MIT-licensed source -- measured rather than picked, which is the only
+    reason this assertion is worth writing down.
+    """
+    theme = decisions.theme_for("GRC")
+    assert theme["accent"] == "#753eef", "the light stop of Gridcoin's own logo gradient"
+    assert theme["dark"] != theme["accent"], "and a lighter variant, readable on a dark page"

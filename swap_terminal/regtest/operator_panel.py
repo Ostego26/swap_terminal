@@ -59,20 +59,62 @@ from regtest.daemons import RegtestSetupError
 #: of it (rule 8). `reclaim_funding.py` appears WITHOUT `--send` deliberately -- the dry run is
 #: the safe one, and the thing that moves money stays a separate, explicit act that has to be
 #: typed (rule 16).
-RUNNABLE: dict[str, tuple[str, list[str]]] = {
+RUNNABLE: dict[str, tuple[str, list[str], str]] = {
     "grc_htlc_verify": (
         "Does OP_CHECKLOCKTIMEVERIFY execute on Gridcoin? ~10 minutes; it waits 6 real blocks.",
-        ["python3", "grc_htlc_verify.py"],
+        ["python3", "grc_htlc_verify.py"], "GRC",
     ),
-    "adaptor_regtest_verify": (
+    "grc_recover_search": (
+        "Find and refund a contract a crashed run funded and never spent. Reads the chain, "
+        "broadcasts only if it finds an UNSPENT one.",
+        ["python3", "grc_htlc_verify.py", "--recover-search"], "GRC",
+    ),
+    "grc_adaptor_verify": (
         "All five protocol transactions on GRC testnet, including the adaptor join.",
-        ["python3", "adaptor_regtest_verify.py", "--chain", "grc"],
+        ["python3", "adaptor_regtest_verify.py", "--chain", "grc"], "GRC",
     ),
-    "reclaim_dry_run": (
+    "grc_reclaim_dry_run": (
         "What is recoverable at the funding address. Broadcasts NOTHING -- no --send.",
-        ["python3", "reclaim_funding.py", "--to-wallet", "--chain", "grc"],
+        ["python3", "reclaim_funding.py", "--to-wallet", "--chain", "grc"], "GRC",
+    ),
+    "btc_htlc_verify": (
+        "The full HTLC suite on BITCOIN regtest -- it starts and stops its own daemon.",
+        ["python3", "regtest_htlc_verify.py", "--chain", "btc"], "BTC",
+    ),
+    "ltc_htlc_verify": (
+        "The full HTLC suite on LITECOIN regtest -- it starts and stops its own daemon.",
+        ["python3", "regtest_htlc_verify.py", "--chain", "ltc"], "LTC",
+    ),
+    "xmr_chain_check": (
+        "Read-only: what monero-wallet-rpc and monerod say about themselves.",
+        ["python3", "monero_chain_check.py"], "XMR",
+    ),
+    "xrp_chain_check": (
+        "Read-only: what the configured XRP Ledger endpoint says about itself.",
+        ["python3", "xrp_chain_check.py"], "XRP",
+    ),
+    "sol_chain_check": (
+        "Read-only: what the configured Solana endpoint says about itself.",
+        ["python3", "solana_chain_check.py"], "SOL",
     ),
 }
+
+
+def runs_for(asset: str) -> list[dict]:
+    """The runs THIS chain offers. The reason every tab used to look the same.
+
+    THE DEFECT, reported by the operator 2026-09-28: "doesn't matter which tab you click, it's
+    all GRC controls too. it doesn't switch per chain." Correct, and it was not a rendering
+    bug -- RUNNABLE had no idea which chain each entry belonged to, so every tab rendered the
+    whole table. A panel with six tabs and one set of controls is a panel with one tab and five
+    decorations, and worse than that: the controls it showed under BTC would have spent GRC.
+
+    THE ASSET IS PART OF THE ENTRY now rather than inferred from its name. Inferring it from a
+    "grc_" prefix would work until the first entry that did not follow the convention, and the
+    failure would be a button appearing under the wrong chain -- which is the thing being fixed.
+    """
+    return [{"key": key, "what": what}
+            for key, (what, _argv, owner) in RUNNABLE.items() if owner == asset]
 
 
 #: HOW EACH CHAIN'S TAB LOOKS. An accent for light and dark, a one-glyph mark, and the unit.
@@ -99,7 +141,11 @@ RUNNABLE: dict[str, tuple[str, list[str]]] = {
 #: that is unreadable half the time is worse than none, since the reader stops looking at it and
 #: the glance-level defense above is what was being bought.
 CHAIN_THEME = {
-    "GRC": {"accent": "#1f7a3d", "dark": "#6ee7a0", "glyph": "G", "unit": "GRC"},
+    # GRIDCOIN IS PURPLE, and these two are its OWN values rather than a guess: they are the
+    # gradient stops in src/qt/res/images/gridcoin.svg in the Gridcoin wallet's source, which
+    # is MIT. It was green here until the operator said otherwise on 2026-09-28 -- a guess
+    # presented as a theme, which is rule 17's failure wearing a colour.
+    "GRC": {"accent": "#753eef", "dark": "#9d7bf5", "glyph": "G", "unit": "GRC"},
     "BTC": {"accent": "#f7931a", "dark": "#f7931a", "glyph": "\u20bf", "unit": "BTC"},
     "LTC": {"accent": "#345d9d", "dark": "#7aa7e0", "glyph": "\u0141", "unit": "LTC"},
     "XMR": {"accent": "#f26822", "dark": "#ff8a4c", "glyph": "\u0271", "unit": "XMR"},

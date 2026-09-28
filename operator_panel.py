@@ -116,9 +116,8 @@ PAGE = r"""<!doctype html>
   .chainhead { display:flex; align-items:center; gap:12px; margin:-2px 0 12px;
                padding:10px 12px; border-radius:8px; border:1px solid var(--line);
                background:linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent); }
-  .mark { width:38px; height:38px; flex:0 0 38px; border-radius:9px; display:grid;
-          place-items:center; font-size:21px; font-weight:700; color:#fff;
-          background:var(--accent); }
+  .mark { width:40px; height:40px; flex:0 0 40px; }
+  .mark svg { width:100%; height:100%; display:block; }
   .chainhead h3 { margin:0; font-size:15px; letter-spacing:.04em; }
   .chainhead .kind { color:var(--dim); font-size:12.5px; }
   .pill { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11.5px;
@@ -139,7 +138,7 @@ this port was bound. The seed is never shown here and never leaves the server's 
 <nav id="tabs">loading the chain list from the server&hellip;</nav>
 
 <section>
-  <div class="chainhead"><div class="mark" id="mark">&middot;</div>
+  <div class="chainhead"><div class="mark" id="mark"></div>
     <div><h3 id="chainname">Chain</h3><div class="kind" id="chainkind">&nbsp;</div></div></div>
   <div id="chain">pick a chain above&hellip;</div>
   <button id="refresh">Re-check this chain</button>
@@ -175,6 +174,25 @@ this port was bound. The seed is never shown here and never leaves the server's 
 const $ = id => document.getElementById(id);
 let pinned = true, current = "";   // set from /api/state's chain list, never spelled here
 const THEMES = {}, KINDS = {};
+
+// THE COIN MARKS, AS INLINE SVG. No image file and no network: the page has to render on a
+// machine with no route to the internet, which is exactly when an operator opens it.
+//
+// GRIDCOIN'S IS THE REAL ONE -- the hexagon and purple gradient from
+// src/qt/res/images/gridcoin.svg in the Gridcoin wallet's own MIT-licensed source, simplified
+// to the outline and the two gradient stops (#753eef -> #3c1b7b). The others are DRAWN here,
+// faithfully but not lifted: a disc in the published brand color carrying the currency's
+// letterform, which is what each of those logos is. They are recognisable rather than official,
+// and saying so beats implying this repository ships anyone's trademark files.
+const MARKS = {
+  GRC: '<svg viewBox="0 0 500 500"><defs><linearGradient id="g" x1="250" y1="4" x2="250" y2="501" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#753eef"/><stop offset="1" stop-color="#3c1b7b"/></linearGradient></defs><path fill="url(#g)" d="M36 126L250 3 464 126 464 374 250 497 36 374z"/><path fill="#fff" d="M250 92l138 79v158l-138 79-138-79V171z" opacity=".15"/><text x="250" y="322" font-size="230" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">G</text></svg>',
+  BTC: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#f7931a"/><text x="32" y="46" font-size="40" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace" transform="rotate(-14 32 32)">\u20bf</text></svg>',
+  LTC: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#345d9d"/><text x="32" y="45" font-size="38" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">\u0141</text></svg>',
+  XMR: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#f26822"/><path fill="#fff" d="M14 42V22l18 17 18-17v20h-9V33l-9 9-9-9v9z"/></svg>',
+  XRP: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#23292f"/><path fill="#fff" d="M20 20h7l5 6 5-6h7l-8.5 10L44 40h-7l-5-6-5 6h-7l8.5-10z"/></svg>',
+  SOL: '<svg viewBox="0 0 64 64"><defs><linearGradient id="s" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9945ff"/><stop offset="1" stop-color="#14f195"/></linearGradient></defs><circle cx="32" cy="32" r="31" fill="#131316"/><g fill="url(#s)"><path d="M18 24l4-4h24l-4 4z"/><path d="M18 34l4-4h24l-4 4z"/><path d="M18 44l4-4h24l-4 4z"/></g></svg>',
+  _: '<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#6b6763"/><text x="32" y="45" font-size="34" font-weight="700" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">?</text></svg>',
+};
 $("out").addEventListener("scroll", () => {
   const el = $("out");
   pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
@@ -224,7 +242,7 @@ function applyTheme(t) {
   // none, because the reader stops looking at it.
   const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   document.documentElement.style.setProperty("--accent", dark ? t.dark : t.accent);
-  $("mark").textContent = t.glyph || "?";
+  $("mark").innerHTML = MARKS[t.asset] || MARKS._;
 }
 
 async function loadChain(asset) {
@@ -282,10 +300,20 @@ async function tick() {
     }
     loadChain(current || d.chains[0].asset);
   }
-  if (!$("buttons").dataset.built) {
-    $("buttons").innerHTML = d.runnable.map(x =>
-      '<div><button data-key="' + esc(x.key) + '">' + esc(x.key) + '</button><span class="what">' + esc(x.what) + "</span></div>").join("");
-    $("buttons").dataset.built = "1";
+  RUNS = d.runnable || {};
+  // REBUILT ON EVERY TAB SWITCH, not once. This was guarded by a `built` flag, so the first
+  // chain's buttons stayed on screen for all six tabs -- the operator's "it's all GRC controls
+  // too, it doesn't switch per chain". A cached render of chain-specific controls is worse than
+  // no render: the buttons under BTC would have spent GRC.
+  const want = current + "|" + JSON.stringify(RUNS[current] || []);
+  if ($("buttons").dataset.showing !== want) {
+    const mine = RUNS[current] || [];
+    $("buttons").innerHTML = mine.length
+      ? mine.map(x => '<div><button data-key="' + esc(x.key) + '">' + esc(x.key) +
+          '</button><span class="what">' + esc(x.what) + "</span></div>").join("")
+      : '<p class="warn">(none) &mdash; this panel has no harness for ' + esc(current) +
+        ". That is a statement about this panel, not about the chain.</p>";
+    $("buttons").dataset.showing = want;
     for (const b of $("buttons").querySelectorAll("button")) {
       b.onclick = async () => {
         const res = await (await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"},
@@ -391,7 +419,9 @@ def state_payload(run: adaptor_steps.Run, runner: HarnessRunner) -> dict:
             "exit_code": live.exit_code, "lines": live.lines, "dropped": live.dropped,
             "verdict": live.verdict,
         },
-        "runnable": [{"key": key, "what": what} for key, (what, _) in decisions.RUNNABLE.items()],
+        # PER CHAIN, not the whole table. See decisions.runs_for(): every tab rendering every
+        # run is what made six tabs into one tab and five decorations.
+        "runnable": {tab.asset: decisions.runs_for(tab.asset) for tab in decisions.CHAINS},
         # THE NAV IS BUILT FROM THE SERVER'S LIST, never hard-coded in the page. A chain added
         # to decisions.CHAINS and not to the page would be a chain that exists in one half of
         # this file and not the other -- rule 8's duplicate with a delay on it, in HTML.
