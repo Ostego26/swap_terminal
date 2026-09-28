@@ -11,10 +11,19 @@ Writes: nothing to disk. THE CHAIN AND THE WALLET: walletlock/walletpassphrase
        change the wallet's lock state; sendtoaddress and sendrawtransaction
        broadcast.
 Can move funds: YES, and this is the only one of the three that UNLOCKS THE
-       WALLET to do it. ensure_fully_unlocked() calls `walletpassphrase` with
-       the configured passphrase and leaves the wallet unlocked for 120
-       seconds by default -- during which anything else with RPC access can
-       spend from it.
+       WALLET to do it -- but ONLY on create_contract() since 2026-09-28.
+       ensure_fully_unlocked() calls `walletpassphrase` with the configured
+       passphrase and leaves the wallet unlocked for 120 seconds by default --
+       during which anything else with RPC access can spend from it. It is now
+       reached from the ONE path that genuinely needs it: create_contract()
+       funds with `sendtoaddress`, which asks the wallet to build a transaction.
+
+       redeem_contract() and refund_contract() no longer call it. Both sign in
+       process with the key they are handed and broadcast with
+       sendrawtransaction, so neither ever consulted the lock; the guard was
+       left behind when the old `signrawtransaction` route was removed.
+       refund_contract()'s docstring carries the measurement and what it cost on
+       a staking wallet.
 Mainnet-safe: NO, for two independent reasons. The script derivation is
        testnet-only, exactly as on the other two clients. AND THE DEFAULT
        PLATFORM FEE ADDRESS IS A TESTNET ADDRESS: redeem_contract() falls back
@@ -265,8 +274,9 @@ class GRCClient:
         # modules/htlc_rpc.py. On THIS client the line carried two
         # secrets, not one: ensure_fully_unlocked() calls
         # `walletpassphrase` with the operator's wallet passphrase as
-        # parameter 0, on every create_contract() and every
-        # redeem_contract().
+        # parameter 0. Since 2026-09-28 that is create_contract() ALONE --
+        # the redeem and the refund no longer unlock -- but the redaction
+        # matters exactly as much for one call site as for three.
         logger.debug("RPC call: %s", describe_rpc_payload(method, params))
         try:
             # The suppression on the requests.post line is a PROPOSAL MARKER,
@@ -509,7 +519,9 @@ class GRCClient:
             The broadcast txid.
         """
         logger.info(f"Redeeming GRC HTLC contract with TXID {contract_txid}.")
-        self.ensure_fully_unlocked()
+        # NO ensure_fully_unlocked() HERE ANY MORE. See refund_contract() below for the
+        # measurement; the short version is that this path signs with the `participant_privkey`
+        # argument and broadcasts with sendrawtransaction, and neither consults the wallet lock.
         found = lookup_contract_output(self.rpc_call, contract_txid, contract_vout, contract_blockhash)
         logger.info(
             "contract output read via %s: value=%s confirmations=%s (a count, never a duration)",
@@ -634,17 +646,42 @@ class GRCClient:
         arguments create on a fund path, and there are no existing callers here forcing
         the older convention.
 
-        THE WALLET UNLOCK IS THE ONE GRC-SPECIFIC LINE. broadcast_refund() is shared
-        across all three chains because a refund has none of the per-chain divergence a
-        redeem has -- no platform fee, one output, one branch. What GRC adds is that its
-        wallet is encrypted and `signrawtransaction` needs it open, which is why
-        ensure_fully_unlocked() is called here exactly as redeem_contract() calls it. It
-        is called BEFORE the output lookup rather than just before signing, matching the
-        redeem, so that a locked wallet fails at the same point on both paths instead of
-        one of them discovering it late.
+        THE WALLET UNLOCK USED TO BE THE ONE GRC-SPECIFIC LINE, AND IT WAS STALE. The
+        paragraph here said "GRC adds is that its wallet is encrypted and
+        `signrawtransaction` needs it open, which is why ensure_fully_unlocked() is called
+        here exactly as redeem_contract() calls it." That justification was already false
+        when it was written: redeem_contract()'s own docstring, a hundred lines up, says
+        "The old `signrawtransaction` call is gone." The guard outlived its reason.
+
+        MEASURED 2026-09-28, by reading what this path actually does. broadcast_refund()
+        calls lookup_contract_output(), build_refund_spend(wif=refund_privkey) and
+        sendrawtransaction. The signing is done IN PROCESS with the refund key this
+        function is handed. NONE of the three consults the wallet's lock state.
+
+        WHAT IT COST, and it is the reason this is a deletion rather than a note.
+        ensure_fully_unlocked() is `walletlock` followed by `walletpassphrase <pass> 120`.
+        On the operator's Gridcoin wallet -- which is unlocked FOR STAKING ONLY, with a
+        deadline about a year out -- `walletlock` DISCARDS that deadline and STOPS STAKING.
+        Gridcoin's own CWallet::ElevateToFull docstring names exactly this cost
+        (wallet/wallet.h:388-405): locking first "threw away the unlock's deadline", and a
+        "cancelled or mistyped prompt left a staking wallet locked and the node no longer
+        staking".
+
+        So with GRC_WALLET_PASSPHRASE unset this was a harmless no-op, and with it SET the
+        refund path locked a staking wallet in order to enable signing that no longer goes
+        through the wallet. The refund is the path that matters most on this chain -- in
+        atomic_swap_xrp_grc.py's GRC-first direction the Gridcoin leg carries the
+        INITIATOR's longer timelock, so it is the leg still locked when a counterparty
+        walks away -- and it was the path that mutated the operator's wallet to run.
+
+        create_contract() KEEPS ITS CALL. That one funds with `sendtoaddress`, which really
+        does need an unlocked wallet, and the difference between the two is the whole point:
+        one asks the wallet to create a transaction and the other does not.
+
+        Deleted on the operator's authorization, 2026-09-28: "delete it and make a note of
+        it all."
         """
         logger.info(f"Refunding GRC HTLC contract with TXID {contract_txid}.")
-        self.ensure_fully_unlocked()
         return broadcast_refund(
             asset="GRC",
             rpc_call=self.rpc_call,

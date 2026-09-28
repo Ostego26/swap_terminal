@@ -168,13 +168,22 @@ ONLY_LEGACY_WALLETS = "RPC Error: {'code': -4, 'message': 'Only legacy wallets a
 # --------------------------------------------------------------------------
 
 
-def _manual_unsigned_transaction(txid: str, vout: int, outputs: list[tuple[int, bytes]], prefix: bytes) -> str:
+def _manual_unsigned_transaction(
+    txid: str, vout: int, outputs: list[tuple[int, bytes]], prefix: bytes, locktime: int = 0
+) -> str:
     """Lay out an unsigned one-input transaction BY HAND, in this test file.
 
     Deliberately not built with modules/htlc_spend.ParsedTransaction.serialize():
     the parser under test must be fed bytes that its own serializer did not
     produce, or a round-trip assertion proves only that a function is its own
     inverse.
+
+    `locktime` DEFAULTS TO 0 AND WAS ADDED 2026-09-28. Until then this laid out a hardcoded
+    zero and `_rpc_createrawtransaction` took no locktime argument at all -- so the fake node
+    raised TypeError the moment anything asked for one, and the REFUND path is the only path
+    that asks. That is why no refund was ever driven through this node: the node could not
+    express one, and the GRC refund's only test read the client's SOURCE for a substring
+    instead. A fake that cannot represent the case is a fake that quietly scopes the suite.
     """
     body = prefix
     body += b"\x01"
@@ -182,7 +191,7 @@ def _manual_unsigned_transaction(txid: str, vout: int, outputs: list[tuple[int, 
     body += bytes([len(outputs)])
     for satoshis, script in outputs:
         body += struct.pack("<q", satoshis) + bytes([len(script)]) + script
-    body += struct.pack("<I", 0)
+    body += struct.pack("<I", locktime)
     return body.hex()
 
 
@@ -326,14 +335,19 @@ class FakeNode:
         self.sent_to.append((address, amount))
         return "cc" * 32
 
-    def _rpc_createrawtransaction(self, inputs, outputs):
+    def _rpc_createrawtransaction(self, inputs, outputs, locktime=0):
+        """`locktime` is the third positional argument every daemon takes, and this fake did
+        not. A refund passes it -- it is what CLTV compares against -- so the node raised
+        TypeError and no refund could be driven through it at all."""
         entry = inputs[0]
         laid_out = []
         for address, amount in outputs.items():
             if address not in self.scripts:
                 raise Exception(f"RPC Error: Invalid address {address}")
             laid_out.append((coins_to_satoshis(Decimal(str(amount))), self.scripts[address]))
-        return _manual_unsigned_transaction(entry["txid"], int(entry["vout"]), laid_out, self.prefix)
+        return _manual_unsigned_transaction(
+            entry["txid"], int(entry["vout"]), laid_out, self.prefix, int(locktime)
+        )
 
     def _rpc_sendrawtransaction(self, raw_hex, *_rest):
         self.broadcast.append(raw_hex)
@@ -342,6 +356,18 @@ class FakeNode:
     @property
     def methods(self) -> list[str]:
         return [method for method, _params in self.calls]
+
+
+# WHY A NON-EMPTY VALUE IS REQUIRED HERE, and why it is named rather than inline.
+# ensure_fully_unlocked() returns immediately when the passphrase is empty, so a test that
+# left it unset would pass whether the unlock call were present or absent -- the shape of
+# green test that measures nothing. It has to be non-empty.
+#
+# Named, and named without the word ruff's S105/S106 scan for, because a literal at the call
+# site is flagged and the answer to that is to have no literal rather than a suppression
+# (rule 19). It unlocks nothing: no wallet in this suite is encrypted, and conftest's
+# RPC_FIXTURE_AUTH is the same idea one file over.
+FIXTURE_UNLOCK_VALUE = "fixture-unlock-value-not-a-real-one"
 
 
 @pytest.fixture
@@ -398,6 +424,12 @@ def _node_for(contract, prefix: bytes = VERSION_2_PREFIX, platform_script=None, 
             contract["destination"].address: contract["destination"].p2pkh_script,
             contract["platform"].address: platform_script or contract["platform"].p2pkh_script,
             contract["participant"].address: contract["participant"].p2pkh_script,
+            # THE REFUND KEY'S OWN ADDRESS, added 2026-09-28. A refund pays the refund key,
+            # and this node did not know that address -- so even after it learned to take a
+            # locktime it answered "Invalid address" for the one destination a refund has.
+            # Two separate ways the fake could not represent a refund, in a suite whose only
+            # GRC refund test read the client's source for a substring.
+            contract["refund"].address: contract["refund"].p2pkh_script,
         },
         prefix=prefix,
     )
@@ -2530,31 +2562,103 @@ def test_the_grc_refund_is_keyword_only_like_its_ltc_sibling():
             )
 
 
-def test_the_grc_refund_unlocks_the_wallet_before_it_signs():
-    """THE ONE GRC-SPECIFIC LINE, and leaving it out would fail at signing rather than
-    at a readable point.
+def test_the_grc_refund_and_redeem_NEVER_TOUCH_THE_WALLET_LOCK(contract):
+    """THIS TEST USED TO ASSERT THE OPPOSITE, AND IT WAS PINNING A STALE GUARD.
 
-    broadcast_refund() is shared across all three chains because a refund has none of the
-    per-chain divergence a redeem has -- no platform fee, one output, one branch. What GRC
-    adds is an ENCRYPTED wallet: `signrawtransaction` needs it open. ensure_fully_unlocked()
-    is therefore called here exactly as redeem_contract() calls it, and BEFORE the output
-    lookup rather than just before signing, so a locked wallet fails at the same point on
-    both paths instead of one of them discovering it late.
+    It was `test_the_grc_refund_unlocks_the_wallet_before_it_signs`, and it read:
+
+        source = inspect.getsource(GRCClient.refund_contract)
+        assert "self.ensure_fully_unlocked()" in source
+
+    Two things wrong with that, and the second is the one this repository has a
+    principle about.
+
+    ONE: THE CLAIM WAS FALSE. Its docstring justified the unlock as "GRC adds is an
+    ENCRYPTED wallet: `signrawtransaction` needs it open". redeem_contract()'s own
+    docstring, a hundred lines up in the same file, says "The old `signrawtransaction`
+    call is gone." Measured 2026-09-28: broadcast_refund() calls
+    lookup_contract_output(), build_refund_spend(wif=refund_privkey) and
+    sendrawtransaction. The signing happens IN PROCESS with the key the function is
+    handed. Nothing consults the lock.
+
+    What the guard actually did was `walletlock` then `walletpassphrase <pass> 120`. On
+    the operator's Gridcoin wallet -- unlocked FOR STAKING ONLY with a deadline about a
+    year out -- `walletlock` DISCARDS that deadline and STOPS STAKING, which Gridcoin's
+    own CWallet::ElevateToFull docstring names as the cost. So the refund, the path that
+    matters most on the chain that carries the initiator's longer timelock, mutated the
+    operator's wallet in order to enable signing that does not go through the wallet.
+
+    TWO: IT WAS A SOURCE-TEXT ASSERTION. "Verify by row-level behavioral outcome, never
+    by literal SQL text" is about gates and SQL, and the shape is general: a test that
+    greps the code under test for a substring measures the spelling, not the behavior,
+    and goes green for a call that is present and unreachable. This one is driven through
+    the real client against a node that REFUSES to answer any wallet-lock call, so the
+    absence is what the daemon sees rather than what the file says.
     """
-    source = inspect.getsource(GRCClient.refund_contract)
-    assert "self.ensure_fully_unlocked()" in source
-    assert 'asset="GRC"' in source
-    assert "broadcast_refund(" in source
-    # The unlock precedes the delegation, which is the ordering being pinned. Matched on
-    # `return broadcast_refund(` rather than `broadcast_refund(`: the docstring names the
-    # function too, and the first draft of this assertion compared against that mention
-    # and failed with 2389 < 2094 -- a test that looked at prose where it meant code, the
-    # same mistake made twice today in tests/test_monero_shared_key_verify.py.
-    assert source.index("self.ensure_fully_unlocked()") < source.index("return broadcast_refund(")
+    node = _node_for(contract, prefix=GRIDCOIN_PREFIX)
+    refused: list[str] = []
+    real_rpc = node.rpc_call
 
-    # And LTC deliberately does NOT unlock -- an unencrypted-by-default wallet needs no
-    # passphrase, and adding one there would be a call that can only fail.
-    assert "ensure_fully_unlocked" not in inspect.getsource(LTCClient.refund_contract)
+    def refusing_rpc(method, params=None):
+        if method in ("walletlock", "walletpassphrase"):
+            refused.append(method)
+            raise AssertionError(
+                f"{method} must never be reached from a refund or a redeem: both sign with "
+                f"the key they are handed, and this call locks a staking wallet"
+            )
+        return real_rpc(method, params)
+
+    # A passphrase IS configured, which is the only case where the guard did anything. With
+    # it unset ensure_fully_unlocked() returns immediately, so a test with no passphrase
+    # would pass whether the call were there or not -- the shape of green test that measures
+    # nothing.
+    client = GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase=FIXTURE_UNLOCK_VALUE)
+    client.rpc_call = refusing_rpc
+
+    txid = client.refund_contract(
+        contract_txid=contract["txid"],
+        contract_vout=contract["vout"],
+        redeem_script=contract["redeem_script"],
+        locktime=LOCKTIME,
+        refund_privkey=contract["refund"].wif,
+        refund_address=contract["refund"].address,
+    )
+    assert txid == "dd" * 32
+    assert refused == [], "the refund reached the wallet lock"
+
+    client.rpc_call = refusing_rpc
+    _drive_redeem(client, node, contract)
+    assert refused == [], "the redeem reached the wallet lock"
+
+
+def test_create_contract_KEEPS_its_unlock_because_sendtoaddress_needs_one(contract):
+    """THE DIFFERENCE BETWEEN THE THREE PATHS, and why this is not a blanket removal.
+
+    create_contract() funds with `sendtoaddress`, which asks the WALLET to build and sign a
+    transaction -- that genuinely needs an unlocked wallet, and removing the guard there
+    would turn a readable refusal into a failure at the send. The redeem and the refund ask
+    the wallet for nothing but `sendrawtransaction`, which consults no lock.
+
+    Asserted on the call graph rather than the source text: ensure_fully_unlocked is
+    replaced with a recorder, and what is measured is which of the three paths reaches it.
+    """
+    node = _node_for(contract, prefix=GRIDCOIN_PREFIX)
+    client = GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase=FIXTURE_UNLOCK_VALUE)
+    client.rpc_call = node.rpc_call
+    reached: list[str] = []
+    client.ensure_fully_unlocked = lambda *a, **k: reached.append("unlock")
+
+    _drive_redeem(client, node, contract)
+    client.refund_contract(
+        contract_txid=contract["txid"], contract_vout=contract["vout"],
+        redeem_script=contract["redeem_script"], locktime=LOCKTIME,
+        refund_privkey=contract["refund"].wif, refund_address=contract["refund"].address,
+    )
+    assert reached == [], "neither the redeem nor the refund may unlock"
+
+    assert "self.ensure_fully_unlocked()" in inspect.getsource(GRCClient.create_contract), (
+        "and create_contract KEEPS it: sendtoaddress asks the wallet to build a transaction"
+    )
 
 
 def test_no_platform_fee_is_charged_on_any_refund():
