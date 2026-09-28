@@ -23,8 +23,32 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from modules import adaptor_swap_chain as chain
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 from regtest.console import FAIL, OK, SKIP
+from regtest.keys import generate_key
+
+
+class _SilentRun:
+    """A Run that answers the three things a step calls and refuses everything else.
+
+    `node()` raises rather than returning a stub: a test that reaches the daemon is a test
+    asserting something other than what it says it does, and it should say so loudly.
+    """
+
+    asset = "GRC"
+
+    def step(self, *a, **k):
+        pass
+
+    def say(self, *a, **k):
+        pass
+
+    def check(self, *a, **k):
+        pass
+
+    def node(self, wallet=True):
+        raise AssertionError("no daemon may be reached here")
 
 
 def _entry():
@@ -238,3 +262,43 @@ def test_the_exit_code_is_non_zero_unless_both_decisive_outcomes_are_OK():
         _outcome(),
     ):
         assert not entry.established(short), f"{short} is not a pass"
+
+
+def test_the_contract_is_funded_with_the_key_that_OWNS_the_output(monkeypatch):
+    """FOUR RUNS REFUSED BY THE CHAIN, and nothing local had anything to say about it.
+
+    `fund_contract` signed with `operator_funding_key(run)` an output that
+    `prepare_operator_funding` had already paid to `contract["refund"]`. The process holds BOTH
+    keys, so the transaction built, signed, serialized, and predicted its own txid; every check
+    this harness makes passed. Gridcoin answered `-22 TX rejected`, which names nothing, and the
+    real answer was in the operator's debug.log all along:
+
+        2026-09-28T17:04:26Z ERROR: ConnectInputs() : 39c099481d VerifySignature failed
+
+    A signature made with the wrong one of two keys you are holding is a perfectly well-formed
+    signature. That is why this is asserted on the KEY handed to the signer rather than on the
+    bytes: the bytes look right either way, which is the whole defect.
+    """
+    entry = _entry()
+    seen = {}
+
+    def _record(run, key, source, destination_script):
+        seen["key"] = key
+        return "00", "cd" * 32, 149_000_000
+
+    monkeypatch.setattr(entry.adaptor_steps, "reclaim_p2pkh_to_script", _record)
+    monkeypatch.setattr(entry.adaptor_steps, "broadcast_and_report", lambda run, raw, label: ("cd" * 32, "accepted"))
+    monkeypatch.setattr(entry.adaptor_steps, "wait_or_mine_to", lambda run, height: None)
+    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 100)
+    monkeypatch.setattr(entry.adaptor_steps, "operator_funding_key", lambda run: generate_key())
+
+    refund = generate_key()
+    contract = {"redeem_script": b"\x51", "refund": refund, "locktime": 106}
+    funding = chain.Outpoint(txid="ab" * 32, vout=0, value_satoshis=150_000_000)
+
+    entry.fund_contract(_SilentRun(), contract, funding)
+
+    assert seen["key"] is refund, (
+        "the coin belongs to the REFUND key by the time this runs -- the funding key's output "
+        "was consumed one step earlier, when it was split into this one"
+    )

@@ -700,6 +700,80 @@ def test_a_daemon_that_cannot_be_SCANNED_does_not_become_a_refusal(monkeypatch):
     assert "no transaction in the last" not in printed, "an aborted scan must not read as a clean one"
 
 
+def test_signing_a_key_DOES_NOT_OWN_is_refused_before_anything_is_signed(monkeypatch):
+    """THE GENERAL FORM of the defect that cost four Gridcoin runs on 2026-09-28.
+
+    grc_htlc_verify.py's fund_contract signed with the funding key an output already paid to the
+    refund key. Both live in the same process, so the transaction built, signed, serialized and
+    predicted its own txid, and every local check passed. Gridcoin answered `-22 TX rejected`,
+    which names nothing, and the operator's debug.log held the real answer:
+
+        ERROR: ConnectInputs() : 39c099481d VerifySignature failed
+
+    A signature made with the wrong one of several keys you hold is a WELL-FORMED signature.
+    Nothing local can tell -- so the check has to be the one the chain makes: does the previous
+    output's scriptPubKey match this key's? One getrawtransaction, asked before signing.
+
+    Fixing the call site alone would leave the next caller free to make the same mistake, which
+    is why this sits in reclaim_p2pkh_to_script rather than in the entry point (rule 19: remove
+    the cause, not the symptom).
+    """
+    owner, impostor = generate_key(), generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=1, value_satoshis=150_000_000)
+
+    class _Node:
+        def call(self, method, *params):
+            if method == "getrawtransaction":
+                return {"vout": [
+                    {"n": 0, "value": "1.0", "scriptPubKey": {"hex": "00"}},
+                    {"n": 1, "value": "1.5", "scriptPubKey": {"hex": owner.p2pkh_script.hex()}},
+                ]}
+            raise AssertionError(f"{method} must not be reached -- nothing may be signed or sent")
+
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+
+    with pytest.raises(adaptor_steps.RegtestSetupError) as raised:
+        adaptor_steps.reclaim_p2pkh_to_script(run, impostor, source, b"\x51")
+
+    message = str(raised.value)
+    assert "DOES NOT OWN" in message
+    assert owner.p2pkh_script.hex() in message, "it names who the output actually pays"
+    assert impostor.address in message, "and which key was about to sign for it"
+    assert "Nothing was signed or broadcast" in message
+
+    # AND THE RIGHT KEY IS NOT OBSTRUCTED. A guard that refuses the good case too is not a
+    # guard, it is an outage -- and it would be invisible in a test that only checks the refusal.
+    raw, predicted, value = adaptor_steps.reclaim_p2pkh_to_script(run, owner, source, b"\x51")
+    assert value < source.value_satoshis, "the fee comes out, and the spend was built normally"
+    assert raw and predicted
+
+
+def test_a_daemon_that_cannot_say_WHO_OWNS_IT_does_not_block_the_signing(monkeypatch):
+    """The ownership check is a diagnostic, not a gate -- the same rule every probe here follows.
+
+    A daemon that will not decode the funding transaction leaves this knowing what it knew
+    before the check existed, and signing proceeds. Refusing there would turn an unreachable
+    node into a failed run, which is the inversion this module keeps having to guard against.
+
+    OSError is in the caught list for a concrete reason: requests.RequestException derives from
+    it, so an unreachable daemon arrives as a ConnectionError rather than an RPCError, and two
+    reclaim tests that stub no node at all found that the hard way.
+    """
+    key = generate_key()
+    source = chain.Outpoint(txid="ab" * 32, vout=1, value_satoshis=150_000_000)
+
+    class _Node:
+        def call(self, method, *params):
+            raise ConnectionError("the daemon is not listening")
+
+    run = _funding_run(monkeypatch, [])
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node())
+
+    raw, predicted, value = adaptor_steps.reclaim_p2pkh_to_script(run, key, source, b"\x51")
+    assert raw and predicted and value > 0
+
+
 # A CHAIN WITH NOTHING IN IT. `refuse_if_the_funding_is_already_spent` walks blocks whenever
 # testmempoolaccept cannot answer, so every stub that reaches that gate has to serve the walk --
 # and a stub that serves it with no blocks is the "not spent, carry on" case, which is what the

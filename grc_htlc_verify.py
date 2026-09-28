@@ -154,7 +154,17 @@ def fund_contract(run: Run, contract: dict, funding: chain.Outpoint) -> chain.Ou
     which is what lets this run at all against a wallet unlocked for staking only.
     """
     run.step(4, "fund the contract's P2SH -- signed in THIS process, the wallet is not asked")
-    key = adaptor_steps.operator_funding_key(run)
+    # THE KEY THAT OWNS THE OUTPUT, NOT THE ONE THAT PAID FOR IT. This read
+    # `operator_funding_key(run)` until 2026-09-28 and the chain refused every transaction it
+    # built -- `39c099481d VerifySignature failed`, in the operator's debug.log, after four runs
+    # in which `-22 TX rejected` named nothing.
+    #
+    # The funding key's output is consumed one step earlier: `prepare_operator_funding` splits
+    # it into an output paying `contract["refund"]`, and `fund_and_prepare` hands that outpoint
+    # back. So by the time this runs, the coin belongs to the REFUND key and the funding key has
+    # no claim on it. Signing with the wrong one of two keys the same process is holding
+    # produces a perfectly well-formed transaction that only a chain can reject.
+    key = contract["refund"]
     raw, predicted, value = adaptor_steps.reclaim_p2pkh_to_script(
         run, key, funding, p2sh_script_for(contract["redeem_script"])
     )

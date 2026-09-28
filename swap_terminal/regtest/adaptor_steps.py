@@ -3041,6 +3041,67 @@ def reclaim_p2pkh(run: Run, key: RegtestKey, source: chain.Outpoint, destination
     return reclaim_p2pkh_to_script(run, key, source, p2pkh_script_for_address(run.asset, destination))
 
 
+def refuse_if_this_key_does_not_own_the_output(
+    run: Run, key: RegtestKey, source: chain.Outpoint
+) -> None:
+    """Does `key` actually own `source`? Ask BEFORE signing, not after the chain refuses.
+
+    THE DEFECT THIS CATCHES, measured 2026-09-28 rather than imagined. grc_htlc_verify.py's
+    fund_contract() signed with `operator_funding_key(run)` an output that
+    `prepare_operator_funding` had already paid to `contract["refund"]`. The process holds both
+    keys, so nothing failed locally: the transaction built, signed, serialized and predicted its
+    own txid, and every check the harness makes passed. The chain refused it with
+
+        -22 TX rejected
+
+    which names nothing, four runs in a row, and the real answer sat in the operator's debug.log
+    as `39c099481d VerifySignature failed`. A wrong key among several the same process is
+    holding is invisible to every local check, because a signature over the wrong key is a
+    perfectly well-formed signature.
+
+    ONE getrawtransaction, AND THE ANSWER IS EXACT. The previous output's scriptPubKey is what
+    ConnectInputs verifies the scriptSig against, so comparing it to this key's own P2PKH script
+    asks the identical question the chain will ask, before anything is signed or sent.
+
+    A DIAGNOSTIC AND NOT A GATE when it cannot be answered, the same shape as every other check
+    in this module: a daemon that will not decode the funding transaction leaves this saying so
+    and returning, and the signing proceeds exactly as it did before this existed. What it must
+    never do is refuse a good run because a lookup failed.
+    """
+    # OSError IS IN THE LIST BECAUSE A DAEMON THAT IS NOT THERE IS NOT A SIGNING ERROR.
+    # requests.RequestException derives from OSError, so an unreachable node arrives here as a
+    # ConnectionError rather than an RPCError -- and letting that escape would turn "the check
+    # could not run" into a crash, which is the exact inversion this function is written to
+    # avoid. Two reclaim tests found it: they exercise the FEE arithmetic with no node stubbed
+    # at all, and a guard that raised there would have made a diagnostic into a gate.
+    try:
+        decoded = _decoded(run, source.txid)
+    except (RegtestSetupError, RPCError, OSError) as error:
+        run.say(f"could not check which key owns {source.txid}:{source.vout} ({error}); signing anyway")
+        return
+    outputs = decoded.get("vout", []) if isinstance(decoded, dict) else []
+    for output in outputs:
+        if int(output.get("n", -1)) != source.vout:
+            continue
+        owner = (output.get("scriptPubKey") or {}).get("hex", "")
+        if owner == key.p2pkh_script.hex():
+            return
+        raise RegtestSetupError(
+            f"{run.asset}: THE SIGNING KEY DOES NOT OWN THE OUTPUT IT IS ABOUT TO SPEND.\n"
+            f"  the output:      {source.txid}:{source.vout}, worth "
+            f"{satoshis_to_coins(source.value_satoshis)} {run.asset}\n"
+            f"  it is paid to:   {owner}\n"
+            f"  this key pays:   {key.p2pkh_script.hex()} ({key.address})\n"
+            f"  A signature made with the wrong key is a well-formed signature, so nothing local "
+            f"catches this -- the chain answers `-22 TX rejected`, and only its debug.log says "
+            f"`VerifySignature failed`. Nothing was signed or broadcast."
+        )
+    run.say(
+        f"{source.txid}:{source.vout} has no output at that index in the daemon's decoding, so "
+        f"ownership could not be checked; signing anyway"
+    )
+
+
 def reclaim_p2pkh_to_script(
     run: Run, key: RegtestKey, source: chain.Outpoint, destination_script: bytes
 ) -> tuple[str, str, int]:
@@ -3058,6 +3119,7 @@ def reclaim_p2pkh_to_script(
     wallet is never asked to sign and a staking-only unlock is irrelevant here exactly as it is
     everywhere else in this harness.
     """
+    refuse_if_this_key_does_not_own_the_output(run, key, source)
     ntime = int(time.time()) if run.asset == "GRC" else None
     sizing = chain.build_unsigned(
         asset=run.asset, spends=source, outputs=[(source.value_satoshis, destination_script)],
