@@ -360,15 +360,39 @@ def step_1_reachable(run: Run) -> None:
     """
     run.step(1, "the daemon answers, and we did not start anything we should not have")
     if run.asset == "GRC":
-        run.say(f"asking {run.config.base_url} for uptime. This harness NEVER starts or stops a Gridcoin daemon")
-        if not daemons.rpc_answers(run.config):
+        # WHICH PROBE ANSWERED IS PRINTED, not just that one did.
+        #
+        # This asked for `uptime` alone until 2026-09-28 and failed against a daemon that was
+        # demonstrably up: three atomic swaps had completed through it twenty minutes earlier.
+        # Measured -- `gridcoinresearchd -testnet help uptime` answers "unknown command:
+        # uptime", while getblockcount on the same port with the same credentials returns
+        # 3295729. `uptime` arrived in Bitcoin Core 0.15 and Gridcoin forked long before it.
+        #
+        # So the refusal message must not say "nothing answered uptime" when uptime is simply
+        # a method this family never had -- that sends the operator to check credentials that
+        # are fine. daemons.liveness_probe_that_answers() tries each in turn and names the one
+        # that worked, because "uptime missed but getblockcount answered" is a fact about the
+        # daemon FAMILY and a bare True hides it.
+        run.say(
+            f"asking {run.config.base_url} for liveness ({', '.join(daemons.LIVENESS_PROBES)}). "
+            f"This harness NEVER starts or stops a Gridcoin daemon"
+        )
+        answered = daemons.liveness_probe_that_answers(run.config)
+        if answered is None:
             raise RegtestSetupError(
-                f"GRC: nothing answered `uptime` at {run.config.base_url}. Start your TESTNET daemon "
-                f"yourself -- `gridcoinresearchd -testnet -daemon` -- and check that GRC_RPC_USER and "
-                f"GRC_RPC_PASS match its gridcoinresearch.conf. This harness will not start it for you: "
-                f"a Gridcoin daemon is a staking wallet and starting one is a live action."
+                f"GRC: none of {list(daemons.LIVENESS_PROBES)} answered at {run.config.base_url}. "
+                f"Start your TESTNET daemon yourself -- `gridcoinresearchd -testnet -daemon` -- and "
+                f"check that GRC_RPC_USER and GRC_RPC_PASS match the TESTNET "
+                f"gridcoinresearch.conf, which on this layout is the one under the `testnet` "
+                f"subdirectory and carries DIFFERENT credentials from the mainnet file. This "
+                f"harness will not start it for you: a Gridcoin daemon is a staking wallet and "
+                f"starting one is a live action."
             )
-        run.check("daemon answers uptime", True, True, OK)
+        run.say(f"GRC: answered by `{answered}`"
+                + (" -- this family has no `uptime`, which is expected"
+                   if answered != daemons.LIVENESS_PROBES[0] else ""))
+        run.check("daemon answers a liveness probe", answered, "any of "
+                  f"{list(daemons.LIVENESS_PROBES)}", OK)
         return
     daemons.check_binaries(run.console, run.config)
     run.spawned = daemons.start_daemon(run.console, run.config)

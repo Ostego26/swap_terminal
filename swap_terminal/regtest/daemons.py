@@ -541,18 +541,59 @@ def adapter_for(config: ChainConfig, wallet: str = "") -> RegtestRPC:
     )
 
 
-def rpc_answers(config: ChainConfig) -> bool:
-    """True if something on the configured port answers `uptime`.
+# Liveness probes, tried in order. Each needs no wallet, so a success means "a daemon is up
+# and our credentials work" rather than "a TCP port is open" -- which is the whole point of
+# probing with an RPC instead of a socket connect.
+#
+# `uptime` FIRST AND `getblockcount` SECOND, AND THE SECOND ONE IS NOT DECORATION. This
+# function's docstring used to say `uptime` "exists on both daemon families", and that was
+# false the moment a third family arrived. Measured 2026-09-28 on the operator's Gridcoin
+# testnet daemon: adaptor_regtest_verify.py --chain grc failed at step 1 with "nothing
+# answered `uptime`" against a daemon that was demonstrably up -- three atomic swaps had
+# completed through it twenty minutes earlier, and `getinfo` answered from the CLI. `uptime`
+# arrived in Bitcoin Core 0.15 and Gridcoin forked long before it; it is the same shape as
+# Gridcoin having no `gettxout`, which made every GRC spend print a stack trace in front of a
+# success.
+#
+# `getblockcount` is the fallback because it is MEASURED to work on that daemon:
+# atomic_swap.py read tip 3295571 from it on 2026-09-27 while funding a real GRC leg. It
+# predates every fork in this tree.
+LIVENESS_PROBES = ("uptime", "getblockcount")
 
-    `uptime` is chosen because it needs no wallet and exists on both daemon
-    families, so a True here means "a daemon is up and our credentials work",
-    not "a TCP port is open".
+
+def liveness_probe_that_answers(config: ChainConfig) -> str | None:
+    """The name of the first probe this daemon answers, or None if none of them do.
+
+    Returns the NAME rather than a bool so a caller can print which one answered. That
+    matters because "uptime failed but getblockcount worked" is a fact about the daemon
+    FAMILY, and a reader who sees only True learns nothing about why the first one missed.
+    """
+    for method in LIVENESS_PROBES:
+        if _probe_answers(config, method):
+            return method
+    return None
+
+
+def _probe_answers(config: ChainConfig, method: str) -> bool:
+    """Does this daemon answer this one method? Extracted so the broad catch sits in a
+    function whose entire contract is "False means it did not", rather than inside a loop
+    where ruff's S112 is right that a bare try/except/continue hides which iteration failed.
     """
     try:
-        adapter_for(config).call("uptime")
-    except Exception:  # noqa: BLE001 -- checked: this is a PROBE whose two answers are "yes" and "not yet". It is called only from readiness polling, and every caller that needs the REASON for a no calls again through wait_for_rpc(), which reports the last error verbatim.
+        adapter_for(config).call(method)
+    except Exception:  # noqa: BLE001 -- checked: this function's ONLY question is "did this method answer", and False says no. A method absent from an older daemon family, a wallet that is not loaded, and a closed port all mean the same thing to the caller: try the next probe. A caller that needs the REASON for a total miss calls wait_for_rpc(), which reports the last error verbatim.
         return False
     return True
+
+
+def rpc_answers(config: ChainConfig) -> bool:
+    """True if something on the configured port answers ANY of the liveness probes.
+
+    Kept as a bool for the readiness polling in wait_for_rpc() and start_daemon(), which only
+    ever branch on yes/no. A caller that wants to report WHICH method answered calls
+    liveness_probe_that_answers() directly.
+    """
+    return liveness_probe_that_answers(config) is not None
 
 
 def start_daemon(console: Console, config: ChainConfig) -> bool:

@@ -42,7 +42,10 @@ from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 from modules import adaptor_swap_chain as chain
 from modules.adaptor_swap_chain import LOCKTIME_THRESHOLD, assert_timelocks_ordered
 from modules.adaptor_swap_scripts import OP_0, two_of_two_redeem_script
-from regtest import adaptor_steps
+from regtest import (
+    adaptor_steps,
+    daemons,
+)
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import ChainConfig, RegtestSetupError
 from regtest.keys import generate_key
@@ -563,3 +566,85 @@ def test_the_selector_probe_reads_a_real_shaped_listunspent_row(console, monkeyp
     adaptor_steps._exercise_input_selection(run)
     assert console.counts[OK] == 1
     assert console.counts[FAIL] == 0
+
+
+# ---------------------------------------------------------------------------------------
+# THE LIVENESS PROBE, AND THE DAEMON FAMILY IT DID NOT KNOW ABOUT.
+#
+# Measured 2026-09-28: `adaptor_regtest_verify.py --chain grc` failed at step 1 with "nothing
+# answered `uptime`" against a Gridcoin testnet daemon that was demonstrably up -- three atomic
+# swaps had completed through it twenty minutes earlier. `gridcoinresearchd -testnet help
+# uptime` answers "unknown command: uptime"; getblockcount on the same port with the same
+# credentials returns 3295729. `uptime` arrived in Bitcoin Core 0.15; Gridcoin forked long
+# before it.
+#
+# daemons.rpc_answers()'s docstring had claimed `uptime` "exists on both daemon families",
+# which was true when there were two and false the moment a third arrived -- the same shape as
+# Gridcoin having no `gettxout`, which made every GRC spend print a stack trace in front of a
+# success.
+# ---------------------------------------------------------------------------------------
+
+
+class _OnlyAnswers:
+    """A daemon that answers exactly one named set of methods and raises for the rest."""
+
+    def __init__(self, *answers: str) -> None:
+        self.answers = set(answers)
+        self.asked: list[str] = []
+
+    def call(self, method: str, *args):
+        self.asked.append(method)
+        if method not in self.answers:
+            raise RuntimeError(f"unknown command: {method}")
+        return 3295729 if method == "getblockcount" else 12345
+
+
+def _patch_adapter(monkeypatch, daemon):
+    monkeypatch.setattr(daemons, "adapter_for", lambda _config: daemon)
+
+
+def test_a_daemon_with_no_uptime_is_still_found_alive(monkeypatch):
+    """THE GRIDCOIN CASE, and the one this repository actually hit. A family that never had
+    `uptime` must not be reported as not answering -- that sends the operator to check
+    credentials which are fine, which is exactly what happened."""
+    daemon = _OnlyAnswers("getblockcount")
+    _patch_adapter(monkeypatch, daemon)
+    assert daemons.liveness_probe_that_answers(object()) == "getblockcount"
+    assert daemon.asked == ["uptime", "getblockcount"], (
+        "uptime is tried first and its miss falls through rather than deciding"
+    )
+    # Cleared before the second call: both functions probe, so asserting on a shared list after
+    # both would read four entries. My first version did exactly that and went red -- the
+    # accumulation was mine, not the code's.
+    daemon.asked.clear()
+    assert daemons.rpc_answers(object()) is True
+
+
+def test_a_daemon_that_answers_uptime_is_not_asked_anything_further(monkeypatch):
+    """BTC and LTC answer the first probe, so the fallback costs them no round trip -- this is
+    an ADDED route, not a replaced one, and the existing two families are unaffected."""
+    daemon = _OnlyAnswers("uptime", "getblockcount")
+    _patch_adapter(monkeypatch, daemon)
+    assert daemons.liveness_probe_that_answers(object()) == "uptime"
+    assert daemon.asked == ["uptime"], "it must stop at the first method that answers"
+
+
+def test_a_daemon_answering_nothing_is_reported_as_not_answering(monkeypatch):
+    """The real failure still fails. A closed port, wrong credentials and a daemon that is
+    down all land here, and the caller's message names every method tried rather than one."""
+    daemon = _OnlyAnswers()
+    _patch_adapter(monkeypatch, daemon)
+    assert daemons.liveness_probe_that_answers(object()) is None
+    assert daemon.asked == list(daemons.LIVENESS_PROBES), "every probe is tried before giving up"
+    daemon.asked.clear()
+    assert daemons.rpc_answers(object()) is False
+
+
+def test_getblockcount_is_in_the_probe_list_because_it_is_measured_to_work():
+    """Not chosen for elegance. atomic_swap.py read tip 3295571 from getblockcount on the
+    operator's Gridcoin testnet daemon on 2026-09-27 while funding a real GRC leg, and the
+    same call returned 3295729 by hand on 2026-09-28. It predates every fork in this tree."""
+    assert "getblockcount" in daemons.LIVENESS_PROBES
+    assert daemons.LIVENESS_PROBES[0] == "uptime", (
+        "uptime stays first: it needs no wallet and the two families that have it answer it"
+    )
