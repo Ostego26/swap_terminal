@@ -534,6 +534,16 @@ def test_a_SPENT_answer_is_remembered_and_an_UNSPENT_one_is_never_cached(monkeyp
         f"spent at any block. walks were {walks}"
     )
     assert [r.usable for r in second] == [True, False], "and the answer is unchanged"
+    # THE CACHE'S CONTENTS ARE ASSERTED, not just its effect. Recording the unspent outpoint as
+    # None happens to be harmless today, because None reads as falsy at the lookup -- so a
+    # mutant that did it SURVIVED the behavioral assertions above. That is an equivalent mutant
+    # now and a live defect the moment anyone writes `if key in known_spent`, which is the
+    # obvious "improvement" for avoiding a repeated miss. Pinning the contents refuses the whole
+    # family rather than the one spelling of it.
+    assert list(cache) == [(spent, 1)], (
+        f"only SPENT outpoints may be recorded; the cache holds {list(cache)}"
+    )
+
     assert "remembered from an earlier look" in second[1].note, (
         "and it SAYS the answer was remembered rather than re-measured (rule 17: a reader must "
         "be able to tell which they are holding)"
