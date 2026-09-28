@@ -519,6 +519,12 @@ def test_recover_search_FINDS_a_contract_from_the_seed_alone(monkeypatch):
 
     class _Node:
         def call(self, method, *params):
+            # getblockcount is served because the search now asks find_the_spender whether the
+            # contract it found is ALREADY SPENT -- an output does not stop existing when it is
+            # spent, so a search that skipped the question would refund the same contract
+            # forever and read every refusal as a failure.
+            if method == "getblockcount":
+                return 3296381
             if method == "getblockhash":
                 return f"hash-of-{params[0]}"
             if method == "getblock":

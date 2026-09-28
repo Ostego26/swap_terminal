@@ -376,12 +376,47 @@ def recover_by_search(run: Run, console: Console) -> int:
                     continue
                 locktime = candidates[script]
                 txid = str(transaction.get("txid", ""))
+                vout = int(output.get("n", 0))
                 console.say(
-                    f"GRC: FOUND a contract of ours in block {height}: {txid}:{output.get('n')} "
+                    f"GRC: FOUND a contract of ours in block {height}: {txid}:{vout} "
                     f"holds {output.get('value')} GRC, locktime {locktime}. Found after "
                     f"{scanned} block(s) -- said here because a search that prints nothing "
                     f"while it walks is a search an operator cannot tell from a hang (rule 14)"
                 )
+                # IS IT STILL THERE? A SEARCH THAT FINDS OUTPUTS FINDS SPENT ONES TOO.
+                #
+                # This walks blocks for an OUTPUT paying one of our scripts, and an output does
+                # not stop existing when it is spent. So a contract an earlier run already
+                # refunded is found again, refunded again, and refused as a double-spend with
+                # `-22 TX rejected` -- forever, on every run, with the successful refund sitting
+                # three minutes further up the same chain.
+                #
+                # MEASURED 2026-09-28, and it is the reconciliation of that evening's confusion:
+                #   19:59:36  contract 8468aa40 funded
+                #   20:09:45  a refund REFUSED
+                #   20:12:26  refund 9495082e ACCEPTED, spending it
+                # Two runs three minutes apart. Every run after the second would refuse, and
+                # the refusal would look like the failure rather than like success already
+                # having happened.
+                #
+                # `find_the_spender` is the function written this morning for exactly this
+                # question about the FUNDING address, and not calling it here was one rule
+                # answered in one place and not the other (rule 8).
+                # THE REAL VALUE, NOT A ZERO PLACEHOLDER. chain.Outpoint refuses a zero value,
+                # and rightly: "a zero-value input would size every fee below from nothing".
+                # A test caught it before a chain did.
+                held = coins_to_satoshis(str(output.get("value", "0")))
+                spender, description = adaptor_steps.find_the_spender(
+                    run, chain.Outpoint(txid=txid, vout=vout, value_satoshis=held),
+                    max_depth=tip - height + 1)
+                if spender:
+                    console.say(
+                        f"GRC: ALREADY REFUNDED -- {spender} spent it. {description}. That is a "
+                        f"SUCCESS that already happened, not a failure: the coin is out of the "
+                        f"contract. Looking further back for another"
+                    )
+                    continue
+                console.say(f"GRC: and it is unspent -- {description}")
                 return recover(run, console, locktime, txid)
         if scanned % 100 == 0:
             console.say(f"GRC: scanned {scanned} block(s), now at height {height}, nothing yet")
