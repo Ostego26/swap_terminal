@@ -1089,3 +1089,108 @@ def test_the_remedy_says_what_RELOCKING_COSTS_on_a_staking_wallet():
         "and it bounds the claim to the build it was checked against (rule 17): ElevateToFull "
         "was read at master, and whether the operator's v5.5.1.0 carries it is NOT established"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# A DIAGNOSED PRECONDITION IS NOT AN UNEXPECTED FAILURE -- AND MUST STILL EXIT NON-ZERO.
+#
+# Fixed one level at a time, three times, which is why the exit-code half is tested here
+# rather than assumed:
+#   3a1af14  a staking-only send stopped arriving as "expected=no unhandled exception"
+#   1a0d0e3  the pre-flight probe stopped scoring its own correct diagnosis as FAIL
+#   this     the RegtestSetupError handler stopped calling it an unexpected failure
+#
+# After the first two, the operator's run STILL ended `FAIL=1` with the refusal under
+# "unexpected failures", because the handler was the one doing it. And the obvious fix --
+# score it XFAIL -- would have made `return 1 if console.counts[FAIL] else 0` return ZERO for
+# a run that funded nothing and spent nothing. That is rule 13's twelve cycles printing
+# exit_code=0 beside "skipping this cycle", rebuilt by accident while fixing a report.
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_chain_refused_at_a_precondition_has_established_NOTHING():
+    """`established()` is what the exit code keys on, so it is asserted directly."""
+    refused = adaptor_steps.ChainOutcome(asset="GRC", setup_refusal="staking-only")
+    assert not refused.established()
+
+    # Even with every decisive outcome green, a refusal means the run did not happen.
+    contradictory = adaptor_steps.ChainOutcome(
+        asset="GRC", setup_refusal="staking-only",
+        located_by_script_match=OK, spends_in_correct_order=OK,
+        refused_when_transposed=OK, refused_without_op0=OK,
+    )
+    assert not contradictory.established(), (
+        "a setup refusal outranks the tallies: those outcomes cannot have been measured"
+    )
+
+
+def test_all_four_decisive_outcomes_OK_is_the_ONLY_thing_that_establishes():
+    """MUTATION: drop any one of the four from established() and this goes red on that one."""
+    fields = ("located_by_script_match", "spends_in_correct_order",
+              "refused_when_transposed", "refused_without_op0")
+    green = dict.fromkeys(fields, OK)
+    assert adaptor_steps.ChainOutcome(asset="LTC", **green).established()
+
+    for missing in fields:
+        one_skipped = {**green, missing: SKIP}
+        assert not adaptor_steps.ChainOutcome(asset="LTC", **one_skipped).established(), (
+            f"{missing}=SKIP must mean NOT ESTABLISHED -- a SKIP is not a pass, and the "
+            f"transposition and missing-OP_0 refusals are the two only a chain can answer"
+        )
+
+
+def test_the_exit_code_is_NON_ZERO_for_a_run_that_was_refused(monkeypatch):
+    """THE ONE THAT MAKES THE XFAIL SAFE. console.py's own note says XFAIL must never be used
+    to make a run green; this is the assertion that it was not. A refused run has NO FAILs by
+    design now, so the old `1 if counts[FAIL] else 0` would return 0 here."""
+    entry = _entry_point()
+    console, stream = _recording_console()
+    refused = adaptor_steps.ChainOutcome(asset="GRC", setup_refusal="unlocked FOR STAKING ONLY")
+
+    code = entry.exit_code_for(console, [refused])
+
+    assert code == 1, "a run refused at a precondition established nothing and must not exit 0"
+    assert console.counts[FAIL] == 0, "and it got there with no FAIL tallied -- that is the point"
+    printed = stream.getvalue()
+    assert "REFUSED AT A PRECONDITION" in printed
+    assert "NOT a pass" in printed, "rule 13: 'did nothing' must not read like 'did work'"
+    assert "GRC" in printed, "and it names which chain"
+
+
+def test_the_exit_code_is_NON_ZERO_when_every_decisive_check_merely_SKIPPED(monkeypatch):
+    """The other way a run can establish nothing without a single FAIL."""
+    entry = _entry_point()
+    console, stream = _recording_console()
+
+    code = entry.exit_code_for(console, [adaptor_steps.ChainOutcome(asset="GRC")])
+
+    assert code == 1
+    assert "NOT ESTABLISHED" in stream.getvalue()
+    assert "SKIP is not a pass" in stream.getvalue()
+
+
+def test_the_exit_code_is_ZERO_only_when_every_chain_established_its_four(monkeypatch):
+    """And the harness can still succeed, or the two tests above would pass with
+    `return 1` hard-coded."""
+    entry = _entry_point()
+    console, stream = _recording_console()
+    green = adaptor_steps.ChainOutcome(
+        asset="LTC", located_by_script_match=OK, spends_in_correct_order=OK,
+        refused_when_transposed=OK, refused_without_op0=OK,
+    )
+
+    assert entry.exit_code_for(console, [green]) == 0
+    assert "ESTABLISHED on every chain" in stream.getvalue()
+
+
+def test_one_green_chain_does_not_cover_for_a_refused_one():
+    """`--chain both` runs two. A pass on one and a refusal on the other is not a pass."""
+    entry = _entry_point()
+    console, _ = _recording_console()
+    green = adaptor_steps.ChainOutcome(
+        asset="LTC", located_by_script_match=OK, spends_in_correct_order=OK,
+        refused_when_transposed=OK, refused_without_op0=OK,
+    )
+    refused = adaptor_steps.ChainOutcome(asset="GRC", setup_refusal="staking-only")
+
+    assert entry.exit_code_for(console, [green, refused]) == 1

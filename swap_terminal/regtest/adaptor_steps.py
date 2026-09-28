@@ -258,6 +258,35 @@ class ChainOutcome:
     refund_accepted_after_cancel: str = SKIP
     predicted_txid_matched: str = SKIP
     notes: list[str] = field(default_factory=list)
+    # A NAMED PRECONDITION THAT REFUSED THE RUN, or "" when none did. Recorded rather than
+    # inferred from the tallies, because the tallies cannot tell "the daemon refused to let us
+    # start" from "the code under test broke" -- and those need different things from a reader.
+    setup_refusal: str = ""
+
+    def established(self) -> bool:
+        """Did this run actually answer the question it exists to answer?
+
+        THE EXIT CODE KEYS ON THIS, NOT ON THE FAIL TALLY, and that change is the whole reason
+        this method exists. main() returned `1 if console.counts[FAIL] else 0`, so the moment a
+        diagnosed precondition stopped being scored FAIL -- which is correct, it is not the code
+        under test breaking -- a run that funded nothing, spent nothing and established nothing
+        would have exited 0. That is rule 13's twelve cycles printing `exit_code=0` beside
+        "skipping this cycle", rebuilt here by accident while fixing a reporting defect one
+        level down.
+
+        So: established means the four DECISIVE outcomes are all OK. Nothing else counts. A
+        SKIP is not a pass, a refusal at setup is not a pass, and a green tally of the checks
+        that did run is not a pass either.
+        """
+        return not self.setup_refusal and all(
+            outcome == OK
+            for outcome in (
+                self.located_by_script_match,
+                self.spends_in_correct_order,
+                self.refused_when_transposed,
+                self.refused_without_op0,
+            )
+        )
 
     def verdict(self) -> str:
         """The one sentence the operator reads, and it never hedges.

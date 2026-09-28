@@ -240,7 +240,7 @@ if str(APP_ROOT) not in sys.path:
 from microfortnights import format_duration  # noqa: E402 -- the sys.path line above must run first
 from regtest import adaptor_steps, daemons  # noqa: E402 -- same
 from regtest.adaptor_steps import ChainOutcome, Run  # noqa: E402 -- same
-from regtest.console import FAIL, OK, SKIP, Console  # noqa: E402 -- same
+from regtest.console import FAIL, OK, SKIP, XFAIL, Console  # noqa: E402 -- same
 from regtest.daemons import RegtestSetupError  # noqa: E402 -- same
 
 WALLET_NAME = "adaptor_2of2_harness"
@@ -330,8 +330,30 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
         # A named precondition failed and the message carries the fix. Printed as an
         # assertion rather than raised, so the other chains still run and the teardown
         # below still happens.
-        console.check(f"{asset} setup", str(exc), "the precondition to hold", FAIL)
-        outcome.notes.append(f"setup failed: {exc}")
+        #
+        # XFAIL, NOT FAIL, AND THIS IS THE THIRD TIME THE SAME DEFECT HAS BEEN FIXED ONE LEVEL
+        # AT A TIME. 3a1af14 stopped a diagnosed staking-only send arriving as "expected=no
+        # unhandled exception"; 1a0d0e3 stopped the pre-flight probe scoring its own correct
+        # diagnosis as a failure; and the operator's run after BOTH still ended
+        #
+        #     OK=8  FAIL=1  XFAIL=1
+        #     unexpected failures, in the order they happened:
+        #       - GRC setup: this wallet is unlocked FOR STAKING ONLY ...
+        #
+        # because this handler was still the one calling it unexpected. A RegtestSetupError is
+        # BY CONSTRUCTION a named precondition carrying its own remedy -- the three lines above
+        # say so -- so filing it under "unexpected failures" leaves the console's own XFAIL
+        # definition ("predicted failures: these are the harness working") sitting unused while
+        # the exact thing it describes is reported as a surprise.
+        #
+        # THE EXIT CODE DOES NOT SOFTEN, and that is what makes this safe rather than quieting.
+        # console.py's note on XFAIL is explicit that it must never be used to make a run green.
+        # `setup_refusal` is what exit_code_for() keys on, through ChainOutcome.established(),
+        # instead of the FAIL tally -- so a run refused here still exits non-zero, because it
+        # established nothing.
+        console.check(f"{asset} setup", str(exc), "the precondition to hold", XFAIL)
+        outcome.setup_refusal = str(exc)
+        outcome.notes.append(f"setup refused: {exc}")
     except Exception as exc:  # noqa: BLE001 -- checked: an unexpected exception must not skip the teardown below, which is this harness's only reaper for a daemon it spawned (rule 13). It is recorded as a FAIL with its type and message, never swallowed into a pass, and the exit code reflects it.
         console.check(f"{asset} run", f"{type(exc).__name__}: {exc}", "no unhandled exception", FAIL)
         outcome.notes.append(f"unhandled {type(exc).__name__}: {exc}")
@@ -458,6 +480,59 @@ def _announce_wall_clock(console: Console, assets: tuple[str, ...] | list[str]) 
     )
 
 
+def exit_code_for(console: Console, outcomes: list) -> int:
+    """The process exit code, and the banner explaining it. 0 only when the run ESTABLISHED.
+
+    A SEPARATE FUNCTION because it is a decision, and a decision inlined at the bottom of
+    main() can only be tested by running the whole harness against real daemons -- which is the
+    one thing a unit test cannot do (rule 10: the thing that decides should be the smallest,
+    most testable piece). It was inline until 2026-09-28 and the rule it encoded was wrong the
+    whole time; nothing in the suite could have caught that.
+
+    THE RULE IT ENCODED WAS `1 if console.counts[FAIL] else 0`, AND IT BREAKS THE MOMENT A
+    DIAGNOSED PRECONDITION STOPS BEING A FAIL. Scoring a RegtestSetupError as XFAIL is correct
+    -- it is a named refusal carrying its own remedy, not the code under test breaking -- but
+    under the old rule a run refused at setup would then have had zero FAILs and exited 0,
+    having funded nothing, spent nothing and established nothing. That is CLAUDE.md rule 13's
+    twelve cycles printing `exit_code=0` beside "skipping this cycle", rebuilt by accident while
+    fixing a reporting defect one level down. The same hole was already open for a run whose
+    decisive checks all SKIPped.
+
+    So the question is not "did anything fail" but "did this run answer what it exists to
+    answer", which is ChainOutcome.established(): the four decisive outcomes, all OK, on every
+    chain. Nothing else is a pass.
+    """
+    failed = console.counts[FAIL]
+    skipped = console.counts[SKIP]
+    refused = [o for o in outcomes if o and o.setup_refusal]
+    unestablished = [o for o in outcomes if o and not o.established()]
+    code = 0 if not failed and not unestablished else 1
+
+    # REFUSED IS REPORTED AHEAD OF FAILED, because it is the more specific fact and it changes
+    # what the reader does next: a precondition refusal names something for THEM to fix, where
+    # an unexpected failure names something in the code under test.
+    if refused:
+        reason = (
+            f"REFUSED AT A PRECONDITION on {', '.join(o.asset for o in refused)} -- NOT a defect "
+            f"in the code under test, and NOT a pass. The remedy is printed above, once. Nothing "
+            f"was funded, signed or broadcast"
+        )
+    elif failed:
+        reason = "unexpected failures above"
+    elif unestablished:
+        reason = (
+            f"NOT ESTABLISHED on {', '.join(o.asset for o in unestablished)}: the four decisive "
+            f"outcomes were not all OK. A SKIP is not a pass"
+        )
+    else:
+        reason = (
+            f"ESTABLISHED on every chain ({console.counts[OK]} checks OK, {skipped} SKIP). The "
+            f"four decisive outcomes are OK everywhere; read the per-chain verdict for the rest"
+        )
+    console.banner(f"exit code {code} -- {reason}")
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
     configure_logging(args.verbose_clients)
@@ -484,19 +559,7 @@ def main(argv: list[str] | None = None) -> int:
     print_verdicts(console, outcomes)
     console.summary()
 
-    failed = console.counts[FAIL]
-    skipped = console.counts[SKIP]
-    console.banner(
-        f"exit code {1 if failed else 0} -- "
-        + (
-            "unexpected failures above"
-            if failed
-            else f"no unexpected failures ({console.counts[OK]} checks OK, {skipped} SKIP). "
-            "Read the per-chain verdict, not this line: a SKIP on any of the four decisive outcomes "
-            "means NOT ESTABLISHED, and a zero exit code does not change that."
-        )
-    )
-    return 1 if failed else 0
+    return exit_code_for(console, outcomes)
 
 
 if __name__ == "__main__":
