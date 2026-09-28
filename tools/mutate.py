@@ -72,6 +72,47 @@ def uncommitted(path: Path) -> str | None:
     return result.stdout.strip() or None
 
 
+# pytest's documented exit codes. ONLY 1 MEANS A TEST FAILED.
+# https://docs.pytest.org/en/stable/reference/exit-codes.html
+PYTEST_ALL_PASSED = 0
+PYTEST_TESTS_FAILED = 1
+_PYTEST_INCONCLUSIVE = {
+    2: "the run was INTERRUPTED (Ctrl-C, or a collection error)",
+    3: "pytest hit an INTERNAL ERROR",
+    4: "the pytest command line was wrong",
+    5: "NO TESTS WERE COLLECTED",
+}
+
+
+def verdict_for(returncode: int) -> str:
+    """What a pytest exit code actually says about the mutant. Three answers, not two.
+
+    THIS WAS A REAL FALSE POSITIVE, 2026-09-28, and it is the same defect this tool was built to
+    prevent one layer up. The check was `returncode != 0` -> KILLED, so a mutation that broke the
+    file's SYNTAX scored KILLED: pytest exited 2 on a collection error, having run no test at
+    all. Two mutants were reported killed in a row on that basis, and neither had been executed.
+
+    That is exactly the shape of rule 13's "skipped plus success in the same output" -- a run
+    that did nothing rendering identically to a run that did work -- and of the earlier failure
+    this tool already refuses, where an anchor matching zero times produced a "killed" verdict
+    for a mutation that never applied. A mutation check whose failure mode is a false PASS is
+    worse than no mutation check, because the conclusion drawn from it is "this is pinned".
+
+    So only exit code 1 -- a test ran and failed -- counts as killed. Everything else says the
+    experiment did not happen, and says which.
+    """
+    if returncode == PYTEST_TESTS_FAILED:
+        return "MUTANT KILLED -- the tests caught it"
+    if returncode == PYTEST_ALL_PASSED:
+        return "MUTANT SURVIVED -- nothing caught this, so the tests do not pin it"
+    reason = _PYTEST_INCONCLUSIVE.get(returncode, f"pytest exited {returncode}")
+    return (
+        f"INCONCLUSIVE -- {reason}, so NO TEST RAN AGAINST THIS MUTANT. This is not a kill. "
+        f"The usual cause is a mutation that broke the file's syntax; fix the replacement text "
+        f"so the file still parses, and run it again."
+    )
+
+
 def main(argv: list[str]) -> int:
     if GIT is None:
         print("REFUSING: no `git` on PATH. This tool's only safety property is that it restores "
@@ -126,9 +167,8 @@ def main(argv: list[str]) -> int:
         print(f"restored {target}" if still_dirty is None
               else f"WARNING: {target} is still dirty after restore: {still_dirty}")
 
-    print("MUTANT KILLED -- the tests caught it" if completed.returncode != 0
-          else "MUTANT SURVIVED -- nothing caught this, so the tests do not pin it")
-    return 0 if completed.returncode != 0 else 1
+    print(verdict_for(completed.returncode))
+    return 0 if completed.returncode == PYTEST_TESTS_FAILED else 1
 
 
 if __name__ == "__main__":

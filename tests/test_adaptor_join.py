@@ -796,3 +796,45 @@ def test_a_wallet_that_will_not_list_does_NOT_break_the_funding_offer(monkeypatc
     monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _MuteNode())
     adaptor_steps.report_recent_payments(run, generate_key())
     assert "could not list" in stream.getvalue()
+
+
+def test_offer_funding_route_ACTUALLY_CALLS_the_diagnostic(monkeypatch):
+    """PINS THE CALL SITE. THIRD TIME.
+
+    tools/mutate.py, replacing `report_recent_payments(run, funding_key)` in
+    `offer_funding_route` with `pass`: SURVIVED. Same shape as the two before it in this file --
+    the function was covered and the WIRING was not -- and a diagnostic nothing calls is a
+    diagnostic that does not exist, which is precisely the state the three lost runs were in.
+
+    The whole offer is driven, so what is asserted is that the address to fund and the
+    did-you-already-pay list arrive on the SAME screen. Either alone is what the operator
+    already had.
+    """
+    stream = io.StringIO()
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    paid = "msxA9RajhxTvJ4EgPwuiza1VJEYJqdsNqw"
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "a-real-seed-for-this-test")
+
+    class _Wallet:
+        def call(self, method, *params):
+            assert method == "listtransactions"
+            return [{"category": "send", "address": paid, "amount": "-3.499", "confirmations": 1}]
+
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Wallet())
+
+    key = adaptor_steps.offer_funding_route(run, "open")
+
+    printed = stream.getvalue()
+    assert key is not None
+    assert key.address in printed, "the address to fund"
+    assert paid in printed, "and, on the SAME screen, where the money actually went"
+    assert "DID YOU ALREADY PAY" in printed
