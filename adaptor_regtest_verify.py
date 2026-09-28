@@ -327,33 +327,7 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
         adaptor_steps.step_7_broadcast_lock(run, built_b, outcome)
         adaptor_steps.step_10_cancel_path(run, built_b, outcome)
     except RegtestSetupError as exc:
-        # A named precondition failed and the message carries the fix. Printed as an
-        # assertion rather than raised, so the other chains still run and the teardown
-        # below still happens.
-        #
-        # XFAIL, NOT FAIL, AND THIS IS THE THIRD TIME THE SAME DEFECT HAS BEEN FIXED ONE LEVEL
-        # AT A TIME. 3a1af14 stopped a diagnosed staking-only send arriving as "expected=no
-        # unhandled exception"; 1a0d0e3 stopped the pre-flight probe scoring its own correct
-        # diagnosis as a failure; and the operator's run after BOTH still ended
-        #
-        #     OK=8  FAIL=1  XFAIL=1
-        #     unexpected failures, in the order they happened:
-        #       - GRC setup: this wallet is unlocked FOR STAKING ONLY ...
-        #
-        # because this handler was still the one calling it unexpected. A RegtestSetupError is
-        # BY CONSTRUCTION a named precondition carrying its own remedy -- the three lines above
-        # say so -- so filing it under "unexpected failures" leaves the console's own XFAIL
-        # definition ("predicted failures: these are the harness working") sitting unused while
-        # the exact thing it describes is reported as a surprise.
-        #
-        # THE EXIT CODE DOES NOT SOFTEN, and that is what makes this safe rather than quieting.
-        # console.py's note on XFAIL is explicit that it must never be used to make a run green.
-        # `setup_refusal` is what exit_code_for() keys on, through ChainOutcome.established(),
-        # instead of the FAIL tally -- so a run refused here still exits non-zero, because it
-        # established nothing.
-        console.check(f"{asset} setup", str(exc), "the precondition to hold", XFAIL)
-        outcome.setup_refusal = str(exc)
-        outcome.notes.append(f"setup refused: {exc}")
+        record_setup_refusal(console, asset, exc, outcome)
     except Exception as exc:  # noqa: BLE001 -- checked: an unexpected exception must not skip the teardown below, which is this harness's only reaper for a daemon it spawned (rule 13). It is recorded as a FAIL with its type and message, never swallowed into a pass, and the exit code reflects it.
         console.check(f"{asset} run", f"{type(exc).__name__}: {exc}", "no unhandled exception", FAIL)
         outcome.notes.append(f"unhandled {type(exc).__name__}: {exc}")
@@ -478,6 +452,30 @@ def _announce_wall_clock(console: Console, assets: tuple[str, ...] | list[str]) 
         "  this harness NEVER starts or stops a Gridcoin daemon and sends no `stop`: your staking "
         "wallet is left exactly as it was found"
     )
+
+
+def record_setup_refusal(console: Console, asset: str, exc: Exception, outcome) -> None:
+    """Report a named precondition refusal, and mark the chain as having established nothing.
+
+    EXTRACTED BECAUSE A MUTATION SURVIVED. tools/mutate.py, on its first real use, flipped this
+    call from XFAIL back to FAIL and NO TEST WENT RED -- so the reporting invariant this whole
+    change is about was not pinned by anything, while two neighbouring tests gave the
+    comfortable impression it was. The exit code was pinned; what an operator READS was not, and
+    that is the half the three preceding commits were each about. Inline in run_chain()'s except
+    clause it could only be reached by driving the whole harness against a live daemon.
+
+    XFAIL, NOT FAIL, AND THE EXIT CODE DOES NOT SOFTEN. A RegtestSetupError is by construction a
+    named precondition carrying its own remedy -- `setup_refusal` below is what
+    exit_code_for() keys on through ChainOutcome.established(), so a run refused here still
+    exits non-zero having established nothing. console.py's note that XFAIL must never be used
+    to make a run green is satisfied by that, not by this outcome class.
+
+    Printed as an assertion rather than re-raised, so the other chains still run and run_chain's
+    teardown -- this harness's only reaper for a daemon it spawned (rule 13) -- still happens.
+    """
+    console.check(f"{asset} setup", str(exc), "the precondition to hold", XFAIL)
+    outcome.setup_refusal = str(exc)
+    outcome.notes.append(f"setup refused: {exc}")
 
 
 def exit_code_for(console: Console, outcomes: list) -> int:

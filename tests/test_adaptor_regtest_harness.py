@@ -50,7 +50,7 @@ from regtest import (
     adaptor_steps,
     daemons,
 )
-from regtest.console import FAIL, OK, SKIP, Console
+from regtest.console import FAIL, OK, SKIP, XFAIL, Console
 from regtest.daemons import ChainConfig, RegtestSetupError
 from regtest.keys import generate_key
 
@@ -1194,3 +1194,32 @@ def test_one_green_chain_does_not_cover_for_a_refused_one():
     refused = adaptor_steps.ChainOutcome(asset="GRC", setup_refusal="staking-only")
 
     assert entry.exit_code_for(console, [green, refused]) == 1
+
+
+def test_a_precondition_refusal_is_NOT_listed_among_unexpected_failures():
+    """THE INVARIANT THREE COMMITS WERE ABOUT, AND NOTHING PINNED IT UNTIL NOW.
+
+    tools/mutate.py flipped this outcome from XFAIL back to FAIL on its first real use and the
+    whole suite stayed green -- because the exit code is pinned by `setup_refusal` either way,
+    and the exit code was all the neighbouring tests checked. What an operator READS was not
+    pinned at all, which is the exact half that had to be fixed at three separate levels.
+
+    `console.failures` is what the SUMMARY prints under "unexpected failures, in the order they
+    happened", so it is the thing to assert on: a diagnosed precondition must not appear there.
+    """
+    console, stream = _recording_console()
+    outcome = adaptor_steps.ChainOutcome(asset="GRC")
+
+    _entry_point().record_setup_refusal(
+        console, "GRC", RegtestSetupError("this wallet is unlocked FOR STAKING ONLY"), outcome,
+    )
+
+    assert console.counts[XFAIL] == 1, "the console's own words for XFAIL are 'the harness working'"
+    assert console.counts[FAIL] == 0
+    assert console.failures == [], (
+        "a refusal the harness predicted and explained must not be listed as an UNEXPECTED "
+        "failure -- that teaches the reader to distrust the word"
+    )
+    assert outcome.setup_refusal, "and the chain must still be marked as having established nothing"
+    assert not outcome.established()
+    assert "STAKING ONLY" in stream.getvalue(), "while still being printed, loudly (rule 14)"
