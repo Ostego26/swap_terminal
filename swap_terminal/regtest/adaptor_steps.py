@@ -104,7 +104,7 @@ from modules.htlc_rpc import lookup_contract_output
 from modules.htlc_spend import SIGHASH_ALL, legacy_sighash, satoshis_to_coins
 from modules.htlc_timelock import SECONDS_PER_BLOCK
 from regtest import daemons
-from regtest.console import FAIL, OK, SKIP, Console
+from regtest.console import FAIL, OK, SKIP, XFAIL, Console
 from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
 from regtest.keys import RegtestKey, generate_key
 from regtest.txbuild import push_data
@@ -464,7 +464,10 @@ def step_1_reachable(run: Run) -> None:
                 f"harness will not start it for you: a Gridcoin daemon is a staking wallet and "
                 f"starting one is a live action."
             )
-        run.say(f"GRC: answered by `{answered}`"
+        # No "GRC:" here -- run.say() already prefixes with the asset, and the first version
+        # of this line printed "GRC: GRC: answered by ...". Small, and exactly the class of
+        # near-miss this file keeps correcting in other people's messages.
+        run.say(f"answered by `{answered}`"
                 + (" -- this family has no `uptime`, which is expected"
                    if answered != daemons.LIVENESS_PROBES[0] else ""))
         run.check("daemon answers a liveness probe", answered, "any of "
@@ -768,18 +771,44 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         "unlock may send. Asking behaviorally instead:"
     )
     scope = probe_wallet_unlock_scope(run)
+    # XFAIL, NOT FAIL, WHEN THE PROBE DIAGNOSES A WALLET THAT CANNOT FUND. The console's own
+    # words for XFAIL are "predicted failures: these are the harness working", and that is
+    # exactly what this is: the harness asked a question, got a definite answer, and is about
+    # to refuse with the remedy. FAIL means the code under test broke.
+    #
+    # THIS IS THE DEFECT I FIXED ONE LAYER DOWN AND RECREATED ONE LAYER UP. 3a1af14 stopped a
+    # diagnosed staking-only send from arriving as `expected=no unhandled exception`; then the
+    # pre-flight probe I added in the same commit scored its own diagnosis as FAIL, so the
+    # operator's 2026-09-28 run ended with `FAIL=2` and BOTH lines under "unexpected failures"
+    # -- for a run that diagnosed the condition perfectly and said so. Rule 13's "treat
+    # 'skipped' plus 'success' in the same output as a defect in the output", inverted: a
+    # correct diagnosis filed under "unexpected" teaches the reader to distrust the word.
+    #
+    # The exit code stays non-zero, because nothing was established. What changes is that the
+    # summary no longer claims the harness was surprised.
     run.check(
         "GRC unlock scope, probed by an unsignable transaction that is never broadcast",
         scope, "can-sign (staking-only cannot fund; undetermined means ask again at the send)",
-        OK if scope == "can-sign" else SKIP if scope == "undetermined" else FAIL,
+        OK if scope == "can-sign" else SKIP if scope == "undetermined" else XFAIL,
     )
-    if scope == "staking-only":
+    if scope in ("staking-only", "locked"):
+        # THE REMEDY IS PRINTED ONCE, HERE, AND THE EXCEPTION CARRIES A ONE-LINE SUMMARY.
+        #
+        # Measured on the operator's run, 2026-09-28: raising with the full remedy embedded put
+        # that whole block on screen THREE times -- once in this refusal, once in the verdict's
+        # `note:`, and once again in the SUMMARY's unexpected-failures list. Rule 14 asks for
+        # output that says something; a wall of identical text repeated three times is how a
+        # reader learns to skim past the part that matters.
+        state = ("unlocked FOR STAKING ONLY" if scope == "staking-only"
+                 else "LOCKED, so it can neither stake nor send")
+        run.console.say("")
+        for line in STAKING_ONLY_REMEDY.splitlines():
+            run.say(line) if line.strip() else run.console.say("")
+        run.console.say("")
         raise RegtestSetupError(
-            f"GRC: this wallet is unlocked FOR STAKING ONLY. {STAKING_ONLY_REMEDY}"
-        )
-    if scope == "locked":
-        raise RegtestSetupError(
-            f"GRC: this wallet is LOCKED, so it can neither stake nor send. {STAKING_ONLY_REMEDY}"
+            f"GRC: this wallet is {state}. The full remedy is printed in step 5 above; in "
+            f"short, this needs a wallet that may CREATE a transaction and changing that is "
+            f"yours to decide. Nothing was funded, signed or broadcast."
         )
     if scope == "undetermined":
         run.say(
@@ -916,34 +945,49 @@ STAKING_ONLY_MESSAGE_MARK = "staking only"
 # is world-readable through /proc and `ps`, and because this repo never moves, copies or reads
 # back a credential.
 STAKING_ONLY_REMEDY = (
-    "A staking-only unlock cannot CREATE a transaction, and EVERY route around it is closed "
-    "too, which is why this refuses rather than trying another way. Read off Gridcoin's source "
-    "2026-09-28: `sendtoaddress` goes through SendMoney(), which checks "
-    "IsUnlockedForStakingOnly() and returns an error (src/wallet/wallet.cpp:4325, the -4 path); "
-    "and `signrawtransaction` with no keys of its own goes through EnsureWalletIsUnlocked(), "
-    "which throws (src/wallet/rpcwallet.cpp:102, the -13 path). The third route -- handing "
-    "signrawtransaction the wallet's own private key -- would mean reading a key back out, "
-    "which this repository does not do for any reason. "
-    "\n\n"
-    "CHANGING A WALLET'S UNLOCK SCOPE IS THE OPERATOR'S DECISION, NOT THIS HARNESS'S, so here "
-    "is the sequence rather than an action. On the TESTNET daemon ONLY -- your mainnet wallet "
-    "is a different daemon on a different port and is not involved:\n"
-    "  1. `walletlock`                       <- REQUIRED FIRST. walletpassphrase refuses an "
-    "already-unlocked wallet: 'Error: Wallet is already unlocked, use walletlock first if need "
-    "to change unlock settings.' This STOPS TESTNET STAKING until step 4.\n"
-    "  2. `walletpassphrase <passphrase> 5400`   <- NO third argument. The third argument is "
-    "`stakingonly` and it defaults to false, which is the full unlock this needs. 5400s covers "
-    "a GRC run, which waits about half an hour for real blocks.\n"
-    "  3. re-run this harness.\n"
-    "  4. `walletlock`, then `walletpassphrase <passphrase> <seconds> true` to put the "
-    "staking-only restriction back. Gridcoin's own help: 'The restriction belongs to the "
-    "unlock, so locking clears it and the next unlock states its own.' There is no RPC that "
-    "narrows a full unlock in place -- RestrictToStakingOnly() exists but is reachable only "
-    "through the GUI (src/wallet/interfaces.cpp), so the TESTNET GUI wallet can also do all of "
-    "this.\n\n"
-    "PREFER THE GUI IF YOU HAVE IT OPEN. A passphrase on a `gridcoinresearch-cli` command line "
-    "lands in argv, which is world-readable through /proc and `ps`, and in your shell history. "
-    "This harness never handles a passphrase and never will.\n\n"
+    "A staking-only unlock cannot CREATE a transaction, and every route around it is closed: "
+    "`sendtoaddress` goes through SendMoney() (wallet.cpp:4325, the -4 path), "
+    "`signrawtransaction` with no keys of its own goes through EnsureWalletIsUnlocked() "
+    "(rpcwallet.cpp:102, the -13 path), and the third route would mean reading a wallet key "
+    "back out, which this repository does not do.\n\n"
+
+    "THIS IS A STAKING WALLET AND THE RPC FIX COSTS YOU SOMETHING. Say that first, because an "
+    "earlier version of this message did not and it was wrong to present the sequence as "
+    "routine. `walletpassphrase` refuses while a wallet is unlocked -- IsLocked() is "
+    "`GetUnlockScope() == Locked` and a staking-only unlock is not Locked -- so the only RPC "
+    "route is `walletlock` first. GRIDCOIN'S OWN SOURCE NAMES WHAT THAT COSTS, in "
+    "CWallet::ElevateToFull's docstring (wallet/wallet.h:388-405): locking first 'threw away "
+    "the unlock's deadline', and a 'cancelled or mistyped prompt left a staking wallet locked "
+    "and the node no longer staking'. If your unlock has a long deadline, relocking discards "
+    "it and the re-unlock carries only the timeout you type.\n\n"
+
+    "AND GRIDCOIN HAS THE RIGHT PRIMITIVE, UNWIRED. ElevateToFull() widens an unlock in place "
+    "for one operation -- same passphrase, no relock, deadline preserved, staking never stops. "
+    "It is implemented (wallet.cpp:723), declared on the interface (interfaces/wallet.h:318) "
+    "and exposed (wallet/interfaces.cpp:145), and NOTHING CALLS IT: grepping the whole of "
+    "src/ at master finds no caller in src/rpc/ and none in src/qt/. So it cannot be reached "
+    "from a daemon or a GUI today, and this harness has no way to ask for it. Checked at "
+    "master; whether v5.5.1.0 carries it at all is NOT established here.\n\n"
+
+    "THE SEQUENCE, ON THE TESTNET DAEMON ONLY -- your mainnet wallet is a different daemon on "
+    "a different port and is not involved. Decide whether the deadline is worth it first:\n"
+    "  1. `walletlock`                            stops testnet staking, DISCARDS the deadline\n"
+    "  2. `walletpassphrase <passphrase> 5400`    no third argument; it defaults to a full unlock\n"
+    "  3. re-run this harness\n"
+    "  4. `walletlock`, then the same with a trailing `true` to restore staking-only\n\n"
+
+    "THE GUI DOES IT SAFELY AND IT STILL WILL NOT HELP HERE, which is worth stating because an "
+    "earlier version of this message said to prefer it. WalletModel::requestUnlock() "
+    "(qt/walletmodel.cpp:615) WIDENS a staking-only unlock in place -- deadline kept, staking "
+    "never stops -- and its own comment describes the relock above as what it replaced. But the "
+    "elevation is an RAII SCOPE: when the GUI operation ends, walletmodel.cpp:704 calls "
+    "restrictToStakingOnly() and hands it straight back. So a GUI unlock covers that one GUI "
+    "action and leaves the wallet staking-only again for anything arriving over RPC. It cannot "
+    "open a window for this harness.\n\n"
+
+    "If you do use the CLI, note the passphrase lands in argv -- world-readable through /proc "
+    "and `ps` -- and in your shell history. This harness never handles a passphrase.\n\n"
+
     "Nothing was funded, signed or broadcast."
 )
 

@@ -994,7 +994,11 @@ def test_the_funding_send_raises_a_NAMED_precondition_not_a_bare_RPCError(consol
     message = str(caught.value)
     assert "STAKING-ONLY" in message
     assert "walletpassphrase" in message, "the remedy names the command"
-    assert "NO third argument" in message, "and the part that actually matters about it"
+    assert "third argument" in message, (
+        "and the part that actually matters about it. Checked as a SUBSTRING and not as the "
+        "exact phrase 'NO third argument' -- that pin went red the moment the sentence was "
+        "reworded, which is a test asserting a spelling rather than the fact"
+    )
     assert "TESTNET" in message and "mainnet" in message, (
         "the operator has two wallets and only one of them is in scope; the message must say so"
     )
@@ -1038,7 +1042,7 @@ def test_the_remedy_never_contains_a_passphrase_or_a_command_carrying_one():
             f"literal here would be a credential in source"
         )
 
-    assert "stakingonly" in remedy, "it says which argument to leave OFF"
+    assert "third argument" in remedy, "it says which argument to leave OFF"
     assert "walletlock" in remedy, (
         "and that walletlock comes FIRST -- walletpassphrase refuses an already-unlocked "
         "wallet, so a remedy without it sends the operator into 'Wallet is already unlocked'"
@@ -1048,3 +1052,40 @@ def test_the_remedy_never_contains_a_passphrase_or_a_command_carrying_one():
     )
     for leak in ("dumpprivkey", "--rpcpassword", "rpcpassword=", "walletpassphrase \""):
         assert leak not in remedy, f"the remedy must not contain {leak!r}"
+
+
+def test_the_remedy_says_what_RELOCKING_COSTS_on_a_staking_wallet():
+    """THE CORRECTION THE OPERATOR HAD TO MAKE FOR ME, 2026-09-28: "GRC is not BTC".
+
+    The first version of this remedy presented `walletlock` + re-unlock as a routine four-step
+    sequence. On a Gridcoin STAKING wallet it is not routine, and Gridcoin's own source says so
+    in CWallet::ElevateToFull's docstring (wallet/wallet.h:388-405) -- the function that exists
+    specifically to REPLACE lock-and-re-unlock:
+
+        "It does NOT lock and re-unlock. That is what this replaces: locking first threw away
+         the unlock's deadline, and the re-unlock that followed carried none... It also meant a
+         cancelled or mistyped prompt left a staking wallet locked and the node no longer
+         staking."
+
+    The operator's daemon reported unlocked_until=1822086129, about a year out. Step 1 of my
+    sequence discards that, and a mistyped passphrase at step 2 leaves a staking node not
+    staking. Telling someone to do that without naming the cost is a defect in the message, and
+    this is the test that keeps it named.
+    """
+    remedy = adaptor_steps.STAKING_ONLY_REMEDY
+    assert "deadline" in remedy.lower(), "it must say relocking discards the unlock's deadline"
+    assert "staking" in remedy.lower() and "stops" in remedy.lower(), (
+        "and that staking stops while the wallet is locked"
+    )
+    assert "ElevateToFull" in remedy, (
+        "and it must name the primitive that would avoid all of this, so the next reader does "
+        "not rediscover it"
+    )
+    assert "NOTHING CALLS IT" in remedy or "nothing calls it" in remedy.lower(), (
+        "AND that it is unreachable -- naming a function the operator cannot invoke, without "
+        "saying so, would send them looking for an RPC that does not exist"
+    )
+    assert "5.5.1.0" in remedy, (
+        "and it bounds the claim to the build it was checked against (rule 17): ElevateToFull "
+        "was read at master, and whether the operator's v5.5.1.0 carries it is NOT established"
+    )
