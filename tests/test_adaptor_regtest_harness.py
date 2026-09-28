@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -1019,7 +1020,31 @@ def test_the_remedy_never_contains_a_passphrase_or_a_command_carrying_one():
     one where argv can be read -- /proc and `ps` are world-readable. The remedy names
     `walletpassphrase` and leaves the secret to the operator to type, with a placeholder."""
     remedy = adaptor_steps.STAKING_ONLY_REMEDY
-    assert "<your passphrase>" in remedy, "a placeholder, never a value"
-    assert "stakingonly" in remedy, "and it says which argument to leave OFF"
-    for leak in ("dumpprivkey", "walletpassphrase <pass>", "--rpcpassword", "rpcpassword="):
+
+    # EVERY `walletpassphrase` IN THE REMEDY IS FOLLOWED BY A BRACKETED PLACEHOLDER, checked by
+    # pattern rather than by one exact string. This assertion read
+    # `assert "<your passphrase>" in remedy` and went red the moment the placeholder was
+    # reworded -- which is a test pinning a SPELLING rather than the property it cares about.
+    # The property is "no literal ever appears where a secret goes".
+    # Anchored to the BACKTICKED command form. An unanchored `walletpassphrase\s+(\S+)` also
+    # matched the prose sentence "walletpassphrase refuses an already-unlocked wallet" and
+    # reported 'refuses' as a credential -- a false positive, and this file's own rule is that a
+    # check nobody trusts is a check somebody deletes.
+    occurrences = re.findall(r"`walletpassphrase\s+(\S+)", remedy)
+    assert occurrences, "the remedy must name the command the operator has to run, in backticks"
+    for argument in occurrences:
+        assert argument.startswith("<") and argument.endswith(">"), (
+            f"walletpassphrase is followed by {argument!r}, which is not a <placeholder>. A "
+            f"literal here would be a credential in source"
+        )
+
+    assert "stakingonly" in remedy, "it says which argument to leave OFF"
+    assert "walletlock" in remedy, (
+        "and that walletlock comes FIRST -- walletpassphrase refuses an already-unlocked "
+        "wallet, so a remedy without it sends the operator into 'Wallet is already unlocked'"
+    )
+    assert "argv" in remedy, (
+        "and it warns that a passphrase on a command line is world-readable through /proc"
+    )
+    for leak in ("dumpprivkey", "--rpcpassword", "rpcpassword=", "walletpassphrase \""):
         assert leak not in remedy, f"the remedy must not contain {leak!r}"
