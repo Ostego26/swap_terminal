@@ -161,11 +161,27 @@ LOCKS_PER_RUN = 3
 # floor -- measured 2026-09-28, the GRC minimum for a completable cancel path is
 # 0.02 GRC, two fee floors plus dust -- so a failure in this harness is never a failure
 # about the amount.
-LOCK_COIN = {"BTC": "0.01", "LTC": "0.01", "GRC": "1.0"}
+# GRC WAS "1.0" UNTIL 2026-09-28, AND IT WAS 100x LARGER THAN ANY RULE REQUIRES.
+#
+# Measured in Gridcoin's own source that day rather than reasoned about: MIN_TX_FEE is 10000
+# satoshis (consensus/consensus.h:26) and version-2 transactions multiply it by ten
+# (policy/fees.h:41), so the fee floor is 0.001 GRC per kB; and an output below CENT -- 0.01
+# GRC -- is what policy/fees.h:54 calls dust. A 0.1 contract is ten times the dust line and a
+# hundred times the per-kB fee.
+#
+# WHY IT MATTERS ENOUGH TO CHANGE. Every run consumes its funding by design, so the size of
+# this number is the price of an ATTEMPT -- and on 2026-09-28 the CLTV measurement took seven
+# attempts to reach step 5, each costing 1.51 GRC to set up and two of them stranding their
+# contract outright. At 0.16 the same day would have cost a tenth as much, and the answer would
+# have been identical: what CLTV does with a locktime does not depend on the amount beside it.
+#
+# BTC and LTC are unchanged. They run on regtest, where coins are minted on demand and the size
+# of a lock costs nothing at all.
+LOCK_COIN = {"BTC": "0.01", "LTC": "0.01", "GRC": "0.1"}
 
 # The extra put into the P2PKH input the harness prepares for itself, over what the lock
 # needs, so Tx_lock's own fee comes out of it with room to spare.
-FUNDING_HEADROOM_COIN = {"BTC": "0.004", "LTC": "0.004", "GRC": "0.5"}
+FUNDING_HEADROOM_COIN = {"BTC": "0.004", "LTC": "0.004", "GRC": "0.05"}
 
 # What to ask the operator to add on top, so the split transaction's own fee comes out of their
 # payment rather than out of the lock. One flat figure rather than a per-asset table: it is the

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -801,7 +802,13 @@ def test_EXHAUSTED_FUNDING_says_send_more_rather_than_lecturing_about_the_wallet
 
     message = str(raised.value)
     assert key.address in message, "it names the address to pay"
-    assert "1.51000000" in message, "and how much, so nobody has to work it out"
+    # DERIVED, NOT SPELLED. Writing "1.51000000" here pinned the CONSTANT rather than the
+    # behavior: lowering LOCK_COIN["GRC"] on 2026-09-28 -- a change with no effect on what this
+    # message is for -- broke three tests that had nothing to do with it, which is the signature
+    # of a test asserting the wrong thing (rule 8: the number lives in one place).
+    assert str(adaptor_steps.funding_needed_coins(run)) in message, (
+        "and how much, so nobody has to work it out"
+    )
     assert "aa" * 32 in message and "what-consumed-it" in message, (
         "and it shows the spent payments it already checked, so the operator can see the run "
         "did not simply fail to look"
@@ -831,7 +838,7 @@ def test_a_FIRST_run_with_a_seed_and_no_payment_yet_gets_the_same_answer(monkeyp
     message = str(raised.value)
     assert "no payment to it at all" in message
     assert "before you have funded it" in message
-    assert key.address in message and "1.51000000" in message
+    assert key.address in message and str(adaptor_steps.funding_needed_coins(run)) in message
 
 
 # A CHAIN WITH NOTHING IN IT. `refuse_if_the_funding_is_already_spent` walks blocks whenever
@@ -1005,7 +1012,11 @@ def test_the_split_reports_the_fee_it_ACTUALLY_PAYS(monkeypatch):
         adaptor_steps.split_operator_funding(run, key, source, [generate_key()])
 
     printed = stream.getvalue()
-    assert "THE MINER TAKES 3.10000000" in printed, printed
+    # 4.60 in, one funding output out, and the miner takes the difference. Computed from the
+    # same constants the code uses, so this asserts the ARITHMETIC rather than a snapshot of it.
+    per_lock = Decimal(adaptor_steps.LOCK_COIN["GRC"]) + Decimal(adaptor_steps.FUNDING_HEADROOM_COIN["GRC"])
+    burned = adaptor_steps.satoshis_to_coins(source.value_satoshis - adaptor_steps.coins_to_satoshis(str(per_lock)))
+    assert f"THE MINER TAKES {burned}" in printed, printed
     assert "larger than one whole funding output" in printed, printed
 
 
