@@ -191,6 +191,28 @@ def test_a_plain_two_of_two_scriptsig_leaks_NOTHING(parties, side):
     )
 
 
+def test_TWO_signatures_that_both_yield_the_scalar_is_reported_as_a_defect(parties, side):
+    """`other_signatures_leaked_nothing` is what makes the positive result mean anything, and a
+    mutant pinning it to True survived until this test existed.
+
+    The scriptSig here carries the SAME completed adaptor twice. That is not a transaction any
+    chain would accept -- it is the isolating case for the counter, and the counter is what says
+    the recovery found the scalar in the adaptor mechanism rather than in something incidental.
+    """
+    alice, bob = parties
+    leg = _leg(bob, side)
+    completed = adaptor_join.complete_leg(leg, side.alice_spend, SIGHASH_ALL)
+    evidence = adaptor_join.recover_published_scalar(
+        leg, _script_sig(alice, bob, completed, completed), public_key_for_share
+    )
+    assert evidence.signatures_seen == 2
+    assert evidence.recovered == side.alice_spend
+    assert not evidence.other_signatures_leaked_nothing, (
+        "two of two leaked, so the recovery is not isolating the adaptor and must not report "
+        "that it is"
+    )
+
+
 def test_a_scriptsig_that_parses_to_nothing_is_reported_as_zero_signatures_not_as_no_leak(parties, side):
     """rule 14: `(none)` is a result and a blank gap is not. A mangled parse and a transaction
     that genuinely leaks nothing must not render identically, because they want opposite
@@ -310,9 +332,10 @@ def test_the_refund_the_harness_ACTUALLY_BROADCASTS_yields_the_OTHER_share(parti
     built = _built(alice, bob, side, lambda digest: _leg(bob, side, digest))
     cancel_output = chain.Outpoint(txid="ef" * 32, vout=0, value_satoshis=built.cancel.output_satoshis)
     refund = chain.build_refund(built.context, cancel_output)
-    leg = adaptor_join.pre_sign_leg(
-        "refund", alice.private_key, refund.digest, side.bob_spend, side.bob_spend_public
-    )
+    # THE HARNESS'S OWN function, not a rebuild of it here. Rebuilding is what let a mutant
+    # swapping Y_b for Y_a survive: a test that constructs the leg itself can only ever agree
+    # with itself.
+    leg = adaptor_steps.build_refund_leg(built, refund)
     raw_hex, _txid = chain.assemble(refund, *adaptor_steps._refund_signatures(built, refund, leg))
     evidence = adaptor_join.recover_published_scalar(leg, _script_sig_of(raw_hex), public_key_for_share)
     assert evidence.recovered == side.bob_spend

@@ -2409,6 +2409,33 @@ def _wait_or_mine_to(run: Run, target: int) -> None:
     _mine(run, max(0, target - tip))
 
 
+def build_refund_leg(built: BuiltChain, refund: chain.ChainTransaction) -> AdaptorLeg:
+    """THE MIRROR IMAGE OF THE REDEEM: Alice pre-signs Tx_refund under Y_b, not Y_a.
+
+    Tx_refund pays BOB, so by docs/monero_swap_protocol.md section 0's argument it is ALICE's
+    signature that must be the pre-signature, and the scalar it publishes is BOB's spend share
+    -- the one ALICE is waiting on if the swap dies down the cancel path. Pre-signing it under
+    Y_a instead would hand each party a share they already hold, which is a protocol that looks
+    symmetric and transfers nothing.
+
+    A NAMED FUNCTION RATHER THAN FOUR LINES INLINE, and the reason is a measurement rather than
+    taste: while it was inline, `tools/mutate.py` swapping `bob_spend`/`bob_spend_public` for
+    Alice's SURVIVED the whole suite. A decision buried inside orchestration can only be tested
+    by running the orchestration, which here means a daemon -- rule 10's defect exactly, and the
+    fix rule 10 names is to extract the decision so it can be called with seeded inputs.
+
+    Pre-signed HERE rather than in step 6 for the reason FINDING 2 gives: Tx_refund cannot exist
+    until Tx_cancel is SIGNED, because a legacy txid covers the scriptSigs and the refund spends
+    the cancel's output. In the real protocol this and the cancel's signatures are one setup
+    round; on a legacy chain they are two, and that is a correction to the design document
+    rather than to this code.
+    """
+    return pre_sign_leg(
+        "refund", built.setup.alice.private_key, refund.digest,
+        built.monero.bob_spend, built.monero.bob_spend_public,
+    )
+
+
 def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outcome: ChainOutcome) -> None:
     """10d: the SECOND 2-of-2's two branches, on the output the cancel just created.
 
@@ -2450,17 +2477,7 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
 
     refund = chain.build_refund(context, cancel_output)
     chain.assert_spends(refund.parsed, cancel_txid, 0)
-    # THE MIRROR IMAGE OF THE REDEEM. Alice pre-signs Tx_refund under Y_b and Bob completes it
-    # with his own Monero spend share, so the party taking the coin back down the cancel path
-    # publishes the share the OTHER party needs. Pre-signed here rather than in step 6 for the
-    # reason FINDING 2 gives: Tx_refund cannot exist until Tx_cancel is signed, because a legacy
-    # txid covers the scriptSigs and the refund spends the cancel's output. In the real protocol
-    # this and the cancel's signatures are one setup round; on a legacy chain they are two, and
-    # that is a correction to the design document rather than to this code.
-    refund_leg = pre_sign_leg(
-        "refund", built.setup.alice.private_key, refund.digest,
-        built.monero.bob_spend, built.monero.bob_spend_public,
-    )
+    refund_leg = build_refund_leg(built, refund)
     run.check(
         "Alice's Tx_refund signature is an ADAPTOR PRE-SIGNATURE under Y_b",
         f"Y_b={point_hex(refund_leg.adaptor_point)[:16]}.. verified under A_pk",
