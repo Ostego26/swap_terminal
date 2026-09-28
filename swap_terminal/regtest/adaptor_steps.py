@@ -857,7 +857,93 @@ def offer_funding_route(run: Run, signing: str) -> RegtestKey | None:
     )
     run.say("  THE ADDRESS IS NOT A SECRET. The key behind it never leaves this process and the "
             "seed is never printed.")
+    report_recent_payments(run, funding_key)
     return funding_key
+
+
+# How many recent outgoing payments to show when the funding address has not been paid.
+# Small on purpose: this is a "did you mean one of these" prompt, not a wallet statement, and a
+# long list is a wall an operator skims past -- which is the failure it exists to prevent.
+RECENT_PAYMENTS_SHOWN = 6
+
+
+def recent_payments(entries: list, exclude: str) -> list[tuple[str, str, str]]:
+    """(address, amount, confirmations) for the wallet's recent SENDS, newest first, minus one.
+
+    A pure function over what `listtransactions` returned, so the decision -- which entries count
+    as "somewhere you recently sent money" -- can be called with seeded rows (rule 10). The RPC
+    call and the printing are both somewhere else.
+
+    `exclude` is the address the harness derived. Leaving it in would be the cruel version of
+    this list: the one entry that is not the answer sitting among the ones that might be.
+    """
+    seen: set[str] = set()
+    found: list[tuple[str, str, str]] = []
+    for entry in reversed(entries):
+        if not isinstance(entry, dict) or entry.get("category") != "send":
+            continue
+        address = str(entry.get("address") or "")
+        if not address or address == exclude or address in seen:
+            continue
+        seen.add(address)
+        found.append((address, str(entry.get("amount", "?")), str(entry.get("confirmations", "?"))))
+        if len(found) >= RECENT_PAYMENTS_SHOWN:
+            break
+    return found
+
+
+def report_recent_payments(run: Run, funding_key: RegtestKey) -> None:
+    """"Did you mean one of these?" -- the line that would have saved three runs.
+
+    MEASURED, 2026-09-28, THREE TIMES IN ONE EVENING, and every one of them was the same
+    mistake wearing a different hat:
+
+      1. the seed was the literal placeholder `<the same seed as yesterday>`, so the harness
+         derived msuGYPvo.. and asked for it to be funded
+      2. the seed was changed again, so it derived mxRi6srj..
+      3. the operator paid msxA9Raj.. -- the address from the ORIGINAL seed, two seeds ago --
+         and the harness went on asking for mxRi6srj.. with no idea the money had arrived
+         somewhere it could almost see
+
+    NOTHING ON THE SCREEN WAS WRONG IN ANY OF THEM. That is what makes this class of failure
+    expensive: there is no bad number to spot, only an address that differs from one printed in a
+    terminal half an hour earlier, and nobody compares addresses between runs. The harness had
+    `listtransactions` in hand the whole time -- it is the same call
+    `discover_operator_funding_txid` uses to FIND the payment -- and when that call found nothing
+    it said nothing about what it HAD found.
+
+    So: when the derived address has not been paid, show where the wallet HAS been sending. If
+    one of those is where the operator meant to send, the seed is the thing that changed, and
+    that sentence is the whole diagnosis.
+
+    NEVER FATAL AND NEVER A CHECK. A wallet that will not list its transactions still gets the
+    funding offer above; a diagnostic that could refuse a run would be a worse defect than the
+    one it explains. It prints `(none)` rather than nothing when there are no recent sends,
+    because a blank gap is ambiguous between "no payments" and "the query broke" (rule 14).
+    """
+    try:
+        entries = run.node().call("listtransactions", "*", FUNDING_SEARCH_DEPTH, 0)
+    except RPCError as exc:
+        run.say(f"  (could not list the wallet's recent payments to compare: {exc})")
+        return
+    if not isinstance(entries, list):
+        return
+    found = recent_payments(entries, funding_key.address)
+    run.say("")
+    run.say(f"  DID YOU ALREADY PAY A DIFFERENT ADDRESS? The wallet has made no payment to "
+            f"{funding_key.address}, and this is where it HAS been sending recently:")
+    if not found:
+        run.say("    (none: this wallet has no recent outgoing payments at all)")
+    for address, amount, confirmations in found:
+        run.say(f"    {address}  {amount} {run.asset}  {confirmations} confirmation(s)")
+    if found:
+        run.say(
+            f"    IF ONE OF THOSE IS WHERE YOU MEANT TO SEND, THE SEED IS WHAT CHANGED, not the "
+            f"payment. {FUNDING_SEED_VARIABLE} derives the address, so a different seed is a "
+            f"different address and the harness cannot see money at one it did not derive. Set "
+            f"the seed back to the one that produced the address you paid, and re-run -- there is "
+            f"nothing to re-send."
+        )
 
 
 def already_funded(run: Run, signing: str) -> bool:

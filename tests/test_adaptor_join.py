@@ -678,3 +678,121 @@ def test_a_scriptsig_the_daemon_DOES_return_still_comes_back(parties, side, monk
     run = _funding_run(monkeypatch, [])
     monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Node(_decoded_with(expected)))
     assert adaptor_steps.published_script_sig(run, "ab" * 32) == expected
+
+
+# ---------------------------------------------------------------------------
+# "DID YOU ALREADY PAY A DIFFERENT ADDRESS?" -- three runs lost to this.
+# ---------------------------------------------------------------------------
+
+
+def test_the_wallets_recent_payments_are_offered_newest_first_without_the_derived_one():
+    """The decision, over seeded rows. `listtransactions` returns OLDEST first, so a list that
+    forgot to reverse would offer the operator their least recent payment as the likely one."""
+    entries = [
+        {"category": "send", "address": "mOLDEST", "amount": "-1.0", "confirmations": 900},
+        {"category": "receive", "address": "mINBOUND", "amount": "5.0", "confirmations": 50},
+        {"category": "send", "address": "mDERIVED", "amount": "-3.5", "confirmations": 3},
+        {"category": "send", "address": "mNEWEST", "amount": "-3.5", "confirmations": 1},
+    ]
+    found = adaptor_steps.recent_payments(entries, exclude="mDERIVED")
+    assert [address for address, _amount, _confirmations in found] == ["mNEWEST", "mOLDEST"], (
+        "newest first, receives dropped, and the address we derived left out -- offering the one "
+        "entry that is NOT the answer among the ones that might be is the cruel version"
+    )
+
+
+def test_a_repeatedly_paid_address_is_offered_once():
+    """A funding address paid across several runs would otherwise fill the whole list with
+    itself and push the actual answer off the bottom."""
+    entries = [
+        {"category": "send", "address": "mSAME", "amount": "-3.5", "confirmations": n}
+        for n in (300, 200, 100)
+    ] + [{"category": "send", "address": "mOTHER", "amount": "-1.0", "confirmations": 2}]
+    found = adaptor_steps.recent_payments(entries, exclude="")
+    assert [address for address, _a, _c in found] == ["mOTHER", "mSAME"]
+
+
+def test_the_list_is_bounded_so_it_stays_a_prompt_and_not_a_statement():
+    entries = [
+        {"category": "send", "address": f"m{n}", "amount": "-1.0", "confirmations": n}
+        for n in range(50)
+    ]
+    assert len(adaptor_steps.recent_payments(entries, exclude="")) == adaptor_steps.RECENT_PAYMENTS_SHOWN
+
+
+def test_the_diagnostic_names_the_seed_variable_as_the_thing_that_changed(monkeypatch):
+    """THE THREE RUNS THIS EXISTS FOR, 2026-09-28: the operator paid msxA9Raj.. -- the address
+    from a seed two changes ago -- while the harness went on asking for mxRi6srj.. with no idea
+    the money had arrived somewhere it could almost see.
+
+    The remedy is the seed, not another payment, and the message has to say so or the operator's
+    next move is to send more coins to a third address.
+    """
+    key = generate_key()
+    stream = io.StringIO()
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    paid = "msxA9RajhxTvJ4EgPwuiza1VJEYJqdsNqw"
+
+    class _Wallet:
+        def call(self, method, *params):
+            assert method == "listtransactions"
+            return [{"category": "send", "address": paid, "amount": "-3.499", "confirmations": 1}]
+
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Wallet())
+    adaptor_steps.report_recent_payments(run, key)
+
+    printed = stream.getvalue()
+    assert paid in printed, "the address they actually paid has to appear, or there is nothing to recognize"
+    assert adaptor_steps.FUNDING_SEED_VARIABLE in printed
+    assert "THE SEED IS WHAT CHANGED" in printed
+    assert "nothing to re-send" in printed, "or the next move is another payment to a third address"
+
+
+def test_a_wallet_with_no_recent_sends_prints_none_rather_than_a_gap(monkeypatch):
+    """rule 14: a blank gap is ambiguous between 'no payments' and 'the query broke'."""
+    stream = io.StringIO()
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    class _Empty:
+        def call(self, method, *params):
+            assert method == "listtransactions"
+            return []
+
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _Empty())
+    adaptor_steps.report_recent_payments(run, generate_key())
+    assert "(none:" in stream.getvalue()
+
+
+def test_a_wallet_that_will_not_list_does_NOT_break_the_funding_offer(monkeypatch):
+    """A diagnostic that could refuse a run would be a worse defect than the one it explains."""
+    stream = io.StringIO()
+    console = Console(adaptor_steps.TOTAL_STEPS, stream=stream)
+    run = adaptor_steps.Run(
+        console=console,
+        config=ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid",
+        ),
+        wallet="",
+    )
+    monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": _MuteNode())
+    adaptor_steps.report_recent_payments(run, generate_key())
+    assert "could not list" in stream.getvalue()
