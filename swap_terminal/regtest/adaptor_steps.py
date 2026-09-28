@@ -860,10 +860,13 @@ def _report_gridcoin_lock_state(run: Run) -> None:
             run.say(f"SO FUND THIS ADDRESS ONCE, FROM YOUR GUI: {funding_key.address}")
             run.say(
                 f"  send at least {Decimal(LOCK_COIN[run.asset]) * 2 + Decimal(FUNDING_HEADROOM_COIN[run.asset]) * 2 + Decimal('0.1')} "
-                f"{run.asset} to it, then re-run with --funding-txid <the txid>. The address is "
-                f"DERIVED from {FUNDING_SEED_VARIABLE}, so it is the same every run as long as "
-                f"that seed is. Your wallet is never asked again: the harness signs this input "
-                f"itself and only sendrawtransaction touches the daemon."
+                f"{run.asset} to it from your GUI, then RE-RUN THIS EXACT COMMAND. There is "
+                f"nothing to copy and no txid to find: your wallet made the payment, so the "
+                f"harness asks it (listtransactions) and picks the payment up by itself. The "
+                f"address is DERIVED from {FUNDING_SEED_VARIABLE} -- keep that set and it is "
+                f"the same address every run. Your wallet is never asked to create or sign "
+                f"anything: the harness signs this input itself and only sendrawtransaction "
+                f"touches the daemon."
             )
             run.say("  THE ADDRESS IS NOT A SECRET. The key behind it never leaves this process "
                     "and the seed is never printed.")
@@ -1991,6 +1994,65 @@ def operator_funding_key(run: Run) -> RegtestKey | None:
     return key_from_seed(seed, FUNDING_ROLE)
 
 
+# How far back to look for the operator's funding payment. 200 covers a staking wallet's recent
+# history comfortably -- a Gridcoin wallet's transaction list fills mostly with its own
+# coinstakes -- without asking a daemon to serialize thousands of entries on every run.
+FUNDING_SEARCH_DEPTH = 200
+
+
+def discover_operator_funding_txid(run: Run, key: RegtestKey) -> str | None:
+    """The txid of the operator's payment to `key.address`, found by ASKING THE WALLET.
+
+    THE OPERATOR SHOULD NOT HAVE TO CARRY A TXID BACK, and requiring one was a failure of
+    imagination on my part rather than a constraint. The reasoning that produced --funding-txid
+    was: this address is deliberately not the wallet's, `listunspent` returns only the wallet's
+    own outputs, `importaddress` is False on v5.5.1.0 so it cannot be watched, and `gettxout` is
+    False -- therefore nothing can say what is unspent there, therefore the operator must name
+    the transaction.
+
+    Every step of that is true and the conclusion does not follow. THE WALLET MADE THE PAYMENT.
+    It does not own the output, but it certainly remembers sending it, and `listtransactions`
+    reports exactly that: txid, address and category for each recent entry
+    (src/wallet/rpcwallet.cpp:1586-1607). So the wallet can be asked "did you pay this address",
+    which is a different question from "what is unspent at it" -- and the one that was needed.
+
+    Measured cost of not seeing that: the operator ran `--funding-txid <that txid>` with my
+    placeholder pasted literally, got a bash redirect error, and told me they did not know the
+    txid. They were right not to. A tool that makes somebody go and look up an identifier their
+    own wallet is already holding is a tool asking them to do its work.
+
+    None means no such payment was found, which is the ordinary state before they have sent one.
+    `--funding-txid` remains for the case this cannot cover: a payment made from somewhere other
+    than this wallet, which it has no record of.
+    """
+    try:
+        entries = run.node().call("listtransactions", "*", FUNDING_SEARCH_DEPTH, 0)
+    except RPCError as exc:
+        run.say(f"could not read the wallet's recent transactions ({exc}); "
+                f"pass --funding-txid instead if you have already funded the address")
+        return None
+    if not isinstance(entries, list):
+        return None
+    # NEWEST FIRST. listtransactions returns oldest-first, and a re-funded address should use
+    # the LATEST payment: an earlier one is most likely already spent by a previous run, and
+    # spending it again would fail as a double-spend several steps later with no clue why.
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("address") != key.address:
+            continue
+        if entry.get("category") not in ("send", "receive"):
+            continue
+        txid = entry.get("txid")
+        if txid:
+            run.say(
+                f"the wallet remembers paying {key.address} in {txid} "
+                f"({entry.get('confirmations', '?')} confirmations) -- no --funding-txid needed"
+            )
+            return str(txid)
+    return None
+
+
 def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoint:
     """The output of `txid` that pays `key.address`, read off the chain.
 
@@ -2108,16 +2170,23 @@ def prepare_operator_funding(run: Run, funding_txid: str, destinations: list[Reg
     rather than inside them: the operator should make ONE payment, not one per lock, and a
     failure to find it has to refuse before anything is built or broadcast.
     """
-    if not funding_txid:
-        return
     funding_key = operator_funding_key(run)
     if funding_key is None:
+        if not funding_txid:
+            return
         raise RegtestSetupError(
             f"{run.asset}: --funding-txid was given but {FUNDING_SEED_VARIABLE} is not set. The "
             f"funding address is DERIVED from that seed, so without it this harness cannot tell "
             f"which output of that transaction is its own. Nothing was funded, signed or "
             f"broadcast."
         )
+    if not funding_txid:
+        # ASK THE WALLET BEFORE ASKING THE OPERATOR. It made the payment, so it knows the txid;
+        # see discover_operator_funding_txid(). No payment yet is the ordinary state and falls
+        # through to the wallet route, which then refuses and prints the address to fund.
+        funding_txid = discover_operator_funding_txid(run, funding_key) or ""
+    if not funding_txid:
+        return
     run.say(
         f"funding from the operator's payment {funding_txid} to {funding_key.address} -- the "
         f"wallet will NOT be asked to create or sign anything"

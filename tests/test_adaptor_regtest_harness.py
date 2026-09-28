@@ -1462,3 +1462,92 @@ def test_funding_too_small_to_cover_both_locks_says_how_much_to_send(console, mo
     assert "Send at least" in message
     assert key.address in message, "and where to send it"
     assert "Nothing was funded" in message
+
+
+def test_the_harness_finds_the_funding_txid_ITSELF_from_the_wallet(console, monkeypatch):
+    """THE OPERATOR SHOULD NOT HAVE TO CARRY A TXID BACK, and requiring one was a failure of
+    imagination rather than a constraint.
+
+    The reasoning that produced --funding-txid was: the address is deliberately not the
+    wallet's, listunspent returns only the wallet's own outputs, importaddress is False on
+    v5.5.1.0 and gettxout is False -- so nothing can say what is unspent there. All true, and
+    the conclusion does not follow. THE WALLET MADE THE PAYMENT. It does not own the output but
+    it remembers sending it, and listtransactions reports txid, address and category.
+
+    "Did you pay this address" is a different question from "what is unspent at it", and it is
+    the one that was needed. Measured cost of not seeing it: the operator pasted the placeholder
+    literally, got a bash redirect error, and said they did not know the txid. They were right.
+    """
+    key = key_from_seed("seed for discovery", "funding")
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"listtransactions": [
+            {"address": "mSomebodyElse", "category": "send", "txid": "11" * 32},
+            {"address": key.address, "category": "send", "txid": "22" * 32, "confirmations": 3},
+        ]},
+        asset="GRC",
+    )
+    assert adaptor_steps.discover_operator_funding_txid(run, key) == "22" * 32
+
+
+def test_the_LATEST_payment_wins_when_the_address_was_funded_twice(console, monkeypatch):
+    """An earlier payment is most likely already spent by a previous run, and spending it again
+    would fail as a double-spend several steps later with no clue why. listtransactions returns
+    oldest-first, so the scan runs backwards."""
+    key = key_from_seed("seed for the re-funding test", "funding")
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"listtransactions": [
+            {"address": key.address, "category": "send", "txid": "aa" * 32},
+            {"address": key.address, "category": "send", "txid": "bb" * 32},
+        ]},
+        asset="GRC",
+    )
+    assert adaptor_steps.discover_operator_funding_txid(run, key) == "bb" * 32, (
+        "oldest-first input means the LAST match is the newest payment"
+    )
+
+
+def test_no_payment_yet_is_None_and_not_an_error(console, monkeypatch):
+    """The ordinary state before the operator has sent anything. It must fall through to the
+    wallet route, which then refuses and prints the address to fund."""
+    key = key_from_seed("seed for the empty case", "funding")
+    run, _ = _run_with(console, monkeypatch, {"listtransactions": []}, asset="GRC")
+    assert adaptor_steps.discover_operator_funding_txid(run, key) is None
+
+    run2, _ = _run_with(console, monkeypatch, {}, asset="GRC")  # listtransactions absent
+    assert adaptor_steps.discover_operator_funding_txid(run2, key) is None
+
+
+def test_a_payment_to_a_DIFFERENT_address_is_never_picked_up(console, monkeypatch):
+    """The wallet's history is mostly its own coinstakes and unrelated sends. Matching anything
+    but our exact address would fund a lock from a stranger's outpoint."""
+    key = key_from_seed("seed for the mismatch test", "funding")
+    other = key_from_seed("a different seed entirely", "funding")
+    run, _ = _run_with(
+        console, monkeypatch,
+        {"listtransactions": [
+            {"address": other.address, "category": "send", "txid": "cc" * 32},
+            {"address": "", "category": "generate", "txid": "dd" * 32},
+        ]},
+        asset="GRC",
+    )
+    assert adaptor_steps.discover_operator_funding_txid(run, key) is None
+
+
+def test_an_explicit_funding_txid_still_OVERRIDES_discovery(console, monkeypatch):
+    """--funding-txid remains for the case discovery cannot cover: a payment made from somewhere
+    other than this wallet, which it has no record of."""
+    monkeypatch.setenv(adaptor_steps.FUNDING_SEED_VARIABLE, "seed for the override test")
+    key = key_from_seed("seed for the override test", "funding")
+    decoded = {"vout": [{"n": 0, "value": "3.5", "scriptPubKey": {"hex": key.p2pkh_script.hex()}}]}
+    run, node = _run_with(
+        console, monkeypatch,
+        {"listtransactions": [{"address": key.address, "category": "send", "txid": "ee" * 32}],
+         "getrawtransaction": decoded, "decoderawtransaction": decoded,
+         "sendrawtransaction": "ff" * 32, "getblockcount": 100},
+        asset="GRC",
+    )
+    found = adaptor_steps.find_operator_funding(run, key, "99" * 32)
+    assert found.txid == "99" * 32, "the explicit txid is used, not the discovered one"
+    assert "listtransactions" not in node.methods_called()
