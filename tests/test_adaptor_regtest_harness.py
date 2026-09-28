@@ -1303,15 +1303,39 @@ def test_a_daemon_that_accepts_a_non_key_without_complaining_is_UNDETERMINED(con
     assert adaptor_steps.probe_supplied_key_signing(run) == "undetermined"
 
 
-def test_the_route_text_says_plainly_that_it_is_NOT_BUILT():
-    """The worst outcome here is an operator reading a measured possibility as a feature and
-    going to look for the flag. Rule 16: this changes how a fund path gets its coins, so it is
-    a proposal and has to say so."""
+def test_the_route_text_and_the_flag_do_not_CONTRADICT_each_other():
+    """THIS TEST ASSERTED THE OPPOSITE UNTIL 2026-09-28, AND THAT IS THE POINT OF KEEPING IT.
+
+    It pinned "NOT IMPLEMENTED" and "proposal", which was right while the route was only a
+    measured possibility -- announcing a route as available would have sent the operator
+    hunting for a flag that did not exist. Then c517b21 BUILT it, and this text went on saying
+    "nothing above is available as a flag today" while the refusal printed `--funding-txid` two
+    lines below it. A message contradicting itself on one screen, in a harness whose whole job
+    this session has been removing exactly that from other people's output.
+
+    So the invariant is not "says proposal" or "says built" -- it is that the text and the
+    parser AGREE. The flag is the ground truth: if argparse has it, the prose must not deny it.
+    """
     route = adaptor_steps.SUPPLIED_KEY_ROUTE
-    assert "NOT IMPLEMENTED" in route or "is not built" in route.lower()
-    assert "proposal" in route.lower()
-    assert "yours to decide" in route.lower(), "and whose call it is"
-    assert "not available as a flag" in route.lower() or "as a flag today" in route.lower()
+    parser_help = _entry_point().parse_args([]).__dict__
+
+    assert "funding_txid" in parser_help, "the flag is what the text has to agree with"
+    assert "--funding-txid" in route, "and the text must name it, or it is not actionable"
+
+    for denial in ("not built", "NOT IMPLEMENTED", "not available as a flag",
+                   "as a flag today", "is a proposal"):
+        assert denial.lower() not in route.lower(), (
+            f"the route IS built, so {denial!r} contradicts the flag printed beside it"
+        )
+
+
+def test_the_route_text_still_states_what_was_MEASURED_versus_read():
+    """Rule 17 does not lapse because the thing got built. The claim rests on a probe against
+    v5.5.1.0, not on master's source, and the text has to keep saying which."""
+    route = adaptor_steps.SUPPLIED_KEY_ROUTE
+    assert "MEASURED" in route
+    assert "v5.5.1.0" in route, "bounded to the build it was measured on"
+    assert "rawtransaction.cpp" in route, "and it still cites what was read, separately"
 
 
 # ---------------------------------------------------------------------------------------

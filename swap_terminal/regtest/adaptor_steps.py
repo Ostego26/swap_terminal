@@ -874,6 +874,15 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         state = ("unlocked FOR STAKING ONLY" if scope == "staking-only"
                  else "LOCKED, so it can neither stake nor send")
         run.console.say("")
+        # THE UNLOCK CEREMONY IS THE FALLBACK NOW, NOT THE HEADLINE, and the ordering says so.
+        # It used to print in full above the one actionable line, so an operator who could take
+        # the --funding-txid route had to read past four paragraphs about discarding their
+        # unlock deadline to reach it. Rule 14 is about output that says something; burying the
+        # answer under the thing it replaced is the same defect as not printing it.
+        if funding_key is not None and signing == "open":
+            run.say("The unlock route below is NOT needed if you take the funding route above. "
+                    "It is kept for a daemon where the supplied-key probe does not come back "
+                    "open, and for anyone who would rather unlock than fund an address:")
         for line in STAKING_ONLY_REMEDY.splitlines():
             run.say(line) if line.strip() else run.console.say("")
         run.console.say("")
@@ -1025,29 +1034,29 @@ STAKING_ONLY_MESSAGE_MARK = "staking only"
 # operator would go looking for a flag. Rule 16 draws the line and this is on the proposal side:
 # it changes how a fund path gets its coins, and it is the operator's call.
 SUPPLIED_KEY_ROUTE = (
-    "BUT THE WALLET MAY NOT BE NEEDED AT ALL, and that was just MEASURED on this daemon rather "
-    "than read from source. `signrawtransaction` chooses its keystore on argument presence "
-    "before it checks any lock (rawtransaction.cpp:2769-2788), so a caller that brings its own "
-    "keys never reaches EnsureWalletIsUnlocked -- and the probe above confirms that branch is "
-    "reachable HERE, on v5.5.1.0, not just at master.\n\n"
+    "THE WALLET IS NOT NEEDED FOR THIS, and that was MEASURED on this daemon rather than read "
+    "from source. `signrawtransaction` picks its keystore on argument presence before it checks "
+    "any lock (rawtransaction.cpp:2769-2788), so a caller bringing its own keys never reaches "
+    "EnsureWalletIsUnlocked -- and the probe above confirms that branch is reachable HERE, on "
+    "v5.5.1.0. This harness already signs its own P2PKH inputs in-process (_sign_p2pkh), and "
+    "sendrawtransaction consults no lock.\n\n"
 
-    "THE WALLET IS THEN NEEDED FOR EXACTLY ONE THING: moving coins to an address this harness "
-    "holds the key for. Everything after that -- build, sign, broadcast -- runs with "
-    "createrawtransaction, signrawtransaction-with-keys and sendrawtransaction, none of which "
-    "consult the unlock. Your staking would never stop and your deadline would never be "
-    "discarded.\n\n"
+    "SO THE WALLET IS NEEDED FOR EXACTLY ONE THING: putting coins at an address this harness "
+    "holds the key for. One payment, from your GUI, which elevates in place and hands the "
+    "elevation straight back (walletmodel.cpp:615, :704) -- staking never stops and your unlock "
+    "deadline is never discarded. After that the wallet is never asked again.\n\n"
 
-    "AND THAT ONE HOP IS SOMETHING THE GUI CAN DO. A plain Send from the testnet GUI elevates "
-    "in place and hands the elevation straight back (walletmodel.cpp:615, :704) -- the scoping "
-    "that makes the GUI useless for serving RPC is exactly right for one manual payment.\n\n"
+    "THIS IS BUILT AND IT IS THE --funding-txid FLAG. Until 2026-09-28 these paragraphs ended "
+    "by denying that the route existed or was reachable by any flag -- correct while it was "
+    "only a measured possibility, and false from the commit that built it. The denial went on "
+    "printing two lines above the flag itself, so one screen said both things. That is the "
+    "defect this harness has spent the day removing from other people's output, and the drift "
+    "is recorded here rather than the old wording (rule 16: a wrong comment is a bug).\n\n"
 
-    "WHAT IS MISSING IS A STABLE ADDRESS TO SEND TO. This harness generates its keys per run "
-    "and never prints them, so the address changes every time. Deriving them from a seed in an "
-    "environment variable would fix that: the harness prints the ADDRESS (not a secret), you "
-    "fund it once from the GUI, and every later run reuses it with the wallet untouched.\n\n"
-
-    "THAT IS A PROPOSAL AND IT IS NOT BUILT. It changes how a fund path gets its coins, so it "
-    "is yours to decide, not this harness's to ship. Nothing above is available as a flag today."
+    "THE OLD SENTENCES ARE DESCRIBED AND NEVER REPRODUCED, and the test that holds this scans "
+    "for their exact phrases -- so quoting them back would fail it, which is correct and not a "
+    "technicality. An operator skims. A screen carrying a denial in quotation marks is still a "
+    "screen carrying that denial, and quotation marks are the first thing skimming drops."
 )
 
 STAKING_ONLY_REMEDY = (
