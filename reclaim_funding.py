@@ -153,6 +153,33 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     console.say(f"{asset}: predicted txid {predicted}; {len(raw) // 2} bytes")
     console.say(f"{asset}: spending {source.txid}:{source.vout}")
 
+    # IS THAT OUTPUT STILL THERE? Ask before claiming the dry run is fine.
+    #
+    # MEASURED ON THE OPERATOR'S HOST, 2026-09-28. They pointed this at a seed whose funding a
+    # completed harness run had already SPLIT AND SPENT, and the dry run reported
+    # "built and signed: 4.59000000 to ..." as if nothing were wrong. find_operator_funding()
+    # reads the vout out of the FUNDING TRANSACTION, and a transaction's outputs do not stop
+    # existing when they are spent -- so it cannot tell. Gridcoin has no `gettxout`, which is
+    # the call that would normally answer this.
+    #
+    # `testmempoolaccept` runs the same AcceptToMemoryPool WITHOUT broadcasting, so the question
+    # costs nothing and is asked here rather than discovered by --send. A dry run whose whole
+    # purpose is "see it before it moves" must not show a healthy-looking spend of an output
+    # that is gone.
+    reason = adaptor_steps.mempool_reject_reason(run, raw)
+    if reason:
+        console.check(f"{asset} the daemon would accept this", f"reject-reason={reason!r}",
+                      "accepted", FAIL)
+        console.say(f"{asset}: asked via testmempoolaccept, so NOTHING was broadcast.")
+        console.say(f"{asset}: THE LIKELIEST CAUSE IS THAT THIS OUTPUT IS ALREADY SPENT -- a "
+                    f"completed adaptor_regtest_verify.py run splits and spends its funding, and "
+                    f"neither this tool nor the daemon can tell a spent output from an unspent "
+                    f"one on a chain with no gettxout. Nothing is stranded at "
+                    f"{key.address} if a run consumed it; it was used.")
+        return 1
+    console.check(f"{asset} the daemon would accept this", "accepted",
+                  "accepted -- asked via testmempoolaccept, and nothing was broadcast", OK)
+
     console.step(6, asset, "broadcast -- ONLY with --send")
     if not args.send:
         console.say(f"{asset}: NOTHING WAS BROADCAST. Re-run with --send to move it:")

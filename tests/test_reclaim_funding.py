@@ -173,7 +173,7 @@ def test_without_send_the_transaction_is_BUILT_AND_SIGNED_and_never_broadcast(mo
     """
     entry = _entry()
     key, destination = generate_key(), generate_key()
-    node = _Node({})
+    node = _Node({"testmempoolaccept": [{"allowed": True}]})
     monkeypatch.setattr(entry.adaptor_steps, "resolve_config", lambda asset: ChainConfig(
         asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
         host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
@@ -297,7 +297,8 @@ def test_the_dry_run_tells_you_to_re_run_with_the_EXACT_address_it_used(monkeypa
     could pay a different one than the one they just read and approved."""
     entry = _entry()
     key, owned = generate_key(), generate_key().address
-    node = _Node({"listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}]})
+    node = _Node({"listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}],
+                  "testmempoolaccept": [{"allowed": True}]})
     for name, value in (
         ("resolve_config", lambda asset: ChainConfig(
             asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
@@ -339,6 +340,7 @@ def test_no_step_number_is_printed_twice(monkeypatch):
         "listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}],
         "getblockcount": 100,
         "getblockchaininfo": {"testnet": True},
+        "testmempoolaccept": [{"allowed": True}],
     })
     for name, value in (
         ("resolve_config", lambda asset: ChainConfig(
@@ -361,3 +363,51 @@ def test_no_step_number_is_printed_twice(monkeypatch):
     assert all(n.endswith(f"/{entry.TOTAL_STEPS}") for n in numbers), (
         f"and the denominator must be the real total, not a stale one: {numbers}"
     )
+
+
+def test_a_dry_run_over_an_ALREADY_SPENT_output_refuses_instead_of_looking_healthy(monkeypatch):
+    """THE LIE THE DRY RUN USED TO TELL, measured on the operator's host 2026-09-28.
+
+    They pointed this at a seed whose funding a completed harness run had already SPLIT AND
+    SPENT, and the dry run reported `built and signed: 4.59000000 to ...` as if nothing were
+    wrong. `find_operator_funding` reads the vout out of the FUNDING TRANSACTION, and a
+    transaction's outputs do not stop existing when they are spent -- so it cannot tell.
+    Gridcoin has no `gettxout`, which is the call that would normally answer.
+
+    A dry run whose entire purpose is "see it before it moves" must not show a healthy-looking
+    spend of an output that is gone. testmempoolaccept runs the same AcceptToMemoryPool without
+    broadcasting, so the question costs nothing -- and it is asked HERE rather than discovered
+    by --send.
+    """
+    entry = _entry()
+    key, owned = generate_key(), generate_key().address
+    node = _Node({
+        "listunspent": [{"address": owned, "txid": "ab" * 32, "vout": 0}],
+        "testmempoolaccept": [{"allowed": False, "reject-reason": "bad-txns-inputs-missingorspent"}],
+    })
+    for name, value in (
+        ("resolve_config", lambda asset: ChainConfig(
+            asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
+            host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
+            conf_name="c.conf", pid_name="c.pid")),
+        ("step_1_reachable", lambda run: None),
+        ("assert_test_network", lambda run: None),
+        ("operator_funding_key", lambda run: key),
+        ("discover_operator_funding_txid", lambda run, k: "cd" * 32),
+        ("find_operator_funding", lambda run, k, txid: _source()),
+        ("adapter_for", lambda config, wallet="": node),
+    ):
+        monkeypatch.setattr(entry.adaptor_steps, name, value)
+
+    stream = io.StringIO()
+    code = entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
+
+    assert code == 1, "a dry run that cannot succeed must not exit 0"
+    printed = stream.getvalue()
+    assert "bad-txns-inputs-missingorspent" in printed, "the daemon's own words"
+    assert "ALREADY SPENT" in printed
+    assert "NOTHING was broadcast" in printed
+    assert "NOTHING WAS BROADCAST. Re-run with --send" not in printed, (
+        "and it must NOT go on to offer a --send line for a transaction that cannot be accepted"
+    )
+    assert node.sent == []
