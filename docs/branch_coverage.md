@@ -69,13 +69,25 @@ v5.5.1.0. Full record: `docs/gridcoin_adaptor_join_2026_09_28.md`.
 
 | Branch | Evidence | note |
 |---|---|---|
-| EscrowCreate | SPENT | XRP testnet, `9D3A81C4946F26E2…` |
-| EscrowFinish, WRONG fulfillment | REFUSED | the hashlock holding |
-| EscrowFinish, RIGHT fulfillment | SPENT | |
-| EscrowCancel before CancelAfter | REFUSED | |
-| EscrowCancel after CancelAfter | SPENT | second escrow, `DDD2CE2A37A830AE…` |
+| EscrowCreate [A] | SPENT | XRP testnet, `1216DF875A438B07…` (2026-09-28) |
+| EscrowFinish, WRONG fulfillment | REFUSED | `tecCRYPTOCONDITION_ERROR` -- the hashlock holding |
+| EscrowFinish, RIGHT fulfillment | SPENT | `DDC13937449FE365…`, destination +1000000 drops exactly |
+| EscrowCreate [B], for the refund path | SPENT | `BB23A43883B9E6B5…`, a dedicated escrow so an early cancel cannot destroy the one step 6 needs |
+| EscrowCancel before CancelAfter | REFUSED | `tecNO_PERMISSION` |
+| EscrowCancel after CancelAfter | SPENT | `5D4EC8C88DCB868B…`, sender's balance restored |
 
-Both branches. This is the most completely exercised leg in the tree.
+Both branches, twice over (2026-09-26 and 2026-09-28, independent runs). This is the most
+completely exercised leg in the tree.
+
+**And it is still not a swap, which the harness says itself**: nothing wires escrow into the
+deposit path, and the XRP leg's `CancelAfter` is not derived from
+`modules/htlc_timelock.lock_hours_for_role()` -- so the two legs' timelocks are not related by
+the rule that makes a swap safe. Branches proven, protocol not assembled.
+
+Incidental, and worth keeping: the public testnet server answered `notSupported` to
+server-side signing, and the harness switched to LOCAL signing with xrpl-py for that and every
+later transaction. That is a fact about the server, not a failure, and the seed never left the
+machine.
 
 ## 4. Monero
 
@@ -93,8 +105,9 @@ Both branches. This is the most completely exercised leg in the tree.
 **RUN 2026-09-28, and these rows moved:** commands 0, 3 and 4 of the operator's list all
 passed -- the offline suite (2154), the BTC and LTC HTLC with both branches through the real
 client (`regtest_htlc_verify.py --chain both --wipe`, OK=76 FAIL=0, CLTV refused by CONSENSUS on
-both chains via `generateblock`), and the Monero shared-key sweep. Commands 1 (GRC adaptor
-chain, including the new punish branch) and 2 (XRP escrow) are still outstanding.
+both chains via `generateblock`), the Monero shared-key sweep, and the XRP escrow (OK=11 FAIL=0,
+both branches on the live testnet). **Command 1 -- the GRC adaptor chain, including the punish
+branch that has still never spent -- is the only one outstanding.**
 
 **a. Tx_punish at T2 has never spent.** Lock C and step 11 are built, tested offline and
 pushed; the run costs one GRC payment of 4.6 and about 40 minutes of block waiting. This is
