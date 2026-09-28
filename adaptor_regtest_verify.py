@@ -432,9 +432,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="adaptor_regtest_verify.py",
         description=(
-            "Fund and SPEND a 2-of-2 P2SH on a real test chain, both branches, and assert that the "
-            "transposed-signature and missing-OP_0 scriptSigs are REFUSED. Refuses to run against any "
-            "network the daemon does not itself say is a test network."
+            "Fund a 2-of-2 P2SH on a real test chain and SPEND it with an ADAPTOR signature -- "
+            "then read that scriptSig back off the chain and check it published the Monero spend "
+            "share it was completed with. Also asserts the transposed-signature and missing-OP_0 "
+            "scriptSigs are REFUSED, and that the plain-signature cancel publishes nothing. "
+            "Refuses to run against any network the daemon does not itself say is a test network."
         ),
     )
     parser.add_argument(
