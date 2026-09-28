@@ -101,12 +101,17 @@ from modules.adaptor_swap_scripts import (
     two_of_two_script_sig,
 )
 from modules.htlc_rpc import lookup_contract_output
-from modules.htlc_spend import SIGHASH_ALL, legacy_sighash, satoshis_to_coins
+from modules.htlc_spend import (
+    SIGHASH_ALL,
+    coins_to_satoshis,
+    legacy_sighash,
+    satoshis_to_coins,
+)
 from modules.htlc_timelock import SECONDS_PER_BLOCK
 from regtest import daemons
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console
 from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
-from regtest.keys import RegtestKey, generate_key
+from regtest.keys import RegtestKey, generate_key, key_from_seed
 from regtest.txbuild import push_data
 
 TOTAL_STEPS = 10
@@ -354,6 +359,11 @@ class Run:
     capabilities: dict = field(default_factory=dict)
     spawned: bool = False
     mining_address: str = ""
+    # FUNDING OUTPOINTS THE OPERATOR ALREADY PAID FOR, one per lock, consumed in order by
+    # fund_and_prepare(). Empty means the ordinary wallet route. A list rather than a flag
+    # because the two locks need two distinct outputs and popping them is what guarantees the
+    # second lock cannot be handed the first one's outpoint.
+    operator_funding: list = field(default_factory=list)
 
     @property
     def asset(self) -> str:
@@ -842,6 +852,25 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         # `note:`, and once again in the SUMMARY's unexpected-failures list. Rule 14 asks for
         # output that says something; a wall of identical text repeated three times is how a
         # reader learns to skim past the part that matters.
+        # THE ADDRESS TO PAY, WHEN A SEED IS CONFIGURED. This is the difference between telling
+        # the operator their wallet is in the way and telling them what to do instead.
+        funding_key = operator_funding_key(run)
+        if funding_key is not None and signing == "open":
+            run.say("")
+            run.say(f"SO FUND THIS ADDRESS ONCE, FROM YOUR GUI: {funding_key.address}")
+            run.say(
+                f"  send at least {Decimal(LOCK_COIN[run.asset]) * 2 + Decimal(FUNDING_HEADROOM_COIN[run.asset]) * 2 + Decimal('0.1')} "
+                f"{run.asset} to it, then re-run with --funding-txid <the txid>. The address is "
+                f"DERIVED from {FUNDING_SEED_VARIABLE}, so it is the same every run as long as "
+                f"that seed is. Your wallet is never asked again: the harness signs this input "
+                f"itself and only sendrawtransaction touches the daemon."
+            )
+            run.say("  THE ADDRESS IS NOT A SECRET. The key behind it never leaves this process "
+                    "and the seed is never printed.")
+        elif funding_key is None and signing == "open":
+            run.say("")
+            run.say(f"TO USE THAT ROUTE, set {FUNDING_SEED_VARIABLE} to something only you know "
+                    f"and re-run. The harness will print an address for you to fund once.")
         state = ("unlocked FOR STAKING ONLY" if scope == "staking-only"
                  else "LOCKED, so it can neither stake nor send")
         run.console.say("")
@@ -1420,7 +1449,12 @@ def _value_of(run: Run, txid: str, vout: int) -> int:
     decoded = _decoded(run, txid)
     for entry in decoded.get("vout", []):
         if int(entry["n"]) == vout:
-            return int((Decimal(str(entry["value"])) * Decimal(100_000_000)).to_integral_value())
+            # coins_to_satoshis(), not a fourth copy of the multiply-and-round. This line was
+            # one (rule 8), and modules/htlc_spend.py's own comment records that
+            # regtest/txbuild.py already held another -- so this file was adding a third to a
+            # conversion that had one owner. They agree today; that is what a duplicate always
+            # looks like on the day it is written.
+            return coins_to_satoshis(str(entry["value"]))
     raise RegtestSetupError(f"{run.asset}: {txid} has no output {vout}")
 
 
@@ -1931,8 +1965,178 @@ def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outc
         outcome.notes.append(f"the second 2-of-2 could not be spent: {message}")
 
 
+FUNDING_SEED_VARIABLE = "ST_ADAPTOR_FUNDING_SEED"
+FUNDING_ROLE = "funding"
+
+
+def operator_funding_key(run: Run) -> RegtestKey | None:
+    """The key the operator funds, or None when no seed is configured.
+
+    None rather than a raise, because "no seed set" is the ordinary case on BTC and LTC where
+    the wallet funds the harness itself. It only becomes a problem on a chain whose wallet has
+    refused, and that is where it is reported.
+    """
+    seed = os.environ.get(FUNDING_SEED_VARIABLE, "")
+    if not seed.strip():
+        return None
+    return key_from_seed(seed, FUNDING_ROLE)
+
+
+def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoint:
+    """The output of `txid` that pays `key.address`, read off the chain.
+
+    WHY THE OPERATOR HAS TO NAME THE TXID. `listunspent` returns the WALLET's outputs, and this
+    address is deliberately not the wallet's -- that is the entire point of the route. The
+    daemon's measured capability set leaves no way to ask "what is unspent at this address":
+    `importaddress` is False on v5.5.1.0, so it cannot be watched, and `gettxout` is False too.
+    `getrawtransaction` is True, so one txid is enough and is the smallest thing the operator
+    has to carry back from their GUI.
+
+    THE VOUT IS FOUND, NEVER ASSUMED. A GUI send puts the payment and the change in whichever
+    order it likes -- _send_to_self() carries the same warning about sendtoaddress for the same
+    reason -- and assuming 0 would have the harness signing over the operator's change.
+    """
+    decoded = _decoded(run, txid)
+    wanted = key.p2pkh_script.hex()
+    for output in decoded.get("vout", []):
+        script = (output.get("scriptPubKey") or {}).get("hex", "")
+        if script == wanted:
+            index = int(output["n"])
+            satoshis = coins_to_satoshis(str(output["value"]))
+            run.say(
+                f"found the operator's funding at {txid}:{index} worth "
+                f"{satoshis_to_coins(satoshis)} {run.asset}, paying {key.address}"
+            )
+            return chain.Outpoint(txid=txid, vout=index, value_satoshis=satoshis)
+    raise RegtestSetupError(
+        f"{run.asset}: transaction {txid} has no output paying {key.address}. Its outputs pay "
+        f"{[(o.get('scriptPubKey') or {}).get('hex', '?')[:16] for o in decoded.get('vout', [])]}. "
+        f"Either the txid is not the funding payment, or the seed in {FUNDING_SEED_VARIABLE} is "
+        f"not the one whose address you sent to -- the address is DERIVED from that seed, so a "
+        f"changed seed is a changed address. Nothing was funded, signed or broadcast."
+    )
+
+
+def split_operator_funding(run: Run, key: RegtestKey, source: chain.Outpoint,
+                           destinations: list[RegtestKey]) -> list[chain.Outpoint]:
+    """One operator payment -> one P2PKH output per lock, signed HERE and broadcast.
+
+    THIS IS THE WHOLE ROUTE, AND IT ASKS THE WALLET FOR NOTHING. The input is a P2PKH the
+    harness holds the key for, so `_sign_p2pkh` signs it in this process exactly as it already
+    signs Tx_lock's input -- no `signrawtransaction`, no `sendtoaddress`, no unlock consulted.
+    Only `sendrawtransaction` touches the daemon, and it reads no lock state.
+
+    ONE TRANSACTION RATHER THAN ONE PER LOCK, so the operator makes ONE payment. The outputs are
+    sized exactly as _send_to_self() sizes its own, so everything downstream is unchanged.
+
+    NO CHANGE OUTPUT, DELIBERATELY. Whatever is left over after the two funding outputs is left
+    to the miner as fee rather than returned to the funding address, and that is a choice worth
+    naming: a change output returning to the same address would be indistinguishable on chain
+    from the operator's next funding payment, so find_operator_funding() could pick up the
+    change of a previous run and fund a lock with the wrong outpoint. Overpaying a testnet fee
+    costs test coins; funding from the wrong output costs a run and a confusing chase.
+    """
+    per_lock = coins_to_satoshis(
+        str(Decimal(LOCK_COIN[run.asset]) + Decimal(FUNDING_HEADROOM_COIN[run.asset]))
+    )
+    needed = per_lock * len(destinations)
+
+    # ONE nTime, READ ONCE, USED FOR BOTH BUILDS. Gridcoin serializes nTime between the version
+    # and the input count, so a GRC transaction built without it is refused by the builder --
+    # which is how a test caught this before it reached a chain, with `ntime=None` here. But the
+    # subtler half is that this function builds the transaction TWICE: once to MEASURE the fee
+    # and once to SIGN. Reading the clock separately for each would size the fee against
+    # different bytes than the ones signed, and would make the predicted txid wrong, because the
+    # txid depends on these bytes and the whole point of the check below is that the prediction
+    # matches. `build_unsigned` refuses to read a clock itself for exactly this reason.
+    ntime = int(time.time()) if run.asset == "GRC" else None
+    outputs = [(per_lock, destination.p2pkh_script) for destination in destinations]
+    fee = chain.fee_satoshis_for(
+        run.asset,
+        chain.build_unsigned(asset=run.asset, spends=source, outputs=outputs,
+                             locktime=0, ntime=ntime),
+        chain.p2pkh_script_sig_upper_bound(key.public_key),
+    )
+    if source.value_satoshis < needed + fee:
+        raise RegtestSetupError(
+            f"{run.asset}: the operator's funding output holds "
+            f"{satoshis_to_coins(source.value_satoshis)} and this run needs "
+            f"{satoshis_to_coins(needed)} for {len(destinations)} lock(s) plus "
+            f"{satoshis_to_coins(fee)} of fee. Send at least "
+            f"{satoshis_to_coins(needed + fee)} {run.asset} to {key.address} and pass that "
+            f"txid. Nothing was funded, signed or broadcast."
+        )
+
+    run.say(
+        f"splitting the operator's {satoshis_to_coins(source.value_satoshis)} into "
+        f"{len(destinations)} funding output(s) of {satoshis_to_coins(per_lock)} each, fee "
+        f"{satoshis_to_coins(fee)}. Signed in THIS process -- the wallet is not asked"
+    )
+    unsigned = chain.build_unsigned(asset=run.asset, spends=source, outputs=outputs,
+                                    locktime=0, ntime=ntime)
+    script_sig = _sign_p2pkh(key, _p2pkh_sighash(unsigned, key))
+    raw = unsigned.serialize({0: script_sig}).hex()
+    predicted = chain.predicted_txid(unsigned, {0: script_sig})
+    txid = run.node(wallet=False).call("sendrawtransaction", raw)
+    run.check("the split txid PREDICTED before broadcast equals the daemon's",
+              f"predicted={predicted} daemon={txid}", "the same txid",
+              OK if txid == predicted else FAIL)
+    _mine(run, 1)
+    return [chain.Outpoint(txid=txid, vout=index, value_satoshis=per_lock)
+            for index in range(len(destinations))]
+
+
+def prepare_operator_funding(run: Run, funding_txid: str, destinations: list[RegtestKey]) -> None:
+    """Find the operator's payment and split it into one input per lock, or do nothing.
+
+    EXTRACTED FROM run_chain(), which ruff put at 55 statements against a ceiling of 50. Rule 12
+    is explicit that the answer is to pull the decision out rather than raise the ceiling, and
+    this is a decision rather than orchestration: whether this run funds from the wallet or from
+    a payment the operator already made, and a refusal if the second was asked for and cannot be
+    located.
+
+    BOTH LOCKS FROM ONE PAYMENT, which is why this runs before either fund_and_prepare() call
+    rather than inside them: the operator should make ONE payment, not one per lock, and a
+    failure to find it has to refuse before anything is built or broadcast.
+    """
+    if not funding_txid:
+        return
+    funding_key = operator_funding_key(run)
+    if funding_key is None:
+        raise RegtestSetupError(
+            f"{run.asset}: --funding-txid was given but {FUNDING_SEED_VARIABLE} is not set. The "
+            f"funding address is DERIVED from that seed, so without it this harness cannot tell "
+            f"which output of that transaction is its own. Nothing was funded, signed or "
+            f"broadcast."
+        )
+    run.say(
+        f"funding from the operator's payment {funding_txid} to {funding_key.address} -- the "
+        f"wallet will NOT be asked to create or sign anything"
+    )
+    source = find_operator_funding(run, funding_key, funding_txid)
+    run.operator_funding = split_operator_funding(run, funding_key, source, destinations)
+
+
 def fund_and_prepare(run: Run, setup: LockSetup) -> chain.Outpoint:
-    """Prepare a P2PKH input this process holds the key for, sized for the lock plus a fee."""
+    """Prepare a P2PKH input this process holds the key for, sized for the lock plus a fee.
+
+    TWO ROUTES, and the second exists because the first is closed on a staking-only wallet.
+
+      WALLET      `sendtoaddress` -- the ordinary one, used whenever the wallet may create a
+                  transaction. BTC and LTC regtest always take it.
+      OPERATOR    a payment the operator already made, split here. Taken when
+                  `run.operator_funding` has been prepared, which happens only when a funding
+                  txid was supplied. It asks the wallet for NOTHING: the input is a P2PKH this
+                  process holds the key for, so _sign_p2pkh() signs it here, and only
+                  sendrawtransaction touches the daemon.
+    """
+    if run.operator_funding:
+        outpoint = run.operator_funding.pop(0)
+        run.say(
+            f"lock {setup.label} is funded from the operator's own payment at "
+            f"{outpoint.txid[:16]}..:{outpoint.vout} -- the wallet was not asked"
+        )
+        return outpoint
     coin = str(Decimal(LOCK_COIN[run.asset]) + Decimal(FUNDING_HEADROOM_COIN[run.asset]))
     run.say(f"preparing the input for lock {setup.label}: {coin} {run.asset}")
     return _send_to_self(run, setup.alice, coin)

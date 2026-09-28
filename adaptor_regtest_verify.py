@@ -314,6 +314,9 @@ def run_chain(console: Console, asset: str, args: argparse.Namespace) -> ChainOu
         # LOCK A: funded, located, then the two refusals, then the happy-path spend. The
         # refusals come BEFORE the spend on purpose -- they spend the same output, and a
         # refusal that arrives because the output is already gone proves nothing.
+        adaptor_steps.prepare_operator_funding(
+            run, args.funding_txid, [setup_a.alice, setup_b.alice],
+        )
         funding_a = adaptor_steps.fund_and_prepare(run, setup_a)
         built_a = adaptor_steps.step_6_build_and_hold(run, setup_a, funding_a, tip)
         adaptor_steps.step_7_broadcast_lock(run, built_a, outcome)
@@ -402,6 +405,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Fund and SPEND a 2-of-2 P2SH on a real test chain, both branches, and assert that the "
             "transposed-signature and missing-OP_0 scriptSigs are REFUSED. Refuses to run against any "
             "network the daemon does not itself say is a test network."
+        ),
+    )
+    parser.add_argument(
+        "--funding-txid", default="",
+        help=(
+            "a txid the OPERATOR already paid to this harness's derived funding address. Takes "
+            "the wallet out of the loop entirely: the harness splits that one output into the "
+            "per-lock inputs it needs, signs them in-process, and never asks the wallet to "
+            "create or sign anything. Requires ST_ADAPTOR_FUNDING_SEED, which is what the "
+            "address is derived from. Run without it once to be told the address."
         ),
     )
     parser.add_argument("--chain", choices=tuple(CHAIN_SETS), default="both", help="which chains to run")

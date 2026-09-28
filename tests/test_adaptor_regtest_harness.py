@@ -53,7 +53,7 @@ from regtest import (
 )
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console
 from regtest.daemons import ChainConfig, RegtestSetupError
-from regtest.keys import generate_key
+from regtest.keys import generate_key, key_from_seed
 
 # NOT CREDENTIALS, and they come from tests/conftest.py rather than being spelled again
 # here. Two reasons, and the second is the real one:
@@ -1312,3 +1312,129 @@ def test_the_route_text_says_plainly_that_it_is_NOT_BUILT():
     assert "proposal" in route.lower()
     assert "yours to decide" in route.lower(), "and whose call it is"
     assert "not available as a flag" in route.lower() or "as a flag today" in route.lower()
+
+
+# ---------------------------------------------------------------------------------------
+# THE OPERATOR-FUNDED ROUTE: taking the wallet out of the loop entirely.
+#
+# MEASURED on the operator's v5.5.1.0, 2026-09-28: their wallet is unlocked FOR STAKING ONLY,
+# so it will not create a transaction, and every RPC route around that is closed. But the
+# harness needs the wallet for exactly ONE thing -- coins at an address it holds the key for.
+# _sign_p2pkh() and _p2pkh_sighash() already sign Tx_lock's P2PKH input in-process, and
+# sendrawtransaction consults no lock. So one payment from their GUI (which elevates in place
+# and hands it straight back: staking never stops, the deadline is never discarded) replaces
+# the whole walletlock ceremony.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_funding_address_is_stable_across_runs_and_the_key_never_appears():
+    """THE PROPERTY THE WHOLE ROUTE RESTS ON. generate_key() is fresh per run, so the operator
+    could never fund it in advance. Derived keys give a stable address -- and the address is
+    all that may ever be printed."""
+    first = key_from_seed("an operator's secret phrase", "funding")
+    second = key_from_seed("an operator's secret phrase", "funding")
+    assert first.address == second.address, "an address that moves cannot be funded in advance"
+    assert first.private_key == second.private_key
+
+    assert key_from_seed("a different phrase", "funding").address != first.address
+    assert key_from_seed("an operator's secret phrase", "other").address != first.address, (
+        "roles are separated so one seed can back more than one purpose without sharing a scalar"
+    )
+    assert first.address.startswith(("m", "n")), "a testnet P2PKH address"
+
+
+def test_an_empty_seed_is_refused_rather_than_deriving_a_public_key():
+    """An empty seed derives ONE fixed key that anyone reading this source could also derive --
+    and on a funded address that is a key anyone can sweep."""
+    for empty in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError, match="only you know"):
+            key_from_seed(empty, "funding")
+
+
+def test_the_funding_vout_is_FOUND_and_never_assumed(console, monkeypatch):
+    """A GUI send puts the payment and the change in whichever order it likes. Assuming vout 0
+    would have the harness signing over the operator's CHANGE -- the same trap _send_to_self()
+    carries the identical warning about for sendtoaddress."""
+    key = key_from_seed("seed for the vout test", "funding")
+    # The payment is at index 1; index 0 is somebody else's output entirely.
+    decoded = {"vout": [
+        {"n": 0, "value": "5.0", "scriptPubKey": {"hex": "76a914" + "11" * 20 + "88ac"}},
+        {"n": 1, "value": "3.5", "scriptPubKey": {"hex": key.p2pkh_script.hex()}},
+    ]}
+    run, _ = _run_with(console, monkeypatch, {"getrawtransaction": decoded, "decoderawtransaction": decoded}, asset="GRC")
+
+    found = adaptor_steps.find_operator_funding(run, key, "aa" * 32)
+
+    assert found.vout == 1, "it must find its OWN output, not take the first one"
+    assert found.value_satoshis == 350_000_000
+
+
+def test_a_transaction_that_pays_us_NOTHING_refuses_and_names_the_seed(console, monkeypatch):
+    """The likeliest operator mistake is a changed seed -- the address is derived from it, so a
+    different seed is a different address and the payment lands somewhere this cannot see."""
+    key = key_from_seed("seed A", "funding")
+    decoded = {"vout": [{"n": 0, "value": "5.0", "scriptPubKey": {"hex": "76a914" + "22" * 20 + "88ac"}}]}
+    run, _ = _run_with(console, monkeypatch, {"getrawtransaction": decoded, "decoderawtransaction": decoded}, asset="GRC")
+
+    with pytest.raises(RegtestSetupError) as caught:
+        adaptor_steps.find_operator_funding(run, key, "bb" * 32)
+    message = str(caught.value)
+    assert adaptor_steps.FUNDING_SEED_VARIABLE in message, "it names the variable to check"
+    assert "changed seed is a changed address" in message
+    assert "Nothing was funded" in message
+
+
+def test_the_two_locks_get_DIFFERENT_outpoints(console, monkeypatch):
+    """THE BUG THIS ORDERING EXISTS TO PREVENT. Both locks funded from the same outpoint would
+    have the second lock spending an output the first already spent -- and the failure would
+    arrive as a confusing double-spend rejection several steps later."""
+    run, _ = _run_with(console, monkeypatch, {}, asset="GRC")
+    run.operator_funding = [
+        chain.Outpoint(txid="cc" * 32, vout=0, value_satoshis=150_000_000),
+        chain.Outpoint(txid="cc" * 32, vout=1, value_satoshis=150_000_000),
+    ]
+    first = adaptor_steps.fund_and_prepare(run, _grc_setup())
+    second = adaptor_steps.fund_and_prepare(run, _grc_setup())
+
+    assert (first.txid, first.vout) != (second.txid, second.vout)
+    assert run.operator_funding == [], "both were consumed; a third lock would fall back to the wallet"
+
+
+def test_without_a_funding_txid_NOTHING_changes(console, monkeypatch):
+    """The wallet route is untouched for BTC and LTC, which always have a wallet that can
+    create transactions. A new route that quietly altered the old one would be worse than no
+    new route."""
+    run, _node = _run_with(
+        console, monkeypatch,
+        {"sendtoaddress": "dd" * 32,
+         "getrawtransaction": {"vout": [{"n": 0, "value": "0.014",
+                                         "scriptPubKey": {"hex": ""}}]}},
+        asset="LTC",
+    )
+    adaptor_steps.prepare_operator_funding(run, "", [])
+    assert run.operator_funding == [], "no txid means no operator route"
+
+
+def test_a_funding_txid_without_a_seed_refuses_before_anything_is_built(console, monkeypatch):
+    """Silently falling back to the wallet would be the worst outcome: the operator asked for
+    the route that leaves their staking alone and would get the one that does not."""
+    monkeypatch.delenv(adaptor_steps.FUNDING_SEED_VARIABLE, raising=False)
+    run, _ = _run_with(console, monkeypatch, {}, asset="GRC")
+
+    with pytest.raises(RegtestSetupError, match=adaptor_steps.FUNDING_SEED_VARIABLE):
+        adaptor_steps.prepare_operator_funding(run, "ee" * 32, [])
+    assert run.operator_funding == []
+
+
+def test_funding_too_small_to_cover_both_locks_says_how_much_to_send(console, monkeypatch):
+    """Rule 14: a refusal an operator cannot act on is a refusal that costs a round trip."""
+    key = key_from_seed("seed for the shortfall test", "funding")
+    run, _ = _run_with(console, monkeypatch, {}, asset="GRC")
+    tiny = chain.Outpoint(txid="ff" * 32, vout=0, value_satoshis=10_000_000)  # 0.1 GRC
+
+    with pytest.raises(RegtestSetupError) as caught:
+        adaptor_steps.split_operator_funding(run, key, tiny, [generate_key(), generate_key()])
+    message = str(caught.value)
+    assert "Send at least" in message
+    assert key.address in message, "and where to send it"
+    assert "Nothing was funded" in message

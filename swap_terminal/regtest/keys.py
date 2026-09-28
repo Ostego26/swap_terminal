@@ -164,6 +164,60 @@ class RegtestKey:
         )
 
 
+def key_from_seed(seed: str, role: str) -> RegtestKey:
+    """A keypair derived DETERMINISTICALLY from an operator-supplied seed, so its address is
+    stable across runs.
+
+    WHY A STABLE ADDRESS IS THE WHOLE POINT. generate_key() above makes a fresh key per run and
+    never prints it, which is right for every key this harness uses to SPEND. But it makes one
+    thing impossible: the operator cannot fund the harness in advance, because the address is
+    different every time.
+
+    Measured on the operator's Gridcoin testnet daemon 2026-09-28, and this is what makes the
+    stable address worth having: their wallet is unlocked FOR STAKING ONLY, so it will not
+    create a transaction -- and every RPC route around that is closed. But the harness needs
+    the wallet for exactly ONE thing: coins sitting at an address it holds the key for.
+    Everything after that is already in-process -- _sign_p2pkh() and _p2pkh_sighash() in
+    adaptor_steps.py sign Tx_lock's P2PKH input here, not in the daemon -- and broadcasting is
+    sendrawtransaction, which consults no lock.
+
+    So with a stable address the operator makes ONE payment from their GUI (which elevates in
+    place and hands the elevation straight back, walletmodel.cpp:615/:704 -- staking never
+    stops, the unlock deadline is never discarded) and the harness never asks the wallet for
+    anything again.
+
+    THE KEY NEVER LEAVES THIS PROCESS AND THE SEED IS NEVER PRINTED. What is printed is the
+    ADDRESS, which is not a secret -- it is what the operator has to be told in order to pay it.
+    `role` separates the keys derived from one seed so a single seed can back more than one
+    purpose without them sharing a scalar.
+
+    SHA-256 over a domain-separated string, then rejection sampling on the scalar, matching
+    generate_key()'s reasoning exactly: reducing modulo the order would bias the distribution,
+    and the biased version must not exist in a repository that also signs real transactions.
+    Not a slow KDF, and that is deliberate rather than an oversight -- this key guards TESTNET
+    coins the operator chose to put at a throwaway address, and a seed weak enough for the KDF
+    to matter is a seed that should not be reused anywhere that does matter. The docstring says
+    so where an operator will read it.
+    """
+    if not seed or not seed.strip():
+        raise ValueError(
+            "an empty funding seed derives one fixed key that anybody reading this source could "
+            "also derive. Set ST_ADAPTOR_FUNDING_SEED to something only you know."
+        )
+    counter = 0
+    while True:
+        material = f"swap_terminal/adaptor-funding/v1/{role}/{counter}/{seed}".encode()
+        candidate = hashlib.sha256(material).digest()
+        scalar = int.from_bytes(candidate, "big")
+        if 0 < scalar < SECP256K1_ORDER:
+            break
+        counter += 1
+    signing_key = SigningKey.from_string(candidate, curve=SECP256k1)
+    public_key = signing_key.get_verifying_key().to_string("compressed")
+    address = base58.b58encode_check(TESTNET_P2PKH_VERSION + hash160(public_key)).decode()
+    return RegtestKey(private_key=candidate, public_key=public_key, address=address)
+
+
 def generate_key() -> RegtestKey:
     """A fresh keypair with a testnet P2PKH address.
 
