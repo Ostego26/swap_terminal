@@ -907,3 +907,89 @@ def test_THE_WRONG_WALLET_REFUSAL_POINTS_AT_open_AND_NOT_AT_run():
     assert "--open" in refusal, "the flag that actually fixes it"
     assert "NOT --run" in refusal, "and an explicit warning off the one that makes it worse"
     assert "samples FRESH shares" in refusal, "with the reason, so nobody re-adds the old advice"
+
+
+def test_A_WALLET_THAT_ALREADY_EXISTS_IS_OPENED_NOT_REGENERATED(monkeypatch):
+    """--open failed on the second use of any wallet, which is its ORDINARY case.
+
+    Hit on the operator's host 2026-09-29. generate_from_keys was called unconditionally and
+    monero-wallet-rpc refuses an existing file:
+
+        error::file_exists ... {'code': -1, 'message': 'Wallet already exists.'}
+
+    --open's whole job is switching one wallet-rpc between two shared wallets that BOTH already
+    exist, so this was not an edge case -- it was the second invocation, every time. And the
+    docstring claimed "SAFE TO RE-RUN ... rather than making a second one": it does not make a
+    second one, it FAILS, so the prose said the opposite of what the code did.
+
+    OPENING IS HELD TO THE SAME STANDARD AS GENERATING. The address check is not skipped for an
+    opened wallet -- that check is what makes trusting the file safe, and a wallet trusted
+    because it was already on disk is trusted for no reason.
+    """
+    calls = []
+
+    def fake(target, method, params=None, timeout=None):
+        calls.append(method)
+        if method == "get_info":
+            return {"height": 2_218_256}
+        if method == "generate_from_keys":
+            raise harness.VerifyError(
+                "generate_from_keys on 127.0.0.1:38084: {'code': -1, 'message': 'Wallet already exists.'}")
+        if method == "open_wallet":
+            return {}
+        if method == "get_address":
+            return {"address": "5B5yTHEEXPECTEDADDRESS"}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness, "shared_wallet_name", lambda _a: "shared-2of2-5B5y")
+    shares = {"spend_summed": 7, "view_summed": 9}
+
+    reported = harness.create_shared_wallet(Console(), 38084, shares, "5B5yTHEEXPECTEDADDRESS", 2_217_256)
+    assert reported == "5B5yTHEEXPECTEDADDRESS"
+    assert "generate_from_keys" in calls and "open_wallet" in calls, (
+        "it tries to create first and falls back -- not the other way round, which would open a "
+        "stale file in preference to writing a correct one"
+    )
+
+
+def test_AN_OPENED_WALLET_WITH_THE_WRONG_ADDRESS_STILL_REFUTES(monkeypatch):
+    """The fallback must not become a way to skip the check that makes it safe.
+
+    The argument for opening rather than regenerating is that the filename is derived from the
+    address, which is derived from the summed keys -- so a file of that name cannot hold
+    different keys. That argument is only as good as the verification behind it, and a caller
+    who removed the check would have a --open that trusts any file it happens to find.
+    """
+    def fake(target, method, params=None, timeout=None):
+        if method == "generate_from_keys":
+            raise harness.VerifyError("{'code': -1, 'message': 'Wallet already exists.'}")
+        if method == "open_wallet":
+            return {}
+        if method == "get_address":
+            return {"address": "5B5ySOMETHINGELSEENTIRELY"}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness, "shared_wallet_name", lambda _a: "shared-2of2-5B5y")
+    with pytest.raises(harness.VerifyError, match="REFUTED"):
+        harness.create_shared_wallet(Console(), 38084, {"spend_summed": 7, "view_summed": 9},
+                                     "5B5yTHEEXPECTEDADDRESS", 2_217_256)
+
+
+def test_A_GENUINE_generate_from_keys_FAILURE_IS_NOT_SWALLOWED(monkeypatch):
+    """Only "already exists" falls back. Anything else is the real failure and must surface.
+
+    A blanket except here would turn a bad key, a dead wallet-rpc or a refused password into
+    "open whatever is on disk", which is how a wallet nobody verified ends up holding a swap.
+    """
+    def fake(target, method, params=None, timeout=None):
+        if method == "generate_from_keys":
+            raise harness.VerifyError("{'code': -1, 'message': 'Failed to parse view key secret key'}")
+        raise AssertionError(method)
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness, "shared_wallet_name", lambda _a: "shared-2of2-5B5y")
+    with pytest.raises(harness.VerifyError, match="view key"):
+        harness.create_shared_wallet(Console(), 38084, {"spend_summed": 7, "view_summed": 9},
+                                     "5B5yTHEEXPECTEDADDRESS", 2_217_256)

@@ -585,15 +585,44 @@ def create_shared_wallet(
 
 
     filename = shared_wallet_name(address)
-    console.say(f"creating wallet file {filename!r} in the wallet-rpc's --wallet-dir")
-    result = rpc(port, "generate_from_keys", {
-        "filename": filename,
-        "address": address,
-        "spendkey": scalar_to_bytes_le(shares["spend_summed"]).hex(),
-        "viewkey": scalar_to_bytes_le(shares["view_summed"]).hex(),
-        "password": SHARED_WALLET_PASSWORD,
-        "restore_height": restore_height,
-    })
+    # GENERATE IF IT IS NEW, OPEN IF IT IS NOT, AND THE FIRST VERSION DID ONLY THE FIRST.
+    # `--open` called generate_from_keys unconditionally, and monero-wallet-rpc refuses an
+    # existing file outright:
+    #
+    #     error::file_exists ... {'code': -1, 'message': 'Wallet already exists.'}
+    #
+    # Hit on the operator's host 2026-09-29 the first time a wallet was re-opened -- which is
+    # the ORDINARY case for --open, since its whole job is switching a wallet-rpc between two
+    # shared wallets that both already exist. Worse, this function's own docstring claimed
+    # "SAFE TO RE-RUN ... addresses the same wallet file rather than making a second one". It
+    # does not make a second one; it FAILS, and the docstring said the opposite of what the
+    # code did.
+    #
+    # OPENING IS SAFE BECAUSE THE FILENAME IS DERIVED FROM THE ADDRESS, which is derived from
+    # the summed keys -- so a file of this name can only have been made from these keys. And
+    # the address check below runs either way, so an opened wallet is held to exactly the same
+    # standard as a generated one rather than trusted because it was already there.
+    console.say(f"wallet file {filename!r} in the wallet-rpc's --wallet-dir")
+    try:
+        result = rpc(port, "generate_from_keys", {
+            "filename": filename,
+            "address": address,
+            "spendkey": scalar_to_bytes_le(shares["spend_summed"]).hex(),
+            "viewkey": scalar_to_bytes_le(shares["view_summed"]).hex(),
+            "password": SHARED_WALLET_PASSWORD,
+            "restore_height": restore_height,
+        })
+        console.say("created it from the summed scalars")
+    except VerifyError as error:
+        if "already exists" not in str(error).lower():
+            raise
+        console.say("it already exists, so OPENING it rather than regenerating -- the filename")
+        console.say("is derived from the address, which is derived from these very keys, so a")
+        console.say("file of this name cannot have been made from different ones. The address")
+        console.say("check below runs either way.")
+        rpc(port, "open_wallet", {"filename": filename, "password": SHARED_WALLET_PASSWORD})
+        result = {"address": str(rpc(port, "get_address", {"account_index": 0}).get("address", "")),
+                  "info": "opened an existing wallet file"}
     reported = str(result.get("address", ""))
     console.say(f"the wallet derived: {reported}")
     console.say(f"wallet info: {result.get('info') or '(none)'}")
@@ -845,10 +874,11 @@ def open_phase(console: Console, target: Target) -> int:
     a wallet built from new shares would sweep beautifully and prove nothing, because the
     scalar would never have touched a chain.
 
-    SAFE TO RE-RUN. generate_from_keys is given a filename derived from the address, so opening
-    the same handoff twice addresses the same wallet file rather than making a second one --
-    shared_wallet_name() exists for exactly that, after a 2026-09-28 run overwrote one wallet
-    with another's keys.
+    SAFE TO RE-RUN, AND IT WAS NOT UNTIL 2026-09-29. This paragraph used to say generate_from_keys
+    "addresses the same wallet file rather than making a second one", which was true and
+    irrelevant: monero-wallet-rpc REFUSES an existing file ("Wallet already exists"), so the
+    second --open on any wallet failed outright. create_shared_wallet() now opens what it cannot
+    create, and holds an opened wallet to the same address check as a generated one.
     """
     console.step(2, "open the wallet these shares describe, WITHOUT sampling anything")
     shares = load_shares(target.shares_path)
