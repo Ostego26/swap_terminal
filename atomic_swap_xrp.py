@@ -258,6 +258,7 @@ if str(APP_ROOT) not in sys.path:
     # and xrp_htlc_escrow.py both document at their own copy of these lines.
     sys.path.insert(0, str(APP_ROOT))
 
+from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network  # noqa: E402 -- same
 from chains.registry import build_adapters  # noqa: E402 -- the sys.path line above must run first
 
 # DROPS_PER_XRP is imported, not respelled: chains/xrp_units.py owns it and a
@@ -350,26 +351,9 @@ def chain_amount_for_rate(xrp_drops: int, xrp_per_chain_unit: Decimal) -> Decima
     xrp = Decimal(xrp_drops) / Decimal(DROPS_PER_XRP)
     return (xrp / xrp_per_chain_unit).quantize(Decimal(1).scaleb(-GRC_DECIMALS), rounding=ROUND_DOWN)
 
-# Chains whose daemon must NOT be mainnet. Gridcoin reports its network in
-# getblockchaininfo.chain on a modern build and getinfo.testnet on an old one;
-# both are read, and anything that is not one of these aborts.
-#: What each script chain CALLS a network that is safe to lose coins on. Per chain and
-#: not one shared set, because the strings differ and a shared set is how a mainnet
-#: answer slips through: Bitcoin says "main" for mainnet and "test"/"regtest"/"signet"
-#: otherwise, Litecoin the same, and Gridcoin answers "test" or "testnet".
-#:
-#: NOT DERIVED FROM A COMMON RULE, deliberately. There is no rule -- these are three
-#: daemons' own vocabularies, and inventing "anything that is not main" would authorize
-#: a network none of them has ever answered. An allowlist refuses the unknown; a
-#: denylist admits it.
-#: What to CALL each chain in a line an operator reads. Only ever cosmetic -- nothing
-#: branches on it -- but the banner said "(Gridcoin testnet)" beside a BTC leg until
-#: 2026-09-29, which is rule 14's defect at the one moment it costs the most: the line
-#: that tells an operator what is about to be funded.
 #: The chains a full swap has actually COMPLETED on, and the evidence. Absence from this
 #: table is not a gap in the table -- it is the honest state of a chain, and the banner
 #: says so out loud rather than letting silence read as reassurance.
-
 PROVEN_LIVE: dict[str, str] = {
     # EARNED 2026-09-29, ON THIS PATH, BY A RUN. It was emptied earlier the same day when
     # both runners moved off Gridcoin's createhtlc/claimhtlc onto the chain clients: the
@@ -389,14 +373,18 @@ PROVEN_LIVE: dict[str, str] = {
     # is the whole reason this table is keyed by what ran rather than by what should work.
 }
 
+#: What to CALL each chain in a line an operator reads. Only ever cosmetic -- nothing
+#: branches on it -- but the banner said "(Gridcoin testnet)" beside a BTC leg until
+#: 2026-09-29, which is rule 14's defect at the one moment it costs the most: the line
+#: that tells an operator what is about to be funded.
 CHAIN_LABELS = {"BTC": "Bitcoin test network", "LTC": "Litecoin test network",
                 "GRC": "Gridcoin testnet"}
 
-CHAIN_TEST_NETWORKS = {
-    "BTC": frozenset({"test", "testnet", "regtest", "signet"}),
-    "LTC": frozenset({"test", "testnet", "regtest"}),
-    "GRC": frozenset({"test", "testnet", "regtest"}),
-}
+# CHAIN_TEST_NETWORKS and chain_network() MOVED to chains/daemon_network.py on
+# 2026-09-29, imported below. chain_balances.py needs both and is read-only, so it
+# must not import this driver to get them -- the same reason the escrow epoch offset
+# left xrp_htlc_escrow.py the same day (rule 8, and rule 10's "a decision is the
+# smallest testable piece at the bottom").
 
 # Two XRP accounts: one funds the escrow, one receives it. Named so the
 # assertion in step 2 and the sentence explaining it cannot disagree about the
@@ -603,34 +591,6 @@ def assert_timelock_ordering(xrp_cancel_after: int, leg: ScriptLeg, now_unix: fl
         f"interval and not a guarantee); XRP is CancelAfter "
         f"{xrp_cancel_after}."
     )
-
-
-def chain_network(adapter) -> str:
-    """Which Gridcoin network this daemon is on. Two field names, because it moved.
-
-    A modern build answers getblockchaininfo.chain; an older one only has
-    getinfo.testnet as a boolean. Both are read and the answer is returned as a
-    name, so step 1 compares one string rather than branching on which RPC
-    answered. An unreadable network is NOT treated as a test network -- it
-    returns "unknown", and step 1 refuses on it (fail closed).
-    """
-    reasons = []
-    for method, field in (("getblockchaininfo", "chain"), ("getinfo", "testnet")):
-        try:
-            answer = adapter.call(method) or {}
-        except Exception as error:  # noqa: BLE001 -- checked: an older daemon does not HAVE getblockchaininfo and answers "Method not found", which is not a failure here but the signal to try the next field. The reason is collected rather than discarded (no bare pass, S110) and returned in the "unknown" string, so an operator sees WHY the network could not be read. A failure of both routes returns "unknown", which step 1 refuses -- fail closed, never "probably testnet".
-            reasons.append(f"{method}: {type(error).__name__}")
-            continue
-        value = answer.get(field)
-        if field == "chain" and value:
-            return str(value)
-        if field == "testnet" and value is not None:
-            # getinfo.testnet is a BOOLEAN on an old build. False means mainnet,
-            # and "main" is returned rather than "" so the caller compares one
-            # vocabulary (rule 11) instead of branching on which RPC answered.
-            return "testnet" if value else "main"
-        reasons.append(f"{method}: no `{field}` field")
-    return f"unknown ({'; '.join(reasons) or 'no route answered'})"
 
 
 # claim_scriptsig_hex() and htlc_vout() MOVED to modules/htlc_chain_read.py on
