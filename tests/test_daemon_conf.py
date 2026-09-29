@@ -23,10 +23,14 @@ credentials, no port, and reports "unconfigured" for a daemon that is running.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 from chains.daemon_conf import (
+    CONF_FALLBACK_NETWORK,
     SECRET_CONF_KEYS,
     DaemonConfError,
+    conf_fallback_settings,
     describe,
     parse_daemon_conf,
     rpc_settings_from_conf,
@@ -164,3 +168,63 @@ def test_every_string_this_module_returns_is_checked_against_the_secret_keys():
     test above passing while a new value leaks.
     """
     assert {"rpcpassword"} == SECRET_CONF_KEYS
+
+
+# ---------------------------------------------------------------------------
+# THE SHARED RESOLVER, and the reason it is shared. Added 2026-09-29 after the
+# balance reader and the swap driver gave different answers about the same
+# running Litecoin daemon within an hour of each other.
+# ---------------------------------------------------------------------------
+
+
+def test_EVERY_entry_point_that_resolves_a_chain_uses_THIS_resolver():
+    """Rule 8, held mechanically rather than by intention.
+
+    chain_balances.py grew the conf fallback and atomic_swap_xrp.py did not, so
+    the operator configured Litecoin, watched the reader find it, and watched the
+    driver say "(none)" about the same daemon. The failure mode is not that the
+    second copy is wrong -- it is that there is no second copy AT ALL and nobody
+    notices which entry points were left out.
+
+    So: any root script that resolves a bitcoin-family chain must import the
+    shared resolver. A new one that builds its own is what this catches.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    resolvers = {"chain_balances.py", "atomic_swap_xrp.py"}
+    for name in sorted(resolvers):
+        source = (root / name).read_text()
+        assert "conf_fallback_settings" in source, (
+            f"{name} resolves a chain without the shared conf fallback. An operator who configured "
+            f"a daemon by conf will be told by one entry point that it is there and by this one "
+            f"that it is not"
+        )
+        assert "CONF_FALLBACK_NETWORK = {" not in source, (
+            f"{name} spells its own fallback table. There is one, in chains/daemon_conf.py, and a "
+            f"second would drift the moment a chain is added to either"
+        )
+
+
+def test_GRC_is_absent_from_the_shared_table_so_no_entry_point_can_resolve_it():
+    """The exclusion has to hold for the DRIVER, not only for the reader.
+
+    A read of the wrong Gridcoin wallet is bad; a swap driver funding an HTLC
+    against it is a different order of bad, and the driver gained this fallback
+    on 2026-09-29. Excluding GRC in one shared table is what makes the guarantee
+    the same in both.
+
+    MUTATION: add "GRC" to CONF_FALLBACK_NETWORK and this fails. Verified
+    2026-09-29.
+    """
+    assert "GRC" not in CONF_FALLBACK_NETWORK
+    settings, line = conf_fallback_settings("GRC")
+    assert settings is None, "GRC was resolved from a conf; its conf is shared with mainnet"
+    assert "by design" in line and "GRC_RPC_PORT" in line, (
+        f"the refusal has to say it is deliberate and name what to set instead:\\n{line}"
+    )
+
+
+def test_an_unknown_chain_gets_a_sentence_rather_than_an_exception():
+    """conf_fallback_settings never raises: a caller needs to SAY why, not crash."""
+    settings, line = conf_fallback_settings("DOGE")
+    assert settings is None
+    assert "DOGE_RPC_PORT" in line, line

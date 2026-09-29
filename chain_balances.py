@@ -47,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from chains.daemon_conf import DaemonConfError, describe, rpc_settings_from_conf
+from chains.daemon_conf import CONF_FALLBACK_NETWORK, conf_fallback_settings
 from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network
 from chains.registry import build_adapters, why_unconfigured
 from chains.wallet_lock import encryption_state
@@ -64,18 +64,6 @@ CHAINS = tuple(sorted(CHAIN_TEST_NETWORKS))
 
 NOTHING_TO_LOOK_AT = 3
 
-# WHICH CHAINS HAVE A CONF THIS CAN FALL BACK TO, and what network its port
-# section is under. regtest.daemons.CHAIN_DEFAULTS owns the datadir and conf name
-# -- respelling them here would be two sources for one fact, and it is the fact
-# that moves whenever the harness is pointed somewhere else.
-#
-# GRC IS DELIBERATELY ABSENT. Its conf lives in ~/.GridcoinResearch, shared by
-# mainnet and testnet, and picking a connection out of it is how a reader ends up
-# on the operator's live staking wallet. Gridcoin stays explicit: GRC_RPC_PORT is
-# set by hand, or GRC is not read. The network check would still refuse a mainnet
-# answer, but the right place to not make that mistake is before the call.
-CONF_FALLBACK_NETWORK = {"BTC": "regtest", "LTC": "regtest"}
-
 # What to CALL a wallet this suggests creating. The same name the HTLC harness
 # uses, so an operator who follows this hint ends up with the wallet
 # regtest_htlc_verify.py will then find already loaded rather than a second one
@@ -90,25 +78,16 @@ def adapter_from_conf(console: Console, chain: str):
     configure, so an operator who exported LTC_RPC_PORT gets exactly what they
     exported -- a fallback that overrode an explicit setting would be the worse
     half of rule 8, two sources with the quiet one winning.
+
+    The RESOLUTION moved to chains/daemon_conf.py on 2026-09-29, the same day
+    this grew it, because atomic_swap_xrp.py needed the identical answer and did
+    not have it: the operator configured Litecoin, this reader found it, and the
+    swap driver then said "(none)" about the same daemon.
     """
-    network = CONF_FALLBACK_NETWORK.get(chain)
-    if network is None:
+    settings, line = conf_fallback_settings(chain)
+    console.say(f"    {line}")
+    if settings is None:
         return None
-    spec = CHAIN_DEFAULTS.get(chain)
-    if spec is None:
-        # A chain in CONF_FALLBACK_NETWORK with no CHAIN_DEFAULTS entry is a
-        # disagreement between two tables, and saying so beats returning None as
-        # though the chain simply had no conf (rule 14).
-        console.say(f"    {chain} is listed for conf fallback but regtest.daemons.CHAIN_DEFAULTS has "
-                    f"no entry for it. One of those two tables is wrong.")
-        return None
-    path = Path(spec["datadir"]).expanduser() / spec["conf_name"]
-    try:
-        settings = rpc_settings_from_conf(path, network=network)
-    except DaemonConfError as error:
-        console.say(f"    no {chain}_RPC_* in the environment and the conf did not supply one: {error}")
-        return None
-    console.say(f"    {chain}: {describe(path, settings, network=network)}")
     # CONSTRUCTED THROUGH build_adapters, not by naming an adapter class here.
     # registry.py owns which class each chain gets and what counts as
     # configured; a second constructor would be a second answer to both, and

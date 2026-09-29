@@ -43,6 +43,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# CONSTANTS ONLY, and the import is at module scope deliberately. regtest/daemons.py
+# has no import-time side effects -- verified by walking its module body, no call
+# outside a def -- and CHAIN_DEFAULTS is the one place that owns each chain's datadir
+# and conf name. Respelling them here would be two sources for the fact that moves
+# whenever the harness is pointed somewhere else (rule 8).
+from regtest.daemons import CHAIN_DEFAULTS
+
 #: The three keys a JSON-RPC connection needs out of a conf, and what this
 #: module calls them. The names on the right are Config.RPC's, so a mapping
 #: built from these splats straight into RPCAdapter like any other entry.
@@ -140,3 +147,49 @@ def describe(path: Path, settings: dict, *, network: str = "") -> str:
             + (f" (top level plus [{network}])" if network else "")
             + f"; connecting to {settings['host']}:{settings['port']} as {settings['user']}. "
             + "The password was read and is NOT shown.")
+
+
+#: WHICH CHAINS MAY BE RESOLVED FROM A CONF, and what network their port section is
+#: under. Every entry must also be in regtest.daemons.CHAIN_DEFAULTS, which is where
+#: the datadir and conf name come from.
+#:
+#: GRC IS DELIBERATELY ABSENT. Its conf lives in ~/.GridcoinResearch, shared by
+#: mainnet and testnet both, and the operator's mainnet wallet is a live staking
+#: wallet holding real coins. Picking a connection out of that file is how a reader
+#: -- or worse, a driver that sends -- ends up pointed at it. The network check
+#: would still refuse a mainnet answer, but the place to not make that mistake is
+#: before the call. Gridcoin stays explicit: GRC_RPC_PORT is set by hand, or GRC is
+#: not reached at all.
+CONF_FALLBACK_NETWORK = {"BTC": "regtest", "LTC": "regtest"}
+
+
+def conf_fallback_settings(chain: str) -> tuple[dict | None, str]:
+    """This chain's connection from its own conf, and a line about the attempt.
+
+    NEVER RAISES, and always returns a sentence. A caller deciding whether a chain
+    is reachable has to be able to say WHY it is not, and an exception at this
+    point would arrive three frames up as something about a file rather than
+    something about a chain (rule 14).
+
+    SHARED BY EVERY ENTRY POINT, which is the whole reason it is here rather than
+    in the script that needed it first. chain_balances.py grew this on 2026-09-29
+    and atomic_swap_xrp.py did not, so the operator configured Litecoin, watched
+    the balance reader find it, and then watched the SWAP DRIVER say
+    "LTC adapter configured: (none)" about the same daemon. Two answers to "is
+    this chain reachable" is rule 8's shape, and it cost a round trip within the
+    hour of the first one being written.
+    """
+    network = CONF_FALLBACK_NETWORK.get(chain)
+    if network is None:
+        return None, (f"{chain} is not resolved from a conf by design; set {chain}_RPC_PORT, "
+                      f"{chain}_RPC_USER and {chain}_RPC_PASS to reach it")
+    spec = CHAIN_DEFAULTS.get(chain)
+    if spec is None:
+        return None, (f"{chain} is listed for conf fallback but regtest.daemons.CHAIN_DEFAULTS has "
+                      f"no entry for it. One of those two tables is wrong.")
+    path = Path(spec["datadir"]).expanduser() / spec["conf_name"]
+    try:
+        settings = rpc_settings_from_conf(path, network=network)
+    except DaemonConfError as error:
+        return None, f"no {chain}_RPC_* in the environment and the conf did not supply one: {error}"
+    return settings, f"{chain}: {describe(path, settings, network=network)}"

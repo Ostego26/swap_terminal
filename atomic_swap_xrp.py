@@ -258,6 +258,7 @@ if str(APP_ROOT) not in sys.path:
     # and xrp_htlc_escrow.py both document at their own copy of these lines.
     sys.path.insert(0, str(APP_ROOT))
 
+from chains.daemon_conf import conf_fallback_settings  # noqa: E402 -- same
 from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network  # noqa: E402 -- same
 from chains.registry import build_adapters  # noqa: E402 -- the sys.path line above must run first
 
@@ -1146,6 +1147,42 @@ def describe_the_dry_run(console: Console, args, chain: str, leg: ScriptLeg,  # 
     console.say("re-run with --run to perform the swap.")
 
 
+def resolve_the_script_chain_adapter(console: Console, chain: str):
+    """The adapter for the script leg, from the environment or from the chain's conf.
+
+    EXTRACTED rather than left in main(), which PLR0912 caught at 13 branches the
+    moment the fallback went in. Rule 12: a main() past the ceiling is
+    orchestration that has swallowed a decision, and the fix is to lift the
+    decision out -- which also makes "where does this daemon come from" answerable
+    without reading the swap's sequence.
+
+    THIS DRIVER DID NOT HAVE THE FALLBACK FOR AN HOUR AFTER THE BALANCE READER DID.
+    The operator configured Litecoin, watched chain_balances.py resolve it out of
+    litecoin.conf, and then watched this say "LTC adapter configured: (none)" about
+    the same running daemon. Two answers to "is this chain reachable" is rule 8's
+    shape, and it cost a round trip within the hour of the first one being written.
+
+    SAFE ON A DRIVER THAT SENDS, and both reasons have to hold. Only BTC and LTC
+    are resolvable from a conf -- GRC is excluded because its conf is shared with
+    the operator's mainnet staking wallet -- and step 1 still asks the daemon its
+    own network afterwards and refuses anything outside that chain's allowlist. A
+    conf SAYING regtest is not evidence that the daemon on that port is on regtest.
+    """
+    adapter = build_adapters(Config.RPC).get(chain)
+    if adapter is None:
+        settings, line = conf_fallback_settings(chain)
+        console.say(line)
+        if settings is not None:
+            adapter = build_adapters({chain: settings}).get(chain)
+    if not console.check(f"{chain} adapter configured", "yes" if adapter else None,
+                         f"{chain}_RPC_* in the environment, or this chain's own conf",
+                         adapter is not None):
+        console.say(f"chains/registry.why_unconfigured({chain!r}) names the missing variable. "
+                    "Nothing was submitted.")
+        return None
+    return adapter
+
+
 def say_what_has_actually_run(console: Console, chain: str) -> None:
     """What evidence exists for THIS chain on THIS code path, before anything is funded.
 
@@ -1372,13 +1409,9 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         console.check("XRP network", f"{type(error).__name__}: {error}", "a non-mainnet network_id", False)
         return console.summary()
 
-    adapters = build_adapters(Config.RPC)
     chain = args.chain
-    grc = adapters.get(chain)
-    if not console.check(f"{chain} adapter configured", "yes" if grc else None,
-                         f"{chain}_RPC_* set in the environment", grc is not None):
-        console.say(f"chains/registry.why_unconfigured({chain!r}) names the missing variable. "
-                    "Nothing was submitted.")
+    grc = resolve_the_script_chain_adapter(console, chain)
+    if grc is None:
         return console.summary()
     network = chain_network(grc)
     safe = CHAIN_TEST_NETWORKS[chain]
