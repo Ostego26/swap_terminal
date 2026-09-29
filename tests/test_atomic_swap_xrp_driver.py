@@ -272,3 +272,151 @@ def test_MAIN_PASSES_EVERY_FIELD_SwapContext_REQUIRES():
         f"main() passes {[n for n in passed if n not in required]}, which SwapContext does not "
         f"declare -- also a TypeError, in the other direction"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE TWO-FEED PRICING, added 2026-09-29 after CoinGecko was measured returning
+# 403 from the operator's host for every request.
+# ---------------------------------------------------------------------------
+
+
+class _PricingRecorder:
+    """A Console that keeps its lines. Same shape as the other recorders here."""
+
+    def __init__(self):
+        self.lines = []
+
+    def say(self, text):
+        self.lines.append(text)
+
+    def check(self, label, got, expected, ok):
+        self.lines.append(f"CHECK {label} got={got} expected={expected} ok={ok}")
+        return ok
+
+    def text(self):
+        return "\n".join(self.lines)
+
+
+class _Quote:
+    """A stand-in for a services.coinpaprika.PaprikaQuote."""
+
+    def __init__(self, asset, cap, volume, derived=False):
+        self.asset = asset
+        self.market_cap_usd = cap
+        self.volume_24h_usd = volume
+        self.market_cap_is_derived = derived
+
+    @property
+    def turnover(self):
+        if not self.market_cap_usd or not self.volume_24h_usd:
+            return None
+        return self.volume_24h_usd / self.market_cap_usd
+
+
+def test_COINGECKO_IS_TRIED_when_coinpaprika_fails_and_the_line_names_which_answered():
+    """A silently swapped source is a transcript nobody can read a day later.
+
+    MUTATION: return the amount without the source sentence and this fails on
+    "CoinGecko". Verified 2026-09-29.
+    """
+    recorder = _PricingRecorder()
+    calls = []
+
+    def _paprika_dies(chain):
+        calls.append("paprika")
+        raise RuntimeError("403 from the edge")
+
+    def _gecko_answers(chain):
+        calls.append("gecko")
+        return driver.Decimal("45.05850281"), "services/pricing.py (CoinGecko): LTC $67.30", None
+
+    original = (driver._paprika_priced, driver._coingecko_priced)
+    try:
+        driver._paprika_priced, driver._coingecko_priced = _paprika_dies, _gecko_answers
+        amount, source = driver._priced_chain_amount(recorder, "LTC")
+    finally:
+        driver._paprika_priced, driver._coingecko_priced = original
+
+    assert calls == ["paprika", "gecko"], f"the feeds were not tried in order: {calls}"
+    assert amount is not None
+    assert "CoinGecko" in source, f"the sentence does not name the feed that answered:\n{source}"
+
+
+def test_BOTH_feeds_failing_REFUSES_and_prints_every_reason():
+    """A swap is never priced 1:1 by default, and the refusal has to be diagnosable.
+
+    One reason is not enough: an operator seeing only the second failure would
+    conclude CoinGecko is the problem when CoinPaprika failed first for its own
+    reason. Rule 14's "state what the number means" applied to a failure.
+
+    MUTATION: keep only the last failure and this fails on the CoinPaprika text.
+    Verified 2026-09-29.
+    """
+    recorder = _PricingRecorder()
+
+    def _dies(message):
+        def _attempt(chain):
+            raise RuntimeError(message)
+        return _attempt
+
+    original = (driver._paprika_priced, driver._coingecko_priced)
+    try:
+        driver._paprika_priced = _dies("CoinPaprika id not found")
+        driver._coingecko_priced = _dies("403 Client Error")
+        amount, source = driver._priced_chain_amount(recorder, "LTC")
+    finally:
+        driver._paprika_priced, driver._coingecko_priced = original
+
+    assert amount is None and source == ""
+    out = recorder.text()
+    assert "CoinPaprika id not found" in out and "403 Client Error" in out, (
+        f"both reasons must survive to the screen:\n{out}"
+    )
+    assert "NOTHING WAS SUBMITTED" in out and "--rate" in out, out
+
+
+def test_a_THIN_market_says_so_beside_the_rate():
+    """GRC's $299 a day is the whole reason this line exists.
+
+    MUTATION: drop the say_how_thin_this_market_is() call and this fails.
+    Verified 2026-09-29.
+    """
+    recorder = _PricingRecorder()
+    # The measured GRC figures: $299.28 of volume against a derived $7,665,794 cap.
+    thin = _Quote("GRC", 7665794.0, 299.2754905121976, derived=True)
+
+    original = driver._paprika_priced
+    try:
+        driver._paprika_priced = lambda chain: (driver.Decimal("0.011171"), "CoinPaprika: GRC", thin)
+        driver._priced_chain_amount(recorder, "GRC")
+    finally:
+        driver._paprika_priced = original
+
+    out = recorder.text()
+    assert "THIN" in out, f"a market turning over 0.0039% a day did not read as thin:\n{out}"
+    assert "DERIVED from supply" in out, (
+        f"the cap was computed from supply and the line does not say so. A derived cap and a "
+        f"reported one are the same number and different claims:\n{out}"
+    )
+    assert "299.28" in out, f"the volume itself is the fact an operator acts on:\n{out}"
+
+
+def test_an_UNMEASURABLE_depth_says_so_rather_than_printing_nothing():
+    """Rule 14: silence here would read as "this market is fine".
+
+    That is the one thing it cannot mean -- no cap and no volume is no evidence,
+    not good evidence.
+    """
+    recorder = _PricingRecorder()
+    blind = _Quote("GRC", None, None)
+
+    original = driver._paprika_priced
+    try:
+        driver._paprika_priced = lambda chain: (driver.Decimal("0.011171"), "CoinPaprika: GRC", blind)
+        driver._priced_chain_amount(recorder, "GRC")
+    finally:
+        driver._paprika_priced = original
+
+    out = recorder.text()
+    assert "NOT MEASURABLE" in out, out
+    assert "how much money set it is unknown" in out, out

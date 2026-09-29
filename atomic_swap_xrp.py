@@ -644,6 +644,108 @@ def _rated_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decimal
     )
 
 
+def _paprika_priced(chain: str) -> tuple[Decimal, str, object]:
+    """(rate, source line, the script chain's quote) from CoinPaprika. Raises on failure.
+
+    SEPARATE FROM THE CONSOLE so the decision can be called with seeded quotes.
+    Rule 10: the thing that decides is the smallest testable piece, and "what is
+    this leg worth" is a decision even when it is two divisions.
+    """
+    from services.coinpaprika import (  # noqa: PLC0415 -- checked: same reason the CoinGecko import below carries it. Importing a price source at module scope makes --help reach for `requests` on a machine that has neither it nor a config, and a dry run should be able to describe a swap without a price.
+        fetch_quote,
+        pair_rate,
+    )
+
+    chain_quote, xrp_quote = fetch_quote(chain), fetch_quote("XRP")
+    rate = Decimal(str(pair_rate(chain_quote, xrp_quote)))
+    return rate, (f"CoinPaprika: {chain} ${chain_quote.price_usd}, XRP ${xrp_quote.price_usd}, "
+                  f"as of {chain_quote.source_updated_at}"), chain_quote
+
+
+def _coingecko_priced(chain: str) -> tuple[Decimal, str, None]:
+    """The same, from services/pricing.py. Measured 403 from the operator's host.
+
+    Kept as the SECOND try rather than deleted. The block is CloudFront refusing a
+    client IP, not anything about this code, so it works from some hosts and not
+    others -- which is what a fallback is for. It is also still the only source
+    the custodial quote path has.
+    """
+    from services.pricing import (  # noqa: PLC0415 -- checked: as above; a price source imported at module scope makes --help require requests and a config.
+        IDS,
+        derive_pair_rate,
+        fetch_usd_prices,
+    )
+
+    if chain not in IDS or "XRP" not in IDS:
+        raise KeyError(f"services/pricing.IDS covers {sorted(IDS)}, not both {chain} and XRP")
+    prices = fetch_usd_prices()
+    return (Decimal(str(derive_pair_rate(chain, "XRP", prices))),
+            f"services/pricing.py (CoinGecko): {chain} ${prices[chain + '_USD']}, XRP ${prices['XRP_USD']}",
+            None)
+
+
+def say_how_thin_this_market_is(console: Console, quote) -> None:
+    """Print the flow behind the price, when there is enough to judge it.
+
+    WHY THIS IS PRINTED AND NOT ENFORCED. A size cap would be live posture and the
+    operator's (rule 16); a number on the screen is what rule 14 asks for. The two
+    are different and this is deliberately the second.
+
+    Measured 2026-09-29, which is why GRC gets this and the others do not in
+    practice: GRC's 24h volume was $299.28 against a $7,665,794 derived cap --
+    0.0039% turnover, where LTC was 7.52% and BTC 1.31%. At that depth a $100
+    swap is a third of a day's volume, so the swap is not priced BY the market,
+    it IS the market. Nothing about the rate line alone would show that.
+    """
+    # LAZY for the reason the two price imports above are: services.market_context
+    # imports services.pricing, which reaches for `requests`, and --help must not
+    # require it. The line carries a short noqa because ruff's isort rewraps a long
+    # one into a parenthesized form that moves the suppression off the import.
+    from services.market_context import THIN_TURNOVER  # noqa: PLC0415 -- checked, see above
+
+    if quote is None:
+        return
+    turnover = quote.turnover
+    if turnover is None:
+        # Rule 14: an absent measurement says it is absent. Silence here would
+        # read as "this market is fine", which is the one thing it cannot mean.
+        console.say(f"    market depth for {quote.asset}: NOT MEASURABLE -- "
+                    f"cap={quote.market_cap_usd} volume={quote.volume_24h_usd}. The price is quoted; "
+                    f"how much money set it is unknown.")
+        return
+    cap_note = " (DERIVED from supply x price; the feed reported none)" if quote.market_cap_is_derived else ""
+    verdict = (f"THIN -- below the {THIN_TURNOVER:.1%} line, so this spot price is set by that much money"
+                if turnover < THIN_TURNOVER else "at or above the thin line")
+    console.say(f"    market depth for {quote.asset}: 24h volume ${quote.volume_24h_usd:,.2f} against a "
+                f"${quote.market_cap_usd:,.0f} cap{cap_note} = {turnover:.6%} turnover per day  <- {verdict}")
+
+
+def _priced_chain_amount(console: Console, chain: str) -> tuple[Decimal | None, str]:
+    """The leg's size from a live feed, or None with the refusal already printed.
+
+    TRIES BOTH FEEDS AND NAMES THE ONE THAT ANSWERED. A source that is silently
+    swapped is a transcript that cannot be read a day later (rule 14's "echo the
+    parameters that decide the answer").
+    """
+    failures = []
+    for attempt in (_paprika_priced, _coingecko_priced):
+        try:
+            rate, source, quote = attempt(chain)
+        except Exception as error:  # noqa: BLE001 -- checked: a feed can fail on the network, on a non-200, on a partial response or on an id it does not know, and every one of those means ONLY "try the next feed". The reason is collected and every collected reason is printed if both fail; nothing treats a failure as a price.
+            failures.append(f"{attempt.__name__}: {type(error).__name__}: {error}")
+            continue
+        amount = chain_amount_for_rate(XRP_DROPS, rate)
+        say_how_thin_this_market_is(console, quote)
+        return amount, (f"{source}, so {rate:.8f} XRP per {chain}. {XRP_DROPS} drops buys {amount} "
+                        f"{chain}, rounded DOWN to {GRC_DECIMALS} places in the {chain} holder's favour")
+    console.check(f"the {chain} leg's size", "; ".join(failures) or "(no feed was tried)",
+                  f"a live XRP/{chain} rate", False)
+    console.say("NOTHING WAS SUBMITTED. A swap will not be priced 1:1 by default -- that is how a thousand "
+                "dollars of one thing moves for a dollar of another, and on testnet it looks fine. Pass "
+                f"--rate <XRP per {chain}> to price it by hand, or --chain-amount to pin the size outright.")
+    return None, ""
+
+
 def resolve_chain_amount(console: Console, args) -> tuple[Decimal | None, str]:
     """How much GRC the swap moves, and WHERE that number came from.
 
@@ -654,12 +756,32 @@ def resolve_chain_amount(console: Console, args) -> tuple[Decimal | None, str]:
 
       --grc-amount   pinned outright, no pricing. For a run where the operator
                      wants a specific size.
-      --rate         XRP per GRC, supplied by hand. For a run where CoinGecko is
-                     unreachable, or where a particular rate is being tested.
-      the live price  services/pricing.py, the SAME table the custodial quote path
-                     uses. Not a second price source written for this file (rule
-                     8) -- if the two ever disagreed, a swap and a quote for the
-                     same pair would price differently and nothing would say so.
+      --rate         XRP per unit of the script chain, supplied by hand. For a run
+                     where no feed is reachable, or where a particular rate is
+                     being tested.
+      the live price  CoinPaprika, then CoinGecko. BOTH are tried and the one that
+                     answered is named in the sentence this returns.
+
+    WHY TWO FEEDS AND WHY THAT ORDER, measured from the operator's host on
+    2026-09-29 rather than chosen. CoinGecko returned 403 to every request, with
+    a body that names AWS CloudFront rather than CoinGecko -- an edge WAF refusing
+    before the API sees anything, so an API key cannot help because the key rides
+    in a header the origin never reads. CoinPaprika answered 200 for all four
+    assets the same minute. CoinGecko is kept as the second try rather than
+    deleted: it is still what services/pricing.py feeds the custodial quote path,
+    the block is on a client's IP and not on this code, and a source that works
+    from some hosts and not others is exactly what a fallback is for.
+
+    THIS DOES MEAN TWO PRICE SOURCES EXIST IN THE TREE, which this docstring used
+    to warn against in as many words ("not a second price source written for this
+    file -- if the two ever disagreed, a swap and a quote for the same pair would
+    price differently and nothing would say so"). That warning stands and is not
+    resolved: the custodial path still prices from CoinGecko alone and cannot
+    price at all from this host. Unifying them changes what the web terminal
+    quotes from, which is live posture and the operator's (rule 16). What is
+    fixed here is the CLI driver, which is what the operator runs by hand against
+    testnet, and the sentence it prints always names which feed answered so the
+    two can never be confused in a transcript.
 
     IT REFUSES RATHER THAN FALLING BACK when the price cannot be fetched. A
     silent default to 1:1 is how a swap comes to move a thousand dollars of one
@@ -674,37 +796,8 @@ def resolve_chain_amount(console: Console, args) -> tuple[Decimal | None, str]:
     if args.rate:
         return _rated_chain_amount(console, args.rate, args.chain)
 
-    # LAZY, and PLC0415 is suppressed for one checked reason written here: importing
-    # services.pricing at module scope would make --help reach for `requests` and a
-    # config import on a machine with neither, and the dry run should be able to
-    # describe a swap without a price.
-    from services.pricing import IDS, derive_pair_rate, fetch_usd_prices  # noqa: PLC0415
     chain = getattr(args, "chain", DEFAULT_CHAIN)
-    if chain not in IDS or "XRP" not in IDS:
-        console.check(f"the {chain} leg's size", f"services/pricing.IDS covers {sorted(IDS)}",
-                      f"both {chain} and XRP priced", False)
-        return None, ""
-    try:
-        prices = fetch_usd_prices()
-        # derive_pair_rate("GRC", "XRP") is GRC_USD / XRP_USD = how many XRP one
-        # GRC costs, which is the direction chain_amount_for_rate divides by. Getting
-        # this backwards makes the swap off by the square of the price, and on
-        # testnet that looks like a large number and nothing else.
-        rate = Decimal(str(derive_pair_rate(chain, "XRP", prices)))
-        amount = chain_amount_for_rate(XRP_DROPS, rate)
-    except Exception as error:  # noqa: BLE001 -- checked: fetch_usd_prices can fail on the network, on a non-200, on a partial response (it raises KeyError naming the missing asset), or on a rate of zero. EVERY one of those must stop the run rather than fall back to an unpriced amount, and the message names --rate as the way through. Nothing here treats a failure as a price.
-        console.check(f"the {chain} leg's size", f"{type(error).__name__}: {error}",
-                      f"a live XRP/{chain} rate", False)
-        console.say("NOTHING WAS SUBMITTED. A swap will not be priced 1:1 by default -- that is how a thousand "
-                    "dollars of one thing moves for a dollar of another, and on testnet it looks fine. Pass "
-                    f"--rate <XRP per {chain}> to price it by hand, or --chain-amount to pin the size "
-                    "outright.")
-        return None, ""
-    return amount, (
-        f"services/pricing.py (CoinGecko): {chain} ${prices[chain + '_USD']}, XRP ${prices['XRP_USD']}, so "
-        f"{rate:.8f} XRP per {chain}. {XRP_DROPS} drops buys {amount} {chain}, rounded DOWN to "
-        f"{GRC_DECIMALS} places in the {chain} holder's favour"
-    )
+    return _priced_chain_amount(console, chain)
 
 
 @dataclass
