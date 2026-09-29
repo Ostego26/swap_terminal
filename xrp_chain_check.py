@@ -63,6 +63,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import requests
 
@@ -218,7 +219,8 @@ def delivered_amount_findings(payments: list[tuple[dict, dict]]) -> list[str]:
 
 
 def verdict_text(
-    failures: list[str], payments_examined: int, unobserved: set[str] | None = None
+    failures: list[str], payments_examined: int, unobserved: set[str] | None = None,
+    *, hunt: HuntResult | None = None,
 ) -> str:
     """FOUR outcomes, not two.
 
@@ -261,6 +263,21 @@ def verdict_text(
             f"  Optional means optional to THIS CHECK, not to the deposit path: DestinationTag is\n"
             f"  the field that attributes a payment to a swap, and nothing here has seen a real one.\n"
             f"  Pass --hunt-tag N to observe it on somebody else's testnet traffic, read-only."
+        )
+    if hunt is not None and hunt.spelling_observed and not hunt.credited:
+        # THE THIRD STATE, and it used to be indistinguishable from never having looked. The
+        # spelling is proven and the adapter still credited nothing -- which on this testnet is
+        # usually CORRECT (an issued-currency Payment delivers no XRP), so it is reported as
+        # what is left to prove rather than as a defect.
+        return (
+            f"PASSED: every field the adapter reads was observed, over {payments_examined} real "
+            f"Payment(s).\n"
+            f"  DestinationTag was seen on a real tagged Payment and rippled spells it the way\n"
+            f"  chains/xrp_payments.py reads it. NOT re-run --hunt-tag for that -- it is proven.\n"
+            f"  STILL UNPROVEN, and it needs a payment rather than a wider walk: that the adapter\n"
+            f"  CREDITS a tagged XRP payment end to end. Every sampled one delivered an issued\n"
+            f"  currency, which it refuses on purpose -- crediting a token anybody can mint would\n"
+            f"  pay out real XRP at face value."
         )
     return f"PASSED: every field the adapter reads was observed, over {payments_examined} real Payment(s)."
 
@@ -637,7 +654,44 @@ def check_real_scan(entries: list[dict], payments: list[tuple[dict, dict]], acco
     done(started)
 
 
-def hunt_tagged_payment(url: str, seq, how_many: int) -> bool:
+class HuntResult(NamedTuple):
+    """TWO ANSWERS, because step 5 asks two questions and they came back as one bool.
+
+    THE CONTRADICTION THIS FIXES, on the operator's screen 2026-09-29. Step 5 printed
+
+        CONFIRMED: rippled spells it 'DestinationTag', which is what
+        chains/xrp_payments.py reads.
+
+    and the verdict eleven lines later printed
+
+        PASSED, WITH 1 FIELD(S) STILL UNOBSERVED: DestinationTag
+        ... nothing here has seen a real one.
+        Pass --hunt-tag N to observe it on somebody else's testnet traffic
+
+    -- telling the operator to run the flag they had just run, about a field the same screen
+    had just confirmed. Both cannot be true.
+
+    The cause is that `hunt_tagged_payment` ended `return credited`, and the caller used that
+    return to decide whether the field had been OBSERVED. Its own comment said so: "The hunt
+    OBSERVED the field, so the verdict must stop calling it unobserved. This is the whole reason
+    the hunt returns a bool." The bool it returned was the other question's.
+
+    They are genuinely different and the REMEDIES differ, which is why they stay apart:
+
+      spelling_observed  a tagged Payment exists on this ledger and rippled spells the field the
+                         way chains/xrp_payments.py reads it. More ledgers cannot improve this
+                         once it is True.
+      credited           the REAL adapter re-read one of those payments and produced a deposit
+                         event. False here is usually correct behavior rather than a defect --
+                         an issued-currency Payment delivers no XRP to credit, and crediting one
+                         at face value would pay real XRP for a token anybody can mint.
+    """
+
+    spelling_observed: bool
+    credited: bool
+
+
+def hunt_tagged_payment(url: str, seq, how_many: int) -> HuntResult:
     """Step 5: walk validated ledgers for ANYONE's tagged Payment. Read-only.
 
     Announces the scale up front and prints a line per ledger, because 200
@@ -691,7 +745,9 @@ def hunt_tagged_payment(url: str, seq, how_many: int) -> bool:
                 print("    was credited. See the per-payment reasons above.", flush=True)
             print("    NOT proven either way: that OUR sender sets the field.", flush=True)
             done(started)
-            return credited
+            # BOTH ANSWERS. `credited` alone went back until 2026-09-29, and the verdict then
+            # called the field unobserved on a screen that had just confirmed its spelling.
+            return HuntResult(spelling_observed=True, credited=credited)
         if (offset + 1) % PROGRESS_EVERY_LEDGERS == 0:
             print(f"    scanned {offset + 1}/{how_many} ledgers, {seen} Payment(s), "
                   f"0 tagged so far", flush=True)
@@ -706,7 +762,7 @@ def hunt_tagged_payment(url: str, seq, how_many: int) -> bool:
     print(f"    not counted as a failure. Widen with --hunt-tag (this walk used "
           f"{how_many}), or send a tagged payment.", flush=True)
     done(started)
-    return False
+    return HuntResult(spelling_observed=False, credited=False)
 
 
 def main() -> int:
@@ -769,13 +825,18 @@ def main() -> int:
     # result is deliberately NOT folded into the verdict: finding no tagged
     # payment on the testnet says nothing about our code, and exit_code() means
     # "a field or method the adapter depends on did not match a real server".
-    if args.hunt_tag > 0 and hunt_tagged_payment(args.url, seq, args.hunt_tag):
-        # The hunt OBSERVED the field, so the verdict must stop calling it
-        # unobserved. This is the whole reason the hunt returns a bool.
+    hunt = HuntResult(spelling_observed=False, credited=False)
+    if args.hunt_tag > 0:
+        hunt = hunt_tagged_payment(args.url, seq, args.hunt_tag)
+    if hunt.spelling_observed:
+        # OBSERVATION, not crediting, is what decides this -- and until 2026-09-29 the caller
+        # used `credited` here, so a run that confirmed the spelling on screen went on to call
+        # the field unobserved eleven lines later and told the operator to re-run the flag they
+        # had just run. See HuntResult.
         unobserved.discard(FIELD_DESTINATION_TAG)
 
     print("\n" + "=" * 70, flush=True)
-    print(verdict_text(failures, len(payments), unobserved), flush=True)
+    print(verdict_text(failures, len(payments), unobserved, hunt=hunt), flush=True)
     return exit_code(failures, len(payments))
 
 

@@ -28,7 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # The path insert above has to run first: xrp_chain_check.py lives at the
 # project root, which conftest.py does not put on sys.path.
+import xrp_chain_check
 from xrp_chain_check import (
+    HuntResult,
     bad_address_verdict,
     collect_payments,
     credit_a_real_tagged_payment,
@@ -408,3 +410,61 @@ def test_an_issued_currency_refusal_is_reported_as_by_design_not_as_a_finding():
     assert any("REFUSED" in line for line in lines)
     assert any("by design" in line for line in lines)
     assert not any("FINDING" in line for line in lines)
+
+
+def test_A_CONFIRMED_SPELLING_IS_NEVER_CALLED_UNOBSERVED_ELEVEN_LINES_LATER():
+    """The contradiction on the operator's screen, 2026-09-29.
+
+    Step 5 printed `CONFIRMED: rippled spells it 'DestinationTag', which is what
+    chains/xrp_payments.py reads.` and the verdict then printed `PASSED, WITH 1 FIELD(S) STILL
+    UNOBSERVED: DestinationTag ... nothing here has seen a real one. Pass --hunt-tag N to
+    observe it` -- telling them to re-run the flag they had just run, about a field the same
+    screen had just confirmed.
+
+    THE CAUSE WAS ONE BOOL FOR TWO QUESTIONS. `hunt_tagged_payment` ended `return credited`, and
+    main() used that to decide whether the field had been OBSERVED. Its own comment said "The
+    hunt OBSERVED the field, so the verdict must stop calling it unobserved" -- and the value it
+    read was the other question's answer.
+
+    The two are separate BECAUSE THE REMEDIES DIFFER: a wider walk can fix "never seen a tagged
+    payment" and cannot fix "seen, but every one delivered an issued currency". The second needs
+    somebody to send a tagged XRP payment.
+    """
+    seen_not_credited = HuntResult(spelling_observed=True, credited=False)
+    text = verdict_text([], 20, set(), hunt=seen_not_credited)
+    # WHITESPACE-FOLDED, because the message is WRAPPED for an 80-column terminal and a phrase
+    # that reads as one thing on screen can straddle a newline in the string. Asserting on the
+    # raw text would pin the line breaks -- which is pinning the layout, not the claim.
+    flat = " ".join(text.split())
+    assert "PASSED" in text
+    assert "STILL UNOBSERVED" not in text, "the defect: the field WAS observed on that screen"
+    assert "NOT re-run --hunt-tag" in flat, "and it must not send them back to the flag"
+    assert "needs a payment rather than a wider walk" in flat, "the remedy that actually differs"
+    assert "issued currency" in flat, "and why crediting nothing was correct, not a fault"
+
+    never_seen = verdict_text([], 20, {"DestinationTag"},
+                              hunt=HuntResult(spelling_observed=False, credited=False))
+    assert "STILL UNOBSERVED" in never_seen
+    assert "Pass --hunt-tag N to observe it" in never_seen, (
+        "THIS is the case that sentence is for -- nothing tagged was ever seen"
+    )
+    assert never_seen != text, "the two states must not share a verdict"
+
+
+def test_CREDITING_AND_OBSERVING_ARE_CARRIED_SEPARATELY():
+    """One field each, so a caller cannot read the wrong answer by taking the whole value.
+
+    A bare bool is what let main() ask "was it observed" and receive "was it credited". Naming
+    both makes the misread a typo rather than a silent substitution.
+    """
+    assert HuntResult(spelling_observed=True, credited=False).spelling_observed is True
+    assert HuntResult(spelling_observed=True, credited=False).credited is False
+
+    source = Path(xrp_chain_check.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def hunt_tagged_payment"):source.index("def main()")]
+    assert "return credited" not in body, "the bare bool, gone rather than left beside the fix"
+    assert "HuntResult(spelling_observed=True" in body
+    main_body = source[source.index("def main()"):]
+    assert "if hunt.spelling_observed:" in main_body, (
+        "and the caller reads the OBSERVATION field, which is the question it is asking"
+    )
