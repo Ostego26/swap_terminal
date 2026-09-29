@@ -1242,8 +1242,25 @@ def describe_the_dry_run(console: Console, args, chain: str, leg: ScriptLeg,  # 
     console.say("re-run with --run to perform the swap.")
 
 
-def resolve_the_script_chain_adapter(console: Console, chain: str):
-    """The adapter for the script leg, from the environment or from the chain's conf.
+def resolve_the_script_chain_adapter(console: Console, chain: str) -> tuple[object | None, dict]:
+    """The adapter AND the settings it was built from, resolved once.
+
+    RETURNS THE SETTINGS, NOT JUST THE ADAPTER, and that is the fix for the third
+    instance of one bug in one session. This driver holds TWO handles on the same
+    daemon by design -- a generic adapter for getnewaddress and the tip, and a
+    chain client that owns the HTLC script -- and build_script_client() read
+    Config.RPC[chain] directly. So a Litecoin daemon resolved from its conf gave an
+    adapter that worked and a script client that raised
+
+        ValueError: LTC_RPC_PORT is not set, so no LTC client can be built
+
+    at step 5b, AFTER the run had priced the legs and computed both timelocks. The
+    conf fallback went into the balance reader, then into this driver's adapter, and
+    the third consumer was invisible both times because nothing pointed from one to
+    the others -- which is rule 8's whole complaint, and the reason it says to grep
+    for the rule rather than trust that you found every copy.
+
+    Config.RPC is now read in exactly one place in this file, and a test holds that.
 
     EXTRACTED rather than left in main(), which PLR0912 caught at 13 branches the
     moment the fallback went in. Rule 12: a main() past the ceiling is
@@ -1263,19 +1280,21 @@ def resolve_the_script_chain_adapter(console: Console, chain: str):
     own network afterwards and refuses anything outside that chain's allowlist. A
     conf SAYING regtest is not evidence that the daemon on that port is on regtest.
     """
+    settings = Config.RPC.get(chain) or {}
     adapter = build_adapters(Config.RPC).get(chain)
     if adapter is None:
         settings, line = conf_fallback_settings(chain)
         console.say(line)
-        if settings is not None:
+        settings = settings or {}
+        if settings:
             adapter = build_adapters({chain: settings}).get(chain)
     if not console.check(f"{chain} adapter configured", "yes" if adapter else None,
                          f"{chain}_RPC_* in the environment, or this chain's own conf",
                          adapter is not None):
         console.say(f"chains/registry.why_unconfigured({chain!r}) names the missing variable. "
                     "Nothing was submitted.")
-        return None
-    return adapter
+        return None, {}
+    return adapter, settings
 
 
 def say_what_has_actually_run(console: Console, chain: str) -> None:
@@ -1305,7 +1324,7 @@ def say_what_has_actually_run(console: Console, chain: str) -> None:
     )
 
 
-def prepare_the_script_leg(console: Console, chain: str) -> tuple[object, ScriptLegKeys] | None:
+def prepare_the_script_leg(console: Console, chain: str, chain_rpc: dict) -> tuple[object, ScriptLegKeys] | None:
     """The client that owns the HTLC and the two keys its branches pay to, or None.
 
     BOTH OR NEITHER, which is why they are made together. A client with no keys cannot
@@ -1322,7 +1341,12 @@ def prepare_the_script_leg(console: Console, chain: str) -> tuple[object, Script
     point and a traceback at step 5 of ten tells an operator less than the sentence does.
     """
     try:
-        client = build_script_client(chain, Config.RPC[chain])
+        # THE SETTINGS COME FROM THE CALLER, not from Config.RPC. They are whatever
+        # resolve_the_script_chain_adapter() used -- the environment, or this chain's
+        # own conf -- so the client and the adapter cannot end up pointed at two
+        # different daemons, and a conf-resolved chain does not fail here after the
+        # run has already priced both legs.
+        client = build_script_client(chain, chain_rpc)
     except Exception as error:  # noqa: BLE001 -- checked: a missing port, an unknown chain, or the client constructor refusing all mean one thing to this caller -- the script leg cannot be built, and NOTHING has been funded. The name and message are reported and the run stops.
         console.check(f"{chain} script client", f"{type(error).__name__}: {error}",
                       "a client that can build the HTLC", False)
@@ -1506,7 +1530,7 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         return console.summary()
 
     chain = args.chain
-    grc = resolve_the_script_chain_adapter(console, chain)
+    grc, chain_rpc = resolve_the_script_chain_adapter(console, chain)
     if grc is None:
         return console.summary()
     network = chain_network(grc)
@@ -1619,7 +1643,7 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
             return submitter.submit(tx_json, secret_for_this_tx)
         except LocalSigningUnavailable as error:
             return {"error": "localSigningUnavailable", "error_message": str(error)}
-    prepared = prepare_the_script_leg(console, chain)
+    prepared = prepare_the_script_leg(console, chain, chain_rpc)
     if prepared is None:
         return console.summary()
     script_client, leg_keys = prepared

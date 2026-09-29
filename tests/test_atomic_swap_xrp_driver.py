@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
+import pathlib
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -420,3 +422,60 @@ def test_an_UNMEASURABLE_depth_says_so_rather_than_printing_nothing():
     out = recorder.text()
     assert "NOT MEASURABLE" in out, out
     assert "how much money set it is unknown" in out, out
+
+
+def test_Config_RPC_IS_READ_IN_EXACTLY_ONE_FUNCTION():
+    """THIS BUG HAPPENED THREE TIMES IN ONE SESSION, 2026-09-29.
+
+    The conf fallback went into chain_balances.py. Then into this driver's
+    adapter, because the driver said "(none)" about a daemon the reader had just
+    found. Then into build_script_client, because a Litecoin daemon resolved from
+    its conf produced a working adapter and a script client that raised
+
+        ValueError: LTC_RPC_PORT is not set, so no LTC client can be built
+
+    at step 5b -- AFTER the run had priced both legs and computed both timelocks,
+    on a --run that was going to move coins.
+
+    Each time, the next consumer was invisible: nothing points from one reader of
+    Config.RPC to the others, which is exactly rule 8's complaint and why it says
+    to grep for the rule rather than trust you found every copy. A count is what
+    makes the next one visible without anybody remembering to look.
+
+    ONE function may read it. Everything else takes the settings as an argument,
+    so the adapter and the script client cannot end up on two different daemons.
+
+    MUTATION: put `Config.RPC[chain]` back into prepare_the_script_leg() and this
+    fails with two reading functions. Verified 2026-09-29.
+    """
+    source = pathlib.Path(driver.__file__).read_text()
+    tree = ast.parse(source)
+
+    readers = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            # Config.RPC, however it is then indexed or .get()-ed.
+            if (isinstance(node, ast.Attribute) and node.attr == "RPC"
+                    and isinstance(node.value, ast.Name) and node.value.id == "Config"):
+                readers.add(function.name)
+    assert readers == {"resolve_the_script_chain_adapter"}, (
+        f"Config.RPC is read in {sorted(readers)}. It may be read in exactly one function, which "
+        f"returns the settings it used; every other consumer takes them as an argument. Two readers "
+        f"is how a chain resolved from its conf gets an adapter that works and a client that does "
+        f"not, and the second failure lands after the run has already priced the legs"
+    )
+
+
+def test_the_resolver_hands_back_the_settings_it_actually_used():
+    """The adapter alone is not enough: the script client needs the same mapping.
+
+    Returning only the adapter is what made the third instance possible -- the
+    caller had nothing to pass on, so the next consumer went back to the global.
+    """
+    signature = inspect.signature(driver.prepare_the_script_leg)
+    assert "chain_rpc" in signature.parameters, (
+        "prepare_the_script_leg() does not take the resolved settings, so it must be finding them "
+        "somewhere else -- which is the global this whole test pair exists to remove"
+    )
