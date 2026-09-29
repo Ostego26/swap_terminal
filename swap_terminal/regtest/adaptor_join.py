@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from chains.monero_keys import shared_private_spend_key
 from ecdsa import SECP256k1
 from ecdsa.util import sigdecode_der, sigencode_der
 from modules import adaptor_ecdsa
@@ -350,3 +351,51 @@ __all__ = [
     "recover_published_scalar",
     "signatures_in_script_sig",
 ]
+
+
+def swap_handoff(side, recovered_alice_share: int) -> dict:
+    """The shares fixture a GRC run hands to the Monero sweeper. GAP (e)'s MISSING HOP.
+
+    WHAT WAS ACTUALLY MISSING, and it was never the cryptography. On 2026-09-28
+    `adaptor_regtest_verify.py --chain grc` moved a coin through ALL FIVE transactions on
+    Gridcoin testnet, recovered `s_a` out of a scriptSig the daemon had accepted, and asserted
+    that `s_a(recovered) + s_b` reconstructs a key whose public key equals the Monero lock
+    address's. Then the run ended and those two integers went out of scope.
+    docs/gridcoin_adaptor_join_2026_09_28.md says so in capitals: **NO MONERO MOVED. The lock
+    address was derived and never funded.** The close was a KEY MATCH, not a spend.
+
+    Separately, on 2026-09-29, `monero_shared_key_verify.py --sweep` spent 0.09993896 XMR out of
+    a 2-of-2 shared address on Monero STAGENET with a summed key --
+    `e0551366693139976f6fa8074e6034c331a068dff9725cbb7c10e361785edf89`. But those shares were
+    sampled by that script, for itself. Nothing had ever swept a lock whose `s_a` CAME OFF
+    ANOTHER CHAIN.
+
+    So the join between the two halves is a FILE, and that is the whole of this function. It
+    writes the same fixture `monero_shared_key_verify.py` already reads -- one format, one
+    implementation, in modules/monero_shares_file.py -- with the RECOVERED share in the
+    `spend_share_a` slot rather than a sampled one. Fund `lock_address` on stagenet, run the
+    sweeper against this file, and the XMR moves because of a scalar that a Gridcoin daemon
+    published.
+
+    THE RECOVERED SHARE, NOT `side.alice_spend`, AND THE DIFFERENCE IS THE ENTIRE POINT. The
+    harness holds both and they are equal when everything works -- so writing the wrong one
+    would produce a fixture that sweeps perfectly and proves nothing, because the scalar would
+    never have touched a chain. That is the same shape as a fake supplying its own answer, and
+    it is why the caller passes `recovered` explicitly and why `reconstruction_opens_lock` has
+    to have returned True before this is called.
+
+    NOT WRITTEN HERE. This returns the payload; the CALLER writes it, after checking the network
+    -- because a function that both decides and persists is a function that cannot be tested
+    without a filesystem (rule 10), and because the refusal that matters is about the network,
+    which this module cannot see.
+    """
+    return {
+        "spend_share_a": recovered_alice_share,
+        "spend_share_b": side.bob_spend,
+        "view_share_a": side.alice_view,
+        "view_share_b": side.bob_view,
+        "spend_summed": shared_private_spend_key(recovered_alice_share, side.bob_spend),
+        "view_summed": shared_private_spend_key(side.alice_view, side.bob_view),
+        "public_spend": side.alice_spend_public,
+        "public_view": "",
+    }

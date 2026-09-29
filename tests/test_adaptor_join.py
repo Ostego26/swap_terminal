@@ -26,17 +26,20 @@ from __future__ import annotations
 import importlib.util
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from chains.base import RPCError
-from chains.monero_keys import decode_address, public_key_for_share
+from chains.monero_keys import decode_address, public_key_for_share, shared_private_spend_key
 from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 from ecdsa import SECP256k1, VerifyingKey
 from ecdsa.util import sigdecode_der
 from modules import adaptor_swap_chain as chain
 from modules.adaptor_swap_scripts import two_of_two_redeem_script, two_of_two_script_sig
 from modules.htlc_spend import SIGHASH_ALL, parse_transaction
+from modules.monero_shares_file import load_shares, save_shares
 from regtest import adaptor_join, adaptor_steps
+from regtest.adaptor_join import swap_handoff
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import ChainConfig
 from regtest.keys import double_sha256, generate_key, key_from_seed
@@ -1672,3 +1675,93 @@ def test_the_driver_unpacks_exactly_what_step_4_returns(monkeypatch, side):
         monkeypatch.setattr(entry.adaptor_steps, name, lambda *a, **k: 100)
 
     entry.drive_locks(run, real_setups, side, 100, adaptor_steps.ChainOutcome(asset="GRC"))
+
+
+def test_THE_HANDOFF_CARRIES_THE_RECOVERED_SHARE_NOT_THE_SAMPLED_ONE():
+    """GAP (e)'s missing hop, and the one substitution that would fake it.
+
+    The 2026-09-28 Gridcoin run moved a coin through all five transactions, recovered `s_a` out
+    of a scriptSig the daemon had accepted, and proved `s_a(recovered) + s_b` reconstructs a key
+    whose public key is the Monero lock address's. Then the run ended and the two integers went
+    out of scope -- docs/gridcoin_adaptor_join_2026_09_28.md says it in capitals: NO MONERO
+    MOVED, the lock address was derived and never funded.
+
+    THE HARNESS HOLDS BOTH SHARES AND THEY ARE EQUAL WHEN EVERYTHING WORKS. So a handoff built
+    from `side.alice_spend` would sweep perfectly and prove NOTHING -- the scalar would never
+    have touched a chain, and the end-to-end claim would rest on a value this process had all
+    along. That is a fake supplying its own answer, and it is the reason the recovered share is
+    passed in explicitly rather than read off `side`.
+
+    This test therefore hands it a share DIFFERENT from the one on `side`, and asserts the
+    difference survives into the fixture. If someone swaps the argument for the field, the two
+    are equal in every real run and only this asserts otherwise.
+    """
+    side = adaptor_steps.MoneroSide(
+        alice_spend=111, alice_view=222, bob_spend=333, bob_view=444,
+        lock_address="5Bwhatever", alice_spend_public="aa" * 32, bob_spend_public="bb" * 32,
+    )
+    recovered = 999  # deliberately NOT side.alice_spend
+    payload = swap_handoff(side, recovered)
+
+    assert payload["spend_share_a"] == recovered
+    assert payload["spend_share_a"] != side.alice_spend, (
+        "the whole point: the scalar in the fixture is the one a CHAIN published"
+    )
+    assert payload["spend_share_b"] == side.bob_spend
+    assert payload["spend_summed"] == shared_private_spend_key(recovered, side.bob_spend), (
+        "and the sum is over the RECOVERED share, not over the sampled one -- a sum taken the "
+        "other way would load cleanly and open a different address"
+    )
+    assert payload["view_summed"] == shared_private_spend_key(side.alice_view, side.bob_view)
+
+
+def test_THE_HANDOFF_IS_READABLE_BY_THE_SWEEPER_THAT_HAS_TO_READ_IT(tmp_path):
+    """One format, one implementation -- asserted by round-tripping through the REAL loader.
+
+    modules/monero_shares_file.py holds it precisely because there are now two writers, and two
+    writers of one format is rule 8's bug with a delay on it. A test that checked the keys by
+    hand would be a third statement of the format and would drift with the other two; this loads
+    the file with the function `monero_shared_key_verify.py --sweep` actually calls, so a change
+    to either side fails here.
+    """
+    side = adaptor_steps.MoneroSide(
+        alice_spend=111, alice_view=222, bob_spend=333, bob_view=444,
+        lock_address="5Bwhatever", alice_spend_public="aa" * 32, bob_spend_public="bb" * 32,
+    )
+    path = tmp_path / "swap-handoff-shares.json"
+    save_shares(path, swap_handoff(side, 999), side.lock_address, "stagenet")
+
+    loaded = load_shares(path)
+    assert loaded["spend_share_a"] == 999
+    assert loaded["shared_address"] == "5Bwhatever"
+    assert path.stat().st_mode & 0o777 == 0o600, "private scalars, even on a test network"
+
+
+def test_A_HANDOFF_IS_NEVER_WRITTEN_FOR_A_NON_TEST_NETWORK(monkeypatch, tmp_path):
+    """PRIVATE SPEND SHARES IN THE CLEAR. Correct on stagenet, a key disclosure anywhere else.
+
+    The network is ASKED of the address -- decoded, not inferred from a flag or a port -- which
+    is the same rule every other network gate in this tree follows. And the refusal is a
+    sentence rather than an exception: the run's findings do not depend on this file, so a
+    refusal to write one must not turn a green run red.
+    """
+    said: list[str] = []
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, line=""):
+            said.append(line)
+
+    monkeypatch.setenv(adaptor_steps.HANDOFF_VARIABLE, str(tmp_path / "must-not-exist.json"))
+    monkeypatch.setattr(adaptor_steps, "decode_address",
+                        lambda _a: SimpleNamespace(network="mainnet", public_spend_key=b""))
+    side = adaptor_steps.MoneroSide(
+        alice_spend=111, alice_view=222, bob_spend=333, bob_view=444,
+        lock_address="4Mainnetlooking", alice_spend_public="aa" * 32, bob_spend_public="bb" * 32,
+    )
+    adaptor_steps.write_the_swap_handoff(_Run(), side, 999)
+
+    assert not (tmp_path / "must-not-exist.json").exists(), "nothing written off a test network"
+    assert any("NOT writing a swap handoff" in line for line in said)
+    assert any("key disclosure" in line for line in said), "and it says WHY, not just that"

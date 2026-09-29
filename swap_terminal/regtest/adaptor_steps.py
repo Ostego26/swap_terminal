@@ -113,6 +113,7 @@ from modules.htlc_spend import (
     satoshis_to_coins,
 )
 from modules.htlc_timelock import SECONDS_PER_BLOCK
+from modules.monero_shares_file import SharesFileError, save_shares
 from modules.monero_swap_protocol import reconstruct_spend_key, sample_shares
 from regtest import daemons
 from regtest.adaptor_join import (
@@ -122,6 +123,7 @@ from regtest.adaptor_join import (
     point_hex,
     pre_sign_leg,
     recover_published_scalar,
+    swap_handoff,
 )
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console
 from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
@@ -1978,6 +1980,62 @@ def build_monero_side(run: Run) -> MoneroSide:
     return side
 
 
+#: Where a GRC run leaves the fixture that lets the Monero leg be swept. Under the funding
+#: seed's own directory rather than the repository, because it holds PRIVATE SCALARS and a
+#: repository is a thing people push.
+HANDOFF_VARIABLE = "ST_SWAP_HANDOFF_FILE"
+DEFAULT_HANDOFF = Path.home() / "xmr-stagenet-shared" / "swap-handoff-shares.json"
+
+
+def write_the_swap_handoff(run: Run, side: MoneroSide, recovered_alice_share: int) -> None:
+    """Persist the recovered share so the Monero leg can actually be swept. GAP (e).
+
+    CALLED ONLY WHEN `reconstruction_opens_lock` HAS ALREADY RETURNED TRUE, because a fixture
+    written from a share that does NOT open the lock is a fixture that wastes a faucet claim and
+    a block-time wait before failing for a reason the run already knew.
+
+    THE NETWORK IS CHECKED HERE AND NOT IN adaptor_join, which is why the write lives at this
+    layer: these are PRIVATE SCALARS IN THE CLEAR, correct on a valueless test network and a
+    key-disclosure bug anywhere else. `MONERO_REHEARSAL_NETWORK` is "stagenet" and the address
+    is decoded to confirm it rather than trusted -- the same rule as every other network gate in
+    this tree: ask, never infer.
+
+    A FAILURE TO WRITE IS NOT A FAILURE OF THE RUN. Everything this run measured is already
+    measured; the file is a convenience for the NEXT step. So it is reported and swallowed --
+    the one case where that is right, because the alternative is a red run whose findings were
+    all green.
+    """
+    decoded = decode_address(side.lock_address)
+    if decoded.network != MONERO_REHEARSAL_NETWORK:
+        run.say(
+            f"NOT writing a swap handoff: the lock address decodes as {decoded.network!r}, not "
+            f"{MONERO_REHEARSAL_NETWORK!r}. That file holds PRIVATE SPEND SHARES in the clear, "
+            f"which is correct on a valueless test network and a key disclosure anywhere else."
+        )
+        return
+    path = Path(os.environ.get(HANDOFF_VARIABLE, "") or DEFAULT_HANDOFF).expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        save_shares(path, swap_handoff(side, recovered_alice_share),
+                    side.lock_address, MONERO_REHEARSAL_NETWORK)
+    except (OSError, SharesFileError) as error:
+        run.say(f"could not write the swap handoff to {path}: {error}. "
+                f"Everything this run measured is unaffected; only the next step is.")
+        return
+    run.say("")
+    run.say("SWAP HANDOFF WRITTEN -- this is the file that closes gap (e).")
+    run.say(f"  {path} (0600, PRIVATE SPEND SHARES IN THE CLEAR -- {MONERO_REHEARSAL_NETWORK} only)")
+    run.say(f"  spend_share_a is the scalar RECOVERED from the {run.asset} scriptSig above, not a")
+    run.say("  sampled one -- which is what makes the sweep below an end-to-end swap rather than")
+    run.say("  a second demonstration of the same arithmetic.")
+    run.say("")
+    run.say(f"  1. fund this {MONERO_REHEARSAL_NETWORK} address -- stagenet-faucet.xmr-tw.org pays it:")
+    run.say(f"     {side.lock_address}")
+    run.say("  2. then sweep it with the share this chain published:")
+    run.say(f"     python3 monero_shared_key_verify.py --sweep {side.lock_address} \\")
+    run.say(f"       --port 38084 --daemon node.monerodevs.org:38089 --shares-file {path} --wait 1800")
+
+
 def reconstruction_opens_lock(side: MoneroSide, recovered_alice_share: int) -> bool:
     """Does `s_a(recovered) + s_b` open the lock address? THE CLOSING ASSERTION OF THE RUN.
 
@@ -2500,6 +2558,8 @@ def _recover_from_the_redeem(run: Run, built: BuiltChain, txid: str, outcome: Ch
         OK if opens else FAIL,
     )
     outcome.reconstructed_key_opens_lock = OK if opens else FAIL
+    if opens:
+        write_the_swap_handoff(run, built.monero, recovered)
     if not opens:
         outcome.notes.append(
             "the scalar recovered from the redeem is the discrete log of the secp256k1 adaptor "
