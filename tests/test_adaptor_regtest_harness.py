@@ -1913,3 +1913,42 @@ def test_the_reject_reason_probe_never_becomes_a_verdict(console, monkeypatch):
     # A REFUSAL IS A REFUSAL EVEN UNNAMED. Gridcoin's own fallback word, from mempool.cpp.
     run, _ = _run_with(console, monkeypatch, {"testmempoolaccept": [{"allowed": False}]}, asset="GRC")
     assert adaptor_steps.mempool_reject_reason(run, "00") == "rejected"
+
+
+def test_A_401_IS_NEVER_REPORTED_AS_A_DEAD_DAEMON():
+    """The harness told an operator to start a daemon that was already running, 2026-09-29.
+
+    Every liveness probe missed and the GRC refusal said `gridcoinresearchd -testnet -daemon`.
+    Their daemon WAS up -- a GUI wallet, pid 8897, serving RPC throughout -- and the real cause
+    was HTTP 401, from credentials read out of the MAINNET conf beside the testnet one.
+
+    So the harness proposed starting a SECOND process against a staking wallet's datadir, which
+    is a worse action than the fault it was diagnosing, to fix something that was not broken.
+    That is the cost of guessing in the voice of a diagnosis (rule 17) when the probe already
+    knew the answer: liveness_probe_results() returns the reasons and nothing was reading them.
+
+    THE TWO CAUSES NEED OPPOSITE ACTIONS, so they must not share a sentence.
+    """
+    unauthorized = daemons.why_nothing_answered(
+        ["uptime: HTTP Error 401: Unauthorized", "getblockcount: HTTP Error 401: Unauthorized"])
+    assert "401" in unauthorized and "Do NOT start another one" in unauthorized
+    assert "testnet" in unauthorized, "and where the right credentials live"
+
+    dead = daemons.why_nothing_answered(["uptime: [Errno 111] Connection refused"])
+    assert "NOTHING IS LISTENING" in dead
+    assert "not a credentials problem" in dead, (
+        "because checking them is what an operator does next, and it is ten wasted minutes"
+    )
+    assert "25715 is testnet and 15715 is MAINNET" in dead
+
+    assert unauthorized != dead
+    assert "start" not in unauthorized.lower().replace("start another one", ""), (
+        "a 401 must never carry an instruction to start anything"
+    )
+
+    unknown = daemons.why_nothing_answered(["something nobody has seen before"])
+    assert "not one this harness recognizes" in unknown
+    assert "NOT known to be credentials" in unknown, (
+        "an unrecognized reason is reported as unrecognized, never folded into whichever "
+        "branch happens to be first"
+    )

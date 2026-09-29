@@ -565,6 +565,52 @@ def adapter_for(config: ChainConfig, wallet: str = "") -> RegtestRPC:
 LIVENESS_PROBES = ("uptime", "getblockcount")
 
 
+def why_nothing_answered(reasons: list[str]) -> str:
+    """Which of the two utterly different causes a total liveness miss is. NEVER guessed.
+
+    THE DEFECT THIS EXISTS FOR, on the operator's host 2026-09-29, and its consequence was
+    worse than the fault. Every probe missed, and the GRC refusal told them:
+
+        Start your TESTNET daemon yourself -- `gridcoinresearchd -testnet -daemon`
+
+    Their daemon WAS running -- a GUI wallet, `gridcoinresearch -testnet`, pid 8897, serving
+    RPC the whole time. The real cause was HTTP 401: the credentials had been read out of the
+    MAINNET conf. So the harness proposed starting a SECOND process against a staking wallet's
+    datadir, which is a worse action than the problem it was diagnosing, to fix something that
+    was not broken.
+
+    THE TWO CAUSES NEED OPPOSITE ACTIONS and share one symptom:
+
+      401 / 403       the daemon is UP and rejecting the credentials. Starting another one
+                      changes nothing and risks the datadir lock.
+      refused / reset  nothing is listening. Credentials are irrelevant until something is.
+
+    Rule 17, in an error message: the probe knows which of these it got, and printing a guess
+    in the voice of a diagnosis is what sent the operator at their own wallet.
+    """
+    blob = " ".join(reasons).lower()
+    if "401" in blob or "unauthorized" in blob or "403" in blob:
+        return (
+            "the daemon IS answering and REFUSED THE CREDENTIALS (HTTP 401). Do NOT start "
+            "another one -- it is already up, and a second process on a staking wallet's "
+            "datadir is a worse problem than this. GRC_RPC_USER and GRC_RPC_PASS have to come "
+            "from the TESTNET gridcoinresearch.conf, which is the one under the `testnet` "
+            "subdirectory and carries DIFFERENT credentials from the mainnet file beside it"
+        )
+    if "refused" in blob or "reset" in blob or "timed out" in blob or "connection" in blob:
+        return (
+            "NOTHING IS LISTENING on that port -- this is not a credentials problem, and "
+            "checking them will waste the next ten minutes. A GUI wallet serves RPC just as a "
+            "daemon does, so if yours is open, check the PORT: 25715 is testnet and 15715 is "
+            "MAINNET. If it is closed, start it yourself; this harness will not, because a "
+            "Gridcoin daemon is a staking wallet and starting one is a live action"
+        )
+    return (
+        "the reason is not one this harness recognizes, so it is printed verbatim above rather "
+        "than diagnosed. It is NOT known to be credentials and NOT known to be a dead port"
+    )
+
+
 def liveness_probe_results(config: ChainConfig) -> tuple[str | None, list[str]]:
     """(the first probe that answered, what each earlier one said). ONE OWNER OF "IS IT UP".
 

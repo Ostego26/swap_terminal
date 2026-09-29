@@ -612,16 +612,17 @@ def step_1_reachable(run: Run) -> None:
             f"asking {run.config.base_url} for liveness ({', '.join(daemons.LIVENESS_PROBES)}). "
             f"This harness NEVER starts or stops a Gridcoin daemon"
         )
-        answered = daemons.liveness_probe_that_answers(run.config)
+        # THE REASONS, NOT JUST THE MISS. This called liveness_probe_that_answers(), which
+        # returns None for a dead port and for a rejected password alike -- so the refusal
+        # below guessed, and on 2026-09-29 it guessed wrong in the expensive direction: it told
+        # an operator whose GUI wallet was up and serving RPC to start a second daemon, when
+        # the answer was HTTP 401 from credentials read out of the MAINNET conf.
+        answered, reasons = daemons.liveness_probe_results(run.config)
         if answered is None:
             raise RegtestSetupError(
-                f"GRC: none of {list(daemons.LIVENESS_PROBES)} answered at {run.config.base_url}. "
-                f"Start your TESTNET daemon yourself -- `gridcoinresearchd -testnet -daemon` -- and "
-                f"check that GRC_RPC_USER and GRC_RPC_PASS match the TESTNET "
-                f"gridcoinresearch.conf, which on this layout is the one under the `testnet` "
-                f"subdirectory and carries DIFFERENT credentials from the mainnet file. This "
-                f"harness will not start it for you: a Gridcoin daemon is a staking wallet and "
-                f"starting one is a live action."
+                f"GRC: none of {list(daemons.LIVENESS_PROBES)} answered at {run.config.base_url}.\n"
+                f"          {daemons.why_nothing_answered(reasons)}.\n"
+                f"          What each probe actually said: {'; '.join(reasons) or '(nothing)'}"
             )
         # No "GRC:" here -- run.say() already prefixes with the asset, and the first version
         # of this line printed "GRC: GRC: answered by ...". Small, and exactly the class of
