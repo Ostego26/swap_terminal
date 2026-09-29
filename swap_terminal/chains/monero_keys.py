@@ -139,7 +139,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from Crypto.Hash import keccak
+try:
+    from Crypto.Hash import keccak
+except ModuleNotFoundError as error:  # pragma: no cover -- exercised by the message test below
+    # A TRACEBACK HERE TELLS THE OPERATOR NOTHING THEY CAN ACT ON, and it cost this session
+    # twice on 2026-09-29. Both times the cause was the same and neither time did the output
+    # say it: a shell where a DIFFERENT project's virtualenv was active, because `cd` moves the
+    # directory and leaves the interpreter alone. What they saw was
+    #
+    #     ModuleNotFoundError: No module named 'Crypto'
+    #
+    # from eleven frames down, in a module they had not heard of, in the middle of a Monero
+    # swap. Rule 14: an operator reading the screen should not have to carry it back to
+    # somebody else to learn what to type.
+    #
+    # RE-RAISED, NEVER SWALLOWED. The import genuinely failed and nothing here works without
+    # it; this only replaces the sentence. `from error` keeps the original chained, so the
+    # underlying ModuleNotFoundError is still in the traceback for anyone who wants it.
+    raise ModuleNotFoundError(
+        "pycryptodome is not importable, so Monero addresses cannot be built.\n"
+        "  THE USUAL CAUSE IS THE WRONG VIRTUALENV, not a missing package: `cd` changes the\n"
+        "  directory and leaves the active interpreter alone, so a shell activated in another\n"
+        "  project stays on that project's packages here. Check for (.venv) in your prompt.\n"
+        "      source <this repository>/.venv/bin/activate\n"
+        "  If it is genuinely absent:  pip install -r swap_terminal/requirements.txt\n"
+        "  Imported as `Crypto`, distributed as `pycryptodome`. It is declared there, and it is\n"
+        "  NOT optional: Monero predates SHA-3 and uses original Keccak padding, which hashlib\n"
+        "  does not have. Keccak-256(b'') is c5d24601... where sha3_256(b'') is a7ffc6f8..., and\n"
+        "  reaching for the close-looking name yields an address every wallet rejects."
+    ) from error
+
 from modules.ed25519_group import (
     GROUP_ORDER,
     Point,
