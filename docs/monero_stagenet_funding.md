@@ -175,6 +175,26 @@ of every placeholder in a pasted block, and CLAUDE.md's "Context that shapes all
 four" asks for a single pasteable block precisely to avoid it. So: find the wallet
 first, then start it, with nothing to substitute by hand.
 
+**IT HAPPENED AGAIN ON 2026-09-29, AND THE SECOND TIME IS THE INTERESTING ONE.**
+`--wallet-file <your stagenet wallet>` was handed to the operator and produced
+`bash: your: No such file or directory`, from a session that had read this page.
+A warning does not stop a mistake it merely names; what stops it is the correct
+command being where the mistake gets made. So, for the SHARED-KEY work
+specifically, do not adapt the block below -- the right route is
+**"Funding the shared address without touching the funded wallet"** further down
+this page, and it differs in three ways that matter:
+
+  - a SECOND wallet-rpc on 38084 in `--wallet-dir` mode, so the funded wallet on
+    38083 is never closed, never reopened and never at risk;
+  - therefore NO `--allow-open-wallet`, which closes the open wallet and does not
+    reopen it -- handing that flag to someone whose only stagenet coins are in the
+    open wallet is the dangerous half of the 2026-09-29 paste;
+  - `node.monerodevs.org:38089` as the remote node, which is the one that section
+    records using, rather than another entry off the candidate list.
+
+The block below is for `monero_chain_check.py`, which reads ONE wallet and needs
+no second process. That is the only thing it is for.
+
 Find the wallet file (Monero's default directory, plus anywhere else it may be):
 
     ls -la ~/.bitmonero/stagenet/ 2>/dev/null
