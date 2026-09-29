@@ -988,10 +988,20 @@ def build_parser() -> argparse.ArgumentParser:
         description="Drive both legs of an atomic swap between any two of "
                     f"{', '.join(ASSETS)}, either direction.",
     )
-    parser.add_argument("--from", dest="from_asset", choices=ASSETS,
-                        help="the asset the INITIATOR funds (the longer timelock)")
-    parser.add_argument("--to", dest="to_asset", choices=ASSETS,
-                        help="the asset the PARTICIPANT funds (expires first)")
+    # EITHER CASE, because the other driver takes either and one tree should not
+    # disagree with itself about the spelling of an asset. atomic_swap_xrp.py has
+    # `type=str.lower` on --chain and accepts `btc`; this file accepted only `BTC`
+    # and answered
+    #
+    #     error: argument --from: invalid choice: 'btc' (choose from 'BTC', 'GRC', 'LTC')
+    #
+    # which is a correct message about a distinction that should not exist. `type`
+    # runs BEFORE `choices` is checked, so upper-casing there is what makes both
+    # spellings reach the same row rather than one of them reaching an error.
+    parser.add_argument("--from", dest="from_asset", choices=ASSETS, type=str.upper,
+                        help="the asset the INITIATOR funds (the longer timelock). Either case.")
+    parser.add_argument("--to", dest="to_asset", choices=ASSETS, type=str.upper,
+                        help="the asset the PARTICIPANT funds (expires first). Either case.")
     parser.add_argument("--from-amount", type=Decimal, help="amount of --from to lock")
     parser.add_argument("--to-amount", type=Decimal, help="amount of --to to lock")
     parser.add_argument("--run", action="store_true", help="actually fund both legs")
