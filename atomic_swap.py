@@ -107,6 +107,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.daemon_conf import conf_fallback_settings, rpc_url
+from chains.registry import missing_settings, why_unconfigured
+from config import Config
 from microfortnights import format_duration
 from modules.atomic_btc_client import BTCClient
 from modules.atomic_grc_client import GRCClient
@@ -353,28 +355,68 @@ def client_for(asset: str):
             f"protocol (see atomic_swap_xrp.py) rather than a missing row here"
         )
     url_default, user_default, _ = DEFAULT_RPC[asset]
-    url = os.environ.get(f"{asset}_RPC_URL", url_default)
-    user = os.environ.get(f"{asset}_RPC_USER", user_default)
+
+    # THREE ROUTES, IN THIS ORDER, and the middle one is the fix for 2026-09-29.
+    #
+    # This file read {ASSET}_RPC_URL and fell back to its own default -- 18332 for
+    # BTC, which is TESTNET3 -- while chain_balances.py and atomic_swap_xrp.py read
+    # Config.RPC's host and port and found the operator's REGTEST daemon on 18443.
+    # Two environment schemes for one fact, so with BTC_RPC_PASS set and
+    # BTC_RPC_URL unset this file silently dialed a port nothing was listening on:
+    #
+    #     HTTPConnectionPool(host='127.0.0.1', port=18332): Connection refused
+    #
+    # and BTC_RPC_PASS being present also meant the conf fallback never ran. That
+    # is the worst shape this gap has taken. The other five instances refused or
+    # failed loudly; this one pointed at a DIFFERENT DAEMON than the operator had
+    # configured, and on a testnet3 box that was actually running it would have
+    # found one and funded a contract there.
+    #
+    # Config.RPC comes second rather than first so an explicit {ASSET}_RPC_URL
+    # still wins -- it is the only route that can name a host this scheme cannot
+    # express, and somebody who set it meant it.
+    if os.environ.get(f"{asset}_RPC_URL"):
+        url = os.environ[f"{asset}_RPC_URL"]
+        user = os.environ.get(f"{asset}_RPC_USER", user_default)
+        password = os.environ.get(f"{asset}_RPC_PASS", "")
+        if password:
+            return CLIENTS[asset](url, user, password)
+
+    configured = Config.RPC.get(asset) or {}
+    if not missing_settings(Config.RPC, asset):
+        print(f"    {asset}: {asset}_RPC_HOST/_PORT/_USER/_PASS from the environment, the same "
+              f"source chain_balances.py and atomic_swap_xrp.py read", flush=True)
+        return CLIENTS[asset](rpc_url(configured), configured["user"], configured["password"])
+
+    # THE CONF, for the chains whose conf names one daemon. GRC is excluded -- its
+    # conf is shared with the operator's mainnet staking wallet -- so GRC stays
+    # explicit, which is the right asymmetry.
+    settings, line = conf_fallback_settings(asset)
+    if settings is not None:
+        print(f"    {line}", flush=True)
+        return CLIENTS[asset](rpc_url(settings), settings["user"], settings["password"])
+
+    # DEFAULT_RPC LAST, AND ANNOUNCED. It is kept rather than removed because for
+    # GRC it is right -- 25715 IS the operator's testnet port -- and a password
+    # alone was enough to run this file for weeks. What it must not be any more is
+    # SILENT: for BTC the default is 18332, which is testnet3, while the operator's
+    # BTC is regtest on 18443, so this route dialed a daemon nobody had configured
+    # and said nothing about having guessed. Five earlier instances of this gap
+    # refused or failed loudly; this one pointed somewhere else, which is worse.
     password = os.environ.get(f"{asset}_RPC_PASS", "")
-    if not password:
-        # THE CONF, for the chains whose conf can be trusted to name one daemon.
-        # This was the FOURTH entry point resolving a chain its own way on
-        # 2026-09-29: chain_balances.py grew the fallback, then
-        # atomic_swap_xrp.py's adapter, then its script client, and this file
-        # still demanded three exported variables for a daemon whose credentials
-        # are already written down in its own litecoin.conf. GRC is excluded from
-        # the fallback -- its conf is shared with the operator's mainnet staking
-        # wallet -- so GRC_RPC_PASS stays required, which is the right asymmetry.
-        settings, line = conf_fallback_settings(asset)
-        if settings is not None:
-            print(f"    {line}", flush=True)
-            return CLIENTS[asset](rpc_url(settings), settings["user"], settings["password"])
-        raise SwapError(
-            f"{asset}_RPC_PASS is not set and the conf did not supply one ({line}). This file "
-            f"will not guess a credential. Set {asset}_RPC_URL (default {url_default}), "
-            f"{asset}_RPC_USER and {asset}_RPC_PASS for the TESTNET daemon"
-        )
-    return CLIENTS[asset](url, user, password)
+    if password:
+        print(f"    {asset}: NO url and no configured host/port, so falling back to "
+              f"DEFAULT_RPC[{asset!r}] = {url_default}. THAT IS A GUESS at which test network you "
+              f"meant -- set {asset}_RPC_PORT if your daemon is elsewhere.", flush=True)
+        return CLIENTS[asset](url_default, os.environ.get(f"{asset}_RPC_USER", user_default),
+                              password)
+
+    raise SwapError(
+        f"{asset} could not be addressed by any route. {asset}_RPC_URL is unset, "
+        f"{why_unconfigured(asset, Config.RPC)}, the conf did not supply one ({line}), and "
+        f"{asset}_RPC_PASS is not set either -- so even the {url_default} default cannot be used. "
+        f"This file will not guess a credential"
+    )
 
 
 def chain_name(asset: str, client) -> str:

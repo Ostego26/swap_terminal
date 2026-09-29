@@ -246,13 +246,40 @@ def test_every_refusal_says_nothing_was_funded_and_means_it():
     )
 
 
-def test_client_for_refuses_an_unset_password_rather_than_guessing_one():
-    """It will not invent a credential, and the refusal names the three variables."""
-    saved = {k: os.environ.pop(k, None) for k in ("GRC_RPC_PASS", "LTC_RPC_PASS", "BTC_RPC_PASS")}
+def test_client_for_refuses_when_NO_ROUTE_addresses_the_chain_and_names_every_one():
+    """It will not invent a credential. It will still guess a PORT -- out loud.
+
+    FOUR ROUTES IN ORDER as of 2026-09-29: {ASSET}_RPC_URL, then Config.RPC's
+    host/port, then the chain's own conf, then DEFAULT_RPC's url with a password.
+
+    The last one used to be SECOND and silent, which was the defect. For GRC its
+    default is right -- 25715 IS the operator's testnet port, and a password alone
+    ran this file for weeks -- but for BTC it is 18332, TESTNET3, while the
+    operator's BTC is regtest on 18443. So with BTC_RPC_PASS set and no URL, this
+    file dialed a daemon nobody had configured and said nothing about guessing.
+    Five earlier instances of that gap refused or failed loudly; this one pointed
+    somewhere else, which is worse. It is demoted and announced rather than
+    removed, because removing it would break a usable default to fix a silent one.
+
+    A refusal therefore means NO route worked, including the default, and it names
+    all four.
+    """
+    keys = [f"{asset}_RPC_{suffix}" for asset in ASSETS
+            for suffix in ("PASS", "URL", "PORT", "USER", "HOST")]
+    saved = {key: os.environ.pop(key, None) for key in keys}
     try:
         for asset in ASSETS:
-            with pytest.raises(SwapError, match=f"{asset}_RPC_PASS is not set"):
+            with pytest.raises(SwapError) as raised:
                 client_for(asset)
+            message = str(raised.value)
+            assert f"{asset}_RPC_PASS is not set" in message, message
+            assert f"{asset}_RPC_URL is unset" in message, message
+            assert "conf did not supply one" in message, message
+            # ALL FOUR ROUTES, because "which of these did you mean to set" is the
+            # question an operator is holding. The DEFAULT_RPC url is named too --
+            # it is the last route and needs only a password, so a refusal that
+            # omitted it would be describing three of four.
+            assert "default cannot be used" in message, message
     finally:
         for key, value in saved.items():
             if value is not None:
