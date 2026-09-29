@@ -1440,8 +1440,9 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     condition = preimage_condition(secret)
     console.say(f"sha256(secret)={secret_hash.hex()}  <- the commitment, public on both chains")
     console.say(f"XRPL condition={condition}")
-    console.say("the secret itself is never printed. Gridcoin's script commits to the sha256 above through "
-                "OP_SHA256; the XRPL condition's fingerprint is the same 32 bytes. One preimage, both legs.")
+    console.say(f"the secret itself is never printed. The {chain} P2SH script this driver builds commits to the "
+                f"sha256 above through OP_SHA256; the XRPL condition's fingerprint is the same 32 bytes. One "
+                f"preimage, both legs.")
 
     console.step(4, "what each leg is worth, at the real rate")
     chain_amount, rate_source = resolve_chain_amount(console, args)
