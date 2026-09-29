@@ -613,30 +613,114 @@ def mine_to_shared_address(console: Console, daemon: int | str, address: str, bl
     return height
 
 
-def report_balance(console: Console, port: int, seconds: int) -> int:
-    """Step 4a. Refresh until the shared wallet SEES the coins, printing every pass."""
+def sync_state(port: int, daemon: int | str) -> tuple[int, int, str]:
+    """(wallet height, daemon tip, what those two mean together).
+
+    THE NUMBER THE WAIT LOOP WAS MISSING, measured on the operator's stagenet run 2026-09-29.
+    `report_balance` printed 28 passes of
+
+        refresh 24: balance=0 unlocked=0 (119.6s)
+
+    and every `Refresh done` beside it said `blocks received: 0`. That output cannot distinguish
+    the two states it might be in, and they need opposite actions:
+
+      SYNCED, NOTHING ARRIVED     the wallet is at the daemon's tip, so it would see a payment
+                                  if one existed. Waiting longer is right only if the faucet has
+                                  not paid yet.
+      NOT SYNCING                 the wallet is behind and not advancing. No amount of waiting
+                                  helps and the balance is meaningless -- the remote node is not
+                                  answering, or the wallet is not asking it.
+
+    They look IDENTICAL as `balance=0`, and the operator pressed Ctrl-C at 140s, which is exactly
+    what rule 14 predicts about output that cannot tell working from stuck.
+
+    THE TIP IS RE-READ EVERY PASS ON PURPOSE. A tip that ADVANCES proves the node connection is
+    live independently of anything the wallet does, so a wallet stuck at one height against a
+    climbing tip is unambiguous rather than a hypothesis.
+    """
+    wallet_height = int(rpc(port, "get_height").get("height", 0))
+    try:
+        tip = int(rpc(daemon, "get_info").get("height", 0))
+    except VerifyError:
+        # THE DAEMON NOT ANSWERING IS ITSELF THE ANSWER, and must not end the wait with a
+        # traceback -- the wallet may still be usable from its own cache, and saying "the tip
+        # could not be read" is more use than dying here.
+        return wallet_height, 0, "daemon tip UNREADABLE -- the remote node did not answer"
+    behind = tip - wallet_height
+    if behind <= 1:
+        return wallet_height, tip, "synced to the tip, so a payment WOULD be visible"
+    return wallet_height, tip, f"BEHIND BY {behind} block(s) -- still scanning, balance not yet meaningful"
+
+
+def pending_in_the_pool(port: int) -> str:
+    """Anything in the mempool for this wallet, which is the EARLIEST possible signal.
+
+    A faucet payment is visible here before it is in any block, so this separates "the faucet has
+    not sent" from "it sent and we are waiting for confirmations" -- and those are the two things
+    a bare `balance=0` leaves the operator guessing between.
+    """
+    try:
+        answer = rpc(port, "get_transfers", {"in": True, "pool": True})
+    except VerifyError as error:
+        return f"could not be read ({error})"
+    pool = answer.get("pool") or []
+    if not pool:
+        return "(none) -- nothing for this wallet in the mempool either"
+    return f"{len(pool)} unconfirmed transfer(s) in the pool: " + ", ".join(
+        f"{int(entry.get('amount', 0))} atomic units" for entry in pool)
+
+
+def report_balance(console: Console, port: int, daemon: int | str, seconds: int) -> int:
+    """Step 4a. Refresh until the shared wallet SEES the coins, printing every pass.
+
+    KeyboardInterrupt IS CAUGHT HERE and turned into a sentence. The operator pressed Ctrl-C at
+    140s on 2026-09-29 and got fourteen frames of traceback ending in `time.sleep(5.0)`, which
+    tells them nothing about what was being waited for or how to resume. Rule 14's whole point is
+    that an operator who cannot tell working from hung presses Ctrl-C -- so the least this can do
+    is answer the question on the way out.
+    """
     started = time.monotonic()
     attempt = 0
-    while time.monotonic() - started < seconds:
-        attempt += 1
-        rpc(port, "refresh")
-        balance = rpc(port, "get_balance", {"account_index": 0})
-        total = int(balance.get("balance", 0))
-        unlocked = int(balance.get("unlocked_balance", 0))
-        console.say(f"refresh {attempt}: balance={total} unlocked={unlocked} "
-                    f"({time.monotonic() - started:.1f}s)")
-        if unlocked:
-            console.check("unlocked balance in the SHARED wallet", unlocked, "greater than 0", True)
-            return unlocked
-        if total:
-            console.say("arrived but still locked -- Monero locks an output for 10 blocks")
-        time.sleep(5.0)
+    console.say(f"waiting up to {seconds}s for coins to appear AND unlock, refreshing every 5s")
+    console.say(f"pool right now: {pending_in_the_pool(port)}")
+    try:
+        while time.monotonic() - started < seconds:
+            attempt += 1
+            rpc(port, "refresh")
+            balance = rpc(port, "get_balance", {"account_index": 0})
+            total = int(balance.get("balance", 0))
+            unlocked = int(balance.get("unlocked_balance", 0))
+            wallet_height, tip, meaning = sync_state(port, daemon)
+            console.say(f"refresh {attempt}: balance={total} unlocked={unlocked} "
+                        f"wallet_height={wallet_height} daemon_tip={tip} -- {meaning} "
+                        f"({time.monotonic() - started:.1f}s)")
+            if unlocked:
+                console.check("unlocked balance in the SHARED wallet", unlocked, "greater than 0", True)
+                return unlocked
+            if total:
+                console.say("arrived but still locked -- Monero locks an output for 10 blocks")
+            time.sleep(5.0)
+    except KeyboardInterrupt:
+        wallet_height, tip, meaning = sync_state(port, daemon)
+        raise VerifyError(
+            f"interrupted after {time.monotonic() - started:.1f}s of waiting. Nothing was sent, "
+            f"signed or lost -- this loop only READS.\n"
+            f"          wallet_height={wallet_height} daemon_tip={tip} -- {meaning}\n"
+            f"          pool: {pending_in_the_pool(port)}\n"
+            f"          The shared wallet still exists in the wallet-rpc's --wallet-dir and the "
+            f"shares file is unchanged, so re-running the same --sweep command resumes from here."
+        ) from None
     balance = rpc(port, "get_balance", {"account_index": 0})
+    wallet_height, tip, meaning = sync_state(port, daemon)
     raise VerifyError(
         f"nothing UNLOCKED in the shared wallet after {seconds}s. balance="
         f"{balance.get('balance', 0)} unlocked={balance.get('unlocked_balance', 0)} atomic "
-        f"units. If balance is 0 the coins were never sent to the shared address; if it is "
-        f"non-zero they are still within the 10-block lock"
+        f"units.\n"
+        f"          wallet_height={wallet_height} daemon_tip={tip} -- {meaning}\n"
+        f"          pool: {pending_in_the_pool(port)}\n"
+        f"          A balance of 0 while SYNCED means the coins were never sent to the shared "
+        f"address. A balance of 0 while BEHIND means this wallet has not reached the block that "
+        f"holds them yet, and the two need opposite actions -- fund it, or fix the node."
     )
 
 
@@ -850,7 +934,7 @@ def sweep_phase(console: Console, target: Target, destination: str, wait: int) -
         )
 
     console.step(3, "refresh the shared wallet until the coins UNLOCK")
-    report_balance(console, target.wallet_port, wait)
+    report_balance(console, target.wallet_port, target.daemon, wait)
 
     console.step(4, "spend it all out with the SUMMED key")
     sweep_out(console, target.wallet_port, destination)

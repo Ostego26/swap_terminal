@@ -39,6 +39,7 @@ from chains.monero_keys import decode_address  # noqa: E402  both shims above fi
 from modules.ed25519_group import GROUP_ORDER  # noqa: E402  same
 from step_console import Console  # noqa: E402  same
 
+import monero_shared_key_verify as harness  # noqa: E402  same
 from monero_shared_key_verify import (  # noqa: E402  same
     DEFAULT_DAEMON_PORT,
     DEFAULT_WALLET_PORT,
@@ -57,6 +58,7 @@ from monero_shared_key_verify import (  # noqa: E402  same
     save_shares,
     shared_wallet_name,
     sweep_command,
+    sync_state,
     wait_for_wallet,
 )
 
@@ -664,3 +666,93 @@ def test_BOTH_BRANCHES_PRINT_THE_SAME_COMMAND_FROM_THE_SAME_FUNCTION():
     body = source[source.index("def run_phase"):]
     assert body.count("sweep_command(") == 2, "both branches call it"
     assert "--sweep {address} " not in body, "and neither still builds its own"
+
+
+def test_SYNCED_AND_EMPTY_READS_DIFFERENTLY_FROM_STILL_SCANNING(monkeypatch):
+    """The two states a bare `balance=0` cannot tell apart, measured 2026-09-29.
+
+    The wait loop printed 28 passes of `refresh 24: balance=0 unlocked=0 (119.6s)` with every
+    `Refresh done` beside it saying `blocks received: 0`, and the operator pressed Ctrl-C at
+    140s. That output is identical in two situations that need OPPOSITE actions:
+
+      SYNCED, NOTHING ARRIVED   the wallet is at the tip, so it WOULD see a payment. Waiting is
+                                right only while the faucet has not paid.
+      NOT SYNCING               the wallet is behind and not advancing. Waiting cannot help and
+                                the balance means nothing -- the node is not answering, or the
+                                wallet is not asking.
+
+    Rule 14 says an operator who cannot tell working from hung presses Ctrl-C, and that is
+    precisely what happened, so this is not a cosmetic complaint about a log line.
+    """
+    def fake(target, method, params=None, timeout=None):
+        if method == "get_height":
+            return {"height": heights["wallet"]}
+        if method == "get_info":
+            return {"height": heights["tip"]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(harness, "rpc", fake)
+
+    heights = {"wallet": 2217975, "tip": 2217975}
+    wallet, tip, meaning = sync_state(38084, "node:38089")
+    assert (wallet, tip) == (2217975, 2217975)
+    assert "synced" in meaning and "WOULD be visible" in meaning
+
+    # ONE BLOCK BEHIND IS STILL SYNCED. The wallet is created at tip-1 by design, and a tip that
+    # advances between the two calls in this function would otherwise read as "scanning".
+    heights = {"wallet": 2217975, "tip": 2217976}
+    assert "synced" in sync_state(38084, "node:38089")[2]
+
+    heights = {"wallet": 2217000, "tip": 2217975}
+    wallet, tip, meaning = sync_state(38084, "node:38089")
+    assert "BEHIND BY 975" in meaning and "not yet meaningful" in meaning
+    assert "synced" not in meaning, "the two must not share a sentence -- that was the defect"
+
+
+def test_AN_UNREADABLE_DAEMON_TIP_IS_A_RESULT_NOT_A_TRACEBACK(monkeypatch):
+    """The wallet may still answer from its own cache, so dying here helps nobody.
+
+    "The tip could not be read" is a statement an operator can act on -- it points at the remote
+    node -- where a traceback out of a wait loop points at nothing (rule 14).
+    """
+    def fake(target, method, params=None, timeout=None):
+        if method == "get_height":
+            return {"height": 2217975}
+        raise harness.VerifyError("get_info on node:38089: connection refused")
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    wallet, tip, meaning = sync_state(38084, "node:38089")
+    assert wallet == 2217975 and tip == 0
+    assert "UNREADABLE" in meaning and "did not answer" in meaning
+
+
+def test_CTRL_C_IN_THE_WAIT_LOOP_SAYS_WHAT_IT_WAS_WAITING_FOR(monkeypatch):
+    """Fourteen frames of traceback ending in `time.sleep(5.0)`, 2026-09-29.
+
+    It told the operator nothing about what was being waited for, whether anything had been
+    risked, or how to resume. All three are answerable, and the loop only READS -- which is the
+    first thing worth saying to someone who just interrupted a money-adjacent script.
+    """
+    def fake(target, method, params=None, timeout=None):
+        if method == "get_height":
+            return {"height": 2217975}
+        if method == "get_info":
+            return {"height": 2217975}
+        if method == "get_balance":
+            return {"balance": 0, "unlocked_balance": 0}
+        if method == "get_transfers":
+            return {}
+        if method == "refresh":
+            raise KeyboardInterrupt
+        raise AssertionError(method)
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
+    console = Console()
+    with pytest.raises(harness.VerifyError) as caught:
+        harness.report_balance(console, 38084, "node:38089", 60)
+    said = str(caught.value)
+    assert "interrupted after" in said
+    assert "only READS" in said, "the first thing to say to someone who just hit Ctrl-C"
+    assert "wallet_height=2217975" in said and "daemon_tip=2217975" in said
+    assert "resumes from here" in said, "and how to pick it back up"
