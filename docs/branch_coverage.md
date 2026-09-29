@@ -63,7 +63,8 @@ v5.5.1.0. Full record: `docs/gridcoin_adaptor_join_2026_09_28.md`.
 | refund after expiry, BTC/LTC | SPENT | `step_9_refund_after_expiry`, real `refund_contract()` |
 | hashlock spend, GRC | SPENT | three live swaps, `docs/atomic_swap_runs_2026_09_27.md` |
 | **refund after expiry, GRC** | **NONE** | `--chain` offers `btc`, `ltc`, `both`. **Gridcoin is not an option and never has been.** See §5 |
-| CLTV executes on GRC | **SPENT 2026-09-28** | `9495082ef304c4ca…` spends the P2SH `8468aa40f9:0` with nLockTime 3296363 and sequence 0xfffffffe, paying 0.13 GRC to the wallet. The REFUSAL side (steps 5 and 6) is still untested |
+| CLTV executes on GRC | **ENFORCED 2026-09-29** | `grc_htlc_verify.py` OK=11 FAIL=0. Step 6 REFUSED a FINAL refund (nLockTime 3296544 = tip, so `IsFinalTx` passed) against a script locktime of 3296548; step 8 ACCEPTED the same outpoint, same script, same fee, with nLockTime 3296548. One field differs and only CLTV reads it. See §5b |
+| CLTV allows a refund AT the locktime, GRC | SPENT 2026-09-28 | `9495082ef304c4ca…` spends the P2SH `8468aa40f9:0` with nLockTime 3296363 and sequence 0xfffffffe, paying 0.13 GRC to the wallet. Re-established 2026-09-29 by step 8, `ee9dc216bf055b22…`, through the real `refund_contract()` |
 | ~~CLTV executes on GRC~~ (the old grade) | ~~NONE~~ | the three GRC swaps took the HASHLOCK branch; `OP_CHECKLOCKTIMEVERIFY` sits in the `OP_ELSE` and never ran. What is established is that Gridcoin ACCEPTS a script CONTAINING it |
 
 ## 3. XRP escrow -- `xrp_htlc_escrow.py --run`
@@ -115,7 +116,11 @@ transactions the protocol specifies have now moved a coin on Gridcoin. Kept stru
 rather than deleted, because what it says about the other four gaps is that they are the same
 kind of work and equally closable.
 
-**b. The HTLC refund branch has never run on Gridcoin, and `--chain` cannot ask for it.** Three
+**b. ~~The HTLC refund branch has never run on Gridcoin, and `--chain` cannot ask for it.~~
+DONE 2026-09-29** -- both directions: it SPENDS at the locktime and it is REFUSED before it.
+The paragraphs below are kept in the order they were written, because the two halves closed
+five days apart and reading them in sequence is what shows why the first one was not enough.
+Three
 GRC swaps completed, all through the hashlock. The refund branch of a GRC HTLC -- the one an
 operator needs when a counterparty vanishes -- has never been executed, and the harness that
 would do it does not offer the chain. `OP_CHECKLOCKTIMEVERIFY` has never executed on Gridcoin
@@ -153,7 +158,46 @@ that is evidence about Gridcoin. This gap closes when the operator runs
     export ST_ADAPTOR_FUNDING_SEED='...'
     python3 grc_htlc_verify.py
 
-and the line `6 CLTV REFUSES A FINAL REFUND BEFORE THE LOCKTIME` reads OK. `--chain grc` is
+and the line `6 CLTV REFUSES A FINAL REFUND BEFORE THE LOCKTIME` reads OK.
+
+**2026-09-29: IT READ OK. THE GAP IS CLOSED.** `OK=11 FAIL=0 SKIP=0`, on Gridcoin testnet at
+tip 3296544, and the three steps that matter are these:
+
+| step | nLockTime | tip | script locktime | result |
+|---|---|---|---|---|
+| 5 control | 3296548 | 3296544 | 3296548 | REFUSED -- non-final, before any script ran |
+| **6 THE MEASUREMENT** | **3296544** | **3296544** | **3296548** | **REFUSED** |
+| 8 control | 3296548 | 3296548 | 3296548 | ACCEPTED, `ee9dc216bf055b22…` |
+
+All three spend the SAME outpoint, `a82a91327cde9642:0`, under the SAME 94-byte redeem script.
+
+WHY STEP 6 ISOLATES THE OPCODE, spelled out because Gridcoin returns the same `-22 TX rejected`
+for every refusal and an identical error string is exactly where an overclaim hides. `IsFinalTx`
+compares nLockTime against `nBestHeight + 1`:
+
+  - step 5: 3296548 < 3296545 is FALSE, so it falls through to the sequence check, and our
+    inputs carry 0xfffffffe. NON-FINAL. The mempool refuses it before loading the script, which
+    is why this step is labeled a control and proves nothing about CLTV.
+  - step 6: 3296544 < 3296545 is TRUE. FINAL. The finality check PASSES, so the refusal came
+    from somewhere after it.
+
+And the remaining candidates are excluded by step 8 rather than by argument: same outpoint, same
+redeem script, same 293 bytes, same fee, same signer. The ONLY field that differs between the
+refused step 6 and the accepted step 8 is nLockTime -- 3296544 against 3296548 -- and the only
+rule in the system that reads that field after finality is
+`<3296548> OP_CHECKLOCKTIMEVERIFY`. It refused 3296544 and accepted 3296548.
+
+So: **OP_CHECKLOCKTIMEVERIFY executes and ENFORCES on Gridcoin.** It is not a no-op, and an
+HTLC this tree funds there is NOT refundable by its funder before the locktime. That was the
+open question, and it is the one that decides whether a GRC leg can be trusted in a swap at all.
+
+WHAT IT STILL DOES NOT ESTABLISH. The locktime used was tip+6, a test value; the production
+`contract_locktime("GRC", ROLE_INITIATOR, tip)` is tip+1920, and the run says so itself. CLTV
+does the same comparison with either number -- the opcode has no knowledge of how far away the
+height is -- but the sentence "the production value was exercised" would be false and is not
+made here. And the refusal REASON was deduced from IsFinalTx plus step 8's controls, not read
+out of the daemon: Gridcoin returned `-22 TX rejected` for both refusals and logged the detail
+only to debug.log, which was not captured for this run. `--chain grc` is
 still not offered by `regtest_htlc_verify.py`, and deliberately so: that harness MINES to the
 locktime, and `contract_locktime("GRC", ROLE_INITIATOR, tip)` is tip+1920, which is 48 hours at
 Gridcoin's 90s target on a chain with no `generateblock`. The separate file is the answer to
