@@ -91,11 +91,20 @@ PAPRIKA_IDS = {
     "LTC": "ltc-litecoin",
     "GRC": "grc-gridcoin",
     "XRP": "xrp-xrp",
-    # UNCONFIRMED. The pattern says sol-solana and nothing has asked for it, so
-    # it is written down rather than left out -- but it has NOT returned a 200
-    # here, unlike the four above, and a caller that needs SOL should expect the
-    # 404 that grc-gridcoinresearch produced (rule 17).
-    "SOL": "sol-solana",
+    # UNCONFIRMED, ALL THREE. The pattern says these, and none has returned a 200
+    # from anywhere -- unlike the four above, each of which was measured
+    # 2026-09-29. `grc-gridcoinresearch` is the standing reminder that the obvious
+    # spelling 404s, so a caller that needs one of these should expect it to and
+    # should look the id up with /v1/search/?q=<name>&c=currencies (rule 17).
+    #
+    # USDC and USDT are here for services/wallet_leveling.peg_findings(), which
+    # checks the dollar this terminal quotes in against the two stablecoins that
+    # actually define it. That check DEGRADES rather than fails when an id is
+    # wrong: an unpriced stablecoin produces a finding saying the peg is
+    # unchecked, never silence.
+    "SOL": "sol-solana",  # UNCONFIRMED
+    "USDC": "usdc-usd-coin",  # UNCONFIRMED
+    "USDT": "usdt-tether",  # UNCONFIRMED
 }
 
 # The request timeout. Seconds, because that is what requests takes -- rule 6's

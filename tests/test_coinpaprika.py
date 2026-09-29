@@ -70,6 +70,12 @@ LTC_TICKER = {
 # 459382131 * 0.016687182941158063, to the dollar.
 GRC_DERIVED_CAP = 7665794
 
+#: Which ids returned a 200 from the operator's host on 2026-09-29, and which were
+#: written from CoinPaprika's naming pattern and never fetched. Two sets rather than
+#: one list, because the whole point is that they are different KINDS of claim.
+MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP"})
+UNCONFIRMED = frozenset({"SOL", "USDC", "USDT"})
+
 
 def test_GRCs_market_cap_is_DERIVED_because_the_feed_reports_zero():
     """The measurement that makes GRC's thinness visible at all.
@@ -174,21 +180,45 @@ def test_an_unknown_asset_says_ids_are_NOT_GUESSABLE_and_how_to_look_one_up():
     assert "NOT guessable" in str(raised.value) and "/v1/search/" in str(raised.value)
 
 
-def test_SOLs_id_is_marked_UNCONFIRMED_rather_than_presented_as_measured():
+def test_EVERY_UNMEASURED_ID_is_marked_UNCONFIRMED_where_it_is_declared():
     """Rule 17, held as a test rather than as an intention.
 
-    Four ids returned 200 from the operator's host. SOL's did not -- nothing
-    asked for it -- so it is written down and labeled, not quietly listed beside
-    the four that were checked.
+    Four ids returned 200 from the operator's host on 2026-09-29: btc-bitcoin,
+    ltc-litecoin, grc-gridcoin and xrp-xrp. The rest are written from CoinPaprika's
+    naming pattern and have never been fetched, so each must carry the marker
+    where it is DECLARED -- not somewhere else in the file that a reader of the
+    table would not see.
+
+    THE FIRST VERSION OF THIS TEST SLICED 600 CHARACTERS BEFORE THE ID and looked
+    for the word in that window. It passed until the comment above the ids grew
+    past 600 characters, at which point it failed on a file that was correct. A
+    check with a magic distance in it measures the distance. This walks upward
+    from the declaration through its own contiguous comment block instead, which
+    is the thing a reader actually reads.
     """
     source = (pathlib.Path(__file__).resolve().parent.parent
               / "swap_terminal" / "services" / "coinpaprika.py").read_text()
-    marker = source[source.index('"SOL"') - 600:source.index('"SOL"')]
-    assert "UNCONFIRMED" in marker, (
-        "SOL's CoinPaprika id sits beside four that were confirmed by a 200 and carries no note "
-        "saying it was not. A reader cannot tell a measured id from a guessed one"
+    lines = source.splitlines()
+    for asset in UNCONFIRMED:
+        declared = next((number for number, line in enumerate(lines)
+                         if line.strip().startswith(f'"{asset}":')), None)
+        assert declared is not None, f"{asset} is not declared in PAPRIKA_IDS at all"
+        # THE DECLARATION LINE ITSELF, or the contiguous comment block above it.
+        # Either is what a reader scanning the table sees; requiring the block
+        # alone failed on the two ids that sit under another id's comment.
+        block, cursor = [lines[declared]], declared - 1
+        while cursor >= 0 and lines[cursor].strip().startswith("#"):
+            block.append(lines[cursor])
+            cursor -= 1
+        assert any("UNCONFIRMED" in line for line in block), (
+            f"{asset}'s id sits with no UNCONFIRMED marker in the comment block above it, beside "
+            f"{len(MEASURED)} ids that were confirmed by a 200. A reader of that table cannot tell "
+            f"a measured id from a guessed one"
+        )
+    assert set(PAPRIKA_IDS) == MEASURED | UNCONFIRMED, (
+        f"PAPRIKA_IDS covers {sorted(PAPRIKA_IDS)}; this test knows {sorted(MEASURED | UNCONFIRMED)}. "
+        f"A new id is either measured -- say so and move it -- or unconfirmed and needs the marker"
     )
-    assert set(PAPRIKA_IDS) >= {"BTC", "LTC", "GRC", "XRP"}
 
 
 def test_an_UNMEASURABLE_turnover_is_None_and_not_zero():

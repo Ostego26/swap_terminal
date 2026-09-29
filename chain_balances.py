@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -53,6 +54,14 @@ from chains.registry import build_adapters, why_unconfigured
 from chains.wallet_lock import encryption_state
 from config import Config
 from regtest.daemons import CHAIN_DEFAULTS
+from services.wallet_leveling import (
+    DEFAULT_TARGET_USD,
+    PEG_ASSETS,
+    WalletValue,
+    even_target,
+    moves_to,
+    peg_findings,
+)
 from step_console import Console
 
 # Every chain this can report, in the order it reports them. Derived from the
@@ -184,8 +193,13 @@ def which_wallets_are_on_disk(adapter, chain: str) -> str:
             f"{prefix}loadwallet {names[0]} loads the first.")
 
 
-def report_chain(console: Console, chain: str, adapters: dict) -> bool:
-    """One chain's holdings. True if the daemon answered and was safe to ask."""
+def report_chain(console: Console, chain: str, adapters: dict) -> Decimal | None:
+    """One chain's holdings, and its spendable amount. None if it could not be read.
+
+    RETURNS THE AMOUNT RATHER THAN A BOOLEAN since 2026-09-29, because the
+    leveling step needs the number and re-reading it would be a second call
+    against the same daemon for a figure this function already has.
+    """
     adapter = adapters.get(chain) or adapter_from_conf(console, chain)
     if adapter is None:
         routes = f"{chain}_RPC_* in the environment"
@@ -193,7 +207,7 @@ def report_chain(console: Console, chain: str, adapters: dict) -> bool:
             routes += ", or an rpcuser/rpcpassword/rpcport in this chain's own conf"
         console.check(f"{chain} configured", "no", routes, False)
         console.say(f"    {why_unconfigured(chain, Config.RPC)}")
-        return False
+        return None
 
     # THE NETWORK, BEFORE THE MONEY. See this module's header: on Gridcoin a
     # mainnet wallet is the operator's live staking wallet and reading it is
@@ -205,7 +219,7 @@ def report_chain(console: Console, chain: str, adapters: dict) -> bool:
         console.say("    REFUSED to ask this daemon about a balance. Nothing was read from its "
                     "wallet. An 'unknown (...)' answer above names which RPC would not say.")
         console.say(f"    {what_to_do_about_it(chain, network)}")
-        return False
+        return None
     console.check(f"{chain} network", network, f"one of {sorted(safe)}", True)
 
     height = "unreadable"
@@ -222,7 +236,7 @@ def report_chain(console: Console, chain: str, adapters: dict) -> bool:
         console.check(f"{chain} balance", f"{type(error).__name__}: {error}", "getbalance", False)
         if NO_WALLET_LOADED in str(error):
             console.say(f"    {which_wallets_are_on_disk(adapter, chain)}")
-        return False
+        return None
 
     # BOTH HALVES OF THE BALANCE. `getbalance` reports only what is SPENDABLE, so
     # a wallet whose coins are freshly mined or freshly received reads lower than
@@ -254,18 +268,94 @@ def report_chain(console: Console, chain: str, adapters: dict) -> bool:
     needs_passphrase, why = encryption_state(adapter)
     console.say(f"    wallet    {'ENCRYPTED -- a payout needs a passphrase' if needs_passphrase else 'not encrypted'}"
                 f" ({why})")
-    return console.check(f"{chain} balance", f"{spendable:.8f} spendable", "read", True)
+    console.check(f"{chain} balance", f"{spendable:.8f} spendable", "read", True)
+    return Decimal(str(spendable))
+
+
+def say_what_levels_them(console: Console, held: dict, target: str, *, even: bool) -> None:
+    """Price every wallet, check the dollar, and print the moves. Nothing is sent.
+
+    THE VALUES ARE NOTIONAL AND THAT IS SAID FIRST, not in a footnote. A regtest
+    wallet holding 13,879 BTC is worth $1.16 billion at a mainnet price and
+    nothing at all in fact -- the coins are on a private chain nobody else has.
+    The arithmetic is still useful, for exactly one thing: rehearsing the sizing
+    of a real book before there is one. A report that prints these figures
+    without saying which they are is lying to its reader.
+
+    THE DOLLAR IS CHECKED, NOT ASSUMED. No feed publishes a dollar; it publishes
+    what the market pays in USDT or USDC and calls it USD. Both have broken their
+    peg -- USDC near $0.88 in 2023, USDT near $0.95 in 2022 -- and when the
+    yardstick moves every figure below moves with it. peg_findings() says where
+    the two stand, and nothing here REFUSES on a broken peg: that would be a
+    posture decision and the operator's (rule 16).
+    """
+    from services.coinpaprika import (  # noqa: PLC0415 -- checked: a price source imported at module scope makes --help reach for `requests`, the same reason atomic_swap_xrp.py defers its two.
+        PaprikaError,
+        fetch_quote,
+    )
+
+    console.say("EVERY FIGURE BELOW IS NOTIONAL. These are TEST-NETWORK coins priced at MAINNET "
+                "rates: they are worth nothing, and the numbers are a rehearsal of sizing a real "
+                "book rather than a statement about money you have.")
+
+    prices, unpriced = {}, {}
+    for asset in sorted(set(held) | set(PEG_ASSETS)):
+        try:
+            prices[asset] = Decimal(str(fetch_quote(asset).price_usd))
+        except PaprikaError as error:
+            unpriced[asset] = str(error)
+
+    suspect, findings = peg_findings(prices)
+    console.say(f"THE DOLLAR THIS USES, checked against {' and '.join(PEG_ASSETS)}:")
+    for finding in findings:
+        console.say(f"    {finding}")
+    console.check("the dollar is a usable yardstick", "suspect" if suspect else "yes",
+                  "both stablecoins priced and within tolerance", not suspect)
+
+    values = [WalletValue(chain=chain, units=amount, price_usd=prices[chain])
+              for chain, amount in sorted(held.items()) if chain in prices]
+    for chain, reason in sorted(unpriced.items()):
+        if chain in held:
+            # Rule 14: a wallet left out of the table must say so IN the table's
+            # place, or a reader counts the rows and concludes it has three chains.
+            console.say(f"    {chain}: HELD BUT NOT PRICED, so it is absent from the moves below "
+                        f"({reason})")
+    if not values:
+        console.say("    (none) -- no wallet could be both read and priced, so there is nothing to level")
+        return
+
+    aim = even_target(values) if even else Decimal(target)
+    console.say(f"target {aim:.2f} USD per wallet"
+                + ("  <- the AVERAGE of what is already held, reachable by moving value between them"
+                   if even else "  <- a fixed figure; reaching it means acquiring, not just moving"))
+    for move in moves_to(values, aim):
+        console.say(f"    {move.chain:<4} holds {move.have_usd:>14,.2f} USD "
+                    f"({move.price_usd} each) -> {move.direction} "
+                    f"{abs(move.delta_usd):,.2f} USD = {abs(move.delta_units):,.8f} {move.chain}")
+    total = sum((value.value_usd for value in values), Decimal(0))
+    console.say(f"    total {total:,.2f} USD across {len(values)} wallet(s); leveling to {aim:.2f} each "
+                f"needs {aim * len(values) - total:+,.2f} USD of net change")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--level", action="store_true",
+                        help="also price every wallet in USD and say what it would take to bring each "
+                             "to --target. Read-only: it prints moves, it does not make them.")
+    parser.add_argument("--target", type=str, default=str(DEFAULT_TARGET_USD),
+                        help=f"the USD figure each wallet should reach (default {DEFAULT_TARGET_USD}). "
+                             f"Ignored without --level.")
+    parser.add_argument("--even", action="store_true",
+                        help="level to the AVERAGE of what the wallets already hold instead of --target. "
+                             "That target is reachable by moving value between them and needs no new "
+                             "funding; --target says what to acquire.")
     parser.add_argument("--chain", action="append", default=[],
                         choices=[chain.lower() for chain in CHAINS],
                         help="report only this chain. Repeatable. Default: all of them.")
     args = parser.parse_args()
 
-    console = Console(total_steps=1)
+    console = Console(total_steps=2 if args.level else 1)
     console.banner("CHAIN BALANCES -- read-only. No wallet is unlocked and nothing is signed.")
     wanted = [chain.upper() for chain in args.chain] or list(CHAINS)
     console.say(f"chains={', '.join(wanted)}  (each daemon's network is checked BEFORE its wallet "
@@ -277,15 +367,21 @@ def main() -> int:
     # defaulting to the mainnet port. See chains/registry.py's header for the
     # 2026-09-26 incident that made every entry conditional.
     adapters = build_adapters(Config.RPC)
-    answered = 0
+    held: dict[str, Decimal] = {}
     for chain in wanted:
-        answered += 1 if report_chain(console, chain, adapters) else 0
+        spendable = report_chain(console, chain, adapters)
+        if spendable is not None:
+            held[chain] = spendable
+    answered = len(held)
     if not answered:
         console.say("(none) -- not one of those chains answered. INCONCLUSIVE rather than a pass: "
                     "nothing here says your wallets are empty, only that none was read.")
         console.summary()
         return NOTHING_TO_LOOK_AT
     console.say(f"{answered} of {len(wanted)} chain(s) reported")
+    if args.level:
+        console.step(2, "what each wallet is worth, and what levels it")
+        say_what_levels_them(console, held, args.target, even=args.even)
     return console.summary()
 
 

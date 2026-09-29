@@ -128,9 +128,9 @@ def test_a_MAINNET_daemon_is_never_asked_about_a_balance_at_all():
     """
     adapter = _Adapter({**TESTNET_DAEMON, "getblockchaininfo": {"chain": "main"}})
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
+    spendable = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
 
-    assert ok is False, "a mainnet daemon must not count as a chain that reported"
+    assert spendable is None, "a mainnet daemon must not count as a chain that reported"
     assert not WALLET_METHODS.intersection(adapter.asked), (
         f"a mainnet daemon was asked {adapter.asked}. Nothing in that list may touch the wallet -- "
         f"the network has to be established from getblockchaininfo alone, before any balance call"
@@ -142,9 +142,9 @@ def test_an_UNREADABLE_network_is_refused_rather_than_assumed_to_be_testnet():
     """Fail closed. chain_network() returns "unknown (...)" and that is not in any allowlist."""
     adapter = _Adapter({"getbalance": 1.0})  # neither getblockchaininfo nor getinfo answers
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "BTC", {"BTC": adapter})
+    spendable = chain_balances.report_chain(recorder, "BTC", {"BTC": adapter})
 
-    assert ok is False
+    assert spendable is None
     assert not WALLET_METHODS.intersection(adapter.asked), (
         f"a daemon that would not say which network it is on was asked {adapter.asked}"
     )
@@ -163,10 +163,10 @@ def test_a_test_network_daemon_reports_BOTH_halves_of_the_balance():
     """
     adapter = _Adapter(TESTNET_DAEMON)
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 
-    assert ok is True, out
+    assert spendable is not None, out
     assert "49.87654321" in out, out
     assert "immature" in out and "5000.00000000" in out, out
     assert "pending" in out and "0.50000000" in out, out
@@ -186,10 +186,10 @@ def test_an_older_daemon_with_no_getbalances_says_so_instead_of_printing_zero():
     adapter = _Adapter({"getblockchaininfo": {"chain": "testnet"}, "getblockcount": 3296544,
                         "getbalance": 3862.76944485, "getwalletinfo": {"unlocked_until": 0}})
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
+    spendable = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
     out = recorder.text()
 
-    assert ok is True, out
+    assert spendable is not None, out
     assert "3862.76944485" in out, out
     assert "not reported" in out, f"an absent getbalances must say so, not print 0:\n{out}"
     assert "immature  0.00000000" not in out, (
@@ -203,8 +203,8 @@ def test_an_older_daemon_with_no_getbalances_says_so_instead_of_printing_zero():
 def test_an_unconfigured_chain_names_the_variable_that_is_missing():
     """Rule 14: "no adapter" is useless; which environment variable is actionable."""
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "BTC", {})
-    assert ok is False
+    spendable = chain_balances.report_chain(recorder, "BTC", {})
+    assert spendable is None
     assert "BTC_RPC_PORT" in recorder.text(), recorder.text()
 
 
@@ -300,11 +300,11 @@ def test_the_ENVIRONMENT_wins_over_the_conf_so_an_explicit_setting_is_never_over
     original = chain_balances.adapter_from_conf
     try:
         chain_balances.adapter_from_conf = _must_not_be_called
-        ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+        spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     finally:
         chain_balances.adapter_from_conf = original
 
-    assert ok is True, recorder.text()
+    assert spendable is not None, recorder.text()
     assert adapter.asked, "the configured adapter was not the one consulted"
 
 
@@ -345,7 +345,7 @@ def test_a_chain_with_neither_route_names_BOTH_of_them():
     variables they may not need.
     """
     recorder = _Recorder()
-    assert chain_balances.report_chain(recorder, "LTC", {}) is False
+    assert chain_balances.report_chain(recorder, "LTC", {}) is None
     out = recorder.text()
     assert "LTC_RPC_*" in out, out
     assert "conf" in out, f"the conf route was tried and is not mentioned:\n{out}"
@@ -382,10 +382,10 @@ def test_a_daemon_that_is_NOT_RUNNING_gets_the_command_that_starts_it():
     """
     adapter = _Unreachable()
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 
-    assert ok is False
+    assert spendable is None
     assert not WALLET_METHODS.intersection(adapter.asked), (
         f"a daemon that is not answering was still asked {adapter.asked}"
     )
@@ -472,10 +472,10 @@ def test_a_daemon_with_no_wallet_loaded_NAMES_the_wallets_it_could_load():
     """
     adapter = _NoWalletLoaded(["regtest_htlc_harness", "other"])
     recorder = _Recorder()
-    ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 
-    assert ok is False
+    assert spendable is None
     assert "2 wallet(s) on disk" in out, out
     assert "regtest_htlc_harness" in out, out
     assert "loadwallet" in out and "litecoin-cli" in out, (
