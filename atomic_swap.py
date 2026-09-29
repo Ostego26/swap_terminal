@@ -108,6 +108,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.daemon_conf import conf_fallback_settings, rpc_url
 from chains.registry import missing_settings, why_unconfigured
+from chains.wallet_hint import which_wallets_are_on_disk
 from config import Config
 from microfortnights import format_duration
 from modules.atomic_btc_client import BTCClient
@@ -131,6 +132,13 @@ from modules.htlc_timelock import (
 )
 from regtest.keys import generate_key
 from step_console import Console
+
+# THE DAEMON'S OWN CODE for "no wallet", matched as a string because these clients
+# wrap every RPC error in a bare Exception and the numeric code is not reachable as
+# an attribute. chain_balances.py matches the getbalance phrasing ("No wallet is
+# loaded"); the wallet-scoped URL these clients build produces "Requested wallet
+# does not exist or is not loaded" instead, so the CODE is what both have in common.
+NO_WALLET_LOADED_CODE = "-18"
 
 # The assets whose legs this file can build: the three with a P2SH HTLC and a client
 # exposing create, redeem AND refund. XRP is absent for a PROTOCOL reason rather than
@@ -691,6 +699,58 @@ def read_contract(step: Step, asset: str, contract: dict) -> dict:
     }
 
 
+def fund_one_leg_or_refuse(console: Console, leg, planned: PlannedLeg, secret_hash: str,  # noqa: PLR0913 -- checked: these six are the leg, its plan, the commitment, the client table and WHAT IS ALREADY FUNDED. None is derivable from another. PLR0917 does not fire because the last two are keyword-only, which is deliberate rather than incidental: `already_funded` decides between "nothing is at risk" and "a contract is live on a chain", and a caller that could pass it positionally could pass it by accident in the wrong slot.
+                           *, clients: dict, already_funded):
+    """Fund one leg, or report what is at risk and raise SwapError.
+
+    RAISES RATHER THAN RETURNING None, and that is rule 12 rather than taste: a
+    None would need a check in main(), which was already at the return ceiling, and
+    rule 12 is explicit that the fix for a function past a ceiling is to move the
+    work out rather than to raise the ceiling or suppress the count. This file
+    already has exactly one refusal path -- `except SwapError` in main() -- so the
+    detail is printed here, where the context is, and the raise carries the
+    one-line summary.
+
+    `already_funded` is the other leg if it has been funded, else None, and it is
+    the only thing that decides which of two very different sentences gets
+    printed. Passing it is not bookkeeping: an operator who cannot tell "nothing
+    was funded" from "one leg is live and the other is impossible" has been told
+    nothing by a failure report.
+
+    THE BROAD CATCH IS THE POINT HERE AND IS NOT A BLIND ONE. The three chain
+    clients raise bare Exception for every RPC refusal -- a wallet not loaded, a
+    balance too low, a script the daemon will not accept -- and every one of those
+    means the same thing to this caller: this leg is not funded, and whether that
+    is safe depends only on the other leg. The message is printed in full, the
+    return value says which happened, and nothing treats a failure as a success.
+    """
+    try:
+        funded = fund_leg(Step(console, 6), planned, secret_hash, clients[leg.asset])
+    except Exception as error:
+        console.check(f"the {leg.asset} leg", f"{type(error).__name__}: {error}",
+                      "a funded HTLC with its output located", False)
+        if already_funded is None:
+            console.say("NOTHING WAS FUNDED. This was the FIRST leg, so no contract exists on either "
+                        "chain, no secret has been published, and there is nothing to recover. Fix "
+                        "the cause and run it again.")
+        else:
+            other = already_funded.leg
+            console.say(f"THE {other.asset} LEG IS FUNDED AND THE {leg.asset} LEG IS NOT. Nobody "
+                        f"holds the secret, so nobody can claim the {other.asset}: it returns to its "
+                        f"refund branch at height {already_funded.funded['locktime']}. Do NOT publish "
+                        f"the "
+                        f"secret, and do NOT fund the {leg.asset} leg by hand -- the ordering that "
+                        f"made this safe was computed from tips that have since moved.")
+        if NO_WALLET_LOADED_CODE in str(error):
+            console.say(f"    {which_wallets_are_on_disk(clients[leg.asset], leg.asset)}")
+        raise SwapError(
+            f"the {leg.asset} leg was not funded"
+            + ("; nothing is at risk" if already_funded is None
+               else f"; the {already_funded.leg.asset} leg IS funded -- see above")
+        ) from error
+    return FundedLeg(leg, funded, clients[leg.asset])
+
+
 def fund_leg(step: Step, planned: PlannedLeg, secret_hash: str, client) -> dict:
     """Fund a leg whose locktime was already decided, then find its vout ON CHAIN.
 
@@ -1144,10 +1204,23 @@ def main() -> int:
             return report_dry_run(console)
 
         console.step(6, "both legs are funded only now that the ordering is proven safe")
-        funded_a = FundedLeg(leg_a, fund_leg(Step(console, 6), planned_a, secret_hash,
-                                             clients[leg_a.asset]), clients[leg_a.asset])
-        funded_b = FundedLeg(leg_b, fund_leg(Step(console, 6), planned_b, secret_hash,
-                                             clients[leg_b.asset]), clients[leg_b.asset])
+        # WHICH LEG FAILED IS THE WHOLE QUESTION, and until 2026-09-29 both answers
+        # were the same traceback. The clients raise bare Exception and main() caught
+        # only SwapError, so a wallet that was not loaded printed a stack trace --
+        # measured on a --run that reached this step:
+        #
+        #     Exception: RPC Error: {'code': -18, 'message': 'Requested wallet does
+        #     not exist or is not loaded'}
+        #
+        # That is the FIRST leg, so nothing was funded and nothing was at risk. Had
+        # the SECOND leg failed the same way, the identical traceback would have hidden
+        # a funded contract on a live chain. An operator reading a stack trace cannot
+        # tell those apart, and they are the difference between "run it again" and "do
+        # not publish the secret".
+        funded_a = fund_one_leg_or_refuse(console, leg_a, planned_a, secret_hash,
+                                          clients=clients, already_funded=None)
+        funded_b = fund_one_leg_or_refuse(console, leg_b, planned_b, secret_hash,
+                                          clients=clients, already_funded=funded_a)
 
         claim_b, claim_a = claim_both_legs(console, funded_a, funded_b, parties, secret)
         return report_completed_swap(console, claim_a, claim_b)

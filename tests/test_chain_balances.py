@@ -25,6 +25,7 @@ import pathlib
 import sys
 
 import pytest
+from chains import wallet_hint
 from chains.daemon_network import CHAIN_TEST_NETWORKS
 from regtest.daemons import CHAIN_DEFAULTS
 
@@ -485,7 +486,7 @@ def test_a_daemon_with_no_wallet_loaded_NAMES_the_wallets_it_could_load():
     # "createwallet" was absent from `out` and failed on the DAEMON'S OWN error
     # message, which names both commands -- so it was measuring the daemon's
     # wording, not this file's advice.
-    hint = chain_balances.which_wallets_are_on_disk(adapter, "LTC")
+    hint = wallet_hint.which_wallets_are_on_disk(adapter, "LTC")
     assert "createwallet" not in hint, (
         f"a daemon WITH wallets on disk should be told to load one, not to create another:\n{hint}"
     )
@@ -507,7 +508,7 @@ def test_a_daemon_with_an_EMPTY_wallet_directory_is_told_to_create_one():
     out = recorder.text()
 
     assert "NO wallet on disk" in out and "(none)" in out, out
-    assert "createwallet" in out and chain_balances.DEFAULT_WALLET_NAME in out, out
+    assert "createwallet" in out and wallet_hint.DEFAULT_WALLET_NAME in out, out
     assert "will be empty until" in out, (
         f"creating a wallet does not produce coins, and a reader who expects a balance next "
         f"should be told:\n{out}"
@@ -520,7 +521,7 @@ def test_the_wallet_name_suggested_is_the_one_the_HTLC_HARNESS_uses():
     An operator who follows this hint should end up with the wallet
     regtest_htlc_verify.py then finds already loaded, not a second one beside it.
     """
-    assert chain_balances.DEFAULT_WALLET_NAME == regtest_htlc_verify.WALLET_NAME
+    assert wallet_hint.DEFAULT_WALLET_NAME == regtest_htlc_verify.WALLET_NAME
 
 
 def test_an_unlistable_wallet_directory_still_names_a_command():
@@ -535,6 +536,6 @@ def test_an_unlistable_wallet_directory_still_names_a_command():
                 raise RuntimeError("Method not found (rpc code -32601)")
             return super().call(method, *params)
 
-    line = chain_balances.which_wallets_are_on_disk(_NoListing([]), "LTC")
+    line = wallet_hint.which_wallets_are_on_disk(_NoListing([]), "LTC")
     assert "could not list" in line and "-32601" in line, line
     assert "createwallet" in line, f"no names is not a reason to name no command:\n{line}"

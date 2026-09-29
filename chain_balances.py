@@ -51,6 +51,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from chains.daemon_conf import CONF_FALLBACK_NETWORK, conf_fallback_settings
 from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network
 from chains.registry import build_adapters, why_unconfigured
+from chains.wallet_hint import (
+    NO_WALLET_LOADED,
+    which_wallets_are_on_disk,
+)
 from chains.wallet_lock import encryption_state
 from config import Config
 from regtest.daemons import CHAIN_DEFAULTS
@@ -72,12 +76,6 @@ from step_console import Console
 CHAINS = tuple(sorted(CHAIN_TEST_NETWORKS))
 
 NOTHING_TO_LOOK_AT = 3
-
-# What to CALL a wallet this suggests creating. The same name the HTLC harness
-# uses, so an operator who follows this hint ends up with the wallet
-# regtest_htlc_verify.py will then find already loaded rather than a second one
-# beside it (rule 8 -- one name for one thing).
-DEFAULT_WALLET_NAME = "regtest_htlc_harness"
 
 
 def adapter_from_conf(console: Console, chain: str):
@@ -145,52 +143,6 @@ def what_to_do_about_it(chain: str, network: str) -> str:
     return (f"nothing is listening on that host and port, so no {chain} daemon is running there. "
             f"Start it and re-run this:  {spec['daemon']} -datadir={datadir} "
             f"-{CONF_FALLBACK_NETWORK[chain]} -daemon    (this script will NOT start it for you)")
-
-
-# A FRESHLY STARTED DAEMON HAS NO WALLET LOADED, and since Bitcoin Core 0.21 it
-# does not create one either. getbalance then answers rpc code -18 with a message
-# naming loadwallet and createwallet, which is most of the answer and not the part
-# that says WHICH wallet -- so this asks.
-#
-# Matched on the message rather than the code because RPCError here is the
-# repository's own wrapper and the code is not exposed as an attribute. The
-# message is the daemon's and is stable across both families; the match is
-# reported as a hint, never branched on for a decision.
-NO_WALLET_LOADED = "No wallet is loaded"
-
-
-def which_wallets_are_on_disk(adapter, chain: str) -> str:
-    """The wallets this daemon could load, and the command that loads one.
-
-    listwalletdir IS A READ. loadwallet is not -- it changes what the daemon has
-    open -- so this names the command and does not run it, the same line
-    what_to_do_about_it() draws around starting a daemon. A read-only balance
-    reader that quietly loads a wallet is no longer a read-only balance reader,
-    and tests/test_chain_balances.py holds the method list that says so.
-
-    ADDED 2026-09-29, one layer in from the down-daemon hint and for the identical
-    reason: the operator started litecoind, re-ran this twice, and got a correct
-    message that did not say what to do next.
-    """
-    cli = CHAIN_DEFAULTS.get(chain, {}).get("cli", "")
-    datadir = CHAIN_DEFAULTS.get(chain, {}).get("datadir", "")
-    network = CONF_FALLBACK_NETWORK.get(chain, "")
-    prefix = (f"{cli} -datadir={Path(datadir).expanduser()} -{network} " if cli and network else "")
-    try:
-        listing = adapter.call("listwalletdir") or {}
-        names = [entry.get("name", "") for entry in (listing.get("wallets") or [])]
-    except Exception as error:  # noqa: BLE001 -- checked: listwalletdir is absent on a daemon built without wallet support and on older builds, and its absence costs only the names. The hint still names the two commands, so the reader is not left with nothing; the reason is printed.
-        return (f"could not list this daemon's wallets ({type(error).__name__}: {error}), so which one "
-                f"to load is unknown. {prefix}createwallet <a name> makes one.")
-    if not names:
-        # (none) is a RESULT. A daemon with an empty wallet directory needs
-        # createwallet, and saying "load one of []" would be nonsense.
-        return (f"this daemon has NO wallet on disk -- (none) in its wallet directory. "
-                f"{prefix}createwallet {DEFAULT_WALLET_NAME} makes one, and it will be empty until "
-                f"something mines or sends to it.")
-    unnamed = [name or "(the unnamed default wallet)" for name in names]
-    return (f"this daemon has {len(names)} wallet(s) on disk: {', '.join(unnamed)}. "
-            f"{prefix}loadwallet {names[0]} loads the first.")
 
 
 def report_chain(console: Console, chain: str, adapters: dict) -> Decimal | None:

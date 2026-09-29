@@ -1085,3 +1085,126 @@ def test_a_dry_run_still_refuses_a_mainnet_daemon_before_reading_a_tip(monkeypat
     ])
     assert atomic_swap.main() == 1, "a mainnet daemon must make the run fail, not merely warn"
     assert "getblockcount" not in client.reads, "it must refuse before deriving a locktime"
+
+
+# ---------------------------------------------------------------------------
+# WHICH LEG FAILED, added 2026-09-29 after a --run printed a stack trace for a
+# wallet that was not loaded. Both answers looked identical and they are not
+# remotely the same situation.
+# ---------------------------------------------------------------------------
+
+
+class _RefusingClient:
+    """A daemon that answers nothing. Raises the bare Exception the real clients raise."""
+
+    def __init__(self, message):
+        self.message = message
+
+    def create_contract(self, **_kwargs):
+        raise Exception(self.message)
+
+    def call(self, method, *_params):
+        raise Exception(self.message)
+
+
+WALLET_NOT_LOADED = "RPC Error: {'code': -18, 'message': 'Requested wallet does not exist or is not loaded'}"
+
+
+def _plan(asset, locktime=967):
+    leg = atomic_swap.Leg(asset=asset, role="initiator", amount=Decimal("0.0002"),
+                          participant_address="mP", refund_address="mR")
+    return leg, atomic_swap.PlannedLeg(leg=leg, locktime=locktime, tip=679)
+
+
+def test_the_FIRST_leg_failing_says_NOTHING_WAS_FUNDED(capsys):
+    """The case the operator actually hit, and the safe one.
+
+    MUTATION: drop the `already_funded is None` branch and print the one-sided
+    sentence unconditionally, and this fails -- an operator told a contract is
+    live when none is would go looking for coins that do not exist, and would
+    treat a rerun as dangerous when it is the correct next step. Verified
+    2026-09-29.
+    """
+    console = Console(total_steps=8)
+    leg, planned = _plan("BTC")
+    with pytest.raises(atomic_swap.SwapError, match="nothing is at risk"):
+        atomic_swap.fund_one_leg_or_refuse(
+            console, leg, planned, "ab" * 32,
+            clients={"BTC": _RefusingClient(WALLET_NOT_LOADED)}, already_funded=None)
+    printed = capsys.readouterr().out
+    assert "NOTHING WAS FUNDED" in printed, printed
+    assert "run it again" in printed, printed
+    assert "Do NOT publish the secret" not in printed, (
+        f"the safe case must not carry the dangerous case's warning:\n{printed}"
+    )
+
+
+def test_the_SECOND_leg_failing_says_the_FIRST_IS_FUNDED_and_not_to_publish(capsys):
+    """The case that would have been the same traceback, and is not the same thing.
+
+    One contract live on a real chain, the other impossible. The operator needs
+    the refund height and needs to be told not to publish the secret -- neither
+    of which a stack trace contains.
+
+    MUTATION: pass already_funded=None here and this fails on "IS FUNDED".
+    Verified 2026-09-29.
+    """
+    console = Console(total_steps=8)
+    first_leg, _ = _plan("BTC", locktime=967)
+    funded_first = atomic_swap.FundedLeg(
+        first_leg, {"txid": "aa" * 32, "p2sh_address": "2NFake", "redeem_script": "51",
+                    "reported_vout": 0, "locktime": 967, "tip": 679},
+        _RefusingClient("unused"))
+    second_leg, second_planned = _plan("GRC", locktime=3298323)
+    with pytest.raises(atomic_swap.SwapError, match="BTC leg IS funded"):
+        atomic_swap.fund_one_leg_or_refuse(
+            console, second_leg, second_planned, "ab" * 32,
+            clients={"GRC": _RefusingClient(WALLET_NOT_LOADED)}, already_funded=funded_first)
+    printed = capsys.readouterr().out
+    assert "THE BTC LEG IS FUNDED AND THE GRC LEG IS NOT" in printed, printed
+    assert "967" in printed, f"the refund height is what makes the warning actionable:\n{printed}"
+    assert "Do NOT publish the secret" in printed, printed
+    assert "NOTHING WAS FUNDED" not in printed, printed
+
+
+def test_a_wallet_that_is_not_loaded_gets_the_wallet_hint_the_balance_reader_gives(capsys):
+    """Rule 8: the hint existed in chain_balances.py and this file printed a traceback.
+
+    It is one module now (chains/wallet_hint.py). The stub refuses listwalletdir
+    too, so this also pins that an unlistable directory still yields a sentence
+    rather than an exception inside a failure handler -- which would replace a
+    diagnosable refusal with a second traceback.
+    """
+    console = Console(total_steps=8)
+    leg, planned = _plan("BTC")
+    with pytest.raises(atomic_swap.SwapError):
+        atomic_swap.fund_one_leg_or_refuse(
+            console, leg, planned, "ab" * 32,
+            clients={"BTC": _RefusingClient(WALLET_NOT_LOADED)}, already_funded=None)
+    printed = capsys.readouterr().out
+    assert "createwallet" in printed or "loadwallet" in printed, (
+        f"a -18 must produce the wallet hint, not just the daemon's own sentence:\n{printed}"
+    )
+
+
+def test_a_failure_that_is_NOT_about_a_wallet_does_not_print_a_wallet_hint(capsys):
+    """Or every failure reads as a wallet problem, which is rule 14 in reverse."""
+    console = Console(total_steps=8)
+    leg, planned = _plan("BTC")
+    with pytest.raises(atomic_swap.SwapError):
+        atomic_swap.fund_one_leg_or_refuse(
+            console, leg, planned, "ab" * 32,
+            clients={"BTC": _RefusingClient("RPC Error: {'code': -6, 'message': 'Insufficient funds'}")},
+            already_funded=None)
+    printed = capsys.readouterr().out
+    assert "Insufficient funds" in printed, printed
+    # NEITHER COMMAND, and the reason the first version of this assertion was
+    # worthless: it checked for "loadwallet" alone. When the hint cannot list the
+    # directory it says "createwallet <a name> makes one" instead, so printing the
+    # hint unconditionally left this green -- the mutation found nothing. Both
+    # commands, plus the phrase the listing path uses.
+    for marker in ("loadwallet", "createwallet", "wallet(s) on disk", "could not list"):
+        assert marker not in printed, (
+            f"an insufficient balance produced the wallet hint ({marker!r}). Every failure then "
+            f"reads as a wallet problem, which is rule 14 in reverse:\n{printed}"
+        )
