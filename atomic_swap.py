@@ -44,16 +44,25 @@ WHAT IS REACHABLE TODAY, and "any currency listed" IS NOT YET TRUE:
                      than a P2SH HTLC -- so its legs are a different protocol and cannot
                      be a row in this file's table.
 
-                     UNTIL 2026-09-29 THAT DRIVER WAS GRC-ONLY and this paragraph said
-                     XRP<->BTC and XRP<->LTC were "real work and not yet done". They were
-                     eleven hardcoded strings. The driver already reached its chain
-                     through chains/registry and the shared modules/htlc_* family -- the
-                     same ones this file uses for all three -- so the protocol work had
-                     been done here all along and only the parameter was missing. GRC is
-                     still the only pair PROVEN LIVE; BTC and LTC are exercised by seeded
-                     tests and have not been run against their testnets.
+                     AND IT STILL ONLY FUNDS GRC, which the --chain flag does not say
+                     and this paragraph did on 2026-09-29. The eleven hardcoded strings
+                     were real and are gone; behind them was a twelfth thing that is not
+                     a string. Both of that driver's runners fund the script leg with
+                     `createhtlc`, a GRIDCOIN RPC, and bitcoind answers "Method not
+                     found". Everything else about BTC there works -- adapter, network,
+                     addresses, block interval, timelock ordering -- which is why it
+                     refuses up front rather than at step 6, AFTER the XRP escrow is
+                     funded at step 5.
 
-So: six directed pairs here, and six more in the XRP driver.
+                     THE FIX IS THIS FILE'S OWN INTERFACE. BTCClient, LTCClient and
+                     GRCClient all expose create_contract()/redeem_contract()/
+                     refund_contract() and build the P2SH themselves -- none of them
+                     mentions createhtlc. That driver has a SECOND implementation of
+                     "fund an HTLC on a script chain" covering one chain where this one
+                     covers three: rule 8, found by running it rather than reading it.
+
+So: six directed pairs here, and two in the XRP driver until its funding
+step moves onto the clients above.
 
 THE PROTOCOL, AND THE ONE PROPERTY THAT MAKES IT ATOMIC
 
@@ -978,8 +987,9 @@ def print_pairs(console: Console) -> int:
     console.say("NOT here, and each for a PROTOCOL reason rather than missing work:")
     console.say("  XRP  no script. Uses EscrowCreate with a PREIMAGE-SHA-256 condition, which")
     console.say("       is a hashlock but not a P2SH one. XRP<->GRC has its own working driver")
-    console.say("       (atomic_swap_xrp.py --chain btc|ltc|grc, both directions). GRC is the")
-    console.say("       pair proven live on testnet; BTC and LTC are tested but not yet run.")
+    console.say("       (atomic_swap_xrp.py, both directions, live on testnet). Its --chain flag")
+    console.say("       offers btc and ltc but REFUSES them: it funds with Gridcoin's createhtlc,")
+    console.say("       and the fix is to route it through the clients above, which build the P2SH.")
     console.say("  SOL  no HTLC. The stub that existed could not run and was deleted (c4ea027).")
     return 0
 

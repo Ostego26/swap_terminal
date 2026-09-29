@@ -362,6 +362,33 @@ def chain_amount_for_rate(xrp_drops: int, xrp_per_chain_unit: Decimal) -> Decima
 #: The chains a full swap has actually COMPLETED on, and the evidence. Absence from this
 #: table is not a gap in the table -- it is the honest state of a chain, and the banner
 #: says so out loud rather than letting silence read as reassurance.
+#: The chains whose HTLC this driver can actually FUND. Not the chains it can reason
+#: about -- it converts timelocks, prices legs and validates networks for all three -- but
+#: the ones where steps 6 and 7 have a method to call.
+#:
+#: MEASURED 2026-09-29, AND THIS IS THE GAP THE --chain FLAG DID NOT CLOSE. Both runners
+#: fund the script leg with `adapter.call("createhtlc", ...)`, and createhtlc is a
+#: GRIDCOIN RPC. bitcoind and litecoind have no such method; they answer "Method not
+#: found". Everything before step 6 succeeds on BTC -- the adapter, the regtest network,
+#: the bech32 addresses, the commitment -- which is precisely what makes refusing here
+#: rather than there necessary.
+#:
+#: WHY IT REFUSES BEFORE STEP 1 RATHER THAN FAILING AT STEP 6. In xrp-first the XRP
+#: ESCROW IS FUNDED AT STEP 5. A --run that discovered the missing method at step 6 would
+#: have one leg funded on a live chain and no way to fund the other -- the exact
+#: one-sided state every timelock in this file exists to prevent, arriving through the
+#: driver instead of through a counterparty.
+#:
+#: THE FIX IS NOT A NEW METHOD. modules/atomic_btc_client.py and
+#: modules/atomic_grc_client.py already expose create_contract()/redeem_contract()/
+#: refund_contract() and build the P2SH themselves -- atomic_swap.py funds HTLCs on all
+#: three chains through exactly that interface, and neither client mentions createhtlc.
+#: So this driver has a SECOND implementation of "fund an HTLC on a script chain" that
+#: works on one chain where the first works on three: rule 8's defect, found by running
+#: the thing rather than by reading it. Routing steps 6 and 7 through the clients is the
+#: work, and it is not done.
+CAN_FUND_THE_HTLC = frozenset({"GRC"})
+
 PROVEN_LIVE = {
     "GRC": ("BOTH directions have completed at the market rate, OK=16 FAIL=0 each (2026-09-27): "
             "xrp-first GRC claim 78472df347a91f31..., grc-first GRC claim 845315f4c2063670..., "
@@ -1051,6 +1078,62 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
     return True
 
 
+def normalize_arguments(args) -> None:
+    """Turn what an operator TYPED into what the tables are keyed by. In place, once.
+
+    `--chain btc` is what a person types and "BTC" is what SECONDS_PER_BLOCK,
+    CHAIN_TEST_NETWORKS, CHAIN_LABELS, Config.RPC and services.pricing.IDS are all keyed
+    by. Converting at each use is five chances to miss one, and the miss is a KeyError at
+    whichever step got there first.
+
+    `grc-first` resolves to `chain-first` here so nothing downstream ever sees two names
+    for one direction. It is accepted because it is the spelling in every recorded run of
+    this driver and in the operator's history, and a direction that vanishes on a rename
+    fails at the moment somebody is trying to move money.
+
+    IN PLACE AND RETURNING NONE, deliberately: an argparse Namespace is the thing every
+    later line reads, so handing back a copy would leave two of them and a reader would
+    have to know which one main() kept.
+    """
+    args.chain = args.chain.upper()
+    if args.direction == LEGACY_CHAIN_FIRST:
+        args.direction = CHAIN_FIRST
+
+
+def refuse_a_chain_this_driver_cannot_fund(console: Console, chain: str) -> bool:
+    """True if this chain's HTLC cannot be funded here, having said why. Contacts nothing.
+
+    A FUNCTION SO IT CAN BE CALLED WITH A SEEDED CONSOLE, and because the branches it
+    added put main() over PLR0912 -- rule 12's answer being to extract the decision rather
+    than raise the ceiling. The decision is "can step 6 happen at all", and it is knowable
+    before the first network call, which is the entire reason it is asked here.
+    """
+    if chain in CAN_FUND_THE_HTLC:
+        return False
+    console.say(
+        f"REFUSED BEFORE ANYTHING IS CONTACTED: this driver funds the script leg with `createhtlc`, "
+        f"which is a GRIDCOIN RPC. {chain} has no such method and would answer 'Method not found' at "
+        f"step 6 -- AFTER the XRP escrow is funded at step 5, leaving one leg funded on a live chain "
+        f"and the other impossible. That is the one-sided state every timelock in this file exists to "
+        f"prevent, so it refuses here instead."
+    )
+    console.say(
+        f"EVERYTHING ELSE ABOUT {chain} WORKS and is not the problem: the adapter, the network "
+        f"allowlist, the addresses, the {SECONDS_PER_BLOCK[chain]}s block interval and the timelock "
+        f"ordering are all exercised."
+    )
+    console.say(
+        "THE FIX IS NOT A NEW METHOD. modules/atomic_btc_client.py and modules/atomic_ltc_client.py "
+        "already expose create_contract()/redeem_contract()/refund_contract() and build the P2SH "
+        "themselves -- atomic_swap.py funds HTLCs on all three chains through them. Steps 6 and 7 here "
+        "need to go through that interface instead of a raw RPC. Until then --chain grc is the only one "
+        "that can complete."
+    )
+    console.check(f"{chain} HTLC can be funded by this driver", "no",
+                  f"a chain in {sorted(CAN_FUND_THE_HTLC)}", False)
+    return True
+
+
 def resolve_wallet_passphrase(console: Console, adapter, chain: str) -> tuple[str, bool] | None:
     """(passphrase, is_encrypted), or None meaning REFUSE before anything is funded.
 
@@ -1128,12 +1211,12 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     # and "BTC" is what SECONDS_PER_BLOCK, CHAIN_TEST_NETWORKS, Config.RPC and
     # services.pricing.IDS are all keyed by; converting at four call sites is four chances
     # to miss one, and the miss would be a KeyError at the point of funding.
-    args.chain = args.chain.upper()
-    if args.direction == LEGACY_CHAIN_FIRST:
-        args.direction = CHAIN_FIRST
+    normalize_arguments(args)
 
     console = Console(total_steps=10)
     console.banner(f"ATOMIC SWAP -- XRP (XRPL testnet) for {args.chain} ({CHAIN_LABELS[args.chain]})")
+    if refuse_a_chain_this_driver_cannot_fund(console, args.chain):
+        return console.summary()
     console.say(f"XRP endpoint={TESTNET_URL}")
     console.say(f"mode={'--run: BOTH LEGS WILL BE FUNDED' if args.run else 'DRY RUN: nothing is submitted'}")
     console.say(f"A holds XRP and wants {args.chain} (the INITIATOR, longer lock). B holds {args.chain} and wants XRP (the "
@@ -1188,8 +1271,9 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         console.check(f"{chain} addresses", f"{type(error).__name__}: {error}", "two wallet addresses", False)
         return console.summary()
     console.check(f"{chain} addresses", f"A claims to {a_grc}, B refunds to {b_grc}", "two wallet addresses", True)
-    console.say("BOTH must be in this wallet: Gridcoin's createhtlc reads each party's PUBKEY out of the wallet, "
-                "so a swap with a real counterparty needs their pubkey imported, not just their address.")
+    console.say(f"BOTH must be in this wallet: {chain}'s HTLC funding reads each party's PUBKEY out of the "
+                f"wallet, so a swap with a real counterparty needs their pubkey imported, not just their "
+                f"address.")
 
     console.step(3, f"one {HTLC_PREIMAGE_BYTES}-byte secret, committed on both chains")
     secret = os.urandom(HTLC_PREIMAGE_BYTES)
