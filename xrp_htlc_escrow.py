@@ -194,6 +194,10 @@ from chains.xrp_crypto_condition import (  # noqa: E402 -- the sys.path line abo
 )
 from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -- same
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
+from chains.xrp_units import (  # noqa: E402 -- same. Re-exported from here: see the note below and rule 8.
+    RIPPLE_EPOCH_OFFSET_SECONDS,
+    ripple_time,
+)
 from microfortnights import format_duration  # noqa: E402 -- same
 
 # The Console moved to swap_terminal/step_console.py on 2026-09-26, when
@@ -202,12 +206,13 @@ from microfortnights import format_duration  # noqa: E402 -- same
 # and each would look right in its own file (rule 8).
 from step_console import Console  # noqa: E402 -- same
 
-# Ripple's epoch is 2000-01-01T00:00:00Z, which is this many seconds after the
-# Unix epoch. CancelAfter and FinishAfter are in RIPPLE seconds, and handing
-# XRPL a Unix timestamp instead produces an escrow whose timelock expired 30
-# years ago -- immediately cancellable by anyone, which on a real swap is the
-# counterparty's money walking away.
-RIPPLE_EPOCH_OFFSET_SECONDS = 946_684_800
+# THE EPOCH OFFSET AND ITS TWO CONVERSIONS NOW LIVE IN chains/xrp_units.py,
+# imported above beside the drop conversions. They moved there 2026-09-29 so
+# xrp_balances.py -- read-only, and forbidden by its own tests from calling
+# anything that submits -- could convert a CancelAfter without importing this
+# file, which submits escrows. This module re-exports both names because
+# atomic_swap_xrp.py and two test files import them from here; that is one
+# definition imported twice, not two definitions (rule 8).
 
 # What each escrow locks. Small on purpose: two faucet accounts hold 100 XRP
 # each and XRPL's base reserve must stay free, so this is a demonstration
@@ -243,11 +248,6 @@ def finish_fee_drops(fulfillment_hex: str) -> int:
     size_bytes = len(fulfillment_hex) // 2
     chunks = -(-size_bytes // 16)  # ceiling division; a partial 16 bytes still costs
     return FINISH_BASE_FEE_DROPS + FINISH_FEE_DROPS_PER_16_BYTES * chunks
-
-
-def ripple_time(unix_seconds: float) -> int:
-    """A Unix timestamp as XRPL's own clock. See RIPPLE_EPOCH_OFFSET_SECONDS."""
-    return int(unix_seconds) - RIPPLE_EPOCH_OFFSET_SECONDS
 
 
 def escrow_create_tx(sender: str, receiver: str, drops: int, condition: str, cancel_after: int) -> dict:

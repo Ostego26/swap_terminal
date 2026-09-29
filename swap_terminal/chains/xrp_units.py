@@ -125,6 +125,19 @@ MAX_DESTINATION_TAG = 2**32 - 1
 RESERVED_DESTINATION_TAG = 0
 FIRST_ALLOCATABLE_TAG = RESERVED_DESTINATION_TAG + 1
 
+# XRPL'S OWN CLOCK. Ripple's epoch is 2000-01-01T00:00:00Z, which is this many
+# seconds after the Unix epoch. CancelAfter and FinishAfter are in RIPPLE
+# seconds, and handing XRPL a Unix timestamp instead produces an escrow whose
+# timelock expired 30 years ago -- immediately cancellable by anyone, which on a
+# real swap is the counterparty's money walking away.
+#
+# MOVED HERE 2026-09-29, from xrp_htlc_escrow.py at the project root. It is a
+# unit conversion and belongs beside DROPS_PER_XRP; where it was, a read-only
+# balance reader could not have it without importing a script that submits
+# escrows. xrp_htlc_escrow.py imports it from here now, so the name it exports
+# is this one object and not a second definition (rule 8).
+RIPPLE_EPOCH_OFFSET_SECONDS = 946_684_800
+
 # REFERENCE VALUES ONLY, for a banner line. The live figures come from
 # server_info.validated_ledger.reserve_base_xrp / reserve_inc_xrp. See point 3.
 REFERENCE_BASE_RESERVE_XRP = Decimal(1)
@@ -284,3 +297,20 @@ def describe_min_confirmations(configured: int) -> str:
     """The banner line, naming the unit so it cannot be read as blocks (rule 14)."""
     value = validate_min_confirmations(configured)
     return f"{value} validated ledger  <- NOT a block depth; the XRP Ledger does not reorganize"
+
+
+def ripple_time(unix_seconds: float) -> int:
+    """A Unix timestamp as XRPL's own clock. See RIPPLE_EPOCH_OFFSET_SECONDS."""
+    return int(unix_seconds) - RIPPLE_EPOCH_OFFSET_SECONDS
+
+
+def unix_from_ripple_time(ripple_seconds) -> int:
+    """XRPL's clock back to a Unix timestamp. The inverse of ripple_time().
+
+    ADDED 2026-09-29 because xrp_balances.py printed `CancelAfter=843784768` at
+    an operator and that number is unreadable. It is 2026-09-27T00:39:28Z, two
+    days before it was printed, so the escrow it belonged to was already
+    cancellable and nothing on the screen said so. Rule 14: state what the number
+    means, next to the number.
+    """
+    return int(ripple_seconds) + RIPPLE_EPOCH_OFFSET_SECONDS

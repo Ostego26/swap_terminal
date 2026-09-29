@@ -35,6 +35,29 @@ Gridcoin side the answer was that both addresses come out of one wallet. On the
 XRP side the arithmetic is genuinely different, and printing a bare balance
 would have hidden it.
 
+AND THE FIRST VERSION GOT THE ESCROW HALF WRONG, found by the operator's first
+run the same day. Both of their accounts printed the same 1 XRP escrow with the
+sentence "it raises this account's reserve by one increment", and one of those
+accounts reported OwnerCount 0 two lines above:
+
+    rBfM7je6e9Ca2cMvuRn7cr9xExFgDa5NGx
+        reserve   1.000000 XRP (1000000 base + 200000 x 0 owned objects)
+        escrow    1.000000 XRP to rBfM7je6... -- ... raises this account's reserve
+
+account_objects lists an escrow under BOTH parties: the object is threaded into
+the sender's owner directory and the destination's. Only the SENDER pays its
+reserve, which is why the other account read OwnerCount 1 for the same escrow.
+So the line claimed a reserve cost on an account that bears none, and described
+incoming money as locked-away money. `Account` is the sender, and comparing it to
+the address being reported is what separates the two; each escrow now says OUT or
+IN and says whose it is. The OwnerCount cross-check that would have caught it at
+the time is in report_account() and prints MISMATCH.
+
+The same run printed `CancelAfter=843784768`, which is unreadable and was also
+already in the past -- 2026-09-27T00:39:28Z, two days earlier. That escrow was
+cancellable and its 1 XRP recoverable, and nothing said so. Both timestamps are
+now decoded and each says whether it has passed.
+
 Both reserve figures are read from server_info.validated_ledger. They are NOT
 hardcoded here and must not be: the base reserve has been 20 XRP, then 10, then
 1, and a compiled-in number would eventually report spendable balance that does
@@ -55,7 +78,9 @@ EXIT CODES
 from __future__ import annotations
 
 import argparse
+import datetime
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -69,7 +94,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from chains.xrp_address import is_valid_classic_address
 from chains.xrp_signing import reserve_drops
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts
-from chains.xrp_units import from_drops
+from chains.xrp_units import from_drops, unix_from_ripple_time
 from step_console import Console
 
 NOTHING_TO_LOOK_AT = 3
@@ -79,6 +104,29 @@ NOTHING_TO_LOOK_AT = 3
 # filter; asking for escrows specifically means an account with forty trust
 # lines does not bury the one row that explains a swap.
 ESCROW_TYPE = "escrow"
+
+
+def _when(field: str, ripple_seconds) -> str:
+    """A CancelAfter or FinishAfter as a date, and whether it has passed.
+
+    RAW RIPPLE SECONDS ARE UNREADABLE and printing them was a defect. The first
+    version of this script showed an operator `CancelAfter=843784768` on their own
+    escrow. That is 2026-09-27T00:39:28Z -- two days before the line was printed,
+    so the escrow was already cancellable and its 1 XRP recoverable, and nothing
+    on the screen said so. Rule 14: state what the number means, next to it.
+    """
+    if ripple_seconds is None:
+        return f"{field:<12} not set"
+    unix = unix_from_ripple_time(ripple_seconds)
+    stamp = datetime.datetime.fromtimestamp(unix, datetime.UTC).isoformat()
+    passed = time.time() >= unix
+    if field == "CancelAfter":
+        verdict = ("PASSED -- this escrow can be canceled now and its drops returned to the sender"
+                   if passed else "not yet reached")
+    else:
+        verdict = ("PASSED -- the destination may finish it now" if passed
+                   else "not yet reached; it cannot be finished before this")
+    return f"{field:<12} {ripple_seconds} = {stamp} ({verdict})"
 
 
 def escrows_held(address: str) -> tuple[list[dict], str]:
@@ -120,9 +168,12 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
     if not isinstance(raw, str):
         return console.check(address, f"Balance={raw!r}", "a drop count as a JSON string", False)
     drops = int(raw)
-    owner_count = data.get("OwnerCount")
-    held, why = reserve_drops(base_reserve, inc_reserve,
-                              None if owner_count is None else int(owner_count))
+    # Converted ONCE, here, because it is read twice below -- by the reserve
+    # arithmetic and by the OwnerCount cross-check -- and two separate
+    # `int(...) if not None` expressions is how those two stop agreeing.
+    raw_owner_count = data.get("OwnerCount")
+    owner_count = None if raw_owner_count is None else int(raw_owner_count)
+    held, why = reserve_drops(base_reserve, inc_reserve, owner_count)
     spendable = drops - held
     console.say(f"{address}")
     console.say(f"    balance   {from_drops(drops):.6f} XRP ({drops} drops)")
@@ -139,6 +190,7 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
         # together are what keep "this account holds no escrows" apart from "the
         # escrow list could not be read", which a blank gap would merge.
         console.say(f"    escrow    (none) -- {escrow_why}")
+    outgoing = 0
     for one in objects:
         amount = one.get("Amount")
         if not isinstance(amount, str):
@@ -148,9 +200,31 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
             # coerced into a number it is not.
             console.say(f"    escrow    Amount is not a drop string: {one}")
             continue
-        console.say(f"    escrow    {from_drops(int(amount)):.6f} XRP to {one.get('Destination')} "
-                    f"(FinishAfter={one.get('FinishAfter')}, CancelAfter={one.get('CancelAfter')}) "
-                    f"-- locked, and it raises this account's reserve by one increment while it stands")
+        # WHOSE ESCROW IS THIS. account_objects lists an escrow under BOTH the
+        # sender and the destination -- the object is threaded into two owner
+        # directories -- but only the SENDER pays its reserve. `Account` is the
+        # sender, so comparing it to the address being reported is what separates
+        # money this account has locked away from money waiting to arrive.
+        mine = one.get("Account") == address
+        outgoing += 1 if mine else 0
+        side = ("OUT  locked by this account; its drops have already left the balance above, and it "
+                "is holding one reserve increment") if mine else (
+               f"IN   locked by {one.get('Account')}; it costs THIS account no balance and no reserve, "
+               f"and the drops are not yours until it is finished")
+        console.say(f"    escrow    {from_drops(int(amount)):.6f} XRP {one.get('Account')} -> "
+                    f"{one.get('Destination')}")
+        console.say(f"              {side}")
+        console.say(f"              {_when('CancelAfter', one.get('CancelAfter'))}")
+        console.say(f"              {_when('FinishAfter', one.get('FinishAfter'))}")
+    # THE CROSS-CHECK THAT WOULD HAVE CAUGHT THE DEFECT THIS BLOCK WAS REWRITTEN
+    # FOR. OwnerCount counts objects this account PAYS FOR, so the escrows it
+    # sent must not exceed it. The first version of this script printed "raises
+    # this account's reserve" beside an OwnerCount of 0 and neither line looked
+    # at the other -- see the module header.
+    if owner_count is not None and outgoing > owner_count:
+        console.say(f"    MISMATCH  {outgoing} escrow(s) sent by this account but OwnerCount is "
+                    f"{owner_count}. One of the two readings is wrong and the reserve above is "
+                    f"computed from OwnerCount, so treat the spendable figure as unproven.")
     return console.check(address, f"{from_drops(spendable):.6f} XRP spendable", "read", True)
 
 

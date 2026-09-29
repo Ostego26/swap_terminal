@@ -185,3 +185,155 @@ def test_a_server_that_reports_no_escrows_says_none_rather_than_printing_nothing
         f"got {why!r}. An account with no escrows is a RESULT and must read as one; this string is "
         f"printed beside '(none)' so the reader knows the list was actually consulted"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE ESCROW DEFECT THE OPERATOR'S FIRST RUN FOUND, 2026-09-29. Seeded with the
+# exact rows their ledger returned, so these are not hypothetical shapes: one
+# escrow, sender rnjG8n..., destination rBfM7j..., and it appeared under BOTH
+# accounts while only the sender reported OwnerCount 1.
+# ---------------------------------------------------------------------------
+
+SENDER = "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv"
+DESTINATION = "rBfM7je6e9Ca2cMvuRn7cr9xExFgDa5NGx"
+
+# The escrow as the live ledger returned it, CancelAfter included. 843784768 in
+# XRPL's clock is 2026-09-27T00:39:28Z.
+LIVE_ESCROW = {"Account": SENDER, "Destination": DESTINATION, "Amount": "1000000",
+               "CancelAfter": 843784768, "FinishAfter": None}
+LIVE_CANCEL_AFTER_ISO = "2026-09-27T00:39:28"
+
+
+class _Recorder:
+    """A Console that keeps every line instead of printing it."""
+
+    def __init__(self):
+        self.lines = []
+
+    def say(self, text):
+        self.lines.append(text)
+
+    def check(self, label, got, expected, ok):
+        # step_console.Console.check's real signature. A recorder with fewer
+        # arguments would silently accept a call the real Console rejects.
+        self.lines.append(f"CHECK {label} got={got} expected={expected} ok={ok}")
+        return ok
+
+    def text(self):
+        return "\n".join(self.lines)
+
+
+def _report(address: str, owner_count, escrows):
+    """report_account() against seeded account_info and account_objects rows."""
+    def _rpc(method, params):
+        if method == "account_info":
+            return {"account_data": {"Balance": "79995090", "OwnerCount": owner_count}}
+        if method == "account_objects":
+            return {"account_objects": escrows}
+        raise AssertionError(f"report_account asked for {method}, which it should not")
+
+    recorder = _Recorder()
+    original = xrp_balances.rpc
+    try:
+        xrp_balances.rpc = _rpc
+        xrp_balances.report_account(recorder, address, 1, 0.2)
+    finally:
+        xrp_balances.rpc = original
+    return recorder.text()
+
+
+def test_an_INCOMING_escrow_is_not_reported_as_costing_this_account_a_reserve():
+    """THE DEFECT, pinned with the operator's own rows.
+
+    The destination reported OwnerCount 0 and got the sentence "it raises this
+    account's reserve by one increment". It does not: the sender pays that.
+
+    MUTATION: drop the `mine` test and use the OUT wording unconditionally, and
+    this fails on "raises". Verified 2026-09-29.
+    """
+    out = _report(DESTINATION, 0, [LIVE_ESCROW])
+    assert "IN " in out, f"an escrow whose Account is not this address must read as incoming:\n{out}"
+    assert "costs THIS account no balance and no reserve" in out, out
+    assert "raises" not in out, (
+        f"an escrow this account did not send must not be described as raising its reserve. That is "
+        f"the defect the operator's first run printed:\n{out}"
+    )
+    assert SENDER in out, f"an incoming escrow has to name whose it is:\n{out}"
+
+
+def test_an_OUTGOING_escrow_says_its_drops_have_already_left_the_balance():
+    """The other side of the same comparison, and the reserve claim IS true here."""
+    out = _report(SENDER, 1, [LIVE_ESCROW])
+    assert "OUT " in out, out
+    assert "already left the balance" in out, out
+    assert "holding one reserve increment" in out, out
+    assert "MISMATCH" not in out, f"one sent escrow against OwnerCount 1 is consistent:\n{out}"
+
+
+def test_more_sent_escrows_than_OwnerCount_says_the_spendable_figure_is_UNPROVEN():
+    """The cross-check that would have caught the defect at the time.
+
+    Two readings of the same account disagree: OwnerCount says it pays for no
+    objects, account_objects says it sent one. The reserve above is computed from
+    OwnerCount, so the spendable number below it cannot be trusted -- and saying
+    so beats printing a confident figure derived from the losing reading.
+
+    MUTATION: delete the `outgoing > owner_count` block and this fails on
+    "MISMATCH". Verified 2026-09-29.
+    """
+    out = _report(SENDER, 0, [LIVE_ESCROW])
+    assert "MISMATCH" in out, out
+    assert "unproven" in out, f"the mismatch has to say what it costs the reader:\n{out}"
+
+
+def test_a_cancel_after_in_the_PAST_says_the_escrow_can_be_canceled_now():
+    """Rule 14 on the number that was printed raw.
+
+    843784768 was shown to the operator as-is. It had already passed, so 1 XRP
+    was sitting recoverable and the screen did not say so.
+
+    MUTATION: return the raw seconds without the comparison and this fails on
+    "PASSED". Verified 2026-09-29.
+    """
+    line = xrp_balances._when("CancelAfter", LIVE_ESCROW["CancelAfter"])
+    assert LIVE_CANCEL_AFTER_ISO in line, (
+        f"got {line!r}; 843784768 in XRPL's clock is {LIVE_CANCEL_AFTER_ISO}Z and the raw number is "
+        f"what an operator cannot read"
+    )
+    assert "PASSED" in line and "canceled now" in line, line
+
+
+def test_a_timestamp_that_is_not_set_says_so_rather_than_printing_None():
+    """FinishAfter is optional on an EscrowCreate, and this repo omits it.
+
+    `FinishAfter=None` is what the first version printed. "not set" is the same
+    fact in words the reader does not have to be a Python programmer to read.
+    """
+    assert xrp_balances._when("FinishAfter", None) == "FinishAfter  not set"
+
+
+def test_the_epoch_offset_has_exactly_one_definition_in_the_tree():
+    """Rule 8, on the constant that moved on 2026-09-29.
+
+    It was defined in xrp_htlc_escrow.py, which submits escrows, so a read-only
+    balance reader could not use it. chains/xrp_units.py is the home now and
+    xrp_htlc_escrow.py IMPORTS it -- one object, two import paths. A second
+    assignment anywhere is the drift rule 8 is about, and a wrong epoch offset
+    builds an escrow whose timelock expired thirty years ago.
+    """
+    root = SOURCE.parent
+    def _assigns_it(path) -> bool:
+        return any(
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "RIPPLE_EPOCH_OFFSET_SECONDS"
+                    for t in node.targets)
+            for node in ast.walk(ast.parse(path.read_text()))
+        )
+
+    defined = [str(path.relative_to(root)) for path in sorted(root.rglob("*.py"))
+               if "__pycache__" not in path.parts and ".venv" not in path.parts
+               and _assigns_it(path)]
+    assert defined == ["swap_terminal/chains/xrp_units.py"], (
+        f"RIPPLE_EPOCH_OFFSET_SECONDS is assigned in {defined}. One definition, imported -- a second "
+        f"copy drifts silently and a wrong offset makes an escrow anyone can cancel"
+    )
