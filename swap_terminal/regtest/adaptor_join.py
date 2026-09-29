@@ -65,7 +65,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chains.monero_keys import shared_private_spend_key
+from chains.monero_keys import public_key_for_share, shared_private_spend_key, shared_public_key
 from ecdsa import SECP256k1
 from ecdsa.util import sigdecode_der, sigencode_der
 from modules import adaptor_ecdsa
@@ -396,6 +396,24 @@ def swap_handoff(side, recovered_alice_share: int) -> dict:
         "view_share_b": side.bob_view,
         "spend_summed": shared_private_spend_key(recovered_alice_share, side.bob_spend),
         "view_summed": shared_private_spend_key(side.alice_view, side.bob_view),
-        "public_spend": side.alice_spend_public,
-        "public_view": "",
+        # THE SUMMED PUBLIC KEYS, NOT ALICE'S SHARE AND AN EMPTY STRING. A code review on
+        # 2026-09-29 flagged these two as looking wrong and could not tell whether they mattered.
+        # They were wrong, and they do not matter for any DECISION: monero_shared_key_verify's
+        # address_for() rebuilds the address from the four SCALARS, so nothing is computed from
+        # these. What reads them is print_plan(), which prints them under the labels
+        # "public spend key (sum)" and "public view key (sum)" -- so the file was carrying
+        # Alice's share alone under a label saying sum, and a blank under the other.
+        #
+        # A wrong value a human reads is rule 16's wrong comment wearing a JSON key. Fixed by
+        # computing them rather than by dropping the fields, because a reader comparing a
+        # handoff against a --run fixture should find the same two keys meaning the same thing.
+        # `.hex()` IS LOAD-BEARING, not cosmetic. save_shares() json.dumps() this payload, and
+        # shared_public_key returns BYTES -- so the first version of this fix would have thrown
+        # TypeError on the write that produces the handoff, turning a wrong display value into
+        # no file at all. monero_shared_key_verify's own build_shares() calls .hex() here for
+        # exactly this reason; matching it is what keeps one loader able to read both.
+        "public_spend": shared_public_key(
+            public_key_for_share(recovered_alice_share), public_key_for_share(side.bob_spend)).hex(),
+        "public_view": shared_public_key(
+            public_key_for_share(side.alice_view), public_key_for_share(side.bob_view)).hex(),
     }

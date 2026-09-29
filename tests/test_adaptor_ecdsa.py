@@ -120,6 +120,7 @@ still come from `secrets` -- that is the code under test, not the fixtures.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import sys
 from pathlib import Path
@@ -136,6 +137,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "swap_terminal"))
 # (measured 2026-09-27, RUF100), because tests/conftest.py already makes this
 # import resolvable and ruff's E402 does not fire on it.
 from modules.adaptor_ecdsa import (
+    INFINITY,
     AdaptorError,
     PreSignature,
     adapt,
@@ -814,3 +816,64 @@ def test_point_encoding_round_trips():
         point_from_bytes(b"\x02" * 32)
     with pytest.raises(AdaptorError):
         point_from_bytes(b"\x09" + b"\x00" * 32)
+
+
+@pytest.mark.parametrize("identity_field", ["r_point", "r_a"])
+def test_pre_verify_RETURNS_FALSE_ON_AN_IDENTITY_POINT_ANYWHERE(identity_field):
+    """It RAISED AttributeError out of the group arithmetic, confirmed by execution 2026-09-29.
+
+    The guard covered `public_key` and `adaptor_point` and not the pre-signature's own
+    `r_point` or `r_a`, so
+
+        AttributeError: 'NoneType' object has no attribute 'p'
+
+    came out of a function whose contract is "returns False for anything that does not
+    verify... raises only on a structurally malformed input". AdaptorError's docstring builds an
+    argument on that split, so a caller writing `except AdaptorError` crashed instead of seeing
+    a refusal.
+
+    NOT REACHABLE FROM THE WIRE -- PreSignature.from_bytes goes through point_from_bytes, which
+    rejects the identity -- which is why this is a contract bug and not a live one. The
+    boundary function is exactly the one that should be self-defending regardless of caller.
+    """
+    secret, witness = 0x1234567890ABCDEF, 0x0FEDCBA987654321
+    adaptor_point = public_key_point(witness)
+    public_key = public_key_point(secret)
+    message_hash = bytes(range(32))
+    pre = pre_sign(secret, message_hash, adaptor_point)
+
+    assert pre_verify(public_key, message_hash, adaptor_point, pre) is True
+    broken = dataclasses.replace(pre, **{identity_field: INFINITY})
+    assert pre_verify(public_key, message_hash, adaptor_point, broken) is False
+
+
+def test_a_malleated_signature_STILL_YIELDS_THE_SCALAR():
+    """The classic ECDSA-adaptor attack, and this implementation is not vulnerable to it.
+
+    ECDSA signatures are malleable in s: a counterparty can publish (r, n-s) instead of (r, s).
+    If recovery assumed one sign, the counterparty could take the coin while the scalar came
+    back as garbage -- which on a swap means taking one leg without opening the other.
+
+    `adapt` negates unconditionally above n/2 and `recover_adaptor_secret` tests the recovered
+    point against BOTH Y and -Y, returning (-y) % n on the second branch. secp256k1 has prime
+    order so Y != -Y, which makes the two candidates unambiguous.
+
+    THE PROPERTY HELD AND NOTHING PINNED IT. A 2026-09-29 review confirmed it by running 50
+    random triples and found the suite's nearest test mangles s with s+1, which takes a
+    different branch entirely. A property that is true by accident and untested is one refactor
+    from being false.
+    """
+    for seed in range(8):
+        secret = 0x1000003 + seed * 7919
+        witness = 0x2000003 + seed * 104729
+        adaptor_point = public_key_point(witness)
+        message_hash = hashlib.sha256(f"malleability {seed}".encode()).digest()
+
+        pre = pre_sign(secret, message_hash, adaptor_point)
+        r, s = adapt(pre, witness)
+        assert recover_adaptor_secret(pre, (r, s)) == witness
+
+        malleated = (r, _N - s)
+        assert recover_adaptor_secret(pre, malleated) == witness, (
+            f"seed {seed}: flipping s must not cost the scalar -- that is the attack"
+        )

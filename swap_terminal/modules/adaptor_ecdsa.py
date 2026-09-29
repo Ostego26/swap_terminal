@@ -734,7 +734,19 @@ def pre_verify(
     verify under its own claimed key. The two are compared below.
     """
     digest = _require_message_hash(message_hash)
-    if INFINITY in (public_key, adaptor_point):
+    # ALL FOUR POINTS, NOT TWO. This checked `public_key` and `adaptor_point` only, and a code
+    # review on 2026-09-29 confirmed by execution that an identity in `r_point` or `r_a` raised
+    #     AttributeError: 'NoneType' object has no attribute 'p'
+    # out of the group arithmetic below. This function's own contract is "returns False for
+    # anything that does not verify... raises only on a structurally malformed input", and
+    # AdaptorError's docstring builds an argument on that split -- so a caller writing
+    # `try: pre_verify(...) except AdaptorError:` crashed instead of seeing a refusal.
+    #
+    # NOT REACHABLE FROM THE WIRE, which is why it is a contract bug rather than a live one:
+    # PreSignature.from_bytes goes through point_from_bytes, which rejects the identity. It is
+    # reachable from any in-process construction or dataclasses.replace. The boundary function
+    # is exactly the one that should be self-defending regardless of who calls it.
+    if INFINITY in (public_key, adaptor_point, pre_signature.r_point, pre_signature.r_a):
         return False
     if pre_signature.adaptor_point != adaptor_point:
         # A pre-signature built for a different Y. Checked explicitly so that

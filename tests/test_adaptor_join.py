@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1765,3 +1766,32 @@ def test_A_HANDOFF_IS_NEVER_WRITTEN_FOR_A_NON_TEST_NETWORK(monkeypatch, tmp_path
     assert not (tmp_path / "must-not-exist.json").exists(), "nothing written off a test network"
     assert any("NOT writing a swap handoff" in line for line in said)
     assert any("key disclosure" in line for line in said), "and it says WHY, not just that"
+
+
+def test_THE_HANDOFFS_PUBLIC_KEYS_ARE_THE_SUMS_AND_ARE_JSON_WRITABLE():
+    """Both halves were wrong in the first version, and only one of them was the reported bug.
+
+    A code review on 2026-09-29 flagged `"public_spend": side.alice_spend_public` and
+    `"public_view": ""` as looking wrong and could not tell whether they mattered. They were
+    wrong and they decide NOTHING -- monero_shared_key_verify.address_for() rebuilds the
+    address from the four SCALARS. What reads them is print_plan(), which labels them "public
+    spend key (sum)" and "public view key (sum)". So the file carried Alice's share alone under
+    a label saying sum, and a blank under the other: a wrong value a human reads.
+
+    AND THE FIX FOR IT NEARLY BROKE THE WRITE. shared_public_key returns BYTES; save_shares
+    json.dumps() the payload. The first version omitted .hex() and would have thrown TypeError
+    on the call that produces the handoff -- turning a wrong display value into no file at all,
+    on the path that closes gap (e). Both properties are pinned here because fixing one is what
+    introduced the other.
+    """
+    side = adaptor_steps.monero_side()
+    payload = swap_handoff(side, side.alice_spend)
+
+    json.dumps(payload)  # raises TypeError on bytes; that is the assertion
+    assert isinstance(payload["public_spend"], str)
+    assert payload["public_spend"] == decode_address(side.lock_address).public_spend_key.hex(), (
+        "the SUM, checked against the address's own spend key rather than against the inputs "
+        "that built it -- the same standard reconstruction_opens_lock() holds itself to"
+    )
+    assert payload["public_view"] and payload["public_view"] != payload["public_spend"]
+    assert payload["public_spend"] != side.alice_spend_public, "the reported bug, gone"
