@@ -36,11 +36,17 @@ sys.path.insert(0, str(SOURCE.parent))
 # The path insert above has to run first: chain_balances.py lives at the project
 # root, which conftest.py does not put on sys.path (it adds swap_terminal/).
 import chain_balances  # noqa: E402 -- checked: the sys.path.insert above is what makes this importable, and moving it earlier would import the module before its own directory is on the path. Same idiom and same reason as tests/test_xrp_chain_check_units.py:28.
+import regtest_htlc_verify  # noqa: E402 -- checked: same path insert, same reason. Imported for WALLET_NAME only; it is a module-level constant and this module's import has no side effects.
 
 # Every RPC method this script may call. All five are reads, and getwalletinfo is
 # reached through chains/wallet_lock.encryption_state() rather than directly.
 READ_ONLY_METHODS = frozenset({"getblockchaininfo", "getinfo", "getblockcount",
-                               "getbalance", "getbalances", "getwalletinfo"})
+                               "getbalance", "getbalances", "getwalletinfo",
+                               # listwalletdir READS the wallet directory. loadwallet
+                               # and createwallet are deliberately NOT here: they
+                               # change what the daemon has open, and this file names
+                               # them for the operator instead of calling them.
+                               "listwalletdir"})
 
 # Anything whose presence would contradict "Can move funds: NO".
 FORBIDDEN_CALLS = ("send_to_address", "sendtoaddress", "walletpassphrase", "unlock_for_sending",
@@ -52,7 +58,11 @@ FORBIDDEN_CALLS = ("send_to_address", "sendtoaddress", "walletpassphrase", "unlo
                    # names are what would turn it into something else. The live
                    # rules are explicit that this harness never starts or stops a
                    # daemon.
-                   "start_daemon", "_spawn", "wait_for_rpc", "apply_mweb_override")
+                   "start_daemon", "_spawn", "wait_for_rpc", "apply_mweb_override",
+                   # ADDED with the no-wallet hint. This file names loadwallet and
+                   # createwallet in a message; calling either would make a
+                   # "read-only" reader change the daemon's open wallets.
+                   "loadwallet", "createwallet", "ensure_wallet")
 
 # THE METHODS A WALLET CALL LOOKS LIKE. Separate from the allowlist above because
 # the mainnet test needs to assert that NONE of these was asked, and
@@ -339,3 +349,192 @@ def test_a_chain_with_neither_route_names_BOTH_of_them():
     out = recorder.text()
     assert "LTC_RPC_*" in out, out
     assert "conf" in out, f"the conf route was tried and is not mentioned:\n{out}"
+
+
+# ---------------------------------------------------------------------------
+# THE DOWN-DAEMON CASE, added 2026-09-29 after the operator ran the same read
+# twice and got the same non-answer both times.
+# ---------------------------------------------------------------------------
+
+
+class _Unreachable:
+    """A daemon that is not there. requests raises before any RPC is answered."""
+
+    def __init__(self):
+        self.asked = []
+
+    def call(self, method, *_params):
+        self.asked.append(method)
+        raise ConnectionError(f"nothing is listening ({method})")
+
+
+def test_a_daemon_that_is_NOT_RUNNING_gets_the_command_that_starts_it():
+    """Rule 14: describe the next step, not only the state.
+
+    "REFUSED to ask this daemon about a balance" beside "unknown
+    (getblockchaininfo: ConnectionError)" is accurate and leaves the reader
+    holding nothing to do. The operator re-ran the identical command and got the
+    identical output, which is what a screen that describes a state instead of a
+    next step produces.
+
+    MUTATION: drop the what_to_do_about_it() line from report_chain() and this
+    fails on "litecoind". Verified 2026-09-29.
+    """
+    adapter = _Unreachable()
+    recorder = _Recorder()
+    ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    out = recorder.text()
+
+    assert ok is False
+    assert not WALLET_METHODS.intersection(adapter.asked), (
+        f"a daemon that is not answering was still asked {adapter.asked}"
+    )
+    assert "nothing is listening" in out and "no LTC daemon is running" in out, out
+    assert "litecoind" in out and "-regtest" in out and "-daemon" in out, (
+        f"the command that starts it is the actionable part and is absent:\n{out}"
+    )
+    assert "will NOT start it for you" in out, (
+        f"printing a start command without saying it is not run invites the reader to expect it "
+        f"already happened:\n{out}"
+    )
+
+
+def test_a_daemon_that_ANSWERED_with_a_wrong_network_is_NOT_told_to_start():
+    """The mainnet case. "Start it" would be wrong -- it is running.
+
+    Conflating the two is how an operator gets told to launch a second daemon
+    against a datadir the first one already holds.
+
+    MUTATION: return the start command unconditionally and this fails on
+    "ANSWERED". Verified 2026-09-29.
+    """
+    line = chain_balances.what_to_do_about_it("LTC", "main")
+    assert "ANSWERED" in line and "it is running" in line, line
+    assert "litecoind" not in line, f"a running daemon must not be told to start:\n{line}"
+
+
+def test_a_chain_with_no_known_datadir_says_what_it_can_rather_than_nothing():
+    """GRC has no conf fallback, so no start command is known for it.
+
+    It still gets a sentence. "(none)" and a state with no action are the two
+    shapes rule 14 forbids, and an unknown datadir is not a reason to print
+    neither.
+    """
+    line = chain_balances.what_to_do_about_it("GRC", "unknown (getblockchaininfo: ConnectionError)")
+    assert "no GRC daemon is running" in line, line
+    assert "GRC_RPC_PORT" in line, f"the one thing the reader can change is not named:\n{line}"
+    assert "gridcoinresearchd" not in line, (
+        f"a start command was printed for the chain deliberately excluded from the conf "
+        f"fallback:\n{line}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NO WALLET LOADED, which is what a freshly started daemon answers. Since
+# Bitcoin Core 0.21 it does not create a default wallet either, so this is the
+# normal state of a daemon somebody just launched -- the operator hit it on LTC
+# within a minute of starting litecoind, 2026-09-29.
+# ---------------------------------------------------------------------------
+
+NO_WALLET_ERROR = ("No wallet is loaded. Load a wallet using loadwallet or create a new one with "
+                   "createwallet. (Note: A default wallet is no longer automatically created) "
+                   "(rpc code -18)")
+
+
+class _NoWalletLoaded:
+    """A running daemon with nothing open. Answers chain RPCs, refuses wallet ones."""
+
+    def __init__(self, on_disk):
+        self.on_disk = on_disk
+        self.asked = []
+
+    def call(self, method, *_params):
+        self.asked.append(method)
+        if method == "getblockchaininfo":
+            return {"chain": "regtest"}
+        if method == "getblockcount":
+            return 2504
+        if method == "listwalletdir":
+            return {"wallets": [{"name": name} for name in self.on_disk]}
+        raise RuntimeError(NO_WALLET_ERROR)
+
+
+def test_a_daemon_with_no_wallet_loaded_NAMES_the_wallets_it_could_load():
+    """Rule 14 again, one layer in from the down-daemon hint.
+
+    The daemon's own -18 message names loadwallet and createwallet, which is most
+    of the answer and not the part that says WHICH wallet. The operator re-ran the
+    read twice against that message, the same way they had against the
+    ConnectionError one.
+
+    MUTATION: drop the which_wallets_are_on_disk() call from report_chain() and
+    this fails on the wallet name. Verified 2026-09-29.
+    """
+    adapter = _NoWalletLoaded(["regtest_htlc_harness", "other"])
+    recorder = _Recorder()
+    ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    out = recorder.text()
+
+    assert ok is False
+    assert "2 wallet(s) on disk" in out, out
+    assert "regtest_htlc_harness" in out, out
+    assert "loadwallet" in out and "litecoin-cli" in out, (
+        f"the command that loads one is the actionable part:\n{out}"
+    )
+    # SCOPED TO THE HINT, not to the whole transcript. The first version asserted
+    # "createwallet" was absent from `out` and failed on the DAEMON'S OWN error
+    # message, which names both commands -- so it was measuring the daemon's
+    # wording, not this file's advice.
+    hint = chain_balances.which_wallets_are_on_disk(adapter, "LTC")
+    assert "createwallet" not in hint, (
+        f"a daemon WITH wallets on disk should be told to load one, not to create another:\n{hint}"
+    )
+    assert "'" not in hint, (
+        f"the command is meant to be pasted, and Python's repr quotes do not belong in it:\n{hint}"
+    )
+
+
+def test_a_daemon_with_an_EMPTY_wallet_directory_is_told_to_create_one():
+    """The other branch, and "(none)" is a result rather than a blank.
+
+    "loadwallet one of []" would be nonsense, so the two cases say different
+    things -- which is the distinction rule 14 asks for between a real zero and
+    nothing to report.
+    """
+    adapter = _NoWalletLoaded([])
+    recorder = _Recorder()
+    chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    out = recorder.text()
+
+    assert "NO wallet on disk" in out and "(none)" in out, out
+    assert "createwallet" in out and chain_balances.DEFAULT_WALLET_NAME in out, out
+    assert "will be empty until" in out, (
+        f"creating a wallet does not produce coins, and a reader who expects a balance next "
+        f"should be told:\n{out}"
+    )
+
+
+def test_the_wallet_name_suggested_is_the_one_the_HTLC_HARNESS_uses():
+    """Rule 8: one name for one thing.
+
+    An operator who follows this hint should end up with the wallet
+    regtest_htlc_verify.py then finds already loaded, not a second one beside it.
+    """
+    assert chain_balances.DEFAULT_WALLET_NAME == regtest_htlc_verify.WALLET_NAME
+
+
+def test_an_unlistable_wallet_directory_still_names_a_command():
+    """A daemon built without wallet support has no listwalletdir.
+
+    The names are unavailable; the reader must not be left with nothing, which is
+    what returning "" or raising would do.
+    """
+    class _NoListing(_NoWalletLoaded):
+        def call(self, method, *params):
+            if method == "listwalletdir":
+                raise RuntimeError("Method not found (rpc code -32601)")
+            return super().call(method, *params)
+
+    line = chain_balances.which_wallets_are_on_disk(_NoListing([]), "LTC")
+    assert "could not list" in line and "-32601" in line, line
+    assert "createwallet" in line, f"no names is not a reason to name no command:\n{line}"
