@@ -635,7 +635,7 @@ class GRCClient:
         was the state.
 
         It matters more here than on the other two chains because of which leg GRC tends
-        to be. In atomic_swap_xrp_grc.py's GRC-first direction the Gridcoin leg carries
+        to be. In atomic_swap_xrp.py's GRC-first direction the Gridcoin leg carries
         the INITIATOR's longer timelock, so it is the leg that is still locked when the
         counterparty walks away: exactly the case a refund exists for, on the one chain
         that could not perform one.
@@ -670,7 +670,7 @@ class GRCClient:
         So with GRC_WALLET_PASSPHRASE unset this was a harmless no-op, and with it SET the
         refund path locked a staking wallet in order to enable signing that no longer goes
         through the wallet. The refund is the path that matters most on this chain -- in
-        atomic_swap_xrp_grc.py's GRC-first direction the Gridcoin leg carries the
+        atomic_swap_xrp.py's GRC-first direction the Gridcoin leg carries the
         INITIATOR's longer timelock, so it is the leg still locked when a counterparty
         walks away -- and it was the path that mutated the operator's wallet to run.
 

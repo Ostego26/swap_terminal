@@ -109,7 +109,7 @@ def test_xrp_is_absent_for_a_protocol_reason_and_says_so():
     assert "XRP" not in CLIENTS
 
     doc = re.sub(r"\s+", " ", atomic_swap.__doc__ or "")
-    assert "atomic_swap_xrp_grc.py" in doc, "the XRP driver that DOES work must be named"
+    assert "atomic_swap_xrp.py" in doc, "the XRP driver that DOES work must be named"
 
 
 def _planned(asset: str, role: str, tip: int, locktime: int) -> PlannedLeg:

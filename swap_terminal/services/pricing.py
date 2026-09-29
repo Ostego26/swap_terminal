@@ -69,7 +69,7 @@ TWO THINGS ABOUT HOW THIS IS SHAPED, AND BOTH ARE THE POINT.
    SIBLING RATHER THAN A WIDENING. Every caller of fetch_usd_prices() was read
    by NAME across the tree before choosing (rule 2), not just through the
    import graph -- open_swap.py:677, services/quote_service.py:67,
-   routes/rates.py:17, atomic_swap_xrp_grc.py:567, swap_readiness.py:371 and
+   routes/rates.py:17, atomic_swap_xrp.py:567, swap_readiness.py:371 and
    tests/test_open_swap.py. Two of them make widening the returned dict wrong
    rather than merely additive:
 

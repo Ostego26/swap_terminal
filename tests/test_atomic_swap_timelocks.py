@@ -7,7 +7,7 @@ Writes: nothing
 Can move funds: no
 Mainnet-safe: yes
 
-THESE TWO THINGS ARE THE SWAP. Everything else in atomic_swap_xrp_grc.py is the
+THESE TWO THINGS ARE THE SWAP. Everything else in atomic_swap_xrp.py is the
 order of five acts; these are the decisions, and both fail in ways nothing else
 would catch:
 
@@ -39,11 +39,12 @@ from modules.htlc_spend import (
 )
 from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT, SECONDS_PER_BLOCK, lock_hours_for_role
 
-from atomic_swap_xrp_grc import (
-    GRC_FIRST,
+from atomic_swap_xrp import (
+    CHAIN_FIRST,
     XRP_FIRST,
+    ScriptLeg,
     assert_timelock_ordering,
-    grc_amount_for_rate,
+    chain_amount_for_rate,
     swap_timelocks,
 )
 from xrp_htlc_escrow import RIPPLE_EPOCH_OFFSET_SECONDS
@@ -54,13 +55,16 @@ TIP = 3_200_000            # a plausible Gridcoin testnet height
 
 def test_the_participants_leg_expires_first_under_the_real_policy():
     """48h against 24h, converted into two different clocks, still in the right order."""
-    xrp_cancel_after, grc_timeout, why = swap_timelocks(NOW, TIP)
+    xrp_cancel_after, leg, why = swap_timelocks(NOW, TIP)
     assert why["initiator_hours"] == lock_hours_for_role(ROLE_INITIATOR) == 48
     assert why["participant_hours"] == lock_hours_for_role(ROLE_PARTICIPANT) == 24
     # 24 hours at Gridcoin's 90-second target: 86400 / 90 = 960 blocks.
-    assert why["grc_blocks"] == 960
-    assert grc_timeout == TIP + 960
-    sentence = assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW)
+    assert why["chain_blocks"] == 960
+    assert leg.timeout_height == TIP + 960
+    # The leg carries the chain it was computed for, which is what makes the height
+    # above interpretable at all -- 960 blocks means 24 hours only on a 90s chain.
+    assert leg.chain == "GRC" and leg.tip_height == TIP
+    sentence = assert_timelock_ordering(xrp_cancel_after, leg, NOW)
     assert "ordering OK" in sentence
     # The margin is the initiator's extra 24 hours, and the sentence has to say
     # the GRC figure is an estimate -- an operator reading a number with no
@@ -77,10 +81,11 @@ def test_an_inverted_ordering_is_REFUSED_before_anything_is_funded():
     would produce it silently.
     """
     # A GRC leg 48 hours out, an XRP leg 1 hour out: the wrong way round.
-    grc_timeout = TIP + int(48 * 3600 // SECONDS_PER_BLOCK["GRC"])
+    chain_timeout = TIP + int(48 * 3600 // SECONDS_PER_BLOCK["GRC"])
     xrp_cancel_after = int(NOW + 3600) - RIPPLE_EPOCH_OFFSET_SECONDS
+    leg = ScriptLeg(chain="GRC", tip_height=TIP, timeout_height=chain_timeout)
     with pytest.raises(SystemExit, match="REFUSED before funding anything"):
-        assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW)
+        assert_timelock_ordering(xrp_cancel_after, leg, NOW)
 
 
 def test_equal_expiries_are_refused_too_not_merely_inverted_ones():
@@ -91,11 +96,12 @@ def test_equal_expiries_are_refused_too_not_merely_inverted_ones():
     same instant" is a coin flip decided by whichever chain moves first.
     """
     grc_blocks = int(24 * 3600 // SECONDS_PER_BLOCK["GRC"])
-    grc_timeout = TIP + grc_blocks
+    chain_timeout = TIP + grc_blocks
     # Put the XRP expiry at exactly the GRC estimate.
     xrp_cancel_after = int(NOW + grc_blocks * SECONDS_PER_BLOCK["GRC"]) - RIPPLE_EPOCH_OFFSET_SECONDS
+    leg = ScriptLeg(chain="GRC", tip_height=TIP, timeout_height=chain_timeout)
     with pytest.raises(SystemExit, match="REFUSED before funding anything"):
-        assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW)
+        assert_timelock_ordering(xrp_cancel_after, leg, NOW)
 
 
 def test_the_demo_scale_shortens_both_legs_and_cannot_invert_them():
@@ -105,10 +111,10 @@ def test_the_demo_scale_shortens_both_legs_and_cannot_invert_them():
     scales to show the property is structural rather than true at one value.
     """
     for scale in (1.0, 0.5, 0.1, 0.02):
-        xrp_cancel_after, grc_timeout, why = swap_timelocks(NOW, TIP, hours_scale=scale)
+        xrp_cancel_after, leg, why = swap_timelocks(NOW, TIP, hours_scale=scale)
         assert why["initiator_hours"] == 48 * scale
         assert why["participant_hours"] == 24 * scale
-        assert "ordering OK" in assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW)
+        assert "ordering OK" in assert_timelock_ordering(xrp_cancel_after, leg, NOW)
 
 
 def test_the_participant_recovers_the_secret_from_the_initiators_own_claim():
@@ -183,17 +189,17 @@ def test_the_longer_lock_follows_the_ROLE_not_the_chain():
     later. This asserts the hours swap over.
     """
     _, _, forward = swap_timelocks(NOW, TIP, direction=XRP_FIRST)
-    _, _, reverse = swap_timelocks(NOW, TIP, direction=GRC_FIRST)
-    assert forward["xrp_hours"] == 48 and forward["grc_hours"] == 24
-    assert reverse["xrp_hours"] == 24 and reverse["grc_hours"] == 48
+    _, _, reverse = swap_timelocks(NOW, TIP, direction=CHAIN_FIRST)
+    assert forward["xrp_hours"] == 48 and forward["chain_hours"] == 24
+    assert reverse["xrp_hours"] == 24 and reverse["chain_hours"] == 48
     # And the block count follows, since GRC is the initiator's leg now.
-    assert reverse["grc_blocks"] == int(48 * 3600 // SECONDS_PER_BLOCK["GRC"]) == 1920
+    assert reverse["chain_blocks"] == int(48 * 3600 // SECONDS_PER_BLOCK["GRC"]) == 1920
 
 
 def test_both_directions_pass_their_own_ordering_check():
-    for direction in (XRP_FIRST, GRC_FIRST):
-        xrp_cancel_after, grc_timeout, _ = swap_timelocks(NOW, TIP, direction=direction)
-        sentence = assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW, direction=direction)
+    for direction in (XRP_FIRST, CHAIN_FIRST):
+        xrp_cancel_after, leg, _ = swap_timelocks(NOW, TIP, direction=direction)
+        sentence = assert_timelock_ordering(xrp_cancel_after, leg, NOW, direction=direction)
         assert "ordering OK" in sentence
         assert direction in sentence
 
@@ -207,10 +213,10 @@ def test_the_ordering_check_is_not_hardcoded_to_GRC_expiring_first():
     wrong direction has to refuse -- otherwise the check would have passed the
     reverse direction while the expiries were the wrong way round.
     """
-    xrp_cancel_after, grc_timeout, _ = swap_timelocks(NOW, TIP, direction=GRC_FIRST)
-    assert "ordering OK" in assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW, direction=GRC_FIRST)
+    xrp_cancel_after, leg, _ = swap_timelocks(NOW, TIP, direction=CHAIN_FIRST)
+    assert "ordering OK" in assert_timelock_ordering(xrp_cancel_after, leg, NOW, direction=CHAIN_FIRST)
     with pytest.raises(SystemExit, match="REFUSED before funding anything"):
-        assert_timelock_ordering(xrp_cancel_after, grc_timeout, TIP, NOW, direction=XRP_FIRST)
+        assert_timelock_ordering(xrp_cancel_after, leg, NOW, direction=XRP_FIRST)
 
 
 def test_an_unknown_direction_is_refused_rather_than_defaulted():
@@ -287,8 +293,8 @@ def test_the_grc_leg_is_sized_by_the_rate():
     looks like a large number and nothing else -- so the direction is asserted
     with a rate whose inverse is a different answer (0.25 -> 4, and 4 -> 0.25).
     """
-    assert grc_amount_for_rate(1_000_000, Decimal("0.25")) == Decimal("4.00000000")
-    assert grc_amount_for_rate(1_000_000, Decimal(4)) == Decimal("0.25000000")
+    assert chain_amount_for_rate(1_000_000, Decimal("0.25")) == Decimal("4.00000000")
+    assert chain_amount_for_rate(1_000_000, Decimal(4)) == Decimal("0.25000000")
 
 
 def test_the_grc_leg_rounds_DOWN_in_the_grc_holders_favour():
@@ -298,7 +304,7 @@ def test_the_grc_leg_rounds_DOWN_in_the_grc_holders_favour():
     leg is what the XRP buyer RECEIVES, so rounding down favours the party giving
     up the GRC rather than silently taking a sliver from them.
     """
-    assert grc_amount_for_rate(1_000_000, Decimal(3)) == Decimal("0.33333333")
+    assert chain_amount_for_rate(1_000_000, Decimal(3)) == Decimal("0.33333333")
 
 
 def test_a_non_positive_rate_is_refused_rather_than_producing_a_free_swap():
@@ -309,7 +315,7 @@ def test_a_non_positive_rate_is_refused_rather_than_producing_a_free_swap():
     """
     for bad in ("0", "-1", "-0.5"):
         with pytest.raises(ValueError, match="rate must be positive"):
-            grc_amount_for_rate(1_000_000, Decimal(bad))
+            chain_amount_for_rate(1_000_000, Decimal(bad))
 
 
 def test_the_rate_arithmetic_is_decimal_not_float():
@@ -318,6 +324,92 @@ def test_the_rate_arithmetic_is_decimal_not_float():
     The amount is what a daemon is asked to SEND, so the arithmetic is Decimal
     end to end. 0.1 is the classic float: three of them do not sum to 0.3.
     """
-    amount = grc_amount_for_rate(1_000_000, Decimal("0.1"))
+    amount = chain_amount_for_rate(1_000_000, Decimal("0.1"))
     assert amount == Decimal("10.00000000")
     assert isinstance(amount, Decimal)
+
+
+# ---------------------------------------------------------------------------
+# The three script chains, which is what --chain added on 2026-09-29.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("chain", "expected_blocks"),
+    [("BTC", (24 * 3600 // 600)), ("LTC", (24 * 3600 // 150)), ("GRC", (24 * 3600 // 90))],
+)
+def test_each_script_chain_converts_the_SAME_hours_into_its_OWN_block_count(chain, expected_blocks):
+    """THE POLICY IS IN HOURS AND EVERY CHAIN ENFORCES IT IN BLOCKS, at its own rate.
+
+    This is the whole reason --chain could not be a cosmetic flag. The participant's leg
+    is 24 hours on all three, and 24 hours is 144 blocks on Bitcoin, 576 on Litecoin and
+    960 on Gridcoin -- a 6.7x spread. A driver that carried Gridcoin's 90-second interval
+    while funding a Bitcoin HTLC would set a timeout roughly SIX AND A HALF TIMES too far
+    out, and the failure would not surface until the refund was needed and the coins were
+    not yet reclaimable.
+
+    The numbers come from modules/htlc_timelock.SECONDS_PER_BLOCK, which already held all
+    three before this driver could use any but GRC.
+    """
+    _, leg, why = swap_timelocks(NOW, TIP, chain=chain)
+    assert leg.chain == chain
+    assert why["chain_blocks"] == expected_blocks
+    assert leg.timeout_height == TIP + expected_blocks
+    assert why["chain_seconds_per_block"] == SECONDS_PER_BLOCK[chain]
+
+
+def test_the_THREE_chains_do_not_all_produce_the_same_height():
+    """The assertion the parametrize above cannot make on its own.
+
+    Each case checks its chain in isolation, so a bug that ignored `chain` and used one
+    interval for all three would still have to disagree with two of the three expected
+    numbers -- but only if the expected numbers differ. This says they do, out loud, so
+    the parametrize cannot be quietly reduced to one shared constant later.
+    """
+    heights = {chain: swap_timelocks(NOW, TIP, chain=chain)[1].timeout_height
+               for chain in ("BTC", "LTC", "GRC")}
+    assert len(set(heights.values())) == 3, f"two chains produced the same timeout height: {heights}"
+
+
+def test_the_ordering_check_uses_THE_LEGS_OWN_chain_interval():
+    """A leg carries its chain so the ordering check converts with the right number.
+
+    THE MUTATION THIS CATCHES IS IN THE SIBLING TEST BELOW, NOT HERE, and that is worth
+    recording because the obvious version of this test does NOT catch it. Making
+    assert_timelock_ordering() read SECONDS_PER_BLOCK['GRC'] instead of the leg's chain
+    was tried against this test on 2026-09-29 and it PASSED: in xrp-first the BTC leg is
+    the participant's, so converting 144 blocks through 90 seconds instead of 600 makes
+    it look like it expires in 3.6 hours rather than 24 -- sooner, not later, which still
+    satisfies "participant before initiator". An understated expiry is invisible in this
+    direction.
+
+    So this test pins what it can honestly pin: that the sentence names the chain and its
+    interval. The ordering consequence lives in the direction where it bites.
+    """
+    xrp_cancel_after, leg, _ = swap_timelocks(NOW, TIP, chain="BTC")
+    sentence = assert_timelock_ordering(xrp_cancel_after, leg, NOW)
+    assert "ordering OK" in sentence
+    assert "BTC is height" in sentence, "the sentence must name the chain it converted for"
+    assert f"{SECONDS_PER_BLOCK['BTC']}s" in sentence
+
+
+def test_a_chain_first_BTC_leg_IS_ORDERED_CORRECTLY_and_the_wrong_interval_would_refuse_it():
+    """WHERE READING THE WRONG CHAIN'S INTERVAL ACTUALLY BITES, measured rather than assumed.
+
+    In chain-first the SCRIPT leg is the initiator's, so it carries the 48-hour lock: 288
+    blocks on Bitcoin, which at Bitcoin's real 600-second interval is 48 hours and orders
+    correctly against the participant's 24-hour XRP leg.
+
+    Convert those same 288 blocks through Gridcoin's 90 seconds and they read as 7.2
+    hours -- now the INITIATOR's leg appears to expire before the participant's, and
+    assert_timelock_ordering raises SystemExit. So the wrong interval does not quietly
+    authorize a bad swap here; it REFUSES a good one, which is the safe direction to fail
+    but still wrong, and it is the direction where the defect is detectable at all.
+
+    MUTATION: replace SECONDS_PER_BLOCK[chain] with SECONDS_PER_BLOCK['GRC'] in
+    assert_timelock_ordering() and this test fails with "REFUSED before funding anything".
+    Verified 2026-09-29; the xrp-first test above was tried first and did not catch it.
+    """
+    xrp_cancel_after, leg, why = swap_timelocks(NOW, TIP, chain="BTC", direction=CHAIN_FIRST)
+    assert why["chain_hours"] == 48
+    assert leg.timeout_height == TIP + int(48 * 3600 // SECONDS_PER_BLOCK["BTC"])
+    sentence = assert_timelock_ordering(xrp_cancel_after, leg, NOW, direction=CHAIN_FIRST)
+    assert "ordering OK" in sentence

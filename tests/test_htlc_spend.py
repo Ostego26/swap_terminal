@@ -2564,7 +2564,7 @@ def test_all_three_clients_can_create_redeem_AND_refund():
     cannot be recovered is the WORST of the three states -- worse than one that cannot be
     funded at all -- because the funding is the irreversible half.
 
-    It mattered most on the leg GRC usually is: in atomic_swap_xrp_grc.py's GRC-first
+    It mattered most on the leg GRC usually is: in atomic_swap_xrp.py's GRC-first
     direction the Gridcoin leg carries the INITIATOR's longer timelock, so it is the leg
     still locked when a counterparty walks away. That is exactly what a refund is for,
     on the one chain that could not perform one.

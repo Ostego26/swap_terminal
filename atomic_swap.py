@@ -38,15 +38,22 @@ WHAT IS REACHABLE TODAY, and "any currency listed" IS NOT YET TRUE:
     BTC<->LTC        THIS FILE, both directions.
     BTC<->GRC        THIS FILE, both directions.
     LTC<->GRC        THIS FILE, both directions.
-    XRP<->GRC        A DIFFERENT DRIVER, and it works: atomic_swap_xrp_grc.py, both
-                     directions, proven live on testnet. The XRP Ledger has no script --
-                     it uses EscrowCreate with a PREIMAGE-SHA-256 crypto-condition rather
+    XRP<->any        A DIFFERENT DRIVER, and it works: atomic_swap_xrp.py, both
+                     directions, --chain btc|ltc|grc. The XRP Ledger has no script -- it
+                     uses EscrowCreate with a PREIMAGE-SHA-256 crypto-condition rather
                      than a P2SH HTLC -- so its legs are a different protocol and cannot
-                     be a row in this file's table. XRP<->BTC and XRP<->LTC would each be
-                     that same escrow leg against a P2SH leg, which is real work and not
-                     yet done.
+                     be a row in this file's table.
 
-So: six directed pairs here, and two more in the XRP driver.
+                     UNTIL 2026-09-29 THAT DRIVER WAS GRC-ONLY and this paragraph said
+                     XRP<->BTC and XRP<->LTC were "real work and not yet done". They were
+                     eleven hardcoded strings. The driver already reached its chain
+                     through chains/registry and the shared modules/htlc_* family -- the
+                     same ones this file uses for all three -- so the protocol work had
+                     been done here all along and only the parameter was missing. GRC is
+                     still the only pair PROVEN LIVE; BTC and LTC are exercised by seeded
+                     tests and have not been run against their testnets.
+
+So: six directed pairs here, and six more in the XRP driver.
 
 THE PROTOCOL, AND THE ONE PROPERTY THAT MAKES IT ATOMIC
 
@@ -330,7 +337,7 @@ def client_for(asset: str):
     if asset not in CLIENTS:
         raise SwapError(
             f"no client for {asset!r}; this file drives {', '.join(ASSETS)}. XRP is a different "
-            f"protocol (see atomic_swap_xrp_grc.py) rather than a missing row here"
+            f"protocol (see atomic_swap_xrp.py) rather than a missing row here"
         )
     url_default, user_default, _ = DEFAULT_RPC[asset]
     url = os.environ.get(f"{asset}_RPC_URL", url_default)
@@ -971,8 +978,8 @@ def print_pairs(console: Console) -> int:
     console.say("NOT here, and each for a PROTOCOL reason rather than missing work:")
     console.say("  XRP  no script. Uses EscrowCreate with a PREIMAGE-SHA-256 condition, which")
     console.say("       is a hashlock but not a P2SH one. XRP<->GRC has its own working driver")
-    console.say("       (atomic_swap_xrp_grc.py, both directions, live on testnet). XRP<->BTC")
-    console.say("       and XRP<->LTC are that escrow leg against a P2SH leg: real work, undone.")
+    console.say("       (atomic_swap_xrp.py --chain btc|ltc|grc, both directions). GRC is the")
+    console.say("       pair proven live on testnet; BTC and LTC are tested but not yet run.")
     console.say("  SOL  no HTLC. The stub that existed could not run and was deleted (c4ea027).")
     return 0
 

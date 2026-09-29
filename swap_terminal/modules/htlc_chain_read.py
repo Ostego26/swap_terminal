@@ -14,7 +14,7 @@ Live-safe: yes.
 
 WHY THIS FILE EXISTS: TWO DRIVERS NEEDED THE SAME TWO READS.
 
-Both functions were written inside atomic_swap_xrp_grc.py, where they served the Gridcoin
+Both functions were written inside atomic_swap_xrp.py, where they served the Gridcoin
 leg of one swap. A second driver for GRC<->LTC needs both, on both of its legs, and
 copying them would be rule 8's exact shape: two copies that agree on the day they are
 written and drift from then on, each reading correctly in its own file. They are moved

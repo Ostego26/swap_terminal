@@ -127,7 +127,7 @@ What was true of `xrp_htlc_escrow.py` and is STILL true of it: its `CancelAfter`
 `--cancel-after` on the command line, not from `lock_hours_for_role()`. That harness exercises
 BRANCHES and was never a swap driver.
 
-What is false is the conclusion drawn from it. `atomic_swap_xrp_grc.py` derives BOTH legs from
+What is false is the conclusion drawn from it. `atomic_swap_xrp.py` derives BOTH legs from
 `lock_hours_for_role()` in `swap_timelocks()`, follows the ROLE rather than the chain so the
 reverse direction cannot invert the ordering, converts the participant's hours to a Gridcoin
 HEIGHT from the tip, and asserts the ordering in `assert_timelock_ordering()`. And it has RUN:

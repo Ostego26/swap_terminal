@@ -59,7 +59,7 @@ property that makes them atomic; a pair of confirmed transactions does not estab
     size             0.0005 BTC for 1843.46 GRC, sized from the live rate
     fee that WOULD have been charged: 27.65190000 GRC on 1843.46 = exactly 1.5%
 
-### XRP -> GRC, TESTNET x TESTNET, 23:01 — `atomic_swap_xrp_grc.py`, OK=16 FAIL=0
+### XRP -> GRC, TESTNET x TESTNET, 23:01 — `atomic_swap_xrp.py`, OK=16 FAIL=0
 
     commitment       afed0eff92b7649cef21a07b385829ff424a642d1b349542752a9d6b663b4fae
     XRPL condition   A0258020AFED0EFF...810120
@@ -71,7 +71,7 @@ property that makes them atomic; a pair of confirmed transactions does not estab
     size             1000000 drops for 66.10183885 GRC
     B's balance      115999980 -> 116999980 drops (+1000000), asserted not assumed
 
-### GRC -> XRP, TESTNET x TESTNET, 23:02 — `atomic_swap_xrp_grc.py`, OK=16 FAIL=0
+### GRC -> XRP, TESTNET x TESTNET, 23:02 — `atomic_swap_xrp.py`, OK=16 FAIL=0
 
     commitment       c94cc1fd97c7c11276037182816c66fcd4b95e0663e52877953afb305a3b3726
     GRC HTLC         9283c4c5d0df8c5b7e6da1299f2cc08ce457de6b7803cb6f8a2028157227cbbc
