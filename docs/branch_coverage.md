@@ -63,7 +63,7 @@ v5.5.1.0. Full record: `docs/gridcoin_adaptor_join_2026_09_28.md`.
 | refund after expiry, BTC/LTC | SPENT | `step_9_refund_after_expiry`, real `refund_contract()` |
 | hashlock spend, GRC | SPENT | three live swaps, `docs/atomic_swap_runs_2026_09_27.md` |
 | **refund after expiry, GRC** | **NONE** | `--chain` offers `btc`, `ltc`, `both`. **Gridcoin is not an option and never has been.** See §5 |
-| CLTV executes on GRC | **ENFORCED 2026-09-29** | `grc_htlc_verify.py` OK=11 FAIL=0. Step 6 REFUSED a FINAL refund (nLockTime 3296544 = tip, so `IsFinalTx` passed) against a script locktime of 3296548; step 8 ACCEPTED the same outpoint, same script, same fee, with nLockTime 3296548. One field differs and only CLTV reads it. See §5b |
+| CLTV executes on GRC | **ENFORCED 2026-09-29** | `grc_htlc_verify.py` OK=11 FAIL=0. Step 6 REFUSED a FINAL refund (nLockTime 3296544 = tip, so `IsFinalTx` passed) against a script locktime of 3296548; step 8 ACCEPTED the same outpoint, same script, same fee, with nLockTime 3296548. The daemon logged `ConnectInputs() : 23148431f9 VerifySignature failed` -- that txid IS step 6's, and `validation.cpp:669` is reached only when the script fails under CONSENSUS flags alone. See §5b |
 | CLTV allows a refund AT the locktime, GRC | SPENT 2026-09-28 | `9495082ef304c4ca…` spends the P2SH `8468aa40f9:0` with nLockTime 3296363 and sequence 0xfffffffe, paying 0.13 GRC to the wallet. Re-established 2026-09-29 by step 8, `ee9dc216bf055b22…`, through the real `refund_contract()` |
 | ~~CLTV executes on GRC~~ (the old grade) | ~~NONE~~ | the three GRC swaps took the HASHLOCK branch; `OP_CHECKLOCKTIMEVERIFY` sits in the `OP_ELSE` and never ran. What is established is that Gridcoin ACCEPTS a script CONTAINING it |
 
@@ -191,13 +191,51 @@ So: **OP_CHECKLOCKTIMEVERIFY executes and ENFORCES on Gridcoin.** It is not a no
 HTLC this tree funds there is NOT refundable by its funder before the locktime. That was the
 open question, and it is the one that decides whether a GRC leg can be trusted in a swap at all.
 
+**AND THE DAEMON SAID SO, same day, one grep later.** The paragraph above stood on a deduction:
+`-22 TX rejected` is all Gridcoin returns, so which stage refused step 6 was argued from
+`IsFinalTx` plus step 8's controls rather than read. The log resolves it, because
+`ConnectInputs` prints the transaction's txid and the two refusals took DIFFERENT paths:
+
+    2026-09-29T01:06:36Z ERROR: AcceptToMemoryPool : nonstandard transaction type
+    2026-09-29T01:06:37Z ERROR: ConnectInputs() : 23148431f9 VerifySignature failed
+
+`23148431f9` is the first ten hex of step 6's txid --
+`23148431f9d2be987d881fdeec98b92b2ba83d0ab7993805869a3d61d953fcfe`, double-SHA256 of the refused
+bytes the run printed. Step 5's is `cbf1d0cff6…`, and the stage that refused it does not log a
+txid. So, read off Gridcoin's own source rather than inferred:
+
+  - `policy/policy.cpp:57` -- `IsStandardTx` returns false when `!IsFinalTx(tx, nBestHeight + 1)`,
+    which is why a NON-FINAL transaction is reported as "nonstandard transaction type". That is
+    step 5, refused in `AcceptToMemoryPool` before any script was loaded. The control behaved
+    as a control, and the `nBestHeight + 1` the argument above assumed is the actual expression.
+  - `validation.cpp:656-669` -- `VerifySignature failed` is reached ONLY after the spend has
+    been re-verified under `consensus_flags` ALONE and failed there too; a script that fails
+    only under `consensus_flags | policy_flags` returns `non-mandatory script verify failure`
+    instead. That is step 6: it PASSED `IsStandardTx`, therefore passed finality, reached
+    `ConnectInputs`, and its SCRIPT failed **under consensus flags**.
+
+Which script rule failed is then the only thing left, and step 8 excludes the alternatives by
+measurement rather than by argument: same outpoint, same 94-byte redeem script, same signer,
+same key, accepted with nLockTime 3296548. A broken signer could not have produced that. So
+`OP_CHECKLOCKTIMEVERIFY` is the rule that refused, and this is now a LOG READING of the stage
+plus a measurement of the alternative, not a chain of reasoning about either.
+
 WHAT IT STILL DOES NOT ESTABLISH. The locktime used was tip+6, a test value; the production
 `contract_locktime("GRC", ROLE_INITIATOR, tip)` is tip+1920, and the run says so itself. CLTV
 does the same comparison with either number -- the opcode has no knowledge of how far away the
 height is -- but the sentence "the production value was exercised" would be false and is not
-made here. And the refusal REASON was deduced from IsFinalTx plus step 8's controls, not read
-out of the daemon: Gridcoin returned `-22 TX rejected` for both refusals and logged the detail
-only to debug.log, which was not captured for this run. `--chain grc` is
+made here.
+
+THE 2026-09-28 UNRECONCILED TIMELINE NOW HAS A MECHANISM, and it is this one. That entry records
+`nonstandard transaction type` and `VerifySignature failed` logged in the same second, with a
+refund that nevertheless exists, as unexplained. The 2026-09-29 run reproduced the identical
+PAIR one second apart, and here both lines are accounted for: the first is a non-final attempt
+refused at the standardness gate, the second is a final-but-early attempt refused by the script.
+A run that tries both before waiting out the locktime produces exactly that pair and then
+succeeds. WHETHER THE 2026-09-28 PAIR WAS THAT SEQUENCE IS STILL NOT PROVEN -- that run's
+refused bytes were not captured, so `bf63246378` cannot be matched against a txid the way
+`23148431f9` just was. It is now the leading explanation and a checkable one, which is a
+different grade from resolved (rule 17). `--chain grc` is
 still not offered by `regtest_htlc_verify.py`, and deliberately so: that harness MINES to the
 locktime, and `contract_locktime("GRC", ROLE_INITIATOR, tip)` is tip+1920, which is 48 hours at
 Gridcoin's 90s target on a chain with no `generateblock`. The separate file is the answer to
