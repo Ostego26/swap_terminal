@@ -56,6 +56,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from config import Config
 from db import SCHEMA
 from services import market_context as market_context_module
 from services import pricing
@@ -256,6 +257,42 @@ def test_the_existing_return_shape_did_not_change(monkeypatch):
     assert set(prices) == {f"{asset}_USD" for asset in IDS} | {"fetched_at"}
     assert len(prices) - 1 == len(IDS)
 
+
+
+def test_every_swappable_asset_has_a_price_id_and_the_ids_are_project_names():
+    """A pair that cannot be PRICED is worse than a pair that is refused.
+
+    Measured 2026-09-26 and it reached the operator's browser as `No quote:
+    'XRP_NETWORK_FEE_RESERVE'` -- str(KeyError(...)), printed with nothing around it --
+    because XRP went into ALLOWED_PAIRS while a table it depends on had no row for it.
+    validate_pair() accepted the swap and create_quote() then failed on the missing value.
+    This is that failure caught in the suite instead of in a browser.
+
+    THE SECOND ASSERTION IS ABOUT THE SHAPE OF THE VALUE, not just its presence. Every id
+    here is the PROJECT'S NAME as CoinGecko spells it -- "solana", "ripple",
+    "gridcoin-research" -- and never the ticker. A ticker guessed into this table 404s, and
+    a 404 surfaces as a missing-price refusal that names no table, so the next person
+    debugging it starts from the wrong end. Lower-cased asset codes are the mistake this
+    catches: "sol", "xrp", "btc", "ltc", "grc".
+
+    SOL IS IN THIS TABLE AHEAD OF ANY SOL PAIR, deliberately. chains/solana.py:700
+    send_to_address() raises NotImplementedError and :278 sets can_spend = False, so SOL can
+    only ever be the INPUT of a swap -- and enabling that pair is live posture and the
+    operator's call (rule 16). Preparing the priceable side first is what stops the pair
+    from being the thing that discovers this table is short a row.
+    """
+    swappable = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    for asset in swappable:
+        assert asset in IDS, (
+            f"{asset} is in ALLOWED_PAIRS with no services/pricing.IDS row: validate_pair() "
+            f"would accept the swap and create_quote() would fail on a missing USD price"
+        )
+
+    for asset, cg_id in IDS.items():
+        assert cg_id != asset.lower(), (
+            f"IDS[{asset!r}] is {cg_id!r}, which is the lower-cased ticker rather than the "
+            f"project name CoinGecko uses; that id 404s and surfaces as a missing price"
+        )
 
 def test_a_response_missing_one_asset_still_refuses_the_whole_fetch(monkeypatch):
     """The partial-response refusal moved into _fetch_raw() and must still fire, for BOTH views.

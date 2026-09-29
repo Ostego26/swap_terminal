@@ -120,6 +120,23 @@ IDS = {
     "LTC": "litecoin",
     "GRC": "gridcoin-research",
     "XRP": "ripple",
+    # SOL added 2026-09-29. The CoinGecko id is "solana" -- the project's name, not the
+    # ticker, exactly as every line above it. "sol" would 404 and surface as a missing-price
+    # refusal rather than an error naming this table.
+    #
+    # INERT UNTIL A PAIR IS ENABLED, and added ahead of one on purpose. A pair in
+    # config.ALLOWED_PAIRS without a line here makes validate_pair() accept the swap and then
+    # create_quote() fail on a missing USD price -- an accepted swap that cannot be priced,
+    # which is worse than a refused one. That is the exact failure XRP produced on 2026-09-26
+    # ("No quote: 'XRP_NETWORK_FEE_RESERVE'", one table over), so this side is prepared first
+    # and the pair stays the operator's decision (rule 16).
+    #
+    # NOTE WHICH DIRECTION IS EVEN POSSIBLE: chains/solana.py:700 send_to_address() raises
+    # NotImplementedError and :278 sets can_spend = False, so SOL can be the INPUT of a swap
+    # and never the output. There is deliberately no SOL_NETWORK_FEE_RESERVE to match this
+    # line: quote_service.get_network_fee_reserve() is keyed on `to_asset`, and SOL cannot be
+    # one.
+    "SOL": "solana",
     # THIS TABLE IS WHY ALLOWED_PAIRS ALONE IS NOT ENOUGH TO ADD A PAIR. Adding one to
     # config.ALLOWED_PAIRS without a line here makes validate_pair() accept it and then
     # create_quote() fail on a missing USD price -- an accepted swap that cannot be
