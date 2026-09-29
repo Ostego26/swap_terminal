@@ -256,6 +256,10 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from chains.registry import build_adapters  # noqa: E402 -- the sys.path line above must run first
+
+# DROPS_PER_XRP is imported, not respelled: chains/xrp_units.py owns it and a
+# second copy of a unit conversion is rule 8's bug with a delay on it.
+from chains.wallet_lock import encryption_state  # noqa: E402 -- same
 from chains.xrp_crypto_condition import (  # noqa: E402 -- same
     HTLC_PREIMAGE_BYTES,
     preimage_condition,
@@ -264,9 +268,6 @@ from chains.xrp_crypto_condition import (  # noqa: E402 -- same
 )
 from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -- same
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
-
-# DROPS_PER_XRP is imported, not respelled: chains/xrp_units.py owns it and a
-# second copy of a unit conversion is rule 8's bug with a delay on it.
 from chains.xrp_units import DROPS_PER_XRP  # noqa: E402 -- same
 from config import Config  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
@@ -715,6 +716,10 @@ class SwapContext:
     chain_timeout: int
     xrp_cancel_after: int
     passphrase: str
+    #: Whether the script chain's wallet has a passphrase at all. Carried rather than
+    #: re-read at each of the three unlock sites: getwalletinfo is a network call, and
+    #: three reads are three chances to get three answers mid-swap.
+    wallet_encrypted: bool
 
 
 def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- checked: this is the protocol's ORDER, five acts across two chains, and every decision inside it is extracted (the timelocks above, the preimage read in modules/htlc_spend, the payloads in xrp_htlc_escrow, the vout lookup in htlc_vout). Rule 10 puts the order in the file named after the thing being done; splitting it would hide the sequence, and the sequence IS the security property.
@@ -740,7 +745,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     # every invocation including --help. The reason lives above the import
     # because the sorter re-wraps a long trailing comment and detaches it from
     # the line it is about, which is how a suppression's justification drifts.
-    from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
+    from chains.wallet_lock import unlocked_for_payout  # noqa: PLC0415
     from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415 -- checked: only the --run path needs it
 
     ctx.console.step(7, f"B funds the {ctx.chain} leg: {ctx.chain_amount} {ctx.chain}, same hash, expiring FIRST")
@@ -752,7 +757,8 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     claim_txid = None
     chain_vout = None
     try:
-        with unlocked_for_payout(ctx.grc, ctx.passphrase):
+        with unlocked_for_payout(ctx.grc, ctx.passphrase, chain=ctx.chain,
+                                 encrypted=ctx.wallet_encrypted):
             htlc = ctx.grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(), ctx.chain_timeout, float(ctx.chain_amount))
             funding_txid = htlc.get("txid")
             # THE KEYS ARE snake_case, read from src/rpc/htlc.cpp rather than
@@ -890,7 +896,7 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
     # LAZY for the reason the other runner documents: the dry run must not touch
     # the unlock path, and a module-scope import would read the environment on
     # every invocation including --help.
-    from chains.gridcoin_wallet_lock import unlocked_for_payout  # noqa: PLC0415
+    from chains.wallet_lock import unlocked_for_payout  # noqa: PLC0415
     from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415
 
     console.step(6, f"B funds the {ctx.chain} leg FIRST: {ctx.chain_amount} {ctx.chain}, hashlocked, expiring LAST")
@@ -900,7 +906,8 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
     chain_vout = None
     expected_script = ""
     try:
-        with unlocked_for_payout(grc, ctx.passphrase):
+        with unlocked_for_payout(grc, ctx.passphrase, chain=ctx.chain,
+                                 encrypted=ctx.wallet_encrypted):
             htlc = grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(),
                             ctx.chain_timeout, float(ctx.chain_amount))
             funding_txid = htlc.get("txid")
@@ -1025,7 +1032,8 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
     console.step(10, f"B claims the {ctx.chain} with the secret it read")
     claim_txid = None
     try:
-        with unlocked_for_payout(grc, ctx.passphrase):
+        with unlocked_for_payout(grc, ctx.passphrase, chain=ctx.chain,
+                                 encrypted=ctx.wallet_encrypted):
             claim = grc.call("claimhtlc", funding_txid, chain_vout, revealed.hex(), ctx.a_grc)
             claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
     except Exception as error:  # noqa: BLE001 -- checked: claimhtlc refuses on a wrong preimage, a missing key or a script failure, and the unlock can fail separately. Reported because A already has the XRP at this point, so the operator needs to know the GRC is still claimable with a secret that is now public rather than getting a traceback.
@@ -1041,6 +1049,41 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
     console.say(f"{ctx.chain}: {ctx.chain_amount} from B's wallet to {ctx.a_grc}, released by the same secret (txid {claim_txid})")
     console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
     return True
+
+
+def resolve_wallet_passphrase(console: Console, adapter, chain: str) -> tuple[str, bool] | None:
+    """(passphrase, is_encrypted), or None meaning REFUSE before anything is funded.
+
+    ASKED OF THE WALLET, NOT ASSUMED FROM THE CHAIN. Until 2026-09-29 the driver refused
+    to start unless <CHAIN>_WALLET_PASSPHRASE was set -- a demand an UNENCRYPTED wallet
+    cannot satisfy, because it has no passphrase to set. A fresh regtest bitcoind wallet
+    is the ordinary case of one, and it is the wallet somebody reaches for first when
+    trying --chain btc. The refusal was unsatisfiable and said nothing about why.
+
+    A FUNCTION RATHER THAN FOUR BRANCHES IN main(), and rule 12's reason rather than
+    taste: adding them put main() over the branch ceiling, and rule 12 is explicit that a
+    function past the ceiling is orchestration that has swallowed a decision -- the fix
+    being to extract it so it can be called with a seeded adapter, never to raise the
+    ceiling. This is the decision it had swallowed.
+
+    THE VALUE IS NEVER RETURNED TO A LOG OR A CONSOLE LINE. Only the NAME of the variable
+    is printed, which is what an operator needs in order to set it; argv is world-readable
+    through /proc and `ps`, and a passphrase that reached this process any other way would
+    be a disclosure this file could not undo.
+    """
+    encrypted, why = encryption_state(adapter)
+    console.say(f"{chain} wallet: {why}")
+    variable = f"{chain}_WALLET_PASSPHRASE"
+    passphrase = os.environ.get(variable, "")
+    if not encrypted:
+        console.check(f"{variable} needed", "no", "not needed for an unencrypted wallet", True)
+        return passphrase, False
+    if not console.check(f"{variable} present", "yes" if passphrase else None,
+                         "set, because this wallet is encrypted and claimhtlc signs",
+                         bool(passphrase)):
+        console.say("Nothing was submitted. The value is never printed or logged.")
+        return None
+    return passphrase, True
 
 
 def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap's SEQUENCE, and every decision in it is extracted -- the timelocks and their ordering above, the preimage read in modules/htlc_spend, the condition in chains/xrp_crypto_condition, the payloads in xrp_htlc_escrow. What is left is the order of five acts on two chains, which is what rule 10 says a file at the root is for. Splitting it would put the order somewhere other than the file named after the thing being done, and the order IS the protocol.
@@ -1203,12 +1246,10 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     # variable is, which is what an operator needs to set it. argv is world-readable
     # through /proc and `ps`, so a passphrase reaching this process any other way would be
     # a disclosure this file cannot undo.
-    passphrase_variable = f"{chain}_WALLET_PASSPHRASE"
-    passphrase = os.environ.get(passphrase_variable, "")
-    if not console.check(f"{passphrase_variable} present", "yes" if passphrase else None,
-                         "set, because claimhtlc signs", bool(passphrase)):
-        console.say("Nothing was submitted. The value is never printed or logged.")
+    resolved = resolve_wallet_passphrase(console, grc, chain)
+    if resolved is None:
         return console.summary()
+    passphrase, wallet_encrypted = resolved
 
     submitter = Submitter(console.say)
 
@@ -1232,7 +1273,7 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         a_xrp=a_xrp, a_xrp_secret=a_xrp_secret, b_xrp=b_xrp, b_xrp_secret=b_xrp_secret,
         a_grc=a_grc, b_grc=b_grc,
         chain_amount=chain_amount, chain_timeout=leg.timeout_height, xrp_cancel_after=xrp_cancel_after,
-        passphrase=passphrase,
+        passphrase=passphrase, wallet_encrypted=wallet_encrypted,
     )
     runner = run_xrp_first if args.direction == XRP_FIRST else run_chain_first
     console.say(f"direction={args.direction}: running {runner.__name__}()")
