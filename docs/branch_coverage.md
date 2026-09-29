@@ -94,10 +94,29 @@ which is the chain's own validity check.
 
 RECORDED AS A LIMIT: that message is GENERIC. It says the block was invalid and does not name the
 locktime, so on LTC the consensus claim rests on a refusal that does not state its reason, where
-on BTC and on Gridcoin the reason was named. Litecoin's debug.log would name it the way Gridcoin's
-did for `23148431f9`, and that grep has not been run. NOT CHECKED is not the same as checked, and
-the sentence "LTC enforces CLTV at consensus" is therefore one grade weaker here than the BTC and
-GRC versions of it.
+on BTC and on Gridcoin the reason was named.
+
+**THE LOG WAS THEN CHECKED, AND IT HELD NOTHING.** 2026-09-29, same run:
+
+    grep -a -iE "locktime|block-validation|TestBlockValidity" regtest/debug.log | tail -20
+    CTransaction(hash=ef17b1d269, ver=2, vin.size=2, vout.size=2, nLockTime=1351)
+    CTransaction(hash=35543aae60, ver=2, vin.size=3, vout.size=2, nLockTime=1352)
+    CTransaction(hash=316cc3becd, ver=2, vin.size=3, vout.size=2, nLockTime=1354)
+    CTransaction(hash=c7c6e82d04, ver=2, vin.size=3, vout.size=2, nLockTime=1355)
+
+Four hits and every one is a FUNDING transaction carrying the wallet's own anti-fee-sniping
+nLockTime -- `ef17b1d269` and `35543aae60` are contracts [A] and [B] from step 6. Not a word
+about the refusal. Bitcoin-derived daemons log script-verification failures under the
+`validation` and `mempoolrej` categories only, and neither is on by default, so there was
+nothing to find rather than something missed.
+
+CHECKED AND ABSENT IS A DIFFERENT GRADE FROM NOT CHECKED, and the fix belongs to the harness
+rather than to the operator: `daemons.REFUSAL_LOGGING` now passes `-debug=validation
+-debug=mempoolrej` on the SPAWN path, so the next LTC run can read 8c's reason out of the log
+the way `23148431f9` was read out of Gridcoin's. Named categories rather than `-debug=all`,
+which on a run that mines 2500 blocks writes a log nobody reads. Until that run happens, the
+sentence "LTC enforces CLTV at consensus" stays one grade weaker than the BTC and GRC versions
+of it.
 
 Which is also a reason not to read Litecoin's MANDATORY set from memory: it was not read for this
 note, and whether v0.21.4 omits `SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY` from it -- or whether

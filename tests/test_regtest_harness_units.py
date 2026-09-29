@@ -44,6 +44,7 @@ import hashlib
 import logging
 import os
 from io import StringIO
+from pathlib import Path
 
 import base58
 import pytest
@@ -1726,3 +1727,39 @@ def test_THE_FILTER_IS_REMOVED_HOWEVER_THE_CALL_ENDS():
         assert len(handler.filters) == before, "and off again even so"
     finally:
         root.removeHandler(handler)
+
+
+def test_A_DAEMON_THIS_HARNESS_STARTS_IS_ASKED_TO_LOG_WHY_IT_REFUSES():
+    """Step 8c's refusal does not name its reason, and the log was checked and held nothing.
+
+    Measured 2026-09-29 on a PASSING LTC run. 8c asks generateblock to mine an early refund and
+    the daemon refused with `TestBlockValidity failed: block-validation-failed` -- the chain's
+    own validity check, and on Litecoin the ONLY thing establishing consensus enforcement,
+    because 8b's mempool graded the same refusal `non-mandatory-script-verify-flag` (relay
+    policy) where Bitcoin Core graded it `mandatory`. That message is generic: it says the
+    block was invalid and does not say the locktime is why.
+
+    SO THE LOG WAS GREPPED AND IT HELD NOTHING: four CTransaction dumps, every one a FUNDING
+    transaction carrying the wallet's own anti-fee-sniping nLockTime, and not a word about the
+    refusal. Bitcoin-derived daemons log script-verification failures under the `validation`
+    and `mempoolrej` categories only, and neither is on by default. "Checked and absent" is a
+    different grade from "not checked", and this is the fix for the first one.
+    """
+    assert daemons_module.REFUSAL_LOGGING == ("-debug=validation", "-debug=mempoolrej")
+    assert "-debug=all" not in daemons_module.REFUSAL_LOGGING, (
+        "`all` on a run that mines 2500 blocks writes a log nobody reads -- rule 14's "
+        "complaint about silence is not an argument for volume"
+    )
+
+    source = Path(daemons_module.__file__).read_text(encoding="utf-8")
+    spawn = source.index("base_argv = [resolved")
+    line = source[spawn:source.index("\n", spawn)]
+    assert "REFUSAL_LOGGING" in line, (
+        "it belongs on the SPAWN path -- an adopted daemon is untouched, because a startup flag "
+        "cannot be applied to a process that is already running"
+    )
+    adopt = source.index("a daemon is ALREADY answering")
+    assert "REFUSAL_LOGGING" not in source[adopt:adopt + 400], (
+        "and the adoption branch must not pretend otherwise, which is the mistake "
+        "mweb_state_line had to stop making"
+    )

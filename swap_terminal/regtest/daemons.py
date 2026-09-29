@@ -635,6 +635,35 @@ def rpc_answers(config: ChainConfig) -> bool:
     return liveness_probe_that_answers(config) is not None
 
 
+#: WHY A DAEMON THIS HARNESS STARTS IS ASKED TO LOG WHY IT REFUSES THINGS.
+#:
+#: Measured 2026-09-29, on the operator's host, on a passing LTC run. Step 8c asks
+#: `generateblock` to MINE an early refund and the daemon refused it --
+#:
+#:     generateblock: code=-25 message=TestBlockValidity failed: block-validation-failed
+#:
+#: -- which is the chain's own validity check and is the ONLY thing establishing consensus
+#: enforcement on Litecoin, because 8b's mempool graded the same refusal
+#: `non-mandatory-script-verify-flag` (relay policy) where Bitcoin Core graded it `mandatory`.
+#: That message is GENERIC: it says the block was invalid and does not name the locktime.
+#:
+#: SO THE LOG WAS GREPPED, AND IT HELD NOTHING. `grep -iE "locktime|block-validation|
+#: TestBlockValidity" regtest/debug.log` returned four `CTransaction(hash=...)` dumps, every one
+#: of them a FUNDING transaction carrying the wallet's own anti-fee-sniping nLockTime, and not a
+#: word about the refusal. Bitcoin-derived daemons log script-verification failures under the
+#: `validation` and `mempoolrej` categories only, and neither is on by default.
+#:
+#: NAMED CATEGORIES, NEVER `-debug=all`. `all` on a run that mines 2500 blocks writes a log
+#: nobody reads, and rule 14's complaint about silence is not an argument for volume -- the two
+#: categories here are the ones that carry the sentence 8c cannot currently produce.
+#:
+#: ONLY ON A DAEMON THIS HARNESS STARTS. It is in `base_argv`, which is the spawn path; an
+#: ADOPTED daemon is untouched, because a startup flag cannot be applied to a running process
+#: (the same fact the MWEB override's own report had to stop getting wrong -- see
+#: mweb_state_line).
+REFUSAL_LOGGING = ("-debug=validation", "-debug=mempoolrej")
+
+
 def apply_mweb_override(console: Console, config: ChainConfig) -> None:
     """Ask THIS litecoind whether it can hold MWEB inactive, and set the flag on `config` if so.
 
@@ -701,7 +730,7 @@ def start_daemon(console: Console, config: ChainConfig) -> bool:
     if resolved is None:
         raise RegtestSetupError(f"{config.daemon_path} vanished between step 1 and step 2; not on PATH")
 
-    base_argv = [resolved, f"-datadir={config.datadir}", "-regtest", "-daemon"]
+    base_argv = [resolved, f"-datadir={config.datadir}", "-regtest", "-daemon", *REFUSAL_LOGGING]
     completed = _spawn(console, config, base_argv + config.extra_args)
     if completed.returncode != 0 and config.extra_args:
         # A daemon that will not start because of an option the harness ADDED
