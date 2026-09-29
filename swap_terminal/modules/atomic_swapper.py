@@ -98,6 +98,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
+from modules.htlc_contract_api import AMOUNT_KEYWORD
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime, describe_locktime
 from modules.market_data import fetch_btc_ltc_prices, fetch_grc_price
 from modules.utils import generate_secret, sha256_hash
@@ -114,11 +115,12 @@ logger = logging.getLogger(__name__)
 # every argument by KEYWORD, which is what makes LTC's different parameter
 # order harmless: passing positionally in the BTC/GRC order would hand LTC the
 # secret hash as its participant address.
-_AMOUNT_KWARG = {
-    "BTC": "amount_btc",
-    "LTC": "amount_ltc",
-    "GRC": "amount_grc",
-}
+# IMPORTED, NOT SPELLED. See modules/htlc_contract_api.py: this table existed here and in
+# atomic_swap.py, and the comment above -- "passing positionally in the BTC/GRC order would
+# hand LTC the secret hash as its participant address" -- described the exact defect that
+# then shipped in a third file which imported neither. The knowledge was in the tree; what
+# was missing was a way to reach it.
+_AMOUNT_KWARG = AMOUNT_KEYWORD
 
 SUPPORTED_ASSETS = ("BTC", "LTC", "GRC")
 

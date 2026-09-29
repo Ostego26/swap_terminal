@@ -44,6 +44,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+from modules.htlc_contract_api import create_contract_kwargs
 from regtest.keys import generate_key
 
 logger = logging.getLogger(__name__)
@@ -88,8 +89,8 @@ def mint_leg_keys() -> ScriptLegKeys:
     return ScriptLegKeys(claim=claim, refund=refund)
 
 
-def fund_the_script_leg(client, amount: Decimal, secret_hash: str, keys: ScriptLegKeys,
-                        locktime: int) -> dict:
+def fund_the_script_leg(client, amount: Decimal, secret_hash: str, keys: ScriptLegKeys,  # noqa: PLR0913 -- checked: same judgment as htlc_contract_api.create_contract_kwargs, which this hands straight to. Six facts, none derivable from another, and `chain` is what selects the amount keyword. PLR0917 does not fire because `chain` is keyword-only.
+                        locktime: int, *, chain: str) -> dict:
     """Build the P2SH HTLC, fund it, and return what the claim will need.
 
     Returns the client's own dict -- {txid, vout, redeemScript, p2shAddress} -- rather
@@ -102,13 +103,26 @@ def fund_the_script_leg(client, amount: Decimal, secret_hash: str, keys: ScriptL
     be read against each other.
     """
     logger.info("funding a script-chain HTLC for %s, locktime %d", amount, locktime)
-    return client.create_contract(
-        amount,
-        secret_hash,
-        keys.claim_address,
-        keys.refund_address,
-        locktime,
-    )
+    # BY KEYWORD, THROUGH THE ONE TABLE. This call was positional until 2026-09-29 and
+    # was correct for two of the three chains this module advertises: LTCClient takes
+    # its parameters in a different ORDER with secret_hash LAST and defaulting to None,
+    # so the positional form handed it the secret hash as a participant address and the
+    # refund address as a locktime. It failed with
+    #
+    #     TypeError: '<=' not supported between instances of 'str' and 'int'
+    #
+    # on a --run that had already funded the XRP leg -- and the type mismatch is the
+    # ONLY thing that stopped it. Every other misrouted argument was a string landing
+    # where a string was expected, so with luckier types this would have funded an HTLC
+    # with no hashlock at all.
+    return client.create_contract(**create_contract_kwargs(
+        chain,
+        amount=amount,
+        secret_hash=secret_hash,
+        participant_address=keys.claim_address,
+        refund_address=keys.refund_address,
+        locktime=locktime,
+    ))
 
 
 def claim_the_script_leg(client, contract: dict, secret: bytes, keys: ScriptLegKeys,

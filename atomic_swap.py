@@ -119,6 +119,7 @@ from modules.htlc_chain_read import (
     client_caller,
     htlc_vout,
 )
+from modules.htlc_contract_api import AMOUNT_KEYWORD as HTLC_AMOUNT_KEYWORD
 from modules.htlc_spend import preimage_from_scriptsig
 from modules.htlc_timelock import (
     ROLE_INITIATOR,
@@ -148,9 +149,12 @@ ASSET_PAIRS = tuple(
 )
 
 # create_contract's amount keyword differs per client: amount_btc, amount_ltc, amount_grc.
-# That divergence is real and predates this file; it is mapped in ONE place here rather
-# than branched at each call, so adding a spoke is a row and not an if.
-AMOUNT_KEYWORD = {"BTC": "amount_btc", "GRC": "amount_grc", "LTC": "amount_ltc"}
+# IMPORTED, NOT SPELLED. This file had its own copy and modules/atomic_swapper.py had a
+# second, both correct on the day they were written -- and on 2026-09-29 a THIRD caller
+# (modules/script_leg.py) reached neither and called positionally instead, which misroutes
+# every argument on LTC. Three copies of one fact, and the defect landed in the gap between
+# them (rule 8).
+AMOUNT_KEYWORD = HTLC_AMOUNT_KEYWORD
 
 # 32 bytes, from secrets. The preimage IS the swap: whoever learns it can claim, so it is
 # never logged, never passed on a command line, and never written to disk by this file.

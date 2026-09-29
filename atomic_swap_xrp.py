@@ -891,7 +891,8 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
         with unlocked_for_payout(ctx.grc, ctx.passphrase, chain=ctx.chain,
                                  encrypted=ctx.wallet_encrypted):
             contract = fund_the_script_leg(ctx.script_client, ctx.chain_amount,
-                                           ctx.secret_hash.hex(), ctx.leg_keys, ctx.chain_timeout)
+                                           ctx.secret_hash.hex(), ctx.leg_keys, ctx.chain_timeout,
+                                           chain=ctx.chain)
         # THE CLIENT ALREADY LOCATED THE OUTPUT, so there is no index to guess here.
         # create_contract() calls wait_for_tx_output() against the P2SH script itself and
         # returns the index it found -- which is the check the old createhtlc path had to
@@ -1040,7 +1041,8 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
         with unlocked_for_payout(grc, ctx.passphrase, chain=ctx.chain,
                                  encrypted=ctx.wallet_encrypted):
             contract = fund_the_script_leg(ctx.script_client, ctx.chain_amount,
-                                           ctx.secret_hash.hex(), ctx.leg_keys, ctx.chain_timeout)
+                                           ctx.secret_hash.hex(), ctx.leg_keys, ctx.chain_timeout,
+                                           chain=ctx.chain)
         funding_txid = contract["txid"]
         # THE OUTPUT INDEX IS THE CLIENT'S ANSWER, NOT A GUESS. create_contract() waits for
         # an output paying the P2SH script itself and returns the index it found, which is

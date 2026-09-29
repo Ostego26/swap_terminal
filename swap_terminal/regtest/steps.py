@@ -104,6 +104,7 @@ from modules.atomic_htlc_scripts import (
     parse_and_reencode_as_testnet_p2pkh,
     script_to_p2sh_address,
 )
+from modules.htlc_contract_api import create_contract_kwargs
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime, describe_locktime
 from modules.utils import generate_secret, sha256_hash
 from regtest import daemons
@@ -1042,14 +1043,19 @@ def _attempt_real_create_contract(run: Run, client, contract: Contract) -> Outpo
     modules/atomic_swapper.py adopted: passing positionally in the BTC order
     hands LTC the secret hash as its participant address.
     """
-    amount_kwarg = {"BTC": "amount_btc", "LTC": "amount_ltc"}[run.asset]
-    kwargs = {
-        amount_kwarg: Decimal(CONTRACT_AMOUNT),
-        "secret_hash": contract.secret_hash.hex(),
-        "participant_address": contract.participant.address,
-        "refund_address": contract.refund.address,
-        "locktime": contract.locktime,
-    }
+    # THE FOURTH COPY OF THIS TABLE, and the only PARTIAL one -- it knew BTC and
+    # LTC and not GRC, so this harness pointed at Gridcoin would have raised a
+    # KeyError on the asset rather than building a call. Merged 2026-09-29 into
+    # modules/htlc_contract_api, which also refuses an empty secret hash; this
+    # site always passed one, and now it cannot stop.
+    kwargs = create_contract_kwargs(
+        run.asset,
+        amount=Decimal(CONTRACT_AMOUNT),
+        secret_hash=contract.secret_hash.hex(),
+        participant_address=contract.participant.address,
+        refund_address=contract.refund.address,
+        locktime=contract.locktime,
+    )
     run.say(f"calling the REAL {type(client).__name__}.create_contract({', '.join(sorted(kwargs))})")
     # Announce the scale BEFORE the call, because this one can sit for minutes
     # with nothing of its own to say (rule 14), and an operator who cannot tell

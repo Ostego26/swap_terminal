@@ -35,8 +35,25 @@ class RecordingClient:
     def __init__(self):
         self.created, self.redeemed = [], []
 
-    def create_contract(self, amount, secret_hash, participant_address, refund_address, locktime):
-        self.created.append((amount, secret_hash, participant_address, refund_address, locktime))
+    def create_contract(self, **kwargs):
+        """KEYWORD-ONLY, because that is how the real call is made now.
+
+        THIS STUB IS WHY THE SUITE DID NOT CATCH THE LTC DEFECT. It took the five
+        arguments POSITIONALLY in the BTC/GRC order, so it accepted the positional
+        call fund_the_script_leg() was making and recorded what that call meant to
+        say -- while LTCClient, whose parameters are in a different order with
+        secret_hash last and defaulting to None, would have received the secret
+        hash as a participant address. A double that accepts a call the real thing
+        rejects is a test asserting on a conversation that never happens.
+
+        The arity check that used to live in the signature is now
+        test_the_kwargs_BIND_to_every_real_clients_signature, which binds against
+        the actual client classes instead of against a stub's idea of them.
+        """
+        amount = next(value for key, value in kwargs.items() if key.startswith("amount"))
+        self.created.append((amount, kwargs["secret_hash"], kwargs["participant_address"],
+                             kwargs["refund_address"], kwargs["locktime"]))
+        self.create_kwargs = dict(kwargs)
         return {"txid": "cc" * 32, "vout": 1, "redeemScript": b"\x51", "p2shAddress": "2NFake"}
 
     def redeem_contract(self, txid, vout, redeem_script, secret, privkey, destination, blockhash=None):  # noqa: PLR0913, PLR0917 -- checked: this stub MIRRORS the real signature, which modules/atomic_btc_client.py:352 carries with its own checked suppression for the same seven. Reshaping it here (or taking *args) would make the test stop testing the interface: a call with the wrong arity would be silently accepted, which is the one thing a recorder exists to catch.
@@ -90,7 +107,7 @@ def test_the_CLAIM_key_is_the_participant_branch_and_the_REFUND_key_is_the_refun
     arguments are addresses so nothing downstream would object. The clients take them
     positionally as (participant_address, refund_address); this asserts the order."""
     client, keys = RecordingClient(), mint_leg_keys()
-    fund_the_script_leg(client, Decimal("0.5"), SECRET_HASH, keys, 900)
+    fund_the_script_leg(client, Decimal("0.5"), SECRET_HASH, keys, 900, chain="GRC")
     (_amount, _hash, participant, refund, _locktime) = client.created[0]
     assert participant == keys.claim_address
     assert refund == keys.refund_address
@@ -98,7 +115,7 @@ def test_the_CLAIM_key_is_the_participant_branch_and_the_REFUND_key_is_the_refun
 
 def test_the_amount_the_locktime_and_the_hash_reach_the_client_unchanged():
     client, keys = RecordingClient(), mint_leg_keys()
-    fund_the_script_leg(client, Decimal("1.25"), SECRET_HASH, keys, 1234)
+    fund_the_script_leg(client, Decimal("1.25"), SECRET_HASH, keys, 1234, chain="GRC")
     amount, secret_hash, _p, _r, locktime = client.created[0]
     assert amount == Decimal("1.25") and secret_hash == SECRET_HASH and locktime == 1234
 
@@ -106,7 +123,7 @@ def test_the_amount_the_locktime_and_the_hash_reach_the_client_unchanged():
 def test_the_clients_OWN_dict_shape_comes_back_rather_than_a_reshaped_one():
     """A second vocabulary for one thing is rule 8 in miniature: a reader diffing this
     against atomic_swap.py must see the same keys."""
-    contract = fund_the_script_leg(RecordingClient(), Decimal(1), SECRET_HASH, mint_leg_keys(), 1)
+    contract = fund_the_script_leg(RecordingClient(), Decimal(1), SECRET_HASH, mint_leg_keys(), 1, chain="GRC")
     assert set(contract) == {"txid", "vout", "redeemScript", "p2shAddress"}
 
 
@@ -118,7 +135,7 @@ def test_the_claim_signs_with_the_CLAIM_key_and_never_the_refund_one():
     well-formed transaction the script interpreter rejects -- which surfaces as a generic
     script failure, the hardest kind to diagnose."""
     client, keys = RecordingClient(), mint_leg_keys()
-    contract = fund_the_script_leg(client, Decimal(1), SECRET_HASH, keys, 1)
+    contract = fund_the_script_leg(client, Decimal(1), SECRET_HASH, keys, 1, chain="GRC")
     claim_the_script_leg(client, contract, SECRET, keys, "mDestination")
     (_txid, _vout, _script, _secret, privkey, _dest) = client.redeemed[0]
     assert privkey == keys.claim.wif
@@ -131,14 +148,14 @@ def test_THE_PREIMAGE_IS_PASSED_THROUGH_because_publishing_it_IS_the_mechanism()
     2026-09-25 (defect 1 in atomic_btc_client's header), so this is pinned rather than
     assumed."""
     client, keys = RecordingClient(), mint_leg_keys()
-    contract = fund_the_script_leg(client, Decimal(1), SECRET_HASH, keys, 1)
+    contract = fund_the_script_leg(client, Decimal(1), SECRET_HASH, keys, 1, chain="GRC")
     claim_the_script_leg(client, contract, SECRET, keys, "mDestination")
     assert client.redeemed[0][3] == SECRET
 
 
 def test_the_funded_outpoint_and_script_reach_the_claim_unchanged():
     client, keys = RecordingClient(), mint_leg_keys()
-    contract = fund_the_script_leg(client, Decimal(1), SECRET_HASH, keys, 1)
+    contract = fund_the_script_leg(client, Decimal(1), SECRET_HASH, keys, 1, chain="GRC")
     claim_the_script_leg(client, contract, SECRET, keys, "mDestination")
     txid, vout, script, _secret, _key, destination = client.redeemed[0]
     assert (txid, vout, script) == (contract["txid"], contract["vout"], contract["redeemScript"])
