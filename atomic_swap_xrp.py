@@ -865,8 +865,9 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
         time.sleep(READ_POLL_SECONDS)
     if not ctx.console.check("the secret was recovered from the chain", "yes" if revealed else None,
                          "a push whose sha256 matches the commitment", revealed is not None):
-        ctx.console.say(f"B cannot finish the escrow without it and recovers the {ctx.chain} at height {ctx.chain_timeout}... f"
-                    f"except that A HAS ALREADY CLAIMED the GRC. Read {claim_txid} by hand; the secret is in it.")
+        ctx.console.say(f"B cannot finish the escrow without it and recovers the {ctx.chain} at height "
+                        f"{ctx.chain_timeout} -- except that A HAS ALREADY CLAIMED the {ctx.chain}. Read "
+                        f"{claim_txid} by hand; the secret is in it.")
         return False
     # THE ASSERTION THAT THE READ IS REAL. `revealed` came from the chain and
     # `ctx.secret` from memory, and they must be equal -- if this file ever finished
@@ -937,8 +938,9 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
     from modules.script_leg import claim_the_script_leg, fund_the_script_leg  # noqa: PLC0415
 
     console.step(6, f"B funds the {ctx.chain} leg FIRST: {ctx.chain_amount} {ctx.chain}, hashlocked, expiring LAST")
-    console.say("the initiator funds first and takes the LONGER lock. Here that is the Gridcoin side, so the "
-                "GRC timeout is the one that outlives the XRP escrow -- the reverse of the other direction.")
+    console.say(f"the initiator funds first and takes the LONGER lock. In this direction that is the "
+                f"{ctx.chain} side, so the {ctx.chain} timeout is the one that outlives the XRP escrow -- "
+                f"the reverse of the other direction.")
     funding_txid = None
     contract = None
     try:
@@ -970,8 +972,8 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
     if not console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
                          engine_result(created) == "tesSUCCESS"):
         console.say(f"the {ctx.chain} leg IS funded ({funding_txid}) and the XRP leg is not. Nobody has the secret, so "
-                    f"nobody can claim the GRC: it returns to B at height {ctx.chain_timeout}. Do NOT publish the "
-                    f"secret.")
+                    f"nobody can claim the {ctx.chain}: it returns to B at height {ctx.chain_timeout}. Do NOT publish "
+                    f"the secret.")
         return False
     escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
     escrow_owner = ctx.b_xrp
@@ -994,7 +996,7 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
                          engine_result(finished) == "tesSUCCESS"):
         console.say("BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret was NOT published, so nobody can "
                     f"claim either: A recovers the XRP at CancelAfter {ctx.xrp_cancel_after} and B recovers the "
-                    f"GRC at height {ctx.chain_timeout}. Do NOT publish the secret.")
+                    f"{ctx.chain} at height {ctx.chain_timeout}. Do NOT publish the secret.")
         return False
     finish_hash = (finished.get("tx_json") or {}).get("hash", "")
     validated = wait_validated(console, finish_hash)
@@ -1360,10 +1362,11 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     # twice) and in the operator's history. It resolves to chain-first below rather than
     # being a second direction, so nothing downstream sees two names for one thing.
     parser.add_argument("--direction", choices=(*DIRECTIONS, LEGACY_CHAIN_FIRST), default=XRP_FIRST,
-                        help=f"which chain the INITIATOR is on: {XRP_FIRST} (XRP funded first, GRC claimed "
-                             f"first, secret read from a Gridcoin scriptSig) or {CHAIN_FIRST} (GRC funded first, "
-                             f"XRP claimed first, secret read from an XRPL Fulfillment). The initiator always "
-                             f"takes the longer lock")
+                        help=f"which chain the INITIATOR is on: {XRP_FIRST} (XRP funded first, the script "
+                             f"chain claimed first, secret read from that chain's scriptSig) or {CHAIN_FIRST} "
+                             f"(the script chain funded first, XRP claimed first, secret read from an XRPL "
+                             f"Fulfillment). The initiator always takes the longer lock. --help cannot name the "
+                             f"chain because --chain is parsed from the same command line")
     parser.add_argument("--rate", type=str, default="",
                         help="XRP per unit of the script chain, overriding the live price. Use it when "
                              "CoinGecko is unreachable or "
@@ -1427,7 +1430,12 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     console.say(f"A (initiator, pays XRP) = {a_xrp}")
     console.say(f"B (participant, receives XRP) = {b_xrp}")
     try:
-        a_grc = grc.call("getnewaddress", "swap-A-claims-GRC")
+        # THE LABEL NAMES THE CHAIN IT IS ON. It said "swap-A-claims-GRC" until
+        # 2026-09-29, so the first LTC run would have written that string into a
+        # LITECOIN wallet's address book -- where, unlike a log line, it outlives the
+        # run and is what an operator reads months later when asking what an address
+        # was for.
+        a_grc = grc.call("getnewaddress", f"swap-A-claims-{chain}")
         b_grc = grc.call("getnewaddress", "swap-B-refund")
     except Exception as error:  # noqa: BLE001 -- checked: getnewaddress fails on a locked or missing wallet, and the message names which. Reported as a FAIL because every later step needs both addresses; nothing continues on a partial answer.
         console.check(f"{chain} addresses", f"{type(error).__name__}: {error}", "two wallet addresses", False)
@@ -1463,8 +1471,18 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
                                                        direction=args.direction)
     console.say(f"{chain} tip={tip} (a height, not a duration)")
     console.say(f"policy: initiator {why['initiator_hours']}h, participant {why['participant_hours']}h "
-                f"(scale={args.hours_scale}); GRC {why['chain_blocks']} blocks at an estimated "
+                f"(scale={args.hours_scale}); {chain} {why['chain_blocks']} blocks at an estimated "
                 f"{why['chain_seconds_per_block']}s")
+    # THE CHAIN NAME WAS THE LITERAL "GRC" HERE UNTIL 2026-09-29, on a line whose
+    # other two values were already per-chain. The first LTC dry run printed
+    #
+    #     policy: initiator 48.0h, participant 24.0h (scale=1.0); GRC 576 blocks at an estimated 150s
+    #
+    # and 150s IS Litecoin's interval -- Gridcoin's is 90 -- so the number was right
+    # and the label was wrong, which is the worse of the two. A reader checking the
+    # timelock against the wrong chain's block time concludes the lock is 14.4 hours
+    # when it is 24. Rule 16: a wrong comment is a bug, and this one is printed at the
+    # moment an operator is deciding whether to fund.
     try:
         console.check("timelock ordering", assert_timelock_ordering(xrp_cancel_after, leg, now,
                                                                    direction=args.direction),
