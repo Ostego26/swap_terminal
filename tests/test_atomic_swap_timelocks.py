@@ -433,22 +433,31 @@ def test_a_chain_with_no_completed_run_SAYS_SO_instead_of_inheriting_another_cha
     first attempt and worth reading rather than retrying. Rule 17's register error, printed
     to the person deciding whether to fund something.
 
-    PROVEN_LIVE is keyed by chain and GRC is its only entry, which is the honest state:
-    BTC and LTC are exercised by seeded tests -- the block arithmetic above and the
-    ordering check -- and have never been run against a chain.
+    PROVEN_LIVE is keyed by chain. GRC and LTC are its entries as of 2026-09-29 and BTC is
+    not, which is the honest state: BTC is exercised by seeded tests -- the block arithmetic
+    above and the ordering check -- and has never been run against a daemon.
+
+    THE LTC RUN IS THE ARGUMENT FOR THE WHOLE TABLE. It took three attempts, and each
+    failure was a defect no seeded test could have found: a script client reading Config.RPC
+    directly, so a conf-resolved daemon failed at step 5b AFTER the XRP leg was funded; and
+    create_contract() called positionally in an order LTC does not share, which misrouted
+    every argument. Fifteen tests covered that call and all fifteen passed, because the test
+    double had the same wrong signature. "Shares code with something that ran" is exactly the
+    claim those three attempts refuted.
 
     This test fails the moment somebody adds a chain to PROVEN_LIVE without a run behind
     it, which is the only way the claim can become false again.
     """
-    assert set(PROVEN_LIVE) == {"GRC"}, (
+    assert set(PROVEN_LIVE) == {"GRC", "LTC"}, (
         "PROVEN_LIVE changed shape. That table is the record of runs that COMPLETED ON "
         "THE CURRENT CODE PATH. It was emptied on 2026-09-29 when both runners moved off "
-        "Gridcoin's createhtlc onto the chain clients, and GRC was added back the same "
-        "day by an actual run of THIS code (OK=15 FAIL=0). BTC and LTC are still absent "
-        "on purpose: they share every function GRC's run exercised, and sharing code is "
-        "not evidence. Adding a chain without a txid from a run makes the banner lie "
-        "again, and the second version of that lie is the dangerous one because the "
-        "chain name is still right"
+        "Gridcoin's createhtlc onto the chain clients; GRC was added back the same day by "
+        "a real run, and LTC by a second one (both OK=15 FAIL=0). BTC is still absent on "
+        "purpose: it shares every function those two exercised, and sharing code is not "
+        "evidence -- the LTC run needed three attempts and found two defects in shared "
+        "code with the whole suite green. Adding a chain without a txid from a run makes "
+        "the banner lie again, and the second version of that lie is the dangerous one "
+        "because the chain name is still right"
     )
     # WHAT COUNTS AS EVIDENCE, spelled as a check rather than as trust. An entry has to
     # carry the transaction identifiers a reader can go look up; a sentence that only
@@ -457,12 +466,13 @@ def test_a_chain_with_no_completed_run_SAYS_SO_instead_of_inheriting_another_cha
     # completed leaves all four behind. Hex is lowercased before matching because XRP
     # prints uppercase and the bitcoin family lowercase, and the requirement is that the
     # identifier is THERE, not which chain's convention typed it.
-    txids = re.findall(r"\b[0-9a-f]{8,}\b", PROVEN_LIVE["GRC"].lower())
-    assert len(txids) >= 4, (
-        f"GRC's PROVEN_LIVE sentence names {len(txids)} transaction identifiers and the "
-        f"run it records has four on-chain acts. An entry that cannot name them is not "
-        f"evidence of a run, which is the one thing this table is for: {txids}"
-    )
+    for chain, sentence in sorted(PROVEN_LIVE.items()):
+        txids = re.findall(r"\b[0-9a-f]{8,}\b", sentence.lower())
+        assert len(txids) >= 4, (
+            f"{chain}'s PROVEN_LIVE sentence names {len(txids)} transaction identifiers and the "
+            f"run it records has four on-chain acts. An entry that cannot name them is not "
+            f"evidence of a run, which is the one thing this table is for: {txids}"
+        )
     for chain in SCRIPT_CHAINS:
         assert chain in CHAIN_LABELS, f"{chain} has no operator-facing label"
         assert chain in CHAIN_TEST_NETWORKS, f"{chain} has no test-network allowlist"

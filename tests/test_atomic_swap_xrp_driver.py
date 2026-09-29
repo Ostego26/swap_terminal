@@ -77,8 +77,25 @@ def test_the_refusal_still_guards_a_chain_the_flag_offers_without_a_funding_path
     assert refuse_a_chain_this_driver_cannot_fund(console, "BTC") is True
     printed = capsys.readouterr().out
     assert "EVERYTHING ELSE ABOUT BTC WORKS" in printed
-    assert "step 5" in printed and "step 6" in printed, (
+    # IT NAMES NO STEP NUMBER, and that is the fix rather than a looser assertion. This
+    # test used to require "step 5" and "step 6", which pinned numbering from before the
+    # driver grew to ten steps AND was direction-dependent: xrp-first funds the XRP leg at
+    # 6 and the script leg at 7, chain-first does the reverse, so any single pair of
+    # numbers is wrong half the time. What has to be there is WHERE in the sequence, said
+    # in terms of the legs.
+    assert "funds the script leg" in printed and "already funded" in printed, (
         "the refusal must say WHERE the one-sided state would arrive, not merely that it could"
+    )
+    assert "step 5" not in printed, (
+        "a step number is back in the refusal. The two directions fund the legs in opposite "
+        "order, so a number names the wrong step in one of them"
+    )
+    # AND IT NO LONGER CLAIMS THE WORK IS UNDONE. The old text said "--chain grc is the only
+    # one that can complete", which was false from the moment LTC completed on 2026-09-29.
+    assert "only one that can complete" not in printed, printed
+    assert "createhtlc" not in printed, (
+        "the refusal names a Gridcoin RPC as the funding mechanism. Both runners fund through "
+        "modules/script_leg.py and have since 2026-09-29"
     )
 
 

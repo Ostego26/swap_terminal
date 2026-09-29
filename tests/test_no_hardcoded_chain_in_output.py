@@ -51,7 +51,31 @@ ALLOWED = (
     "createhtlc",
     # The evidence table's own sentence. GRC is the chain that ran.
     "GRC's 2026-09-27 swaps",
+    # The three client MODULES, named by filename in the refusal that tells a
+    # reader what a new chain needs. atomic_grc_client.py is a path, not a label.
+    "atomic_grc_client.py",
+    # The legacy flag spelling, which is a real accepted option string and is
+    # named alongside the current one rather than instead of it. The messages
+    # around it used to name ONLY this one, on every chain -- that was the defect,
+    # and it is fixed by adding --chain-amount rather than by removing this.
+    "its old spelling --grc-amount",
 )
+
+#: Both spellings, because searching one missed the other. The first version of
+#: this file looked for "GRC" alone and passed a whole LTC run that printed
+#:
+#:     step 9/10  B reads the secret OFF THE GRIDCOIN CHAIN -- never from A
+#:
+#: "GRIDCOIN" does not contain "GRC". A check that names one spelling of a thing
+#: is a check somebody will route around by accident, which is what happened
+#: within the hour of writing it.
+SPELLINGS = ("GRC", "GRIDCOIN")
+
+#: Every Console method whose argument an operator READS. `step` was missing from
+#: the first version, which is the other half of how the line above survived: it
+#: is a step TITLE, not a say() or a check(). The titles are the largest text on
+#: the screen.
+SPOKEN_METHODS = frozenset({"say", "check", "step", "banner"})
 
 
 def _spoken_strings(tree: ast.AST) -> list[tuple[int, str]]:
@@ -66,7 +90,7 @@ def _spoken_strings(tree: ast.AST) -> list[tuple[int, str]]:
         if not isinstance(node, ast.Call):
             continue
         target = node.func
-        if not (isinstance(target, ast.Attribute) and target.attr in {"say", "check"}):
+        if not (isinstance(target, ast.Attribute) and target.attr in SPOKEN_METHODS):
             continue
         for argument in node.args:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
@@ -86,7 +110,8 @@ def test_no_line_the_operator_READS_names_GRC_where_it_means_whichever_chain_is_
     """
     offenders = [
         (line, text) for line, text in _spoken_strings(TREE)
-        if "GRC" in text and not any(allowed in text for allowed in ALLOWED)
+        if any(spelling in text.upper() for spelling in SPELLINGS)
+        and not any(allowed in text for allowed in ALLOWED)
     ]
     assert not offenders, (
         "these lines print GRC on every chain:\n"
@@ -129,7 +154,11 @@ def test_the_check_is_looking_at_a_file_that_still_says_GRC_somewhere():
     vacuously and keep passing while somebody reintroduced one in a form it does
     not walk. This asserts the file still contains the string at all.
     """
-    assert "GRC" in SOURCE.read_text(), (
-        "atomic_swap_xrp.py no longer mentions GRC anywhere, so the test above proves nothing. "
-        "Either the evidence table lost its Gridcoin entry or this check needs rewriting."
+    text = SOURCE.read_text()
+    assert any(spelling in text.upper() for spelling in SPELLINGS), (
+        "atomic_swap_xrp.py no longer mentions Gridcoin under any spelling, so the test above "
+        "proves nothing. Either the evidence table lost its GRC entry or this check needs rewriting."
     )
+    # AND THE WALK HAS TO REACH step() TITLES. Asserting the method set directly, because
+    # the one line this file failed to catch was a step title rather than a say().
+    assert "step" in SPOKEN_METHODS and "banner" in SPOKEN_METHODS

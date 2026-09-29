@@ -150,8 +150,28 @@ back.
 | direction | result | evidence |
 |---|---|---|
 | XRP -> GRC, on `script_leg` | OK=15 FAIL=0 | 2026-09-29. Escrow `56E03AA90B97BD8E…` (OfferSequence 21051299), GRC HTLC `25749c35389772e9…` vout 1 on P2SH `2N775AaLXRuxBoXS8q…`, claim `c8ec9f79e541bfa7…` crediting 66.09001328 GRC to `n3f7cJxrGH1i4gRrNF62NU4H36YkoE1GDX`, XRP finish `C72EBF3F56D97180…`, B +1000000 drops. The secret was read back out of the claim's 237-byte scriptSig |
-| GRC -> XRP, on `script_leg` | **NONE** | `chain-first` shares every function the row above exercised and has not been run on this path. Sharing code is not evidence |
-| XRP -> BTC / XRP -> LTC | **NONE** | the block arithmetic, the timelock ordering and the key handling are exercised by seeded tests; neither has been run against a daemon |
+| XRP -> LTC, on `script_leg` | OK=15 FAIL=0 | 2026-09-29, and the SECOND chain. Escrow `27627931A82718BF…` (OfferSequence 21051302), LTC HTLC `6e06a4c906c1d5db…` vout 1 on P2SH `QbWXa1K6v74M7qWcZN8bXNPu4WMJMybuFh`, claim `7bd4f0ef9602c2a1…` paying 0.02217136 LTC to `rltc1qrlv7f9majkfujxn6cgspgx998nc60umpjce6vv`, XRP finish `0DEB63047A0CDDE3…`, B 118999970 -> 119999970 drops. Priced at the live rate (44.90069981 XRP per LTC, CoinPaprika), not a hand-supplied figure |
+| GRC -> XRP / LTC -> XRP, on `script_leg` | **NONE** | `chain-first` shares every function the rows above exercised and has not been run on this path. Sharing code is not evidence -- see below |
+| XRP -> BTC | **NONE** | the block arithmetic, the timelock ordering and the key handling are exercised by seeded tests; it has never been run against a daemon |
+
+**THE LTC RUN TOOK THREE ATTEMPTS AND THAT IS THE ARGUMENT FOR THIS WHOLE TABLE.** Both
+failures were in code the GRC run already exercised, and the suite was green for both:
+
+1. `build_script_client` read `Config.RPC` directly, so a Litecoin daemon resolved from
+   its own conf produced a working adapter and a script client that raised
+   `LTC_RPC_PORT is not set` at step 5b -- the last check before funding, on a run that
+   was about to move coins.
+2. `create_contract()` was called POSITIONALLY in the BTC/GRC order. `LTCClient` takes
+   its parameters in a different order with `secret_hash` last, so all five arguments
+   landed in the wrong places: the participant address received the secret hash, the
+   locktime received an address (that `str` vs `int` mismatch is the only thing that
+   stopped it), and `secret_hash` received the locktime -- a hashlock committing to a
+   preimage nobody holds. Fifteen tests covered that call and all fifteen passed,
+   because the test double had the same wrong signature.
+
+Neither was findable by running GRC. "Shares code with something that ran" is exactly
+the claim those three attempts refuted, which is why `chain-first` stays NONE until it
+is run rather than being inferred from the two rows above it.
 
 The funding amount and the credited amount differ by the spend's own miner fee -- 66.10001328
 left B's wallet into the HTLC, 66.09001328 arrived, 0.01 to the miner. The driver's summary

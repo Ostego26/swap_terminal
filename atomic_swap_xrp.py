@@ -369,9 +369,25 @@ PROVEN_LIVE: dict[str, str] = {
         "back out of the claim's 237-byte scriptSig, not out of memory. A failure here is a "
         "regression, not a discovery."
     ),
-    # chain-first is NOT listed. It is the same five acts in the other order and shares every
-    # function, but it has not been run on this path and sharing code is not evidence -- that
-    # is the whole reason this table is keyed by what ran rather than by what should work.
+    # EARNED 2026-09-29, the second chain and the first one this driver could not fund at
+    # all that morning. It took three attempts and each failure was a real defect the seeded
+    # tests could not have found: the script client read Config.RPC directly so a
+    # conf-resolved daemon failed at step 5b; then create_contract() was called positionally
+    # in the BTC/GRC order, which LTC does not share.
+    "LTC": (
+        "xrp-first COMPLETED on this code path 2026-09-29, OK=15 FAIL=0: XRP escrow "
+        "27627931A82718BF.. (OfferSequence 21051302), LTC HTLC 6e06a4c906c1d5db.. at vout 1 on "
+        "P2SH QbWXa1K6v74M7qWcZN8bXNPu4WMJMybuFh, claim 7bd4f0ef9602c2a1.. paying 0.02217136 LTC "
+        "to rltc1qrlv7f9majkfujxn6cgspgx998nc60umpjce6vv, XRP finish 0DEB63047A0CDDE3.. and B's "
+        "balance 118999970 -> 119999970 drops. The secret was read back out of the claim's "
+        "236-byte scriptSig. Priced at the live rate, 44.90069981 XRP per LTC from CoinPaprika, "
+        "not a hand-supplied figure. A failure here is a regression, not a discovery."
+    ),
+    # chain-first is NOT listed, on EITHER chain. It is the same five acts in the other order
+    # and shares every function, but it has not been run on this path and sharing code is not
+    # evidence -- that is the whole reason this table is keyed by what ran rather than by what
+    # should work. Two of the three defects the LTC run found were in code both directions
+    # share, and the xrp-first tests were green for all of them.
 }
 
 #: What to CALL each chain in a line an operator reads. Only ever cosmetic -- nothing
@@ -603,17 +619,28 @@ def assert_timelock_ordering(xrp_cancel_after: int, leg: ScriptLeg, now_unix: fl
 
 
 def _pinned_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decimal | None, str]:
-    """--grc-amount, validated. Its own function so resolve_chain_amount() stays
-    under the return ceiling by SHAPE rather than by a suppression (rule 19)."""
+    """--chain-amount, validated. Its own function so resolve_chain_amount() stays
+    under the return ceiling by SHAPE rather than by a suppression (rule 19).
+
+    IT NAMED THE LEGACY SPELLING IN EVERY MESSAGE, until 2026-09-29. The flag has
+    two option strings -- --chain-amount and --grc-amount, the second kept because
+    it is in the operator's shell history (a flag that vanishes on a rename fails
+    with "unrecognized arguments" at the point somebody is trying to move money).
+    argparse accepts either and dest is `chain_amount`, so the code cannot see
+    which was typed; what it CAN do is stop asserting one. Telling an operator
+    "--grc-amount 'x' is not a number" when they typed --chain-amount on a
+    Litecoin swap names a flag they did not use, on a chain it does not mention.
+    """
+    both = "--chain-amount (or its old spelling --grc-amount)"
     try:
         pinned = Decimal(raw)
     except (ArithmeticError, ValueError):
-        console.check(f"the {chain} leg's size", f"--grc-amount {raw!r} is not a number", "a decimal", False)
+        console.check(f"the {chain} leg's size", f"{both} {raw!r} is not a number", "a decimal", False)
         return None, ""
     if pinned <= 0:
-        console.check(f"the {chain} leg's size", f"--grc-amount {pinned}", "a positive amount", False)
+        console.check(f"the {chain} leg's size", f"{both} {pinned}", "a positive amount", False)
         return None, ""
-    return pinned, "--grc-amount, pinned by hand; NO rate was applied and the legs are not priced"
+    return pinned, f"{both}, pinned by hand; NO rate was applied and the legs are not priced"
 
 
 def _rated_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decimal | None, str]:
@@ -937,7 +964,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
                         f"{ctx.xrp_cancel_after}. Do NOT publish the secret.")
         return False
 
-    ctx.console.step(9, "B reads the secret OFF THE GRIDCOIN CHAIN -- never from A")
+    ctx.console.step(9, f"B reads the secret OFF THE {ctx.chain} CHAIN -- never from A")
     ctx.console.say("this is the step that makes the swap atomic. B does not ask A for anything, and A cannot "
                 "refuse: the secret is in A's own claim transaction.")
     revealed = None
@@ -1395,24 +1422,42 @@ def refuse_a_chain_this_driver_cannot_fund(console: Console, chain: str) -> bool
     """
     if chain in CAN_FUND_THE_HTLC:
         return False
+    # THIS MESSAGE DESCRIBED A MECHANISM THE DRIVER STOPPED USING, until 2026-09-29. It
+    # said the script leg is funded with `createhtlc`, "which is a GRIDCOIN RPC" -- true
+    # when the guard was written and false since both runners moved onto the chain clients
+    # the same day. A refusal that misnames its own reason sends the reader to fix the
+    # wrong thing, and this one is printed at the moment a swap is being declined.
+    #
+    # The guard itself is NOT dead and is not deleted: CAN_FUND_THE_HTLC is every chain in
+    # SCRIPT_CLIENTS today, so this branch cannot fire, and it exists for the chain somebody
+    # adds to SECONDS_PER_BLOCK without a client to go with it. The test one file over
+    # asserts the two sets are equal today AND drives this branch with a shrunken set.
     console.say(
-        f"REFUSED BEFORE ANYTHING IS CONTACTED: this driver funds the script leg with `createhtlc`, "
-        f"which is a GRIDCOIN RPC. {chain} has no such method and would answer 'Method not found' at "
-        f"step 6 -- AFTER the XRP escrow is funded at step 5, leaving one leg funded on a live chain "
-        f"and the other impossible. That is the one-sided state every timelock in this file exists to "
-        f"prevent, so it refuses here instead."
+        f"REFUSED BEFORE ANYTHING IS CONTACTED: {chain} is a known chain but has no client in "
+        f"SCRIPT_CLIENTS, so nothing here can build or fund its HTLC. It would fail at the step that "
+        f"funds the script leg -- which in xrp-first is AFTER the XRP escrow is already funded, leaving "
+        f"one leg live on a real chain and the other impossible. That is the one-sided state every "
+        f"timelock in this file exists to prevent, so it refuses here instead. (The step NUMBER is "
+        f"deliberately not named: the two directions fund the legs in opposite order, so it is 7 in "
+        f"one and 6 in the other, and a message naming one is wrong half the time.)"
     )
     console.say(
         f"EVERYTHING ELSE ABOUT {chain} WORKS and is not the problem: the adapter, the network "
         f"allowlist, the addresses, the {SECONDS_PER_BLOCK[chain]}s block interval and the timelock "
         f"ordering are all exercised."
     )
+    # THIS PARAGRAPH WAS ENTIRELY FALSE BY 2026-09-29 and said so at the moment of a
+    # refusal: "Steps 6 and 7 here need to go through that interface instead of a raw RPC.
+    # Until then --chain grc is the only one that can complete." They DO go through it --
+    # modules/script_leg.py, both runners -- and GRC is not the only one: LTC completed the
+    # same day, OK=15 FAIL=0. A refusal that tells the reader the work is undone when it is
+    # done is worse than one that says nothing, because it is actionable and wrong.
     console.say(
-        "THE FIX IS NOT A NEW METHOD. modules/atomic_btc_client.py and modules/atomic_ltc_client.py "
-        "already expose create_contract()/redeem_contract()/refund_contract() and build the P2SH "
-        "themselves -- atomic_swap.py funds HTLCs on all three chains through them. Steps 6 and 7 here "
-        "need to go through that interface instead of a raw RPC. Until then --chain grc is the only one "
-        "that can complete."
+        f"THE FIX IS A CLIENT, NOT A METHOD. modules/script_leg.py funds and spends every script "
+        f"leg through SCRIPT_CLIENTS[chain].create_contract(), and modules/atomic_btc_client.py, "
+        f"atomic_ltc_client.py and atomic_grc_client.py are the three that exist. {chain} needs an "
+        f"entry there -- one that builds its P2SH and locates the funded output -- and then this "
+        f"guard stops firing on its own. Nothing else in this driver is chain-specific."
     )
     console.check(f"{chain} HTLC can be funded by this driver", "no",
                   f"a chain in {sorted(CAN_FUND_THE_HTLC)}", False)
