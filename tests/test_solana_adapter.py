@@ -43,6 +43,7 @@ from chains.registry import build_adapters
 from chains.solana import SolanaAdapter, SolanaRPCError, deposit_event
 from chains.solana_address import SolanaAddressError
 from config import Config
+from services.swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION
 
 WALLET = "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN"
 WALLET_WSOL_ATA = "2TJwPdpDwgGrcQjW5K5E2uNxEqBTNkQsZ46axFy5bNm3"
@@ -613,3 +614,32 @@ def test_the_event_dict_carries_exactly_the_keys_deposit_service_reads():
     event = deposit_event(SIG, 2, WALLET, 1.25, 3)
     assert set(event) == {"txid", "vout", "address", "amount", "confirmations"}
     assert event["vout"] == 2
+
+
+def test_EVERY_TAG_ATTRIBUTED_ASSET_HAS_THE_CONFIG_KEY_ITS_TABLE_NAMES():
+    """TAG_ATTRIBUTION pointed at a config key that did not exist, for about an hour.
+
+    `SOL` was added to TAG_ATTRIBUTED_ASSETS and TAG_ATTRIBUTION was wired to read
+    `SOL_DEPOSIT_ACCOUNT` from config -- before config defined it. So
+    `config.get("SOL_DEPOSIT_ACCOUNT")` returned None and every SOL swap would have refused
+    with "SOL_DEPOSIT_ACCOUNT is not set" NO MATTER WHAT THE OPERATOR EXPORTED.
+
+    That is the worst shape a refusal can have: it reads as a configuration problem on the
+    person's side and is missing code on ours, so the only one who can see it is the one who
+    cannot fix it.
+
+    ASSERTED OVER THE TABLE rather than for SOL specifically, so the third tag-attributed chain
+    -- Stellar's memo, Cosmos's memo, whatever it turns out to be -- cannot land with the same
+    gap. TAG_ATTRIBUTED_ASSETS's own comment says it expects one.
+    """
+    assert set(TAG_ATTRIBUTION) == set(TAG_ATTRIBUTED_ASSETS), (
+        "a chain attributed by tag with no entry here would raise KeyError inside "
+        "deposit_address_for(), which runs while a customer is waiting for an address"
+    )
+    for asset, (variable, discriminator, network) in TAG_ATTRIBUTION.items():
+        assert hasattr(Config, variable), (
+            f"{asset} is attributed by tag and TAG_ATTRIBUTION names {variable}, but config.py "
+            f"does not define it -- so config.get({variable!r}) is None and no swap on {asset} "
+            f"can ever be created, whatever the operator exports"
+        )
+        assert discriminator and network, f"{asset}'s refusals would name a blank"

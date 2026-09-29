@@ -220,6 +220,25 @@ class Config:
     # than a swap whose deposit instruction points nowhere.
     XRP_DEPOSIT_ACCOUNT = _env("XRP_DEPOSIT_ACCOUNT", "").strip()
 
+    # THE ACCOUNT SOL DEPOSITS ARE PAID INTO. Every word above applies unchanged -- one shared
+    # account, no default, an empty value refuses rather than improvising -- with one difference
+    # worth naming: the discriminator is a MEMO INSTRUCTION rather than an integer field on the
+    # transaction, read by chains/solana_memo.py. services/swap_service.TAG_ATTRIBUTION carries
+    # which is which, so neither this comment nor that table is the only place it is written.
+    #
+    # ADDED 2026-09-29, AND ITS ABSENCE WAS A REAL GAP FOR ABOUT AN HOUR. TAG_ATTRIBUTION was
+    # wired to read `SOL_DEPOSIT_ACCOUNT` from config before config defined it, so
+    # `config.get("SOL_DEPOSIT_ACCOUNT")` returned None and every SOL swap would have refused
+    # with "SOL_DEPOSIT_ACCOUNT is not set" NO MATTER WHAT THE OPERATOR EXPORTED. That failure
+    # reads as a configuration problem on their side and is missing code on ours -- the worst
+    # shape a refusal can have, because the person who can see it cannot fix it.
+    #
+    # THE DIFFERENCE FROM XRP THAT MATTERS FOR CUSTODY: an XRP account is funded past a base
+    # reserve and holds nothing else; a Solana deposit account is an ordinary keypair's public
+    # key, and whoever holds that key holds every deposit between arrival and payout. Under the
+    # brief-escrow model the operator described, that window is the whole exposure.
+    SOL_DEPOSIT_ACCOUNT = _env("SOL_DEPOSIT_ACCOUNT", "").strip()
+
     RPC: ClassVar[dict[str, dict[str, object]]] = {
         "BTC": {
             "user": _env("BTC_RPC_USER", ""),
