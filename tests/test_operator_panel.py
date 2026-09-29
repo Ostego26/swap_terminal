@@ -1266,3 +1266,95 @@ def test_THE_STARTUP_GATE_IS_NOT_THE_THING_BEING_QUIETED():
     wrapped = source.index("run.console = decisions.SaysEachLineOnce(console)")
     gated = source.index("adaptor_steps.assert_test_network(run)")
     assert gated < wrapped, "the gate prints through the real console, unwrapped"
+
+
+def test_THE_TERMINAL_SAYS_SPENT_OR_USABLE_AND_NOT_ONLY_THE_PAGE():
+    """The misreading this fixes was mine, off the operator's paste, 2026-09-28.
+
+    The panel's page was never wrong -- payment_rows() marked all five payments SPENT in the
+    funding table. What the TERMINAL showed was only the candidate line from
+    find_operator_funding(), which is emitted before anything asks whether the output is still
+    unspent, and which used to read "found the operator's funding at <txid>:1 worth 1.00000000
+    GRC". Five long-spent outputs printed as five found fundings, I read it as the answer, and
+    told the operator 12.12 GRC was available. The next run of grc_htlc_verify established that
+    every one of the five was spent -- at 168, 193, 278, 418 and 479 blocks deep -- in about
+    eight seconds of block walking.
+
+    So the verdict is said where it is read. Both words are asserted, because a line that
+    appears only for the bad case trains a reader to skim for noise, and the quiet failure here
+    looks exactly like the healthy one (rule 14).
+    """
+    said: list[str] = []
+    spent_txid, live_txid = "aa" * 32, "bb" * 32
+    spender = "cc" * 32
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, line):
+            said.append(line)
+
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *params):
+            if method == "listtransactions":
+                return [
+                    {"address": "ours", "category": "send", "txid": spent_txid, "confirmations": 9},
+                    {"address": "ours", "category": "send", "txid": live_txid, "confirmations": 2},
+                ]
+            raise AssertionError(method)
+
+    class _Key:
+        address = "ours"
+
+    run = _Run()
+    outpoints = {
+        spent_txid: adaptor_steps.chain.Outpoint(txid=spent_txid, vout=1, value_satoshis=150_000_000),
+        live_txid: adaptor_steps.chain.Outpoint(txid=live_txid, vout=0, value_satoshis=16_000_000),
+    }
+    original_find = adaptor_steps.find_operator_funding
+    original_spender = adaptor_steps.find_the_spender
+    try:
+        adaptor_steps.find_operator_funding = lambda r, k, txid: outpoints[txid]
+        adaptor_steps.find_the_spender = lambda r, o, max_depth=None: (
+            (spender, "SPENT ALREADY") if o.txid == spent_txid else (None, "no spender found")
+        )
+        rows = decisions.payment_rows(run, _Key())
+    finally:
+        adaptor_steps.find_operator_funding = original_find
+        adaptor_steps.find_the_spender = original_spender
+
+    # NEWEST FIRST is payments_to_the_funding_address()'s order, so the 2-confirmation one
+    # leads. Asserted as the order rather than as a set, because "which one would a run pick"
+    # is the question the table exists to answer.
+    assert [r.usable for r in rows] == [True, False]
+    terminal = "\n".join(said)
+    assert "SPENT by " + spender[:16] in terminal, "the spent one says so in the terminal"
+    assert "USABLE" in terminal, (
+        "and so does the healthy one -- a line that only appears when something is wrong "
+        "teaches the reader to skim, and this is the case I skimmed"
+    )
+    assert "1.50000000 GRC" in terminal and "0.16000000 GRC" in terminal, (
+        "with the value, because whether there is ENOUGH is the next question"
+    )
+
+
+def test_A_CANDIDATE_OUTPUT_IS_NOT_ANNOUNCED_AS_THE_OPERATORS_FUNDING():
+    """`find_operator_funding` says candidate, because that is what it has at that line.
+
+    It locates the output paying the funding address and returns; nothing in it asks whether
+    that output is still unspent. In the nine-step harness the verdict follows two lines later
+    and the sequence reads correctly -- but the line has to be true on its own, because the
+    panel is a second reader that does not print those two lines.
+    """
+    source = Path(adaptor_steps.__file__).read_text(encoding="utf-8")
+    start = source.index("def find_operator_funding(")
+    end = source.index("def ", source.index("raise RegtestSetupError", start))
+    body = source[start:end]
+    code = "\n".join(line for line in body.splitlines() if not line.strip().startswith("#"))
+    assert "candidate funding output" in code
+    assert "NOT yet checked" in code
+    assert "found the operator's funding" not in code, (
+        "the old wording, gone rather than left beside the fix"
+    )

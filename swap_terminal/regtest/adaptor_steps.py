@@ -3386,9 +3386,25 @@ def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoin
         if script == wanted:
             index = int(output["n"])
             satoshis = coins_to_satoshis(str(output["value"]))
+            # "CANDIDATE", NOT "THE OPERATOR'S FUNDING", and the word is the fix for a
+            # misreading this line caused on 2026-09-28 -- mine, not the operator's. It used to
+            # read "found the operator's funding at <txid>:<n> worth 1.00000000 GRC", and it is
+            # emitted HERE, before anything has asked whether that output is still unspent. In
+            # the nine-step harness the verdict follows two lines later, so the sequence reads
+            # correctly. In the operator panel it does NOT: payment_rows() puts the verdict in
+            # the PAGE's table and the terminal shows only this line, so five long-spent outputs
+            # printed as five found fundings. I read that terminal off the operator's paste and
+            # told them 12.12 GRC was available; the next run established that every one of the
+            # five was spent, at depths of 168 to 479 blocks.
+            #
+            # Rule 14's "state what the number means, next to the number", and rule 17's line
+            # between a finding and a hypothesis, are the same sentence here: this line is a
+            # candidate, the spend check has not run, and the words have to say so where they
+            # are read rather than where they were written.
             run.say(
-                f"found the operator's funding at {txid}:{index} worth "
-                f"{satoshis_to_coins(satoshis)} {run.asset}, paying {key.address}"
+                f"candidate funding output {txid}:{index} worth "
+                f"{satoshis_to_coins(satoshis)} {run.asset}, paying {key.address} "
+                f"-- NOT yet checked for having been spent"
             )
             return chain.Outpoint(txid=txid, vout=index, value_satoshis=satoshis)
     raise RegtestSetupError(

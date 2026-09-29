@@ -725,4 +725,23 @@ def payment_rows(run: adaptor_steps.Run, key, known_spent: dict | None = None) -
         else:
             rows.append(PaymentRow(payment.txid, payment.confirmations, value, "", True,
                                    description))
+        # AND SAY THE VERDICT WHERE IT IS READ, 2026-09-28. Until this line the verdict existed
+        # ONLY in the row, which renders in the page's funding table -- and the panel's terminal
+        # showed just the candidate line from find_operator_funding(). Five long-spent outputs
+        # therefore printed as five found fundings on the operator's screen, and I read that
+        # paste and told them 12.12 GRC was available. Every one was spent, at 168 to 479 blocks
+        # deep, which the next run of grc_htlc_verify established in eight seconds.
+        #
+        # The page was never wrong. The terminal was incomplete, and an incomplete line in the
+        # place someone is actually looking is rule 14's defect in the output -- "make 'did
+        # nothing' look different from 'did work'" applied to a usable output versus a dead one.
+        run.say(
+            f"{payment.txid[:16]}…:{rows[-1].value_coins} {run.asset} -- "
+            f"{'SPENT by ' + rows[-1].spender[:16] + '…' if rows[-1].spender else 'USABLE'}"
+        )
+    if not rows:
+        # RULE 14: "(none) is a result". A blank here is ambiguous between no payment and a
+        # listtransactions that came back empty for another reason, and the address is what the
+        # operator needs in order to fix either.
+        run.say(f"no payment to {key.address} is in the wallet's recent transactions")
     return rows
