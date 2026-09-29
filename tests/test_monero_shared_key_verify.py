@@ -756,3 +756,72 @@ def test_CTRL_C_IN_THE_WAIT_LOOP_SAYS_WHAT_IT_WAS_WAITING_FOR(monkeypatch):
     assert "only READS" in said, "the first thing to say to someone who just hit Ctrl-C"
     assert "wallet_height=2217975" in said and "daemon_tip=2217975" in said
     assert "resumes from here" in said, "and how to pick it back up"
+
+
+def test_THE_REFUSAL_PRINTS_THE_ADDRESS_THE_COINS_ARE_MISSING_FROM(monkeypatch):
+    """"the coins were never sent to the shared address" -- without printing it, 2026-09-29.
+
+    The stagenet run waited 300s, established exactly the right thing (synced, node live, pool
+    empty, so nothing was ever sent), and refused with a sentence naming "the shared address"
+    while never showing it. That string is the one thing the operator has to paste into a faucet,
+    and it was in the process's own hands the whole time.
+
+    Rule 14's "echo the parameters that decide the answer": the answer is decided by whether
+    anything was sent THERE, so the there belongs on screen -- both while waiting, so a faucet
+    can be opened without scrolling, and in the refusal, so the pasted output is self-describing
+    a day later.
+    """
+    address = "5B5yTESTADDRESSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def fake(target, method, params=None, timeout=None):
+        return {"height": 2217986, "balance": 0, "unlocked_balance": 0}
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
+    console = Console()
+    with pytest.raises(harness.VerifyError) as caught:
+        harness.report_balance(console, 38084, "node:38089", 0, address)
+    said = str(caught.value)
+    assert address in said, "the address, in the refusal that says it was never paid"
+    assert "cypherfaucet.com/xmr-stagenet" in said, "and how to pay it on a valueless network"
+    assert "only reads" in said, "and that re-running needs nothing undone first"
+
+
+def test_THE_WAIT_ANNOUNCES_WHICH_ADDRESS_IT_IS_WATCHING(monkeypatch):
+    """Announce before, not only after (rule 14). A 300s wait should say what it is waiting on
+    at the START, because that is when a faucet tab would be useful -- not 300 seconds later."""
+    address = "5B5yANOTHERTESTADDRESS"
+    said: list[str] = []
+
+    def fake(target, method, params=None, timeout=None):
+        return {"height": 1, "balance": 0, "unlocked_balance": 0}
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
+
+    class _Recorder(Console):
+        def say(self, line=""):
+            said.append(line)
+
+    with pytest.raises(harness.VerifyError):
+        harness.report_balance(_Recorder(), 38084, "node:38089", 0, address)
+    assert any(address in line and "waiting on THIS address" in line for line in said)
+
+
+def test_THE_ADDRESS_IS_OPTIONAL_SO_NO_CALLER_IS_BROKEN_BY_IT(monkeypatch):
+    """--mine on regtest funds the address itself and has no faucet to point at.
+
+    The parameter defaults to empty and the faucet block is omitted entirely rather than printed
+    with a blank in it -- a sentence telling a regtest operator to visit a stagenet faucet would
+    be worse than saying nothing (rule 14: state what the number means, and do not state what it
+    does not).
+    """
+    def fake(target, method, params=None, timeout=None):
+        return {"height": 1, "balance": 0, "unlocked_balance": 0}
+
+    monkeypatch.setattr(harness, "rpc", fake)
+    monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
+    with pytest.raises(harness.VerifyError) as caught:
+        harness.report_balance(Console(), 38084, "node:38089", 0)
+    assert "cypherfaucet" not in str(caught.value)
+    assert "SEND ANY AMOUNT TO" not in str(caught.value)

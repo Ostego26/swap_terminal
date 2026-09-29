@@ -670,7 +670,8 @@ def pending_in_the_pool(port: int) -> str:
         f"{int(entry.get('amount', 0))} atomic units" for entry in pool)
 
 
-def report_balance(console: Console, port: int, daemon: int | str, seconds: int) -> int:
+def report_balance(console: Console, port: int, daemon: int | str, seconds: int,
+                   address: str = "") -> int:
     """Step 4a. Refresh until the shared wallet SEES the coins, printing every pass.
 
     KeyboardInterrupt IS CAUGHT HERE and turned into a sentence. The operator pressed Ctrl-C at
@@ -682,6 +683,13 @@ def report_balance(console: Console, port: int, daemon: int | str, seconds: int)
     started = time.monotonic()
     attempt = 0
     console.say(f"waiting up to {seconds}s for coins to appear AND unlock, refreshing every 5s")
+    if address:
+        # THE ADDRESS, WHERE THE WAITING HAPPENS. The 2026-09-29 stagenet run waited 300s and
+        # refused with "the coins were never sent to the shared address" WITHOUT PRINTING IT --
+        # and that string is the one thing the operator has to paste into a faucet. Rule 14's
+        # "echo the parameters that decide the answer": the answer here is decided by whether
+        # anything was sent THERE, so the there belongs on screen beside the waiting.
+        console.say(f"waiting on THIS address: {address}")
     console.say(f"pool right now: {pending_in_the_pool(port)}")
     try:
         while time.monotonic() - started < seconds:
@@ -720,7 +728,12 @@ def report_balance(console: Console, port: int, daemon: int | str, seconds: int)
         f"          pool: {pending_in_the_pool(port)}\n"
         f"          A balance of 0 while SYNCED means the coins were never sent to the shared "
         f"address. A balance of 0 while BEHIND means this wallet has not reached the block that "
-        f"holds them yet, and the two need opposite actions -- fund it, or fix the node."
+        f"holds them yet, and the two need opposite actions -- fund it, or fix the node.\n"
+        + (f"          SEND ANY AMOUNT TO: {address}\n"
+           f"          On stagenet a faucet is the way: cypherfaucet.com/xmr-stagenet pays 0.01\n"
+           f"          sXMR about once an hour. More routes, and which ones answered when, are in\n"
+           f"          docs/monero_stagenet_funding.md. Re-run the SAME command afterwards; this\n"
+           f"          loop only reads, so nothing here has to be undone first." if address else "")
     )
 
 
@@ -934,7 +947,7 @@ def sweep_phase(console: Console, target: Target, destination: str, wait: int) -
         )
 
     console.step(3, "refresh the shared wallet until the coins UNLOCK")
-    report_balance(console, target.wallet_port, target.daemon, wait)
+    report_balance(console, target.wallet_port, target.daemon, wait, open_address)
 
     console.step(4, "spend it all out with the SUMMED key")
     sweep_out(console, target.wallet_port, destination)
