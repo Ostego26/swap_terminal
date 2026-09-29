@@ -513,8 +513,36 @@ def preflight_sweep(console: Console, port: int, daemon: int | str) -> str:
     return nettype
 
 
+def restore_height_for(daemon: int | str, blocks_of_margin: int) -> tuple[int, int, list[str]]:
+    """(restore height, tip, what to print). THE decision, extracted so it can be asserted on.
+
+    It left create_shared_wallet() at six arguments against ruff's ceiling of five, and rule 12
+    is explicit that the answer is to extract the decision rather than raise the ceiling. It is
+    also the right split: the height is a choice with a wrong answer, and the wrong answer is
+    silent -- a restore height ABOVE the block holding a deposit reports 0 for a funded address,
+    which looks exactly like the shared key not working.
+
+    ONE BLOCK OF MARGIN IS CORRECT ONLY WHEN THE KEYS WERE SAMPLED SECONDS AGO, which is --run's
+    case and not --open's. A handoff file written by a GRC adaptor run may be hours old and its
+    address may already be funded and buried.
+    """
+    tip = int(rpc(daemon, "get_info").get("height", 0))
+    restore_height = max(0, tip - blocks_of_margin)
+    lines = [f"daemon tip {tip}; restoring the new wallet from height {restore_height}"]
+    if blocks_of_margin <= 1:
+        lines += ["(not 0: these keys were sampled seconds ago, so no earlier block can",
+                  " hold a transaction for them, and on stagenet scanning from genesis",
+                  " would mean 2.2 million blocks from a remote node)"]
+    else:
+        lines += [f"({blocks_of_margin} blocks of margin, NOT 1: these keys came from a file and",
+                  " may be hours old, so a deposit may already be buried. tip-1 would put the",
+                  " restore height ABOVE it and report 0 for a funded address. Not 0 either:",
+                  " scanning stagenet from genesis is ~2.2 million blocks from a remote node)"]
+    return restore_height, tip, lines
+
+
 def create_shared_wallet(
-    console: Console, port: int, daemon: int | str, shares: dict, address: str
+    console: Console, port: int, shares: dict, address: str, restore_height: int
 ) -> str:
     """Step 2. THE DECISIVE CHECK, and it needs no coins.
 
@@ -547,12 +575,14 @@ def create_shared_wallet(
     # wallet being created, and a restore height above the block a deposit lands in
     # would make that deposit invisible -- which would look exactly like the shared
     # address not working, the one wrong conclusion this script exists to prevent.
-    tip = int(rpc(daemon, "get_info").get("height", 0))
-    restore_height = max(0, tip - 1)
-    console.say(f"daemon tip {tip}; restoring the new wallet from height {restore_height}")
-    console.say("(not 0: these keys were sampled seconds ago, so no earlier block can")
-    console.say(" hold a transaction for them, and on stagenet scanning from genesis")
-    console.say(" would mean 2.2 million blocks from a remote node)")
+    # `blocks_of_margin` IS 1 FOR --run AND MUCH LARGER FOR --open, and the difference is a
+    # correctness one rather than a tuning knob. The paragraph above is true only when the keys
+    # were sampled seconds ago by THIS process, which is --run's case. A handoff file written by
+    # a GRC adaptor run hours earlier has keys that are hours old, and its deposit may already
+    # be buried -- so tip-1 would place the restore height ABOVE the block holding the payment
+    # and the wallet would report a balance of 0 for a funded address. That is the exact wrong
+    # conclusion this comment already warns about, arriving through the other door.
+
 
     filename = shared_wallet_name(address)
     console.say(f"creating wallet file {filename!r} in the wallet-rpc's --wallet-dir")
@@ -783,6 +813,73 @@ def load_shares(path: Path) -> dict:
         raise VerifyError(str(error)) from error
 
 
+#: How far back --open rewinds. Stagenet targets 120s a block, so 1000 blocks is roughly 33
+#: hours -- comfortably longer than any handoff file is likely to sit between the GRC run that
+#: wrote it and the operator funding the address it names. It is a SCAN, not a wait: a thousand
+#: blocks from a remote node costs seconds, where being one block too high costs a balance of 0
+#: on a funded address and looks exactly like the shared key not working.
+OPEN_RESTORE_MARGIN_BLOCKS = 1000
+
+
+def open_phase(console: Console, target: Target) -> int:
+    """Turn an existing shares file into a wallet the sweeper can spend from.
+
+    THE GAP THIS FILLS, found on the operator's host 2026-09-29. `regtest/adaptor_steps.py`
+    writes a handoff fixture carrying the Monero share RECOVERED from a Gridcoin scriptSig --
+    and nothing could open it. `--run` creates a wallet from FRESHLY SAMPLED shares, which is
+    the wrong keys; `--sweep` requires the wallet to be open already and refuses otherwise. So
+    the file that closes gap (e) was unusable by the only script that reads its format.
+
+    IT DOES NOT SAMPLE ANYTHING. Every scalar comes out of the file, which is the whole point:
+    a wallet built from new shares would sweep beautifully and prove nothing, because the
+    scalar would never have touched a chain.
+
+    SAFE TO RE-RUN. generate_from_keys is given a filename derived from the address, so opening
+    the same handoff twice addresses the same wallet file rather than making a second one --
+    shared_wallet_name() exists for exactly that, after a 2026-09-28 run overwrote one wallet
+    with another's keys.
+    """
+    console.step(2, "open the wallet these shares describe, WITHOUT sampling anything")
+    shares = load_shares(target.shares_path)
+    console.say(f"loaded four shares from {target.shares_path}; both sums recomputed and agree")
+    address = str(shares.get("shared_address") or "")
+    if not address:
+        raise VerifyError(
+            f"{target.shares_path} carries no `shared_address`, so there is nothing to open. A "
+            f"handoff written by regtest/adaptor_steps.py always has one"
+        )
+    network = decode_address(address).network
+    console.check("the address in the file decodes", f"{network}/primary", "a test network",
+                  network != "mainnet")
+    if network == "mainnet":
+        raise VerifyError(
+            "that shares file names a MAINNET address. It holds private spend shares in the "
+            "clear, which is correct on a valueless test network and a key disclosure anywhere "
+            "else, and this script will not open it"
+        )
+    recomputed = address_for(shares, network)
+    console.check("and the SHARES re-derive to it",
+                  "identical" if recomputed == address else f"DIFFERENT ({recomputed[:12]}...)",
+                  "identical", recomputed == address)
+    if recomputed != address:
+        raise VerifyError(
+            f"the shares in {target.shares_path} do not sum to the address it names. Nothing was "
+            f"opened. One of the two was edited, or the file is from a different run"
+        )
+
+    console.step(3, "hand the SUMMED scalars to the wallet")
+    restore_height, _tip, lines = restore_height_for(target.daemon, OPEN_RESTORE_MARGIN_BLOCKS)
+    for line in lines:
+        console.say(line)
+    create_shared_wallet(console, target.wallet_port, shares, address, restore_height)
+    console.step(4, "what to do next")
+    console.say("the wallet is open on this wallet-rpc and holds the keys from that file.")
+    console.say(f"fund {address}")
+    console.say("then sweep it, with the SAME --shares-file:")
+    console.say(f"  {sweep_command(address, target.wallet_port, target.daemon, target.shares_path)}")
+    return console.summary()
+
+
 def sweep_command(address: str, port: int, daemon: int | str, shares_path: Path) -> str:
     """The `--sweep` command line to finish the experiment, with EVERY argument it needs.
 
@@ -849,7 +946,10 @@ def run_phase(console: Console, target: Target, network: str, mine_blocks: int) 
                   "a standard address", True)
 
     console.step(3, "hand the SUMMED scalars to the wallet -- the decisive check")
-    create_shared_wallet(console, target.wallet_port, target.daemon, shares, address)
+    restore_height, _tip, lines = restore_height_for(target.daemon, 1)
+    for line in lines:
+        console.say(line)
+    create_shared_wallet(console, target.wallet_port, shares, address, restore_height)
     target.shares_path.parent.mkdir(parents=True, exist_ok=True)
     save_shares(target.shares_path, shares, address, network)
 
@@ -923,6 +1023,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prove a 2-of-2 shared Monero address is spendable with the summed key."
     )
+    parser.add_argument("--open", action="store_true", dest="open_shares",
+                        help="open the wallet an EXISTING --shares-file describes, without "
+                             "sampling anything. This is how a swap handoff written by "
+                             "adaptor_regtest_verify.py becomes spendable")
     parser.add_argument("--run", action="store_true",
                         help="generate shares and create the shared wallet (steps 1-3)")
     parser.add_argument("--sweep", metavar="DESTINATION",
@@ -957,12 +1061,18 @@ def main() -> int:
         shares_path=Path(args.shares_file).expanduser(),
     )
 
-    if not args.run and not args.sweep:
+    if not args.run and not args.sweep and not args.open_shares:
         return print_plan(console, target.wallet_port, target.shares_path)
 
     try:
         console.banner("Monero 2-of-2 shared key -- the last untested claim in the GRC<->XMR work")
         console.step(1, "refuse mainnet, and refuse a wallet that holds anything")
+        if args.open_shares:
+            # NO preflight_run HERE. That gate refuses a wallet holding funds, which is right
+            # for --run (it is about to replace the open wallet with a newly sampled one) and
+            # wrong for --open: the whole point is to switch to a DIFFERENT shared wallet, and
+            # the one already open may legitimately hold a previous run's coins.
+            return open_phase(console, target)
         if args.run:
             network = preflight_run(
                 console, target.wallet_port, target.daemon, args.allow_open_wallet

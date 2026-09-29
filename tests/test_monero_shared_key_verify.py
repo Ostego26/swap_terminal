@@ -825,3 +825,55 @@ def test_THE_ADDRESS_IS_OPTIONAL_SO_NO_CALLER_IS_BROKEN_BY_IT(monkeypatch):
         harness.report_balance(Console(), 38084, "node:38089", 0)
     assert "cypherfaucet" not in str(caught.value)
     assert "SEND ANY AMOUNT TO" not in str(caught.value)
+
+
+def test_A_HANDOFF_FILE_HAD_NO_PATH_INTO_A_WALLET():
+    """The gap found on the operator's host 2026-09-29, with coins already at the address.
+
+    regtest/adaptor_steps.py writes a handoff fixture carrying the Monero share RECOVERED from a
+    Gridcoin scriptSig. Nothing could open it: `--run` creates a wallet from FRESHLY SAMPLED
+    shares, which is the wrong keys entirely, and `--sweep` requires the wallet to be open
+    already and refuses otherwise. So the file that closes gap (e) was unusable by the only
+    script that reads its format -- discovered with 0.01 sXMR already sitting at the address.
+    """
+    parser = build_parser()
+    assert parser.parse_args(["--open"]).open_shares is True
+    source = pathlib.Path(harness.__file__).read_text(encoding="utf-8")
+    assert "def open_phase(" in source
+    assert "if args.open_shares:" in source, "and main() dispatches to it"
+    # IT MUST NOT SAMPLE. A wallet built from new shares would sweep beautifully and prove
+    # nothing, because the scalar would never have touched a chain.
+    body = source[source.index("def open_phase("):source.index("def sweep_command(")]
+    assert "build_shares" not in body and "sample_share" not in body
+
+
+def test_THE_RESTORE_HEIGHT_FOR_A_FILE_IS_NOT_THE_HEIGHT_FOR_A_FRESH_RUN(monkeypatch):
+    """tip-1 is correct ONLY when the keys were sampled seconds ago, and a handoff's were not.
+
+    create_shared_wallet's own comment argues for tip-1 because "the keys were sampled seconds
+    ago by this very process... every block before the current tip is provably irrelevant". That
+    is --run's case. A handoff file may be HOURS old and its address already funded and buried --
+    so tip-1 would put the restore height ABOVE the block holding the deposit, and the wallet
+    would report 0 for a funded address.
+
+    That failure is silent and looks exactly like the shared key not working, which is the one
+    wrong conclusion this whole script exists to prevent. Hence two margins, and a test that the
+    reasoning printed alongside each one is the reasoning that applies.
+    """
+    monkeypatch.setattr(harness, "rpc", lambda *a, **k: {"height": 2_218_209})
+
+    fresh, tip, fresh_lines = harness.restore_height_for("node:38089", 1)
+    assert (fresh, tip) == (2_218_208, 2_218_209)
+    assert any("sampled seconds ago" in line for line in fresh_lines)
+
+    from_file, _, file_lines = harness.restore_height_for("node:38089", harness.OPEN_RESTORE_MARGIN_BLOCKS)
+    assert from_file == 2_218_209 - harness.OPEN_RESTORE_MARGIN_BLOCKS
+    assert from_file < 2_218_209, "it must reach BELOW the tip to find a buried deposit"
+    assert any("may be hours old" in line for line in file_lines)
+    assert not any("sampled seconds ago" in line for line in file_lines), (
+        "the --run reasoning must not be printed for the --open case; it is false there"
+    )
+    assert harness.OPEN_RESTORE_MARGIN_BLOCKS >= 100, (
+        "the margin has to cover a realistic gap between a GRC run writing the file and the "
+        "operator funding the address it names"
+    )
