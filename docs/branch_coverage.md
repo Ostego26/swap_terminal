@@ -174,6 +174,46 @@ server-side signing, and the harness switched to LOCAL signing with xrpl-py for 
 later transaction. That is a fact about the server, not a failure, and the seed never left the
 machine.
 
+## 3b. Solana -- `solana_chain_check.py`
+
+**THIS SECTION DID NOT EXIST UNTIL 2026-09-29, AND THE ABSENCE WAS THE DEFECT.** Every other
+leg here carries rows saying what is proven and what is not. Solana carried none, and a missing
+row is the one state this inventory cannot distinguish from an oversight -- so a reader could
+conclude the chain was out of scope, or that somebody forgot, and the truth is neither.
+
+| Branch | Evidence | note |
+|---|---|---|
+| the READ half of the adapter contract | **PASSED 2026-09-29** | `solana_chain_check.py` against `api.devnet.solana.com`, every step answered. Cluster DEVNET by genesis `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`, solana-core 4.3.0, slot 505503638, epoch 1170 |
+| rent exemption, both account sizes | PASSED | 650240 lamports for 0 bytes and 1488440 for 165, both matching the 5080 lamports/byte reference |
+| a real address's balance and signatures | **NOT RUN** | no `--address` and no `SOL_HOT_WALLET`. The check says so as a RESULT rather than skipping quietly |
+| an SPL mint | **NOT RUN** | same -- no `--mint`, no `SOL_SPL_MINT`, and the check prints "(none configured -- native SOL. This is a RESULT, not a skipped step.)" |
+| `get_new_address()` | **REFUSES BY DESIGN** | not a gap. See below |
+| `send_to_address()` | **REFUSES BY DESIGN** | not a gap. See below |
+| any swap leg, either direction | **NONE** | there is no Solana swap driver in this tree, and there cannot be one until the refusal below is resolved |
+
+**THE TWO REFUSALS ARE NOT UNFINISHED WORK, and this section exists partly to stop them being
+read as such.** BTC, LTC and GRC answer `get_new_address` with `getnewaddress`: the DAEMON
+derives a key, stores it in wallet.dat, and the application never holds a secret. Solana has no
+equivalent -- no wallet daemon, no keystore, nothing on the far end of an RPC that can mint an
+address and remember how to spend from it. So the application must hold something, and WHICH
+something is a custody decision rather than an implementation detail:
+
+    fresh keypair per swap   a stored secret for EVERY open swap. Largest secret surface.
+    one account + memo       no new secrets; a misattributed deposit pays the wrong person.
+    derivation from a seed   one secret, many addresses; the seed leaking is total loss.
+
+README.md carries the three and recommends the memo strategy. Rule 20's "do not ask which" does
+not reach this: that rule's own exception is fund movement, and address derivation and signing
+are fund movement. Until an operator chooses, SOL is a PAYOUT-SIDE asset only and the refusal is
+the guard rather than the gap.
+
+**WHAT THE ADAPTER CONTRACT ACTUALLY IS, because it is the reason a non-UTXO chain fits at all.**
+Measured 2026-09-25 by walking the AST of every module in `services/`, `workers/`, `routes/` and
+`app.py` and collecting every attribute accessed on an adapter object: five methods, one call
+site each. `chains/base.RPCAdapter`'s wide UTXO surface is NOT the contract, so `chains/solana.py`
+does not subclass it -- and says so in its own header rather than leaving a reader to wonder
+whether that was an oversight.
+
 ## 4. Monero
 
 | Branch | Evidence | note |
