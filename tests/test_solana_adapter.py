@@ -34,6 +34,7 @@ and closing it is the operator's run.
 
 from __future__ import annotations
 
+import logging
 import tokenize
 from pathlib import Path
 
@@ -73,10 +74,23 @@ def make_adapter(responses: dict, **kwargs) -> SolanaAdapter:
     return adapter
 
 
-def native_tx(keys, pre, post, err=None):
+#: The tag these fixtures' deposits carry. A FIXTURE THAT CARRIES ONE IS THE ORDINARY CASE
+#: since 2026-09-29: every SOL swap shares one deposit account under the memo strategy, so a
+#: deposit WITHOUT a memo is the exceptional one and gets its own tests below rather than being
+#: the silent default here.
+FIXTURE_TAG = 4242
+
+
+def memo_instruction(text):
+    return {"programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "parsed": str(text)}
+
+
+def native_tx(keys, pre, post, err=None, memo=FIXTURE_TAG):
+    instructions = [] if memo is None else [memo_instruction(memo)]
     return {
         "meta": {"err": err, "preBalances": pre, "postBalances": post},
-        "transaction": {"message": {"accountKeys": [{"pubkey": k} for k in keys]}},
+        "transaction": {"message": {"accountKeys": [{"pubkey": k} for k in keys],
+                                    "instructions": instructions}},
     }
 
 
@@ -205,21 +219,73 @@ def test_a_native_credit_is_the_balance_delta_at_the_accounts_own_index():
         }
     )
     events = adapter.find_deposits_to_address(WALLET)
-    assert events == [{"txid": SIG, "vout": 1, "address": WALLET, "amount": 2.0, "confirmations": 3}]
+    assert events == [{"txid": SIG, "vout": FIXTURE_TAG, "address": WALLET, "amount": 2.0, "confirmations": 3}]
 
 
-def test_vout_is_the_account_index_read_from_the_transaction():
-    """NOT chains/base.py's fabricated vout=0. The index comes out of the
-    transaction's own account key list, which is why two different deposit
-    addresses in one transaction cannot collide on the UNIQUE(asset, txid, vout)
-    key."""
+def test_vout_IS_THE_MEMO_TAG_AND_NO_LONGER_THE_ACCOUNT_INDEX():
+    """This test asserted the ACCOUNT INDEX until 2026-09-29, and the change is the deposit
+    model rather than a detail.
+
+    Under the one-account-plus-memo strategy the operator chose, every SOL swap shares ONE
+    deposit account -- so the address no longer identifies the swap and `vout` is what does.
+    services/deposit_service.attributable_events() matches `event["vout"]` against the swap's
+    own deposit_tag, exactly as chains/xrp_payments.py already arranged for the DestinationTag.
+    One contract, two chains.
+
+    THE OLD PROPERTY IT PROTECTED SURVIVES: `vout` is still never fabricated. The index was
+    there for UNIQUE(asset, txid, vout), and the memo serves that too -- Solana's account model
+    gives one net balance delta per account per transaction, so a deposit is one row either way.
+    What the index could not do is say whose money it is.
+    """
     adapter = make_adapter(
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "confirmed"}],
             "getTransaction": native_tx([OTHER, OTHER, WALLET], [5, 5, 100], [5, 5, 600]),
         }
     )
-    assert adapter.find_deposits_to_address(WALLET)[0]["vout"] == 2
+    assert adapter.find_deposits_to_address(WALLET)[0]["vout"] == FIXTURE_TAG
+
+
+def test_AN_UNATTRIBUTABLE_DEPOSIT_IS_DROPPED_AND_NEVER_FALLS_BACK_TO_THE_INDEX(caplog):
+    """A credit with no memo is dropped, and dropping it is safer than stamping it.
+
+    Returning the account index -- what `vout` used to carry -- would be WORSE than returning
+    nothing. attributable_events() compares `vout` against the swap's deposit_tag, and a small
+    integer read off the transaction could COLLIDE with a real tag and credit a stranger's
+    deposit to somebody's swap. The old value was never a discriminator and must not be reused
+    as one.
+
+    AND IT IS LOGGED, because the coins are real and arrived. An uncredited deposit is a
+    support ticket somebody has to be able to open, so the signature and the reason have to
+    exist somewhere.
+    """
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "confirmed"}],
+            "getTransaction": native_tx([OTHER, OTHER, WALLET], [5, 5, 100], [5, 5, 600], memo=None),
+        }
+    )
+    with caplog.at_level(logging.WARNING):
+        assert adapter.find_deposits_to_address(WALLET) == []
+    assert SIG in caplog.text
+    assert "CANNOT BE ATTRIBUTED" in caplog.text
+    assert "pay the wrong person" in caplog.text, "and why dropping it was the safe direction"
+
+
+def test_A_PROSE_MEMO_IS_ALSO_UNATTRIBUTABLE():
+    """Most memos on a real cluster are text. A deposit carrying one is not this swap's.
+
+    int('gm frens') would raise; the danger is a parser that reaches for a number inside prose
+    and finds one. chains/solana_memo.deposit_tag_from() refuses the whole string, and this
+    pins that the adapter honors the refusal rather than working around it.
+    """
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "confirmed"}],
+            "getTransaction": native_tx([OTHER, WALLET], [5, 100], [5, 600], memo="thanks for the swap 77"),
+        }
+    )
+    assert adapter.find_deposits_to_address(WALLET) == []
 
 
 def test_a_failed_transaction_credits_nothing():
@@ -308,6 +374,7 @@ def test_an_spl_credit_is_matched_on_owner_and_mint_at_the_mints_decimals():
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
             "getTransaction": {
+                "transaction": {"message": {"accountKeys": [], "instructions": [memo_instruction(FIXTURE_TAG)]}},
                 "meta": {
                     "err": None,
                     "preTokenBalances": [token_balance(3, WALLET, WSOL_MINT, 1_000_000)],
@@ -318,7 +385,7 @@ def test_an_spl_credit_is_matched_on_owner_and_mint_at_the_mints_decimals():
         mint=WSOL_MINT,
     )
     assert adapter.find_deposits_to_address(WALLET) == [
-        {"txid": SIG, "vout": 3, "address": WALLET, "amount": 3.5, "confirmations": 3}
+        {"txid": SIG, "vout": FIXTURE_TAG, "address": WALLET, "amount": 3.5, "confirmations": 3}
     ]
 
 
@@ -329,6 +396,7 @@ def test_a_deposit_of_a_different_token_to_the_same_wallet_is_not_credited():
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
             "getTransaction": {
+                "transaction": {"message": {"accountKeys": [], "instructions": [memo_instruction(FIXTURE_TAG)]}},
                 "meta": {
                     "err": None,
                     "preTokenBalances": [],
@@ -348,6 +416,7 @@ def test_a_first_deposit_into_a_brand_new_token_account_has_no_pre_balance():
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
             "getTransaction": {
+                "transaction": {"message": {"accountKeys": [], "instructions": [memo_instruction(FIXTURE_TAG)]}},
                 "meta": {"err": None, "preTokenBalances": [], "postTokenBalances": [token_balance(4, WALLET, WSOL_MINT, 2_000_000)]},
             },
         },

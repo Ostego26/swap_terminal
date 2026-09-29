@@ -129,6 +129,7 @@ expects.
 from __future__ import annotations
 
 import json
+import logging
 
 import requests
 
@@ -140,6 +141,7 @@ from .solana_address import (
     is_on_curve,
     is_valid_address,
 )
+from .solana_memo import deposit_tag_from
 from .solana_units import (
     BALANCE_COMMITMENT,
     DISCOVERY_COMMITMENT,
@@ -202,6 +204,14 @@ def assert_amount_fits_a_float(signature: str, address: str, base_units: int) ->
         )
 
 
+#: An arriving deposit that cannot be attributed is REAL MONEY and must not vanish silently.
+#: services/deposit_service.attributable_events() states the standard -- "an uncredited deposit
+#: is a support ticket, a misattributed one is somebody else's money" -- and a support ticket
+#: somebody has to be able to open. WARNING and not INFO: nothing is wrong with the code, and
+#: something is wrong for a customer.
+logger = logging.getLogger(__name__)
+
+
 def deposit_event(signature: str, account_index: int, address: str, amount: float, rank: int) -> dict:
     """One deposit event, in the five keys services/deposit_service.py reads.
 
@@ -209,11 +219,24 @@ def deposit_event(signature: str, account_index: int, address: str, amount: floa
     from five values to a dict and holds no adapter state -- CLAUDE.md rule
     10's bottom layer, where a test can call it directly.
 
-    `vout` is the ACCOUNT INDEX: read from the transaction, stable for a given
-    (signature, address) pair, and never invented. See this module's header for
-    why that distinction is load-bearing -- chains/base.py's fabricated vout=0
-    is the artifact migrate_deposit_vouts.py exists to clean up, and nothing
-    here reproduces it.
+    `vout` IS THE MEMO TAG SINCE 2026-09-29, NOT THE ACCOUNT INDEX, and the change is the whole
+    of Solana's deposit model rather than a detail. The operator chose the one-account-plus-memo
+    strategy (README.md, "Solana deposit addresses"), so every SOL swap shares ONE deposit
+    account and the address no longer identifies the swap. `vout` is what does:
+    services/deposit_service.attributable_events() matches `event["vout"]` against the swap's
+    own `deposit_tag`, and chains/xrp_payments.py already puts a DestinationTag there for the
+    same reason -- "`vout` is the integer discriminator in the adapter contract". One contract,
+    two chains, rather than a second mechanism (rule 8).
+
+    THE ACCOUNT INDEX WAS THERE FOR UNIQUENESS, and the memo serves that too. deposit_events
+    has UNIQUE(asset, txid, vout); Solana's account model gives one net balance delta per
+    account per transaction, so a deposit is one row either way. What the index could NOT do is
+    say whose money it is.
+
+    IT IS STILL NEVER INVENTED, which is the property the old comment was protecting:
+    chains/base.py's fabricated vout=0 is the artifact migrate_deposit_vouts.py exists to clean
+    up. A transaction with no readable memo produces NO EVENT here rather than an event with a
+    guessed discriminator -- see _attributable_credit below.
 
     `confirmations` carries a COMMITMENT RANK. The key name is
     deposit_service's, not this adapter's; renaming the column would be a
@@ -527,9 +550,41 @@ class SolanaAdapter:
         meta = transaction.get("meta") or {}
         if meta.get("err") is not None:
             return []
-        if self.is_spl:
-            return self._spl_credits(signature, address, meta, rank)
-        return self._native_credits(signature, address, transaction, meta, rank)
+        credits = (self._spl_credits(signature, address, meta, rank) if self.is_spl
+                   else self._native_credits(signature, address, transaction, meta, rank))
+        return self._attributable(signature, transaction, credits)
+
+    def _attributable(self, signature: str, transaction: dict, credits: list[dict]) -> list[dict]:
+        """Stamp each credit with the transaction's memo tag, or DROP it and say so.
+
+        THE ADDRESS NO LONGER IDENTIFIES THE SWAP. Every SOL swap shares one deposit account
+        under the strategy the operator chose on 2026-09-29, so the memo is the only thing that
+        says whose money this is. A credit without one is not this swap's and is not anybody's
+        until a human matches it.
+
+        DROPPED, NOT STAMPED WITH A FALLBACK. Returning the account index -- what `vout` used to
+        carry -- would be worse than returning nothing: attributable_events() compares `vout`
+        against the swap's deposit_tag, and a small integer read off the transaction could
+        COLLIDE with a real tag and credit a stranger's deposit to somebody's swap. The old
+        value was never a discriminator and must not be reused as one.
+
+        AND IT IS LOGGED AT WARNING, because a dropped credit is real money arriving that
+        nobody can attribute. Nothing is wrong with the code; something is wrong for a
+        customer, and a support ticket needs the signature and the reason to exist at all.
+        """
+        if not credits:
+            return []
+        tag, why = deposit_tag_from(transaction)
+        if tag is None:
+            logger.warning(
+                "SOL deposit %s to the shared account CANNOT BE ATTRIBUTED and was NOT credited: "
+                "%s. %d credit(s) dropped. The coins arrived and are real; matching them to a "
+                "swap is a human's job, and crediting them to whichever swap was being refreshed "
+                "would pay the wrong person.",
+                signature, why, len(credits),
+            )
+            return []
+        return [{**credit, "vout": tag} for credit in credits]
 
     def _native_credits(self, signature: str, address: str, transaction: dict, meta: dict, rank: int) -> list[dict]:
         """Native SOL: postBalances[i] - preBalances[i] for the account's index."""

@@ -68,7 +68,28 @@ def get_quote_or_raise(db, quote_id: str) -> dict:
 # `if from_asset == "XRP"` so the concept is greppable and a second such chain
 # (Stellar's memo, Cosmos's memo, several exchange-style deposit models) is one
 # entry rather than a second branch to find. Rule 11: one vocabulary, in one place.
-TAG_ATTRIBUTED_ASSETS = frozenset({"XRP"})
+TAG_ATTRIBUTED_ASSETS = frozenset({"XRP", "SOL"})
+
+#: WHICH SHARED ACCOUNT each tag-attributed chain pays into, and what the discriminator is
+#: CALLED on that chain. Derived from the asset rather than spelled at the use site, which is
+#: what adding SOL on 2026-09-29 forced: `deposit_address_for()` read XRP_DEPOSIT_ACCOUNT from
+#: inside the branch and every refusal it raised said "DestinationTag" -- so a SOL swap would
+#: have been refused for the absence of an XRP variable, in a sentence naming a field the
+#: Solana blockchain does not have. Rule 11: one vocabulary, in one place, meaning the same
+#: thing for every asset that uses it.
+#:
+#: THE DISCRIMINATOR NAME IS FOR HUMANS ONLY. Both chains carry the integer in the event's
+#: `vout` -- see services/deposit_service.attributable_events() -- and what differs is what the
+#: chain's own documentation calls it, which is what an operator will search for.
+#: THE NETWORK NAME IS CARRIED, not derived by appending a word to the ticker. Generalizing
+#: this on 2026-09-29 first produced "not a valid XRP account" where the message had said "XRP
+#: LEDGER account" -- a real loss of precision caught by a test that pinned the wording, and
+#: the wording was right: an operator searching for why their account was refused searches the
+#: network's name, not the ticker's.
+TAG_ATTRIBUTION = {
+    "XRP": ("XRP_DEPOSIT_ACCOUNT", "DestinationTag", "XRP Ledger"),
+    "SOL": ("SOL_DEPOSIT_ACCOUNT", "Memo instruction", "Solana"),
+}
 
 # THE COLUMN that holds the tag, named once so no reader can spell it differently.
 #
@@ -130,18 +151,19 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
         _refuse_unusable_deposit_address(config, from_asset, derived, "the wallet's own get_new_address()")
         return derived, False
 
-    account = (config.get("XRP_DEPOSIT_ACCOUNT") or "").strip()
+    variable, discriminator, network = TAG_ATTRIBUTION[from_asset]
+    account = (config.get(variable) or "").strip()
     if not account:
         raise ValueError(
-            f"{from_asset} deposits are attributed by DestinationTag on one shared account, and "
-            f"XRP_DEPOSIT_ACCOUNT is not set, so there is no account to pay into. NO SWAP WAS "
+            f"{from_asset} deposits are attributed by {discriminator} on one shared account, and "
+            f"{variable} is not set, so there is no account to pay into. NO SWAP WAS "
             f"CREATED -- which is the intended failure: a swap created now would hand a customer a "
-            f"deposit instruction this terminal cannot receive against. Set XRP_DEPOSIT_ACCOUNT to "
+            f"deposit instruction this terminal cannot receive against. Set {variable} to "
             f"an account you hold the key for; it is a custody decision and has no default."
         )
     if not adapters[from_asset].validate_address(account):
         raise ValueError(
-            f"XRP_DEPOSIT_ACCOUNT ({account}) is not a valid XRP Ledger account, so no swap was "
+            f"{variable} ({account}) is not a valid {network} account, so no swap was "
             f"created. Checked BEFORE allocating a tag: a tag is never reused, so allocating one "
             f"against a bad account would burn it permanently for a swap that cannot exist."
         )
@@ -151,7 +173,7 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
     # review finding -- so on this one chain the adapter's yes is the weaker of the two
     # answers. Keeping both is not duplication (rule 8): they answer different questions and
     # the difference is named here and at chains/xrp.py.
-    _refuse_unusable_deposit_address(config, from_asset, account, "XRP_DEPOSIT_ACCOUNT")
+    _refuse_unusable_deposit_address(config, from_asset, account, variable)
 
     # The tag is NOT allocated here, and the split is not stylistic. It is a
     # WRITE with a FOREIGN KEY into swaps(id), so it cannot run until the swap row
