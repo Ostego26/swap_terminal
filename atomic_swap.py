@@ -44,15 +44,13 @@ WHAT IS REACHABLE TODAY, and "any currency listed" IS NOT YET TRUE:
                      than a P2SH HTLC -- so its legs are a different protocol and cannot
                      be a row in this file's table.
 
-                     AND IT STILL ONLY FUNDS GRC, which the --chain flag does not say
-                     and this paragraph did on 2026-09-29. The eleven hardcoded strings
-                     were real and are gone; behind them was a twelfth thing that is not
-                     a string. Both of that driver's runners fund the script leg with
-                     `createhtlc`, a GRIDCOIN RPC, and bitcoind answers "Method not
-                     found". Everything else about BTC there works -- adapter, network,
-                     addresses, block interval, timelock ordering -- which is why it
-                     refuses up front rather than at step 6, AFTER the XRP escrow is
-                     funded at step 5.
+                     AND IT FUNDS ALL THREE NOW. This paragraph said "IT STILL ONLY
+                     FUNDS GRC" until 2026-09-29, which was true for part of that day
+                     and false by the end of it: both runners moved onto the chain
+                     clients (modules/script_leg.py), XRP<->GRC completed OK=15 FAIL=0
+                     and XRP<->LTC completed OK=15 FAIL=0 on the new path. BTC has a
+                     client and has not been run. chain-first has not been run on any
+                     chain and is absent from that driver's PROVEN_LIVE for that reason.
 
                      THE FIX IS THIS FILE'S OWN INTERFACE. BTCClient, LTCClient and
                      GRCClient all expose create_contract()/redeem_contract()/
@@ -108,6 +106,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from chains.daemon_conf import conf_fallback_settings, rpc_url
 from microfortnights import format_duration
 from modules.atomic_btc_client import BTCClient
 from modules.atomic_grc_client import GRCClient
@@ -120,6 +119,7 @@ from modules.htlc_chain_read import (
     htlc_vout,
 )
 from modules.htlc_contract_api import AMOUNT_KEYWORD as HTLC_AMOUNT_KEYWORD
+from modules.htlc_contract_api import create_contract_kwargs
 from modules.htlc_spend import preimage_from_scriptsig
 from modules.htlc_timelock import (
     ROLE_INITIATOR,
@@ -357,10 +357,22 @@ def client_for(asset: str):
     user = os.environ.get(f"{asset}_RPC_USER", user_default)
     password = os.environ.get(f"{asset}_RPC_PASS", "")
     if not password:
+        # THE CONF, for the chains whose conf can be trusted to name one daemon.
+        # This was the FOURTH entry point resolving a chain its own way on
+        # 2026-09-29: chain_balances.py grew the fallback, then
+        # atomic_swap_xrp.py's adapter, then its script client, and this file
+        # still demanded three exported variables for a daemon whose credentials
+        # are already written down in its own litecoin.conf. GRC is excluded from
+        # the fallback -- its conf is shared with the operator's mainnet staking
+        # wallet -- so GRC_RPC_PASS stays required, which is the right asymmetry.
+        settings, line = conf_fallback_settings(asset)
+        if settings is not None:
+            print(f"    {line}", flush=True)
+            return CLIENTS[asset](rpc_url(settings), settings["user"], settings["password"])
         raise SwapError(
-            f"{asset}_RPC_PASS is not set. This file will not guess a credential. Set "
-            f"{asset}_RPC_URL (default {url_default}), {asset}_RPC_USER and {asset}_RPC_PASS "
-            f"for the TESTNET daemon"
+            f"{asset}_RPC_PASS is not set and the conf did not supply one ({line}). This file "
+            f"will not guess a credential. Set {asset}_RPC_URL (default {url_default}), "
+            f"{asset}_RPC_USER and {asset}_RPC_PASS for the TESTNET daemon"
         )
     return CLIENTS[asset](url, user, password)
 
@@ -653,13 +665,19 @@ def fund_leg(step: Step, planned: PlannedLeg, secret_hash: str, client) -> dict:
     leg = planned.leg
     step.announce(f"fund the {leg.role} leg: {leg.amount} {leg.asset}, locktime {planned.locktime}")
 
-    fields = read_contract(step, leg.asset, client.create_contract(**{
-        AMOUNT_KEYWORD[leg.asset]: leg.amount,
-        "participant_address": leg.participant_address,
-        "refund_address": leg.refund_address,
-        "locktime": planned.locktime,
-        "secret_hash": secret_hash,
-    }))
+    # THROUGH THE ONE BUILDER. This site spelled the five keys itself, which was
+    # correct -- and was also the fifth copy of a call shape whose sixth copy
+    # (modules/script_leg.py) got it wrong by going positional. create_contract_kwargs
+    # also REFUSES an empty secret hash, which this site always passed and now
+    # cannot stop passing.
+    fields = read_contract(step, leg.asset, client.create_contract(**create_contract_kwargs(
+        leg.asset,
+        amount=leg.amount,
+        secret_hash=secret_hash,
+        participant_address=leg.participant_address,
+        refund_address=leg.refund_address,
+        locktime=planned.locktime,
+    )))
     step.check(f"{leg.asset} funding txid", fields["txid"][:16] + "...", "a txid",
                bool(fields["txid"]))
     address = fields["p2sh_address"] or "(none reported; derived below)"

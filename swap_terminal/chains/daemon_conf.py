@@ -193,3 +193,22 @@ def conf_fallback_settings(chain: str) -> tuple[dict | None, str]:
     except DaemonConfError as error:
         return None, f"no {chain}_RPC_* in the environment and the conf did not supply one: {error}"
     return settings, f"{chain}: {describe(path, settings, network=network)}"
+
+
+def rpc_url(settings: dict) -> str:
+    """http://host:port, with /wallet/<name> when one is configured.
+
+    ASSEMBLED FROM host AND port RATHER THAN READ FROM A SECOND VARIABLE. Some
+    callers read {ASSET}_RPC_URL and some have the host and port already because
+    an adapter needed them; asking an operator to set a URL as well as a port --
+    two settings that must agree -- is a second source for one fact (rule 8).
+    This is the one assembly, extracted 2026-09-29 from
+    atomic_swap_xrp.build_script_client(), which was the only place that did it
+    until atomic_swap.client_for() needed the same thing.
+    """
+    host = settings.get("host") or "127.0.0.1"
+    port = settings.get("port")
+    if not port:
+        raise DaemonConfError(f"no port in {sorted(settings)}, so no RPC url can be built")
+    wallet = (settings.get("wallet") or "").strip()
+    return f"http://{host}:{port}" + (f"/wallet/{wallet}" if wallet else "")

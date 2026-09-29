@@ -177,30 +177,122 @@ def test_every_string_this_module_returns_is_checked_against_the_secret_keys():
 # ---------------------------------------------------------------------------
 
 
-def test_EVERY_entry_point_that_resolves_a_chain_uses_THIS_resolver():
-    """Rule 8, held mechanically rather than by intention.
+#: EVERY ROOT SCRIPT THAT RESOLVES A CHAIN, and which side it is on. This is a
+#: decision register rather than a rule, and the honest reason is that I tried
+#: three rules first and each one bent: "these two files" missed the fourth
+#: instance, "goes through the service" missed settle_payout.py, "touches the
+#: custodial database" missed swap_readiness.py. Every attempt was a
+#: generalization fitted to the cases I had already seen.
+#:
+#: DIRECT DRIVERS are the operator's own tools. They hold no custodial state and
+#: talk to daemons on the operator's behalf, so resolving a Litecoin daemon from
+#: litecoin.conf is a convenience with no other party's money behind it. These
+#: MUST use the shared resolver, because an operator who configures a daemon once
+#: should not be told it exists by one of them and not another -- which happened
+#: four times on 2026-09-29.
+DIRECT_DRIVERS = frozenset({
+    "atomic_swap.py",       # self-custody swap, BTC/LTC/GRC, both directions
+    "atomic_swap_xrp.py",   # self-custody swap, XRP against a script chain
+    "chain_balances.py",    # read-only balances
+})
 
-    chain_balances.py grew the conf fallback and atomic_swap_xrp.py did not, so
-    the operator configured Litecoin, watched the reader find it, and watched the
-    driver say "(none)" about the same daemon. The failure mode is not that the
-    second copy is wrong -- it is that there is no second copy AT ALL and nobody
-    notices which entry points were left out.
+#: SERVICE SIDE scripts speak FOR the brokered terminal, and must connect to
+#: exactly what it connects to. open_swap.py creates a swap the deposit watcher
+#: then has to see; settle_payout.py proves a payout exists in the wallet the
+#: service paid from; show_swap.py reports on those rows; swap_readiness.py
+#: answers "can this terminal run a swap", which is a question about the
+#: service's daemons and not about any daemon a conf happens to name. For these a
+#: conf fallback is not a convenience -- it is a way to inspect, credit or clear
+#: a DIFFERENT daemon than the one holding customer funds, which is strictly
+#: worse than refusing until the variables are exported. Changing how the service
+#: resolves its daemons is live posture and the operator's (rule 16).
+SERVICE_SIDE = frozenset({
+    "open_swap.py",
+    "settle_payout.py",
+    "swap_readiness.py",
+})
+# show_swap.py was in this set for one commit and the register's own completeness
+# check removed it: it reads swap_terminal.db and resolves no chain at all, so a
+# row describing it was a row about a file that does not do the thing. That is the
+# check working in the direction nobody writes a test for -- an entry going stale
+# rather than one going missing.
 
-    So: any root script that resolves a bitcoin-family chain must import the
-    shared resolver. A new one that builds its own is what this catches.
+
+def test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other():
+    """A new one fails this test rather than quietly picking a side.
+
+    THE FOUR INSTANCES, in the order they were found on 2026-09-29, none of them
+    pointed to by anything:
+
+      1. chain_balances.py grew the conf fallback.
+      2. atomic_swap_xrp.py's adapter did not -- "(none)" for a daemon the
+         reader had just found.
+      3. build_script_client() still did not -- found the daemon, then could not
+         build an HTLC on it, at the last check before funding a --run.
+      4. atomic_swap.py's client_for() still did not.
+
+    The first version of this test named two files and asserted they imported
+    the resolver. They did. That is why it caught none of instances 3 and 4, and
+    why its own docstring's claim -- "a new one that builds its own is what this
+    catches" -- was false as written. A check that enumerates what it checks
+    measures the list.
+
+    What it measures now is that the register is COMPLETE: every root script
+    resolving a chain is classified, so an unclassified new one fails here and
+    somebody has to decide which side it is on. That is the property the four
+    instances actually needed, and it does not depend on my finding the right
+    generalization.
     """
     root = pathlib.Path(__file__).resolve().parent.parent
-    resolvers = {"chain_balances.py", "atomic_swap_xrp.py"}
-    for name in sorted(resolvers):
+    # What "resolves a chain" looks like in source: it asks the registry for
+    # adapters, or indexes a client table. Both are how a daemon handle is made.
+    markers = ("build_adapters(", "CLIENTS[", "SCRIPT_CLIENTS[")
+    found = sorted(path.name for path in root.glob("*.py")
+                   if any(marker in path.read_text() for marker in markers))
+    assert found, "no root script resolves a chain any more; this test has stopped measuring"
+    unclassified = set(found) - DIRECT_DRIVERS - SERVICE_SIDE
+    assert not unclassified, (
+        f"{sorted(unclassified)} resolve a chain and are on neither side of the register above. "
+        f"Decide: a DIRECT DRIVER must use chains/daemon_conf.conf_fallback_settings() so an "
+        f"operator's conf is honored everywhere; a SERVICE SIDE script must NOT, because it has to "
+        f"connect to exactly what the brokered terminal connects to"
+    )
+    assert not (DIRECT_DRIVERS | SERVICE_SIDE) - set(found), (
+        f"{sorted((DIRECT_DRIVERS | SERVICE_SIDE) - set(found))} is in the register but no longer "
+        f"resolves a chain. Remove the row rather than leaving it to describe a file that moved"
+    )
+
+
+def test_every_DIRECT_DRIVER_uses_the_shared_resolver():
+    """The rule the register exists to enforce on the three that must follow it."""
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for name in sorted(DIRECT_DRIVERS):
         source = (root / name).read_text()
         assert "conf_fallback_settings" in source, (
             f"{name} resolves a chain without the shared conf fallback. An operator who configured "
-            f"a daemon by conf will be told by one entry point that it is there and by this one "
+            f"a daemon by conf will be told by one direct driver that it is there and by this one "
             f"that it is not"
         )
         assert "CONF_FALLBACK_NETWORK = {" not in source, (
-            f"{name} spells its own fallback table. There is one, in chains/daemon_conf.py, and a "
-            f"second would drift the moment a chain is added to either"
+            f"{name} spells its own fallback table. There is one, in chains/daemon_conf.py"
+        )
+
+
+def test_no_SERVICE_SIDE_script_quietly_gained_a_conf_fallback():
+    """The other direction, and it is the one that costs money if it slips.
+
+    A brokered script resolving a daemon from a conf can credit or clear against
+    a different daemon than the one holding customer funds. Adding it there is a
+    posture change and belongs to the operator, so it fails here rather than
+    passing because it looks like consistency.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for name in sorted(SERVICE_SIDE):
+        source = (root / name).read_text()
+        assert "conf_fallback_settings" not in source, (
+            f"{name} speaks for the brokered terminal and now resolves daemons from a conf. It has "
+            f"to connect to exactly what the service connects to; this is a live-posture change and "
+            f"the operator's call, not a consistency fix"
         )
 
 
