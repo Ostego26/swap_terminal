@@ -358,7 +358,17 @@ def chain_amount_for_rate(xrp_drops: int, xrp_per_chain_unit: Decimal) -> Decima
 #: branches on it -- but the banner said "(Gridcoin testnet)" beside a BTC leg until
 #: 2026-09-29, which is rule 14's defect at the one moment it costs the most: the line
 #: that tells an operator what is about to be funded.
-CHAIN_LABELS = {"BTC": "Bitcoin testnet", "LTC": "Litecoin testnet", "GRC": "Gridcoin testnet"}
+#: The chains a full swap has actually COMPLETED on, and the evidence. Absence from this
+#: table is not a gap in the table -- it is the honest state of a chain, and the banner
+#: says so out loud rather than letting silence read as reassurance.
+PROVEN_LIVE = {
+    "GRC": ("BOTH directions have completed at the market rate, OK=16 FAIL=0 each (2026-09-27): "
+            "xrp-first GRC claim 78472df347a91f31..., grc-first GRC claim 845315f4c2063670..., "
+            "1 XRP for 66.10250498 GRC both ways. A failure here is a regression, not a discovery."),
+}
+
+CHAIN_LABELS = {"BTC": "Bitcoin test network", "LTC": "Litecoin test network",
+                "GRC": "Gridcoin testnet"}
 
 CHAIN_TEST_NETWORKS = {
     "BTC": frozenset({"test", "testnet", "regtest", "signet"}),
@@ -1087,9 +1097,18 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
                 "PARTICIPANT, shorter lock).")
     console.say("one operator plays both parties here, so counterparty misbehavior is NOT exercised -- the "
                 "mechanism is, on real chains. See this file's header.")
-    console.say("BOTH directions have completed at the market rate, OK=16 FAIL=0 each (2026-09-27): xrp-first "
-                "GRC claim 78472df347a91f31..., grc-first GRC claim 845315f4c2063670..., 1 XRP for "
-                "66.10250498 GRC both ways. A failure here is a regression, not a discovery.")
+    # WHAT HAS ACTUALLY RUN, PER CHAIN, because "a failure here is a regression" is a
+    # claim about evidence and it was printed on every chain until 2026-09-29. On a BTC or
+    # LTC run it was false in the dangerous direction: it told an operator a failure would
+    # be a regression when no run had ever happened, so a genuine first-time discovery
+    # would read as a known-good path breaking. Rule 17's register error, printed.
+    if args.chain in PROVEN_LIVE:
+        console.say(PROVEN_LIVE[args.chain])
+    else:
+        console.say(f"NO {args.chain} RUN HAS EVER COMPLETED. This chain became reachable from this driver on "
+                    f"2026-09-29 and is exercised by seeded tests only -- the block arithmetic and the timelock "
+                    f"ordering. A failure here is a DISCOVERY, not a regression, and is worth reading carefully "
+                    f"rather than retrying.")
 
     console.step(1, "both networks are TEST networks, and each says which")
     try:

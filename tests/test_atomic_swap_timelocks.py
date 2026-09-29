@@ -41,6 +41,10 @@ from modules.htlc_timelock import ROLE_INITIATOR, ROLE_PARTICIPANT, SECONDS_PER_
 
 from atomic_swap_xrp import (
     CHAIN_FIRST,
+    CHAIN_LABELS,
+    CHAIN_TEST_NETWORKS,
+    PROVEN_LIVE,
+    SCRIPT_CHAINS,
     XRP_FIRST,
     ScriptLeg,
     assert_timelock_ordering,
@@ -413,3 +417,33 @@ def test_a_chain_first_BTC_leg_IS_ORDERED_CORRECTLY_and_the_wrong_interval_would
     assert leg.timeout_height == TIP + int(48 * 3600 // SECONDS_PER_BLOCK["BTC"])
     sentence = assert_timelock_ordering(xrp_cancel_after, leg, NOW, direction=CHAIN_FIRST)
     assert "ordering OK" in sentence
+
+
+def test_a_chain_with_no_completed_run_SAYS_SO_instead_of_inheriting_another_chains_evidence():
+    """THE BANNER MAKES A CLAIM ABOUT EVIDENCE, and it was printing GRC's on every chain.
+
+    Found by running `atomic_swap_xrp.py --chain btc` on 2026-09-29, after the
+    parameterization had already passed the suite and ruff. The banner said
+
+        BOTH directions have completed ... A failure here is a regression, not a discovery.
+
+    on a chain no run had ever touched. That is false in the dangerous direction: it tells
+    an operator that a failure is a known-good path breaking, when it would in fact be the
+    first attempt and worth reading rather than retrying. Rule 17's register error, printed
+    to the person deciding whether to fund something.
+
+    PROVEN_LIVE is keyed by chain and GRC is its only entry, which is the honest state:
+    BTC and LTC are exercised by seeded tests -- the block arithmetic above and the
+    ordering check -- and have never been run against a chain.
+
+    This test fails the moment somebody adds a chain to PROVEN_LIVE without a run behind
+    it, which is the only way the claim can become false again.
+    """
+    assert set(PROVEN_LIVE) == {"GRC"}, (
+        "a chain was added to PROVEN_LIVE; that table is the record of runs that actually "
+        "COMPLETED, so adding one without a txid behind it makes the banner lie again"
+    )
+    for chain in SCRIPT_CHAINS:
+        assert chain in CHAIN_LABELS, f"{chain} has no operator-facing label"
+        assert chain in CHAIN_TEST_NETWORKS, f"{chain} has no test-network allowlist"
+    assert "regression" in PROVEN_LIVE["GRC"]
