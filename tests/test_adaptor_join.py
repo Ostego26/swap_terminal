@@ -62,7 +62,7 @@ DIGEST = bytes(range(32))
 
 def _leg(bob, side, digest: bytes = DIGEST) -> adaptor_join.AdaptorLeg:
     return adaptor_join.pre_sign_leg(
-        "redeem", bob.private_key, digest, side.alice_spend, side.alice_spend_public
+        "redeem", bob.private_key, digest, side.alice_adaptor_point, side.alice_spend_public
     )
 
 
@@ -1700,6 +1700,8 @@ def test_THE_HANDOFF_CARRIES_THE_RECOVERED_SHARE_NOT_THE_SAMPLED_ONE():
     side = adaptor_steps.MoneroSide(
         alice_spend=111, alice_view=222, bob_spend=333, bob_view=444,
         lock_address="5Bwhatever", alice_spend_public="aa" * 32, bob_spend_public="bb" * 32,
+        alice_adaptor_point=adaptor_join.adaptor_point_for_share(111),
+        bob_adaptor_point=adaptor_join.adaptor_point_for_share(333),
     )
     recovered = 999  # deliberately NOT side.alice_spend
     payload = swap_handoff(side, recovered)
@@ -1728,6 +1730,8 @@ def test_THE_HANDOFF_IS_READABLE_BY_THE_SWEEPER_THAT_HAS_TO_READ_IT(tmp_path):
     side = adaptor_steps.MoneroSide(
         alice_spend=111, alice_view=222, bob_spend=333, bob_view=444,
         lock_address="5Bwhatever", alice_spend_public="aa" * 32, bob_spend_public="bb" * 32,
+        alice_adaptor_point=adaptor_join.adaptor_point_for_share(111),
+        bob_adaptor_point=adaptor_join.adaptor_point_for_share(333),
     )
     path = tmp_path / "swap-handoff-shares.json"
     save_shares(path, swap_handoff(side, 999), side.lock_address, "stagenet")
@@ -1760,6 +1764,8 @@ def test_A_HANDOFF_IS_NEVER_WRITTEN_FOR_A_NON_TEST_NETWORK(monkeypatch, tmp_path
     side = adaptor_steps.MoneroSide(
         alice_spend=111, alice_view=222, bob_spend=333, bob_view=444,
         lock_address="4Mainnetlooking", alice_spend_public="aa" * 32, bob_spend_public="bb" * 32,
+        alice_adaptor_point=adaptor_join.adaptor_point_for_share(111),
+        bob_adaptor_point=adaptor_join.adaptor_point_for_share(333),
     )
     adaptor_steps.write_the_swap_handoff(_Run(), side, 999)
 

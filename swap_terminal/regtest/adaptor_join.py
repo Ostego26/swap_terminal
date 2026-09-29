@@ -202,20 +202,61 @@ class AdaptorLeg:
     spend_public_at_setup: str
 
 
+def adaptor_point_for_share(spend_share: int) -> object:
+    """Y for a Monero spend share: the SECP256K1 point whose discrete log is that ed25519 scalar.
+
+    A NAMED FUNCTION RATHER THAN `adaptor_ecdsa.public_key_point` AT EACH CALL SITE, because
+    the two are not the same concept wearing different names. `public_key_point` means "the
+    public key of a secp256k1 private key". This means "the cross-curve commitment to a
+    scalar that is ALSO a Monero spend share, and whose ed25519 public form is what the lock
+    address was built from". The arithmetic is identical; the claim is not, and the claim is
+    what a reader needs when they are deciding whether a Y and a spend share belong together.
+
+    THE BOUND IS WHY THIS MATTERS AND IT IS NOT ENFORCED HERE. `monero_swap_protocol.sample_shares`
+    owns the [1, 2^252) range specifically because 2^252 is the cross-curve DLEQ's limit -- a
+    share at or above it cannot be proven to be the same integer on both curves at all. This
+    function does not re-check that bound, because sampling owns it; what it must not do is
+    let a reader think that calling it PROVES anything about the pairing. It proves nothing.
+    The proof is a DLEQ, and measured 2026-09-29 no chain-executing path in this tree
+    produces or verifies one.
+    """
+    return adaptor_ecdsa.public_key_point(spend_share)
+
+
 def pre_sign_leg(
     label: str,
     private_key: bytes,
     digest: bytes,
-    adaptor_secret: int,
+    adaptor_point: object,
     spend_public_at_setup: str,
 ) -> AdaptorLeg:
-    """Pre-sign `digest` under `Y = adaptor_secret * G`, and VERIFY it before handing it back.
+    """Pre-sign `digest` under `Y`, and VERIFY it before handing it back.
 
-    `adaptor_secret` is taken rather than a point because the harness plays both parties and
-    would otherwise derive the same point twice; the point is derived once, here. A real
-    implementation receives Y over the wire with a DLEQ proof and never sees the scalar --
-    `monero_swap_protocol.verify_share_commitment` is that gate, and it is not this
-    function's job.
+    `adaptor_point` IS A POINT AND NOT THE SCALAR BEHIND IT, and that is the shape of this
+    function rather than a detail of one parameter. Until 2026-09-29 it took
+    `adaptor_secret: int` and derived `Y = adaptor_secret * G` on its own first line, under a
+    docstring that said "a real implementation receives Y over the wire with a DLEQ proof and
+    never sees the scalar". The docstring was right and the SIGNATURE was what made it
+    impossible: a party that had never seen the scalar could not call this function at all,
+    so the two-process protocol had no entry point here even in principle. The comment
+    described the destination and the type refused to go there.
+
+    WHAT THIS BUYS, AND WHAT IT DOES NOT. It does NOT make the harness two-party. The caller
+    still plays both sides and still derives Y from a scalar it holds -- `monero_side()`
+    captures both points at setup and the call sites pass them in. What it buys is that the
+    derivation is now OUTSIDE this function and visible at the call site, so the pre-signing
+    party's own code no longer handles the counterparty's secret, and a real Bob who receives
+    Y over a wire calls this exact signature unchanged. The distance from "the caller derived
+    it" to "the caller received it" is one line at one call site. The distance while the
+    derivation lived in here was the function's type, which no call site can change.
+
+    WHAT IS STILL MISSING, NAMED SO IT IS NOT READ AS DONE: nothing checks that this Y is
+    cross-curve bound to `spend_public_at_setup`. That is
+    `monero_swap_protocol.verify_share_commitment` plus the DLEQ gate, and measured
+    2026-09-29 neither is reached from any chain-executing path -- grepping `dleq` across
+    regtest/ and adaptor_regtest_verify.py returns ONE hit and it is a prose comment. So a
+    caller passing a Y unrelated to the Monero share it claims is not caught here, and is
+    not caught anywhere else either. That is the next thing to wire, not a caveat on this one.
 
     THE `pre_verify` CALL IS NOT CEREMONY. A pre-signature that does not verify cannot be
     detected later by anything the chain does: `adapt` will happily produce a well-formed
@@ -227,7 +268,6 @@ def pre_sign_leg(
     with itself rather than that the chain answered wrongly.
     """
     secret_scalar = int.from_bytes(private_key, "big")
-    adaptor_point = adaptor_ecdsa.public_key_point(adaptor_secret)
     pre_signature = adaptor_ecdsa.pre_sign(secret_scalar, digest, adaptor_point)
     public_key = adaptor_ecdsa.public_key_point(secret_scalar)
     if not adaptor_ecdsa.pre_verify(public_key, digest, adaptor_point, pre_signature):
@@ -250,7 +290,7 @@ def complete_leg(leg: AdaptorLeg, adaptor_secret: int, sighash_byte: int) -> byt
     This is the moment the swap becomes irreversible for the completing party: from here the
     bytes can be broadcast, and broadcasting them publishes the scalar. Nothing in this
     function can be undone by not sending, which is why the ordering in
-    `monero_swap_protocol.safe_to_release_redeem_presignature` is a separate gate and not a
+    `monero_swap_protocol.redeem_presignature_may_be_released` is a separate gate and not a
     parameter here.
     """
     return der_from_signature(adaptor_ecdsa.adapt(leg.pre_signature, adaptor_secret)) + bytes([sighash_byte])
@@ -343,6 +383,7 @@ __all__ = [
     "AdaptorJoinError",
     "AdaptorLeg",
     "RecoveryEvidence",
+    "adaptor_point_for_share",
     "complete_leg",
     "der_from_signature",
     "nothing_leaks",

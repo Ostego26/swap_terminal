@@ -445,7 +445,8 @@ def _built_chain(asset: str = "LTC"):
         cancel=chain.build_cancel(context, lock, 1_500), t1=1_500, t2=1_650,
         monero=monero,
         redeem_leg=adaptor_join.pre_sign_leg(
-            "redeem", bob.private_key, redeem.digest, monero.alice_spend, monero.alice_spend_public,
+            "redeem", bob.private_key, redeem.digest, monero.alice_adaptor_point,
+            monero.alice_spend_public,
         ),
     )
 

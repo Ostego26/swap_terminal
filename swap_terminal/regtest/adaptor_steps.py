@@ -118,6 +118,7 @@ from modules.monero_swap_protocol import reconstruct_spend_key, sample_shares
 from regtest import daemons
 from regtest.adaptor_join import (
     AdaptorLeg,
+    adaptor_point_for_share,
     complete_leg,
     nothing_leaks,
     point_hex,
@@ -1931,6 +1932,17 @@ class MoneroSide:
     lock_address: str
     alice_spend_public: str
     bob_spend_public: str
+    # THE TWO ADAPTOR POINTS, CAPTURED AT SETUP for exactly the reason the paragraph above
+    # gives for the public spend shares, and the reason is stronger here. Until 2026-09-29
+    # `pre_sign_leg` took the SCALAR and derived Y on its first line, so the pre-signing
+    # party's own code handled the counterparty's Monero spend share -- Bob's call was
+    # handed Alice's `alice_spend`. Carrying the POINT means the scalar stops at this
+    # object, and a two-process Bob who receives Y over a wire reaches the same call
+    # unchanged. These are SECP256K1 points; `alice_spend_public` above is the ED25519
+    # form of the same scalar, and nothing in this tree yet proves the two agree -- see
+    # adaptor_join.adaptor_point_for_share, which says so at the site.
+    alice_adaptor_point: object
+    bob_adaptor_point: object
 
 
 def monero_side() -> MoneroSide:
@@ -1959,6 +1971,8 @@ def monero_side() -> MoneroSide:
         ),
         alice_spend_public=public_key_for_share(alice.spend).hex(),
         bob_spend_public=public_key_for_share(bob.spend).hex(),
+        alice_adaptor_point=adaptor_point_for_share(alice.spend),
+        bob_adaptor_point=adaptor_point_for_share(bob.spend),
     )
 
 
@@ -2154,8 +2168,13 @@ def step_6_build_and_hold(
     # BEFORE Tx_lock has been broadcast. `pre_sign_leg` verifies it under Bob's own public key
     # before returning, so a pre-signature that could never be completed is refused here rather
     # than surfacing later as a generic script failure the operator cannot diagnose.
+    # BOB'S CALL NO LONGER TOUCHES ALICE'S SCALAR. It was `monero.alice_spend` here until
+    # 2026-09-29 -- the pre-signing party handed the counterparty's private Monero spend
+    # share, at the earliest possible moment, inside the function that pre-signs. It is now
+    # the POINT captured at setup, which is what a real Bob would have received over a wire.
     redeem_leg = pre_sign_leg(
-        "redeem", setup.bob.private_key, redeem.digest, monero.alice_spend, monero.alice_spend_public,
+        "redeem", setup.bob.private_key, redeem.digest,
+        monero.alice_adaptor_point, monero.alice_spend_public,
     )
     run.check(
         "Bob's Tx_redeem signature is an ADAPTOR PRE-SIGNATURE under Y_a",
@@ -2848,9 +2867,10 @@ def build_refund_leg(built: BuiltChain, refund: chain.ChainTransaction) -> Adapt
     round; on a legacy chain they are two, and that is a correction to the design document
     rather than to this code.
     """
+    # Alice's call no longer touches Bob's scalar, for the reason step 6's call site gives.
     return pre_sign_leg(
         "refund", built.setup.alice.private_key, refund.digest,
-        built.monero.bob_spend, built.monero.bob_spend_public,
+        built.monero.bob_adaptor_point, built.monero.bob_spend_public,
     )
 
 
