@@ -332,11 +332,16 @@ def test_a_transaction_that_cannot_be_read_raises_instead_of_fabricating_a_row()
             "getTransaction": None,
         }
     )
+    # THE REFUSAL IS STILL THERE, one level down. _credits_in_transaction is the decision
+    # and it still raises; what changed on 2026-09-29 is that find_deposits_to_address
+    # CATCHES it per signature instead of letting it abandon the scan.
     with pytest.raises(SolanaRPCError, match="Nothing is credited"):
-        adapter.find_deposits_to_address(WALLET)
+        adapter._credits_in_transaction(SIG, WALLET, 3)
+    # And nothing is fabricated from it at the scan level either.
+    assert adapter.find_deposits_to_address(WALLET) == []
 
 
-def test_a_mismatched_balance_array_raises_rather_than_guessing():
+def test_a_mismatched_balance_array_refuses_rather_than_guessing():
     adapter = make_adapter(
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
@@ -344,7 +349,64 @@ def test_a_mismatched_balance_array_raises_rather_than_guessing():
         }
     )
     with pytest.raises(SolanaRPCError, match="Refusing to guess"):
-        adapter.find_deposits_to_address(WALLET)
+        adapter._credits_in_transaction(SIG, WALLET, 3)
+    assert adapter.find_deposits_to_address(WALLET) == []
+
+
+def test_ONE_UNREADABLE_TRANSACTION_DOES_NOT_ABANDON_THE_REST_OF_THE_SCAN(caplog):
+    """THE DEFECT THIS PINS COST NOTHING YET ONLY BECAUSE NO SOL PAIR IS ENABLED.
+
+    Until 2026-09-29 find_deposits_to_address() called _credits_in_transaction in a bare
+    loop, so any SolanaRPCError propagated out and abandoned every signature after it.
+
+    MEASURED ON DEVNET THAT DAY rather than imagined. `solana_chain_check.py --hunt-memo 20`
+    against api.devnet.solana.com, running solana-core 4.3.0, produced both triggers in one
+    run: `-32015 Transaction version (1) is not supported by the requesting client` on one
+    signature, and HTTP 429 on eleven more. Either would have ended a real scan.
+
+    WHY THE BLAST RADIUS IS THE WHOLE POINT. The SOL deposit account is SHARED by every swap
+    (attribution is by memo tag, not by address), so one versioned transaction or one
+    throttled response anywhere in its recent history would stop deposit discovery for ALL
+    swaps -- and stop it invisibly, because an exception out of a poll loop looks exactly
+    like a poll that found nothing.
+
+    The ordering here is deliberate: the UNREADABLE signature is listed FIRST, so a scan
+    that aborts returns nothing at all and this fails on an empty list rather than on a log
+    message. Reversing it would let the old code pass.
+    """
+    good = native_tx([OTHER, WALLET], [0, 0], [0, 1_000_000_000])
+
+    def by_signature(signature, *_rest):
+        if signature == SIG:
+            raise SolanaRPCError(
+                "getTransaction failed: {'code': -32015, 'message': 'Transaction version (1) "
+                "is not supported by the requesting client.'}"
+            )
+        return good
+
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [
+                {"signature": SIG, "err": None, "confirmationStatus": "finalized"},
+                {"signature": SIG2, "err": None, "confirmationStatus": "finalized"},
+            ],
+            "getTransaction": by_signature,
+        }
+    )
+    events = adapter.find_deposits_to_address(WALLET)
+
+    assert [event["txid"] for event in events] == [SIG2], (
+        "the readable transaction after the unreadable one must still be credited; an empty "
+        "list here is the abort this test exists to catch"
+    )
+    assert all(event["txid"] != SIG for event in events), (
+        "nothing may be credited from a transaction that could not be read"
+    )
+    # Rule 14: skipping must not look like finding nothing. Both the per-signature skip and
+    # the run total are said out loud.
+    warnings = " ".join(record.getMessage() for record in caplog.records)
+    assert SIG in warnings and "SKIPPED" in warnings
+    assert "read 1 of 2 listed transaction(s)" in warnings
 
 
 def test_deposits_across_two_transactions_both_come_back():

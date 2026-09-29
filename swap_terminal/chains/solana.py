@@ -516,7 +516,8 @@ class SolanaAdapter:
             address,
             {"limit": int(tx_limit), "commitment": DISCOVERY_COMMITMENT},
         ) or []
-        events = []
+        events: list[dict] = []
+        unreadable: list[str] = []
         for entry in signatures:
             if entry.get("err") is not None:
                 # A failed transaction moved nothing. See the docstring.
@@ -525,7 +526,45 @@ class SolanaAdapter:
             if not signature:
                 continue
             rank = commitment_rank(entry.get("confirmationStatus"))
-            events.extend(self._credits_in_transaction(signature, address, rank))
+            # ONE UNREADABLE TRANSACTION MUST NOT END THE SCAN, and until 2026-09-29 it did.
+            # This call was bare, so any SolanaRPCError from getTransaction propagated out of
+            # the loop and abandoned every signature after it.
+            #
+            # MEASURED ON DEVNET THAT DAY, not reasoned about. `solana_chain_check.py
+            # --hunt-memo 20` against api.devnet.solana.com (solana-core 4.3.0) hit
+            #
+            #     -32015  Transaction version (1) is not supported by the requesting client.
+            #             Please try the request again with "maxSupportedTransactionVersion": 1
+            #
+            # on one signature, and HTTP 429 on eleven more. Either would have aborted a real
+            # deposit scan. The deposit account is SHARED by every SOL swap, so one versioned
+            # transaction or one throttled response anywhere in its recent history stops
+            # deposit discovery for ALL of them -- and stops it silently, because an
+            # exception out of a poll loop looks like a poll that found nothing.
+            #
+            # SKIPPED LOUDLY, NEVER SILENTLY, and nothing is credited from a transaction that
+            # could not be read -- the module header's rule is unchanged. What changes is the
+            # blast radius: one signature instead of the whole account.
+            # The try is INSIDE the loop deliberately: per-signature isolation is the whole
+            # point, and hoisting it out would restore exactly the abort described above.
+            try:
+                events.extend(self._credits_in_transaction(signature, address, rank))
+            except SolanaRPCError as error:
+                unreadable.append(signature)
+                logger.warning(
+                    "SOL deposit scan could not read transaction %s for account %s and SKIPPED "
+                    "it: %s. Nothing was credited from it. The scan continued; if a real "
+                    "deposit is in this transaction it is NOT credited and needs a human.",
+                    signature, address, error,
+                )
+        if unreadable:
+            # Rule 14: a scan that silently examined fewer transactions than it listed must
+            # not report the same way as one that read them all.
+            logger.warning(
+                "SOL deposit scan for %s read %d of %d listed transaction(s); %d were "
+                "unreadable and are named above. A deposit in any of them is NOT credited.",
+                address, len(signatures) - len(unreadable), len(signatures), len(unreadable),
+            )
         deduped = {(event["txid"], event["vout"]): event for event in events}
         return list(deduped.values())
 
@@ -536,6 +575,34 @@ class SolanaAdapter:
         can be called with a seeded response (CLAUDE.md rule 10) instead of
         needing a cluster and a signature list to reach it.
         """
+        # maxSupportedTransactionVersion IS 0 AND RAISING IT IS A PROPOSAL, NOT A FIX.
+        # Measured 2026-09-29 against api.devnet.solana.com (solana-core 4.3.0): a signature
+        # came back `-32015 Transaction version (1) is not supported by the requesting
+        # client. Please try the request again with "maxSupportedTransactionVersion": 1`.
+        # The obvious move is to do what the error says. Do not, yet, and the reason is in
+        # this file rather than in the error:
+        #
+        # `_native_credits` maps the deposit address to a balance index through
+        # `message.accountKeys` alone (see its own line), and a versioned transaction can
+        # draw account keys from an ADDRESS LOOKUP TABLE, which arrive in
+        # `meta.loadedAddresses` instead. Grepped the tree 2026-09-29 for `loadedAddresses`:
+        # ZERO hits. Nothing here knows about them.
+        #
+        # WHAT THAT WOULD AND WOULD NOT COST, stated precisely because the scarier version is
+        # easy to reach for and is wrong. Static keys occupy the LEADING indices of the
+        # resolved key list, so positional indexing into preBalances/postBalances stays
+        # correct for them -- this is not a misattribution risk. What it is, is a MISSED
+        # deposit: an address that arrives via a lookup table is simply absent from
+        # `accountKeys`, `address not in keys` returns [], and real money is silently not
+        # credited. A deposit account named directly by a sender is almost certainly a static
+        # key, but "almost certainly" is not the standard for crediting money.
+        #
+        # So raising this needs loadedAddresses merged into `keys` FIRST, and that cannot be
+        # verified from this container -- the environment's network policy denies
+        # api.devnet.solana.com, so there is no versioned transaction here to test against
+        # (rule 16: a fix that cannot be tested here is a proposal, and this says which).
+        # Until then the cap stays at 0 and an unreadable transaction is SKIPPED loudly by
+        # find_deposits_to_address above rather than crediting anything.
         transaction = self.call(
             "getTransaction",
             signature,

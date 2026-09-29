@@ -42,6 +42,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     make_runner,
     print_banner,
     print_summary,
+    what_the_hunt_established,
 )
 
 
@@ -167,3 +168,61 @@ def test_an_unset_endpoint_is_reported_rather_than_silently_doing_nothing(capsys
     rpc = {"url": "", "mint": "", "min_commitment_rank": 3}
     print_banner(rpc, "")
     assert "SOL_RPC_URL is UNSET" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# What a hunt ESTABLISHED, which is not the same question as what it read.
+# ---------------------------------------------------------------------------
+def test_a_memo_we_parsed_CONFIRMS_the_program_id():
+    confirmed, lines = what_the_hunt_established("MemoX", seen=3, read=9, unread=11)
+    assert confirmed is True
+    assert "CONFIRMED" in " ".join(lines)
+
+
+def test_ZERO_READ_ESTABLISHES_NOTHING_AND_MUST_NOT_READ_AS_A_WRONG_ID():
+    """THE DEFECT THIS PINS PRINTED A FALSEHOOD TO THE OPERATOR ON 2026-09-29.
+
+    `solana_chain_check.py --hunt-memo 20` against api.devnet.solana.com got HTTP 429 on all
+    20 transactions for the second program id. With only two branches, read==0 fell into the
+    "we looked and found nothing" arm and printed
+
+        read transactions for this id and found NO memo our parser recognizes.
+        ... If it says jsonParsed, the id is wrong.
+
+    Nothing had been read. A reader following that guidance would have changed a constant
+    that may well be correct -- which is rule 17's register error rendered as output: a
+    hypothesis printed where a measurement belongs, in the one file whose whole job is to
+    tell "the cluster is quiet" apart from "our constant is wrong".
+
+    MUTATION: delete the `read == 0` branch and this fails on the phrase it must not print.
+    """
+    confirmed, lines = what_the_hunt_established("Memo1", seen=0, read=0, unread=20)
+    text = " ".join(lines)
+    assert confirmed is False
+    assert "NOT ESTABLISHED" in text
+    assert "neither that it is right" in text
+    assert "429" in text, "the operator needs to know throttling is the cause, not the id"
+    assert "the id is wrong" not in text, (
+        "zero transactions read cannot support a claim about the program id, and this is the "
+        "exact sentence the defect printed"
+    )
+
+
+def test_reading_transactions_and_finding_no_memo_IS_evidence_and_says_so():
+    """The third outcome, and the one that genuinely is about the id."""
+    confirmed, lines = what_the_hunt_established("Memo1", seen=0, read=20, unread=0)
+    text = " ".join(lines)
+    assert confirmed is False
+    assert "found NO memo our parser recognizes" in text
+    assert "the id is wrong" in text, "with transactions actually read, that reading IS supported"
+
+
+def test_the_three_outcomes_are_distinguishable_from_each_other():
+    """Rule 14: "did nothing" must not look like "did work". Asserted on the OUTPUT, since
+    the output is what the operator reads."""
+    texts = [
+        " ".join(what_the_hunt_established("M", seen=1, read=1, unread=0)[1]),
+        " ".join(what_the_hunt_established("M", seen=0, read=0, unread=1)[1]),
+        " ".join(what_the_hunt_established("M", seen=0, read=1, unread=0)[1]),
+    ]
+    assert len(set(texts)) == 3, "two outcomes render identically, which is the defect"

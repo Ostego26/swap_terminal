@@ -271,6 +271,62 @@ def main() -> int:
     return print_summary(failures, time.monotonic() - started)
 
 
+def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int) -> tuple[bool, list[str]]:
+    """What one program id's hunt actually proved, as (confirmed, lines to print).
+
+    A FUNCTION RATHER THAN THREE BRANCHES INSIDE THE LOOP, for rule 10's reason and rule 12's:
+    this is the DECISION the hunt exists to make, and inside the loop the only way to exercise
+    it was to reach a cluster. Here it takes three integers and can be asserted on directly --
+    which is also how the defect below is now pinned instead of described.
+
+    THE THIRD OUTCOME IS THE ONE THAT WAS MISSING, and leaving it out printed a falsehood.
+    Measured 2026-09-29 against api.devnet.solana.com: all 20 transactions for the second
+    program id came back HTTP 429, so `read` was 0 and `seen` was 0 -- and with only two
+    branches, zero-read fell into the "we looked and found nothing" arm. It printed
+
+        read transactions for this id and found NO memo our parser recognizes.
+        ... If it says jsonParsed, the id is wrong.
+
+    Nothing had been read. The reading it invited -- that the id is wrong -- was unsupported,
+    and a reader who acted on it would have changed a correct constant. That is rule 14's
+    defect inside the very file whose job is telling two silences apart, and rule 17's
+    register error in printed form: a hypothesis stated where a measurement belongs.
+
+    So the three outcomes are distinct and named:
+
+        seen > 0            CONFIRMED. Our parser read a real memo under this id.
+        read == 0           NOT ESTABLISHED. Nothing was parsed, so this is evidence
+                            about the ENDPOINT, not about the id.
+        read > 0, seen == 0 We read transactions and found no memo we recognize. THAT is
+                            evidence, and the encoding line says which kind.
+    """
+    if seen:
+        return True, [
+            f"    CONFIRMED: {program} is a real Memo program id and",
+            "    chains/solana_memo.memo_strings_in() reads its instructions.",
+        ]
+    if read == 0:
+        return False, [
+            f"    NOT ESTABLISHED: all {unread} transaction(s) were unreadable, so NOTHING was",
+            "    parsed and this says nothing about the program id -- neither that it is right",
+            "    nor that it is wrong. The reasons are printed above; HTTP 429 means the",
+            "    endpoint throttled us, not that the id is bad. Re-run with a smaller N, or",
+            "    against an endpoint that is not rate-limited.",
+        ]
+    return False, [
+        f"    read {read} transaction(s) for this id and found NO memo our parser recognizes.",
+        "    If the encoding line above says NOT jsonParsed, that is the cause and the program",
+        "    id is still unsettled. If it says jsonParsed, the id is wrong.",
+    ]
+
+
+#: How long to wait between the hunt's getTransaction calls. SECONDS, because it is passed
+#: straight to sleep -- an interface, not a report (rule 6). Measured 2026-09-29: an unpaced
+#: hunt of 20 signatures against api.devnet.solana.com got HTTP 429 on 11 of them and on ALL
+#: 20 for the second program id, so the run established nothing about that id at all.
+MEMO_HUNT_PACING_SECONDS = 0.35
+
+
 def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
     """Read real Memo-program transactions and check our parser recognizes them. Read-only.
 
@@ -325,6 +381,12 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
             signature = entry.get("signature")
             if not signature:
                 continue
+            # PACED, because the public devnet endpoint throttled 11 of 20 reads on
+            # 2026-09-29 and a hunt that cannot finish settles nothing. SECONDS here, not
+            # microfortnights: this is an argument to sleep, which is an interface rather
+            # than a report (rule 6). The figure is deliberately small -- it costs a few
+            # seconds over a 20-signature hunt and turns a 429 storm into a complete answer.
+            time.sleep(MEMO_HUNT_PACING_SECONDS)
             try:
                 transaction = adapter.call(
                     "getTransaction", signature,
@@ -348,16 +410,13 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
         # THE DENOMINATOR, because a zero above is ambiguous without it: no memo found over
         # twenty transactions read is a different fact from no memo found over twenty that
         # could not be read at all (rule 3 -- state what it was counted out of).
-        print(f"    read {min(len(entries), how_many) - unread} transaction(s), "
+        read = min(len(entries), how_many) - unread
+        print(f"    read {read} transaction(s), "
               f"{unread} unreadable; encoding received: {parsed_shape}", flush=True)
-        if seen:
-            confirmed = True
-            print(f"    CONFIRMED: {program} is a real Memo program id and", flush=True)
-            print("    chains/solana_memo.memo_strings_in() reads its instructions.", flush=True)
-        else:
-            print("    read transactions for this id and found NO memo our parser recognizes.", flush=True)
-            print("    If the encoding line above says NOT jsonParsed, that is the cause and the", flush=True)
-            print("    program id is still unsettled. If it says jsonParsed, the id is wrong.", flush=True)
+        established, lines = what_the_hunt_established(program, seen=seen, read=read, unread=unread)
+        confirmed = confirmed or established
+        for line in lines:
+            print(line, flush=True)
     if not confirmed:
         print("  NOT CONFIRMED: no memo was read back. The ids in chains/solana_memo.py remain", flush=True)
         print("  WRITTEN RATHER THAN MEASURED, exactly as that file says.", flush=True)
