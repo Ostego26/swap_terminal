@@ -142,30 +142,6 @@ class Config:
     # swap while XRP_DEPOSIT_ACCOUNT is unset, which is the custody decision and
     # has no default. So this line opens the gate; the operator's account setting
     # is what puts anything through it.
-    # OPERATOR INSTRUCTION 2026-09-27: "wire GRC to XMR as well." Both directions,
-    # because a one-way pair is a swap desk that takes a currency it cannot give back.
-    #
-    # WHAT HAD TO BE TRUE FIRST, checked rather than assumed, because adding a pair here
-    # is the LAST step and not the first -- an accepted swap that cannot be priced or
-    # paid out is worse than a refused one:
-    #
-    #   pricing         services/pricing.IDS needed an XMR entry ("monero") and had
-    #                   none. Without it validate_pair() accepts and create_quote()
-    #                   fails on a missing USD price. Added in the same change.
-    #   fee reserve     XMR_NETWORK_FEE_RESERVE already existed (0.0005), and
-    #                   quote_service.get_network_fee_reserve() refuses by name for an
-    #                   asset that has none, so this was already safe either way.
-    #   adapter         chains/registry.py registers MoneroAdapter when Config.RPC["XMR"]
-    #                   carries a port, so an unconfigured host has no XMR adapter and
-    #                   open_swap.py reports it unconfigured rather than crashing.
-    #   deposits        chains/monero_transfers.deposit_events_from_transfers(), and its
-    #                   ten field names were CONFIRMED against a real wallet on
-    #                   2026-09-27 -- see chains/monero.py's header. Before that date
-    #                   this pair would have rested on an unverified wire format.
-    #   payout          MoneroAdapter.send_to_address(), which refuses unless the
-    #                   adapter was built with can_spend=True. XMR_WALLET_CAN_SPEND is
-    #                   FALSE by default, so a deposit watcher cannot pay out by
-    #                   accident and enabling it stays the operator's decision.
     ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]] = {
         ("GRC", "BTC"),
         ("BTC", "GRC"),
@@ -173,29 +149,7 @@ class Config:
         ("LTC", "GRC"),
         ("XRP", "GRC"),
         ("GRC", "XRP"),
-        ("GRC", "XMR"),
-        ("XMR", "GRC"),
     }
-    # Monero. No default port: monero-wallet-rpc binds wherever it was told to
-    # with --rpc-bind-port, and there is no conventional value the way 8332 is
-    # Bitcoin's. XMR_RPC_PORT unset means "no Monero wallet here", and
-    # chains/registry.py leaves the adapter unbuilt rather than pointing one at
-    # a guess.
-    XMR_RPC_PORT = _env_int("XMR_RPC_PORT", "0")
-    # Clamped to Monero's ten-block consensus spend lock by
-    # chains/monero_units.effective_min_confirmations(). The default is that
-    # floor rather than a number chosen to look like the others: anything lower
-    # would release a swap the wallet then refuses to pay.
-    XMR_MIN_CONFIRMATIONS = _env_int("XMR_MIN_CONFIRMATIONS", "10")
-    XMR_NETWORK_FEE_RESERVE = _env_float("XMR_NETWORK_FEE_RESERVE", "0.0005")
-    # FALSE BY DEFAULT, AND THIS IS THE ONE CHAIN THAT CAN AFFORD IT. Monero
-    # splits the view key from the spend key, so the deposit watcher can run
-    # against a wallet that is cryptographically unable to send. The other
-    # three chains inherit send_to_address() unconditionally from
-    # chains/base.py and have no equivalent. Setting this true is a deliberate
-    # act that arms the payout path for XMR.
-    XMR_WALLET_CAN_SPEND = _env("XMR_WALLET_CAN_SPEND", "").strip().lower() in {"1", "true", "yes"}
-
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's
     # machine. Unset means no XRP adapter is constructed at all.
@@ -293,12 +247,6 @@ class Config:
             "timeout": _env_float("GRC_RPC_TIMEOUT", "30"),
         },
         # A DIFFERENT SHAPE ON PURPOSE, matching MoneroAdapter.__init__ rather
-        # than RPCAdapter's six. There is no `wallet` key because a
-        # monero-wallet-rpc process serves exactly one wallet -- the name is
-        # chosen when the daemon starts, not per request -- and there is an
-        # `account_index` instead, because that is what a subaddress is derived
-        # under. chains/registry.py splats this dict, so a key added here
-        # without a matching parameter fails at construction.
         # Its own shape again, matching XRPAdapter.__init__. An XRP endpoint is
         # one URL with no HTTP auth, no wallet path and no port of its own --
         # the same reason Config.RPC["SOL"] does not use the Bitcoin six.
@@ -306,15 +254,5 @@ class Config:
             "url": XRP_RPC_URL,
             "min_confirmations": XRP_MIN_CONFIRMATIONS,
             "timeout": _env_float("XRP_RPC_TIMEOUT", "30"),
-        },
-        "XMR": {
-            "host": _env("XMR_RPC_HOST", "127.0.0.1"),
-            "port": XMR_RPC_PORT,
-            "user": _env("XMR_RPC_USER", ""),
-            "password": _env("XMR_RPC_PASS", ""),
-            "account_index": _env_int("XMR_ACCOUNT_INDEX", "0"),
-            "min_confirmations": XMR_MIN_CONFIRMATIONS,
-            "can_spend": XMR_WALLET_CAN_SPEND,
-            "timeout": _env_float("XMR_RPC_TIMEOUT", "30"),
         },
     }

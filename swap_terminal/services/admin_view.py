@@ -115,12 +115,10 @@ ECHOED_CONFIG_KEYS = (
     "LTC_MIN_CONFIRMATIONS",
     "GRC_MIN_CONFIRMATIONS",
     "SOL_MIN_CONFIRMATIONS",
-    "XMR_MIN_CONFIRMATIONS",
     "XRP_MIN_CONFIRMATIONS",
     "BTC_NETWORK_FEE_RESERVE",
     "LTC_NETWORK_FEE_RESERVE",
     "GRC_NETWORK_FEE_RESERVE",
-    "XMR_NETWORK_FEE_RESERVE",
 )
 
 # The read-only RPC method a Bitcoin-derived daemon answers a reachability probe
@@ -419,7 +417,7 @@ def pair_rows(config, adapters: dict) -> list[dict]:
     answer to a question an operator will otherwise ask by reading source.
     """
     allowed = set(config["ALLOWED_PAIRS"])
-    assets = sorted({asset for pair in allowed for asset in pair} | set(ATTRIBUTION_MODELS) | {"SOL", "XMR"})
+    assets = sorted({asset for pair in allowed for asset in pair} | set(ATTRIBUTION_MODELS) | {"SOL"})
     rows = []
     for from_asset in assets:
         for to_asset in assets:
@@ -475,7 +473,7 @@ def chain_rows(config, adapters: dict) -> list[dict]:
     carries `user` and `password` in the same dict.
     """
     rows = []
-    for asset in sorted(set(ATTRIBUTION_MODELS) | {"BTC", "LTC", "GRC", "SOL", "XMR"}):
+    for asset in sorted(set(ATTRIBUTION_MODELS) | {"BTC", "LTC", "GRC", "SOL"}):
         adapter = adapters.get(asset)
         threshold = config.get(f"{asset}_MIN_CONFIRMATIONS")
         rows.append(

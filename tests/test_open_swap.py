@@ -41,7 +41,7 @@ from db import connect_db
 from modules.address_network import is_testnet_address
 from report_block import LABEL_WIDTH
 from services import quote_service
-from valid_addresses import INVALID_PLACEHOLDERS, XMR_PAYOUT
+from valid_addresses import INVALID_PLACEHOLDERS
 from workers.common import get_config_dict
 
 import open_swap
@@ -346,24 +346,6 @@ def test_an_undecodable_payout_address_is_refused_without_asking_any_daemon():
     assert "base58check" in detail or "version byte" in detail
 
 
-def test_a_valid_monero_payout_address_is_not_refused_by_the_cli_check():
-    """THE CENTRAL TRAP, pinned where it would have been walked into.
-
-    A blanket `is_valid_address()` here refuses every valid Monero address, because that
-    function understands three encodings and Monero's base58 is none of them. XMR is a live
-    destination: Config.ALLOWED_PAIRS carries ("GRC","XMR").
-
-    The stub accepts, so a VALID state proves the LOCAL check did not refuse first -- an
-    INVALID would mean the local decode overrode a working chain.
-    """
-    class StubXMR(StubGRC):
-        def validate_address(self, address):
-            self.asked.append(address)
-            return True
-
-    state, detail = check_payout_address({"XMR": StubXMR()}, "XMR", XMR_PAYOUT)
-
-    assert state == "VALID", detail
 
 
 def test_a_daemon_that_cannot_be_asked_is_unaskable_and_not_invalid():

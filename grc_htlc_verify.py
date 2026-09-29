@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Does OP_CHECKLOCKTIMEVERIFY actually EXECUTE on Gridcoin? Measured, on the real testnet.
 
-Role: file (the entry point; the decisions live in swap_terminal/regtest/adaptor_steps.py,
+Role: file (the entry point; the decisions live in swap_terminal/regtest/funding_steps.py,
       modules/atomic_htlc_scripts.py and modules/htlc_rpc.py, and it holds none of its own)
 Reads: the operator's Gridcoin TESTNET daemon over JSON-RPC, and ST_ADAPTOR_FUNDING_SEED
 Writes: nothing on disk. It BROADCASTS on a test network.
@@ -80,16 +80,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.base import RPCError
 from microfortnights import format_duration
-from modules import adaptor_swap_chain as chain
+from modules import script_chain as chain
 from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
 from modules.htlc_rpc import build_refund_spend
 from modules.htlc_spend import coins_to_satoshis, parse_transaction, satoshis_to_coins
 from modules.htlc_timelock import SECONDS_PER_BLOCK
-from regtest import adaptor_steps
-from regtest.adaptor_steps import Run
+from regtest import funding_steps
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.daemons import RegtestSetupError
+from regtest.funding_steps import Run
 from regtest.keys import key_from_seed
 
 TOTAL_STEPS = 9
@@ -180,10 +180,10 @@ def _seed_or_refuse() -> str:
     fresh one, pay it, and strand the coin if anything failed -- which is precisely what this
     constant exists to stop.
     """
-    seed = os.environ.get(adaptor_steps.FUNDING_SEED_VARIABLE, "")
+    seed = os.environ.get(funding_steps.FUNDING_SEED_VARIABLE, "")
     if not seed.strip():
         raise RegtestSetupError(
-            f"{adaptor_steps.FUNDING_SEED_VARIABLE} is not set. This harness derives BOTH the "
+            f"{funding_steps.FUNDING_SEED_VARIABLE} is not set. This harness derives BOTH the "
             f"address you fund AND the contract's refund key from it, so that a run which dies "
             f"after funding leaves its coins somewhere recoverable rather than at a key that "
             f"existed only in a process that has exited. Nothing was built or broadcast."
@@ -273,16 +273,16 @@ def fund_contract(run: Run, contract: dict, funding: chain.Outpoint) -> chain.Ou
     # no claim on it. Signing with the wrong one of two keys the same process is holding
     # produces a perfectly well-formed transaction that only a chain can reject.
     key = contract["refund"]
-    raw, predicted, value = adaptor_steps.reclaim_p2pkh_to_script(
+    raw, predicted, value = funding_steps.reclaim_p2pkh_to_script(
         run, key, funding, p2sh_script_for(contract["redeem_script"])
     )
     run.say(f"paying {satoshis_to_coins(value)} into the contract; predicted txid {predicted}")
-    txid, message = adaptor_steps.broadcast_and_report(run, raw, "the contract funding transaction")
+    txid, message = funding_steps.broadcast_and_report(run, raw, "the contract funding transaction")
     if txid is None:
         raise RegtestSetupError(f"{run.asset}: the contract could not be funded: {message}")
     run.check("the funding txid PREDICTED before broadcast equals the daemon's",
               f"predicted={predicted} daemon={txid}", "the same txid", OK if txid == predicted else FAIL)
-    adaptor_steps.wait_or_mine_to(run, adaptor_steps.current_height(run) + 1)
+    funding_steps.wait_or_mine_to(run, funding_steps.current_height(run) + 1)
     return chain.Outpoint(txid=txid, vout=0, value_satoshis=value)
 
 
@@ -341,7 +341,7 @@ def recover_by_search(run: Run, console: Console) -> int:
     one worth doing.
     """
     console.banner("SEARCH FOR A CONTRACT THIS SEED FUNDED AND NEVER SPENT")
-    tip = adaptor_steps.current_height(run)
+    tip = funding_steps.current_height(run)
     floor = max(0, tip - RECOVERY_SEARCH_BLOCKS + 1)
     seed = _seed_or_refuse()
 
@@ -406,7 +406,7 @@ def recover_by_search(run: Run, console: Console) -> int:
                 # and rightly: "a zero-value input would size every fee below from nothing".
                 # A test caught it before a chain did.
                 held = coins_to_satoshis(str(output.get("value", "0")))
-                spender, description = adaptor_steps.find_the_spender(
+                spender, description = funding_steps.find_the_spender(
                     run, chain.Outpoint(txid=txid, vout=vout, value_satoshis=held),
                     max_depth=tip - height + 1)
                 if spender:
@@ -471,7 +471,7 @@ def recover(run: Run, console: Console, locktime: int, contract_txid: str) -> in
     wanted = p2sh_script_for(contract["redeem_script"]).hex()
     console.say(f"GRC: rebuilt the contract for locktime {locktime}; its P2SH is {wanted}")
 
-    decoded = adaptor_steps._decoded(run, contract_txid)
+    decoded = funding_steps._decoded(run, contract_txid)
     outpoint = None
     for output in decoded.get("vout", []):
         if (output.get("scriptPubKey") or {}).get("hex", "") == wanted:
@@ -483,12 +483,12 @@ def recover(run: Run, console: Console, locktime: int, contract_txid: str) -> in
         console.say(
             f"GRC: {contract_txid} has NO output paying the rebuilt contract. Its outputs pay "
             f"{paid}. Either the locktime is not the one that run printed, or "
-            f"{adaptor_steps.FUNDING_SEED_VARIABLE} is not the seed it ran with -- the P2SH "
+            f"{funding_steps.FUNDING_SEED_VARIABLE} is not the seed it ran with -- the P2SH "
             f"above is the fingerprint of both together. Nothing was signed or broadcast."
         )
         return 1
 
-    tip = adaptor_steps.current_height(run)
+    tip = funding_steps.current_height(run)
     console.say(f"GRC: found {satoshis_to_coins(outpoint.value_satoshis)} GRC at "
                 f"{contract_txid}:{outpoint.vout}. Tip is {tip}, the locktime is {locktime}")
     if tip < locktime:
@@ -502,7 +502,7 @@ def recover(run: Run, console: Console, locktime: int, contract_txid: str) -> in
                     f"about {waiting}. Nothing was signed or broadcast; run this again then.")
         return 1
 
-    destination = adaptor_steps.wallet_owned_address(run)
+    destination = funding_steps.wallet_owned_address(run)
     step_8_accepted(run, contract, outpoint, destination, {"refund_accepted": SKIP, "notes": []})
     return 0
 
@@ -511,8 +511,8 @@ def step_5_non_final(run: Run, contract: dict, outpoint: chain.Outpoint, outcome
     """8a: nLockTime = the script's locktime, before it. REFUSED, and it proves nothing."""
     run.step(5, "the refund with nLockTime = the SCRIPT's locktime, before it -- a NON-FINAL refusal")
     raw = _refund_bytes(run, contract, outpoint, contract["locktime"])
-    reason = adaptor_steps.mempool_reject_reason(run, raw)
-    txid, message = adaptor_steps.broadcast_and_report(run, raw, f"refund, nLockTime {contract['locktime']} (not yet final)")
+    reason = funding_steps.mempool_reject_reason(run, raw)
+    txid, message = funding_steps.broadcast_and_report(run, raw, f"refund, nLockTime {contract['locktime']} (not yet final)")
     refused = txid is None
     run.check("5 a non-final refund is REFUSED",
               f"{message}{f' [reject-reason={reason}]' if reason else ''}" if refused else f"ACCEPTED as {txid}",
@@ -525,7 +525,7 @@ def step_5_non_final(run: Run, contract: dict, outpoint: chain.Outpoint, outcome
 
 def step_6_cltv(run: Run, contract: dict, outpoint: chain.Outpoint, outcome: dict) -> None:
     """8b: THE MEASUREMENT. nLockTime = the tip, so the transaction is FINAL."""
-    tip = adaptor_steps.current_height(run)
+    tip = funding_steps.current_height(run)
     run.step(6, "THE CLTV MEASUREMENT: a FINAL refund, before the locktime. Only the script can refuse it")
     run.check("we are genuinely before the script's locktime", tip < contract["locktime"], True,
               OK if tip < contract["locktime"] else FAIL)
@@ -534,8 +534,8 @@ def step_6_cltv(run: Run, contract: dict, outpoint: chain.Outpoint, outcome: dic
             f"nLockTime below the next block's height makes this transaction FINAL, so the "
             f"mempool's finality check PASSES and the only rule left that can refuse it is the "
             f"script's OP_CHECKLOCKTIMEVERIFY")
-    reason = adaptor_steps.mempool_reject_reason(run, raw)
-    txid, message = adaptor_steps.broadcast_and_report(run, raw, f"refund, nLockTime {tip} -- FINAL, and CLTV must refuse it")
+    reason = funding_steps.mempool_reject_reason(run, raw)
+    txid, message = funding_steps.broadcast_and_report(run, raw, f"refund, nLockTime {tip} -- FINAL, and CLTV must refuse it")
     refused = txid is None
     run.check("6 CLTV REFUSES A FINAL REFUND BEFORE THE LOCKTIME",
               f"{message}{f' [reject-reason={reason}]' if reason else ''}" if refused else f"ACCEPTED as {txid}",
@@ -555,7 +555,7 @@ def explain_a_refused_refund(run: Run, contract: dict, outpoint: chain.Outpoint)
     """Print the bytes the chain refused, and where the reason is. NEVER raises.
 
     WHAT THIS PATH LOST, 2026-09-28. Every other broadcast in this repository goes through
-    `adaptor_steps.broadcast_and_report`, which since that morning prints the refused hex and
+    `funding_steps.broadcast_and_report`, which since that morning prints the refused hex and
     the `grep ERROR ... debug.log` line -- because Gridcoin answers `-22 TX rejected` and names
     nothing, and the reason is written to the daemon's log where nobody was looking.
 
@@ -656,13 +656,13 @@ def main(argv: list[str], console: Console | None = None) -> int:
     outcome = {"non_final_refused": SKIP, "cltv_refused_final": SKIP, "refund_accepted": SKIP, "notes": []}
     console.banner("DOES OP_CHECKLOCKTIMEVERIFY EXECUTE ON GRIDCOIN? The refund branch, on the real testnet")
     try:
-        config = adaptor_steps.resolve_config("GRC")
+        config = funding_steps.resolve_config("GRC")
         run = Run(console=console, config=config, wallet="")
         console.say(f"GRC: endpoint {config.base_url}  datadir {config.datadir}")
         console.say("GRC: this harness starts and stops NOTHING, and since 2026-09-28 the refund "
                     "path does not touch the wallet's lock -- your staking wallet is left as found")
-        adaptor_steps.step_1_reachable(run)
-        adaptor_steps.assert_test_network(run)
+        funding_steps.step_1_reachable(run)
+        funding_steps.assert_test_network(run)
 
         if args.recover_search:
             return recover_by_search(run, console)
@@ -675,18 +675,18 @@ def main(argv: list[str], console: Console | None = None) -> int:
                 )
             return recover(run, console, args.recover, args.contract_txid)
 
-        tip = adaptor_steps.current_height(run)
+        tip = funding_steps.current_height(run)
         contract = build_contract(run, tip)
-        adaptor_steps.prepare_operator_funding(run, args.funding_txid, [contract["refund"]])
-        funding = adaptor_steps.fund_and_prepare(run, "the HTLC contract", contract["refund"])
+        funding_steps.prepare_operator_funding(run, args.funding_txid, [contract["refund"]])
+        funding = funding_steps.fund_and_prepare(run, "the HTLC contract", contract["refund"])
         outpoint = fund_contract(run, contract, funding)
 
         step_5_non_final(run, contract, outpoint, outcome)
         step_6_cltv(run, contract, outpoint, outcome)
 
         console.step(7, "GRC", "advance to the script's locktime -- real blocks, nothing can mine them")
-        adaptor_steps.wait_or_mine_to(run, contract["locktime"])
-        step_8_accepted(run, contract, outpoint, adaptor_steps.wallet_owned_address(run), outcome)
+        funding_steps.wait_or_mine_to(run, contract["locktime"])
+        step_8_accepted(run, contract, outpoint, funding_steps.wallet_owned_address(run), outcome)
     except RegtestSetupError as exc:
         console.banner("REFUSED AT A PRECONDITION")
         console.say(str(exc))

@@ -27,7 +27,6 @@ WHY EACH CHAIN GETS COINS A DIFFERENT WAY
                J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM from the key
                rotation on 2026-09-25, so this step only CONFIRMS it rather
                than asking for more.
-    XMR        NOT HANDLED, and see the --xmr note. A stagenet wallet cannot
                see a deposit until it has synced, and that was MEASURED at
                33-54 hours on this hardware. It needs a decision, not a script.
     GRC        excluded at the operator's request: they already hold testnet
@@ -453,31 +452,6 @@ def check_gridcoin_testnet(console: Console, allow_mainnet: bool = False) -> dic
     )
 
 
-def explain_monero() -> None:
-    """Monero is not scriptable here, and saying so beats a script that pretends."""
-    print("""
-[XMR] NOT DONE, and deliberately not attempted by this script.
-
-  A stagenet wallet cannot see a deposit until it has synced, and the sync was
-  MEASURED on this hardware at 33-54 hours (2,215,603 blocks, 11-19 blocks/s,
-  and that rate was a floor because early blocks are nearly empty).
-
-  Three ways forward, and the choice is yours rather than a default:
-
-    1. Let monerod --stagenet sync in the background for a day or two, then
-       faucet into it. Costs wall clock, nothing else.
-    2. Point monero-wallet-rpc at a REMOTE stagenet node with --daemon-address,
-       which skips the sync entirely. Needs a current public stagenet host, and
-       a dead one would present as a wallet bug -- so find one and hand it over
-       rather than taking a hostname from me.
-    3. Skip it. chains/monero.py's field names are already confirmed against
-       the published spec, and the two things the docs do not settle are both
-       guarded at runtime to refuse rather than mis-credit.
-
-  There is also a wallet already on disk whose seed was printed into a chat
-  transcript on 2026-09-25. Do not reuse it; generate a fresh one when you pick
-  an option above.
-""")
 
 
 def selected_chains(args) -> list[tuple[str, str, object]]:
@@ -498,7 +472,6 @@ def selected_chains(args) -> list[tuple[str, str, object]]:
         ("SOL", "devnet: confirm the balance the key rotation left (read-only)", check_solana_devnet, args.sol),
         ("GRC", "testnet: report the balance (READ-ONLY; mints nothing)",
          lambda console: check_gridcoin_testnet(console, args.grc_mainnet), args.grc),
-        ("XMR", "not scripted; explaining why", None, args.xmr),
     ]
     return [(asset, title, run) for asset, title, run, on in everything if on or args.all]
 
@@ -542,7 +515,6 @@ def main() -> int:
     parser.add_argument("--grc-mainnet", action="store_true",
                         help="also ask the MAINNET Gridcoin daemon on port 15715. Off by default: it "
                              "prints a real balance, and this script's output tends to get pasted")
-    parser.add_argument("--xmr", action="store_true", help="explain why Monero is not scripted here")
     parser.add_argument("--all", action="store_true", help="every chain above")
     parser.add_argument("--wipe", action="store_true",
                         help="DELETE the regtest chain first and restart at height 0, where the subsidy "
@@ -567,9 +539,6 @@ def main() -> int:
     problems: list[str] = []
     for number, (asset, title, run) in enumerate(chains, start=1):
         console.step(number, asset, title)
-        if run is None:
-            explain_monero()
-            continue
         try:
             results.append(run(console))
         except Exception as error:  # noqa: BLE001 -- checked: this is an operator tool whose job is to report a per-chain outcome. Every failure is named, printed and counted into the exit code, so none is swallowed and one chain failing does not abandon the others.

@@ -26,7 +26,7 @@ import io
 from pathlib import Path
 
 import pytest
-from modules import adaptor_swap_chain as chain
+from modules import script_chain as chain
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 from regtest.console import FAIL, OK, SKIP, Console
 from regtest.keys import generate_key, key_from_seed
@@ -147,11 +147,11 @@ def test_a_chain_that_ACCEPTS_the_final_early_refund_is_FAIL_and_names_what_it_c
 
     outcome = _outcome()
     built_with: list[int] = []
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 100)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 100)
     monkeypatch.setattr(entry, "_refund_bytes",
                         lambda run, contract, outpoint, nlocktime: built_with.append(nlocktime) or "00")
-    monkeypatch.setattr(entry.adaptor_steps, "mempool_reject_reason", lambda run, raw: "")
-    monkeypatch.setattr(entry.adaptor_steps, "broadcast_and_report",
+    monkeypatch.setattr(entry.funding_steps, "mempool_reject_reason", lambda run, raw: "")
+    monkeypatch.setattr(entry.funding_steps, "broadcast_and_report",
                         lambda run, raw, label: ("ee" * 32, ""))
 
     entry.step_6_cltv(_AcceptingRun(), {"locktime": 200}, None, outcome)
@@ -184,11 +184,11 @@ def test_a_chain_that_REFUSES_it_is_OK_and_earns_no_note(monkeypatch):
 
     outcome = _outcome()
     built_with: list[int] = []
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 100)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 100)
     monkeypatch.setattr(entry, "_refund_bytes",
                         lambda run, contract, outpoint, nlocktime: built_with.append(nlocktime) or "00")
-    monkeypatch.setattr(entry.adaptor_steps, "mempool_reject_reason", lambda run, raw: "")
-    monkeypatch.setattr(entry.adaptor_steps, "broadcast_and_report",
+    monkeypatch.setattr(entry.funding_steps, "mempool_reject_reason", lambda run, raw: "")
+    monkeypatch.setattr(entry.funding_steps, "broadcast_and_report",
                         lambda run, raw, label: (None, "code=-22 TX rejected"))
 
     entry.step_6_cltv(_RefusingRun(), {"locktime": 200}, None, outcome)
@@ -351,11 +351,11 @@ def test_the_contract_is_funded_with_the_key_that_OWNS_the_output(monkeypatch):
         seen["key"] = key
         return "00", "cd" * 32, 149_000_000
 
-    monkeypatch.setattr(entry.adaptor_steps, "reclaim_p2pkh_to_script", _record)
-    monkeypatch.setattr(entry.adaptor_steps, "broadcast_and_report", lambda run, raw, label: ("cd" * 32, "accepted"))
-    monkeypatch.setattr(entry.adaptor_steps, "wait_or_mine_to", lambda run, height: None)
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 100)
-    monkeypatch.setattr(entry.adaptor_steps, "operator_funding_key", lambda run: generate_key())
+    monkeypatch.setattr(entry.funding_steps, "reclaim_p2pkh_to_script", _record)
+    monkeypatch.setattr(entry.funding_steps, "broadcast_and_report", lambda run, raw, label: ("cd" * 32, "accepted"))
+    monkeypatch.setattr(entry.funding_steps, "wait_or_mine_to", lambda run, height: None)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 100)
+    monkeypatch.setattr(entry.funding_steps, "operator_funding_key", lambda run: generate_key())
 
     refund = generate_key()
     contract = {"redeem_script": b"\x51", "refund": refund, "locktime": 106}
@@ -452,10 +452,10 @@ def test_recover_REFUSES_when_the_rebuilt_contract_does_not_match_the_named_tran
     entry = _entry()
     _with_seed(monkeypatch)
     console = Console(entry.TOTAL_STEPS, stream=io.StringIO())
-    monkeypatch.setattr(entry.adaptor_steps, "_decoded",
+    monkeypatch.setattr(entry.funding_steps, "_decoded",
                         lambda run, txid: {"vout": [{"n": 0, "value": "1.0",
                                                      "scriptPubKey": {"hex": "deadbeef"}}]})
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 999_999)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 999_999)
     monkeypatch.setattr(entry, "step_8_accepted",
                         lambda *a: (_ for _ in ()).throw(AssertionError("must not sign")))
 
@@ -479,10 +479,10 @@ def test_recover_REFUSES_BEFORE_THE_LOCKTIME_rather_than_broadcasting_a_doomed_r
     built = {}
     monkeypatch.setattr(entry, "build_htlc_redeem_script", lambda **kw: built.update(kw) or b"\x51")
     wanted = entry.p2sh_script_for(b"\x51").hex()
-    monkeypatch.setattr(entry.adaptor_steps, "_decoded",
+    monkeypatch.setattr(entry.funding_steps, "_decoded",
                         lambda run, txid: {"vout": [{"n": 1, "value": "1.49",
                                                      "scriptPubKey": {"hex": wanted}}]})
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 3296300)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 3296300)
     monkeypatch.setattr(entry, "step_8_accepted",
                         lambda *a: (_ for _ in ()).throw(AssertionError("must not sign")))
 
@@ -551,7 +551,7 @@ def test_recover_search_FINDS_a_contract_from_the_seed_alone(monkeypatch):
         def node(self, wallet=True):
             return _Node()
 
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 3296381)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 3296381)
     monkeypatch.setattr(entry, "recover",
                         lambda run, console, locktime, txid: handed.update(
                             locktime=locktime, txid=txid) or 0)
@@ -593,7 +593,7 @@ def test_recover_search_SAYS_WHAT_IT_DID_NOT_SEARCH_rather_than_claiming_there_i
         def node(self, wallet=True):
             return _Node()
 
-    monkeypatch.setattr(entry.adaptor_steps, "current_height", lambda run: 500)
+    monkeypatch.setattr(entry.funding_steps, "current_height", lambda run: 500)
     monkeypatch.setattr(entry, "recover",
                         lambda *a: (_ for _ in ()).throw(AssertionError("nothing to recover")))
     stream = io.StringIO()

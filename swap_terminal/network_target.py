@@ -116,7 +116,6 @@ CHAIN_PORTS: dict[str, ChainPorts] = {
 _ENDPOINT_VARIABLES: dict[str, str] = {
     "SOL": "SOL_RPC_URL",
     "XRP": "XRP_RPC_URL",
-    "XMR": "XMR_RPC_PORT",
 }
 
 
@@ -251,7 +250,7 @@ def startup_lines(rpc: dict) -> list[str]:
     # network_id before signing. That is a call, not a lookup, so it does not
     # belong in a pure function -- named here so a reader knows the stronger
     # check exists and where.
-    for chain in ("SOL", "XRP", "XMR"):
+    for chain in ("SOL", "XRP"):
         entry = rpc.get(chain) or {}
         target = entry.get("url") or (f"port {entry['port']}" if entry.get("port") else "")
         if target:

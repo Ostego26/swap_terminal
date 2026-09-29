@@ -63,7 +63,7 @@ def test_all_selects_every_chain_including_gridcoin_as_a_read():
     ETH stays out entirely; see the README section on why it is deferred.
     """
     assets = [asset for asset, _, _ in selected_chains(Args(all=True))]
-    assert assets == ["BTC", "LTC", "XRP", "SOL", "GRC", "XMR"]
+    assert assets == ["BTC", "LTC", "XRP", "SOL", "GRC"]
     assert "ETH" not in assets
 
 
@@ -80,14 +80,6 @@ def test_gridcoin_is_present_but_only_as_a_read():
     assert "mints nothing" in grc[1]
 
 
-def test_monero_has_no_runner_so_it_cannot_pretend():
-    """XMR's entry is None on purpose: the script EXPLAINS rather than attempts.
-
-    A stagenet sync was measured at 33-54 hours, so a runner here would either
-    block for a day or produce a wallet that cannot see its own deposit.
-    """
-    xmr = next(entry for entry in selected_chains(Args(all=True)) if entry[0] == "XMR")
-    assert xmr[2] is None
 
 
 def test_every_other_chain_has_a_runner():

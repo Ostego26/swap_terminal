@@ -153,7 +153,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.base import RPCError
-from chains.monero import MoneroRPCError
 from chains.registry import unconfigured_chains, why_unconfigured
 from chains.solana import SolanaRPCError
 from chains.xrp import XRPRPCError
@@ -196,7 +195,7 @@ class SwapRefused(RuntimeError):
 # not be asked", which is a different fact from "the answer is no" -- the
 # distinction chains/base.validate_address() exists to preserve, and the one whose
 # loss sent an operator to check a customer's address during an outage.
-ADAPTER_ERRORS = (RPCError, XRPRPCError, SolanaRPCError, MoneroRPCError)
+ADAPTER_ERRORS = (RPCError, XRPRPCError, SolanaRPCError)
 
 # Accepted spellings of the pair argument. Both are shell-safe, which is the
 # whole selection rule: `XRP->GRC` is NOT accepted and never will be, because

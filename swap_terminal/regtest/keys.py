@@ -245,7 +245,7 @@ def key_from_seed(seed: str, role: str) -> RegtestKey:
     create a transaction -- and every RPC route around that is closed. But the harness needs
     the wallet for exactly ONE thing: coins sitting at an address it holds the key for.
     Everything after that is already in-process -- _sign_p2pkh() and _p2pkh_sighash() in
-    adaptor_steps.py sign Tx_lock's P2PKH input here, not in the daemon -- and broadcasting is
+    funding_steps.py sign Tx_lock's P2PKH input here, not in the daemon -- and broadcasting is
     sendrawtransaction, which consults no lock.
 
     So with a stable address the operator makes ONE payment from their GUI (which elevates in

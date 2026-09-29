@@ -39,7 +39,6 @@ import base58
 import bech32
 import pytest
 from bip350_vectors import CORRUPTED_TAPROOT
-from chains import monero_keys
 from chains.registry import build_adapters
 from config import Config
 from conftest import RPC_FIXTURE_AUTH
@@ -63,7 +62,6 @@ from modules.address_network import (
     P2PKH_VERSIONS,
     P2SH_VERSIONS,
     TESTNET,
-    is_valid_address,
 )
 from modules.atomic_htlc_scripts import parse_and_reencode_as_testnet_p2pkh
 from modules.htlc_fee import usable_platform_fee_address
@@ -78,8 +76,6 @@ from valid_addresses import (
     BTC_TAPROOT_PAYOUT,
     GRC_PAYOUT,
     INVALID_PLACEHOLDERS,
-    INVALID_XMR_INTEGRATED_PREFIX_STANDARD_LENGTH,
-    INVALID_XMR_PRIMARY_PREFIX_INTEGRATED_LENGTH,
     LTC_P2SH_SCRIPT_ADDRESS2,
     LTC_PARTICIPANT,
     LTC_REGTEST_DEPOSIT,
@@ -87,10 +83,6 @@ from valid_addresses import (
     LTC_TAPROOT_PAYOUT,
     LTC_TAPROOT_PLATFORM_FEE,
     SOL_PAYOUT,
-    XMR_INTEGRATED_STAGENET,
-    XMR_INTEGRATED_TESTNET,
-    XMR_PAYOUT,
-    XMR_SUBADDRESS_TESTNET,
     XRP_HOT_ACCOUNT,
 )
 
@@ -137,36 +129,6 @@ CONFIG_TESTNET_GRC = {
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("asset", "address"),
-    [("XMR", XMR_PAYOUT), ("SOL", SOL_PAYOUT)],
-)
-def test_the_blanket_guard_would_have_refused_monero_and_solana(asset, address):
-    """THE MEASUREMENT THAT DECIDED THE DESIGN, kept as a test so nobody re-walks into it.
-
-    The obvious fix for a burn is one line at the send site:
-
-        if not is_valid_address(address): refuse
-
-    This asserts that line would have refused a VALID payout on two live chains.
-    `is_valid_address()` understands bech32, Bitcoin-alphabet base58check and XRP-alphabet
-    base58check; Monero is a different base58 with a Keccak checksum and Solana is a bare
-    32-byte key with no checksum at all. Config.ALLOWED_PAIRS carries ("GRC","XMR"), so a
-    Monero payout is not hypothetical -- and a false refusal there lands on a swap whose
-    deposit is ALREADY OURS and already credited.
-
-    Both halves are asserted together on purpose: the first alone would read as a complaint
-    about address_network, and the second alone would read as a nice property of the
-    authority. Together they are the reason the authority exists.
-
-    MUTATION: point VALIDATORS["XMR"] (or ["SOL"]) at the bitcoin-family validator and the
-    second assertion fails.
-    """
-    assert is_valid_address(address) is False, (
-        f"address_network.is_valid_address() now accepts {asset}; if that is deliberate, the "
-        f"argument in modules/address_authority.py's header has changed and must be rewritten"
-    )
-    assert check_address(asset, address).state == VALID
 
 
 def test_every_asset_this_terminal_can_reach_has_a_validator():
@@ -268,10 +230,8 @@ def test_the_flat_hrp_table_is_derived_from_the_per_asset_one():
         ("a Litecoin bech32 address paid from a Bitcoin wallet", "BTC", LTC_PARTICIPANT),
         ("a Bitcoin bech32 address paid from a Litecoin wallet", "LTC", BTC_PARTICIPANT),
         ("an XRP classic account paid as Bitcoin", "BTC", XRP_HOT_ACCOUNT),
-        ("a Monero address paid as Bitcoin", "BTC", XMR_PAYOUT),
         ("a Solana key paid as Bitcoin", "BTC", SOL_PAYOUT),
         ("a bech32 address paid as Gridcoin, which has no bech32", "GRC", BTC_PARTICIPANT),
-        ("a Bitcoin address paid as Monero", "XMR", BTC_PARTICIPANT),
         ("a Gridcoin address paid as XRP", "XRP", GRC_PAYOUT),
         # ADDED AFTER A MUTATION SURVIVED. Removing the version-byte cross-chain check in
         # _bitcoin_base58() killed NO test, because every case above is bech32 or a different
@@ -581,11 +541,6 @@ def test_a_chain_whose_addresses_carry_no_network_says_the_check_was_skipped():
     assert "NETWORK NOT CHECKED" in verdict.why, verdict.why
 
 
-def test_xrp_xmr_and_sol_have_no_port_convention_to_compare_against():
-    """And that is stated rather than silently absent: those three are not in
-    network_target.CHAIN_PORTS, which that module's own comment explains."""
-    for asset in ("XRP", "XMR", "SOL"):
-        assert expected_network(asset, {asset: {"port": 18081, "url": "http://x"}}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -708,23 +663,6 @@ def test_a_valid_payout_is_still_sent(tmp_path):
     assert conn.execute("SELECT status AS s FROM swaps WHERE id='s1'").fetchone()["s"] == "completed"
 
 
-def test_a_valid_monero_payout_is_not_refused_by_the_send_guard(tmp_path):
-    """THE CENTRAL TRAP, AT THE SITE IT WOULD HAVE BEEN WALKED INTO.
-
-    Config.ALLOWED_PAIRS carries ("GRC","XMR"). A blanket `is_valid_address()` at this exact
-    line refuses every valid Monero payout -- on a swap whose deposit has already been taken
-    and credited, so the customer's money is ours and they cannot be paid.
-
-    MUTATION: replace check_address() in payout_service with address_network.
-    is_valid_address() and this goes red while every refusal test above stays green. That
-    asymmetry is the whole argument for the table.
-    """
-    adapter = RecordingAdapter()
-    conn = _seed_pending(tmp_path / "xmr.db", to_asset="XMR", payout_address=XMR_PAYOUT)
-
-    process_pending_payouts(conn, {}, {"XMR": adapter})
-
-    assert adapter.sends == [(XMR_PAYOUT, 0.0975)]
 
 
 def test_a_chain_with_no_validator_is_sent_and_says_it_was_not_checked(tmp_path, caplog):
@@ -1297,37 +1235,11 @@ def test_a_swap_paying_out_to_TAPROOT_can_be_CREATED(tmp_path):
 # =======================================================================================
 
 
-@pytest.mark.parametrize(("fixture", "network"), [
-    (XMR_INTEGRATED_TESTNET, "testnet"),
-    (XMR_INTEGRATED_STAGENET, "stagenet"),
-    (XMR_SUBADDRESS_TESTNET, "testnet"),
-])
-def test_an_integrated_or_sub_monero_address_is_VALID(fixture, network):
-    """All three non-primary forms. 106 characters for integrated, 95 for the rest."""
-    verdict = check_address("XMR", fixture)
-    assert verdict.state == VALID, verdict.why
-    assert not verdict.refuses
-    assert verdict.network == network, verdict.why
 
 
-def test_the_payment_id_is_carried_rather_than_discarded():
-    """A caller reporting "we are paying an integrated address" to an operator needs to be able
-    to say so, and a future caller that must NOT accept one can ask instead of re-decoding."""
-    decoded = monero_keys.decode_address(XMR_INTEGRATED_TESTNET)
-    assert decoded.is_integrated
-    assert decoded.payment_id == bytes.fromhex("a1b2c3d4e5f60718")
-    assert len(decoded.public_spend_key) == 32, "and the payment ID did not leak into a key"
-    assert len(decoded.public_view_key) == 32, (
-        "THE MUTATION THAT MATTERS: slicing the view key as body[33:] instead of "
-        "body[33:STANDARD_BODY_BYTES] gives a 40-byte 'view key' with the payment ID glued on, "
-        "and every downstream key comparison then fails for a reason nobody could find"
-    )
-    assert not monero_keys.decode_address(XMR_SUBADDRESS_TESTNET).is_integrated
 
 
 @pytest.mark.parametrize("fixture", [
-    INVALID_XMR_INTEGRATED_PREFIX_STANDARD_LENGTH,
-    INVALID_XMR_PRIMARY_PREFIX_INTEGRATED_LENGTH,
 ])
 def test_a_prefix_and_length_that_DISAGREE_are_still_refused(fixture):
     """WHAT MAKES THIS A FIX RATHER THAN JUST ACCEPTING A LONGER STRING. Both of these have a
@@ -1338,23 +1250,8 @@ def test_a_prefix_and_length_that_DISAGREE_are_still_refused(fixture):
 
     MUTATION: delete the `len(body) != expected_body` check and both of these become VALID,
     with the payment ID read out of a body that has none."""
-    verdict = check_address("XMR", fixture)
+    verdict = check_address(fixture)
     assert verdict.state == INVALID, verdict.why
     assert "disagree" in verdict.why, "and the reason says which two facts conflict"
 
 
-def test_a_credited_swap_paying_out_to_an_INTEGRATED_monero_address_is_SENT(tmp_path):
-    """THE MONEY PATH, not the decoder. Before this an already-credited GRC->XMR swap whose
-    payout address was exchange-issued went to status='failed' terminally: nothing sent, no
-    retry, customer's GRC in our wallet."""
-    adapter = RecordingAdapter()
-    conn = _seed_pending(tmp_path / "xmr_integrated.db", to_asset="XMR",
-                         payout_address=XMR_INTEGRATED_TESTNET)
-
-    process_pending_payouts(conn, {}, {"XMR": adapter})
-
-    assert adapter.sends == [(XMR_INTEGRATED_TESTNET, 0.0975)], (
-        f"an exchange-issued Monero address sent nothing: {adapter.sends}"
-    )
-    swap = conn.execute("SELECT status, failed_reason FROM swaps WHERE id='s1'").fetchone()
-    assert swap["status"] == "completed", swap["failed_reason"]

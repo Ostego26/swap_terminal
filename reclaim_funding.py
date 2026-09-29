@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Empty a seed-derived funding address back into your wallet.
 
-Role: file (the entry point; the decisions are adaptor_steps.reclaim_p2pkh() and
+Role: file (the entry point; the decisions are funding_steps.reclaim_p2pkh() and
       p2pkh_script_for_address(), and it holds none of its own)
 Reads: ST_ADAPTOR_FUNDING_SEED, and one daemon over JSON-RPC
 Writes: nothing on disk. With --send it BROADCASTS one transaction.
@@ -53,10 +53,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.base import RPCError
 from modules.htlc_spend import satoshis_to_coins
-from regtest import adaptor_steps
-from regtest.adaptor_steps import Run
+from regtest import funding_steps
 from regtest.console import FAIL, OK, Console
 from regtest.daemons import RegtestSetupError
+from regtest.funding_steps import Run
 
 # SIX, not five, and this is a correction rather than a count. The first run printed two
 # `step 1/5` lines and two `step 2/5` lines, because `step_1_reachable` and
@@ -111,29 +111,29 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     """
     asset = args.chain.upper()
     console.banner(f"{asset} -- reclaim a seed-derived funding address")
-    config = adaptor_steps.resolve_config(asset)
+    config = funding_steps.resolve_config(asset)
     run = Run(console=console, config=config, wallet="")
     console.say(f"{asset}: endpoint {config.base_url}")
 
     # Steps 1 and 2 are printed by the two calls themselves, borrowed whole from
     # adaptor_regtest_verify: the daemon answering, and the daemon SAYING which network it is
     # on. Printing a header here as well is what produced the duplicate numbering.
-    adaptor_steps.step_1_reachable(run)
-    adaptor_steps.assert_test_network(run)
+    funding_steps.step_1_reachable(run)
+    funding_steps.assert_test_network(run)
 
     console.step(3, asset, "derive the funding address from the seed in the environment")
-    key = adaptor_steps.operator_funding_key(run)
+    key = funding_steps.operator_funding_key(run)
     if key is None:
         raise RegtestSetupError(
-            f"{adaptor_steps.FUNDING_SEED_VARIABLE} is not set, so there is no address to empty. "
+            f"{funding_steps.FUNDING_SEED_VARIABLE} is not set, so there is no address to empty. "
             f"Export the seed that derived the address you want back -- `history | grep "
-            f"{adaptor_steps.FUNDING_SEED_VARIABLE}` usually has it -- and run this again."
+            f"{funding_steps.FUNDING_SEED_VARIABLE}` usually has it -- and run this again."
         )
     console.check(f"{asset} funding address derived from the seed", key.address,
                   "the address you funded", OK)
 
     console.step(4, asset, "find the payment the wallet made to it")
-    txid = args.funding_txid or adaptor_steps.discover_operator_funding_txid(run, key)
+    txid = args.funding_txid or funding_steps.discover_operator_funding_txid(run, key)
     if not txid:
         # IT USED TO SAY "the wallet remembers no payment to <address>" IN EVERY CASE, and on
         # 2026-09-28 it said that directly beneath twenty lines listing THREE payments it had
@@ -153,17 +153,17 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
         # shared message does not: a reclaim is usually run BECAUSE the operator suspects they
         # used a different seed.
         raise RegtestSetupError(
-            adaptor_steps.no_usable_funding_message(run, key)
+            funding_steps.no_usable_funding_message(run, key)
             + f"\n  If you expected a payment here and there is none, check that this is the "
               f"seed that derived the address you funded -- {key.address} is its fingerprint, so "
               f"compare it -- or pass --funding-txid if the payment came from somewhere this "
               f"wallet has no record of."
         )
-    source = adaptor_steps.find_operator_funding(run, key, txid)
+    source = funding_steps.find_operator_funding(run, key, txid)
 
     console.step(5, asset, "build and sign the spend -- IN THIS PROCESS, and broadcast nothing yet")
-    destination = args.to or adaptor_steps.wallet_owned_address(run)
-    raw, predicted, value = adaptor_steps.reclaim_p2pkh(run, key, source, destination)
+    destination = args.to or funding_steps.wallet_owned_address(run)
+    raw, predicted, value = funding_steps.reclaim_p2pkh(run, key, source, destination)
     console.check(
         f"{asset} built and signed", f"{satoshis_to_coins(value)} to {destination}",
         f"the whole output less the fee ({satoshis_to_coins(source.value_satoshis - value)})", OK,
@@ -194,12 +194,12 @@ def reclaim(console: Console, args: argparse.Namespace) -> int:
     #
     # `find_the_spender` walks blocks instead, which needs only `getblockhash` and `getblock`.
     # Same question, answered from the chain rather than from a method the daemon does not have.
-    answer = adaptor_steps.mempool_answer(run, raw)
+    answer = funding_steps.mempool_answer(run, raw)
     console.say(f"{asset}: asked the daemon whether it would accept this -- {answer.description}")
     reason = answer.reason
     spender = None
     if not reason:
-        spender, description = adaptor_steps.find_the_spender(run, source)
+        spender, description = funding_steps.find_the_spender(run, source)
         console.say(f"{asset}: asked the chain instead -- {description}")
     if reason or spender:
         console.check(f"{asset} the output is still there",

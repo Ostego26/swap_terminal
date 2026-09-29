@@ -92,7 +92,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
-from chains import monero_keys, solana_address, xrp_address
+from chains import solana_address, xrp_address
 from modules.address_network import (
     BASE58_VERSION_ASSETS,
     BASE58_VERSIONED_HASH160_LEN,
@@ -432,27 +432,6 @@ def _xrp(address: str) -> AddressVerdict:
     )
 
 
-def _monero(address: str) -> AddressVerdict:
-    """The XMR verdict, delegated to chains/monero_keys.py, which owns that encoding.
-
-    THIS IS THE FUNCTION THE BLANKET GUARD WOULD HAVE BROKEN. Monero's base58 has nothing in
-    common with Bitcoin's beyond the alphabet -- 8-byte blocks encode to 11 characters, and
-    the checksum is the first four bytes of KECCAK-256, not of a double SHA-256 -- so no
-    amount of trying harder inside address_network.py would decode one.
-
-    decode_address() raises MoneroAddressError with a sentence already written for a reader,
-    so it is reported rather than replaced. The network comes back from the decode
-    (mainnet/testnet/stagenet), which is what makes a receive-path network check possible on
-    this chain at all.
-    """
-    raw = address.strip() if isinstance(address, str) else ""
-    try:
-        decoded = monero_keys.decode_address(raw)
-    except monero_keys.MoneroAddressError as error:
-        return AddressVerdict(INVALID, f"{address!r} is not a valid Monero address: {error}", UNKNOWN)
-    return AddressVerdict(
-        VALID, f"{raw!r}: valid Monero {decoded.network} {decoded.kind} address", decoded.network
-    )
 
 
 def _solana(address: str) -> AddressVerdict:
@@ -504,7 +483,6 @@ VALIDATORS: dict[str, Callable[[str], AddressVerdict]] = {
     "LTC": lambda address: _bitcoin_family("LTC", address),
     "GRC": lambda address: _bitcoin_family("GRC", address),
     "XRP": _xrp,
-    "XMR": _monero,
     "SOL": _solana,
 }
 

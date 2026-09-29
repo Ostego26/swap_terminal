@@ -35,7 +35,7 @@ So this harness answers six questions, each as a row-level outcome on a real cha
 
 Three and four are the ones only a chain can answer. A transposed pair of signatures
 produces a scriptSig of the SAME LENGTH and the SAME SHAPE as a correct one -- no local
-assertion can tell them apart, which is why tests/test_adaptor_swap_chain.py says so
+assertion can tell them apart, which is why tests/test_script_chain.py says so
 rather than trying.
 
 WHY NO BIP65 ACTIVATION HEIGHT IS MINED, WHICH MAKES THIS RUN IN SECONDS WHERE
@@ -94,16 +94,9 @@ from typing import NamedTuple
 
 import base58
 from chains.base import RPCError
-from chains.monero_keys import decode_address, public_key_for_share, shared_address
 from microfortnights import format_duration
-from modules import adaptor_swap_chain as chain
 from modules import network_selection
-from modules.adaptor_swap_scripts import (
-    OP_0,
-    two_of_two_p2sh_script,
-    two_of_two_redeem_script,
-    two_of_two_script_sig,
-)
+from modules import script_chain as chain
 from modules.address_network import BASE58_VERSIONED_HASH160_LEN
 from modules.htlc_rpc import lookup_contract_output
 from modules.htlc_spend import (
@@ -113,22 +106,10 @@ from modules.htlc_spend import (
     satoshis_to_coins,
 )
 from modules.htlc_timelock import SECONDS_PER_BLOCK
-from modules.monero_shares_file import SharesFileError, save_shares
-from modules.monero_swap_protocol import reconstruct_spend_key, sample_shares
 from regtest import daemons
-from regtest.adaptor_join import (
-    AdaptorLeg,
-    adaptor_point_for_share,
-    complete_leg,
-    nothing_leaks,
-    point_hex,
-    pre_sign_leg,
-    recover_published_scalar,
-    swap_handoff,
-)
 from regtest.console import FAIL, OK, SKIP, XFAIL, Console
 from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
-from regtest.keys import RegtestKey, generate_key, key_from_seed
+from regtest.keys import RegtestKey, key_from_seed
 from regtest.txbuild import push_data
 
 TOTAL_STEPS = 11
@@ -222,32 +203,8 @@ _LOCK_B_CONFIRMATION_BLOCKS = 4
 _LOCK_C_CONFIRMATION_BLOCKS = 2
 
 
-def expected_grc_blocks() -> int:
-    """A FLOOR on the blocks a GRC run waits for -- not a prediction of the run's length.
-
-    A floor because the tip moves while the run works: T1 and T2 are computed from the tip at
-    the moment each lock confirms, so every block that arrives during the earlier steps counts
-    toward them and the real total is between this and this plus a few.
-
-    LOCK C ADDED ITS OWN T2 WAIT, 2026-09-28, and the floor went up with it rather than being
-    left to surprise somebody thirty minutes in. Lock B waits to T1 and then stops (its refund
-    has no locktime); lock C waits to T1 for its cancel and then to T2 for the punish, so it
-    carries the full T2 distance on its own. Measured against the previous run, whose floor was
-    19 blocks and which took about 12 minutes of waiting: this raises the floor to 31.
-
-    rule 14, and this is the line it governs: an operator who is told 28 minutes and waits 45
-    reaches for Ctrl-C at minute 30, and on this harness that kills a run mid-chain.
-    """
-    return (
-        _LOCK_A_BLOCKS
-        + _LOCK_B_CONFIRMATION_BLOCKS + T1_BLOCKS_AHEAD
-        + _LOCK_C_CONFIRMATION_BLOCKS + T2_BLOCKS_AHEAD
-    )
 
 
-def expected_grc_seconds() -> float:
-    """The floor above in seconds, at Gridcoin's target stake interval."""
-    return expected_grc_blocks() * GRC_SECONDS_PER_BLOCK
 
 # The fields, in order, that count as a daemon SAYING it is on a test network. Each is
 # (method, key, accepted values). The order is the order they are tried, and every one is
@@ -316,147 +273,6 @@ GRC_ENV = {
 GRC_MAINNET_PORT = 15715
 
 
-@dataclass
-class ChainOutcome:
-    """What this run established on one chain, as the six questions and nothing else.
-
-    Every field starts at SKIP rather than at False, because "not attempted" and "
-    attempted and failed" must not render identically (rule 14). A harness that
-    initialized these to False would print a clean row of failures for a chain whose
-    daemon was never reachable.
-    """
-
-    asset: str
-    located_by_script_match: str = SKIP
-    spends_in_correct_order: str = SKIP
-    refused_when_transposed: str = SKIP
-    refused_without_op0: str = SKIP
-    cancel_refused_before_t1_by_relay: str = SKIP
-    cancel_refused_before_t1_by_consensus: str = SKIP
-    cancel_accepted_at_t1: str = SKIP
-    punish_refused_before_t2: str = SKIP
-    refund_accepted_after_cancel: str = SKIP
-    predicted_txid_matched: str = SKIP
-    # THE JOIN (docs/monero_swap_protocol.md section 2). These are what make this an XMR
-    # swap rehearsal rather than a 2-of-2 demonstration: a scalar read back out of a
-    # scriptSig a daemon accepted, and the Monero spend key it reconstructs.
-    redeem_publishes_alice_share: str = SKIP
-    refund_publishes_bob_share: str = SKIP
-    plain_branch_leaks_nothing: str = SKIP
-    reconstructed_key_opens_lock: str = SKIP
-    # THE FIFTH TRANSACTION, which had never moved a coin until 2026-09-28. Tx_punish was
-    # broadcast once per run, before T2, and asserted REFUSED -- a real assertion, and not the
-    # branch working. This is the branch working.
-    punish_accepted_after_t2: str = SKIP
-    punish_leaks_nothing: str = SKIP
-    notes: list[str] = field(default_factory=list)
-    # A NAMED PRECONDITION THAT REFUSED THE RUN, or "" when none did. Recorded rather than
-    # inferred from the tallies, because the tallies cannot tell "the daemon refused to let us
-    # start" from "the code under test broke" -- and those need different things from a reader.
-    setup_refusal: str = ""
-
-    def established(self) -> bool:
-        """Did this run actually answer the question it exists to answer?
-
-        THE EXIT CODE KEYS ON THIS, NOT ON THE FAIL TALLY, and that change is the whole reason
-        this method exists. main() returned `1 if console.counts[FAIL] else 0`, so the moment a
-        diagnosed precondition stopped being scored FAIL -- which is correct, it is not the code
-        under test breaking -- a run that funded nothing, spent nothing and established nothing
-        would have exited 0. That is rule 13's twelve cycles printing `exit_code=0` beside
-        "skipping this cycle", rebuilt here by accident while fixing a reporting defect one
-        level down.
-
-        So: established means the four DECISIVE outcomes are all OK. Nothing else counts. A
-        SKIP is not a pass, a refusal at setup is not a pass, and a green tally of the checks
-        that did run is not a pass either.
-        """
-        return not self.setup_refusal and all(outcome == OK for outcome in self.decisive())
-
-    def decisive(self) -> tuple[str, ...]:
-        """The outcomes a pass is made of. Named once, because `established()` and `verdict()`
-        both had this tuple written out and a sixth outcome added to one of them would have
-        silently disagreed with the other (rule 8 -- two copies of one rule, with a delay on it).
-
-        THE LAST TWO ARE NEW AS OF 2026-09-28 AND THEY RAISE THE BAR. Four of these say a 2-of-2
-        P2SH is usable; the last two say an ADAPTOR signature is, which is a different and
-        stronger claim -- the redeem's scriptSig, read back off the chain, must yield the Monero
-        spend share it was completed with, and that share plus the other one must reconstruct a
-        private spend key whose public key is the one the lock ADDRESS carries.
-
-        WHY THE CANCEL-PATH OUTCOMES ARE STILL NOT HERE, including the refund's recovery. They
-        ride on mining to T1, which a chain this harness cannot mine on cannot reach -- and a
-        decisive outcome that a reachable daemon can turn into a SKIP is a decisive outcome that
-        silently stops deciding. The redeem needs no height at all, which is why the join is
-        anchored to it. The refund's recovery is measured and printed and is not softened; it is
-        simply not what the exit code keys on.
-        """
-        return (
-            self.located_by_script_match,
-            self.spends_in_correct_order,
-            self.refused_when_transposed,
-            self.refused_without_op0,
-            self.redeem_publishes_alice_share,
-            self.reconstructed_key_opens_lock,
-        )
-
-    def verdict(self) -> str:
-        """The one sentence the operator reads, and it never hedges.
-
-        `decisive()` names which outcomes those are and why; this method only renders them.
-        The sentence used to be written from a tuple spelled out here as well as in
-        `established()`, and it said "2-of-2 P2SH IS SPENDABLE" -- which stopped being the
-        whole claim when the adaptor join was wired in on 2026-09-28. A pass now also means
-        the redeem published a Monero spend share, so the sentence says so.
-
-        A green on the spend with a SKIP on either refusal is still NOT a pass -- it would mean
-        the harness never tested the footgun, and the footgun is the thing that produces a
-        well-formed scriptSig verifying nothing.
-        """
-        decisive = self.decisive()
-        if all(item == OK for item in decisive):
-            return (
-                "THE ADAPTOR JOIN WORKS ON THIS CHAIN: the 2-of-2 P2SH funded, was located by "
-                "scriptPubKey match, spent with both signatures in key order, and was REFUSED both "
-                "transposed and without the OP_0 dummy -- and the redeem's second signature was an "
-                "ADAPTOR pre-signature, completed with a Monero spend share, whose scalar was read "
-                "back out of the scriptSig the daemon accepted and reconstructed a private spend key "
-                "matching the lock address. This is a spend, not a source reading."
-            )
-        if any(item == FAIL for item in decisive):
-            return (
-                "THE ADAPTOR JOIN DID NOT WORK ON THIS CHAIN. See the FAIL lines above; nothing here is "
-                "softened to make the run green."
-            )
-        return (
-            "NOT ESTABLISHED: one or more of the decisive checks was never attempted (SKIP). A "
-            "SKIP is not a pass -- the transposition and the missing-OP_0 refusals are the two things "
-            "only a chain can answer."
-        )
-
-    def cancel_verdict(self) -> str:
-        """How strong the timelock evidence is, reported separately from the branch verdict.
-
-        Separate because it differs per daemon: a relay refusal says a node will not pass
-        the transaction on, and only a refusal to MINE it says a miner could not have
-        included it. regtest_htlc_verify.py's step 8c draws the same distinction and it is
-        the one that mattered on 2026-09-27.
-        """
-        if self.cancel_accepted_at_t1 != OK:
-            return "nLockTime on the 2-of-2: NOT ESTABLISHED -- the cancel was never accepted at T1"
-        if self.cancel_refused_before_t1_by_consensus == OK:
-            return (
-                "nLockTime on the 2-of-2 is CONSENSUS-enforced: the daemon refused to MINE an early "
-                "cancel, and accepted the same transaction at T1"
-            )
-        if self.cancel_refused_before_t1_by_relay == OK:
-            return (
-                "nLockTime on the 2-of-2 is RELAY-refused before T1 and the SAME BYTES are "
-                "accepted at T1 -- which isolates nLockTime as the cause, because nothing about "
-                "the transaction changed and only the height did. That a MINER could not have "
-                "included it is NOT MEASURED here (no generateblock on this chain), but it is "
-                "not unknown either: " + GRIDCOIN_FINALITY_SOURCE_READING
-            )
-        return "nLockTime on the 2-of-2: accepted at T1, but the early refusal was never measured"
 
 
 @dataclass
@@ -731,7 +547,7 @@ def step_3_capabilities(run: Run) -> None:
     """Ask the daemon what it can do, and print the answers the funding route depends on.
 
     THIS IS WHERE THE `fundrawtransaction` QUESTION GETS ANSWERED RATHER THAN ASSUMED.
-    `modules/adaptor_swap_chain.select_funding_inputs()` exists because Gridcoin is on the
+    `modules/script_chain.select_funding_inputs()` exists because Gridcoin is on the
     pre-0.17 RPC surface -- measured 2026-09-27: no `gettxout`, no
     `signrawtransactionwithkey` -- and nothing in this tree had ever asked whether
     `fundrawtransaction` is there. This asks, and prints the answer whichever way it goes.
@@ -806,7 +622,7 @@ def _exercise_input_selection(run: Run) -> None:
     target = 1
     try:
         chosen, total = chain.select_funding_inputs(rows, target)
-    except chain.AdaptorChainError as exc:
+    except chain.ScriptChainError as exc:
         run.check("select_funding_inputs() over real listunspent rows", str(exc),
                   "a selection, or a shortfall naming the total", FAIL)
         return
@@ -1252,67 +1068,8 @@ def _report_gridcoin_lock_state(run: Run) -> None:
         )
 
 
-@dataclass
-class LockSetup:
-    """One 2-of-2 and the keys that can sign for it. Two of these per run.
-
-    TWO SEPARATE KEY PAIRS PER LOCK, and different pairs between the two locks, for a
-    reason that is a diagnostic rather than a protocol requirement: the lock and cancel
-    2-of-2s in the real protocol name the same two parties, so their P2SH scriptPubKeys
-    are the same bytes, and a scriptPubKey match then cannot say which of the two outputs
-    it found. Using distinct keys per lock here makes every match in this harness
-    unambiguous, which is what makes outcome 1 mean anything.
-    `modules/adaptor_swap_chain.ChainContext`'s docstring carries the full argument.
-    """
-
-    label: str
-    alice: RegtestKey
-    bob: RegtestKey
-    lock_script: bytes
-    cancel_script: bytes
-
-    @property
-    def lock_script_pubkey(self) -> bytes:
-        return two_of_two_p2sh_script(self.lock_script)
 
 
-def step_4_build_scripts(run: Run) -> tuple[LockSetup, ...]:
-    """LOCKS_PER_RUN independent 2-of-2s -- one per terminal branch, because a lock spends once.
-
-    A takes the redeem, B the refund, C the punish. LOCKS_PER_RUN's comment carries why each
-    needs its own output and why C exists at all.
-
-    Distinct keys per lock, which is a diagnostic rather than a protocol requirement: it makes
-    every scriptPubKey match in this run unambiguous about WHICH lock it found.
-    """
-    run.step(4, f"{LOCKS_PER_RUN} 2-of-2 scripts, with distinct keys so every scriptPubKey match is unambiguous")
-    setups = []
-    for label in ("A -- spend and refusals", "B -- the cancel path", "C -- the punish path"):
-        alice, bob = generate_key(), generate_key()
-        lock_script = two_of_two_redeem_script(alice.public_key, bob.public_key)
-        # The cancel 2-of-2 uses the SAME two keys, which is what the protocol specifies.
-        # It is therefore byte-identical to the lock script, so the cancel output is
-        # located by txid and vout rather than by a scriptPubKey match -- said here and on
-        # screen because an ambiguous match reported as a found output is worse than none.
-        cancel_script = two_of_two_redeem_script(alice.public_key, bob.public_key)
-        setup = LockSetup(label=label, alice=alice, bob=bob, lock_script=lock_script, cancel_script=cancel_script)
-        run.say(
-            f"lock {label}: redeem script {len(lock_script)} bytes, "
-            f"P2SH scriptPubKey {setup.lock_script_pubkey.hex()}"
-        )
-        setups.append(setup)
-    distinct = {setup.lock_script_pubkey for setup in setups}
-    run.check(
-        f"all {LOCKS_PER_RUN} locks have different scriptPubKeys",
-        f"{len(distinct)} distinct of {len(setups)}", f"{len(setups)} distinct",
-        OK if len(distinct) == len(setups) else FAIL,
-    )
-    run.say(
-        "within ONE lock, the cancel 2-of-2 names the same two keys as the lock 2-of-2, exactly as "
-        "docs/monero_swap_protocol.md section 2 specifies -- so those two scriptPubKeys ARE identical and "
-        "the cancel output is located by txid:vout, never by a script match"
-    )
-    return tuple(setups)
 
 
 # THE STAKING-ONLY UNLOCK, WHICH IS THE CONDITION THAT ENDED THE 2026-09-28 GRC RUN, AND THE
@@ -1694,7 +1451,7 @@ def _send_to_self(run: Run, key: RegtestKey, coin: str) -> chain.Outpoint:
 
     WHY THE HARNESS DOES THIS INSTEAD OF FUNDING THE 2-of-2 DIRECTLY. Tx_lock has to be
     built, signed and HELD unbroadcast -- that is FINDING 1 in
-    modules/adaptor_swap_chain.py and the whole reason `sendtoaddress` cannot build it. To
+    modules/script_chain.py and the whole reason `sendtoaddress` cannot build it. To
     sign Tx_lock in-process the harness needs an input it holds the key for, so it makes
     one: `sendtoaddress` to an address generated here, confirm it, and then Tx_lock spends
     that.
@@ -1838,58 +1595,8 @@ def _sign_p2pkh(key: RegtestKey, digest: bytes) -> bytes:
     return push_data(key.sign_digest(digest) + bytes([SIGHASH_ALL])) + push_data(key.public_key)
 
 
-@dataclass
-class BuiltChain:
-    """One lock and the four transactions built against it, all still unbroadcast.
-
-    `lock_raw_hex` and `lock_txid` are the point of this object: the txid is computed from
-    bytes that have not been sent, and every other transaction here references it. That is
-    FINDING 1 in modules/adaptor_swap_chain.py -- step 0 of the protocol exchanges
-    signatures on transactions that spend Tx_lock BEFORE Tx_lock is broadcast, and
-    `sendtoaddress` cannot produce that state at all.
-    """
-
-    setup: LockSetup
-    context: chain.ChainContext
-    lock_raw_hex: str
-    lock_txid: str
-    lock_vout: int
-    lock_satoshis: int
-    lock_fee: int
-    redeem: chain.ChainTransaction
-    cancel: chain.ChainTransaction
-    t1: int
-    t2: int
-    # THE JOIN. `monero` is the swap this chain is the script half of; `redeem_leg` is Bob's
-    # signature on Tx_redeem as an ADAPTOR PRE-SIGNATURE under Y_a, made here at build time
-    # because that is where the protocol puts it -- step 0, before Tx_lock is broadcast, which
-    # is FINDING 1 above. It is carried on this object rather than recreated at the spend
-    # because `recover_published_scalar` needs the SAME PreSignature the signature was adapted
-    # from: recovery is `s^-1 * s_a` against that object's `s_a`, so a second pre-signature over
-    # the same digest (they are randomized, not RFC6979) would recover nothing at all.
-    monero: MoneroSide
-    redeem_leg: AdaptorLeg
 
 
-def _signatures_in_key_order(setup: LockSetup, digest: bytes) -> tuple[bytes, bytes]:
-    """(Alice's, Bob's) -- the SAME order the keys appear in the redeem script.
-
-    two_of_two_redeem_script(alice, bob) puts Alice first, so Alice's signature goes first.
-    This function exists so that order is stated once; the transposition test below calls
-    it and swaps the result, which makes the two cases provably the same two signatures in
-    two orders rather than two independently built scriptSigs.
-
-    BOTH SIGNATURES ARE PLAIN HERE, and only Tx_cancel and Tx_punish use both of them --
-    which is what docs/monero_swap_protocol.md section 2 specifies for those two, and the
-    reason neither of them leaks anything when it is published. `_redeem_signatures` and
-    `_refund_signatures` are the other two callers: each takes ONE of the two from here and
-    replaces the other with a completed adaptor signature, so the key ORDER is still stated
-    once, in this function, and only the adapted half differs between them.
-    """
-    return (
-        setup.alice.sign_digest(digest) + bytes([SIGHASH_ALL]),
-        setup.bob.sign_digest(digest) + bytes([SIGHASH_ALL]),
-    )
 
 
 # Which Monero network the rehearsal's lock address is encoded for. STAGENET, never
@@ -1900,99 +1607,10 @@ def _signatures_in_key_order(setup: LockSetup, digest: bytes) -> tuple[bytes, by
 MONERO_REHEARSAL_NETWORK = "stagenet"
 
 
-@dataclass(frozen=True)
-class MoneroSide:
-    """The Monero half of the swap, with BOTH parties' shares -- because one process plays both.
-
-    ONE SET PER RUN, NOT ONE PER LOCK, and the reason is the protocol rather than economy.
-    docs/monero_swap_protocol.md describes ONE swap with five transactions; this harness funds
-    two 2-of-2s only because the redeem and the cancel path both spend a lock and there has to
-    be an unspent one left for the second. So lock A exercises the redeem branch of one swap and
-    lock B the cancel branch of the same swap -- branches that in reality are exclusive, which is
-    exactly why a single harness has to take both and a single real swap never does.
-
-    THE TWO SPEND SHARES ARE PRIVATE AND ARE NEVER PRINTED. What is printed is the lock ADDRESS,
-    which is not a secret -- it is the thing both parties watch -- and the two PUBLIC spend
-    shares, which are what the recovery check is measured against. `RehearsalResult` in
-    modules/monero_swap_protocol.py reduces a rehearsal to booleans before returning for the same
-    reason, and that reasoning applies here with more force, because this object is held across a
-    whole run rather than for the length of one call.
-
-    `alice_spend_public` and `bob_spend_public` are CAPTURED AT SETUP and carried, rather than
-    recomputed from the shares when recovery happens. Recomputing would make the recovery check
-    compare a scalar against a derivation of the very scalar it was adapted from, which passes
-    unconditionally. Captured, it compares against the value the lock address was built from
-    minutes earlier, which is the claim that matters.
-    """
-
-    alice_spend: int
-    alice_view: int
-    bob_spend: int
-    bob_view: int
-    lock_address: str
-    alice_spend_public: str
-    bob_spend_public: str
-    # THE TWO ADAPTOR POINTS, CAPTURED AT SETUP for exactly the reason the paragraph above
-    # gives for the public spend shares, and the reason is stronger here. Until 2026-09-29
-    # `pre_sign_leg` took the SCALAR and derived Y on its first line, so the pre-signing
-    # party's own code handled the counterparty's Monero spend share -- Bob's call was
-    # handed Alice's `alice_spend`. Carrying the POINT means the scalar stops at this
-    # object, and a two-process Bob who receives Y over a wire reaches the same call
-    # unchanged. These are SECP256K1 points; `alice_spend_public` above is the ED25519
-    # form of the same scalar, and nothing in this tree yet proves the two agree -- see
-    # adaptor_join.adaptor_point_for_share, which says so at the site.
-    alice_adaptor_point: object
-    bob_adaptor_point: object
 
 
-def monero_side() -> MoneroSide:
-    """Sample both parties' Monero shares and encode the address the swap would lock XMR to.
-
-    `monero_swap_protocol.sample_shares` rather than a fresh `secrets.randbelow` here: that
-    function owns the [1, 2^252) bound, and the bound is not a style choice -- 2^252 is the
-    cross-curve DLEQ's own limit, and a share at or above it cannot be proven the same integer
-    on both curves at all. A second sampler in this file would be rule 8's defect with a delay
-    on it, and the delay would end at the first share that happened to exceed the bound.
-
-    NOTHING HERE TOUCHES MONERO. No daemon is contacted, no XMR moves, and the address is
-    encoded rather than funded. What it is for is the closing assertion of the run: the scalar
-    recovered from a Gridcoin scriptSig has to reconstruct a private spend key whose public key
-    is the one THIS ADDRESS carries, and an address is the only artifact that can carry that
-    claim across from one chain to the other.
-    """
-    alice, bob = sample_shares(), sample_shares()
-    return MoneroSide(
-        alice_spend=alice.spend, alice_view=alice.view,
-        bob_spend=bob.spend, bob_view=bob.view,
-        lock_address=shared_address(
-            MONERO_REHEARSAL_NETWORK,
-            public_key_for_share(alice.spend), public_key_for_share(bob.spend),
-            public_key_for_share(alice.view), public_key_for_share(bob.view),
-        ),
-        alice_spend_public=public_key_for_share(alice.spend).hex(),
-        bob_spend_public=public_key_for_share(bob.spend).hex(),
-        alice_adaptor_point=adaptor_point_for_share(alice.spend),
-        bob_adaptor_point=adaptor_point_for_share(bob.spend),
-    )
 
 
-def build_monero_side(run: Run) -> MoneroSide:
-    """`monero_side()` and the one line of screen it earns.
-
-    Split from the sampling so a test can build a Monero side without a console, a node or a
-    monkeypatched RPC -- the sampling is the DECISION and printing is not (rule 10). The split
-    was made when `tests/test_adaptor_regtest_harness._built_chain` needed one and the only way
-    to get it was a stub Run that existed solely to swallow a `say`; a stub written to satisfy a
-    print is a sign the print is in the wrong layer.
-    """
-    side = monero_side()
-    run.say(
-        f"Monero side of the swap: lock address {side.lock_address} "
-        f"({MONERO_REHEARSAL_NETWORK}, spend key S_a+S_b, view key V_a+V_b). The two SPEND shares "
-        f"are private and are never printed; the redeem below is pre-signed under S_a's secp256k1 "
-        f"twin Y_a and the refund under Y_b"
-    )
-    return side
 
 
 #: Where a GRC run leaves the fixture that lets the Monero leg be swept. Under the funding
@@ -2002,233 +1620,14 @@ HANDOFF_VARIABLE = "ST_SWAP_HANDOFF_FILE"
 DEFAULT_HANDOFF = Path.home() / "xmr-stagenet-shared" / "swap-handoff-shares.json"
 
 
-def write_the_swap_handoff(run: Run, side: MoneroSide, recovered_alice_share: int) -> None:
-    """Persist the recovered share so the Monero leg can actually be swept. GAP (e).
-
-    CALLED ONLY WHEN `reconstruction_opens_lock` HAS ALREADY RETURNED TRUE, because a fixture
-    written from a share that does NOT open the lock is a fixture that wastes a faucet claim and
-    a block-time wait before failing for a reason the run already knew.
-
-    THE NETWORK IS CHECKED HERE AND NOT IN adaptor_join, which is why the write lives at this
-    layer: these are PRIVATE SCALARS IN THE CLEAR, correct on a valueless test network and a
-    key-disclosure bug anywhere else. `MONERO_REHEARSAL_NETWORK` is "stagenet" and the address
-    is decoded to confirm it rather than trusted -- the same rule as every other network gate in
-    this tree: ask, never infer.
-
-    A FAILURE TO WRITE IS NOT A FAILURE OF THE RUN. Everything this run measured is already
-    measured; the file is a convenience for the NEXT step. So it is reported and swallowed --
-    the one case where that is right, because the alternative is a red run whose findings were
-    all green.
-    """
-    decoded = decode_address(side.lock_address)
-    if decoded.network != MONERO_REHEARSAL_NETWORK:
-        run.say(
-            f"NOT writing a swap handoff: the lock address decodes as {decoded.network!r}, not "
-            f"{MONERO_REHEARSAL_NETWORK!r}. That file holds PRIVATE SPEND SHARES in the clear, "
-            f"which is correct on a valueless test network and a key disclosure anywhere else."
-        )
-        return
-    path = Path(os.environ.get(HANDOFF_VARIABLE, "") or DEFAULT_HANDOFF).expanduser()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        save_shares(path, swap_handoff(side, recovered_alice_share),
-                    side.lock_address, MONERO_REHEARSAL_NETWORK)
-    except (OSError, SharesFileError) as error:
-        run.say(f"could not write the swap handoff to {path}: {error}. "
-                f"Everything this run measured is unaffected; only the next step is.")
-        return
-    run.say("")
-    run.say("SWAP HANDOFF WRITTEN -- this is the file that closes gap (e).")
-    run.say(f"  {path} (0600, PRIVATE SPEND SHARES IN THE CLEAR -- {MONERO_REHEARSAL_NETWORK} only)")
-    run.say(f"  spend_share_a is the scalar RECOVERED from the {run.asset} scriptSig above, not a")
-    run.say("  sampled one -- which is what makes the sweep below an end-to-end swap rather than")
-    run.say("  a second demonstration of the same arithmetic.")
-    run.say("")
-    run.say(f"  1. fund this {MONERO_REHEARSAL_NETWORK} address -- stagenet-faucet.xmr-tw.org pays it:")
-    run.say(f"     {side.lock_address}")
-    run.say("  2. then sweep it with the share this chain published:")
-    run.say(f"     python3 monero_shared_key_verify.py --sweep {side.lock_address} \\")
-    run.say(f"       --port 38084 --daemon node.monerodevs.org:38089 --shares-file {path} --wait 1800")
 
 
-def reconstruction_opens_lock(side: MoneroSide, recovered_alice_share: int) -> bool:
-    """Does `s_a(recovered) + s_b` open the lock address? THE CLOSING ASSERTION OF THE RUN.
-
-    Measured against the ADDRESS -- decoded back to its public spend key -- and not against
-    `shared_public_key(S_a, S_b)`, which is what built the address in the first place. Comparing
-    against the inputs would establish that the addition is associative; comparing against the
-    decoded address establishes that a party holding these two integers can spend what is at the
-    address a counterparty was told to pay, which is the only form of the claim worth anything.
-
-    The addition happens in `monero_swap_protocol.reconstruct_spend_key` -- on the ed25519 side,
-    after both shares are known as integers -- and NOT here, because that is the rule
-    docs/monero_swap_protocol.md section 1.1 exists to enforce: 48.0% of random share pairs sum
-    to at least `l`, so a secp256k1 sum and an ed25519 sum commit to different integers about
-    half the time, with no error anywhere.
-    """
-    spend_key = reconstruct_spend_key(side.bob_spend, recovered_alice_share)
-    return public_key_for_share(spend_key) == decode_address(side.lock_address).public_spend_key
 
 
-def _redeem_signatures(built: BuiltChain) -> tuple[bytes, bytes]:
-    """(Alice's PLAIN, Bob's ADAPTED) -- Tx_redeem's two signatures, in redeem-script key order.
-
-    THIS IS THE ASYMMETRY THAT MAKES IT A SWAP. Alice signs Tx_redeem ordinarily, because it
-    pays her and she is allowed to want it. Bob's signature is not one he ever produced: he
-    produced a PRE-signature under Y_a, and the bytes here are that pre-signature COMPLETED with
-    `built.monero.alice_spend` -- a scalar only Alice holds. So Alice cannot take the S-coin
-    without using her own Monero spend share, and using it in a transaction she must broadcast
-    is what hands it to Bob.
-
-    Bob's key never signs this digest anywhere in this harness, which is the property worth
-    stating: swap `complete_leg` for `setup.bob.sign_digest` and every check in step 8 and step 9
-    still passes -- the chain cannot tell the difference, and that is exactly why the measurement
-    has to be the RECOVERY and not the acceptance.
-
-    `_signatures_in_key_order` still owns the ORDER (rule 8: one statement of it), and this
-    function owns only which of the two is adapted.
-    """
-    alice_plain, _ = _signatures_in_key_order(built.setup, built.redeem.digest)
-    return alice_plain, complete_leg(built.redeem_leg, built.monero.alice_spend, SIGHASH_ALL)
 
 
-def _refund_signatures(built: BuiltChain, refund: chain.ChainTransaction, leg: AdaptorLeg) -> tuple[bytes, bytes]:
-    """(Alice's ADAPTED, Bob's PLAIN) -- Tx_refund's two, and the mirror image of the redeem's.
-
-    Tx_refund pays BOB, so by the same argument it is ALICE's signature that is the
-    pre-signature -- under Y_b this time -- and Bob completes it with his own Monero spend share.
-    Broadcasting it hands `s_b` to Alice, who is the party left holding a funded Monero lock she
-    cannot open if the swap dies on the cancel path.
-
-    Named as its own function beside `_redeem_signatures` rather than parameterized into one,
-    because the difference between them IS the protocol (docs/monero_swap_protocol.md section 0)
-    and a boolean argument would hide it inside a call site (rule 8's "if they genuinely differ,
-    the difference is the point").
-    """
-    _, bob_plain = _signatures_in_key_order(built.setup, refund.digest)
-    return complete_leg(leg, built.monero.bob_spend, SIGHASH_ALL), bob_plain
 
 
-def step_6_build_and_hold(
-    run: Run, setup: LockSetup, funding: chain.Outpoint, tip: int, monero: MoneroSide
-) -> BuiltChain:
-    """Build Tx_lock and the whole four-transaction chain, and broadcast NOTHING.
-
-    THIS IS THE STEP THAT ANSWERS THE `sendtoaddress` QUESTION AS A MEASUREMENT. Every
-    txid below is printed before a single byte reaches the network, and step 7 compares the
-    one predicted for Tx_lock against the one the daemon hands back.
-
-    The order inside this step is forced and it is FINDING 2: Tx_cancel's txid depends on
-    Tx_cancel's signatures, because a legacy txid covers the scriptSigs. So the cancel is
-    SIGNED here, its txid taken, and only then can Tx_refund and Tx_punish be built. The
-    design document's step 0 says these are exchanged "in one round"; on a legacy chain
-    they cannot be, and that is a correction to the document rather than to this code.
-    """
-    run.step(6, "build Tx_lock and all four spends -- and broadcast NOTHING")
-    lock_coin = LOCK_COIN[run.asset]
-    context = chain.ChainContext(
-        asset=run.asset,
-        lock_redeem_script=setup.lock_script,
-        cancel_redeem_script=setup.cancel_script,
-        # Both parties are played by this process, so "Alice's destination" is just an
-        # address this harness holds. The point of the run is the SCRIPT, not the payee.
-        alice_script=setup.alice.p2pkh_script,
-        bob_script=setup.bob.p2pkh_script,
-        ntime=int(time.time()) if run.asset == "GRC" else None,
-    )
-    minimum = chain.minimum_lock_value_satoshis(context)
-    run.say(
-        f"minimum lock value on {run.asset} is {minimum} satoshis ({satoshis_to_coins(minimum)}) "
-        f"<- two fee floors plus a non-dust output, because the cancel path is TWO hops"
-    )
-    unsigned_lock, lock_vout, lock_fee = chain.two_of_two_funding_transaction(
-        context, funding, chain.p2pkh_script_sig_upper_bound(setup.alice.public_key), None, None
-    )
-    lock_script_sig = _sign_p2pkh(setup.alice, _p2pkh_sighash(unsigned_lock, setup.alice))
-    lock_raw = unsigned_lock.serialize({0: lock_script_sig})
-    lock_txid = chain.predicted_txid(unsigned_lock, {0: lock_script_sig})
-    lock_satoshis = unsigned_lock.outputs[lock_vout][0]
-    run.check(
-        "Tx_lock built, signed and HELD (not broadcast)", lock_txid,
-        "a txid computed from bytes that have not been sent", OK,
-    )
-    run.say(
-        f"Tx_lock pays {satoshis_to_coins(lock_satoshis)} to the 2-of-2 P2SH, fee {lock_fee} satoshis, "
-        f"{len(lock_raw)} bytes. Asked for {lock_coin}; the whole prepared input went in less the fee"
-    )
-    run.check("lock value is at or above the minimum", lock_satoshis >= minimum, True,
-              OK if lock_satoshis >= minimum else FAIL)
-
-    lock_outpoint = chain.Outpoint(txid=lock_txid, vout=lock_vout, value_satoshis=lock_satoshis)
-    t1, t2 = tip + T1_BLOCKS_AHEAD, tip + T2_BLOCKS_AHEAD
-    chain.assert_timelocks_ordered(t1, t2)
-    redeem = chain.build_redeem(context, lock_outpoint)
-    cancel = chain.build_cancel(context, lock_outpoint, t1)
-    # STEP 0 OF THE PROTOCOL, in the one place it can be: Bob pre-signs Tx_redeem under Y_a
-    # BEFORE Tx_lock has been broadcast. `pre_sign_leg` verifies it under Bob's own public key
-    # before returning, so a pre-signature that could never be completed is refused here rather
-    # than surfacing later as a generic script failure the operator cannot diagnose.
-    # BOB'S CALL NO LONGER TOUCHES ALICE'S SCALAR. It was `monero.alice_spend` here until
-    # 2026-09-29 -- the pre-signing party handed the counterparty's private Monero spend
-    # share, at the earliest possible moment, inside the function that pre-signs. It is now
-    # the POINT captured at setup, which is what a real Bob would have received over a wire.
-    redeem_leg = pre_sign_leg(
-        "redeem", setup.bob.private_key, redeem.digest,
-        monero.alice_adaptor_point, monero.alice_spend_public,
-    )
-    run.check(
-        "Bob's Tx_redeem signature is an ADAPTOR PRE-SIGNATURE under Y_a",
-        f"Y_a={point_hex(redeem_leg.adaptor_point)[:16]}.. verified under B_pk",
-        "a pre-signature Bob cannot complete and Alice can",
-        OK,
-    )
-    run.say(
-        "Bob's key never signs this digest: the bytes that reach the chain are that pre-signature "
-        "completed with Alice's Monero spend share, so taking the coin is what publishes it"
-    )
-    run.say(f"T1={t1} T2={t2} (BLOCK HEIGHTS, never microfortnights -- tip was {tip})")
-    run.say(
-        f"Tx_redeem: {redeem.output_satoshis} sat to Alice, fee {redeem.fee_satoshis}, "
-        f"size bound {redeem.unsigned_size_bound}, predicted txid {chain.predicted_txid(redeem.parsed)} "
-        f"(UNSIGNED -- signing changes it)"
-    )
-    run.say(
-        f"Tx_cancel: {cancel.output_satoshis} sat to the second 2-of-2, fee {cancel.fee_satoshis}, "
-        f"nLockTime {cancel.locktime}"
-    )
-    # FINDING 2 demonstrated on screen: sign the cancel, and its txid is not the one the
-    # unsigned bytes predicted. The refund and the punish can only be built after this.
-    cancel_sigs = _signatures_in_key_order(setup, cancel.digest)
-    _, signed_cancel_txid = chain.assemble(cancel, *cancel_sigs)
-    run.check(
-        "signing Tx_cancel CHANGES its txid (FINDING 2)",
-        f"unsigned={chain.predicted_txid(cancel.parsed)[:16]}.. signed={signed_cancel_txid[:16]}..",
-        "two different txids, which is why step 0 needs TWO rounds and not one",
-        OK if signed_cancel_txid != chain.predicted_txid(cancel.parsed) else FAIL,
-    )
-    cancel_output = chain.Outpoint(txid=signed_cancel_txid, vout=0, value_satoshis=cancel.output_satoshis)
-    refund = chain.build_refund(context, cancel_output)
-    punish = chain.build_punish(context, cancel_output, t2)
-    chain.assert_spends(refund.parsed, signed_cancel_txid, 0)
-    chain.assert_spends(punish.parsed, signed_cancel_txid, 0)
-    run.check(
-        "Tx_refund and Tx_punish bind to the SIGNED cancel's outpoint",
-        f"{signed_cancel_txid[:16]}..:0", "the assembled cancel, not the unsigned one", OK,
-    )
-    run.say(
-        f"Tx_refund: {refund.output_satoshis} sat to Bob, fee {refund.fee_satoshis}, no locktime. "
-        f"Tx_punish: {punish.output_satoshis} sat to Alice, nLockTime {punish.locktime}"
-    )
-    run.say(
-        f"total paid in fees down the cancel path: {cancel.fee_satoshis + refund.fee_satoshis} satoshis "
-        f"over two hops, against {redeem.fee_satoshis} for the one-hop redeem"
-    )
-    return BuiltChain(
-        setup=setup, context=context, lock_raw_hex=lock_raw.hex(), lock_txid=lock_txid,
-        lock_vout=lock_vout, lock_satoshis=lock_satoshis, lock_fee=lock_fee,
-        redeem=redeem, cancel=cancel, t1=t1, t2=t2,
-        monero=monero, redeem_leg=redeem_leg,
-    )
 
 
 def _p2pkh_sighash(parsed, key: RegtestKey) -> bytes:
@@ -2276,407 +1675,20 @@ def broadcast_and_report(run: Run, raw_hex: str, label: str) -> tuple[str | None
     return txid, "accepted"
 
 
-def step_7_broadcast_lock(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
-    """Broadcast Tx_lock, and check the predicted txid against the daemon's.
-
-    OUTCOME 1, in two halves. The txid check is what turns predicted_txid() from an
-    expression into a measurement: a local test can only compare that function against
-    another expression of the same rule, and this compares it against a chain. Then the
-    funded output is LOCATED by scriptPubKey match, through
-    modules/htlc_rpc.lookup_contract_output() -- the real product code, four routes -- and
-    the bytes it reports are compared against the P2SH script built in step 5.
-
-    The match is on the scriptPubKey HEX and not on a rendered address, for the reason
-    atomic_htlc_scripts.p2sh_script_for() records: Core removed `addresses` from decoded
-    outputs in 22.0, and Bitcoin and Litecoin do not even agree on the base58 P2SH version
-    byte. An address comparison is the wrong key in two independent ways.
-    """
-    run.step(7, "broadcast Tx_lock, then FIND the 2-of-2 output by scriptPubKey match")
-    txid, message = broadcast_and_report(run, built.lock_raw_hex, f"Tx_lock for lock {built.setup.label}")
-    if txid is None:
-        run.check("Tx_lock accepted", f"REFUSED: {message}", "a txid", FAIL)
-        outcome.notes.append(f"Tx_lock refused for lock {built.setup.label}: {message}")
-        raise RegtestSetupError(f"{run.asset}: Tx_lock was refused, so nothing downstream can be measured: {message}")
-    matched = txid == built.lock_txid
-    run.check(
-        "the txid PREDICTED before broadcast equals the daemon's",
-        f"predicted={built.lock_txid} daemon={txid}", "the same txid", OK if matched else FAIL,
-    )
-    outcome.predicted_txid_matched = OK if matched else FAIL
-    _mine(run, 1)
-    found = lookup_contract_output(lambda method, params: run.node().call(method, *params),
-                                   built.lock_txid, built.lock_vout)
-    expected_hex = built.setup.lock_script_pubkey.hex()
-    good = found.script_pubkey_hex == expected_hex
-    run.check(
-        "the funded output's scriptPubKey is the 2-of-2 P2SH",
-        found.script_pubkey_hex, expected_hex, OK if good else FAIL,
-    )
-    run.say(f"located via route: {found.route}; confirmations={found.confirmations}")
-    outcome.located_by_script_match = OK if good else FAIL
 
 
-def step_8_refusals(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
-    """OUTCOMES 3 AND 4: the transposed signatures, and the missing OP_0.
-
-    THESE RUN BEFORE THE HAPPY PATH, deliberately. Both spend the same output the happy
-    path spends, so if the happy path went first there would be nothing left to be refused
-    -- and the refusal would then be indistinguishable from "already spent", which is the
-    one answer that proves nothing about the script.
-
-    The two signatures are the SAME two in both orders, produced once by
-    _signatures_in_key_order() and swapped, so a pass here cannot be an artifact of two
-    independently built scriptSigs. That is the whole point: the transposed scriptSig is
-    the same LENGTH and the same SHAPE as the correct one, and only an interpreter can tell
-    them apart. tests/test_adaptor_swap_chain.py says so instead of pretending otherwise.
-    """
-    run.step(8, "the two footguns: signatures TRANSPOSED, and the OP_0 dummy MISSING")
-    alice_sig, bob_sig = _redeem_signatures(built)
-
-    transposed_hex, _ = chain.assemble(built.redeem, bob_sig, alice_sig)
-    correct_hex, _ = chain.assemble(built.redeem, alice_sig, bob_sig)
-    run.say(
-        f"the transposed scriptSig is {len(bytes.fromhex(transposed_hex))} bytes and the correct one is "
-        f"{len(bytes.fromhex(correct_hex))} -- identical, which is why only a chain can tell them apart"
-    )
-    txid, message = broadcast_and_report(run, transposed_hex, "Tx_redeem with the signatures TRANSPOSED")
-    refused = txid is None
-    run.check(
-        "transposed signatures are REFUSED", message if refused else f"ACCEPTED as {txid}",
-        "a refusal from the script interpreter", OK if refused else FAIL,
-    )
-    outcome.refused_when_transposed = OK if refused else FAIL
-    if not refused:
-        outcome.notes.append(
-            "THE CHAIN ACCEPTED A TRANSPOSED 2-of-2 scriptSig. That contradicts OP_CHECKMULTISIG's "
-            "documented lockstep walk and would mean the key order in the redeem script does not "
-            "constrain the signature order on this chain. Nothing in this tree should rely on it either "
-            "way until that is explained."
-        )
-
-    no_dummy_hex = _script_sig_without_op0(built, alice_sig, bob_sig)
-    txid, message = broadcast_and_report(run, no_dummy_hex, "Tx_redeem with the leading OP_0 MISSING")
-    refused = txid is None
-    run.check(
-        "a missing OP_0 dummy is REFUSED", message if refused else f"ACCEPTED as {txid}",
-        "a refusal: OP_CHECKMULTISIG pops one item more than it uses", OK if refused else FAIL,
-    )
-    outcome.refused_without_op0 = OK if refused else FAIL
-    if not refused:
-        outcome.notes.append(
-            "THE CHAIN ACCEPTED A 2-of-2 scriptSig WITH NO OP_0 DUMMY. The 2010 off-by-one in "
-            "OP_CHECKMULTISIG can never be fixed without invalidating old transactions, so this would be "
-            "a genuine consensus divergence on this chain and is worth reporting upstream."
-        )
 
 
-def _script_sig_without_op0(built: BuiltChain, first_signature: bytes, second_signature: bytes) -> str:
-    """The same scriptSig as assemble() produces, minus its leading OP_0 byte.
-
-    Built by REMOVING the byte from the real assembler's output rather than by writing a
-    second assembler, so the two differ in exactly one byte and nothing else. A
-    hand-written variant could differ in a push encoding as well, and the harness would
-    then be measuring two changes while reporting one.
-    """
-    full = two_of_two_script_sig(first_signature, second_signature, built.redeem.redeem_script)
-    if not full.startswith(OP_0):
-        raise RegtestSetupError(
-            "the assembler did not put OP_0 first, so this test would be removing the wrong byte. "
-            "adaptor_swap_scripts.two_of_two_script_sig() is the thing to look at."
-        )
-    return built.redeem.parsed.serialize({0: full[len(OP_0):]}).hex()
 
 
-def published_script_sig(run: Run, txid: str) -> bytes | None:
-    """The scriptSig of input 0 of `txid`, AS THE DAEMON HOLDS IT -- or None if it will not say.
-
-    Fetched rather than remembered, and that is the entire reason this function exists rather
-    than the caller passing the hex it just broadcast. The claim being measured is that
-    COMPLETING an adaptor signature and PUBLISHING it hands a scalar to anyone watching the
-    chain. Recovering from bytes this process still has in a local variable would measure
-    nothing about publication -- it would measure that Python remembers what it was assigned.
-
-    CALL THIS WHILE THE TRANSACTION IS STILL IN THE MEMPOOL, which is what every caller now
-    does. Without `-txindex` a Gridcoin daemon's `getrawtransaction` searches the MEMPOOL and
-    the wallet, and these transactions pay keys this process generated, so once one confirms
-    the wallet does not know it and there is no index to find it in. The moment straight after
-    `sendrawtransaction` returns is therefore the RELIABLE one, and it is also the faithful one:
-    a counterparty watching for their scalar reads it out of the mempool, not out of a block --
-    waiting for a confirmation is what they do AFTER they have it.
-
-    Nothing about the claim weakens. The daemon has the bytes, ran the script interpreter over
-    them to accept them, and will relay them to every peer. That is publication.
-
-    NONE, NEVER AN EXCEPTION, and the distinction is the point. "The daemon would not give it
-    back" and "the transaction published no scalar" are different findings with different
-    causes -- one is a node configuration, the other is the swap being broken -- and folding
-    them together would report a read-back quirk as a cryptographic failure after half an hour
-    of waiting for blocks. Every caller renders None as SKIP with the reason, and a SKIP is not
-    a pass either (rule 14).
-
-    `_decoded` is the one route-finder (rule 8): it already handles a daemon without -txindex,
-    a wallet-only `gettransaction`, and the block-hash fallback, and a second fetch written here
-    would rediscover each of those one failed run at a time.
-    """
-    try:
-        decoded = _decoded(run, txid)
-    except (RegtestSetupError, RPCError) as exc:
-        run.say(f"could not read {txid[:16]}.. back from the daemon ({exc}) -- so the recovery "
-                f"below is UNMEASURED, which is not the same as a transaction that leaked nothing")
-        return None
-    inputs = decoded.get("vin") or []
-    if not inputs:
-        run.say(f"the daemon's decoding of {txid[:16]}.. has no inputs at all; it returned keys "
-                f"{sorted(decoded)} <- expected a 'vin' list. The recovery below is UNMEASURED")
-        return None
-    script_sig_hex = (inputs[0].get("scriptSig") or {}).get("hex", "")
-    if not script_sig_hex:
-        run.say(f"the daemon's decoding of {txid[:16]}.. input 0 carries no scriptSig hex; it "
-                f"returned keys {sorted(inputs[0])} <- expected 'scriptSig' with a 'hex'. The "
-                f"recovery below is UNMEASURED, NOT failed")
-        return None
-    return bytes.fromhex(script_sig_hex)
 
 
-def _report_recovery(run: Run, leg: AdaptorLeg, script_sig: bytes | None, who: str) -> tuple[int | None, str]:
-    """Recover the scalar from a published scriptSig and print all four facts about it.
-
-    FOUR CHECKS AND NOT ONE, because "a scalar came out" is the weakest of them and the other
-    three are what stop it meaning less than it reads:
-
-      seen         how many signatures the scriptSig parsed to. Without it, a mangled parse and
-                   a transaction that genuinely leaks nothing print identically (rule 14 --
-                   `(none)` is a result, a blank gap is ambiguous).
-      recovered    a scalar came out of `recover_adaptor_secret` for one of them.
-      only one     the OTHER signature in the same scriptSig yielded nothing. If both did, the
-                   recovery would be finding the scalar in something other than the adaptor
-                   mechanism and the measurement would be worthless.
-      matches      its ed25519 public key equals the public spend share CAPTURED AT SETUP --
-                   the one the lock address was built from, not a re-derivation from the secret
-                   it was adapted with, which would pass unconditionally.
-
-    THE RECOVERED SCALAR IS NEVER PRINTED. It is a Monero spend share; printing it would put
-    half a private key on a screen an operator pastes into a terminal window. What is printed is
-    the public key it derives to, which is already public by construction.
-
-    Returns `(scalar, outcome)` rather than a bare scalar so that UNREADABLE and REFUTED do not
-    collapse into the same None. A daemon that will not hand the transaction back leaves the
-    question unanswered, which is a SKIP; a scriptSig that yields no scalar answers it NO, which
-    is a FAIL. Those need different things from whoever is reading the screen, and the caller
-    cannot tell them apart from a None.
-    """
-    if script_sig is None:
-        run.check(
-            f"{who} PUBLISHES the Monero spend share (the join)",
-            "(none: the daemon would not hand the transaction back -- see the line above)",
-            "a scriptSig to read", SKIP,
-        )
-        return None, SKIP
-    evidence = recover_published_scalar(leg, script_sig, public_key_for_share)
-    run.say(
-        f"{who}'s published scriptSig parsed to {evidence.signatures_seen} signature(s) "
-        f"<- expected 2; the redeem script and the OP_0 dummy are pushes too and decode to neither"
-    )
-    good = (
-        evidence.recovered is not None
-        and evidence.other_signatures_leaked_nothing
-        and evidence.matches_setup_commitment
-    )
-    run.check(
-        f"{who} PUBLISHES the Monero spend share (the join)",
-        f"recovered={evidence.recovered is not None} "
-        f"only_the_adaptor_leaked={evidence.other_signatures_leaked_nothing} "
-        f"ed25519_public_matches_setup={evidence.matches_setup_commitment}",
-        "all three true -- the scalar is real, it came from the adaptor, and it opens the share "
-        "the lock address was built from",
-        OK if good else FAIL,
-    )
-    return (evidence.recovered, OK) if good else (None, FAIL)
 
 
-def step_9_happy_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
-    """OUTCOME 2: the 2-of-2 spends, with both signatures in key order.
-
-    The assertion is the broadcast being ACCEPTED plus the output appearing on chain, not
-    the broadcast returning a txid alone. `sendrawtransaction` accepting a transaction is
-    already a full script verification -- the mempool runs the interpreter -- so acceptance
-    is the measurement; the confirmation and the read-back are what say the coins moved.
-    """
-    run.step(9, "the happy path: Alice's signature and Bob's COMPLETED adaptor, in key order")
-    alice_sig, bob_sig = _redeem_signatures(built)
-    raw_hex, predicted = chain.assemble(built.redeem, alice_sig, bob_sig)
-    real_size = len(bytes.fromhex(raw_hex))
-    run.say(
-        f"size {real_size} bytes against a bound of {built.redeem.unsigned_size_bound} "
-        f"(slack {built.redeem.unsigned_size_bound - real_size} -- the bound must never be under)"
-    )
-    run.check("the real size is at or under the fee's bound", real_size <= built.redeem.unsigned_size_bound,
-              True, OK if real_size <= built.redeem.unsigned_size_bound else FAIL)
-    txid, message = broadcast_and_report(run, raw_hex, "Tx_redeem with both signatures in key order")
-    accepted = txid is not None
-    run.check(
-        "the 2-of-2 SPENDS", txid if accepted else f"REFUSED: {message}",
-        "a txid -- mempool acceptance IS a full script verification", OK if accepted else FAIL,
-    )
-    outcome.spends_in_correct_order = OK if accepted else FAIL
-    if not accepted:
-        outcome.notes.append(f"the 2-of-2 could not be spent at all on {run.asset}: {message}")
-        return
-    run.check("the predicted spend txid equals the daemon's", f"predicted={predicted} daemon={txid}",
-              "the same txid", OK if txid == predicted else FAIL)
-    # READ IT BACK BEFORE MINING. Without -txindex the daemon searches the mempool and the
-    # wallet, and this transaction pays keys this process generated -- so once it confirms, the
-    # wallet does not know it and there is no index to find it in. published_script_sig()'s
-    # docstring carries the argument, including why the mempool is the FAITHFUL moment and not
-    # merely the convenient one: a counterparty watching for their scalar reads it there.
-    # On GRC this also puts the answer on screen before a ~90s block wait rather than after it.
-    _recover_from_the_redeem(run, built, txid, outcome)
-    _mine(run, 1)
-    _corroborate_payout(run, txid, built.setup.alice.p2pkh_script, "the redeem")
 
 
-def _recover_from_the_redeem(run: Run, built: BuiltChain, txid: str, outcome: ChainOutcome) -> None:
-    """BOB'S SIDE OF THE SWAP, played out against the chain: read s_a off Alice's redeem.
-
-    This is the step the whole protocol converts into money, and until 2026-09-28 nothing in
-    this tree had ever done it against a consensus rule. Alice has just taken the Gridcoin by
-    broadcasting a signature she could only produce with her own Monero spend share; Bob, who
-    holds the other share, now reads hers out of the transaction and opens the Monero lock.
-
-    THE SECOND CHECK IS THE ONE THAT CROSSES THE CURVES. The first says a scalar came out of a
-    secp256k1 signature. The second adds it to Bob's own share on ed25519 and asks the ADDRESS
-    whether the result opens it -- which is the only form of the claim that is about money
-    rather than about arithmetic.
-    """
-    recovered, verdict = _report_recovery(run, built.redeem_leg, published_script_sig(run, txid), "Tx_redeem")
-    outcome.redeem_publishes_alice_share = verdict
-    if verdict == SKIP:
-        # UNMEASURED, and it must not be dressed as either answer. The decisive outcome stays
-        # SKIP, which established() already refuses to count as a pass, and the note says the
-        # spend itself was fine so nobody chases the cryptography for a read-back problem.
-        outcome.reconstructed_key_opens_lock = SKIP
-        outcome.notes.append(
-            "the redeem was ACCEPTED and the daemon then would not hand the transaction back, so "
-            "whether it published the scalar is UNMEASURED -- not refuted. That is a node "
-            "configuration (no -txindex, and these keys are not the wallet's), not a fact about "
-            "the adaptor. The spend itself verified: sendrawtransaction runs the interpreter."
-        )
-        return
-    if recovered is None:
-        outcome.notes.append(
-            "the redeem was accepted by the chain and published NO recoverable scalar. The script "
-            "half of the swap works and the adaptor half does not: a counterparty who funded the "
-            "Monero leg against this would have no way to open it, and nothing would have failed."
-        )
-        outcome.reconstructed_key_opens_lock = FAIL
-        return
-    opens = reconstruction_opens_lock(built.monero, recovered)
-    run.check(
-        "s_a(recovered) + s_b opens the Monero lock ADDRESS",
-        f"reconstructed spend key -> public spend key of {built.monero.lock_address[:16]}..",
-        "the address's own public spend key, decoded back out of the address",
-        OK if opens else FAIL,
-    )
-    outcome.reconstructed_key_opens_lock = OK if opens else FAIL
-    if opens:
-        write_the_swap_handoff(run, built.monero, recovered)
-    if not opens:
-        outcome.notes.append(
-            "the scalar recovered from the redeem is the discrete log of the secp256k1 adaptor "
-            "point but the sum does not open the lock address. That is the silent cross-curve "
-            "failure docs/monero_swap_protocol.md section 1.1 measures at 48% of random pairs, "
-            "and it is the one that looks like an operational fault rather than a broken proof."
-        )
 
 
-def step_10_cancel_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
-    """OUTCOME 5: nLockTime on the 2-of-2, before and after T1, and then both branches of
-    the SECOND 2-of-2.
-
-    Four assertions in a deliberate order:
-
-      a  the cancel is refused before T1 by RELAY (sendrawtransaction)
-      b  the cancel is refused before T1 by CONSENSUS -- the daemon is asked to MINE it,
-         which is the only thing that says a miner could not have included it. That is the
-         distinction regtest_htlc_verify.py's step 8c draws and the one that mattered on
-         2026-09-27. A chain with no generateblock gets a SKIP with the reason, never a
-         pass.
-      c  the cancel is ACCEPTED at T1
-      d  the punish is refused before T2 and the refund is accepted -- which is the second
-         2-of-2 spending, both branches, on the output the cancel created
-
-    Nothing here uses OP_CHECKLOCKTIMEVERIFY. T1 and T2 are plain nLockTime fields, which
-    is why no BIP65 activation height has to be mined first.
-    """
-    run.step(10, "the cancel path: nLockTime before T1, at T1, and then the second 2-of-2's two branches")
-    cancel_sigs = _signatures_in_key_order(built.setup, built.cancel.digest)
-    cancel_hex, cancel_txid = chain.assemble(built.cancel, *cancel_sigs)
-    tip = current_height(run)
-    run.say(f"tip={tip}, T1={built.t1}, T2={built.t2} -- the cancel is not final until height {built.t1}")
-    run.check("we are genuinely before T1", tip < built.t1, True, OK if tip < built.t1 else FAIL)
-
-    # THE REASON, WHEN THE DAEMON WILL GIVE ONE. `sendrawtransaction` answers `code=-22 message=TX
-    # rejected` and nothing else, which is why the check below cannot say WHY it was refused.
-    # testmempoolaccept exists on Gridcoin (src/rpc/server.cpp:640) and returns a structured
-    # `reject-reason`, so ask it first -- and it moves nothing, which sendrawtransaction cannot
-    # promise.
-    reason = mempool_reject_reason(run, cancel_hex)
-    if reason:
-        run.say(f"testmempoolaccept on the early cancel: reject-reason={reason!r}")
-
-    txid, message = broadcast_and_report(run, cancel_hex, f"Tx_cancel EARLY (nLockTime {built.cancel.locktime})")
-    refused = txid is None
-    run.check(
-        "10a RELAY refuses the early cancel",
-        f"{message}{f' [reject-reason={reason}]' if reason else ''}" if refused
-        else f"ACCEPTED as {txid}",
-        "a non-final refusal from the mempool", OK if refused else FAIL,
-    )
-    outcome.cancel_refused_before_t1_by_relay = OK if refused else FAIL
-    if reason:
-        # AND THE REASON ALONE CANNOT ISOLATE NON-FINALITY ON THIS CHAIN, which is worth saying
-        # rather than letting a specific-looking string imply more than it does. Gridcoin checks
-        # finality inside IsStandardTx (src/policy/policy.cpp:57), and
-        # AcceptToMemoryPool reports that failure as `tx-nonstandard`
-        # (src/validation.cpp:2176-2177) -- the same reason a dust output or an odd script gives.
-        # What isolates it is the control below: the SAME BYTES at T1.
-        run.say("that reason is not specific to nLockTime -- Gridcoin folds finality into "
-                "IsStandardTx, so `tx-nonstandard` covers dust and odd scripts too. The control "
-                "is 10c: the SAME BYTES, accepted once the height moves")
-
-    _mine_early_cancel(run, built, cancel_hex, outcome)
-
-    wait_or_mine_to(run, built.t1)
-    early_hex = cancel_hex
-    txid, message = broadcast_and_report(run, cancel_hex, f"Tx_cancel AT T1 (height {current_height(run)} >= {built.t1})")
-    accepted = txid is not None
-    # THE BYTES ARE ASSERTED IDENTICAL, AND THAT IS THE WHOLE ARGUMENT. Neither refusal message
-    # on this chain names nLockTime -- `-22 TX rejected` from sendrawtransaction, at best
-    # `tx-nonstandard` from testmempoolaccept -- so on their own they prove only "refused for
-    # some reason", which a bad signature or a dust output would satisfy equally. What isolates
-    # nLockTime is that the SAME TRANSACTION, byte for byte, was refused at one height and
-    # accepted at another. Nothing about the transaction changed; only the chain did.
-    #
-    # It was already true -- both broadcasts read the same `cancel_hex` -- and nothing said so,
-    # so the pair read as two independent checks instead of one controlled experiment.
-    run.check(
-        "the early and at-T1 broadcasts are the SAME BYTES (this is what isolates nLockTime)",
-        f"{len(early_hex) // 2} bytes, identical" if early_hex == cancel_hex else "DIFFERENT",
-        "identical -- otherwise the pair proves nothing about finality",
-        OK if early_hex == cancel_hex else FAIL,
-    )
-    run.check(
-        "10c the cancel is ACCEPTED at T1", txid if accepted else f"REFUSED: {message}",
-        "the same transaction, now final", OK if accepted else FAIL,
-    )
-    outcome.cancel_accepted_at_t1 = OK if accepted else FAIL
-    if not accepted:
-        outcome.notes.append(f"the cancel was refused at T1 too, so nLockTime is not the reason: {message}")
-        return
-    run.check("the predicted cancel txid equals the daemon's", f"predicted={cancel_txid} daemon={txid}",
-              "the same txid", OK if txid == cancel_txid else FAIL)
-    _mine(run, 1)
-    _spend_the_cancel_output(run, built, cancel_txid, outcome)
 
 
 class MempoolAnswer(NamedTuple):
@@ -2771,72 +1783,6 @@ def mempool_reject_reason(run: Run, raw_hex: str) -> str:
     return mempool_answer(run, raw_hex).reason
 
 
-def _mine_early_cancel(run: Run, built: BuiltChain, cancel_hex: str, outcome: ChainOutcome) -> None:
-    """10b: ask the daemon to MINE the early cancel. The only consensus-strength answer.
-
-    A mempool refusal says a node will not pass the transaction on. `generateblock` runs
-    TestBlockValidity over a block containing exactly the transactions it is handed, so a
-    refusal from it says the CHAIN would not accept the block -- which is the claim worth
-    having, and the one a relay refusal cannot make. regtest_htlc_verify.py's step 8c
-    exists for the same reason.
-
-    A daemon with no `generateblock` gets a SKIP naming the absence, never a pass. Gridcoin
-    is expected to be in that position and the run says so rather than implying the
-    stronger result.
-    """
-    node = run.node(wallet=False)
-    if not daemons.method_exists(node, "generateblock"):
-        run.check(
-            "10b CONSENSUS refuses the early cancel",
-            "not attempted: this daemon has no `generateblock`",
-            "a TestBlockValidity refusal -- only this says a MINER could not have included it",
-            SKIP,
-        )
-        outcome.notes.append(
-            f"{run.asset} has no generateblock, so the early cancel was refused by RELAY only. The "
-            f"stronger claim -- that a miner could not have included it -- is NOT established on this chain."
-        )
-        return
-    # THE ADDRESS IS RESOLVED OUTSIDE THE try, AND THAT IS NOT TIDINESS. Inside it, a
-    # `getnewaddress` that failed for any reason at all -- a locked wallet, a daemon with no
-    # wallet loaded, a typo in a method name -- would raise RPCError and be scored as
-    # "consensus refused the early cancel", which is the strongest claim this harness makes.
-    # tests/test_adaptor_regtest_harness.py caught exactly that: a stub with no getnewaddress
-    # answer produced `OK 10b CONSENSUS refuses the early cancel: got=getnewaddress: code=-32601
-    # Method not found`. A refusal has to come from the thing under test or it is not evidence.
-    try:
-        mining_address = run.resolve_mining_address()
-    except RPCError as exc:
-        run.check(
-            "10b CONSENSUS refuses the early cancel",
-            f"not attempted: no address to mine to ({exc})",
-            "a TestBlockValidity refusal -- and a wallet failure is NOT one", SKIP,
-        )
-        outcome.notes.append(
-            f"{run.asset}: could not get an address to mine to, so the consensus-strength refusal was "
-            f"never attempted: {exc}"
-        )
-        return
-    try:
-        result = node.call("generateblock", mining_address, [cancel_hex])
-    except RPCError as exc:
-        run.check(
-            "10b CONSENSUS refuses the early cancel", str(exc),
-            "a TestBlockValidity or non-final refusal", OK,
-        )
-        outcome.cancel_refused_before_t1_by_consensus = OK
-        return
-    run.check(
-        "10b CONSENSUS refuses the early cancel", f"MINED IT: {result}",
-        "a refusal -- nLockTime finality is supposed to be checked when a block is validated", FAIL,
-    )
-    outcome.cancel_refused_before_t1_by_consensus = FAIL
-    outcome.notes.append(
-        "THE DAEMON MINED A CANCEL WHOSE nLockTime IS IN THE FUTURE. That would mean nLockTime finality "
-        "is relay policy on this chain rather than consensus, and the cancel path's timelock would be "
-        "worth nothing against a miner. Nothing in this tree should use nLockTime as a timelock on this "
-        "chain until that is explained."
-    )
 
 
 def wait_or_mine_to(run: Run, target: int) -> None:
@@ -2846,240 +1792,10 @@ def wait_or_mine_to(run: Run, target: int) -> None:
     _mine(run, max(0, target - tip))
 
 
-def build_refund_leg(built: BuiltChain, refund: chain.ChainTransaction) -> AdaptorLeg:
-    """THE MIRROR IMAGE OF THE REDEEM: Alice pre-signs Tx_refund under Y_b, not Y_a.
-
-    Tx_refund pays BOB, so by docs/monero_swap_protocol.md section 0's argument it is ALICE's
-    signature that must be the pre-signature, and the scalar it publishes is BOB's spend share
-    -- the one ALICE is waiting on if the swap dies down the cancel path. Pre-signing it under
-    Y_a instead would hand each party a share they already hold, which is a protocol that looks
-    symmetric and transfers nothing.
-
-    A NAMED FUNCTION RATHER THAN FOUR LINES INLINE, and the reason is a measurement rather than
-    taste: while it was inline, `tools/mutate.py` swapping `bob_spend`/`bob_spend_public` for
-    Alice's SURVIVED the whole suite. A decision buried inside orchestration can only be tested
-    by running the orchestration, which here means a daemon -- rule 10's defect exactly, and the
-    fix rule 10 names is to extract the decision so it can be called with seeded inputs.
-
-    Pre-signed HERE rather than in step 6 for the reason FINDING 2 gives: Tx_refund cannot exist
-    until Tx_cancel is SIGNED, because a legacy txid covers the scriptSigs and the refund spends
-    the cancel's output. In the real protocol this and the cancel's signatures are one setup
-    round; on a legacy chain they are two, and that is a correction to the design document
-    rather than to this code.
-    """
-    # Alice's call no longer touches Bob's scalar, for the reason step 6's call site gives.
-    return pre_sign_leg(
-        "refund", built.setup.alice.private_key, refund.digest,
-        built.monero.bob_adaptor_point, built.monero.bob_spend_public,
-    )
 
 
-def _spend_the_cancel_output(run: Run, built: BuiltChain, cancel_txid: str, outcome: ChainOutcome) -> None:
-    """10d: the SECOND 2-of-2's two branches, on the output the cancel just created.
-
-    The punish is tried first and must be refused (it is not final until T2), then the
-    refund is tried and must be accepted. Order matters for the same reason step 8 runs
-    before step 9: both spend the same output, and a refusal that arrives because the
-    output is already gone proves nothing about the timelock.
-
-    The cancel output is located by TXID AND VOUT, not by a scriptPubKey match, and that is
-    not laziness: the cancel 2-of-2 names the same two keys as the lock 2-of-2 -- which is
-    what the protocol specifies -- so the two P2SH scriptPubKeys are the same bytes and a
-    script match cannot say which of the two outputs it found.
-    """
-    context = built.context
-    value = built.cancel.output_satoshis
-    cancel_output = chain.Outpoint(txid=cancel_txid, vout=0, value_satoshis=value)
-    found = lookup_contract_output(lambda method, params: run.node().call(method, *params), cancel_txid, 0)
-    run.say(
-        f"the cancel output is {cancel_txid}:0 worth {satoshis_to_coins(value)}; the daemon reports "
-        f"scriptPubKey {found.script_pubkey_hex} (route: {found.route}). Located by txid:vout, NOT by "
-        f"script match -- the lock and cancel P2SH scripts are the same bytes by protocol design"
-    )
-    run.check("the cancel output's value is the one the refund was signed for",
-              found.script_pubkey_hex, context.cancel_script_pubkey.hex(),
-              OK if found.script_pubkey_hex == context.cancel_script_pubkey.hex() else FAIL)
-
-    punish = chain.build_punish(context, cancel_output, built.t2)
-    chain.assert_spends(punish.parsed, cancel_txid, 0)
-    punish_hex, _ = chain.assemble(punish, *_signatures_in_key_order(built.setup, punish.digest))
-    tip = current_height(run)
-    run.check("we are genuinely before T2", tip < built.t2, True, OK if tip < built.t2 else FAIL)
-    txid, message = broadcast_and_report(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
-    refused = txid is None
-    run.check(
-        "10d-i the early punish is REFUSED", message if refused else f"ACCEPTED as {txid}",
-        "a non-final refusal: T2 has not arrived", OK if refused else FAIL,
-    )
-    outcome.punish_refused_before_t2 = OK if refused else FAIL
-
-    refund = chain.build_refund(context, cancel_output)
-    chain.assert_spends(refund.parsed, cancel_txid, 0)
-    refund_leg = build_refund_leg(built, refund)
-    run.check(
-        "Alice's Tx_refund signature is an ADAPTOR PRE-SIGNATURE under Y_b",
-        f"Y_b={point_hex(refund_leg.adaptor_point)[:16]}.. verified under A_pk",
-        "the mirror of the redeem: the party taking the coin publishes the other's share",
-        OK,
-    )
-    refund_hex, refund_txid = chain.assemble(refund, *_refund_signatures(built, refund, refund_leg))
-    # The cancel's own scriptSig, read back while IT was still fetchable. Captured here rather
-    # than after the refund confirms for the reason published_script_sig() gives, and it is what
-    # the plain-branch check below reads -- a check that could not fetch its subject would
-    # report "leaks nothing" for a transaction it never saw, which is the one answer worse than
-    # no answer at all.
-    cancel_script_sig = published_script_sig(run, cancel_txid)
-    txid, message = broadcast_and_report(run, refund_hex, "Tx_refund (no locktime -- publishable as soon as the cancel confirms)")
-    accepted = txid is not None
-    run.check(
-        "10d-ii the refund SPENDS the second 2-of-2", txid if accepted else f"REFUSED: {message}",
-        "a txid -- this is the second 2-of-2 spending", OK if accepted else FAIL,
-    )
-    outcome.refund_accepted_after_cancel = OK if accepted else FAIL
-    if accepted:
-        run.check("the predicted refund txid equals the daemon's", f"predicted={refund_txid} daemon={txid}",
-                  "the same txid", OK if txid == refund_txid else FAIL)
-        # The scalar itself is discarded here on purpose. On the redeem it is carried into
-        # reconstruction_opens_lock() because that is BOB closing the loop with a share he did
-        # not have; the refund's scalar closes it for ALICE, who in this harness is the same
-        # process and already holds it, so reconstructing from it would assert nothing a
-        # variable in memory did not already guarantee. What the refund establishes is the
-        # PUBLICATION, and that is the outcome recorded.
-        _, outcome.refund_publishes_bob_share = _report_recovery(
-            run, refund_leg, published_script_sig(run, txid), "Tx_refund"
-        )
-        _mine(run, 1)
-        _corroborate_payout(run, txid, built.setup.bob.p2pkh_script, "the refund")
-        # AND THE PLAIN BRANCH MUST LEAK NOTHING, asserted against the CANCEL -- the one
-        # plain-signature transaction in this run that actually reaches a chain. Tx_punish is the
-        # other plain one and it is never published here, because 10d-i requires it to be REFUSED
-        # before T2; asserting on bytes that were refused would be asserting on bytes no watcher
-        # ever sees. `nothing_leaks` is a measurement rather than an argument about this file:
-        # "we did not call adapt here" is a reason to believe it, not a check of the bytes
-        # (rule 17).
-        if cancel_script_sig is None:
-            run.check(
-                "Tx_cancel (plain signatures on both sides) leaks NOTHING",
-                "(none: the daemon would not hand the cancel back -- see the line above)",
-                "a scriptSig to read", SKIP,
-            )
-            outcome.plain_branch_leaks_nothing = SKIP
-        else:
-            quiet = nothing_leaks([built.redeem_leg, refund_leg], cancel_script_sig)
-            run.check(
-                "Tx_cancel (plain signatures on both sides) leaks NOTHING",
-                f"no scalar recoverable for either leg from {cancel_txid[:16]}..:0's scriptSig "
-                f"({len(cancel_script_sig)} bytes read back)",
-                "nothing -- the cancel is publishable by either party and must tell neither anything",
-                OK if quiet else FAIL,
-            )
-            outcome.plain_branch_leaks_nothing = OK if quiet else FAIL
-    else:
-        outcome.notes.append(f"the second 2-of-2 could not be spent: {message}")
 
 
-def step_11_punish_path(run: Run, built: BuiltChain, outcome: ChainOutcome) -> None:
-    """THE FIFTH TRANSACTION, and the only one of the five that had never moved a coin.
-
-    Tx_punish pays ALICE from the cancel output after T2. It is the branch that exists so that
-    Bob cannot simply publish the cancel and then sit on it: once T1 passes either party can
-    cancel, but if Bob never follows through with the refund, T2 hands the whole output to
-    Alice. Nothing in the protocol works without it and nothing in this tree had ever spent it.
-
-    WHAT WAS ALREADY TESTED AND WHY IT IS NOT THIS. Step 10d-i broadcasts the punish BEFORE T2
-    and asserts a refusal. That is necessary -- it is the timelock holding -- and it is the
-    opposite measurement: it says the branch is closed when it should be closed, and says
-    nothing about whether it opens. Four of the five transactions had moved a coin; this one
-    had only ever been rejected.
-
-    WHY IT NEEDS ITS OWN LOCK. On lock B the refund spends the cancel output first, so a punish
-    tried afterwards would be refused because the output is GONE -- which is the one answer that
-    proves nothing about T2. Same argument step 8 makes for running before step 9, one level
-    further down the chain. So lock C runs the cancel path and then simply does not refund.
-
-    The sequence, and every wait is a real Gridcoin block:
-
-      a  the cancel is broadcast at T1 and confirmed          (the refund is NEVER broadcast)
-      b  the punish is refused before T2                      -- the control
-      c  the chain advances to T2
-      d  the SAME BYTES are accepted                          -- which isolates nLockTime,
-                                                                 because only the height changed
-      e  the punish's scriptSig publishes NOTHING             -- plain signatures on both sides
-    """
-    run.step(11, "the punish path: the cancel, then WAIT TO T2, and the fifth transaction spends")
-    cancel_sigs = _signatures_in_key_order(built.setup, built.cancel.digest)
-    cancel_hex, cancel_txid = chain.assemble(built.cancel, *cancel_sigs)
-    wait_or_mine_to(run, built.t1)
-    txid, message = broadcast_and_report(run, cancel_hex, f"Tx_cancel AT T1 for the punish path (nLockTime {built.cancel.locktime})")
-    if txid is None:
-        run.check("11a the cancel is accepted at T1 (the punish path needs its output)",
-                  f"REFUSED: {message}", "a txid", FAIL)
-        outcome.notes.append(f"the punish path could not start: its cancel was refused at T1 ({message})")
-        return
-    run.check("11a the cancel is ACCEPTED at T1 (and the refund will NOT be broadcast)",
-              txid, "a txid -- the cancel output is now the punish's to take", OK)
-    _mine(run, 1)
-
-    context, value = built.context, built.cancel.output_satoshis
-    cancel_output = chain.Outpoint(txid=cancel_txid, vout=0, value_satoshis=value)
-    punish = chain.build_punish(context, cancel_output, built.t2)
-    chain.assert_spends(punish.parsed, cancel_txid, 0)
-    punish_hex, punish_txid = chain.assemble(punish, *_signatures_in_key_order(built.setup, punish.digest))
-
-    tip = current_height(run)
-    run.check("11b we are genuinely before T2", tip < built.t2, True, OK if tip < built.t2 else FAIL)
-    early_txid, early_message = broadcast_and_report(run, punish_hex, f"Tx_punish EARLY (nLockTime {built.t2}, tip {tip})")
-    run.check(
-        "11b the early punish is REFUSED (the control for 11d)",
-        early_message if early_txid is None else f"ACCEPTED as {early_txid}",
-        "a non-final refusal: T2 has not arrived", OK if early_txid is None else FAIL,
-    )
-
-    wait_or_mine_to(run, built.t2)
-    txid, message = broadcast_and_report(run, punish_hex, f"Tx_punish AT T2 (height {current_height(run)} >= {built.t2})")
-    accepted = txid is not None
-    # THE SAME BYTES, ASSERTED IDENTICAL, and that is the whole argument -- the same one step
-    # 10c makes for the cancel. Gridcoin's refusal message names nothing (`-22 TX rejected`), so
-    # a refusal alone proves only "refused for some reason", which a bad signature would satisfy
-    # equally. What isolates nLockTime is that the SAME TRANSACTION was refused at one height
-    # and accepted at another. Nothing about it changed; only the chain did.
-    run.check(
-        "11c the early and at-T2 punish broadcasts are the SAME BYTES",
-        f"{len(punish_hex) // 2} bytes, identical",
-        "identical -- otherwise the pair proves nothing about finality", OK,
-    )
-    run.check(
-        "11d THE PUNISH SPENDS at T2", txid if accepted else f"REFUSED: {message}",
-        "a txid -- the fifth transaction, and the only one that had never moved a coin",
-        OK if accepted else FAIL,
-    )
-    outcome.punish_accepted_after_t2 = OK if accepted else FAIL
-    if not accepted:
-        outcome.notes.append(
-            f"THE PUNISH BRANCH DOES NOT WORK ON THIS CHAIN: {message}. Without it, a "
-            f"counterparty who publishes the cancel and then does nothing keeps the output "
-            f"locked forever -- T2 is what makes the cancel safe to publish."
-        )
-        return
-    run.check("the predicted punish txid equals the daemon's", f"predicted={punish_txid} daemon={txid}",
-              "the same txid", OK if txid == punish_txid else FAIL)
-    published = published_script_sig(run, txid)
-    if published is None:
-        run.check("Tx_punish (plain signatures on both sides) leaks NOTHING",
-                  "(none: the daemon would not hand it back -- see the line above)",
-                  "a scriptSig to read", SKIP)
-        outcome.punish_leaks_nothing = SKIP
-    else:
-        quiet = nothing_leaks([built.redeem_leg], published)
-        run.check(
-            "Tx_punish (plain signatures on both sides) leaks NOTHING",
-            f"no scalar recoverable from {txid[:16]}..'s scriptSig ({len(published)} bytes read back)",
-            "nothing -- taking the punish branch must tell the counterparty nothing",
-            OK if quiet else FAIL,
-        )
-        outcome.punish_leaks_nothing = OK if quiet else FAIL
-    _mine(run, 1)
-    _corroborate_payout(run, txid, built.setup.alice.p2pkh_script, "the punish")
 
 
 def wallet_owned_address(run: Run) -> str:

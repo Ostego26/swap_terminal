@@ -57,7 +57,7 @@ from pathlib import Path
 # rootlessly, which is CLAUDE.md rule 10's layout gap. E402 is ignored repo-wide for this idiom.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from regtest import adaptor_steps, daemons
+from regtest import daemons, funding_steps
 from regtest import operator_panel as decisions
 from regtest.console import Console
 from regtest.daemons import RegtestSetupError
@@ -491,7 +491,7 @@ def javascript_strings_are_closed(page: str) -> str:
     return ""
 
 
-def state_payload(run: adaptor_steps.Run, runner: HarnessRunner) -> dict:
+def state_payload(run: funding_steps.Run, runner: HarnessRunner) -> dict:
     """Everything the page shows, as one JSON-able dict. The only decision here is what to ask.
 
     ORDERED SO THE SLOW PART IS LAST. The run state and the method probe are instant; the
@@ -522,16 +522,16 @@ def state_payload(run: adaptor_steps.Run, runner: HarnessRunner) -> dict:
     return payload
 
 
-def funding_payload(run: adaptor_steps.Run, known_spent: dict | None = None) -> dict:
+def funding_payload(run: funding_steps.Run, known_spent: dict | None = None) -> dict:
     """The funding picture: the address, what the daemon can be asked, and every payment.
 
     A REFUSAL IS A RESULT HERE, not an exception that blanks the page. A daemon that cannot be
     read leaves `error` set and the page says so where the table would be -- rule 14's "(none)
     is a result", applied to the failure as well as the empty case.
     """
-    key = adaptor_steps.operator_funding_key(run)
+    key = funding_steps.operator_funding_key(run)
     if key is None:
-        return {"error": f"{adaptor_steps.FUNDING_SEED_VARIABLE} is not set in the environment "
+        return {"error": f"{funding_steps.FUNDING_SEED_VARIABLE} is not set in the environment "
                          f"of the process serving this page, so no funding address can be "
                          f"derived. Export it and restart the panel.", "rows": [], "methods": []}
     methods = [{"method": m.method, "present": m.present, "matters": m.matters}
@@ -542,7 +542,7 @@ def funding_payload(run: adaptor_steps.Run, known_spent: dict | None = None) -> 
         return {"address": key.address, "error": str(error), "rows": [], "methods": methods}
     return {
         "address": key.address,
-        "needed": adaptor_steps.funding_needed_coins(run),
+        "needed": funding_steps.funding_needed_coins(run),
         "asset": run.asset,
         "methods": methods,
         "error": "",
@@ -582,7 +582,7 @@ def guarded(answer, path: str, *rest) -> tuple[bytes, str, int]:
         )
 
 
-def chain_payload(asset: str, grc_run: adaptor_steps.Run, known_spent: dict | None = None) -> dict:
+def chain_payload(asset: str, grc_run: funding_steps.Run, known_spent: dict | None = None) -> dict:
     """One tab's contents, by asset. An unknown asset is a 200 saying so, not a 404.
 
     NOT A 404, and that is deliberate. The browser only ever asks for an asset the page itself
@@ -617,7 +617,7 @@ def chain_payload(asset: str, grc_run: adaptor_steps.Run, known_spent: dict | No
     return state
 
 
-def answer_a_get(path: str, run: adaptor_steps.Run, runner: HarnessRunner, page: str,
+def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page: str,
                  known_spent: dict | None = None) -> tuple[bytes, str, int]:
     """Which of the three GETs this is, and its bytes. The routing decision, out of the handler.
 
@@ -846,7 +846,7 @@ def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:
     return ({"error": refusal}, 409) if refusal else ({"started": key}, 200)
 
 
-def build_handler(run: adaptor_steps.Run, runner: HarnessRunner, page: str,
+def build_handler(run: funding_steps.Run, runner: HarnessRunner, page: str,
                   known_spent: dict | None = None, chains: dict | None = None):
     """The HTTP surface, closed over the objects it serves. Four routes and no others.
 
@@ -931,11 +931,11 @@ def main(argv: list[str], console: Console | None = None) -> int:
     console.banner("OPERATOR PANEL -- Gridcoin testnet harnesses")
     try:
         assert_loopback_only(HOST)
-        config = adaptor_steps.resolve_config("GRC")
-        run = adaptor_steps.Run(console=console, config=config, wallet="")
+        config = funding_steps.resolve_config("GRC")
+        run = funding_steps.Run(console=console, config=config, wallet="")
         console.say(f"GRC: endpoint {config.base_url}  datadir {config.datadir}")
-        adaptor_steps.step_1_reachable(run)
-        adaptor_steps.assert_test_network(run)
+        funding_steps.step_1_reachable(run)
+        funding_steps.assert_test_network(run)
     except RegtestSetupError as exc:
         console.banner("REFUSED BEFORE THE PORT WAS BOUND")
         console.say(str(exc))
@@ -968,8 +968,8 @@ def main(argv: list[str], console: Console | None = None) -> int:
             console.say(f"{tab.asset}: no RPC console -- {refusal}")
             continue
         try:
-            chains[tab.asset] = adaptor_steps.Run(
-                console=console, config=adaptor_steps.resolve_config(tab.asset), wallet="")
+            chains[tab.asset] = funding_steps.Run(
+                console=console, config=funding_steps.resolve_config(tab.asset), wallet="")
         except Exception as exc:  # noqa: BLE001 -- checked: a chain with no connection parameters simply gets no console, which its tab already reports; the panel must still serve the others
             console.say(f"{tab.asset}: no RPC console -- no connection parameters "
                         f"({type(exc).__name__}: {exc})")

@@ -47,7 +47,7 @@ import os
 from typing import NamedTuple
 
 from chains.base import RPCError
-from regtest import adaptor_steps, daemons
+from regtest import daemons, funding_steps
 from regtest.daemons import RegtestSetupError
 
 #: What the panel is allowed to run, by KEY. The browser posts a key from this table and nothing
@@ -85,10 +85,6 @@ RUNNABLE: dict[str, tuple[str, list[str], str]] = {
     "ltc_htlc_verify": (
         "The full HTLC suite on LITECOIN regtest -- it starts and stops its own daemon.",
         ["python3", "regtest_htlc_verify.py", "--chain", "ltc"], "LTC",
-    ),
-    "xmr_chain_check": (
-        "Read-only: what monero-wallet-rpc and monerod say about themselves.",
-        ["python3", "monero_chain_check.py"], "XMR",
     ),
     "xrp_chain_check": (
         "Read-only: what the configured XRP Ledger endpoint says about itself.",
@@ -149,7 +145,6 @@ CHAIN_THEME = {
     "GRC": {"accent": "#753eef", "dark": "#9d7bf5", "glyph": "G", "unit": "GRC"},
     "BTC": {"accent": "#f7931a", "dark": "#f7931a", "glyph": "\u20bf", "unit": "BTC"},
     "LTC": {"accent": "#345d9d", "dark": "#7aa7e0", "glyph": "\u0141", "unit": "LTC"},
-    "XMR": {"accent": "#f26822", "dark": "#ff8a4c", "glyph": "\u0271", "unit": "XMR"},
     "XRP": {"accent": "#23292f", "dark": "#9fb3c8", "glyph": "\u2715", "unit": "XRP"},
     "SOL": {"accent": "#7b3fe4", "dark": "#c4a6ff", "glyph": "\u25ce", "unit": "SOL"},
 }
@@ -211,7 +206,6 @@ class ChainTab(NamedTuple):
 #: a rename there makes this stale rather than wrong -- and the tab prints the names it checked,
 #: so a stale one is visible rather than silent.
 FOREIGN_ENV = {
-    "XMR": ("XMR_RPC_PORT",),
     "XRP": ("XRP_RPC_URL",),
     "SOL": ("SOL_RPC_URL",),
 }
@@ -226,10 +220,6 @@ CHAINS = (
     ChainTab("LTC", "regtest", True,
              "a regtest daemon that regtest_htlc_verify.py starts and stops for itself. Same "
              "rule as BTC: probed, never launched."),
-    ChainTab("XMR", "foreign", False,
-             "monero-wallet-rpc speaks JSON-RPC 2.0 with a different shape from a "
-             "Bitcoin-style daemon, so this panel does not probe it directly. Its own "
-             "read-only check is the button below."),
     ChainTab("XRP", "foreign", False,
              "the XRP Ledger has its own JSON-RPC shape, reached through chains/xrp.py. This "
              "panel does not probe it directly; its own read-only check is the button below."),
@@ -328,14 +318,14 @@ def chain_state(tab: ChainTab, console) -> dict:
                 "configured": not missing, "missing_env": missing,
                 "env": list(FOREIGN_ENV.get(tab.asset, ()))}
     try:
-        config = adaptor_steps.resolve_config(tab.asset)
+        config = funding_steps.resolve_config(tab.asset)
     except Exception as error:  # noqa: BLE001 -- checked: the failure IS the tab's contents, named below
         return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
                 "network": "", "error": f"no connection parameters: {type(error).__name__}: {error}",
                 "methods": [], "funding": None}
-    run = adaptor_steps.Run(console=console, config=config, wallet="")
+    run = funding_steps.Run(console=console, config=config, wallet="")
     try:
-        height = adaptor_steps.current_height(run)
+        height = funding_steps.current_height(run)
     except Exception as error:  # noqa: BLE001 -- checked: an unreachable daemon is the ordinary case and is reported as one
         return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
                 "network": "", "error": f"{type(error).__name__}: {error}",
@@ -349,7 +339,7 @@ def chain_state(tab: ChainTab, console) -> dict:
     }
 
 
-def network_the_daemon_says(run: adaptor_steps.Run) -> str:
+def network_the_daemon_says(run: funding_steps.Run) -> str:
     """"testnet", "regtest", "MAINNET" or "unknown" -- from the daemon, never from the port.
 
     UNKNOWN IS ITS OWN ANSWER and is not folded into mainnet here, because this function only
@@ -437,7 +427,7 @@ def refuse_unless_read_only(method: object) -> str:
     )
 
 
-def call_read_only(run: adaptor_steps.Run, method: str, args: list) -> dict:
+def call_read_only(run: funding_steps.Run, method: str, args: list) -> dict:
     """Make one allowlisted call and return {ok, result} or {ok: false, error}. NEVER raises.
 
     A REFUSAL AND A FAILURE ARE DIFFERENT and both are results. "That method is not allowed" is
@@ -638,7 +628,7 @@ class PaymentRow(NamedTuple):
     note: str
 
 
-def probe_methods(run: adaptor_steps.Run) -> list[Missing]:
+def probe_methods(run: funding_steps.Run) -> list[Missing]:
     """Which of the three shaping RPCs this daemon actually has.
 
     ASKED EVERY TIME RATHER THAN ASSUMED. The operator can rebuild their daemon, and a panel
@@ -657,7 +647,7 @@ def probe_methods(run: adaptor_steps.Run) -> list[Missing]:
     return found
 
 
-def payment_rows(run: adaptor_steps.Run, key, known_spent: dict | None = None) -> list[PaymentRow]:
+def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None) -> list[PaymentRow]:
     """Every payment to the funding address, newest first, each marked usable or spent.
 
     THIS IS THE PANEL'S WHOLE REASON TO EXIST. Six runs on 2026-09-28 failed or refused because
@@ -677,7 +667,7 @@ def payment_rows(run: adaptor_steps.Run, key, known_spent: dict | None = None) -
     exactly like a healthy one (rule 14).
     """
     try:
-        entries = run.node().call("listtransactions", "*", adaptor_steps.FUNDING_SEARCH_DEPTH, 0)
+        entries = run.node().call("listtransactions", "*", funding_steps.FUNDING_SEARCH_DEPTH, 0)
     except (RPCError, OSError) as error:
         raise RegtestSetupError(
             f"could not read the wallet's recent transactions ({error}), so no payment to "
@@ -685,9 +675,9 @@ def payment_rows(run: adaptor_steps.Run, key, known_spent: dict | None = None) -
         ) from error
 
     rows = []
-    for payment in adaptor_steps.payments_to_the_funding_address(entries, key.address):
+    for payment in funding_steps.payments_to_the_funding_address(entries, key.address):
         try:
-            outpoint = adaptor_steps.find_operator_funding(run, key, payment.txid)
+            outpoint = funding_steps.find_operator_funding(run, key, payment.txid)
         except (RegtestSetupError, RPCError, OSError) as error:
             rows.append(PaymentRow(payment.txid, payment.confirmations, "?", "", False,
                                    f"could not be read off the chain: {error}"))
@@ -709,11 +699,11 @@ def payment_rows(run: adaptor_steps.Run, key, known_spent: dict | None = None) -
             spender, description = cached, "SPENT ALREADY -- remembered from an earlier look, not re-walked"
         else:
             depth = (payment.confirmations + 1 if isinstance(payment.confirmations, int)
-                     and payment.confirmations >= 0 else adaptor_steps.MAX_SPEND_SCAN_BLOCKS)
-            spender, description = adaptor_steps.find_the_spender(run, outpoint, max_depth=depth)
+                     and payment.confirmations >= 0 else funding_steps.MAX_SPEND_SCAN_BLOCKS)
+            spender, description = funding_steps.find_the_spender(run, outpoint, max_depth=depth)
             if spender and known_spent is not None:
                 known_spent[(outpoint.txid, outpoint.vout)] = spender
-        value = adaptor_steps.satoshis_to_coins(outpoint.value_satoshis)
+        value = funding_steps.satoshis_to_coins(outpoint.value_satoshis)
         if spender:
             # THE DESCRIPTION IS CARRIED, not replaced. It is the only thing that says whether
             # this answer was measured just now or remembered from an earlier look, and rule 17

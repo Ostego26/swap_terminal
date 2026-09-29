@@ -134,7 +134,7 @@ def test_every_chain_gets_a_banner_line_even_when_unset():
     """
     lines = startup_lines({})
 
-    for chain in (*CHAIN_PORTS, "SOL", "XRP", "XMR"):
+    for chain in (*CHAIN_PORTS, "SOL", "XRP"):
         assert any(line.startswith(chain) for line in lines), f"{chain} has no banner line"
 
 
@@ -272,15 +272,6 @@ def test_the_refusal_names_every_missing_setting_when_more_than_one_is_missing()
     assert "GRC_RPC_PORT, GRC_RPC_USER and GRC_RPC_PASS are unset" in reason
 
 
-def test_monero_is_not_required_to_have_credentials():
-    """monero-wallet-rpc can be started with --disable-rpc-login, so an empty user
-    and password is a legitimate configuration for it -- unlike a Bitcoin-derived
-    daemon, which requires basic auth or a cookie this adapter cannot read."""
-    rpc = {"XMR": {"host": "127.0.0.1", "port": 18083, "user": "", "password": "",
-                   "account_index": 0, "min_confirmations": 10, "can_spend": False, "timeout": 30.0}}
-
-    assert missing_settings(rpc, "XMR") == []
-    assert sorted(build_adapters(rpc)) == ["XMR"]
 
 
 # --- which variable makes a chain reachable -----------------------------------
@@ -307,7 +298,7 @@ def test_configuring_variable_matches_what_config_py_actually_reads():
     """
     config_source = (Path(__file__).resolve().parent.parent / "swap_terminal" / "config.py").read_text()
 
-    for asset in ("BTC", "LTC", "GRC", "XRP", "SOL", "XMR"):
+    for asset in ("BTC", "LTC", "GRC", "XRP", "SOL"):
         variable = configuring_variable(asset)
         assert re.search(rf'_env(?:_int|_float)?\("{re.escape(variable)}"', config_source), (
             f"configuring_variable({asset!r}) returned {variable!r}, which config.py never reads"
@@ -320,19 +311,6 @@ def test_the_three_bitcoin_derived_chains_come_from_chain_ports():
         assert configuring_variable(asset) == CHAIN_PORTS[asset].port_variable
 
 
-def test_the_two_url_chains_and_monero_are_not_port_variables_by_accident():
-    """SOL and XRP are configured by a URL, so <ASSET>_RPC_PORT would be wrong.
-
-    MUTATION: drop _ENDPOINT_VARIABLES and let the fallback answer. SOL and XRP
-    then read SOL_RPC_PORT and XRP_RPC_PORT, neither of which config.py contains,
-    and the page would tell an operator to set a variable that does nothing. XMR
-    IS a port and is in the same table only because monero-wallet-rpc has no
-    conventional port to classify against -- chains/registry.py says so at its
-    construction site.
-    """
-    assert configuring_variable("SOL") == "SOL_RPC_URL"
-    assert configuring_variable("XRP") == "XRP_RPC_URL"
-    assert configuring_variable("XMR") == "XMR_RPC_PORT"
 
 
 def test_an_unknown_chain_gets_a_plausible_name_rather_than_raising():

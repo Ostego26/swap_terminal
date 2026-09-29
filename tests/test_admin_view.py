@@ -298,7 +298,7 @@ def test_pair_rows_read_allowed_pairs_and_mark_everything_else_disabled():
     Every chain is reachable here, so `enabled` and `reachable` agree and the
     original assertion still reads as written. The two come apart in the next test.
     """
-    adapters = {asset: object() for asset in ("BTC", "GRC", "LTC", "XRP", "SOL", "XMR")}
+    adapters = {asset: object() for asset in ("BTC", "GRC", "LTC", "XRP", "SOL")}
     rows = pair_rows(seeded_config(), adapters)
     enabled = {row["label"] for row in rows if row["enabled"]}
     assert enabled == {"GRC -> BTC", "BTC -> GRC"}
@@ -345,7 +345,7 @@ def test_an_allowed_pair_whose_chain_has_no_adapter_reads_unreachable_not_enable
 
 def test_chain_rows_report_an_unconfigured_chain_rather_than_omitting_it():
     rows = {row["asset"]: row for row in chain_rows(seeded_config(), {})}
-    assert set(rows) >= {"BTC", "LTC", "GRC", "SOL", "XMR", "XRP"}
+    assert set(rows) >= {"BTC", "LTC", "GRC", "SOL", "XRP"}
     assert all(row["configured"] is False for row in rows.values())
     assert "not configured" in rows["XRP"]["endpoint"]
     # XRP is present, described, and NOT tradeable.
@@ -354,55 +354,6 @@ def test_chain_rows_report_an_unconfigured_chain_rather_than_omitting_it():
     assert rows["GRC"]["tradeable"] is True
 
 
-def test_the_monero_row_does_not_claim_get_new_address_refuses():
-    """MEASURED 2026-09-27, and this test fails without the fix.
-
-    Before the fix, `_attribution_note("XMR")` returned the default branch's
-    sentence verbatim:
-
-        "not decided in this application -- get_new_address() refuses and the
-         custody choice is the operator's"
-
-    Both halves are false about Monero. chains/monero.py:280
-    MoneroAdapter.get_new_address() does NOT refuse -- it calls the wallet's
-    `create_address` for the configured account and returns a real per-swap
-    SUBADDRESS -- and the custody choice is not open, because
-    monero-wallet-rpc holds the keys exactly as bitcoind does. XMR reached that
-    branch only because services/swap_view.ATTRIBUTION_MODELS listed four chains
-    and Monero was not one of them, while chain_rows() forces XMR into the table.
-    So the sentence rendered on the operator's chain page every time it was
-    opened, beside an `attribution` column reading "unknown" -- on the page an
-    operator would consult to learn how Monero deposits are told apart.
-
-    MUTATION: remove "XMR" from ATTRIBUTION_MODELS, and both assertions below
-    fail -- the first because the "refuses" sentence returns, the second because
-    the column goes back to "unknown". Removing only the XMR entry from
-    ADDRESS_DERIVATIONS fails the third: the note then admits it does not know
-    how the address is derived instead of inventing a `getnewaddress` that
-    monero-wallet-rpc does not have.
-
-    This asserts on the ROW, not on the function alone, because the row is what
-    renders (templates/admin.html:213 prints `attribution` and
-    `attribution_note` together).
-    """
-    rows = {row["asset"]: row for row in chain_rows(seeded_config(), {})}
-    note = rows["XMR"]["attribution_note"]
-
-    assert "refuses" not in note, (
-        "Monero's get_new_address() returns a subaddress; saying it refuses is false on the page an "
-        "operator reads to find out"
-    )
-    assert "not decided in this application" not in note
-    assert rows["XMR"]["attribution"] == "address", (
-        "a subaddress IS the attribution for XMR, the same question BTC/LTC/GRC answer -- see "
-        "ATTRIBUTION_MODELS for why this is not a fourth model name"
-    )
-    assert "subaddress" in note, "the DERIVATION differs from a daemon's getnewaddress and the note must say so"
-    assert "create_address" in note, "name the RPC method, so the claim can be checked against chains/monero.py"
-    assert "getnewaddress" not in note, (
-        "monero-wallet-rpc has no getnewaddress -- inheriting the Bitcoin clause is the second false sentence "
-        "this fix had to avoid"
-    )
 
 
 def test_the_solana_row_still_says_get_new_address_refuses():
@@ -447,13 +398,10 @@ def test_an_address_chain_with_no_recorded_derivation_says_so_rather_than_guessi
         "every chain in the address model must have its derivation recorded"
     )
 
-    note = admin_view._attribution_note("XMR")
-    assert "getnewaddress" not in note
-
     original = dict(ADDRESS_DERIVATIONS)
-    ADDRESS_DERIVATIONS.pop("XMR")
+    ADDRESS_DERIVATIONS.pop("BTC")
     try:
-        gap = admin_view._attribution_note("XMR")
+        gap = admin_view._attribution_note("BTC")
     finally:
         ADDRESS_DERIVATIONS.clear()
         ADDRESS_DERIVATIONS.update(original)
@@ -545,7 +493,7 @@ def test_not_configured_and_not_probeable_are_not_failures():
     assert missing["probed"] is False and missing["reachable"] is None
     assert "not configured" in missing["detail"]
 
-    unprobeable = probe_chain("XMR", _NoProbeAdapter())
+    unprobeable = probe_chain("SOL", _NoProbeAdapter())
     assert unprobeable["probed"] is False and unprobeable["reachable"] is None
     assert "no read-only network probe" in unprobeable["detail"]
 

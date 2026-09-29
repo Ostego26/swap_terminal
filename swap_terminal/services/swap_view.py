@@ -345,10 +345,6 @@ ATTRIBUTION_MODELS = {
     "BTC": "address",
     "LTC": "address",
     "GRC": "address",
-    # A fresh per-swap SUBADDRESS, which is an address as far as attribution is
-    # concerned. See the paragraph above for why this is not its own model name,
-    # and ADDRESS_DERIVATIONS below for the difference it does have.
-    "XMR": "address",
     "XRP": "destination_tag",
 }
 
@@ -372,11 +368,6 @@ ADDRESS_DERIVATIONS = {
     "BTC": "the daemon's `getnewaddress` -- an independent address whose key bitcoind stores in wallet.dat",
     "LTC": "the daemon's `getnewaddress` -- an independent address whose key litecoind stores in wallet.dat",
     "GRC": "the daemon's `getnewaddress` -- an independent address whose key the Gridcoin wallet stores in wallet.dat",
-    "XMR": (
-        "the wallet's `create_address` on the configured account -- a fresh subaddress, not an independent "
-        "address: it is derived from that one account and monero-wallet-rpc finds payments to it by scanning "
-        "with the view key rather than by holding a key per swap"
-    ),
 }
 
 

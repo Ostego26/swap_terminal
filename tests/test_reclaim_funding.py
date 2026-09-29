@@ -1,7 +1,7 @@
 """Emptying a seed-derived funding address, and the two refusals that make it safe.
 
 Role: tests (offline; no daemon, no network)
-Reads: reclaim_funding.py, regtest/adaptor_steps.py, modules/network_selection.py
+Reads: reclaim_funding.py, regtest/funding_steps.py, modules/network_selection.py
 Writes: nothing
 Can move funds: no
 Mainnet-safe: yes -- nothing here opens a socket
@@ -31,9 +31,9 @@ from pathlib import Path
 import base58
 import pytest
 from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
-from modules import adaptor_swap_chain as chain
 from modules import network_selection
-from regtest import adaptor_steps
+from modules import script_chain as chain
+from regtest import funding_steps
 from regtest.console import Console
 from regtest.daemons import ChainConfig, RegtestSetupError
 from regtest.keys import generate_key
@@ -48,10 +48,10 @@ def _entry():
     return module
 
 
-def _run(monkeypatch, node=None) -> tuple[adaptor_steps.Run, io.StringIO]:
+def _run(monkeypatch, node=None) -> tuple[funding_steps.Run, io.StringIO]:
     stream = io.StringIO()
-    run = adaptor_steps.Run(
-        console=Console(adaptor_steps.TOTAL_STEPS, stream=stream),
+    run = funding_steps.Run(
+        console=Console(funding_steps.TOTAL_STEPS, stream=stream),
         config=ChainConfig(
             asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
             host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
@@ -60,7 +60,7 @@ def _run(monkeypatch, node=None) -> tuple[adaptor_steps.Run, io.StringIO]:
         wallet="",
     )
     if node is not None:
-        monkeypatch.setattr(adaptor_steps, "adapter_for", lambda config, wallet="": node)
+        monkeypatch.setattr(funding_steps, "adapter_for", lambda config, wallet="": node)
     return run, stream
 
 
@@ -71,7 +71,7 @@ def _run(monkeypatch, node=None) -> tuple[adaptor_steps.Run, io.StringIO]:
 
 def test_a_testnet_address_gives_the_p2pkh_script_that_pays_it():
     key = generate_key()
-    assert adaptor_steps.p2pkh_script_for_address("GRC", key.address) == key.p2pkh_script
+    assert funding_steps.p2pkh_script_for_address("GRC", key.address) == key.p2pkh_script
 
 
 def test_a_MAINNET_address_is_REFUSED_while_this_engine_is_on_testnet():
@@ -88,7 +88,7 @@ def test_a_MAINNET_address_is_REFUSED_while_this_engine_is_on_testnet():
     mainnet_address = base58.b58encode_check(mainnet_byte + key.hash160).decode()
 
     with pytest.raises(RegtestSetupError) as raised:
-        adaptor_steps.p2pkh_script_for_address("GRC", mainnet_address)
+        funding_steps.p2pkh_script_for_address("GRC", mainnet_address)
 
     message = str(raised.value)
     assert "other network" in message, "it has to say what paying it would do, not just refuse"
@@ -101,7 +101,7 @@ def test_a_destination_that_is_not_a_P2PKH_address_is_refused(bad):
     output to an ordinary wallet address, and a reclaim tool that silently built the wrong
     script for a fancier destination would strand it again somewhere harder to reach."""
     with pytest.raises(RegtestSetupError):
-        adaptor_steps.p2pkh_script_for_address("GRC", bad)
+        funding_steps.p2pkh_script_for_address("GRC", bad)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def test_the_whole_output_goes_to_the_destination_less_the_fee(monkeypatch):
     key, destination = generate_key(), generate_key()
     source = _source()
 
-    raw, predicted, value = adaptor_steps.reclaim_p2pkh(run, key, source, destination.address)
+    raw, predicted, value = funding_steps.reclaim_p2pkh(run, key, source, destination.address)
 
     assert 0 < value < source.value_satoshis, "the fee comes out of it, and something is left"
     assert len(predicted) == 64
@@ -134,7 +134,7 @@ def test_an_output_too_small_to_cover_its_own_fee_is_refused_by_name(monkeypatch
     key, destination = generate_key(), generate_key()
 
     with pytest.raises(RegtestSetupError) as raised:
-        adaptor_steps.reclaim_p2pkh(run, key, _source(value=1), destination.address)
+        funding_steps.reclaim_p2pkh(run, key, _source(value=1), destination.address)
     assert "cannot be emptied" in str(raised.value)
 
 
@@ -170,7 +170,7 @@ class _Node:
         raise RPCErrorStub(f"{method}: no answer configured")
 
 
-class RPCErrorStub(adaptor_steps.RPCError):
+class RPCErrorStub(funding_steps.RPCError):
     """An unconfigured method, raised as the DAEMON would raise it.
 
     Subclassing the real `RPCError` rather than `Exception` on 2026-09-28, because the code
@@ -192,17 +192,17 @@ def test_without_send_the_transaction_is_BUILT_AND_SIGNED_and_never_broadcast(mo
     entry = _entry()
     key, destination = generate_key(), generate_key()
     node = _Node({"testmempoolaccept": [{"allowed": True}]})
-    monkeypatch.setattr(entry.adaptor_steps, "resolve_config", lambda asset: ChainConfig(
+    monkeypatch.setattr(entry.funding_steps, "resolve_config", lambda asset: ChainConfig(
         asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
         host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
         conf_name="c.conf", pid_name="c.pid",
     ))
-    monkeypatch.setattr(entry.adaptor_steps, "step_1_reachable", lambda run: None)
-    monkeypatch.setattr(entry.adaptor_steps, "assert_test_network", lambda run: None)
-    monkeypatch.setattr(entry.adaptor_steps, "operator_funding_key", lambda run: key)
-    monkeypatch.setattr(entry.adaptor_steps, "discover_operator_funding_txid", lambda run, k: "cd" * 32)
-    monkeypatch.setattr(entry.adaptor_steps, "find_operator_funding", lambda run, k, txid: _source())
-    monkeypatch.setattr(entry.adaptor_steps, "adapter_for", lambda config, wallet="": node)
+    monkeypatch.setattr(entry.funding_steps, "step_1_reachable", lambda run: None)
+    monkeypatch.setattr(entry.funding_steps, "assert_test_network", lambda run: None)
+    monkeypatch.setattr(entry.funding_steps, "operator_funding_key", lambda run: key)
+    monkeypatch.setattr(entry.funding_steps, "discover_operator_funding_txid", lambda run, k: "cd" * 32)
+    monkeypatch.setattr(entry.funding_steps, "find_operator_funding", lambda run, k, txid: _source())
+    monkeypatch.setattr(entry.funding_steps, "adapter_for", lambda config, wallet="": node)
 
     stream = io.StringIO()
     code = entry.main(["--to", destination.address, "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
@@ -219,14 +219,14 @@ def test_an_unset_seed_says_where_the_seed_usually_is(monkeypatch):
     """The refusal has to name the recovery route, or it is the dead end this whole tool exists
     because of: the operator's shell history is the only place a lost seed actually is."""
     entry = _entry()
-    monkeypatch.setattr(entry.adaptor_steps, "resolve_config", lambda asset: ChainConfig(
+    monkeypatch.setattr(entry.funding_steps, "resolve_config", lambda asset: ChainConfig(
         asset="GRC", daemon_path="x", cli_path="y", datadir=Path("/nonexistent"),
         host="127.0.0.1", port=1, rpc_user=RPC_FIXTURE_USER, rpc_password=RPC_FIXTURE_AUTH,
         conf_name="c.conf", pid_name="c.pid",
     ))
-    monkeypatch.setattr(entry.adaptor_steps, "step_1_reachable", lambda run: None)
-    monkeypatch.setattr(entry.adaptor_steps, "assert_test_network", lambda run: None)
-    monkeypatch.setattr(entry.adaptor_steps, "operator_funding_key", lambda run: None)
+    monkeypatch.setattr(entry.funding_steps, "step_1_reachable", lambda run: None)
+    monkeypatch.setattr(entry.funding_steps, "assert_test_network", lambda run: None)
+    monkeypatch.setattr(entry.funding_steps, "operator_funding_key", lambda run: None)
 
     stream = io.StringIO()
     assert entry.main(["--to", generate_key().address], Console(entry.TOTAL_STEPS, stream=stream)) == 1
@@ -271,7 +271,7 @@ def test_an_address_the_wallet_already_owns_is_found_from_listunspent(monkeypatc
             return [{"txid": "ab" * 32, "vout": 0, "amount": 1.0, "address": owned}]
 
     run, _stream = _run(monkeypatch, _Wallet())
-    assert adaptor_steps.wallet_owned_address(run) == owned
+    assert funding_steps.wallet_owned_address(run) == owned
 
 
 def test_a_wallet_with_no_unspent_outputs_says_so_rather_than_paying_nowhere(monkeypatch):
@@ -281,7 +281,7 @@ def test_a_wallet_with_no_unspent_outputs_says_so_rather_than_paying_nowhere(mon
 
     run, _stream = _run(monkeypatch, _Empty())
     with pytest.raises(RegtestSetupError) as raised:
-        adaptor_steps.wallet_owned_address(run)
+        funding_steps.wallet_owned_address(run)
     assert "--to" in str(raised.value), "and it names the way round it"
 
 
@@ -295,7 +295,7 @@ def test_rows_without_an_address_are_skipped_rather_than_paying_an_empty_string(
             return [{"txid": "ab" * 32, "vout": 0}, {"address": ""}, {"address": owned}]
 
     run, _stream = _run(monkeypatch, _Mixed())
-    assert adaptor_steps.wallet_owned_address(run) == owned
+    assert funding_steps.wallet_owned_address(run) == owned
 
 
 def test_to_and_to_wallet_are_mutually_exclusive_and_one_is_required():
@@ -329,7 +329,7 @@ def test_the_dry_run_tells_you_to_re_run_with_the_EXACT_address_it_used(monkeypa
         ("find_operator_funding", lambda run, k, txid: _source()),
         ("adapter_for", lambda config, wallet="": node),
     ):
-        monkeypatch.setattr(entry.adaptor_steps, name, value)
+        monkeypatch.setattr(entry.funding_steps, name, value)
 
     stream = io.StringIO()
     assert entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream)) == 0
@@ -370,7 +370,7 @@ def test_no_step_number_is_printed_twice(monkeypatch):
         ("find_operator_funding", lambda run, k, txid: _source()),
         ("adapter_for", lambda config, wallet="": node),
     ):
-        monkeypatch.setattr(entry.adaptor_steps, name, value)
+        monkeypatch.setattr(entry.funding_steps, name, value)
 
     stream = io.StringIO()
     entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
@@ -415,7 +415,7 @@ def test_a_dry_run_over_an_ALREADY_SPENT_output_refuses_instead_of_looking_healt
         ("find_operator_funding", lambda run, k, txid: _source()),
         ("adapter_for", lambda config, wallet="": node),
     ):
-        monkeypatch.setattr(entry.adaptor_steps, name, value)
+        monkeypatch.setattr(entry.funding_steps, name, value)
 
     stream = io.StringIO()
     code = entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))
@@ -470,7 +470,7 @@ def test_the_dry_run_WALKS_THE_CHAIN_when_the_daemon_has_no_testmempoolaccept(mo
         ("find_operator_funding", lambda run, k, txid: source),
         ("adapter_for", lambda config, wallet="": node),
     ):
-        monkeypatch.setattr(entry.adaptor_steps, name, value)
+        monkeypatch.setattr(entry.funding_steps, name, value)
 
     stream = io.StringIO()
     code = entry.main(["--to-wallet", "--chain", "grc"], Console(entry.TOTAL_STEPS, stream=stream))

@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
-from regtest import adaptor_steps, daemons, steps
+from regtest import daemons, funding_steps, steps
 from regtest import operator_panel as decisions
 from regtest.daemons import RegtestSetupError
 from regtest.harness_runner import HarnessRunner
@@ -262,7 +262,7 @@ def test_the_panel_reads_the_SAME_payment_list_the_harness_picks_from(monkeypatc
         {"address": "ours", "category": "send", "txid": "22" * 32, "confirmations": 9},
         {"address": "ours", "category": "send", "txid": "33" * 32, "confirmations": 2},
     ]
-    assert [p.txid for p in adaptor_steps.payments_to_the_funding_address(rows, "ours")] == [
+    assert [p.txid for p in funding_steps.payments_to_the_funding_address(rows, "ours")] == [
         "33" * 32, "22" * 32
     ], "newest first, and somebody else's payment is not ours"
 
@@ -285,9 +285,9 @@ def test_the_panel_reads_the_SAME_payment_list_the_harness_picks_from(monkeypatc
                 return rows
             raise AssertionError(method)
 
-    monkeypatch.setattr(adaptor_steps, "find_operator_funding",
+    monkeypatch.setattr(funding_steps, "find_operator_funding",
                         lambda run, key, txid: seen.append(txid) or _Outpoint(txid))
-    monkeypatch.setattr(adaptor_steps, "find_the_spender",
+    monkeypatch.setattr(funding_steps, "find_the_spender",
                         lambda run, outpoint, max_depth=0: (
                             ("what-consumed-it", "SPENT ALREADY") if outpoint.txid == "22" * 32
                             else (None, "no transaction in the last 3 block(s) spends this outpoint")))
@@ -370,7 +370,7 @@ def test_every_chain_gets_a_tab_including_the_ones_with_no_adapter():
     kinds = {c.asset: c.kind for c in decisions.CHAINS}
     assert kinds["GRC"] == "operator", "the operator runs it; this panel only reads it"
     assert kinds["BTC"] == kinds["LTC"] == "regtest"
-    assert kinds["XMR"] == kinds["XRP"] == kinds["SOL"] == "foreign"
+    assert kinds["XRP"] == kinds["SOL"] == "foreign"
     for chain in decisions.CHAINS:
         assert chain.note, f"{chain.asset} must say what it is, even when unreachable"
 
@@ -383,15 +383,15 @@ def test_a_chain_with_no_adapter_is_a_RESULT_and_never_an_outage(monkeypatch):
     find out why something was down. `resolve_config` is made to explode here to prove the tab
     survives it.
     """
-    foreign = next(c for c in decisions.CHAINS if c.asset == "XMR")
+    foreign = next(c for c in decisions.CHAINS if c.asset == "SOL")
     state = decisions.chain_state(foreign, None)
     assert state["reachable"] is False and state["error"] == ""
-    assert "does not probe it directly" in state["note"]
+    assert "read-only check is the button below" in state["note"]
 
     def _explodes(asset):
         raise RuntimeError("no connection parameters for you")
 
-    monkeypatch.setattr(adaptor_steps, "resolve_config", _explodes)
+    monkeypatch.setattr(funding_steps, "resolve_config", _explodes)
     btc = next(c for c in decisions.CHAINS if c.asset == "BTC")
     state = decisions.chain_state(btc, None)
     assert state["reachable"] is False
@@ -526,7 +526,7 @@ def test_a_SPENT_answer_is_remembered_and_an_UNSPENT_one_is_never_cached(monkeyp
                         {"address": "ours", "category": "send", "txid": fresh, "confirmations": 2}]
             raise AssertionError(method)
 
-    monkeypatch.setattr(adaptor_steps, "find_operator_funding",
+    monkeypatch.setattr(funding_steps, "find_operator_funding",
                         lambda run, key, txid: _Outpoint(txid))
 
     def _walk(run, outpoint, max_depth=0):
@@ -534,7 +534,7 @@ def test_a_SPENT_answer_is_remembered_and_an_UNSPENT_one_is_never_cached(monkeyp
         return (("what-consumed-it", "SPENT ALREADY") if outpoint.txid == spent
                 else (None, "no transaction in the last 3 block(s) spends this outpoint"))
 
-    monkeypatch.setattr(adaptor_steps, "find_the_spender", _walk)
+    monkeypatch.setattr(funding_steps, "find_the_spender", _walk)
 
     cache: dict = {}
     first = decisions.payment_rows(_Run(), _Key(), cache)
@@ -582,8 +582,8 @@ def test_the_cache_is_OPTIONAL_so_every_other_caller_is_unaffected(monkeypatch):
         def call(self, method, *params):
             return [{"address": "ours", "category": "send", "txid": "44" * 32, "confirmations": 9}]
 
-    monkeypatch.setattr(adaptor_steps, "find_operator_funding", lambda run, key, txid: _Outpoint(txid))
-    monkeypatch.setattr(adaptor_steps, "find_the_spender",
+    monkeypatch.setattr(funding_steps, "find_operator_funding", lambda run, key, txid: _Outpoint(txid))
+    monkeypatch.setattr(funding_steps, "find_the_spender",
                         lambda run, outpoint, max_depth=0: walks.append(1) or ("x", "SPENT"))
 
     decisions.payment_rows(_Run(), _Key())
@@ -851,7 +851,7 @@ def test_every_mark_renders_without_a_network_or_a_file():
     marks = entry.PAGE.split("const MARKS", 1)[1].split("};", 1)[0]
     for forbidden in ("<img", "http://", "https://", "url(http", ".png", ".svg\"", "src="):
         assert forbidden not in marks, f"{forbidden!r} in the marks: this page fetches nothing"
-    for asset in ("GRC", "BTC", "LTC", "XMR", "XRP", "SOL"):
+    for asset in ("GRC", "BTC", "LTC", "XRP", "SOL"):
         assert f"{asset}: '<svg" in marks, f"{asset} has no mark"
 
 
@@ -970,7 +970,7 @@ def test_a_foreign_chains_SWITCH_IS_REFUSED_FOR_A_REASON_ABOUT_THIS_PANEL(monkey
     to a pgrep pattern", in the case where there is not even a pattern worth having.
     """
     monkeypatch.setenv(decisions.MAY_STOP_VARIABLE, "yes")
-    for asset in ("XMR", "XRP", "SOL"):
+    for asset in ("XRP", "SOL"):
         start = decisions.refuse_daemon_control(_tab(asset), "start")
         stop = decisions.refuse_daemon_control(_tab(asset), "stop")
         assert start and stop, f"{asset} must refuse both -- arming the stop conjures no daemon"
@@ -998,8 +998,8 @@ def test_the_four_refusals_are_NOT_interchangeable(monkeypatch):
     said = {
         "grc_start": decisions.refuse_daemon_control(_tab("GRC"), "start"),
         "grc_stop": decisions.refuse_daemon_control(_tab("GRC"), "stop"),
-        "xmr_start": decisions.refuse_daemon_control(_tab("XMR"), "start"),
-        "xmr_stop": decisions.refuse_daemon_control(_tab("XMR"), "stop"),
+        "sol_start": decisions.refuse_daemon_control(_tab("SOL"), "start"),
+        "sol_stop": decisions.refuse_daemon_control(_tab("SOL"), "stop"),
     }
     # FOUR NOW, NOT THREE. The foreign start and the foreign stop shared one sentence until
     # 2026-09-28 and the sentence was wrong for both of them; splitting it is what made this
@@ -1015,13 +1015,13 @@ def test_the_switch_route_refuses_before_it_reaches_a_daemon():
     answer, code = entry.answer_a_daemon_switch({"asset": "DOGE", "action": "stop"}, {})
     assert code == 403 and answer["refused"] is True
 
-    answer, code = entry.answer_a_daemon_switch({"asset": "XMR", "action": "stop"}, {})
+    answer, code = entry.answer_a_daemon_switch({"asset": "SOL", "action": "stop"}, {})
     # THE ROUTE GIVES THE DECISION'S OWN SENTENCE, asserted by deriving it rather than by
     # quoting it. This pinned the literal "no daemon lifecycle" and so had to be edited when
     # that sentence was found to be a false claim about Monero -- a test that pins a constant
     # fails on a wording change and passes on a behavior one, which is backwards.
     assert code == 403
-    assert answer["error"] == decisions.refuse_daemon_control(_tab("XMR"), "stop")
+    assert answer["error"] == decisions.refuse_daemon_control(_tab("SOL"), "stop")
 
     answer, code = entry.answer_a_daemon_switch("not an object", {})
     assert code == 400
@@ -1101,17 +1101,17 @@ def test_a_FOREIGN_TAB_IS_NOT_OFFERED_A_CONSOLE_IT_CANNOT_USE():
     well. What is true is that this console sends one protocol and XMR does not speak it.
     """
     entry = _entry()
-    xmr = next(c for c in decisions.CHAINS if c.asset == "XMR")
+    sol = next(c for c in decisions.CHAINS if c.asset == "SOL")
     grc = next(c for c in decisions.CHAINS if c.asset == "GRC")
 
-    refusal = decisions.refuse_an_rpc_console(xmr)
+    refusal = decisions.refuse_an_rpc_console(sol)
     assert refusal and "does not speak" in refusal
     assert "unreachable" not in refusal and "not reachable" not in refusal, (
         "it must not claim anything about whether that daemon is up -- nothing asked it"
     )
     assert decisions.refuse_an_rpc_console(grc) == "", "GRC speaks it, so GRC keeps its console"
 
-    answer, code = entry.answer_an_rpc({"asset": "XMR", "method": "getblockcount"}, {})
+    answer, code = entry.answer_an_rpc({"asset": "SOL", "method": "getblockcount"}, {})
     assert code == 403 and answer["refused"] is True
     assert answer["error"] == refusal, (
         "the route gives the same sentence the tab does, from the same function -- two copies "
@@ -1264,7 +1264,7 @@ def test_THE_STARTUP_GATE_IS_NOT_THE_THING_BEING_QUIETED():
     """
     source = Path(_entry().__file__).read_text(encoding="utf-8")
     wrapped = source.index("run.console = decisions.SaysEachLineOnce(console)")
-    gated = source.index("adaptor_steps.assert_test_network(run)")
+    gated = source.index("funding_steps.assert_test_network(run)")
     assert gated < wrapped, "the gate prints through the real console, unwrapped"
 
 
@@ -1310,20 +1310,20 @@ def test_THE_TERMINAL_SAYS_SPENT_OR_USABLE_AND_NOT_ONLY_THE_PAGE():
 
     run = _Run()
     outpoints = {
-        spent_txid: adaptor_steps.chain.Outpoint(txid=spent_txid, vout=1, value_satoshis=150_000_000),
-        live_txid: adaptor_steps.chain.Outpoint(txid=live_txid, vout=0, value_satoshis=16_000_000),
+        spent_txid: funding_steps.chain.Outpoint(txid=spent_txid, vout=1, value_satoshis=150_000_000),
+        live_txid: funding_steps.chain.Outpoint(txid=live_txid, vout=0, value_satoshis=16_000_000),
     }
-    original_find = adaptor_steps.find_operator_funding
-    original_spender = adaptor_steps.find_the_spender
+    original_find = funding_steps.find_operator_funding
+    original_spender = funding_steps.find_the_spender
     try:
-        adaptor_steps.find_operator_funding = lambda r, k, txid: outpoints[txid]
-        adaptor_steps.find_the_spender = lambda r, o, max_depth=None: (
+        funding_steps.find_operator_funding = lambda r, k, txid: outpoints[txid]
+        funding_steps.find_the_spender = lambda r, o, max_depth=None: (
             (spender, "SPENT ALREADY") if o.txid == spent_txid else (None, "no spender found")
         )
         rows = decisions.payment_rows(run, _Key())
     finally:
-        adaptor_steps.find_operator_funding = original_find
-        adaptor_steps.find_the_spender = original_spender
+        funding_steps.find_operator_funding = original_find
+        funding_steps.find_the_spender = original_spender
 
     # NEWEST FIRST is payments_to_the_funding_address()'s order, so the 2-confirmation one
     # leads. Asserted as the order rather than as a set, because "which one would a run pick"
@@ -1348,7 +1348,7 @@ def test_A_CANDIDATE_OUTPUT_IS_NOT_ANNOUNCED_AS_THE_OPERATORS_FUNDING():
     and the sequence reads correctly -- but the line has to be true on its own, because the
     panel is a second reader that does not print those two lines.
     """
-    source = Path(adaptor_steps.__file__).read_text(encoding="utf-8")
+    source = Path(funding_steps.__file__).read_text(encoding="utf-8")
     start = source.index("def find_operator_funding(")
     end = source.index("def ", source.index("raise RegtestSetupError", start))
     body = source[start:end]

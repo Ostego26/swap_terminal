@@ -831,7 +831,7 @@ def wait_for_rpc(console: Console, config: ChainConfig) -> None:
     method this family never had, reported as a credential problem: the exact shape the
     LIVENESS_PROBES table above exists to refuse.
 
-    NOT REACHED ON TODAY'S GRC PATH, and that is not a reason to leave it. adaptor_steps.
+    NOT REACHED ON TODAY'S GRC PATH, and that is not a reason to leave it. funding_steps.
     step_1_reachable() returns before this line for GRC, and fund_testnets.py's GRC branch
     never enters fund_regtest_chain() -- so this was a live break waiting for the first
     caller who pointed a readiness wait at Gridcoin, while `rpc_answers()` forty lines up

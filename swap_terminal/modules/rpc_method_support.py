@@ -46,7 +46,7 @@ both required, and the table says which chains each optional method is expected 
 ASKED AFTER THE FACT, WHICH IS THE OTHER HALF OF A PAIR (rule 8, which asks for a comment at
 BOTH sites naming the other). The other is regtest/daemons.method_exists(), and it asks the
 opposite way round: `help <method>` BEFORE a call, so a caller can decide not to attempt
-something -- regtest/adaptor_steps._mine_early_cancel() SKIPs on a daemon with no
+something -- regtest/funding_steps._mine_early_cancel() SKIPs on a daemon with no
 `generateblock` instead of scoring the absence as a consensus refusal. This function is handed
 an exception that has already been raised, four routes deep inside
 htlc_rpc.lookup_contract_output(), where no probe could have helped. Neither replaces the

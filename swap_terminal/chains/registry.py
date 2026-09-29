@@ -77,7 +77,6 @@ from network_target import configuring_variable
 from .bitcoin import BitcoinAdapter
 from .gridcoin import GridcoinAdapter
 from .litecoin import LitecoinAdapter
-from .monero import MoneroAdapter
 from .solana import SolanaAdapter
 from .xrp import XRPAdapter
 
@@ -140,28 +139,11 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     if solana and solana.get("url"):
         adapters["SOL"] = SolanaAdapter(**solana)
 
-    # XMR is conditional for the same reason SOL is, and on the same test:
-    # "configured" means the operator supplied the one value that cannot be
-    # defaulted. For Solana that is the endpoint URL; for Monero it is the
-    # wallet RPC port, because monero-wallet-rpc has no conventional port the
-    # way bitcoind's 8332 does -- it is whatever the operator passed to
-    # --rpc-bind-port when they started it, and guessing one would produce an
-    # adapter that fails on every cycle against a port nothing is listening on.
-    #
-    # Config.RPC["XMR"] has its own shape again -- {host, port, user, password,
-    # account_index, min_confirmations, can_spend, timeout} -- matching
-    # MoneroAdapter.__init__ exactly, for the reason the SOL paragraph above
-    # gives: the dict is built for the signature, and the splat makes a
-    # mismatch fail loudly here instead of being ignored.
     # XRP is conditional on its URL, exactly as SOL is, and for the same
     # reason: an endpoint is the one value that cannot be defaulted.
     xrp = rpc.get("XRP")
     if xrp and xrp.get("url"):
         adapters["XRP"] = XRPAdapter(**xrp)
-
-    monero = rpc.get("XMR")
-    if monero and monero.get("port"):
-        adapters["XMR"] = MoneroAdapter(**monero)
     return adapters
 
 
@@ -181,21 +163,16 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
 #
 # An empty user or password is therefore never usable through this code, which
 # makes it exactly the same kind of value as an unset port: something that cannot
-# be defaulted. The registry's own principle, stated twice below for SOL and XMR,
+# be defaulted. The registry's own principle, stated below for SOL and XRP,
 # is that "configured" means the operator supplied those values. The three oldest
 # chains were checking one of three.
-#
-# XMR is deliberately NOT here: monero-wallet-rpc can be started with
-# --disable-rpc-login, so an empty user and password is a legitimate
-# configuration for it. Bitcoin-derived daemons require basic auth or a cookie,
-# and this adapter cannot read a cookie.
+
 _REQUIRED_SETTINGS: dict[str, tuple[tuple[str, str | None], ...]] = {
     "BTC": (("port", None), ("user", "USER"), ("password", "PASS")),
     "LTC": (("port", None), ("user", "USER"), ("password", "PASS")),
     "GRC": (("port", None), ("user", "USER"), ("password", "PASS")),
     "SOL": (("url", None),),
     "XRP": (("url", None),),
-    "XMR": (("port", None),),
 }
 
 

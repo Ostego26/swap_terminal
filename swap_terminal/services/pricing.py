@@ -131,7 +131,6 @@ IDS = {
     # swap that cannot be priced, which is worse than a refused one. The comment above
     # records XRP as the asset that would have hit the old two-table version; XMR is the
     # asset that proves the single table works.
-    "XMR": "monero",
 }
 
 # THE CONTEXT TABLE. (query flag, response key, MarketSnapshot field), and the

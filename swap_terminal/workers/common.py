@@ -53,7 +53,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from chains.monero import MoneroAdapter
 from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
@@ -173,13 +172,6 @@ def endpoint_lines() -> list[str]:
             f"is constructed; no XRP pair is allowed"
         )
 
-    if Config.RPC.get("XMR", {}).get("port"):
-        lines.append(MoneroAdapter(**Config.RPC["XMR"]).endpoint_line())
-    else:
-        lines.append(
-            f"  XMR  not configured ({configuring_variable('XMR')} unset)  <- no Monero adapter "
-            f"is constructed; no XMR pair is allowed"
-        )
     return lines
 
 
