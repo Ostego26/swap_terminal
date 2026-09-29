@@ -301,3 +301,90 @@ def deposit_events_from_transfers(transfers, address: str, min_confirmations: in
 
     _reject_ambiguous_keys(scan.events)
     return scan
+
+
+@dataclass(frozen=True)
+class MoneroLockState:
+    """What one party's OWN wallet says about the swap's Monero lock. One value, not two.
+
+    `confirmed` and `unlocked` are not independent facts and must not travel as two loose
+    booleans: `unlocked` is meaningless when `confirmed` is False, and a caller that
+    received them separately could pass a stale one beside a fresh one. Bundling them means
+    an observation is taken once and used whole.
+
+    `reason` is carried so a refusal can be PRINTED (rule 14). A swap that sits there not
+    progressing is the common case for this object, and "why" is the only thing the operator
+    watching it needs.
+    """
+
+    confirmed: bool
+    unlocked: bool
+    reason: str
+
+
+def lock_observation(transfers: list[dict], minimum_atomic: int) -> MoneroLockState:
+    """Is the swap's Monero lock funded, confirmed, and SPENDABLE? Three-part answer.
+
+    THIS IS THE OBSERVATION `monero_swap_protocol.redeem_presignature_may_be_released`
+    CONSUMES, and until 2026-09-29 nothing in this tree produced it. That gate takes
+    `xmr_lock_confirmed` and `xmr_lock_unlocked` as two booleans its caller supplies, and it
+    had no caller anywhere -- not in production, not in the harness, not in `rehearse()`, only
+    in two unit tests. A predicate over booleans nobody computes is a predicate that guards
+    nothing, so the missing half was never the gate. It was this.
+
+    WHY IT LIVES HERE AND NOT BESIDE THE GATE. `deposit_events_from_transfers` above already
+    owns what `locked` and `unlock_time` mean together, and it learned that the expensive way:
+    a custom `unlock_time` can hold an output past the ten-block consensus lock for as long as
+    the sender chose, so a second implementation would be rule 8's defect with a delay on it.
+    One module knows the lock rule; this function asks it the swap's question rather than
+    re-deriving the answer.
+
+    THE TWO BOOLEANS ARE GENUINELY DIFFERENT AND THE SECOND IS THE ONE THAT SURPRISES PEOPLE.
+    Measured on the operator's host 2026-09-27 and recorded at `monero_swap_protocol.py:604`:
+    a transfer with 3 confirmations and `unlock_time=0` still reported `locked=True` and
+    contributed 0 to `unlocked_balance`. Confirmed does not imply spendable. An ordinary
+    Monero output locks for ten blocks, so a funder who released on confirmations alone would
+    be releasing against a lock they could not yet sweep.
+
+    THE AMOUNT IS PART OF THE OBSERVATION, deliberately. A lock funded for less than the
+    agreed amount is not a funded lock, and a gate that asked only "did anything arrive"
+    would release the redeem pre-signature against a dust payment. Only CREDITABLE_TYPES
+    count toward the total: a transfer still in the pool has no confirmations to count and
+    can be replaced, so counting one would credit money the chain has not committed to.
+
+    Returns a `MoneroLockState` rather than a bare pair, because the reason is
+    what an operator reads when the swap sits there not progressing (rule 14: state what the
+    number means, next to the number). `confirmed` is False when too little has arrived at
+    all; `unlocked` is False when it arrived but no output is spendable yet.
+    """
+    arrived, spendable, held_back = 0, 0, []
+    for transfer in transfers:
+        if transfer.get(FIELD_TYPE) not in CREDITABLE_TYPES:
+            continue
+        atomic = int(transfer.get(FIELD_AMOUNT, 0) or 0)
+        arrived += atomic
+        unlock_time = int(transfer.get(FIELD_UNLOCK_TIME, 0) or 0)
+        if unlock_time or transfer.get(FIELD_LOCKED):
+            held_back.append(
+                f"{transfer.get(FIELD_TXID, '(no txid)')} {from_atomic(atomic)} XMR "
+                f"unlock_time={unlock_time} locked={bool(transfer.get(FIELD_LOCKED))}"
+            )
+            continue
+        spendable += atomic
+
+    if arrived < minimum_atomic:
+        return MoneroLockState(False, False, (
+            f"the Monero lock holds {from_atomic(arrived)} XMR in confirmed transfers and the "
+            f"swap needs {from_atomic(minimum_atomic)}. Nothing may be released against a lock "
+            f"that is not funded"
+        ))
+    if spendable < minimum_atomic:
+        return MoneroLockState(True, False, (
+            f"the Monero lock holds {from_atomic(arrived)} XMR but only "
+            f"{from_atomic(spendable)} is spendable; {len(held_back)} transfer(s) are still "
+            f"locked -- {'; '.join(held_back) if held_back else '(none named)'}"
+        ))
+    return MoneroLockState(True, True, (
+        f"the Monero lock holds {from_atomic(spendable)} XMR, confirmed and spendable, "
+        f"against a requirement of {from_atomic(minimum_atomic)}"
+    ))

@@ -66,16 +66,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from chains.monero_keys import public_key_for_share, shared_private_spend_key, shared_public_key
+from chains.monero_transfers import MoneroLockState
 from ecdsa import SECP256k1
 from ecdsa.util import sigdecode_der, sigencode_der
 from modules import adaptor_ecdsa
 from modules.htlc_spend import script_pushes
+from modules.monero_swap_protocol import redeem_presignature_may_be_released
 
 SECP256K1_ORDER = SECP256k1.order
 # BIP62's low-S boundary. `adaptor_ecdsa.adapt` already negates above it; this constant
 # exists so `der_from_signature` can ASSERT that rather than silently re-canonizing, for
 # the reason that function's docstring gives.
 SECP256K1_HALF_ORDER = SECP256K1_ORDER // 2
+
+
+class RedeemPresignatureWithheld(RuntimeError):
+    """The redeem pre-signature was NOT made, because the Monero lock is not ready for it.
+
+    DELIBERATELY NOT AN `AdaptorJoinError`. That type means "this repository disagrees with
+    itself" -- a pre-signature that will not verify under the key that just made it. This
+    means the opposite: every piece of code behaved correctly and the protocol refused, which
+    is the single security property standing between the first funder and a total loss. A
+    caller that logged both as defects would report the guard doing its job as a bug, and a
+    caller that swallowed both would lose the distinction entirely.
+
+    Carries the gate's own reason string rather than composing a new one, so what an operator
+    reads is what `monero_swap_protocol.redeem_presignature_may_be_released` decided.
+    """
 
 
 class AdaptorJoinError(RuntimeError):
@@ -284,6 +301,58 @@ def pre_sign_leg(
     )
 
 
+
+def release_redeem_presignature(
+    *,
+    private_key: bytes,
+    digest: bytes,
+    adaptor_point: object,
+    spend_public_at_setup: str,
+    lock_state: MoneroLockState,
+) -> AdaptorLeg:
+    """Bob's redeem pre-signature, CONSTRUCTED ONLY IF the Monero lock is confirmed and spendable.
+
+    THE GATE IS INSIDE THIS FUNCTION AND NOT BESIDE IT, and that placement is the entire
+    point rather than a matter of arrangement. `redeem_presignature_may_be_released` is a
+    pure predicate over two booleans; a caller who checks it and then pre-signs has a window
+    in which the value exists and the gate has already returned. The protocol's own rule is
+    stricter than "do not send it" -- `monero_swap_protocol.py:598-601` says nothing may
+    compute the pre-signature earlier "to have it ready", because "a value that exists in a
+    process is a value that can be sent by the next line somebody writes". So the refusal
+    returns before `pre_sign_leg` is reached, and there is no ordering for a later edit to
+    get wrong.
+
+    WHAT THIS REPLACES, MEASURED 2026-09-29. `redeem_presignature_may_be_released` had NO
+    caller anywhere in the tree -- not in production, not in this harness, not in
+    `rehearse()` -- only two unit tests. Meanwhile `adaptor_steps.step_6_build_and_hold`
+    computed the redeem pre-signature at the earliest moment it could, inside the build step,
+    BEFORE Tx_lock was broadcast at all. The one protection for the first funder was a
+    predicate nothing called, and the value it existed to withhold was manufactured as early
+    as the code could manage. This function is the join between those two facts.
+
+    THE ASYMMETRY, because it decides what a test of this has to look like. The party this
+    protects is BOB, and the party who gains from Bob breaking it is ALICE -- playing
+    honestly by her own lights, since all she does is take a coin she was offered. Released
+    at setup, Alice completes the pre-signature and takes the script-chain coin having sent
+    no XMR; Bob then recovers the scalar from her broadcast exactly as designed, opens the
+    lock address, and finds it empty. Every cryptographic check passes and Bob is ruined. So
+    a test of this rule is not "X cheats, Y catches them" -- nothing catches it. It is "Bob
+    skips the gate and loses everything while nothing reports an error".
+
+    THE OBSERVATION MUST COME FROM THE CALLER'S OWN CHAIN READ. `chains.monero_transfers.
+    lock_observation` computes it from a wallet's transfer list. It must never come from
+    a message the counterparty sent: a gate whose input the adversary supplies is not a gate.
+    This function cannot enforce that -- it receives an observation and has no way to know
+    where they came from -- which is a real limit and is named here rather than implied.
+    """
+    allowed, reason = redeem_presignature_may_be_released(
+        xmr_lock_confirmed=lock_state.confirmed, xmr_lock_unlocked=lock_state.unlocked
+    )
+    if not allowed:
+        raise RedeemPresignatureWithheld(reason)
+    return pre_sign_leg("redeem", private_key, digest, adaptor_point, spend_public_at_setup)
+
+
 def complete_leg(leg: AdaptorLeg, adaptor_secret: int, sighash_byte: int) -> bytes:
     """The completed signature, DER plus the SIGHASH byte -- what goes into the scriptSig.
 
@@ -383,6 +452,7 @@ __all__ = [
     "AdaptorJoinError",
     "AdaptorLeg",
     "RecoveryEvidence",
+    "RedeemPresignatureWithheld",
     "adaptor_point_for_share",
     "complete_leg",
     "der_from_signature",
@@ -390,6 +460,7 @@ __all__ = [
     "point_hex",
     "pre_sign_leg",
     "recover_published_scalar",
+    "release_redeem_presignature",
     "signatures_in_script_sig",
 ]
 
