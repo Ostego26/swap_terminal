@@ -136,10 +136,38 @@ something else in that path explains the grading -- is unestablished rather than
 Both branches, twice over (2026-09-26 and 2026-09-28, independent runs). This is the most
 completely exercised leg in the tree.
 
-**And it is still not a swap, which the harness says itself**: nothing wires escrow into the
-deposit path, and the XRP leg's `CancelAfter` is not derived from
-`modules/htlc_timelock.lock_hours_for_role()` -- so the two legs' timelocks are not related by
-the rule that makes a swap safe. Branches proven, protocol not assembled.
+**THAT PARAGRAPH SAID "AND IT IS STILL NOT A SWAP" UNTIL 2026-09-29, AND IT WAS WRONG BY TWO
+DAYS.** It is kept named rather than quietly replaced, because a reader who believed it would
+rebuild a driver that exists and has completed both directions on real testnets -- which is more
+expensive than the original error (rule 1: the drift is the point, and this document is the one
+place a stale claim about what is proven does the most damage).
+
+What was true of `xrp_htlc_escrow.py` and is STILL true of it: its `CancelAfter` comes from
+`--cancel-after` on the command line, not from `lock_hours_for_role()`. That harness exercises
+BRANCHES and was never a swap driver.
+
+What is false is the conclusion drawn from it. `atomic_swap_xrp_grc.py` derives BOTH legs from
+`lock_hours_for_role()` in `swap_timelocks()`, follows the ROLE rather than the chain so the
+reverse direction cannot invert the ordering, converts the participant's hours to a Gridcoin
+HEIGHT from the tip, and asserts the ordering in `assert_timelock_ordering()`. And it has RUN:
+
+| direction | result | evidence |
+|---|---|---|
+| XRP -> GRC | OK=16 FAIL=0 | escrow `C5563F1C9FECEFB8…`, GRC HTLC `7cf4b61200b913e4…`, GRC claim `d3134b2cfa8a208b…`, XRP finish `A4F8123482E24386…`. B's balance 115999980 -> 116999980 drops, asserted |
+| GRC -> XRP | OK=16 FAIL=0 | GRC HTLC `9283c4c5d0df8c5b…`, escrow `98E03E67336167A6…`, XRP claim `B5E22EA1F4AACBDA…` (the Fulfillment carries the preimage), GRC claim `b6f7f57dc789bfb5…`. A's balance +999640 drops = 1000000 escrowed - 360 finish fee |
+
+Both 2026-09-27, both testnet x testnet, recorded in `docs/atomic_swap_runs_2026_09_27.md`.
+
+**SO THE GRC<->XRP SWAP IS THE ONE THAT IS FINISHED, and GRC<->XMR is the one that is not.** That
+ordering is worth stating plainly because the XMR work is louder in this tree and it is the
+less complete of the two.
+
+And the finding that pair produced, which is the reason it matters beyond XRP: the two
+directions reveal the secret by DIFFERENT MECHANISMS -- `xrp-first` publishes the preimage in a
+scriptSig on Gridcoin, `grc-first` publishes it in the `Fulfillment` field of an `EscrowFinish`
+on a ledger with no scripting language at all. Atomicity does not require a script. It requires
+only that TAKING your leg forces you to publish something the counterparty can read, which is
+exactly the property the XMR leg has to obtain from adaptor signatures instead.
 
 Incidental, and worth keeping: the public testnet server answered `notSupported` to
 server-side signing, and the harness switched to LOCAL signing with xrpl-py for that and every
