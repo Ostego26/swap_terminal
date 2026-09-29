@@ -152,7 +152,8 @@ machine.
 |---|---|---|
 | shared address derivation | SPENT | checked against `monero-wallet-rpc generate_from_keys`, byte-identical |
 | sweep with `s_a + s_b` | SPENT | Monero REGTEST, `bb85f7fa10759077…` (2026-09-28) and `f584606948f430bf…` (2026-09-27), 738,723,841,921,372 atomic units each. Two runs, two independent share sets, the same answer -- `python3 monero_shared_key_verify.py --run --allow-open-wallet --mine 80` then `--sweep <address>` |
-| the same on STAGENET | **NONE** | `docs/monero_stagenet_funding.md` says in its own words the regtest result "does NOT settle anything about stagenet specifically" |
+| shared address derivation, ON STAGENET | **CONFIRMED 2026-09-29** | OK=4 FAIL=0 against `node.monerodevs.org:38089`, nettype STAGENET read from the daemon. This repo computed `5B5ybDArLcPdBe67aRWb4wWjzhdswh5EKXL5KxMYLBW2EeB4GWxy31nhpssDAzzKKrTf5xjFDji4P4vHCNMfcZgJ91qjDkt` offline from the summed scalars and `monero-wallet-rpc generate_from_keys` derived the IDENTICAL string, with stagenet prefixes. Spend keys summed to `f43e44df97b4e8d8…`, view to `8dc18ef4ea9205f4…` |
+| the SWEEP on STAGENET | **NONE** | the shared wallet exists and is empty. What remains is whether the CHAIN lets the summed key spend -- fund that address and run the printed `--sweep`. The arithmetic is settled on both networks; this is the consensus half and only stagenet coins can answer it |
 | a funded GRC↔XMR swap, end to end | **NONE** | the script half and the Monero half have never been run as one. The cross-curve close is a KEY MATCH against an address, not a spend of coins at it |
 
 ---

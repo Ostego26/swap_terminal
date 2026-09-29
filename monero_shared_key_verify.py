@@ -724,6 +724,36 @@ def load_shares(path: Path) -> dict:
     return shares
 
 
+def sweep_command(address: str, port: int, daemon: int | str, shares_path: Path) -> str:
+    """The `--sweep` command line to finish the experiment, with EVERY argument it needs.
+
+    THE DEFECT THIS FIXES, measured on the operator's stagenet run 2026-09-29. The two branches
+    below printed
+
+        python3 monero_shared_key_verify.py --sweep <address> --port 38084
+
+    and that command CANNOT WORK, for two independent reasons, neither of which announces itself:
+
+      --daemon       omitted, so it falls back to DEFAULT_DAEMON_PORT (28081), which is
+                     monero_regtest.py's LOCAL regtest daemon. On a stagenet run the daemon is
+                     remote, nothing is on 28081, and step 1 fails with the same "nothing is
+                     listening" the operator had already hit twice that evening.
+      --shares-file  omitted, so it falls back to ~/xmr-regtest/shared-shares.json -- the
+                     REGTEST path. The shares for this run were just written somewhere else,
+                     because a stagenet run passes --shares-file. And that file usually EXISTS,
+                     left by the regtest runs of 2026-09-27 and 2026-09-28, so the sweep does
+                     not fail cleanly: it loads a DIFFERENT share set, recomputes a DIFFERENT
+                     address, and then reports a mismatch against a wallet whose keys were never
+                     wrong. A wrong answer that looks like a real finding is worse than an error.
+
+    So this echoes every argument that produced the state being swept, and it is ONE function
+    because the string was written twice -- once in the --mine branch and once in the funding
+    branch -- which is rule 8's two copies of one rule, in a line of output.
+    """
+    return (f"python3 monero_shared_key_verify.py --sweep {address} "
+            f"--port {port} --daemon {daemon} --shares-file {shares_path}")
+
+
 def print_plan(console: Console, port: int, shares_path: Path) -> int:
     """What --run and --sweep each do, printed instead of done. Rule 14: a bare
     invocation that creates wallets and moves coins has announced nothing."""
@@ -773,16 +803,14 @@ def run_phase(console: Console, target: Target, network: str, mine_blocks: int) 
         console.say("")
         console.say("funded. Now finish it -- the destination below is this same shared wallet's")
         console.say("own address, which is a real spend and needs nothing else to exist:")
-        console.say(f"  python3 monero_shared_key_verify.py --sweep {address} "
-                    f"--port {target.wallet_port}")
+        console.say(f"  {sweep_command(address, target.wallet_port, target.daemon, target.shares_path)}")
     else:
         console.say("")
         console.say(f"send any amount to:\n          {address}")
         console.say("on REGTEST, add --mine 80 to this command instead and it funds itself.")
         console.say("Then sweep it out. The destination can be this same address, which is a")
         console.say("real spend and needs no other wallet to exist:")
-        console.say(f"  python3 monero_shared_key_verify.py --sweep {address} "
-                    f"--port {target.wallet_port}")
+        console.say(f"  {sweep_command(address, target.wallet_port, target.daemon, target.shares_path)}")
     return console.summary()
 
 

@@ -56,6 +56,7 @@ from monero_shared_key_verify import (  # noqa: E402  same
     sample_share,
     save_shares,
     shared_wallet_name,
+    sweep_command,
     wait_for_wallet,
 )
 
@@ -599,3 +600,67 @@ def test_an_empty_address_is_refused_rather_than_naming_a_file_after_nothing():
     and it would mean the arithmetic above produced nothing -- which is worth a sentence."""
     with pytest.raises(VerifyError):
         shared_wallet_name("")
+
+
+def test_THE_PRINTED_SWEEP_COMMAND_CARRIES_EVERY_ARGUMENT_IT_NEEDS():
+    """The command printed at the end of a stagenet --run could not work, 2026-09-29.
+
+    It read `--sweep <address> --port 38084` and stopped there, and both omissions are fatal in
+    different ways:
+
+      --daemon       falls back to DEFAULT_DAEMON_PORT, monero_regtest.py's LOCAL regtest
+                     daemon. On a stagenet run the daemon is REMOTE, nothing is on that port,
+                     and step 1 fails with the same "nothing is listening" the operator had
+                     already hit twice that evening.
+      --shares-file  falls back to ~/xmr-regtest/shared-shares.json, the REGTEST path, while a
+                     stagenet run passes its own. THAT FILE USUALLY EXISTS -- the regtest runs
+                     of 2026-09-27 and 2026-09-28 left one -- so the sweep does not fail
+                     cleanly. It loads a DIFFERENT share set, recomputes a DIFFERENT address,
+                     and reports a mismatch against a wallet whose keys were never wrong. A
+                     wrong answer that looks like a finding is worse than an error.
+
+    The defaults are what make the omission dangerous rather than merely wrong, so they are
+    asserted here: if either default ever becomes the stagenet value, this test should be read
+    again rather than trusted.
+    """
+    line = sweep_command("5B5yTESTADDRESS", 38084, "node.monerodevs.org:38089",
+                         pathlib.Path("/home/op/xmr-stagenet-shared/shared-shares.json"))
+    assert "--sweep 5B5yTESTADDRESS" in line
+    assert "--port 38084" in line
+    assert "--daemon node.monerodevs.org:38089" in line
+    assert "--shares-file /home/op/xmr-stagenet-shared/shared-shares.json" in line
+
+    assert DEFAULT_DAEMON_PORT == 28081, (
+        "the regtest daemon port -- which is why omitting --daemon sent a stagenet sweep at a "
+        "local port with nothing on it"
+    )
+    assert "xmr-regtest" in str(_shares_file_default()), (
+        "the regtest shares path -- which is why omitting --shares-file could load the WRONG "
+        "share set instead of failing"
+    )
+
+
+def _shares_file_default():
+    """The parser's own default for --shares-file, READ rather than restated here.
+
+    A copy of the path in this test would be the very thing the test exists to catch: two
+    statements of one default, agreeing today (rule 8).
+    """
+    for action in build_parser()._actions:
+        if action.dest == "shares_file":
+            return action.default
+    raise AssertionError("--shares-file is gone; this test and sweep_command() both need reading")
+
+
+def test_BOTH_BRANCHES_PRINT_THE_SAME_COMMAND_FROM_THE_SAME_FUNCTION():
+    """The string was written twice -- once in the --mine branch, once in the funding branch.
+
+    Rule 8's two copies of one rule, in a line of output: they agreed the day they were written
+    and the fix would otherwise have had to be applied to both, which is how one of them stays
+    broken.
+    """
+    source = pathlib.Path(
+        inspect.getfile(inspect.getmodule(sweep_command))).read_text(encoding="utf-8")
+    body = source[source.index("def run_phase"):]
+    assert body.count("sweep_command(") == 2, "both branches call it"
+    assert "--sweep {address} " not in body, "and neither still builds its own"
