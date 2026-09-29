@@ -139,6 +139,24 @@ HEIGHT from the tip, and asserts the ordering in `assert_timelock_ordering()`. A
 
 Both 2026-09-27, both testnet x testnet, recorded in `docs/atomic_swap_runs_2026_09_27.md`.
 
+**THOSE TWO ROWS ARE A DIFFERENT CODE PATH, AS OF 2026-09-29.** Both legs above were funded
+and spent through Gridcoin's own `createhtlc`/`claimhtlc` RPCs, which no other daemon has --
+which is exactly why `--chain btc` could not fund anything. Both runners now build and spend
+the HTLC through the chain clients (`modules/script_leg.py`), so the 2026-09-27 evidence
+describes a route the driver no longer takes. It was not carried across; `PROVEN_LIVE` in
+`atomic_swap_xrp.py` was emptied, and the banner said so on every chain until a run put one
+back.
+
+| direction | result | evidence |
+|---|---|---|
+| XRP -> GRC, on `script_leg` | OK=15 FAIL=0 | 2026-09-29. Escrow `56E03AA90B97BD8E…` (OfferSequence 21051299), GRC HTLC `25749c35389772e9…` vout 1 on P2SH `2N775AaLXRuxBoXS8q…`, claim `c8ec9f79e541bfa7…` crediting 66.09001328 GRC to `n3f7cJxrGH1i4gRrNF62NU4H36YkoE1GDX`, XRP finish `C72EBF3F56D97180…`, B +1000000 drops. The secret was read back out of the claim's 237-byte scriptSig |
+| GRC -> XRP, on `script_leg` | **NONE** | `chain-first` shares every function the row above exercised and has not been run on this path. Sharing code is not evidence |
+| XRP -> BTC / XRP -> LTC | **NONE** | the block arithmetic, the timelock ordering and the key handling are exercised by seeded tests; neither has been run against a daemon |
+
+The funding amount and the credited amount differ by the spend's own miner fee -- 66.10001328
+left B's wallet into the HTLC, 66.09001328 arrived, 0.01 to the miner. The driver's summary
+line printed one figure beside "to <address>" until this run and overstated what arrived.
+
 **SO THE GRC<->XRP SWAP IS THE ONE THAT IS FINISHED**, and since 2026-09-29 it is the only
 cross-chain atomic swap this tree implements at all.
 

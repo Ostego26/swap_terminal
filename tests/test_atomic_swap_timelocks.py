@@ -26,6 +26,7 @@ would catch:
 from __future__ import annotations
 
 import hashlib
+import re
 from decimal import Decimal
 
 import pytest
@@ -439,19 +440,35 @@ def test_a_chain_with_no_completed_run_SAYS_SO_instead_of_inheriting_another_cha
     This test fails the moment somebody adds a chain to PROVEN_LIVE without a run behind
     it, which is the only way the claim can become false again.
     """
-    assert PROVEN_LIVE == {}, (
-        "PROVEN_LIVE gained an entry. That table is the record of runs that COMPLETED ON "
-        "THE CURRENT CODE PATH, and it was emptied on 2026-09-29 when both runners moved "
-        "off Gridcoin's createhtlc onto the chain clients. GRC's 2026-09-27 swaps went "
-        "through the old path, so their evidence does not describe this one -- adding a "
-        "chain back without a txid from a run of THIS code makes the banner lie again, "
-        "and the second version of that lie is the dangerous one because the chain name "
-        "is still right"
+    assert set(PROVEN_LIVE) == {"GRC"}, (
+        "PROVEN_LIVE changed shape. That table is the record of runs that COMPLETED ON "
+        "THE CURRENT CODE PATH. It was emptied on 2026-09-29 when both runners moved off "
+        "Gridcoin's createhtlc onto the chain clients, and GRC was added back the same "
+        "day by an actual run of THIS code (OK=15 FAIL=0). BTC and LTC are still absent "
+        "on purpose: they share every function GRC's run exercised, and sharing code is "
+        "not evidence. Adding a chain without a txid from a run makes the banner lie "
+        "again, and the second version of that lie is the dangerous one because the "
+        "chain name is still right"
+    )
+    # WHAT COUNTS AS EVIDENCE, spelled as a check rather than as trust. An entry has to
+    # carry the transaction identifiers a reader can go look up; a sentence that only
+    # asserts "this works" is the claim, not the proof of it. Four txids because the run
+    # has four on-chain acts -- escrow, HTLC funding, claim, finish -- and a path that
+    # completed leaves all four behind. Hex is lowercased before matching because XRP
+    # prints uppercase and the bitcoin family lowercase, and the requirement is that the
+    # identifier is THERE, not which chain's convention typed it.
+    txids = re.findall(r"\b[0-9a-f]{8,}\b", PROVEN_LIVE["GRC"].lower())
+    assert len(txids) >= 4, (
+        f"GRC's PROVEN_LIVE sentence names {len(txids)} transaction identifiers and the "
+        f"run it records has four on-chain acts. An entry that cannot name them is not "
+        f"evidence of a run, which is the one thing this table is for: {txids}"
     )
     for chain in SCRIPT_CHAINS:
         assert chain in CHAIN_LABELS, f"{chain} has no operator-facing label"
         assert chain in CHAIN_TEST_NETWORKS, f"{chain} has no test-network allowlist"
-    # The sentence a chain gets when it HAS evidence is still formatted from this table,
-    # so its shape is pinned even while the table is empty -- otherwise the first entry
-    # added back would be the one that discovers the format drifted.
+    # The sentence a chain gets when it HAS evidence is read straight out of this table
+    # and printed to the operator, so its ENDING is pinned too: "a regression, not a
+    # discovery" is the half that tells them what a failure would mean, and it is the half
+    # a shortened entry would drop first. This assertion was vacuous while the table was
+    # empty (all() over nothing is True) and is not any more.
     assert all("regression" in sentence for sentence in PROVEN_LIVE.values())

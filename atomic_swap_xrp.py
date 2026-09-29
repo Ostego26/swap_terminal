@@ -371,16 +371,22 @@ def chain_amount_for_rate(xrp_drops: int, xrp_per_chain_unit: Decimal) -> Decima
 #: says so out loud rather than letting silence read as reassurance.
 
 PROVEN_LIVE: dict[str, str] = {
-    # EMPTIED 2026-09-29 AND NOT CARRIED ACROSS. GRC's two completed swaps (xrp-first claim
-    # 78472df347a91f31..., chain-first claim 845315f4c2063670..., 2026-09-27) went through
-    # Gridcoin's `createhtlc`/`claimhtlc`. This driver no longer calls either: both runners
-    # now build and spend the P2SH through the chain clients, which is what lets BTC and LTC
-    # work at all.
-    #
-    # THE EVIDENCE BELONGS TO THE PATH THAT PRODUCED IT. Leaving GRC listed would tell an
-    # operator a failure is a regression on a route no run has ever taken -- the same
-    # falsehood the per-chain banner was added to stop, one commit later and with the chain
-    # name still technically correct. Re-earned by a run, not by a rename.
+    # EARNED 2026-09-29, ON THIS PATH, BY A RUN. It was emptied earlier the same day when
+    # both runners moved off Gridcoin's createhtlc/claimhtlc onto the chain clients: the
+    # 2026-09-27 evidence belonged to the route that produced it, and carrying it across
+    # would have told an operator a failure was a regression on a route nothing had taken.
+    # This entry is a different run, of this code, with its own txids.
+    "GRC": (
+        "xrp-first COMPLETED on this code path 2026-09-29, OK=15 FAIL=0: XRP escrow "
+        "56E03AA90B97BD8E.. (OfferSequence 21051299), GRC HTLC 25749c35389772e9.. at vout 1 "
+        "on P2SH 2N775AaLXRuxBoXS8q.., claim c8ec9f79e541bfa7.. crediting 66.09001328 GRC, "
+        "XRP finish C72EBF3F56D97180.. and B's balance +1000000 drops. The secret was read "
+        "back out of the claim's 237-byte scriptSig, not out of memory. A failure here is a "
+        "regression, not a discovery."
+    ),
+    # chain-first is NOT listed. It is the same five acts in the other order and shares every
+    # function, but it has not been run on this path and sharing code is not evidence -- that
+    # is the whole reason this table is keyed by what ran rather than by what should work.
 }
 
 CHAIN_LABELS = {"BTC": "Bitcoin test network", "LTC": "Litecoin test network",
@@ -924,7 +930,12 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
                       b_after - b_before == XRP_DROPS)
 
     ctx.console.banner("WHAT CHANGED HANDS")
-    ctx.console.say(f"{ctx.chain}: {ctx.chain_amount} from B's wallet to {ctx.a_grc}, claimed with the secret (txid {claim_txid})f")
+    # TWO NUMBERS, NOT ONE, and the difference is the miner fee. chain_amount is what left
+    # B's wallet INTO the HTLC; the claim pays it on to a_grc less the spend's own fee, so a
+    # single figure beside "to {a_grc}" overstates what arrived. Measured on the first run of
+    # this path, 2026-09-29: 66.10001328 funded, 66.09001328 credited, 0.01 to the miner.
+    ctx.console.say(f"{ctx.chain}: {ctx.chain_amount} left B's wallet into the HTLC; the claim paid it on to "
+                    f"{ctx.a_grc} less the spend's miner fee (txid {claim_txid})")
     ctx.console.say(f"XRP: {XRP_DROPS} drops from {ctx.a_xrp} to {ctx.b_xrp}, released by the same secret")
     ctx.console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
     return False
