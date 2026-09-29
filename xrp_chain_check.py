@@ -159,8 +159,8 @@ def payment_field_report(
     same defect as not measuring it.
 
     Counted per payment rather than unioned across them, because a union says
-    the NAME exists and a human reads it as a statement about every row --
-    the misreading monero_chain_check.py was corrected for.
+    the NAME exists and a human reads it as a statement about every row, which
+    is the misreading this shape exists to prevent.
     """
     if not payments:
         return (

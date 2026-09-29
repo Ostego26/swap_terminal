@@ -91,7 +91,6 @@ THE THREE JUDGMENT CALLS, AND WHAT DECIDED THEM.
        swap_readiness.py         (none)    read-only, so no flag
        xrp_chain_check.py        (none)    read-only
        solana_chain_check.py     (none)    read-only
-       monero_chain_check.py     (none)    read-only
 
    Four writers, four opt-in flags that default off. The first draft of this
    paragraph said "zero exceptions", and that was an overclaim worth correcting
@@ -185,11 +184,11 @@ class SwapRefused(RuntimeError):
 # rather than a traceback. One per adapter family, which is the complete set
 # chains/registry.build_adapters() can construct -- grepped 2026-09-26 for
 # `^class .*Error` across chains/: base.RPCError (BTC, LTC, GRC),
-# xrp.XRPRPCError, solana.SolanaRPCError, monero.MoneroRPCError. All four are
-# listed even though ALLOWED_PAIRS mentions only BTC, LTC, GRC and XRP today,
-# because listing only the reachable ones is rule 8's drift with a delay on it:
-# adding a SOL or XMR pair would then turn a down daemon back into a traceback,
-# and nothing would point at this line.
+# xrp.XRPRPCError, solana.SolanaRPCError. All three are listed even though
+# ALLOWED_PAIRS mentions only BTC, LTC, GRC and XRP today, because listing only
+# the reachable ones is rule 8's drift with a delay on it: adding a SOL pair
+# would then turn a down daemon back into a traceback, and nothing would point
+# at this line.
 #
 # They are NOT collapsed with SwapRefused. An RPC failure means "the daemon could
 # not be asked", which is a different fact from "the answer is no" -- the

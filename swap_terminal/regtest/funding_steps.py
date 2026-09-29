@@ -1599,30 +1599,6 @@ def _sign_p2pkh(key: RegtestKey, digest: bytes) -> bytes:
 
 
 
-# Which Monero network the rehearsal's lock address is encoded for. STAGENET, never
-# mainnet: nothing in this harness sends XMR, but an address is a thing an operator can
-# copy off a screen, and a mainnet-encoded one is a mainnet-encoded one whatever the
-# comment beside it says. `chains/monero_keys.NETWORK_PREFIXES` owns the vocabulary
-# (rule 8); this line only chooses from it.
-MONERO_REHEARSAL_NETWORK = "stagenet"
-
-
-
-
-
-
-
-
-#: Where a GRC run leaves the fixture that lets the Monero leg be swept. Under the funding
-#: seed's own directory rather than the repository, because it holds PRIVATE SCALARS and a
-#: repository is a thing people push.
-HANDOFF_VARIABLE = "ST_SWAP_HANDOFF_FILE"
-DEFAULT_HANDOFF = Path.home() / "xmr-stagenet-shared" / "swap-handoff-shares.json"
-
-
-
-
-
 
 
 

@@ -17,25 +17,23 @@ Mainnet-safe: yes in the sense that applies -- it contacts no chain and knows no
       version byte is decided here (modules/address_network owns that vocabulary).
 Live-safe: yes
 
-WHAT THIS IS, AND WHY IT IS A SEPARATE FILE FROM adaptor_swap_scripts.py.
+WHAT THIS IS, AND WHAT IT USED TO BE.
 
-`docs/monero_swap_protocol.md` section 2 names five transactions. `adaptor_swap_scripts.py`
-builds the SCRIPTS and the signature assembly they are made of -- the 2-of-2 redeem script,
-its P2SH wrapper, the OP_0-dummy scriptSig, and the sighash. This file builds the
-TRANSACTIONS: Tx_lock's output, and the four spends that hang off it.
+Raw transaction construction for the three Bitcoin-derived chains: the byte layout, the
+nTime field Gridcoin serializes and the other two do not, fee sizing against real bytes,
+predicted txids, and funding-input selection. Nothing here decides anything about a swap;
+it builds transactions a caller has already decided on.
 
-    Tx_lock     pays a 2-of-2 {A_pk, B_pk}. No hashlock: the adaptor REPLACES the
-                hashlock, it does not join it.
-    Tx_redeem   lock -> ALICE. Both signatures; Bob's is an adaptor pre-signature under Y_a.
-    Tx_cancel   lock -> a SECOND 2-of-2 {A_pk, B_pk}, nLockTime T1.
-    Tx_refund   cancel output -> BOB. Both signatures; Alice's is a pre-signature under Y_b.
-    Tx_punish   cancel output -> ALICE, nLockTime T2 > T1.
+RENAMED FROM adaptor_swap_chain.py ON 2026-09-29, and the rename is the honest half of a
+removal rather than tidying. This file used to build the five transactions of an
+adaptor-signature swap -- a 2-of-2 lock and the redeem, cancel, refund and punish that hang
+off it -- for a protocol whose other leg was Monero. That protocol was removed at the
+operator's instruction, and about 450 lines of it went from this file with it. What stayed
+is everything the HTLC path and the funding harness were already using through it, which
+was never adaptor-specific and only looked it because of the name.
 
-The adaptor signatures themselves are `modules/adaptor_ecdsa.py`'s and the protocol
-decisions around them are `modules/monero_swap_protocol.py`'s. This module's only
-contribution to that is the DIGEST: `digest` on each ChainTransaction below is exactly what
-`adaptor_ecdsa.pre_sign` is handed and exactly what the completed signature is over, which
-is the property that makes a pre-signature and its completion provably about the same bytes.
+A name that claims a protocol the file no longer serves is the same defect as a comment
+describing a deleted function, which is why this is a rename and not a note.
 
 =============================================================================
 FINDING 1, MEASURED HERE: `sendtoaddress` CANNOT BUILD Tx_lock, AND THE REASON
@@ -343,9 +341,9 @@ def p2pkh_script(hash160_bytes: bytes) -> bytes:
 def _layout_for(asset: str) -> dict:
     if asset not in CHAIN_LAYOUT:
         raise ScriptChainError(
-            f"unknown script chain {asset!r}; this module knows {sorted(CHAIN_LAYOUT)}. Monero is "
-            f"the OTHER leg of this swap and has no script, no transaction layout here, and no "
-            f"timelock at all"
+            f"unknown script chain {asset!r}; this module knows {sorted(CHAIN_LAYOUT)}. Only "
+            f"chains with a Bitcoin-derived transaction layout belong here; an account-model "
+            f"chain has no layout in this file and no timelock at all"
         )
     return CHAIN_LAYOUT[asset]
 

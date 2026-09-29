@@ -28,7 +28,6 @@ choice of which blockchain real money lives on. Guessing it is not a
 convenience, and guessing the mainnet one is the worst available guess. The
 correct pattern was ALREADY in that same dict for the newer chains:
 
-    XMR_RPC_PORT = int(os.getenv("XMR_RPC_PORT", "0"))   # 0 means "no wallet here"
     SOL: constructed only when SOL_RPC_URL is set
     XRP: url defaults to empty
 
@@ -60,9 +59,9 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-# Not configured, deliberately distinct from every real port. Matches the
-# convention config.py already documents for XMR_RPC_PORT ("unset means no
-# Monero wallet here"), so a reader meets one meaning of 0 and not two.
+# Not configured, deliberately distinct from every real port. One meaning of 0
+# across this file and config.py, so a reader meets one and not two: 0 is never
+# a port somebody meant, it is the absence of a setting.
 UNCONFIGURED_PORT = 0
 
 
@@ -104,9 +103,6 @@ CHAIN_PORTS: dict[str, ChainPorts] = {
 #
 #   SOL  an endpoint URL; there is no port to compare
 #   XRP  an endpoint URL, for the same reason
-#   XMR  a port, but monero-wallet-rpc has no conventional one -- it is whatever
-#        the operator passed to --rpc-bind-port, so there is nothing to classify
-#        against and chains/registry.py says so at its construction site
 #
 # Kept next to CHAIN_PORTS rather than in a second file because the question
 # "what do I set to reach this chain?" has exactly one answer per chain and it is
@@ -123,8 +119,8 @@ def configuring_variable(chain: str) -> str:
     """The environment variable that makes this chain reachable. Never raises.
 
     Verified against config.py 2026-09-26 rather than recalled: BTC/LTC/GRC read
-    <CHAIN>_RPC_PORT (config.py:204 for GRC), XMR reads XMR_RPC_PORT
-    (config.py:116), XRP reads XRP_RPC_URL (config.py:134) and SOL reads
+    <CHAIN>_RPC_PORT (config.py:204 for GRC), XRP reads XRP_RPC_URL
+    (config.py:134) and SOL reads
     SOL_RPC_URL (config.py:192). chains/registry.build_adapters() skips a chain
     whose value is falsy, which is what makes this the variable that decides
     whether an adapter exists at all.

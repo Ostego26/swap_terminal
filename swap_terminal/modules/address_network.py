@@ -88,32 +88,21 @@ MAINNET = "mainnet"
 TESTNET = "testnet"
 UNKNOWN = "unknown"
 
-# STAGENET IS A THIRD ANSWER, AND IT ARRIVES FROM MONERO. No version byte or hrp in the tables
-# below produces it -- Bitcoin-derived chains have two networks as far as an address is
-# concerned -- but chains/monero_keys.decode_address() reports "stagenet" for prefix bytes 24,
-# 25 and 36, and modules/address_authority._monero() passes that straight through as the
-# verdict's network. So this vocabulary has been INCOMPLETE since the Monero validator arrived:
-# the string existed and this module had no name for it.
-#
-# Named 2026-09-28, when a stagenet fixture first appeared and
-# tests/test_address_literals_are_valid.py refused it -- that gate demands every fixture
-# expressing a network be exactly TESTNET, which was satisfiable only because nothing had ever
-# produced a stagenet one. Refusing stagenet would be refusing a genuine test network for not
-# being the test network this module happened to know, which is the same shape as bech32m being
-# refused for not being bech32.
-STAGENET = "stagenet"
-
 # The networks where losing a coin costs nothing. Used by the fixture gate, and by anything that
 # needs "is this safe to have in a test" rather than "which network exactly".
 #
-# NOT THE SAME SET AS modules/monero_swap_protocol.XMR_TEST_NETTYPES, and the difference is the
-# point (rule 8 wants it named at both sites): that one is
-# frozenset({"fakechain", "stagenet", "testnet"}) and answers "is this MONEROD's nettype a test
-# network", where `fakechain` is monerod's word for regtest. `fakechain` can never appear HERE,
-# because a regtest Monero wallet emits MAINNET prefix bytes -- `case FAKECHAIN: return
-# mainnet;` in Monero's own get_config() -- so an address from one decodes as mainnet and the
-# two sets are answering different questions about different inputs.
-TEST_NETWORKS = frozenset({TESTNET, STAGENET})
+# A FROZENSET WITH ONE MEMBER IS NOT AN OVERSIGHT, AND SIMPLIFYING IT BACK TO `== TESTNET`
+# IS THE TRAP THIS SHAPE EXISTS TO HOLD OPEN. It held two until 2026-09-29: a validator that
+# decoded a THIRD network name ("stagenet") was removed with its chain, and nothing in the
+# tables below can produce that string today, so the member went with it (rule 9).
+#
+# What did not go is the reason for the set. tests/test_address_literals_are_valid.py once
+# demanded every fixture expressing a network be exactly TESTNET, which was satisfiable only
+# because nothing had ever decoded as anything else -- and the first fixture that did was
+# refused for being a genuine test network the gate did not happen to know. That is the same
+# shape as bech32m refused for not being bech32. The next chain with a third network name
+# arrives as a new member here, not as an argument about what TESTNET really means.
+TEST_NETWORKS = frozenset({TESTNET})
 
 P2PKH_VERSIONS: dict[int, str] = {
     0x00: MAINNET,   # BTC mainnet

@@ -319,7 +319,6 @@ out 1,600 wei low.
 BTC/LTC/GRC   8 decimals    92,233,720,368 coins
 XRP           6 decimals     9,223,372,036,854
 SOL           9 decimals         9,223,372,036
-XMR          12 decimals             9,223,372
 ETH          18 decimals                  9.22   <- the only one that fails
 ```
 
@@ -343,9 +342,9 @@ always 8 bytes.
 
 **The obstacle is blast radius.** It would touch 7 amount columns across 4
 tables, the 5 Python `sum(float(...))` sites, and the event-dict contract of
-**all six existing adapters** — because ETH in base units while the others use
+**all five existing adapters** — because ETH in base units while the others use
 floats is the duplication rule 8 exists to prevent. It also requires an
-asset→decimals authority that does not exist yet: XMR, SOL and XRP each declare
+asset→decimals authority that does not exist yet: SOL and XRP each declare
 their own, and BTC/LTC/GRC declare none (only `SATOSHI = 1e-8` as a float
 tolerance in `chains/base.py`).
 
@@ -354,8 +353,8 @@ tolerance in `chains/base.py`).
 Worth recording, so nobody assumes ETH is hard everywhere. Unlike Solana, ETH
 uses BIP32, so per-swap deposit addresses can be derived from an **extended
 public key with no spend key on the web host** — better than any account-model
-chain here on that axis. And ETH has contracts, so unlike Monero it could join
-the atomic-swap path.
+chain here on that axis. And ETH has contracts, so it could join the
+atomic-swap path, which no account-model chain here can.
 
 The awkward parts are gas (sweeping a deposit address means funding it with ETH
 first, and an ERC-20 transfer needs ETH the depositor never sent) and the
@@ -957,8 +956,7 @@ that drops a legal value is wrong either way.
 ### Two rippled quirks that bite
 
 **`params` is a list containing one object** — `{"method": "...", "params":
-[{...}]}`. Not an object like Monero's JSON-RPC, not a positional list like
-bitcoind's.
+[{...}]}`. Not a positional list like bitcoind's, and not a bare object.
 
 **Errors arrive as HTTP 200**, with `result.status == "error"`. A client that
 only checks `raise_for_status()` reads every failure as a success. `call()`
@@ -982,158 +980,8 @@ XRP_RPC_URL=              # unset means no XRP adapter is constructed at all
 XRP_MIN_CONFIRMATIONS=1
 ```
 
-`ALLOWED_PAIRS` is unchanged, matching how Solana and Monero landed. No XRP
+`ALLOWED_PAIRS` is unchanged, matching how Solana landed. No XRP
 swap can be created; enabling it is the operator's (rule 16).
-
-## Monero
-
-Brokered only. There is no atomic-swap path for Monero and there is not going
-to be one -- see **Why there is no XMR HTLC** at the end of this section, which
-is written down so it is a decided question rather than one that gets reopened.
-
-### Status: the arithmetic is measured, the wire format is not
-
-This is the single most important thing to know before turning it on.
-
-| part | state |
-|---|---|
-| `chains/monero_units.py` -- atomic units, the confirmation floor | **measured**, tested directly |
-| `chains/monero_transfers.py` -- which transfers count as a deposit | **measured**, tested directly |
-| `chains/monero.py` -- RPC method and field names | **UNVERIFIED** |
-
-The third row moved on 2026-09-25 and the table above keeps the old wording
-because the drift is the point. Those names were originally written from prior
-knowledge, because the environment they were written in could not reach
-`getmonero.org` (403 through the proxy) or run a daemon.
-
-**They have since been checked against the published spec**, fetched from the
-operator's host (`docs.getmonero.org/rpc-library/wallet-rpc/`, 380,318 bytes).
-All six method names, the `in` array returned by `get_transfers`, the
-`{major, minor}` shape of `subaddr_index`, `txid`, `type: "in"`, `locked`,
-`unlock_time`, `double_spend_seen` and `unlocked_balance` are all in the
-request/response spec as this code reads them, and `validate_address`'s
-`any_net_type` does default to false, which the adapter relies on.
-
-So it is no longer a guess. Three things are still open, and they are why
-`monero_chain_check.py` should still be the first thing you run:
-
-1. **Documentation is not a daemon.** A spec can lag a release, and nothing
-   above came from a wallet answering a real call.
-2. **The multi-output amount.** Every `amounts` example in the spec has one
-   element, so nothing published proves `amount` is the *sum* when several
-   outputs arrive. `_reject_amount_disagreement()` checks it at runtime and
-   refuses rather than short-paying a customer silently.
-3. **`locked` is described contradictorily** -- `locked - boolean; Is the
-   output spendable`, which is the opposite of what the field name says. This
-   code follows the name, so the worst case is a deposit deferred that was
-   fine: a delay, printed, never a wrong credit.
-
-### Verify it first
-
-```
-monero-wallet-rpc --stagenet --rpc-bind-port 38083 \
-    --wallet-file <wallet> --prompt-for-password --disable-rpc-login
-
-python3 monero_chain_check.py --port 38083
-```
-
-Read-only: it sends nothing, signs nothing, constructs its adapter with
-`can_spend=False` regardless of configuration, and has no flag that broadcasts.
-It identifies the network from the daemon rather than from the port, and prints
-`MAINNET  <- REAL MONEY` if that is where you pointed it.
-
-Three exit codes, because there are three outcomes:
-
-| exit | meaning |
-|---|---|
-| 0 | every method and field was observed against real transfers |
-| 1 | at least one name is wrong; each is listed by name |
-| **3** | **inconclusive** -- no failures, but the wallet had no transfers, so nothing was confirmed |
-
-Exit 3 is deliberate. A wallet with no incoming transfers confirms none of the
-field names, and exiting 0 would tell a shell `&&` exactly what a real pass
-tells it. **Send a small amount to the wallet on stagenet and run it again** --
-that is the only thing that confirms the field names.
-
-### Configuration
-
-```
-XMR_RPC_HOST=127.0.0.1
-XMR_RPC_PORT=38083          # no default: monero-wallet-rpc binds wherever you told it
-XMR_RPC_USER=               # empty for --disable-rpc-login; digest auth otherwise
-XMR_RPC_PASS=
-XMR_ACCOUNT_INDEX=0
-XMR_MIN_CONFIRMATIONS=10
-XMR_WALLET_CAN_SPEND=       # see below -- leave unset for a deposit watcher
-```
-
-`XMR_RPC_PORT` unset means no Monero adapter is constructed at all, exactly as
-`SOL_RPC_URL` works for Solana.
-
-### Run the watcher view-only
-
-Monero splits the view key from the spend key, so a wallet opened from the view
-key alone sees every incoming transfer and is *cryptographically incapable* of
-sending. Bitcoin, Litecoin and Gridcoin have no equivalent -- in
-`chains/base.py` every subclass inherits `send_to_address` unconditionally.
-
-`XMR_WALLET_CAN_SPEND` is therefore **false by default**, and
-`send_to_address()` refuses before making any network call. The worker banner
-says which you are on:
-
-```
-  XMR  rpc=127.0.0.1:38083 account=0 min_confirmations=10 blocks view-only (cannot send)
-  XMR  rpc=127.0.0.1:38083 account=0 min_confirmations=10 blocks CAN SPEND  <- this wallet is armed for payouts
-```
-
-### Things Monero does differently, and where each one lives
-
-- **12 decimals, not 8.** `chains/base.py` hardcodes `SATOSHI = 1e-8`. Amounts
-  convert through `Decimal`, never by multiplying the float: measured, `2.11`
-  XMR loses a piconero to `int(float * 10**12)`.
-- **Ten-block spend lock, by consensus.** `XMR_MIN_CONFIRMATIONS` below 10 is
-  clamped up, because a lower setting does not buy a faster payout -- it buys a
-  payout that fails at `transfer` time. The banner says when it raised your
-  number.
-- **`get_balance()` reports the UNLOCKED balance**, not the total. The total
-  includes outputs inside that lock, which cannot fund a payout.
-- **No vouts.** `vout` carries the receiving subaddress's minor index -- read
-  from the wallet, never invented. Where the wallet's answer does not determine
-  which output a deposit is, the scan **raises** and the swap waits for a human
-  rather than being credited from a guess. That is deliberately unlike
-  `chains/base.py:169`, which fabricates an event at vout 0 and whose own
-  comment admits the caller cannot tell it from a real one.
-- **Subaddresses are a real per-swap deposit address**, so the attribution
-  problem that `chains/solana.py` had to hand back to the operator does not
-  arise here at all.
-
-### Not enabled for trading
-
-`ALLOWED_PAIRS` is **unchanged**, so no XMR quote or swap can be created. This
-matches how Solana landed. Enabling it is one line in `config.py` and it is
-deliberately the operator's, because it changes what gets traded (rule 16).
-
-### Known gap: proving a payout
-
-On the Bitcoin-derived chains a payout proves itself -- anyone can look up the
-txid and see the output. Monero publishes no such link, and the only proof is
-the transaction key, checked by the recipient against their own address.
-Storing it needs a schema change on `payouts` **and** creates a new class of
-secret: a tx key reveals the amount and destination to whoever holds it. Left
-undone and written up at the bottom of `chains/monero.py` rather than
-half-built.
-
-### Why there is no XMR HTLC
-
-Monero has no scripting language: no `OP_CHECKLOCKTIMEVERIFY`, no P2SH, no
-hashlock. Everything under `modules/atomic_*` is inapplicable, not unported.
-
-XMR<->BTC atomic swaps do exist, and they work by replacing the Monero-side
-HTLC with a 2-of-2 shared spend key where the Bitcoin-side spend reveals the
-scalar that completes it. That requires a discrete-log-equality proof that the
-same secret is committed on **two different curves** (ed25519 and secp256k1).
-No implementation targets Gridcoin. Writing cross-curve proofs for a path where
-a revealed preimage cannot be un-revealed is not a trade worth making here.
 
 ## Regtest HTLC verification
 

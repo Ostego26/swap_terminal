@@ -62,6 +62,7 @@ from modules.address_network import (
     P2PKH_VERSIONS,
     P2SH_VERSIONS,
     TESTNET,
+    is_valid_address,
 )
 from modules.atomic_htlc_scripts import parse_and_reencode_as_testnet_p2pkh
 from modules.htlc_fee import usable_platform_fee_address
@@ -129,6 +130,40 @@ CONFIG_TESTNET_GRC = {
 # ---------------------------------------------------------------------------
 
 
+
+
+def test_the_blanket_guard_would_have_refused_solana():
+    """THE MEASUREMENT THAT DECIDED THE DESIGN, kept as a test so nobody re-walks into it.
+
+    The obvious fix for a burn is one line at the send site:
+
+        if not is_valid_address(address): refuse
+
+    This asserts that line would refuse a VALID Solana payout. `is_valid_address()`
+    understands bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check; a Solana
+    address is a bare 32-byte ed25519 key in plain base58 with no checksum at all.
+
+    RECOVERED 2026-09-29, AND THE RECOVERY IS THE POINT. This test used to be parametrized
+    over XMR and SOL, and the Monero removal deleted it wholesale because its NAME matched
+    "monero" -- taking the Solana half, which had nothing to do with Monero, with it. That
+    is rule 2's other half: a test dies with the thing it pinned, or it CHANGES to pin the
+    stronger invariant. Deleting by name does neither.
+
+    WHAT THE REMOVAL ALSO CHANGED, stated rather than quietly dropped: the old docstring
+    said a false refusal here was not hypothetical, because Config.ALLOWED_PAIRS carried
+    ("GRC","XMR"). Measured 2026-09-29, ALLOWED_PAIRS is BTC/GRC/LTC/XRP and carries no SOL
+    pair, so this trap is LATENT rather than live. It is still worth a test, because
+    enabling a pair is a one-line change and the refusal would land on a swap whose deposit
+    is ALREADY OURS and already credited.
+
+    MUTATION: point VALIDATORS["SOL"] at the bitcoin-family validator and the second
+    assertion fails.
+    """
+    assert is_valid_address(SOL_PAYOUT) is False, (
+        "address_network.is_valid_address() now accepts SOL; if that is deliberate, the "
+        "argument in modules/address_authority.py's header has changed and must be rewritten"
+    )
+    assert check_address("SOL", SOL_PAYOUT).state == VALID
 
 
 def test_every_asset_this_terminal_can_reach_has_a_validator():

@@ -88,27 +88,28 @@ def test_every_asset_has_a_client_and_an_amount_keyword():
         assert hasattr(CLIENTS[asset], "refund_contract")
 
 
-def test_xrp_and_xmr_are_absent_for_protocol_reasons_and_say_so():
+def test_xrp_is_absent_for_a_protocol_reason_and_says_so():
     """"Any currency listed" is not yet true and the file must not imply it is.
 
-    XRP has no script (EscrowCreate with a crypto-condition instead) and XMR has NO SCRIPT
-    AT ALL, so there is nowhere to put a hashlock. Adding either to CLIENTS would be a
-    claim no code can honor, and the module docstring is where a reader finds out which
-    pairs are real.
+    XRP has no script -- EscrowCreate with a crypto-condition instead -- so there is nowhere
+    to put a P2SH hashlock. Adding it to CLIENTS would be a claim no code can honor, and the
+    module docstring is where a reader finds out which pairs are real.
+
+    NARROWED 2026-09-29 FROM A TEST THAT ALSO PINNED XMR. Monero was removed from this tree,
+    so the three prose assertions naming its blocker were pinning sentences that no longer
+    describe anything. The XRP half is unchanged and is the half that still has a subject
+    (rule 2: a test dies with the thing it pinned, or changes to pin the stronger invariant).
+
+    WHITESPACE-NORMALIZED, and that is worth keeping: the docstring wraps at 90 columns, so
+    a phrase can be split across a newline and a contiguous match fails on text that says
+    exactly the right thing. The structural assertion is the load-bearing one -- XRP being
+    absent from CLIENTS is what stops a claim no code can honor -- and the prose one only
+    checks that a reader is TOLD where the working driver is.
     """
     assert "XRP" not in CLIENTS
-    assert "XMR" not in CLIENTS
 
-    # WHITESPACE-NORMALIZED, and that is the third time today a test of mine matched prose
-    # and lost. The docstring wraps at 90 columns, so "NO SCRIPT AT ALL" is split across a
-    # newline and a contiguous match fails on text that says exactly the right thing. The
-    # structural assertions above are the load-bearing ones -- XRP and XMR being absent
-    # from CLIENTS is what stops a claim no code can honor -- and these three only check
-    # that a reader is TOLD where to look.
     doc = re.sub(r"\s+", " ", atomic_swap.__doc__ or "")
-    assert "NO SCRIPT AT ALL" in doc, "the XMR blocker must be stated, not implied"
     assert "atomic_swap_xrp_grc.py" in doc, "the XRP driver that DOES work must be named"
-    assert "section 6 stage 5" in doc, "and where the XMR work is tracked"
 
 
 def _planned(asset: str, role: str, tip: int, locktime: int) -> PlannedLeg:

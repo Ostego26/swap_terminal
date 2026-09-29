@@ -16,8 +16,8 @@ Mainnet-safe: yes. It opens no socket and names no network.
 WHY THIS EXISTS AT ALL
 =============================================================================
 
-Bitcoin, Litecoin, Gridcoin and Monero answer "where should the customer pay?"
-with a fresh address per swap, derived by a wallet that keeps the key.
+Bitcoin, Litecoin and Gridcoin answer "where should the customer pay?" with a
+fresh address per swap, derived by a wallet that keeps the key.
 chains/xrp.py::get_new_address() REFUSES to do that, and its refusal names this
 module as the alternative:
 

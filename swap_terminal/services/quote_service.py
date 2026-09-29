@@ -29,7 +29,7 @@ def get_network_fee_reserve(config, to_asset: str) -> float:
 
         No quote: 'XRP_NETWORK_FEE_RESERVE'
 
-    That is str(KeyError(...)). BTC, LTC, GRC and XMR each have a reserve in
+    That is str(KeyError(...)). BTC, LTC and GRC each have a reserve in
     config.py; XRP was never given one when the pair was enabled, so the subscript
     raised, routes/quotes.py's HTTP boundary returned str(exc), and the page printed
     the key and nothing else -- the third bare KeyError repr to reach a person that

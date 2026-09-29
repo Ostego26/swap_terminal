@@ -203,11 +203,11 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
         #
         # WHY NOT THAT FUNCTION, AND WHY THIS IS A TABLE LOOKUP INSTEAD. is_valid_address()
         # understands bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check.
-        # Config.ALLOWED_PAIRS carries ("GRC","XMR") and ("XMR","GRC"), and a Monero address
-        # is a DIFFERENT base58 with a Keccak checksum -- measured 2026-09-27, every valid
-        # XMR and SOL fixture in tests/valid_addresses.py returns False from it. So the
-        # one-line version of this guard would have refused every Monero payout, on a swap
-        # whose deposit is ALREADY OURS and already credited. That is a worse outcome than
+        # A Solana address is plain base58 of an ed25519 key with no checksum at all --
+        # measured 2026-09-27, every valid SOL fixture in tests/valid_addresses.py returns
+        # False from it. So the one-line version of this guard would refuse every Solana
+        # payout the day a SOL pair is enabled, on a swap whose deposit is ALREADY OURS and
+        # already credited. That is a worse outcome than
         # the burn: the burn costs one payout, the false refusal costs every customer of
         # that chain while their money sits in our wallet. modules/address_authority.py is
         # the per-asset table that avoids it.

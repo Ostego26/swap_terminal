@@ -224,7 +224,7 @@ def _refuse_unusable_deposit_address(config, asset: str, address: str, source: s
     construction rather than by cleanup.
 
     WHAT IT DOES NOT DO. NO_VALIDATOR does not refuse: see modules/address_authority.py's
-    header. And `expected_network()` returns None for XRP, XMR and SOL, and for any chain on
+    header. And `expected_network()` returns None for XRP and SOL, and for any chain on
     a port network_target.py has no convention for, so on those the network half is SKIPPED
     rather than guessed -- rule 17: "I could not tell" must never be written as "it is
     wrong". The decode half still runs everywhere.

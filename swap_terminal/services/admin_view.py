@@ -131,9 +131,9 @@ _PROBE_METHOD = "getblockchaininfo"
 
 # WHICH ADAPTERS CAN BE PROBED, MEASURED BY READING THEM (rule 17).
 #
-# Two of the six cannot, and the page says so rather than reporting them as
-# unreachable -- those are different facts and collapsing them would report a
-# healthy Monero wallet as down.
+# One of the five cannot, and the page says so rather than reporting it as
+# unreachable -- those are different facts, and collapsing them would report a
+# healthy wallet as down.
 #
 #   BTC / LTC / GRC   chains/base.RPCAdapter.call("getblockchaininfo") -- a read
 #                     that returns a `chain` field naming the network.
@@ -143,8 +143,6 @@ _PROBE_METHOD = "getblockchaininfo"
 #                     cluster; solana_chain_check.py does it with getGenesisHash,
 #                     which the adapter does not expose. Adding one is an adapter
 #                     change and is not this surface's to make.
-#   XMR               NO PROBE. chains/monero.py exposes no version or network
-#                     read either; monero_chain_check.py is the script that does.
 #
 # Named here as a capability rather than tested by asset string, so a probe is
 # attempted only where one is actually implemented.
@@ -523,27 +521,27 @@ def _attribution_note(asset: str) -> str:
     attributed" from one place (rule 8), the same arrangement threshold_note()
     already has.
 
-    THE DEFAULT BRANCH WAS BEING RENDERED FOR A CHAIN IT IS FALSE ABOUT.
-    Measured 2026-09-27, before the fix, by calling this function directly:
+    THE DEFAULT BRANCH WAS ONCE RENDERED FOR A CHAIN IT WAS FALSE ABOUT, and
+    that is why the default is narrow. Measured 2026-09-27 by calling this
+    function directly, it returned
 
-        _attribution_note("XMR") == "not decided in this application --
-            get_new_address() refuses and the custody choice is the operator's"
-        _attribution_note("SOL") == the same string
+        "not decided in this application -- get_new_address() refuses and the
+         custody choice is the operator's"
 
-    It is TRUE of SOL -- chains/solana.py:597 get_new_address() raises
-    NotImplementedError at line 618 and its
-    message names the three custody options README.md leaves with the operator --
-    and FALSE of XMR, where chains/monero.py:280 calls the wallet's
-    `create_address` and returns a real per-swap subaddress. XMR reached the
-    default only because swap_view.ATTRIBUTION_MODELS did not list it, while
-    chain_rows() below forces XMR into the table, so the false sentence rendered
-    on the operator's chain page beside an `attribution` column reading
-    "unknown". The chain WAS decided; only this mapping had not heard.
+    for a chain whose adapter DID return a real per-swap address and whose
+    custody question was not open. It is true of SOL -- chains/solana.py:597
+    get_new_address() raises NotImplementedError at line 618 and its message
+    names the three custody options README.md leaves with the operator -- and it
+    was false of the other, which reached the default only because
+    swap_view.ATTRIBUTION_MODELS did not list it while chain_rows() below forces
+    every reachable chain into the table. So the false sentence rendered on the
+    operator's chain page beside an `attribution` column reading "unknown". The
+    chain WAS decided; only the mapping had not heard.
 
     The address-model clause was the other half. It said "derived by the daemon's
     getnewaddress" for every chain in that model, which is right for the three
-    Bitcoin-derived daemons and wrong for monero-wallet-rpc -- so admitting XMR
-    to the model without splitting that clause per asset would have replaced one
+    Bitcoin-derived daemons and wrong for anything else that joins -- so admitting
+    a chain to the model without splitting that clause per asset replaces one
     false sentence with another. ADDRESS_DERIVATIONS is that split.
 
     An asset in the address model with no derivation recorded says so rather than

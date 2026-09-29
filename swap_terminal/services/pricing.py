@@ -120,17 +120,12 @@ IDS = {
     "LTC": "litecoin",
     "GRC": "gridcoin-research",
     "XRP": "ripple",
-    # XMR added 2026-09-27 to wire GRC<->XMR, at the operator's instruction. The
-    # CoinGecko id is "monero" -- the same shape as the four above, where the id is the
-    # project's name rather than its ticker, which is why "xmr" would 404 and produce a
-    # missing-price refusal rather than an error naming this table.
-    #
-    # THIS TABLE IS WHY ALLOWED_PAIRS ALONE WOULD NOT HAVE BEEN ENOUGH. Adding
-    # ("GRC","XMR") to config.ALLOWED_PAIRS without this line makes validate_pair()
-    # accept the pair and then create_quote() fail on a missing USD price -- an accepted
-    # swap that cannot be priced, which is worse than a refused one. The comment above
-    # records XRP as the asset that would have hit the old two-table version; XMR is the
-    # asset that proves the single table works.
+    # THIS TABLE IS WHY ALLOWED_PAIRS ALONE IS NOT ENOUGH TO ADD A PAIR. Adding one to
+    # config.ALLOWED_PAIRS without a line here makes validate_pair() accept it and then
+    # create_quote() fail on a missing USD price -- an accepted swap that cannot be
+    # priced, which is worse than a refused one. Note also that every id above is the
+    # project's NAME and not its ticker, so a ticker guessed into this table 404s and
+    # produces a missing-price refusal rather than an error naming this table.
 }
 
 # THE CONTEXT TABLE. (query flag, response key, MarketSnapshot field), and the

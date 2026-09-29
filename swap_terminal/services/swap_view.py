@@ -276,27 +276,16 @@ STALL_EXPLANATIONS = {
 # refuses, and README.md's Solana section leaves the custody choice with the
 # operator, so there is no attribution model to draw yet.
 #
-# XMR WAS MISSING FROM THIS MAPPING AND THAT WAS A DEFECT, NOT A GAP. Measured
-# 2026-09-27 by calling services/admin_view._attribution_note("XMR"), which
-# returned
-#
-#     "not decided in this application -- get_new_address() refuses and the
-#      custody choice is the operator's"
-#
-# and that sentence is false in both halves. chains/monero.py:280
-# MoneroAdapter.get_new_address() does NOT refuse: it calls the wallet's
-# `create_address` for the configured account and returns a real per-swap
-# SUBADDRESS, raising only when the wallet answers without one. And the custody
-# choice is not open either -- monero-wallet-rpc holds the keys, exactly as
-# bitcoind does, which is why that method's own docstring says "this is where
-# Monero is easier than Solana rather than harder".
-#
-# admin_view.chain_rows() forces XMR into the table (`| {"BTC", "LTC", "GRC",
-# "SOL", "XMR"}`), so the sentence rendered on the operator's chain table every
-# time that page was opened, next to an `attribution` column reading "unknown".
-# The page an operator would consult to learn how Monero deposits are told apart
-# told them nobody had decided. Rule 16 counts a wrong comment as a bug; this is
-# the same bug rendered as a fact about live state.
+# A CHAIN MISSING FROM THIS MAPPING IS A DEFECT AND NOT A GAP, and that was
+# learned from one. Measured 2026-09-27, a chain absent here rendered
+# "not decided in this application -- get_new_address() refuses and the custody
+# choice is the operator's" on the operator's chain table, next to an
+# `attribution` column reading "unknown" -- while that chain's adapter returned a
+# real per-swap address and its custody question was not open at all. The page an
+# operator consults to learn how deposits are told apart told them nobody had
+# decided. Rule 16 counts a wrong comment as a bug; that was the same bug
+# rendered as a fact about live state, because admin_view.chain_rows() forces
+# every reachable chain into the table whether or not this mapping knows it.
 #
 # SOL IS THE OPPOSITE CASE AND THE DEFAULT SENTENCE IS TRUE OF IT.
 # chains/solana.py:597 get_new_address() really does raise NotImplementedError,
@@ -304,38 +293,27 @@ STALL_EXPLANATIONS = {
 # operator. So the fix could not be to the default branch: the default is right
 # for the chain it was written for and wrong for the chain that arrived later.
 #
-# WHY XMR REUSES "address" RATHER THAN GETTING A FOURTH MODEL NAME.
+# A MODEL NAME DESCRIBES A BEHAVIOR, NOT A DERIVATION, and the difference has
+# teeth. Two chains can derive their per-swap address completely differently --
+# an independent key in wallet.dat versus something scanned for with a view key
+# -- and still answer the SAME attribution question: given money that arrived,
+# which swap claims it? "The one whose deposit address it was sent to" is one
+# model however the address was made, and it is different in kind from XRP,
+# where one account is shared and an integer decides.
 #
-# A Monero subaddress and a Bitcoin address are genuinely not the same object. A
-# `getnewaddress` address is independent -- its own key, in wallet.dat, unrelated
-# to any other address the wallet holds. A subaddress belongs to ONE account, is
-# derived from that account's keys, and the wallet finds payments to it by
-# scanning with the view key rather than by watching a key it stores per address.
-# That difference is real and it is recorded, below, in ADDRESS_DERIVATIONS.
-#
-# But it is not a difference in ATTRIBUTION, and attribution is the only question
-# this mapping answers: given money that arrived, which swap claims it? For XMR
-# the answer is "the one whose deposit address it was sent to" -- identical in
-# kind to BTC/LTC/GRC, and different in kind from XRP, where the address is
-# shared by every swap and an integer decides. Every consumer of this value
-# branches on exactly that question and on nothing else:
+# Every consumer branches on exactly that question and on nothing else:
 #
 #     deposit_instruction() below        address box, or address + tag pair
 #     templates/swap.html:59,64          `deposit.model == 'address'` vs
 #                                        `== 'destination_tag'`, else a bare note
 #     admin_view.chain_rows()            the `attribution` column
 #
-# So a fourth model name would not describe a fourth behavior -- it would
-# describe the same behavior under a name none of those three readers knows, and
-# templates/swap.html would route XMR into its `{% else %}` fallback, which
-# prints the note and NO send target. A customer would get a page that explains
-# how Monero attribution works and never shows them the subaddress. That is the
-# large-diff-no-benefit trade rule 10 and rule 12 both refuse, arriving as a
-# vocabulary split: the model split would have to be followed into a template
-# branch and a second template branch for the problem case, to render what the
-# "address" branch already renders correctly.
-#
-# The derivation difference therefore lives in a sentence rather than in a key.
+# So a model name minted for a derivation would name the same behavior in a word
+# none of those three readers knows, and the template would route that chain into
+# its `{% else %}` fallback -- printing the note and NO send target, so a customer
+# gets a page explaining how attribution works that never shows them where to
+# send. Derivation differences therefore live in a sentence, in
+# ADDRESS_DERIVATIONS below, rather than in a key.
 #
 # A chain missing from this mapping renders as "unknown" and says so. It does
 # not fall back to "address", because an address field drawn for a chain that
@@ -354,16 +332,15 @@ ATTRIBUTION_MODELS = {
 #
 # That clause read "derived by the daemon's getnewaddress" for every chain in the
 # address model. It was written when the address model meant "a Bitcoin-derived
-# daemon" and it stayed after Monero joined -- so the day XMR entered this
-# mapping, one true sentence about three chains would have become a false
-# sentence about a fourth. Rule 8: the copies agree on the day they are written.
-# Keyed per asset so adding a chain cannot inherit another chain's derivation,
-# and read by admin_view._attribution_note() rather than restated there.
+# daemon", and it held only for as long as that stayed true: the first chain to
+# join the model with any other derivation would turn one true sentence about
+# three chains into a false sentence about a fourth. Rule 8: the copies agree on
+# the day they are written. Keyed per asset so a chain cannot inherit another
+# chain's derivation, and read by admin_view._attribution_note() rather than
+# restated there.
 #
 # Each entry was read out of the adapter, 2026-09-27:
 #   BTC/LTC/GRC   chains/base.RPCAdapter.get_new_address() -> `getnewaddress`
-#   XMR           chains/monero.py:290 -> `create_address` with
-#                 account_index=self.account_index
 ADDRESS_DERIVATIONS = {
     "BTC": "the daemon's `getnewaddress` -- an independent address whose key bitcoind stores in wallet.dat",
     "LTC": "the daemon's `getnewaddress` -- an independent address whose key litecoind stores in wallet.dat",

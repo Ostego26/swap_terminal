@@ -124,7 +124,7 @@ def runs_for(asset: str) -> list[dict]:
 #: against that, and they work at a glance rather than after reading.
 #:
 #: THE COLORS ARE APPROXIMATED FROM PUBLIC BRAND USAGE and are NOT claimed to be official.
-#: Bitcoin's orange and Monero's orange are the widely published ones; Litecoin's blue, XRP's
+#: Bitcoin's orange is the widely published one; Litecoin's blue, XRP's
 #: near-black and Solana's purple-to-green pair likewise; Gridcoin's green is the closest match
 #: to its logo that is readable on both backgrounds. If any is wrong it is wrong as decoration,
 #: and nothing here reads a color to decide anything.
@@ -186,7 +186,7 @@ class ChainTab(NamedTuple):
 #:              that spawn and its reaper, rule 13). The panel probes it if it happens to be up
 #:              and says so if it is not -- it must NOT start one, because a process this panel
 #:              spawned outside HarnessRunner would have no reaper here.
-#:   foreign    no Bitcoin-style adapter in this panel. XMR, XRP and SOL are swapped by other
+#:   foreign    no Bitcoin-style adapter in this panel. XRP and SOL are swapped by other
 #:              entry points with their own clients; saying so beats an empty tab or a missing
 #:              one.
 #:
@@ -194,7 +194,7 @@ class ChainTab(NamedTuple):
 #: HAS EVER CARRIED IT. CHAINS below has said "foreign" since the tabs were written, so both
 #: the comment and the annotation described a fourth kind that does not exist -- and two live
 #: branches were written against the name: `main()` skipped console construction on
-#: `kind == "none"` (so it never skipped, and printed `KeyError: 'XMR'` three times at startup
+#: `kind == "none"` (so it never skipped, and printed a `KeyError` per foreign tab at startup
 #: on 2026-09-28), and the page set a nav dot on `d.kind === "none"` (so it never set grey, and
 #: painted every foreign chain RED for a probe this panel never makes). A wrong comment is a
 #: bug, rule 16, and this one was read as documentation by two pieces of code.
@@ -303,7 +303,7 @@ def chain_state(tab: ChainTab, console) -> dict:
     """
     if tab.kind == "foreign":
         # A CHAIN THIS PANEL CANNOT SPEAK TO STILL HAS A CONFIGURED-OR-NOT ANSWER, and that is
-        # the one an operator actually needs. "XMR does nothing" was the report on 2026-09-28,
+        # the one an operator actually needs. "this tab does nothing" was the report on 2026-09-28,
         # and it was accurate: the tab said "no adapter" and stopped, which is a statement about
         # this panel dressed as a statement about the chain. What the operator could act on was
         # sitting one environment variable away.
@@ -474,7 +474,7 @@ def call_read_only(run: funding_steps.Run, method: str, args: list) -> dict:
 #:             line for the process that stakes the operator's wallet is exactly the guess rule
 #:             17 forbids, and "it did not come back up" is the worst time to discover a guess.
 #:
-#:   foreign   XMR, XRP, SOL. No daemon lifecycle here at all; this panel cannot even probe them.
+#:   foreign   XRP, SOL. No daemon lifecycle here at all; this panel cannot even probe them.
 DAEMON_CONTROL = {
     "regtest": {"start": True, "stop": True},
     "operator": {"start": False, "stop": True},
@@ -491,8 +491,8 @@ def refuse_daemon_control(tab: ChainTab, action: str) -> str:
     THREE REFUSALS AND THEY ARE NOT INTERCHANGEABLE, which is why each carries its own sentence
     rather than a shared "not allowed". An operator refused a START on GRC needs to know this
     panel does not know their command line, because they will otherwise look for a flag. One
-    refused a STOP needs to know an environment variable arms it. One on XMR needs to know
-    there is no lifecycle here at all.
+    refused a STOP needs to know an environment variable arms it. One on a foreign tab needs
+    to know there is no lifecycle here at all.
     """
     if action not in ("start", "stop"):
         return f"{action!r} is not start or stop"
@@ -506,17 +506,15 @@ def refuse_daemon_control(tab: ChainTab, action: str) -> str:
                 f"a guess, and 'it did not come back up' is the worst time to find that out."
             )
         if action == "start":
-            # NOT "THERE IS NO LIFECYCLE", WHICH WAS A CLAIM ABOUT MONERO AND WAS FALSE.
-            # Until 2026-09-28 both buttons on a foreign tab said "this panel has no daemon
-            # lifecycle for XMR -- it cannot even probe that endpoint, let alone run it", and
-            # the operator read it beside a tab that had just told them exactly which variable
-            # was unset. Monero has daemons; so does rippled; so does a Solana validator. What
+            # NOT "THERE IS NO LIFECYCLE", WHICH IS A CLAIM ABOUT THE CHAIN AND IS FALSE.
+            # Until 2026-09-28 both buttons on a foreign tab said this panel had no daemon
+            # lifecycle for that chain and could not even probe it -- and the operator read it
+            # beside a tab that had just told them exactly which variable was unset. Every
+            # foreign chain here HAS a daemon: rippled is one, a Solana validator is one. What
             # is true is the same thing that is true of GRC one branch up -- THIS PANEL DOES
             # NOT KNOW YOUR COMMAND LINE -- and it is true here for a stronger reason: nothing
-            # in this tree has ever started one. `grep -rn "monero-wallet-rpc" --include=*.py`
-            # over the tree on 2026-09-28 found the string in eleven files and a spawn of it in
-            # none; `regtest/daemons.py` owns every Popen here and knows bitcoind and litecoind
-            # only.
+            # in this tree has ever started one. `regtest/daemons.py` owns every Popen here and
+            # knows bitcoind and litecoind only.
             return (
                 f"this panel will not START {tab.asset}: nothing in this tree has ever started "
                 f"one, so it has no binary, no wallet file, no port and no network flag to "
@@ -525,10 +523,10 @@ def refuse_daemon_control(tab: ChainTab, action: str) -> str:
                 f"this tab will say so."
             )
         # A STOP NEEDS A HANDLE, AND THERE IS NONE. Rule 13 prefers a pid file to a `pgrep -f`
-        # pattern for exactly the case this is: the only way to find a monero-wallet-rpc this
-        # panel did not spawn is to match its command line, and that pattern matches EVERY
-        # monero-wallet-rpc on the host -- including one serving a different wallet the
-        # operator is mid-transfer on. A kill that cannot say which process it hit is not a
+        # pattern for exactly the case this is: the only way to find a daemon this panel did
+        # not spawn is to match its command line, and that pattern matches EVERY daemon of that
+        # kind on the host -- including one serving a different wallet the operator is
+        # mid-transfer on. A kill that cannot say which process it hit is not a
         # stop, it is a guess with a signal attached.
         return (
             f"this panel will not STOP {tab.asset}: it did not start that process, so it holds "
@@ -552,15 +550,14 @@ def refuse_an_rpc_console(tab: ChainTab) -> str:
     """"" if this tab gets the read-only RPC console, else why it does not.
 
     THE CONSOLE SPEAKS ONE PROTOCOL. Every method in READ_ONLY_RPCS is a Bitcoin-style JSON-RPC
-    call, sent as {"method": ..., "params": [...]} to a daemon that answers that shape. Monero,
-    XRP and Solana each answer a DIFFERENT shape -- monero-wallet-rpc is JSON-RPC 2.0 with the
-    call nested under `params`, the XRP Ledger takes a single-element `params` array of objects,
-    Solana takes named parameters -- so `getblockcount` is not a method any of them has, and a
-    console pointed at one would not fail usefully, it would fail confusingly.
+    call, sent as {"method": ..., "params": [...]} to a daemon that answers that shape. XRP and
+    Solana each answer a DIFFERENT shape -- the XRP Ledger takes a single-element `params` array
+    of objects, Solana takes named parameters -- so `getblockcount` is not a method either of
+    them has, and a console pointed at one would not fail usefully, it would fail confusingly.
 
     ASKED HERE RATHER THAN DISCOVERED AT THE SOCKET, which is the whole point of it being a
     function. Before this existed, `main()` tried to build a connection for every tab and the
-    three foreign ones printed `no RPC console (KeyError: 'XMR')` at startup -- a Python
+    foreign ones each printed `no RPC console (KeyError: ...)` at startup -- a Python
     exception class in an operator's terminal, for a condition that is by design and known
     before anything is asked of a network (rule 14: the panel should say what it is doing in
     words the operator can act on, and an exception name is not one).

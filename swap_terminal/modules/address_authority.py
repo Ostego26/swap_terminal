@@ -24,24 +24,23 @@ The obvious fix is one line at the send site:
 **THAT LINE WOULD HAVE BROKEN TWO WORKING CHAINS**, and saying why is the whole reason this
 module is a table instead of a call. `is_valid_address()` understands exactly three
 encodings -- bech32, Bitcoin-alphabet base58check, and XRP-alphabet base58check -- and this
-repository pays out on two more that look nothing like any of them:
+repository can reach one more that looks nothing like any of them:
 
-    Monero    a DIFFERENT base58: 8-byte blocks to 11 characters, and a KECCAK-256
-              checksum rather than a double SHA-256. chains/monero_keys.py owns it.
-              Measured below: every valid XMR address fails is_valid_address().
     Solana    plain base58 of a 32-byte ed25519 key with NO CHECKSUM AT ALL.
               chains/solana_address.py owns it. Length is the only structure there is.
 
-So the blanket guard refuses every valid Monero and Solana payout. Config.ALLOWED_PAIRS
-carries ("GRC","XMR") and ("XMR","GRC"), so that is not a hypothetical chain -- it is a live
-pair, and the refusal would land on a swap whose deposit has ALREADY been taken and
+So the blanket guard refuses every valid Solana payout. MEASURED 2026-09-29 rather than
+asserted: SOL is NOT in Config.ALLOWED_PAIRS today -- the set is BTC, GRC, LTC and XRP --
+so this trap is LATENT and not live, and saying otherwise would be the register error rule
+17 is about. What makes it worth a table anyway is that enabling a pair is a one-line
+change and this refusal would land on a swap whose deposit has ALREADY been taken and
 credited. A false refusal there is worse than the burn it was meant to prevent: the burn
 costs one customer's payout, and the outage costs every customer of that chain while their
 money sits in our wallet.
 
 Measured here 2026-09-27, by calling the real functions on the real fixtures rather than by
 reading either module (rule 17). `tests/test_address_authority.py::
-test_the_blanket_guard_would_have_refused_monero_and_solana` is that measurement, kept as a
+test_the_blanket_guard_would_have_refused_solana` is that measurement, kept as a
 test so the trap cannot be walked into again by someone who reads only the send site.
 
 WHAT AN ASSET WITH NO VALIDATOR DOES, AND HOW THAT WAS DECIDED.
@@ -470,10 +469,10 @@ def _solana(address: str) -> AddressVerdict:
 #
 # Every entry DELEGATES to the module that already owns the encoding rather than
 # reimplementing it (rule 8). Nothing in this file decodes anything itself: the Bitcoin
-# family reads modules/address_network.py's tables, XRP reads chains/xrp_address.py, XMR
-# reads chains/monero_keys.py and SOL reads chains/solana_address.py. That is deliberate --
-# a second implementation of Monero's base58 would agree with the first on the day it was
-# written and drift from then on, and the drift would be invisible until a payout burned.
+# family reads modules/address_network.py's tables, XRP reads chains/xrp_address.py and SOL
+# reads chains/solana_address.py. That is deliberate -- a second implementation of an
+# encoding would agree with the first on the day it was written and drift from then on, and
+# the drift would be invisible until a payout burned.
 #
 # Keyed by the SAME asset strings chains/registry.py and Config.ALLOWED_PAIRS use, and
 # tests/test_address_authority.py asserts the key sets line up so a new chain cannot arrive

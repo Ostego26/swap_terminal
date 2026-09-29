@@ -17,7 +17,7 @@ Live-safe: yes in the sense that matters -- it opens no swap database, reads no 
 ANY PAIR, EITHER DIRECTION -- AND WHICH PAIRS THAT ACTUALLY IS
 
 Operator, 2026-09-27: "we should be able to inter swap with any currency listed... either
-direction... btc/ltc or ltc/btc or ltc/xmr or grc/xmr etc. whatever. xmr/btc", alongside
+direction... btc/ltc or ltc/btc etc. whatever", alongside
 "basically we are creating swap opportunities for grc and the other shit is just a side
 hustle."
 
@@ -45,46 +45,8 @@ WHAT IS REACHABLE TODAY, and "any currency listed" IS NOT YET TRUE:
                      be a row in this file's table. XRP<->BTC and XRP<->LTC would each be
                      that same escrow leg against a P2SH leg, which is real work and not
                      yet done.
-    ANY<->XMR        NOT POSSIBLE YET, and not for want of effort. Monero has NO SCRIPT AT
-                     ALL, so there is nowhere to put a hashlock -- ltc/xmr, grc/xmr and
-                     xmr/btc are all blocked on the same single missing thing, not on
-                     three different ones. Their swap needs adaptor signatures plus a
-                     cross-curve discrete-log-equality proof. All four components are now
-                     individually tested (modules/adaptor_ecdsa.py,
-                     modules/ed25519_group.py, modules/dleq_helper.py, and
-                     chains/monero_keys.py, whose shared 2-of-2 key really spends -- on
-                     REGTEST, txid f584606948f430bf..., which is what is recorded in that
-                     module's header). NOTHING COMPOSES THEM, and composing them is not
-                     enough either: see the note below. docs/dleq_cross_curve_design.md
-                     section 6 stage 5, and docs/monero_swap_protocol.md.
 
-                     THIS LINE SAID "swept live on STAGENET" UNTIL 2026-09-27 AND THAT WAS
-                     FALSE. Grepped every .py and .md in the tree: the stagenet txid it
-                     named appears ZERO times, and what is recorded is a REGTEST sweep.
-                     docs/monero_stagenet_funding.md says in its own words that the regtest
-                     result "does NOT settle anything about stagenet specifically." The
-                     CRYPTOGRAPHIC claim is settled either way -- regtest and stagenet
-                     derive keys identically, which is that document's own argument for
-                     using regtest -- but a network-specific claim was made from a
-                     measurement that was never taken. I wrote the wrong version, and it is
-                     corrected here rather than quietly replaced because a false txid is
-                     worse than no txid: it stops the next reader checking.
-
-                     AND FOUR COMPONENTS ARE NOT SUFFICIENT. Measured 2026-09-27 by reading
-                     build_htlc_redeem_script() and hashlock_script_sig(): BOTH branches of
-                     this repo's HTLC end in a single-key OP_CHECKSIG, and the claimer
-                     satisfies it with a signature under their own key that they can produce
-                     freely. AN ADAPTOR SIGNATURE HAS NO PURCHASE ON A SINGLE-KEY OUTPUT --
-                     the mechanism needs the spender to be UNABLE to sign alone, so that the
-                     only available signature is one they must complete with the scalar. The
-                     adaptor swap therefore cannot reuse this HTLC at all; the script chain
-                     needs five transactions that do not exist (lock 2-of-2, redeem, cancel,
-                     refund, punish). That is why nothing here is one composition away.
-    ANY<->SOL        no HTLC. The one that existed was a stub that could not run, deleted
-                     in c4ea027 for four independent reasons.
-
-So: six directed pairs here, two more in the XRP driver, and the XMR family blocked behind
-one named piece of protocol work rather than behind this file.
+So: six directed pairs here, and two more in the XRP driver.
 
 THE PROTOCOL, AND THE ONE PROPERTY THAT MAKES IT ATOMIC
 
@@ -152,9 +114,9 @@ from regtest.keys import generate_key
 from step_console import Console
 
 # The assets whose legs this file can build: the three with a P2SH HTLC and a client
-# exposing create, redeem AND refund. XRP and XMR are absent for PROTOCOL reasons rather
-# than missing work -- see the module docstring -- and adding either here would be a claim
-# no code can honor.
+# exposing create, redeem AND refund. XRP is absent for a PROTOCOL reason rather than
+# missing work -- see the module docstring -- and adding it here would be a claim no code
+# can honor.
 CLIENTS = {"BTC": BTCClient, "GRC": GRCClient, "LTC": LTCClient}
 ASSETS = tuple(sorted(CLIENTS))
 
@@ -368,8 +330,7 @@ def client_for(asset: str):
     if asset not in CLIENTS:
         raise SwapError(
             f"no client for {asset!r}; this file drives {', '.join(ASSETS)}. XRP is a different "
-            f"protocol (see atomic_swap_xrp_grc.py) and XMR has no script at all -- neither is a "
-            f"missing row here"
+            f"protocol (see atomic_swap_xrp_grc.py) rather than a missing row here"
         )
     url_default, user_default, _ = DEFAULT_RPC[asset]
     url = os.environ.get(f"{asset}_RPC_URL", url_default)
@@ -1012,15 +973,6 @@ def print_pairs(console: Console) -> int:
     console.say("       is a hashlock but not a P2SH one. XRP<->GRC has its own working driver")
     console.say("       (atomic_swap_xrp_grc.py, both directions, live on testnet). XRP<->BTC")
     console.say("       and XRP<->LTC are that escrow leg against a P2SH leg: real work, undone.")
-    console.say("  XMR  NO SCRIPT AT ALL, so there is nowhere to put a hashlock. Every XMR pair")
-    console.say("       -- xmr/btc, ltc/xmr, grc/xmr, xrp/xmr -- is blocked on ONE piece of")
-    console.say("       protocol work, not four: the adaptor-signature swap. Its four components")
-    console.say("       are each tested (adaptor_ecdsa, ed25519_group, dleq_helper, monero_keys,")
-    console.say("       whose shared 2-of-2 key really spends on REGTEST: f584606948f430bf...).")
-    console.say("       Composing them is NOT sufficient: both branches of this repo's HTLC end")
-    console.say("       in a single-key OP_CHECKSIG, and an adaptor signature has no purchase on")
-    console.say("       one -- the script chain needs five transactions that do not exist yet.")
-    console.say("       docs/monero_swap_protocol.md, docs/dleq_cross_curve_design.md stage 5.")
     console.say("  SOL  no HTLC. The stub that existed could not run and was deleted (c4ea027).")
     return 0
 

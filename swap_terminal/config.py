@@ -23,10 +23,9 @@ Mainnet-safe: yes to import, and since 2026-09-26 yes to RUN with nothing set.
        All three now default to UNCONFIGURED_PORT (0) and chains/registry.py
        skips an unconfigured chain, so a missing setting REFUSES instead of
        guessing the most expensive possible answer. This is not a new
-       convention: XMR_RPC_PORT already defaulted to 0 meaning "no Monero
-       wallet here", SOL is constructed only when SOL_RPC_URL is set, and XRP's
+       convention: SOL is constructed only when SOL_RPC_URL is set, and XRP's
        url defaults to empty. The three oldest chains were the three not
-       following the rule their own file states three times.
+       following the rule their own file states twice.
 
        To reach a chain, set its port: BTC_RPC_PORT=18443 and LTC_RPC_PORT=19443
        for regtest (18332/19332 for testnet), GRC_RPC_PORT=25779 for the
@@ -246,7 +245,6 @@ class Config:
             "wallet": _env("GRC_RPC_WALLET", ""),
             "timeout": _env_float("GRC_RPC_TIMEOUT", "30"),
         },
-        # A DIFFERENT SHAPE ON PURPOSE, matching MoneroAdapter.__init__ rather
         # Its own shape again, matching XRPAdapter.__init__. An XRP endpoint is
         # one URL with no HTTP auth, no wallet path and no port of its own --
         # the same reason Config.RPC["SOL"] does not use the Bitcoin six.
