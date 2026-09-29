@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+from decimal import Decimal
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
@@ -40,25 +39,6 @@ def a_console(capsys):
 # ---------------------------------------------------------------------------
 # The refusal. It exists because the alternative is a funded XRP escrow.
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("chain", sorted(set(SCRIPT_CHAINS) - CAN_FUND_THE_HTLC))
-def test_a_chain_whose_HTLC_CANNOT_BE_FUNDED_is_refused_before_any_network_call(chain, capsys):
-    """THE ONE-SIDED STATE THIS PREVENTS IS THE WHOLE POINT.
-
-    Both runners fund the script leg with `adapter.call("createhtlc", ...)`, and
-    createhtlc is a GRIDCOIN RPC -- bitcoind and litecoind answer "Method not found".
-    Measured 2026-09-29 by running `--chain btc`, which passed the adapter check, the
-    regtest network check, the bech32 addresses and the commitment before anything
-    suggested a problem.
-
-    In xrp-first THE XRP ESCROW IS FUNDED AT STEP 5 and createhtlc runs at step 6. A
-    --run that discovered the missing method there would have one leg funded on a live
-    chain and no way to fund the other -- exactly the state every timelock in this file
-    exists to prevent, arriving through the driver rather than through a counterparty.
-
-    So the refusal is at the top of main(), before the first network call, and this test
-    asserts it returns True for every chain that cannot be funded.
-    """
-    assert refuse_a_chain_this_driver_cannot_fund(a_console(capsys), chain) is True
 
 
 def test_a_chain_that_CAN_be_funded_is_not_refused(capsys):
@@ -67,7 +47,13 @@ def test_a_chain_that_CAN_be_funded_is_not_refused(capsys):
 
 
 def test_the_refusal_still_guards_a_chain_the_flag_offers_without_a_funding_path(capsys, monkeypatch):
-    """IT REFUSES NOTHING TODAY, AND THAT IS WHY IT IS TESTED WITH A CHAIN THAT DOES NOT EXIST.
+    """IT REFUSES NOTHING TODAY, AND THAT IS WHY THE PERMISSION IS TAKEN AWAY HERE.
+
+    THIS REPLACED A PARAMETRIZED TEST OVER `set(SCRIPT_CHAINS) - CAN_FUND_THE_HTLC`, which
+    became an EMPTY parameter set the moment the two sets converged -- pytest reported it
+    as one skip among ten passes, which is how a guard loses its only test without anything
+    turning red. A test whose subject can vanish should not be parametrized over the thing
+    that makes it vanish.
 
     On 2026-09-29 this guard refused BTC and LTC, because both runners funded through
     Gridcoin's createhtlc. They now fund through the chain clients, so CAN_FUND_THE_HTLC
@@ -134,3 +120,103 @@ def test_the_modern_direction_is_left_alone():
     args = argparse.Namespace(chain="grc", direction=XRP_FIRST)
     normalize_arguments(args)
     assert args.direction == XRP_FIRST
+
+
+# ---------------------------------------------------------------------------
+# The rate, which is easy to invert and expensive to get wrong.
+# ---------------------------------------------------------------------------
+def test_THE_RATE_SENTENCE_STATES_BOTH_DIRECTIONS(capsys):
+    """A CORRECT LABEL IS ONLY HALF OF RULE 14, measured 2026-09-29.
+
+    `--rate` is XRP PER UNIT of the script chain and the output always said so. The number
+    an operator carries in their head is the other one, because it is what the recorded
+    runs print: "1 XRP for 66.10250498 GRC". Passing 66.1 to a flag wanting 0.0151 is
+    accepted, arithmetically fine, and off by a factor of about 4,300.
+
+    That is exactly what happened: --rate 66.1 was suggested, passed, and produced a leg of
+    0.01512859 GRC against one XRP. The label was right and nobody read it, because reading
+    it required doing the division. Printing the inverse does the division.
+    """
+    amount, why = driver._rated_chain_amount(a_console(capsys), "66.1", "GRC")
+    assert "1 XRP buys 0.01512859 GRC" in why
+    assert "1 GRC costs 66.1 XRP" in why
+    assert "you have passed its inverse" in why, (
+        "the sentence must name the mistake, not merely make it visible"
+    )
+    assert amount == Decimal("0.01512859")
+
+
+def test_the_rate_that_reproduces_the_recorded_run_is_the_INVERSE_of_the_recorded_figure():
+    """docs/atomic_swap_runs_2026_09_27.md records 1 XRP for 66.10250498 GRC. The --rate
+    that produces that is ~0.0151, not 66.1 -- which is the trap, stated as a number."""
+    amount, _ = driver._rated_chain_amount(_QuietConsole(), "0.01512859", "GRC")
+    assert Decimal(66) < amount < Decimal(67), (
+        f"--rate 0.01512859 should buy about 66 GRC per XRP, got {amount}"
+    )
+
+
+class _QuietConsole:
+    """A console that answers check() and says nothing. The rate path only prints on error."""
+
+    def check(self, *_args, **_kwargs):
+        return True
+
+    def say(self, *_args, **_kwargs):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# The dry run, which is prose and which no test read until it was wrong.
+# ---------------------------------------------------------------------------
+def test_THE_DRY_RUN_DESCRIBES_THE_PATH_THAT_ACTUALLY_RUNS(capsys):
+    """IT DESCRIBED A DEAD MECHANISM, and a dry run is where that costs the most.
+
+    Until 2026-09-29 this printed "step 6 would fund the GRC leg: createhtlc
+    receiver=<wallet address> sender=<wallet address>". Both halves were wrong the moment
+    the runners moved onto the chain clients: there is no createhtlc call, and those
+    addresses are where the claim and refund LAND rather than the HTLC's branches.
+
+    Caught by an operator running it, not by the suite -- the dry run is prose and nothing
+    read it. A stale comment is bad; a dry run describing the wrong mechanism is a stale
+    comment at the exact moment it is load-bearing, because a dry run exists to be read
+    BEFORE committing money.
+    """
+    console = a_console(capsys)
+    leg = driver.ScriptLeg(chain="BTC", tip_height=100, timeout_height=244)
+    driver.describe_the_dry_run(console, argparse.Namespace(direction=XRP_FIRST), "BTC", leg,
+                                Decimal("0.5"), 844199449, "rA", "rB", "mClaim")
+    printed = capsys.readouterr().out
+    assert "createhtlc" not in printed, "the dry run names an RPC this driver no longer calls"
+    assert "P2SH HTLC" in printed and "script_leg.py" in printed
+    assert "minted" in printed, "the branches pay minted keys and the reader must know that"
+    assert "shut before the step that publishes the secret" in printed
+
+
+def test_the_dry_run_numbers_the_steps_BY_DIRECTION(capsys):
+    """In xrp-first the XRP leg is step 6 and the script leg is 7; chain-first reverses it.
+
+    Both printed "step 6" until 2026-09-29 -- which reads as two things happening at once,
+    in a sequence whose ORDER is the security property. The whole reason the initiator's
+    leg is funded first and takes the longer lock is that the order decides who is exposed.
+
+    THE FIRST VERSION OF THIS TEST WAS WORTHLESS and is recorded rather than quietly
+    replaced: it ended `assert ... or True`, which passes whatever the code does. A test
+    that cannot fail is worse than no test, because it occupies the place where a real one
+    would go and reports green while doing so.
+    """
+    leg = driver.ScriptLeg(chain="GRC", tip_height=1, timeout_height=2)
+
+    driver.describe_the_dry_run(a_console(capsys), argparse.Namespace(direction=XRP_FIRST),
+                                "GRC", leg, Decimal(1), 1, "rA", "rB", "mClaim")
+    forward = capsys.readouterr().out
+    assert "step 6 would fund the XRP leg" in forward
+    assert "step 7 would fund the GRC leg" in forward
+
+    driver.describe_the_dry_run(a_console(capsys), argparse.Namespace(direction=CHAIN_FIRST),
+                                "GRC", leg, Decimal(1), 1, "rA", "rB", "mClaim")
+    reverse = capsys.readouterr().out
+    assert "step 7 would fund the XRP leg" in reverse
+    assert "step 6 would fund the GRC leg" in reverse, (
+        "chain-first funds the script leg FIRST; numbering it 7 would describe the other "
+        "direction's exposure to an operator about to commit to this one"
+    )

@@ -650,14 +650,31 @@ def _pinned_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decima
 
 
 def _rated_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decimal | None, str]:
-    """--rate, validated and applied. See chain_amount_for_rate for the direction."""
+    """--rate, validated and applied. See chain_amount_for_rate for the direction.
+
+    THE SENTENCE SAYS THE RATE BOTH WAYS ROUND, and that is worth four lines of code.
+    `--rate` is XRP PER UNIT of the script chain, and the label always said so -- but the
+    number an operator has in their head is usually the other one, because it is the one
+    the recorded runs print ("1 XRP for 66.10250498 GRC"). Passing 66.1 to a flag that
+    wants 0.0151 is accepted, arithmetically fine, and off by a factor of 4,300.
+
+    Measured 2026-09-29: that is exactly what happened. `--rate 66.1` was suggested,
+    passed, and produced a leg of 0.01512859 GRC against 1 XRP -- which the output
+    labelled correctly and which nobody read, because a correct label is only half of
+    rule 14. Printing the INVERSE beside it makes the mistake visible without the reader
+    having to do the division, and the division is the step that was skipped.
+    """
     try:
         rate = Decimal(raw)
         amount = chain_amount_for_rate(XRP_DROPS, rate)
     except (ArithmeticError, ValueError) as error:
         console.check(f"the {chain} leg's size", f"--rate {raw!r}: {error}", "a positive rate", False)
         return None, ""
-    return amount, f"--rate {rate} XRP per {chain}, supplied by hand and NOT checked against a market"
+    return amount, (
+        f"--rate {rate} XRP per {chain} -- so 1 XRP buys {amount} {chain}, and 1 {chain} costs "
+        f"{rate} XRP. IF THOSE ARE THE WRONG WAY ROUND FOR YOU, the flag wants XRP per {chain} "
+        f"and you have passed its inverse. Supplied by hand and NOT checked against a market"
+    )
 
 
 def resolve_chain_amount(console: Console, args) -> tuple[Decimal | None, str]:
@@ -1121,6 +1138,43 @@ def build_script_client(chain: str, rpc: dict):
     return SCRIPT_CLIENTS[chain](url, rpc.get("user") or "", rpc.get("password") or "")
 
 
+def describe_the_dry_run(console: Console, args, chain: str, leg: ScriptLeg,  # noqa: PLR0913, PLR0917 -- checked: these eight ARE the swap as far as a reader is concerned -- both legs' sizes, both timelocks, and where each side's coins land. None is derivable from another and none can be defaulted. Bundling them would mean building the SwapContext before the dry run, which is the one thing a dry run must not do: it mints keys and constructs a client, both of which are real work for a run that is not happening.
+                         chain_amount, xrp_cancel_after: int, a_xrp: str, b_xrp: str,
+                         a_grc: str) -> None:
+    """What --run WOULD do, described from the same values the run would use.
+
+    IT DESCRIBED A PATH THAT NO LONGER EXISTED. Until 2026-09-29 this said "step 6 would
+    fund the GRC leg: createhtlc receiver=<wallet address> sender=<wallet address>", and
+    both halves were wrong the moment the runners moved onto the chain clients: there is no
+    createhtlc call, and those wallet addresses are where the claim and refund LAND, not
+    the HTLC's branches. Caught by an operator running it, not by the suite -- a dry run's
+    output is prose, and no test read it.
+
+    That is worse than an ordinary stale comment. A dry run exists to be read BEFORE
+    committing money, so a dry run describing the wrong mechanism is a wrong comment at the
+    exact moment it is load-bearing.
+
+    THE BRANCH ADDRESSES ARE NOT SHOWN HERE, and the absence is deliberate rather than an
+    omission: the keys are minted in prepare_the_script_leg(), which a dry run never
+    reaches, because minting two keypairs and constructing a client is real work for a run
+    that is not happening. So this says WHAT would be built rather than pretending to know
+    the addresses a future run will mint.
+    """
+    console.banner("DRY RUN -- nothing was submitted")
+    xrp_step, chain_step = (6, 7) if args.direction == XRP_FIRST else (7, 6)
+    console.say(f"step {xrp_step} would fund the XRP leg: Escrow of {XRP_DROPS} drops from {a_xrp} to "
+                f"{b_xrp}, Condition above, CancelAfter {xrp_cancel_after}.")
+    console.say(f"step {chain_step} would fund the {chain} leg: a P2SH HTLC paying {chain_amount} {chain}, "
+                f"committing to the sha256 above, claimable by a key minted for it and refundable to a "
+                f"SECOND minted key at height {leg.timeout_height}. Built and funded through "
+                f"modules/script_leg.py, which is why btc and ltc work here too.")
+    console.say(f"the claim would push the secret into a scriptSig on {chain}; the other side would read it "
+                f"back OFF THAT CHAIN and finish the XRP escrow with it. Claimed coins land at {a_grc}.")
+    console.say("THE WALLET IS OPENED FOR THE FUNDING ONLY. The claim signs with the minted key, so the "
+                "wallet is shut before the step that publishes the secret.")
+    console.say("re-run with --run to perform the swap.")
+
+
 def say_what_has_actually_run(console: Console, chain: str) -> None:
     """What evidence exists for THIS chain on THIS code path, before anything is funded.
 
@@ -1375,9 +1429,10 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         console.check(f"{chain} addresses", f"{type(error).__name__}: {error}", "two wallet addresses", False)
         return console.summary()
     console.check(f"{chain} addresses", f"A claims to {a_grc}, B refunds to {b_grc}", "two wallet addresses", True)
-    console.say(f"BOTH must be in this wallet: {chain}'s HTLC funding reads each party's PUBKEY out of the "
-                f"wallet, so a swap with a real counterparty needs their pubkey imported, not just their "
-                f"address.")
+    console.say("THESE TWO ARE WHERE THE CLAIMED AND REFUNDED COINS LAND, not the HTLC's own branches. The "
+                "branches pay two keys minted in this process (step 5b) and neither needs to be in the wallet "
+                "-- which is what removed the 'import your counterparty's pubkey' requirement Gridcoin's "
+                "createhtlc imposed until 2026-09-29.")
 
     console.step(3, f"one {HTLC_PREIMAGE_BYTES}-byte secret, committed on both chains")
     secret = os.urandom(HTLC_PREIMAGE_BYTES)
@@ -1414,15 +1469,8 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         return console.summary()
 
     if not args.run:
-        console.banner("DRY RUN -- nothing was submitted")
-        console.say(f"step 6 would fund the XRP leg: Escrow of {XRP_DROPS} drops from {a_xrp} to {b_xrp}, "
-                    f"Condition above, CancelAfter {xrp_cancel_after}.")
-        console.say(f"step 6 would fund the {chain} leg: createhtlc receiver={a_grc} sender={b_grc} "
-                    f"hash={secret_hash.hex()} timeout={leg.timeout_height} amount={chain_amount}.")
-        console.say(f"step 8 would claim the {chain} with the secret; step 9 would read the secret back OFF THE "
-                    "GRIDCOIN CHAIN; step 10 would finish the XRP escrow with what step 9 read. In the "
-                    "grc-first direction the same five acts run in the other order -- see --direction.")
-        console.say("re-run with --run to perform the swap.")
+        describe_the_dry_run(console, args, chain, leg, chain_amount,
+                             xrp_cancel_after, a_xrp, b_xrp, a_grc)
         return console.summary()
 
     # PER CHAIN, because the wallet that signs is per chain. This read
