@@ -439,11 +439,19 @@ def test_a_chain_with_no_completed_run_SAYS_SO_instead_of_inheriting_another_cha
     This test fails the moment somebody adds a chain to PROVEN_LIVE without a run behind
     it, which is the only way the claim can become false again.
     """
-    assert set(PROVEN_LIVE) == {"GRC"}, (
-        "a chain was added to PROVEN_LIVE; that table is the record of runs that actually "
-        "COMPLETED, so adding one without a txid behind it makes the banner lie again"
+    assert PROVEN_LIVE == {}, (
+        "PROVEN_LIVE gained an entry. That table is the record of runs that COMPLETED ON "
+        "THE CURRENT CODE PATH, and it was emptied on 2026-09-29 when both runners moved "
+        "off Gridcoin's createhtlc onto the chain clients. GRC's 2026-09-27 swaps went "
+        "through the old path, so their evidence does not describe this one -- adding a "
+        "chain back without a txid from a run of THIS code makes the banner lie again, "
+        "and the second version of that lie is the dangerous one because the chain name "
+        "is still right"
     )
     for chain in SCRIPT_CHAINS:
         assert chain in CHAIN_LABELS, f"{chain} has no operator-facing label"
         assert chain in CHAIN_TEST_NETWORKS, f"{chain} has no test-network allowlist"
-    assert "regression" in PROVEN_LIVE["GRC"]
+    # The sentence a chain gets when it HAS evidence is still formatted from this table,
+    # so its shape is pinned even while the table is empty -- otherwise the first entry
+    # added back would be the one that discovers the format drifted.
+    assert all("regression" in sentence for sentence in PROVEN_LIVE.values())

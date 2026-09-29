@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 
 from step_console import Console
 
+import atomic_swap_xrp as driver
 from atomic_swap_xrp import (
     CAN_FUND_THE_HTLC,
     CHAIN_FIRST,
@@ -65,36 +66,47 @@ def test_a_chain_that_CAN_be_funded_is_not_refused(capsys):
         assert refuse_a_chain_this_driver_cannot_fund(a_console(capsys), chain) is False
 
 
-def test_the_refusal_names_the_METHOD_and_the_INTERFACE_that_would_replace_it(capsys):
-    """Rule 14: a refusal an operator cannot act on is one they route around.
+def test_the_refusal_still_guards_a_chain_the_flag_offers_without_a_funding_path(capsys, monkeypatch):
+    """IT REFUSES NOTHING TODAY, AND THAT IS WHY IT IS TESTED WITH A CHAIN THAT DOES NOT EXIST.
 
-    It has to say three things -- which method is missing, that everything else about the
-    chain works, and where the replacement already lives -- because the fix is NOT to add
-    a method. modules/atomic_btc_client.py already exposes create_contract() and builds
-    the P2SH itself; atomic_swap.py funds HTLCs on all three chains through it. This
-    driver simply has a second implementation that covers one chain.
+    On 2026-09-29 this guard refused BTC and LTC, because both runners funded through
+    Gridcoin's createhtlc. They now fund through the chain clients, so CAN_FUND_THE_HTLC
+    equals SCRIPT_CHAINS and no real chain is refused.
+
+    DELETING THE GUARD WOULD BE THE MISTAKE. What it prevents is a chain arriving in
+    SCRIPT_CHAINS -- which derives from SECONDS_PER_BLOCK, so adding an interval is enough
+    -- with no funding path behind it. That chain would pass every check up to step 5,
+    fund the XRP escrow, and fail at step 6. DOGE stands in for it here because a guard
+    exercised only by the state it already permits is a guard nobody would notice breaking.
     """
+    # A REAL CHAIN WITH THE PERMISSION TAKEN AWAY, not an invented ticker. The refusal
+    # reports the chain's block interval, so a chain absent from SECONDS_PER_BLOCK raises
+    # KeyError instead of refusing -- which is what the first version of this test did,
+    # and it would have hidden the guard rather than exercised it.
+    monkeypatch.setattr(driver, "CAN_FUND_THE_HTLC", frozenset({"GRC"}))
     console = a_console(capsys)
-    refuse_a_chain_this_driver_cannot_fund(console, "BTC")
+    assert refuse_a_chain_this_driver_cannot_fund(console, "BTC") is True
     printed = capsys.readouterr().out
-    assert "createhtlc" in printed
-    assert "atomic_btc_client" in printed and "create_contract" in printed
     assert "EVERYTHING ELSE ABOUT BTC WORKS" in printed
     assert "step 5" in printed and "step 6" in printed, (
         "the refusal must say WHERE the one-sided state would arrive, not merely that it could"
     )
 
 
-def test_CAN_FUND_THE_HTLC_is_a_SUBSET_of_the_chains_the_flag_offers():
-    """The flag deliberately offers more chains than can complete a swap, because the
-    driver genuinely handles them everywhere except step 6 -- and a flag that hid them
-    would hide the gap too. This pins that the two sets cannot drift into disagreement in
-    the other direction: a chain that can fund but is not offered would be unreachable.
+def test_EVERY_CHAIN_THE_FLAG_OFFERS_CAN_ACTUALLY_FUND_ITS_HTLC():
+    """THE TWO SETS AGREE AGAIN, and this is what keeps them that way.
+
+    They diverged for one commit on 2026-09-29: --chain offered btc and ltc while only GRC
+    could be funded, deliberately, because a flag that hid them would have hidden the gap
+    too. Moving both runners onto the chain clients closed it. What this pins now is that
+    the sets cannot drift APART again silently -- SCRIPT_CHAINS derives from
+    SECONDS_PER_BLOCK, so adding a block interval for a fourth chain is enough to offer it,
+    and this fails until that chain can actually fund.
     """
-    assert set(SCRIPT_CHAINS) >= CAN_FUND_THE_HTLC
-    assert {"GRC"} == CAN_FUND_THE_HTLC, (
-        "if a chain gained a funding path, this set moved -- and PROVEN_LIVE, the banner "
-        "and docs/branch_coverage.md all describe the old state until they are updated too"
+    assert set(SCRIPT_CHAINS) == CAN_FUND_THE_HTLC, (
+        "a chain the --chain flag offers has no funding path. It would pass every check up "
+        "to step 5, fund the XRP escrow, and fail at step 6 with one leg live on a real "
+        "chain -- which is the whole reason refuse_a_chain_this_driver_cannot_fund() exists"
     )
 
 

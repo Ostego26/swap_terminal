@@ -31,8 +31,11 @@ Role: file (the entry point; the decisions are swap_timelocks() and
 Reads: the XRPL testnet endpoint in chains/xrp_testnet.py, the faucet accounts
        in ~/.config/swap_terminal/keys/, and the script chain's daemon through
        Config.RPC[<the --chain asset>]
-Writes: nothing on disk. It SUBMITS an EscrowCreate, an EscrowFinish, a
-       createhtlc and a claimhtlc, and only with --run.
+Writes: nothing on disk. It SUBMITS an EscrowCreate, an EscrowFinish, a P2SH
+       HTLC funding transaction and its claim, and only with --run. The two
+       script-chain transactions are built by modules/script_leg.py through the
+       chain clients -- NOT by Gridcoin's createhtlc/claimhtlc, which is what
+       confined this driver to one chain until 2026-09-29.
 Can move funds: YES, on both chains, and this is the first file in this tree
        that moves money on two chains in one program. Testnet only.
 Mainnet-safe: NO, AND IT REFUSES TO BE ASKED, on BOTH legs, before anything is
@@ -58,7 +61,7 @@ THE PROTOCOL, and every step below is named after the party who acts:
     1. A picks a 32-byte secret and publishes only sha256(secret).
     2. A funds the XRP leg: an Escrow to B, with a PREIMAGE-SHA-256 Condition
        and CancelAfter at A's own (LONGER) timelock.
-    3. B funds the GRC leg: createhtlc with the same sha256, claimable by A,
+    3. B funds the script leg: a P2SH HTLC on the same sha256, claimable by A,
        refundable to B after B's (SHORTER) timelock.
     4. A claims the GRC leg with the secret. Claiming REQUIRES pushing the
        secret into a scriptSig that lands in a block, so A cannot take the GRC
@@ -271,7 +274,10 @@ from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_ac
 from chains.xrp_units import DROPS_PER_XRP  # noqa: E402 -- same
 from config import Config  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
-from modules.htlc_chain_read import claim_scriptsig_hex, htlc_vout  # noqa: E402 -- same
+from modules.atomic_btc_client import BTCClient  # noqa: E402 -- same
+from modules.atomic_grc_client import GRCClient  # noqa: E402 -- same
+from modules.atomic_ltc_client import LTCClient  # noqa: E402 -- same
+from modules.htlc_chain_read import claim_scriptsig_hex  # noqa: E402 -- same
 from modules.htlc_spend import preimage_from_scriptsig  # noqa: E402 -- same
 
 # SECONDS_PER_BLOCK is imported rather than respelled: it is the number that
@@ -284,6 +290,7 @@ from modules.htlc_timelock import (  # noqa: E402 -- same
     SECONDS_PER_BLOCK,
     lock_hours_for_role,
 )
+from modules.script_leg import ScriptLegKeys, mint_leg_keys  # noqa: E402 -- same
 from step_console import Console  # noqa: E402 -- same
 
 from xrp_htlc_escrow import (  # noqa: E402 -- same: the escrow payloads and the read-only helpers are that file's, not copied here (rule 8)
@@ -362,37 +369,18 @@ def chain_amount_for_rate(xrp_drops: int, xrp_per_chain_unit: Decimal) -> Decima
 #: The chains a full swap has actually COMPLETED on, and the evidence. Absence from this
 #: table is not a gap in the table -- it is the honest state of a chain, and the banner
 #: says so out loud rather than letting silence read as reassurance.
-#: The chains whose HTLC this driver can actually FUND. Not the chains it can reason
-#: about -- it converts timelocks, prices legs and validates networks for all three -- but
-#: the ones where steps 6 and 7 have a method to call.
-#:
-#: MEASURED 2026-09-29, AND THIS IS THE GAP THE --chain FLAG DID NOT CLOSE. Both runners
-#: fund the script leg with `adapter.call("createhtlc", ...)`, and createhtlc is a
-#: GRIDCOIN RPC. bitcoind and litecoind have no such method; they answer "Method not
-#: found". Everything before step 6 succeeds on BTC -- the adapter, the regtest network,
-#: the bech32 addresses, the commitment -- which is precisely what makes refusing here
-#: rather than there necessary.
-#:
-#: WHY IT REFUSES BEFORE STEP 1 RATHER THAN FAILING AT STEP 6. In xrp-first the XRP
-#: ESCROW IS FUNDED AT STEP 5. A --run that discovered the missing method at step 6 would
-#: have one leg funded on a live chain and no way to fund the other -- the exact
-#: one-sided state every timelock in this file exists to prevent, arriving through the
-#: driver instead of through a counterparty.
-#:
-#: THE FIX IS NOT A NEW METHOD. modules/atomic_btc_client.py and
-#: modules/atomic_grc_client.py already expose create_contract()/redeem_contract()/
-#: refund_contract() and build the P2SH themselves -- atomic_swap.py funds HTLCs on all
-#: three chains through exactly that interface, and neither client mentions createhtlc.
-#: So this driver has a SECOND implementation of "fund an HTLC on a script chain" that
-#: works on one chain where the first works on three: rule 8's defect, found by running
-#: the thing rather than by reading it. Routing steps 6 and 7 through the clients is the
-#: work, and it is not done.
-CAN_FUND_THE_HTLC = frozenset({"GRC"})
 
-PROVEN_LIVE = {
-    "GRC": ("BOTH directions have completed at the market rate, OK=16 FAIL=0 each (2026-09-27): "
-            "xrp-first GRC claim 78472df347a91f31..., grc-first GRC claim 845315f4c2063670..., "
-            "1 XRP for 66.10250498 GRC both ways. A failure here is a regression, not a discovery."),
+PROVEN_LIVE: dict[str, str] = {
+    # EMPTIED 2026-09-29 AND NOT CARRIED ACROSS. GRC's two completed swaps (xrp-first claim
+    # 78472df347a91f31..., chain-first claim 845315f4c2063670..., 2026-09-27) went through
+    # Gridcoin's `createhtlc`/`claimhtlc`. This driver no longer calls either: both runners
+    # now build and spend the P2SH through the chain clients, which is what lets BTC and LTC
+    # work at all.
+    #
+    # THE EVIDENCE BELONGS TO THE PATH THAT PRODUCED IT. Leaving GRC listed would tell an
+    # operator a failure is a regression on a route no run has ever taken -- the same
+    # falsehood the per-chain banner was added to stop, one commit later and with the chain
+    # name still technically correct. Re-earned by a run, not by a rename.
 }
 
 CHAIN_LABELS = {"BTC": "Bitcoin test network", "LTC": "Litecoin test network",
@@ -445,6 +433,33 @@ SCRIPT_CHAINS = tuple(sorted(SECONDS_PER_BLOCK))
 #: GRC unless told otherwise, because every recorded run of this driver was GRC and a
 #: changed default would silently re-point an operator's existing command.
 DEFAULT_CHAIN = "GRC"
+
+#: The chains whose HTLC this driver can actually FUND. Not the chains it can reason
+#: about -- it converts timelocks, prices legs and validates networks for all three -- but
+#: the ones where steps 6 and 7 have a method to call.
+#:
+#: MEASURED 2026-09-29, AND THIS IS THE GAP THE --chain FLAG DID NOT CLOSE. Both runners
+#: fund the script leg with `adapter.call("createhtlc", ...)`, and createhtlc is a
+#: GRIDCOIN RPC. bitcoind and litecoind have no such method; they answer "Method not
+#: found". Everything before step 6 succeeds on BTC -- the adapter, the regtest network,
+#: the bech32 addresses, the commitment -- which is precisely what makes refusing here
+#: rather than there necessary.
+#:
+#: WHY IT REFUSES BEFORE STEP 1 RATHER THAN FAILING AT STEP 6. In xrp-first the XRP
+#: ESCROW IS FUNDED AT STEP 5. A --run that discovered the missing method at step 6 would
+#: have one leg funded on a live chain and no way to fund the other -- the exact
+#: one-sided state every timelock in this file exists to prevent, arriving through the
+#: driver instead of through a counterparty.
+#:
+#: THE FIX IS NOT A NEW METHOD. modules/atomic_btc_client.py and
+#: modules/atomic_grc_client.py already expose create_contract()/redeem_contract()/
+#: refund_contract() and build the P2SH themselves -- atomic_swap.py funds HTLCs on all
+#: three chains through exactly that interface, and neither client mentions createhtlc.
+#: So this driver has a SECOND implementation of "fund an HTLC on a script chain" that
+#: works on one chain where the first works on three: rule 8's defect, found by running
+#: the thing rather than by reading it. Routing steps 6 and 7 through the clients is the
+#: work, and it is not done.
+CAN_FUND_THE_HTLC = frozenset(SCRIPT_CHAINS)
 
 XRP_FIRST = "xrp-first"
 CHAIN_FIRST = "chain-first"
@@ -747,9 +762,17 @@ class SwapContext:
     #: re-read at each of the three unlock sites: getwalletinfo is a network call, and
     #: three reads are three chances to get three answers mid-swap.
     wallet_encrypted: bool
+    #: The chain client that builds and spends the P2SH. NOT the adapter above: `grc` is
+    #: the raw RPC used for getnewaddress, the tip and reading a claim back, while this is
+    #: BTCClient/LTCClient/GRCClient, which own the script. One driver, two handles on one
+    #: daemon, and they do different jobs -- see modules/script_leg.py.
+    script_client: object
+    #: The two throwaway keypairs this swap's HTLC branches pay to. Minted per run, never
+    #: written, never printed.
+    leg_keys: ScriptLegKeys
 
 
-def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- checked: this is the protocol's ORDER, five acts across two chains, and every decision inside it is extracted (the timelocks above, the preimage read in modules/htlc_spend, the payloads in xrp_htlc_escrow, the vout lookup in htlc_vout). Rule 10 puts the order in the file named after the thing being done; splitting it would hide the sequence, and the sequence IS the security property.
+def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this is the protocol's ORDER, five acts across two chains, and every decision inside it is extracted (the timelocks above, the preimage read in modules/htlc_spend, the payloads in xrp_htlc_escrow, the vout lookup in htlc_vout). Rule 10 puts the order in the file named after the thing being done; splitting it would hide the sequence, and the sequence IS the security property.
     """A funds XRP first, B funds GRC, A claims GRC, B reads the scriptSig, B claims XRP.
 
     THE DIRECTION THAT RAN ON 2026-09-26 (OK=15) -- see the module header for the
@@ -773,68 +796,66 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     # because the sorter re-wraps a long trailing comment and detaches it from
     # the line it is about, which is how a suppression's justification drifts.
     from chains.wallet_lock import unlocked_for_payout  # noqa: PLC0415
-    from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415 -- checked: only the --run path needs it
+    from modules.script_leg import (  # noqa: PLC0415 -- checked: only the --run path funds anything
+        claim_the_script_leg,
+        fund_the_script_leg,
+    )
 
     ctx.console.step(7, f"B funds the {ctx.chain} leg: {ctx.chain_amount} {ctx.chain}, same hash, expiring FIRST")
-    ctx.console.say("BOTH createhtlc AND claimhtlc need the wallet FULLY unlocked -- Gridcoin's htlc.cpp calls "
-                "EnsureWalletIsUnlocked() in each, and createhtlc also SENDS. So steps 6 and 7 run inside ONE "
-                "unlock, which walletlocks first and therefore clears a staking-only unlock (rpc -13, measured "
-                "on the operator's wallet 2026-09-26: `Wallet is unlocked for staking only.`).")
-    htlc = None
+    ctx.console.say(
+        "ONLY THE FUNDING NEEDS THE WALLET. It sends coins to the P2SH, so an encrypted wallet is "
+        "opened for that and closed again immediately. The CLAIM in step 8 signs with a key minted "
+        "in this process (modules/script_leg.py), not with a wallet key, so it happens OUTSIDE the "
+        "unlock -- the wallet is shut before the irreversible step, not during it."
+    )
+    contract = None
     claim_txid = None
-    chain_vout = None
     try:
         with unlocked_for_payout(ctx.grc, ctx.passphrase, chain=ctx.chain,
                                  encrypted=ctx.wallet_encrypted):
-            htlc = ctx.grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(), ctx.chain_timeout, float(ctx.chain_amount))
-            funding_txid = htlc.get("txid")
-            # THE KEYS ARE snake_case, read from src/rpc/htlc.cpp rather than
-            # guessed: p2sh_address, redeem_script, sender_pubkey,
-            # receiver_pubkey, hash, timeout, txid. An earlier version read
-            # `address` and `redeemScript` and printed p2sh=None on a successful
-            # call, which is rule 14's defect -- an instrument reporting less
-            # than the run established.
-            p2sh_address = htlc.get("p2sh_address")
-            redeem_script_hex = htlc.get("redeem_script")
-            ctx.console.check(f"{ctx.chain} leg funded", f"p2sh={p2sh_address} txid={funding_txid}", "a funded HTLC",
-                          bool(funding_txid))
-            ctx.console.say(f"{ctx.chain} redeem script={redeem_script_hex}")
-            if not funding_txid or not redeem_script_hex:
-                raise RuntimeError(
-                    f"createhtlc answered without a txid or a redeem_script (keys: {sorted(htlc)}). Nothing "
-                    "can be claimed from that, and nothing was."
-                )
-            expected_script = p2sh_script_for(bytes.fromhex(redeem_script_hex)).hex()
-            chain_vout, how = htlc_vout(ctx.grc, funding_txid, expected_script)
-            ctx.console.check("the HTLC's output index, located not assumed", chain_vout, "an output paying "
-                          f"{expected_script}", chain_vout is not None)
-            ctx.console.say(f"vout lookup: {how}")
-            if chain_vout is None:
-                raise RuntimeError(
-                    "the funding transaction's HTLC output could not be located, and claiming a GUESSED index "
-                    "would spend whichever output happened to be there -- createhtlc funds through SendMoney, "
-                    "which adds a change output, so index 0 is as likely to be the change. Nothing was claimed."
-                )
+            contract = fund_the_script_leg(ctx.script_client, ctx.chain_amount,
+                                           ctx.secret_hash.hex(), ctx.leg_keys, ctx.chain_timeout)
+        # THE CLIENT ALREADY LOCATED THE OUTPUT, so there is no index to guess here.
+        # create_contract() calls wait_for_tx_output() against the P2SH script itself and
+        # returns the index it found -- which is the check the old createhtlc path had to
+        # perform separately with htlc_vout(), because createhtlc funds through SendMoney
+        # and adds a change output, making index 0 as likely to be the change as the HTLC.
+        funding_txid = contract["txid"]
+        ctx.console.check(f"{ctx.chain} leg funded",
+                          f"p2sh={contract['p2shAddress']} txid={funding_txid} vout={contract['vout']}",
+                          "a funded HTLC with its output located", bool(funding_txid))
+        ctx.console.say(f"{ctx.chain} redeem script={contract['redeemScript'].hex()}")
+        ctx.console.say(
+            f"claim branch pays the key minted for it; refund branch pays a SECOND minted key at "
+            f"height {ctx.chain_timeout}. Neither key exists anywhere but this process, and neither "
+            f"controls anything else."
+        )
 
-            ctx.console.step(8, f"A claims the {ctx.chain} with the secret -- which PUBLISHES it")
-            ctx.console.say("this is the irreversible step for A: claiming requires pushing the secret into a "
-                        "scriptSig that lands in a block. A cannot take the GRC without giving B what B needs.")
-            claim = ctx.grc.call("claimhtlc", funding_txid, chain_vout, ctx.secret.hex(), ctx.a_grc)
-            claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
-            ctx.console.check(f"A claimed the {ctx.chain}", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
-    except Exception as error:  # noqa: BLE001 -- checked: createhtlc and claimhtlc each refuse for several named reasons (a staking-only or locked wallet, a pubkey not in the wallet, insufficient funds, a wrong preimage, a script failure) and the unlock/restore can fail on its own. It is reported rather than raised because the XRP leg is ALREADY FUNDED here, and which recovery line applies depends on how far the block got -- an operator needs that sentence, not a traceback. The unlock context restores the wallet on the way out regardless.
+        ctx.console.step(8, f"A claims the {ctx.chain} with the secret -- which PUBLISHES it")
+        ctx.console.say("this is the irreversible step for A: claiming requires pushing the secret into a "
+                        "scriptSig that lands in a block. A cannot take the coins without giving B what B needs.")
+        claim_txid = claim_the_script_leg(ctx.script_client, contract, ctx.secret,
+                                          ctx.leg_keys, ctx.a_grc)
+        ctx.console.check(f"A claimed the {ctx.chain}", f"txid={claim_txid}", "a broadcast txid",
+                          bool(claim_txid))
+    except Exception as error:  # noqa: BLE001 -- checked: create_contract and redeem_contract each refuse for several named reasons (a locked wallet, insufficient funds, a funding output that never appeared, a wrong preimage, a script failure) and the unlock/restore can fail on its own. It is reported rather than raised because the XRP leg is ALREADY FUNDED here, and which recovery line applies depends on how far the block got -- an operator needs that sentence, not a traceback. The unlock context restores the wallet on the way out regardless.
         ctx.console.check(f"the {ctx.chain} leg", f"{type(error).__name__}: {error}",
                       "a funded HTLC, its output located, and a claim", False)
         if claim_txid:
             ctx.console.say(f"the claim went out as {claim_txid} -- the secret IS public. B must finish the escrow "
                         f"with it; read the secret out of that transaction. Do not let the escrow expire.")
-        elif htlc and htlc.get("txid"):
+        elif contract and contract.get("txid"):
             ctx.console.say(f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret has NOT been published, so "
-                        f"nobody can finish the escrow: B recovers the GRC at height {ctx.chain_timeout} and A "
-                        f"recovers the XRP at CancelAfter {ctx.xrp_cancel_after}. Do NOT publish the secret.")
+                        f"nobody can finish the escrow: the {ctx.chain} refund branch returns it at height "
+                        f"{ctx.chain_timeout} and A recovers the XRP at CancelAfter {ctx.xrp_cancel_after}. "
+                        f"Do NOT publish the secret.")
         else:
-            ctx.console.say(f"THE XRP LEG IS FUNDED AND THE {ctx.chain} LEG IS NOT. Nothing is lost: nobody has the ctx.secret, f"
-                        f"so nobody can finish the escrow, and it returns to A at CancelAfter "
+            # "nobody has the ctx.secret" stood here until 2026-09-29 -- an attribute
+            # expression that had leaked into prose, printed to an operator deciding what
+            # to do with a funded escrow. Rule 14: the line an operator reads at the worst
+            # moment is the one that must be readable.
+            ctx.console.say(f"THE XRP LEG IS FUNDED AND THE {ctx.chain} LEG IS NOT. Nothing is lost: nobody has "
+                        f"the secret, so nobody can finish the escrow, and it returns to A at CancelAfter "
                         f"{ctx.xrp_cancel_after}. Do NOT publish the secret.")
         return False
 
@@ -893,7 +914,7 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0912, PLR0915 -- 
     return True
 
 
-def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked: same as run_xrp_first, and the two are deliberately parallel so a reader can diff them. The decisions are extracted; what is left is the order.
+def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same as run_xrp_first, and the two are deliberately parallel so a reader can diff them. The decisions are extracted; what is left is the order.
     """B funds GRC first, A funds XRP, B claims XRP, A reads the Fulfillment, A claims GRC.
 
     THE REVERSE DIRECTION, and it is not a mirror of the other one for free. Two
@@ -924,45 +945,33 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
     # the unlock path, and a module-scope import would read the environment on
     # every invocation including --help.
     from chains.wallet_lock import unlocked_for_payout  # noqa: PLC0415
-    from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: PLC0415
+    from modules.script_leg import claim_the_script_leg, fund_the_script_leg  # noqa: PLC0415
 
     console.step(6, f"B funds the {ctx.chain} leg FIRST: {ctx.chain_amount} {ctx.chain}, hashlocked, expiring LAST")
     console.say("the initiator funds first and takes the LONGER lock. Here that is the Gridcoin side, so the "
                 "GRC timeout is the one that outlives the XRP escrow -- the reverse of the other direction.")
     funding_txid = None
-    chain_vout = None
-    expected_script = ""
+    contract = None
     try:
         with unlocked_for_payout(grc, ctx.passphrase, chain=ctx.chain,
                                  encrypted=ctx.wallet_encrypted):
-            htlc = grc.call("createhtlc", ctx.a_grc, ctx.b_grc, ctx.secret_hash.hex(),
-                            ctx.chain_timeout, float(ctx.chain_amount))
-            funding_txid = htlc.get("txid")
-            redeem_script_hex = htlc.get("redeem_script")
-            console.check(f"{ctx.chain} leg funded", f"p2sh={htlc.get('p2sh_address')} txid={funding_txid}",
-                          "a funded HTLC", bool(funding_txid))
-            console.say(f"{ctx.chain} redeem script={redeem_script_hex}")
-            if not funding_txid or not redeem_script_hex:
-                raise RuntimeError(
-                    f"createhtlc answered without a txid or a redeem_script (keys: {sorted(htlc)}). Nothing was "
-                    "funded on the XRP side yet, so nothing is at risk."
-                )
-            expected_script = p2sh_script_for(bytes.fromhex(redeem_script_hex)).hex()
-            chain_vout, how = htlc_vout(grc, funding_txid, expected_script)
-            console.check("the HTLC's output index, located not assumed", chain_vout,
-                          f"an output paying {expected_script}", chain_vout is not None)
-            console.say(f"vout lookup: {how}")
-            if chain_vout is None:
-                raise RuntimeError(
-                    "the HTLC output could not be located, and a guessed index would spend whichever output "
-                    "happened to be there -- createhtlc funds through SendMoney, which adds change. Nothing "
-                    "else was submitted."
-                )
-    except Exception as error:  # noqa: BLE001 -- checked: createhtlc and the unlock each refuse for named reasons and the message says which. Reported rather than raised because this is the FIRST leg: nothing else is funded, so the recovery line is short and the operator needs it rather than a traceback. The unlock context restores the wallet on the way out.
+            contract = fund_the_script_leg(ctx.script_client, ctx.chain_amount,
+                                           ctx.secret_hash.hex(), ctx.leg_keys, ctx.chain_timeout)
+        funding_txid = contract["txid"]
+        # THE OUTPUT INDEX IS THE CLIENT'S ANSWER, NOT A GUESS. create_contract() waits for
+        # an output paying the P2SH script itself and returns the index it found, which is
+        # the check the old createhtlc path had to make separately -- that RPC funds through
+        # SendMoney and adds a change output, so index 0 is as likely to be the change.
+        console.check(f"{ctx.chain} leg funded",
+                      f"p2sh={contract['p2shAddress']} txid={funding_txid} vout={contract['vout']}",
+                      "a funded HTLC with its output located", bool(funding_txid))
+        console.say(f"{ctx.chain} redeem script={contract['redeemScript'].hex()}")
+    except Exception as error:  # noqa: BLE001 -- checked: create_contract and the unlock each refuse for named reasons (a locked wallet, insufficient funds, a funding output that never appeared) and the message says which. Reported rather than raised because this is the FIRST leg: nothing else is funded, so the recovery line is short and the operator needs it rather than a traceback. The unlock context restores the wallet on the way out.
         console.check(f"the {ctx.chain} leg", f"{type(error).__name__}: {error}", "a funded HTLC with its output located",
                       False)
-        console.say(f"NOTHING ELSE WAS SUBMITTED. If the createhtlc transaction did go out, B recovers the {ctx.chain} at "
-                    f"height {ctx.chain_timeout}; no XRP was escrowed and the secret was never published.")
+        console.say(f"NOTHING ELSE WAS SUBMITTED. If the funding transaction did go out, the {ctx.chain} returns "
+                    f"to the refund branch at height {ctx.chain_timeout}; no XRP was escrowed and the secret was "
+                    f"never published.")
         return False
 
     console.step(7, f"A funds the XRP leg: {XRP_DROPS} drops to B's counterparty, expiring FIRST")
@@ -1058,24 +1067,117 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: C901, PLR0915 -- checked
 
     console.step(10, f"B claims the {ctx.chain} with the secret it read")
     claim_txid = None
+    # NO UNLOCK HERE, and that is the change rather than an omission. The claim signs with
+    # the key minted for the contract's hashlock branch (modules/script_leg.py), not with a
+    # wallet key, so the wallet is never opened for the irreversible step. Until 2026-09-29
+    # this called Gridcoin's claimhtlc, which needs EnsureWalletIsUnlocked() -- so the
+    # wallet was held open across a claim that publishes a secret.
     try:
-        with unlocked_for_payout(grc, ctx.passphrase, chain=ctx.chain,
-                                 encrypted=ctx.wallet_encrypted):
-            claim = grc.call("claimhtlc", funding_txid, chain_vout, revealed.hex(), ctx.a_grc)
-            claim_txid = claim.get("txid") if isinstance(claim, dict) else str(claim)
-    except Exception as error:  # noqa: BLE001 -- checked: claimhtlc refuses on a wrong preimage, a missing key or a script failure, and the unlock can fail separately. Reported because A already has the XRP at this point, so the operator needs to know the GRC is still claimable with a secret that is now public rather than getting a traceback.
+        claim_txid = claim_the_script_leg(ctx.script_client, contract, revealed,
+                                          ctx.leg_keys, ctx.a_grc)
+    except Exception as error:  # noqa: BLE001 -- checked: redeem_contract refuses on a wrong preimage, an output it cannot read back, or a script failure, and the message says which. Reported because A already has the XRP at this point, so the operator needs to know the coins are still claimable with a secret that is now public rather than getting a traceback.
         console.check(f"B claimed the {ctx.chain}", f"{type(error).__name__}: {error}", "a broadcast txid", False)
-        console.say(f"A HAS THE XRP AND B HAS NOT CLAIMED THE {ctx.chain}. The secret is PUBLIC (in {finish_hash}), so "
-                    f"the claim can be retried by hand before height {ctx.chain_timeout}, after which the GRC "
-                    f"returns to B anyway.")
+        console.say(f"A HAS THE XRP AND B HAS NOT CLAIMED THE {ctx.chain}. The secret is PUBLIC (in {finish_hash}), "
+                    f"so the claim can be retried before height {ctx.chain_timeout}, after which the coins return "
+                    f"to the refund branch anyway.")
         return False
     console.check(f"B claimed the {ctx.chain}", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
 
     console.banner("WHAT CHANGED HANDS")
     console.say(f"XRP: {XRP_DROPS} drops from {ctx.b_xrp} to {ctx.a_xrp}, claimed with the secret ({finish_hash})")
-    console.say(f"{ctx.chain}: {ctx.chain_amount} from B's wallet to {ctx.a_grc}, released by the same secret (txid {claim_txid})")
+    console.say(f"{ctx.chain}: {ctx.chain_amount} from B's wallet through the HTLC to {ctx.a_grc}, released by the "
+                f"same secret (txid {claim_txid})")
     console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
     return True
+
+
+#: The chain clients that own the P2SH, keyed the same way everything else here is.
+#: Imported rather than re-implemented -- these are the ones atomic_swap.py swaps BTC,
+#: LTC and GRC against each other with, and a second construction of the same three would
+#: be the duplication this whole change removed.
+SCRIPT_CLIENTS = {"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}
+
+
+def build_script_client(chain: str, rpc: dict):
+    """The chain client for the script leg, from the same Config.RPC the adapter came from.
+
+    TWO HANDLES ON ONE DAEMON, DELIBERATELY. `build_adapters()` gives a generic RPC object
+    -- what getnewaddress, the tip and reading a claim back need. The client below owns the
+    HTLC script: it builds the redeem script, funds the P2SH, locates the output and signs
+    the spend. They are different jobs and neither is a superset of the other, so the driver
+    holds both rather than widening one.
+
+    THE URL IS ASSEMBLED FROM host AND port RATHER THAN READ FROM A SECOND VARIABLE.
+    atomic_swap.py reads {ASSET}_RPC_URL; this driver already has the host and port in
+    Config.RPC because the adapter needed them, and asking an operator to set a URL as well
+    as a port -- which must agree -- is a second source for one fact (rule 8).
+    """
+    host = rpc.get("host") or "127.0.0.1"
+    port = rpc.get("port")
+    if not port:
+        raise ValueError(f"{chain}_RPC_PORT is not set, so no {chain} client can be built")
+    wallet = (rpc.get("wallet") or "").strip()
+    url = f"http://{host}:{port}" + (f"/wallet/{wallet}" if wallet else "")
+    return SCRIPT_CLIENTS[chain](url, rpc.get("user") or "", rpc.get("password") or "")
+
+
+def say_what_has_actually_run(console: Console, chain: str) -> None:
+    """What evidence exists for THIS chain on THIS code path, before anything is funded.
+
+    A CLAIM ABOUT EVIDENCE IS A CLAIM, and this driver printed the wrong one twice in one
+    day. First it printed GRC's two completed swaps on every chain, telling a BTC operator
+    a failure was a regression on a route no run had taken. Then -- after that was keyed
+    per chain -- the funding path moved onto the chain clients, and GRC's entry would have
+    gone on asserting evidence for a route that had also never run, with the chain name
+    still technically correct. The second version is the more dangerous one: it is right
+    about everything except the thing that matters.
+
+    So PROVEN_LIVE is keyed by chain AND emptied whenever the path changes, and absence is
+    not a gap in a table -- it is the honest state, printed as such. Re-earned by a run.
+    """
+    if chain in PROVEN_LIVE:
+        console.say(PROVEN_LIVE[chain])
+        return
+    console.say(
+        f"NO {chain} RUN HAS COMPLETED ON THIS CODE PATH. Both runners fund and spend the HTLC "
+        f"through the chain clients (modules/script_leg.py) as of 2026-09-29, which is what lets "
+        f"BTC and LTC work at all -- and it is NOT the path GRC's 2026-09-27 swaps took, so that "
+        f"evidence was not carried across. What is exercised here is seeded tests: the block "
+        f"arithmetic, the timelock ordering, the branch ordering and the key handling. A failure "
+        f"is a DISCOVERY, not a regression, and is worth reading rather than retrying."
+    )
+
+
+def prepare_the_script_leg(console: Console, chain: str) -> tuple[object, ScriptLegKeys] | None:
+    """The client that owns the HTLC and the two keys its branches pay to, or None.
+
+    BOTH OR NEITHER, which is why they are made together. A client with no keys cannot
+    fund anything and keys with no client are two secrets nobody asked for; returning them
+    as a pair means no caller can hold half of the arrangement.
+
+    THE ADDRESSES ARE PRINTED AND THE KEYS ARE NOT. An address is public by construction --
+    it is what the contract pays, and it will be on the chain within seconds. The private
+    halves are never printed, never logged and never written; CLAUDE.md's chain-safety
+    rules put that above convenience, and modules/script_leg.py deliberately has no repr
+    that would make printing the pair look safe.
+
+    Returns None having SAID WHY rather than raising, because nothing is funded at this
+    point and a traceback at step 5 of ten tells an operator less than the sentence does.
+    """
+    try:
+        client = build_script_client(chain, Config.RPC[chain])
+    except Exception as error:  # noqa: BLE001 -- checked: a missing port, an unknown chain, or the client constructor refusing all mean one thing to this caller -- the script leg cannot be built, and NOTHING has been funded. The name and message are reported and the run stops.
+        console.check(f"{chain} script client", f"{type(error).__name__}: {error}",
+                      "a client that can build the HTLC", False)
+        return None
+    keys = mint_leg_keys()
+    console.say(
+        f"minted two throwaway keypairs for this swap's {chain} HTLC branches -- claim "
+        f"{keys.claim_address}, refund {keys.refund_address}. Generated in this process, "
+        f"never written, and they control nothing but this contract. The ADDRESSES are "
+        f"public; the keys are never printed."
+    )
+    return client, keys
 
 
 def normalize_arguments(args) -> None:
@@ -1169,6 +1271,14 @@ def resolve_wallet_passphrase(console: Console, adapter, chain: str) -> tuple[st
     return passphrase, True
 
 
+#: Which runner each direction uses. A TABLE rather than a conditional, for the reason
+#: selected_chains() in fund_testnets.py gives about its own: "which, in what order" is
+#: data. A ternary here also read as if there were two cases when DIRECTIONS is the thing
+#: that decides how many there are -- add a third and the ternary silently routes it to
+#: the else branch, while this raises KeyError naming it.
+RUNNERS = {XRP_FIRST: run_xrp_first, CHAIN_FIRST: run_chain_first}
+
+
 def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap's SEQUENCE, and every decision in it is extracted -- the timelocks and their ordering above, the preimage read in modules/htlc_spend, the condition in chains/xrp_crypto_condition, the payloads in xrp_htlc_escrow. What is left is the order of five acts on two chains, which is what rule 10 says a file at the root is for. Splitting it would put the order somewhere other than the file named after the thing being done, and the order IS the protocol.
     parser = argparse.ArgumentParser(
         description="A real atomic swap: XRP on the XRPL testnet against a script chain (BTC, LTC or "
@@ -1228,13 +1338,7 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     # LTC run it was false in the dangerous direction: it told an operator a failure would
     # be a regression when no run had ever happened, so a genuine first-time discovery
     # would read as a known-good path breaking. Rule 17's register error, printed.
-    if args.chain in PROVEN_LIVE:
-        console.say(PROVEN_LIVE[args.chain])
-    else:
-        console.say(f"NO {args.chain} RUN HAS EVER COMPLETED. This chain became reachable from this driver on "
-                    f"2026-09-29 and is exercised by seeded tests only -- the block arithmetic and the timelock "
-                    f"ordering. A failure here is a DISCOVERY, not a regression, and is worth reading carefully "
-                    f"rather than retrying.")
+    say_what_has_actually_run(console, args.chain)
 
     console.step(1, "both networks are TEST networks, and each says which")
     try:
@@ -1351,6 +1455,11 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
             return submitter.submit(tx_json, secret_for_this_tx)
         except LocalSigningUnavailable as error:
             return {"error": "localSigningUnavailable", "error_message": str(error)}
+    prepared = prepare_the_script_leg(console, chain)
+    if prepared is None:
+        return console.summary()
+    script_client, leg_keys = prepared
+
     ctx = SwapContext(
         console=console, grc=grc, submit_xrp=submit_xrp,
         secret=secret, secret_hash=secret_hash, condition=condition,
@@ -1358,8 +1467,9 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
         a_grc=a_grc, b_grc=b_grc,
         chain_amount=chain_amount, chain_timeout=leg.timeout_height, xrp_cancel_after=xrp_cancel_after,
         passphrase=passphrase, wallet_encrypted=wallet_encrypted,
+        script_client=script_client, leg_keys=leg_keys,
     )
-    runner = run_xrp_first if args.direction == XRP_FIRST else run_chain_first
+    runner = RUNNERS[args.direction]
     console.say(f"direction={args.direction}: running {runner.__name__}()")
     runner(ctx)
     return console.summary()
