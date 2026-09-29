@@ -1004,8 +1004,16 @@ def sweep_phase(console: Console, target: Target, destination: str, wait: int) -
             f"about.\n          open wallet  {open_address}\n"
             f"          fixture      {shares['shared_address']}\n"
             f"          shares give  {recomputed}\n"
-            f"          Run --run again to recreate the shared wallet, or point --port at the "
-            f"wallet-rpc that holds it"
+            f"          FIX IT WITH --open, WHICH BUILDS THE WALLET FROM THIS VERY FILE:\n"
+            f"            python3 monero_shared_key_verify.py --open --port {target.wallet_port} "
+            f"--daemon {target.daemon} --shares-file {target.shares_path}\n"
+            f"          then re-run this exact --sweep.\n"
+            f"          NOT --run. That samples FRESH shares and creates a wallet from them, so "
+            f"it would replace the one this fixture describes with a different address entirely "
+            f"-- and on a swap handoff that destroys the thing being proven, because the whole "
+            f"point is that `spend_share_a` came off a chain rather than out of a sampler. This "
+            f"line said 'Run --run again' until 2026-09-29, before --open existed, and it sent "
+            f"the operator the wrong way on the run that needed it."
         )
 
     console.step(3, "refresh the shared wallet until the coins UNLOCK")

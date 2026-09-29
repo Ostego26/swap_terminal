@@ -877,3 +877,25 @@ def test_THE_RESTORE_HEIGHT_FOR_A_FILE_IS_NOT_THE_HEIGHT_FOR_A_FRESH_RUN(monkeyp
         "the margin has to cover a realistic gap between a GRC run writing the file and the "
         "operator funding the address it names"
     )
+
+
+def test_THE_WRONG_WALLET_REFUSAL_POINTS_AT_open_AND_NOT_AT_run():
+    """It said "Run --run again" on the run that needed --open, 2026-09-29.
+
+    The operator hit the wrong-wallet refusal with a swap handoff loaded and 0.01 sXMR already
+    sitting at the address it names. Following that advice would have been the worst available
+    action: --run SAMPLES FRESH SHARES and creates a wallet from them, replacing the one the
+    fixture describes with a different address entirely -- and on a handoff that destroys the
+    thing being proven, because the whole claim is that `spend_share_a` came off a chain rather
+    than out of a sampler.
+
+    The message predates --open. Adding a flag and leaving the guidance pointing elsewhere is
+    the same defect this session has fixed repeatedly in other output: a screen making a claim
+    the tree no longer supports.
+    """
+    source = pathlib.Path(harness.__file__).read_text(encoding="utf-8")
+    refusal = source[source.index("REFUSING: the wallet open on port"):]
+    refusal = refusal[:refusal.index("def ")]
+    assert "--open" in refusal, "the flag that actually fixes it"
+    assert "NOT --run" in refusal, "and an explicit warning off the one that makes it worse"
+    assert "samples FRESH shares" in refusal, "with the reason, so nobody re-adds the old advice"
