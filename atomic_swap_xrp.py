@@ -1087,10 +1087,21 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
                     f"never published.")
         return False
 
-    console.step(7, f"A funds the XRP leg: {XRP_DROPS} drops to B's counterparty, expiring FIRST")
-    a_before = balance_drops(ctx.a_xrp)
-    created = ctx.submit_xrp(escrow_create_tx(ctx.b_xrp, ctx.a_xrp, XRP_DROPS, ctx.condition,
-                                              ctx.xrp_cancel_after), ctx.b_xrp_secret)
+    # THE PARTIES WERE REVERSED HERE UNTIL 2026-09-29, and this function's own docstring is
+    # what settles which way is right: "B funds GRC first, A funds XRP, B claims XRP, A reads
+    # the Fulfillment, A claims GRC ... The escrow is CREATED by the XRP holder and FINISHED
+    # by the GRC holder." The code created it as B paying A and finished it as A -- so B
+    # funded the script leg AND sent the XRP, A received both, and B ended up claiming back
+    # its own coins. Not a swap: one side paid twice.
+    #
+    # Found by reading, not by running: this direction has never been run on this code path,
+    # which is exactly why it is absent from PROVEN_LIVE and why "it shares every function
+    # with the direction that works" was never evidence. Both legs are real money on a real
+    # swap, and no test caught it because no test drove the runner.
+    console.step(7, f"A funds the XRP leg: {XRP_DROPS} drops to B, expiring FIRST")
+    b_before = balance_drops(ctx.b_xrp)
+    created = ctx.submit_xrp(escrow_create_tx(ctx.a_xrp, ctx.b_xrp, XRP_DROPS, ctx.condition,
+                                              ctx.xrp_cancel_after), ctx.a_xrp_secret)
     if not console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
                          engine_result(created) == "tesSUCCESS"):
         console.say(f"the {ctx.chain} leg IS funded ({funding_txid}) and the XRP leg is not. Nobody has the secret, so "
@@ -1098,11 +1109,13 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
                     f"the secret.")
         return False
     escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
-    escrow_owner = ctx.b_xrp
+    # THE OWNER IS THE ACCOUNT THAT CREATED IT, which is A in this direction. It read
+    # ctx.b_xrp while B was (wrongly) the creator; both moved together.
+    escrow_owner = ctx.a_xrp
     wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
     console.say(f"OfferSequence={escrow_sequence}, Owner={escrow_owner} -- how the finish below names this escrow")
 
-    console.step(8, "A claims the XRP with the secret -- which PUBLISHES it in the Fulfillment")
+    console.step(8, "B claims the XRP with the secret -- which PUBLISHES it in the Fulfillment")
     console.say("the irreversible step for the initiator: an EscrowFinish carries the fulfillment, and the "
                 "fulfillment contains the preimage. A cannot take the XRP without giving B what B needs.")
     fulfillment = preimage_fulfillment(ctx.secret)
@@ -1111,18 +1124,18 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
     # escrow. Anyone may submit an EscrowFinish; doing it as A is what makes the
     # roles readable on the ledger, and it is the only place in this file where
     # two different XRP secrets are used in one run.
-    finished = ctx.submit_xrp(escrow_finish_tx(ctx.a_xrp, escrow_owner, escrow_sequence,
+    finished = ctx.submit_xrp(escrow_finish_tx(ctx.b_xrp, escrow_owner, escrow_sequence,
                                                condition=ctx.condition, fulfillment=fulfillment, fee=fee),
-                              ctx.a_xrp_secret)
-    if not console.check("A claimed the XRP", describe_result(finished), "tesSUCCESS",
+                              ctx.b_xrp_secret)
+    if not console.check("B claimed the XRP", describe_result(finished), "tesSUCCESS",
                          engine_result(finished) == "tesSUCCESS"):
         console.say("BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. The secret was NOT published, so nobody can "
-                    f"claim either: A recovers the XRP at CancelAfter {ctx.xrp_cancel_after} and B recovers the "
+                    f"claim either: A recovers its XRP at CancelAfter {ctx.xrp_cancel_after} and B recovers its "
                     f"{ctx.chain} at height {ctx.chain_timeout}. Do NOT publish the secret.")
         return False
     finish_hash = (finished.get("tx_json") or {}).get("hash", "")
     validated = wait_validated(console, finish_hash)
-    a_after = balance_drops(ctx.a_xrp)
+    b_after = balance_drops(ctx.b_xrp)
     # THE CLAIMER PAYS THE FINISH FEE, AND HERE THE CLAIMER IS THE DESTINATION,
     # so the fee comes out of the same account the escrow pays into and the net
     # rise is the escrowed amount MINUS the fee. Measured on the first grc-first
@@ -1139,12 +1152,12 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
     # `>=`, because a fee is a known number and a range would also pass a swap
     # that paid the wrong amount.
     expected_rise = XRP_DROPS - fee
-    console.check("A's XRP balance rose by the escrowed amount less the finish fee A itself paid",
-                  f"{a_before} -> {a_after} drops (+{a_after - a_before})",
+    console.check("B's XRP balance rose by the escrowed amount less the finish fee B itself paid",
+                  f"{b_before} -> {b_after} drops (+{b_after - b_before})",
                   f"+{expected_rise} = {XRP_DROPS} escrowed - {fee} fee",
-                  a_after - a_before == expected_rise)
+                  b_after - b_before == expected_rise)
 
-    console.step(9, "B reads the secret OFF THE XRP LEDGER -- out of A's own EscrowFinish")
+    console.step(9, "A reads the secret OFF THE XRP LEDGER -- out of B's own EscrowFinish")
     console.say("B does not ask A for anything. The fulfillment is a field of the transaction A just submitted, "
                 "and it is public the moment that transaction validates.")
     revealed = None
@@ -1167,18 +1180,18 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
         time.sleep(READ_POLL_SECONDS)
     if not console.check("the secret was recovered from the XRP ledger", "yes" if revealed else None,
                          "a Fulfillment whose sha256 matches the commitment", revealed is not None):
-        console.say(f"B cannot claim the {ctx.chain} without it and the {ctx.chain} returns to B at height {ctx.chain_timeout} -- "
-                    f"except that A HAS ALREADY TAKEN THE XRP. Read {finish_hash} by hand; the secret is in its "
-                    f"Fulfillment field.")
+        console.say(f"A cannot claim the {ctx.chain} without it and the {ctx.chain} returns to B at height "
+                    f"{ctx.chain_timeout} -- except that B HAS ALREADY TAKEN THE XRP. Read {finish_hash} by hand; "
+                    f"the secret is in its Fulfillment field.")
         return False
     # The same assertion the other direction makes: `revealed` came from the
     # ledger and `secret` from memory. A version that claimed with `secret`
     # directly would work here and prove nothing, because a real B has no such
     # variable.
-    console.check("what the ledger gave B equals what A committed to", revealed == ctx.secret, "True",
+    console.check("what the ledger gave A equals what B committed to", revealed == ctx.secret, "True",
                   revealed == ctx.secret)
 
-    console.step(10, f"B claims the {ctx.chain} with the secret it read")
+    console.step(10, f"A claims the {ctx.chain} with the secret it read")
     claim_txid = None
     # NO UNLOCK HERE, and that is the change rather than an omission. The claim signs with
     # the key minted for the contract's hashlock branch (modules/script_leg.py), not with a
@@ -1189,8 +1202,8 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
         claim_txid = claim_the_script_leg(ctx.script_client, contract, revealed,
                                           ctx.leg_keys, ctx.a_grc)
     except Exception as error:  # noqa: BLE001 -- checked: redeem_contract refuses on a wrong preimage, an output it cannot read back, or a script failure, and the message says which. Reported because A already has the XRP at this point, so the operator needs to know the coins are still claimable with a secret that is now public rather than getting a traceback.
-        console.check(f"B claimed the {ctx.chain}", f"{type(error).__name__}: {error}", "a broadcast txid", False)
-        console.say(f"A HAS THE XRP AND B HAS NOT CLAIMED THE {ctx.chain}. The secret is PUBLIC (in {finish_hash}), "
+        console.check(f"A claimed the {ctx.chain}", f"{type(error).__name__}: {error}", "a broadcast txid", False)
+        console.say(f"B HAS THE XRP AND A HAS NOT CLAIMED THE {ctx.chain}. The secret is PUBLIC (in {finish_hash}), "
                     f"so the claim can be retried before height {ctx.chain_timeout}, after which the coins return "
                     f"to the refund branch anyway.")
         return False
