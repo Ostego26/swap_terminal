@@ -222,7 +222,7 @@ whether that was an oversight.
 | sweep with `s_a + s_b` | SPENT | Monero REGTEST, `bb85f7fa10759077…` (2026-09-28) and `f584606948f430bf…` (2026-09-27), 738,723,841,921,372 atomic units each. Two runs, two independent share sets, the same answer -- `python3 monero_shared_key_verify.py --run --allow-open-wallet --mine 80` then `--sweep <address>` |
 | shared address derivation, ON STAGENET | **CONFIRMED 2026-09-29** | OK=4 FAIL=0 against `node.monerodevs.org:38089`, nettype STAGENET read from the daemon. This repo computed `5B5ybDArLcPdBe67aRWb4wWjzhdswh5EKXL5KxMYLBW2EeB4GWxy31nhpssDAzzKKrTf5xjFDji4P4vHCNMfcZgJ91qjDkt` offline from the summed scalars and `monero-wallet-rpc generate_from_keys` derived the IDENTICAL string, with stagenet prefixes. Spend keys summed to `f43e44df97b4e8d8…`, view to `8dc18ef4ea9205f4…` |
 | the SWEEP on STAGENET | **SPENT 2026-09-29** | `e0551366693139976f6fa8074e6034c331a068dff9725cbb7c10e361785edf89`. 99,938,960,000 atomic units (0.09993896 XMR) swept OUT of the 2-of-2 shared address with `s_a + s_b`, on Monero stagenet, against `node.monerodevs.org:38089`. Funded by the xmr-tw.org faucet, `c9cd65f2dae52f37…`, 99,969,500,000 in; fee 30,540,000 atomic (0.00003054 XMR) |
-| a funded GRC↔XMR swap, end to end | **THE HOP EXISTS, THE RUN HAS NOT HAPPENED** | Both halves are measured on real networks and the file that joins them is written as of 2026-09-29: `adaptor_regtest_verify.py --chain grc` now emits a shares fixture carrying the `s_a` it RECOVERED from a Gridcoin scriptSig, in the format `monero_shared_key_verify.py --sweep` reads. What remains is an operator funding that stagenet lock address and running the sweep -- a swap whose XMR leg moves because a Gridcoin daemon published the scalar. Until that run, this row is NOT a pass |
+| **a funded GRC↔XMR swap, end to end** | **DONE 2026-09-29** | `6dd649aedd6e344c` on Gridcoin testnet spent a 2-of-2 with an adaptor pre-signature completed by Alice's Monero share; the scalar was read back out of that scriptSig; `1c390795d621daf6` on Monero stagenet then swept 0.00996958 XMR out of the lock address with `s_a(recovered) + s_b`. See §6 |
 
 ---
 
@@ -419,7 +419,61 @@ The fee is recorded because it is the one number that says a real transaction ha
 than a simulation: 30,540,000 atomic units, 0.00003054 XMR, taken by the network between
 99,969,500,000 received and 99,938,960,000 swept.
 
-**e. A full GRC↔XMR swap.** Everything above is halves.
+**e. ~~A full GRC↔XMR swap.~~ DONE 2026-09-29.** It was halves until this run joined them.
+
+---
+
+## 6. THE GRC↔XMR SWAP, END TO END
+
+    adaptor_regtest_verify.py --chain grc      OK=63  FAIL=0  XFAIL=1  SKIP=2
+    monero_shared_key_verify.py --open         OK=3   FAIL=0
+    monero_shared_key_verify.py --sweep        OK=6   FAIL=0
+
+THE CHAIN OF CUSTODY OF ONE NUMBER, which is the whole claim:
+
+1. Tx_redeem was built with Bob's signature as an ADAPTOR PRE-SIGNATURE under `Y_a`, the
+   secp256k1 twin of Alice's Monero spend share. Bob's key never signs that digest anywhere.
+2. Alice completed it with `s_a` -- the only way to take the Gridcoin -- and broadcast it:
+   `6dd649aedd6e344cb350761df79582fa5cf70ef6bd23a4ec6bddac0dfa261f9ff`, accepted by the daemon,
+   which IS a full script verification.
+3. The harness read that scriptSig back OFF THE CHAIN and recovered the scalar:
+   `recovered=True only_the_adaptor_leaked=True ed25519_public_matches_setup=True`.
+4. `s_a(recovered) + s_b` reconstructed a private spend key whose public key equals the one
+   decoded out of the lock ADDRESS -- measured against the address, not against the inputs
+   that built it.
+5. That recovered scalar went into a handoff fixture, a faucet in Taiwan funded the lock
+   address knowing nothing but the string, and the sweep spent it:
+   `1c390795d621daf6cc92aa8c56b5f823f96f9e2f714e37574d6f809ff590effb`.
+
+    received   10,000,000,000 atomic   0.01000000 XMR   faucet 0034079fcf69b6fd
+    swept       9,969,580,000 atomic   0.00996958 XMR   1c390795d621daf6
+    fee            30,420,000 atomic   0.00003042 XMR
+
+WHAT MAKES THIS DIFFERENT FROM THE STAGENET SWEEP IN §4, which used the same code and looked
+identical on screen: THOSE SHARES WERE SAMPLED BY THE SWEEPER ITSELF. Here `spend_share_a` came
+out of a transaction a Gridcoin daemon accepted. The harness holds both values and they are
+EQUAL when everything works, so the substitution would have swept perfectly and proven nothing
+-- which is why `swap_handoff()` takes the recovered share as an explicit argument and a test
+hands it a deliberately different one.
+
+WHAT IS STILL NOT ESTABLISHED, and none of it is small:
+
+  ONE PROCESS PLAYED BOTH PARTIES. Nothing here tests transport, timing, or a counterparty who
+  vanishes mid-swap. `atomic_swap.py`'s report_completed_swap() carries the same caveat about
+  its own runs. The cryptography and the chain behavior are measured; the PROTOCOL between two
+  hosts is not.
+
+  THE CRYPTOGRAPHY IS UNAUDITED. `modules/adaptor_ecdsa.py` is a single-author implementation
+  from a written specification, checked against that specification's own vectors. Two chains
+  accepting its output says the ENCODING is right and says nothing about whether the scheme is
+  secure. Its header's first sentence is unchanged by this run.
+
+  THE CONSENSUS HALF OF GRIDCOIN'S TIMELOCK IS STILL A READING. Gridcoin has no generateblock,
+  no getblocktemplate proposal mode and no submitblock, so `5b refused before T1 by CONSENSUS`
+  is SKIP. What IS measured is that the same 306 bytes were refused before T1 and accepted at
+  T1, which isolates nLockTime. The stronger claim rests on src/validation.cpp:1777.
+
+  THIS IS TESTNET AND STAGENET, against coins with no value, on purpose.
 
 ---
 
