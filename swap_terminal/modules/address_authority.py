@@ -165,7 +165,7 @@ class AddressVerdict(NamedTuple):
     valid bech32 (checksum or charset)" sends somebody to a different fix than "valid bech32,
     hrp=ltc, which is Litecoin and not Bitcoin", and a bare False sends them nowhere.
 
-    `network` is MAINNET, TESTNET, a Monero network name, NOT_EXPRESSED or UNKNOWN. It is
+    `network` is MAINNET, TESTNET, NOT_EXPRESSED or UNKNOWN. It is
     filled in even when the state is INVALID where the encoding still said something, so a
     refusal can explain itself.
     """
@@ -596,7 +596,7 @@ def expected_network(asset: str, rpc: dict | None) -> str | None:
                         classify()'s own docstring refuses to call that "not mainnet".
                         Turning it into TESTNET would be a guess dressed as a measurement.
 
-    None for XRP, XMR and SOL too, and that is honest rather than a gap: those three are not
+    None for XRP and SOL too, and that is honest rather than a gap: those two are not
     in network_target.CHAIN_PORTS because they have no conventional port to classify against
     -- that module's own comment says so -- so there is nothing here to compare a decoded
     network TO. The address-side check still runs; only the cross-check is skipped.

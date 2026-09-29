@@ -2515,7 +2515,7 @@ def test_an_asset_with_no_fee_address_rule_is_refused_by_name():
     no XRP HTLC client at all, so there is no redeem to take a fee out of. An asset with
     no rule must be refused BY NAME rather than silently returning None, because None
     means "charge no fee" and would make a typo look like a policy."""
-    for absent in ("XRP", "XMR", "SOL", "DOGE"):
+    for absent in ("XRP", "SOL", "DOGE"):
         with pytest.raises(ValueError, match=f"no platform fee address rule for asset '{absent}'"):
             platform_fee_address(absent)
         assert absent not in PLATFORM_FEE_RATE, (

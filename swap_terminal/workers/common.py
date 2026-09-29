@@ -99,7 +99,7 @@ def endpoint_lines() -> list[str]:
         rpc = Config.RPC[asset]
         wallet = rpc["wallet"] or "(default wallet)"
         confirmations = getattr(Config, f"{asset}_MIN_CONFIRMATIONS")
-        # AN UNCONFIGURED CHAIN SAYS SO, matching what SOL, XRP and XMR say below.
+        # AN UNCONFIGURED CHAIN SAYS SO, matching what SOL and XRP say below.
         #
         # This printed `rpc=127.0.0.1:0` until 2026-09-26, and it was a regression
         # from the same day's change that made these three default to
@@ -155,13 +155,6 @@ def endpoint_lines() -> list[str]:
             f"is constructed; no SOL pair is allowed"
         )
 
-    # XMR, appended separately for a DIFFERENT reason than SOL's. Its threshold
-    # genuinely is a count of blocks, so it is not the unit mismatch above --
-    # it is that the number printed may not be the number configured. Monero's
-    # ten-block consensus spend lock is a floor under XMR_MIN_CONFIRMATIONS
-    # (chains/monero_units.py), so a banner echoing the raw setting could tell
-    # an operator their wallet waits 2 blocks when it waits 10. The adapter
-    # renders its own line and says so when it raised the figure.
     # XRP, and its threshold is neither blocks nor a commitment rank -- it is
     # a validated-ledger boolean. Its own line so the unit is stated (rule 6).
     if Config.RPC.get("XRP", {}).get("url"):

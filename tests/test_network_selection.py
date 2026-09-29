@@ -132,7 +132,7 @@ def test_every_preference_names_a_byte_the_AUTHORITY_agrees_is_that_network():
 
 def test_an_asset_with_no_byte_on_a_network_says_so_rather_than_raising_a_KeyError():
     with pytest.raises(network_selection.NetworkSelectionError) as raised:
-        network_selection.base58_version("XMR", network_selection.P2PKH, MAINNET)
+        network_selection.base58_version("DOGE", network_selection.P2PKH, MAINNET)
     assert "address_network" in str(raised.value), "and it names where the fix goes"
 
 

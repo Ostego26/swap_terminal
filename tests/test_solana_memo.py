@@ -125,7 +125,7 @@ def test_THE_PROGRAM_IDS_ARE_DECLARED_UNVERIFIED_IN_THE_SOURCE():
 
     Nothing in the container this was written in can reach a Solana cluster, so no real memo
     transaction has confirmed the program id. That is exactly the shape of error
-    chains/monero_transfers.py carried -- seeded tests passing green over an unverified wire
+    an unverified adapter carries -- seeded tests passing green over a wire
     format -- and the only thing separating the two is that one of them says which it is
     (rule 17). This test fails if that admission is ever quietly deleted.
     """

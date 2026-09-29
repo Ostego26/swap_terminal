@@ -202,7 +202,6 @@ def seeded_config() -> dict:
         "LTC_MIN_CONFIRMATIONS": 2,
         "GRC_MIN_CONFIRMATIONS": 6,
         "SOL_MIN_CONFIRMATIONS": 3,
-        "XMR_MIN_CONFIRMATIONS": 10,
         "XRP_MIN_CONFIRMATIONS": 1,
         "QUOTE_TTL_SECONDS": 600,
         # Deliberately present, and deliberately NOT echoed. See the test below.
@@ -359,13 +358,13 @@ def test_chain_rows_report_an_unconfigured_chain_rather_than_omitting_it():
 def test_the_solana_row_still_says_get_new_address_refuses():
     """The companion, because the default sentence is TRUE of SOL and a careless fix breaks it.
 
-    MEASURED 2026-09-27: `_attribution_note("SOL")` returned the same string as
-    `_attribution_note("XMR")` before the fix, and for SOL it is correct.
+    MEASURED 2026-09-27: `_attribution_note("SOL")` returned the same string the default
+    branch gave a chain it was FALSE about, and for SOL it is correct.
     chains/solana.py:597 get_new_address() raises NotImplementedError and its
     message names the three custody options README.md leaves with the operator.
 
-    MUTATION: fix the XMR defect by editing the DEFAULT branch -- softening
-    "refuses" or adding "XMR" wording to it, or giving every unmapped chain the
+    MUTATION: fix that other chain's defect by editing the DEFAULT branch -- softening
+    "refuses" or adding per-chain wording to it, or giving every unmapped chain the
     address model -- and this test fails. That is the point: the default is right
     for the chain it was written for, and the repair had to be an entry in
     ATTRIBUTION_MODELS rather than a change to the sentence SOL depends on.
@@ -436,11 +435,10 @@ class _RefusingAdapter(RPCAdapter):
     got that wrong in a way worth recording. probe_kind() decides by
     `isinstance(adapter, RPCAdapter)` rather than by "has a .call", and the
     duck-typed stub was therefore reported as UNPROBEABLE -- which is what
-    should happen. Monero's adapter also has a `call`, with a different
+    should happen. A non-Bitcoin adapter can also have a `call`, with a different
     signature (`call(method, params: dict)`), so a duck-typed probe would send
     `getblockchaininfo` to a wallet RPC, get an error, and report a healthy
-    Monero wallet as unreachable. The strict check is the point; the stub was
-    wrong.
+    wallet as unreachable. The strict check is the point; the stub was wrong.
     """
 
     asset = "BTC"
@@ -485,9 +483,9 @@ def test_an_answering_chain_is_named_by_what_the_daemon_reports(monkeypatch):
 def test_not_configured_and_not_probeable_are_not_failures():
     """Three outcomes, three answers (rule 14: "did nothing" must not look like "did work").
 
-    MUTATION: report an unprobeable adapter as reachable=False. A Monero wallet
-    with no probe implemented would then display as a Monero wallet that is
-    down, and somebody would go looking for a daemon that is running fine.
+    MUTATION: report an unprobeable adapter as reachable=False. A wallet with no
+    probe implemented would then display as a wallet that is down, and somebody
+    would go looking for a daemon that is running fine.
     """
     missing = probe_chain("SOL", None)
     assert missing["probed"] is False and missing["reachable"] is None

@@ -260,8 +260,8 @@ def test_client_for_refuses_an_unset_password_rather_than_guessing_one():
 
 
 def test_client_for_refuses_an_asset_it_cannot_drive_and_names_why():
-    with pytest.raises(SwapError, match="no client for 'XMR'"):
-        client_for("XMR")
+    with pytest.raises(SwapError, match="no client for 'DOGE'"):
+        client_for("DOGE")
     with pytest.raises(SwapError, match=r"different protocol|no script"):
         client_for("XRP")
 
@@ -321,7 +321,7 @@ def test_the_parser_only_offers_pairs_the_file_can_drive():
     for asset in ASSETS:
         assert parser.parse_args(["--from", asset, "--to", "GRC" if asset != "GRC" else "LTC"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["--from", "XMR", "--to", "GRC"])
+        parser.parse_args(["--from", "DOGE", "--to", "GRC"])
 
 
 def test_the_party_pairs_a_key_with_its_destination():

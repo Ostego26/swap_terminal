@@ -90,17 +90,15 @@ def fixture_asset(name: str) -> str:
     ADDED 2026-09-27, AND THE REASON IS THE DEFECT THIS WHOLE DAY IS ABOUT. The two fixture
     tests below used to call modules/address_network.decodes_as_address(), which understands
     bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check -- and NOTHING ELSE.
-    So the moment XMR_PAYOUT and SOL_PAYOUT were added to valid_addresses.py, this gate
-    failed on three valid addresses:
-
-        XMR_PAYOUT         "not decodable as base58check"   (Monero: 11-char blocks, Keccak)
-        XMR_SECOND_PAYOUT  "not decodable as base58check"
-        SOL_PAYOUT         accepted/refused by length alone (Solana has NO checksum)
+    So the moment a non-Bitcoin fixture such as SOL_PAYOUT was added to
+    valid_addresses.py, this gate failed on valid addresses -- Solana's is accepted or
+    refused by LENGTH alone, because it has no checksum at all.
 
     That is exactly the trap modules/address_authority.py exists to name, arriving in a
-    TEST instead of on the fund path: a blanket check over every chain calls two working
-    chains invalid. Had the same blanket check been put at payout_service's send site, every
-    valid Monero payout would have been refused -- on a swap whose deposit was already taken.
+    TEST instead of on the fund path: a blanket check over every chain calls a working
+    chain invalid. Had the same blanket check been put at payout_service's send site, every
+    valid payout on that chain would have been refused -- on a swap whose deposit was
+    already taken.
 
     So the gate now asks the AUTHORITY, per asset, which is the same thing the fund path
     asks (rule 8: one question, one answer, one place).
@@ -382,7 +380,7 @@ def test_a_planted_valid_address_is_not_a_violation(tmp_path):
     found = list(_candidates([planted]))
     assert len(found) >= 10, f"only {len(found)} of {len(ALL_VALID)} valid fixtures matched"
     # Asked per asset, via the reverse lookup, for the reason fixture_asset() gives: a
-    # blanket decoder refuses the Monero and Solana fixtures, which are valid.
+    # blanket decoder refuses the Solana fixture, which is valid.
     by_value = {value: name for name, value in ALL_VALID.items()}
     refused = [
         f"{by_value[v]}={v}: {check_address(fixture_asset(by_value[v]), v).why}"
@@ -428,7 +426,7 @@ def test_no_shared_fixture_is_a_mainnet_address(name):
     This used to skip every fixture starting with "XRP", because XRP has no testnet address
     format -- true, and it meant a rule enforced by SPELLING: a fixture named XRP_anything
     was exempt, including one that should not have been. SOL_PAYOUT would have needed a
-    second such exemption and XMR_PAYOUT must not get one.
+    second such exemption, and the next chain a third.
 
     So the exemption is now read off the ENCODING instead. address_authority reports
     NOT_EXPRESSED for a format that carries no network at all (XRP, Solana), which is an
@@ -440,10 +438,10 @@ def test_no_shared_fixture_is_a_mainnet_address(name):
     assert verdict.network != MAINNET, f"{name} = {ALL_VALID[name]} is MAINNET: {verdict.why}"
     if verdict.network != NOT_EXPRESSED:
         # TEST_NETWORKS, not `== TESTNET`. This demanded exactly "testnet" and was satisfiable
-        # only because no fixture had ever decoded as anything else -- the first Monero
-        # STAGENET fixture failed it, on a network where losing a coin costs nothing. Refusing
-        # stagenet for not being the test network this gate happened to know is the same shape
-        # as bech32m being refused for not being bech32, and the assertion above -- the one
+        # only because no fixture had ever decoded as anything else -- the first fixture that
+        # did, on a third network name, failed it although losing a coin there costs nothing.
+        # Refusing a genuine test network for not being the one this gate happened to know is
+        # the same shape as bech32m being refused for not being bech32, and the assertion above
         # this test is actually for -- is unchanged and is what keeps a mainnet address out.
         assert verdict.network in TEST_NETWORKS, (
             f"{name} = {ALL_VALID[name]} is on {verdict.network!r}, which is not one of "

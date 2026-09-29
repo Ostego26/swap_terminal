@@ -26,8 +26,8 @@ THE PROGRAM IDS ARE NOT VERIFIED FROM THIS MACHINE, AND THAT IS SAID HERE RATHER
 
 The two constants below are written from knowledge, not measured: nothing in this container can
 reach a Solana cluster, so no transaction has been read back to confirm that a real memo carries
-this program id. That is precisely the shape of error chains/monero_transfers.py was built with
-and that monero_chain_check.py later caught -- 620 seeded tests passing while a wire format was
+this program id. That is precisely the shape of error a chain adapter is built with and that a
+live read later catches -- 620 seeded tests passing while a wire format was
 a hypothesis -- and writing it down is the only thing that keeps a reader from mistaking one for
 the other (rule 17).
 

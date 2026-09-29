@@ -24,9 +24,9 @@ written in (no response through the proxy), so every RPC METHOD NAME and every
 RESPONSE FIELD NAME here came from prior knowledge and was NOT read from the
 published API reference. If one is wrong, the tests still pass -- they seed the
 shapes this file expects -- and it fails on the operator's first real call.
-That is the same limitation chains/monero.py carried, and it was resolved there
-by fetching the docs from the operator's host, which is the first thing to do
-here too.
+The way that limitation has been resolved before is by fetching the published
+docs from the operator's host and checking the names against them, which is the
+first thing to do here too.
 
 CONFIRMED AGAINST A LIVE SERVER ON 2026-09-25, from the operator's host --
 rippled 3.4.1 on s.altnet.rippletest.net, network_id 1:
@@ -69,8 +69,8 @@ rejected by checksum.
 
 TWO THINGS ABOUT rippled's JSON-RPC THAT ARE EASY TO GET WRONG
 
-1. `params` IS AN ARRAY CONTAINING ONE OBJECT. Not an object, as Monero's
-   JSON-RPC takes, and not a positional list as bitcoind takes. The shape is
+1. `params` IS AN ARRAY CONTAINING ONE OBJECT. Not a bare object, and not a
+   positional list as bitcoind takes. The shape is
    {"method": "...", "params": [{...}]} and sending either of the other two
    forms produces an error about parameter parsing, several layers from the
    cause.
@@ -732,7 +732,7 @@ class XRPAdapter:
             "description": description,
         }
 
-    def send_to_address(  # noqa: PLR0913 -- checked: these four keywords ARE the payment, and bundling them into one object would add a type without removing a parameter AND would let a single object carry both the seed and the arming token. Their separation is the reason a forgotten opt-in cannot become a send. Same judgment recorded at chains/base.py:68 and chains/monero.py:186. PLR0917 is deliberately NOT suppressed beside it: it does not fire, because every one of the four is keyword-only, which is the same property the arming argument relies on.
+    def send_to_address(  # noqa: PLR0913 -- checked: these four keywords ARE the payment, and bundling them into one object would add a type without removing a parameter AND would let a single object carry both the seed and the arming token. Their separation is the reason a forgotten opt-in cannot become a send. Same judgment recorded at chains/base.py:68. PLR0917 is deliberately NOT suppressed beside it: it does not fire, because every one of the four is keyword-only, which is the same property the arming argument relies on.
         self,
         address: str,
         amount: float,

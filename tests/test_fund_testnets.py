@@ -37,7 +37,7 @@ class Args:
     """Stands in for argparse's namespace."""
 
     def __init__(self, **kwargs):
-        for name in ("btc", "ltc", "xrp", "sol", "grc", "xmr", "all", "wipe", "grc_mainnet"):
+        for name in ("btc", "ltc", "xrp", "sol", "grc", "all", "wipe", "grc_mainnet"):
             setattr(self, name, kwargs.get(name, False))
         self.blocks = kwargs.get("blocks", COINBASE_MATURITY_BLOCKS)
 
@@ -70,7 +70,7 @@ def test_all_selects_every_chain_including_gridcoin_as_a_read():
 def test_gridcoin_is_present_but_only_as_a_read():
     """The operator holds testnet GRC already and asked only to SEE it.
 
-    So GRC has a runner (unlike XMR) but that runner mints nothing -- it makes
+    So GRC has a runner, but that runner mints nothing -- it makes
     two read calls. Pinned so a future "while we are here, let us mine some
     GRC too" is a deliberate change rather than a drive-by.
     """
@@ -82,10 +82,16 @@ def test_gridcoin_is_present_but_only_as_a_read():
 
 
 
-def test_every_other_chain_has_a_runner():
+def test_every_chain_has_a_runner():
+    """EVERY chain, with no exception clause, since 2026-09-29.
+
+    This read `if asset != <a chain>` -- one chain was listed with a None runner and explained
+    rather than run. That chain is gone, and with it the only reason for the exception. A
+    skip clause left behind after its subject is removed is a hole a future chain slips
+    through silently (rule 9), so it goes rather than staying as decoration.
+    """
     for asset, _, run in selected_chains(Args(all=True)):
-        if asset != "XMR":
-            assert callable(run), asset
+        assert callable(run), asset
 
 
 def test_gridcoins_mainnet_port_is_named_so_the_report_can_warn():

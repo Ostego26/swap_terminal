@@ -149,7 +149,7 @@ def test_an_unrecognized_response_is_NOT_read_as_unlocked():
     cost of being wrong is a swap created against a wallet that cannot pay it.
 
     It also prints the keys the daemon DID return, which is how the real field
-    names get confirmed: the same way the Monero and XRP field names were, from
+    names get confirmed: the same way the XRP field names were, from
     the operator's own run rather than from memory.
     """
     state, detail = describe_wallet_lock({"balance": 1.0, "walletversion": 130000})

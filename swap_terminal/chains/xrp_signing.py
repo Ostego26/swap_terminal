@@ -367,7 +367,7 @@ def require_reserve_headroom(
     conversion). A reserve check done in XRP floats could refuse a payment that
     fits, or permit one that does not, by one drop in either direction -- and
     the direction would depend on where the binary representation happened to
-    land, which is the failure chains/monero_units.py documents at length.
+    land, which is the failure this conversion exists to avoid.
 
     WHY REFUSE HERE WHEN THE LEDGER WOULD ALSO REFUSE. The ledger's refusal is
     a tecUNFUNDED_PAYMENT or tecINSUFFICIENT_RESERVE, which arrives AFTER the

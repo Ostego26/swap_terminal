@@ -856,7 +856,7 @@ def test_every_mark_renders_without_a_network_or_a_file():
 
 
 def test_a_foreign_chain_says_whether_it_is_CONFIGURED_rather_than_just_unprobed(monkeypatch):
-    """"XMR does nothing" was the report, and it was accurate.
+    """"this tab does nothing" was the report on a foreign chain, and it was accurate.
 
     The tab said "no adapter in this panel" and stopped, which is a statement about THIS PANEL
     dressed as a statement about the chain -- and the thing the operator could act on was one
@@ -953,13 +953,13 @@ def test_STOPPING_the_operators_own_daemon_is_armed_OUTSIDE_the_browser(monkeypa
 
 
 def test_a_foreign_chains_SWITCH_IS_REFUSED_FOR_A_REASON_ABOUT_THIS_PANEL(monkeypatch):
-    """"this panel has no daemon lifecycle for XMR" was a claim about MONERO, and it was false.
+    """"this panel has no daemon lifecycle for <chain>" was a claim about the CHAIN, and false.
 
     Both buttons on a foreign tab said it until 2026-09-28, and the operator read it directly
-    beneath a tab that had just named the one variable that was unset. Monero has daemons. So
+    beneath a tab that had just named the one variable that was unset. That chain has daemons. So
     does rippled, so does a Solana validator. What is true is what is true of GRC one branch up
     -- THIS PANEL DOES NOT KNOW YOUR COMMAND LINE -- and it is true here for a stronger reason:
-    nothing in this tree has ever started one. On 2026-09-28 the string "monero-wallet-rpc"
+    nothing in this tree has ever started one. On 2026-09-28 that daemon's name
     appeared in eleven Python files in this tree and a spawn of it in none; regtest/daemons.py
     owns every Popen here and knows bitcoind and litecoind only.
 
@@ -1018,7 +1018,7 @@ def test_the_switch_route_refuses_before_it_reaches_a_daemon():
     answer, code = entry.answer_a_daemon_switch({"asset": "SOL", "action": "stop"}, {})
     # THE ROUTE GIVES THE DECISION'S OWN SENTENCE, asserted by deriving it rather than by
     # quoting it. This pinned the literal "no daemon lifecycle" and so had to be edited when
-    # that sentence was found to be a false claim about Monero -- a test that pins a constant
+    # that sentence was found to be a false claim about the chain -- a test that pins a constant
     # fails on a wording change and passes on a behavior one, which is backwards.
     assert code == 403
     assert answer["error"] == decisions.refuse_daemon_control(_tab("SOL"), "stop")
@@ -1036,7 +1036,7 @@ def test_NO_TAB_HAS_EVER_CARRIED_THE_KIND_TWO_LIVE_BRANCHES_TESTED_FOR():
     the data, and both were dead the moment they were typed:
 
       main()            skipped building an RPC console on `kind == "none"`, so it never
-                        skipped, and printed `XMR: no RPC console (KeyError: 'XMR')` three
+                        skipped, and printed `no RPC console (KeyError: ...)` once per foreign
                         times at startup -- a Python exception class in an operator's terminal.
       the nav dot       set grey on `d.kind === "none"`, so it never set grey, and painted
                         every foreign chain RED for a probe this panel never makes.
@@ -1056,7 +1056,7 @@ def test_a_CHAIN_THIS_PANEL_CANNOT_SPEAK_TO_IS_NEVER_RED():
     """Red means "we asked and it did not answer". This panel never asks a foreign chain.
 
     Until this function existed the page computed `d.reachable ? "yes" : "no"` with its grey
-    branch guarded by a kind no tab carries, so XMR, XRP and SOL were red on a page whose own
+    branch guarded by a kind no tab carries, so every foreign tab was red on a page whose own
     legend says red means the daemon did not answer. That is the stale-green-an-operator-acts-on
     the dot's comment forbids, running the other way: a red dot for a question nobody asked
     sends someone looking for a daemon that may be up and fine.
@@ -1089,16 +1089,16 @@ def test_a_CHAIN_THIS_PANEL_CANNOT_SPEAK_TO_IS_NEVER_RED():
 
 
 def test_a_FOREIGN_TAB_IS_NOT_OFFERED_A_CONSOLE_IT_CANNOT_USE():
-    """The operator pressed Call on the XMR tab and got REFUSED BY THIS PANEL.
+    """The operator pressed Call on a foreign tab and got REFUSED BY THIS PANEL.
 
     A dropdown of twenty-five Bitcoin-style methods was rendered for a chain that has none of
     them, and the refusal arrived after the click. Offering a control that cannot work and
     explaining afterwards is rule 14's defect-in-the-output: the page should say so where the
     control would have been.
 
-    AND THE REFUSAL NAMED THE WRONG REASON. It said XMR "has no reachable daemon in this panel",
-    which is not established -- the operator's monero-wallet-rpc may be answering perfectly
-    well. What is true is that this console sends one protocol and XMR does not speak it.
+    AND THE REFUSAL NAMED THE WRONG REASON. It said the chain "has no reachable daemon here",
+    which is not established -- the operator's daemon for it may be answering perfectly
+    well. What is true is that this console sends one protocol and that chain does not speak it.
     """
     entry = _entry()
     sol = next(c for c in decisions.CHAINS if c.asset == "SOL")
@@ -1123,10 +1123,10 @@ def test_a_FOREIGN_TAB_IS_NOT_OFFERED_A_CONSOLE_IT_CANNOT_USE():
 
 
 def test_STARTUP_SAYS_WHY_A_CHAIN_HAS_NO_CONSOLE_IN_WORDS_NOT_IN_A_KeyError():
-    """`XMR: no RPC console (KeyError: 'XMR')`, printed three times, on 2026-09-28.
+    """`no RPC console (KeyError: ...)`, printed once per foreign tab, on 2026-09-28.
 
     Two defects in one line. The condition was knowable before anything was asked of anything
-    -- this console speaks a protocol XMR does not -- so the try/except was reached at all only
+    -- this console speaks a protocol those chains do not -- so the try/except was reached only
     because the skip above it tested a kind that does not exist. And what it printed was a
     Python exception class, for a design decision, in the terminal of an operator deciding
     whether the panel came up correctly (rule 14).

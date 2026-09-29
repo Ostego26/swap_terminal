@@ -57,7 +57,7 @@ construction rather than by assumption.
 
 A payment with NO destination tag is money that arrived and cannot be
 attributed. It is reported, never credited and never guessed at -- the same
-refusal chains/monero_transfers.py makes for a transfer with no subaddress
+refusal a transfer-scanner makes for an arrival it cannot attribute
 index, and for the same reason: the alternative is inventing an identifier,
 which is the fabrication chains/base.py:169 documents and migrate_deposit_
 vouts.py exists to clean up.

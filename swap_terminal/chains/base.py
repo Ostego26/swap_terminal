@@ -123,14 +123,12 @@ def rpc_error_from_body(response) -> str | None:
 class RPCAdapter:
     asset = ""
 
-    # CAN THIS CHAIN BE A PAYOUT DESTINATION? One name across every adapter, and
-    # the name is MoneroAdapter's, which has carried `can_spend` since it was
-    # written -- extended rather than replaced, because a second vocabulary for
-    # one concept is rule 8's bug with a delay on it.
+    # CAN THIS CHAIN BE A PAYOUT DESTINATION? One name across every adapter,
+    # extended rather than replaced whenever a chain arrives, because a second
+    # vocabulary for one concept is rule 8's bug with a delay on it.
     #
     # True here: a Bitcoin-derived daemon's own wallet signs, which is what
-    # send_to_address() below calls. False on XRPAdapter and SolanaAdapter;
-    # an instance attribute on MoneroAdapter, defaulting False.
+    # send_to_address() below calls. False on XRPAdapter and SolanaAdapter.
     #
     # Read through chains/registry.why_cannot_pay_out(), which uses
     # getattr(adapter, "can_spend", False) -- FAIL-CLOSED, so an adapter that

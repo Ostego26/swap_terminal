@@ -12,7 +12,7 @@ WHAT IS TESTED HERE, AND WHY IT IS THE ENTRY POINT AND NOT THE LIBRARY
 services/market_context.py's own tests cover the verdicts, the parser and the SQL. What they
 cannot cover is the thing that made this file necessary: the library had no caller, so
 nothing proved the pieces FIT. The defect class is specific and has bitten this repository
-twice in two days -- monero_shared_key_verify.py referenced target.daemon_port after a rename
+twice in two days -- a script referenced target.daemon_port after a rename
 and ruff could not see it because no test reached main(), and atomic_swap.py shipped a
 function whose arguments no test ever supplied. Both were plumbing, both looked right, and
 both failed on the operator's first run.

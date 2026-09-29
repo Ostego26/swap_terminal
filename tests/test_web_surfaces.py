@@ -208,7 +208,7 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
 
     # And nothing else -- with the disabled set DERIVED, not written out.
     #
-    # This second half used to hardcode ("XRP", "SOL", "XMR"), which was the very
+    # This second half used to hardcode a chain list, which was the very
     # duplication this test exists to prevent, one level up: a hand-written copy
     # of what the config allows, correct on the day it was written. XRP<->GRC was
     # enabled on 2026-09-26 and it failed immediately -- which is the guard

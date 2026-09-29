@@ -29,15 +29,14 @@ signature was involved anywhere: measured by the NAME grep rule 2 asks for -- `a
 `pre_sign`, `complete_signature`, `recover` across `adaptor_regtest_verify.py` and
 `swap_terminal/regtest/adaptor_steps.py` -- zero occurrences at the commit this run was made
 from. Nothing here is softened by saying so; a 2-of-2 P2SH funding and spending on Gridcoin is
-exactly what it claims and it is what was asked for. But it is NOT an XMR swap rehearsal, and
-the number 40 OK / 0 FAIL should not be read as one.
+exactly what it claims and it is what was asked for. But it is NOT a rehearsal of the
+adaptor-signature swap that later used it, and 40 OK / 0 FAIL should not be read as one.
 
-The join landed after this run (`48eaaf7`): Tx_redeem's second signature and Tx_refund's first
-are now adaptor pre-signatures completed with a Monero spend share, and two of the harness's six
-decisive outcomes are the recovery and the cross-curve close. **A rerun would therefore not
-produce these numbers, and this document is not the record of the adaptor version.** The
-transactions below would score FAIL under the current harness, which is the point of having
-raised the bar rather than an inconsistency between the two.
+The adaptor join landed after this run (`48eaaf7`) and was REMOVED on 2026-09-29 with the
+chain it existed for. **This document is a record of a Gridcoin 2-of-2 funding and spend, and
+nothing here depends on the protocol that was removed.** The harness it names is gone, so these
+numbers cannot be reproduced by rerunning it; the transactions below are on Gridcoin testnet
+and are the durable part.
 
 `tests/test_adaptor_join.py::test_an_ordinary_2of2_spend_is_NOT_scored_as_having_published_anything`
 rebuilds this exact state offline and asserts the new answer.

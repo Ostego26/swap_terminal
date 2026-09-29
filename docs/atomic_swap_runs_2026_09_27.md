@@ -86,8 +86,8 @@ worth keeping from this pair.** `xrp-first` publishes the preimage in a scriptSi
 `grc-first` publishes it in the `Fulfillment` field of an `EscrowFinish` on the XRP Ledger. The
 XRP Ledger has no scripting language at all. So atomicity does not require a script — it
 requires only that TAKING your leg forces you to publish something the counterparty can read.
-That is the same property an XMR swap has to obtain from adaptor signatures, and this pair is
-the existence proof that the property is separable from scripting.
+This pair is the existence proof that the property is separable from scripting -- which is why
+the finding outlasted the scriptless-chain work that was later removed.
 
 ### ONE VOUT WAS NEVER 0 BY DEFAULT
 
@@ -269,10 +269,6 @@ Stated because a list of five successes reads as more than it is.
 - **Three directed pairs of six remain untested** in `atomic_swap.py`: `LTC -> BTC`,
   `GRC -> LTC`, `GRC -> BTC`. The last two put the 48-hour lock on GRC testnet, where a stranded
   leg waits out a real two days instead of a mined instant.
-- **Every XMR pair is blocked on one piece of protocol work**, not on plumbing. Monero has no
-  script, so an XMR leg needs adaptor signatures plus a cross-curve DLEQ proof. Four components
-  are individually tested and nothing composes them; see
-  `docs/dleq_cross_curve_design.md` section 6 stage 5.
 - **No platform fee was collected on any run.** `PLATFORM_FEE_{BTC,LTC,GRC}_ADDRESS` are unset,
   which by design charges nothing and never blocks a redeem. The 1.5% arithmetic was exercised
   and correct on all three GRC-side runs; only the collection is missing.

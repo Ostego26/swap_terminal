@@ -140,7 +140,8 @@ def test_a_missing_destination_tag_is_not_a_failure_and_says_why():
 
 
 def test_a_field_present_in_only_some_payments_is_shown_as_a_fraction():
-    """Counted per payment, not unioned -- the correction monero_chain_check needed."""
+    """Counted per payment, not unioned -- a union states the NAME exists and reads as a
+    statement about every row."""
     lines, _failures, _unobserved = payment_field_report(collect_payments([flat_payment(), flat_payment(tag=None, txhash="D" * 64)]))
     line = next(line for line in lines if "DestinationTag" in line)
     assert "present in 1/2" in line

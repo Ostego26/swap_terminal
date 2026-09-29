@@ -35,9 +35,10 @@ WHY EACH CHAIN GETS COINS A DIFFERENT WAY
 SECRETS ARE NEVER PRINTED. The XRP faucet returns a funded account AND its
 secret. That secret goes straight to a 0600 file outside any git repository and
 only the address and balance reach the screen. This is not caution in the
-abstract: on 2026-09-25 a monero-wallet-cli run printed a 25-word seed into a
+abstract: on 2026-09-25 a wallet CLI printed a 25-word recovery seed into a
 terminal whose whole output was then pasted into a chat, and that wallet had to
-be treated as public from then on.
+be treated as public from then on. The tool it happened with has since been
+removed from this tree; the way it happened has not changed at all.
 """
 
 from __future__ import annotations

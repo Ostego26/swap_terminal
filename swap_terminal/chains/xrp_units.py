@@ -12,7 +12,7 @@ WHAT XRP DOES DIFFERENTLY FROM EVERY CHAIN ALREADY HERE
    XRP. That makes XRP the roomiest chain in this tree for the REAL columns
    db.py stores amounts in: measured 2026-09-25, a double holds integers
    exactly to 2**53, which is 9,007,199,254 XRP against 90,071,992 for the
-   8-decimal chains and 9,007 for Monero's twelve. XRP's total supply is under
+   8-decimal chains. XRP's total supply is under
    100 billion, so the ceiling is reachable in principle and unreachable by any
    broker; it is written down rather than relied on.
 
@@ -159,8 +159,7 @@ class XRPTagError(ValueError):
 def to_drops(amount) -> int:
     """XRP as a decimal quantity -> drops as an integer.
 
-    Via Decimal(str(amount)) rather than multiplying the float, for the reason
-    chains/monero_units.py documents at length: `0.1 * 10**6` is not reliably
+    Via Decimal(str(amount)) rather than multiplying the float: `0.1 * 10**6` is not reliably
     100000 in binary floating point, and the error falls whichever way the
     representation happens to land.
     """

@@ -44,7 +44,7 @@ somebody noticing.
 
 All five are now conditional on the one value that cannot be defaulted, and the
 test is identical for each: a URL for SOL and XRP, a port for BTC, LTC, GRC and
-XMR. config.py defaults those ports to network_target.UNCONFIGURED_PORT.
+config.py defaults those ports to network_target.UNCONFIGURED_PORT.
 
 The reason a missing port must SKIP rather than guess is the one the Solana
 paragraph below already gives, plus a second one that only applies to the older
@@ -118,7 +118,7 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # Gridcoin staking wallet came to be polled on a loop by a terminal that was
     # supposed to be on testnet.
     #
-    # The test is the same one SOL, XMR and XRP already use, three paragraphs
+    # The test is the same one SOL and XRP already use, three paragraphs
     # below: "configured" means the operator supplied the one value that cannot
     # be defaulted. For those it is a URL or a port; for these it is a port. The
     # module header's old claim that these three are "always constructed" was

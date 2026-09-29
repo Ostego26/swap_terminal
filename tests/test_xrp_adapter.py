@@ -86,7 +86,7 @@ MAINNET_URL = "https://s1.ripple.com:51234/"
 
 # --- the fake transport ------------------------------------------------------
 #
-# Modeled on tests/test_monero_adapter.py's Recorder, and the reason it records
+# A Recorder, and the reason it records
 # rather than merely answering is that half the assertions in this file are
 # about calls that must NOT have happened. "The exception was raised" does not
 # distinguish a guard that refused before reading the account from one that
@@ -107,7 +107,7 @@ class FakeResponse:
 class Recorder:
     """Stands in for requests.post, answering rippled calls by METHOD NAME.
 
-    Keyed by method rather than ordered, unlike the Monero recorder's queue,
+    Keyed by method rather than ordered, unlike an ordered queue,
     because the order of server_info and account_info is itself under test: a
     queue would answer whichever call came first with the server_info payload
     and the assertions would pass for the wrong reason.

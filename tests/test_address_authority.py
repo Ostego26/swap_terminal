@@ -187,7 +187,7 @@ def test_every_asset_this_terminal_can_reach_has_a_validator():
     exactly a chain whose addresses can reach the fund path, and that is the function that
     decides it.
 
-    MUTATION: delete VALIDATORS["XMR"] and this fails naming XMR.
+    MUTATION: delete VALIDATORS["SOL"] and this fails naming SOL.
     """
     fully_configured = {
         "BTC": {"user": "u", "password": RPC_FIXTURE_AUTH, "host": "127.0.0.1", "port": 18443},
@@ -195,7 +195,6 @@ def test_every_asset_this_terminal_can_reach_has_a_validator():
         "GRC": {"user": "u", "password": RPC_FIXTURE_AUTH, "host": "127.0.0.1", "port": 25715},
         "SOL": {"url": "http://127.0.0.1:8899"},
         "XRP": {"url": "http://127.0.0.1:5005"},
-        "XMR": {"host": "127.0.0.1", "port": 18081},
     }
     # build_adapters() opens no socket -- chains/registry.py's header states it and its own
     # tests hold it -- so this constructs six adapters and touches nothing.
@@ -328,7 +327,7 @@ def test_a_testnet_address_is_not_attributed_to_one_of_the_three_chains_that_sha
     header states. So a testnet base58 address CANNOT be attributed to one of the three by
     decoding, and a validator that claimed otherwise would refuse every valid Bitcoin
     testnet address in this repository -- the false-refusal outage again, from the opposite
-    direction to the Monero one.
+    direction to the Solana one.
 
     GRC_PAYOUT is a 0x6F address and it must be VALID for BTC, LTC and GRC alike.
 
@@ -952,7 +951,7 @@ def test_a_wrong_network_deposit_address_is_still_shown_on_the_page():
 def test_the_shared_xrp_account_is_checked_too_and_the_missing_tag_is_reported_first():
     """THE GAP REVIEW FOUND, 2026-09-28. Two branches render an address; one was checked.
 
-    deposit_instruction() has a per-swap `address` branch (BTC/LTC/GRC/XMR) and a shared
+    deposit_instruction() has a per-swap `address` branch (BTC/LTC/GRC) and a shared
     `destination_tag` branch (XRP). _address_problem() was wired into the first on 2026-09-27
     and NOT into the second, so an XRP swap that HAD a tag reported problem="" no matter what
     was in `deposit_address` -- the page printed the account, printed the tag, and said
@@ -1254,20 +1253,6 @@ def test_a_swap_paying_out_to_TAPROOT_can_be_CREATED(tmp_path):
     ).fetchone()["a"] == LTC_TAPROOT_PAYOUT
 
 
-# =======================================================================================
-# MONERO INTEGRATED ADDRESSES. THE SECOND BLOCKING FALSE REFUSAL, SAME CLASS AS bech32m.
-#
-# chains/monero_keys.decode_address() compared the decoded length against the STANDARD form
-# only and raised for anything else; _monero() reported that as INVALID. So every INTEGRATED
-# address -- the form an EXCHANGE issues, where the 8-byte payment ID is how they know whose
-# account to credit -- was refused. "Paste the address your exchange gave you" is the single
-# most likely thing a customer does with an XMR payout field.
-#
-# The old refusal's own words were "a swap has no use for one -- the shared address is
-# generated per swap, so there is nothing to disambiguate". Sound about the address THIS
-# REPOSITORY GENERATES for a swap's XMR leg; wrong about the one a CUSTOMER SUPPLIES as a
-# payout destination. Two different addresses, one function, and only one of them is ours.
-# =======================================================================================
 
 
 

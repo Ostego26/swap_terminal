@@ -13,8 +13,7 @@ equal by `tests/test_htlc_spend.py::test_both_platform_fee_clients_read_one_rate
                      output through, so the rate and the collection landed together.
     LTC    atomic    YES                 the fee is a separate output; PLATFORM_FEE_LTC_ADDRESS
     GRC    atomic    YES                 the same; PLATFORM_FEE_GRC_ADDRESS
-    XMR    brokered  NO, AND THIS IS NOT AN OVERSIGHT -- see below
-    XRP    brokered  NO, same reason
+    XRP    brokered  NO, AND THIS IS NOT AN OVERSIGHT -- see below
 
 ## MINTING THE THREE ADDRESSES, from the wallets that will hold the fees
 
@@ -48,12 +47,12 @@ these and sees no change in their wallet is seeing the correct behavior: there i
 to collect until a swap redeems. Until then every redeem logs a WARNING naming the unset
 variable and the amount not collected.
 
-## THERE IS NO XMR FEE DEPOSIT ADDRESS, BECAUSE THERE IS NOTHING TO DEPOSIT
+## THERE IS NO BROKERED FEE DEPOSIT ADDRESS, BECAUSE THERE IS NOTHING TO DEPOSIT
 
-Asked for on 2026-09-27 and it should not be built, and the reason is a measurement
-rather than an opinion. Grepped the whole tree for `PLATFORM_FEE_XMR` and for any
-pairing of "platform" with "XMR": **zero hits.** Nothing reads such a variable
-because nothing would send to it.
+Asked for on 2026-09-27 for a brokered chain, and it should not be built -- the reason
+is a measurement rather than an opinion. Grepped the whole tree for a `PLATFORM_FEE_`
+variable naming a brokered chain: **zero hits.** Nothing reads such a variable because
+nothing would send to it.
 
 The brokered path does not TRANSFER its fee, it WITHHOLDS it.
 `services/quote_service.create_quote()` computes
@@ -65,16 +64,15 @@ is the difference between what the swap was worth and what the customer is paid,
 it never leaves the hot wallet in the first place. There is no second transaction, no
 destination, and nothing to address.
 
-So a `PLATFORM_FEE_XMR_ADDRESS` would be a mechanism with no reader -- which CLAUDE.md
+So a `PLATFORM_FEE_<brokered chain>_ADDRESS` would be a mechanism with no reader -- which CLAUDE.md
 rule 5 refuses on the main path and rule 19 refuses generally. The fee is already
 yours; it accumulates as the hot wallet's growing balance.
 
 **If the goal is ACCOUNTING rather than collection** -- seeing fee income separately
 from float -- that is a real and different want, and the honest answer is that it
 needs a sweep, not an address: a periodic transfer of accumulated fee value out of
-the hot wallet to somewhere you count separately. Monero's wallet will make the
-destination for you (`create_address`, which `monero_chain_check.py --derive-address`
-already calls), but the deciding piece is a ledger of what was earned per swap, and
+the hot wallet to somewhere you count separately. An account-model wallet will make the
+destination for you, but the deciding piece is a ledger of what was earned per swap, and
 the `quotes` table already stores `fee_bps` and `output_amount_estimate` per row,
 which is the input to that sum. Say the word and that is a query plus a sweep, not an
 environment variable.

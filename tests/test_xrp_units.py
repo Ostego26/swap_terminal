@@ -32,7 +32,7 @@ def test_one_xrp_is_a_million_drops():
 def test_to_drops_does_not_multiply_the_float():
     """Searched for amounts where int(float(x) * 1e6) disagrees with the exact value.
 
-    Fewer exist at 6 decimals than at Monero's 12 -- which is the point: the
+    Fewer exist at 6 decimals than at 12 -- which is the point: the
     hazard shrinks with the exponent but does not vanish, so the Decimal path
     is not an optimization to remove later.
     """
