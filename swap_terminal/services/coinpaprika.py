@@ -91,20 +91,29 @@ PAPRIKA_IDS = {
     "LTC": "ltc-litecoin",
     "GRC": "grc-gridcoin",
     "XRP": "xrp-xrp",
-    # UNCONFIRMED, ALL THREE. The pattern says these, and none has returned a 200
-    # from anywhere -- unlike the four above, each of which was measured
-    # 2026-09-29. `grc-gridcoinresearch` is the standing reminder that the obvious
-    # spelling 404s, so a caller that needs one of these should expect it to and
-    # should look the id up with /v1/search/?q=<name>&c=currencies (rule 17).
+    # SOL IS STILL UNCONFIRMED and the two stablecoins are not any more. All three
+    # were written from CoinPaprika's naming pattern; the first `--level` run on
+    # 2026-09-29 fetched USDC and USDT and got
     #
-    # USDC and USDT are here for services/wallet_leveling.peg_findings(), which
-    # checks the dollar this terminal quotes in against the two stablecoins that
+    #     USDC: $1.0003730499669257
+    #     USDT: $0.9996531383088825
+    #     USDC/USDT = 1.000720161454463172734562835
+    #
+    # so those two ids are measured now and the marker moved off them. SOL's has
+    # still never been fetched -- nothing has asked for it -- and stays marked.
+    # `grc-gridcoinresearch` is the standing reminder that the obvious spelling
+    # 404s, so a caller that needs SOL should expect that and look it up with
+    # /v1/search/?q=<name>&c=currencies (rule 17).
+    #
+    # The two stablecoins are here for services/wallet_leveling.peg_findings(),
+    # which checks the dollar this terminal quotes in against the two coins that
     # actually define it. That check DEGRADES rather than fails when an id is
     # wrong: an unpriced stablecoin produces a finding saying the peg is
-    # unchecked, never silence.
+    # unchecked, never silence -- which is what made it safe to ship these two
+    # before they had been fetched.
     "SOL": "sol-solana",  # UNCONFIRMED
-    "USDC": "usdc-usd-coin",  # UNCONFIRMED
-    "USDT": "usdt-tether",  # UNCONFIRMED
+    "USDC": "usdc-usd-coin",  # measured 2026-09-29: $1.0003730499669257
+    "USDT": "usdt-tether",  # measured 2026-09-29: $0.9996531383088825
 }
 
 # The request timeout. Seconds, because that is what requests takes -- rule 6's

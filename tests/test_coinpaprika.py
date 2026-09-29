@@ -73,8 +73,14 @@ GRC_DERIVED_CAP = 7665794
 #: Which ids returned a 200 from the operator's host on 2026-09-29, and which were
 #: written from CoinPaprika's naming pattern and never fetched. Two sets rather than
 #: one list, because the whole point is that they are different KINDS of claim.
-MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP"})
-UNCONFIRMED = frozenset({"SOL", "USDC", "USDT"})
+#: USDC and USDT moved from UNCONFIRMED to MEASURED on 2026-09-29, when the first
+#: `chain_balances.py --level` run fetched both and the peg check printed their
+#: prices. They were shipped unfetched on purpose -- peg_findings() reports an
+#: unpriced stablecoin as UNCHECKED rather than failing -- and the marker moved the
+#: moment there was a number. A label that only ever gets stricter is a label
+#: nobody trusts.
+MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP", "USDC", "USDT"})
+UNCONFIRMED = frozenset({"SOL"})
 
 
 def test_GRCs_market_cap_is_DERIVED_because_the_feed_reports_zero():
