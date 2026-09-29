@@ -47,10 +47,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from chains.daemon_conf import DaemonConfError, describe, rpc_settings_from_conf
 from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network
 from chains.registry import build_adapters, why_unconfigured
 from chains.wallet_lock import encryption_state
 from config import Config
+from regtest.daemons import CHAIN_DEFAULTS
 from step_console import Console
 
 # Every chain this can report, in the order it reports them. Derived from the
@@ -62,12 +64,61 @@ CHAINS = tuple(sorted(CHAIN_TEST_NETWORKS))
 
 NOTHING_TO_LOOK_AT = 3
 
+# WHICH CHAINS HAVE A CONF THIS CAN FALL BACK TO, and what network its port
+# section is under. regtest.daemons.CHAIN_DEFAULTS owns the datadir and conf name
+# -- respelling them here would be two sources for one fact, and it is the fact
+# that moves whenever the harness is pointed somewhere else.
+#
+# GRC IS DELIBERATELY ABSENT. Its conf lives in ~/.GridcoinResearch, shared by
+# mainnet and testnet, and picking a connection out of it is how a reader ends up
+# on the operator's live staking wallet. Gridcoin stays explicit: GRC_RPC_PORT is
+# set by hand, or GRC is not read. The network check would still refuse a mainnet
+# answer, but the right place to not make that mistake is before the call.
+CONF_FALLBACK_NETWORK = {"BTC": "regtest", "LTC": "regtest"}
+
+
+def adapter_from_conf(console: Console, chain: str):
+    """An adapter built from this chain's own conf, or None with the reason said.
+
+    THE ENVIRONMENT STILL WINS. This runs only for a chain Config.RPC does not
+    configure, so an operator who exported LTC_RPC_PORT gets exactly what they
+    exported -- a fallback that overrode an explicit setting would be the worse
+    half of rule 8, two sources with the quiet one winning.
+    """
+    network = CONF_FALLBACK_NETWORK.get(chain)
+    if network is None:
+        return None
+    spec = CHAIN_DEFAULTS.get(chain)
+    if spec is None:
+        # A chain in CONF_FALLBACK_NETWORK with no CHAIN_DEFAULTS entry is a
+        # disagreement between two tables, and saying so beats returning None as
+        # though the chain simply had no conf (rule 14).
+        console.say(f"    {chain} is listed for conf fallback but regtest.daemons.CHAIN_DEFAULTS has "
+                    f"no entry for it. One of those two tables is wrong.")
+        return None
+    path = Path(spec["datadir"]).expanduser() / spec["conf_name"]
+    try:
+        settings = rpc_settings_from_conf(path, network=network)
+    except DaemonConfError as error:
+        console.say(f"    no {chain}_RPC_* in the environment and the conf did not supply one: {error}")
+        return None
+    console.say(f"    {chain}: {describe(path, settings, network=network)}")
+    # CONSTRUCTED THROUGH build_adapters, not by naming an adapter class here.
+    # registry.py owns which class each chain gets and what counts as
+    # configured; a second constructor would be a second answer to both, and
+    # missing_settings() is the check that stopped a port-with-no-password from
+    # building an adapter that 401s on every call (2026-09-26).
+    return build_adapters({chain: settings}).get(chain)
+
 
 def report_chain(console: Console, chain: str, adapters: dict) -> bool:
     """One chain's holdings. True if the daemon answered and was safe to ask."""
-    adapter = adapters.get(chain)
+    adapter = adapters.get(chain) or adapter_from_conf(console, chain)
     if adapter is None:
-        console.check(f"{chain} configured", "no", f"{chain}_RPC_* in the environment", False)
+        routes = f"{chain}_RPC_* in the environment"
+        if chain in CONF_FALLBACK_NETWORK:
+            routes += ", or an rpcuser/rpcpassword/rpcport in this chain's own conf"
+        console.check(f"{chain} configured", "no", routes, False)
         console.say(f"    {why_unconfigured(chain, Config.RPC)}")
         return False
 

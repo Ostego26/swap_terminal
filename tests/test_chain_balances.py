@@ -26,6 +26,7 @@ import sys
 
 import pytest
 from chains.daemon_network import CHAIN_TEST_NETWORKS
+from regtest.daemons import CHAIN_DEFAULTS
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent / "chain_balances.py"
 TREE = ast.parse(SOURCE.read_text())
@@ -44,7 +45,14 @@ READ_ONLY_METHODS = frozenset({"getblockchaininfo", "getinfo", "getblockcount",
 # Anything whose presence would contradict "Can move funds: NO".
 FORBIDDEN_CALLS = ("send_to_address", "sendtoaddress", "walletpassphrase", "unlock_for_sending",
                    "signrawtransactionwithwallet", "sendrawtransaction", "dumpprivkey",
-                   "createhtlc", "unlocked_for_payout")
+                   "createhtlc", "unlocked_for_payout",
+                   # ADDED 2026-09-29 with the conf fallback, which imports from
+                   # regtest.daemons -- a module whose other half STARTS AND STOPS
+                   # DAEMONS. The import is a constant (CHAIN_DEFAULTS) and these
+                   # names are what would turn it into something else. The live
+                   # rules are explicit that this harness never starts or stops a
+                   # daemon.
+                   "start_daemon", "_spawn", "wait_for_rpc", "apply_mweb_override")
 
 # THE METHODS A WALLET CALL LOOKS LIKE. Separate from the allowlist above because
 # the mainnet test needs to assert that NONE of these was asked, and
@@ -248,3 +256,86 @@ def test_the_chain_list_is_DERIVED_from_the_allowlist_and_not_spelled_twice():
     assert set(chain_balances.CHAINS) == set(CHAIN_TEST_NETWORKS)
     for chain in chain_balances.CHAINS:
         assert CHAIN_TEST_NETWORKS[chain], f"{chain} has an EMPTY allowlist, which refuses everything"
+
+
+# ---------------------------------------------------------------------------
+# THE CONF FALLBACK, added 2026-09-29 when the operator asked for LTC to be
+# configured and the only routes on offer were three exports, one of them a
+# password.
+# ---------------------------------------------------------------------------
+
+
+def test_the_ENVIRONMENT_wins_over_the_conf_so_an_explicit_setting_is_never_overridden():
+    """A fallback that overrode an export is the worse half of rule 8.
+
+    Two sources for one fact is bad; two sources where the QUIET one wins is how
+    an operator points a reader at one daemon and gets another.
+
+    THE FIRST VERSION OF THIS TEST WAS WORTHLESS and the mutation said so. It
+    asserted the seeded adapter got asked and that no conf line was printed,
+    which passes on any machine with no LTC conf on disk -- so it measured the
+    filesystem, not the code. Swapping the order in report_chain() left it green.
+    Now adapter_from_conf is replaced with something that FAILS if it is called
+    at all, which is the actual property: a configured chain must not consult a
+    conf, whether or not one exists.
+
+    MUTATION: reorder to `adapter_from_conf(...) or adapters.get(chain)` and this
+    fails. Verified 2026-09-29, by running it -- unlike the version before it.
+    """
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("report_chain() consulted the conf for a chain that was configured")
+
+    adapter = _Adapter(TESTNET_DAEMON)
+    recorder = _Recorder()
+    original = chain_balances.adapter_from_conf
+    try:
+        chain_balances.adapter_from_conf = _must_not_be_called
+        ok = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    finally:
+        chain_balances.adapter_from_conf = original
+
+    assert ok is True, recorder.text()
+    assert adapter.asked, "the configured adapter was not the one consulted"
+
+
+def test_GRC_has_NO_conf_fallback_because_its_conf_is_shared_with_mainnet():
+    """The one chain where guessing a connection could reach real money.
+
+    ~/.GridcoinResearch holds one conf for mainnet and testnet both, and the
+    operator's mainnet wallet is a live staking wallet. The network check would
+    still refuse a mainnet answer, but the place to not make that mistake is
+    before the call rather than after it.
+
+    MUTATION: add "GRC": "testnet" to CONF_FALLBACK_NETWORK and this fails.
+    Verified 2026-09-29.
+    """
+    assert "GRC" not in chain_balances.CONF_FALLBACK_NETWORK, (
+        "GRC gained a conf fallback. Its conf does not distinguish mainnet from testnet by "
+        "location, so a connection picked out of it can reach the operator's staking wallet"
+    )
+    assert set(chain_balances.CONF_FALLBACK_NETWORK) == {"BTC", "LTC"}
+
+
+def test_every_chain_with_a_conf_fallback_has_a_datadir_in_the_harness_table():
+    """Rule 8: the datadir and conf name are owned by regtest.daemons, not respelled.
+
+    A chain listed for fallback with no CHAIN_DEFAULTS entry is a disagreement
+    between two tables, and the code says so rather than reading as "no conf".
+    """
+    for chain in chain_balances.CONF_FALLBACK_NETWORK:
+        assert chain in CHAIN_DEFAULTS, f"{chain} has no datadir or conf name to look in"
+        assert CHAIN_DEFAULTS[chain]["conf_name"], f"{chain} has an empty conf name"
+
+
+def test_a_chain_with_neither_route_names_BOTH_of_them():
+    """Rule 14: the failure line has to name every route that was tried.
+
+    It said only "LTC_RPC_* in the environment" after the conf route existed,
+    which understates what was attempted and sends the reader to export three
+    variables they may not need.
+    """
+    recorder = _Recorder()
+    assert chain_balances.report_chain(recorder, "LTC", {}) is False
+    out = recorder.text()
+    assert "LTC_RPC_*" in out, out
+    assert "conf" in out, f"the conf route was tried and is not mentioned:\n{out}"
