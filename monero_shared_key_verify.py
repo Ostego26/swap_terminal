@@ -813,6 +813,17 @@ def load_shares(path: Path) -> dict:
         raise VerifyError(str(error)) from error
 
 
+#: What `--wait` the PRINTED sweep command carries. The parser's own default is 300s, and a
+#: command printed right after --open is aimed at an address that was funded MINUTES ago -- so
+#: 300s expires while the deposit is still inside Monero's 10-block lock, and the run ends
+#: saying "nothing UNLOCKED" about coins that were always going to arrive. Measured on the
+#: operator's host 2026-09-29: the faucet paid at block 2218209 with the tip at 2218215, six
+#: blocks into a ten-block lock, so the printed command would have timed out four blocks short.
+#:
+#: 1800s is ~15 blocks at Monero's 120s target, which clears the lock with margin. It is a
+#: CEILING on waiting, not a delay: the loop returns the moment the balance unlocks.
+SWEEP_WAIT_FOR_A_FRESH_DEPOSIT = 1800
+
 #: How far back --open rewinds. Stagenet targets 120s a block, so 1000 blocks is roughly 33
 #: hours -- comfortably longer than any handoff file is likely to sit between the GRC run that
 #: wrote it and the operator funding the address it names. It is a SCAN, not a wait: a thousand
@@ -880,7 +891,8 @@ def open_phase(console: Console, target: Target) -> int:
     return console.summary()
 
 
-def sweep_command(address: str, port: int, daemon: int | str, shares_path: Path) -> str:
+def sweep_command(address: str, port: int, daemon: int | str, shares_path: Path,
+                  wait_seconds: int = SWEEP_WAIT_FOR_A_FRESH_DEPOSIT) -> str:
     """The `--sweep` command line to finish the experiment, with EVERY argument it needs.
 
     THE DEFECT THIS FIXES, measured on the operator's stagenet run 2026-09-29. The two branches
@@ -907,7 +919,7 @@ def sweep_command(address: str, port: int, daemon: int | str, shares_path: Path)
     branch -- which is rule 8's two copies of one rule, in a line of output.
     """
     return (f"python3 monero_shared_key_verify.py --sweep {address} "
-            f"--port {port} --daemon {daemon} --shares-file {shares_path}")
+            f"--port {port} --daemon {daemon} --shares-file {shares_path} --wait {wait_seconds}")
 
 
 def print_plan(console: Console, port: int, shares_path: Path) -> int:

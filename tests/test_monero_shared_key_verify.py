@@ -631,6 +631,14 @@ def test_THE_PRINTED_SWEEP_COMMAND_CARRIES_EVERY_ARGUMENT_IT_NEEDS():
     assert "--port 38084" in line
     assert "--daemon node.monerodevs.org:38089" in line
     assert "--shares-file /home/op/xmr-stagenet-shared/shared-shares.json" in line
+    # AND --wait, because the parser's default of 300s expires inside Monero's 10-block lock.
+    # Measured 2026-09-29: the faucet paid at block 2218209 with the tip at 2218215 -- six
+    # blocks into a ten-block lock -- so the printed command would have timed out four blocks
+    # short and reported "nothing UNLOCKED" about coins that were always going to arrive.
+    assert f"--wait {harness.SWEEP_WAIT_FOR_A_FRESH_DEPOSIT}" in line
+    assert harness.SWEEP_WAIT_FOR_A_FRESH_DEPOSIT >= 1200, (
+        "it has to clear a 10-block lock at Monero's 120s target, with margin"
+    )
 
     assert DEFAULT_DAEMON_PORT == 28081, (
         "the regtest daemon port -- which is why omitting --daemon sent a stagenet sweep at a "
