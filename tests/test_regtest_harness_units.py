@@ -39,6 +39,7 @@ nothing else, and the harness's own step 8 still needs a node to prove the
 parts a stack machine cannot.
 """
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -1650,3 +1651,78 @@ def test_a_getnetworkinfo_answering_a_non_object_does_not_crash_the_run(monkeypa
     console = Console(total_steps=10, stream=StringIO())
     capabilities = probe_capabilities(console, resolve_chain_config("BTC"))
     assert capabilities["subversion"].startswith("(none: getnetworkinfo answered str, not an object")
+
+
+def test_AN_EXPECTED_REFUSAL_DOES_NOT_PRINT_A_TRACEBACK_ABOVE_ITS_OWN_OK():
+    """From the operator's BTC run, 2026-09-28. Step 8b passed and looked like a crash.
+
+        ERROR modules.atomic_btc_client: BTC RPC call `sendrawtransaction` failed: ...
+        Traceback (most recent call last):
+          ... eight lines ...
+        Exception: RPC Error: {'code': -26, 'message': 'mandatory-script-verify-flag-failed ...'}
+        OK    BTC 8b ... is REFUSED: got=[consensus] ...  expected=the node to refuse it
+
+    A refusal is the ENTIRE POINT of step 8 -- an opcode that never refuses is
+    indistinguishable from a no-op -- and the step scored OK. Rule 14 in its plainest form: a
+    step that did exactly what it was asked must not read as a failure, and an operator should
+    not have to work out which of two adjacent lines is the verdict.
+
+    THE TEXT SURVIVES, ONLY THE LEVEL AND THE STACK GO. Step 8's finding IS the wording:
+    `mandatory-script-verify-flag-failed` is consensus and `non-mandatory-script-verify-flag`
+    is relay policy, and scoring those the same is the overclaim the step exists to avoid. A
+    filter that swallowed the message would destroy the measurement it is tidying.
+    """
+    guard = steps.AnExpectedRefusalIsNotAnError()
+    record = logging.LogRecord(
+        name="modules.atomic_btc_client", level=logging.ERROR, pathname=__file__, lineno=1,
+        msg="BTC RPC call `sendrawtransaction` failed: mandatory-script-verify-flag-failed",
+        args=(), exc_info=(ValueError, ValueError("boom"), None),
+    )
+    assert guard.filter(record) is True, "the record is kept -- it is demoted, never dropped"
+    assert record.levelno == logging.INFO and record.levelname == "INFO"
+    assert record.exc_info is None and record.exc_text is None, "the stack is what cost the run"
+    assert "mandatory-script-verify-flag-failed" in record.msg, (
+        "the wording IS the finding; demoting must not lose it"
+    )
+    assert record.msg.startswith(steps.AnExpectedRefusalIsNotAnError.PREFIX), (
+        "and it says why it is not an error, so the demotion is not itself a silence"
+    )
+
+    below = logging.LogRecord(name="modules.htlc_rpc", level=logging.INFO, pathname=__file__,
+                              lineno=1, msg="refunding at nLockTime 677", args=(), exc_info=None)
+    assert guard.filter(below) is True and below.levelno == logging.INFO
+    assert below.msg == "refunding at nLockTime 677", "anything below ERROR is untouched"
+
+
+def test_WHICH_REFUND_EXPECTS_A_REFUSAL_IS_DERIVED_FROM_THE_TWO_HEIGHTS():
+    """Not a flag a caller passes. The two numbers already answer it exactly.
+
+    This started as `expecting_a_refusal=` on _attempt_real_refund(), which put that signature
+    at six arguments against ruff's ceiling of five -- and rule 12 says extract the decision
+    rather than suppress the count. Extracting it is the better design regardless: a refund
+    whose nLockTime is below the script's locktime cannot be valid, which is the whole content
+    of OP_CHECKLOCKTIMEVERIFY, so no caller can label step 8's attempt as step 9's by mistake.
+    """
+    assert steps.a_refusal_is_expected(677, 678) is True, "step 8: one block short"
+    assert steps.a_refusal_is_expected(678, 678) is False, "step 9: at the locktime, must succeed"
+    assert steps.a_refusal_is_expected(700, 678) is False, "and past it"
+
+
+def test_THE_FILTER_IS_REMOVED_HOWEVER_THE_CALL_ENDS():
+    """A filter left installed would quiet step 9's REAL failures for the rest of the run.
+
+    Step 9 is where a refusal is a FAIL, and it runs after step 8 on the same process and the
+    same root handlers. That is why the removal is in a `finally` and why this asserts through
+    an exception rather than only through the happy path.
+    """
+    root = logging.getLogger()
+    handler = logging.StreamHandler()
+    root.addHandler(handler)
+    try:
+        before = len(handler.filters)
+        with contextlib.suppress(RuntimeError), steps.a_refusal_is_the_expected_answer():
+            assert len(handler.filters) == before + 1, "installed for the scope"
+            raise RuntimeError("the call blew up rather than returning")
+        assert len(handler.filters) == before, "and off again even so"
+    finally:
+        root.removeHandler(handler)

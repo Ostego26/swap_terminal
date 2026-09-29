@@ -91,6 +91,8 @@ as a varint and 500,000 was enforced as 128,000,254.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -1648,6 +1650,91 @@ def _assert_spend_landed(run: Run, txid: str, key: RegtestKey, label: str, block
 # --------------------------------------------------------------------------
 
 
+class AnExpectedRefusalIsNotAnError(logging.Filter):
+    """Demote the client's own ERROR-with-stack while the harness is PROVOKING a refusal.
+
+    THE OUTPUT DEFECT THIS EXISTS FOR, from the operator's BTC run on 2026-09-28. Step 8b asks
+    the real refund_contract() to spend the timelock branch one block early, and a refusal is
+    the ENTIRE POINT of the step -- an opcode that never refuses is indistinguishable from a
+    no-op. What the screen showed was:
+
+        ERROR modules.atomic_btc_client: BTC RPC call `sendrawtransaction` failed: ...
+        Traceback (most recent call last):
+          File ".../atomic_btc_client.py", line 250, in rpc_call
+          ...
+        Exception: RPC Error: {'code': -26, 'message': 'mandatory-script-verify-flag-failed ...'}
+        OK    BTC 8b ... is REFUSED: got=[consensus] ... expected=the node to refuse it
+
+    Eight lines of traceback and the word ERROR, immediately above the OK they produced. Rule
+    14 in its plainest form: a step that did exactly what it was supposed to must not look like
+    a crash. The operator reading that has to work out which of the two lines is the verdict.
+
+    NOT FIXED IN rpc_failure_report(), and that distinction is the whole design. A rejected
+    transaction reaching a REAL caller should be as loud as it is now -- louder, if anything.
+    What makes this one quiet is not the error, it is the CALLER: this harness asked for it.
+    So the scope is one call, opened by the harness, and the record's own text survives at
+    INFO where a reader can still see which refusal arrived.
+
+    THE TEXT IS NEVER DROPPED, only the level and the stack. Step 8's finding is the WORDING of
+    the refusal -- `mandatory-script-verify-flag-failed` is consensus and
+    `non-mandatory-script-verify-flag` is relay policy, and scoring those the same is the
+    overclaim the step exists to avoid -- so a filter that swallowed the message would destroy
+    the measurement it is tidying.
+    """
+
+    PREFIX = "the harness asked for this refusal, so it is not an error here -- "
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        record.levelno = logging.INFO
+        record.levelname = "INFO"
+        record.msg = f"{self.PREFIX}{record.msg}"
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
+@contextlib.contextmanager
+def a_refusal_is_the_expected_answer():
+    """Install the filter for one call, and take it off again however that call ends.
+
+    ON THE HANDLERS RATHER THAN ON A LOGGER, because logging applies a logger's filters only to
+    records logged THROUGH that logger -- a record from `modules.htlc_rpc` never passes a
+    filter set on `modules.atomic_btc_client`. Handler filters see every record that reaches
+    the handler, whichever module emitted it, which is what this needs: the refusal can come
+    from either of those two and from the LTC client as well.
+    """
+    guard = AnExpectedRefusalIsNotAnError()
+    handlers = list(logging.getLogger().handlers)
+    for handler in handlers:
+        handler.addFilter(guard)
+    try:
+        yield
+    finally:
+        # REMOVED IN A finally, because a filter left installed would quiet the REAL failures
+        # for the rest of the run -- including step 9's, where a refusal is a FAIL.
+        for handler in handlers:
+            handler.removeFilter(guard)
+
+
+def a_refusal_is_expected(nlocktime: int, script_locktime: int) -> bool:
+    """Is this refund the EARLY one -- the attempt the harness expects the chain to refuse?
+
+    DERIVED, NOT PASSED, and that is deliberate. This began as an `expecting_a_refusal=` keyword
+    on _attempt_real_refund(), which put the signature at six arguments against ruff's ceiling
+    of five -- and rule 12 is explicit that the answer to that is to extract the decision rather
+    than suppress the count. Extracting it turned out to be the better design anyway: the
+    question has an exact answer in the two numbers already being passed, so a caller cannot
+    get it wrong, and the one place it is decided can be called with a pair of ints.
+
+    A refund whose nLockTime is BELOW the script's locktime cannot be valid -- that is the
+    whole content of OP_CHECKLOCKTIMEVERIFY -- so it is step 8's attempt. One at or above it is
+    step 9's, where a refusal is a FAIL and keeps every line of its stack.
+    """
+    return nlocktime < script_locktime
+
+
 def _attempt_real_refund(run: Run, client, contract: Contract, outpoint: Outpoint, nlocktime: int) -> tuple[str | None, str]:
     """Drive the REAL refund_contract(). Returns (txid or None, the failure text).
 
@@ -1673,15 +1760,21 @@ def _attempt_real_refund(run: Run, client, contract: Contract, outpoint: Outpoin
         f"calling the REAL {type(client).__name__}.refund_contract(nLockTime={nlocktime}, "
         f"script locktime={contract.locktime}) -- both heights, never durations"
     )
+    # QUIET ONLY WHEN THE HARNESS ASKED FOR THE REFUSAL. Step 9 passes False and its failures
+    # stay as loud as they were -- there a refusal is a FAIL, and the stack is how it gets
+    # diagnosed.
+    quiet = (a_refusal_is_the_expected_answer()
+             if a_refusal_is_expected(nlocktime, contract.locktime) else contextlib.nullcontext())
     try:
-        txid = client.refund_contract(
-            contract_txid=outpoint.txid,
-            contract_vout=outpoint.vout,
-            redeem_script=contract.redeem_script,
-            locktime=nlocktime,
-            refund_privkey=contract.refund.wif,
-            refund_address=contract.refund.address,
-        )
+        with quiet:
+            txid = client.refund_contract(
+                contract_txid=outpoint.txid,
+                contract_vout=outpoint.vout,
+                redeem_script=contract.redeem_script,
+                locktime=nlocktime,
+                refund_privkey=contract.refund.wif,
+                refund_address=contract.refund.address,
+            )
     except Exception as exc:  # noqa: BLE001 -- checked: this is a harness, and the REASON is the measurement. The three clients raise a bare Exception for an RPC error, requests' own HTTPError for a transport failure and ValueError for a refused build, and step 8 needs the text of whichever it was in order to classify the refusal. Narrowing this would drop the case that has not happened yet, which on a nine-step harness means a bare traceback instead of a labeled FAIL. Nothing here treats the failure as a result: the caller gets None and says so.
         return None, str(exc)
     return txid, ""
@@ -1931,6 +2024,8 @@ def step_9_refund_after_expiry(run: Run, client, contract: Contract, outpoint: O
         OK if height >= contract.locktime else FAIL,
     )
 
+    # STEP 9 EXPECTS SUCCESS, so a failure here is a FAIL and keeps its stack --
+    # a_refusal_is_expected() reads False from these two numbers, without being told.
     txid, failure = _attempt_real_refund(run, client, contract, outpoint, contract.locktime)
     outcome.real_refund_contract = run.check(
         "9a REAL refund_contract() after expiry",
