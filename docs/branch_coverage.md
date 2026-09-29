@@ -60,12 +60,48 @@ v5.5.1.0. Full record: `docs/gridcoin_adaptor_join_2026_09_28.md`.
 |---|---|---|
 | hashlock spend, BTC regtest | SPENT | `--chain btc` |
 | hashlock spend, LTC regtest | SPENT | `--chain ltc` |
-| refund after expiry, BTC/LTC | SPENT | `step_9_refund_after_expiry`, real `refund_contract()` |
+| refund after expiry, BTC/LTC | SPENT | `step_9_refund_after_expiry`, real `refund_contract()`. BTC `7cc92abdbad07a99…` and LTC `59ed52a9f4255332…`, both 2026-09-29 |
+| CLTV refuses an early refund, BTC | **ENFORCED 2026-09-29** | OK=37 FAIL=0. 8b's MEMPOOL said `mandatory-script-verify-flag-failed (Locktime requirement not satisfied)` at height 677 with BIP65 active from 1; 8c's `generateblock` refused the block. Both layers, and the mempool's own wording already said consensus |
+| CLTV refuses an early refund, LTC | **ENFORCED 2026-09-29, BY A DIFFERENT PATH** | OK=38 FAIL=0. 8b's mempool said `non-mandatory-script-verify-flag (Locktime requirement not satisfied)` -- CLTV RAN and refused, but on Litecoin Core v0.21.4 it is not in the flag set the mempool calls mandatory, so that refusal alone is RELAY POLICY. 8c is what establishes consensus here: `generateblock` refused with `TestBlockValidity failed`. See the note below -- 8c is load-bearing on LTC in a way it is not on BTC |
 | hashlock spend, GRC | SPENT | three live swaps, `docs/atomic_swap_runs_2026_09_27.md` |
 | **refund after expiry, GRC** | **NONE** | `--chain` offers `btc`, `ltc`, `both`. **Gridcoin is not an option and never has been.** See §5 |
 | CLTV executes on GRC | **ENFORCED 2026-09-29** | `grc_htlc_verify.py` OK=11 FAIL=0. Step 6 REFUSED a FINAL refund (nLockTime 3296544 = tip, so `IsFinalTx` passed) against a script locktime of 3296548; step 8 ACCEPTED the same outpoint, same script, same fee, with nLockTime 3296548. The daemon logged `ConnectInputs() : 23148431f9 VerifySignature failed` -- that txid IS step 6's, and `validation.cpp:669` is reached only when the script fails under CONSENSUS flags alone. See §5b |
 | CLTV allows a refund AT the locktime, GRC | SPENT 2026-09-28 | `9495082ef304c4ca…` spends the P2SH `8468aa40f9:0` with nLockTime 3296363 and sequence 0xfffffffe, paying 0.13 GRC to the wallet. Re-established 2026-09-29 by step 8, `ee9dc216bf055b22…`, through the real `refund_contract()` |
 | ~~CLTV executes on GRC~~ (the old grade) | ~~NONE~~ | the three GRC swaps took the HASHLOCK branch; `OP_CHECKLOCKTIMEVERIFY` sits in the `OP_ELSE` and never ran. What is established is that Gridcoin ACCEPTS a script CONTAINING it |
+
+### The BTC/LTC flag-set difference, because the two runs are not interchangeable
+
+Same script, same harness, same step, two different gradings of the same refusal:
+
+    BTC (Core 28.1)        8b mempool: mandatory-script-verify-flag-failed (Locktime requirement
+                                       not satisfied)
+    LTC (Core v0.21.4)     8b mempool: non-mandatory-script-verify-flag (Locktime requirement
+                                       not satisfied)
+
+BOTH PARENTHETICALS NAME CLTV. "Locktime requirement not satisfied" is `SCRIPT_ERR_UNSATISFIED_LOCKTIME`,
+which only `OP_CHECKLOCKTIMEVERIFY` produces, so on both chains the opcode ran and refused. That
+is not the part that differs.
+
+WHAT DIFFERS IS WHICH LAYER OWNS THE REFUSAL. `non-mandatory` means the spend was re-checked
+under the daemon's MANDATORY flag set and PASSED there -- so on that daemon this node declined to
+relay it while the chain had not refused it, and a miner not applying that policy could have
+included an early refund. The harness says exactly this at the step and does not score the two
+the same, which is why the wording is worth keeping rather than collapsing into "refused".
+
+So step 8c -- asking `generateblock` to MINE the early refund -- is LOAD-BEARING ON LTC and
+merely corroborating on BTC. It refused with `TestBlockValidity failed: block-validation-failed`,
+which is the chain's own validity check.
+
+RECORDED AS A LIMIT: that message is GENERIC. It says the block was invalid and does not name the
+locktime, so on LTC the consensus claim rests on a refusal that does not state its reason, where
+on BTC and on Gridcoin the reason was named. Litecoin's debug.log would name it the way Gridcoin's
+did for `23148431f9`, and that grep has not been run. NOT CHECKED is not the same as checked, and
+the sentence "LTC enforces CLTV at consensus" is therefore one grade weaker here than the BTC and
+GRC versions of it.
+
+Which is also a reason not to read Litecoin's MANDATORY set from memory: it was not read for this
+note, and whether v0.21.4 omits `SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY` from it -- or whether
+something else in that path explains the grading -- is unestablished rather than known.
 
 ## 3. XRP escrow -- `xrp_htlc_escrow.py --run`
 
