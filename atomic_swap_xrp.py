@@ -1510,7 +1510,7 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0915 -- checked: this is the swap'
     script_client, leg_keys = prepared
 
     ctx = SwapContext(
-        console=console, grc=grc, submit_xrp=submit_xrp,
+        console=console, chain=chain, grc=grc, submit_xrp=submit_xrp,
         secret=secret, secret_hash=secret_hash, condition=condition,
         a_xrp=a_xrp, a_xrp_secret=a_xrp_secret, b_xrp=b_xrp, b_xrp_secret=b_xrp_secret,
         a_grc=a_grc, b_grc=b_grc,

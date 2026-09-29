@@ -10,6 +10,7 @@ Live-safe: yes
 from __future__ import annotations
 
 import argparse
+import ast
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -219,4 +220,55 @@ def test_the_dry_run_numbers_the_steps_BY_DIRECTION(capsys):
     assert "step 6 would fund the GRC leg" in reverse, (
         "chain-first funds the script leg FIRST; numbering it 7 would describe the other "
         "direction's exposure to an operator about to commit to this one"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The gap between the dry run and --run, which no test covered until it bit.
+# ---------------------------------------------------------------------------
+def test_MAIN_PASSES_EVERY_FIELD_SwapContext_REQUIRES():
+    """THE DRY RUN CANNOT CATCH THIS, WHICH IS THE WHOLE REASON IT IS A TEST.
+
+    Measured 2026-09-29, on the operator's first --run of this path:
+
+        TypeError: SwapContext.__init__() missing 1 required positional argument: 'chain'
+
+    `chain` was added to SwapContext when the operator-facing lines were made per-chain,
+    and never added to the construction in main(). The dry run passed seven checks and
+    returned BEFORE the context is built -- so a clean dry run said nothing at all about
+    it, and was taken as evidence that --run was safe.
+
+    WHERE IT LANDED WAS LUCK. The construction sits after the passphrase check and the key
+    minting but before either leg is funded, so nothing moved. Two lines further down and
+    it would have crashed with a live XRP escrow.
+
+    CHECKED STRUCTURALLY RATHER THAN BY CONSTRUCTING ONE. A SwapContext needs a console, a
+    submitter, an adapter, a client, four addresses and two secrets; a test that built one
+    would be mostly fixture, and the fixture would drift from main()'s real call. Comparing
+    the dataclass's fields against the keywords main() actually passes is the exact defect,
+    with nothing in between to get stale.
+    """
+    source = Path(__file__).resolve().parent.parent / "atomic_swap_xrp.py"
+    tree = ast.parse(source.read_text())
+
+    context_class = next(n for n in tree.body
+                         if isinstance(n, ast.ClassDef) and n.name == "SwapContext")
+    required = [n.target.id for n in context_class.body if isinstance(n, ast.AnnAssign)]
+
+    constructions = [n for n in ast.walk(tree)
+                     if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "SwapContext"]
+    assert len(constructions) == 1, (
+        f"expected exactly one SwapContext construction, found {len(constructions)} -- a second "
+        f"one is a second place that can fall out of step with the fields"
+    )
+    passed = {keyword.arg for keyword in constructions[0].keywords}
+
+    assert not [field for field in required if field not in passed], (
+        f"SwapContext requires {[f for f in required if f not in passed]} and main() does not "
+        f"pass it. This raises TypeError at --run time, AFTER the wallet has been opened and "
+        f"keys minted, and the dry run returns before this line so it cannot catch it"
+    )
+    assert not [name for name in passed if name not in required], (
+        f"main() passes {[n for n in passed if n not in required]}, which SwapContext does not "
+        f"declare -- also a TypeError, in the other direction"
     )
