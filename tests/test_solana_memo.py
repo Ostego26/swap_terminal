@@ -133,3 +133,46 @@ def test_THE_PROGRAM_IDS_ARE_DECLARED_UNVERIFIED_IN_THE_SOURCE():
               / "solana_memo.py").read_text(encoding="utf-8")
     assert "NOT VERIFIED FROM THIS MACHINE" in source
     assert "--hunt-memo" in source, "and it names the instrument that would settle it"
+
+
+def test_THE_INSTRUMENT_solana_memo_POINTS_AT_ACTUALLY_EXISTS():
+    """`--hunt-memo` is named in chains/solana_memo.py as what settles the program ids.
+
+    It was named there before it was built, on 2026-09-29 -- a pointer to an instrument that
+    did not exist, which is the same defect shape this session spent the day removing from
+    other output: a screen (or a docstring) making a claim the tree does not support.
+
+    So this asserts the flag is real, and that the hunt is NOT folded into the exit code.
+    Finding no memo traffic is a fact about the cluster rather than about the adapter, and
+    print_summary's failures mean "a method or field the adapter depends on did not match a
+    real server". A quiet cluster must never read as a broken adapter.
+    """
+    root = Path(__file__).resolve().parent.parent
+    check = (root / "solana_chain_check.py").read_text(encoding="utf-8")
+    assert '"--hunt-memo"' in check, "the flag chains/solana_memo.py points at"
+    assert "def hunt_memo(" in check
+    # AND THE CALL SITE, which the first version of this test left unpinned -- so replacing
+    # `if args.hunt_memo > 0:` with `if False:` kept every assertion green while the flag did
+    # nothing. A defined-but-never-called instrument is the same lie as a named-but-absent one,
+    # which is the defect this whole test exists for.
+    assert "if args.hunt_memo > 0:" in check
+    assert "hunt_memo(adapter, args.hunt_memo)" in check
+
+    hunt = check[check.index("def hunt_memo("):check.index("def _network_line(")]
+    # COMMENTS AND THE DOCSTRING STRIPPED FIRST. The docstring EXPLAINS why `failures` is not
+    # touched here, so a naive substring check fails on the explanation rather than on the
+    # defect -- the same trap as pinning a dead branch that a comment quotes. Rule 1 wants the
+    # reasoning next to the code; a test has to read past it.
+    code = "\n".join(
+        line for line in hunt.splitlines()
+        if not line.strip().startswith("#") and '"' not in line.strip()[:1])
+    body = code[code.index("confirmed = False"):] if "confirmed = False" in code else code
+    assert "failures" not in body, (
+        "the hunt must not feed the exit code -- a cluster with no memo traffic is not a "
+        "failing adapter"
+    )
+    assert "NOT CONFIRMED" in hunt, "and it says so when nothing was read back"
+    assert "unreadable" in hunt, (
+        "with the denominator: 'no memo over 20 read' and 'no memo over 20 unreadable' are "
+        "different facts (rule 3)"
+    )

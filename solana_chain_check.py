@@ -72,6 +72,7 @@ if str(APP_ROOT) not in sys.path:
 # suppressions claim and what a reader can check from these lines.
 from chains.solana import SolanaAdapter, SolanaRPCError  # noqa: E402
 from chains.solana_address import describe_address  # noqa: E402
+from chains.solana_memo import MEMO_PROGRAM_IDS, deposit_tag_from, memo_strings_in  # noqa: E402
 from chains.solana_units import (  # noqa: E402
     ACCOUNT_STORAGE_OVERHEAD_BYTES,
     LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
@@ -239,6 +240,12 @@ def main() -> int:
     parser.add_argument("--address", default="", help="a wallet address to inspect (defaults to SOL_HOT_WALLET)")
     parser.add_argument("--mint", default="", help="an SPL mint to inspect (defaults to SOL_SPL_MINT)")
     parser.add_argument("--limit", type=int, default=10, help="how many recent signatures to read for the address")
+    parser.add_argument(
+        "--hunt-memo", type=int, default=0, metavar="N",
+        help="also read N recent transactions from the Memo program itself and check that "
+             "chains/solana_memo.py recognizes them (read-only; settles the program id "
+             "without sending anything)",
+    )
     args = parser.parse_args()
 
     rpc = dict(Config.RPC["SOL"])
@@ -259,7 +266,102 @@ def main() -> int:
     check_rent(adapter, run)
     check_mint(adapter, run)
     check_address(adapter, address, args.limit, run)
+    if args.hunt_memo > 0:
+        hunt_memo(adapter, args.hunt_memo)
     return print_summary(failures, time.monotonic() - started)
+
+
+def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
+    """Read real Memo-program transactions and check our parser recognizes them. Read-only.
+
+    WHY THIS EXISTS, AND WHY IT IS NOT A TEST. `chains/solana_memo.py` names two program ids
+    that were WRITTEN rather than measured -- nothing in the container they were written in can
+    reach a Solana cluster. Its header says so, and a test asserts the admission is still there.
+    But an admission is not a measurement, and the failure it is admitting to is specific: if
+    the id is wrong, `memo_strings_in()` returns nothing on every real deposit, and a zero
+    match rate reads as "nobody uses memos" rather than as "the constant is wrong". Both look
+    like silence.
+
+    So this asks the cluster. It reads recent signatures FOR THE MEMO PROGRAM ACCOUNT, pulls
+    those transactions, and runs the real parser over them. Somebody else's memo proves the id
+    as well as our own would -- the same principle as xrp_chain_check.py's --hunt-tag, which
+    settled the DestinationTag spelling off a stranger's payment.
+
+    NOT FOLDED INTO THE EXIT CODE, deliberately. Finding no memo traffic says something about
+    the cluster, not about our code, and `print_summary`'s failures are for "a method or field
+    the adapter depends on did not match a real server". A cluster with no recent memos must not
+    read as a broken adapter. What it returns is whether the id was CONFIRMED, so a caller can
+    print the difference.
+
+    THE ENCODING IS REPORTED RATHER THAN ASSUMED. `memo_strings_in()` reads the jsonParsed
+    shape only, and a cluster that answers with base58-encoded instructions would produce zero
+    memos for a reason that has nothing to do with the program id. This prints which encoding
+    came back, so those two are never confused.
+    """
+    print(flush=True)
+    print(f"MEMO PROGRAM  (reading up to {how_many} recent transaction(s) of the Memo program "
+          f"itself; read-only, sends nothing)", flush=True)
+    print("  WHY: chains/solana_memo.py names two program ids that were WRITTEN, not measured.", flush=True)
+    print("  If the id is wrong, every real deposit parses to no memo -- which looks exactly", flush=True)
+    print("  like a cluster nobody sends memos on. This tells those two apart.", flush=True)
+
+    confirmed = False
+    for program in MEMO_PROGRAM_IDS:
+        done = step(f"getSignaturesForAddress({program[:12]}...)", "recent memo-program traffic")
+        try:
+            signatures = adapter.call(
+                "getSignaturesForAddress", program, {"limit": max(1, min(how_many, 1000))})
+        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic. The failure is named and printed, and this hunt is deliberately outside the exit code
+            done(f"{type(exc).__name__}: {exc}", ok=False)
+            continue
+        entries = list(signatures or [])
+        done(f"{len(entries)} signature(s)")
+        if not entries:
+            print("    (none) -- no recent traffic for this id. That is NOT evidence the id is", flush=True)
+            print("    wrong, and NOT evidence it is right: this cluster may simply be quiet.", flush=True)
+            continue
+        seen, unread, parsed_shape = 0, 0, "(none read)"
+        for entry in entries[:how_many]:
+            signature = entry.get("signature")
+            if not signature:
+                continue
+            try:
+                transaction = adapter.call(
+                    "getTransaction", signature,
+                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0})
+            except Exception as exc:  # noqa: BLE001 -- checked: one unreadable transaction must not end the hunt, and it is REPORTED rather than skipped in silence -- an unread transaction and a memo-less one must not both show up as nothing
+                unread += 1
+                print(f"    {signature[:16]}...  could not be read: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+                continue
+            instructions = ((transaction or {}).get("transaction", {})
+                            .get("message", {}) or {}).get("instructions") or []
+            parsed_shape = ("jsonParsed (parsed present)"
+                            if any(isinstance(i, dict) and "parsed" in i for i in instructions)
+                            else "NOT jsonParsed -- instructions came back encoded")
+            memos = memo_strings_in(transaction)
+            if memos:
+                seen += len(memos)
+                tag, why = deposit_tag_from(transaction)
+                print(f"    {signature[:16]}...  {len(memos)} memo(s)  "
+                      f"tag={tag if tag is not None else 'none'}  <- {why}", flush=True)
+        # THE DENOMINATOR, because a zero above is ambiguous without it: no memo found over
+        # twenty transactions read is a different fact from no memo found over twenty that
+        # could not be read at all (rule 3 -- state what it was counted out of).
+        print(f"    read {min(len(entries), how_many) - unread} transaction(s), "
+              f"{unread} unreadable; encoding received: {parsed_shape}", flush=True)
+        if seen:
+            confirmed = True
+            print(f"    CONFIRMED: {program} is a real Memo program id and", flush=True)
+            print("    chains/solana_memo.memo_strings_in() reads its instructions.", flush=True)
+        else:
+            print("    read transactions for this id and found NO memo our parser recognizes.", flush=True)
+            print("    If the encoding line above says NOT jsonParsed, that is the cause and the", flush=True)
+            print("    program id is still unsettled. If it says jsonParsed, the id is wrong.", flush=True)
+    if not confirmed:
+        print("  NOT CONFIRMED: no memo was read back. The ids in chains/solana_memo.py remain", flush=True)
+        print("  WRITTEN RATHER THAN MEASURED, exactly as that file says.", flush=True)
+    return confirmed
 
 
 def _network_line(adapter: SolanaAdapter) -> str:
