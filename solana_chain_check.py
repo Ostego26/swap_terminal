@@ -73,7 +73,11 @@ if str(APP_ROOT) not in sys.path:
 # hoisting them would break the import it enables. That is what the E402
 # suppressions claim and what a reader can check from these lines.
 from chains.solana import SolanaAdapter, SolanaRPCError  # noqa: E402
-from chains.solana_address import SOLANA_DEVNET_ACCOUNT, describe_address  # noqa: E402
+from chains.solana_address import (  # noqa: E402
+    SOLANA_DEVNET_ACCOUNT,
+    describe_address,
+    is_valid_address,
+)
 from chains.solana_memo import (  # noqa: E402
     MEASURED_MEMO_PROGRAM_IDS,
     MEMO_PROGRAM_IDS,
@@ -82,6 +86,7 @@ from chains.solana_memo import (  # noqa: E402
 )
 from chains.solana_units import (  # noqa: E402
     ACCOUNT_STORAGE_OVERHEAD_BYTES,
+    BALANCE_COMMITMENT,
     LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
     RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS,
     RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS,
@@ -263,6 +268,54 @@ def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> Cred
         credits=credited[0] if credited else 0,
         refused=sum(d.credits for d in adapter.unattributable_drops),
     )
+
+
+def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
+    """Ask the cluster for a wallet that actually holds `mint`. Read-only. Returns (owner, why).
+
+    WHY THIS EXISTS. `_spl_credits` is the last reader in this adapter with no real response
+    behind it, and it cannot be proven by pointing at an account that holds none of the token:
+    it selects token balances by owner AND mint BEFORE touching an amount, so over an account
+    with no token account it returns [] without ever reading
+    `entry["uiTokenAmount"]["decimals"]` or `["amount"]`. Those are the field names that would
+    lose an SPL deposit silently. The operator's 2026-09-30 run said exactly that -- "PARTLY
+    exercised ... WITHOUT decoding an amount" -- and the only next step was for a human to go
+    and find an address holding the token.
+
+    That is a step the cluster can take instead. getTokenLargestAccounts names the biggest token
+    ACCOUNTS for a mint; getAccountInfo on one of those, parsed, names the WALLET that owns it.
+    Two reads, nothing signed, nothing sent, and the answer is somebody else's account -- which
+    proves the reader exactly as well as our own would, on the same principle as --hunt-memo.
+
+    THE FIELD NAMES BELOW ARE FROM DOCUMENTATION AND HAVE NOT BEEN MEASURED (rule 17). No
+    Solana cluster is reachable from the container this was written in -- re-checked 2026-09-30,
+    api.devnet.solana.com still answers 403 through the proxy. So this helper carries the same
+    risk the rest of the file was written with, with one difference that makes it acceptable: a
+    wrong field name here makes the HELPER fail and say so, and cannot credit anything or
+    misreport what was proven. It refuses rather than guessing at every step.
+    """
+    largest = adapter.call("getTokenLargestAccounts", mint, {"commitment": BALANCE_COMMITMENT})
+    holders = ((largest or {}).get("value") or [])
+    if not holders:
+        return "", (f"getTokenLargestAccounts returned no holders for {mint}, so no account on "
+                    f"this cluster holds it. Nothing to point at.")
+
+    for holder in holders:
+        token_account = holder.get("address")
+        if not token_account:
+            continue
+        info = adapter.call("getAccountInfo", token_account,
+                            {"encoding": "jsonParsed", "commitment": BALANCE_COMMITMENT})
+        parsed = (((info or {}).get("value") or {}).get("data") or {}).get("parsed") or {}
+        owner = ((parsed.get("info") or {}).get("owner") or "")
+        if owner and is_valid_address(owner):
+            return owner, (f"FOUND by asking the cluster: token account {token_account} holds "
+                           f"{holder.get('uiAmountString', '?')} and is owned by this wallet. "
+                           f"Two reads, nothing sent.")
+    return "", (f"getTokenLargestAccounts named {len(holders)} token account(s) for {mint} and "
+                f"none of them reported a readable `owner` under data.parsed.info -- which is a "
+                f"finding about the response shape, not about the mint. The field names in "
+                f"find_a_holder() were written from documentation and never measured.")
 
 
 def resolve_address(explicit: str, hot_wallet: str) -> tuple[str, str]:
@@ -468,6 +521,13 @@ def main() -> int:
     parser.add_argument("--mint", default="", help="an SPL mint to inspect (defaults to SOL_SPL_MINT)")
     parser.add_argument("--limit", type=int, default=10, help="how many recent signatures to read for the address")
     parser.add_argument(
+        "--find-holder", action="store_true",
+        help="ask the cluster for a wallet that actually holds --mint and check THAT one. "
+             "Read-only: getTokenLargestAccounts then getAccountInfo. This is what proves "
+             "_spl_credits decodes a real amount, which an account holding none of the token "
+             "cannot do.",
+    )
+    parser.add_argument(
         "--hunt-memo", type=int, default=0, metavar="N",
         help="also read N recent transactions from the Memo program itself and check that "
              "chains/solana_memo.py recognizes them (read-only; settles the program id "
@@ -487,6 +547,33 @@ def main() -> int:
         return 1
 
     adapter = SolanaAdapter(**rpc)
+    # ASKED AFTER THE ADAPTER EXISTS AND BEFORE THE SECTIONS RUN, so the banner has already
+    # printed the address it was going to use and this prints the override with its reason.
+    # Rule 14: a value that decides the answer is echoed next to the answer, and a DIFFERENT
+    # account than the banner named would otherwise be read silently.
+    if args.find_holder:
+        print(flush=True)
+        if not rpc.get("mint"):
+            print("  --find-holder needs --mint: it looks for a wallet holding a TOKEN, and "
+                  "native SOL has no holders to look up.", flush=True)
+            return 1
+        print(f"  --find-holder: asking the cluster who holds {rpc['mint']} (read-only)", flush=True)
+        try:
+            found, why = find_a_holder(adapter, rpc["mint"])
+        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic helper whose field names are unmeasured (see find_a_holder). The failure is PRINTED and the run stops with a non-zero exit rather than falling back to an address that proves nothing.
+            print(f"  that lookup FAILED: {type(exc).__name__}: {exc}", flush=True)
+            print("  the field names in find_a_holder() were written from documentation and "
+                  "never measured -- this is the finding, not a crash.", flush=True)
+            return 1
+        print(f"  {why}", flush=True)
+        if not found:
+            return 1
+        # ONLY `address` IS REASSIGNED. The first version of this also set `address_why`, which
+        # nothing reads after print_banner() has run -- dead on arrival (rule 9), and ruff does
+        # not flag a rebind of a name that WAS used earlier. The reason is printed on its own
+        # line instead, which is what the banner's version of it was for.
+        address = found
+        print(f"  reading {address} instead of the address in the banner", flush=True)
     failures: list[str] = []
     run = make_runner(failures)
     check_cluster(adapter, run)

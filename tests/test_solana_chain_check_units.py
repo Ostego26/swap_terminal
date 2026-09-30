@@ -57,6 +57,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     _network_line,
     check_rent,
     credit_path_lines,
+    find_a_holder,
     hunt_one_program_id,
     make_runner,
     memo_status_lines,
@@ -1377,3 +1378,133 @@ def test_the_native_line_does_not_claim_a_call_the_native_path_never_makes():
         "getAccountInfo is never called without a mint, so the native line must not name it"
     )
     assert "_native_credits" in native, "name the reader, which is what was actually exercised"
+
+
+# ---------------------------------------------------------------------------
+# --find-holder: THE LAST UNPROVEN READER, WITHOUT A HUMAN HUNTING FOR AN ADDRESS.
+#
+# The operator's --mint run ended "PARTLY exercised ... WITHOUT decoding an
+# amount", and the only next step was for somebody to find a wallet holding
+# wrapped SOL. The cluster can answer that: getTokenLargestAccounts names the
+# biggest token accounts for a mint, getAccountInfo on one names its owner.
+#
+# THE FIELD NAMES ARE FROM DOCUMENTATION AND UNMEASURED. api.devnet.solana.com
+# still answers 403 through this container's proxy -- re-checked 2026-09-30, not
+# assumed from the 2026-09-25 measurement. So these tests pin the REFUSALS as
+# hard as the happy path: a wrong field name has to make the helper say so.
+# ---------------------------------------------------------------------------
+
+_A_HOLDER = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+# NAMED WITHOUT THE WORD "token" ON PURPOSE. As `_A_HOLDING_ACCOUNT` this tripped ruff's S105
+# ("possible hardcoded password"), because the rule matches a name containing `token` assigned a
+# string literal. It is a public base58 address and a `noqa` would have been defensible -- but
+# rule 19 says a suppression is a claim you checked, and there is nothing to check here: the
+# name was just unlucky. Renaming removes the finding instead of asserting past it.
+_A_HOLDING_ACCOUNT = "FDhqCrFJki8JAg8qo9hzFoPuPUpBth4fTzgSjiZR2Ujp"
+_A_MINT = "So11111111111111111111111111111111111111112"
+
+
+def test_find_a_holder_returns_the_WALLET_and_not_the_token_account():
+    """THE DISTINCTION THAT MAKES THIS WORK AT ALL.
+
+    getTokenLargestAccounts names token ACCOUNTS. find_deposits_to_address matches on
+    `owner == address` in the transaction's token balances, so handing it a token account would
+    match nothing -- the same "PARTLY exercised" dead end, reached by a longer route. The owner
+    comes from getAccountInfo's parsed data.
+    """
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": {"value": [{"address": _A_HOLDING_ACCOUNT,
+                                               "uiAmountString": "12.5"}]},
+        "getAccountInfo": {"value": {"data": {"parsed": {"info": {"owner": _A_HOLDER}}}}},
+    })
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == _A_HOLDER
+    assert found != _A_HOLDING_ACCOUNT, "a token account is not a wallet"
+    assert _A_HOLDING_ACCOUNT in why, "say which holding account led there"
+    assert "12.5" in why, "and how much it holds, so the reader has something to decode"
+    assert "nothing sent" in why
+
+
+def test_a_mint_nobody_holds_says_so_rather_than_returning_an_address():
+    """An empty value list is an answer about the mint, and it is not an error."""
+    adapter = _seeded_adapter({"getTokenLargestAccounts": {"value": []}})
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == ""
+    assert "no holders" in why
+    assert _A_MINT in why
+
+
+def test_an_UNREADABLE_owner_is_reported_as_a_RESPONSE_SHAPE_finding():
+    """THE REFUSAL THAT MATTERS, because these field names were never measured.
+
+    If `data.parsed.info.owner` is not where the owner lives on a real cluster, the helper must
+    say that it could not read it -- naming the path it looked under -- rather than returning
+    nothing that reads like "no holders". The two are different findings and only one of them is
+    about our code.
+
+    MUTATION: return ("", "no holders") for this case and it becomes indistinguishable from an
+    unheld mint, which is how a wrong field name would hide as a fact about the chain.
+    """
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": {"value": [{"address": _A_HOLDING_ACCOUNT}]},
+        "getAccountInfo": {"value": {"data": {"parsed": {"info": {"authority": _A_HOLDER}}}}},
+    })
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == ""
+    assert "data.parsed.info" in why, "name the path it looked under"
+    assert "written from documentation and never measured" in why
+    assert "not about the mint" in why
+    assert "no holders" not in why
+
+
+def test_it_walks_PAST_a_holder_whose_owner_cannot_be_read():
+    """One unreadable entry must not abandon the lookup.
+
+    MUTATION: return on the first entry and a single malformed row hides every good one behind
+    it -- which over a mint with many holders is the difference between working and not.
+    """
+    def account_info(holding_account, _config):
+        if holding_account == "UNREADABLE":
+            return {"value": {"data": {"parsed": {"info": {}}}}}
+        return {"value": {"data": {"parsed": {"info": {"owner": _A_HOLDER}}}}}
+
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": {"value": [{"address": "UNREADABLE"},
+                                              {"address": _A_HOLDING_ACCOUNT}]},
+        "getAccountInfo": account_info,
+    })
+    found, _why = find_a_holder(adapter, _A_MINT)
+    assert found == _A_HOLDER
+
+
+def test_an_owner_that_is_not_a_valid_address_is_refused():
+    """is_valid_address on the way out, because the next thing done with it is an RPC call.
+
+    A garbage owner would be passed to find_deposits_to_address, which raises SolanaAddressError
+    -- readable, but it would report as a failure of the deposit reader rather than of this
+    lookup. Refusing here keeps the finding where it belongs.
+    """
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": {"value": [{"address": _A_HOLDING_ACCOUNT}]},
+        "getAccountInfo": {"value": {"data": {"parsed": {"info": {"owner": "not-an-address"}}}}},
+    })
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == ""
+    assert "readable `owner`" in why
+
+
+def test_find_holder_without_a_mint_refuses_and_exits_nonzero(monkeypatch, capsys):
+    """Native SOL has no holders to look up, and the flag says which flag it needs.
+
+    MUTATION: fall through to the default address and the run would report coverage of a check
+    the operator did not ask for, having silently ignored the flag.
+    """
+    _point_config_at_the_stub(monkeypatch)
+    monkeypatch.setattr(chains_solana.requests, "post", _WholeClusterStub())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py", "--find-holder"])
+    code = solana_chain_check.main()
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "--find-holder needs --mint" in out
+    assert "ADDRESS" not in out, "it must not go on and check something else instead"

@@ -279,8 +279,32 @@ stranded deposit is still a WARNING in a log and nothing else. Rule 5 says a
 measurement that only exists in a log is not learning. Wiring the drops into
 `under_review` would be a money-path change and is not made here.
 
-**Still unproven:** `_spl_credits` and the associated-token-account derivation —
-pass `--mint` with an SPL mint to exercise them.
+**Still unproven: `_spl_credits`' decoder**, and `--mint` alone cannot prove it.
+Measured 2026-09-30 with `--mint` wrapped SOL: `getAccountInfo` returned the
+Token program and `decimals=9`, the associated token account derived and was
+correctly reported as not existing, and `getTokenAccountBalance` read 0.0 — but
+`_spl_credits` selects token balances by owner **and** mint before touching an
+amount, so over an account holding none of the token its filter matched nothing,
+the loop body never ran, and `entry["uiTokenAmount"]["decimals"]` and
+`["amount"]` were never read. Those are the field names that lose an SPL deposit
+silently.
+
+**`--find-holder` closes it without a human hunting for an address:**
+
+    python3 solana_chain_check.py --mint So11111111111111111111111111111111111111112 --find-holder
+
+Read-only. `getTokenLargestAccounts` names the biggest token accounts for the
+mint, `getAccountInfo` on one names the wallet that owns it, and the check reads
+**that** account — somebody else's holdings prove the reader exactly as well as
+ours would, the same principle as `--hunt-memo`. Nothing is signed or sent.
+
+Its own field names were written from documentation and are **not measured**:
+no Solana cluster is reachable from the development container (re-checked
+2026-09-30 — `api.devnet.solana.com` still answers 403 through the proxy). That
+is the same risk the rest of the adapter was written with, with one difference
+that makes it acceptable: a wrong field name there makes the *helper* say so,
+naming the path it looked under, and cannot credit anything or misreport what
+was proven.
 
 **Also still open, and it is a money question rather than a code one:** no SOL
 pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured
