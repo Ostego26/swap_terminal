@@ -1144,12 +1144,33 @@ def test_STARTUP_SAYS_WHY_A_CHAIN_HAS_NO_CONSOLE_IN_WORDS_NOT_IN_A_KeyError():
     this panel will never have a console here, the other says it could not build one this time.
     """
     entry = _entry()
+    # THE INVARIANT MOVED ON 2026-09-30 AND THIS IS THE STRONGER ONE (rule 2: a test pins the
+    # stronger invariant rather than the old behavior). It used to read "every foreign tab
+    # refuses", which became false when XRP gained a command map and a console. What was
+    # actually being protected is that a foreign tab NEVER reaches the bitcoin-style
+    # resolve_config path, and that whichever answer it gives is in words -- a refusal that
+    # names what to use instead, or a protocol this panel can actually speak. Both are decided
+    # before anything is asked of a network; neither may be an exception class.
     for tab in decisions.CHAINS:
         if tab.kind != "foreign":
             continue
+        protocol = decisions.console_protocol(tab)
         refusal = decisions.refuse_an_rpc_console(tab)
-        assert refusal, f"{tab.asset} is foreign and must refuse before resolve_config is called"
+        assert bool(protocol) != bool(refusal), (
+            f"{tab.asset} both has a console protocol ({protocol!r}) and refuses one "
+            f"({refusal!r}), or does neither -- exactly one has to be true or the page has no "
+            f"answer to give"
+        )
+        assert protocol != "bitcoin", (
+            f"{tab.asset} is foreign and must never be given the bitcoin-style console, which "
+            f"is the path that reaches resolve_config"
+        )
         assert "KeyError" not in refusal and "Error" not in refusal
+        if refusal:
+            assert "button under Run" in refusal, (
+                "a refusal has to say what to use INSTEAD, or it is a dead end in an operator's "
+                "terminal"
+            )
 
     source = Path(entry.__file__).read_text(encoding="utf-8")
     assert 'if tab.kind == "none"' not in source and 'tab.kind == "none"' not in source, (

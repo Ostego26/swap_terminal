@@ -161,6 +161,7 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <div class="row" id="rpcrow">
     <select id="method"></select>
     <input id="rpcargs" placeholder='arguments as JSON, e.g. ["txid", true] &mdash; blank for none'>
+    <input id="rpcaccount" placeholder="r-address &mdash; blank uses XRP_DEPOSIT_ACCOUNT" style="display:none">
     <button id="callrpc">Call</button>
   </div>
   <p class="what">Every method offered here READS. Nothing on this page can create a
@@ -307,10 +308,11 @@ async function loadChain(asset) {
            " is set in the environment this panel was started with, so the button below has " +
            "somewhere to connect to. Whether it ANSWERS is what pressing it finds out.</p>";
     } else {
-      h += '<p class="bad">NOT CONFIGURED &mdash; ' + esc((d.missing_env || []).join(", ")) +
-           " is unset in the environment this panel was started with. Nothing reads a .env " +
-           "here, so it has to be exported in the shell that starts the panel; a value set " +
-           "only in a file, or only in another shell, does not reach this process.</p>";
+      // THE SENTENCE IS THE SERVER'S (decisions.why_foreign_is_unconfigured). It was
+      // assembled here until 2026-09-30, when the XRP console needed the same words in
+      // Python -- and two copies of one sentence is rule 8's defect at its quietest, because
+      // nothing ever compares two pieces of prose.
+      h += '<p class="bad">NOT CONFIGURED &mdash; ' + esc(d.unconfigured_why || "") + "</p>";
     }
     // THE SENTENCE THAT USED TO BE HERE SAID WHAT `d.note` ALREADY SAYS, four lines above it
     // on the same tab, and both ended by pointing at the same button. The operator pasted the
@@ -343,6 +345,17 @@ async function loadChain(asset) {
   $("rpcwhynot").style.display = d.console ? "" : "none";
   $("rpcrow").style.display = d.console ? "none" : "";
   $("rpcout").textContent = d.console ? "(no console on this tab)" : "(nothing called yet)";
+  // THE ACCOUNT BOX EXISTS ONLY WHERE AN ACCOUNT IS A THING. rippled has no wallet, so five of
+  // the mapped reads are ABOUT AN ACCOUNT and need one named; bitcoind's equivalents read a
+  // wallet the daemon already holds. A box shown on a bitcoin tab would be a control that
+  // cannot do anything, which is the defect the comment above this one is about.
+  const xrpl = d.protocol === "xrpl";
+  $("rpcaccount").style.display = xrpl ? "" : "none";
+  if (xrpl) {
+    $("rpcargs").placeholder = "one argument, e.g. a ledger index or a tx hash \u2014 blank for none";
+  } else {
+    $("rpcargs").placeholder = 'arguments as JSON, e.g. ["txid", true] \u2014 blank for none';
+  }
   // THE SWITCH SAYS WHY IT IS OFF, rather than being absent or greyed with no reason. Three
   // different refusals live behind these buttons and they are not interchangeable: one says
   // this panel does not know your command line, one says an environment variable arms it, one
@@ -451,14 +464,31 @@ $("callrpc").onclick = async () => {
   let d;
   try {
     d = await (await fetch("/api/rpc", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({asset: current, method: $("method").value, args})})).json();
+      body: JSON.stringify({asset: current, method: $("method").value, args,
+                            account: $("rpcaccount").value.trim()})})).json();
   } catch (e) { $("rpcout").textContent = "could not reach the panel: " + e; return; }
   // A REFUSAL AND A FAILURE READ DIFFERENTLY. One is a boundary this panel holds on purpose;
   // the other is the chain answering. Rendering both as "error" would make the deliberate one
   // look like a bug worth working around.
-  if (d.ok) { $("rpcout").textContent = JSON.stringify(d.result, null, 2); }
-  else if (d.refused) { $("rpcout").textContent = "REFUSED BY THIS PANEL\n\n" + d.error; }
-  else { $("rpcout").textContent = "the daemon answered:\n\n" + d.error; }
+  //
+  // AND ON THE XRP TAB THE TRANSLATION IS PART OF THE ANSWER. The operator asked for
+  // getblockcount and rippled answered about ledger_closed; a figure whose method is not shown
+  // cannot be checked, and the whole point of the map is that using it teaches what it maps to
+  // (rule 14: echo the parameters that decide the answer).
+  const head = [];
+  if (d.translated) {
+    head.push("asked " + $("method").value + "  \u2192  sent " + d.translated +
+              (d.params && Object.keys(d.params).length ? " " + JSON.stringify(d.params) : ""));
+  }
+  if (d.answers) { head.push("the figure getblockcount-style callers want is at: " + d.answers); }
+  if (d.account_used) { head.push("account: " + d.account_used); }
+  if (d.extra_args_ignored) { head.push("IGNORED, this call takes one argument: " + JSON.stringify(d.extra_args_ignored)); }
+  if (d.note) { head.push("", "HOW THE TWO DIFFER: " + d.note); }
+  const prefix = head.length ? head.join("\n") + "\n\n" : "";
+  if (d.ok) { $("rpcout").textContent = prefix + JSON.stringify(d.result, null, 2); }
+  else if (d.needs) { $("rpcout").textContent = prefix + "THIS CALL NEEDS SOMETHING\n\n" + d.error; }
+  else if (d.refused) { $("rpcout").textContent = prefix + "REFUSED BY THIS PANEL\n\n" + d.error; }
+  else { $("rpcout").textContent = prefix + "the daemon answered:\n\n" + d.error; }
 };
 
 // THE SWAPPER REGION. One fetch, no chain and no price feed touched: overview() reads the
@@ -1031,6 +1061,15 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     if not isinstance(body, dict):
         return {"ok": False, "error": "the request body was not an object"}, 400
     asset = body.get("asset")
+    tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
+    # THE XRP TAB SPEAKS A DIFFERENT PROTOCOL AND TAKES A DIFFERENT ROUTE, decided by the tab
+    # rather than by whether a bitcoin-style connection happens to exist. `chains` holds
+    # funding_steps.Run objects for the bitcoind-family tabs only, so before the map existed an
+    # XRP request fell into the run-is-None branch below and was refused -- correctly then, and
+    # wrongly now that chains/xrp_rpc_map.py can translate the question.
+    if tab is not None and decisions.console_protocol(tab) == "xrpl":
+        answer = answer_an_xrp_rpc(body, tab)
+        return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
     run = (chains or {}).get(asset) if isinstance(asset, str) else None
     if run is None:
         # WHY THERE IS NO CONSOLE, not merely that there is none. "this chain has no
@@ -1038,7 +1077,6 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
         # true: the operator's daemon for that chain may be answering perfectly well. What
         # is true is that this console speaks one protocol and the chain does not, and only
         # the tab knows which of those two it is.
-        tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
         reason = decisions.refuse_an_rpc_console(tab) if tab is not None else ""
         return {"ok": False, "refused": True,
                 "error": reason or f"{asset!r} has no reachable daemon in this panel"}, 403
@@ -1047,6 +1085,62 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
         args = []
     answer = decisions.call_read_only(run, body.get("method"), args)
     return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
+
+
+def answer_an_xrp_rpc(body: dict, tab) -> dict:
+    """One translated XRP Ledger read, or the reason there is none. Never raises.
+
+    THE ADAPTER IS BUILT FROM CONFIGURATION, not held by this panel, and that is the honest
+    shape: the XRP tab has no funding_steps.Run because this panel does not and cannot drive a
+    rippled daemon's lifecycle -- see refuse_daemon_control(). What it CAN do is read, through
+    the same chains/xrp.XRPAdapter every worker uses, which already owns rippled's params shape
+    and its 200-with-error behavior.
+
+    AN UNSET XRP_RPC_URL IS A REFUSAL AND NAMES THE VARIABLE. It is the ordinary reading on a
+    host that has not exported it, it is not a fault, and it must not read like one -- the tab
+    above already says the same thing about the same variable, in the same words, from the same
+    place (regtest/operator_panel.FOREIGN_ENV).
+
+    THE ACCOUNT COMES FROM THE REQUEST OR FROM XRP_DEPOSIT_ACCOUNT, in that order, and NEITHER
+    is invented. An account_info with a silently defaulted account answers confidently about
+    the wrong account, which is the shape rule 17 forbids; `account_used` rides on the answer so
+    the operator can see which one it was.
+    """
+    from workers.common import (  # noqa: PLC0415 -- checked: deferred like swapper_payload()'s imports, so this stdlib-only server imports on a host without the chains package's dependencies.
+        build_adapters_from_config,
+        get_config_dict,
+    )
+
+    try:
+        config = get_config_dict()
+        adapter = build_adapters_from_config().get(tab.asset)
+    except Exception as error:  # noqa: BLE001 -- checked: a configuration that will not construct is reported rather than raised; the console is an exploration tool and a panel that dies building an adapter cannot say which setting broke it.
+        return {"ok": False, "refused": True,
+                "error": f"the {tab.asset} adapter could not be built: {type(error).__name__}: {error}"}
+    if adapter is None:
+        return {"ok": False, "refused": True,
+                "error": decisions.why_foreign_is_unconfigured(tab) or
+                         f"no {tab.asset} adapter was built, and every endpoint variable it needs IS set -- "
+                         f"which is a fault rather than a configuration gap"}
+
+    account = body.get("account")
+    if not isinstance(account, str) or not account.strip():
+        account = str(config.get("XRP_DEPOSIT_ACCOUNT") or "")
+    # ONE NAMED ARGUMENT, NOT THE WHOLE LIST. The console's box takes a JSON array because
+    # bitcoind's params are positional; rippled's are named, and every entry in the map that
+    # needs an argument needs exactly one. Passing the list through would have asked `ledger`
+    # for ledger_index [90000000] -- a list where an integer goes -- which rippled reports as
+    # an invalid params error that says nothing about the real mistake.
+    args = body.get("args")
+    argument = args[0] if isinstance(args, list) and args else (None if isinstance(args, list) else args)
+    answer = decisions.call_xrp_read_only(adapter, body.get("method"), argument, account)
+    if isinstance(args, list) and len(args) > 1:
+        # SAID RATHER THAN IGNORED (rule 14). An operator who typed three arguments and got an
+        # answer computed from one must be told which one was used.
+        answer["extra_args_ignored"] = args[1:]
+    if account:
+        answer["account_used"] = account
+    return answer
 
 
 def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:

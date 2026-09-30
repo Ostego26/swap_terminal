@@ -210,6 +210,28 @@ FOREIGN_ENV = {
     "SOL": ("SOL_RPC_URL",),
 }
 
+def why_foreign_is_unconfigured(tab: ChainTab) -> str:
+    """"" if this foreign chain's endpoint is set, else the sentence saying which is missing.
+
+    ONE SENTENCE, ONE PLACE, THREE READERS. The page assembled this prose in JavaScript from
+    `missing_env`, and on 2026-09-30 the XRP console needed the same sentence in Python -- which
+    would have been a second copy of it, agreeing on the day it was written (rule 8). So the
+    server owns the words, chain_state() carries them, and the page prints what it is given.
+
+    The VARIABLE NAMES are derived from FOREIGN_ENV either way; it is the prose that was about
+    to be duplicated, and prose drifts more quietly than a name does because nothing ever
+    compares two sentences.
+    """
+    names = FOREIGN_ENV.get(tab.asset, ())
+    missing = [name for name in names if not os.environ.get(name)]
+    if not missing:
+        return ""
+    return (f"{', '.join(missing)} is unset in the environment this panel was started with. "
+            f"Nothing reads a .env here, so it has to be exported in the shell that starts the "
+            f"panel; a value set only in a file, or only in another shell, does not reach this "
+            f"process.")
+
+
 CHAINS = (
     ChainTab("GRC", "operator", True,
              "your own testnet daemon. This panel reads it and starts and stops nothing."),
@@ -313,9 +335,17 @@ def chain_state(tab: ChainTab, console) -> dict:
         # is a different question from whether that endpoint answers, and the tab says which
         # question it answered (rule 17).
         missing = [name for name in FOREIGN_ENV.get(tab.asset, ()) if not os.environ.get(name)]
+        # `methods` IS NOT EMPTY FOR EVERY FOREIGN TAB ANY MORE. XRP has a command map
+        # (chains/xrp_rpc_map.py) and therefore a console, so its dropdown is populated from
+        # that map rather than from READ_ONLY_RPCS -- see xrp_console_methods() for why the
+        # bitcoind allowlist cannot serve it. SOL still has none, and "" is the honest answer.
+        protocol = console_protocol(tab)
         return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
-                "network": "", "error": "", "methods": [], "funding": None,
+                "network": "", "error": "", "funding": None,
+                "protocol": protocol,
+                "methods": xrp_console_methods() if protocol == "xrpl" else [],
                 "configured": not missing, "missing_env": missing,
+                "unconfigured_why": why_foreign_is_unconfigured(tab),
                 "env": list(FOREIGN_ENV.get(tab.asset, ()))}
     try:
         config = funding_steps.resolve_config(tab.asset)
@@ -606,27 +636,132 @@ def refuse_worker_control(name: object, action: object, known: dict | None = Non
     return ""
 
 
-def refuse_an_rpc_console(tab: ChainTab) -> str:
-    """"" if this tab gets the read-only RPC console, else why it does not.
+#: WHICH PROTOCOL EACH TAB'S CONSOLE SPEAKS. Three values and they are not interchangeable.
+#:
+#:   "bitcoin"   {"method": ..., "params": [positional]} against a bitcoind-family daemon.
+#:               The allowlist is READ_ONLY_RPCS above.
+#:   "xrpl"      {"method": ..., "params": [{named}]} against rippled. The allowlist is
+#:               chains/xrp_rpc_map's own tables -- see xrp_console_methods() for why the
+#:               Bitcoin one cannot serve here.
+#:   ""          no console. Said in words, with what to use instead.
+#:
+#: DERIVED FROM THE TAB'S KIND for the two bitcoin-family kinds, and named per asset only where
+#: the protocol genuinely differs. A hand-kept row for BTC, LTC and GRC would be three chances
+#: to forget one (rule 8); XRP is a row because its protocol is a fact about XRP and not about
+#: its kind, and SOL is the honest absence.
+CONSOLE_PROTOCOL = {"XRP": "xrpl", "SOL": ""}
 
-    THE CONSOLE SPEAKS ONE PROTOCOL. Every method in READ_ONLY_RPCS is a Bitcoin-style JSON-RPC
-    call, sent as {"method": ..., "params": [...]} to a daemon that answers that shape. XRP and
-    Solana each answer a DIFFERENT shape -- the XRP Ledger takes a single-element `params` array
-    of objects, Solana takes named parameters -- so `getblockcount` is not a method either of
-    them has, and a console pointed at one would not fail usefully, it would fail confusingly.
+
+def console_protocol(tab: ChainTab) -> str:
+    """Which console this tab gets: "bitcoin", "xrpl", or "" for none."""
+    if tab.asset in CONSOLE_PROTOCOL:
+        return CONSOLE_PROTOCOL[tab.asset]
+    return "bitcoin" if tab.kind in ("regtest", "operator") else ""
+
+
+def xrp_console_methods() -> list[str]:
+    """Every name the XRP console offers, Bitcoin-style names first.
+
+    THE MAP IS THE ALLOWLIST ON THIS TAB, and that is a deliberate difference from the
+    bitcoin-style tabs rather than a gap in READ_ONLY_RPCS. Two reasons, and the second is the
+    one that decides it:
+
+      READ_ONLY_RPCS is a list of BITCOIN method names. `fee`, `server_state` and the three
+      account_* reads are not on it and should not be added to it -- putting XRPL names on the
+      bitcoind allowlist would mean a GRC tab could be asked for `account_lines`, which is a
+      method that daemon has never heard of and a list that would then be lying about what it
+      governs.
+
+      Every entry in chains/xrp_rpc_map IS a read, by construction, and
+      tests/test_xrp_rpc_map.py asserts it against a denylist of every rippled method that
+      signs, submits or proposes a key. So the map can only ever SHRINK what this console
+      offers relative to the questions an operator might ask -- NO_EQUIVALENT removes names,
+      and nothing in that module can add a write.
+
+    Sorted within each half rather than interleaved, because "what does this translate to" and
+    "what can this chain tell me that Bitcoin cannot" are different questions and a single
+    alphabetical list answers neither.
+    """
+    from chains.xrp_rpc_map import (  # noqa: PLC0415 -- checked: imported inside the function so this module still imports on a host without the chains package's dependencies, which is the same reason refuse_worker_control() defers supervisor.
+        CONGRUENT,
+        XRP_ONLY,
+    )
+
+    return [*sorted(CONGRUENT), *sorted(XRP_ONLY)]
+
+
+def refuse_an_rpc_console(tab: ChainTab) -> str:
+    """"" if this tab gets a console, else why it does not.
+
+    THE CONSOLE USED TO SPEAK ONE PROTOCOL AND REFUSED BOTH FOREIGN TABS. That was honest and
+    it was also a dead end: the operator asked on 2026-09-30 for "xrp control commands that are
+    congruent to btc/ltc/grc rpc commands since xrp is just different", and the XRP Ledger does
+    answer the same QUESTIONS -- under different names, in a different request shape, with a
+    handful that genuinely have no answer there. chains/xrp_rpc_map.py is that mapping, so the
+    XRP tab now gets a console and this function refuses only where there is nothing to point.
+
+    SOL STILL HAS NONE, and the reason is not symmetry: nobody has written the equivalent map
+    for it, and Solana's JSON-RPC takes named parameters with a different method vocabulary
+    again. Saying "not mapped yet" is a different claim from "cannot be", and this says the
+    first one (rule 17).
 
     ASKED HERE RATHER THAN DISCOVERED AT THE SOCKET, which is the whole point of it being a
-    function. Before this existed, `main()` tried to build a connection for every tab and the
-    foreign ones each printed `no RPC console (KeyError: ...)` at startup -- a Python
-    exception class in an operator's terminal, for a condition that is by design and known
-    before anything is asked of a network (rule 14: the panel should say what it is doing in
-    words the operator can act on, and an exception name is not one).
+    function. Before it existed, `main()` tried to build a connection for every tab and the
+    foreign ones each printed `no RPC console (KeyError: ...)` at startup -- a Python exception
+    class in an operator's terminal, for a condition known before anything is asked of a
+    network (rule 14).
     """
-    if tab.kind == "foreign":
-        return (f"{tab.asset} does not speak the Bitcoin-style JSON-RPC this console sends, so "
-                f"there is nothing here to point at it. That chain has its own client in this "
-                f"tree, and its own read-only check is the button under Run.")
-    return ""
+    if console_protocol(tab):
+        return ""
+    return (f"{tab.asset} has no console here yet. It does not speak the Bitcoin-style JSON-RPC "
+            f"this one sends, and no command map has been written for it the way "
+            f"chains/xrp_rpc_map.py was written for XRP -- which is a thing nobody has done, "
+            f"not a thing that cannot be done. That chain has its own client in this tree, and "
+            f"its own read-only check is the button under Run.")
+
+
+def call_xrp_read_only(adapter, method: str, argument: object = None, account: str = "") -> dict:
+    """One translated XRP read. {ok, result} or {ok: false, error}. NEVER raises.
+
+    THE SAME THREE-WAY DISTINCTION call_read_only() makes, because it is the same distinction
+    and collapsing it costs the same thing: the panel's own refusal, a missing argument, and the
+    ledger's own answer are three different things an operator does three different things
+    about.
+
+      refused=True   this name has no XRP equivalent, or is not mapped. Stop looking, or look
+                     somewhere the message names.
+      refused=True   with `needs`, when the call translates but an argument is missing. NOT the
+                     same as the above -- the operator should ask again with the argument, and
+                     the message says which one.
+      refused=False  rippled answered, and the answer is an error. Its own words, unparaphrased.
+
+    `translated` rides on every successful answer, because the operator asked for
+    `getblockcount` and rippled answered about `ledger_closed`, and a reader who cannot see
+    which method produced a figure cannot check it (rule 14: echo the parameters that decide
+    the answer).
+    """
+    from chains.xrp_rpc_map import (  # noqa: PLC0415 -- checked: deferred for the same reason as xrp_console_methods().
+        MissingArgument,
+        equivalent_of,
+        refuse_without_equivalent,
+        xrp_call_for,
+    )
+
+    refusal = refuse_without_equivalent(method)
+    if refusal:
+        return {"ok": False, "refused": True, "error": refusal}
+    try:
+        rippled_method, params = xrp_call_for(method, argument, account)
+    except MissingArgument as error:
+        return {"ok": False, "refused": True, "needs": True, "error": str(error)}
+    entry = equivalent_of(method)
+    try:
+        result = adapter.call(rippled_method, params)
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value, named with its type, and a panel that dies on an account that does not exist is a panel that cannot be used to explore. rippled reports errors with HTTP 200, so XRPRPCError is the ordinary case here rather than the exceptional one.
+        return {"ok": False, "refused": False, "translated": rippled_method,
+                "error": f"{type(error).__name__}: {error}"}
+    return {"ok": True, "result": result, "translated": rippled_method,
+            "params": params, "answers": entry.answers, "note": entry.note}
 
 
 #: What one nav dot may say. NAMED, because the page has a CSS rule per value and a typo in
