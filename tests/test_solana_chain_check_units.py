@@ -28,6 +28,7 @@ If a hash in that table were wrong, mainnet would print as devnet.
 from __future__ import annotations
 
 import json as _json
+import logging
 import sys
 from pathlib import Path
 
@@ -1124,14 +1125,78 @@ def test_a_refused_credit_is_NEVER_reported_as_zero_credits_read():
     assert "human's job" in line
 
 
-def test_the_stranded_line_says_the_WARNING_above_is_the_same_event():
-    """Otherwise a reader counts two incidents where there is one.
+def test_the_adapters_WARNING_is_folded_INTO_the_step_and_not_left_to_cross_it():
+    """THE FRAME HOLDS. Nothing this step emits starts at column 0.
 
-    The adapter logs at WARNING and this reports the same drop, so both appear in one paste --
-    the log line above the step and this line inside it.
+    On the operator's 2026-09-30 run the adapter's WARNING went straight to stderr the moment it
+    happened, so an unindented 300-character sentence landed between the step's announcement and
+    its result. CLAUDE.md's "every diagnostic has to be a single pasteable block" is not a style
+    note there: the operator pastes this back, and a line at column 0 mid-step breaks the
+    alignment that makes the block readable.
+
+    THE FIRST FIX FOR THIS WAS A NOTE, NOT A FIX. The stranded line ended with "(the WARNING
+    above this step is the same event, logged; it is not a second one)" -- prose explaining a
+    formatting defect rather than removing it. The record is buffered and re-emitted indented
+    now, so there is nothing above the step to explain.
+
+    MUTATION: drop the handler and let the record propagate, and this fails -- driven through a
+    real logger rather than a stub, so the capture is exercised and not described.
     """
-    line = _deposits_line(_DepositStub(drops=[_a_drop()], signatures_read=1), "rADDR", 10)
-    assert "not a second one" in line
+    address = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+    memoless = {
+        "transaction": {"message": {"accountKeys": [address], "instructions": []}},
+        "meta": {"preBalances": [0], "postBalances": [5_000], "err": None},
+    }
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": "2K2Pw1Hz", "confirmationStatus": "confirmed"}],
+        "getTransaction": memoless,
+    })
+    line = _deposits_line(adapter, address, 10)
+
+    assert "logged:" in line, "the adapter's own record is still reported, not silenced"
+    assert "CANNOT BE ATTRIBUTED" in line, "and it is the real record, not a paraphrase"
+    assert "not a second one" not in line, "the caveat explained a defect that is now fixed"
+    for continuation in line.splitlines()[1:]:
+        assert continuation.startswith("      "), (
+            f"a line in this step starts at column {len(continuation) - len(continuation.lstrip())}"
+            f": {continuation[:60]!r}. The block has to survive being pasted."
+        )
+
+
+def test_the_capture_is_removed_even_when_the_call_raises():
+    """A handler left attached would swallow every later warning in the process.
+
+    MUTATION: drop the try/finally and this fails -- and the damage would be invisible, because
+    the symptom is a warning that never appears rather than an error.
+    """
+    address = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+    adapter_logger = logging.getLogger("chains.solana")
+    before = list(adapter_logger.handlers), adapter_logger.propagate
+
+    exploding = _seeded_adapter({"getSignaturesForAddress": _raise})
+    with pytest.raises(RuntimeError):
+        _deposits_line(exploding, address, 10)
+
+    assert list(adapter_logger.handlers) == before[0], "a handler survived the exception"
+    assert adapter_logger.propagate is before[1], "propagation was left switched off"
+
+
+def _raise(*_args):
+    raise RuntimeError("the cluster went away mid-poll")
+
+
+def _seeded_adapter(responses):
+    """A real SolanaAdapter with only its transport replaced, so its logger really fires."""
+    adapter = chains_solana.SolanaAdapter(url="http://seeded.invalid")
+
+    def fake_call(method, *params):
+        if method not in responses:
+            raise AssertionError(f"the adapter called {method}, which this test did not seed")
+        value = responses[method]
+        return value(*params) if callable(value) else value
+
+    adapter.call = fake_call
+    return adapter
 
 
 def test_several_drops_are_summed_across_transactions():
@@ -1181,3 +1246,28 @@ def test_a_real_credit_still_renders_its_credits():
     assert "sigOK" in line
     assert "vout=4242" in line
     assert "REFUSED" not in line
+
+def test_the_native_coverage_line_names_only_methods_the_native_path_CALLS():
+    """getAccountInfo IS NOT ONE OF THEM, and this line said it was.
+
+    Measured 2026-09-30 by driving the adapter with a captured transport: on a native run it
+    sends getBalance, getSignaturesForAddress and getTransaction. getAccountInfo is SPL-only --
+    the owner-program read that decides token-program detection, and the mint-decimals read --
+    so naming it claimed coverage of a call that never happened.
+
+    THIRD FALSE COVERAGE CLAIM IN THIS FILE IN THREE COMMITS, and I wrote this one INTO the
+    paragraph that replaced an unconditional claim with a derived one. Derived is not the same as
+    right: `read_address` was true and the sentence beside it was still wrong.
+
+    MUTATION: add getAccountInfo back to the native line and this fails.
+    """
+    native = " ".join(credit_path_lines(read_address=True, read_mint=False))
+    assert "getAccountInfo" not in native.split("The SPL reader was NOT")[0], (
+        "getAccountInfo is never called without a mint"
+    )
+    for method in ("getBalance", "getSignaturesForAddress", "getTransaction"):
+        assert method in native, f"{method} does run on the native path and belongs named"
+    assert "getAccountInfo" in native, "named on the SPL side, as what --mint would cover"
+
+    both = " ".join(credit_path_lines(read_address=True, read_mint=True))
+    assert "getAccountInfo" in both and "getTokenAccountBalance" in both

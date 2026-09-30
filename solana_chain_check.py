@@ -58,6 +58,7 @@ self-describing.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -338,12 +339,25 @@ def credit_path_lines(read_address: bool, read_mint: bool) -> list[str]:
     """
     if read_address and read_mint:
         return ["  CREDIT path: exercised for BOTH native SOL and the SPL mint against real",
-                "  responses. That is the deepest this check goes without sending anything."]
+                "  responses -- getBalance, getSignaturesForAddress, getTransaction,",
+                "  getAccountInfo, getTokenAccountBalance, and both credit readers.",
+                "  That is the deepest this check goes without sending anything."]
     if read_address:
-        return ["  CREDIT path: the NATIVE reader was exercised against real responses "
-                "(getBalance,",
-                "  getAccountInfo, find_deposits_to_address). The SPL reader was NOT -- pass",
-                "  --mint <an spl mint> to exercise _spl_credits and the token-account derivation."]
+        # THE METHOD LIST IS WHAT ACTUALLY RAN, MEASURED, and it named getAccountInfo until
+        # 2026-09-30. getAccountInfo is SPL-ONLY -- it is the owner-program read that decides
+        # token-program detection, and the mint-decimals read -- so on a native run it is never
+        # called at all. Driven with a captured transport to check: the native path sends
+        # getBalance, getSignaturesForAddress and getTransaction, and nothing else.
+        #
+        # That is the third false coverage claim in this file in three commits, and I wrote this
+        # one INTO the paragraph that replaced an unconditional claim with a derived one. Being
+        # derived is not the same as being right: `read_address` is true and the sentence beside
+        # it was still wrong about which methods that covers.
+        return ["  CREDIT path: the NATIVE reader was exercised against real responses --",
+                "  getBalance, getSignaturesForAddress, getTransaction, then _native_credits and",
+                "  the memo attribution over what came back. The SPL reader was NOT: _spl_credits,",
+                "  the token-account derivation, getAccountInfo's owner-program and decimals reads",
+                "  and getTokenAccountBalance all need a mint. Pass --mint with an SPL mint."]
     return ["  CREDIT path: NOT exercised, and it is the half that matters. getBalance,",
             "  getAccountInfo and find_deposits_to_address did not run, because no address was",
             "  read. A wrong field name there loses a deposit rather than raising."]
@@ -849,6 +863,48 @@ def _balance_line(adapter: SolanaAdapter, address: str) -> str:
     return f"{probe.get_balance()} {unit}  <- read at finalized commitment; an unsettled balance can go away"
 
 
+class _CapturedAdapterLogs(logging.Handler):
+    """Buffers chains.solana's log records so they land INSIDE the step, not across it.
+
+    WHY A HANDLER AND NOT A SILENCE. The adapter logs a dropped credit at WARNING, which is
+    right -- an operator reading a log file later needs it. But it goes to stderr the moment it
+    happens, which on the operator's 2026-09-30 run put an unindented 300-character sentence
+    between the step's announcement and its result:
+
+        find_deposits_to_address(limit=10) ...  <- THE REAL METHOD ...
+    SOL deposit 2K2Pw1Hz... CANNOT BE ATTRIBUTED and was NOT credited: ...
+        ok   (none) CREDITED -- but 1 credit(s) ...
+
+    CLAUDE.md's "every diagnostic has to be a single pasteable block" is not a style note here:
+    the operator pastes this back, and a line at column 0 in the middle of a step breaks the
+    alignment that makes the block readable at a glance.
+
+    SUPPRESSING IT WOULD BE THE WRONG FIX even though the step now reports the same drop in more
+    detail. The step reports what it READ; the log is what the ADAPTER said, and a future record
+    this script does not know how to summarize would vanish. Buffered and re-emitted indented,
+    nothing is lost and the frame holds.
+    """
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.records: list[str] = []
+
+    def emit(self, record):
+        self.records.append(self.format(record))
+
+
+def _indented(records: list[str], indent: str = "      ") -> str:
+    """Log lines folded into a step's output, each continuation line aligned under the first."""
+    if not records:
+        return ""
+    lines = []
+    for record in records:
+        first, *rest = record.splitlines() or [""]
+        lines.append(f"\n{indent}logged: {first}")
+        lines.extend(f"\n{indent}        {line}" for line in rest)
+    return "".join(lines)
+
+
 def _deposits_line(adapter: SolanaAdapter, address: str, limit: int) -> str:
     """What the deposit watcher would see, including what it would REFUSE to credit.
 
@@ -869,7 +925,18 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int) -> str:
         credits, all refused        MONEY IS STRANDED. This is the one that must never render
                                     as "(none)"
     """
-    events = adapter.find_deposits_to_address(address, tx_limit=limit)
+    # CAPTURED FOR THE DURATION OF THE CALL ONLY, and removed in a finally so an exception
+    # cannot leave a handler attached to the adapter's logger for the rest of the process.
+    captured = _CapturedAdapterLogs()
+    adapter_logger = logging.getLogger("chains.solana")
+    adapter_logger.addHandler(captured)
+    was_propagating = adapter_logger.propagate
+    adapter_logger.propagate = False
+    try:
+        events = adapter.find_deposits_to_address(address, tx_limit=limit)
+    finally:
+        adapter_logger.removeHandler(captured)
+        adapter_logger.propagate = was_propagating
     dropped = adapter.unattributable_drops
     if dropped:
         # REPORTED FIRST AND AS A PROBLEM, not appended to a "(none)". The credits are real.
@@ -882,16 +949,17 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int) -> str:
             f"\n      {d.signature}\n        {d.credits} credit(s) dropped: {d.why}"
             for d in dropped
         )
-        lines.append(
-            "\n      (the WARNING above this step is the same event, logged; it is not a second one)"
-        )
+        # THE ADAPTER'S OWN WARNING, folded in rather than left to cross the block. The
+        # caveat that used to be here -- "the WARNING above this step is the same event" --
+        # was a note explaining a formatting defect instead of fixing it.
+        lines.append(_indented(captured.records))
         return "".join(lines)
     if not events and not adapter.signatures_read:
         return ("(none)  <- and ZERO signatures were read, so nothing has touched this account "
-                "in the window. A RESULT, not a failure.")
+                "in the window. A RESULT, not a failure." + _indented(captured.records))
     if not events:
         return (f"(none)  <- {adapter.signatures_read} signature(s) read and none credited this "
-                f"address. A RESULT, not a failure.")
+                f"address. A RESULT, not a failure." + _indented(captured.records))
     lines = [f"{len(events)} credit(s):"]
     lines.extend(
         f"\n      {event['txid']}\n        vout={event['vout']} (account index, read from the tx -- never fabricated) "
