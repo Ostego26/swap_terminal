@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import sqlite3
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,9 @@ from regtest.harness_runner import HarnessRunner
 
 import supervisor  # isort: skip -- rootless import; see _entry()
 import workers.common  # isort: skip -- same
+from db import SCHEMA, db_session, dict_factory  # isort: skip -- same
+from services.admin_view import overview  # isort: skip -- same
+from valid_addresses import GRC_PAYOUT  # isort: skip -- a real payout address; see tests/valid_addresses.py
 
 
 def _entry():
@@ -1512,4 +1518,120 @@ def test_the_swapper_region_is_admin_views_overview_and_holds_no_query_of_its_ow
         assert spelling not in code, (
             f"{spelling!r} appears in the panel's swapper region, which means it has started "
             f"reading the database itself instead of through services/admin_view.overview()"
+        )
+
+
+
+def test_every_overview_FIELD_the_panel_renders_actually_EXISTS(tmp_path):
+    """The defect this exists for was on the operator's screen, twice, in one paste.
+
+    2026-09-30, the panel's swapper region rendered
+
+        0=[object Object] 1=[object Object] 2=[object Object]
+        GRC  confirmed undefined  available undefined
+
+    because the script read `status_counts` as a mapping (it is a GROUP BY's list of
+    {status, swaps} rows) and read r.confirmed / r.available / r.freshness on an
+    inventory row whose real keys are hot_confirmed / hot_available / fresh.
+
+    NOTHING FAILED. That is the whole reason this test exists: a second renderer
+    guessing at a payload's field names is rule 8 at its least visible -- no
+    exception, no empty region, no test, just the word `undefined` where a balance
+    goes. templates/admin.html has the names right and this file had them wrong, and
+    the two are supposed to be one payload rendered twice.
+
+    SO THIS WALKS THE SCRIPT and checks each field against a REAL overview() on a
+    real empty schema. It is deliberately not a list of expected names -- a list
+    would be a third copy, and it would go stale the same way.
+
+    MUTATION: rename any read back (o.status_counts -> o.statusCounts,
+    r.hot_available -> r.available) and this names the field and the object it was
+    read from.
+    """
+    db_path = tmp_path / "panel.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    conn.executescript(SCHEMA)
+    # REAL ROWS, so every list comes back non-empty and its shape is the one the
+    # renderer will actually see. The first version of this test derived the shape
+    # from PRAGMA table_info instead, and it was wrong in the way that matters here:
+    # inventory_rows() attaches a COMPUTED `fresh` reading that no table has a column
+    # for, so a column list would have called the panel's correct read a defect.
+    # Seed the rows, run the real function, assert on what comes out
+    # (swap_terminal/CLAUDE.md: verify by row-level behavioral outcome).
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO wallet_inventory (asset, hot_confirmed, hot_reserved, hot_available, updated_at)"
+        " VALUES (?,?,?,?,?)", ("GRC", 1.5, 0.25, 1.25, now),
+    )
+    conn.execute(
+        "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
+        " network_fee_reserve, output_amount_estimate, expires_at, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)", ("q_f", "XRP", "GRC", 1.0, 90.0, 150, 0.01, 88.0, now, now),
+    )
+    conn.execute(
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
+        " expected_input_amount, quoted_rate, fee_bps, network_fee_reserve, output_amount_estimate,"
+        " status, min_confirmations, created_at, updated_at, expires_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("s_field00000000aa", "q_f", "XRP", "GRC", "rDeposit", GRC_PAYOUT, 1.0, 90.0, 150, 0.01,
+         88.0, "completed", 6, now, now, now),
+    )
+    conn.execute(
+        "INSERT INTO payouts (swap_id, asset, amount, destination_address, status, created_at)"
+        " VALUES (?,?,?,?,?,?)",
+        ("s_field00000000aa", "GRC", 88.0, GRC_PAYOUT, "broadcast", now),
+    )
+    conn.commit()
+    conn.close()
+
+    # THE REAL CONFIG with only the path redirected. A minimal dict here raised
+    # KeyError on ALLOWED_PAIRS, which is the same class of mistake this test is
+    # about: a hand-built stand-in for a real mapping, missing a key its reader
+    # needs. get_config_dict() is what the panel itself passes.
+    config = dict(workers.common.get_config_dict())
+    config["DB_PATH"] = str(db_path)
+    with db_session(str(db_path)) as db:
+        payload = overview(db, config, {}, run_dir=tmp_path)
+
+    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    script = source[source.index("async function loadSwapper("):source.index('$("checkall").onclick')]
+
+    # `const o = d.overview`, so every o.<name> is a top-level key of the payload.
+    top = set(re.findall(r"\bo\.([a-zA-Z_]\w*)", script))
+    assert top, "the walk found no field reads at all, so it is proving nothing"
+    missing = sorted(name for name in top if name not in payload)
+    assert not missing, (
+        f"the panel renders o.{', o.'.join(missing)}, which services/admin_view.overview() does "
+        f"not return. It returns {sorted(payload)}. A field that does not exist renders as the "
+        f"word `undefined` and fails nothing"
+    )
+
+    # THE ROW FIELDS, PER LIST. Each map callback in the script names its parameter
+    # after the list it walks, one identifier per list, precisely so a field read can
+    # be attributed here. It could not be at first: `r` was the parameter for
+    # inventory rows, payout rows AND pricing rows, so this walk could check only
+    # `w` -- and the hole was found by mutating r.hot_available and watching the test
+    # pass. A check that cannot attribute a read cannot verify it.
+    per_list = {
+        "workers": "w",
+        "status_counts": "sc",
+        "inventory": "iv",
+        "payouts": "po",
+    }
+    for key, identifier in per_list.items():
+        names = set(re.findall(rf"\b{identifier}\.([a-zA-Z_]\w*)", script))
+        assert names, (
+            f"no {identifier}.<field> read was found for {key}, so either the renderer stopped "
+            f"reading that list or its callback parameter was renamed and this table is stale"
+        )
+        rows = payload[key]
+        assert rows, (
+            f"{key} came back empty from a seeded database, so its field names were NOT checked "
+            f"and this test passed without proving anything"
+        )
+        missing_fields = sorted(name for name in names if name not in rows[0])
+        assert not missing_fields, (
+            f"the panel renders {key} row field(s) {missing_fields}, which are not on the row. "
+            f"The row has {sorted(rows[0])}"
         )

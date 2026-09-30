@@ -477,7 +477,11 @@ async function loadSwapper() {
     return;
   }
   const o = d.overview;
-  const counts = Object.entries(o.status_counts || {}).map(([k, v]) => k + "=" + v);
+  // status_counts IS A LIST OF ROWS, not a mapping. It is a GROUP BY's result --
+  // {status, swaps} per row -- and reading it with Object.entries() printed
+  // "0=[object Object]" on the operator's screen on 2026-09-30. templates/admin.html
+  // reads row.status and row.swaps; so does this now, because they render one payload.
+  const counts = (o.status_counts || []).map(sc => sc.status + "=" + sc.swaps);
   $("swapperstate").innerHTML =
     "database <code>" + esc(o.database) + "</code><br>read at " + esc(o.generated_at) +
     "<br>" + (counts.length ? esc(counts.join("  ")) : "<span class=\"what\">(none) no swap of any status is in the database</span>") +
@@ -528,14 +532,26 @@ async function loadSwapper() {
     };
   }
 
-  const inv = (o.inventory || []).map(r =>
-    "  " + r.asset + "  confirmed " + r.confirmed + "  available " + r.available +
-    "  " + (r.freshness ? r.freshness.state + " " + r.freshness.age_display : "")).join("\n");
-  const pay = (o.payouts || []).slice(0, 8).map(r =>
-    "  " + r.swap_id + "  " + r.asset + " " + r.amount + "  " + r.status +
-    "  " + (r.txid || "(no txid)")).join("\n");
+  // THE FIELD NAMES ARE admin_view's, and all four of these were WRONG until
+  // 2026-09-30: confirmed/available/freshness do not exist, and the panel printed
+  // "confirmed undefined available undefined" beside a real balance. A second
+  // renderer guessing at a payload's keys is rule 8 at its least visible -- nothing
+  // fails, the page just says undefined. test_operator_panel.py now walks every
+  // o.<field> this script reads against a real overview() payload.
+  //
+  // EIGHT DECIMALS, like templates/admin.html. A balance rendered as
+  // 55.52645238097888 is a float's repr, not an amount of money, and the two
+  // surfaces must not disagree about how much was paid.
+  const amount = n => (typeof n === "number" ? n.toFixed(8) : String(n));
+  const inv = (o.inventory || []).map(iv =>
+    "  " + iv.asset + "  confirmed " + amount(iv.hot_confirmed) +
+    "  reserved " + amount(iv.hot_reserved) + "  available " + amount(iv.hot_available) +
+    "  " + (iv.fresh ? iv.fresh.state.toUpperCase() + " " + iv.fresh.age_display : "(no reading)")).join("\n");
+  const pay = (o.payouts || []).slice(0, 8).map(po =>
+    "  " + po.swap_id + "  " + po.asset + " " + amount(po.amount) + "  " + po.status +
+    "  " + (po.txid || "(no txid)")).join("\n");
   const price = o.pricing && o.pricing.cached
-    ? (o.pricing.assets || []).map(a => "  " + a.asset + "  $" + a.price_usd + "  " + a.turnover_verdict).join("\n") +
+    ? (o.pricing.assets || []).map(pa => "  " + pa.asset + "  $" + pa.price_usd + "  " + pa.turnover_verdict).join("\n") +
       "\n  priced by " + o.pricing.source + ", " + o.pricing.age + " ago"
     : "  (not fetched) nothing has been priced since this process started";
   $("swapperout").textContent =
