@@ -616,6 +616,48 @@ def prove_every_wallet_will_open(step: Step, clients: dict) -> None:
         adapter = adapter_for(client_caller(client))
         encrypted, why = encryption_state(adapter)
         step.say(f"{asset} wallet: {why}")
+        # A MISSING WALLET IS NOT A LOCKED ONE, and this check asked the wrong
+        # question about it on its first fresh-shell run, 2026-09-30. BTC_RPC_WALLET
+        # was unset, BTCClient fell back to its `LegacyWallet` default -- a name
+        # nothing in this repo creates -- and getwalletinfo answered -18. encryption_state()
+        # cannot read a state it was refused, so it assumes ENCRYPTED, which is the
+        # right default for an unreadable state and the wrong one here: the daemon had
+        # said precisely what was wrong, and this replied by demanding a passphrase for
+        # a wallet that does not exist. Two minutes of looking for a passphrase that
+        # would never have helped.
+        #
+        # The -18 is specific and already has a reader: chains/wallet_hint names the
+        # wallets on disk and the command that loads one.
+        if NO_WALLET_LOADED_CODE in why:
+            step.check(f"{asset} wallet will open", "the wallet is not loaded",
+                       "a wallet this daemon has open", False)
+            # THE ADAPTER, NOT THE CLIENT. This repo has two adapter conventions --
+            # rpc_call(method, [args]) and call(method, *args) -- and
+            # modules/htlc_chain_read.client_caller() exists to bridge them in ONE
+            # place. I passed the client, so which_wallets_are_on_disk() looked for
+            # `.call`, got an AttributeError, and reported "could not list this
+            # daemon's wallets" -- losing the wallet NAMES, which are the only
+            # actionable part of this refusal. Caught by the test rather than by the
+            # operator, which is the first time that has happened today.
+            step.say(f"    {which_wallets_are_on_disk(adapter, asset)}")
+            # AND THE HINT'S OWN ADVICE IS WRONG IN THIS CONTEXT, so the variable is
+            # named here rather than left to it. chains/wallet_hint was written for
+            # the case where NO wallet is loaded, and it says `loadwallet <name>`.
+            # Here a wallet IS loaded -- the operator's listwallets returned
+            # ["regtest_htlc_harness"] -- and the client is asking for a DIFFERENT
+            # name, because BTCClient defaults to `LegacyWallet` when
+            # BTC_RPC_WALLET is unset. Running loadwallet would answer "already
+            # loaded" and leave the operator no further along. The names are the
+            # useful half of that hint; the command is not.
+            step.say(f"    THE WALLET MAY ALREADY BE LOADED under a different name than this client "
+                     f"asks for: set {asset}_RPC_WALLET to one of the names above. This client "
+                     f"defaults to a name nothing in this repository creates when that variable is "
+                     f"unset, which is how a loaded wallet reads as a missing one.")
+            raise SwapError(
+                f"the {asset} daemon has no wallet under the name this client asks for, so its "
+                f"encryption state cannot even be read. NOTHING WAS FUNDED. This is not a "
+                f"passphrase problem -- set {asset}_RPC_WALLET to one of the names above"
+            )
         if not encrypted:
             step.check(f"{asset} wallet will open", "not encrypted", "no passphrase needed", True)
             continue

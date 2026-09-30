@@ -1334,3 +1334,53 @@ def test_the_check_runs_ONLY_on_run_and_never_on_a_dry_run():
         "the wallet check is no longer directly under `if args.run:`; a dry run would unlock a "
         "wallet it has no use for"
     )
+
+
+class _NoWalletClient:
+    """A daemon with no wallet loaded under the name the client asks for."""
+
+    NOT_LOADED = "RPC Error: {'code': -18, 'message': 'Requested wallet does not exist or is not loaded'}"
+
+    def __init__(self, on_disk=("regtest_htlc_harness",)):
+        self.on_disk = on_disk
+        self.asked = []
+
+    def rpc_call(self, method, params=None):
+        self.asked.append(method)
+        if method == "listwalletdir":
+            return {"wallets": [{"name": name} for name in self.on_disk]}
+        raise Exception(self.NOT_LOADED)
+
+
+def test_a_wallet_that_is_NOT_LOADED_is_not_treated_as_one_that_is_LOCKED(capsys):
+    """THE WRONG QUESTION, asked on this check's first fresh-shell run.
+
+    BTC_RPC_WALLET was unset, BTCClient fell back to its `LegacyWallet` default --
+    a name nothing in this repo creates -- and getwalletinfo answered -18.
+    encryption_state() cannot read a state it was refused, so it assumes ENCRYPTED:
+    the right default for an UNREADABLE state and the wrong one here, because the
+    daemon had said exactly what was wrong. The check replied by demanding
+    BTC_WALLET_PASSPHRASE for a wallet that does not exist.
+
+    MUTATION: drop the NO_WALLET_LOADED_CODE branch and this fails -- the refusal
+    goes back to naming a passphrase, which is the question that cannot be
+    answered. Verified 2026-09-30.
+    """
+    console = Console(total_steps=8)
+    client = _NoWalletClient()
+    with pytest.raises(atomic_swap.SwapError, match="not a passphrase problem"):
+        atomic_swap.prove_every_wallet_will_open(Step(console, 1), {"BTC": client})
+    printed = capsys.readouterr().out
+    assert "the wallet is not loaded" in printed, printed
+    assert "regtest_htlc_harness" in printed, (
+        f"the wallets on disk are the actionable part and the hint already existed:\n{printed}"
+    )
+    assert "BTC_RPC_WALLET" in printed, printed
+    # AND IT DOES NOT ASK FOR A PASSPHRASE. That is the defect, and a passphrase
+    # demand reads as authoritative -- an operator goes looking for one.
+    assert "BTC_WALLET_PASSPHRASE is not set" not in printed, (
+        f"a passphrase is still being demanded for a wallet that is not loaded:\n{printed}"
+    )
+    assert "walletpassphrase" not in client.asked, (
+        f"a wallet that is not loaded was sent an unlock: {client.asked}"
+    )
