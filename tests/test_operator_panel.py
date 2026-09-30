@@ -33,7 +33,6 @@ import supervisor  # isort: skip -- rootless import; see _entry()
 import workers.common  # isort: skip -- same
 from db import SCHEMA, db_session, dict_factory  # isort: skip -- same
 from services.admin_view import overview  # isort: skip -- same
-from chains.xrp_rpc_map import CONGRUENT, NO_EQUIVALENT, XRP_ONLY  # isort: skip -- same
 from valid_addresses import GRC_PAYOUT  # isort: skip -- a real payout address; see tests/valid_addresses.py
 
 
@@ -1123,22 +1122,36 @@ def test_a_FOREIGN_TAB_IS_NOT_OFFERED_A_CONSOLE_IT_CANNOT_USE():
     well. What is true is that this console sends one protocol and that chain does not speak it.
     """
     entry = _entry()
-    sol = next(c for c in decisions.CHAINS if c.asset == "SOL")
-    grc = next(c for c in decisions.CHAINS if c.asset == "GRC")
 
-    refusal = decisions.refuse_an_rpc_console(sol)
-    assert refusal and "does not speak" in refusal
+    # SOL WAS THE EXAMPLE HERE UNTIL 2026-09-30, and it no longer is: chains/solana_rpc_map.py
+    # gave that tab a console, so every chain in CHAINS now has one. The MECHANISM still has to
+    # work for the next chain added, which will arrive in exactly the state SOL was in -- so
+    # this uses a tab that is not in CONSOLE_PROTOCOL rather than deleting the test with the
+    # last real example of it (rule 2: its test changes to pin the stronger invariant).
+    unmapped = decisions.ChainTab("ZZZ", "foreign", False, "a chain nobody has mapped")
+    refusal = decisions.refuse_an_rpc_console(unmapped)
+    assert refusal, "a chain with no command map was offered a console anyway"
+    assert "does not speak" in refusal
+    assert "nobody has done" in refusal, (
+        "it must say NOT MAPPED rather than CANNOT BE -- those are different claims and only one "
+        "of them is established (rule 17)"
+    )
     assert "unreachable" not in refusal and "not reachable" not in refusal, (
         "it must not claim anything about whether that daemon is up -- nothing asked it"
     )
-    assert decisions.refuse_an_rpc_console(grc) == "", "GRC speaks it, so GRC keeps its console"
 
-    answer, code = entry.answer_an_rpc({"asset": "SOL", "method": "getblockcount"}, {})
+    for asset in ("GRC", "XRP", "SOL"):
+        tab = next(c for c in decisions.CHAINS if c.asset == asset)
+        assert decisions.refuse_an_rpc_console(tab) == "", (
+            f"{asset} has a console protocol and must not be refused one"
+        )
+
+    # AND THE ROUTE GIVES THE TAB'S OWN SENTENCE, from the same function -- two copies of one
+    # refusal is rule 8's bug with a delay on it. Asserted through an asset the panel does not
+    # know at all, which is the only no-console path reachable from a request today.
+    answer, code = entry.answer_an_rpc({"asset": "ZZZ", "method": "getblockcount"}, {})
     assert code == 403 and answer["refused"] is True
-    assert answer["error"] == refusal, (
-        "the route gives the same sentence the tab does, from the same function -- two copies "
-        "of one refusal is rule 8's bug with a delay on it"
-    )
+    assert "not a chain this panel knows" in answer["error"]
 
     page = entry.PAGE
     assert 'd.console ? "none" : ""' in page, "and the row is hidden rather than left to refuse"
@@ -1910,18 +1923,28 @@ def test_A_TABS_CONSOLE_OFFERS_ONLY_WHAT_THAT_TAB_CAN_ANSWER():
             f"{tab.asset} publishes its console list under `methods`, which is the capability "
             f"report's key on every bitcoin-family tab"
         )
-        if protocol == "xrpl":
-            assert offered == set(CONGRUENT) | set(XRP_ONLY), (
-                f"the XRP console offers {sorted(offered)}, not the command map's own names"
+        # EVERY TRANSLATED PROTOCOL, not just XRP. This named `xrpl` and asserted every other
+        # foreign tab offered nothing, which became false the moment
+        # chains/solana_rpc_map.py landed -- so it asks the protocol's OWN map instead of
+        # knowing which chains exist (rule 2: pin the stronger invariant).
+        if protocol:
+            module = decisions.console_map(protocol)
+            assert module is not None, (
+                f"{tab.asset} claims protocol {protocol!r} and CONSOLE_MAPS has no module for it, "
+                f"so its console can only fail"
             )
-            impossible = offered & set(NO_EQUIVALENT)
+            assert offered == set(module.CONGRUENT) | set(module.NATIVE_ONLY), (
+                f"the {tab.asset} console offers {sorted(offered)}, not the command map's own names"
+            )
+            impossible = offered & set(module.NO_EQUIVALENT)
             assert not impossible, (
-                f"the XRP console offers {sorted(impossible)}, which chains/xrp_rpc_map records "
-                f"as having NO equivalent. Every one would be refused after the operator picked it"
+                f"the {tab.asset} console offers {sorted(impossible)}, which {module.__name__} "
+                f"records as having NO equivalent. Every one would be refused after the operator "
+                f"picked it"
             )
-            assert set(XRP_ONLY) <= offered, (
-                f"the XRP console omits {sorted(set(XRP_ONLY) - offered)} -- reads that tab is "
-                f"the only place to make"
+            assert set(module.NATIVE_ONLY) <= offered, (
+                f"the {tab.asset} console omits {sorted(set(module.NATIVE_ONLY) - offered)} -- "
+                f"reads that tab is the only place to make"
             )
         else:
             assert offered == set(), f"{tab.asset} has no console and offered {sorted(offered)}"

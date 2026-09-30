@@ -24,14 +24,14 @@ import pytest
 from chains.xrp_rpc_map import (
     CONGRUENT,
     DROPS_PER_XRP,
+    NATIVE_ONLY,
     NO_EQUIVALENT,
-    XRP_ONLY,
     MissingArgument,
+    call_for,
     equivalent_of,
     refuse_without_equivalent,
-    xrp_call_for,
 )
-from regtest.operator_panel import READ_ONLY_RPCS, xrp_console_methods
+from regtest.operator_panel import READ_ONLY_RPCS, console_methods
 
 #: EVERY rippled method that signs, submits, proposes a key or changes server state.
 #:
@@ -59,7 +59,7 @@ def test_EVERY_METHOD_THIS_MAP_CAN_EMIT_IS_A_READ():
     sees an XRP request, refuse_unless_read_only() is not on that path, and the
     console would happily broadcast. This is the only test standing there.
     """
-    emitted = {entry.method for entry in (*CONGRUENT.values(), *XRP_ONLY.values())}
+    emitted = {entry.method for entry in (*CONGRUENT.values(), *NATIVE_ONLY.values())}
     assert emitted, "the map emits no method at all, so this test is proving nothing"
     forbidden = sorted(emitted & WRITES_OR_SECRETS)
     assert not forbidden, (
@@ -101,21 +101,21 @@ def test_the_allowlist_is_an_EXACT_PARTITION_of_the_panels_own():
     invented = sorted((translated | impossible) - allowlist)
     assert not invented, (
         f"{invented} are mapped as bitcoin-style names but are not on READ_ONLY_RPCS, so the "
-        f"bitcoin tabs would refuse them. An XRPL-only read belongs in XRP_ONLY"
+        f"bitcoin tabs would refuse them. An XRPL-only read belongs in NATIVE_ONLY"
     )
 
 
-def test_XRP_ONLY_holds_no_bitcoin_name_and_the_console_offers_both_halves():
-    """XRP_ONLY is for reads Bitcoin has no NAME for; a name it does have belongs above."""
-    overlap = sorted(set(XRP_ONLY) & (set(READ_ONLY_RPCS) | set(CONGRUENT) | set(NO_EQUIVALENT)))
-    assert not overlap, f"{overlap} are in XRP_ONLY and are also bitcoin-style names"
+def test_NATIVE_ONLY_holds_no_bitcoin_name_and_the_console_offers_both_halves():
+    """NATIVE_ONLY is for reads Bitcoin has no NAME for; a name it does have belongs above."""
+    overlap = sorted(set(NATIVE_ONLY) & (set(READ_ONLY_RPCS) | set(CONGRUENT) | set(NO_EQUIVALENT)))
+    assert not overlap, f"{overlap} are in NATIVE_ONLY and are also bitcoin-style names"
 
-    offered = xrp_console_methods()
-    assert set(offered) == set(CONGRUENT) | set(XRP_ONLY)
+    offered = console_methods("xrpl")
+    assert set(offered) == set(CONGRUENT) | set(NATIVE_ONLY)
     assert len(offered) == len(set(offered)), "the console offers a method twice"
     # Bitcoin-style names first, then the XRPL-only reads -- two questions, two halves.
     assert offered[:len(CONGRUENT)] == sorted(CONGRUENT)
-    assert offered[len(CONGRUENT):] == sorted(XRP_ONLY)
+    assert offered[len(CONGRUENT):] == sorted(NATIVE_ONLY)
 
 
 def test_a_call_that_needs_an_ACCOUNT_refuses_rather_than_defaulting_to_one():
@@ -126,14 +126,14 @@ def test_a_call_that_needs_an_ACCOUNT_refuses_rather_than_defaulting_to_one():
     was -- so the operator goes looking at the ledger for an account that was never
     named.
     """
-    needing = [name for name, entry in {**CONGRUENT, **XRP_ONLY}.items() if entry.needs_account]
+    needing = [name for name, entry in {**CONGRUENT, **NATIVE_ONLY}.items() if entry.needs_account]
     assert needing, "no entry needs an account, so this test is vacuous"
     for name in needing:
         for account in ("", "   ", None, 7):
             with pytest.raises(MissingArgument) as raised:
-                xrp_call_for(name, None, account)
+                call_for(name, None, account)
             assert "needs one" in str(raised.value) or "needs" in str(raised.value)
-        _method, params = xrp_call_for(name, None, "  rHotWallet  ")
+        _method, params = call_for(name, None, "  rHotWallet  ")
         assert params["account"] == "rHotWallet", "the account was not stripped"
         # VALIDATED, NOT CURRENT. A balance read from an unvalidated ledger can still
         # change, and a payout sized against one is sized against a guess.
@@ -154,11 +154,11 @@ def test_a_call_that_needs_an_ARGUMENT_refuses_rather_than_asking_about_the_wron
     for name, argument in needing:
         for blank in ("", "   ", None):
             with pytest.raises(MissingArgument) as raised:
-                xrp_call_for(name, blank)
+                call_for(name, blank)
             assert argument in str(raised.value), (
                 f"{name}'s refusal does not name the argument it needs ({argument})"
             )
-        _method, params = xrp_call_for(name, " VALUE ")
+        _method, params = call_for(name, " VALUE ")
         assert params[argument] == "VALUE"
 
 
@@ -239,15 +239,15 @@ def test_equivalent_of_is_None_for_a_name_with_no_equivalent_AND_for_junk():
     assert equivalent_of("fee").method == "fee"
 
 
-def test_xrp_call_for_raises_the_refusal_TEXT_for_an_untranslatable_name():
+def test_call_for_raises_the_refusal_TEXT_for_an_untranslatable_name():
     """The caller gets the same sentence whichever door it came through (rule 8)."""
     with pytest.raises(ValueError, match="NO XRP Ledger equivalent") as raised:
-        xrp_call_for("getdifficulty")
+        call_for("getdifficulty")
     assert str(raised.value) == refuse_without_equivalent("getdifficulty")
 
 
 def test_no_entry_carries_an_empty_answers_path():
     """`answers` is what makes a translated figure checkable, so it is never blank."""
-    for name, entry in sorted({**CONGRUENT, **XRP_ONLY}.items()):
+    for name, entry in sorted({**CONGRUENT, **NATIVE_ONLY}.items()):
         assert entry.answers, f"{name} names no path into the result, so the reader gets a document"
         assert entry.method, f"{name} names no rippled method"

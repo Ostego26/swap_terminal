@@ -242,7 +242,7 @@ NO_EQUIVALENT: dict[str, str] = {
 #: reserve is holding back, and whether this endpoint is caught up.
 #:
 #: `fee` and `server_state` take no argument. The three account_* reads take one.
-XRP_ONLY: dict[str, XRPEquivalent] = {
+NATIVE_ONLY: dict[str, XRPEquivalent] = {
     "fee": XRPEquivalent(
         "fee", "drops.open_ledger_fee",
         note="the CURRENT cost of a transaction, in drops, which rises with load. There is no "
@@ -285,7 +285,7 @@ def equivalent_of(bitcoin_method: object) -> XRPEquivalent | None:
     """
     if not isinstance(bitcoin_method, str):
         return None
-    return CONGRUENT.get(bitcoin_method) or XRP_ONLY.get(bitcoin_method)
+    return CONGRUENT.get(bitcoin_method) or NATIVE_ONLY.get(bitcoin_method)
 
 
 def refuse_without_equivalent(bitcoin_method: object) -> str:
@@ -294,7 +294,7 @@ def refuse_without_equivalent(bitcoin_method: object) -> str:
     THREE OUTCOMES, AND THEY ARE NOT INTERCHANGEABLE, which is why each gets its own
     sentence rather than a shared "unsupported":
 
-      it translates        "" -- the caller proceeds to xrp_call_for().
+      it translates        "" -- the caller proceeds to call_for().
       no equivalent        the chain has no such concept, and the reason says what it
                            has instead. The operator should stop looking.
       not a name we know   a typo, or a method nobody has mapped. The operator should
@@ -311,7 +311,7 @@ def refuse_without_equivalent(bitcoin_method: object) -> str:
         return (
             f"{bitcoin_method} is not mapped for the XRP Ledger. This table knows "
             f"{', '.join(sorted(CONGRUENT))} as Bitcoin-style names, and "
-            f"{', '.join(sorted(XRP_ONLY))} as XRPL reads with no Bitcoin name. It is not a "
+            f"{', '.join(sorted(NATIVE_ONLY))} as XRPL reads with no Bitcoin name. It is not a "
             f"claim that no equivalent exists -- see NO_EQUIVALENT in this module for the names "
             f"where that IS the claim."
         )
@@ -326,7 +326,7 @@ class MissingArgument(ValueError):
     """
 
 
-def xrp_call_for(bitcoin_method: str, argument: object = None, account: str = "") -> tuple[str, dict]:
+def call_for(bitcoin_method: str, argument: object = None, account: str = "") -> tuple[str, dict]:
     """(rippled method, params) for one translated call. Sends nothing.
 
     RAISES RATHER THAN GUESSING, and that is the whole reason this is a function.

@@ -44,6 +44,7 @@ autofill, and the server's request log.
 from __future__ import annotations
 
 import os
+from importlib import import_module
 from typing import NamedTuple
 
 from chains.base import RPCError
@@ -337,7 +338,7 @@ def chain_state(tab: ChainTab, console) -> dict:
         missing = [name for name in FOREIGN_ENV.get(tab.asset, ()) if not os.environ.get(name)]
         # `methods` IS NOT EMPTY FOR EVERY FOREIGN TAB ANY MORE. XRP has a command map
         # (chains/xrp_rpc_map.py) and therefore a console, so its dropdown is populated from
-        # that map rather than from READ_ONLY_RPCS -- see xrp_console_methods() for why the
+        # that map rather than from READ_ONLY_RPCS -- see console_methods() for why the
         # bitcoind allowlist cannot serve it. SOL still has none, and "" is the honest answer.
         protocol = console_protocol(tab)
         # `console_methods`, NOT `methods`. On a bitcoin-family tab `methods` already means
@@ -351,7 +352,7 @@ def chain_state(tab: ChainTab, console) -> dict:
         return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
                 "network": "", "error": "", "funding": None, "methods": [],
                 "protocol": protocol,
-                "console_methods": xrp_console_methods() if protocol == "xrpl" else [],
+                "console_methods": console_methods(protocol),
                 "configured": not missing, "missing_env": missing,
                 "unconfigured_why": why_foreign_is_unconfigured(tab),
                 "env": list(FOREIGN_ENV.get(tab.asset, ()))}
@@ -649,7 +650,7 @@ def refuse_worker_control(name: object, action: object, known: dict | None = Non
 #:   "bitcoin"   {"method": ..., "params": [positional]} against a bitcoind-family daemon.
 #:               The allowlist is READ_ONLY_RPCS above.
 #:   "xrpl"      {"method": ..., "params": [{named}]} against rippled. The allowlist is
-#:               chains/xrp_rpc_map's own tables -- see xrp_console_methods() for why the
+#:               that protocol's own map tables -- see console_methods() for why the
 #:               Bitcoin one cannot serve here.
 #:   ""          no console. Said in words, with what to use instead.
 #:
@@ -657,7 +658,19 @@ def refuse_worker_control(name: object, action: object, known: dict | None = Non
 #: the protocol genuinely differs. A hand-kept row for BTC, LTC and GRC would be three chances
 #: to forget one (rule 8); XRP is a row because its protocol is a fact about XRP and not about
 #: its kind, and SOL is the honest absence.
-CONSOLE_PROTOCOL = {"XRP": "xrpl", "SOL": ""}
+CONSOLE_PROTOCOL = {"XRP": "xrpl", "SOL": "solana"}
+
+#: WHICH MODULE SPEAKS EACH PROTOCOL. One entry per non-bitcoin console, and the ONLY place a
+#: protocol name is turned into an implementation.
+#:
+#: Both modules present the SAME interface -- CONGRUENT, NO_EQUIVALENT, NATIVE_ONLY,
+#: equivalent_of(), refuse_without_equivalent(), call_for(), MissingArgument -- and they were
+#: made to, on 2026-09-30, at the moment the second one appeared. They did not start that way:
+#: the XRP module had XRP_ONLY and xrp_call_for, the Solana one SOL_ONLY and solana_call_for,
+#: and two modules answering the same four questions under different names means every reader
+#: of both needs a branch. The branch IS the copy (rule 8), and merging at the moment the
+#: second implementation lands is the only time it costs nothing.
+CONSOLE_MAPS = {"xrpl": "chains.xrp_rpc_map", "solana": "chains.solana_rpc_map"}
 
 
 def console_protocol(tab: ChainTab) -> str:
@@ -667,35 +680,44 @@ def console_protocol(tab: ChainTab) -> str:
     return "bitcoin" if tab.kind in ("regtest", "operator") else ""
 
 
-def xrp_console_methods() -> list[str]:
-    """Every name the XRP console offers, Bitcoin-style names first.
+def console_map(protocol: str):
+    """The module that speaks this protocol, imported on demand. None if there is no console.
 
-    THE MAP IS THE ALLOWLIST ON THIS TAB, and that is a deliberate difference from the
-    bitcoin-style tabs rather than a gap in READ_ONLY_RPCS. Two reasons, and the second is the
-    one that decides it:
+    IMPORTED BY NAME FROM ONE TABLE rather than by an `if protocol == ...` chain, so adding a
+    chain's console is a row in CONSOLE_MAPS and nothing else. Deferred, like every other
+    chains/ import in this module, so the panel still imports on a host without that package's
+    dependencies.
+    """
+    name = CONSOLE_MAPS.get(protocol)
+    return None if name is None else import_module(name)
 
-      READ_ONLY_RPCS is a list of BITCOIN method names. `fee`, `server_state` and the three
-      account_* reads are not on it and should not be added to it -- putting XRPL names on the
-      bitcoind allowlist would mean a GRC tab could be asked for `account_lines`, which is a
-      method that daemon has never heard of and a list that would then be lying about what it
-      governs.
 
-      Every entry in chains/xrp_rpc_map IS a read, by construction, and
-      tests/test_xrp_rpc_map.py asserts it against a denylist of every rippled method that
-      signs, submits or proposes a key. So the map can only ever SHRINK what this console
-      offers relative to the questions an operator might ask -- NO_EQUIVALENT removes names,
-      and nothing in that module can add a write.
+def console_methods(protocol: str) -> list[str]:
+    """Every name this protocol's console offers, Bitcoin-style names first.
+
+    THE MAP IS THE ALLOWLIST ON A TRANSLATED TAB, and that is a deliberate difference from the
+    bitcoin-style tabs rather than a gap in READ_ONLY_RPCS. Two reasons, and the second decides
+    it:
+
+      READ_ONLY_RPCS is a list of BITCOIN method names. `fee` and `account_lines` on rippled,
+      `getHealth` and `getSupply` on Solana, are not bitcoin names and should not be added to
+      it -- putting them on the bitcoind allowlist would mean a GRC tab could be asked for
+      `getSupply`, a method that daemon has never heard of, and that list would then be lying
+      about what it governs.
+
+      Every entry in either map IS a read, by construction, and each map's own test file
+      asserts it against a denylist of everything that signs, submits or proposes a key. So a
+      map can only ever SHRINK what a console offers -- NO_EQUIVALENT removes names, and
+      nothing in either module can add a write.
 
     Sorted within each half rather than interleaved, because "what does this translate to" and
     "what can this chain tell me that Bitcoin cannot" are different questions and a single
     alphabetical list answers neither.
     """
-    from chains.xrp_rpc_map import (  # noqa: PLC0415 -- checked: imported inside the function so this module still imports on a host without the chains package's dependencies, which is the same reason refuse_worker_control() defers supervisor.
-        CONGRUENT,
-        XRP_ONLY,
-    )
-
-    return [*sorted(CONGRUENT), *sorted(XRP_ONLY)]
+    module = console_map(protocol)
+    if module is None:
+        return []
+    return [*sorted(module.CONGRUENT), *sorted(module.NATIVE_ONLY)]
 
 
 def refuse_an_rpc_console(tab: ChainTab) -> str:
@@ -708,10 +730,11 @@ def refuse_an_rpc_console(tab: ChainTab) -> str:
     handful that genuinely have no answer there. chains/xrp_rpc_map.py is that mapping, so the
     XRP tab now gets a console and this function refuses only where there is nothing to point.
 
-    SOL STILL HAS NONE, and the reason is not symmetry: nobody has written the equivalent map
-    for it, and Solana's JSON-RPC takes named parameters with a different method vocabulary
-    again. Saying "not mapped yet" is a different claim from "cannot be", and this says the
-    first one (rule 17).
+    SOL HAS ONE TOO, since later the same day: chains/solana_rpc_map.py, written after
+    solana_chain_check.py passed against api.devnet.solana.com so the shapes in it are measured
+    rather than documented. This function now refuses only a chain in CHAINS with no entry in
+    CONSOLE_MAPS -- which is none of them today, and the refusal is kept rather than deleted
+    because the next chain added will be in exactly that state.
 
     ASKED HERE RATHER THAN DISCOVERED AT THE SOCKET, which is the whole point of it being a
     function. Before it existed, `main()` tried to build a connection for every tab and the
@@ -723,52 +746,60 @@ def refuse_an_rpc_console(tab: ChainTab) -> str:
         return ""
     return (f"{tab.asset} has no console here yet. It does not speak the Bitcoin-style JSON-RPC "
             f"this one sends, and no command map has been written for it the way "
-            f"chains/xrp_rpc_map.py was written for XRP -- which is a thing nobody has done, "
-            f"not a thing that cannot be done. That chain has its own client in this tree, and "
-            f"its own read-only check is the button under Run.")
+            f"chains/xrp_rpc_map.py and chains/solana_rpc_map.py were -- which is a thing "
+            f"nobody has done, not a thing that cannot be done. That chain has its own client "
+            f"in this tree, and its own read-only check is the button under Run.")
 
 
-def call_xrp_read_only(adapter, method: str, argument: object = None, account: str = "") -> dict:
-    """One translated XRP read. {ok, result} or {ok: false, error}. NEVER raises.
+def call_translated_read_only(adapter, protocol: str, method: str, argument: object = None,
+                             account: str = "") -> dict:
+    """One translated read on a non-bitcoin chain. {ok, result} or {ok: false, error}. NEVER raises.
+
+    ONE IMPLEMENTATION FOR EVERY TRANSLATED CONSOLE, and it was one function for XRP alone for
+    about two hours. Writing the Solana one revealed it would have been the same five steps --
+    refuse an unmapped name, build the call, catch a missing argument, send, report -- against a
+    different module, which is rule 8's shape exactly: two copies agreeing on the day they are
+    written. The protocol picks the module and nothing else differs.
 
     THE SAME THREE-WAY DISTINCTION call_read_only() makes, because it is the same distinction
-    and collapsing it costs the same thing: the panel's own refusal, a missing argument, and the
-    ledger's own answer are three different things an operator does three different things
-    about.
+    and collapsing it costs the same thing:
 
-      refused=True   this name has no XRP equivalent, or is not mapped. Stop looking, or look
-                     somewhere the message names.
+      refused=True   this name has no equivalent on that chain, or is not mapped. Stop looking,
+                     or look where the message says.
       refused=True   with `needs`, when the call translates but an argument is missing. NOT the
-                     same as the above -- the operator should ask again with the argument, and
-                     the message says which one.
-      refused=False  rippled answered, and the answer is an error. Its own words, unparaphrased.
+                     same as the above -- ask again WITH it, and the message says which.
+      refused=False  the chain answered, and the answer is an error. Its own words, unparaphrased.
 
     `translated` rides on every successful answer, because the operator asked for
-    `getblockcount` and rippled answered about `ledger_closed`, and a reader who cannot see
-    which method produced a figure cannot check it (rule 14: echo the parameters that decide
-    the answer).
-    """
-    from chains.xrp_rpc_map import (  # noqa: PLC0415 -- checked: deferred for the same reason as xrp_console_methods().
-        MissingArgument,
-        equivalent_of,
-        refuse_without_equivalent,
-        xrp_call_for,
-    )
+    `getblockcount` and the node answered about `getBlockHeight`, and a reader who cannot see
+    which method produced a figure cannot check it (rule 14: echo the parameters that decide the
+    answer).
 
-    refusal = refuse_without_equivalent(method)
+    THE PARAMS SHAPE IS THE MAP'S, NOT THIS FUNCTION'S. rippled takes one object and Solana
+    takes a positional list, so call_for() returns whichever that chain wants and the adapter is
+    handed it the way that adapter expects -- a dict as one argument, a list spread. That branch
+    is here, once, and it is about a CALLING CONVENTION rather than about a policy.
+    """
+    module = console_map(protocol)
+    if module is None:
+        return {"ok": False, "refused": True,
+                "error": f"there is no command map for protocol {protocol!r}, so nothing can be "
+                         f"translated. CONSOLE_MAPS knows {', '.join(sorted(CONSOLE_MAPS))}."}
+
+    refusal = module.refuse_without_equivalent(method)
     if refusal:
         return {"ok": False, "refused": True, "error": refusal}
     try:
-        rippled_method, params = xrp_call_for(method, argument, account)
-    except MissingArgument as error:
+        chain_method, params = module.call_for(method, argument, account)
+    except module.MissingArgument as error:
         return {"ok": False, "refused": True, "needs": True, "error": str(error)}
-    entry = equivalent_of(method)
+    entry = module.equivalent_of(method)
     try:
-        result = adapter.call(rippled_method, params)
-    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value, named with its type, and a panel that dies on an account that does not exist is a panel that cannot be used to explore. rippled reports errors with HTTP 200, so XRPRPCError is the ordinary case here rather than the exceptional one.
-        return {"ok": False, "refused": False, "translated": rippled_method,
+        result = adapter.call(chain_method, params) if isinstance(params, dict) else adapter.call(chain_method, *params)
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value, named with its type, and a panel that dies on an account that does not exist is a panel that cannot be used to explore. rippled reports errors with HTTP 200 and a Solana node answers null for a skipped slot, so a chain-level error is the ordinary case here rather than the exceptional one.
+        return {"ok": False, "refused": False, "translated": chain_method,
                 "error": f"{type(error).__name__}: {error}"}
-    return {"ok": True, "result": result, "translated": rippled_method,
+    return {"ok": True, "result": result, "translated": chain_method,
             "params": params, "answers": entry.answers, "note": entry.note}
 
 

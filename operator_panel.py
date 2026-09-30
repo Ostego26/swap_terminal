@@ -192,7 +192,7 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <div class="row" id="rpcrow">
     <select id="method"></select>
     <input id="rpcargs" placeholder='arguments as JSON, e.g. ["txid", true] &mdash; blank for none'>
-    <input id="rpcaccount" placeholder="r-address &mdash; blank uses XRP_DEPOSIT_ACCOUNT" style="display:none">
+    <input id="rpcaccount" placeholder="account address" style="display:none">
     <button id="callrpc">Call</button>
   </div>
   <p class="what">Every method offered here READS. Nothing on this page can create a
@@ -405,10 +405,17 @@ async function loadChain(asset) {
   // only be refused is the defect the comment above this block is already about; this is the
   // same defect arriving through the option list instead of the section.
   $("method").innerHTML = (d.console_methods || []).map(m => '<option>' + esc(m) + '</option>').join("");
-  const xrpl = d.protocol === "xrpl";
-  $("rpcaccount").style.display = xrpl ? "" : "none";
-  if (xrpl) {
-    $("rpcargs").placeholder = "one argument, e.g. a ledger index or a tx hash \u2014 blank for none";
+  // A TRANSLATED CONSOLE TAKES ONE ARGUMENT AND MAY TAKE AN ACCOUNT; a bitcoin-style one takes
+  // a positional array and reads a wallet the daemon already holds. The placeholders say which,
+  // because a box whose format is wrong is worse than a box with no hint -- and the address
+  // hint names the VARIABLE that fills it when blank, derived from the asset the same way the
+  // server derives it.
+  const translated = d.protocol === "xrpl" || d.protocol === "solana";
+  $("rpcaccount").style.display = translated ? "" : "none";
+  if (translated) {
+    $("rpcaccount").placeholder = (d.protocol === "xrpl" ? "r-address" : "base58 address") +
+      " \u2014 blank uses " + d.asset + "_DEPOSIT_ACCOUNT";
+    $("rpcargs").placeholder = "one argument \u2014 a ledger index, slot, tx hash or signature \u2014 blank for none";
   } else {
     $("rpcargs").placeholder = 'arguments as JSON, e.g. ["txid", true] \u2014 blank for none';
   }
@@ -1318,8 +1325,8 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     # funding_steps.Run objects for the bitcoind-family tabs only, so before the map existed an
     # XRP request fell into the run-is-None branch below and was refused -- correctly then, and
     # wrongly now that chains/xrp_rpc_map.py can translate the question.
-    if tab is not None and decisions.console_protocol(tab) == "xrpl":
-        answer = answer_an_xrp_rpc(body, tab)
+    if tab is not None and decisions.console_protocol(tab) in decisions.CONSOLE_MAPS:
+        answer = answer_a_translated_rpc(body, tab)
         return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
     run = (chains or {}).get(asset) if isinstance(asset, str) else None
     if run is None:
@@ -1328,9 +1335,21 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
         # true: the operator's daemon for that chain may be answering perfectly well. What
         # is true is that this console speaks one protocol and the chain does not, and only
         # the tab knows which of those two it is.
-        reason = decisions.refuse_an_rpc_console(tab) if tab is not None else ""
+        # THREE REASONS AND THE THIRD WAS SAYING THE SECOND'S SENTENCE. A chain this panel does
+        # not know at all is not a chain whose daemon is unreachable -- nothing asked it -- and
+        # this branch claimed the latter for both until 2026-09-30. It is the same wrong-reason
+        # defect this function's own history records for the foreign tabs: "has no reachable
+        # daemon here" is not established, and an operator reading it goes looking at a daemon
+        # instead of at their request. chain_payload() already had the right sentence for an
+        # unknown asset; this had a copy of the wrong one (rule 8, and the copies did not even
+        # agree).
+        if tab is None:
+            return {"ok": False, "refused": True,
+                    "error": f"{asset!r} is not a chain this panel knows about. It serves "
+                             f"{', '.join(c.asset for c in decisions.CHAINS)}."}, 403
+        reason = decisions.refuse_an_rpc_console(tab)
         return {"ok": False, "refused": True,
-                "error": reason or f"{asset!r} has no reachable daemon in this panel"}, 403
+                "error": reason or f"{asset} has no reachable daemon in this panel"}, 403
     args = body.get("args")
     if not isinstance(args, list):
         args = []
@@ -1338,7 +1357,7 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
 
 
-def answer_an_xrp_rpc(body: dict, tab) -> dict:
+def answer_a_translated_rpc(body: dict, tab) -> dict:
     """One translated XRP Ledger read, or the reason there is none. Never raises.
 
     THE ADAPTER IS BUILT FROM CONFIGURATION, not held by this panel, and that is the honest
@@ -1347,15 +1366,19 @@ def answer_an_xrp_rpc(body: dict, tab) -> dict:
     the same chains/xrp.XRPAdapter every worker uses, which already owns rippled's params shape
     and its 200-with-error behavior.
 
-    AN UNSET XRP_RPC_URL IS A REFUSAL AND NAMES THE VARIABLE. It is the ordinary reading on a
-    host that has not exported it, it is not a fault, and it must not read like one -- the tab
-    above already says the same thing about the same variable, in the same words, from the same
-    place (regtest/operator_panel.FOREIGN_ENV).
+    AN UNSET ENDPOINT VARIABLE IS A REFUSAL AND NAMES IT. It is the ordinary reading on a host
+    that has not exported one, it is not a fault, and it must not read like one -- the tab above
+    already says the same thing about the same variable, in the same words, from the same place
+    (regtest/operator_panel.why_foreign_is_unconfigured, over FOREIGN_ENV).
 
-    THE ACCOUNT COMES FROM THE REQUEST OR FROM XRP_DEPOSIT_ACCOUNT, in that order, and NEITHER
-    is invented. An account_info with a silently defaulted account answers confidently about
-    the wrong account, which is the shape rule 17 forbids; `account_used` rides on the answer so
-    the operator can see which one it was.
+    THE ACCOUNT COMES FROM THE REQUEST OR FROM <ASSET>_DEPOSIT_ACCOUNT, in that order, and
+    NEITHER is invented. The variable name is DERIVED from the asset rather than written down:
+    it read XRP_DEPOSIT_ACCOUNT while this function served one chain, and the day Solana
+    arrived that default would have answered a getBalance about an XRP account -- silently,
+    because an empty string routes to the map's own missing-argument refusal and a WRONG one
+    does not. A getBalance with a quietly defaulted address answers confidently about the wrong
+    account, which is the shape rule 17 forbids; `account_used` rides on the answer so the
+    operator can see which one it was.
     """
     from workers.common import (  # noqa: PLC0415 -- checked: deferred like swapper_payload()'s imports, so this stdlib-only server imports on a host without the chains package's dependencies.
         build_adapters_from_config,
@@ -1376,15 +1399,17 @@ def answer_an_xrp_rpc(body: dict, tab) -> dict:
 
     account = body.get("account")
     if not isinstance(account, str) or not account.strip():
-        account = str(config.get("XRP_DEPOSIT_ACCOUNT") or "")
-    # ONE NAMED ARGUMENT, NOT THE WHOLE LIST. The console's box takes a JSON array because
-    # bitcoind's params are positional; rippled's are named, and every entry in the map that
-    # needs an argument needs exactly one. Passing the list through would have asked `ledger`
-    # for ledger_index [90000000] -- a list where an integer goes -- which rippled reports as
-    # an invalid params error that says nothing about the real mistake.
+        account = str(config.get(f"{tab.asset}_DEPOSIT_ACCOUNT") or "")
+    # ONE ARGUMENT, NOT THE WHOLE LIST. The console's box takes a JSON array because bitcoind's
+    # params are positional; every entry in either map that needs an argument needs exactly one,
+    # whether the chain wants it named (rippled) or positional (Solana). Passing the list
+    # through would have asked `ledger` for ledger_index [90000000] -- a list where an integer
+    # goes -- which rippled reports as an invalid params error that says nothing about the real
+    # mistake, and a Solana node reports the same way for getBlock.
     args = body.get("args")
     argument = args[0] if isinstance(args, list) and args else (None if isinstance(args, list) else args)
-    answer = decisions.call_xrp_read_only(adapter, body.get("method"), argument, account)
+    answer = decisions.call_translated_read_only(
+        adapter, decisions.console_protocol(tab), body.get("method"), argument, account)
     if isinstance(args, list) and len(args) > 1:
         # SAID RATHER THAN IGNORED (rule 14). An operator who typed three arguments and got an
         # answer computed from one must be told which one was used.
