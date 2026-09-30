@@ -141,6 +141,43 @@ class Config:
     # swap while XRP_DEPOSIT_ACCOUNT is unset, which is the custody decision and
     # has no default. So this line opens the gate; the operator's account setting
     # is what puts anything through it.
+    # WHAT A PAIR NEEDS BEFORE IT BELONGS HERE, because this set alone is not
+    # enough and the tree has said so twice:
+    #
+    #   an adapter        chains/registry.build_adapters() must construct both
+    #                     chains, which needs their *_RPC_* settings
+    #   a USD price       services/pricing.IDS must carry both, or create_quote()
+    #                     accepts the swap and then fails on a missing price
+    #   a FEE RESERVE     config.<TO_ASSET>_NETWORK_FEE_RESERVE must exist, or the
+    #                     quote refuses: a reserve is a PRICING decision and is
+    #                     never defaulted to zero, because zero quotes a payout
+    #                     the destination chain will not deliver
+    #
+    # THE FOUR ADDED 2026-09-30 all satisfy those, and each pays out to an asset
+    # whose reserve already exists (BTC 0.00002, LTC 0.001):
+    #
+    #   ("BTC", "LTC"), ("LTC", "BTC")   both proven by atomic_swap.py's own
+    #                                    BTC<->LTC coverage
+    #   ("XRP", "BTC"), ("XRP", "LTC")   XRP as the INPUT. XRP<->LTC completed
+    #                                    OK=15 FAIL=0 on 2026-09-29 through
+    #                                    atomic_swap_xrp.py, and BTC shares every
+    #                                    function of that path
+    #
+    # THE TWO NOT ADDED, AND WHY -- ("BTC", "XRP") and ("LTC", "XRP") pay out in
+    # XRP, and XRP_NETWORK_FEE_RESERVE DOES NOT EXIST. Adding them would enable a
+    # pair that refuses every quote.
+    #
+    # WHICH IS ALREADY TRUE OF ("GRC", "XRP"), enabled 2026-09-26 and unquotable
+    # since: quote_service.network_fee_reserve() raises for a missing reserve, and
+    # the operator saw exactly that from their browser --
+    #
+    #     No quote: 'XRP_NETWORK_FEE_RESERVE'
+    #
+    # -- which is the bare KeyError repr that docstring was rewritten to prevent.
+    # The message is better now; the pair is still broken. Setting that number is
+    # a pricing decision and the operator's (rule 16), so it is REPORTED here
+    # rather than guessed, and tests/test_allowed_pairs_are_serviceable.py fails
+    # on it so it cannot be forgotten again.
     ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]] = {
         ("GRC", "BTC"),
         ("BTC", "GRC"),
@@ -148,6 +185,10 @@ class Config:
         ("LTC", "GRC"),
         ("XRP", "GRC"),
         ("GRC", "XRP"),
+        ("BTC", "LTC"),
+        ("LTC", "BTC"),
+        ("XRP", "BTC"),
+        ("XRP", "LTC"),
     }
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's

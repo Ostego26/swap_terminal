@@ -10,8 +10,8 @@
   Writes: nothing
   Can move funds: no. THERE IS NO FORM ON THIS PAGE THAT POSTS ANYWHERE, and
         there is no route on the admin blueprint that accepts a POST -- see
-        routes/admin.py's header. The one control is a link-shaped button that
-        GETs a read-only chain probe.
+        routes/admin.py's header. The two controls are link-shaped buttons that
+        GET a read-only chain probe and a read-only stablecoin price check.
   Mainnet-safe: yes
 
   STALE MUST NOT LOOK LIKE FRESH. Every time-bearing reading here goes through
@@ -241,6 +241,86 @@
   </div>
 </section>
 
+<section class="panel" aria-labelledby="pricing-heading">
+  <h2 id="pricing-heading">Pricing</h2>
+  {# WHAT THIS PANEL IS AND IS NOT, stated on the page and not only in the
+     source, because the operator reads the screen (rule 14).
+
+     It is the price cache, as the quote path last filled it. It is NOT a fresh
+     reading: nothing on this page load contacted a price API, which is why
+     /admin still renders when every feed is down. That also makes it the more
+     useful number -- it is what a customer was quoted against. #}
+  <p class="panel-note">Read out of <code>services/pricing.py</code>&rsquo;s in-process cache. <strong>This page
+     fetched nothing.</strong> These are the numbers the quote path last priced from &#8212; which is what a customer
+     was actually quoted against, not a fresh figure nothing used. A price feed being down costs this panel its
+     freshness and not the rest of the page.</p>
+
+  {% if not data.pricing.cached %}
+    {# Cold cache and every asset unpriced are different facts, and this is the
+       first one. An empty table would have read as the second. #}
+    <p class="empty"><span class="empty-mark">(not fetched)</span> <span class="empty-what">nothing has been priced
+       since this process started</span> <span class="empty-params">&#8592; the cache fills on the first quote, or on
+       the first <code>/api/rates</code>; on a freshly restarted app this is the ordinary reading and not a
+       fault</span></p>
+  {% else %}
+  <dl class="kv">
+    <dt>Feed that answered</dt>
+    <dd class="mono">{{ data.pricing.source or '(the cache recorded no source)' }}</dd>
+    <dt>Fetched</dt>
+    <dd>{{ data.pricing.age }} ago
+        {% if data.pricing.expired %}<span class="subtle">&#8592; past its TTL of {{ data.pricing.ttl }}; the next
+        quote re-fetches</span>{% else %}<span class="subtle">&#8592; within its TTL of {{ data.pricing.ttl }}; the
+        next quote reuses this</span>{% endif %}</dd>
+  </dl>
+
+  {% if data.pricing.assets %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>asset</th><th>USD</th><th>market cap</th><th>24h volume</th><th>24h change</th>
+      <th>depth</th><th>what that reading means</th></tr></thead>
+    <tbody>
+      {% for row in data.pricing.assets %}
+      {# The verdict is services/market_context.turnover_finding()'s, decided in
+         Python and only rendered here. "(not measured)" is its own state and is
+         deliberately not styled as OK: turnover_finding() returns None when the
+         cap or the volume is unusable, which for GRC on a feed reporting
+         market_cap 0 is the ORDINARY case -- and a check that could not run must
+         not look like a check that passed. #}
+      {% set level = {'OK': 'ok', 'THIN': 'halted'}.get(row.turnover_verdict, 'unknown') %}
+      <tr>
+        <td class="mono">{{ row.asset }}</td>
+        <td class="mono">{{ '%.8f'|format(row.price_usd) }}</td>
+        <td class="mono subtle">{% if row.market_cap_usd %}{{ '{:,.0f}'.format(row.market_cap_usd) }}{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
+        <td class="mono subtle">{% if row.volume_24h_usd %}{{ '{:,.0f}'.format(row.volume_24h_usd) }}{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
+        <td class="mono subtle">{% if row.change_24h_pct is not none %}{{ '%+.2f'|format(row.change_24h_pct) }}%{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
+        <td>{{ badges.level_badge(level, row.turnover_verdict) }}</td>
+        <td class="breakable subtle">{{ row.turnover_note }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('asset came back priced', 'every asset in services/pricing.IDS') }}
+  {% endif %}
+  {% endif %}
+
+  <div class="probe">
+    <h3>The dollar these numbers are quoted in</h3>
+    {# Announce BEFORE (rule 14), and say why it is not on the page already. #}
+    <p class="panel-note">{{ data.pricing.peg }} Asking makes <strong>two HTTPS reads</strong> &#8212; one per
+       stablecoin &#8212; carrying no key and touching no chain. The findings come from the same
+       <code>wallet_leveling.peg_findings()</code> that <code>chain_balances.py --level</code> prints, so this page and
+       that command cannot disagree about whether the peg holds.</p>
+    <p><a class="button" href="{{ url_for('admin.admin_peg_route') }}" id="peg-link">Check USDC and USDT against the
+       dollar</a></p>
+    <div id="peg-result" class="result" aria-live="polite">
+      <p class="result-idle"><span class="empty-mark">(not checked)</span> The dollar above is unchecked on this page
+         load. That is not the same as checked and holding.</p>
+    </div>
+  </div>
+</section>
+
 <section class="panel" aria-labelledby="pairs-heading">
   <h2 id="pairs-heading">Trading pairs</h2>
   <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code>. Disabled pairs are listed rather than hidden,
@@ -367,5 +447,6 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='admin.js') }}" defer
-        data-probe-url="{{ url_for('admin.admin_chains_route') }}"></script>
+        data-probe-url="{{ url_for('admin.admin_chains_route') }}"
+        data-peg-url="{{ url_for('admin.admin_peg_route') }}"></script>
 {% endblock %}

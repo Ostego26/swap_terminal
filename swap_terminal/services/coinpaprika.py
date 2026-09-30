@@ -40,7 +40,7 @@ WHY market_cap HAS TO BE DERIVED, AND WHY THAT IS THE WHOLE GRIDCOIN STORY
 CoinPaprika reports `market_cap: 0` for GRC while reporting
 `total_supply: 459382131`. Zero is not a market cap; it is a field the feed does
 not compute for an asset this small. And market cap is not decoration here --
-services/market_context._turnover_finding() returns None when the cap is zero or
+services/market_context.turnover_finding() returns None when the cap is zero or
 absent, so a GRC snapshot taken straight from this feed SKIPS THE THINNESS CHECK
 SILENTLY. The one asset that needs it is the one that would not get it.
 
@@ -169,7 +169,7 @@ def derive_market_cap(reported, total_supply, price_usd: float) -> tuple[float |
 
     ZERO IS TREATED AS ABSENT, and that is the decision this function exists for.
     CoinPaprika returns `market_cap: 0` for GRC -- not null, not missing, zero --
-    and a zero cap propagates into market_context._turnover_finding(), which
+    and a zero cap propagates into market_context.turnover_finding(), which
     returns None for a cap of zero and therefore SKIPS the thinness check
     entirely. The asset that most needs measuring is the one whose feed does not
     compute the number the measurement needs.

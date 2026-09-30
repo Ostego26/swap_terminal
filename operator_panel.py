@@ -20,7 +20,7 @@ only ever computed INSIDE a run, as a side effect of choosing. This is the place
 first.
 
 IT IS NOT THE FLASK APP. `swap_terminal/routes/admin.py` serves an operator page whose GET-only
-shape is structural and asserted by tests/test_admin_surface.py over the real URL map, and the
+shape is structural and asserted by tests/test_web_surfaces.py over the real URL map, and the
 whole app is unauthenticated behind a loopback bind. Buttons that spend money do not belong on
 a surface with that posture, so this is a separate server sharing no route table with it --
 stdlib only, no Flask, no database, no configuration file.

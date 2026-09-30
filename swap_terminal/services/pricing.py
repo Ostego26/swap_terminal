@@ -95,6 +95,7 @@ TWO THINGS ABOUT HOW THIS IS SHAPED, AND BOTH ARE THE POINT.
 """
 
 from dataclasses import dataclass, fields
+from datetime import datetime
 from threading import Lock
 from time import time
 
@@ -106,7 +107,12 @@ import requests
 # tests/test_open_swap.py's stub_prices() docstring names it as the thing both
 # call sites consult in production; renaming it would make that sentence wrong
 # (rule 16: a wrong comment is a bug).
-_cache = {"raw": None, "prices": None, "context": None, "fetched_at": 0.0, "expires_at": 0.0}
+# `source` NAMES THE FEED THAT ANSWERED, added 2026-09-30 with the fallback. A
+# price whose origin is not recorded is a number nobody can check a day later,
+# and two feeds that disagree would be indistinguishable in a quote row (rule
+# 14's "echo the parameters that decide the answer").
+_cache = {"raw": None, "prices": None, "context": None, "fetched_at": 0.0, "expires_at": 0.0,
+          "source": ""}
 _lock = Lock()
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
@@ -260,6 +266,69 @@ def _fetch_raw(ttl_seconds: int) -> dict:
     now = time()
     if _cache["raw"] is not None and now < _cache["expires_at"]:
         return _cache
+    try:
+        raw, source = _coingecko_raw()
+    except Exception as coingecko_error:  # noqa: BLE001 -- checked: a non-200, a transport failure, a shape that is not JSON and a partial response all mean the same thing to this function -- CoinGecko did not price this, try the other feed. The reason is not swallowed: it is carried into the fallback's own failure message below, so a run where BOTH feeds fail reports BOTH reasons.
+        try:
+            raw, source = _coinpaprika_raw()
+        except Exception as paprika_error:
+            raise PriceSourceError(
+                f"no price feed answered. CoinGecko: {type(coingecko_error).__name__}: "
+                f"{coingecko_error}. CoinPaprika: {type(paprika_error).__name__}: {paprika_error}. "
+                f"NO RATE IS DERIVED FROM A MISSING PRICE -- a quote is refused rather than "
+                f"computed from a stale or zero one"
+            ) from paprika_error
+    _cache["raw"] = raw
+    _cache["source"] = source
+    _cache["prices"] = None
+    _cache["context"] = None
+    _cache["fetched_at"] = now
+    _cache["expires_at"] = now + ttl_seconds
+    return _cache
+
+
+class PriceSourceError(RuntimeError):
+    """No feed answered. Raised rather than returning a zero or a stale price.
+
+    A distinct type because open_swap.py's fetch_prices_or_refuse() catches
+    TypeError and ValueError by name for the unparseable-price case, and "every
+    feed is down" is a different thing an operator can act on differently.
+    """
+
+
+def _require_every_asset(raw: dict, source: str) -> dict:
+    """The missing-asset refusal, applied identically to both feeds.
+
+    Derived from IDS rather than written out. A missing asset raises a KeyError
+    naming WHICH one, here, instead of returning a dict that is quietly short one
+    key and failing later inside derive_pair_rate() where the message would be
+    about a rate rather than about a price.
+
+    THE MESSAGE IS UNCHANGED from the CoinGecko-only version, because
+    open_swap.py:655 quotes it by name in its own docstring; the source is
+    appended rather than substituted.
+    """
+    missing = [asset for asset, cg_id in IDS.items() if cg_id not in raw]
+    if missing:
+        raise KeyError(
+            f"{source} returned no price for {', '.join(sorted(missing))} "
+            f"(asked for {', '.join(sorted(IDS))}). No rate is derived from a "
+            f"partial response: a swap priced off a missing leg is a swap priced wrong."
+        )
+    return raw
+
+
+def _coingecko_raw() -> tuple[dict, str]:
+    """CoinGecko's /simple/price, keyed by its own ids. The original path, unchanged.
+
+    KEPT AS THE FIRST TRY rather than replaced. Measured 2026-09-29 and -30 from
+    the operator's host, this returns 403 on every request -- from AWS CloudFront's
+    edge, not from CoinGecko, so an API key cannot help because the key rides in a
+    header the origin never reads. But the block is on a client IP and not on this
+    code: it works from other hosts, it is the shape every field name here was
+    written against, and one aggregator is a single point of failure whichever one
+    it is.
+    """
     response = requests.get(
         COINGECKO_URL,
         # The context flags cost no extra round trip: they are parameters on the
@@ -268,24 +337,82 @@ def _fetch_raw(ttl_seconds: int) -> dict:
         timeout=15,
     )
     response.raise_for_status()
-    raw = response.json()
-    # Derived from IDS rather than written out. A missing asset raises a
-    # KeyError naming WHICH one, here, instead of returning a dict that is
-    # quietly short one key and failing later inside derive_pair_rate()
-    # where the message would be about a rate rather than about a price.
-    missing = [asset for asset, cg_id in IDS.items() if cg_id not in raw]
-    if missing:
+    return _require_every_asset(response.json(), "CoinGecko"), "CoinGecko"
+
+
+def _coinpaprika_raw() -> tuple[dict, str]:
+    """CoinPaprika, reshaped into CoinGecko's own response shape.
+
+    THE RESHAPE IS THE WHOLE DESIGN. fetch_usd_prices() and
+    fetch_market_context() both index raw[cg_id] and read the four
+    _CONTEXT_FIELDS keys, and neither needed a line changed to gain a second
+    feed -- because what changes is where the dict came from, not what it looks
+    like. A second parser would be rule 8's shape: two readers of one concept,
+    agreeing on the day they are written.
+
+    ONE REQUEST PER ASSET, unlike CoinGecko's one for all of them. CoinPaprika's
+    /v1/tickers takes a single id, so this is len(IDS) round trips -- which the
+    cache makes once per TTL window rather than once per quote.
+
+    GRC'S MARKET CAP IS DERIVED and the snapshot has no way to say so, which is
+    the one place this reshape loses information. CoinPaprika reports
+    market_cap 0 for GRC while reporting total_supply, and
+    services/market_context.turnover_finding() returns None on a zero cap --
+    so the thinness check on the one asset that needs it would silently not
+    run. chains/coinpaprika.derive_market_cap() computes supply x price and
+    flags it; MarketSnapshot carries no such flag, so the value goes in
+    unflagged here and the flag survives only where PaprikaQuote is used
+    directly (chain_balances.py --level). Naming that gap rather than leaving
+    it: a cap that is derived and a cap that was reported are the same float
+    and different claims.
+    """
+    from services.coinpaprika import (  # noqa: PLC0415 -- checked: imported inside the function so that a host without `requests` can still import services.pricing for its pure helpers, which is the same reason the drivers defer their price imports.
+        PAPRIKA_IDS,
+        fetch_quote,
+    )
+
+    raw, unpriced = {}, {}
+    for asset, cg_id in IDS.items():
+        try:
+            quote = fetch_quote(asset)
+        except Exception as error:  # noqa: BLE001 -- checked: one asset failing must not lose the others; every failure is collected and _require_every_asset() below raises naming exactly which assets are missing, which is more useful than the first exception.
+            unpriced[asset] = f"{type(error).__name__}: {error}"
+            continue
+        raw[cg_id] = {
+            "usd": quote.price_usd,
+            "usd_market_cap": quote.market_cap_usd,
+            "usd_24h_vol": quote.volume_24h_usd,
+            "usd_24h_change": quote.change_24h_pct,
+            "last_updated_at": _unix_from_iso(quote.source_updated_at),
+        }
+    if unpriced:
         raise KeyError(
-            f"CoinGecko returned no price for {', '.join(sorted(missing))} "
-            f"(asked for {', '.join(sorted(IDS))}). No rate is derived from a "
-            f"partial response: a swap priced off a missing leg is a swap priced wrong."
+            f"CoinPaprika could not price {', '.join(sorted(unpriced))}: "
+            + "; ".join(f"{asset}: {why}" for asset, why in sorted(unpriced.items()))
+            + f". Ids are <symbol>-<slug> and are NOT guessable -- see PAPRIKA_IDS, where "
+              f"{', '.join(sorted(PAPRIKA_IDS))} are mapped and the unconfirmed ones are "
+              f"marked. A 404 here is a wrong id, not a missing asset."
         )
-    _cache["raw"] = raw
-    _cache["prices"] = None
-    _cache["context"] = None
-    _cache["fetched_at"] = now
-    _cache["expires_at"] = now + ttl_seconds
-    return _cache
+    return _require_every_asset(raw, "CoinPaprika"), "CoinPaprika"
+
+
+def _unix_from_iso(stamp) -> int | None:
+    """CoinPaprika's ISO-8601 `last_updated` as the unix second CoinGecko sends.
+
+    None rather than a guess when it cannot be parsed: MarketSnapshot carries
+    source_updated_at as optional precisely so "the feed did not say when" is
+    expressible, and services/market_context reads its absence as a staleness it
+    cannot measure rather than as a fresh price.
+    """
+    if not stamp:
+        return None
+    try:
+        # No Z-to-+00:00 rewrite: Python 3.11+ parses the trailing Z directly, and
+        # ruff's FURB162 flags the replace as dead. Verified against CoinPaprika's
+        # own "2026-09-29T21:35:13Z" on 3.11.
+        return int(datetime.fromisoformat(str(stamp)).timestamp())
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_usd_prices(ttl_seconds: int = 30) -> dict:
@@ -313,6 +440,17 @@ def fetch_usd_prices(ttl_seconds: int = 30) -> dict:
         return cache["prices"]
 
 
+def last_price_source() -> str:
+    """Which feed the cached prices came from, or "" if nothing is cached.
+
+    READ, NEVER FETCHED. A caller asking which feed answered must not cause a
+    fetch: that would make a provenance question into an outbound request, and
+    the answer would be about a different call than the one it is describing.
+    """
+    with _lock:
+        return _cache["source"] or ""
+
+
 def fetch_market_context(ttl_seconds: int = 30) -> list[MarketSnapshot]:
     """Every asset's price with its market cap, 24h volume and 24h change beside it.
 
@@ -332,29 +470,91 @@ def fetch_market_context(ttl_seconds: int = 30) -> list[MarketSnapshot]:
     with _lock:
         cache = _fetch_raw(ttl_seconds)
         if cache["context"] is None:
-            raw = cache["raw"]
-            snapshots = []
-            for asset, cg_id in IDS.items():
-                entry = raw[cg_id]
-                values = {field: _optional_float(entry, key) for _flag, key, field in _CONTEXT_FIELDS}
-                # The feed's own timestamp is a unix SECOND, not a fraction of one.
-                # int() rather than float() so a row read back out of SQL compares
-                # equal to what the API said, and None stays None.
-                updated = values["source_updated_at"]
-                snapshots.append(
-                    MarketSnapshot(
-                        asset=asset,
-                        coingecko_id=cg_id,
-                        price_usd=float(entry["usd"]),
-                        market_cap_usd=values["market_cap_usd"],
-                        volume_24h_usd=values["volume_24h_usd"],
-                        change_24h_pct=values["change_24h_pct"],
-                        source_updated_at=None if updated is None else int(updated),
-                        fetched_at=cache["fetched_at"],
-                    )
-                )
-            cache["context"] = snapshots
+            cache["context"] = _snapshots_from_raw(cache["raw"], cache["fetched_at"])
         return cache["context"]
+
+
+def _snapshots_from_raw(raw: dict, fetched_at: float) -> list[MarketSnapshot]:
+    """One MarketSnapshot per IDS entry, from a raw body already in hand.
+
+    PURE, AND THAT IS WHY IT IS SEPARATE. It was inline in
+    fetch_market_context() until 2026-09-30, when cached_market_context() needed
+    the identical objects WITHOUT being allowed to make a request -- and two
+    loops building one dataclass from one dict shape is rule 8's failure with a
+    delay on it: the day one of them gained a field the other would still be
+    reading four.
+    """
+    snapshots = []
+    for asset, cg_id in IDS.items():
+        entry = raw[cg_id]
+        values = {field: _optional_float(entry, key) for _flag, key, field in _CONTEXT_FIELDS}
+        # The feed's own timestamp is a unix SECOND, not a fraction of one.
+        # int() rather than float() so a row read back out of SQL compares
+        # equal to what the API said, and None stays None.
+        updated = values["source_updated_at"]
+        snapshots.append(
+            MarketSnapshot(
+                asset=asset,
+                coingecko_id=cg_id,
+                price_usd=float(entry["usd"]),
+                market_cap_usd=values["market_cap_usd"],
+                volume_24h_usd=values["volume_24h_usd"],
+                change_24h_pct=values["change_24h_pct"],
+                source_updated_at=None if updated is None else int(updated),
+                fetched_at=fetched_at,
+            )
+        )
+    return snapshots
+
+
+def cached_market_context() -> tuple[MarketSnapshot, ...]:
+    """What is already in the cache, and NEVER a request. Empty when nothing is.
+
+    THE ADMIN PAGE IS THE CALLER AND THE NO-FETCH PART IS THE POINT. /admin
+    renders from the database and the configuration and contacts nothing --
+    routes/admin.py's header says why at length: six chains at a 30s timeout is
+    a three-minute page, which is rule 14's blinking cursor, and the resolution
+    an operator reaches for is Ctrl-C. A pricing panel that fetched would put
+    the page's load time behind a third-party API, so an operator would lose
+    the whole picture -- swaps in flight, stuck payouts, worker state -- on the
+    day a price feed went down. The panel therefore reports what the QUOTE path
+    last fetched, which is also the more useful reading: it is the number a
+    customer was actually quoted from.
+
+    Returns () rather than raising or fetching when the cache is cold, and the
+    caller must render that as "(not fetched)" rather than as an empty table --
+    zero assets priced and nothing having asked yet are different facts (rule 14).
+
+    Building the snapshots and storing them back is not a fetch: the raw body is
+    already here, and this is the same lazy fill fetch_market_context() does.
+    """
+    with _lock:
+        if _cache["raw"] is None:
+            return ()
+        if _cache["context"] is None:
+            _cache["context"] = _snapshots_from_raw(_cache["raw"], _cache["fetched_at"])
+        return tuple(_cache["context"])
+
+
+def cache_state() -> dict:
+    """Which feed answered, when, and when it goes stale. Reads, never fetches.
+
+    One reader for the whole cache header rather than three accessors, because
+    a source without the time it was fetched is a provenance claim with no date
+    on it -- and the admin panel needs both in the same breath.
+
+    `expires_at` is carried so the page can say whether the next quote will
+    re-fetch. The TTL is not a field on the cache: it is the argument the last
+    caller passed, so expires_at - fetched_at is the only place the TTL that
+    actually applied survives.
+    """
+    with _lock:
+        return {
+            "source": _cache["source"] or "",
+            "fetched_at": _cache["fetched_at"] or None,
+            "expires_at": _cache["expires_at"] or None,
+            "cached": _cache["raw"] is not None,
+        }
 
 
 def derive_pair_rate(from_asset: str, to_asset: str, prices: dict) -> float:

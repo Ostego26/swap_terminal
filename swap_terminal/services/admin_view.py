@@ -3,8 +3,10 @@
 Role: submodule -> function (the read-only assembly behind the admin surface)
 Reads: swap_terminal.db (swaps, deposit_events, payouts, wallet_inventory,
        swap_audit_log), config.Config through the dict the caller passes,
-       supervisor.py's pid files, and -- only from probe_chains(), only when
-       explicitly asked -- one read-only RPC call per configured chain
+       supervisor.py's pid files, services/pricing.py's in-process price CACHE
+       (read, never fetched), and -- only from probe_chains() and probe_peg(),
+       only when explicitly asked -- one read-only RPC call per configured chain
+       and one price lookup per stablecoin
 Writes: NOTHING. No INSERT, no UPDATE, no DELETE, no file. Every SQL statement
        in this module is a SELECT and that is checked by a test
        (tests/test_admin_view.py::test_no_statement_in_this_module_writes).
@@ -13,7 +15,8 @@ Can move funds: no. This module imports nothing that can sign, calls no
 Mainnet-safe: yes. probe_chains() makes network calls, and they are the same
        read-only calls workers already make every cycle (getblockchaininfo /
        server_info); it never calls getnewaddress, sendtoaddress or any signing
-       method.
+       method. probe_peg() makes two HTTPS GETs to a public price API, which
+       carry no key and touch no chain.
 
 WHY THIS SURFACE IS READ-ONLY, WRITTEN DOWN SO IT IS NOT READ AS AN OVERSIGHT.
 
@@ -40,6 +43,12 @@ next to the readings they govern (rule 14).
 
 WHAT IS NOT DUPLICATED HERE.
 
+The thinness verdict on the pricing panel is market_context.turnover_finding()
+called, and the peg findings are wallet_leveling.peg_findings() called -- the
+same two functions the quote path and `chain_balances.py --level` use. This
+module owns no copy of either threshold, which is why THIN_TURNOVER and
+PEG_TOLERANCE appear nowhere in it.
+
 workers/common.endpoint_lines() and supervisor.endpoint_summary() already render
 the per-chain endpoint and threshold as TEXT for a terminal banner. chain_rows()
 below is the structured form of the same facts for a table, and the difference
@@ -50,6 +59,8 @@ workers/common.py names this one.
 """
 
 from __future__ import annotations
+
+from time import time
 
 from chains.base import RPCAdapter
 from chains.registry import unconfigured_chains, why_unconfigured
@@ -642,6 +653,161 @@ def config_echo(config) -> list[dict]:
     return [{"key": key, "value": config.get(key)} for key in ECHOED_CONFIG_KEYS if key in config]
 
 
+# The two coins the dollar on this page is checked against, and the one place
+# the admin surface names them.
+#
+# THEY ARE DELIBERATELY NOT IN services/pricing.IDS. Adding them there would put
+# them inside _require_every_asset(), so a CoinPaprika outage on USDC -- a coin
+# no pair on this terminal trades -- would refuse every quote. The peg is a
+# yardstick check on the reporting, not an input to a price, and a yardstick
+# that can veto a swap is the wrong shape. The cost of keeping them out is that
+# the cached reading below cannot carry them, which is why the peg is a separate
+# explicit probe rather than a row in the pricing panel.
+_PEG_NOT_ON_RENDER = (
+    "not checked on page load -- USDC and USDT are not in services/pricing.IDS (see "
+    "_PEG_NOT_ON_RENDER in services/admin_view.py for why), so checking the peg is a "
+    "fetch and this page fetches nothing. Ask for it."
+)
+
+
+def pricing_rows(snapshots) -> list[dict]:
+    """One row per priced asset, with the thinness verdict beside the numbers.
+
+    THE VERDICT IS market_context.turnover_finding(), CALLED, NOT RESTATED. That
+    function was `_turnover_finding` until 2026-09-30 and became public for this
+    caller rather than being copied into it -- a second `volume / cap <
+    THIN_TURNOVER` in this file is rule 8's exact shape, and the drift would be
+    invisible: each site would look right in its own file and the page would
+    disagree with the quote a customer was refused.
+
+    A None finding is rendered as "(not measured)" and not as OK. turnover_finding()
+    returns None when the cap or the volume is unusable, which for GRC is the
+    ORDINARY case on a feed that reports market_cap 0 -- and a missing thinness
+    reading must not read as a passed one (rule 14).
+    """
+    from .market_context import (  # noqa: PLC0415 -- checked: imported inside the function, not at module scope, because market_context imports services.pricing which imports `requests`; a host without it must still be able to import admin_view for the database-only rows, which is what every other reading on this page is.
+        turnover_finding,
+    )
+
+    rows = []
+    for snapshot in snapshots:
+        finding = turnover_finding(snapshot)
+        rows.append(
+            {
+                "asset": snapshot.asset,
+                "price_usd": snapshot.price_usd,
+                "market_cap_usd": snapshot.market_cap_usd,
+                "volume_24h_usd": snapshot.volume_24h_usd,
+                "change_24h_pct": snapshot.change_24h_pct,
+                "turnover_verdict": "(not measured)" if finding is None else finding.verdict,
+                "turnover_note": (
+                    "the feed gave no usable market cap or 24h volume, so no thinness bound exists "
+                    "at all -- this is NOT a passed check"
+                    if finding is None
+                    else finding.message
+                ),
+            }
+        )
+    return rows
+
+
+def pricing_panel(now_unix: float | None = None) -> dict:
+    """What the quote path last fetched, read out of the cache. FETCHES NOTHING.
+
+    The panel answers three questions an operator has had to read source to
+    answer: which feed is actually answering from this host, how old the number
+    is, and whether any asset is thin enough that its spot price is not a price.
+
+    WHY IT READS THE CACHE RATHER THAN ASKING. routes/admin.py's header sets out
+    the rule this follows: /admin renders from the database and the
+    configuration, and every network call is a separate deliberate route,
+    because a page whose load time is the sum of remote timeouts is the blinking
+    cursor rule 14 opens with. A pricing panel that fetched would also make the
+    whole page -- swaps in flight, stuck payouts, worker state -- fail on the day
+    a price API went down, which is exactly the wrong dependency for the screen
+    an operator opens when something is wrong.
+
+    It is also the more honest number. The cache is what create_quote() priced
+    from, so this is the figure a customer was quoted against, not a fresh one
+    that nothing used.
+
+    A COLD CACHE IS A RESULT AND SAYS SO. `cached` False with `assets` empty
+    means nothing has been priced since this process started -- which on a
+    freshly restarted app is the ordinary case, and is a different fact from
+    "every asset came back unpriced" (rule 14). The template renders the
+    difference.
+    """
+    from .pricing import (  # noqa: PLC0415 -- checked: same reason as pricing_rows() -- services.pricing imports `requests` at module scope, and the database-only readings on this page must not need it.
+        cache_state,
+        cached_market_context,
+    )
+
+    now = time() if now_unix is None else now_unix
+    state = cache_state()
+    snapshots = cached_market_context()
+    fetched_at = state["fetched_at"]
+    expires_at = state["expires_at"]
+    return {
+        "cached": state["cached"],
+        "source": state["source"] or None,
+        "fetched_at": fetched_at,
+        "age": None if fetched_at is None else format_duration(max(0.0, now - fetched_at)),
+        # The TTL that actually applied, recovered from the two stamps, because
+        # the cache does not store it -- it is whatever the last caller passed.
+        "ttl": None if fetched_at is None or expires_at is None else format_duration(expires_at - fetched_at),
+        "expired": None if expires_at is None else now >= expires_at,
+        "assets": pricing_rows(snapshots),
+        "peg": _PEG_NOT_ON_RENDER,
+    }
+
+
+def probe_peg() -> dict:
+    """Price USDC and USDT and report whether this page's dollar is a dollar.
+
+    THE SECOND AND LAST FUNCTION IN THIS MODULE THAT OPENS A SOCKET, and like
+    probe_chain() it is called only from its own explicit route and never on a
+    page render. Two reads, no amount, no address, no key.
+
+    The findings come from services/wallet_leveling.peg_findings(), which is the
+    same function `chain_balances.py --level` prints -- so the web surface and
+    the CLI cannot disagree about whether the peg holds (rule 8). What is NOT
+    shared is the price fetch: --level prices every wallet asset, and this needs
+    the two stablecoins only.
+
+    Never raises. A feed that will not answer is reported in the return value as
+    suspect=True with the reason in the findings, which is what peg_findings()
+    already does for an absent price -- "unchecked" and "fine" must not render
+    the same way.
+    """
+    from decimal import (  # noqa: PLC0415 -- checked: local to keep this module's import surface to what the database rows need, matching pricing_panel() above.
+        Decimal,
+    )
+
+    from .coinpaprika import (  # noqa: PLC0415 -- checked: imports `requests` transitively; see pricing_rows().
+        fetch_quote,
+    )
+    from .wallet_leveling import PEG_ASSETS, peg_findings  # noqa: PLC0415 -- checked: same.
+
+    prices, failures = {}, []
+    for asset in PEG_ASSETS:
+        try:
+            prices[asset] = Decimal(str(fetch_quote(asset).price_usd))
+        except Exception as exc:  # noqa: BLE001 -- checked: one stablecoin failing must not lose the other, and the caller CAN tell the failure from an answer because the asset is absent from `prices` and peg_findings() reports it as NOT PRICED rather than as on peg. The reason is carried in `failures` so it is not swallowed.
+            failures.append(f"{asset}: {type(exc).__name__}: {exc}")
+    suspect, findings = peg_findings(prices)
+    return {
+        "probed_at": utc_now_iso(),
+        # Echo what decided the answer (rule 14): asking for two and pricing
+        # zero, and asking for two and pricing two that disagree, are different
+        # failures and a bare findings list does not distinguish them.
+        "assets_asked": list(PEG_ASSETS),
+        "assets_priced": sorted(prices),
+        "suspect": suspect,
+        "findings": findings,
+        "fetch_failures": failures,
+    }
+
+
 def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=None) -> dict:
     """Everything the admin page shows, in one read-only pass.
 
@@ -649,6 +815,10 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
     ONE clock reading. Computing the time per row would let two rows on the same
     screen disagree about what "now" is, which is a small thing that makes a
     staleness table impossible to reason about.
+
+    STILL CONTACTS NOTHING. pricing_panel() reads the price cache and does not
+    fetch; probe_chains() and probe_peg() are the only network calls in this
+    module and neither is reachable from here.
     """
     now = utc_now_iso() if now_iso is None else now_iso
     return {
@@ -665,6 +835,7 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
         "pairs": pair_rows(config, adapters),
         "chains": chain_rows(config, adapters),
         "workers": worker_rows(run_dir),
+        "pricing": pricing_panel(),
         "thresholds": {
             "inventory_stale_after": format_duration(INVENTORY_STALE_AFTER_SECONDS),
             "deposit_quiet_after": format_duration(DEPOSIT_QUIET_AFTER_SECONDS),

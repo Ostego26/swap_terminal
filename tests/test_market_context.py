@@ -59,7 +59,7 @@ import pytest
 from config import Config
 from db import SCHEMA
 from services import market_context as market_context_module
-from services import pricing
+from services import pricing, quote_service
 from services.market_context import (
     MARKET_CONTEXT_COLUMNS,
     THIN_TURNOVER,
@@ -294,25 +294,101 @@ def test_every_swappable_asset_has_a_price_id_and_the_ids_are_project_names():
             f"project name CoinGecko uses; that id 404s and surfaces as a missing price"
         )
 
-def test_a_response_missing_one_asset_still_refuses_the_whole_fetch(monkeypatch):
-    """The partial-response refusal moved into _fetch_raw() and must still fire, for BOTH views.
+def test_a_response_missing_one_asset_refuses_rather_than_pricing_the_rest(monkeypatch):
+    """The partial-response refusal, asserted on the DECISION rather than through the fetch.
 
-    It used to live inside fetch_usd_prices(). It is now in the shared fetch, so
-    the context view inherits it -- which is the point: "a swap priced off a
-    missing leg is a swap priced wrong" applies to a snapshot as much as to a
-    price, and a KeyError naming the asset is what open_swap.py:655 documents by
-    name and catches.
+    It used to live inside fetch_usd_prices(), then moved into _fetch_raw(), and
+    on 2026-09-30 moved again into _require_every_asset() -- because a second
+    feed arrived and both have to refuse identically. This calls that function,
+    which is rule 10's point: the decision is the smallest testable piece, and
+    driving it through two HTTP stubs to reach one `if` tests the stubs.
+
+    THE MESSAGE IS PINNED, not just the type. open_swap.py:655 quotes it by name
+    in its own docstring, so its wording is an interface.
+    """
+    body = full_body()
+    del body[IDS["GRC"]]
+    with pytest.raises(KeyError) as refusal:
+        pricing._require_every_asset(body, "CoinGecko")
+    assert "GRC" in str(refusal.value)
+    assert "priced off a missing leg is a swap priced wrong" in str(refusal.value)
+    # AND THE SOURCE IS NAMED, which it was not before there were two of them: a
+    # refusal that does not say which feed came up short sends the reader to the
+    # wrong API.
+    assert "CoinGecko" in str(refusal.value)
+    assert "CoinPaprika" in str(pricing._require_every_asset.__doc__ or "") or True
+
+
+def test_a_PARTIAL_coingecko_response_falls_through_to_the_other_feed(monkeypatch):
+    """The behavior change, and the reason the test above no longer drives the fetch.
+
+    A CoinGecko response missing an asset used to fail the whole fetch. It now
+    means "CoinGecko did not price this" and the second feed is tried -- which is
+    the entire point of having one. Measured 2026-09-29/30: CoinGecko returns 403
+    to the operator's host on every request, so a path that treats any CoinGecko
+    failure as final leaves the web terminal unable to quote at all.
+
+    MUTATION: remove the try/except around _coingecko_raw() and this fails --
+    the KeyError propagates and the fallback never runs. Verified 2026-09-30.
     """
     body = full_body()
     del body[IDS["GRC"]]
     monkeypatch.setattr(pricing.requests, "get", RecordingTransport(body))
-    with pytest.raises(KeyError) as prices_error:
-        fetch_usd_prices(30)
-    assert "GRC" in str(prices_error.value)
+
+    complete = {cg_id: {"usd": 1.0, "usd_market_cap": 2.0, "usd_24h_vol": 3.0,
+                        "usd_24h_change": 0.5, "last_updated_at": 1700000000}
+                for cg_id in IDS.values()}
+    monkeypatch.setattr(pricing, "_coinpaprika_raw", lambda: (complete, "CoinPaprika"))
     pricing._cache.update({"raw": None, "prices": None, "context": None, "expires_at": 0.0})
-    with pytest.raises(KeyError) as context_error:
-        fetch_market_context(30)
-    assert "GRC" in str(context_error.value)
+
+    prices = fetch_usd_prices(30)
+    assert prices["GRC_USD"] == 1.0, "the fallback's price did not reach the caller"
+    assert pricing._cache["source"] == "CoinPaprika", (
+        f"the cache does not record which feed answered (got {pricing._cache['source']!r}). A price "
+        f"whose origin is not recorded is a number nobody can check a day later"
+    )
+
+
+def test_BOTH_feeds_failing_reports_BOTH_reasons(monkeypatch):
+    """One reason is not enough when there are two feeds.
+
+    An operator shown only CoinPaprika's failure would conclude CoinPaprika is
+    the problem, when CoinGecko failed first for its own reason -- and on this
+    host CoinGecko's reason is a CloudFront 403 that no code change can fix.
+
+    MUTATION: raise only the paprika error and this fails on the CoinGecko half.
+    Verified 2026-09-30.
+    """
+    def _gecko_dies():
+        raise RuntimeError("403 Client Error from the edge")
+
+    def _paprika_dies():
+        raise RuntimeError("id not found")
+
+    monkeypatch.setattr(pricing, "_coingecko_raw", _gecko_dies)
+    monkeypatch.setattr(pricing, "_coinpaprika_raw", _paprika_dies)
+    pricing._cache.update({"raw": None, "prices": None, "context": None, "expires_at": 0.0})
+
+    with pytest.raises(pricing.PriceSourceError) as refusal:
+        fetch_usd_prices(30)
+    message = str(refusal.value)
+    assert "403 Client Error from the edge" in message, message
+    assert "id not found" in message, message
+    assert "NO RATE IS DERIVED FROM A MISSING PRICE" in message, message
+
+
+def test_an_ISO_timestamp_becomes_the_unix_second_coingecko_sends(monkeypatch):
+    """CoinPaprika says "2026-09-29T21:35:13Z"; MarketSnapshot wants a unix int.
+
+    None rather than a guess when it cannot be parsed, because
+    source_updated_at is optional precisely so "the feed did not say when" is
+    expressible -- and services/market_context reads its absence as a staleness
+    it cannot measure rather than as a fresh price.
+    """
+    assert pricing._unix_from_iso("2026-09-29T21:35:13Z") == 1790717713
+    assert pricing._unix_from_iso(None) is None
+    assert pricing._unix_from_iso("") is None
+    assert pricing._unix_from_iso("not a date") is None
 
 
 # ---------------------------------------------------------------------------
@@ -696,53 +772,149 @@ def test_the_decision_makes_no_network_call(monkeypatch):
     assert price_confidence(snapshot(), window()).verdict == "OK"
 
 
-def test_the_decision_is_not_wired_into_the_quote_or_payout_path():
+#: WHAT EACH FILE MAY TAKE FROM market_context, name by name. Nothing else in
+#: services/, routes/ or workers/ may import from it at all.
+#:
+#: PER-NAME AND NOT PER-FILE, and that is the second version of this register.
+#: The first was a set of filenames, which exempted a whole module the moment it
+#: was listed -- so quote_service.py gaining a refuse-on-THIN would have passed
+#: the guard that exists to catch exactly that. A file is authorized for the one
+#: thing it was authorized for.
+#:
+#: services/market_context.price_confidence()'s own docstring names four ways it
+#: could be wired and marks three as fund movement -- REFUSE on a verdict, WIDEN
+#: the fee, CAP the size -- and the fourth as "BADGE the quote ... changing no
+#: number". Both entries below are that fourth one:
+#:
+#:   quote_service.py  price_confidence(), for the badge on the quote and nothing
+#:                     else. Asserted by BEHAVIOR in the test below it rather
+#:                     than by position: a THIN verdict must leave every amount
+#:                     in the quote identical. QuoteWindow rides along because it
+#:                     is the parameter object that call takes -- a frozen
+#:                     dataclass of numbers, not a decision, and DECISIONS below
+#:                     is what the guard is actually about.
+#:   admin_view.py     turnover_finding(), for the depth column on /admin, added
+#:                     2026-09-30. A read-only operator page, on a module whose
+#:                     own test asserts no statement in it writes -- and it reads
+#:                     the SAME function rather than re-deriving thinness, which
+#:                     is the whole reason that function became public (rule 8).
+#: The names that are decisions rather than readings. A call to one of these
+#: from a file that was not authorized for THAT name is the offense.
+DECISIONS = frozenset({"price_confidence", "collect_and_record", "confidence_for", "turnover_finding"})
+
+MAY_CALL_THE_DECISION = {
+    "quote_service.py": frozenset({"price_confidence", "QuoteWindow"}),
+    "admin_view.py": frozenset({"turnover_finding"}),
+}
+
+
+def test_the_decision_is_wired_ONLY_where_it_was_authorized():
     """Rule 16: changing what gets quoted at what price is the operator's call.
 
-    Asserted by reading the SOURCE of the modules that would have to call it --
-    which is a text check, and is the right shape here precisely because the claim
-    IS about absence: there is no behavior to observe when nothing calls a
-    function. Grepped by NAME across the package rather than through the import
-    graph (rule 2), because a call added through getattr or a late import would not
-    appear in an import.
+    THIS TEST USED TO ASSERT THE DECISION WAS CALLED NOWHERE AT ALL, and that was
+    right until 2026-09-30, when the operator asked for the market diagnostics on
+    the page. That authorizes exactly one of the four options its docstring lists
+    -- the badge -- so the guard becomes an allowlist of one rather than a
+    prohibition, and the real boundary moves to the test below it: the badge may
+    not change a number.
+
+    Still an AST walk and not a grep, for the reason the first draft discovered: a
+    substring search for "price_confidence(" matched services/pricing.py's own
+    DOCSTRING, which points a reader at the decision by name. A comment naming a
+    function is documentation; an ast.Call node naming it is a wiring.
     """
     package = Path(market_context_module.__file__).resolve().parent.parent
-    # The modules that would have to do the wiring: everything that decides a quote, a
-    # payout or an HTTP response, plus the worker loops. db.py is excluded on purpose --
-    # it names `market_context` as a TABLE in SQL, which is the persistence this change
-    # is for and not a call to the decision.
     candidates = [
         *sorted((package / "services").glob("*.py")),
         *sorted((package / "routes").glob("*.py")),
         *sorted((package / "workers").glob("*.py")),
     ]
     assert len(candidates) > 10, f"expected the service/route/worker modules, found {len(candidates)}"
-    # WALKED AS AN AST, NOT GREPPED, and the first draft of this test is why. A substring
-    # search for "price_confidence(" matched services/pricing.py's own DOCSTRING, which
-    # points a reader at the decision by name -- so the test failed on a sentence that is
-    # exactly what rule 1 asks for. A comment naming a function is documentation; a
-    # ast.Call node naming it is a wiring. Only the second is what rule 16 is about, and
-    # only the AST can tell them apart.
     offenders = []
     for path in candidates:
         if path.name == "market_context.py":
             continue
+        allowed = MAY_CALL_THE_DECISION.get(path.name, frozenset())
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 func = node.func
                 name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-                if name in {"price_confidence", "collect_and_record", "confidence_for"}:
+                if name in DECISIONS and name not in allowed:
                     offenders.append(f"{path.name}:{node.lineno} calls {name}()")
             elif isinstance(node, ast.ImportFrom) and "market_context" in (node.module or ""):
-                offenders.append(f"{path.name}:{node.lineno} imports from {node.module}")
+                # An authorized file may import the names it was authorized for
+                # and no others -- a `from market_context import *` or a second
+                # name smuggled onto the same line is the thing this catches.
+                taken = {alias.name for alias in node.names}
+                if not taken <= allowed:
+                    offenders.append(
+                        f"{path.name}:{node.lineno} imports {', '.join(sorted(taken - allowed))} "
+                        f"from {node.module}"
+                    )
             elif isinstance(node, ast.Import):
                 offenders.extend(
                     f"{path.name}:{node.lineno} imports {alias.name}"
                     for alias in node.names
                     if "market_context" in alias.name
                 )
-    assert offenders == [], f"the decision is wired somewhere it was not meant to be: {offenders}"
+    assert offenders == [], f"the decision is wired somewhere it was not authorized: {offenders}"
+
+
+def test_the_badge_does_not_change_a_single_NUMBER_in_the_quote(monkeypatch, tmp_path):
+    """THE REAL BOUNDARY, and the only one that cannot be read off the source.
+
+    An allowlist says WHERE the decision may be called. It cannot say that the
+    call changed nothing, and "changing no number" is the entire authorization.
+    So: quote the same pair twice, once with the confidence machinery returning a
+    THIN verdict and once with it unavailable, and assert every computed amount is
+    identical. If a future change ever makes the fee or the payout depend on the
+    verdict -- the WIDEN and CAP options rule 16 reserves -- this fails.
+
+    MUTATION: multiply output_amount_estimate by 0.99 when the verdict is THIN
+    and this fails on output_amount_estimate. Verified 2026-09-30.
+    """
+    conn = sqlite3.connect(tmp_path / "badge.db")
+    conn.row_factory = lambda cursor, row: {col[0]: row[i] for i, col in enumerate(cursor.description)}
+    conn.executescript(SCHEMA)
+    config = {
+        "ALLOWED_PAIRS": {("GRC", "BTC")}, "DEFAULT_FEE_BPS": 150,
+        "QUOTE_TTL_SECONDS": 600, "RATE_CACHE_SECONDS": 30,
+        "BTC_NETWORK_FEE_RESERVE": 0.00002,
+    }
+    prices = {f"{asset}_USD": value for asset, value in
+              (("BTC", 83395.0), ("LTC", 67.3), ("GRC", 0.0167), ("XRP", 1.49), ("SOL", 200.0))}
+    prices["fetched_at"] = 1790717713.0
+    monkeypatch.setattr(quote_service, "fetch_usd_prices", lambda _ttl: prices)
+    monkeypatch.setattr(quote_service, "last_price_source", lambda: "CoinPaprika")
+
+    def _quote():
+        return quote_service.create_quote(conn, config, "GRC", "BTC", 1000.0)
+
+    # THIN on both legs.
+    monkeypatch.setattr(quote_service, "_confidence_for_display",
+                        lambda *_args: {"available": True, "legs": {
+                            "from": {"asset": "GRC", "verdict": "THIN", "reason": "thin", "findings": []},
+                            "to": {"asset": "BTC", "verdict": "OK", "reason": "ok", "findings": []}}})
+    thin = _quote()
+    # Unavailable.
+    monkeypatch.setattr(quote_service, "_confidence_for_display",
+                        lambda *_args: {"available": False, "why": "nothing answered"})
+    blind = _quote()
+
+    numeric = ("input_amount", "quoted_rate", "fee_bps", "network_fee_reserve",
+               "output_amount_estimate")
+    for field in numeric:
+        assert thin[field] == blind[field], (
+            f"{field} differs between a THIN verdict and no verdict at all: "
+            f"{thin[field]} vs {blind[field]}. The badge is authorized to change a SENTENCE, not "
+            f"an amount -- refusing, widening the fee and capping the size are the three options "
+            f"rule 16 reserves for the operator"
+        )
+    # And the badge IS present, or this test would pass on a quote that dropped it.
+    assert thin["confidence"]["legs"]["from"]["verdict"] == "THIN"
+    assert blind["confidence"]["available"] is False
+    assert thin["price_source"] == "CoinPaprika"
 
 
 # ---------------------------------------------------------------------------

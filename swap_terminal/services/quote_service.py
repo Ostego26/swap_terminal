@@ -18,7 +18,7 @@ own list, so there is one vocabulary (rule 11).
 from datetime import timedelta
 
 from .helpers import new_id, utc_now
-from .pricing import derive_pair_rate, fetch_usd_prices
+from .pricing import derive_pair_rate, fetch_usd_prices, last_price_source
 
 
 def get_network_fee_reserve(config, to_asset: str) -> float:
@@ -57,6 +57,58 @@ def validate_pair(config, from_asset: str, to_asset: str) -> None:
         raise ValueError("Unsupported trading pair")
 
 
+def _confidence_for_display(config, from_asset: str, to_asset: str, notional_usd: float) -> dict:
+    """The market-depth reading for both legs, as plain data for a template.
+
+    DISPLAY ONLY, AND IT CANNOT FAIL A QUOTE. Every failure returns a dict saying
+    what could not be read, because a badge is not worth a refused swap: a quote
+    whose numbers are all correct must not be lost to a diagnostic that could not
+    be computed. That is the opposite of the pricing path's rule -- a missing
+    PRICE refuses, a missing CONFIDENCE reports -- and the difference is that one
+    decides an amount and the other decides a sentence.
+
+    IT SHARES THE PRICE CACHE. fetch_market_context() reads the same
+    _fetch_raw() the rate above already populated, so this costs no extra
+    request inside the TTL window.
+    """
+    from .market_context import (  # noqa: PLC0415 -- checked: market_context imports pricing, and pricing is already imported at the top of this module; importing it at module scope here would make the import order of two services decide whether this one loads, which is the kind of coupling rule 12 warns about in its import-time note.
+        QuoteWindow,
+        price_confidence,
+    )
+    from .pricing import fetch_market_context  # noqa: PLC0415 -- same.
+
+    try:
+        window = QuoteWindow(
+            quote_ttl_seconds=float(config["QUOTE_TTL_SECONDS"]),
+            rate_cache_seconds=float(config["RATE_CACHE_SECONDS"]),
+            fee_bps=float(config["DEFAULT_FEE_BPS"]),
+        )
+        snapshots = {snapshot.asset: snapshot for snapshot in fetch_market_context(
+            int(config["RATE_CACHE_SECONDS"]))}
+    except Exception as error:  # noqa: BLE001 -- checked: see the docstring. Every failure here costs a badge and nothing else, the reason is returned rather than swallowed, and no number in the quote depends on it.
+        return {"available": False, "why": f"{type(error).__name__}: {error}"}
+
+    legs = {}
+    for role, asset in (("from", from_asset), ("to", to_asset)):
+        snapshot = snapshots.get(asset)
+        if snapshot is None:
+            legs[role] = {"asset": asset, "verdict": "UNKNOWN",
+                          "reason": f"no market snapshot for {asset}"}
+            continue
+        # The notional is the same for both legs by construction: it is the swap's
+        # size in dollars, and a size that is a large share of ONE side's daily
+        # volume is the thing worth saying whichever side it is.
+        reading = price_confidence(snapshot, window, swap_notional_usd=notional_usd)
+        legs[role] = {
+            "asset": asset,
+            "verdict": reading.verdict,
+            "reason": reading.reason,
+            "findings": [{"kind": finding.kind, "verdict": finding.verdict,
+                          "message": finding.message} for finding in reading.findings],
+        }
+    return {"available": True, "legs": legs}
+
+
 def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float) -> dict:
     from_asset = from_asset.upper().strip()
     to_asset = to_asset.upper().strip()
@@ -83,6 +135,25 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
         "expires_at": (now + timedelta(seconds=int(config["QUOTE_TTL_SECONDS"]))).isoformat(),
         "created_at": now.isoformat(),
     }
+    # PROVENANCE AND CONFIDENCE, ADDED TO THE RESPONSE ONLY -- no number above
+    # changes, and that is the whole boundary.
+    #
+    # services/market_context.price_confidence() names four ways it could be
+    # wired in and marks three of them as fund movement: REFUSE on a verdict,
+    # WIDEN the fee, CAP the size. The fourth is "BADGE the quote -- returning
+    # the verdict alongside the quote for the page to display, changing no
+    # number", and it is the only one authorized (operator, 2026-09-30, asked
+    # for the diagnostics on the page). quoted_rate, fee_bps,
+    # network_fee_reserve and output_amount_estimate are computed exactly as
+    # before and are not touched below.
+    #
+    # THE PRICE SOURCE IS NOT PERSISTED, and the quotes table has no column for
+    # it. That is a gap rather than a decision: which feed priced a quote is
+    # provenance the next reader wants, and storing it needs a migration. Named
+    # here so it is a known follow-up rather than an oversight.
+    quote["price_source"] = last_price_source()
+    quote["price_fetched_at"] = prices.get("fetched_at")
+    quote["confidence"] = _confidence_for_display(config, from_asset, to_asset, gross_output)
     db.execute(
         """
         INSERT INTO quotes (

@@ -21,7 +21,7 @@ inside a run that had already committed to a choice. A panel is the place that s
 LOOKED AT before a run starts.
 
 It is NOT part of the Flask app's `/admin`. That blueprint's header says its GET-only shape is
-structural, tests/test_admin_surface.py asserts it over the real URL map, and the app is
+structural, tests/test_web_surfaces.py asserts it over the real URL map, and the app is
 unauthenticated behind a loopback bind. Adding buttons that spend money to a page with that
 posture would weaken a deliberate invariant that somebody wrote a test to keep. This is a
 separate surface with its own, stricter guards, and it shares no route table with that one.

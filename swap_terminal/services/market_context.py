@@ -320,7 +320,7 @@ def _availability_findings(snapshot: MarketSnapshot, window: QuoteWindow) -> lis
     return findings
 
 
-def _turnover_finding(snapshot: MarketSnapshot) -> Finding | None:
+def turnover_finding(snapshot: MarketSnapshot) -> Finding | None:
     """THIN when a day's volume is a small enough fraction of the float.
 
     Independent of swap size: this is about whether the spot price is set by an
@@ -474,7 +474,7 @@ def price_confidence(
     findings.extend(
         result
         for result in (
-            _turnover_finding(snapshot),
+            turnover_finding(snapshot),
             _size_finding(snapshot, window, swap_notional_usd),
             _drift_finding(snapshot, window),
         )

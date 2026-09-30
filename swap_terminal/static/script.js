@@ -143,8 +143,12 @@ function wireQuoteForm() {
     // Announce BEFORE (rule 14), naming what is being contacted and what for.
     say(
       region,
+      // TWO FEEDS SINCE 2026-09-30, and this line said "One outbound call." until
+      // then. CoinGecko is tried first and CoinPaprika second, because CoinGecko
+      // returns 403 from some hosts at the CloudFront edge -- so the number of
+      // calls is one or many, and the answer names which feed it came from.
       "Pricing " + amount + " " + parts[0] + " to " + parts[1] + ": asking the server, which fetches a live USD " +
-        "price for each asset. One outbound call.",
+        "price for each asset. Two feeds are tried in order and the answer says which one priced it.",
       "result-working"
     );
 
@@ -164,8 +168,13 @@ function wireQuoteForm() {
           ["Fee", latestQuote.fee_bps + " bps"],
           ["Network fee reserved", latestQuote.network_fee_reserve + " " + latestQuote.to_asset],
           ["Valid until", latestQuote.expires_at],
+          // RULE 14: echo the parameter that decides the answer. A rate with no
+          // source is a number nobody can check, and this terminal now has two
+          // feeds that could have produced it.
+          ["Priced by", latestQuote.price_source || "(the server did not say)"],
         ]
       );
+      appendDepth(region, latestQuote.confidence);
       if (createButton) createButton.disabled = false;
     } catch (error) {
       latestQuote = null;
@@ -173,6 +182,57 @@ function wireQuoteForm() {
       say(region, "No quote: " + error.message, "result-error");
     }
   });
+}
+
+/**
+ * The market-depth reading for both legs of a quote, appended under its rows.
+ *
+ * WHY A CUSTOMER SEES THIS AT ALL. A spot price is only as good as the money
+ * behind it, and one of this terminal's assets is thin enough for that to matter:
+ * measured 2026-09-29, GRC turned over 0.0039% of its market cap in a day
+ * against Litecoin's 7.5%, and a $100 swap was a third of GRC's entire 24h
+ * volume. At that depth the swap is not priced BY the market, it IS the market --
+ * and a quote that shows a confident rate with no mention of that is telling the
+ * customer something the server knows to be shaky.
+ *
+ * IT CHANGES NO NUMBER. services/market_context.price_confidence() lists four
+ * ways it could be wired; three of them move money (refuse, widen the fee, cap
+ * the size) and are the operator's. This is the fourth: display.
+ *
+ * AND AN UNAVAILABLE READING SAYS SO. Silence would read as "the market is
+ * fine", which is the one thing it cannot mean -- no reading is no evidence, not
+ * good evidence.
+ */
+function appendDepth(region, confidence) {
+  if (!region || !confidence) return;
+  const note = document.createElement("p");
+  note.className = "panel-note";
+  if (confidence.available !== true) {
+    note.textContent =
+      "Market depth: NOT MEASURED for this quote (" + (confidence.why || "no reason given") +
+      "). The rate above stands; how much money set it is unknown.";
+    region.appendChild(note);
+    return;
+  }
+  const legs = confidence.legs || {};
+  const parts = [];
+  ["from", "to"].forEach(function (role) {
+    const leg = legs[role];
+    if (!leg) return;
+    parts.push(leg.asset + ": " + leg.verdict + " -- " + (leg.reason || "no reason given"));
+  });
+  note.textContent = parts.length
+    ? "Market depth. " + parts.join("  |  ")
+    : "Market depth: no leg was readable for this quote.";
+  const thin = ["from", "to"].some(function (role) {
+    return legs[role] && legs[role].verdict !== "OK";
+  });
+  // `panel-note warn`, NOT a new class. styles.css:251 already styles exactly
+  // this state -- a left rule in the "slow" colour over a soft background -- and
+  // index.html's own comments make the same point about `pair-off` and `subtle`:
+  // a second vocabulary for one state is rule 8 with a stylesheet attached.
+  if (thin) note.className = "panel-note warn";
+  region.appendChild(note);
 }
 
 // --- swaps -----------------------------------------------------------------

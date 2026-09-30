@@ -541,6 +541,19 @@ button:disabled {
 
 /* --- lists, chips, cards, tables --------------------------------------- */
 
+/* One finding per line, in reading order. A COLUMN and not the flex-wrap row
+   .pair-list is: each peg finding is a sentence with a number in it, and wrapping
+   them side by side puts two numbers on one line where the operator has to work
+   out which belongs to which. */
+.finding-list {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
 .pair-list, .pair-grid, .chips, .cards {
   list-style: none;
   margin: 0;

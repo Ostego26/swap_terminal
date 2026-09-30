@@ -17,7 +17,7 @@ names taken from documentation rather than a response, marked UNVERIFIED.
 
 WHAT THIS IS REALLY GUARDING. CoinPaprika reports `market_cap: 0` for GRC while
 reporting `total_supply: 459382131`. Zero is not a cap; it is a field the feed
-does not compute for an asset that small. And market_context._turnover_finding()
+does not compute for an asset that small. And market_context.turnover_finding()
 returns None when the cap is zero or absent -- so a GRC snapshot taken straight
 from this feed produces NO thinness finding at all. The asset whose price most
 needs a confidence figure is the one that would silently not get one. Everything
@@ -88,7 +88,7 @@ def test_GRCs_market_cap_is_DERIVED_because_the_feed_reports_zero():
 
     MUTATION: treat a reported 0 as a real cap (drop the `> 0` test in
     derive_market_cap) and this fails -- market_cap_usd comes back 0.0 and
-    market_context._turnover_finding() then returns None, which is the SILENT
+    market_context.turnover_finding() then returns None, which is the SILENT
     failure this whole file is about. Verified 2026-09-29.
     """
     quote = quote_from_ticker("GRC", GRC_TICKER)

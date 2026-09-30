@@ -22,10 +22,13 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import time
 
 import pytest
 from db import SCHEMA, dict_factory
 from network_target import configuring_variable
+from services import coinpaprika, market_context, pricing
+from services.wallet_leveling import PEG_ASSETS
 from valid_addresses import GRC_PAYOUT
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
@@ -735,3 +738,248 @@ def test_the_reason_says_it_cannot_pay_rather_than_that_it_is_unreachable(client
     assert "XRP_RPC_URL is unset" not in body, (
         "XRP IS configured here; naming its endpoint variable would be the wrong remedy"
     )
+
+
+# --- the pricing panel ------------------------------------------------------
+#
+# WHY THESE ARE HERE AND NOT IN tests/test_admin_view.py. The failure this panel
+# can actually produce is a render failure: a cold cache drawing as an empty
+# table, a thinness verdict that could not be measured drawing like one that
+# passed, or a page that stops loading because a price API is down. A test that
+# called pricing_panel() and asserted on the returned dict would pass through
+# all three. So these seed the cache, ask the app for the page, and assert on
+# the bytes it returned.
+
+
+def seed_price_cache(monkeypatch, entries, *, source="CoinPaprika", age_seconds=12.0):
+    """Put a raw feed body straight into services/pricing._cache. Fetches nothing.
+
+    THE CACHE IS SEEDED, NOT THE FEED MOCKED, because what the panel reads is the
+    cache and nothing else -- that is the property under test. Seeding it is also
+    the only way to assert the no-fetch claim, since a test that mocked requests
+    could not tell "did not fetch" from "fetched a mock".
+
+    `entries` is keyed by ASSET and reshaped onto the CoinGecko ids here, so a
+    case reads BTC rather than bitcoin. The shape is the one BOTH feeds produce
+    -- see services/pricing._coinpaprika_raw(), which exists to make them one
+    shape.
+    """
+    fetched_at = time() - age_seconds
+    raw = {pricing.IDS[asset]: values for asset, values in entries.items()}
+    monkeypatch.setitem(pricing._cache, "raw", raw)
+    monkeypatch.setitem(pricing._cache, "prices", None)
+    monkeypatch.setitem(pricing._cache, "context", None)
+    monkeypatch.setitem(pricing._cache, "source", source)
+    monkeypatch.setitem(pricing._cache, "fetched_at", fetched_at)
+    monkeypatch.setitem(pricing._cache, "expires_at", fetched_at + 30.0)
+
+
+def priced(usd, cap, volume, change=1.5):
+    """One asset's entry in a raw feed body, in the shape both feeds return."""
+    return {
+        "usd": usd,
+        "usd_market_cap": cap,
+        "usd_24h_vol": volume,
+        "usd_24h_change": change,
+        "last_updated_at": 1790717713,
+    }
+
+
+def every_asset_priced(**overrides):
+    """A full raw body -- one entry per services/pricing.IDS key.
+
+    DERIVED FROM IDS rather than written out, because _require_every_asset()
+    refuses a partial body and a hand-written dict here would have to be edited
+    every time an asset is added -- which is the failure that table's own comment
+    warns about, one level up in a test file.
+    """
+    body = {asset: priced(100.0, 5_000_000_000.0, 200_000_000.0) for asset in pricing.IDS}
+    body.update(overrides)
+    return body
+
+
+def cold_price_cache():
+    """Every cache field back to what it is before anything has been priced.
+
+    Stated rather than assumed: the cache is process-wide, and another test in
+    this session may have filled it (rule 17).
+    """
+    pricing._cache.update({"raw": None, "prices": None, "context": None, "source": "",
+                           "fetched_at": 0.0, "expires_at": 0.0})
+
+
+def test_a_cold_price_cache_renders_not_fetched_and_not_an_empty_table(client):
+    """Nothing priced yet and every asset unpriced are different facts (rule 14).
+
+    MUTATION: render the assets table unconditionally. An empty <tbody> draws as
+    a blank region, which is indistinguishable from a query that broke -- the
+    exact defect CLAUDE.md records being shipped the day rule 14 was written.
+    """
+    cold_price_cache()
+    body = client.get("/admin").get_data(as_text=True)
+    assert "(not fetched)" in body, "a cold price cache rendered no marker at all"
+    # The sentence is asserted in fragments because the template wraps it, so a
+    # whole-sentence match would fail on a line break rather than on a defect.
+    assert "nothing has been priced" in body
+    assert "fetched nothing" in body
+
+
+def test_the_admin_page_renders_with_every_price_feed_unreachable(client, monkeypatch):
+    """THE WHOLE POINT OF READING THE CACHE. An /admin that needs a price API is broken.
+
+    MUTATION: make pricing_panel() call fetch_market_context() instead of
+    cached_market_context(). It then fails with the AssertionError below rather
+    than rendering -- which is what an operator would have got on the day a feed
+    went down, losing swaps in flight, stuck payouts and worker state along with
+    the prices, on the one screen they open when something is wrong.
+
+    requests.get is replaced at BOTH modules the feeds reach it through, so this
+    covers CoinGecko and CoinPaprika. Measured from the operator's host, the
+    first of those really does 403 on every call (services/pricing.py's header),
+    so a dead feed is the ordinary case there and not a hypothetical.
+    """
+    def refuse(*args, **kwargs):
+        raise AssertionError("the admin page made an outbound price request")
+
+    monkeypatch.setattr(pricing.requests, "get", refuse)
+    monkeypatch.setattr(coinpaprika.requests, "get", refuse)
+    cold_price_cache()
+    response = client.get("/admin")
+    assert response.status_code == 200, "the admin page failed with the price feeds down"
+    assert "Swaps in flight" in response.get_data(as_text=True), (
+        "the page rendered but lost the database readings -- a pricing panel must not be able to "
+        "cost the operator the rest of the screen"
+    )
+
+
+def test_the_panel_names_the_feed_that_answered_and_how_old_it_is(client, monkeypatch):
+    """A price whose origin is not recorded is a number nobody can check later.
+
+    Both halves in one test on purpose: a source with no timestamp beside it is a
+    provenance claim with no date on it.
+    """
+    seed_price_cache(monkeypatch, every_asset_priced(), source="CoinPaprika", age_seconds=12.0)
+    body = client.get("/admin").get_data(as_text=True)
+    assert "CoinPaprika" in body, "the page did not say which feed the prices came from"
+    # Rule 6: µfn with the seconds in parentheses, and the symbol is µ -- an
+    # ASCII "u" in displayed output is a defect, not a rendering fallback.
+    assert "µfn" in body, "the age was not reported in microfortnights"
+
+
+def test_an_asset_whose_thinness_could_not_be_measured_does_not_render_as_OK(client, monkeypatch):
+    """GRC's ORDINARY case on a feed reporting market_cap 0, and the silent one.
+
+    services/market_context.turnover_finding() returns None when the cap or the
+    volume is unusable, and None is not OK: no bound at all exists on whether
+    that spot price is one anybody can transact at. A page that drew it as OK
+    would be the "unchecked reads as fine" failure rule 14 names, on the one
+    asset that needs the check most.
+
+    MUTATION: render "OK" when the finding is None. The NOT MEASURED assertion
+    below fails.
+    """
+    seed_price_cache(monkeypatch, every_asset_priced(GRC=priced(0.0167, 0.0, 6_500.0)))
+    body = client.get("/admin").get_data(as_text=True)
+    assert "NOT MEASURED" in body.upper(), "an unmeasurable thinness verdict rendered as something else"
+    assert "NOT a passed check" in body, (
+        "the page showed a missing thinness reading without saying it is not a passed one"
+    )
+
+
+def test_the_thinness_verdict_is_market_contexts_and_not_a_copy_in_the_view(client, monkeypatch):
+    """Move THIN_TURNOVER and the PAGE must move with it.
+
+    This is the rule 8 assertion, and it is behavioral rather than a grep: a
+    second `volume / cap < THIN_TURNOVER` in services/admin_view.py would pass
+    every other test in this file and disagree with the quote path the first day
+    one of the two thresholds was tuned -- each site looking correct in its own
+    file, which is the drift rule 8 opens with.
+
+    So the threshold is raised above any real turnover and every asset must come
+    back THIN. A copy holding the old constant would still report OK.
+    """
+    seed_price_cache(monkeypatch, every_asset_priced())
+    assert "THIN" not in client.get("/admin").get_data(as_text=True), (
+        "these seeded assets are already thin at the real threshold, so the flip below proves nothing"
+    )
+    monkeypatch.setattr(market_context, "THIN_TURNOVER", 1.0)
+    assert "THIN" in client.get("/admin").get_data(as_text=True), (
+        "raising market_context.THIN_TURNOVER did not change the page, so the admin view is deciding "
+        "thinness itself instead of calling turnover_finding()"
+    )
+
+
+def test_the_peg_is_not_checked_on_page_load_and_says_so(client, monkeypatch):
+    """Unchecked must not read as fine, and the page must not fetch to say so."""
+    def refuse(*args, **kwargs):
+        raise AssertionError("the admin page priced a stablecoin on render")
+
+    monkeypatch.setattr(coinpaprika.requests, "get", refuse)
+    seed_price_cache(monkeypatch, every_asset_priced())
+    body = client.get("/admin").get_data(as_text=True)
+    assert "(not checked)" in body
+    assert "not the same as checked and holding" in body
+
+
+def test_the_peg_route_reports_a_dead_feed_as_suspect_rather_than_raising(client, monkeypatch):
+    """A stablecoin that cannot be priced is an unchecked dollar, not a 500.
+
+    MUTATION: let the exception out of probe_peg(). The route then 500s and the
+    operator gets no finding at all -- where what they need is the sentence
+    saying the yardstick itself is unverified.
+    """
+    def refuse(asset, **kwargs):
+        raise RuntimeError("403 from the edge")
+
+    monkeypatch.setattr("services.coinpaprika.fetch_quote", refuse)
+    payload = client.get("/api/admin/peg").get_json()
+    assert payload["suspect"] is True
+    assert payload["assets_priced"] == []
+    assert payload["assets_asked"] == list(PEG_ASSETS)
+    assert any("NOT PRICED" in finding for finding in payload["findings"]), (
+        "an unpriceable stablecoin produced no finding naming it as unpriced"
+    )
+    assert any("403 from the edge" in failure for failure in payload["fetch_failures"]), (
+        "the feed's own reason was swallowed, so the operator cannot tell a block from an outage"
+    )
+
+
+def test_the_peg_route_reports_both_coins_and_their_ratio_when_both_price(client, monkeypatch):
+    """The findings come from wallet_leveling.peg_findings(), so the CLI cannot disagree."""
+    def quote(asset, **kwargs):
+        return coinpaprika.PaprikaQuote(
+            asset=asset,
+            paprika_id=coinpaprika.PAPRIKA_IDS[asset],
+            price_usd=1.0002 if asset == "USDC" else 0.9998,
+            total_supply=1e10,
+            market_cap_usd=1e10,
+            market_cap_is_derived=False,
+            volume_24h_usd=1e9,
+            change_24h_pct=0.01,
+            source_updated_at="2026-09-30T00:00:00Z",
+        )
+
+    monkeypatch.setattr("services.coinpaprika.fetch_quote", quote)
+    payload = client.get("/api/admin/peg").get_json()
+    assert payload["assets_priced"] == ["USDC", "USDT"]
+    assert payload["suspect"] is False
+    assert any("USDC/USDT" in finding for finding in payload["findings"]), (
+        "the two were priced and never compared to each other"
+    )
+
+
+def test_every_admin_route_including_the_peg_check_is_still_a_GET():
+    """The read-only constraint is structural, and a new route must not loosen it.
+
+    routes/admin.py's header claims every route on the blueprint is a GET. This
+    asserts it over the real URL map, so adding one with a POST fails here
+    rather than waiting to be caught by a reader.
+    """
+    methods = {
+        rule.rule: rule.methods - {"HEAD", "OPTIONS"}
+        for rule in app_module.app.url_map.iter_rules()
+        if rule.endpoint.startswith("admin.")
+    }
+    assert "/api/admin/peg" in methods, "the peg route is not registered on the admin blueprint"
+    for path, verbs in methods.items():
+        assert verbs == {"GET"}, f"{path} accepts {sorted(verbs)}, and this surface is GET-only"

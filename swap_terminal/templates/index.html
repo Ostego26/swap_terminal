@@ -113,8 +113,10 @@
      asking will do and what it depends on, so the wait is never a blank box. #}
   <div id="quote-result" class="result" aria-live="polite">
     <p class="result-idle"><span class="empty-mark">(no quote yet)</span> Asking for one fetches a live USD price
-       per asset and derives the pair rate from the two. That is one outbound call to a price API, so it fails
-       loudly if the price feed is down rather than quoting you a stale number.</p>
+       per asset and derives the pair rate from the two. Two price feeds are tried in order and the answer
+       names the one that priced it &#8212; if BOTH are down the quote fails loudly rather than giving you a
+       stale number. The reply also carries a market-depth reading for each leg, because a rate is only as
+       good as the money behind it and one asset here is thin enough for that to matter.</p>
   </div>
 </section>
 
