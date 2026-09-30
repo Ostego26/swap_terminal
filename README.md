@@ -213,11 +213,21 @@ What was built to it, so nobody re-opens this by reading the table as a menu:
 | a credit with no attributable memo is DROPPED and logged at WARNING | `chains/solana.py::_attributable()` |
 | the customer's page and the operator's chain row | `services/swap_view.ATTRIBUTION_MODELS`, derived from the set above |
 
-**Still unproven, and it is the one thing that needs a cluster:** the Memo
-program IDs were written from knowledge, not measured -- nothing in the
-development container reaches a Solana cluster. `solana_chain_check.py
---hunt-memo N` is the instrument that settles it, and a test fails if that
-admission is ever deleted.
+**One of the two Memo program IDs is now measured and the other is not.** Both
+were written from knowledge; the operator ran `solana_chain_check.py
+--hunt-memo 50` against devnet on 2026-09-30 and:
+
+| id | status |
+|---|---|
+| `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` (v2) | **MEASURED.** Ten of that program's own transactions read, `memo_strings_in()` found a memo in all ten, and `getTransaction` answered in the `jsonParsed` shape this code reads. |
+| `Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo` (v1) | **still unmeasured.** All twenty-two reads attempted for it were refused with HTTP 429, so nothing was parsed -- evidence about the public endpoint, none about the constant. |
+
+v1 still matters even though v2 covers what most wallets emit: v1 is still
+accepted by the cluster and still emitted by older wallets, so a wrong id there
+means a deposit that parses to no memo and a customer's money sitting
+uncredited while everything reports success. **`--hunt-memo 5`** is what settles
+it -- a small N finishes inside the public endpoint's rate limit. A test fails
+if either id's status is ever misstated, in either direction.
 
 **Also still open, and it is a money question rather than a code one:** no SOL
 pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured

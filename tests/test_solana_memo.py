@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
 from chains.solana_memo import (
+    MEASURED_MEMO_PROGRAM_IDS,
     MEMO_PROGRAM_IDS,
     MEMO_PROGRAM_V1,
     MEMO_PROGRAM_V2,
@@ -120,19 +121,70 @@ def test_another_programs_instruction_is_not_a_memo():
     assert memo_strings_in(_tx([{"programId": "11111111111111111111111111111111", "parsed": "4242"}])) == []
 
 
-def test_THE_PROGRAM_IDS_ARE_DECLARED_UNVERIFIED_IN_THE_SOURCE():
-    """These constants were WRITTEN, not measured, and the module has to keep saying so.
+def _memo_module_source() -> str:
+    return (Path(__file__).resolve().parent.parent / "swap_terminal" / "chains"
+            / "solana_memo.py").read_text(encoding="utf-8")
 
-    Nothing in the container this was written in can reach a Solana cluster, so no real memo
-    transaction has confirmed the program id. That is exactly the shape of error
-    an unverified adapter carries -- seeded tests passing green over a wire
-    format -- and the only thing separating the two is that one of them says which it is
-    (rule 17). This test fails if that admission is ever quietly deleted.
+
+def test_EACH_PROGRAM_ID_SAYS_WHETHER_IT_IS_MEASURED_AND_THE_TWO_DIFFER():
+    """ONE IS MEASURED NOW AND THE OTHER IS NOT, and this used to assert neither was.
+
+    It was `test_THE_PROGRAM_IDS_ARE_DECLARED_UNVERIFIED_IN_THE_SOURCE`, and its docstring said
+    "These constants were WRITTEN, not measured" -- of both, which was true until 2026-09-30.
+    That day the operator ran `--hunt-memo 50` against devnet: ten of MEMO_PROGRAM_V2's own
+    transactions were read and memo_strings_in() found a memo in all ten, while every one of the
+    twenty-two reads attempted for MEMO_PROGRAM_V1 came back HTTP 429.
+
+    IT KEPT PASSING, on the substring "NOT VERIFIED FROM THIS MACHINE", which the rewritten
+    header still contains inside a sentence that now means the opposite for one of the two. That
+    is the third time in this session a test has passed a substring while its premise went
+    stale, and each time the substring was the reason nobody noticed -- so what is pinned here
+    is not a phrase but the PROPERTY: each id states its own status, and the two statuses differ.
+
+    Rule 17 is the whole point of the admission and it cuts both ways. Describing a measured
+    constant as unverified is the same register error as the reverse: a reader who cannot tell
+    which of the two ids has been exercised will either re-run a settled check or trust an
+    unsettled one.
     """
-    source = (Path(__file__).resolve().parent.parent / "swap_terminal" / "chains"
-              / "solana_memo.py").read_text(encoding="utf-8")
-    assert "NOT VERIFIED FROM THIS MACHINE" in source
-    assert "--hunt-memo" in source, "and it names the instrument that would settle it"
+    source = _memo_module_source()
+    v2 = source[source.index("MEMO_PROGRAM_V2 ="):source.index("MEMO_PROGRAM_V1 =")]
+    v1 = source[source.index("MEMO_PROGRAM_V1 ="):source.index("MEMO_PROGRAM_IDS =")]
+
+    # Each constant's own comment block carries its own verdict. Sliced BACKWARD from the
+    # assignment so the comment above it is what is read -- `#:` blocks precede their name.
+    above_v2 = source[:source.index("MEMO_PROGRAM_V2 =")].rsplit("\n\n", 1)[-1]
+    above_v1 = source[:source.index("MEMO_PROGRAM_V1 =")].rsplit("\n\n", 1)[-1]
+
+    assert "MEASURED" in above_v2, "v2 was exercised against real traffic; say so at the constant"
+    assert "2026-09-30" in above_v2, "with the date, because a bare claim ages (rule 3)"
+    assert "UNMEASURED" in above_v1, "v1 still is not, and that must not be quietly inherited"
+    assert above_v2 != above_v1, "the two cannot carry the same status; one run settled only one"
+    assert v2 and v1  # the assignments themselves are intact between the slices
+
+    # AND THE HEADER STILL NAMES THE INSTRUMENT, because v1 is what is left to settle.
+    assert "--hunt-memo" in source
+    assert "NOT VERIFIED" in source, "the unmeasured half keeps its admission"
+
+
+def test_the_measured_half_is_not_described_as_a_hypothesis_anywhere_in_the_module():
+    """The standing instruction was NARROWED, not deleted, and the narrowing is the finding.
+
+    The header used to say: until that run, treat a zero-match rate as "the constant is wrong"
+    before treating it as "nobody uses memos". Applied to v2 now, that sentence is wrong and
+    expensive -- it would send somebody to change a constant that ten real transactions have
+    confirmed, when a zero-match rate on a v2 memo means the encoding, the CPI path, or the
+    transaction instead.
+
+    MUTATION: restore the unqualified instruction and this fails, because it can no longer be
+    stated of both ids at once.
+    """
+    source = _memo_module_source()
+    assert "applies to v1 only" in source or "v1 only" in source, (
+        "the treat-it-as-wrong instruction has to say WHICH id it still applies to"
+    )
+    header = source[:source.index("from __future__")]
+    assert "STILL NOT VERIFIED" in header, "v1, named"
+    assert "MEASURED 2026-09-30" in header, "v2, named, with the run that did it"
 
 
 def test_THE_INSTRUMENT_solana_memo_POINTS_AT_ACTUALLY_EXISTS():
@@ -189,3 +241,52 @@ def test_THE_INSTRUMENT_solana_memo_POINTS_AT_ACTUALLY_EXISTS():
     #     ::test_a_throttled_hunt_blames_the_endpoint_and_says_what_to_do_about_it
     # Those also cover what this one could not: that a rate limit is counted apart from an
     # unreadable transaction, which is the distinction the old single word could not express.
+
+
+def test_the_measured_set_agrees_with_what_the_prose_says():
+    """The data and the sentences are the same fact, so they must not disagree.
+
+    `MEASURED_MEMO_PROGRAM_IDS` exists so solana_chain_check.py's banner can DERIVE each id's
+    status rather than carry a hand-written copy -- because earlier on 2026-09-30 the operator's
+    custody decision existed in five places, four went stale, and the fifth was found only when
+    they read it off a screen. Having the data does not help if the prose beside the constants
+    can drift from it, so this pins them to each other.
+
+    MUTATION: add v1 to the set, or drop v2 from it, and this fails against the comments.
+    """
+    source = _memo_module_source()
+    above_v2 = source[:source.index("MEMO_PROGRAM_V2 =")].rsplit("\n\n", 1)[-1]
+    above_v1 = source[:source.index("MEMO_PROGRAM_V1 =")].rsplit("\n\n", 1)[-1]
+
+    assert {MEMO_PROGRAM_V2} == MEASURED_MEMO_PROGRAM_IDS
+    assert ("MEASURED" in above_v2) is (MEMO_PROGRAM_V2 in MEASURED_MEMO_PROGRAM_IDS)
+    assert ("UNMEASURED" in above_v1) is (MEMO_PROGRAM_V1 not in MEASURED_MEMO_PROGRAM_IDS)
+
+
+def test_the_measured_set_is_a_subset_of_the_ids_the_parser_actually_reads():
+    """A measured id the parser does not consult would be a measurement of nothing.
+
+    MUTATION: measure an id that is not in MEMO_PROGRAM_IDS -- a typo, a v3 added to one tuple
+    and not the other -- and the banner would print MEASURED beside an id no deposit is ever
+    checked against.
+    """
+    assert set(MEMO_PROGRAM_IDS) >= MEASURED_MEMO_PROGRAM_IDS
+    assert MEASURED_MEMO_PROGRAM_IDS, (
+        "empty would be honest in 2026-09-29's tree and is not honest now: v2 was measured"
+    )
+
+
+def test_the_chain_check_derives_the_status_rather_than_spelling_it():
+    """The banner must ask the module, not restate it.
+
+    MUTATION: hand-write "v2 is measured" into solana_chain_check.py's banner and this fails.
+    That is the fifth-copy defect exactly: a fact spelled where it is printed instead of read
+    from where it is decided.
+    """
+    root = Path(__file__).resolve().parent.parent
+    check = (root / "solana_chain_check.py").read_text(encoding="utf-8")
+    assert "MEASURED_MEMO_PROGRAM_IDS" in check, "the banner reads the set"
+    assert MEMO_PROGRAM_V2 not in check, (
+        "the chain check must not contain a program id literal -- it imports them"
+    )
+    assert MEMO_PROGRAM_V1 not in check

@@ -73,7 +73,12 @@ if str(APP_ROOT) not in sys.path:
 # suppressions claim and what a reader can check from these lines.
 from chains.solana import SolanaAdapter, SolanaRPCError  # noqa: E402
 from chains.solana_address import describe_address  # noqa: E402
-from chains.solana_memo import MEMO_PROGRAM_IDS, deposit_tag_from, memo_strings_in  # noqa: E402
+from chains.solana_memo import (  # noqa: E402
+    MEASURED_MEMO_PROGRAM_IDS,
+    MEMO_PROGRAM_IDS,
+    deposit_tag_from,
+    memo_strings_in,
+)
 from chains.solana_units import (  # noqa: E402
     ACCOUNT_STORAGE_OVERHEAD_BYTES,
     LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
@@ -549,7 +554,11 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
 
     WHY THIS EXISTS, AND WHY IT IS NOT A TEST. `chains/solana_memo.py` names two program ids
     that were WRITTEN rather than measured -- nothing in the container they were written in can
-    reach a Solana cluster. Its header says so, and a test asserts the admission is still there.
+    reach a Solana cluster. Its header says so per id, and a test asserts each one's status.
+    ONE OF THE TWO IS NOW SETTLED: the operator's 2026-09-30 run read ten of v2's own
+    transactions and found a memo in all ten. v1 is what is left, and it is still worth having
+    -- older wallets still emit it, so a wrong id there means a deposit that parses to no memo
+    and money sitting uncredited while everything reports success.
     But an admission is not a measurement, and the failure it is admitting to is specific: if
     the id is wrong, `memo_strings_in()` returns nothing on every real deposit, and a zero
     match rate reads as "nobody uses memos" rather than as "the constant is wrong". Both look
@@ -574,9 +583,15 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
     print(flush=True)
     print(f"MEMO PROGRAM  (reading up to {how_many} recent transaction(s) of the Memo program "
           f"itself; read-only, sends nothing)", flush=True)
-    print("  WHY: chains/solana_memo.py names two program ids that were WRITTEN, not measured.", flush=True)
-    print("  If the id is wrong, every real deposit parses to no memo -- which looks exactly", flush=True)
-    print("  like a cluster nobody sends memos on. This tells those two apart.", flush=True)
+    print("  WHY: chains/solana_memo.py names two program ids. If one is wrong, a deposit that", flush=True)
+    print("  used it parses to no memo -- which looks exactly like a cluster nobody sends memos", flush=True)
+    print("  on. This tells those two apart, off other people's memo traffic.", flush=True)
+    # THE STATUS PER ID, DERIVED, so this banner cannot drift from the constants the way four
+    # other surfaces drifted from the custody decision earlier on 2026-09-30. A hand-written
+    # "v2 is measured" here would be a fifth copy of a fact that lives in solana_memo.py.
+    for program in MEMO_PROGRAM_IDS:
+        known = "MEASURED 2026-09-30" if program in MEASURED_MEMO_PROGRAM_IDS else "NOT YET MEASURED"
+        print(f"  {program}  <- {known}", flush=True)
 
     confirmed = False
     for program in MEMO_PROGRAM_IDS:

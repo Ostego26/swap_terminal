@@ -115,18 +115,44 @@ WHAT IS IMPLEMENTED AND WHAT IS A PROPOSAL (CLAUDE.md rule 16)
                              transfer for inspection; it does not sign, and
                              this module holds no key to sign with.
 
-**NOTHING IN THIS FILE HAS BEEN EXERCISED AGAINST A SOLANA CLUSTER.** Measured
-2026-09-25: api.devnet.solana.com and release.anza.xyz both return 403 from
-this environment's proxy, and `solana-test-validator` cannot be installed
-because its only distribution channels are those two hosts. Every RPC method
-name, parameter shape and response field below was written from Solana's JSON-
-RPC documentation and from the shapes server.js already relies on. The pure
-functions are tested; the RPC plumbing is tested against seeded responses. The
-proof that it talks to a real cluster is the operator's run, and
-`solana_chain_check.py` at the repository root is written to be exactly that
-run: read-only, one pasteable block, every step announced before it runs, and
-a non-zero exit when any step's response does not have the shape this file
-expects.
+**PART OF THIS FILE HAS NOW MET A REAL CLUSTER, AND THE LINE BETWEEN THE TWO
+HALVES IS DRAWN BY METHOD.** This header said "NOTHING IN THIS FILE HAS BEEN
+EXERCISED AGAINST A SOLANA CLUSTER" until 2026-09-30, which was true when it
+was written -- measured 2026-09-25, api.devnet.solana.com and release.anza.xyz
+both returned 403 from the development environment's proxy and
+`solana-test-validator` could not be installed, its only distribution channels
+being those two hosts. Every method name, parameter shape and response field
+below was therefore written from Solana's JSON-RPC documentation and from the
+shapes server.js already relies on.
+
+The operator ran `solana_chain_check.py` against devnet on 2026-09-30 and
+pasted the output back. What that run touched, method by method, because "the
+adapter works" is not a thing a run proves and the list is what a reader needs:
+
+  EXERCISED, devnet, solana-core 4.3.0
+      getHealth, getVersion, getGenesisHash, getSlot, getEpochInfo
+      getMinimumBalanceForRentExemption -- 650240 for 0 bytes and 1488440 for
+          165, both matching the 5080 lamports/byte reference
+      getSignaturesForAddress -- 50 entries returned for a program account
+      getTransaction -- with jsonParsed and maxSupportedTransactionVersion 0,
+          ten read, `parsed` present, memo instructions found in all ten
+
+  STILL UNEXERCISED, and every one needs an address or a mint the runs did not
+  pass (`--address`, `--mint`)
+      getBalance, getTokenAccountsByOwner, getTokenAccountBalance
+      getAccountInfo -- the owner-program read that decides token-program
+          detection, and the mint decimals read
+      find_deposits_to_address end to end against a funded account, which is
+          the one that matters most: it is the credit path
+      send_to_address and get_new_address refuse by design and always will
+
+So the read PLUMBING is proven -- the transport, the error shape, the
+throttling, the version parameter -- and the DEPOSIT-DISCOVERY path is not. A
+field-name error in `_native_credits` or `_spl_credits` would still pass every
+seeded test in this tree. The instrument is the same one:
+`solana_chain_check.py --address <wallet>` and `--mint <spl mint>`, read-only,
+one pasteable block, every step announced before it runs, and a non-zero exit
+when any step's response does not have the shape this file expects.
 """
 
 from __future__ import annotations

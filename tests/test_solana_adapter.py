@@ -38,6 +38,7 @@ import logging
 import tokenize
 from pathlib import Path
 
+import chains.solana as chains_solana
 import pytest
 from chains.registry import build_adapters
 from chains.solana import SolanaAdapter, SolanaRPCError, deposit_event
@@ -727,3 +728,45 @@ def test_EVERY_TAG_ATTRIBUTED_ASSET_HAS_THE_CONFIG_KEY_ITS_TABLE_NAMES():
             f"can ever be created, whatever the operator exports"
         )
         assert discriminator and network, f"{asset}'s refusals would name a blank"
+
+
+def test_the_module_header_names_which_rpc_METHODS_met_a_real_cluster():
+    """THE FILE'S TOP-LINE HONESTY CLAIM, and it went false the day a run succeeded.
+
+    It read "NOTHING IN THIS FILE HAS BEEN EXERCISED AGAINST A SOLANA CLUSTER" until
+    2026-09-30, which was true from 2026-09-25 -- devnet returned 403 from the development
+    proxy and solana-test-validator could not be installed. Then the operator ran
+    solana_chain_check.py against devnet twice and --hunt-memo once, and the sentence stopped
+    being true without anything failing. That is the fourth stale claim this session, and the
+    pattern in every one of them is the same: a measurement arrived and the document that
+    describes the code did not hear about it.
+
+    WHAT IS PINNED IS THE SPLIT, NOT THE SENTENCE. "The adapter works" is not a thing a run
+    proves, and a header that said so would be worse than the false one it replaced. So the
+    header lists methods on both sides, and this asserts that the credit path -- the one that
+    decides whether somebody's money is seen -- is still on the unproven side, because it is:
+    every run so far passed no --address and no --mint, so getBalance, getAccountInfo and
+    find_deposits_to_address have never met a real response.
+
+    MUTATION: declare the file exercised, or move find_deposits_to_address to the proven
+    side without a run, and this fails. A field-name error in _native_credits still passes
+    every seeded test in this tree, which is exactly why the list has to stay accurate.
+    """
+    source = Path(chains_solana.__file__).read_text(encoding="utf-8")
+    header = source[:source.index("from __future__")]
+
+    assert "NOTHING IN THIS FILE HAS BEEN EXERCISED" not in header, (
+        "false since 2026-09-30: the read plumbing met devnet"
+    )
+    assert "EXERCISED" in header and "STILL UNEXERCISED" in header, "both sides, named"
+
+    proven, unproven = header.split("STILL UNEXERCISED", 1)
+    for method in ("getHealth", "getGenesisHash", "getSignaturesForAddress", "getTransaction",
+                   "getMinimumBalanceForRentExemption"):
+        assert method in proven, f"{method} answered on the operator's run and belongs above"
+    for method in ("getBalance", "getAccountInfo", "find_deposits_to_address"):
+        assert method in unproven, (
+            f"{method} has never met a real response -- every run passed no --address or --mint"
+        )
+    assert "4.3.0" in proven, "the solana-core build it was proven against (rule 3)"
+    assert "--address" in unproven, "and the instrument that would settle the rest"
