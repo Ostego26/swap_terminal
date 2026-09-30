@@ -153,6 +153,7 @@ back.
 | XRP -> LTC, on `script_leg` | OK=15 FAIL=0 | 2026-09-29, and the SECOND chain. Escrow `27627931A82718BF…` (OfferSequence 21051302), LTC HTLC `6e06a4c906c1d5db…` vout 1 on P2SH `QbWXa1K6v74M7qWcZN8bXNPu4WMJMybuFh`, claim `7bd4f0ef9602c2a1…` paying 0.02217136 LTC to `rltc1qrlv7f9majkfujxn6cgspgx998nc60umpjce6vv`, XRP finish `0DEB63047A0CDDE3…`, B 118999970 -> 119999970 drops. Priced at the live rate (44.90069981 XRP per LTC, CoinPaprika), not a hand-supplied figure |
 | GRC -> XRP / LTC -> XRP, on `script_leg` | **NONE** | `chain-first` shares every function the rows above exercised and has not been run on this path. Sharing code is not evidence -- see below |
 | XRP -> BTC | **NONE** | the block arithmetic, the timelock ordering and the key handling are exercised by seeded tests; it has never been run against a daemon |
+| **BTC -> GRC, `atomic_swap.py`** | OK=13 FAIL=0 | 2026-09-30, and the THIRD PAIR SHAPE: two script chains, both legs P2SH, no XRP and no `EscrowFinish` anywhere. BTC HTLC `9817d072ca6c1176…` on P2SH `2N7ZzkWTmYEbxjszGJ57Wdi5txGrpn9vu3j`, GRC HTLC `df7c2043dfe568bb…` vout 1 on `2N3bqzcWSDasdmqKkDKUAFU8f5Hk11NZzYN`, GRC claim `f2803eae34bbd252…` paying 999.99 GRC to `mywoGmK7CbqEqPU8x1ytKnjM5L69wumWKC`, secret read off the GRC chain (32 bytes, never messaged), BTC claim `1aa16133e4ea29c8…` paying 0.0001 BTC to `bcrt1q7t4mppg9glmtv8qqmh362kfylz86pks8h4exzp` |
 
 **THE LTC RUN TOOK THREE ATTEMPTS AND THAT IS THE ARGUMENT FOR THIS WHOLE TABLE.** Both
 failures were in code the GRC run already exercised, and the suite was green for both:
@@ -434,3 +435,56 @@ which parts of a money system are proven. Two things hold it down and neither is
     or re-runnable, rather than trusted;
   - **a row with no harness is a gap by construction.** The NONE rows are the work list, and
     the document stops being useful the moment somebody writes SPENT in one without a txid.
+
+## The BTC <-> GRC run, 2026-09-30, and what it cost to get there
+
+Both legs are P2SH, so neither side reveals through an XRPL `EscrowFinish` --
+the secret surfaces in a scriptSig on GRC and is read back off that chain. That
+is the last of the three pair shapes this tree implements, and it is the one the
+XRP driver cannot exercise at all.
+
+**It took five attempts and every failure was a real defect.** None was findable
+from the two pairs that already worked:
+
+1. `--from btc` was an invalid choice while `--chain btc` was valid in the other
+   driver. `type=str.upper` on the argument, since `type` runs before `choices`.
+2. `client_for()` read `{ASSET}_RPC_URL` and fell back to `DEFAULT_RPC` = 18332,
+   which is TESTNET3, while the operator's BTC is regtest on 18443 -- and
+   `BTC_RPC_PASS` being set meant the conf fallback never ran. It dialed a daemon
+   nobody had configured and said nothing about guessing. Four routes now, each
+   announced.
+3. `BTCClient` defaults to wallet `LegacyWallet`, a name nothing in this
+   repository creates; the operator's is `regtest_htlc_harness`. Cost three runs.
+4. A wrong `GRC_WALLET_PASSPHRASE` was discovered BETWEEN the two legs, twice,
+   stranding `8d3ac063…` and `cd0b0e60…`. Those coins are not time-locked: step 2
+   mints the keypairs in-process and never writes them, so the refund key died
+   with the process and they are unspendable by anybody, permanently.
+   `prove_every_wallet_will_open()` now unlocks and restores every encrypted
+   wallet in step 1, before anything is funded.
+5. That check then asked for a BTC passphrase for a wallet that was not loaded,
+   because `encryption_state()` assumes encrypted when it cannot read
+   `getwalletinfo` -- right for an unreadable state, wrong when the daemon has
+   just said the wallet is missing.
+
+### Two things this run did NOT prove
+
+**The GRC wallet's staking state.** The step-1 check goes through
+`chains/gridcoin_wallet_lock` and restores staking. `GRCClient.ensure_fully_unlocked()`,
+which `create_contract()` calls, does not: it is `walletlock` then
+`walletpassphrase <phrase> <timeout>` with no staking flag and no restore. So
+after a SUCCESSFUL run the wallet is left unlocked, then plain locked when the
+timeout expires, with nothing printed. Gridcoin stakes and Bitcoin does not, and
+that client treats a GRC wallet as a BTC wallet with a passphrase. Unfixed, and
+it is a fund-path change.
+
+**A counterparty.** Both sides were this process. The driver says so at the end
+and names the one step a real participant does differently: they are not the
+claimer, so `gettransaction` will not find the claim and they need `-txindex` or
+a block scan.
+
+### The fees are most of the small leg
+
+BTC funded 0.0002 and the claim paid 0.0001 -- a 0.0001 miner fee on a 318-byte
+spend took HALF the leg. GRC funded 1000 and the claim paid 999.99. At these
+sizes the BTC leg is mostly fee, which is a fact about the leg size rather than
+about the code, and it is why a real book would not swap 0.0002 BTC.
