@@ -167,6 +167,7 @@ this port was bound. The seed is never shown here and never leaves the server's 
   <button data-pane="daemons">2 &middot; Daemon controls</button>
   <button data-pane="swaps">3 &middot; Swaps</button>
   <button data-pane="run">4 &middot; Run</button>
+  <button data-pane="teller">5 &middot; Teller</button>
 </nav>
 
 <div class="pane" data-pane="chains">
@@ -257,6 +258,58 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <pre id="out">(none)</pre>
 </section>
 </div><!-- /run -->
+
+<div class="pane" data-pane="teller" hidden>
+<section>
+  <h2>Teller &mdash; open a swap by hand</h2>
+  <!-- WHAT THIS COMMITS, BEFORE THE BUTTONS AND NOT AFTER THEM. Two steps, and the second
+       one writes something that cannot be taken back. Rule 14's "announce before, not only
+       after", applied to a form rather than a progress line. -->
+  <p class="what">Two steps, because they commit different things. <strong>Quote</strong> writes
+  a row in <code>quotes</code> and nothing else &mdash; no address, no key, no coin &mdash; and
+  it expires on its own. <strong>Open the swap</strong> is the one that cannot be undone.</p>
+
+  <p class="warn">Opening a swap does two FINAL things. The <strong>payout address is fixed
+  forever</strong>: <code>payout_worker</code> broadcasts to whatever is recorded, and nothing
+  in this tree can change it afterwards &mdash; a typo is a payout to a stranger, which is why
+  it is typed twice below. And on BTC, LTC or GRC a <strong>fresh deposit key is derived in the
+  hot wallet</strong> by <code>getnewaddress</code>, which is a wallet write. On XRP it is a
+  destination tag instead and no key is made.</p>
+
+  <p class="what">No coin moves here. The customer has not deposited yet and no payout is
+  attempted &mdash; <code>deposit_watcher</code> sees the deposit and <code>payout_worker</code>
+  pays it out, and both are switches under <strong>2 &middot; Daemon controls</strong>. If they
+  are stopped, a swap opened here sits in <code>awaiting_deposit</code> forever and every HTTP
+  response still says 200.</p>
+
+  <p class="warn">THIS PANEL'S TESTNET GATE COVERS GRIDCOIN ONLY. The daemon on the GRC
+  endpoint said it was a test network before this port was bound &mdash; that is the banner at
+  the top &mdash; and <strong>nothing here has asked BTC, LTC or XRP which network they are
+  on</strong>. A swap opened against a mainnet endpoint fixes a mainnet payout address just as
+  easily. <strong>1 &middot; Chains</strong>&rsquo; probe asks each daemon directly, and
+  <code>swap_readiness.py</code> is the other way to ask.</p>
+
+  <div id="tellerpairs" class="sub">asking the server which pairs are serviceable&hellip;</div>
+
+  <h3>1 &middot; Quote</h3>
+  <div class="row">
+    <select id="tellerpair"></select>
+    <input id="telleramount" placeholder="amount to be received FROM the customer">
+    <button id="tellerquote">Quote</button>
+  </div>
+  <pre id="tellerquoteout">(nothing quoted yet)</pre>
+
+  <h3>2 &middot; Open the swap</h3>
+  <p class="what">Needs a quote from step 1. The payout address is where the CUSTOMER receives
+  the other asset, on the destination chain, and it is typed twice because it is final.</p>
+  <div class="row">
+    <input id="telleraddress" placeholder="customer payout address">
+    <input id="telleraddress2" placeholder="the same address again">
+    <button class="stop" id="telleropen" disabled>Open the swap</button>
+  </div>
+  <pre id="telleropenout">(no swap opened from this panel yet)</pre>
+</section>
+</div><!-- /teller -->
 
 <script>
 const $ = id => document.getElementById(id);
@@ -574,6 +627,7 @@ function showPane(name) {
   try { sessionStorage.setItem("pane", name); } catch (e) { /* private window: not remembering is fine */ }
   if (name === "daemons") { loadControls(); }
   if (name === "swaps") { loadSwapper(); }
+  if (name === "teller") { loadTeller(); }
 }
 for (const b of $("toptabs").querySelectorAll("button")) {
   b.onclick = () => showPane(b.dataset.pane);
@@ -667,6 +721,127 @@ async function loadControls() {
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// THE TELLER. Two buttons, and the second one is disabled until the first has produced a
+// quote -- because "open the swap" needs a quote id and inventing one would be a request
+// for a row that does not exist.
+//
+// THE PAIR LIST OFFERS ONLY WHAT A QUOTE CAN BE BUILT FROM. services/admin_view.pair_rows()
+// answers that in three states, and the two that are not `enabled` go in the readout rather
+// than the dropdown: offering a pair whose chain has no adapter in this process is the defect
+// its own docstring records -- six pairs badged ENABLED against a server that had built one,
+// and `No swap was created: 'GRC'` at the counter.
+// ---------------------------------------------------------------------------
+let tellerQuote = null;
+
+async function loadTeller() {
+  let d;
+  try { d = await (await fetch("/api/teller")).json(); }
+  catch (e) { $("tellerpairs").innerHTML = '<span class="bad">the panel stopped answering: ' + esc(e) + "</span>"; return; }
+  if (!d.ok) {
+    $("tellerpairs").innerHTML = '<span class="bad">which pairs are serviceable could not be read: ' + esc(d.error) + "</span>";
+    return;
+  }
+  const rows = d.pairs || [];
+  const ready = rows.filter(r => r.state === "enabled");
+  $("tellerpair").innerHTML = ready.map(r =>
+    '<option value="' + esc(r.from_asset) + ":" + esc(r.to_asset) + '">' + esc(r.label) + "</option>").join("");
+
+  // EVERY PAIR IS LISTED WITH ITS VERDICT, not just the usable ones -- "why can I not sell
+  // XRP" is a question that otherwise gets answered by reading source (rule 14).
+  const blocked = rows.filter(r => r.state !== "enabled");
+  const settings = (d.config || []).map(c => c.key + "=" + c.value).join("  ");
+  $("tellerpairs").innerHTML =
+    "<p>" + (ready.length
+      ? "<strong>" + ready.length + " pair(s) can be quoted from this process.</strong>"
+      : '<span class="bad">NO pair can be quoted from this process.</span> Every one is listed below with the reason.') +
+    ' <span class="what">database <code>' + esc(d.database) + "</code></span></p>" +
+    '<p class="what">' + esc(settings) + "  &#8592; the settings these numbers come out of</p>" +
+    (blocked.length
+      ? '<details><summary class="what">' + blocked.length + " pair(s) cannot be quoted here &#8212; why</summary>" +
+        blocked.map(r => '<div class="what"><strong>' + esc(r.label) + "</strong> " +
+                         esc(r.state) + " &#8212; " + esc(r.detail) + "</div>").join("") + "</details>"
+      : "");
+}
+
+$("tellerquote").onclick = async () => {
+  const picked = $("tellerpair").value;
+  if (!picked) { $("tellerquoteout").textContent = "no pair is quotable from this process -- see the reasons above."; return; }
+  const [from_asset, to_asset] = picked.split(":");
+  $("tellerquoteout").textContent = "pricing " + picked + "\u2026 one price fetch, no chain touched.";
+  let d;
+  try {
+    d = await (await fetch("/api/teller/quote", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({from_asset, to_asset, amount: $("telleramount").value})})).json();
+  } catch (e) { $("tellerquoteout").textContent = "could not reach the panel: " + e; return; }
+  if (!d.ok) {
+    tellerQuote = null;
+    $("telleropen").disabled = true;
+    $("tellerquoteout").textContent = "NO QUOTE\n\n" + d.error;
+    return;
+  }
+  tellerQuote = d.quote;
+  $("telleropen").disabled = false;
+  const q = d.quote;
+  // EVERY FIGURE WITH WHAT IT MEANS BESIDE IT. This is read out to a customer.
+  $("tellerquoteout").textContent =
+    "quote " + q.id + "\n" +
+    "  in            " + q.input_amount + " " + q.from_asset + "\n" +
+    "  rate          " + q.quoted_rate + "  " + q.to_asset + " per " + q.from_asset + "\n" +
+    "  fee           " + q.fee_bps + " bps\n" +
+    "  network fee   " + q.network_fee_reserve + " " + q.to_asset + "  <- held back for the payout transaction\n" +
+    "  customer gets " + q.output_amount_estimate + " " + q.to_asset + "  <- an ESTIMATE until the deposit confirms\n" +
+    "  expires       " + q.expires_at + "\n" +
+    (q.price_source ? "  priced by     " + q.price_source + "\n" : "") +
+    "\nNothing is committed yet. This row expires on its own if no swap is opened.";
+};
+
+$("telleropen").onclick = async () => {
+  if (!tellerQuote) { $("telleropenout").textContent = "quote something first."; return; }
+  const address = $("telleraddress").value.trim();
+  // CONFIRMED IN THE PAGE AND COMPARED ON THE SERVER. This dialog is the last point at which
+  // the address can be changed, so it PRINTS the address rather than asking in the abstract.
+  if (!confirm("Open " + tellerQuote.from_asset + " -> " + tellerQuote.to_asset + " for " +
+               tellerQuote.input_amount + " " + tellerQuote.from_asset + "?\n\n" +
+               "The payout goes to:\n" + address + "\n\n" +
+               "That address is FINAL. Nothing in this tree can change it afterwards, and a " +
+               "fresh deposit key will be derived in the hot wallet.")) { return; }
+  $("telleropen").disabled = true;
+  let d;
+  try {
+    d = await (await fetch("/api/teller/swap", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({quote_id: tellerQuote.id, payout_address: address,
+                            payout_address_again: $("telleraddress2").value.trim()})})).json();
+  } catch (e) { $("telleropenout").textContent = "could not reach the panel: " + e; $("telleropen").disabled = false; return; }
+  if (!d.ok) {
+    $("telleropenout").textContent = (d.refused ? "REFUSED BY THIS PANEL\n\n" : "NO SWAP WAS OPENED\n\n") + d.error;
+    $("telleropen").disabled = false;
+    return;
+  }
+  const w = d.swap;
+  $("telleropenout").textContent =
+    "swap " + w.id + "  status " + w.status + "\n\n" +
+    "TELL THE CUSTOMER TO SEND " + w.expected_input_amount + " " + w.from_asset + " TO\n" +
+    "  " + w.deposit_address + "\n" +
+    // `deposit_tag`, NOT `destination_tag`. The swap row's field is deposit_tag and I wrote
+    // the other one first -- which would have printed NOTHING for an XRP swap, on the one
+    // line whose absence makes a deposit unattributable. Found by walking the real payload
+    // rather than by reading it back, which is the third time this session a guessed field
+    // name got as far as the page.
+    (w.deposit_tag ? "  destination tag " + w.deposit_tag + "  <- REQUIRED; without it the deposit cannot be attributed\n" : "") +
+    "\n  payout to     " + w.payout_address + " (" + w.to_asset + ")  <- FINAL\n" +
+    "  confirmations " + w.min_confirmations + " needed before a payout is released\n" +
+    "  expires       " + w.expires_at + "\n" +
+    "\nNothing pays out until deposit_watcher SEES the deposit and payout_worker sends it. " +
+    "Check both are running under 2 - Daemon controls.";
+  // The quote is spent: one swap per quote, and re-pressing would ask for a row that is
+  // already consumed.
+  tellerQuote = null;
+  loadSwapper();
+};
 
 // THE SWAPPER REGION. One fetch, no chain and no price feed touched: overview() reads the
 // database, the configuration and supervisor's pid files, and its pricing panel reads the price
@@ -977,6 +1152,7 @@ def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page:
         "/api/funding": lambda: funding_payload(run, memory),
         "/api/swapper": swapper_payload,
         "/api/controls": controls_payload,
+        "/api/teller": teller_payload,
     }
     handler = routes.get(path)
     if handler is None and path.startswith("/api/chain/"):
@@ -1012,6 +1188,8 @@ def answer_a_post(path: str, raw: bytes, runner: HarnessRunner,
         "/api/daemon": lambda one: answer_a_daemon_switch(one, chains),
         "/api/rpc": lambda one: answer_an_rpc(one, chains),
         "/api/worker": answer_a_worker_switch,
+        "/api/teller/quote": answer_a_teller_quote,
+        "/api/teller/swap": answer_a_teller_swap,
         "/api/run": lambda one: start_named_run(runner, one),
     }
     handler = routes.get(path)
@@ -1255,6 +1433,160 @@ def controls_payload(run_dir=None) -> dict:
         return {"ok": False, "controls": rows,
                 "error": f"the worker list could not be read: {type(error).__name__}: {error}"}
     return {"ok": True, "controls": rows}
+
+
+#: The settings a teller quote's numbers come out of, echoed on the pane.
+#:
+#: Rule 14's "echo the parameters that decide the answer": a rate and a fee that appear
+#: without the fee_bps and the TTL that produced them are numbers an operator cannot check, and
+#: this pane is where somebody is about to read one out to a customer.
+_TELLER_CONFIG_KEYS = ("DEFAULT_FEE_BPS", "QUOTE_TTL_SECONDS", "AMOUNT_TOLERANCE_PCT",
+                       "RATE_CACHE_SECONDS", "SMALL_SWAP_MANUAL_REVIEW_USD")
+
+
+def _teller_db_and_config():
+    """(db_session context, config dict, adapters) the way every other caller builds them.
+
+    workers/common.py owns both constructions and services/admin_view.overview() already
+    takes them as arguments for exactly this reason -- so nothing here is new plumbing.
+    """
+    from db import (  # noqa: PLC0415 -- checked: deferred like swapper_payload()'s imports, so this stdlib-only server imports on a host without the Flask app's dependencies.
+        db_session,
+    )
+    from workers.common import (  # noqa: PLC0415 -- checked: same, and these are the CLI's own constructions rather than new ones.
+        build_adapters_from_config,
+        get_config_dict,
+    )
+
+    config = get_config_dict()
+    return db_session(config["DB_PATH"]), config, build_adapters_from_config()
+
+
+def teller_payload() -> dict:
+    """What the teller pane needs BEFORE anything is typed: which pairs work, and why not.
+
+    THE REFUSALS COME FIRST, which is the whole shape of this pane. services/admin_view's
+    pair_rows() already answers "may this pair be swapped from THIS process" in three states
+    rather than two -- enabled, disabled, and in ALLOWED_PAIRS but with no adapter here -- and
+    its docstring records why: the swap page once offered six pairs badged ENABLED against a
+    server that had built one adapter, and Create swap answered `No swap was created: 'GRC'`.
+    A teller pane that offered the same six would repeat that at a counter.
+
+    So the pane renders every pair with its verdict, and the form offers only the ones a quote
+    can actually be built from. Reused, not re-derived (rule 8): a second answer to "is this
+    pair serviceable" would agree today and disagree the first time an endpoint moved.
+
+    READ-ONLY, AND IT CONTACTS NO CHAIN. pair_rows() reads the configuration and the adapters
+    dict; it opens no socket. The prices a quote needs are fetched when the quote is asked for,
+    not here.
+    """
+    try:
+        from services.admin_view import (  # noqa: PLC0415 -- checked: deferred like the imports in _teller_db_and_config().
+            pair_rows,
+        )
+
+        session, config, adapters = _teller_db_and_config()
+        with session:
+            pass
+        return {
+            "ok": True,
+            "pairs": pair_rows(config, adapters),
+            "config": [{"key": key, "value": config.get(key)} for key in _TELLER_CONFIG_KEYS],
+            "database": config["DB_PATH"],
+        }
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value. A pane that cannot say which pairs are serviceable must say THAT rather than render an empty list, because an empty pair list and an unreadable configuration are different facts and only one of them means "no pair is enabled".
+        return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+
+def answer_a_teller_quote(body: object) -> tuple[dict, int]:
+    """Price one pair. Writes a `quotes` row; moves nothing and fixes nothing.
+
+    IT CALLS services/quote_service.create_quote(), THE SAME FUNCTION THE WEB FORM CALLS, with
+    no argv anywhere: the pair and the amount arrive as JSON fields and are handed to a Python
+    function. That is what keeps this panel's allowlist invariant intact -- "no path, no
+    argument and no flag from a request ever reaches subprocess" is still true, because nothing
+    here reaches subprocess at all.
+
+    WHAT A QUOTE COMMITS: a row in `quotes`, and nothing else. No address is derived, no key is
+    made, no coin moves. It expires after QUOTE_TTL_SECONDS whether or not anybody uses it.
+    That is why this is a separate step from the swap below rather than one button.
+
+    THE VALIDATION IS quote_service's OWN. It upper-cases the assets, refuses a non-positive
+    amount, calls validate_pair() against ALLOWED_PAIRS and refuses an unpriceable asset by
+    name. Re-checking any of that here would be a second opinion that could disagree with the
+    one the web form gets (rule 8), so this function's only job is to carry the failure back as
+    a sentence instead of a traceback.
+    """
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "the request body was not an object"}, 400
+    try:
+        from services.quote_service import (  # noqa: PLC0415 -- checked: deferred like the imports in _teller_db_and_config().
+            create_quote,
+        )
+
+        session, config, _adapters = _teller_db_and_config()
+        with session as db:
+            quote = create_quote(db, config, str(body.get("from_asset", "")),
+                                 str(body.get("to_asset", "")), body.get("amount"))
+    except Exception as error:  # noqa: BLE001 -- checked: every refusal quote_service can make -- an unsupported pair, a non-positive amount, a missing price, a feed that answered nothing -- is a sentence an operator standing at a counter needs to READ, and a traceback in an alert box is not one. `ok` False with the reason is the answer; nothing downstream reads a decision from this.
+        return {"ok": False, "error": f"{type(error).__name__}: {error}"}, 200
+    return {"ok": True, "quote": quote}, 200
+
+
+def answer_a_teller_swap(body: object) -> tuple[dict, int]:
+    """Turn a quote into a swap with a deposit address. WRITES, AND TWO OF THEM ARE FINAL.
+
+    THIS IS THE FIRST THING ON THIS PANEL THAT WRITES TO swap_terminal.db, and the two
+    irreversible parts are named here because the pane has to name them before the button:
+
+      THE PAYOUT ADDRESS IS FIXED FOREVER. workers/payout_worker.py later broadcasts to it and
+      nothing in this tree can change it afterwards. A typo is a payout to a stranger, which is
+      why open_swap.py keeps --apply off by default and why this pane asks for the address
+      twice before it will send.
+
+      A FRESH DEPOSIT KEY IS DERIVED in the hot wallet on an address-attributed source chain
+      (BTC, LTC, GRC), by `getnewaddress`. That is a wallet write. On XRP it is a destination
+      tag instead and no key is made.
+
+    NO COIN MOVES HERE. The customer's deposit has not happened yet and no payout is attempted;
+    services/payout_service.py does that, driven by payout_worker, which this panel can start
+    and stop under Daemon controls.
+
+    services/swap_service.create_swap() IS THE IMPLEMENTATION and its refusals are better than
+    anything this function could add: it checks BOTH chains have an adapter in THIS process and
+    names the missing one, after a 2026-09-26 incident where the browser was told
+    `No swap was created: 'GRC'` -- the str() of a KeyError -- while a Gridcoin daemon was
+    answering perfectly well one env var away.
+    """
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "the request body was not an object"}, 400
+    quote_id = str(body.get("quote_id", "")).strip()
+    payout_address = str(body.get("payout_address", "")).strip()
+    confirm = str(body.get("payout_address_again", "")).strip()
+    if not quote_id:
+        return {"ok": False, "error": "no quote id was given, so there is nothing to turn into a swap"}, 400
+    # TYPED TWICE, COMPARED HERE. The payout address is the one field on this panel that cannot
+    # be corrected afterwards, and the check belongs on the server: a browser-side comparison is
+    # a convenience that a request can skip entirely.
+    if not payout_address:
+        return {"ok": False, "error": "no payout address was given. It cannot be added later -- "
+                                      "the payout goes to whatever is recorded now"}, 400
+    if payout_address != confirm:
+        return {"ok": False, "refused": True,
+                "error": "the two payout addresses do not match. This address is FINAL -- "
+                         "workers/payout_worker.py broadcasts to it and nothing in this tree can "
+                         "change it afterwards -- so it is typed twice on purpose"}, 400
+    try:
+        from services.swap_service import (  # noqa: PLC0415 -- checked: deferred like the imports in _teller_db_and_config().
+            create_swap,
+        )
+
+        session, config, adapters = _teller_db_and_config()
+        with session as db:
+            swap = create_swap(db, config, adapters, quote_id, payout_address)
+    except Exception as error:  # noqa: BLE001 -- checked: same reason as the quote route. create_swap()'s refusals name a missing adapter, an unusable deposit address and an expired quote, and every one of them is a sentence the operator has to act on rather than a traceback.
+        return {"ok": False, "error": f"{type(error).__name__}: {error}"}, 200
+    return {"ok": True, "swap": swap}, 200
 
 
 def answer_a_worker_switch(body: object, run_dir=None) -> tuple[dict, int]:

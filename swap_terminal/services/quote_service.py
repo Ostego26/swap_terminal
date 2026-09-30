@@ -77,6 +77,20 @@ def _confidence_for_display(config, from_asset: str, to_asset: str, notional_usd
     )
     from .pricing import fetch_market_context  # noqa: PLC0415 -- same.
 
+    # THE WHOLE BODY IS INSIDE THE TRY, AND IT WAS NOT UNTIL 2026-09-30. The docstring above
+    # has always claimed this function "CANNOT FAIL A QUOTE" and that "every failure returns a
+    # dict saying what could not be read" -- and the loop that builds the legs sat OUTSIDE the
+    # except, so any failure in it propagated straight out of create_quote(). The guarantee was
+    # documented and not implemented, which is the worst of the three states it could be in: a
+    # reader checks the docstring, sees the promise, and stops looking.
+    #
+    # It was found by a defect it let through, on the line below: `finding.kind`, on a
+    # dataclass whose fields are code/verdict/message. Every quote that reached a real snapshot
+    # raised AttributeError -- the ORDER PATH, refusing every quote, for a badge. No test caught
+    # it because the tests that exercise this produce an EMPTY findings list, so the
+    # comprehension never evaluated its own body; and market_context.Finding's own docstring
+    # records the same trap one field over ("three tests written that day asserted on docstring
+    # and message TEXT and passed while the code was wrong").
     try:
         window = QuoteWindow(
             quote_ttl_seconds=float(config["QUOTE_TTL_SECONDS"]),
@@ -85,27 +99,30 @@ def _confidence_for_display(config, from_asset: str, to_asset: str, notional_usd
         )
         snapshots = {snapshot.asset: snapshot for snapshot in fetch_market_context(
             int(config["RATE_CACHE_SECONDS"]))}
-    except Exception as error:  # noqa: BLE001 -- checked: see the docstring. Every failure here costs a badge and nothing else, the reason is returned rather than swallowed, and no number in the quote depends on it.
+
+        legs = {}
+        for role, asset in (("from", from_asset), ("to", to_asset)):
+            snapshot = snapshots.get(asset)
+            if snapshot is None:
+                legs[role] = {"asset": asset, "verdict": "UNKNOWN",
+                              "reason": f"no market snapshot for {asset}"}
+                continue
+            # The notional is the same for both legs by construction: it is the swap's
+            # size in dollars, and a size that is a large share of ONE side's daily
+            # volume is the thing worth saying whichever side it is.
+            reading = price_confidence(snapshot, window, swap_notional_usd=notional_usd)
+            legs[role] = {
+                "asset": asset,
+                "verdict": reading.verdict,
+                "reason": reading.reason,
+                # `code`, not `kind`. Finding is (code, verdict, message) and its docstring
+                # says why the split exists: "code is for assertions, message is for a human".
+                "findings": [{"code": finding.code, "verdict": finding.verdict,
+                              "message": finding.message} for finding in reading.findings],
+            }
+    except Exception as error:  # noqa: BLE001 -- checked: see the docstring, which this now actually implements. Every failure here costs a badge and nothing else, the reason is returned rather than swallowed, and no number in the quote depends on it. The catch is deliberately around the WHOLE body: the point is that no diagnostic in it can refuse a swap, and a try that covered only the setup was that promise made and not kept.
         return {"available": False, "why": f"{type(error).__name__}: {error}"}
 
-    legs = {}
-    for role, asset in (("from", from_asset), ("to", to_asset)):
-        snapshot = snapshots.get(asset)
-        if snapshot is None:
-            legs[role] = {"asset": asset, "verdict": "UNKNOWN",
-                          "reason": f"no market snapshot for {asset}"}
-            continue
-        # The notional is the same for both legs by construction: it is the swap's
-        # size in dollars, and a size that is a large share of ONE side's daily
-        # volume is the thing worth saying whichever side it is.
-        reading = price_confidence(snapshot, window, swap_notional_usd=notional_usd)
-        legs[role] = {
-            "asset": asset,
-            "verdict": reading.verdict,
-            "reason": reading.reason,
-            "findings": [{"kind": finding.kind, "verdict": finding.verdict,
-                          "message": finding.message} for finding in reading.findings],
-        }
     return {"available": True, "legs": legs}
 
 

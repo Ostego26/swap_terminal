@@ -14,14 +14,18 @@ diverged an operator would fund an address the harness refuses to spend from (ru
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 import json
 import re
 import sqlite3
 import sys
+import textwrap
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from time import time as _now
 
 import pytest
 from regtest import daemons, funding_steps, steps
@@ -34,6 +38,9 @@ import workers.common  # isort: skip -- same
 from db import SCHEMA, db_session, dict_factory  # isort: skip -- same
 from services.admin_view import overview  # isort: skip -- same
 from valid_addresses import GRC_PAYOUT  # isort: skip -- a real payout address; see tests/valid_addresses.py
+from services import pricing  # isort: skip -- same
+from services.quote_service import create_quote  # isort: skip -- same
+from services.swap_service import create_swap  # isort: skip -- same
 
 
 def _entry():
@@ -1963,7 +1970,13 @@ def test_every_CONTROLS_FIELD_the_panel_renders_actually_EXISTS():
     """
     entry = _entry()
     source = Path(entry.__file__).read_text(encoding="utf-8")
-    script = source[source.index("async function loadControls("):source.index("// THE SWAPPER REGION.")]
+    # SLICED TO THE NEXT BANNER, whichever it is. This read to "// THE SWAPPER REGION." until
+    # the teller script was added between the two, at which point the walk picked up the
+    # teller's own `r` callbacks and attributed their fields to the controls payload.
+    start = source.index("async function loadControls(")
+    ends = [source.index(marker, start) for marker in ("// THE TELLER.", "// THE SWAPPER REGION.")
+            if marker in source[start:]]
+    script = source[start:min(ends)]
 
     payload = entry.controls_payload()
     rows = payload["controls"]
@@ -2018,3 +2031,184 @@ def test_the_controls_pane_holds_no_POLICY_of_its_own():
         )
     # And the route comes from the row, so a new process kind cannot need a branch here.
     assert "row.route" in code, "the POST target is hardcoded rather than carried on the row"
+
+
+# ---------------------------------------------------------------------------
+# THE TELLER PANE
+#
+# Two steps that commit different things: a quote writes a `quotes` row and expires on its
+# own; opening a swap fixes the PAYOUT ADDRESS forever and derives a fresh deposit key in the
+# hot wallet. No coin moves in either -- deposit_watcher and payout_worker do that, and both
+# are switches under Daemon controls.
+#
+# THE FIELD WALK IS THE POINT OF THE FIRST TEST HERE. Three times this session a guessed
+# payload field reached the page: `[object Object]` and `undefined` in the swapper region,
+# `methods` colliding with the capability report, and -- caught by this walk before it shipped
+# -- `destination_tag` where the row's field is `deposit_tag`. That last one would have printed
+# NOTHING for an XRP swap, on the one line whose absence makes a deposit unattributable.
+# ---------------------------------------------------------------------------
+
+
+def _seeded_price_cache():
+    """A full raw body in the price cache, so a quote needs no network."""
+    now = _now()
+    raw = {cg: {"usd": 100.0, "usd_market_cap": 5_000_000_000.0, "usd_24h_vol": 200_000_000.0,
+                "usd_24h_change": 1.0, "last_updated_at": 1790717713}
+           for cg in pricing.IDS.values()}
+    pricing._cache.update({"raw": raw, "prices": None, "context": None, "source": "seeded",
+                           "fetched_at": now, "expires_at": now + 999})
+
+
+class _PayableStub:
+    """The least an adapter can be and still let create_swap() through.
+
+    can_spend and why_cannot_pay_out() are both here because create_swap() refuses a
+    destination that cannot pay -- "a swap that cannot be paid out takes a deposit it can
+    never settle" -- and that refusal is correct and worth not stubbing away silently.
+    """
+
+    can_spend = True
+
+    def __init__(self, asset):
+        self.asset = asset
+
+    def get_new_address(self, _label):
+        return GRC_PAYOUT
+
+    def validate_address(self, _address):
+        return True
+
+    def describe_address(self, _address):
+        return "a stub address"
+
+    def why_cannot_pay_out(self):
+        return ""
+
+
+def test_every_TELLER_FIELD_the_pane_renders_actually_EXISTS(tmp_path):
+    """Walk the pane's field reads against a REAL quote and a REAL swap.
+
+    MUTATION: rename any read (w.deposit_tag -> w.destination_tag, q.output_amount_estimate ->
+    q.output). This names the field and the payload it is missing from -- which is how
+    deposit_tag was caught before it reached the operator.
+    """
+    db_path = tmp_path / "teller.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = dict_factory
+    conn.executescript(SCHEMA)
+    conn.commit()
+    conn.close()
+
+    _seeded_price_cache()
+    config = dict(workers.common.get_config_dict())
+    config["DB_PATH"] = str(db_path)
+    adapters = {"GRC": _PayableStub("GRC"), "LTC": _PayableStub("LTC")}
+
+    with db_session(str(db_path)) as db:
+        quote = create_quote(db, config, "GRC", "LTC", 10)
+        swap = create_swap(db, config, adapters, quote["id"], GRC_PAYOUT)
+
+    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    script = source[source.index("let tellerQuote = null;"):source.index("// THE SWAPPER REGION.")]
+    code = "\n".join(line for line in script.splitlines() if not line.strip().startswith("//"))
+
+    for identifier, payload, label in (("q", quote, "quote"), ("w", swap, "swap")):
+        names = set(re.findall(rf"\b{identifier}\.([a-zA-Z_]\w*)", code))
+        assert names, f"no {identifier}.<field> read was found for the {label}; this walk is stale"
+        missing = sorted(name for name in names if name not in payload)
+        assert not missing, (
+            f"the teller pane renders {label} field(s) {missing}, which the real payload does not "
+            f"have. It has {sorted(payload)}"
+        )
+
+    # AND THE XRP TAG IS READ UNDER ITS REAL NAME, called out because it is the one field whose
+    # absence is not cosmetic: without the destination tag an XRP deposit cannot be attributed
+    # to a swap at all.
+    assert "w.deposit_tag" in code, "the pane does not print the XRP destination tag"
+    assert "destination_tag" not in code.replace("destination tag", ""), (
+        "a `destination_tag` read is back; the swap row's field is deposit_tag"
+    )
+
+
+def test_a_quote_and_a_swap_COMMIT_DIFFERENT_THINGS_and_the_pane_says_which(tmp_path):
+    """Announce before, not after (rule 14), on the two irreversible things.
+
+    The payout address cannot be changed once recorded and a deposit key is derived in the hot
+    wallet. Both belong on the screen BEFORE the button, not in an alert afterwards.
+    """
+    page = _entry().PAGE
+    teller = page[page.index('data-pane="teller"'):page.index("</div><!-- /teller -->")]
+    for promise in ("payout address is fixed\n  forever", "payout address is fixed"):
+        if promise.replace("\n  ", " ") in teller.replace("\n  ", " "):
+            break
+    else:
+        raise AssertionError("the pane does not say the payout address is final")
+    assert "getnewaddress" in teller, "the pane does not say a deposit key is derived"
+    assert "No coin moves here" in teller, "the pane does not say that nothing is paid out here"
+    assert "deposit_watcher" in teller and "payout_worker" in teller, (
+        "the pane does not name what has to be RUNNING for a swap opened here to complete"
+    )
+    # AND THE GATE'S LIMIT IS STATED. The banner says a daemon confirmed a test network; that
+    # daemon is GRC's. Nothing here has asked BTC, LTC or XRP which network they are on, and a
+    # swap opened against a mainnet endpoint fixes a mainnet payout address just as easily.
+    assert "TESTNET GATE COVERS GRIDCOIN ONLY" in teller, (
+        "the pane does not say that this panel's testnet proof covers one chain"
+    )
+
+
+def test_the_payout_address_is_typed_twice_and_COMPARED_ON_THE_SERVER():
+    """A browser-side comparison is a convenience a request can skip entirely.
+
+    MUTATION: drop the mismatch check. A request with two different addresses then reaches
+    create_swap() and the first one becomes final.
+    """
+    entry = _entry()
+    answer, code = entry.answer_a_teller_swap(
+        {"quote_id": "q_x", "payout_address": "addrA", "payout_address_again": "addrB"})
+    assert code == 400 and answer["refused"] is True
+    assert "do not match" in answer["error"]
+    assert "FINAL" in answer["error"], "the refusal does not say why it is typed twice"
+
+    blank, code = entry.answer_a_teller_swap(
+        {"quote_id": "q_x", "payout_address": "", "payout_address_again": ""})
+    assert code == 400 and "cannot be added later" in blank["error"]
+
+    for body in ("not an object", None, 7):
+        answer, code = entry.answer_a_teller_swap(body)
+        assert code == 400, f"{body!r} was not refused"
+
+
+def test_the_teller_routes_REACH_THE_SAME_SERVICES_the_web_form_does():
+    """Rule 8: one quote implementation, one swap implementation, two callers.
+
+    A teller pane that priced its own quotes would disagree with the customer-facing form the
+    first time a fee or a reserve moved -- and the operator would be reading one of the two
+    numbers out loud.
+    """
+    # CODE WITHOUT DOCSTRINGS, via the parser. A text slice fails here for a reason that is
+    # not a defect: the swap route's docstring explains that create_swap() derives a key with
+    # `getnewaddress`, which is exactly the word this test forbids in the CODE. That is the
+    # third text-versus-prose collision in this session, and ast is the answer to all three.
+    entry = _entry()
+    bodies = []
+    for name in ("answer_a_teller_quote", "answer_a_teller_swap"):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(entry, name))))
+        function = tree.body[0]
+        statements = function.body
+        if (isinstance(statements[0], ast.Expr)
+                and isinstance(statements[0].value, ast.Constant)
+                and isinstance(statements[0].value.value, str)):
+            statements = statements[1:]
+        bodies.append("\n".join(ast.unparse(node) for node in statements))
+    quote_body, swap_body = bodies
+
+    assert "create_quote(" in quote_body, "the teller quote route no longer calls quote_service"
+    assert "create_swap(" in swap_body, "the teller swap route no longer calls swap_service"
+    for inventing in ("fee_bps /", "* rate", "derive_pair_rate", "getnewaddress", "ALLOWED_PAIRS"):
+        assert inventing not in quote_body + swap_body, (
+            f"{inventing!r} appears in a teller route's CODE, which means it has started "
+            f"computing something the services already decide"
+        )
+    # AND NOTHING FROM A REQUEST REACHES A SUBPROCESS, which is this panel's standing
+    # invariant. These routes call Python functions; they do not spawn.
+    assert "subprocess" not in quote_body + swap_body
