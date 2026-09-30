@@ -245,8 +245,24 @@ def print_summary(failures: list[str], elapsed: float) -> int:
         print(f"  checked in    {total}", flush=True)
         return 1
     print("  PASSED  every step answered. The adapter's read path works against this cluster.", flush=True)
-    print("  NOT PROVEN by this run: nothing was sent. get_new_address() and send_to_address() refuse by design,", flush=True)
-    print("  and the deposit-address strategy is still the operator's choice (README.md, 'Solana deposit addresses').", flush=True)
+    print("  NOT PROVEN by this run: nothing was sent. get_new_address() and send_to_address() refuse by design.", flush=True)
+    # THE LINE THIS REPLACES WAS STALE AND THE OPERATOR READ IT OFF THEIR OWN SCREEN.
+    # It said "the deposit-address strategy is still the operator's choice (README.md, 'Solana
+    # deposit addresses')" -- decided on 2026-09-29, which is eleven days before this run, and
+    # it pointed at a README section that now says DECIDED. So the script sent the reader to a
+    # document to be told the opposite of what the script had just told them.
+    #
+    # It survived the 2026-09-30 sweep that fixed the same sentence in admin_view, swap_view,
+    # the regtest panel and README because I grepped for the phrases those four used -- "not
+    # decided", "custody choice is the operator's", "until it is settled" -- and this one is
+    # spelled "still the operator's choice". That is rule 2's warning exactly: grep the tree
+    # for the NAME, and a phrase is not a name. The fifth copy was found by an operator
+    # pasting output back, which is how every one of these gets found.
+    print("  The deposit-address strategy IS decided: one shared account plus a per-swap Memo", flush=True)
+    print("  instruction, chosen 2026-09-29. get_new_address() refuses BECAUSE of that choice --", flush=True)
+    print("  under a shared account there is no per-swap address to derive. What is still unproven", flush=True)
+    print("  is the memo PROGRAM IDS, written from documentation and never seen on a cluster:", flush=True)
+    print("  re-run with --hunt-memo N to settle them against real transactions.", flush=True)
     print(f"  checked in    {total}", flush=True)
     return 0
 

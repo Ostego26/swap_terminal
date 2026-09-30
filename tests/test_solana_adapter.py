@@ -498,17 +498,39 @@ def test_deposit_discovery_refuses_a_malformed_address_before_calling_out():
 # --- the two refusals --------------------------------------------------------
 
 
-def test_get_new_address_refuses_and_names_the_three_options():
-    """Solana has no `getnewaddress`. The strategy is a custody decision and is
-    the operator's (CLAUDE.md rule 16), so this refuses and pays the refusal
-    back in the message rather than picking one."""
+def test_get_new_address_refuses_because_the_chosen_strategy_has_no_per_swap_address():
+    """STILL REFUSES, FOR A DIFFERENT REASON, and the old reason was on screen for eleven days.
+
+    This test was `test_get_new_address_refuses_and_names_the_three_options` and it asserted
+    the message listed all three custody options -- "fresh keypair per swap", "one account +
+    memo", "derivation from a seed" -- because the strategy was unchosen when it was written.
+    The operator chose on 2026-09-29 (one shared account plus a per-swap Memo instruction), and
+    the refusal went on offering them the menu: "no strategy has been chosen. ... See README.md
+    ... Until the operator chooses, SOL is a payout-side asset only."
+
+    Rule 2: the test changes to pin the stronger invariant, and the stronger invariant is that
+    the refusal points at the thing that HAS the answer. An operator who hits this at runtime
+    needs `deposit_account()`, not a decision they already made.
+
+    THE REFUSAL ITSELF IS UNCHANGED AND MUST STAY. Under a shared account there is no per-swap
+    address to derive, so returning something address-shaped here would be worse than raising:
+    services/swap_service.deposit_account() routes SOL by TAG_ATTRIBUTED_ASSETS and never calls
+    this, and anything that DOES call it has the wrong model of the chain.
+    """
     with pytest.raises(NotImplementedError) as exc:
         make_adapter({}).get_new_address("swap_s_abc")
     message = str(exc.value)
-    assert "fresh keypair per swap" in message
-    assert "one account + memo" in message
-    assert "derivation from a seed" in message
+
+    assert "deposit_account" in message, "point at what has the answer, not at a decision"
+    assert "Memo instruction" in message
+    assert "2026-09-29" in message, "say WHEN it was decided; a bare claim ages the same way"
     assert "README.md" in message
+
+    # The menu is gone, and each phrase is checked so re-adding any one of them fails here.
+    for stale in ("no strategy has been chosen", "fresh keypair per swap",
+                  "derivation from a seed", "Until the operator chooses",
+                  "payout-side asset only"):
+        assert stale not in message, f"the refusal still offers a decision already made: {stale!r}"
 
 
 def test_send_to_address_refuses_and_holds_no_key_that_could_sign():

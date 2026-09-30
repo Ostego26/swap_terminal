@@ -115,17 +115,24 @@ chains/xrp_signing.py:
                              environment variable. The seed is an argument. So
                              there is no .env edit that arms this.
 
-That still leaves the custody question chains/solana.py hands back exactly
-where it was: whether this terminal should hold an XRP hot wallet at all, and
-which account it should be, is the operator's (rule 16). Nothing here decides
-it, and nothing here is wired to the payout worker.
+That still leaves the custody question exactly where it was: whether this
+terminal should hold an XRP hot wallet at all, and which account it should be,
+is the operator's (rule 16). Nothing here decides it, and nothing here is wired
+to the payout worker. (This used to say "the custody question chains/solana.py
+hands back" -- Solana's was handed back and then ANSWERED, on 2026-09-29, so the
+comparison now points at a decided question. XRP's own is still open, which is
+the only part this paragraph was ever about.)
 
 get_new_address() also refuses, but for a happier reason. XRP does not need
 one: a DESTINATION TAG is a per-swap identifier on a single account, costs
 nothing, creates no key, and is what every exchange on this ledger uses. The
-attribution problem chains/solana.py had to hand back does not exist here --
-what it needs instead is a tag allocator, which is a services/ change rather
-than an adapter one.
+attribution problem does not exist here -- what it needs instead is a tag
+allocator, which is a services/ change rather than an adapter one. (Nor, since
+2026-09-29, does it exist on Solana: the operator chose the same shape there,
+one shared account plus a per-swap Memo instruction, so the two chains now
+differ only in what the field carrying the integer is CALLED. This sentence said
+"the attribution problem chains/solana.py had to hand back", which was the
+difference between them and is no longer one.)
 
 THAT ALLOCATOR NOW EXISTS, at services/xrp_tag_service.py, and this refusal
 still stands rather than calling it. The reason is written out in full under

@@ -103,10 +103,13 @@ WHAT IS IMPLEMENTED AND WHAT IS A PROPOSAL (CLAUDE.md rule 16)
                              find_deposits_to_address, commitment reporting,
                              rent lookup, mint decimals, token program
                              detection, ATA derivation, health/announce.
-  REFUSES, BY DESIGN         get_new_address  -- the deposit-address strategy
-                             is fund movement and is the operator's choice
-                             between three options with different custody
-                             consequences. See the method.
+  REFUSES, BY DESIGN         get_new_address  -- NOT because the strategy is
+                             unchosen (it was chosen 2026-09-29: one shared
+                             account plus a per-swap Memo instruction) but
+                             BECAUSE of that choice. A shared account has no
+                             per-swap address to derive, so callers go through
+                             services/swap_service.deposit_account(). See the
+                             method.
                              send_to_address -- signing and broadcasting.
                              build_transfer_plan() builds and DESCRIBES the
                              transfer for inspection; it does not sign, and
@@ -717,36 +720,50 @@ class SolanaAdapter:
     # --- the contract: the two that refuse -----------------------------------
 
     def get_new_address(self, label: str) -> str:
-        """REFUSES. The deposit-address strategy is the operator's to choose.
+        """REFUSES, AND THE REASON CHANGED ON 2026-09-29 WITHOUT THIS METHOD NOTICING.
 
         Bitcoin, Litecoin and Gridcoin answer this with `getnewaddress`: the
         DAEMON derives a key, stores it in wallet.dat, and the application
         never holds a secret. **Solana has no equivalent.** There is no wallet
         daemon, no keystore, and nothing on the other end of an RPC that can
-        mint an address and remember how to spend from it.
+        mint an address and remember how to spend from it. So the application
+        must hold something, and WHICH something was a custody decision --
+        which is why this used to refuse with "no strategy has been chosen"
+        and a menu of three options.
 
-        So the three ways to produce a Solana deposit address differ in WHO
-        HOLDS WHAT, and that is a custody decision rather than an
-        implementation detail. CLAUDE.md rule 16 puts address derivation
-        explicitly on the operator's side of the line, and rule 20's "do not
-        ask which" does not reach it: that rule's own exception is fund
-        movement, and this is fund movement.
+        THE OPERATOR CHOSE, and the refusal outlived the question. On
+        2026-09-29 they chose one shared account plus a per-swap Memo
+        instruction, and clarified that this terminal takes no custody beyond
+        brief escrow. Under that strategy there IS no per-swap Solana address,
+        so this method still refuses -- but as a CONSEQUENCE of the decision
+        rather than a placeholder waiting on it, and the difference matters to
+        whoever hits it: the old message sent them to README.md to choose
+        something that is already chosen, and the new one sends them to the
+        function that has the answer.
 
-        README.md carries the three options, their trade-offs and a
-        recommendation. This method refuses until one is chosen and pays that
-        refusal back in the error message, so an operator who hits it at
-        runtime does not have to go and find the document.
+        WHERE A SOL DEPOSIT TARGET ACTUALLY COMES FROM:
+        services/swap_service.deposit_account(), which returns the shared
+        account from TAG_ATTRIBUTION and `needs_tag=True`, with the integer
+        allocated from the database. chains/solana_memo.py reads it back off
+        the transaction and _attributable() above drops any credit it cannot
+        resolve to one.
         """
         raise NotImplementedError(
-            f"cannot derive a Solana deposit address for {label!r}: no strategy has been chosen.\n"
-            "  Solana has no `getnewaddress` -- there is no wallet daemon to hold the key, so the application\n"
-            "  must hold something, and WHICH something is a custody decision (CLAUDE.md rule 16).\n"
-            "  The three options, and what each one puts at risk:\n"
-            "    fresh keypair per swap  -- a stored secret for EVERY open swap. Largest secret surface.\n"
-            "    one account + memo      -- no new secrets; a misattributed deposit pays the wrong person.\n"
-            "    derivation from a seed  -- one secret, many addresses; the seed is total loss if it leaks.\n"
-            "  See README.md, 'Solana deposit addresses'. The recommendation there is the memo strategy.\n"
-            "  Until the operator chooses, SOL is a payout-side asset only and this refusal is the guard."
+            f"cannot derive a per-swap Solana deposit address for {label!r}: there is no such thing here.\n"
+            "  Solana has no `getnewaddress` -- no wallet daemon to hold a key -- so the operator chose the\n"
+            # "Memo instruction" IS KEPT ON ONE LINE ON PURPOSE. It is the exact value in
+            # services/swap_service.TAG_ATTRIBUTION, so it is what an operator greps for after
+            # reading it off a screen -- and a phrase broken across a line break is a phrase
+            # nothing finds. This message wrapped it as "per-swap Memo\n  instruction" for
+            # about a minute and the test asserting the field name failed on the wrap, which is
+            # the same class of miss as the fifth stale copy this commit is fixing: the search
+            # that would have found it did not match the way the text was written.
+            "  strategy that adds no secret at all (2026-09-29): ONE SHARED ACCOUNT plus a per-swap\n"
+            "  Memo instruction carrying the swap's integer tag. A shared account has no per-swap\n"
+            "  address, so this refusal is a CONSEQUENCE of that choice, not a placeholder awaiting it.\n"
+            "  WHAT TO CALL INSTEAD: services/swap_service.deposit_account(config, adapters, 'SOL', swap_id),\n"
+            "  which returns (shared account, needs_tag=True) and allocates the tag from the database.\n"
+            "  See README.md, 'Solana deposit addresses' -- it records the decision and what was built to it."
         )
 
     def send_to_address(self, address: str, amount: float) -> str:
