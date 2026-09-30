@@ -546,6 +546,66 @@ def refuse_daemon_control(tab: ChainTab, action: str) -> str:
     return ""
 
 
+#: THE SWAPPER'S OWN PROCESSES, AND WHY THEY GET A BUTTON WHERE A DAEMON DOES NOT.
+#:
+#: refuse_daemon_control() above refuses to stop anything this panel did not start, and its
+#: reason is rule 13's: the only handle on a foreign process is a command-line pattern, and that
+#: pattern hits every daemon of its kind on the host. The three supervisor workers are the
+#: opposite case in every respect, which is why the same file can allow both buttons without
+#: contradicting itself:
+#:
+#:   a pid file exists      supervisor.pid_file() writes pid AND the command line, and
+#:                          pid_is_still_ours() compares /proc's cmdline against the recorded
+#:                          one -- so a recycled pid reports `stale-pidfile` and is NOT
+#:                          signalled. That is the case where killing would be the damage, and
+#:                          it is detected rather than risked.
+#:   the stop is PROVEN     stop_worker() polls for ABSENCE after SIGTERM and again after
+#:                          SIGKILL, and returns `failed` if the process is still there. The
+#:                          assertion is the absence, never the exit code of the kill.
+#:   this tree owns them    worker_commands() is the only table of what they are, and
+#:                          start_worker() is called with that argv. Nothing is invented.
+#:
+#: NO ENVIRONMENT VARIABLE ARMS THIS, and that is deliberate rather than an oversight.
+#: MAY_STOP_VARIABLE exists because the GRC daemon is STAKING the operator's wallet and a
+#: browser button that stops it should be a decision made in a shell. A worker is not that: it
+#: holds no wallet lock, it stakes nothing, and stopping one costs exactly what
+#: services/admin_view.worker_stopped_consequence() says it costs -- which the page prints
+#: beside the button rather than making the operator remember.
+#:
+#: WHAT IS GENUINELY AT RISK, said plainly because a button should not hide it: payout_worker
+#: can be stopped between a broadcast and the row that records it.
+#: services/payout_service.process_pending_payouts() names that window in its own comment -- a
+#: timeout after the daemon accepted a transaction is marked `failed` and is indistinguishable
+#: from a refusal -- and settle_payout.py exists because it happened. A stop lands inside that
+#: window no more often than a crash does, and the operator now has one screen where they can
+#: see the swap it happened to.
+def refuse_worker_control(name: object, action: object, known: dict | None = None) -> str:
+    """"" if this worker switch may be thrown, else why not. The decision, not the plumbing.
+
+    THE ALLOWLIST IS DERIVED, never written here: `known` defaults to
+    supervisor.worker_commands(), which is the one table of what a worker IS. A hand-kept copy
+    in this file would be rule 8's shape at the worst place -- a name that fell out of the table
+    would still be startable from a browser, with an argv this file had guessed.
+
+    A name that is not in it is refused by NAME, and nothing from the request reaches subprocess
+    either way: start_worker() is called with the table's own argv list.
+    """
+    from supervisor import (  # noqa: PLC0415 -- checked: imported inside the function because this module is imported by tests that must not touch supervisor's BASE_DIR at import time, and because the table is read fresh per request rather than frozen at import.
+        worker_commands,
+    )
+
+    table = worker_commands() if known is None else known
+    if action not in ("start", "stop"):
+        return f"{action!r} is not start or stop"
+    if not isinstance(name, str) or name not in table:
+        return (
+            f"{name!r} is not a worker this panel knows. It knows {', '.join(sorted(table))}, "
+            f"which is supervisor.worker_commands() -- the one table of what a worker is. A "
+            f"name not in it has no argv, and this panel will not invent one."
+        )
+    return ""
+
+
 def refuse_an_rpc_console(tab: ChainTab) -> str:
     """"" if this tab gets the read-only RPC console, else why it does not.
 

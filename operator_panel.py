@@ -169,6 +169,32 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <pre id="rpcout">(nothing called yet)</pre>
 </section>
 
+<section id="swappersection">
+  <h2>The swapper</h2>
+  <!-- ONE OPERATOR SURFACE, 2026-09-30. These regions are the Flask app's /admin, rendered
+       here instead: the SAME services/admin_view.overview() assembly, so the two cannot
+       disagree. What is NOT shared is the posture -- this server binds loopback as a constant
+       rather than a default, refuses to start unless the daemon says testnet, and takes no
+       path, argument or flag from a request.
+
+       SERVER-RENDERED PLACEHOLDERS, FETCHED VALUES, like every other region here: the text is
+       in the markup before any script runs, so a failed fetch leaves a sentence rather than an
+       empty box (rule 14). -->
+  <div id="swapperstate" class="sub">asking the server for swap state&hellip;</div>
+
+  <h3>Workers</h3>
+  <p class="what">These three ARE the swapper. Nothing polls a chain, credits a deposit or pays
+  anybody out while they are stopped &mdash; and every HTTP response still says 200, which is
+  why each row prints what its own absence costs rather than a shared warning. They are
+  <strong>supervisor.py's</strong> processes and they have pid files, which is the handle the
+  daemon switches above do not have: a stop here is proven by polling for the process's
+  ABSENCE, and a recycled pid is detected and NOT signalled.</p>
+  <div id="workers">asking&hellip;</div>
+
+  <h3>Swaps, payouts and inventory</h3>
+  <pre id="swapperout">(nothing fetched yet)</pre>
+</section>
+
 <section>
   <h2>Run</h2>
   <div id="buttons">asking&hellip;</div>
@@ -435,6 +461,89 @@ $("callrpc").onclick = async () => {
   else { $("rpcout").textContent = "the daemon answered:\n\n" + d.error; }
 };
 
+// THE SWAPPER REGION. One fetch, no chain and no price feed touched: overview() reads the
+// database, the configuration and supervisor's pid files, and its pricing panel reads the price
+// CACHE rather than fetching. That is what makes this safe to poll.
+async function loadSwapper() {
+  let d;
+  try { d = await (await fetch("/api/swapper")).json(); }
+  catch (e) { $("swapperstate").innerHTML = '<span class="bad">the panel stopped answering: ' + esc(e) + "</span>"; return; }
+  if (!d.ok) {
+    // ok=false is a REPORT, not an empty table. The region says it could not read and why,
+    // because a blank area cannot be told apart from zero swaps (rule 14).
+    $("swapperstate").innerHTML = '<span class="bad">swap state could not be read: ' + esc(d.error) + "</span>";
+    $("workers").innerHTML = '<span class="bad">unknown -- the same read failed</span>';
+    $("swapperout").textContent = "(not read)";
+    return;
+  }
+  const o = d.overview;
+  const counts = Object.entries(o.status_counts || {}).map(([k, v]) => k + "=" + v);
+  $("swapperstate").innerHTML =
+    "database <code>" + esc(o.database) + "</code><br>read at " + esc(o.generated_at) +
+    "<br>" + (counts.length ? esc(counts.join("  ")) : "<span class=\"what\">(none) no swap of any status is in the database</span>") +
+    "<br>in flight: " + (o.in_flight || []).length +
+    " &middot; payouts never reported sent: " +
+    ((o.unresolved_payouts || []).length
+      ? '<span class="bad">' + o.unresolved_payouts.length + "</span>"
+      : '<span class="ok">0</span>');
+
+  // ONE BUTTON PAIR PER WORKER, WITH ITS OWN COST BESIDE IT. The consequence text is
+  // services/admin_view.worker_stopped_consequence()'s, carried on the row -- not written
+  // here, and not one shared warning for all three, because what a stopped deposit_watcher
+  // costs and what a stopped payout_worker costs are different facts.
+  $("workers").innerHTML = (o.workers || []).map(w => {
+    const running = w.state === "running";
+    return '<div class="row"><strong>' + esc(w.worker) + "</strong> " +
+      '<span class="' + (running ? "ok" : "bad") + '">' + esc((w.state || "unknown").toUpperCase()) + "</span> " +
+      '<span class="what">pid ' + esc(w.pid === null || w.pid === undefined ? "(none)" : w.pid) + "</span> " +
+      '<button data-worker="' + esc(w.worker) + '" data-action="start"' + (running ? " disabled" : "") + ">Start</button>" +
+      '<button class="stop" data-worker="' + esc(w.worker) + '" data-action="stop"' + (running ? "" : " disabled") + ">Stop</button>" +
+      '<div class="what">' + esc(w.stopped_consequence || "") + "</div></div>";
+  }).join("") || '<span class="what">(none) supervisor.worker_commands() named no worker</span>';
+
+  for (const b of $("workers").querySelectorAll("button:not([disabled])")) {
+    b.onclick = async () => {
+      // CONFIRMED IN THE PAGE for a stop, like the daemon switches. No environment variable
+      // arms this one -- a worker holds no wallet lock and stakes nothing -- so the click is
+      // the only deliberate act, and it should be one.
+      if (b.dataset.action === "stop" &&
+          !confirm("Stop " + b.dataset.worker + "?\n\n" +
+                   (b.dataset.worker === "payout_worker"
+                     ? "A stop can land between a broadcast and the row that records it, which is the " +
+                       "window settle_payout.py exists for.\n\n" : "") +
+                   "Nothing restarts it but this button.")) { return; }
+      b.disabled = true;
+      const res = await (await fetch("/api/worker", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({worker: b.dataset.worker, action: b.dataset.action})})).json();
+      // SUPERVISOR'S OWN WORD, never a thumbs-up. already-running, not-running and
+      // stale-pidfile are outcomes, not quiet successes, and `failed` means the operator asked
+      // for something and did not get it (rule 13).
+      alert(res.refused ? "REFUSED BY THIS PANEL\n\n" + res.error
+            : res.error ? "the switch failed\n\n" + res.error
+            : (res.ok ? "" : "THIS DID NOT HAPPEN: ") + res.result.worker + ": " + res.result.outcome +
+              (res.result.pid ? " (pid " + res.result.pid + ")" : "") +
+              (res.result.note ? "\n" + res.result.note : ""));
+      loadSwapper();
+    };
+  }
+
+  const inv = (o.inventory || []).map(r =>
+    "  " + r.asset + "  confirmed " + r.confirmed + "  available " + r.available +
+    "  " + (r.freshness ? r.freshness.state + " " + r.freshness.age_display : "")).join("\n");
+  const pay = (o.payouts || []).slice(0, 8).map(r =>
+    "  " + r.swap_id + "  " + r.asset + " " + r.amount + "  " + r.status +
+    "  " + (r.txid || "(no txid)")).join("\n");
+  const price = o.pricing && o.pricing.cached
+    ? (o.pricing.assets || []).map(a => "  " + a.asset + "  $" + a.price_usd + "  " + a.turnover_verdict).join("\n") +
+      "\n  priced by " + o.pricing.source + ", " + o.pricing.age + " ago"
+    : "  (not fetched) nothing has been priced since this process started";
+  $("swapperout").textContent =
+    "HOT-WALLET INVENTORY\n" + (inv || "  (none) the reconcile worker has written no row") +
+    "\n\nPAYOUTS (most recent 8)\n" + (pay || "  (none) no payout row exists") +
+    "\n\nPRICING, out of the cache -- this page fetched nothing\n" + price;
+}
+
 $("checkall").onclick = checkEveryChain;
 $("refresh").onclick = () => loadChain(current);
 $("stop").onclick = async () => {
@@ -444,6 +553,11 @@ $("stop").onclick = async () => {
 };
 tick();
 setInterval(tick, 1000);
+// THE SWAPPER REGION POLLS SLOWER THAN THE RUN OUTPUT, on purpose. /api/state is a run's
+// stdout and wants to look live; this is a database read plus three pid-file reads, and once
+// every five seconds is the difference between a freshness reading and a busy loop.
+loadSwapper();
+setInterval(loadSwapper, 5000);
 </script></body></html>"""
 
 
@@ -637,6 +751,8 @@ def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page:
         return json.dumps(funding_payload(run, known_spent)).encode(), "application/json", 200
     if path.startswith("/api/chain/"):
         return json.dumps(chain_payload(path.rsplit("/", 1)[-1], run, known_spent)).encode(), "application/json", 200
+    if path == "/api/swapper":
+        return json.dumps(swapper_payload()).encode(), "application/json", 200
     return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
 
 
@@ -652,17 +768,22 @@ def answer_a_post(path: str, raw: bytes, runner: HarnessRunner,
         body = json.loads(raw)
     except ValueError:
         return json.dumps({"error": "the request body was not JSON"}).encode(), "application/json", 400
-    if path == "/api/stop":
-        return json.dumps({"said": runner.stop()}).encode(), "application/json", 200
-    if path == "/api/daemon":
-        answer, code = answer_a_daemon_switch(body, chains)
-        return json.dumps(answer).encode(), "application/json", code
-    if path == "/api/rpc":
-        answer, code = answer_an_rpc(body, chains)
-        return json.dumps(answer).encode(), "application/json", code
-    if path != "/api/run":
+    # A TABLE, NOT A CHAIN OF `if`. It was a chain until the worker route made it six deep and
+    # ruff's PLR0911 fired, which is rule 12's reading of that code exactly: a dispatch that has
+    # swallowed a decision per branch. Extracting it is the fix; raising the ceiling would not
+    # be. Every value takes the parsed body and returns (payload, status), so a new route cannot
+    # invent its own calling convention, and the 404 below is the only path not in the table.
+    routes = {
+        "/api/stop": lambda _body: ({"said": runner.stop()}, 200),
+        "/api/daemon": lambda one: answer_a_daemon_switch(one, chains),
+        "/api/rpc": lambda one: answer_an_rpc(one, chains),
+        "/api/worker": answer_a_worker_switch,
+        "/api/run": lambda one: start_named_run(runner, one),
+    }
+    handler = routes.get(path)
+    if handler is None:
         return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
-    answer, code = start_named_run(runner, body)
+    answer, code = handler(body)
     return json.dumps(answer).encode(), "application/json", code
 
 
@@ -787,6 +908,94 @@ def answer_a_daemon_switch(body: object, chains: dict | None) -> tuple[dict, int
         return {"ok": False, "refused": False,
                 "error": f"{type(error).__name__}: {error}"}, 200
     return {"ok": True, "said": said}, 200
+
+
+def swapper_payload(run_dir=None) -> dict:
+    """The swap terminal's own state: swaps, payouts, workers, inventory, pricing.
+
+    ONE OPERATOR SURFACE, 2026-09-30, at the operator's instruction. Until today this panel and
+    the Flask app's /admin were deliberately separate, and four docstrings in this repo argued
+    for it at length -- the argument being that buttons which spend money do not belong on an
+    unauthenticated GET-only page. That argument still holds and is not what changed. What
+    changed is the direction: the read-only PICTURE moves onto the surface that already has the
+    stricter guards, rather than the buttons moving onto the looser one.
+
+    NOT A SECOND IMPLEMENTATION OF IT. Every row here is services/admin_view.overview(), the
+    same pure function routes/admin.py renders and /api/admin/overview serializes. It takes its
+    database, config and adapters as arguments precisely so a caller outside Flask can supply
+    them, and workers/common.py already owns both of those constructions -- so this function
+    builds nothing of its own and holds no query, no threshold and no freshness rule. If it
+    ever grows one, that is the bug (rule 8).
+
+    NEVER RAISES. This panel is opened when something is already wrong, and a swap-state region
+    that takes the whole page down with it is worse than one that says it could not read. The
+    failure is IN the return value -- `ok` is False with the reason -- which is the shape rule 12
+    requires of a broad catch: the caller can tell it from an answer.
+
+    IT CONTACTS NO CHAIN AND NO PRICE FEED. overview() reads the database, the configuration and
+    supervisor's pid files; its pricing panel reads the price CACHE and does not fetch. That is
+    why this is a GET the page may poll.
+    """
+    try:
+        from db import (  # noqa: PLC0415 -- checked: deferred so this stdlib-only server still imports on a host where the Flask app's dependencies are absent, which is the same reason the regtest modules defer theirs.
+            db_session,
+        )
+        from services.admin_view import overview  # noqa: PLC0415 -- checked: same.
+        from workers.common import (  # noqa: PLC0415 -- checked: same, and these two are the CLI's own constructions rather than new ones.
+            build_adapters_from_config,
+            get_config_dict,
+        )
+
+        config = get_config_dict()
+        with db_session(config["DB_PATH"]) as db:
+            return {"ok": True, "overview": overview(db, config, build_adapters_from_config(), run_dir=run_dir)}
+    except Exception as error:  # noqa: BLE001 -- checked: a missing database file, an unreadable schema, a chain adapter that will not construct and an import failure all mean the same thing to this region -- it cannot show swap state right now -- and every one of them is reported as ok=False with the reason, never as an empty table. A panel that dies here is a panel that cannot tell the operator why.
+        return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+
+def answer_a_worker_switch(body: object, run_dir=None) -> tuple[dict, int]:
+    """Start or stop one of the swapper's workers, or say why not.
+
+    IT REUSES supervisor.start_worker AND supervisor.stop_worker and adds no lifecycle of its
+    own -- the same reason answer_a_daemon_switch() calls daemons.start_daemon: a spawn and its
+    reaper belong in one file so neither can be edited without the other in view (rule 13).
+    stop_worker() polls for the process's ABSENCE after SIGTERM and again after SIGKILL and
+    returns `failed` if it is still there, so the assertion is the absence and not the exit code
+    of the kill.
+
+    THE OUTCOME IS PASSED THROUGH VERBATIM, and there are five of them:
+    started, already-running, stopped, not-running, stale-pidfile, failed. "already-running"
+    and "not-running" are NOT quiet successes -- rule 13 calls "skipped" printed beside "ok" a
+    defect in the output -- so the page renders the word supervisor returned rather than a
+    thumbs-up. `failed` is the one that means the operator asked for something and did not get
+    it, and it must not read like `stopped`.
+    """
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "the request body was not an object"}, 400
+    name, action = body.get("worker"), body.get("action")
+    refusal = decisions.refuse_worker_control(name, action)
+    if refusal:
+        return {"ok": False, "refused": True, "error": refusal}, 403
+
+    from supervisor import (  # noqa: PLC0415 -- checked: deferred for the same reason as swapper_payload()'s imports, and worker_commands() is read here rather than cached so the argv used is the table's own.
+        DEFAULT_RUN_DIR,
+        start_worker,
+        stop_worker,
+        worker_commands,
+    )
+
+    directory = DEFAULT_RUN_DIR if run_dir is None else run_dir
+    try:
+        if action == "start":
+            result = start_worker(name, worker_commands()[name], directory)
+        else:
+            result = stop_worker(name, directory)
+    except Exception as error:  # noqa: BLE001 -- checked: a worker that will not start and a signal that cannot be sent are reported rather than raised, because a panel that dies on a failed start is a panel that cannot say which worker failed. The reason is in the return value and `ok` is False.
+        return {"ok": False, "refused": False, "error": f"{type(error).__name__}: {error}"}, 200
+    # `failed` means the thing the operator asked for did not happen. It is the one outcome that
+    # must not be reported as ok=True, because a stop that could not prove the process is gone
+    # is not a stop (rule 13).
+    return {"ok": result.get("outcome") != "failed", "result": result}, 200
 
 
 def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:

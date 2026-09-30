@@ -26,6 +26,9 @@ from regtest import operator_panel as decisions
 from regtest.daemons import RegtestSetupError
 from regtest.harness_runner import HarnessRunner
 
+import supervisor  # isort: skip -- rootless import; see _entry()
+import workers.common  # isort: skip -- same
+
 
 def _entry():
     """Import operator_panel.py, the root entry point, the way the other entry-point tests do."""
@@ -1358,3 +1361,155 @@ def test_A_CANDIDATE_OUTPUT_IS_NOT_ANNOUNCED_AS_THE_OPERATORS_FUNDING():
     assert "found the operator's funding" not in code, (
         "the old wording, gone rather than left beside the fix"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE SWAPPER'S OWN WORKERS
+#
+# Added 2026-09-30 when the operator asked for ONE gui that controls the swapper.
+# The panel already had daemon buttons; these are the three supervisor workers,
+# and they are a different case in every respect that matters -- see
+# regtest/operator_panel.refuse_worker_control()'s comment. What is tested here is
+# the part that makes a button safe rather than the part that makes it work: a name
+# this tree does not own is refused by NAME, and a stop is PROVEN.
+# ---------------------------------------------------------------------------
+
+
+SLEEPER = "import time; time.sleep(120)"
+
+
+@pytest.fixture
+def one_fake_worker(monkeypatch):
+    """Replace the worker table with one harmless process that sleeps.
+
+    THE TABLE IS PATCHED, NOT THE SPAWN, so start_worker() and stop_worker() run for
+    real -- a real fork, a real pid file, a real SIGTERM, a real absence poll. A test
+    that stubbed those two would assert that this panel calls two functions, which is
+    not the property worth holding; the property is that the process is gone.
+
+    A sleeper rather than a real worker because a real one opens chain adapters and
+    exits immediately on a host with none configured, and stop_worker() would then
+    report `not-running` -- which passes without ever exercising the reaper. This is
+    the shape of the mutation-check failure that keeps happening here: a test that
+    passes for the wrong reason.
+    """
+    table = {"sleeper": [sys.executable, "-c", SLEEPER]}
+    monkeypatch.setattr(supervisor, "worker_commands", lambda *_a, **_k: table)
+    return table
+
+
+def test_a_worker_this_tree_does_not_own_is_refused_BY_NAME(one_fake_worker):
+    """The allowlist is supervisor's own table, never a copy in the panel.
+
+    MUTATION: have refuse_worker_control() accept any string. Nothing in the tree
+    would then stop a request naming a worker with no argv, and this panel would be
+    one KeyError away from inventing a command line -- which is the guess rule 17
+    forbids, on the surface that can spend coin.
+    """
+    assert decisions.refuse_worker_control("sleeper", "start") == "", (
+        "the patched table's own name was refused, so the allowlist is not being read from it"
+    )
+    for name in ("payout_worker", "", "sleeper; rm -rf /", None, 7):
+        refusal = decisions.refuse_worker_control(name, "start")
+        assert refusal, f"{name!r} was accepted while the table holds only {sorted(one_fake_worker)}"
+        assert "sleeper" in refusal, "the refusal does not say what this panel DOES know"
+
+
+def test_only_start_and_stop_are_actions():
+    for action in ("restart", "kill", "", None, "START"):
+        assert "is not start or stop" in decisions.refuse_worker_control("payout_worker", action)
+
+
+def test_the_panel_starts_a_worker_and_PROVES_the_stop(tmp_path, one_fake_worker):
+    """The round trip, with a real process at the end of it (rule 13).
+
+    Four assertions in one test on purpose: started, alive, stopped, and ABSENT. The
+    fourth is the one that matters and the first three are what make it mean
+    anything -- asserting an absence without first proving a presence is a test that
+    passes against a panel that starts nothing at all.
+    """
+    entry = _entry()
+
+    answer, code = entry.answer_a_worker_switch({"worker": "sleeper", "action": "start"}, tmp_path)
+    assert code == 200 and answer["ok"] is True, answer
+    assert answer["result"]["outcome"] == "started", answer
+    pid = answer["result"]["pid"]
+    assert supervisor.process_alive(pid), "the panel reported `started` for a process that is not there"
+
+    # A SECOND START IS NOT A QUIET SUCCESS. rule 13 calls "skipped" printed beside
+    # "ok" a defect in the output, so supervisor's own word is passed through and the
+    # page renders it.
+    again, _ = entry.answer_a_worker_switch({"worker": "sleeper", "action": "start"}, tmp_path)
+    assert again["result"]["outcome"] == "already-running", again
+    assert again["result"]["pid"] == pid, "a second start forked a second process"
+
+    stopped, code = entry.answer_a_worker_switch({"worker": "sleeper", "action": "stop"}, tmp_path)
+    assert code == 200 and stopped["ok"] is True, stopped
+    assert stopped["result"]["outcome"] == "stopped", stopped
+    # THE ASSERTION IS THE ABSENCE, not the exit code of the kill, and not the word
+    # supervisor returned. This is the line the whole button is judged by.
+    assert not supervisor.process_alive(pid), (
+        "the panel said `stopped` and the process is still running -- which is the orphan rule 13 "
+        "is about, now reachable from a browser"
+    )
+    assert not supervisor.pid_file(tmp_path, "sleeper").exists(), "the pid file outlived the process"
+
+
+def test_a_stop_that_could_not_prove_it_is_NOT_reported_as_ok(monkeypatch, tmp_path, one_fake_worker):
+    """`failed` means the operator asked for something and did not get it.
+
+    supervisor.stop_worker() returns `failed` when a process is still there after
+    SIGTERM, the grace period and SIGKILL. That must not render like `stopped`: a
+    stop that cannot prove it worked is not a stop, and a page that says ok to both
+    is the "skipped beside success" output defect (rule 13).
+
+    MUTATION: return ok=True for every outcome. This fails, and nothing else does --
+    which is the point of asserting on the flag rather than on the word.
+    """
+    entry = _entry()
+    monkeypatch.setattr(
+        supervisor, "stop_worker",
+        lambda *_a, **_k: {"worker": "sleeper", "outcome": "failed", "pid": 1, "signals": ["SIGTERM", "SIGKILL"]},
+    )
+    answer, code = entry.answer_a_worker_switch({"worker": "sleeper", "action": "stop"}, tmp_path)
+    assert code == 200
+    assert answer["ok"] is False, "a stop that could not prove the process is gone was reported as ok"
+    assert answer["result"]["outcome"] == "failed"
+
+
+def test_the_swapper_region_reports_a_broken_database_rather_than_dying(monkeypatch):
+    """This panel is opened when something is already wrong (rule 14).
+
+    A swap-state region that raises takes the funding view, the daemon switches and
+    the run controls down with it -- on the one screen an operator opens to find out
+    why. The failure belongs IN the return value, where the caller can tell it from
+    an answer.
+
+    MUTATION: drop the try/except. The panel then 500s on a database it cannot open
+    and says nothing about which.
+    """
+    entry = _entry()
+    monkeypatch.setattr(workers.common, "get_config_dict",
+                        lambda *_a, **_k: {"DB_PATH": "/nonexistent/dir/swap.db"})
+    payload = entry.swapper_payload()
+    assert payload["ok"] is False, "an unopenable database was reported as a successful read"
+    assert payload.get("error"), "ok=False with no reason is not a report"
+
+
+def test_the_swapper_region_is_admin_views_overview_and_holds_no_query_of_its_own():
+    """Rule 8, as a property of the file rather than of a rendering.
+
+    /admin and this panel are now two renderers of ONE assembly. A SELECT, a
+    threshold or a freshness rule appearing in operator_panel.py would be the second
+    implementation -- and it would agree on the day it was written and drift after,
+    which is the whole failure rule 8 opens with.
+    """
+    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    body = source[source.index("def swapper_payload("):source.index("def answer_a_worker_switch(")]
+    code = "\n".join(line for line in body.splitlines() if not line.strip().startswith("#"))
+    assert "overview(" in code, "the panel no longer calls the shared assembly"
+    for spelling in ("SELECT", "FROM swaps", "STALE_AFTER", "cursor", "execute("):
+        assert spelling not in code, (
+            f"{spelling!r} appears in the panel's swapper region, which means it has started "
+            f"reading the database itself instead of through services/admin_view.overview()"
+        )
