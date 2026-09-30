@@ -1225,3 +1225,112 @@ def test_a_failure_that_is_NOT_about_a_wallet_does_not_print_a_wallet_hint(capsy
             f"an insufficient balance produced the wallet hint ({marker!r}). Every failure then "
             f"reads as a wallet problem, which is rule 14 in reverse:\n{printed}"
         )
+
+
+# ---------------------------------------------------------------------------
+# PROVE THE WALLETS OPEN BEFORE FUNDING, added 2026-09-30 after two runs
+# stranded a BTC contract on a GRC passphrase.
+# ---------------------------------------------------------------------------
+
+
+class _WalletClient:
+    """A daemon whose wallet may be encrypted and may accept a passphrase."""
+
+    def __init__(self, *, encrypted=True, accepts=None):
+        self.encrypted = encrypted
+        self.accepts = accepts
+        self.asked = []
+
+    def rpc_call(self, method, params=None):
+        self.asked.append(method)
+        if method == "getwalletinfo":
+            # PRESENCE is the test for encryption, not the value: bitcoin-derived
+            # daemons omit unlocked_until entirely on an unencrypted wallet.
+            return {"walletname": "w", "unlocked_until": 0} if self.encrypted else {"walletname": "w"}
+        if method == "walletpassphrase":
+            if self.accepts is not None and params and params[0] != self.accepts:
+                raise Exception(
+                    "GRC RPC Error: {'code': -14, 'message': 'Error: The wallet passphrase entered was incorrect.'}")
+            return None
+        return None
+
+
+def test_a_wrong_passphrase_is_caught_at_step_1_and_NOTHING_IS_FUNDED(monkeypatch, capsys):
+    """THE WHOLE POINT. Two runs found this at step 6 instead, and each stranded coins.
+
+    MUTATION: delete the prove_every_wallet_will_open() call from main() and the
+    run reaches step 6 with a wallet that will not open, which is what stranded
+    8d3ac063 and cd0b0e60. Verified 2026-09-30 by the two runs themselves.
+    """
+    monkeypatch.setenv("GRC_WALLET_PASSPHRASE", "wrong")
+    console = Console(total_steps=8)
+    client = _WalletClient(encrypted=True, accepts="right")
+    with pytest.raises(atomic_swap.SwapError, match="NOTHING WAS FUNDED"):
+        atomic_swap.prove_every_wallet_will_open(Step(console, 1), {"GRC": client})
+    printed = capsys.readouterr().out
+    assert "-14" in printed, f"the daemon's own message is what says WHY:\n{printed}"
+    # AND THE VALUE IS NEVER PRINTED, only the variable's name.
+    assert "wrong" not in printed.replace("was wrong", ""), (
+        f"the passphrase reached the screen:\n{printed}"
+    )
+    assert "GRC_WALLET_PASSPHRASE" in printed, printed
+
+
+def test_an_UNSET_passphrase_names_the_variable_and_refuses():
+    """An encrypted wallet with no passphrase configured cannot be opened at all."""
+    console = Console(total_steps=8)
+    with pytest.raises(atomic_swap.SwapError, match="GRC_WALLET_PASSPHRASE is not set"):
+        atomic_swap.prove_every_wallet_will_open(
+            Step(console, 1), {"GRC": _WalletClient(encrypted=True, accepts="right")})
+
+
+def test_an_UNENCRYPTED_wallet_is_not_unlocked_at_all(capsys):
+    """Calling walletpassphrase on an unencrypted wallet is an error, not a no-op.
+
+    MUTATION: drop the `if not encrypted: continue` branch and this fails on the
+    recorded method list -- a BTC regtest wallet with no passphrase is the
+    ordinary case, and unlocking it would refuse a run that is perfectly fine.
+    """
+    console = Console(total_steps=8)
+    client = _WalletClient(encrypted=False)
+    atomic_swap.prove_every_wallet_will_open(Step(console, 1), {"BTC": client})
+    assert "walletpassphrase" not in client.asked, (
+        f"an unencrypted wallet was sent walletpassphrase: {client.asked}"
+    )
+    assert "not encrypted" in capsys.readouterr().out
+
+
+def test_a_CORRECT_passphrase_unlocks_and_puts_the_wallet_BACK(monkeypatch, capsys):
+    """The body is empty on purpose: this proves the passphrase, it does not send.
+
+    And it goes through chains/wallet_lock, so GRC is restored to STAKING rather
+    than left unlocked or locked -- Gridcoin stakes and Bitcoin does not, and the
+    resting state of a GRC wallet is unlocked-for-staking. A check that proved the
+    passphrase by stopping the operator's staking would be a worse trade than the
+    bug it prevents.
+    """
+    monkeypatch.setenv("GRC_WALLET_PASSPHRASE", "right")
+    console = Console(total_steps=8)
+    client = _WalletClient(encrypted=True, accepts="right")
+    atomic_swap.prove_every_wallet_will_open(Step(console, 1), {"GRC": client})
+    printed = capsys.readouterr().out
+    assert "unlocked and restored" in printed, printed
+    assert "walletpassphrase" in client.asked, "the passphrase was never actually tried"
+    # The restore is what makes this safe to run against a staking wallet.
+    assert client.asked.count("walletpassphrase") >= 2, (
+        f"only one walletpassphrase call, so the wallet was left open rather than restored to "
+        f"staking: {client.asked}"
+    )
+
+
+def test_the_check_runs_ONLY_on_run_and_never_on_a_dry_run():
+    """A dry run funds nothing, so unlocking a wallet it will not use is the one
+    thing a read-only mode must not do."""
+    source = pathlib.Path(atomic_swap.__file__).read_text()
+    call = source.index("prove_every_wallet_will_open(Step(console, 1), clients)")
+    guard = source[:call].rindex("if args.run:")
+    between = source[guard:call]
+    assert "\n\n" not in between.strip("\n"), (
+        "the wallet check is no longer directly under `if args.run:`; a dry run would unlock a "
+        "wallet it has no use for"
+    )

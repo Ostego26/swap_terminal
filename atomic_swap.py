@@ -109,6 +109,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from chains.daemon_conf import conf_fallback_settings, rpc_url
 from chains.registry import missing_settings, why_unconfigured
 from chains.wallet_hint import which_wallets_are_on_disk
+from chains.wallet_lock import encryption_state, unlocked_for_payout
 from config import Config
 from microfortnights import format_duration
 from modules.atomic_btc_client import BTCClient
@@ -578,6 +579,72 @@ def report_dry_run(console: Console) -> int:
     console.say("wallet will unlock, or that create_contract will be accepted by the daemon.")
     console.say("Add --run to fund both legs.")
     return console.summary()
+
+
+def prove_every_wallet_will_open(step: Step, clients: dict) -> None:
+    """Unlock and restore each encrypted wallet BEFORE anything is funded.
+
+    THIS EXISTS BECAUSE THE DRIVER STRANDED TWO CONTRACTS, 2026-09-29/30. Both
+    runs funded the BTC leg, reached the GRC leg, and were refused by the daemon:
+
+        GRC RPC Error: {'code': -14, 'message': 'Error: The wallet passphrase
+        entered was incorrect.'}
+
+    A wrong passphrase is knowable before a satoshi moves. It was instead
+    discovered between the two legs, which leaves one contract live and the other
+    impossible -- and because step 2 mints the keypairs in-process and never
+    writes them, the funded leg's refund key dies with the process and those coins
+    are unspendable by anybody, permanently. Twice, for a variable.
+
+    THIS CHECK CAN ONLY EVER PREVENT FUNDING. It adds no send, signs nothing, and
+    moves no coins; every outcome is either "the wallets will open" or a refusal
+    before step 6. That is why it did not need to be asked for the way a change to
+    what gets funded would (rule 16).
+
+    IT USES THE STAKING-AWARE PATH, which is the Gridcoin half of the same
+    lesson. Gridcoin stakes and Bitcoin does not: a GRC wallet's resting state is
+    unlocked FOR STAKING, and `walletlock` followed by a plain
+    `walletpassphrase <phrase> <timeout>` -- what GRCClient.ensure_fully_unlocked()
+    does -- leaves it not staking, then locked when the timeout expires, with
+    nothing printed. chains/wallet_lock.unlocked_for_payout() delegates GRC to
+    chains/gridcoin_wallet_lock, which restores staking whether the body returned,
+    raised or was interrupted. So proving the passphrase here does not cost the
+    operator their staking, and the check is over an EMPTY body: open it, put it
+    back, say so.
+    """
+    for asset, client in sorted(clients.items()):
+        adapter = adapter_for(client_caller(client))
+        encrypted, why = encryption_state(adapter)
+        step.say(f"{asset} wallet: {why}")
+        if not encrypted:
+            step.check(f"{asset} wallet will open", "not encrypted", "no passphrase needed", True)
+            continue
+        variable = f"{asset}_WALLET_PASSPHRASE"
+        passphrase = os.environ.get(variable, "")
+        if not passphrase:
+            # THE NAME, NEVER THE VALUE. argv and the environment of a running
+            # process are readable through /proc, and a passphrase this file
+            # printed would be a disclosure it could not undo.
+            step.check(f"{asset} wallet will open", f"{variable} is not set",
+                       "a passphrase for an encrypted wallet", False)
+            raise SwapError(
+                f"the {asset} wallet is encrypted and {variable} is not set. NOTHING WAS FUNDED. "
+                f"Export it and run again -- discovering this between the two legs is what "
+                f"stranded two contracts on 2026-09-29 and 2026-09-30"
+            )
+        try:
+            with unlocked_for_payout(adapter, passphrase, chain=asset, encrypted=True):
+                pass
+        except Exception as error:
+            step.check(f"{asset} wallet will open", f"{type(error).__name__}: {error}",
+                       f"an unlock with {variable}", False)
+            raise SwapError(
+                f"the {asset} wallet would not open. NOTHING WAS FUNDED. The value of {variable} "
+                f"is not printed and not guessed at; the daemon's own message above says whether "
+                f"it was wrong or the wallet is missing"
+            ) from error
+        step.check(f"{asset} wallet will open", "unlocked and restored", f"an unlock with {variable}",
+                   True)
 
 
 def open_test_clients(step: Step, assets: tuple[str, ...]) -> dict:
@@ -1180,6 +1247,14 @@ def main() -> int:
             )
         console.step(1, "both daemons say which network they are on, and both must be a test one")
         clients = open_test_clients(Step(console, 1), (args.from_asset, args.to_asset))
+        # IN STEP 1, WITH THE NETWORK CHECK, because both answer the same question:
+        # is there any reason this cannot work, knowable before anything moves. A
+        # wrong passphrase found at step 6 leaves one leg funded and unrecoverable;
+        # found here it costs nothing. Only on --run: a dry run funds nothing, so
+        # unlocking a wallet to prove a point it will not use would be the one thing
+        # a read-only mode must not do.
+        if args.run:
+            prove_every_wallet_will_open(Step(console, 1), clients)
         assets = (args.from_asset, args.to_asset)
         parties = mint_parties(Step(console, 2), assets)
 
