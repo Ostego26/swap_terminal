@@ -735,12 +735,32 @@ def fund_one_leg_or_refuse(console: Console, leg, planned: PlannedLeg, secret_ha
                         "the cause and run it again.")
         else:
             other = already_funded.leg
+            # THE REFUND BRANCH IS NOT A RECOVERY PATH HERE, and this message said it
+            # was. Written 2026-09-29, wrong within the hour: the first run it printed
+            # on had funded 0.0002 regtest BTC, and the operator read "it returns to
+            # its refund branch at height 967" as "my coins come back". They do not.
+            #
+            # Step 2 mints the four keypairs IN THIS PROCESS and never writes them
+            # (atomic_swap.py:911, and that is deliberate -- the repository does not
+            # put keys on disk). So when the process exits, the refund key for the
+            # funded leg is GONE, and the refund branch pays an address nobody can
+            # sign for. The coins are not time-locked; they are unspendable, by
+            # anybody, permanently.
+            #
+            # A message that says otherwise at this exact moment is the worst kind of
+            # wrong comment: it is read by somebody deciding whether they have a
+            # problem, and it tells them they do not.
             console.say(f"THE {other.asset} LEG IS FUNDED AND THE {leg.asset} LEG IS NOT. Nobody "
-                        f"holds the secret, so nobody can claim the {other.asset}: it returns to its "
-                        f"refund branch at height {already_funded.funded['locktime']}. Do NOT publish "
-                        f"the "
-                        f"secret, and do NOT fund the {leg.asset} leg by hand -- the ordering that "
-                        f"made this safe was computed from tips that have since moved.")
+                        f"holds the secret, so nobody can claim the {other.asset}.")
+            console.say(f"AND NOBODY CAN REFUND IT EITHER. The refund branch pays a key minted in "
+                        f"THIS process and never written to disk, so it died with the process. The "
+                        f"script's refund path opens at height {already_funded.funded['locktime']} "
+                        f"and there is no key to sign it with: those {other.amount} {other.asset} "
+                        f"are unspendable by anybody, permanently. On a test network that is a "
+                        f"rounding error; on a real chain it is a loss.")
+            console.say(f"Do NOT publish the secret, and do NOT fund the {leg.asset} leg by hand -- "
+                        f"the ordering that made this safe was computed from tips that have since "
+                        f"moved.")
         if NO_WALLET_LOADED_CODE in str(error):
             console.say(f"    {which_wallets_are_on_disk(clients[leg.asset], leg.asset)}")
         raise SwapError(

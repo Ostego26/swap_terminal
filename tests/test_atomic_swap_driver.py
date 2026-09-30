@@ -1162,9 +1162,26 @@ def test_the_SECOND_leg_failing_says_the_FIRST_IS_FUNDED_and_not_to_publish(caps
             clients={"GRC": _RefusingClient(WALLET_NOT_LOADED)}, already_funded=funded_first)
     printed = capsys.readouterr().out
     assert "THE BTC LEG IS FUNDED AND THE GRC LEG IS NOT" in printed, printed
-    assert "967" in printed, f"the refund height is what makes the warning actionable:\n{printed}"
+    assert "967" in printed, f"the refund height is named:\n{printed}"
     assert "Do NOT publish the secret" in printed, printed
     assert "NOTHING WAS FUNDED" not in printed, printed
+    # AND IT DOES NOT CALL THE REFUND BRANCH A RECOVERY. The first version of this
+    # message said "it returns to its refund branch at height 967", which the
+    # operator read as "my coins come back". They do not: step 2 mints the keypairs
+    # in-process and never writes them, so the refund key dies with the process and
+    # the funded output is unspendable by anybody, permanently.
+    #
+    # MUTATION: restore "it returns to its refund branch" and drop the
+    # unspendable sentence, and this fails. Verified 2026-09-30.
+    assert "NOBODY CAN REFUND IT EITHER" in printed, printed
+    assert "unspendable by anybody, permanently" in printed, (
+        f"the message names a refund height without saying there is no key to sign it with. That "
+        f"is read by somebody deciding whether they have a problem, and it tells them they do "
+        f"not:\n{printed}"
+    )
+    assert "returns to its refund branch" not in printed, (
+        f"the reassuring phrasing is back:\n{printed}"
+    )
 
 
 def test_a_wallet_that_is_not_loaded_gets_the_wallet_hint_the_balance_reader_gives(capsys):
