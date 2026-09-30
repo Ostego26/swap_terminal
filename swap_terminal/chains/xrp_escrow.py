@@ -4,8 +4,12 @@
 Role: submodule (a decision, callable with a dict and a clock -- rule 10)
 Reads: nothing. One escrow object and one timestamp, both arguments.
 Writes: nothing
-Can move funds: no. It returns a verdict. Nothing here builds, signs or submits a
-      transaction, and this module imports no transport.
+Can move funds: no -- but it now BUILDS a payload that would, so the line is worth stating
+      precisely rather than as a bare "no". escrow_cancel_tx() returns a dict. Nothing here
+      signs it, nothing here submits it, and this module imports no transport at all (asserted
+      by tests/test_xrp_escrow_verdict.py, which reads the import statements rather than
+      trusting this sentence). A caller has to supply a signer and a submitter, and doing so is
+      armed state and the operator's (rule 16).
 Mainnet-safe: yes. It names no endpoint and asks no server which network it is on.
 Live-safe: yes.
 
@@ -25,17 +29,27 @@ somebody else's expired escrow returns THEIR money to THEM and costs the cancell
 "who may cancel" is not the interesting question and "where does the money go" has exactly one
 answer, which every verdict below carries.
 
-WHAT THIS MODULE DELIBERATELY DOES NOT DO: build the EscrowCancel. That transaction needs
-`Owner` and `OfferSequence` -- the SEQUENCE OF THE EscrowCreate -- and an escrow entry returned
-by `account_objects` is not known here to carry it; the sequence belongs to the creating
-transaction, which `PreviousTxnID` points at. Nothing in this tree has a recorded escrow ledger
-entry to check that against, and no XRPL endpoint is reachable from where this was written.
-Guessing the field would be the same mistake xrp_htlc_escrow.py's header already records: it
-claimed rippled's server-side `submit` "may" be allowed on a public testnet server, and the
-first real run answered `notSupported`. One `account_objects` response settles it, so
-`cancel_inputs()` below reports what the real response carried instead of assuming -- it is the
-question asked as code rather than as a hypothesis (rule 17). Until an answer comes back the
-reclaim is a PROPOSAL and this module is the half that is not (rule 16).
+THE OPEN QUESTION IS ANSWERED, AND THE ANSWER IS NO. This module used to say that building the
+EscrowCancel was deliberately not done, because that transaction needs `Owner` and
+`OfferSequence` -- the SEQUENCE OF THE EscrowCreate -- and nothing here knew whether an
+`account_objects` escrow entry carries it. Rather than guess, `cancel_inputs()` printed the
+question into the operator's own report. They ran it 2026-09-30 against the testnet:
+
+    EscrowCancel buildable from this entry?  NO, missing OfferSequence
+    Owner=rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv OfferSequence=(absent)
+
+FOUR entries -- two escrows, each listed under both the sender's and the destination's owner
+directory -- and `OfferSequence` was absent from every one, while `PreviousTxnID` was present in
+every one. So the sequence has to come from the creating transaction, which is one `tx` read
+away, and `offer_sequence_from()` below is that read's decision half. Asking rather than
+assuming cost one line of output and settled it in one run; guessing would have repeated the
+mistake xrp_htlc_escrow.py's header already records, where it claimed rippled's server-side
+`submit` "may" be allowed on a public testnet server and the first real run answered
+`notSupported`.
+
+WHAT THIS MODULE STILL DOES NOT DO: submit anything. `escrow_cancel_tx()` below builds the
+payload and nothing here signs it or opens a socket. Reclaiming spends a fee and is armed state,
+so it stays the operator's (rule 16).
 """
 
 from __future__ import annotations
@@ -192,6 +206,76 @@ def cancel_inputs(escrow: object) -> CancelInputs:
             "`OfferSequence` is the EscrowCreate's own Sequence and is not on this entry: " + where
         )
     return CancelInputs(False, owner, sequence, missing, "; ".join(how))
+
+
+def offer_sequence_from(created: object) -> tuple[int | None, str]:
+    """The EscrowCreate's own Sequence, read off a `tx` response. Returns (sequence, why).
+
+    THE ONE READ `cancel_inputs()` NAMES, and it is here rather than inline in a report because
+    it is a decision with three outcomes that a caller must tell apart (rule 10):
+
+        (int, "")           the sequence, and an EscrowCancel can be built
+        (None, reason)      the response is not an EscrowCreate, so this is the wrong
+                            transaction and using its Sequence would cancel a different escrow
+        (None, reason)      no readable Sequence at all
+
+    WHY THE TransactionType IS CHECKED AND NOT ASSUMED. `PreviousTxnID` on a ledger entry points
+    at the transaction that LAST MODIFIED it, which for an untouched escrow is its EscrowCreate
+    and after any other modification is not. An EscrowCancel built from the wrong Sequence does
+    not fail safe -- `OfferSequence` plus `Owner` is how the ledger IDENTIFIES an escrow, so a
+    wrong sequence names a DIFFERENT escrow of the same owner, and the operator's own account
+    holds two. Cancelling the wrong one of two 1-XRP escrows is exactly the kind of quiet
+    mis-action that has no error message.
+
+    A `tx` RESPONSE, WHICH NESTS. rippled returns the transaction's fields at the top level of
+    `result` on some API versions and under `tx_json` on others, so both are read. A response
+    carrying neither is reported, not defaulted.
+    """
+    if not isinstance(created, dict):
+        return None, f"not a tx response: {type(created).__name__}"
+
+    body = created.get("tx_json") if isinstance(created.get("tx_json"), dict) else created
+    kind = body.get("TransactionType")
+    if kind != "EscrowCreate":
+        return None, (
+            f"this transaction is a {kind!r}, not an EscrowCreate. PreviousTxnID points at "
+            "whatever LAST modified the entry, so on a modified escrow it is not the creation -- "
+            "and OfferSequence from the wrong transaction names a different escrow of the same "
+            "owner, which the ledger would cancel without complaint"
+        )
+
+    sequence = body.get("Sequence")
+    if not isinstance(sequence, int) or isinstance(sequence, bool):
+        return None, f"the EscrowCreate carries no readable Sequence (got {sequence!r})"
+    return sequence, ""
+
+
+def escrow_cancel_tx(sender: str, owner: str, offer_sequence: int) -> dict:
+    """The EscrowCancel payload. No condition and no fulfillment: this is the timelock branch.
+
+    MOVED HERE FROM xrp_htlc_escrow.py ON 2026-09-30, and the move is rules 8 and 10 rather
+    than tidying. It was defined in a root ENTRY POINT -- the nine-step testnet verifier -- so
+    anything else that wanted to build a cancel had two options: import from a script whose
+    import side effects are a nine-step run's worth of module-level setup, or write a second
+    copy. A second copy of a transaction payload is rule 8's bug with a delay on it, and this
+    one is a payload that moves money.
+
+    It belongs beside the verdict that decides WHETHER to cancel and the lookup that supplies
+    its one missing field: this module is the escrow's function layer, and xrp_htlc_escrow.py
+    imports it from here now.
+
+    `sender` IS SEPARATE FROM `owner` ON PURPOSE. Anybody may submit an EscrowCancel once
+    CancelAfter has passed; `Owner` is the account that CREATED the escrow and is where the
+    drops go back to. Defaulting one to the other would bake in "the creator cancels it", and
+    the whole reason cancel_verdict() reports `returns_to` on every verdict is that those two
+    are not the same question.
+    """
+    return {
+        "TransactionType": "EscrowCancel",
+        "Account": sender,
+        "Owner": owner,
+        "OfferSequence": offer_sequence,
+    }
 
 
 def reclaimable(escrows, now_unix: float) -> list[tuple[dict, EscrowVerdict]]:

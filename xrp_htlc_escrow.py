@@ -192,6 +192,7 @@ from chains.xrp_crypto_condition import (  # noqa: E402 -- the sys.path line abo
     preimage_condition,
     preimage_fulfillment,
 )
+from chains.xrp_escrow import escrow_cancel_tx  # noqa: E402 -- same. MOVED 2026-09-30
 from chains.xrp_submit import LocalSigningUnavailable, Submitter  # noqa: E402 -- same
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts  # noqa: E402 -- same
 from chains.xrp_units import (  # noqa: E402 -- same. Re-exported from here: see the note below and rule 8.
@@ -299,14 +300,14 @@ def escrow_finish_tx(  # noqa: PLR0913 -- checked: six, and each one is a field 
     }
 
 
-def escrow_cancel_tx(sender: str, owner: str, offer_sequence: int) -> dict:
-    """The EscrowCancel payload. No condition and no fulfillment: this is the timelock branch."""
-    return {
-        "TransactionType": "EscrowCancel",
-        "Account": sender,
-        "Owner": owner,
-        "OfferSequence": offer_sequence,
-    }
+# escrow_cancel_tx() STOOD HERE AND NOW LIVES IN chains/xrp_escrow.py, imported above.
+# It was defined in this entry point, which meant anything else wanting to build a cancel had
+# to either import from a nine-step testnet verifier or write a second copy -- and a second
+# copy of a payload that moves money is rule 8's bug with a delay on it. It belongs beside
+# cancel_verdict(), which decides WHETHER to cancel, and offer_sequence_from(), which supplies
+# the one field an account_objects entry does not carry (measured 2026-09-30: absent from all
+# four entries the operator's run returned). Rule 10: the decision is the smallest testable
+# piece, and a file at the root owns the ORDER of steps rather than their contents.
 
 
 def submit(console: Console, submitter, secret: str, tx_json: dict) -> dict:

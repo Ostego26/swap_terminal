@@ -42,6 +42,8 @@ from chains.xrp_escrow import (
     UNREADABLE,
     cancel_inputs,
     cancel_verdict,
+    escrow_cancel_tx,
+    offer_sequence_from,
     reclaimable,
 )
 from chains.xrp_units import RIPPLE_EPOCH_OFFSET_SECONDS, unix_from_ripple_time
@@ -313,12 +315,167 @@ def test_a_non_object_is_not_ready_and_says_what_it_got(escrow):
 def test_readiness_is_not_authorization():
     """A ready entry is a statement about a dict, and nothing here can act on it.
 
-    The module holds no transport (asserted above) so this cannot submit -- but the wording
-    matters too: `ready` invites "so cancel it", and reclaiming spends a fee on somebody else's
-    behalf, which is armed state and the operator's (rule 16).
+    REWRITTEN 2026-09-30 BECAUSE IT PASSED ON A NAME TECHNICALITY. It asserted
+    `not hasattr(xrp_escrow, "build_cancel")` and `not hasattr(xrp_escrow, "cancel_escrow")`,
+    and then escrow_cancel_tx() moved into this module from xrp_htlc_escrow.py -- a function
+    that builds exactly the transaction those two names stood for. The test stayed green because
+    neither spelling was the one chosen. That is the fourth time in this session a check has
+    passed on a string while its premise changed, and the pattern is always the same: it pinned
+    a NAME where it meant a PROPERTY.
+
+    THE PROPERTY IS: this module can describe and build, and cannot act. Building a dict is not
+    authorization -- submitting is, and submitting needs a signer and a socket, neither of which
+    exists here (the import check above reads the statements rather than trusting this
+    sentence). Reclaiming an escrow spends a fee, which is armed state and the operator's
+    (rule 16).
     """
     inputs = cancel_inputs({**THE_STRANDED_ESCROW, "OfferSequence": 42})
     assert inputs.ready is True
     assert not hasattr(inputs, "submit")
-    assert not hasattr(xrp_escrow, "build_cancel")
-    assert not hasattr(xrp_escrow, "cancel_escrow")
+
+    # Every public callable is a describer or a builder. A name that is neither has to be read
+    # rather than pass silently, so the list is explicit and adding to it is a deliberate act.
+    #
+    # DEFINED HERE, NOT MERELY VISIBLE HERE: the imported names (`NamedTuple`,
+    # `unix_from_ripple_time`) are what this module USES, and listing them would make the
+    # assertion about its imports, which the import test above already covers precisely.
+    # Filtered by __module__ so an import cannot pad the set and a definition cannot hide in it.
+    defined = {
+        name for name, value in vars(xrp_escrow).items()
+        if not name.startswith("_") and callable(value)
+        and getattr(value, "__module__", "") == xrp_escrow.__name__
+    }
+    assert defined == {"cancel_verdict", "reclaimable", "cancel_inputs",
+                       "offer_sequence_from", "escrow_cancel_tx",
+                       "EscrowVerdict", "CancelInputs"}, (
+        f"a new callable appeared in a module whose header promises it cannot act: {defined}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# offer_sequence_from: THE ONE READ, now that the operator's run settled that
+# account_objects does not carry the field.
+#
+# Measured 2026-09-30 on the XRP testnet. Four entries -- two escrows, each
+# listed under both the sender's and the destination's owner directory --
+# and `OfferSequence` was absent from every one while `PreviousTxnID` was
+# present in every one. So the question cancel_inputs() printed into the
+# report is answered, and the answer is that the sequence comes from the
+# creating transaction.
+# ---------------------------------------------------------------------------
+
+#: A `tx` response for an EscrowCreate, reduced to the fields the lookup reads.
+A_REAL_ESCROW_CREATE = {
+    "TransactionType": "EscrowCreate",
+    "Account": "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv",
+    "Sequence": 11,
+    "validated": True,
+}
+
+
+def test_the_sequence_is_read_off_the_creating_transaction():
+    """The happy path, and the whole point of the PreviousTxnID pointer."""
+    sequence, why = offer_sequence_from(A_REAL_ESCROW_CREATE)
+    assert sequence == 11
+    assert why == ""
+
+
+def test_the_same_fields_nested_under_tx_json_are_read_too():
+    """rippled puts them under `tx_json` on some API versions and at the top level on others.
+
+    Reading only one shape would mean a lookup that works against one endpoint and silently
+    finds nothing against another -- and "finds nothing" here renders as "cannot build the
+    cancel", which looks like a protocol fact rather than a parsing miss.
+    """
+    sequence, why = offer_sequence_from({"tx_json": A_REAL_ESCROW_CREATE, "validated": True})
+    assert sequence == 11
+    assert why == ""
+
+
+def test_a_transaction_that_is_not_an_EscrowCreate_IS_REFUSED_AND_THE_REASON_IS_MONEY():
+    """THE REFUSAL THAT MATTERS MOST HERE, and it is not a type check for tidiness.
+
+    `PreviousTxnID` points at whatever LAST MODIFIED the ledger entry. On an untouched escrow
+    that is its EscrowCreate; after any other modification it is not. And `OfferSequence` plus
+    `Owner` is how the ledger IDENTIFIES an escrow -- so a sequence taken from the wrong
+    transaction names a DIFFERENT escrow of the same owner, which the ledger cancels without
+    complaint.
+
+    That is not hypothetical for this operator: their account holds TWO 1-XRP escrows to the
+    same destination, one reclaimable and one not due for another 85888s. Cancelling the wrong
+    one is a silent mis-action with no error message anywhere.
+    """
+    sequence, why = offer_sequence_from({**A_REAL_ESCROW_CREATE, "TransactionType": "EscrowFinish"})
+    assert sequence is None
+    assert "not an EscrowCreate" in why
+    assert "different escrow of the same owner" in why, "say what the wrong sequence would DO"
+
+
+@pytest.mark.parametrize("sequence", [None, "11", 11.0, True, [], {}])
+def test_a_sequence_that_is_not_an_integer_is_refused_rather_than_coerced(sequence):
+    """`True` is an int in Python and is not a sequence number.
+
+    int(True) is 1, so a coercing reader would build an EscrowCancel against ledger sequence 1.
+    Same exclusion and same reason as cancel_inputs() above -- stated at both because the two
+    read the field from different places (rule 8).
+    """
+    got, why = offer_sequence_from({**A_REAL_ESCROW_CREATE, "Sequence": sequence})
+    assert got is None
+    assert "no readable Sequence" in why
+
+
+@pytest.mark.parametrize("response", ["not a dict", None, 11, []])
+def test_a_non_response_says_what_it_got(response):
+    got, why = offer_sequence_from(response)
+    assert got is None
+    assert type(response).__name__ in why
+
+
+def test_the_lookup_answers_exactly_what_cancel_inputs_said_was_missing():
+    """The two halves fit, and this asserts the seam rather than assuming it.
+
+    cancel_inputs() reports `missing == ("OfferSequence",)` and names `PreviousTxnID` as the one
+    read. offer_sequence_from() is that read. If the field names ever drift apart, a reader
+    following the report's instruction would arrive at a function that returns something else.
+    """
+    entry = {**THE_STRANDED_ESCROW, "PreviousTxnID": "F74EFFDB"}
+    inputs = cancel_inputs(entry)
+    assert inputs.missing == ("OfferSequence",)
+    assert "F74EFFDB" in inputs.how_to_get_it
+
+    sequence, _ = offer_sequence_from(A_REAL_ESCROW_CREATE)
+    supplied = cancel_inputs({**entry, "OfferSequence": sequence})
+    assert supplied.ready is True
+    assert supplied.offer_sequence == sequence
+
+
+def test_the_cancel_payload_carries_only_the_four_fields_the_ledger_needs():
+    """MOVED HERE FROM xrp_htlc_escrow.py, so the payload is pinned where it now lives.
+
+    tests/test_xrp_escrow_payloads.py still covers it from the entry point's side -- that is not
+    duplication but the seam: the entry point must keep getting the same dict after the move.
+
+    NO Fee, NO Sequence, NO SigningPubKey. Those are the submitter's to autofill, and a payload
+    that pre-set them would silently override whatever the signer computed.
+    """
+    payload = escrow_cancel_tx("rSUBMITTER", "rCREATOR", 11)
+    assert payload == {
+        "TransactionType": "EscrowCancel",
+        "Account": "rSUBMITTER",
+        "Owner": "rCREATOR",
+        "OfferSequence": 11,
+    }
+
+
+def test_the_submitter_and_the_owner_are_not_collapsed():
+    """Anybody may cancel an expired escrow, and the drops go to its OWNER regardless.
+
+    MUTATION: default `owner` to `sender`. Every call in xrp_htlc_escrow.py passes the same
+    account for both -- it is the creator cancelling its own escrow -- so the suite would stay
+    green while the function became unable to express the case the verdict exists to describe:
+    a third party reclaiming somebody's expired escrow on their behalf.
+    """
+    payload = escrow_cancel_tx("rANYBODY", "rCREATOR", 11)
+    assert payload["Account"] == "rANYBODY"
+    assert payload["Owner"] == "rCREATOR"
+    assert payload["Account"] != payload["Owner"]

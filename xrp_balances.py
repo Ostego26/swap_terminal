@@ -92,7 +92,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 # the insert. Rule 19 -- a suppression is a claim you checked, so an unnecessary
 # one is a false claim, and RUF100 catches it.
 from chains.xrp_address import is_valid_classic_address
-from chains.xrp_escrow import cancel_inputs, cancel_verdict
+from chains.xrp_escrow import cancel_inputs, cancel_verdict, offer_sequence_from
 from chains.xrp_signing import reserve_drops
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts
 from chains.xrp_units import from_drops, unix_from_ripple_time
@@ -105,6 +105,42 @@ NOTHING_TO_LOOK_AT = 3
 # filter; asking for escrows specifically means an account with forty trust
 # lines does not bury the one row that explains a swap.
 ESCROW_TYPE = "escrow"
+
+
+def _sequence_from_the_creating_tx(console, escrow: dict, inputs):
+    """Do the `tx` read that cancel_inputs() names, and return an updated CancelInputs.
+
+    READ-ONLY, AND THE ONLY NETWORK CALL IN THIS BLOCK. `tx` is a lookup; nothing here signs or
+    submits, which is the same promise the rest of this script makes.
+
+    IT REPORTS THE READ RATHER THAN DOING IT SILENTLY (rule 14). An extra round trip per escrow
+    is a visible cost on an account with several of them, and a reader who sees OfferSequence
+    appear needs to know it came from a second call and which transaction it came from -- not
+    least because the NEXT thing anybody does with that number is build a transaction around it.
+
+    A FAILED READ LEAVES THE ORIGINAL VERDICT AND SAYS WHY. It does not fall back to a guess,
+    and it does not swallow the reason: chains/xrp_escrow.offer_sequence_from() refuses a
+    transaction that is not an EscrowCreate, because PreviousTxnID points at whatever LAST
+    modified the entry and a sequence from the wrong one names a DIFFERENT escrow of the same
+    owner. This operator's account holds two, so that is a live way to cancel the wrong 1 XRP.
+    """
+    previous = escrow.get("PreviousTxnID")
+    console.say(f"                           reading `tx {previous}` for its Sequence "
+                f"(one extra read; nothing is signed)")
+    try:
+        created = rpc("tx", {"transaction": previous, "binary": False})
+    except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic, and the failure is REPORTED and returns the ORIGINAL verdict rather than a guess. A read that did not happen must not look like a field that is absent.
+        console.say(f"                           that read FAILED: {type(exc).__name__}: {exc}")
+        console.say("                           so OfferSequence is still unknown -- which is "
+                    "not the same as absent, and the cancel stays unbuildable from here")
+        return inputs
+
+    sequence, why = offer_sequence_from(created)
+    if sequence is None:
+        console.say(f"                           that read gave no usable Sequence: {why}")
+        return inputs
+    console.say(f"                           got OfferSequence={sequence} from the EscrowCreate")
+    return cancel_inputs({**escrow, "OfferSequence": sequence})
 
 
 def _when(field: str, ripple_seconds) -> str:
@@ -242,6 +278,17 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
         # question as code: one run against the real account settles it, and the verdict above
         # stays useful whether the answer is yes or no.
         inputs = cancel_inputs(one)
+        # THE ONE READ, NOW ACTUALLY DONE. Until 2026-09-30 this block printed
+        # "`OfferSequence` ... is one read away: `tx <PreviousTxnID>`" and stopped, because
+        # nothing here knew whether account_objects carried the field. The operator's run
+        # settled it -- absent from all four entries, PreviousTxnID present in all four -- so
+        # the question does not need asking again and the report does the read instead of
+        # describing it. Rule 16: handing somebody a proven next step and making them do it by
+        # hand is not delivery.
+        #
+        # STILL READ-ONLY. `tx` is a lookup. Nothing below signs or submits.
+        if not inputs.ready and inputs.missing == ("OfferSequence",) and one.get("PreviousTxnID"):
+            inputs = _sequence_from_the_creating_tx(console, one, inputs)
         ready = "YES, both fields present" if inputs.ready else f"NO, missing {', '.join(inputs.missing)}"
         console.say(f"              EscrowCancel buildable from this entry?  {ready}")
         console.say(f"                           Owner={inputs.owner or '(absent)'} "

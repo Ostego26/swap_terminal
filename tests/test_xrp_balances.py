@@ -82,10 +82,43 @@ def test_the_balance_reader_CALLS_nothing_that_could_move_money(forbidden):
     )
 
 
-# EVERY RIPPLED METHOD THIS SCRIPT MAY ASK FOR, and all three are reads.
+# EVERY RIPPLED METHOD THIS SCRIPT MAY ASK FOR, and all four are reads.
 # account_info is the balance, server_info is the reserve, account_objects is the
 # escrow list. Nothing else, and in particular not `submit` or `sign`.
-READ_ONLY_METHODS = frozenset({"account_info", "server_info", "account_objects"})
+#
+# `tx` WAS ADDED 2026-09-30, AND THE GATE CAUGHT IT FIRST, which is what it is for.
+# The escrow block now looks up an EscrowCancel's OfferSequence, which an
+# account_objects entry does not carry -- measured on the operator's own run, absent
+# from all four entries it returned, with PreviousTxnID present in all four. `tx`
+# takes a transaction hash and returns that transaction; it signs nothing, submits
+# nothing and changes no ledger state, which is why it belongs in this set.
+#
+# THIS IS AN ALLOWLIST OF READS AND NOT A SUPPRESSION BASELINE (rule 19). The
+# difference is whether the entry was READ before it was added: `submit`, `sign`,
+# `sign_for` and `submit_multisigned` are the four that must never appear here, and
+# a method arriving because a check failed rather than because somebody established
+# it is a read is the thing rule 19 forbids. Adding `tx` is a claim that it was
+# checked, and this comment is what that claim looks like.
+READ_ONLY_METHODS = frozenset({"account_info", "server_info", "account_objects", "tx"})
+
+#: The methods that may never be in the set above, whatever else changes. A separate
+#: constant so that widening READ_ONLY_METHODS cannot quietly admit one of them --
+#: which is the only way the allowlist above turns into the baseline it says it is not.
+NEVER_READ_ONLY = frozenset({"submit", "sign", "sign_for", "submit_multisigned"})
+
+
+def test_the_read_only_allowlist_can_never_admit_a_submitting_method():
+    """The guard on the guard. MUTATION: add "submit" to READ_ONLY_METHODS and this fails.
+
+    Without it, the allowlist is one edit away from permitting exactly what the module header
+    promises the script cannot do -- and that edit would look like every other legitimate
+    addition to the set, including the `tx` one above.
+    """
+    overlap = READ_ONLY_METHODS & NEVER_READ_ONLY
+    assert not overlap, (
+        f"the read-only allowlist admits {sorted(overlap)}, which signs or submits. "
+        f"xrp_balances.py's header tells an operator it cannot move funds"
+    )
 
 
 def test_every_rippled_method_this_script_asks_for_is_a_READ():
