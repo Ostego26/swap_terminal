@@ -92,6 +92,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 # the insert. Rule 19 -- a suppression is a claim you checked, so an unnecessary
 # one is a false claim, and RUF100 catches it.
 from chains.xrp_address import is_valid_classic_address
+from chains.xrp_escrow import cancel_inputs, cancel_verdict
 from chains.xrp_signing import reserve_drops
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts
 from chains.xrp_units import from_drops, unix_from_ripple_time
@@ -107,7 +108,14 @@ ESCROW_TYPE = "escrow"
 
 
 def _when(field: str, ripple_seconds) -> str:
-    """A CancelAfter or FinishAfter as a date, and whether it has passed.
+    """A FinishAfter as a date, and whether it has passed.
+
+    ITS CancelAfter BRANCH IS NO LONGER REACHED FROM THIS FILE.
+    chains/xrp_escrow.cancel_verdict() answers that one, because it is a DECISION and this is
+    a formatter -- it could not be called with a seeded object and a fixed clock while it lived
+    here (rule 10). The branch stays rather than being deleted for one reason: it is what makes
+    this function safe to call on either field, and the alternative is a formatter that raises
+    on an input it obviously handles. If no second caller appears, it should go (rule 9).
 
     RAW RIPPLE SECONDS ARE UNREADABLE and printing them was a defect. The first
     version of this script showed an operator `CancelAfter=843784768` on their own
@@ -214,8 +222,34 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
         console.say(f"    escrow    {from_drops(int(amount)):.6f} XRP {one.get('Account')} -> "
                     f"{one.get('Destination')}")
         console.say(f"              {side}")
-        console.say(f"              {_when('CancelAfter', one.get('CancelAfter'))}")
+        # THE CANCEL VERDICT IS A DECISION AND IT LIVES IN chains/xrp_escrow.py NOW.
+        # `_when('CancelAfter', ...)` reached the same answer inside a display helper in this
+        # entry point -- a decision in a report builder, which is rule 10's opening complaint
+        # and which is why it could not be called with a seeded object and a fixed clock. The
+        # verdict also carries WHERE THE DROPS GO, which the old line did not say: EscrowCancel
+        # has no destination, so they return to the escrow's own Account and not to whoever
+        # cancels it. That is the fact somebody needs before deciding whether to bother.
+        verdict = cancel_verdict(one, time.time())
+        console.say(f"              CancelAfter  {one.get('CancelAfter')} -> {verdict.state}")
+        console.say(f"                           {verdict.reason}")
         console.say(f"              {_when('FinishAfter', one.get('FinishAfter'))}")
+        # WHAT AN EscrowCancel WOULD NEED, PRINTED BECAUSE NOBODY HERE KNOWS THE ANSWER.
+        # The reclaim itself is not written. It needs `Owner` and `OfferSequence`, and whether an
+        # account_objects entry carries the second is not established anywhere in this tree --
+        # no recorded escrow response exists to check against, and guessing a protocol field is
+        # the mistake xrp_htlc_escrow.py's header already records once (it claimed server-side
+        # `submit` "may" work; the first real run answered notSupported). So this line asks the
+        # question as code: one run against the real account settles it, and the verdict above
+        # stays useful whether the answer is yes or no.
+        inputs = cancel_inputs(one)
+        ready = "YES, both fields present" if inputs.ready else f"NO, missing {', '.join(inputs.missing)}"
+        console.say(f"              EscrowCancel buildable from this entry?  {ready}")
+        console.say(f"                           Owner={inputs.owner or '(absent)'} "
+                    f"OfferSequence={inputs.offer_sequence if inputs.offer_sequence is not None else '(absent)'}")
+        console.say(f"                           {inputs.how_to_get_it}")
+        console.say("                           Nothing was submitted. Reclaiming an escrow "
+                    "spends a fee and returns the drops to its own Account, so whether to do it "
+                    "is the operator's call.")
     # THE CROSS-CHECK THAT WOULD HAVE CAUGHT THE DEFECT THIS BLOCK WAS REWRITTEN
     # FOR. OwnerCount counts objects this account PAYS FOR, so the escrows it
     # sent must not exceed it. The first version of this script printed "raises
