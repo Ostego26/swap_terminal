@@ -155,9 +155,18 @@ class CancelInputs(NamedTuple):
     offer_sequence: int | None
     missing: tuple[str, ...]
     how_to_get_it: str
+    #: WHERE `offer_sequence` CAME FROM, and it is a field because the answer is not always the
+    #: same place. Added 2026-09-30 after the operator's run printed "both fields are on the
+    #: object" for a sequence that had just been fetched from a SECOND transaction -- a false
+    #: sentence, in the block whose entire job is saying what is known and how. It is worse than
+    #: a harmless inaccuracy: the next thing anybody does with that number is build a
+    #: transaction around it, and "on the object" tells them it needs no further checking, when
+    #: in fact it was read from a transaction whose identity had to be verified first.
+    source: str = ""
 
 
-def cancel_inputs(escrow: object) -> CancelInputs:
+def cancel_inputs(escrow: object, supplied_sequence: int | None = None,
+                  supplied_from: str = "") -> CancelInputs:
     """Can the two fields EscrowCancel needs be read off this `account_objects` entry?
 
     THIS FUNCTION EXISTS BECAUSE THE ANSWER IS NOT KNOWN HERE, AND GUESSING IT IS THE FAILURE
@@ -178,18 +187,29 @@ def cancel_inputs(escrow: object) -> CancelInputs:
     """
     if not isinstance(escrow, dict):
         return CancelInputs(False, "", None, CANCEL_NEEDS,
-                            f"not an escrow object: {type(escrow).__name__}")
+                            f"not an escrow object: {type(escrow).__name__}", "")
 
     owner = str(escrow.get("Account") or "")
     raw = escrow.get("OfferSequence")
     sequence = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+    source = "the account_objects entry itself" if sequence is not None else ""
+
+    # A SEQUENCE SUPPLIED BY A CALLER THAT DID THE `tx` READ, kept distinct from one found on
+    # the entry. This used to be expressed by the caller merging the value into a copy of the
+    # escrow dict and calling again -- which worked and then reported "both fields are on the
+    # object", because by then it was true of the dict and false of the world. Passing it as an
+    # argument keeps the provenance, and `supplied_from` is required in practice: a caller that
+    # supplies a sequence without saying where it got it gets told so in the output.
+    if sequence is None and supplied_sequence is not None:
+        sequence = supplied_sequence
+        source = supplied_from or "supplied by the caller, which did not say from where"
 
     missing = tuple(
         name for name, present in (("Owner", bool(owner)), ("OfferSequence", sequence is not None))
         if not present
     )
     if not missing:
-        return CancelInputs(True, owner, sequence, (), "both fields are on the object")
+        return CancelInputs(True, owner, sequence, (), f"OfferSequence came from {source}", source)
 
     how = []
     if "Owner" in missing:
@@ -205,7 +225,7 @@ def cancel_inputs(escrow: object) -> CancelInputs:
         how.append(
             "`OfferSequence` is the EscrowCreate's own Sequence and is not on this entry: " + where
         )
-    return CancelInputs(False, owner, sequence, missing, "; ".join(how))
+    return CancelInputs(False, owner, sequence, missing, "; ".join(how), source)
 
 
 def offer_sequence_from(created: object) -> tuple[int | None, str]:

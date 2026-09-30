@@ -107,6 +107,23 @@ NOTHING_TO_LOOK_AT = 3
 ESCROW_TYPE = "escrow"
 
 
+#: `tx` responses already fetched this run, keyed by transaction hash.
+#:
+#: MEASURED ON THE OPERATOR'S 2026-09-30 RUN: it did the SAME two `tx` reads TWICE -- four calls
+#: for two escrows. account_objects lists an escrow under BOTH the sender's and the
+#: destination's owner directory, which this script already knows and prints (the OUT/IN line),
+#: and both faucet accounts being ends of the same escrow is the common case in a test setup
+#: rather than a curiosity. So half the reads were waste: 2 of 4, against a public endpoint that
+#: has already rate-limited this tree once today.
+#:
+#: A HASH IS AN IMMUTABLE KEY, which is what makes this safe rather than merely faster. A
+#: validated transaction's fields never change, so a cached response cannot go stale within a
+#: run the way a balance or a ledger index could -- and only the `tx` read is cached, not
+#: account_info and not account_objects (rule 15's shape: a buffer with one reader, and the
+#: authority still asked every time).
+_TX_ALREADY_READ: dict[str, dict] = {}
+
+
 def _sequence_from_the_creating_tx(console, escrow: dict, inputs):
     """Do the `tx` read that cancel_inputs() names, and return an updated CancelInputs.
 
@@ -125,22 +142,38 @@ def _sequence_from_the_creating_tx(console, escrow: dict, inputs):
     owner. This operator's account holds two, so that is a live way to cancel the wrong 1 XRP.
     """
     previous = escrow.get("PreviousTxnID")
-    console.say(f"                           reading `tx {previous}` for its Sequence "
-                f"(one extra read; nothing is signed)")
-    try:
-        created = rpc("tx", {"transaction": previous, "binary": False})
-    except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic, and the failure is REPORTED and returns the ORIGINAL verdict rather than a guess. A read that did not happen must not look like a field that is absent.
-        console.say(f"                           that read FAILED: {type(exc).__name__}: {exc}")
-        console.say("                           so OfferSequence is still unknown -- which is "
-                    "not the same as absent, and the cancel stays unbuildable from here")
-        return inputs
+    if previous in _TX_ALREADY_READ:
+        created = _TX_ALREADY_READ[previous]
+        # SAID OUT LOUD RATHER THAN SILENTLY SKIPPED (rule 14). A reader comparing two accounts'
+        # sections would otherwise see the read announced under one and not the other and have
+        # no way to tell a cache hit from a branch that did not run.
+        console.say(f"                           `tx {previous}` was already read this run "
+                    f"(same escrow, listed under both accounts) -- not asking again")
+    else:
+        console.say(f"                           reading `tx {previous}` for its Sequence "
+                    f"(one extra read; nothing is signed)")
+        try:
+            created = rpc("tx", {"transaction": previous, "binary": False})
+        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic, and the failure is REPORTED and returns the ORIGINAL verdict rather than a guess. A read that did not happen must not look like a field that is absent.
+            console.say(f"                           that read FAILED: {type(exc).__name__}: {exc}")
+            console.say("                           so OfferSequence is still unknown -- which is "
+                        "not the same as absent, and the cancel stays unbuildable from here")
+            return inputs
+        # CACHED ONLY ON SUCCESS, so a failed read is retried for the second account rather than
+        # remembered as a failure. A transient network error is not a fact about the ledger.
+        _TX_ALREADY_READ[previous] = created
 
     sequence, why = offer_sequence_from(created)
     if sequence is None:
         console.say(f"                           that read gave no usable Sequence: {why}")
         return inputs
     console.say(f"                           got OfferSequence={sequence} from the EscrowCreate")
-    return cancel_inputs({**escrow, "OfferSequence": sequence})
+    # SUPPLIED AS AN ARGUMENT, not merged into a copy of the escrow dict. The merge worked and
+    # then made cancel_inputs() report "both fields are on the object" -- true of the dict it was
+    # handed and false of the world, in the block whose whole job is saying what is known and
+    # how. `supplied_from` is what keeps the provenance on the screen.
+    return cancel_inputs(escrow, supplied_sequence=sequence,
+                         supplied_from=f"the EscrowCreate `tx {previous}`")
 
 
 def _when(field: str, ripple_seconds) -> str:
@@ -287,10 +320,17 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
         # hand is not delivery.
         #
         # STILL READ-ONLY. `tx` is a lookup. Nothing below signs or submits.
+        # THE SECTION HEADER COMES FIRST, and it did not on the operator's 2026-09-30 run. The
+        # read announcement printed at the continuation indent directly under "FinishAfter not
+        # set", so "reading `tx ...`" and "got OfferSequence=21051277" read as FinishAfter
+        # detail -- two lines about a reclaim, filed under an unrelated field, above the header
+        # they belong to. Rule 14 is about whether the screen can be acted on, and a number
+        # under the wrong heading is worse than no number.
+        console.say("              EscrowCancel  <- what reclaiming this escrow would need")
         if not inputs.ready and inputs.missing == ("OfferSequence",) and one.get("PreviousTxnID"):
             inputs = _sequence_from_the_creating_tx(console, one, inputs)
         ready = "YES, both fields present" if inputs.ready else f"NO, missing {', '.join(inputs.missing)}"
-        console.say(f"              EscrowCancel buildable from this entry?  {ready}")
+        console.say(f"                           buildable from this entry?  {ready}")
         console.say(f"                           Owner={inputs.owner or '(absent)'} "
                     f"OfferSequence={inputs.offer_sequence if inputs.offer_sequence is not None else '(absent)'}")
         console.say(f"                           {inputs.how_to_get_it}")

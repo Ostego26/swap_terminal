@@ -370,3 +370,184 @@ def test_the_epoch_offset_has_exactly_one_definition_in_the_tree():
         f"RIPPLE_EPOCH_OFFSET_SECONDS is assigned in {defined}. One definition, imported -- a second "
         f"copy drifts silently and a wrong offset makes an escrow anyone can cancel"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE `tx` CACHE. Measured on the operator's 2026-09-30 run: FOUR reads for TWO
+# escrows, because account_objects lists an escrow under BOTH the sender's and
+# the destination's owner directory and both faucet accounts are ends of the
+# same two escrows. Half the calls were waste, against a public endpoint that
+# has already rate-limited this tree once today.
+# ---------------------------------------------------------------------------
+
+
+class _CountingConsole:
+    """Collects what would be printed, so the test can assert on the SCREEN."""
+
+    def __init__(self):
+        self.lines = []
+
+    def say(self, line):
+        self.lines.append(line)
+
+
+@pytest.fixture(autouse=True)
+def _empty_tx_cache():
+    """A module-level cache is shared state; each test starts from empty and leaves it empty.
+
+    Without this the second test to run would see the first one's entries and pass for the wrong
+    reason -- which is the failure mode of caching in a module rather than in a call, and the
+    reason the cache is documented as per-run.
+    """
+    xrp_balances._TX_ALREADY_READ.clear()
+    yield
+    xrp_balances._TX_ALREADY_READ.clear()
+
+
+ESCROW_UNDER_BOTH_ACCOUNTS = {
+    "Account": "rSENDER",
+    "Amount": "1000000",
+    "CancelAfter": 843784768,
+    "PreviousTxnID": "F74EFFDB",
+}
+A_CREATE = {"TransactionType": "EscrowCreate", "Account": "rSENDER", "Sequence": 21051277}
+
+
+def test_the_same_escrow_seen_twice_is_read_from_the_ledger_ONCE(monkeypatch):
+    """THE DEFECT, MEASURED AND FIXED. Two lookups of one hash became one.
+
+    Seeded exactly as the live run produced it: the same escrow entry handed in twice, which is
+    what happens when both ends of it are in the account list.
+    """
+    calls = []
+    monkeypatch.setattr(xrp_balances, "rpc",
+                        lambda method, params: calls.append((method, params)) or A_CREATE)
+
+    console = _CountingConsole()
+    first = xrp_balances._sequence_from_the_creating_tx(
+        console, ESCROW_UNDER_BOTH_ACCOUNTS, xrp_balances.cancel_inputs(ESCROW_UNDER_BOTH_ACCOUNTS))
+    second = xrp_balances._sequence_from_the_creating_tx(
+        console, ESCROW_UNDER_BOTH_ACCOUNTS, xrp_balances.cancel_inputs(ESCROW_UNDER_BOTH_ACCOUNTS))
+
+    assert len(calls) == 1, f"asked the ledger {len(calls)} times for one transaction hash"
+    assert calls[0][0] == "tx"
+    assert first.offer_sequence == second.offer_sequence == 21051277
+    assert first.ready is second.ready is True
+
+    # THE PROVENANCE, AND THIS IS THE ASSERTION THAT WAS MISSING. Reverting this function to
+    # merging the sequence into a copy of the escrow dict -- which is how it was first written --
+    # survived every other check here: cancel_inputs() would then report "the account_objects
+    # entry itself", true of the dict it was handed and false of the world. The provenance has to
+    # be asserted where the read HAPPENS, not only on the function that formats it.
+    for result in (first, second):
+        assert result.source == "the EscrowCreate `tx F74EFFDB`"
+        assert "F74EFFDB" in result.how_to_get_it
+        assert "account_objects entry" not in result.how_to_get_it, (
+            "this sequence came from a second transaction; saying it was on the entry tells the "
+            "reader it needs no further checking, when its identity had to be verified first"
+        )
+
+    # AND THE CACHE HIT IS ON THE SCREEN (rule 14). A reader comparing the two accounts' sections
+    # would otherwise see the read announced under one and not the other, with no way to tell a
+    # cache hit from a branch that did not run.
+    printed = " ".join(console.lines)
+    assert "was already read this run" in printed
+    assert printed.count("reading `tx") == 1
+
+
+def test_a_DIFFERENT_hash_is_still_read(monkeypatch):
+    """MUTATION: cache on any key at all -- or return the first response for every hash -- and
+    the second escrow inherits the first's OfferSequence. Which is the sequence of a DIFFERENT
+    escrow of the same owner, and cancelling by it cancels the wrong one. The operator holds two.
+    """
+    responses = {"F74EFFDB": A_CREATE,
+                 "AD6C8FAF": {**A_CREATE, "Sequence": 21051301}}
+    asked = []
+
+    def fake_rpc(method, params):
+        asked.append(params["transaction"])
+        return responses[params["transaction"]]
+
+    monkeypatch.setattr(xrp_balances, "rpc", fake_rpc)
+    console = _CountingConsole()
+    other = {**ESCROW_UNDER_BOTH_ACCOUNTS, "PreviousTxnID": "AD6C8FAF", "CancelAfter": 844206951}
+
+    one = xrp_balances._sequence_from_the_creating_tx(
+        console, ESCROW_UNDER_BOTH_ACCOUNTS, xrp_balances.cancel_inputs(ESCROW_UNDER_BOTH_ACCOUNTS))
+    two = xrp_balances._sequence_from_the_creating_tx(
+        console, other, xrp_balances.cancel_inputs(other))
+
+    assert asked == ["F74EFFDB", "AD6C8FAF"], "two distinct hashes, two reads"
+    assert one.offer_sequence == 21051277
+    assert two.offer_sequence == 21051301
+    assert one.offer_sequence != two.offer_sequence
+    # Each names ITS OWN creating transaction, so the two cannot be confused on the screen either.
+    assert one.source == "the EscrowCreate `tx F74EFFDB`"
+    assert two.source == "the EscrowCreate `tx AD6C8FAF`"
+
+
+def test_a_FAILED_read_is_not_cached_as_a_failure(monkeypatch):
+    """A transient network error is not a fact about the ledger.
+
+    MUTATION: cache before checking the call succeeded, or cache the exception, and the second
+    account's section reports the field unreadable because the FIRST one's request timed out.
+    """
+    attempts = []
+
+    def flaky_rpc(_method, params):
+        attempts.append(params["transaction"])
+        if len(attempts) == 1:
+            raise RuntimeError("connection reset")
+        return A_CREATE
+
+    monkeypatch.setattr(xrp_balances, "rpc", flaky_rpc)
+    console = _CountingConsole()
+
+    failed = xrp_balances._sequence_from_the_creating_tx(
+        console, ESCROW_UNDER_BOTH_ACCOUNTS, xrp_balances.cancel_inputs(ESCROW_UNDER_BOTH_ACCOUNTS))
+    assert failed.ready is False, "the read did not happen, so nothing is known"
+    assert "F74EFFDB" not in xrp_balances._TX_ALREADY_READ
+
+    retried = xrp_balances._sequence_from_the_creating_tx(
+        console, ESCROW_UNDER_BOTH_ACCOUNTS, xrp_balances.cancel_inputs(ESCROW_UNDER_BOTH_ACCOUNTS))
+    assert len(attempts) == 2, "the second account retries rather than inheriting a failure"
+    assert retried.ready is True
+
+    printed = " ".join(console.lines)
+    assert "that read FAILED" in printed
+    assert "not the same as absent" in printed, (
+        "a read that did not happen must not read as a field that is absent"
+    )
+
+
+def test_only_the_tx_read_is_cached_and_it_is_keyed_BY_THE_HASH(monkeypatch):
+    """account_info and account_objects are NOT cached, and that is the point of the split.
+
+    A validated transaction's fields never change, so its response cannot go stale within a run.
+    A balance and an owner list can, and caching those would make this script report a state the
+    ledger has moved past -- rule 15's shape at script scale: a buffer with one reader, and the
+    authority still asked directly.
+
+    ASSERTED ON THE CACHE'S CONTENTS after a real call, not by grepping the source. The first
+    version of this test did grep -- for `_TX_ALREADY_READ[address]` and two other spellings --
+    which is the same "pin a name where you mean a property" mistake four other checks in this
+    tree have already made, and it had a syntax error in its own escape sequence besides.
+    """
+    monkeypatch.setattr(xrp_balances, "rpc", lambda _m, _p: A_CREATE)
+    console = _CountingConsole()
+    xrp_balances._sequence_from_the_creating_tx(
+        console, ESCROW_UNDER_BOTH_ACCOUNTS, xrp_balances.cancel_inputs(ESCROW_UNDER_BOTH_ACCOUNTS))
+
+    # Exactly one entry, keyed by the transaction hash and nothing else -- not the address, not
+    # a (method, params) tuple, not the escrow dict.
+    assert set(xrp_balances._TX_ALREADY_READ) == {"F74EFFDB"}
+    assert all(isinstance(key, str) for key in xrp_balances._TX_ALREADY_READ)
+    assert ESCROW_UNDER_BOTH_ACCOUNTS["Account"] not in xrp_balances._TX_ALREADY_READ, (
+        "an address is not a transaction hash; caching by account would return one escrow's "
+        "creation for a different escrow of the same owner"
+    )
+
+    # And the only rippled method this cache stands in front of is `tx`. The read-only allowlist
+    # above holds the full set; this holds that the cached one is the immutable one.
+    assert "tx" in READ_ONLY_METHODS
+    assert not {"account_info", "account_objects", "server_info"} & set(xrp_balances._TX_ALREADY_READ)

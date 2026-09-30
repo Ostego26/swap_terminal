@@ -479,3 +479,78 @@ def test_the_submitter_and_the_owner_are_not_collapsed():
     assert payload["Account"] == "rANYBODY"
     assert payload["Owner"] == "rCREATOR"
     assert payload["Account"] != payload["Owner"]
+
+# ---------------------------------------------------------------------------
+# WHERE THE SEQUENCE CAME FROM. The operator's 2026-09-30 run printed
+# "both fields are on the object" for a sequence it had just fetched from a
+# SECOND transaction -- a false sentence in the block whose whole job is
+# saying what is known and how.
+# ---------------------------------------------------------------------------
+
+
+def test_a_sequence_found_on_the_entry_says_so():
+    inputs = cancel_inputs({**THE_STRANDED_ESCROW, "OfferSequence": 42})
+    assert inputs.ready is True
+    assert inputs.source == "the account_objects entry itself"
+    assert "the account_objects entry itself" in inputs.how_to_get_it
+
+
+def test_a_sequence_SUPPLIED_by_a_caller_never_claims_it_was_on_the_entry():
+    """THE DEFECT, PINNED. It is not a harmless inaccuracy.
+
+    The next thing anybody does with that number is build a transaction around it, and "on the
+    object" tells a reader it needs no further checking -- when in fact it was read from a
+    transaction whose identity had to be verified first (offer_sequence_from() refuses anything
+    that is not an EscrowCreate, because the wrong one names a different escrow of the same
+    owner). Erasing the provenance erases the reason that check exists.
+    """
+    inputs = cancel_inputs(THE_STRANDED_ESCROW, supplied_sequence=21051277,
+                           supplied_from="the EscrowCreate `tx F74EFFDB`")
+    assert inputs.ready is True
+    assert inputs.offer_sequence == 21051277
+    assert inputs.source == "the EscrowCreate `tx F74EFFDB`"
+    assert "F74EFFDB" in inputs.how_to_get_it
+    assert "on the object" not in inputs.how_to_get_it
+    assert "account_objects entry" not in inputs.how_to_get_it
+
+
+def test_a_caller_that_supplies_a_sequence_without_saying_where_is_called_out():
+    """Silence about provenance is itself reported, rather than defaulting to the entry.
+
+    MUTATION: default `supplied_from` to "the account_objects entry itself" and this fails --
+    which is the original defect, reintroduced through the parameter that was meant to fix it.
+    """
+    inputs = cancel_inputs(THE_STRANDED_ESCROW, supplied_sequence=7)
+    assert inputs.ready is True
+    assert "did not say from where" in inputs.source
+
+
+def test_the_entry_WINS_over_a_supplied_sequence():
+    """If the field is really there, the read's answer must not override it.
+
+    The ledger entry is the authority; a supplied value is a convenience for the case where the
+    entry lacks the field. Preferring the argument would let a caller's stale or wrong value
+    silently replace a present, correct one -- and both are "a sequence", so nothing would
+    complain.
+    """
+    inputs = cancel_inputs({**THE_STRANDED_ESCROW, "OfferSequence": 42},
+                           supplied_sequence=999, supplied_from="a second read")
+    assert inputs.offer_sequence == 42
+    assert inputs.source == "the account_objects entry itself"
+
+
+def test_the_unready_verdict_reports_an_empty_source_rather_than_a_guess():
+    """No sequence means no provenance, and an empty string is the honest answer."""
+    inputs = cancel_inputs(THE_STRANDED_ESCROW)
+    assert inputs.ready is False
+    assert inputs.source == ""
+
+
+def test_source_defaults_so_the_existing_call_shape_still_works():
+    """A five-field CancelInputs is constructible, because every earlier call site builds one.
+
+    MUTATION: make `source` required and every existing construction in this module breaks --
+    which is fine to do deliberately and must not happen by accident.
+    """
+    assert cancel_inputs("junk").source == ""
+    assert len(cancel_inputs("junk")) == 6, "five fields plus source"
