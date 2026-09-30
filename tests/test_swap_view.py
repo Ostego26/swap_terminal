@@ -21,7 +21,11 @@ from datetime import datetime, timedelta
 
 import pytest
 from services import swap_view
-from services.swap_service import DEPOSIT_TAG_COLUMN
+from services.swap_service import (
+    DEPOSIT_TAG_COLUMN,
+    TAG_ATTRIBUTED_ASSETS,
+    TAG_ATTRIBUTION,
+)
 from services.swap_view import (
     STAGE_ORDER,
     STALL_AFTER_SECONDS,
@@ -29,6 +33,7 @@ from services.swap_view import (
     confirmation_progress,
     deposit_instruction,
     quote_window,
+    shouted_discriminator,
     stage_rail,
     status_meaning,
     swap_display,
@@ -274,7 +279,14 @@ def test_xrp_attributes_by_destination_tag_and_refuses_without_one():
     # while claiming to measure the TAG. Derived in tests/valid_addresses.py.
     swap = make_swap(from_asset="XRP", deposit_address=XRP_HOT_ACCOUNT)
     deposit = deposit_instruction(swap)
-    assert deposit["model"] == "destination_tag", "the MODEL keeps the XRP Ledger's own term"
+    # THE MODEL NO LONGER KEEPS THE XRP LEDGER'S OWN TERM, and this line used to say it did.
+    # `destination_tag` as a model name is what kept Solana out of the model it belongs to: SOL
+    # attributes by a Memo instruction, has no destination tag, and fell into the template's
+    # {% else %} -- a page explaining attribution with no send target on it. The chain's own
+    # word arrives per asset now, from services/swap_service.TAG_ATTRIBUTION, and the
+    # CUSTOMER-FACING WORDING BELOW IS UNCHANGED, which is the assertion that matters here.
+    assert deposit["model"] == "tag"
+    assert deposit["discriminator"] == "DestinationTag", "the chain's own field name, per asset"
     assert deposit["tag"] is None
     assert deposit["problem"], "a swap with no tag issued must say so, loudly"
     assert "NO DESTINATION TAG" in deposit["problem"]
@@ -301,13 +313,55 @@ def test_xrp_attributes_by_destination_tag_and_refuses_without_one():
 def test_a_chain_with_no_attribution_model_refuses_to_say_where_to_send():
     """MUTATION: make ATTRIBUTION_MODELS.get() default to "address".
 
-    A chain whose custody model has not been decided -- Solana, per README.md --
-    would then render a send target derived from a column that has no meaning
-    for it. Refusing is the only safe answer.
+    A chain whose custody model has not been decided would then render a send target derived
+    from a column that has no meaning for it. Refusing is the only safe answer.
+
+    SEEDED WITH A CHAIN THAT DOES NOT EXIST, AND IT USED TO BE SEEDED WITH SOL. That was
+    correct on 2026-09-27 and false by 2026-09-30: the operator chose the one-account-plus-memo
+    strategy on 2026-09-29 (commit d22b2a1), SOL joined TAG_ATTRIBUTED_ASSETS, and this test
+    was still asserting its attribution was unknown -- pinning a claim the code had already
+    refuted. Rule 2: a test for behavior that has been replaced changes to pin the stronger
+    invariant, and the stronger invariant is the one below rather than this one.
     """
-    deposit = deposit_instruction(make_swap(from_asset="SOL"))
+    deposit = deposit_instruction(make_swap(from_asset="ZZZ"))
     assert deposit["model"] == "unknown"
     assert deposit["problem"]
+
+
+def test_no_tag_attributed_asset_can_render_as_undecided():
+    """THE STRONGER INVARIANT, and the one that would have caught this twice.
+
+    ATTRIBUTION_MODELS' tag entries are derived from TAG_ATTRIBUTED_ASSETS, so a chain cannot
+    be credited by tag in services/deposit_service and simultaneously told "we do not know how
+    your deposit is attributed" on its own page. That is not a hypothetical pairing: it is
+    exactly what SOL did between 2026-09-29 and 2026-09-30, and what a different chain did on
+    2026-09-27, both because this mapping was hand-maintained beside a set that already knew.
+
+    MUTATION: write ATTRIBUTION_MODELS' tag entries out as literals again -- which is how both
+    defects arrived -- and adding the third tag chain fails here instead of on a customer's page.
+    """
+    for asset in sorted(TAG_ATTRIBUTED_ASSETS):
+        deposit = deposit_instruction(make_swap(from_asset=asset, deposit_tag=7))
+        assert deposit["model"] == "tag", f"{asset} is credited by tag and must render as such"
+        assert asset in deposit["note"]
+
+        # EACH CHAIN'S OWN FIELD NAME, AND NOT ANY OTHER CHAIN'S. Asserting only that
+        # `discriminator` is non-empty let a mutation through: hardcoding "DestinationTag" at
+        # the call site survived the whole suite, which is the precise defect this rename
+        # exists to prevent -- a Solana customer told to set a field the Solana blockchain does
+        # not have, on the page that tells them where to send money. Compared against
+        # TAG_ATTRIBUTION per asset, and every OTHER chain's field name is asserted absent,
+        # because "contains the right word" does not exclude also containing the wrong one.
+        _, expected, network = TAG_ATTRIBUTION[asset]
+        assert deposit["discriminator"] == expected
+        assert deposit["network"] == network
+        assert shouted_discriminator(expected) in deposit["note"]
+        for other, (_, foreign, _) in TAG_ATTRIBUTION.items():
+            if other != asset and foreign != expected:
+                assert foreign not in deposit["note"], (
+                    f"{asset}'s deposit page names {other}'s field {foreign!r}"
+                )
+                assert shouted_discriminator(foreign) not in deposit["note"]
 
 
 # --- waiting versus stalled -------------------------------------------------

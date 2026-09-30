@@ -348,35 +348,53 @@ def test_chain_rows_report_an_unconfigured_chain_rather_than_omitting_it():
     assert all(row["configured"] is False for row in rows.values())
     assert "not configured" in rows["XRP"]["endpoint"]
     # XRP is present, described, and NOT tradeable.
-    assert rows["XRP"]["attribution"] == "destination_tag"
+    assert rows["XRP"]["attribution"] == "tag"   # renamed 2026-09-30; the XRP
+    # Ledger's field name is no longer the model name -- see ATTRIBUTION_MODELS
     assert rows["XRP"]["tradeable"] is False
     assert rows["GRC"]["tradeable"] is True
 
 
 
 
-def test_the_solana_row_still_says_get_new_address_refuses():
-    """The companion, because the default sentence is TRUE of SOL and a careless fix breaks it.
+def test_the_solana_row_reports_the_memo_strategy_the_operator_chose():
+    """THIS TEST USED TO ASSERT THE OPPOSITE, and that is why it is worth reading.
 
-    MEASURED 2026-09-27: `_attribution_note("SOL")` returned the same string the default
-    branch gave a chain it was FALSE about, and for SOL it is correct.
-    chains/solana.py:597 get_new_address() raises NotImplementedError and its
-    message names the three custody options README.md leaves with the operator.
+    Until 2026-09-30 it was `test_the_solana_row_still_says_get_new_address_refuses`, and it
+    asserted SOL's attribution was "unknown" and its note said "the custody choice is the
+    operator's" -- with a docstring explaining that the default sentence "is TRUE of SOL and a
+    careless fix breaks it". It was true when written, on 2026-09-27.
 
-    MUTATION: fix that other chain's defect by editing the DEFAULT branch -- softening
-    "refuses" or adding per-chain wording to it, or giving every unmapped chain the
-    address model -- and this test fails. That is the point: the default is right
-    for the chain it was written for, and the repair had to be an entry in
-    ATTRIBUTION_MODELS rather than a change to the sentence SOL depends on.
+    The operator chose the one-account-plus-memo deposit strategy on 2026-09-29 (commit
+    d22b2a1, plus the clarification that this terminal takes no custody beyond brief escrow).
+    SOL joined services/swap_service.TAG_ATTRIBUTED_ASSETS and TAG_ATTRIBUTION,
+    chains/solana_memo.py was written to parse the memo, and chains/solana.py._attributable()
+    drops any credit it cannot attribute to one. So by 2026-09-30 the code credited SOL by tag
+    while this page told the operator the question was still open -- and THIS TEST HELD THE
+    STALE HALF IN PLACE, which is the part worth naming: a ratchet on a false claim is worse
+    than no test, because it makes the correction look like a regression.
+
+    Rule 2: it changes to pin the stronger invariant. What it pins now is that the row agrees
+    with the credit path, and test_swap_view's test_no_tag_attributed_asset_can_render_as_
+    undecided pins the same thing one layer down.
+
+    `get_new_address()` DOES still refuse on Solana, and that has not changed -- it is the
+    clause that stayed true while the sentence around it went stale, which is what let the old
+    assertion look verified. It is asserted below for what it is: a fact about the adapter, not
+    evidence that the custody question is open.
     """
     rows = {row["asset"]: row for row in chain_rows(seeded_config(), {})}
     note = rows["SOL"]["attribution_note"]
 
-    assert "get_new_address() refuses" in note
-    assert "custody choice is the operator's" in note
-    assert rows["SOL"]["attribution"] == "unknown", (
-        "SOL genuinely has no attribution model yet -- README.md leaves the choice with the operator"
+    assert rows["SOL"]["attribution"] == "tag"
+    assert "Memo instruction" in note, "SOL's own field name, not XRP's DestinationTag"
+    assert "Solana" in note
+    assert "custody choice is the operator's" not in note, (
+        "the operator made the choice on 2026-09-29; the page must not still be asking"
     )
+    assert "get_new_address() refuses" in note, (
+        "still true of the adapter, and the reason a shared account is what the page shows"
+    )
+    assert "DestinationTag" not in note, "Solana has no destination tag"
 
 
 def test_an_address_chain_with_no_recorded_derivation_says_so_rather_than_guessing():

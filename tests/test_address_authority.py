@@ -980,7 +980,7 @@ def test_the_shared_xrp_account_is_checked_too_and_the_missing_tag_is_reported_f
     instruction = deposit_instruction(tagged_but_unpayable)
 
     # (1) the branch really is the tag branch, so this is not measuring the other one
-    assert instruction["model"] == "destination_tag"
+    assert instruction["model"] == "tag"   # renamed 2026-09-30; see ATTRIBUTION_MODELS
     # (2) an unpayable SHARED account is reported even though the tag is fine
     assert "CANNOT RECEIVE A DEPOSIT" in instruction["problem"], (
         "the page rendered a shared XRP account that cannot receive a deposit, with no problem set -- "

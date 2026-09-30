@@ -91,11 +91,13 @@ fails instead of the page quietly calling every healthy swap stalled.
 
 from __future__ import annotations
 
+import re
+
 from microfortnights import format_duration
 from modules.address_authority import check_address
 
 from .helpers import parse_iso
-from .swap_service import DEPOSIT_TAG_COLUMN
+from .swap_service import DEPOSIT_TAG_COLUMN, TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION
 
 # The happy path, in order. This is the rail the customer watches fill, and it
 # is a DISPLAY ordering, not a state machine: the transitions are owned by
@@ -273,8 +275,11 @@ STALL_EXPLANATIONS = {
 # address IS the attribution. chains/xrp.XRPAdapter.get_new_address() REFUSES
 # and its message says why: the XRP Ledger attributes by an integer DESTINATION
 # TAG on one shared account. chains/solana.SolanaAdapter.get_new_address() also
-# refuses, and README.md's Solana section leaves the custody choice with the
-# operator, so there is no attribution model to draw yet.
+# refuses -- and on 2026-09-29 the operator chose the strategy that refusal was
+# waiting for: one shared account plus a per-swap Memo instruction, the same
+# shape as XRP's with a different field carrying the integer. So SOL is a tag
+# chain, and it joins by being in TAG_ATTRIBUTED_ASSETS rather than by an entry
+# written here.
 #
 # A CHAIN MISSING FROM THIS MAPPING IS A DEFECT AND NOT A GAP, and that was
 # learned from one. Measured 2026-09-27, a chain absent here rendered
@@ -287,11 +292,23 @@ STALL_EXPLANATIONS = {
 # rendered as a fact about live state, because admin_view.chain_rows() forces
 # every reachable chain into the table whether or not this mapping knows it.
 #
-# SOL IS THE OPPOSITE CASE AND THE DEFAULT SENTENCE IS TRUE OF IT.
-# chains/solana.py:597 get_new_address() really does raise NotImplementedError,
-# and its message names the three custody options README.md leaves with the
-# operator. So the fix could not be to the default branch: the default is right
-# for the chain it was written for and wrong for the chain that arrived later.
+# AND IT HAPPENED A SECOND TIME, TO SOL, WHICH IS WHY THIS PARAGRAPH IS A
+# CORRECTION RATHER THAN A WARNING. It used to read "SOL IS THE OPPOSITE CASE AND
+# THE DEFAULT SENTENCE IS TRUE OF IT", on the grounds that get_new_address()
+# really does raise NotImplementedError there and names the three custody options
+# README.md left with the operator. Both halves of that were true on 2026-09-27
+# and the conclusion was false by 2026-09-30: the operator chose one of those
+# three options on 2026-09-29 and the credit path was built to it, so the page
+# was telling an operator the question was open while deposit_service credited
+# SOL by tag. The adapter's refusal -- the part a reader can check in one grep --
+# stayed true the whole time, which is exactly what made the stale sentence look
+# verified. Rule 17: a reason to believe something is not having checked it.
+#
+# The lesson the first occurrence drew was "the fix had to be an entry in this
+# mapping rather than a change to the default branch". That was too small. An
+# entry is a copy, and a copy drifts on a schedule; the second occurrence took
+# twelve days. The tag entries are DERIVED now, so the default branch is
+# unreachable for any chain this application can credit.
 #
 # A MODEL NAME DESCRIBES A BEHAVIOR, NOT A DERIVATION, and the difference has
 # teeth. Two chains can derive their per-swap address completely differently --
@@ -305,7 +322,7 @@ STALL_EXPLANATIONS = {
 #
 #     deposit_instruction() below        address box, or address + tag pair
 #     templates/swap.html:59,64          `deposit.model == 'address'` vs
-#                                        `== 'destination_tag'`, else a bare note
+#                                        `== 'tag'`, else a bare note
 #     admin_view.chain_rows()            the `attribution` column
 #
 # So a model name minted for a derivation would name the same behavior in a word
@@ -319,11 +336,45 @@ STALL_EXPLANATIONS = {
 # not fall back to "address", because an address field drawn for a chain that
 # attributes by tag would invite a customer to send money that can never be
 # matched to their swap.
+#
+# THE MODEL IS `tag`, NOT `destination_tag`, AND THE RENAME IS THE POINT OF THE 2026-09-30
+# EDIT. `destination_tag` is the XRP LEDGER's field name, and using it as the model name made
+# the model unjoinable by any other tag chain: Solana's discriminator is a Memo instruction and
+# the Solana blockchain has no destination tag at all. The chain-specific word therefore moved
+# out of the key and into services/swap_service.TAG_ATTRIBUTION, which already carried it per
+# asset, and the key says only what the three consumers above actually branch on.
+#
+# THAT IS NOT A STYLE ARGUMENT -- THE IDENTICAL MISTAKE IS ALREADY RECORDED ONE FILE OVER.
+# TAG_ATTRIBUTION's own comment says that before it existed, `deposit_address_for()` raised
+# every refusal with the word "DestinationTag" in it, "so a SOL swap would have been refused
+# for the absence of an XRP variable, in a sentence naming a field the Solana blockchain does
+# not have." This table was the second copy of that same mistake, and it had already drifted.
+#
+# MEASURED 2026-09-30, which is what forced this: TAG_ATTRIBUTED_ASSETS and TAG_ATTRIBUTION
+# both held {"SOL", "XRP"} and this table held XRP alone, so `_attribution_note("SOL")` told
+# the operator on their own chain page
+#
+#     "not decided in this application -- get_new_address() refuses and the custody choice is
+#      the operator's"
+#
+# while services/swap_service.deposit_account() would hand a SOL swap a shared account and a
+# memo tag, and chains/solana.py._attributable() credits by that tag. The operator CHOSE the
+# one-account-plus-memo strategy on 2026-09-29 (commit d22b2a1, and the clarification that this
+# terminal takes no custody beyond brief escrow). The chain was decided; only this mapping had
+# not heard -- which is word for word the defect admin_view._attribution_note()'s docstring
+# already describes happening to a different chain on 2026-09-27. Second occurrence, same
+# table, so it is derived now rather than corrected again.
+#
+# THE TAG ENTRIES ARE DERIVED AND THE ADDRESS ENTRIES ARE NOT, and the asymmetry is deliberate.
+# There is no set of "address-attributed assets" to derive from -- an address chain is simply
+# one that answers get_new_address(), which is a property of its adapter and not a list. The
+# tag chains ARE a named set, so that set is the authority and a third chain joining it cannot
+# reach this file's default branch.
 ATTRIBUTION_MODELS = {
     "BTC": "address",
     "LTC": "address",
     "GRC": "address",
-    "XRP": "destination_tag",
+    **dict.fromkeys(TAG_ATTRIBUTED_ASSETS, "tag"),
 }
 
 # WHO derives the per-swap address, for the chains whose model is "address".
@@ -510,6 +561,23 @@ def _address_problem(asset: str, address: str | None) -> str:
     )
 
 
+def shouted_discriminator(discriminator: str) -> str:
+    """"DestinationTag" -> "DESTINATION TAG". The customer-facing shout, from the field name.
+
+    WHY A FUNCTION AND NOT A FOURTH COLUMN IN TAG_ATTRIBUTION. The shouted form is the field
+    name and nothing else, so storing it would be storing the same fact twice -- rule 8's "two
+    copies of one rule is a bug with a delay on it", at the scale of one word. It is derived.
+
+    WHY NOT PLAIN .upper(), WHICH IS WHAT THIS DID FOR ABOUT A MINUTE ON 2026-09-30 AND WAS
+    WRONG ON THE LIVE CHAIN. `"DestinationTag".upper()` is `DESTINATIONTAG`, one word, and the
+    customer's page has said "DESTINATION TAG" since it was written -- so uppercasing the field
+    name silently degraded the wording on the only tag chain with enabled pairs, in the
+    sentence that tells somebody not to send money yet. The camel-case boundary is where the
+    space goes, which also leaves "Memo instruction" alone because it has none.
+    """
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", discriminator).upper()
+
+
 def deposit_instruction(swap: dict) -> dict:
     """WHAT the customer must send, and HOW it gets attributed to this swap.
 
@@ -547,22 +615,36 @@ def deposit_instruction(swap: dict) -> dict:
             "note": f"This {asset} address belongs to this swap alone. Sending to it is what identifies your deposit.",
             "problem": _address_problem(asset, swap.get("deposit_address")),
         }
-    if model == "destination_tag":
-        # The MODEL is called destination_tag (the XRP Ledger's term, and what the
-        # customer's wallet labels the field). The COLUMN is deposit_tag (the
-        # schema's generic name, because the same column carries a Stellar or
-        # Cosmos memo). Read from the shared constant rather than either literal:
-        # this line read swap["destination_tag"] until 2026-09-26 and so found
-        # nothing, which rendered "NO DESTINATION TAG HAS BEEN ISSUED" for a swap
-        # that had one. See services/swap_service.DEPOSIT_TAG_COLUMN.
+    if model == "tag":
+        # The MODEL is called `tag` and the COLUMN is `deposit_tag` (the schema's generic name,
+        # because the same column carries a Solana, Stellar or Cosmos memo). Read from the
+        # shared constant rather than either literal: this line read
+        # swap["destination_tag"] until 2026-09-26 and so found nothing, which rendered "NO
+        # DESTINATION TAG HAS BEEN ISSUED" for a swap that had one. See
+        # services/swap_service.DEPOSIT_TAG_COLUMN.
+        #
+        # THE MODEL WAS CALLED `destination_tag` UNTIL 2026-09-30, and it was renamed for the
+        # reason ATTRIBUTION_MODELS above sets out at length: that is the XRP Ledger's field
+        # name, so it named the whole model after one member's vocabulary and no other tag
+        # chain could join it without the page telling a Solana customer about a field Solana
+        # does not have. The chain-specific word is read per asset below instead.
         tag = swap.get(DEPOSIT_TAG_COLUMN)
+        # WHAT THIS CHAIN CALLS THE DISCRIMINATOR, from the one table that knows. XRP's is a
+        # DestinationTag; SOL's is a Memo instruction. Nothing here spells either -- a
+        # tag-attributed asset with no TAG_ATTRIBUTION entry is impossible by the test in
+        # tests/test_solana_adapter.py that pins the two tables to the same key set, and
+        # falling back to a generic word would be the guess this rename exists to remove.
+        _, discriminator, network = TAG_ATTRIBUTION[asset]
+        upper = shouted_discriminator(discriminator)
         return {
-            "model": "destination_tag",
+            "model": "tag",
+            "discriminator": discriminator,
+            "network": network,
             "asset": asset,
             "address": swap.get("deposit_address") or "",
             "tag": tag,
             "note": (
-                f"{asset} deposits are attributed by DESTINATION TAG, not by address. The account below is shared by "
+                f"{asset} deposits are attributed by {upper}, not by address. The account below is shared by "
                 f"every swap, so a payment without the exact tag cannot be matched to yours."
             ),
             # TWO WAYS THIS PAGE CAN SEND MONEY NOWHERE, AND IT ONLY CHECKED ONE UNTIL
@@ -586,7 +668,7 @@ def deposit_instruction(swap: dict) -> dict:
             # where the real guard belongs -- this covers the row that is already in the
             # table, exactly as _address_problem()'s own docstring argues for its branch.
             "problem": (
-                "NO DESTINATION TAG HAS BEEN ISSUED for this swap, so there is nothing safe to send yet. Do not "
+                f"NO {upper} HAS BEEN ISSUED for this swap, so there is nothing safe to send yet. Do not "
                 "send to the account without one."
                 if tag is None
                 else _address_problem(asset, swap.get("deposit_address"))

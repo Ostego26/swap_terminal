@@ -69,6 +69,7 @@ from microfortnights import format_duration
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
 from .helpers import parse_iso, utc_now_iso
+from .swap_service import TAG_ATTRIBUTION
 from .swap_view import (
     ADDRESS_DERIVATIONS,
     ATTRIBUTION_MODELS,
@@ -427,7 +428,12 @@ def pair_rows(config, adapters: dict) -> list[dict]:
     answer to a question an operator will otherwise ask by reading source.
     """
     allowed = set(config["ALLOWED_PAIRS"])
-    assets = sorted({asset for pair in allowed for asset in pair} | set(ATTRIBUTION_MODELS) | {"SOL"})
+    # `| {"SOL"}` STOOD HERE UNTIL 2026-09-30 and is gone because it is now redundant, proven
+    # rather than assumed: ATTRIBUTION_MODELS' keys are {BTC, GRC, LTC, SOL, XRP}, and SOL is a
+    # member because the table derives its tag entries from TAG_ATTRIBUTED_ASSETS. The literal
+    # existed precisely BECAUSE the table did not know about SOL -- a hardcoded patch over the
+    # drift the derivation removes (rule 9: consolidation creates dead code, and this is it).
+    assets = sorted({asset for pair in allowed for asset in pair} | set(ATTRIBUTION_MODELS))
     rows = []
     for from_asset in assets:
         for to_asset in assets:
@@ -483,7 +489,14 @@ def chain_rows(config, adapters: dict) -> list[dict]:
     carries `user` and `password` in the same dict.
     """
     rows = []
-    for asset in sorted(set(ATTRIBUTION_MODELS) | {"BTC", "LTC", "GRC", "SOL"}):
+    # THE SAME CULL, and this union was the louder one: all four literals are keys of
+    # ATTRIBUTION_MODELS (checked 2026-09-30 -- {BTC, GRC, LTC, SOL, XRP}), so it restated the
+    # table's own contents beside the table. What it was FOR is worth keeping in words: every
+    # chain this application knows gets a row whether or not a pair enables it, because "XRP is
+    # off" is the answer to a question an operator would otherwise ask by reading source. That
+    # intent is now served by the table alone, and a chain absent from the table has no
+    # attribution model to report anyway.
+    for asset in sorted(ATTRIBUTION_MODELS):
         adapter = adapters.get(asset)
         threshold = config.get(f"{asset}_MIN_CONFIRMATIONS")
         rows.append(
@@ -533,22 +546,32 @@ def _attribution_note(asset: str) -> str:
     attributed" from one place (rule 8), the same arrangement threshold_note()
     already has.
 
-    THE DEFAULT BRANCH WAS ONCE RENDERED FOR A CHAIN IT WAS FALSE ABOUT, and
-    that is why the default is narrow. Measured 2026-09-27 by calling this
+    THE DEFAULT BRANCH HAS NOW RENDERED FOR TWO CHAINS IT WAS FALSE ABOUT, which is why the
+    table it reads is DERIVED rather than merely corrected. Measured 2026-09-27 by calling this
     function directly, it returned
 
         "not decided in this application -- get_new_address() refuses and the
          custody choice is the operator's"
 
-    for a chain whose adapter DID return a real per-swap address and whose
-    custody question was not open. It is true of SOL -- chains/solana.py:597
-    get_new_address() raises NotImplementedError at line 618 and its message
-    names the three custody options README.md leaves with the operator -- and it
-    was false of the other, which reached the default only because
-    swap_view.ATTRIBUTION_MODELS did not list it while chain_rows() below forces
-    every reachable chain into the table. So the false sentence rendered on the
-    operator's chain page beside an `attribution` column reading "unknown". The
+    for a chain whose adapter DID return a real per-swap address and whose custody question was
+    not open. It reached the default only because swap_view.ATTRIBUTION_MODELS did not list it
+    while chain_rows() below forces every reachable chain into the table. So the false sentence
+    rendered on the operator's chain page beside an `attribution` column reading "unknown". The
     chain WAS decided; only the mapping had not heard.
+
+    THEN IT HAPPENED AGAIN, TO SOL, AND THIS DOCSTRING ASSERTED IT COULD NOT. The paragraph
+    above used to continue "It is true of SOL -- chains/solana.py get_new_address() raises
+    NotImplementedError and its message names the three custody options README.md leaves with
+    the operator". That was true when it was written and false by the next day. The operator
+    chose the one-account-plus-memo strategy on 2026-09-29 (commit d22b2a1), SOL joined
+    services/swap_service.TAG_ATTRIBUTED_ASSETS and TAG_ATTRIBUTION, chains/solana_memo.py was
+    written and chains/solana.py._attributable() credits by that memo tag -- and measured
+    2026-09-30, this function still told the operator SOL's attribution was undecided.
+    get_new_address() does still refuse, which is the sentence's own trap: the half a reader can
+    verify stayed true while the half that mattered went stale.
+
+    Same table, same failure, twelve days apart, so ATTRIBUTION_MODELS now derives its tag
+    entries from TAG_ATTRIBUTED_ASSETS and a third tag chain cannot reach this default at all.
 
     The address-model clause was the other half. It said "derived by the daemon's
     getnewaddress" for every chain in that model, which is right for the three
@@ -570,8 +593,21 @@ def _attribution_note(asset: str) -> str:
                 f"is not recorded here -- add it to ADDRESS_DERIVATIONS in services/swap_view.py"
             )
         return f"a fresh address per swap, and the address IS the attribution. Derived by {derivation}"
-    if model == "destination_tag":
-        return "one shared account, one integer destination tag per swap; get_new_address() refuses by design"
+    if model == "tag":
+        # NAMED PER ASSET, from the one table that knows. XRP's discriminator is a
+        # DestinationTag on the XRP Ledger; SOL's is a Memo instruction on Solana. This line
+        # said "one integer destination tag per swap" for every tag chain until 2026-09-30,
+        # which was true of the only member it had and would have been false about Solana the
+        # moment SOL joined -- the same shape as the address clause two branches up, which said
+        # "derived by the daemon's getnewaddress" for every address chain and is now split per
+        # asset for exactly this reason. Rule 8: the copies agree on the day they are written.
+        _, discriminator, network = TAG_ATTRIBUTION[asset]
+        # PHRASED SO IT READS CORRECTLY FOR BOTH, which the first attempt did not: "one
+        # integer Memo instruction per swap" is garbled, because on Solana the integer is
+        # CARRIED BY the memo rather than being the memo. The integer is the thing both chains
+        # have in common and the field is where each one puts it, so the sentence says that.
+        return (f"one shared {network} account, one integer per swap carried as its "
+                f"{discriminator}; get_new_address() refuses by design")
     return "not decided in this application -- get_new_address() refuses and the custody choice is the operator's"
 
 

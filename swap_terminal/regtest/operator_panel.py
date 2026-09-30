@@ -246,10 +246,15 @@ CHAINS = (
     ChainTab("XRP", "foreign", False,
              "the XRP Ledger has its own JSON-RPC shape, reached through chains/xrp.py. This "
              "panel does not probe it directly; its own read-only check is the button below."),
+    # "the custody choice is the operator's and is not decided in this tree" stood here until
+    # 2026-09-30 and was stale from 2026-09-29, the day the operator decided it. The panel is
+    # the screen somebody reads INSTEAD of the source, so a sentence on it saying a decision is
+    # open is the same defect as a wrong number (rule 16).
     ChainTab("SOL", "foreign", False,
-             "Solana is reached through chains/solana.py, and get_new_address() refuses there "
-             "by design -- the custody choice is the operator's and is not decided in this "
-             "tree. Its own read-only check is the button below."),
+             "Solana is reached through chains/solana.py. get_new_address() still refuses there "
+             "by design: the operator chose one shared account plus a per-swap Memo instruction "
+             "on 2026-09-29, so there is no per-swap address to derive. Its own read-only check "
+             "is the button below."),
 )
 
 

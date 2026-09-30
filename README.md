@@ -189,10 +189,40 @@ What still needs the operator: whether the hot wallet or the recipient pays the
 rent-exempt minimum when a recipient has no associated token account yet. The
 transfer plan reports the cost and does not choose.
 
-### Solana deposit addresses -- the operator's decision
+### Solana deposit addresses -- decided 2026-09-29: one account, one memo per swap
 
-**This is the one thing that is handed back rather than chosen, and
-`get_new_address()` refuses until it is settled.**
+**DECIDED. The operator chose the one-account-plus-memo strategy on 2026-09-29,
+and clarified the model alongside it: this terminal takes no custody beyond brief
+escrow.** That clarification *strengthens* the choice rather than changing it --
+under brief escrow a per-swap keypair is a secret that outlives the window it was
+created for, and the memo option is the only one of the three below that adds no
+secret at all.
+
+`get_new_address()` still refuses on Solana, and that is now a consequence of the
+decision rather than a question waiting on one: under a shared account there is
+no per-swap address to derive. The three options are kept below because the
+reasoning is the reason, and a decision recorded without it gets re-litigated.
+
+What was built to it, so nobody re-opens this by reading the table as a menu:
+
+| piece | where |
+|---|---|
+| SOL admitted to the tag-attributed set | `services/swap_service.TAG_ATTRIBUTED_ASSETS` |
+| the shared account and the field's name | `services/swap_service.TAG_ATTRIBUTION` -- `("SOL_DEPOSIT_ACCOUNT", "Memo instruction", "Solana")` |
+| memo parsing, and every refusal | `chains/solana_memo.py` |
+| a credit with no attributable memo is DROPPED and logged at WARNING | `chains/solana.py::_attributable()` |
+| the customer's page and the operator's chain row | `services/swap_view.ATTRIBUTION_MODELS`, derived from the set above |
+
+**Still unproven, and it is the one thing that needs a cluster:** the Memo
+program IDs were written from knowledge, not measured -- nothing in the
+development container reaches a Solana cluster. `solana_chain_check.py
+--hunt-memo N` is the instrument that settles it, and a test fails if that
+admission is ever deleted.
+
+**Also still open, and it is a money question rather than a code one:** no SOL
+pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured
+2026-09-30), so no SOL swap can be created yet. Enabling one is live posture and
+the operator's.
 
 Bitcoin, Litecoin and Gridcoin answer this with `getnewaddress`: the *daemon*
 derives a key, stores it in `wallet.dat`, and this application never holds a
@@ -207,8 +237,9 @@ decision.**
 | **one deposit account + per-swap memo/reference** | nothing new. One public key; the private key stays wherever the hot wallet already lives | attribution. Two customers sending identical amounts within a poll interval, or a sender whose wallet drops the memo, produce a deposit that must be matched to a swap by something other than the address -- and a wrong attribution **pays the wrong person**. |
 | **derivation from a seed** | one secret, deriving many addresses | the seed becomes the single thing that must never leak, and it is worse than one key: it controls every address ever derived, past and future. Solana has no BIP32-style *watch-only* public derivation, so the seed must be present to derive at all -- the app cannot hold a public parent the way a Bitcoin xpub allows. |
 
-**Recommendation: one deposit account plus a per-swap reference, and treat
-attribution as the thing to engineer.**
+**This was the recommendation, and it is the option that was chosen: one deposit
+account plus a per-swap reference, treating attribution as the thing to
+engineer.**
 
 The reasoning, against what this codebase already does:
 
@@ -233,11 +264,21 @@ The reasoning, against what this codebase already does:
    *Gridcoin* and pays out in SOL, so it needs no Solana deposit address. There
    is no existing choice here to be consistent with.
 
-What the operator has to decide before this can be built, and the reason it is
-not a code question: whether an unmatched deposit to the shared account halts
-for manual review (safe, and more operator work) or is auto-matched by amount
-within a window (less work, and a wrong attribution pays the wrong person). The
-second is fund movement.
+The second question this section used to leave open -- whether an unmatched
+deposit to the shared account halts for manual review, or is auto-matched by
+amount within a window -- **is answered by the build, and it halts.**
+`chains/solana.py::_attributable()` returns no credits for a transaction whose
+memo it cannot resolve to a tag, and logs at WARNING with the signature, because
+the coins really arrived and matching them is a human's job. Auto-matching by
+amount was never implemented and should not be: it is fund movement, and a wrong
+attribution pays the wrong person.
+
+Two of the refusals are worth knowing about because they are not tidiness.
+**Two memos on one transaction is refused rather than first-wins**: the memo is
+attacker-controlled, so a first-wins rule would let a *sender* choose whose swap
+gets credited by appending a second. And a memo outside `xrp_tag_service`'s
+allocator range is refused, because no tag this terminal could have issued lives
+there.
 
 ### What has not been proven
 

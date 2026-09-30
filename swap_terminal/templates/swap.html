@@ -61,16 +61,23 @@
     <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
        {{ view.swap.from_asset }}</strong> to</p>
     <p class="copyable mono breakable" id="deposit-target">{{ deposit.address }}</p>
-  {% elif deposit.model == 'destination_tag' and not deposit.problem %}
+  {#- The model was called 'destination_tag' until 2026-09-30. That is the XRP Ledger's own
+      field name, and naming the whole model after it is what kept Solana out: SOL attributes
+      by a Memo instruction and has no destination tag, so a SOL swap fell into the {% else %}
+      below and got a page that explains attribution and shows no send target. The chain's own
+      word for the field now arrives as `deposit.discriminator`, from
+      services/swap_service.TAG_ATTRIBUTION, so this branch serves every tag chain and names
+      each one's field correctly. -#}
+  {% elif deposit.model == 'tag' and not deposit.problem %}
     <p class="callout callout-working"><strong>{{ view.swap.from_asset }} works differently from the other chains
        here.</strong> {{ deposit.note }}</p>
     <p class="field-label">Account (shared by every swap)</p>
     <p class="copyable mono breakable">{{ deposit.address }}</p>
-    <p class="field-label">Destination tag &#8212; <strong>this is what identifies your swap</strong></p>
+    <p class="field-label">{{ deposit.discriminator }} &#8212; <strong>this is what identifies your swap</strong></p>
     <p class="copyable mono tag-value" id="deposit-target">{{ deposit.tag }}</p>
     <p class="panel-note">A payment to that account without exactly this tag cannot be matched to your swap. The tag
        is an integer, and <code>0</code> is a legal tag rather than a missing one.</p>
-  {% elif deposit.model == 'destination_tag' %}
+  {% elif deposit.model == 'tag' %}
     <p class="panel-note">{{ deposit.note }}</p>
   {% else %}
     <p class="panel-note">{{ deposit.note }}</p>
