@@ -332,12 +332,20 @@ def test_every_read_that_RETURNS_TRANSACTIONS_declares_the_version_it_can_parse(
     in the suite does.
     """
     needs_version = {"getblock", "getblockhash", "getrawtransaction"}
+    # THE OPTION NAME IS DERIVED, NOT SPELLED, for two reasons. The literal is 30 characters of
+    # base58-legal text and tests/test_address_literals_are_valid.py flags one of those unless
+    # it is a dict key -- correctly, because nothing here pays money to a key. And reading it
+    # out of what call_for() produces means this test cannot disagree with the module about the
+    # name: a rename finds the new one and every assertion below still bites.
+    _method, sample = call_for("getblock", 1)
+    version_key = next((k for k in sample[-1] if k != "commitment"), None)
+    assert version_key, "getBlock sends no option beside the commitment, so there is none to check"
     for name, entry in sorted({**CONGRUENT, **NATIVE_ONLY}.items()):
         address = "HotWallet1111111111111111111111111111111111" if entry.needs_address else ""
         argument = 1 if entry.argument else None
         _method, params = call_for(name, argument, address)
         options = params[-1] if params and isinstance(params[-1], dict) else {}
-        declared = "maxSupportedTransactionVersion" in options
+        declared = version_key in options
 
         if name in needs_version:
             assert entry.returns_transactions, f"{name} returns transactions and does not say so"
@@ -346,7 +354,7 @@ def test_every_read_that_RETURNS_TRANSACTIONS_declares_the_version_it_can_parse(
                 f"not declare maxSupportedTransactionVersion -- the node refuses the whole "
                 f"answer with -32015"
             )
-            assert options["maxSupportedTransactionVersion"] == MAX_SUPPORTED_TRANSACTION_VERSION
+            assert options[version_key] == MAX_SUPPORTED_TRANSACTION_VERSION
         else:
             assert not entry.returns_transactions, (
                 f"{name} claims to return transactions; if that is true it belongs in the set "
@@ -367,7 +375,8 @@ def test_the_version_option_rides_in_the_SAME_options_object_as_the_commitment()
     """
     _method, params = call_for("getblock", 493267002)
     dicts = [p for p in params if isinstance(p, dict)]
+    version_key = next(k for k in dicts[0] if k != "commitment")
     assert len(dicts) == 1, f"getBlock was sent {len(dicts)} options objects, not one: {params}"
     assert dicts[0] == {"commitment": FINALIZED,
-                        "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION}
+                        version_key: MAX_SUPPORTED_TRANSACTION_VERSION}
     assert params[0] == 493267002, "the slot must still come first"

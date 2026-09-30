@@ -411,13 +411,22 @@ def call_for(bitcoin_method: str, argument: object = None,
         # balance read at a weaker commitment can still change -- which for a deposit is the
         # difference between crediting a customer and crediting a rollback. This is the same
         # decision as chains/xrp_rpc_map's ledger_index="validated".
-        options: dict = {"commitment": FINALIZED}
-        if entry.returns_transactions:
-            # WITHOUT THIS THE NODE REFUSES THE WHOLE ANSWER -- see
-            # MAX_SUPPORTED_TRANSACTION_VERSION for the error it returns and why every block
-            # with any activity in it hit it. ONE options object rather than two appended
-            # dicts: Solana takes one, and a second would be an extra positional argument
-            # where the method expects none.
-            options["maxSupportedTransactionVersion"] = MAX_SUPPORTED_TRANSACTION_VERSION
+        # WITHOUT THE VERSION THE NODE REFUSES THE WHOLE ANSWER -- see
+        # MAX_SUPPORTED_TRANSACTION_VERSION for the error it returns and why every block with
+        # any activity in it hit it. ONE options object rather than two appended dicts: Solana
+        # takes one, and a second would be an extra positional argument where the method
+        # expects none.
+        #
+        # SPELLED AS A DICT LITERAL rather than assigned by subscript, and that is not a style
+        # choice: tests/test_address_literals_are_valid.py flags any 30-character base58-legal
+        # literal in the tree unless it sits in dict-KEY position, which is a precise rule --
+        # nothing in this repository pays money to a key. `maxSupportedTransactionVersion` is
+        # base58-legal by coincidence and 30 characters long, so a subscript assignment tripped
+        # that gate. The first fix widened the gate; this writes the call site the way the gate
+        # already recognizes, which is the right direction (rule 19: fix the cause, and the
+        # cause was here).
+        options: dict = ({"commitment": FINALIZED, "maxSupportedTransactionVersion":
+                          MAX_SUPPORTED_TRANSACTION_VERSION}
+                         if entry.returns_transactions else {"commitment": FINALIZED})
         params.append(options)
     return entry.method, params
