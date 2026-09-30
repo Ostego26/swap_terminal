@@ -43,6 +43,13 @@ import pytest
 from chains.registry import build_adapters
 from chains.solana import SolanaAdapter, SolanaRPCError, deposit_event
 from chains.solana_address import SolanaAddressError
+from chains.solana_units import (
+    BALANCE_COMMITMENT,
+    COMMITMENT_RANKS,
+    DISCOVERY_COMMITMENT,
+    FINALIZED_RANK,
+    LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT,
+)
 from config import Config
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION
 
@@ -762,11 +769,142 @@ def test_the_module_header_names_which_rpc_METHODS_met_a_real_cluster():
 
     proven, unproven = header.split("STILL UNEXERCISED", 1)
     for method in ("getHealth", "getGenesisHash", "getSignaturesForAddress", "getTransaction",
-                   "getMinimumBalanceForRentExemption"):
-        assert method in proven, f"{method} answered on the operator's run and belongs above"
-    for method in ("getBalance", "getAccountInfo", "find_deposits_to_address"):
-        assert method in unproven, (
-            f"{method} has never met a real response -- every run passed no --address or --mint"
+                   "getMinimumBalanceForRentExemption", "getBalance"):
+        assert method in proven, f"{method} answered on a real run and belongs above"
+
+    # getBalance MOVED to the proven side on 2026-09-30, when the ADDRESS section first ran and
+    # returned 28.7786992 SOL for a real devnet account. This test failed on that move, which is
+    # it working: the list is the file's honesty claim and a method must not cross without a run.
+    #
+    # WHAT MUST STAY UNPROVEN IS THE READERS, not the RPC methods. `_native_credits` and
+    # `_spl_credits` turn a transaction into a credit, and a wrong field name there returns
+    # nothing rather than raising -- which reads as "no deposit arrived". Naming the methods and
+    # not the readers is how a header could claim the credit path was covered because
+    # getSignaturesForAddress answered.
+    for reader in ("_native_credits", "_spl_credits"):
+        assert reader in unproven, (
+            f"{reader} has never run on a real response, and it is where a wrong field name "
+            f"silently loses a deposit"
         )
     assert "4.3.0" in proven, "the solana-core build it was proven against (rule 3)"
-    assert "--address" in unproven, "and the instrument that would settle the rest"
+    assert "--mint" in unproven, "and the instrument that would settle the SPL half"
+
+
+def test_the_header_records_the_defect_the_live_run_FOUND_rather_than_only_coverage():
+    """A failed step is the most useful thing this check has produced, and it is recorded as one.
+
+    The run did not merely leave the credit path uncovered -- it REFUTED a constant. Discovery
+    asked for `processed` and getSignaturesForAddress answered -32602, so SOL deposit discovery
+    had never worked. A header that listed the method as "unexercised" and moved on would lose
+    the finding, and the next reader would treat the fix as unnecessary.
+
+    MUTATION: delete the ATTEMPTED AND FAILED section, or fold it into the unexercised list, and
+    this fails.
+    """
+    source = Path(chains_solana.__file__).read_text(encoding="utf-8")
+    header = source[:source.index("from __future__")]
+    assert "ATTEMPTED AND FAILED" in header
+    assert "-32602" in header, "the error the cluster actually returned"
+    assert "LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT" in header, "and where the fix lives"
+    assert "NOT YET CONFIRMED BY A RUN" in header, (
+        "the fix is a fix and not a measurement until a run says so (rule 17)"
+    )
+
+# ---------------------------------------------------------------------------
+# THE COMMITMENT FLOOR. Found by the operator's 2026-09-30 devnet run, the first
+# time solana_chain_check.py's ADDRESS section executed:
+#
+#   find_deposits_to_address(limit=10)
+#   FAIL getSignaturesForAddress failed: {'code': -32602, 'message':
+#        'Method does not support commitment below `confirmed`'}
+#
+# find_deposits_to_address is THE method the deposit watcher calls. It had never
+# worked against a real cluster and could not have: DISCOVERY_COMMITMENT asked
+# for `processed`, which that method rejects. Every seeded test passed, because a
+# stub answers whatever it is asked -- which is the exact failure mode
+# chains/solana.py's header warns about and the reason the chain check exists.
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_never_asks_below_the_floor_the_cluster_enforces():
+    """THE DEFECT, PINNED AT THE CONSTANT.
+
+    MUTATION: set DISCOVERY_COMMITMENT back to "processed" and this fails. That is the value
+    that shipped, and it made SOL deposit discovery impossible while every test stayed green.
+    """
+    assert COMMITMENT_RANKS[DISCOVERY_COMMITMENT] >= COMMITMENT_RANKS[
+        LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT], (
+        f"discovery asks for {DISCOVERY_COMMITMENT!r}, below the floor "
+        f"{LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT!r} that getSignaturesForAddress enforces "
+        f"with -32602"
+    )
+    assert DISCOVERY_COMMITMENT in COMMITMENT_RANKS, "it has to be a rung, not a typo"
+
+    # THE FLOOR ITSELF IS A MEASURED PROTOCOL FACT, NOT A TUNABLE, and this assertion is here
+    # because lowering it survived the check above: comparing discovery >= floor passes if BOTH
+    # move, so the relative test alone let the whole fix be undone in one edit. The value is what
+    # the cluster said, and the error message is the evidence:
+    #
+    #     -32602  Method does not support commitment below `confirmed`
+    #
+    # A future reader who believes the floor has changed needs a run that says so, not an edit.
+    assert LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT == "confirmed", (
+        "this is what api.devnet.solana.com enforced on 2026-09-30, measured. Lowering it is a "
+        "claim about the protocol and needs a run, not an assumption"
+    )
+    assert COMMITMENT_RANKS[LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT] == 2
+
+
+def test_discovery_is_still_BELOW_finalized_so_a_deposit_is_visible_while_confirming():
+    """The floor was raised, and the reason for a low discovery commitment survives it.
+
+    If discovery read at `finalized` -- the default SOL_MIN_CONFIRMATIONS -- a deposit would be
+    invisible for its whole confirmation window and then appear already credited. That is rule
+    14's silence: neither the operator nor the customer could tell "arriving" from "never sent".
+
+    MUTATION: raise DISCOVERY_COMMITMENT to "finalized" to be safe, and this fails. Safe is not
+    the axis; crediting is gated on the rank read from the RESPONSE, not on this value.
+    """
+    assert COMMITMENT_RANKS[DISCOVERY_COMMITMENT] < COMMITMENT_RANKS[BALANCE_COMMITMENT]
+    assert COMMITMENT_RANKS[DISCOVERY_COMMITMENT] < FINALIZED_RANK
+
+
+def test_the_two_calls_that_hit_the_floor_both_read_the_constant(monkeypatch):
+    """BOTH call sites, checked at the wire rather than in the source.
+
+    getSignaturesForAddress is the one that failed; getTransaction takes the same constant and
+    is documented to enforce the same floor -- it was never reached on the operator's run,
+    because discovery failed first. Fixing the constant fixes both, and this asserts both
+    actually send it rather than one having been special-cased.
+    """
+    sent = []
+
+    class Recording(dict):
+        pass
+
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": "sig1", "confirmationStatus": "confirmed"}],
+        "getTransaction": {
+            "transaction": {"message": {"accountKeys": [WALLET], "instructions": []}},
+            "meta": {"preBalances": [0], "postBalances": [1_000_000], "err": None},
+        },
+    })
+    original = adapter.call
+
+    def recording_call(method, *params):
+        sent.append((method, params))
+        return original(method, *params)
+
+    monkeypatch.setattr(adapter, "call", recording_call)
+    adapter.find_deposits_to_address(WALLET)
+
+    for method, params in sent:
+        if method in ("getSignaturesForAddress", "getTransaction"):
+            config = next(p for p in params if isinstance(p, dict))
+            assert config.get("commitment") == DISCOVERY_COMMITMENT, (
+                f"{method} sent commitment {config.get('commitment')!r}, not the constant -- so "
+                f"raising the floor in one place would not have raised it here"
+            )
+    assert {m for m, _ in sent} >= {"getSignaturesForAddress", "getTransaction"}, (
+        f"expected both history calls to run; got {sorted({m for m, _ in sent})}"
+    )

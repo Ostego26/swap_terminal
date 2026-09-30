@@ -137,22 +137,40 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
       getTransaction -- with jsonParsed and maxSupportedTransactionVersion 0,
           ten read, `parsed` present, memo instructions found in all ten
 
-  STILL UNEXERCISED, and every one needs an address or a mint the runs did not
-  pass (`--address`, `--mint`)
-      getBalance, getTokenAccountsByOwner, getTokenAccountBalance
-      getAccountInfo -- the owner-program read that decides token-program
-          detection, and the mint decimals read
-      find_deposits_to_address end to end against a funded account, which is
-          the one that matters most: it is the credit path
-      send_to_address and get_new_address refuse by design and always will
+  EXERCISED on the 2026-09-30 run that first read an address
+      getBalance -- 28.7786992 SOL returned at BALANCE_COMMITMENT for a real
+          devnet account, so the value unwrapping is right
 
-So the read PLUMBING is proven -- the transport, the error shape, the
-throttling, the version parameter -- and the DEPOSIT-DISCOVERY path is not. A
-field-name error in `_native_credits` or `_spl_credits` would still pass every
-seeded test in this tree. The instrument is the same one:
-`solana_chain_check.py --address <wallet>` and `--mint <spl mint>`, read-only,
-one pasteable block, every step announced before it runs, and a non-zero exit
-when any step's response does not have the shape this file expects.
+  ATTEMPTED AND FAILED, WHICH IS THE MOST USEFUL RESULT THIS FILE HAS PRODUCED
+      find_deposits_to_address -- answered
+          `-32602 Method does not support commitment below `confirmed``
+          on its first call against a real cluster. DISCOVERY_COMMITMENT was
+          `processed`, which getSignaturesForAddress rejects, so SOL deposit
+          discovery had never worked and could not have. Fixed by raising the
+          constant to the floor the cluster enforces; see
+          chains/solana_units.LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT.
+          THE FIX IS NOT YET CONFIRMED BY A RUN -- the next one settles it.
+
+  STILL UNEXERCISED
+      getTransaction on the DEPOSIT path. The memo hunt proved getTransaction
+          itself against real traffic, but at its own config; this path sends
+          DISCOVERY_COMMITMENT and was never reached, because discovery failed
+          first. It is documented to enforce the same floor and that is not
+          measured here (rule 17).
+      _native_credits and _spl_credits -- the readers that turn a transaction
+          into a credit. Never run on a real response, and a wrong field name
+          there returns nothing rather than raising, which reads as "no deposit
+          arrived". This is the credit path and it remains the half that matters.
+      getTokenAccountsByOwner, getTokenAccountBalance, and getAccountInfo's
+          owner-program and decimals reads -- all need `--mint`.
+      send_to_address and get_new_address refuse by design and always will.
+
+So the transport is proven, one balance read is proven, and one real defect on
+the deposit path has been found and fixed. The instrument is the same one:
+`solana_chain_check.py`, which needs no arguments since 2026-09-30, plus
+`--mint` for the SPL half. Read-only, one pasteable block, every step announced
+before it runs, and a non-zero exit when any step's response does not have the
+shape this file expects -- which is exactly how the -32602 surfaced.
 """
 
 from __future__ import annotations

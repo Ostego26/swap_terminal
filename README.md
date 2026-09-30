@@ -234,13 +234,30 @@ bare integers outside `0..4294967295`** — `1790804868669741040` and three
 siblings, unix timestamps in nanoseconds. Somebody really does put a bare
 integer in a memo, so `TAG_MAXIMUM` is what stops one being read as a swap tag.
 
-**Still unproven, and it is the half that matters:** the **credit path**.
-`getBalance`, `getAccountInfo`, `getTokenAccountsByOwner`,
-`getTokenAccountBalance` and `find_deposits_to_address` have never met a real
-response, because every run so far passed no `--address` and no `--mint`. A
-wrong field name in `_native_credits` or `_spl_credits` still passes every
-seeded test in this tree. `solana_chain_check.py --address <wallet>` is the run
-that settles it.
+**The credit path found a real defect the first time it ran, 2026-09-30.**
+`find_deposits_to_address` — the method the deposit watcher calls — answered
+
+    -32602  Method does not support commitment below `confirmed`
+
+`DISCOVERY_COMMITMENT` was `processed`, which `getSignaturesForAddress` rejects,
+so **SOL deposit discovery had never worked and could not have.** Every seeded
+test passed, because a stub answers whatever it is asked — which is exactly the
+failure mode `chains/solana.py`'s header warns about and the reason this script
+exists. Fixed by raising the constant to the floor the cluster enforces
+(`chains/solana_units.LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT`); the fix is
+**not yet confirmed by a run**.
+
+Raising it costs one rung of visibility and nothing else: a deposit now appears
+at `confirmed` rather than `processed`, while the rank that gates crediting is
+read from the response's own `confirmationStatus` and never from the commitment
+asked for. `confirmed` is still below `finalized`, so the visibility window that
+constant exists to provide is intact. There is no lower value the method
+accepts, so this is a constraint rather than a trade.
+
+**Still unproven:** `_native_credits` and `_spl_credits` — the readers that turn
+a transaction into a credit. A wrong field name there returns nothing rather
+than raising, and nothing reads as "no deposit arrived". `getBalance` is proven
+(28.7786992 SOL for a real devnet account); the SPL half needs `--mint`.
 
 **Also still open, and it is a money question rather than a code one:** no SOL
 pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured

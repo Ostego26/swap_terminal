@@ -227,10 +227,27 @@ COMMITMENT_RANKS: dict[str, int] = {
 # against a deposit that then disappears costs the deposit.
 FINALIZED_RANK = COMMITMENT_RANKS["finalized"]
 
+#: THE LOWEST COMMITMENT THE HISTORY METHODS ACCEPT, MEASURED ON DEVNET 2026-09-30.
+#:
+#: `getSignaturesForAddress` refuses anything below this, and says so:
+#:
+#:     -32602  Method does not support commitment below `confirmed`
+#:
+#: Which is how this was found. The operator ran solana_chain_check.py the first time its
+#: ADDRESS section actually executed, and `find_deposits_to_address` -- THE method the deposit
+#: watcher calls -- failed on its first call against a real cluster. It had never worked and
+#: could not have: the constant below asked for `processed` from a method that rejects it.
+#:
+#: A CONSTANT RATHER THAN A COMMENT, because it is a protocol constraint and not a preference.
+#: Anything deriving a commitment for `getSignaturesForAddress` or `getTransaction` has to
+#: respect this floor, and a future reader lowering DISCOVERY_COMMITMENT "for visibility" needs
+#: to meet the reason in the code rather than in prose (rule 11: one place, derived).
+LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT = "confirmed"
+
 # THE TWO COMMITMENTS THIS TERMINAL ASKS FOR, AND THEY ARE DIFFERENT ON PURPOSE.
 #
-# Discovery reads at `processed` -- the LOWEST level -- so that a deposit which
-# has landed but is not yet settled is VISIBLE. That is what moves a swap to
+# Discovery reads as LOW as the cluster permits, so that a deposit which has
+# landed but is not yet settled is VISIBLE. That is what moves a swap to
 # `deposit_seen` and then `confirming`, which is what a customer refreshing the
 # page is looking at. Reading discovery at `finalized` would make a deposit
 # invisible for its whole confirmation window and then appear already credited,
@@ -238,10 +255,29 @@ FINALIZED_RANK = COMMITMENT_RANKS["finalized"]
 # the ability to tell "arriving" from "never sent".
 #
 # The GATE is a separate question and reads the rank, not this constant. Seeing
-# a deposit at `processed` credits nothing; only rank >= SOL_MIN_CONFIRMATIONS
-# does. So the low discovery commitment buys visibility and cannot buy an early
-# payout.
-DISCOVERY_COMMITMENT = "processed"
+# a deposit early credits nothing; only rank >= SOL_MIN_CONFIRMATIONS does. So a
+# low discovery commitment buys visibility and cannot buy an early payout.
+#
+# IT WAS `processed` UNTIL 2026-09-30 AND THAT NEVER WORKED. The reasoning above
+# was right about what discovery is FOR and wrong about what the cluster allows:
+# getSignaturesForAddress answers -32602 to anything below `confirmed`, so
+# find_deposits_to_address failed on its first real call. Not a silent wrong
+# answer -- it raises -- but the effect was that SOL deposit discovery could
+# never have run at all, and every seeded test passed because a stub answers
+# whatever it is asked.
+#
+# WHAT THE ONE RUNG COSTS, precisely, because it is worth knowing rather than
+# waving at: a deposit is now visible at rank 2 instead of rank 1. The rank
+# itself is read from the RESPONSE's `confirmationStatus` (see
+# chains/solana.py's find_deposits_to_address) and never from the commitment
+# asked for, so nothing about crediting moves -- only the earliest moment the
+# deposit appears at all. `confirmed` is still below `finalized`, which is what
+# SOL_MIN_CONFIRMATIONS defaults to, so the visibility window this constant
+# exists to provide is intact.
+#
+# AND IT IS FORCED, NOT CHOSEN. There is no lower value the method accepts, so
+# this is the constraint rather than a trade.
+DISCOVERY_COMMITMENT = LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT
 
 # What a balance read asks for. Finalized, because a hot-wallet balance is used
 # to decide whether a payout can be covered, and an unsettled balance can go
