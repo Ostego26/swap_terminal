@@ -229,9 +229,12 @@
        because six chains at a 30s timeout is a three-minute page, and a page
        like that is one an operator interrupts. #}
     <p class="panel-note">Not probed on page load. Asking makes <strong>one read-only call per configured
-       chain</strong> &#8212; <code>getblockchaininfo</code> on a Bitcoin-style daemon,
-       <code>server_info</code> for XRP &#8212; and each can take up to its RPC timeout (30s by default), so the answer
-       can take a while. The network is taken from what the daemon reports, never from its port number.</p>
+       chain, and a second on a Bitcoin-style daemon to name its network</strong> &#8212;
+       <code>getblockchaininfo</code>, then <code>getinfo</code> for an older build that has no <code>chain</code>
+       key, which is Gridcoin&rsquo;s shape; <code>server_info</code> for XRP. Each can take up to its RPC timeout
+       (30s by default), so the answer can take a while. The network is taken from what the daemon reports, never
+       from its port number &#8212; and a daemon that will not name it says so rather than being reported as a
+       network called something.</p>
     <p><a class="button" href="{{ url_for('admin.admin_chains_route') }}" id="probe-link">Probe
        {{ data.chains | selectattr('configured') | list | length }} configured chain(s)</a></p>
     <div id="probe-result" class="result" aria-live="polite">

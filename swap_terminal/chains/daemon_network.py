@@ -42,6 +42,27 @@ CHAIN_TEST_NETWORKS = {
 }
 
 
+#: The prefix chain_network() returns when it could not read a network at all.
+#:
+#: NAMED rather than spelled twice, because a second reader appeared on
+#: 2026-09-30: services/admin_view.probe_chain() has to render "the daemon did
+#: not name its network" differently from a network called something -- rule
+#: 14's "did nothing must not look like did work", applied to a table cell. The
+#: existing callers never needed to ask, because they test membership of
+#: CHAIN_TEST_NETWORKS and an unknown string is in no allowlist.
+UNKNOWN_PREFIX = "unknown ("
+
+
+def is_named(network: str) -> bool:
+    """Did the daemon actually name its network, or is this the failure string?
+
+    A predicate rather than each caller testing the prefix, so the sentinel has
+    exactly one spelling and chain_network() below builds its own return value
+    from the same constant (rule 8).
+    """
+    return not network.startswith(UNKNOWN_PREFIX)
+
+
 def chain_network(adapter) -> str:
     """Which network this daemon is on, as a name. Two field names, because it moved.
 
@@ -67,4 +88,4 @@ def chain_network(adapter) -> str:
             # vocabulary (rule 11) instead of branching on which RPC answered.
             return "testnet" if value else "main"
         reasons.append(f"{method}: no `{field}` field")
-    return f"unknown ({'; '.join(reasons) or 'no route answered'})"
+    return f"{UNKNOWN_PREFIX}{'; '.join(reasons) or 'no route answered'})"

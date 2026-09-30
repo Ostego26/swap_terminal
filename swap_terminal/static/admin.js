@@ -93,8 +93,8 @@
     regionId: "probe-result",
     urlAttribute: "data-probe-url",
     announce:
-      "Probing now: one read-only call per configured chain, each up to its own RPC timeout (30s by default). " +
-      "Nothing is signed and nothing is sent.",
+      "Probing now: one read-only call per configured chain, plus a second on a Bitcoin-style daemon to name " +
+      "its network, each up to its own RPC timeout (30s by default). Nothing is signed and nothing is sent.",
     render: function (region, data, elapsed) {
       region.appendChild(
         line(
@@ -141,6 +141,11 @@
         head.appendChild(badge);
         item.appendChild(head);
 
+        // `network` is a NAME or null, never a sentence explaining its absence.
+        // A daemon that answered but would not name its network gets no line
+        // here and its reason in `detail` below -- rather than the line reading
+        // "Network: answered, but reported no chain name", which is what this
+        // rendered on the operator's screen on 2026-09-30.
         if (chain.network) {
           item.appendChild(
             line("Network, as the daemon itself reports it: " + chain.network, "card-body")

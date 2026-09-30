@@ -63,6 +63,7 @@ from __future__ import annotations
 from time import time
 
 from chains.base import RPCAdapter
+from chains.daemon_network import chain_network, is_named
 from chains.registry import unconfigured_chains, why_unconfigured
 from microfortnights import format_duration
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
@@ -894,12 +895,23 @@ def probe_chain(asset: str, adapter) -> dict:
             "network": None,
             "detail": f"did not answer: {exc}",
         }
+    # NAMED AND UNNAMED ARE DIFFERENT ANSWERS AND RENDER DIFFERENTLY (rule 14).
+    # `network` carries a name or None -- never a sentence about why there is no
+    # name, which is the shape that put "it reports its network as answered, but
+    # reported no chain name" on the operator's screen.
+    named = is_named(network)
     return {
         "asset": asset,
         "probed": True,
         "reachable": True,
-        "network": network,
-        "detail": f"answered; it reports its network as {network}",
+        "network": network if named else None,
+        "detail": (
+            f"answered; it reports its network as {network}"
+            if named
+            else f"answered, but would not name its network -- {network}. Reachable is not the "
+            f"question this probe exists to answer: an alias pointing at mainnet reads the same "
+            f"as one pointing at testnet until a daemon says which"
+        ),
     }
 
 
@@ -919,16 +931,42 @@ def probe_kind(adapter) -> str:
 
 
 def _ask_network(adapter) -> str:
-    """The one read that both names the network and proves reachability."""
+    """Name this daemon's network. RAISES when it cannot be reached at all.
+
+    THIS USED TO BE A SECOND IMPLEMENTATION OF chains/daemon_network.chain_network()
+    and it was the weaker one, which showed up on the operator's screen on
+    2026-09-30. It asked `getblockchaininfo` only, and Gridcoin's answer HAS NO
+    `chain` KEY -- so on the one chain that host had configured, this returned
+    the sentence "answered, but reported no chain name" and probe_chain()
+    interpolated it into "it reports its network as answered, but reported no
+    chain name". A sentence rendered as a name.
+
+    That is not a cosmetic defect. probe_chain()'s own docstring says an
+    operator whose "testnet" alias points at mainnet must READ THE WORD MAINNET
+    here, and for GRC this could never print either word. chain_network() falls
+    back to `getinfo.testnet` -- a boolean on the older build Gridcoin is -- and
+    names it. atomic_swap.py:435 already carried the same finding in a comment;
+    this is the third place that knowledge lived and the second that acted on it.
+
+    TWO CALLS NOW, NOT ONE, AND THE PROBE SAYS SO. The reachability read is kept
+    separate and first, because chain_network() never raises: folding the two
+    together would turn "this daemon did not answer" into "it answered and its
+    network is unknown", which are different facts and only one of them means
+    a daemon is down.
+    """
     if probe_kind(adapter) == "network_method":
         return str(adapter.network())
-    info = adapter.call(_PROBE_METHOD)
-    if isinstance(info, dict) and info.get("chain"):
-        return str(info["chain"])
-    return "answered, but reported no chain name"
+    # Reachability, and it is this call raising that reports a chain as down.
+    adapter.call(_PROBE_METHOD)
+    return chain_network(adapter)
 
 
 def probe_chains(adapters: dict, assets: tuple[str, ...] | None = None) -> list[dict]:
-    """Probe every configured chain, one read-only call each. Never raises."""
+    """Probe every configured chain, read-only. Never raises.
+
+    One call for an adapter with its own network(); up to two for a
+    Bitcoin-style daemon -- the reachability read, then the naming read that
+    older builds need. See _ask_network().
+    """
     names = tuple(sorted(adapters)) if assets is None else assets
     return [probe_chain(asset, adapters.get(asset)) for asset in names]

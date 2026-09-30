@@ -456,6 +456,37 @@ class _AnsweringAdapter(_RefusingAdapter):
         return {"chain": "test"}
 
 
+class _GridcoinShapedAdapter(_RefusingAdapter):
+    """A daemon whose getblockchaininfo carries no `chain` key. GRIDCOIN'S REAL SHAPE.
+
+    Not invented for a test. atomic_swap.py:435 records it -- "Bitcoin and
+    Litecoin answer `getblockchaininfo` with a `chain`; Gridcoin does not have
+    that KEY" -- and on 2026-09-30 the operator's /admin probe rendered the
+    consequence: the one chain that host had configured came back as a network
+    literally called "answered, but reported no chain name".
+
+    `getinfo.testnet` is where the older build puts it, as a BOOLEAN, which is
+    what chains/daemon_network.chain_network() knows and what this module did
+    not until the two were merged.
+    """
+
+    asset = "GRC"
+
+    def call(self, method, *params):
+        if method == "getblockchaininfo":
+            return {"blocks": 1234}
+        if method == "getinfo":
+            return {"testnet": True}
+        raise AssertionError(f"the probe asked for {method}, which is not one of the two reads")
+
+
+class _MuteAdapter(_RefusingAdapter):
+    """Answers both reads and names its network in neither."""
+
+    def call(self, method, *params):
+        return {"blocks": 1234}
+
+
 class _NoProbeAdapter:
     """An adapter with neither network() nor an RPCAdapter transport."""
 
@@ -478,6 +509,53 @@ def test_an_answering_chain_is_named_by_what_the_daemon_reports(monkeypatch):
     answered = probe_chain("BTC", _AnsweringAdapter())
     assert answered["reachable"] is True
     assert answered["network"] == "test"
+
+
+def test_a_daemon_with_no_chain_key_is_still_NAMED_from_getinfo():
+    """The defect the operator's screen showed on 2026-09-30, pinned.
+
+    Gridcoin answers getblockchaininfo without a `chain` key, and this module
+    used to return its own sentence -- "answered, but reported no chain name" --
+    which probe_chain() then rendered as the network's NAME. On the operator's
+    host that was the ONLY configured chain, so the panel whose stated purpose is
+    to make an operator "read the word mainnet" could not print either word for
+    the chain it was showing.
+
+    MUTATION: drop the chain_network() call and go back to reading `chain`
+    directly. `network` comes back None and this fails on the first assertion --
+    which is the honest failure, and still not good enough, because the daemon
+    CAN say.
+    """
+    named = probe_chain("GRC", _GridcoinShapedAdapter())
+    assert named["reachable"] is True
+    assert named["network"] == "testnet", (
+        "a daemon that puts its network in getinfo.testnet was not named, so /admin cannot tell "
+        "an operator whether the one chain they have configured is testnet or mainnet"
+    )
+    assert "testnet" in named["detail"]
+
+
+def test_a_daemon_that_names_NOTHING_is_reported_as_unnamed_and_not_as_a_network():
+    """A sentence must never arrive where a reader expects a name (rule 14).
+
+    `network` carries a name or None. The reason lives in `detail`, where it
+    reads as a reason -- and the detail says plainly that reachable is not the
+    question this probe exists to answer, because an alias pointing at mainnet
+    and one pointing at testnet look identical until a daemon says which.
+
+    MUTATION: return the "unknown (...)" string as `network`. The template and
+    admin.js both render that field as the network, so the page would print
+    "Network, as the daemon itself reports it: unknown (...)" -- the same defect
+    in new words.
+    """
+    mute = probe_chain("GRC", _MuteAdapter())
+    assert mute["reachable"] is True, "it answered; not naming a network is not being down"
+    assert mute["network"] is None, "an explanation was rendered where a network name goes"
+    assert "would not name its network" in mute["detail"]
+    assert "no `chain` field" in mute["detail"] and "no `testnet` field" in mute["detail"], (
+        "the detail does not say which reads were tried, so an operator cannot tell a daemon "
+        "that is shaped unexpectedly from one this code asked the wrong question"
+    )
 
 
 def test_not_configured_and_not_probeable_are_not_failures():
