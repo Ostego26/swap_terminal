@@ -1137,3 +1137,120 @@ def test_a_clean_asset_prints_the_no_findings_line_and_no_severity_tags():
     assert "every check that could run, ran, and none fired (3 checks)" in block
     assert "[OK]" not in block and "[THIN]" not in block and "[STALE]" not in block
     assert "checks fired" not in block
+
+
+# ---------------------------------------------------------------------------
+# WHICH ASSETS A PARTIAL RESPONSE MAY BE MISSING.
+#
+# IDS carries five assets and Config.ALLOWED_PAIRS trades four. Until 2026-09-30
+# _require_every_asset() demanded the whole table, so a response missing SOL -- an asset no
+# pair trades -- refused EVERY quote on EVERY pair. A wrong CoinPaprika id would have done
+# it, and chains/solana_rpc_map's history is exactly that: `grc-gridcoinresearch` 404s where
+# `grc-gridcoin` works, and SOL's own id was unconfirmed for days.
+# ---------------------------------------------------------------------------
+
+
+def test_required_assets_is_DERIVED_from_the_pairs_and_excludes_what_nothing_trades():
+    """The derivation, not a list. A hand-kept copy would be rule 8 on "may this be priced".
+
+    MUTATION: return tuple(IDS). The exemption assertion below fails, and so does the
+    behavioral test after it.
+    """
+    required = set(pricing.required_assets())
+    traded = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+
+    assert required == traded & set(pricing.IDS), (
+        f"required_assets() is {sorted(required)}, which is not the traded set "
+        f"{sorted(traded & set(pricing.IDS))}"
+    )
+    untraded = set(pricing.IDS) - traded
+    assert untraded, (
+        "every asset in IDS is now traded, so this test proves nothing -- which is fine, but "
+        "the exemption below cannot be checked and somebody should notice"
+    )
+    assert not (required & untraded), (
+        f"{sorted(required & untraded)} are required and traded by no pair, so an outage on "
+        f"one of them refuses every quote"
+    )
+
+
+def test_an_UNTRADED_asset_going_missing_does_not_refuse_a_quote(monkeypatch):
+    """The behavioral half, which is the point of the change.
+
+    A raw body short the untraded asset must still price. Before this, `_require_every_asset`
+    raised and the whole terminal stopped quoting because one asset nobody trades was absent.
+
+    MUTATION: put the untraded asset back in required_assets(). This fails at the fetch.
+    """
+    traded = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    untraded = sorted(set(pricing.IDS) - traded)
+    if not untraded:
+        pytest.skip("every asset in IDS is traded, so none can be missing harmlessly")
+
+    absent = untraded[0]
+    body = {cg_id: {"usd": 100.0, "usd_market_cap": 5e9, "usd_24h_vol": 2e8,
+                    "usd_24h_change": 1.0, "last_updated_at": 1790717713}
+            for asset, cg_id in pricing.IDS.items() if asset != absent}
+
+    monkeypatch.setattr(pricing.requests, "get", RecordingTransport(body))
+    pricing._cache.update({"raw": None, "prices": None, "context": None, "expires_at": 0.0})
+
+    prices = pricing.fetch_usd_prices()
+    assert f"{absent}_USD" not in prices, "the absent asset produced a price out of nowhere"
+    for asset in sorted(traded & set(pricing.IDS)):
+        assert f"{asset}_USD" in prices, f"{asset} is traded and was not priced"
+
+    # AND THE DEPTH SNAPSHOTS DO NOT RAISE EITHER. _snapshots_from_raw() indexed every IDS
+    # entry, so a short body would have made the badge able to refuse a quote -- which is the
+    # defect services/quote_service._confidence_for_display() already shipped once.
+    snapshots = pricing.fetch_market_context()
+    assert {snapshot.asset for snapshot in snapshots} == set(pricing.IDS) - {absent}
+
+    # A RATE OVER TWO TRADED ASSETS IS UNAFFECTED.
+    pair = next(iter(sorted(Config.ALLOWED_PAIRS)))
+    assert pricing.derive_pair_rate(pair[0], pair[1], prices) > 0
+
+
+def test_a_TRADED_asset_going_missing_still_refuses_and_names_it(monkeypatch):
+    """The narrowing must not weaken the refusal for anything a pair can trade.
+
+    MUTATION: drop the missing-asset check entirely. This fails -- and the failure is the one
+    that matters, because a swap priced off a missing leg is a swap priced wrong.
+    """
+    traded = sorted({asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+                    & set(pricing.IDS))
+    assert traded, "no asset is traded, so there is nothing whose absence must refuse"
+    absent = traded[0]
+    body = {cg_id: {"usd": 100.0} for asset, cg_id in pricing.IDS.items() if asset != absent}
+
+    monkeypatch.setattr(pricing.requests, "get", RecordingTransport(body))
+    pricing._cache.update({"raw": None, "prices": None, "context": None, "expires_at": 0.0})
+
+    with pytest.raises(pricing.PriceSourceError) as raised:
+        pricing.fetch_usd_prices()
+    # BOTH feeds are tried, so the traded asset's absence is reported twice -- once per feed --
+    # and the asset has to be named in it.
+    assert absent in str(raised.value), (
+        f"{absent} is traded and its absence was not named in the refusal"
+    )
+    assert "required" in str(raised.value), (
+        "the refusal does not say what was REQUIRED, which is now narrower than what was asked "
+        "for -- and printing only the asked-for list beside a narrower refusal is the more "
+        "confusing half of the pair"
+    )
+
+
+def test_NO_ENABLED_PAIR_REQUIRES_EVERYTHING_which_is_failing_closed(monkeypatch):
+    """With nothing enabled, require the whole table -- the behavior this replaced.
+
+    Requiring NOTHING would let a garbage response into the cache and turn a clear refusal
+    into a KeyError deeper in, which is what _require_every_asset() exists to prevent. The
+    empty case is the one where a derivation quietly becomes a no-op.
+
+    MUTATION: drop the `or tuple(IDS)` fallback. required_assets() returns () and this fails.
+    """
+    monkeypatch.setattr(Config, "ALLOWED_PAIRS", ())
+    assert set(pricing.required_assets()) == set(pricing.IDS), (
+        "with no pair enabled the required set did not fall back to every asset, so a response "
+        "missing anything at all would be accepted"
+    )

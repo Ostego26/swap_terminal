@@ -296,23 +296,65 @@ class PriceSourceError(RuntimeError):
     """
 
 
+def required_assets() -> tuple[str, ...]:
+    """The assets a response may NOT be missing: the ones some pair can actually trade.
+
+    NARROWED FROM ALL OF IDS ON 2026-09-30, and the reason is measured rather than
+    hypothetical. IDS carries BTC, LTC, GRC, XRP and SOL; Config.ALLOWED_PAIRS names the
+    first four. SOL is priced because a pair may want it one day and is traded by nothing
+    today -- and until this change a response missing SOL refused EVERY quote, on every
+    pair, because _require_every_asset() demanded the whole table.
+
+    That is not a theoretical hazard. chains/solana_rpc_map's own history is a wrong
+    CoinPaprika id 404ing, and `grc-gridcoinresearch` is the standing reminder that the
+    obvious spelling does. A wrong id for an untraded asset, or an outage on one, would
+    have taken the terminal down for the four assets that DO trade.
+
+    DERIVED, IN ONE PLACE. Three call sites read it -- this refusal,
+    fetch_usd_prices() and _snapshots_from_raw() -- and a hand-kept list beside any of
+    them would be rule 8's shape on the question "may this quote be priced".
+
+    IT FAILS CLOSED ON AN EMPTY ALLOWED_PAIRS: with no pair enabled, every asset in IDS is
+    required, which is the behavior this replaced. Requiring NOTHING would let a garbage
+    response into the cache and turn a clear refusal here into a KeyError deeper in, which
+    is the shape this function exists to prevent.
+
+    CONFIG IS IMPORTED INSIDE THE FUNCTION, not at module scope. config.py reads the
+    process environment at import time, and this module's own header warns that a
+    read-only report which triggers that import is how family resolution broke elsewhere.
+    Deferring it also keeps the answer live: an operator who changes ALLOWED_PAIRS and
+    restarts gets the new set without this module caching the old one.
+    """
+    from config import (  # noqa: PLC0415 -- checked: deferred deliberately. config.py reads os.environ at IMPORT time, and pricing.py is imported by read-only reports; making this module's import trigger that one is the import-time side effect rule 12 names. It is also read per call so a changed ALLOWED_PAIRS is picked up rather than frozen.
+        Config,
+    )
+
+    traded = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    required = tuple(asset for asset in IDS if asset in traded)
+    return required or tuple(IDS)
+
+
 def _require_every_asset(raw: dict, source: str) -> dict:
     """The missing-asset refusal, applied identically to both feeds.
 
-    Derived from IDS rather than written out. A missing asset raises a KeyError
-    naming WHICH one, here, instead of returning a dict that is quietly short one
-    key and failing later inside derive_pair_rate() where the message would be
-    about a rate rather than about a price.
+    Derived from required_assets() rather than written out. A missing asset raises a
+    KeyError naming WHICH one, here, instead of returning a dict that is quietly short one
+    key and failing later inside derive_pair_rate() where the message would be about a
+    rate rather than about a price.
 
-    THE MESSAGE IS UNCHANGED from the CoinGecko-only version, because
-    open_swap.py:655 quotes it by name in its own docstring; the source is
-    appended rather than substituted.
+    THE MESSAGE KEEPS ITS SHAPE from the CoinGecko-only version, because open_swap.py:655
+    quotes it by name in its own docstring. What changed is that it now says what was
+    REQUIRED rather than what was asked for -- those differ the moment an asset is priced
+    without being traded, and printing the asked-for list beside a refusal about a
+    narrower set would be the more confusing half of the pair.
     """
-    missing = [asset for asset, cg_id in IDS.items() if cg_id not in raw]
+    required = required_assets()
+    missing = [asset for asset in required if IDS[asset] not in raw]
     if missing:
         raise KeyError(
             f"{source} returned no price for {', '.join(sorted(missing))} "
-            f"(asked for {', '.join(sorted(IDS))}). No rate is derived from a "
+            f"(required {', '.join(sorted(required))}; asked for "
+            f"{', '.join(sorted(IDS))}). No rate is derived from a "
             f"partial response: a swap priced off a missing leg is a swap priced wrong."
         )
     return raw
@@ -434,7 +476,14 @@ def fetch_usd_prices(ttl_seconds: int = 30) -> dict:
         cache = _fetch_raw(ttl_seconds)
         if cache["prices"] is None:
             raw = cache["raw"]
-            data = {f"{asset}_USD": float(raw[cg_id]["usd"]) for asset, cg_id in IDS.items()}
+            # ONLY WHAT THE RESPONSE ACTUALLY CARRIES. This built a key for every asset in
+            # IDS, so an absent untraded asset raised KeyError here even once
+            # _require_every_asset() stopped demanding it -- the narrowing would have moved
+            # the failure four lines instead of removing it. Every REQUIRED asset is present
+            # by the time this runs, so a short dict can only be short an untraded one, and
+            # derive_pair_rate() raises by name if anything ever reads a key that is gone.
+            data = {f"{asset}_USD": float(raw[cg_id]["usd"])
+                    for asset, cg_id in IDS.items() if cg_id in raw}
             data["fetched_at"] = cache["fetched_at"]
             cache["prices"] = data
         return cache["prices"]
@@ -486,6 +535,12 @@ def _snapshots_from_raw(raw: dict, fetched_at: float) -> list[MarketSnapshot]:
     """
     snapshots = []
     for asset, cg_id in IDS.items():
+        if cg_id not in raw:
+            # Same reason as fetch_usd_prices(): an untraded asset may be absent, and a
+            # snapshot list that raised on one would make the depth badge able to refuse a
+            # quote -- which services/quote_service._confidence_for_display() exists to
+            # prevent, and which it already got wrong once.
+            continue
         entry = raw[cg_id]
         values = {field: _optional_float(entry, key) for _flag, key, field in _CONTEXT_FIELDS}
         # The feed's own timestamp is a unix SECOND, not a fraction of one.
