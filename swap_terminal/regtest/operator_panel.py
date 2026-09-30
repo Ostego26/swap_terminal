@@ -839,7 +839,59 @@ def probe_methods(run: funding_steps.Run) -> list[Missing]:
     return found
 
 
-def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None) -> list[PaymentRow]:
+def scan_depth(previous: int | None, tip: int | None, full: int) -> tuple[int, str]:
+    """How many blocks this spend-scan must examine, and the sentence saying why.
+
+    THE DECISION, PULLED OUT OF payment_rows() BECAUSE IT IS ONE (rule 10 and rule 12). Ruff
+    put that function at 11 against a ceiling of 10 the moment this logic went inline, and
+    the ceiling was right: what had been swallowed is the only interesting judgment on that
+    path. It is pure, so it is called with seeded numbers in the tests -- including the
+    reorganization case, which is not reachable from a daemon anybody can arrange to have.
+
+    THREE CASES AND ONLY ONE OF THEM IS THE FAST PATH:
+
+      never looked        `previous` is None. The full depth, because nothing below the tip
+                          has been examined yet.
+      tip unreadable      `tip` is None. The full depth: a depth computed from a height
+                          nobody read is a confident number derived from a failure.
+      tip went BACKWARD   tip < previous, which means a reorganization or a different
+                          daemon. The full depth, because the blocks examined last time may
+                          no longer be the blocks that exist.
+      otherwise           exactly tip - previous, the blocks that have arrived since. ZERO
+                          when the tip has not moved, and that is the correct answer rather
+                          than a skipped check: a spend after height `previous` must appear
+                          in a block after `previous`, and no such block exists yet.
+
+    The returned sentence is appended to find_the_spender()'s own description, so a reader
+    can always tell a full walk from an extended one -- rule 17's "say which you have",
+    applied to how much of the chain an answer actually rests on.
+    """
+    if previous is None or tip is None or tip < previous:
+        return full, ""
+    depth = tip - previous
+    return depth, (
+        f" Only the {depth} block(s) since height {previous} were examined; everything below "
+        f"that was examined on an earlier look, and a spend cannot appear in a block that "
+        f"already exists."
+    )
+
+
+def _tip_or_none(run: funding_steps.Run) -> int | None:
+    """The chain tip, or None if the daemon will not say. Never raises.
+
+    None RATHER THAN A HEIGHT OF 0, because 0 is a height and would make the incremental
+    scan in payment_rows() compute a depth from a tip that was never read -- a confident
+    number derived from a failure, which is the shape rule 17 forbids. None routes to the
+    full walk instead, which is slower and correct.
+    """
+    try:
+        return funding_steps.current_height(run)
+    except (RPCError, OSError):
+        return None
+
+
+def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None,
+                 unspent_as_of: dict | None = None) -> list[PaymentRow]:
     """Every payment to the funding address, newest first, each marked usable or spent.
 
     THIS IS THE PANEL'S WHOLE REASON TO EXIST. Six runs on 2026-09-28 failed or refused because
@@ -886,15 +938,49 @@ def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None) -
         # spent" is NOT monotone -- the very next block can spend it, and caching that would
         # have the panel cheerfully offering a payment the harness then refuses. The cache may
         # therefore only ever turn a slow correct answer into a fast one.
-        cached = (known_spent or {}).get((outpoint.txid, outpoint.vout))
+        point = (outpoint.txid, outpoint.vout)
+        cached = (known_spent or {}).get(point)
         if cached:
             spender, description = cached, "SPENT ALREADY -- remembered from an earlier look, not re-walked"
         else:
-            depth = (payment.confirmations + 1 if isinstance(payment.confirmations, int)
-                     and payment.confirmations >= 0 else funding_steps.MAX_SPEND_SCAN_BLOCKS)
+            # A NEGATIVE ANSWER IS NOT CACHED. IT IS EXTENDED. Measured on the operator's
+            # screen 2026-09-30, and it is why they pressed Ctrl-C: the ONE usable payment was
+            # re-walked in full on every page draw -- "scanning blocks 3298076 down to
+            # 3296986", 1092 blocks, one getblock each -- and with the funding view and the
+            # chain tab both fetching, two of those walks ran at once against the same daemon.
+            # Eight candidates, seven long spent and cached, and the eighth cost 1092 RPC reads
+            # a second forever.
+            #
+            # THE CORRECTNESS ARGUMENT IS UNCHANGED AND IS THE REASON THIS IS NOT A CACHE.
+            # "Spent by X" is monotone, so remembering it can only turn a slow correct answer
+            # into a fast one. "Not spent" is NOT monotone -- the next block can spend it -- so
+            # remembering THAT would have the panel offering a payment the harness then
+            # refuses. What is monotone is the pair ("unspent", the height it was established
+            # at): a spend after height H must appear in a block after H, so re-examining
+            # exactly the blocks since H is not a weaker check than re-walking all of them, it
+            # is the same check with the already-examined part skipped (rule 3 prefers removing
+            # work to doing it faster).
+            #
+            # The tip is read BEFORE the scan on purpose. If a block lands mid-scan the older
+            # height is recorded, so that block is examined next time -- the union of the
+            # scanned ranges always covers the full original depth plus every block since.
+            # Reading it after would leave a one-block hole, which on a spend is the whole
+            # answer.
+            previous = (unspent_as_of or {}).get(point)
+            tip = _tip_or_none(run)
+            full = (payment.confirmations + 1 if isinstance(payment.confirmations, int)
+                    and payment.confirmations >= 0 else funding_steps.MAX_SPEND_SCAN_BLOCKS)
+            depth, since = scan_depth(previous, tip, full)
             spender, description = funding_steps.find_the_spender(run, outpoint, max_depth=depth)
+            description += since
             if spender and known_spent is not None:
-                known_spent[(outpoint.txid, outpoint.vout)] = spender
+                known_spent[point] = spender
+                if unspent_as_of is not None:
+                    # It is spent now, so the unspent height is not merely stale, it is a
+                    # statement that would be WRONG if it outlived this branch (rule 9).
+                    unspent_as_of.pop(point, None)
+            elif not spender and unspent_as_of is not None and tip is not None:
+                unspent_as_of[point] = tip
         value = funding_steps.satoshis_to_coins(outpoint.value_satoshis)
         if spender:
             # THE DESCRIPTION IS CARRIED, not replaced. It is the only thing that says whether

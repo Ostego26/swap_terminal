@@ -292,6 +292,11 @@ def test_the_panel_reads_the_SAME_payment_list_the_harness_picks_from(monkeypatc
         def call(self, method, *params):
             if method == "listtransactions":
                 return rows
+            if method == "getblockcount":
+                # payment_rows() reads the tip to size an incremental spend-scan
+                # (regtest/operator_panel.scan_depth). A fixed height means "the chain has not
+                # moved", which is the case the fast path is about.
+                return TIP_HEIGHT
             raise AssertionError(method)
 
     monkeypatch.setattr(funding_steps, "find_operator_funding",
@@ -533,6 +538,11 @@ def test_a_SPENT_answer_is_remembered_and_an_UNSPENT_one_is_never_cached(monkeyp
             if method == "listtransactions":
                 return [{"address": "ours", "category": "send", "txid": spent, "confirmations": 9},
                         {"address": "ours", "category": "send", "txid": fresh, "confirmations": 2}]
+            if method == "getblockcount":
+                # payment_rows() reads the tip to size an incremental spend-scan
+                # (regtest/operator_panel.scan_depth). A fixed height means "the chain has not
+                # moved", which is the case the fast path is about.
+                return TIP_HEIGHT
             raise AssertionError(method)
 
     monkeypatch.setattr(funding_steps, "find_operator_funding",
@@ -589,6 +599,8 @@ def test_the_cache_is_OPTIONAL_so_every_other_caller_is_unaffected(monkeypatch):
             return self
 
         def call(self, method, *params):
+            if method == "getblockcount":
+                return TIP_HEIGHT
             return [{"address": "ours", "category": "send", "txid": "44" * 32, "confirmations": 9}]
 
     monkeypatch.setattr(funding_steps, "find_operator_funding", lambda run, key, txid: _Outpoint(txid))
@@ -1333,6 +1345,11 @@ def test_THE_TERMINAL_SAYS_SPENT_OR_USABLE_AND_NOT_ONLY_THE_PAGE():
                     {"address": "ours", "category": "send", "txid": spent_txid, "confirmations": 9},
                     {"address": "ours", "category": "send", "txid": live_txid, "confirmations": 2},
                 ]
+            if method == "getblockcount":
+                # payment_rows() reads the tip to size an incremental spend-scan
+                # (regtest/operator_panel.scan_depth). A fixed height means "the chain has not
+                # moved", which is the case the fast path is about.
+                return TIP_HEIGHT
             raise AssertionError(method)
 
     class _Key:
@@ -1401,6 +1418,8 @@ def test_A_CANDIDATE_OUTPUT_IS_NOT_ANNOUNCED_AS_THE_OPERATORS_FUNDING():
 # this tree does not own is refused by NAME, and a stop is PROVEN.
 # ---------------------------------------------------------------------------
 
+
+TIP_HEIGHT = 3_298_078
 
 SLEEPER = "import time; time.sleep(120)"
 
@@ -1656,3 +1675,181 @@ def test_every_overview_FIELD_the_panel_renders_actually_EXISTS(tmp_path):
             f"the panel renders {key} row field(s) {missing_fields}, which are not on the row. "
             f"The row has {sorted(rows[0])}"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE SPEND-SCAN'S DEPTH
+#
+# 2026-09-30, from the operator's own terminal, and it is why they pressed Ctrl-C:
+#
+#   GRC: scanning blocks 3298076 down to 3296986 for anything that spends 34fcaa81…
+#   GRC: scanned 100 block(s) ... scanned 1700 block(s), now at height 3296378
+#
+# 1092 blocks, one getblock each, for the ONE payment that came back usable -- repeated
+# on every page draw, with two walks overlapping against the same daemon because the
+# funding view and the chain tab both fetch. The seven spent ones were cached after the
+# first look; the eighth could not be, because "not spent" is not monotone.
+#
+# What IS monotone is the pair ("unspent", the height it was established at), and that
+# is what scan_depth() turns into work removed rather than work done faster (rule 3).
+# ---------------------------------------------------------------------------
+
+
+def test_scan_depth_examines_only_the_blocks_that_have_ARRIVED():
+    """The decision, with seeded numbers. Four cases and one of them is the fast path."""
+    full = 1092
+
+    # Never looked: the whole depth, and no claim about what was skipped.
+    assert decisions.scan_depth(None, 3_298_078, full) == (full, "")
+
+    # The tip has not moved. ZERO blocks, and that is the correct answer rather than a
+    # skipped check -- a spend after height H must appear in a block after H, and there
+    # is no such block yet.
+    depth, why = decisions.scan_depth(3_298_078, 3_298_078, full)
+    assert depth == 0, "an unchanged tip still cost a walk"
+    assert "0 block(s) since height 3298078" in why
+
+    # Seven blocks have arrived: seven blocks are examined, not 1092.
+    depth, why = decisions.scan_depth(3_298_078, 3_298_085, full)
+    assert depth == 7
+    assert "7 block(s) since height 3298078" in why
+    assert "cannot appear in a block that already exists" in why, (
+        "the sentence does not say WHY the rest may be skipped, so a reader cannot check the "
+        "reasoning the speed-up rests on"
+    )
+
+
+def test_scan_depth_walks_the_FULL_depth_when_it_cannot_be_sure():
+    """Three ways to be unsure, and every one of them costs the full walk.
+
+    MUTATION: return `tip - previous` unconditionally. The reorganization case then returns
+    a NEGATIVE depth, and a tip that could not be read returns a TypeError or a depth
+    computed from None -- either way the scan silently stops covering the chain, and the
+    symptom is a payment reported usable that the harness refuses.
+    """
+    full = 1092
+    # The tip could not be read. A depth computed from a height nobody read is a confident
+    # number derived from a failure (rule 17).
+    assert decisions.scan_depth(3_298_078, None, full) == (full, "")
+    # The tip went BACKWARD: a reorganization, or a different daemon. The blocks examined
+    # last time may not be the blocks that exist.
+    assert decisions.scan_depth(3_298_078, 3_298_000, full) == (full, "")
+    # And never-looked, again, because it is the same answer for a different reason.
+    assert decisions.scan_depth(None, None, full) == (full, "")
+
+
+def test_an_unspent_output_is_RE_EXAMINED_but_not_RE_WALKED(monkeypatch):
+    """The behavioral half: the walk still happens, and it costs nothing when nothing changed.
+
+    The older test beside this one asserts the unspent outpoint IS walked again, which is
+    the safety property and is still true. It cannot tell a 1092-block walk from a
+    zero-block one, which is the entire defect -- so this asserts the DEPTH, which is the
+    thing that was costing the operator their daemon.
+
+    MUTATION: drop the unspent_as_of write. Every look then passes the full depth, this
+    fails on the second call's depth, and nothing else in the suite notices.
+    """
+    depths = []
+    unspent = "aa" * 32
+
+    class _Key:
+        address = "ours"
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *params):
+            if method == "getblockcount":
+                return tip["now"]
+            if method == "listtransactions":
+                return [{"address": "ours", "category": "send", "txid": unspent, "confirmations": 5}]
+            raise AssertionError(method)
+
+    tip = {"now": TIP_HEIGHT}
+    monkeypatch.setattr(funding_steps, "find_operator_funding", lambda run, key, txid: _Outpoint(txid))
+
+    def _walk(run, outpoint, max_depth=0):
+        depths.append(max_depth)
+        return (None, f"no transaction in the last {max_depth} block(s) spends this outpoint")
+
+    monkeypatch.setattr(funding_steps, "find_the_spender", _walk)
+
+    spent_cache: dict = {}
+    watermark: dict = {}
+    first = decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    assert [r.usable for r in first] == [True]
+    assert depths == [6], f"the first look must walk the full depth (confirmations + 1), got {depths}"
+    assert watermark == {(unspent, 1): TIP_HEIGHT}, (
+        f"the tip at which it was established unspent was not recorded: {watermark}"
+    )
+    assert spent_cache == {}, "an unspent outpoint must never reach the SPENT cache"
+
+    # The tip has not moved: nothing can have spent it, and it costs nothing to say so.
+    decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    assert depths == [6, 0], f"an unchanged tip cost another walk: {depths}"
+
+    # Four blocks arrive. Four blocks are examined.
+    tip["now"] = TIP_HEIGHT + 4
+    rows = decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    assert depths == [6, 0, 4], f"the incremental walk was not sized to the new blocks: {depths}"
+    assert watermark == {(unspent, 1): TIP_HEIGHT + 4}, "the watermark did not advance"
+    assert "since height" in rows[0].note, (
+        "the row does not say the answer rests on an earlier full walk, so a reader cannot tell "
+        "it from a fresh one (rule 17)"
+    )
+
+
+def test_a_WATERMARK_IS_DELETED_the_moment_the_output_is_found_spent(monkeypatch):
+    """A statement that would be wrong if it outlived its branch (rule 9).
+
+    Once a spend is found, "unspent as of height H" is not stale -- it is false. Leaving it
+    behind is a row in a dict that contradicts the row beside it, and the next reader has to
+    decide which to trust.
+    """
+    txid = "bb" * 32
+
+    class _Key:
+        address = "ours"
+
+    class _Run:
+        asset = "GRC"
+
+        def say(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *params):
+            if method == "getblockcount":
+                return tip["now"]
+            if method == "listtransactions":
+                return [{"address": "ours", "category": "send", "txid": txid, "confirmations": 5}]
+            raise AssertionError(method)
+
+    tip = {"now": TIP_HEIGHT}
+    monkeypatch.setattr(funding_steps, "find_operator_funding", lambda run, key, txid_: _Outpoint(txid_))
+    monkeypatch.setattr(funding_steps, "find_the_spender",
+                        lambda run, outpoint, max_depth=0: (None, "nothing spends it yet"))
+
+    spent_cache: dict = {}
+    watermark: dict = {}
+    decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    assert watermark, "precondition: it was recorded as unspent"
+
+    # Now a block spends it.
+    tip["now"] = TIP_HEIGHT + 1
+    monkeypatch.setattr(funding_steps, "find_the_spender",
+                        lambda run, outpoint, max_depth=0: ("what-consumed-it", "SPENT"))
+    rows = decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    assert [r.usable for r in rows] == [False]
+    assert spent_cache == {(txid, 1): "what-consumed-it"}
+    assert watermark == {}, (
+        f"the unspent watermark survived the spend, so the memory now says both things: {watermark}"
+    )

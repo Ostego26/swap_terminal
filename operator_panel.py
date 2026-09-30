@@ -682,7 +682,27 @@ def state_payload(run: funding_steps.Run, runner: HarnessRunner) -> dict:
     return payload
 
 
-def funding_payload(run: funding_steps.Run, known_spent: dict | None = None) -> dict:
+def funding_memory() -> dict:
+    """A fresh memory for the funding view: what is spent, and what was unspent when.
+
+    TWO DICTS IN ONE OBJECT because they are two halves of one answer and a parallel
+    parameter through five signatures is the shape that drifts -- somebody threads one and
+    forgets the other, and the symptom is not a failure, it is a silent return to walking
+    1092 blocks per page draw.
+
+      spent           (txid, vout) -> the spender's txid. MONOTONE: a spend cannot be
+                      undone, so this only ever turns a slow correct answer into a fast one.
+      unspent_as_of   (txid, vout) -> the chain tip when a FULL-depth walk found no spender.
+                      NOT an answer, a WATERMARK: see regtest/operator_panel.scan_depth().
+
+    A function rather than a literal so the two key names exist in exactly one place; a
+    dict spelled at the call site is two chances to typo a key that would read as an empty
+    cache and never fail.
+    """
+    return {"spent": {}, "unspent_as_of": {}}
+
+
+def funding_payload(run: funding_steps.Run, memory: dict | None = None) -> dict:
     """The funding picture: the address, what the daemon can be asked, and every payment.
 
     A REFUSAL IS A RESULT HERE, not an exception that blanks the page. A daemon that cannot be
@@ -697,7 +717,8 @@ def funding_payload(run: funding_steps.Run, known_spent: dict | None = None) -> 
     methods = [{"method": m.method, "present": m.present, "matters": m.matters}
                for m in decisions.probe_methods(run)]
     try:
-        rows = decisions.payment_rows(run, key, known_spent)
+        held = memory or funding_memory()
+        rows = decisions.payment_rows(run, key, held["spent"], held["unspent_as_of"])
     except RegtestSetupError as error:
         return {"address": key.address, "error": str(error), "rows": [], "methods": methods}
     return {
@@ -742,7 +763,7 @@ def guarded(answer, path: str, *rest) -> tuple[bytes, str, int]:
         )
 
 
-def chain_payload(asset: str, grc_run: funding_steps.Run, known_spent: dict | None = None) -> dict:
+def chain_payload(asset: str, grc_run: funding_steps.Run, memory: dict | None = None) -> dict:
     """One tab's contents, by asset. An unknown asset is a 200 saying so, not a 404.
 
     NOT A 404, and that is deliberate. The browser only ever asks for an asset the page itself
@@ -773,12 +794,12 @@ def chain_payload(asset: str, grc_run: funding_steps.Run, known_spent: dict | No
     state["dot"] = decisions.dot_state(state)
     state["console"] = decisions.refuse_an_rpc_console(tab)
     if asset == "GRC" and state["reachable"]:
-        state["funding"] = funding_payload(grc_run, known_spent)
+        state["funding"] = funding_payload(grc_run, memory)
     return state
 
 
 def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page: str,
-                 known_spent: dict | None = None) -> tuple[bytes, str, int]:
+                 memory: dict | None = None) -> tuple[bytes, str, int]:
     """Which of the three GETs this is, and its bytes. The routing decision, out of the handler.
 
     THREE ROUTES AND A 404, and it is a function rather than a chain of `elif` inside
@@ -794,9 +815,9 @@ def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page:
     if path == "/api/state":
         return json.dumps(state_payload(run, runner)).encode(), "application/json", 200
     if path == "/api/funding":
-        return json.dumps(funding_payload(run, known_spent)).encode(), "application/json", 200
+        return json.dumps(funding_payload(run, memory)).encode(), "application/json", 200
     if path.startswith("/api/chain/"):
-        return json.dumps(chain_payload(path.rsplit("/", 1)[-1], run, known_spent)).encode(), "application/json", 200
+        return json.dumps(chain_payload(path.rsplit("/", 1)[-1], run, memory)).encode(), "application/json", 200
     if path == "/api/swapper":
         return json.dumps(swapper_payload()).encode(), "application/json", 200
     return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
@@ -1166,7 +1187,7 @@ def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:
 
 
 def build_handler(run: funding_steps.Run, runner: HarnessRunner, page: str,
-                  known_spent: dict | None = None, chains: dict | None = None):
+                  memory: dict | None = None, chains: dict | None = None):
     """The HTTP surface, closed over the objects it serves. Four routes and no others.
 
     A CLOSURE RATHER THAN CLASS ATTRIBUTES because BaseHTTPRequestHandler is instantiated per
@@ -1204,7 +1225,7 @@ def build_handler(run: funding_steps.Run, runner: HarnessRunner, page: str,
             self._send(code, json.dumps(payload).encode(), "application/json")
 
         def do_GET(self) -> None:
-            body, content_type, code = guarded(answer_a_get, self.path, run, runner, page, known_spent)
+            body, content_type, code = guarded(answer_a_get, self.path, run, runner, page, memory)
             self._send(code, body, content_type)
 
         def do_POST(self) -> None:
@@ -1293,7 +1314,7 @@ def main(argv: list[str], console: Console | None = None) -> int:
             console.say(f"{tab.asset}: no RPC console -- no connection parameters "
                         f"({type(exc).__name__}: {exc})")
     server = ThreadingHTTPServer((HOST, args.port),
-                                 build_handler(run, runner, PAGE, {}, chains))
+                                 build_handler(run, runner, PAGE, funding_memory(), chains))
     console.say(f"the panel is at http://{HOST}:{args.port}/ -- loopback only, by construction")
     console.say(f"it can start: {', '.join(decisions.RUNNABLE)}")
     console.say("Ctrl-C stops the panel AND reaps any run it started (rule 13)")
