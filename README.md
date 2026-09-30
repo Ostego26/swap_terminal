@@ -298,6 +298,16 @@ mint, `getAccountInfo` on one names the wallet that owns it, and the check reads
 **that** account — somebody else's holdings prove the reader exactly as well as
 ours would, the same principle as `--hunt-memo`. Nothing is signed or sent.
 
+**Its first real run answered HTTP 429** and it is retried now. The public
+devnet endpoint rate-limits `getTokenLargestAccounts`, and the first version of
+this helper neither retried it nor told the two apart — it printed "the field
+names were written from documentation and never measured" for what was simply
+the endpoint refusing to answer. A throttle and a wrong field name are opposite
+findings: one says re-run in a moment, the other says go read the code. The
+retry is one implementation shared with `--hunt-memo` now (it was welded to
+`getTransaction`, so this helper inherited none of it), and a throttle says so
+in its own words without mentioning field names at all.
+
 Its own field names were written from documentation and are **not measured**:
 no Solana cluster is reachable from the development container (re-checked
 2026-09-30 — `api.devnet.solana.com` still answers 403 through the proxy). That

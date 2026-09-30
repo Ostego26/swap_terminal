@@ -50,17 +50,19 @@ import solana_chain_check  # noqa: E402
 from solana_chain_check import (  # noqa: E402 -- the sys.path line above is what puts the repository root on the path; this script lives there (rule 10), not inside the package.
     GENESIS_HASHES,
     MEMO_HUNT_GIVE_UP_AFTER_THROTTLES,
-    MEMO_HUNT_RETRIES_PER_READ,
     MEMO_HUNT_TRANSACTION_VERSION,
+    RPC_RETRIES_PER_CALL,
     CreditPathObserved,
     _deposits_line,
     _network_line,
+    call_with_backoff,
     check_rent,
     credit_path_lines,
     find_a_holder,
     hunt_one_program_id,
     make_runner,
     memo_status_lines,
+    owner_of,
     print_banner,
     print_summary,
     read_one_transaction,
@@ -447,7 +449,7 @@ def _memo_transaction(text: str) -> dict:
 def _no_sleeping(monkeypatch):
     """Zero every delay, so these run instantly and still exercise the real functions."""
     monkeypatch.setattr(solana_chain_check, "MEMO_HUNT_PACING_SECONDS", 0)
-    monkeypatch.setattr(solana_chain_check, "MEMO_HUNT_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
 
 
 def test_one_throttled_read_is_retried_rather_than_counted_as_a_failure():
@@ -472,8 +474,8 @@ def test_a_persistent_throttle_gives_up_and_says_it_was_a_throttle():
     assert transaction is None
     assert throttled is True
     assert "429" in reason
-    assert adapter.asked == MEMO_HUNT_RETRIES_PER_READ, (
-        f"tried {adapter.asked} times; the per-read cap is {MEMO_HUNT_RETRIES_PER_READ}"
+    assert adapter.asked == RPC_RETRIES_PER_CALL, (
+        f"tried {adapter.asked} times; the per-read cap is {RPC_RETRIES_PER_CALL}"
     )
 
 
@@ -618,7 +620,7 @@ def test_the_consecutive_counter_RESETS_on_a_good_read(capsys):
     read: two, then a success, then two. Consecutive, that peaks at 2 and the hunt finishes.
     Cumulative, it is 4 and the hunt abandons a healthy endpoint three reads early.
     """
-    r = MEMO_HUNT_RETRIES_PER_READ
+    r = RPC_RETRIES_PER_CALL
     answers = (
         [_throttle()] * r          # signature 1: reported throttle
         + [_throttle()] * r        # signature 2: reported throttle  (in_a_row == 2)
@@ -1508,3 +1510,129 @@ def test_find_holder_without_a_mint_refuses_and_exits_nonzero(monkeypatch, capsy
     assert code == 1
     assert "--find-holder needs --mint" in out
     assert "ADDRESS" not in out, "it must not go on and check something else instead"
+
+# ---------------------------------------------------------------------------
+# A THROTTLE IS NOT A FINDING -- the same rule, in the second place it was needed.
+#
+# The operator's --find-holder run, 2026-09-30:
+#
+#   that lookup FAILED: SolanaRPCError: getTokenLargestAccounts returned HTTP 429
+#   the field names in find_a_holder() were written from documentation and never
+#   measured -- this is the finding, not a crash.
+#
+# Both lines wrong together. It did not retry a rate limit that retrying fixes,
+# and then it blamed unmeasured field names for the endpoint refusing to answer.
+# "A throttled hunt is not a finding" had been fixed in the memo hunt hours
+# earlier and was welded to getTransaction, so the new helper inherited none of
+# it -- rule 8 with the second copy not yet written when the first was.
+# ---------------------------------------------------------------------------
+
+
+def test_the_retry_is_ONE_implementation_shared_by_both_callers():
+    """MUTATION: give find_a_holder its own retry loop and this fails.
+
+    Asserted structurally: read_one_transaction must not contain a retry of its own, because the
+    version that did is what left find_a_holder without one.
+    """
+    source = Path(solana_chain_check.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def read_one_transaction("):source.index("def hunt_one_program_id(")]
+    assert "call_with_backoff(" in body, "the wrapper must delegate"
+    assert "for attempt in range" not in body, "a second retry loop is the defect returning"
+    assert source.count("for attempt in range") == 1, "exactly one retry loop in this file"
+
+
+def test_a_throttled_holder_lookup_blames_the_ENDPOINT_and_nothing_else():
+    """THE DEFECT, PINNED. The message must not mention the field names at all.
+
+    MUTATION: fall back to the shape-finding wording for a throttle and this fails -- which is
+    the sentence the operator read.
+    """
+    adapter = _seeded_adapter({"getTokenLargestAccounts": _throttle_always})
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == ""
+    assert "THROTTLED" in why
+    assert "never answered" in why
+    assert "says NOTHING about the field names" in why
+    assert "never measured" not in why, (
+        "a rate limit is not evidence about our field names, and saying so sends the reader to "
+        "read code that is probably fine"
+    )
+    assert "Re-run in a moment" in why, "rule 14: the instruction has to be on the screen"
+
+
+def test_a_throttle_is_RETRIED_before_it_is_reported(monkeypatch):
+    """It did not retry at all, and a 429 is the one status where asking again shortly works."""
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    attempts = []
+
+    def throttle_then_answer(*_params):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise SolanaRPCError("getTokenLargestAccounts returned HTTP 429", status_code=429)
+        return {"value": [{"address": _A_HOLDING_ACCOUNT, "uiAmountString": "12.5"}]}
+
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": throttle_then_answer,
+        "getAccountInfo": {"value": {"data": {"parsed": {"info": {"owner": _A_HOLDER}}}}},
+    })
+    found, _why = find_a_holder(adapter, _A_MINT)
+    assert found == _A_HOLDER
+    assert len(attempts) == 3, f"asked {len(attempts)} times; the retry is what makes this work"
+
+
+def test_a_throttle_MID_LOOP_stops_rather_than_walking_past_it(monkeypatch):
+    """Walking past a throttled owner lookup would read as "this holder has no owner field".
+
+    That is the finding-versus-endpoint confusion one level down: the loop would exhaust the
+    list against an endpoint that has started refusing, then report a shape finding.
+    """
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": {"value": [{"address": _A_HOLDING_ACCOUNT},
+                                              {"address": "SECOND"}]},
+        "getAccountInfo": _throttle_always,
+    })
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == ""
+    assert "THROTTLED the owner lookup" in why
+    assert _A_HOLDING_ACCOUNT in why, "name the entry it was on"
+    assert "holders were read; who owns them was not" in why
+    assert "never measured" not in why
+
+
+def test_owner_of_separates_a_throttle_from_an_unusable_entry():
+    """The extracted decision, directly: three outcomes and the caller treats them differently."""
+    good = _seeded_adapter({"getAccountInfo": {"value": {"data": {"parsed": {"info": {
+        "owner": _A_HOLDER}}}}}})
+    assert owner_of(good, _A_HOLDING_ACCOUNT) == (_A_HOLDER, False, "")
+
+    empty = _seeded_adapter({"getAccountInfo": {"value": {"data": {"parsed": {"info": {}}}}}})
+    owner, throttled, why = owner_of(empty, _A_HOLDING_ACCOUNT)
+    assert (owner, throttled) == ("", False)
+    assert "data.parsed.info" in why, "name the path, so a shape change is diagnosable"
+
+    bad = _seeded_adapter({"getAccountInfo": {"value": {"data": {"parsed": {"info": {
+        "owner": "not-an-address"}}}}}})
+    owner, throttled, why = owner_of(bad, _A_HOLDING_ACCOUNT)
+    assert (owner, throttled) == ("", False)
+    assert "not a valid Solana address" in why
+
+
+def test_call_with_backoff_does_not_retry_a_failure_that_waiting_cannot_fix():
+    """A 503 or a bad shape is not a rate limit, and retrying it just multiplies the wait."""
+    attempts = []
+
+    def unwell(*_params):
+        attempts.append(1)
+        raise SolanaRPCError("returned HTTP 503 from devnet: node is unwell", status_code=503)
+
+    adapter = _seeded_adapter({"getSlot": unwell})
+    result, throttled, why = call_with_backoff(adapter, "getSlot")
+    assert result is None
+    assert throttled is False, "503 is not a rate limit"
+    assert "503" in why
+    assert len(attempts) == 1
+
+
+def _throttle_always(*_params):
+    raise SolanaRPCError("returned HTTP 429 from devnet", status_code=429)

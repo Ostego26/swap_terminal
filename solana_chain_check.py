@@ -270,6 +270,41 @@ def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> Cred
     )
 
 
+def owner_of(adapter: SolanaAdapter, token_account: str) -> tuple[str, bool, str]:
+    """The WALLET that owns one token account. Returns (owner, throttled, why). Read-only.
+
+    EXTRACTED FROM find_a_holder() because inlining it put that function at PLR0911 7 returns
+    against a ceiling of 6, and CLAUDE.md rule 12 is explicit about which way that resolves:
+    extract the decision, do not raise the ceiling. It is a decision in its own right -- "is
+    this entry usable, and if not, is that the endpoint's fault or ours" -- and find_a_holder()
+    is then a loop over entries.
+
+    AN EMPTY OWNER WITH throttled=False IS "this entry is not usable", which the caller walks
+    past: one malformed row must not hide every good row behind it. A THROTTLE is returned as a
+    throttle so the caller can stop, because retrying the rest of the list against an endpoint
+    that has started refusing just spends the budget.
+
+    `data.parsed.info.owner` IS FROM DOCUMENTATION AND NOT MEASURED. No Solana cluster is
+    reachable from the container this was written in (re-checked 2026-09-30: 403 through the
+    proxy). A wrong path here yields an empty owner and the caller says it could not read one,
+    naming the path -- it cannot credit anything or claim coverage it does not have.
+    """
+    info, throttled, why = call_with_backoff(
+        adapter, "getAccountInfo", token_account,
+        {"encoding": "jsonParsed", "commitment": BALANCE_COMMITMENT})
+    if throttled:
+        return "", True, why
+    if info is None:
+        return "", False, f"getAccountInfo failed: {why}"
+    parsed = ((info.get("value") or {}).get("data") or {}).get("parsed") or {}
+    owner = (parsed.get("info") or {}).get("owner") or ""
+    if not owner:
+        return "", False, "no `owner` under data.parsed.info"
+    if not is_valid_address(owner):
+        return "", False, f"`owner` is {owner!r}, which is not a valid Solana address"
+    return owner, False, ""
+
+
 def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
     """Ask the cluster for a wallet that actually holds `mint`. Read-only. Returns (owner, why).
 
@@ -294,8 +329,19 @@ def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
     wrong field name here makes the HELPER fail and say so, and cannot credit anything or
     misreport what was proven. It refuses rather than guessing at every step.
     """
-    largest = adapter.call("getTokenLargestAccounts", mint, {"commitment": BALANCE_COMMITMENT})
-    holders = ((largest or {}).get("value") or [])
+    largest, throttled, why_not = call_with_backoff(
+        adapter, "getTokenLargestAccounts", mint, {"commitment": BALANCE_COMMITMENT})
+    if throttled:
+        # A RATE LIMIT IS NOT A FINDING ABOUT OUR FIELD NAMES, and the first version of this
+        # helper said it was. See call_with_backoff().
+        return "", (f"the endpoint THROTTLED this lookup ({why_not}) -- it never answered, so "
+                    f"this says NOTHING about the field names here or about who holds {mint}. "
+                    f"Re-run in a moment, or against an endpoint that is not rate-limited.")
+    if largest is None:
+        return "", (f"getTokenLargestAccounts failed: {why_not}. The endpoint answered and the "
+                    f"answer could not be used, which IS a finding -- the field names in "
+                    f"find_a_holder() were written from documentation and never measured.")
+    holders = (largest.get("value") or [])
     if not holders:
         return "", (f"getTokenLargestAccounts returned no holders for {mint}, so no account on "
                     f"this cluster holds it. Nothing to point at.")
@@ -304,11 +350,15 @@ def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
         token_account = holder.get("address")
         if not token_account:
             continue
-        info = adapter.call("getAccountInfo", token_account,
-                            {"encoding": "jsonParsed", "commitment": BALANCE_COMMITMENT})
-        parsed = (((info or {}).get("value") or {}).get("data") or {}).get("parsed") or {}
-        owner = ((parsed.get("info") or {}).get("owner") or "")
-        if owner and is_valid_address(owner):
+        owner, throttled_here, owner_why = owner_of(adapter, token_account)
+        if throttled_here:
+            # REPORTED AS A THROTTLE EVEN MID-LOOP, rather than walked past as an unreadable
+            # entry. Walking past would look identical to "this holder has no owner field",
+            # which is the finding-versus-endpoint confusion one level down.
+            return "", (f"the endpoint THROTTLED the owner lookup for {token_account} "
+                        f"({owner_why}). The mint's holders were read; who owns them was not. "
+                        f"Re-run in a moment.")
+        if owner:
             return owner, (f"FOUND by asking the cluster: token account {token_account} holds "
                            f"{holder.get('uiAmountString', '?')} and is owned by this wallet. "
                            f"Two reads, nothing sent.")
@@ -560,11 +610,15 @@ def main() -> int:
         print(f"  --find-holder: asking the cluster who holds {rpc['mint']} (read-only)", flush=True)
         try:
             found, why = find_a_holder(adapter, rpc["mint"])
-        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic helper whose field names are unmeasured (see find_a_holder). The failure is PRINTED and the run stops with a non-zero exit rather than falling back to an address that proves nothing.
-            print(f"  that lookup FAILED: {type(exc).__name__}: {exc}", flush=True)
-            print("  the field names in find_a_holder() were written from documentation and "
-                  "never measured -- this is the finding, not a crash.", flush=True)
+        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic. find_a_holder() already returns its throttles and shape findings as reasons, so reaching HERE means something it did not anticipate; it is PRINTED and the run stops rather than falling back to an address that proves nothing.
+            print(f"  that lookup RAISED, which find_a_holder() should have returned instead: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
             return 1
+        # NO BLANKET ATTRIBUTION HERE ANY MORE. This printed "the field names in find_a_holder()
+        # were written from documentation and never measured -- this is the finding, not a
+        # crash" after EVERY failure, and the operator's first run failed with HTTP 429 -- a
+        # rate limit, which says nothing about any field name. find_a_holder() distinguishes the
+        # two now and its `why` carries the right one.
         print(f"  {why}", flush=True)
         if not found:
             return 1
@@ -675,22 +729,27 @@ def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int
 #: three consecutive refusals is worth the wait, and waiting is what made the run unbearable.
 MEMO_HUNT_GIVE_UP_AFTER_THROTTLES = 3
 
-#: How many times ONE read is attempted before it is reported as throttled. A DIFFERENT
-#: DECISION from the give-up above, which counts REPORTED throttles in a row across different
-#: signatures -- they shared the constant at first and that was rule 8's two-copies-of-one-rule
-#: inverted: one name for two rules, so tuning either moved the other. One reported throttle
-#: therefore costs this many attempts, and the give-up fires after that many reports.
-MEMO_HUNT_RETRIES_PER_READ = 3
+#: How many times ONE call is attempted before it is reported as throttled. A DIFFERENT
+#: DECISION from MEMO_HUNT_GIVE_UP_AFTER_THROTTLES, which counts REPORTED throttles in a row
+#: across different signatures -- they shared the constant at first and that was rule 8's
+#: two-copies-of-one-rule inverted: one name for two rules, so tuning either moved the other.
+#: One reported throttle therefore costs this many attempts, and the give-up fires after that
+#: many reports. Also renamed from RPC_RETRIES_PER_CALL, since every call uses it now.
+RPC_RETRIES_PER_CALL = 3
 
-#: Seconds to wait before retrying one throttled read, doubling each time. SECONDS because it
+#: Seconds to wait before retrying one throttled CALL, doubling each time. SECONDS because it
 #: is passed to sleep -- an interface, not a report (rule 6).
+#:
+#: RENAMED FROM RPC_BACKOFF_SECONDS on 2026-09-30, when the retry it governs was extracted
+#: for find_a_holder() to share. A name that says MEMO_HUNT while governing every call is the
+#: drift rule 8 is about: the next reader tunes it believing it only affects the hunt.
 #:
 #: RETRY, WHICH THE FIXED PACE ABOVE DOES NOT DO AND IS WHY IT WAS NOT ENOUGH. The pace was
 #: added on 2026-09-29 after an earlier 429 storm, and it was a patch rather than a fix
 #: (rule 19): it slows every read whether or not the endpoint is complaining, and does nothing
 #: at all once one does. A 429 is the one HTTP status where asking again shortly is the correct
 #: response, so that is what happens -- and the give-up above is what stops it being infinite.
-MEMO_HUNT_BACKOFF_SECONDS = 1.0
+RPC_BACKOFF_SECONDS = 1.0
 
 #: How long to wait between the hunt's getTransaction calls. SECONDS, because it is passed
 #: straight to sleep -- an interface, not a report (rule 6). Measured 2026-09-29: an unpaced
@@ -730,6 +789,49 @@ MEMO_HUNT_PACING_SECONDS = 0.35
 MEMO_HUNT_TRANSACTION_VERSION = 1
 
 
+def call_with_backoff(adapter: SolanaAdapter, method: str, *params):
+    """One RPC call, retrying a rate limit, returning (result, throttled, reason).
+
+    EXTRACTED FROM read_one_transaction() 2026-09-30, AND THE OPERATOR'S RUN IS WHY. That
+    function had the retry and the throttle/finding split welded to `getTransaction`, so
+    find_a_holder() -- written an hour later -- had neither. Its first real run answered
+
+        that lookup FAILED: SolanaRPCError: getTokenLargestAccounts returned HTTP 429
+        the field names in find_a_holder() were written from documentation and never measured
+        -- this is the finding, not a crash.
+
+    Both lines were wrong together. It did not retry a rate limit that retrying fixes, and then
+    it blamed unmeasured field names for the endpoint refusing to answer -- which is the exact
+    defect ("a throttled hunt is not a finding") fixed in the memo hunt earlier the same day and
+    not carried across. Rule 8: two copies of one rule, and the second copy did not exist yet
+    when the first was written, so nothing pointed from one to the other. One copy now.
+
+    EXACTLY ONE OF THE THREE RETURN SHAPES IS MEANINGFUL:
+
+        (result, False, "")       the call answered
+        (None, True, reason)      the ENDPOINT refused -- says nothing about our field names
+        (None, False, reason)     we asked and could not use what came back -- a real finding
+
+    THE STATUS COMES OFF THE EXCEPTION, not out of its message. chains/solana.SolanaRPCError
+    carries `status_code` and `throttled`; sniffing the sentence for "429" would be parsing prose
+    that a later reword silently turns into "nothing is ever throttled".
+    """
+    delay = RPC_BACKOFF_SECONDS
+    for attempt in range(1, RPC_RETRIES_PER_CALL + 1):
+        try:
+            return adapter.call(method, *params), False, ""
+        except SolanaRPCError as exc:
+            if not exc.throttled:
+                return None, False, f"{type(exc).__name__}: {exc}"
+            if attempt == RPC_RETRIES_PER_CALL:
+                return None, True, f"HTTP 429 after {attempt} attempt(s)"
+            time.sleep(delay)
+            delay *= 2
+        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic, and the failure is RETURNED as the reason rather than swallowed, so the caller can tell it from a throttle and from a real answer
+            return None, False, f"{type(exc).__name__}: {exc}"
+    return None, True, "HTTP 429"
+
+
 def read_one_transaction(adapter: SolanaAdapter, signature: str):
     """One getTransaction, retrying a rate limit and giving the two failures separate names.
 
@@ -750,23 +852,10 @@ def read_one_transaction(adapter: SolanaAdapter, signature: str):
     carries `status_code` and `throttled`; sniffing the sentence for "429" would be parsing
     prose that a later reword silently turns into "nothing is ever throttled".
     """
-    delay = MEMO_HUNT_BACKOFF_SECONDS
-    for attempt in range(1, MEMO_HUNT_RETRIES_PER_READ + 1):
-        try:
-            return adapter.call(
-                "getTransaction", signature,
-                {"encoding": "jsonParsed",
-                 "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION}), False, ""
-        except SolanaRPCError as exc:
-            if not exc.throttled:
-                return None, False, f"{type(exc).__name__}: {exc}"
-            if attempt == MEMO_HUNT_RETRIES_PER_READ:
-                return None, True, f"HTTP 429 after {attempt} attempt(s)"
-            time.sleep(delay)
-            delay *= 2
-        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic, and the failure is RETURNED as the reason rather than swallowed, so the caller can tell it from a throttle and from a real read
-            return None, False, f"{type(exc).__name__}: {exc}"
-    return None, True, "HTTP 429"
+    return call_with_backoff(
+        adapter, "getTransaction", signature,
+        {"encoding": "jsonParsed",
+         "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION})
 
 
 class OneIdResult(NamedTuple):
