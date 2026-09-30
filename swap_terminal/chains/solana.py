@@ -174,7 +174,42 @@ class SolanaRPCError(Exception):
     A separate class from RPCError rather than a shared one: the two adapters
     share no code and no connection model, and a caller catching one should not
     silently catch the other.
+
+    IT CARRIES THE HTTP STATUS, AND `throttled` IS THE ONE A CALLER ACTUALLY BRANCHES ON.
+    Added 2026-09-30 after an operator's `--hunt-memo 50` run: every read after the tenth
+    answered HTTP 429, the hunt reported each one as "could not be read", and the two
+    program ids came out the other side looking identical -- one of them CONFIRMED off ten
+    good reads, the other with nothing read at all. "The endpoint refused to answer" and
+    "this transaction cannot be parsed" are different findings and only the second is about
+    our code, which is CLAUDE.md rule 12's BLE001 complaint one level up: a handler that
+    hands the caller a value it cannot tell from a real answer.
+
+    THE STATUS IS AN ATTRIBUTE AND NOT A STRING TO GREP. The message already contains
+    "HTTP 429", and a caller sniffing for that substring would be parsing prose -- which
+    breaks the day the wording changes, silently, in the direction of "nothing is throttled
+    any more". `status_code` is set at the raise site where the response object is in hand.
+    It is None for a failure with no HTTP status: a connection error, or a JSON-RPC error
+    object returned inside a 200.
     """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def throttled(self) -> bool:
+        """Was this the endpoint rate-limiting us, rather than a real answer about the data?
+
+        429 only. A 503 is a node that is unwell and a 500 is one that broke, and neither is
+        fixed by waiting a moment and asking again in the way a 429 is -- so neither gets to
+        borrow the retry that this enables.
+        """
+        return self.status_code == HTTP_TOO_MANY_REQUESTS
+
+
+#: HTTP 429. Named because `status_code == 429` is a magic number to PLR2004 and, more to the
+#: point, because a reader meeting `== 429` has to know the protocol to know what it means.
+HTTP_TOO_MANY_REQUESTS = 429
 
 
 # How many signatures to ask for in one getSignaturesForAddress page. Solana's
@@ -365,7 +400,13 @@ class SolanaAdapter:
             # which is never an answer about a balance or a deposit.
             raise SolanaRPCError(f"{method} could not reach {self.url}: {exc}") from exc
         if response.status_code != 200:  # noqa: PLR2004 -- 200 is the JSON-RPC success status, not a tunable.
-            raise SolanaRPCError(f"{method} returned HTTP {response.status_code} from {self.url}: {response.text[:300]}")
+            # THE STATUS IS PASSED THROUGH, not just formatted into the message. See
+            # SolanaRPCError's docstring: a caller needs to tell a rate limit from a real
+            # failure, and reading it back out of the sentence would be parsing prose.
+            raise SolanaRPCError(
+                f"{method} returned HTTP {response.status_code} from {self.url}: {response.text[:300]}",
+                status_code=response.status_code,
+            )
         data = response.json()
         if data.get("error"):
             raise SolanaRPCError(f"{method} failed: {data['error']}")

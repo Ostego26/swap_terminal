@@ -172,7 +172,20 @@ def test_THE_INSTRUMENT_solana_memo_POINTS_AT_ACTUALLY_EXISTS():
         "failing adapter"
     )
     assert "NOT CONFIRMED" in hunt, "and it says so when nothing was read back"
-    assert "unreadable" in hunt, (
-        "with the denominator: 'no memo over 20 read' and 'no memo over 20 unreadable' are "
-        "different facts (rule 3)"
-    )
+
+    # THE DENOMINATOR ASSERTION THAT USED TO BE HERE IS GONE, and the reason is the better
+    # argument for dropping it than any style preference: it grepped this function's own SOURCE
+    # SLICE for the word "unreadable", and on 2026-09-30 the per-id read was extracted into
+    # `hunt_one_program_id()` to get hunt_memo() back under the C901 ceiling (rule 12: extract
+    # the decision, do not raise the ceiling). The slice above stops at `def _network_line(`, so
+    # the word moved out of it and this failed -- while the printed line it was protecting was
+    # not only intact but had gained a column.
+    #
+    # A text check over a source slice pins WHERE code lives, which is the thing a refactor is
+    # allowed to change. The invariant it was reaching for is behavioral and is pinned
+    # behaviorally, by running the real function and reading the real output:
+    #   tests/test_solana_chain_check_units.py
+    #     ::test_ten_good_reads_then_a_throttle_storm_still_confirms_the_id  (asked N of 50)
+    #     ::test_a_throttled_hunt_blames_the_endpoint_and_says_what_to_do_about_it
+    # Those also cover what this one could not: that a rate limit is counted apart from an
+    # unreadable transaction, which is the distinction the old single word could not express.

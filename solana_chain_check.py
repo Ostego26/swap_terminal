@@ -61,6 +61,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent
 APP_ROOT = REPO_ROOT / "swap_terminal"
@@ -305,7 +306,8 @@ def main() -> int:
     return print_summary(failures, time.monotonic() - started)
 
 
-def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int) -> tuple[bool, list[str]]:
+def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int,
+                              throttled: int = 0) -> tuple[bool, list[str]]:
     """What one program id's hunt actually proved, as (confirmed, lines to print).
 
     A FUNCTION RATHER THAN THREE BRANCHES INSIDE THE LOOP, for rule 10's reason and rule 12's:
@@ -329,23 +331,42 @@ def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int
     So the three outcomes are distinct and named:
 
         seen > 0            CONFIRMED. Our parser read a real memo under this id.
-        read == 0           NOT ESTABLISHED. Nothing was parsed, so this is evidence
-                            about the ENDPOINT, not about the id.
+        read == 0, throttled  NOT ESTABLISHED, and the reason is the ENDPOINT. Separated
+                            from the line below on 2026-09-30 -- see the next paragraph.
+        read == 0, no throttle  NOT ESTABLISHED, and the reason is that what came back could
+                            not be used. Still not evidence about the id, but a different
+                            thing to go and look at.
         read > 0, seen == 0 We read transactions and found no memo we recognize. THAT is
                             evidence, and the encoding line says which kind.
+
+    THROTTLED IS ITS OWN COUNT BECAUSE THE OPERATOR'S RUN PROVED THE LINE WAS UNREADABLE.
+    Until 2026-09-30 a throttle was counted as `unread`, so the zero-read branch said "all N
+    transaction(s) were unreadable" and then, in the same breath, "HTTP 429 means the endpoint
+    throttled us, not that the id is bad" -- telling the reader the count it had just given
+    them was the wrong count. It also buried the actionable instruction (re-run smaller, or
+    against a paid endpoint) at the end of five lines about something else.
     """
     if seen:
         return True, [
             f"    CONFIRMED: {program} is a real Memo program id and",
             "    chains/solana_memo.memo_strings_in() reads its instructions.",
         ]
+    if read == 0 and throttled:
+        return False, [
+            f"    NOT ESTABLISHED -- THE ENDPOINT, NOT THE ID. {throttled} read(s) were refused",
+            f"    with HTTP 429 and {unread} failed for another reason, so NOTHING was parsed",
+            "    under this id. That is neither evidence it is right nor that it is wrong.",
+            "    WHAT TO DO: re-run with a smaller N (--hunt-memo 5), or point SOL_RPC_URL at an",
+            "    endpoint that is not rate-limited. A local solana-test-validator has no limit",
+            "    but also no memo traffic, so a paid devnet endpoint is what settles this one.",
+        ]
     if read == 0:
         return False, [
-            f"    NOT ESTABLISHED: all {unread} transaction(s) were unreadable, so NOTHING was",
-            "    parsed and this says nothing about the program id -- neither that it is right",
-            "    nor that it is wrong. The reasons are printed above; HTTP 429 means the",
-            "    endpoint throttled us, not that the id is bad. Re-run with a smaller N, or",
-            "    against an endpoint that is not rate-limited.",
+            f"    NOT ESTABLISHED: all {unread} transaction(s) failed to be read, and none was a",
+            "    rate limit, so the reasons above are about what the endpoint SENT rather than",
+            "    about whether it would answer. Nothing was parsed, so this says nothing about",
+            "    the program id either way -- but the reasons are worth reading: an encoding or",
+            "    field-shape failure here is a finding about chains/solana.py.",
         ]
     return False, [
         f"    read {read} transaction(s) for this id and found NO memo our parser recognizes.",
@@ -354,11 +375,173 @@ def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int
     ]
 
 
+#: How many throttles in a row mean the endpoint is not going to answer, so stop asking.
+#:
+#: MEASURED ON THE OPERATOR'S RUN, 2026-09-30, `--hunt-memo 50`: the first ten reads answered
+#: and then forty in a row returned HTTP 429. Not one recovered. The hunt asked all forty
+#: anyway, printed a six-line error block for each, and then started the second program id and
+#: threw away twenty-two more the same way before the operator pressed Ctrl-C. Three is the
+#: number because zero of the forty recovered: there is no evidence that a fourth try after
+#: three consecutive refusals is worth the wait, and waiting is what made the run unbearable.
+MEMO_HUNT_GIVE_UP_AFTER_THROTTLES = 3
+
+#: How many times ONE read is attempted before it is reported as throttled. A DIFFERENT
+#: DECISION from the give-up above, which counts REPORTED throttles in a row across different
+#: signatures -- they shared the constant at first and that was rule 8's two-copies-of-one-rule
+#: inverted: one name for two rules, so tuning either moved the other. One reported throttle
+#: therefore costs this many attempts, and the give-up fires after that many reports.
+MEMO_HUNT_RETRIES_PER_READ = 3
+
+#: Seconds to wait before retrying one throttled read, doubling each time. SECONDS because it
+#: is passed to sleep -- an interface, not a report (rule 6).
+#:
+#: RETRY, WHICH THE FIXED PACE ABOVE DOES NOT DO AND IS WHY IT WAS NOT ENOUGH. The pace was
+#: added on 2026-09-29 after an earlier 429 storm, and it was a patch rather than a fix
+#: (rule 19): it slows every read whether or not the endpoint is complaining, and does nothing
+#: at all once one does. A 429 is the one HTTP status where asking again shortly is the correct
+#: response, so that is what happens -- and the give-up above is what stops it being infinite.
+MEMO_HUNT_BACKOFF_SECONDS = 1.0
+
 #: How long to wait between the hunt's getTransaction calls. SECONDS, because it is passed
 #: straight to sleep -- an interface, not a report (rule 6). Measured 2026-09-29: an unpaced
 #: hunt of 20 signatures against api.devnet.solana.com got HTTP 429 on 11 of them and on ALL
 #: 20 for the second program id, so the run established nothing about that id at all.
 MEMO_HUNT_PACING_SECONDS = 0.35
+
+
+def read_one_transaction(adapter: SolanaAdapter, signature: str):
+    """One getTransaction, retrying a rate limit and giving the two failures separate names.
+
+    RETURNS (transaction, throttled, reason). Exactly one of the three is meaningful:
+
+        (dict, False, "")       read it
+        (None, True,  reason)   the endpoint refused to answer -- says nothing about the data
+        (None, False, reason)   we asked and could not use what came back -- a real finding
+
+    THE SPLIT IS THE POINT AND IT IS RULE 12's BLE001 COMPLAINT ONE LEVEL UP. Until 2026-09-30
+    both came back as "could not be read", so an operator's screen showed forty rate limits in
+    the same shape as an unparseable transaction -- and only the second is evidence about
+    chains/solana.py. The consequence was not cosmetic: the two Memo program ids came out of the
+    same run looking alike, one CONFIRMED off ten good reads and the other with nothing read at
+    all, and telling those two apart is the entire reason the hunt exists.
+
+    THE STATUS COMES OFF THE EXCEPTION, not out of its message. chains/solana.SolanaRPCError
+    carries `status_code` and `throttled`; sniffing the sentence for "429" would be parsing
+    prose that a later reword silently turns into "nothing is ever throttled".
+    """
+    delay = MEMO_HUNT_BACKOFF_SECONDS
+    for attempt in range(1, MEMO_HUNT_RETRIES_PER_READ + 1):
+        try:
+            return adapter.call(
+                "getTransaction", signature,
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}), False, ""
+        except SolanaRPCError as exc:
+            if not exc.throttled:
+                return None, False, f"{type(exc).__name__}: {exc}"
+            if attempt == MEMO_HUNT_RETRIES_PER_READ:
+                return None, True, f"HTTP 429 after {attempt} attempt(s)"
+            time.sleep(delay)
+            delay *= 2
+        except Exception as exc:  # noqa: BLE001 -- checked: a diagnostic, and the failure is RETURNED as the reason rather than swallowed, so the caller can tell it from a throttle and from a real read
+            return None, False, f"{type(exc).__name__}: {exc}"
+    return None, True, "HTTP 429"
+
+
+class OneIdResult(NamedTuple):
+    """What reading one program id's traffic produced. Counts, not conclusions.
+
+    The verdict is what_the_hunt_established()'s job; this is the evidence it reads. Kept
+    apart so the counting can be exercised without the sentences and the sentences without a
+    network (rule 10 -- the decision is the smallest testable piece, and it is not this).
+    """
+
+    seen: int
+    read: int
+    unread: int
+    throttled: int
+    asked: int
+    of: int
+    abandoned: bool
+    parsed_shape: str
+
+
+def hunt_one_program_id(adapter: SolanaAdapter, program: str, entries: list, how_many: int) -> OneIdResult:
+    """Read up to `how_many` of one Memo program id's transactions, printing as it goes.
+
+    EXTRACTED FROM hunt_memo() 2026-09-30, because adding the throttle handling put that
+    function at C901 13 against a ceiling of 10 -- and CLAUDE.md rule 12 is explicit about
+    which way that gets resolved: "a main() past the ceiling is orchestration that has
+    swallowed decisions ... the fix is to extract the decision so it can be called with seeded
+    inputs, not to raise the ceiling." hunt_memo() is now the loop over the two ids and this is
+    one id's read.
+
+    WHAT IT DECIDES, and it is the thing the operator's 2026-09-30 run showed missing: when to
+    STOP. Forty consecutive HTTP 429s were asked for anyway, one six-line error block printed
+    for each, and then twenty-two more thrown at the second id before Ctrl-C. Three in a row
+    ends it now, with a line saying how many were skipped and that the endpoint -- not the
+    program id -- is what went quiet.
+    """
+    seen, unread, throttled, parsed_shape = 0, 0, 0, "(none read)"
+    asked, in_a_row, abandoned = 0, 0, False
+    of = min(len(entries), how_many)
+    for entry in entries[:how_many]:
+        signature = entry.get("signature")
+        if not signature:
+            continue
+        # PACED BETWEEN READS, and BACKED OFF on a refusal -- see read_one_transaction(). The
+        # pace alone was a patch: it slowed every read whether or not the endpoint was
+        # complaining and did nothing once one did. SECONDS here, not microfortnights: an
+        # argument to sleep is an interface rather than a report (rule 6).
+        time.sleep(MEMO_HUNT_PACING_SECONDS)
+        asked += 1
+        transaction, was_throttled, reason = read_one_transaction(adapter, signature)
+        if transaction is None:
+            if not was_throttled:
+                unread += 1
+                in_a_row = 0
+                print(f"    {signature[:16]}...  could not be read: {reason}", flush=True)
+                continue
+            throttled += 1
+            in_a_row += 1
+            # ONE LINE FOR THE FIRST, A COUNT FOR THE REST. The operator's run printed a
+            # six-line error block forty times over and then twenty-two more for the second
+            # id, which buried the one real result in the middle of it. Rule 14 says silence
+            # is a defect; forty copies of one sentence is the same defect from the other
+            # side -- the screen says nothing a reader can act on either way.
+            if in_a_row == 1:
+                print(f"    {signature[:16]}...  endpoint THROTTLED us ({reason}); "
+                      f"backing off and retrying", flush=True)
+            if in_a_row >= MEMO_HUNT_GIVE_UP_AFTER_THROTTLES:
+                abandoned = True
+                print(f"    ABANDONED this id after {in_a_row} throttled reads in a row (asked "
+                      f"{asked} of {of}). Not asking the remaining {of - asked}; the endpoint "
+                      f"has stopped answering, which says nothing about the program id.",
+                      flush=True)
+                break
+            continue
+        in_a_row = 0
+        instructions = ((transaction or {}).get("transaction", {})
+                        .get("message", {}) or {}).get("instructions") or []
+        parsed_shape = ("jsonParsed (parsed present)"
+                        if any(isinstance(i, dict) and "parsed" in i for i in instructions)
+                        else "NOT jsonParsed -- instructions came back encoded")
+        memos = memo_strings_in(transaction)
+        if memos:
+            seen += len(memos)
+            tag, why = deposit_tag_from(transaction)
+            print(f"    {signature[:16]}...  {len(memos)} memo(s)  "
+                  f"tag={tag if tag is not None else 'none'}  <- {why}", flush=True)
+    # THE DENOMINATOR, because a zero above is ambiguous without it: no memo found over twenty
+    # transactions read is a different fact from no memo found over twenty that could not be
+    # read at all (rule 3 -- state what it was counted out of). THROTTLED IS ITS OWN COLUMN: it
+    # is neither a read nor a defect in what came back, and adding it to `unread` is what made
+    # forty refusals look like forty bad transactions.
+    read = asked - unread - throttled
+    print(f"    asked {asked} of {of}; read {read}, throttled {throttled}, "
+          f"unreadable {unread}; encoding received: {parsed_shape}"
+          + ("  <- ABANDONED EARLY" if abandoned else ""), flush=True)
+    return OneIdResult(seen=seen, read=read, unread=unread, throttled=throttled,
+                       asked=asked, of=of, abandoned=abandoned, parsed_shape=parsed_shape)
 
 
 def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
@@ -410,44 +593,10 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
             print("    (none) -- no recent traffic for this id. That is NOT evidence the id is", flush=True)
             print("    wrong, and NOT evidence it is right: this cluster may simply be quiet.", flush=True)
             continue
-        seen, unread, parsed_shape = 0, 0, "(none read)"
-        for entry in entries[:how_many]:
-            signature = entry.get("signature")
-            if not signature:
-                continue
-            # PACED, because the public devnet endpoint throttled 11 of 20 reads on
-            # 2026-09-29 and a hunt that cannot finish settles nothing. SECONDS here, not
-            # microfortnights: this is an argument to sleep, which is an interface rather
-            # than a report (rule 6). The figure is deliberately small -- it costs a few
-            # seconds over a 20-signature hunt and turns a 429 storm into a complete answer.
-            time.sleep(MEMO_HUNT_PACING_SECONDS)
-            try:
-                transaction = adapter.call(
-                    "getTransaction", signature,
-                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0})
-            except Exception as exc:  # noqa: BLE001 -- checked: one unreadable transaction must not end the hunt, and it is REPORTED rather than skipped in silence -- an unread transaction and a memo-less one must not both show up as nothing
-                unread += 1
-                print(f"    {signature[:16]}...  could not be read: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
-                continue
-            instructions = ((transaction or {}).get("transaction", {})
-                            .get("message", {}) or {}).get("instructions") or []
-            parsed_shape = ("jsonParsed (parsed present)"
-                            if any(isinstance(i, dict) and "parsed" in i for i in instructions)
-                            else "NOT jsonParsed -- instructions came back encoded")
-            memos = memo_strings_in(transaction)
-            if memos:
-                seen += len(memos)
-                tag, why = deposit_tag_from(transaction)
-                print(f"    {signature[:16]}...  {len(memos)} memo(s)  "
-                      f"tag={tag if tag is not None else 'none'}  <- {why}", flush=True)
-        # THE DENOMINATOR, because a zero above is ambiguous without it: no memo found over
-        # twenty transactions read is a different fact from no memo found over twenty that
-        # could not be read at all (rule 3 -- state what it was counted out of).
-        read = min(len(entries), how_many) - unread
-        print(f"    read {read} transaction(s), "
-              f"{unread} unreadable; encoding received: {parsed_shape}", flush=True)
-        established, lines = what_the_hunt_established(program, seen=seen, read=read, unread=unread)
+        outcome = hunt_one_program_id(adapter, program, entries, how_many)
+        established, lines = what_the_hunt_established(
+            program, seen=outcome.seen, read=outcome.read, unread=outcome.unread,
+            throttled=outcome.throttled)
         confirmed = confirmed or established
         for line in lines:
             print(line, flush=True)
