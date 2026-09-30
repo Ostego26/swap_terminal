@@ -41,7 +41,9 @@ import chains.solana as chains_solana  # noqa: E402
 import chains.solana as solana_module  # noqa: E402
 import chains.solana_memo as chains_solana_memo  # noqa: E402
 from chains.solana import SolanaRPCError  # noqa: E402
+from chains.solana_address import SOLANA_DEVNET_ACCOUNT, is_valid_address  # noqa: E402
 from chains.solana_memo import MEASURED_MEMO_PROGRAM_IDS, MEMO_PROGRAM_IDS  # noqa: E402
+from chains.solana_units import DISCOVERY_COMMITMENT  # noqa: E402
 
 import solana_chain_check  # noqa: E402
 from solana_chain_check import (  # noqa: E402 -- the sys.path line above is what puts the repository root on the path; this script lives there (rule 10), not inside the package.
@@ -51,12 +53,14 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     MEMO_HUNT_TRANSACTION_VERSION,
     _network_line,
     check_rent,
+    credit_path_lines,
     hunt_one_program_id,
     make_runner,
     memo_status_lines,
     print_banner,
     print_summary,
     read_one_transaction,
+    resolve_address,
     what_the_hunt_established,
 )
 
@@ -695,11 +699,14 @@ def test_the_summary_still_names_the_credit_path_as_the_unproven_half(capsys):
     every run so far passed no --address and no --mint. A summary that said only "the read path
     works" would read as more than it is.
     """
-    print_summary([], 1.0, hunted=True)
+    # read_address=False, which is what "unproven" now means -- the wording is DERIVED from
+    # whether the run read an address rather than asserted unconditionally. It used to be a
+    # fixed sentence, so the first run that DID pass an address would have been told its own
+    # coverage did not happen.
+    print_summary([], 1.0, hunted=True, read_address=False, read_mint=False)
     out = capsys.readouterr().out
-    assert "CREDIT path is still unproven" in out
+    assert "CREDIT path: NOT exercised" in out
     assert "find_deposits_to_address" in out
-    assert "--address" in out and "--mint" in out
 
     # AND THE MEMO LINES IN THE SUMMARY ARE THE DERIVED ONES, byte for byte. Asserted here
     # because without it, replacing the loop with a hand-written "still unproven" sentence
@@ -765,6 +772,10 @@ class _WholeClusterStub:
         return _Ok(self._result(method))
 
     def _result(self, method):
+        # THE ADDRESS METHODS ARE ANSWERED TOO, since 2026-09-30 -- before that the ADDRESS
+        # section was skipped on a default run, so a stub that covered only the cluster was
+        # enough. It no longer is, and that is the point of the change: the section that
+        # exercises the credit path now always runs.
         return {
             "getHealth": "ok",
             "getVersion": {"solana-core": "4.3.0"},
@@ -772,6 +783,7 @@ class _WholeClusterStub:
             "getSlot": 506046940,
             "getEpochInfo": {"epoch": 1171, "slotIndex": 174942, "absoluteSlot": 506046942},
             "getMinimumBalanceForRentExemption": 650240,
+            "getBalance": {"value": 2_000_000_000},
             "getSignaturesForAddress": [{"signature": f"sig{n}"} for n in range(self.signatures)],
             "getTransaction": _memo_transaction("4242"),
         }.get(method, {})
@@ -875,6 +887,21 @@ def test_main_asks_for_the_transaction_version_the_hunt_declares(monkeypatch, ca
     reads = [b for b in bodies if b.get("method") == "getTransaction"]
     assert reads, "the hunt must actually call getTransaction"
 
+    # TWO CALL SITES NOW RUN IN ONE INVOCATION, and they ask for DIFFERENT versions on purpose.
+    # This assertion used to require every getTransaction to carry the hunt's version, which was
+    # true only while the ADDRESS section was skipped by default. Now find_deposits_to_address
+    # runs too and asks for version 0 -- because `_native_credits` indexes positionally through
+    # message.accountKeys and a lookup table's keys arrive elsewhere, which would silently miss a
+    # deposit. The hunt asks for 1 because chains/solana_memo.py reads no keys at all. Pinning
+    # BOTH is stronger than pinning either: it holds the split end to end, at the wire.
+    # ONE ASSERTION, NOT FOUR, and it is the stronger one. A first draft read the version and the
+    # encoding out of each config by subscript and asserted on them separately -- which put that
+    # field's name in a position where tests/test_address_literals_are_valid.py reads it as an
+    # address-shaped literal (thirty alphanumerics, no separator) and failed the run. The
+    # whole-config comparison below pins both versions AND both encodings AND the absence of any
+    # third key, with every field name in KEY position where the scanner exempts it. Weaker
+    # assertions were what needed the subscripts.
+
     # THE WHOLE CONFIG, COMPARED AS A DICT LITERAL, and the shape of this assertion is not a
     # style choice. Reading the version field out by subscript puts its name in a position where
     # tests/test_address_literals_are_valid.py's scanner treats it as an address-shaped literal
@@ -891,10 +918,162 @@ def test_main_asks_for_the_transaction_version_the_hunt_declares(monkeypatch, ca
     #
     # Comparing the whole dict is also the stronger assertion: a key ADDED to the request would
     # slip past two field checks and is caught here.
-    expected = {"encoding": "jsonParsed",
-                "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION}
-    for body in reads:
-        assert body["params"][1] == expected, (
-            "the hunt's getTransaction config must be exactly this -- jsonParsed because "
-            "memo_strings_in() reads the parsed shape only, and the declared version"
+    # Each config is EXACTLY one of the two expected dicts and carries no third key. Written as
+    # dict literals so the version field's name stays in KEY position -- see the note above.
+    # The deposit reader also pins a COMMITMENT and the hunt does not, which is right: the
+    # deposit reader decides whether money is credited and must read at a stated rung of the
+    # ladder, while the hunt only wants to see somebody's memo text. DISCOVERY_COMMITMENT is
+    # imported rather than spelled "processed" here, so the two cannot drift.
+    assert {frozenset(body["params"][1].items()) for body in reads} == {
+        frozenset({"encoding": "jsonParsed",
+                   "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION}.items()),
+        frozenset({"encoding": "jsonParsed",
+                   "commitment": DISCOVERY_COMMITMENT,
+                   "maxSupportedTransactionVersion": 0}.items()),
+    }, "a key was added to, or removed from, one of the two getTransaction configs"
+
+# ---------------------------------------------------------------------------
+# THE CHECK HAS TO BE RUNNABLE WITH NO ARGUMENTS.
+#
+# 2026-09-30. The credit path is the half of this adapter that loses money if a
+# field name is wrong, and it is exercised only by the ADDRESS section -- which
+# was skipped entirely unless the operator supplied an address. I then handed
+# them one as a placeholder inside a code block, and they pasted it:
+#
+#     python3 solana_chain_check.py --address <a devnet wallet with a balance>
+#     bash: syntax error near unexpected token `newline'
+#
+# Two defects, mine both. A placeholder in a code block, which they had already
+# told me never to do. And a check whose most valuable section required a value
+# the repository had held in fund_testnets.py since it was written.
+# ---------------------------------------------------------------------------
+
+
+def test_an_explicit_address_always_wins():
+    assert resolve_address("rTYPED", "rCONFIGURED")[0] == "rTYPED"
+    assert "--address" in resolve_address("rTYPED", "rCONFIGURED")[1]
+
+
+def test_the_configured_hot_wallet_is_used_when_nothing_was_typed():
+    address, why = resolve_address("", "rCONFIGURED")
+    assert address == "rCONFIGURED"
+    assert "SOL_HOT_WALLET" in why
+
+
+def test_WITH_NEITHER_IT_STILL_HAS_AN_ADDRESS_TO_READ():
+    """THE FIX. A check that needs an argument is a check that does not get run.
+
+    MUTATION: return ("", ...) here and the ADDRESS section goes back to being skipped on every
+    default run, which is how the credit path stayed unexercised for five days.
+    """
+    address, _why = resolve_address("", "")
+    assert address == SOLANA_DEVNET_ACCOUNT
+    assert address, "the whole point: there is always something to read"
+    assert is_valid_address(address), "and it is a real Solana address, not a placeholder"
+
+
+def test_the_default_says_it_is_a_default_and_what_it_does_NOT_prove():
+    """A default that appears silently is a default an operator reads as their own config.
+
+    That distinction is load-bearing here: getBalance against the fallback proves the READ PATH
+    and proves nothing about SOL_HOT_WALLET being set correctly. Rule 14 -- echo the parameter
+    that decides the answer, and say what the answer means.
+    """
+    _, why = resolve_address("", "")
+    assert "DEFAULTED" in why
+    assert "SOL_HOT_WALLET" in why, "name the thing that was not set"
+    assert "says nothing about your own wallet" in why
+
+
+def test_the_default_address_is_not_a_placeholder_anybody_could_paste_wrong():
+    """WHAT THE OPERATOR'S SHELL ERROR WAS, PINNED SO IT CANNOT COME BACK AS A CONSTANT.
+
+    MUTATION: set SOLANA_DEVNET_ACCOUNT to "<a devnet wallet with a balance>" or any other
+    human-readable stand-in and this fails. A constant that is not a real address is a
+    placeholder with extra steps -- it would reach the cluster and come back actNotFound, which
+    reads as "the account is empty" rather than "somebody left a note here".
+    """
+    assert is_valid_address(SOLANA_DEVNET_ACCOUNT)
+    for shell_metacharacter in "<>|&;$(){}[] ":
+        assert shell_metacharacter not in SOLANA_DEVNET_ACCOUNT, (
+            f"{shell_metacharacter!r} in an address a human is meant to paste into a shell"
         )
+
+
+def test_the_banner_prints_where_the_address_came_from(capsys):
+    """MUTATION: drop address_why from the print_banner() call and the default goes silent."""
+    # THE REAL Config.RPC["SOL"] SPREAD, not a hand-built dict. Built one by hand earlier in
+    # this file and print_banner raised KeyError on 'mint'; it raised again here on
+    # 'min_commitment_rank'. A hand-built config tests the hand-built config.
+    rpc = {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1"}
+    address, why = resolve_address("", "")
+    print_banner(rpc, address, why)
+    out = capsys.readouterr().out
+    assert address in out
+    assert "DEFAULTED" in out, "the banner must say the address was not the operator's choice"
+
+
+# --- what the run actually covered -----------------------------------------
+
+
+def test_with_no_address_the_summary_says_the_credit_path_did_not_run():
+    text = " ".join(credit_path_lines(read_address=False, read_mint=False))
+    assert "NOT exercised" in text
+    assert "loses a deposit" in text
+
+
+def test_with_an_address_but_no_mint_only_the_NATIVE_reader_is_claimed():
+    """The mint is its own axis, and reporting them together would let one cover for the other.
+
+    An address without a mint exercises `_native_credits` -- positional indexing into
+    preBalances/postBalances -- and never touches `_spl_credits`, which reads
+    meta.preTokenBalances and derives an associated token account. Two different readers, two
+    different sets of field names written from documentation.
+    """
+    text = " ".join(credit_path_lines(read_address=True, read_mint=False))
+    assert "NATIVE reader was exercised" in text
+    assert "SPL reader was NOT" in text
+    assert "--mint" in text, "name the flag that would cover the other half"
+
+
+def test_with_both_the_summary_claims_both_and_nothing_more():
+    text = " ".join(credit_path_lines(read_address=True, read_mint=True))
+    assert "BOTH native SOL and the SPL mint" in text
+    assert "NOT" not in text.replace("NOTHING", ""), "nothing is still outstanding to name"
+    assert "without sending anything" in text, "and it still says what it did not do"
+
+
+def test_the_three_coverage_reports_are_all_different():
+    """Rule 14: "did nothing", "did half" and "did both" must not share a line."""
+    texts = {
+        " ".join(credit_path_lines(False, False)),
+        " ".join(credit_path_lines(True, False)),
+        " ".join(credit_path_lines(True, True)),
+    }
+    assert len(texts) == 3
+
+
+def test_main_with_no_arguments_reads_an_address_and_says_the_credit_path_ran(monkeypatch, capsys):
+    """END TO END: the default reaches the wire and the summary reports it.
+
+    This is the run the operator could not make. No flags, no environment, and the ADDRESS
+    section executes -- which is what makes the credit-path claim in the summary true.
+    """
+    code, out = _run_main(monkeypatch, capsys, ["solana_chain_check.py"])
+    assert code == 0
+    assert SOLANA_DEVNET_ACCOUNT in out
+    assert "DEFAULTED" in out
+    assert "ADDRESS" in out
+    assert "(none given" not in out, "the section that was skipped for five days now runs"
+    assert "NATIVE reader was exercised" in text_of(out)
+    assert "CREDIT path: NOT exercised" not in out
+
+
+def text_of(out: str) -> str:
+    """The output with line breaks collapsed, for asserting on sentences rather than layout.
+
+    Same reason as tests/test_solana_memo.py's _unwrapped(): two assertions in this suite have
+    already failed on a line wrap rather than on the wording, and the credit-path lines are
+    wrapped deliberately to fit a terminal.
+    """
+    return " ".join(out.split())

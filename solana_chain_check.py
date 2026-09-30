@@ -72,7 +72,7 @@ if str(APP_ROOT) not in sys.path:
 # hoisting them would break the import it enables. That is what the E402
 # suppressions claim and what a reader can check from these lines.
 from chains.solana import SolanaAdapter, SolanaRPCError  # noqa: E402
-from chains.solana_address import describe_address  # noqa: E402
+from chains.solana_address import SOLANA_DEVNET_ACCOUNT, describe_address  # noqa: E402
 from chains.solana_memo import (  # noqa: E402
     MEASURED_MEMO_PROGRAM_IDS,
     MEMO_PROGRAM_IDS,
@@ -152,12 +152,18 @@ def make_runner(failures: list[str]):
     return run
 
 
-def print_banner(rpc: dict, address: str) -> None:
-    """Everything that decides the answer, before anything runs (rule 14)."""
+def print_banner(rpc: dict, address: str, address_why: str = "") -> None:
+    """Everything that decides the answer, before anything runs (rule 14).
+
+    `address_why` says WHERE the address came from -- typed, configured, or defaulted. A default
+    that appears without saying so is a default an operator reads as their own configuration.
+    """
     print("solana_chain_check: READ-ONLY. It signs nothing and broadcasts nothing.", flush=True)
     print(f"  endpoint        {rpc['url'] or '(SOL_RPC_URL is UNSET -- nothing can be checked)'}", flush=True)
     print(f"  mint            {rpc['mint'] or '(none -- checking native SOL)'}", flush=True)
-    print(f"  address         {address or '(none given; pass --address or set SOL_HOT_WALLET)'}", flush=True)
+    print(f"  address         {address or '(none)'}", flush=True)
+    if address_why:
+        print(f"                  <- {address_why}", flush=True)
     print(f"  threshold       rank {rpc['min_commitment_rank']}  <- a RUNG on the commitment ladder, NOT blocks", flush=True)
     print(f"  database        {Config.DB_PATH}  <- echoed for the paste; this script does not open it", flush=True)
 
@@ -239,6 +245,45 @@ def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> None
         lambda: _deposits_line(adapter, address, limit))
 
 
+def resolve_address(explicit: str, hot_wallet: str) -> tuple[str, str]:
+    """Which account to read, and WHY that one. Returns (address, why).
+
+    THREE SOURCES IN PRECEDENCE ORDER, and the third is why this function exists:
+
+        --address            what the operator typed. Always wins.
+        SOL_HOT_WALLET       the configured wallet, if there is one.
+        SOLANA_DEVNET_ACCOUNT  a known-funded devnet account this repository already holds.
+
+    WHAT THE THIRD FIXES. Until 2026-09-30 there was no third, so a run with no --address
+    printed "(none given -- pass --address or set SOL_HOT_WALLET to check one)" and skipped the
+    entire ADDRESS section -- which is the section that exercises getBalance, getAccountInfo and
+    find_deposits_to_address, the credit path, the one place a wrong field name loses a deposit
+    rather than raising. The check most worth running was the one that needed an argument, and I
+    then handed the operator that argument as a placeholder inside a code block. They pasted it:
+
+        python3 solana_chain_check.py --address <a devnet wallet with a balance>
+        bash: syntax error near unexpected token `newline'
+
+    A script that cannot run without a value its own repository already knows is a script that
+    mostly does not get run. The address has been in fund_testnets.py since it was written; it
+    lives in chains/solana_address.py now so both can reach it.
+
+    THE REASON IS RETURNED, NOT JUST THE ADDRESS. A default that appears silently is a default
+    an operator reads as their own configuration -- and the difference matters here, because
+    getBalance against the fallback says the READ PATH works and says nothing about whether
+    SOL_HOT_WALLET is set correctly. Rule 14: echo the parameter that decides the answer.
+    """
+    if explicit:
+        return explicit, "from --address"
+    if hot_wallet:
+        return hot_wallet, "from SOL_HOT_WALLET"
+    return SOLANA_DEVNET_ACCOUNT, (
+        "DEFAULTED to the devnet account this repo already knows (chains/solana_address."
+        "SOLANA_DEVNET_ACCOUNT) -- no --address and no SOL_HOT_WALLET. This proves the READ "
+        "PATH and says nothing about your own wallet being configured"
+    )
+
+
 def memo_status_lines(hunted: bool | None) -> list[str]:
     """What the summary should say about the memo program ids, DERIVED rather than written.
 
@@ -277,7 +322,35 @@ def memo_status_lines(hunted: bool | None) -> list[str]:
     return lines
 
 
-def print_summary(failures: list[str], elapsed: float, hunted: bool | None = None) -> int:
+def credit_path_lines(read_address: bool, read_mint: bool) -> list[str]:
+    """What the run proved about the deposit-credit path, which is the half that loses money.
+
+    THE DISTINCTION WORTH KEEPING: the cluster section proves the TRANSPORT -- that the adapter
+    can talk to a real node, that its error handling and result unwrapping work. The address
+    section proves the READERS: getBalance, getAccountInfo and find_deposits_to_address, whose
+    field names were written from documentation. A wrong field name there does not raise; it
+    returns nothing, and nothing means "no deposit arrived".
+
+    AND THE MINT IS ITS OWN AXIS. A run with an address but no mint exercises the NATIVE reader
+    (`_native_credits`, positional indexing into preBalances/postBalances) and never touches the
+    SPL one (`_spl_credits`, which reads meta.preTokenBalances and derives an associated token
+    account). Reporting them together would let one cover for the other.
+    """
+    if read_address and read_mint:
+        return ["  CREDIT path: exercised for BOTH native SOL and the SPL mint against real",
+                "  responses. That is the deepest this check goes without sending anything."]
+    if read_address:
+        return ["  CREDIT path: the NATIVE reader was exercised against real responses "
+                "(getBalance,",
+                "  getAccountInfo, find_deposits_to_address). The SPL reader was NOT -- pass",
+                "  --mint <an spl mint> to exercise _spl_credits and the token-account derivation."]
+    return ["  CREDIT path: NOT exercised, and it is the half that matters. getBalance,",
+            "  getAccountInfo and find_deposits_to_address did not run, because no address was",
+            "  read. A wrong field name there loses a deposit rather than raising."]
+
+
+def print_summary(failures: list[str], elapsed: float, hunted: bool | None = None,
+                  read_address: bool = False, read_mint: bool = False) -> int:
     """Rule 14: a run that found nothing and a run that failed must not share a line."""
     print("\nSUMMARY", flush=True)
     total = format_duration(elapsed)
@@ -309,9 +382,13 @@ def print_summary(failures: list[str], elapsed: float, hunted: bool | None = Non
     # own output four lines earlier. See memo_status_lines().
     for line in memo_status_lines(hunted):
         print(line, flush=True)
-    print("  The CREDIT path is still unproven and is the half that matters: getBalance,", flush=True)
-    print("  getAccountInfo and find_deposits_to_address have never met a real response, because", flush=True)
-    print("  this run passed no --address and no --mint. A wrong field name there loses a deposit.", flush=True)
+    # WHAT THIS RUN ACTUALLY COVERED, derived from whether an address was read rather than
+    # asserted. These three lines used to say the credit path "have never met a real response,
+    # because this run passed no --address and no --mint" -- unconditionally, so the first run
+    # that DID pass one would have been told its own coverage did not happen. Same defect as the
+    # memo lines two commits ago, in the paragraph written to replace them.
+    for line in credit_path_lines(read_address, read_mint):
+        print(line, flush=True)
     print(f"  checked in    {total}", flush=True)
     return 0
 
@@ -334,10 +411,10 @@ def main() -> int:
     rpc = dict(Config.RPC["SOL"])
     if args.mint:
         rpc["mint"] = args.mint
-    address = args.address or rpc.get("hot_wallet") or ""
+    address, address_why = resolve_address(args.address, rpc.get("hot_wallet") or "")
 
     started = time.monotonic()
-    print_banner(rpc, address)
+    print_banner(rpc, address, address_why)
     if not rpc["url"]:
         print("  FAIL  SOL_RPC_URL is unset, so there is nothing to check. Set it and run again.", flush=True)
         return 1
@@ -362,7 +439,8 @@ def main() -> int:
     # an id was confirmed "so a caller can print the difference", and this line discarded it --
     # which is how the summary came to tell the operator the ids were unproven immediately after
     # printing two CONFIRMED lines.
-    return print_summary(failures, time.monotonic() - started, hunted)
+    return print_summary(failures, time.monotonic() - started, hunted,
+                         read_address=bool(address), read_mint=bool(rpc.get('mint')))
 
 
 def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int,

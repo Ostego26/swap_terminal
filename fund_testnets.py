@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 import requests
 from chains.base import RPCAdapter
+from chains.solana_address import SOLANA_DEVNET_ACCOUNT
 from regtest.console import Console
 from regtest.daemons import (
     RegtestSetupError,
@@ -72,8 +73,10 @@ from regtest.daemons import (
 XRP_FAUCET = "https://faucet.altnet.rippletest.net/accounts"
 SOLANA_DEVNET = "https://api.devnet.solana.com"
 
-# The devnet account the key rotation moved everything to. Read-only here.
-SOLANA_DEVNET_ACCOUNT = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+# SOLANA_DEVNET_ACCOUNT MOVED TO chains/solana_address.py on 2026-09-30, imported below. It was
+# defined here, in an entry point, so solana_chain_check.py could not reach it and asked the
+# operator for an address instead -- which they could not supply from a pasted placeholder. A
+# constant only one file can see is a constant every other file asks a human for (rule 10).
 
 # A coinbase output needs 100 confirmations before it can be spent, so 101
 # blocks is the smallest number that yields one spendable reward. Mining fewer

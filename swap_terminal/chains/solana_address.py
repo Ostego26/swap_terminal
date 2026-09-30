@@ -114,6 +114,31 @@ ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"  # 
 # balance of zero from an account that holds nine figures of lamports.
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
+#: A DEVNET ACCOUNT KNOWN TO HOLD A BALANCE, so a read-only check has something to read.
+#:
+#: MOVED HERE FROM fund_testnets.py ON 2026-09-30, and the reason is an operator pasting a
+#: placeholder into a shell:
+#:
+#:     python3 solana_chain_check.py --address <a devnet wallet with a balance>
+#:     bash: syntax error near unexpected token `newline'
+#:
+#: That is my defect twice over. Once for putting a placeholder inside a code block, which the
+#: operator had already told me never to do. And once for the design underneath it: the chain
+#: check's whole purpose is to exercise the read path against a real cluster, and it asked the
+#: operator to supply the one input that makes that possible -- when the tree has held a funded
+#: devnet address since fund_testnets.py was written. A script that cannot run without a value
+#: its own repository already knows is a script that mostly does not get run.
+#:
+#: DEVNET ONLY AND WORTH NOTHING. This is the account the Solana key rotation moved everything
+#: to. Reading its balance is read-only; no key for it lives in this repository, and none is
+#: needed, because every method a check would call is a read.
+#:
+#: IT IS A DEFAULT AND NEVER A TARGET. Nothing pays to it, nothing derives from it, and
+#: solana_chain_check.py prints WHICH address it is reading and why whenever it falls back to
+#: this one -- rule 14: a value that decides the answer gets echoed next to the answer.
+SOLANA_DEVNET_ACCOUNT = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+
+
 
 class SolanaAddressError(ValueError):
     """A string was not a usable Solana address, and the message says why.

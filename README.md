@@ -326,12 +326,30 @@ It is **read-only**: it signs nothing, broadcasts nothing, opens no database and
 reads no key, and there is no flag that changes that.
 
     source .venv/bin/activate
-    export SOL_RPC_URL=http://127.0.0.1:8899          # a local test validator
+    export SOL_RPC_URL=https://api.devnet.solana.com
     python3 solana_chain_check.py
 
-    # or devnet, with an address and a mint to inspect:
-    export SOL_RPC_URL=https://api.devnet.solana.com
-    python3 solana_chain_check.py --address <wallet> --mint <spl mint>
+It needs **no arguments**. With neither `--address` nor `SOL_HOT_WALLET` set it
+reads `chains/solana_address.SOLANA_DEVNET_ACCOUNT` -- a devnet account this
+repository already holds -- and says in the banner that it defaulted, and that
+doing so proves the read path rather than your own wallet being configured.
+
+Until 2026-09-30 it did not, and the cost was specific: the ADDRESS section is
+the only one that exercises `getBalance`, `getAccountInfo` and
+`find_deposits_to_address` -- the credit path, where a wrong field name returns
+nothing rather than raising, and nothing means "no deposit arrived". That
+section was skipped on every run that did not supply an address, so the most
+valuable check in the script was the one that needed an argument.
+
+Two flags add coverage rather than enabling it:
+
+  `--mint` an SPL mint, which exercises `_spl_credits` and the token-account
+  derivation. Without it only the native reader runs, and the summary says so
+  rather than claiming both.
+
+  `--hunt-memo N` reads N of the Memo program's own recent transactions. Both
+  program ids are already measured, so this is now a re-check rather than an
+  open question.
 
 It **identifies the network from `getGenesisHash`, not from the URL**, because a
 cluster cannot lie about its genesis and a hostname can -- an operator with a
