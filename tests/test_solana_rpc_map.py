@@ -380,3 +380,33 @@ def test_the_version_option_rides_in_the_SAME_options_object_as_the_commitment()
     assert dicts[0] == {"commitment": FINALIZED,
                         version_key: MAX_SUPPORTED_TRANSACTION_VERSION}
     assert params[0] == 493267002, "the slot must still come first"
+
+
+def test_getblocks_note_warns_that_a_HEIGHT_used_as_a_SLOT_answers_without_erroring():
+    """The trap that caught the confirmation script itself, 2026-09-30.
+
+    getBlock takes a slot. Handed a block HEIGHT it returns the block at that slot number --
+    a valid object, no error, and on devnet roughly 25 days stale, because the two numbers
+    differ by about 12.2 million. That is rule 17's shape in one call: a confident answer to a
+    question nobody asked.
+
+    The note on getblockcount already explains that slots run ahead of heights. What was
+    missing is the consequence AT THE CALL THAT TAKES A SLOT, which is where somebody holding
+    a height is standing.
+
+    MUTATION: drop the warning. Nothing else fails -- and nothing would, because the map is
+    correct either way. This test exists because the DANGER is not in the mapping, it is in
+    what a caller is likely to have in their hand.
+    """
+    note = CONGRUENT["getblock"].note
+    assert "takes a SLOT" in note, "the note no longer says what the argument is"
+    assert "FEEDING IT A BLOCK HEIGHT" in note, (
+        "the note does not warn that a height is accepted silently, which is the failure that "
+        "produces a wrong block rather than an error"
+    )
+    assert "481049841" in note and "493269229" in note, (
+        "the warning does not carry the measured pair, so a reader cannot see the size of the "
+        "mistake -- which is weeks, not blocks"
+    )
+    # And the null case is still named: a skipped slot is a real answer.
+    assert "answers null" in note

@@ -194,7 +194,15 @@ CONGRUENT: dict[str, SolanaEquivalent] = {
     "getblock": SolanaEquivalent(
         "getBlock", "the object", argument="slot", commitment=True, returns_transactions=True,
         note="takes a SLOT where bitcoind takes a hash, and a skipped slot has no block -- the "
-             "node answers null, which is a real answer and not an error.",
+             "node answers null, which is a real answer and not an error. "
+             "FEEDING IT A BLOCK HEIGHT RETURNS A DIFFERENT BLOCK AND NO ERROR, which is the "
+             "expensive way to get this wrong and is how it was found: on 2026-09-30 a "
+             "confirmation script passed getBlockHeight's answer (493269229) into this call, "
+             "and the node returned the block at SLOT 493269229 -- blockHeight 481049841, "
+             "blockTime 1788566330, roughly 25 days old. A plausible object, nothing raised, "
+             "and the wrong block. The two numbers differ by ~12.2 million here (see "
+             "getblockcount), so a height used as a slot lands WEEKS in the past rather than "
+             "slightly off.",
     ),
     "getblockhash": SolanaEquivalent(
         "getBlock", "blockhash", argument="slot", commitment=True, returns_transactions=True,
