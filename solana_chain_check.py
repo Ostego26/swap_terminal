@@ -177,10 +177,28 @@ def check_rent(adapter: SolanaAdapter, run) -> None:
     # the operator could not tell a devnet-vs-mainnet difference (which would be
     # expected) from a value stale everywhere (which is what it turned out to
     # be). It says so now, in the header and in every mismatch line.
+    #
+    # AND THE HEADER SAID MORE THAN ANYBODY HAD MEASURED, corrected 2026-09-30.
+    # It read "mainnet-beta, devnet and testnet all reached it on SIMD-0437 step
+    # 2" -- stated as fact, in the line an operator reads on every run, while
+    # chains/solana_units.py and the mismatch line below both mark the same
+    # figure as MEASURED on devnet and SOURCED for the other two. Rule 17 is
+    # exactly that those must not share a voice, and the version that hedges is
+    # the correct one: no mainnet-beta or testnet endpoint has ever been read
+    # from this tree.
+    #
+    # WHAT THE 2026-09-30 DEVNET RUN ADDS, because it bears on the next step
+    # rather than on this one: that cluster answers getVersion 4.3.0, at slot
+    # 506004644 / epoch 1171, and returned 650240 and 1488440 lamports -- 5080
+    # exactly, at both sizes. solana_units.py records that SIMD-0437's steps 3-5
+    # wait for Agave 4.4, so a cluster on 4.3.0 still carrying 5080 is the
+    # consistent reading rather than a coincidence.
     print(
-        f"\nRENT  (reference = {LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION} lamports/byte -- ONE cluster parameter, not a "
-        "per-cluster figure: mainnet-beta, devnet and testnet all reached it on SIMD-0437 step 2, 2026-09-11. "
-        "The chain is the authority; a mismatch means a further step activated, which is EXPECTED, not a defect.)",
+        f"\nRENT  (reference = {LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION} lamports/byte, which is SIMD-0437 step 2 -- "
+        "ONE cluster parameter rather than a per-cluster figure, so a mismatch means a further step activated and "
+        "is EXPECTED, not a defect. MEASURED on devnet; for mainnet-beta and testnet it is SOURCED from "
+        "solana.com/upgrades/reduced-rent and has never been read from an endpoint here. The chain is the "
+        "authority and nothing sizes a transfer from the constant.)",
         flush=True,
     )
     run("getMinimumBalanceForRentExemption(0)", f"expected {RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS} lamports for a system account (0 bytes)",
