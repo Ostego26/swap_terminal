@@ -83,6 +83,7 @@ class SolanaEquivalent(NamedTuple):
     argument: str = ""
     needs_address: bool = False
     commitment: bool = False
+    returns_transactions: bool = False
     note: str = ""
 
 
@@ -92,6 +93,28 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 #: The commitment every read here asks for by name. See the module header.
 FINALIZED = "finalized"
+
+#: The transaction version this client declares it can parse, sent with every read that
+#: returns transactions.
+#:
+#: MEASURED THE HARD WAY, 2026-09-30. getBlock against api.devnet.solana.com without it:
+#:
+#:     -32015  Transaction version (0) is not supported by the requesting client. Please try
+#:             the request again with the following configuration parameter:
+#:             "maxSupportedTransactionVersion": 0
+#:
+#: A node will not hand a block to a client that has not said which transaction versions it
+#: understands, and it refuses the WHOLE BLOCK rather than omitting the versioned transactions
+#: in it. Versioned (v0) transactions have been ordinary on Solana since 2022, so in practice
+#: every block containing any activity failed -- which is to say getBlock and getTransaction
+#: were both broken, for every input, and no test in this repository would ever have shown it:
+#: they exercise the map, and the map was internally consistent. The operator's first real call
+#: is what found it, which is the argument this module's header already makes about writing a
+#: map from documentation.
+#:
+#: 0 rather than a higher number because 0 is the only version that exists today; raising it
+#: would be claiming to parse a format nobody has defined.
+MAX_SUPPORTED_TRANSACTION_VERSION = 0
 
 #: WHAT DOES TRANSLATE. Bitcoin-style name -> the Solana call that answers the same question.
 CONGRUENT: dict[str, SolanaEquivalent] = {
@@ -116,8 +139,10 @@ CONGRUENT: dict[str, SolanaEquivalent] = {
         "getBlockHeight", "the integer itself", commitment=True,
         note="getBlockHeight, NOT getSlot, AND THE DIFFERENCE IS REAL: a SLOT is a scheduled "
              "leader window and a slot can be SKIPPED, so the slot number runs ahead of the "
-             "block height and the two are never equal on a live cluster. The devnet run read "
-             "slot 506014088; the block height at that moment was lower. "
+             "block height and the two are never equal on a live cluster. MEASURED on devnet "
+             "2026-09-30, both figures from ONE getEpochInfo answer: absoluteSlot 506018813 "
+             "against blockHeight 493266987 -- a gap of 12,751,826. Mapping this to getSlot "
+             "would have been wrong by that much. "
              "solana_chain_check.py prints getSlot as 'a DIAGNOSTIC, never a confirmation "
              "count' for exactly this reason, and anything counting confirmations wants "
              "COMMITMENT rather than either number.",
@@ -162,16 +187,17 @@ CONGRUENT: dict[str, SolanaEquivalent] = {
     ),
     "getrawtransaction": SolanaEquivalent(
         "getTransaction", "transaction / meta", argument="signature", commitment=True,
+        returns_transactions=True,
         note="the argument is a SIGNATURE, not a txid -- Solana identifies a transaction by its "
              "first signature. The answer is JSON; pass {'encoding': 'base64'} for the raw form.",
     ),
     "getblock": SolanaEquivalent(
-        "getBlock", "the object", argument="slot", commitment=True,
+        "getBlock", "the object", argument="slot", commitment=True, returns_transactions=True,
         note="takes a SLOT where bitcoind takes a hash, and a skipped slot has no block -- the "
              "node answers null, which is a real answer and not an error.",
     ),
     "getblockhash": SolanaEquivalent(
-        "getBlock", "blockhash", argument="slot", commitment=True,
+        "getBlock", "blockhash", argument="slot", commitment=True, returns_transactions=True,
         note="same call as getblock, reading one field of it. THIS is the tip's identifier that "
              "getbestblockhash does not give you.",
     ),
@@ -385,5 +411,13 @@ def call_for(bitcoin_method: str, argument: object = None,
         # balance read at a weaker commitment can still change -- which for a deposit is the
         # difference between crediting a customer and crediting a rollback. This is the same
         # decision as chains/xrp_rpc_map's ledger_index="validated".
-        params.append({"commitment": FINALIZED})
+        options: dict = {"commitment": FINALIZED}
+        if entry.returns_transactions:
+            # WITHOUT THIS THE NODE REFUSES THE WHOLE ANSWER -- see
+            # MAX_SUPPORTED_TRANSACTION_VERSION for the error it returns and why every block
+            # with any activity in it hit it. ONE options object rather than two appended
+            # dicts: Solana takes one, and a second would be an extra positional argument
+            # where the method expects none.
+            options["maxSupportedTransactionVersion"] = MAX_SUPPORTED_TRANSACTION_VERSION
+        params.append(options)
     return entry.method, params

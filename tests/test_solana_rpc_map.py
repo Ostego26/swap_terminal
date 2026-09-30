@@ -26,6 +26,7 @@ from chains.solana_rpc_map import (
     CONGRUENT,
     FINALIZED,
     LAMPORTS_PER_SOL,
+    MAX_SUPPORTED_TRANSACTION_VERSION,
     NATIVE_ONLY,
     NO_EQUIVALENT,
     MissingArgument,
@@ -187,7 +188,13 @@ def test_every_read_that_can_ask_for_a_COMMITMENT_asks_for_finalized():
         address = "HotWallet1111111111111111111111111111111111" if entry.needs_address else ""
         argument = 1 if entry.argument else None
         _method, params = call_for(name, argument, address)
-        assert params and params[-1] == {"commitment": FINALIZED}, (
+        # THE KEY, not the whole object. This asserted exact equality until 2026-09-30, when
+        # the three transaction-returning reads gained maxSupportedTransactionVersion in the
+        # same options object -- and a test that pins a whole dict fails on a correct addition
+        # to it. What this test is about is the commitment; the exact shape is
+        # test_the_version_option_rides_in_the_SAME_options_object_as_the_commitment's job.
+        options = params[-1] if params and isinstance(params[-1], dict) else {}
+        assert options.get("commitment") == FINALIZED, (
             f"{name} does not ask for a commitment by name, so it answers at the node's default"
         )
 
@@ -302,3 +309,65 @@ def test_no_entry_carries_an_empty_answers_path():
     for name, entry in sorted({**CONGRUENT, **NATIVE_ONLY}.items()):
         assert entry.answers, f"{name} names no path into the result, so the reader gets a document"
         assert entry.method, f"{name} names no Solana method"
+
+
+def test_every_read_that_RETURNS_TRANSACTIONS_declares_the_version_it_can_parse():
+    """The defect the operator's first real getBlock found, 2026-09-30.
+
+        -32015  Transaction version (0) is not supported by the requesting client. Please try
+                the request again with the following configuration parameter:
+                "maxSupportedTransactionVersion": 0
+
+    A node will not hand a block to a client that has not said which transaction versions it
+    understands, and it refuses the WHOLE BLOCK rather than omitting the versioned transactions
+    in it. Versioned transactions have been ordinary on Solana since 2022, so getBlock and
+    getTransaction were broken for every input -- and no test here would ever have shown it,
+    because the tests exercise the map and the map was internally consistent with itself.
+
+    THAT IS THIS FILE'S OWN LIMIT, WRITTEN DOWN: a map tested only against its own tables is
+    tested for self-consistency, not for correctness against a chain. The run is the proof, and
+    this test exists to keep a proven fact from being un-proven by a later edit.
+
+    MUTATION: drop the returns_transactions append. This fails naming the method; nothing else
+    in the suite does.
+    """
+    needs_version = {"getblock", "getblockhash", "getrawtransaction"}
+    for name, entry in sorted({**CONGRUENT, **NATIVE_ONLY}.items()):
+        address = "HotWallet1111111111111111111111111111111111" if entry.needs_address else ""
+        argument = 1 if entry.argument else None
+        _method, params = call_for(name, argument, address)
+        options = params[-1] if params and isinstance(params[-1], dict) else {}
+        declared = "maxSupportedTransactionVersion" in options
+
+        if name in needs_version:
+            assert entry.returns_transactions, f"{name} returns transactions and does not say so"
+            assert declared, (
+                f"{name} translates to `{entry.method}`, which returns transactions, and does "
+                f"not declare maxSupportedTransactionVersion -- the node refuses the whole "
+                f"answer with -32015"
+            )
+            assert options["maxSupportedTransactionVersion"] == MAX_SUPPORTED_TRANSACTION_VERSION
+        else:
+            assert not entry.returns_transactions, (
+                f"{name} claims to return transactions; if that is true it belongs in the set "
+                f"above, and if not the flag is wrong"
+            )
+            assert not declared, (
+                f"{name} declares a transaction version and returns no transactions. Sending an "
+                f"option a method does not accept is an invalid-params error, not a harmless "
+                f"extra"
+            )
+
+
+def test_the_version_option_rides_in_the_SAME_options_object_as_the_commitment():
+    """ONE options object, because Solana's params are positional and it takes one.
+
+    Appending a second dict would be an extra positional argument where the method expects
+    none -- which the node reports as invalid params, saying nothing about the real mistake.
+    """
+    _method, params = call_for("getblock", 493267002)
+    dicts = [p for p in params if isinstance(p, dict)]
+    assert len(dicts) == 1, f"getBlock was sent {len(dicts)} options objects, not one: {params}"
+    assert dicts[0] == {"commitment": FINALIZED,
+                        "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION}
+    assert params[0] == 493267002, "the slot must still come first"
