@@ -84,26 +84,43 @@ TICKER_URL = "https://api.coinpaprika.com/v1/tickers/{id}"
 #: CoinPaprika's own ids, which are `<symbol>-<slug>` and NOT guessable. Measured
 #: 2026-09-29: `grc-gridcoinresearch` -- the obvious guess, and the spelling
 #: CoinGecko uses -- returns {"error":"id not found"}. The real one came from
-#: /v1/search/?q=gridcoin&c=currencies and is `grc-gridcoin`. Every id below
-#: except SOL's was confirmed by a 200 from the operator's host that minute.
+#: /v1/search/?q=gridcoin&c=currencies and is `grc-gridcoin`. EVERY id below is
+#: now confirmed by a 200 from the operator's host -- four on 2026-09-29, the two
+#: stablecoins on the first `--level` run that day, and SOL on 2026-09-30.
 PAPRIKA_IDS = {
     "BTC": "btc-bitcoin",
     "LTC": "ltc-litecoin",
     "GRC": "grc-gridcoin",
     "XRP": "xrp-xrp",
-    # SOL IS STILL UNCONFIRMED and the two stablecoins are not any more. All three
-    # were written from CoinPaprika's naming pattern; the first `--level` run on
-    # 2026-09-29 fetched USDC and USDT and got
+    # NOTHING IN THIS TABLE IS UNCONFIRMED ANY MORE, and the last three moved for
+    # the same reason in three steps. All three were written from CoinPaprika's
+    # naming pattern rather than looked up. The first `--level` run on 2026-09-29
+    # fetched USDC and USDT and got
     #
     #     USDC: $1.0003730499669257
     #     USDT: $0.9996531383088825
     #     USDC/USDT = 1.000720161454463172734562835
     #
-    # so those two ids are measured now and the marker moved off them. SOL's has
-    # still never been fetched -- nothing has asked for it -- and stays marked.
-    # `grc-gridcoinresearch` is the standing reminder that the obvious spelling
-    # 404s, so a caller that needs SOL should expect that and look it up with
-    # /v1/search/?q=<name>&c=currencies (rule 17).
+    # so those two ids became measurements that day. SOL's was fetched
+    # 2026-09-30, and it is the one that also cross-checks the FALLBACK: the same
+    # minute, CoinGecko priced solana at $118.83 and CoinPaprika priced
+    # sol-solana at $118.80134147181197. Three cents apart on a $119 asset is the
+    # only direct comparison of the two feeds this repo has ever taken, and it
+    # says the fallback in services/pricing.py substitutes a number rather than a
+    # different number.
+    #
+    # WHY IT WAS WORTH SPENDING A REQUEST ON AN ASSET NO PAIR TRADES. SOL is in
+    # services/pricing.IDS, and _require_every_asset() refuses a PARTIAL body --
+    # so a wrong id here would have failed the whole fallback on all five assets,
+    # and every quote with it, the first time CoinGecko refused. No test would
+    # have caught it, because every test seeds the cache rather than fetching.
+    # That hazard is now measured away rather than reasoned away; the shape that
+    # ALLOWS it -- an untraded asset able to veto a quote -- is still there and is
+    # the operator's call, not a fix to make quietly (rule 16).
+    #
+    # `grc-gridcoinresearch` stays as the standing reminder that the obvious
+    # spelling 404s: a NEW id is looked up with /v1/search/?q=<name>&c=currencies
+    # and gets its 200 recorded beside it before it is trusted (rule 17).
     #
     # The two stablecoins are here for services/wallet_leveling.peg_findings(),
     # which checks the dollar this terminal quotes in against the two coins that
@@ -111,7 +128,7 @@ PAPRIKA_IDS = {
     # wrong: an unpriced stablecoin produces a finding saying the peg is
     # unchecked, never silence -- which is what made it safe to ship these two
     # before they had been fetched.
-    "SOL": "sol-solana",  # UNCONFIRMED
+    "SOL": "sol-solana",  # measured 2026-09-30: $118.80134147181197 (CoinGecko said $118.83 that minute)
     "USDC": "usdc-usd-coin",  # measured 2026-09-29: $1.0003730499669257
     "USDT": "usdt-tether",  # measured 2026-09-29: $0.9996531383088825
 }

@@ -390,8 +390,8 @@ def _coinpaprika_raw() -> tuple[dict, str]:
             f"CoinPaprika could not price {', '.join(sorted(unpriced))}: "
             + "; ".join(f"{asset}: {why}" for asset, why in sorted(unpriced.items()))
             + f". Ids are <symbol>-<slug> and are NOT guessable -- see PAPRIKA_IDS, where "
-              f"{', '.join(sorted(PAPRIKA_IDS))} are mapped and the unconfirmed ones are "
-              f"marked. A 404 here is a wrong id, not a missing asset."
+              f"{', '.join(sorted(PAPRIKA_IDS))} are mapped and each carries the 200 that "
+              f"confirmed it. A 404 here is a wrong id, not a missing asset."
         )
     return _require_every_asset(raw, "CoinPaprika"), "CoinPaprika"
 

@@ -70,17 +70,23 @@ LTC_TICKER = {
 # 459382131 * 0.016687182941158063, to the dollar.
 GRC_DERIVED_CAP = 7665794
 
-#: Which ids returned a 200 from the operator's host on 2026-09-29, and which were
-#: written from CoinPaprika's naming pattern and never fetched. Two sets rather than
-#: one list, because the whole point is that they are different KINDS of claim.
-#: USDC and USDT moved from UNCONFIRMED to MEASURED on 2026-09-29, when the first
-#: `chain_balances.py --level` run fetched both and the peg check printed their
-#: prices. They were shipped unfetched on purpose -- peg_findings() reports an
-#: unpriced stablecoin as UNCHECKED rather than failing -- and the marker moved the
-#: moment there was a number. A label that only ever gets stricter is a label
-#: nobody trusts.
-MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP", "USDC", "USDT"})
-UNCONFIRMED = frozenset({"SOL"})
+#: Which ids returned a 200 from the operator's host, and which were written from
+#: CoinPaprika's naming pattern and never fetched. Two sets rather than one list,
+#: because the whole point is that they are different KINDS of claim.
+#:
+#: UNCONFIRMED IS EMPTY AS OF 2026-09-30, and the sets stay because emptying one
+#: is the outcome, not the end of the check. Four ids got their 200 on 2026-09-29;
+#: USDC and USDT moved the same day, on the first `chain_balances.py --level` run
+#: that fetched them; SOL moved 2026-09-30. Each was shipped unfetched on purpose
+#: and each moved the moment there was a number -- a label that only ever gets
+#: stricter is a label nobody trusts.
+#:
+#: What still bites with UNCONFIRMED empty is the coverage assertion at the end of
+#: the walk below: a NEW id must be declared in one of these two sets, so it
+#: arrives either with its 200 recorded or with the marker. The loop is vacuous
+#: today and is one added id away from being the check again.
+MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP", "USDC", "USDT", "SOL"})
+UNCONFIRMED = frozenset()
 
 
 def test_GRCs_market_cap_is_DERIVED_because_the_feed_reports_zero():
@@ -189,11 +195,16 @@ def test_an_unknown_asset_says_ids_are_NOT_GUESSABLE_and_how_to_look_one_up():
 def test_EVERY_UNMEASURED_ID_is_marked_UNCONFIRMED_where_it_is_declared():
     """Rule 17, held as a test rather than as an intention.
 
-    Four ids returned 200 from the operator's host on 2026-09-29: btc-bitcoin,
-    ltc-litecoin, grc-gridcoin and xrp-xrp. The rest are written from CoinPaprika's
-    naming pattern and have never been fetched, so each must carry the marker
-    where it is DECLARED -- not somewhere else in the file that a reader of the
-    table would not see.
+    An id written from CoinPaprika's naming pattern and never fetched must carry
+    the marker where it is DECLARED -- not somewhere else in the file that a
+    reader of the table would not see.
+
+    EVERY ID IS MEASURED AS OF 2026-09-30, so the loop below runs zero times and
+    the coverage assertion after it is what currently holds: a new id has to be
+    named in MEASURED or in UNCONFIRMED, and naming it in the second turns the
+    loop back on. Stated rather than left for a reader to work out from an empty
+    frozenset, because a test whose body does not execute looks like a passing
+    test and is not one (rule 14, applied to a test's own output).
 
     THE FIRST VERSION OF THIS TEST SLICED 600 CHARACTERS BEFORE THE ID and looked
     for the word in that window. It passed until the comment above the ids grew
