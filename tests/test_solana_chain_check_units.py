@@ -51,6 +51,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     MEMO_HUNT_GIVE_UP_AFTER_THROTTLES,
     MEMO_HUNT_RETRIES_PER_READ,
     MEMO_HUNT_TRANSACTION_VERSION,
+    _deposits_line,
     _network_line,
     check_rent,
     credit_path_lines,
@@ -1077,3 +1078,106 @@ def text_of(out: str) -> str:
     wrapped deliberately to fit a terminal.
     """
     return " ".join(out.split())
+
+# ---------------------------------------------------------------------------
+# "(none)" MUST NOT COVER A STRANDED DEPOSIT. The operator's 2026-09-30 run:
+#
+#   SOL deposit 2K2Pw1Hz... CANNOT BE ATTRIBUTED and was NOT credited ... 1 credit(s) dropped
+#       ok   (none)  <- zero credits in the signatures read. This is a RESULT, not a failure.
+#
+# One credit was read and refused. "zero credits in the signatures read" was
+# false, in the line an operator reads, four lines under the log that said so.
+# ---------------------------------------------------------------------------
+
+
+class _DepositStub:
+    """Stands in for the adapter, exposing exactly what _deposits_line() reads."""
+
+    def __init__(self, events=(), drops=(), signatures_read=0):
+        self._events = list(events)
+        self.unattributable_drops = list(drops)
+        self.signatures_read = signatures_read
+        self.min_commitment_rank = 3
+
+    def find_deposits_to_address(self, _address, tx_limit=10):
+        return self._events
+
+
+def _a_drop(credits=1):
+    return chains_solana.UnattributableCredit(
+        signature="2K2Pw1Hz", credits=credits,
+        why="no memo instruction -- unattributable, and a human has to match it")
+
+
+def test_a_refused_credit_is_NEVER_reported_as_zero_credits_read():
+    """THE FALSE LINE, PINNED.
+
+    MUTATION: restore the single `if not events: return "(none) ... zero credits"` branch and
+    this fails -- which is the sentence that printed over somebody's stranded deposit.
+    """
+    line = _deposits_line(_DepositStub(drops=[_a_drop()], signatures_read=1), "rADDR", 10)
+    assert "zero credits" not in line
+    assert "WERE READ AND REFUSED" in line
+    assert "1 credit(s)" in line
+    assert "2K2Pw1Hz" in line, "the signature, because a human has to go and find it"
+    assert "no memo instruction" in line, "and why it was refused"
+    assert "human's job" in line
+
+
+def test_the_stranded_line_says_the_WARNING_above_is_the_same_event():
+    """Otherwise a reader counts two incidents where there is one.
+
+    The adapter logs at WARNING and this reports the same drop, so both appear in one paste --
+    the log line above the step and this line inside it.
+    """
+    line = _deposits_line(_DepositStub(drops=[_a_drop()], signatures_read=1), "rADDR", 10)
+    assert "not a second one" in line
+
+
+def test_several_drops_are_summed_across_transactions():
+    """Two transactions, three credits: the operator needs both numbers."""
+    line = _deposits_line(
+        _DepositStub(drops=[_a_drop(credits=2), _a_drop(credits=1)], signatures_read=5), "rADDR", 10)
+    assert "3 credit(s) across 2 transaction(s)" in line
+
+
+def test_a_quiet_account_and_an_uncrediting_one_read_differently():
+    """Rule 3's denominator, and rule 14's "did nothing must not look like did work".
+
+    Zero signatures means nothing has touched the account. Signatures with no credits means the
+    poll IS seeing traffic, which is what answers "is the watcher even running".
+    """
+    quiet = _deposits_line(_DepositStub(signatures_read=0), "rADDR", 10)
+    busy = _deposits_line(_DepositStub(signatures_read=10), "rADDR", 10)
+
+    assert "ZERO signatures" in quiet
+    assert "10 signature(s) read and none credited" in busy
+    assert quiet != busy
+    for line in (quiet, busy):
+        assert line.startswith("(none)")
+        assert "RESULT, not a failure" in line, "an empty result is still a result"
+
+
+def test_all_four_deposit_outcomes_are_distinguishable():
+    """MUTATION: collapse any two branches and this fails.
+
+    Four, and only one of them is a problem -- which is why they cannot share a line.
+    """
+    event = {"txid": "sigOK", "vout": 4242, "amount": 1.5, "confirmations": 3}
+    lines = {
+        _deposits_line(_DepositStub(signatures_read=0), "rADDR", 10),
+        _deposits_line(_DepositStub(signatures_read=10), "rADDR", 10),
+        _deposits_line(_DepositStub(drops=[_a_drop()], signatures_read=1), "rADDR", 10),
+        _deposits_line(_DepositStub(events=[event], signatures_read=1), "rADDR", 10),
+    }
+    assert len(lines) == 4
+
+
+def test_a_real_credit_still_renders_its_credits():
+    """The branch that was already right, so the new ones did not displace it."""
+    event = {"txid": "sigOK", "vout": 4242, "amount": 1.5, "confirmations": 3}
+    line = _deposits_line(_DepositStub(events=[event], signatures_read=1), "rADDR", 10)
+    assert "1 credit(s):" in line
+    assert "sigOK" in line
+    assert "vout=4242" in line
+    assert "REFUSED" not in line

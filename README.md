@@ -254,10 +254,33 @@ asked for. `confirmed` is still below `finalized`, so the visibility window that
 constant exists to provide is intact. There is no lower value the method
 accepts, so this is a constraint rather than a trade.
 
-**Still unproven:** `_native_credits` and `_spl_credits` — the readers that turn
-a transaction into a credit. A wrong field name there returns nothing rather
-than raising, and nothing reads as "no deposit arrived". `getBalance` is proven
-(28.7786992 SOL for a real devnet account); the SPL half needs `--mint`.
+**The credit path is proven for native SOL, 2026-09-30.** With the commitment
+fixed, `find_deposits_to_address` ran end to end against devnet and
+`_native_credits` read a real credit off a real transaction — which
+`deposit_tag_from()` then correctly refused, because it carried no memo. Every
+link fired: discovery, the reader, the refusal, the drop.
+
+**And the run exposed a second defect immediately.** The check printed
+
+    (none)  <- zero credits in the signatures read. This is a RESULT, not a failure.
+
+four lines under its own WARNING saying one credit had been dropped. One credit
+*was* read; it was discarded. `find_deposits_to_address` returned `[]` for both
+"nothing arrived" and "money arrived that nobody can claim", and those are
+different operator situations — the second is a support ticket with somebody's
+deposit in it. The adapter records `unattributable_drops` and `signatures_read`
+alongside its unchanged return value now, and the check reports **four** distinct
+outcomes instead of one: no signatures, signatures with no credits, credits read
+and refused, credits credited.
+
+**A live gap this surfaced, and it is the operator's call (rule 16):**
+`services/deposit_service.py` reads only the returned list, so on the live path a
+stranded deposit is still a WARNING in a log and nothing else. Rule 5 says a
+measurement that only exists in a log is not learning. Wiring the drops into
+`under_review` would be a money-path change and is not made here.
+
+**Still unproven:** `_spl_credits` and the associated-token-account derivation —
+pass `--mint` with an SPL mint to exercise them.
 
 **Also still open, and it is a money question rather than a code one:** no SOL
 pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured

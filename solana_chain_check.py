@@ -850,9 +850,48 @@ def _balance_line(adapter: SolanaAdapter, address: str) -> str:
 
 
 def _deposits_line(adapter: SolanaAdapter, address: str, limit: int) -> str:
+    """What the deposit watcher would see, including what it would REFUSE to credit.
+
+    THE LINE THIS REPLACES WAS FALSE ON THE FIRST RUN THAT REACHED IT. On 2026-09-30 a real
+    devnet credit was read, correctly refused for carrying no memo, and this printed
+
+        (none)  <- zero credits in the signatures read. This is a RESULT, not a failure.
+
+    four lines below its own WARNING saying one credit had been dropped. Zero credits were not
+    read; one was, and discarded. The two are different operator situations and the difference is
+    money: "nothing arrived" is normal, and "something arrived that nobody can claim" is a
+    support ticket with somebody's deposit in it.
+
+    THREE OUTCOMES, ALL NAMED, because an empty return value covers all three (rule 14):
+
+        no signatures at all        nothing has touched this account in the window
+        signatures, no credits      transactions exist; none of them credited this address
+        credits, all refused        MONEY IS STRANDED. This is the one that must never render
+                                    as "(none)"
+    """
     events = adapter.find_deposits_to_address(address, tx_limit=limit)
+    dropped = adapter.unattributable_drops
+    if dropped:
+        # REPORTED FIRST AND AS A PROBLEM, not appended to a "(none)". The credits are real.
+        lines = [
+            f"(none) CREDITED -- but {sum(d.credits for d in dropped)} credit(s) across "
+            f"{len(dropped)} transaction(s) WERE READ AND REFUSED. Real money arrived that no "
+            f"swap can claim; matching it is a human's job.",
+        ]
+        lines.extend(
+            f"\n      {d.signature}\n        {d.credits} credit(s) dropped: {d.why}"
+            for d in dropped
+        )
+        lines.append(
+            "\n      (the WARNING above this step is the same event, logged; it is not a second one)"
+        )
+        return "".join(lines)
+    if not events and not adapter.signatures_read:
+        return ("(none)  <- and ZERO signatures were read, so nothing has touched this account "
+                "in the window. A RESULT, not a failure.")
     if not events:
-        return "(none)  <- zero credits in the signatures read. This is a RESULT, not a failure."
+        return (f"(none)  <- {adapter.signatures_read} signature(s) read and none credited this "
+                f"address. A RESULT, not a failure.")
     lines = [f"{len(events)} credit(s):"]
     lines.extend(
         f"\n      {event['txid']}\n        vout={event['vout']} (account index, read from the tx -- never fabricated) "

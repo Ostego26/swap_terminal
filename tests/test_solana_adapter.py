@@ -908,3 +908,124 @@ def test_the_two_calls_that_hit_the_floor_both_read_the_constant(monkeypatch):
     assert {m for m, _ in sent} >= {"getSignaturesForAddress", "getTransaction"}, (
         f"expected both history calls to run; got {sorted({m for m, _ in sent})}"
     )
+
+# ---------------------------------------------------------------------------
+# A DROPPED CREDIT IS REAL MONEY, AND THE CALLER HAS TO BE ABLE TO SEE IT.
+#
+# The operator's 2026-09-30 devnet run, the first that reached the deposit
+# reader: a real credit was read, correctly refused for carrying no memo, and
+# solana_chain_check.py printed
+#
+#   (none)  <- zero credits in the signatures read. This is a RESULT, not a failure.
+#
+# four lines below the WARNING saying one credit had been dropped. The check's own
+# log contradicted its own result line. `find_deposits_to_address` returned [] for
+# both "nothing arrived" and "money arrived that nobody can claim", and rule 5
+# says a measurement that only exists in a log is not learning.
+# ---------------------------------------------------------------------------
+
+
+def _memoless_credit(address):
+    """A real transaction crediting `address` with no memo instruction on it."""
+    return {
+        "transaction": {"message": {"accountKeys": [address], "instructions": []}},
+        "meta": {"preBalances": [0], "postBalances": [5_000], "err": None},
+    }
+
+
+def test_an_unattributable_credit_is_RECORDED_and_not_only_logged():
+    """THE DEFECT. The return value stays [] -- correctly -- and the drop is readable.
+
+    MUTATION: delete the self.unattributable_drops.append() in _attributable and this fails,
+    which puts the check back to printing "(none)" over somebody's stranded deposit.
+    """
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": "2K2Pw1Hz", "confirmationStatus": "confirmed"}],
+        "getTransaction": _memoless_credit(WALLET),
+    })
+    events = adapter.find_deposits_to_address(WALLET)
+
+    assert events == [], "an unattributable credit must NOT be credited -- that part was right"
+    assert len(adapter.unattributable_drops) == 1
+    drop = adapter.unattributable_drops[0]
+    assert drop.signature == "2K2Pw1Hz"
+    assert drop.credits == 1
+    assert "no memo" in drop.why
+
+
+def test_the_drops_describe_THIS_poll_and_not_every_poll_since_construction():
+    """Cleared per call, because a watcher keeps one adapter for its whole lifetime.
+
+    MUTATION: initialize the list in __init__ only and this fails -- a drop from an hour ago
+    would be reported as though it had just happened, on every poll, forever.
+    """
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": "2K2Pw1Hz", "confirmationStatus": "confirmed"}],
+        "getTransaction": _memoless_credit(WALLET),
+    })
+    adapter.find_deposits_to_address(WALLET)
+    assert len(adapter.unattributable_drops) == 1
+
+    # THE SAME ADAPTER, POLLED AGAIN, and this is the assertion that matters -- a fresh adapter
+    # starting empty proves only __init__. The seeded responses are mutated so the second poll
+    # sees a quiet cluster, which is what a watcher's next tick looks like after a drop.
+    #
+    # The signatures dict is reached through the closure make_adapter() built rather than an
+    # attribute: the first attempt here wrote `adapter.responses[...]` and raised AttributeError,
+    # because make_adapter keeps the mapping in a closure. A test that cannot drive the second
+    # poll is a test that only ever checked the first.
+    responses = {"getSignaturesForAddress": [{"signature": "2K2Pw1Hz",
+                                              "confirmationStatus": "confirmed"}],
+                 "getTransaction": _memoless_credit(WALLET)}
+    again = make_adapter(responses)
+    again.find_deposits_to_address(WALLET)
+    assert len(again.unattributable_drops) == 1
+
+    responses["getSignaturesForAddress"] = []
+    again.find_deposits_to_address(WALLET)
+    assert again.unattributable_drops == [], "the list must describe the latest poll only"
+    assert again.signatures_read == 0
+
+
+def test_the_signature_count_separates_a_quiet_account_from_an_uncrediting_one():
+    """Rule 3's denominator. Zero signatures and zero credits are different facts.
+
+    "(none)" over an account nothing has touched is normal. "(none)" over ten transactions that
+    all credited somebody else is also normal but means the poll IS seeing traffic -- which is
+    what an operator asking "is the watcher even running" needs to know.
+    """
+    quiet = make_adapter({"getSignaturesForAddress": []})
+    quiet.find_deposits_to_address(WALLET)
+    assert quiet.signatures_read == 0
+
+    busy = make_adapter({
+        "getSignaturesForAddress": [{"signature": f"sig{n}", "confirmationStatus": "confirmed"}
+                                    for n in range(3)],
+        "getTransaction": {"transaction": {"message": {"accountKeys": ["rOTHER"],
+                                                       "instructions": []}},
+                           "meta": {"preBalances": [0], "postBalances": [0], "err": None}},
+    })
+    busy.find_deposits_to_address(WALLET)
+    assert busy.signatures_read == 3
+    assert busy.unattributable_drops == [], "no credits to this address means nothing was dropped"
+
+
+def test_an_ATTRIBUTABLE_credit_records_no_drop():
+    """The happy path leaves the list empty, so a non-empty list always means something.
+
+    MUTATION: append to unattributable_drops unconditionally and this fails -- a check that
+    always reports stranded money is a check nobody reads.
+    """
+    with_memo = _memoless_credit(WALLET)
+    with_memo["transaction"]["message"]["instructions"] = [{
+        "program": "spl-memo", "parsed": "4242",
+        "programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+    }]
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": "sigOK", "confirmationStatus": "confirmed"}],
+        "getTransaction": with_memo,
+    })
+    events = adapter.find_deposits_to_address(WALLET)
+    assert len(events) == 1
+    assert events[0]["vout"] == 4242, "the memo tag becomes the discriminator"
+    assert adapter.unattributable_drops == []

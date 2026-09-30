@@ -177,6 +177,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import NamedTuple
 
 import requests
 
@@ -203,6 +204,34 @@ from .solana_units import (
     transfer_fee_lamports,
     validate_min_commitment_rank,
 )
+
+
+class UnattributableCredit(NamedTuple):
+    """A real credit that arrived and could not be matched to a swap. Money, not an error.
+
+    WHY THIS EXISTS AS A RETURNED VALUE AND NOT ONLY A LOG LINE. Until 2026-09-30 a dropped
+    credit was logged at WARNING and nothing else, so `find_deposits_to_address` returned `[]`
+    for two situations a caller must never confuse:
+
+        nothing arrived                      normal, and the overwhelmingly common case
+        something arrived, unattributable    real money sitting in the shared account that
+                                             a human has to match by hand
+
+    The operator's 2026-09-30 devnet run is what made that concrete: a real credit was read,
+    correctly refused for carrying no memo, and the check then printed
+    "(none)  <- zero credits in the signatures read" -- a sentence its own log line four lines
+    above contradicted. CLAUDE.md rule 5 says a measurement that only exists in a log is not
+    learning, and rule 14 says "did nothing" must not look like "did work"; this is both, on the
+    path where the difference is whether somebody's deposit is stranded.
+
+    THE RETURN VALUE OF find_deposits_to_address IS UNCHANGED. This is recorded alongside it, so
+    the five-method contract services/ and workers/ read is untouched -- a caller that wants the
+    drops asks for them.
+    """
+
+    signature: str
+    credits: int
+    why: str
 
 
 class SolanaRPCError(Exception):
@@ -397,6 +426,13 @@ class SolanaAdapter:
         self.mint = (mint or "").strip()
         self.hot_wallet = (hot_wallet or "").strip()
         self.min_commitment_rank = validate_min_commitment_rank(int(min_commitment_rank))
+        #: Credits the LAST find_deposits_to_address() call read and refused. See
+        #: UnattributableCredit -- returning [] for "nothing arrived" and for "money arrived
+        #: that nobody can claim" is the distinction this exists to restore.
+        self.unattributable_drops: list[UnattributableCredit] = []
+        #: How many signatures that same call read, so a caller can tell "no signatures" from
+        #: "signatures with no credits in them" -- rule 3's denominator.
+        self.signatures_read = 0
         for label, value in (("SOL_SPL_MINT", self.mint), ("SOL_HOT_WALLET", self.hot_wallet)):
             if value and not is_valid_address(value):
                 raise SolanaAddressError(f"{label}={value!r} is not a valid Solana address")
@@ -599,11 +635,16 @@ class SolanaAdapter:
         """
         if not is_valid_address(address):
             raise SolanaAddressError(f"cannot search for deposits to {address!r}: not a valid Solana address")
+        # CLEARED PER CALL, so the list describes THIS poll rather than every poll since the
+        # adapter was constructed. A watcher keeps one adapter for its lifetime, so an
+        # accumulating list would report a drop from an hour ago as though it had just happened.
+        self.unattributable_drops = []
         signatures = self.call(
             "getSignaturesForAddress",
             address,
             {"limit": int(tx_limit), "commitment": DISCOVERY_COMMITMENT},
         ) or []
+        self.signatures_read = len(signatures)
         events: list[dict] = []
         unreadable: list[str] = []
         for entry in signatures:
@@ -741,6 +782,10 @@ class SolanaAdapter:
             return []
         tag, why = deposit_tag_from(transaction)
         if tag is None:
+            # RECORDED AS WELL AS LOGGED. The log is for an operator reading a file later; this
+            # is for the caller deciding what to say on a screen now. See UnattributableCredit.
+            self.unattributable_drops.append(
+                UnattributableCredit(signature=signature, credits=len(credits), why=why))
             logger.warning(
                 "SOL deposit %s to the shared account CANNOT BE ATTRIBUTED and was NOT credited: "
                 "%s. %d credit(s) dropped. The coins arrived and are real; matching them to a "
