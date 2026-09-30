@@ -27,6 +27,7 @@ If a hash in that table were wrong, mainnet would print as devnet.
 
 from __future__ import annotations
 
+import json as _json
 import sys
 from pathlib import Path
 
@@ -36,18 +37,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import chains.solana as chains_solana  # noqa: E402
 import chains.solana as solana_module  # noqa: E402
+import chains.solana_memo as chains_solana_memo  # noqa: E402
 from chains.solana import SolanaRPCError  # noqa: E402
+from chains.solana_memo import MEASURED_MEMO_PROGRAM_IDS, MEMO_PROGRAM_IDS  # noqa: E402
 
 import solana_chain_check  # noqa: E402
 from solana_chain_check import (  # noqa: E402 -- the sys.path line above is what puts the repository root on the path; this script lives there (rule 10), not inside the package.
     GENESIS_HASHES,
     MEMO_HUNT_GIVE_UP_AFTER_THROTTLES,
     MEMO_HUNT_RETRIES_PER_READ,
+    MEMO_HUNT_TRANSACTION_VERSION,
     _network_line,
     check_rent,
     hunt_one_program_id,
     make_runner,
+    memo_status_lines,
     print_banner,
     print_summary,
     read_one_transaction,
@@ -624,3 +630,271 @@ def test_the_consecutive_counter_RESETS_on_a_good_read(capsys):
     assert outcome.read == 1
     assert outcome.seen == 1
     assert "ABANDONED" not in capsys.readouterr().out
+
+# ---------------------------------------------------------------------------
+# THE SUMMARY MUST NOT CONTRADICT THE RUN IT IS SUMMARIZING.
+#
+# 2026-09-30, `--hunt-memo 50`: two CONFIRMED lines printed, one per program id, and four
+# lines later the summary said "What is still unproven is the memo PROGRAM IDS, written from
+# documentation and never seen on a cluster: re-run with --hunt-memo N to settle them." It
+# told the operator to re-run the thing they had just run, to settle what it had just settled.
+#
+# The least excusable of the six stale-claim defects that day: hunt_memo() RETURNS whether an
+# id was confirmed, its docstring says it returns that "so a caller can print the difference",
+# and main() discarded the value -- in the same commit that added MEASURED_MEMO_PROGRAM_IDS so
+# this banner could not drift. The per-id line at the TOP of the hunt derived; the one at the
+# bottom was hand-written.
+# ---------------------------------------------------------------------------
+
+
+def test_the_summary_derives_the_memo_status_and_never_calls_a_measured_id_unproven():
+    """MUTATION: hand-write "still unproven" back into the summary and this fails."""
+    for hunted in (None, True, False):
+        text = " ".join(memo_status_lines(hunted))
+        assert "measured against a real cluster" in text
+        assert "never seen on a cluster" not in text
+        assert "still unproven" not in text.lower()
+
+    # Derived from the set, so the COUNT moves when the set does rather than being spelled.
+    measured = [p for p in MEMO_PROGRAM_IDS if p in MEASURED_MEMO_PROGRAM_IDS]
+    assert f"{len(measured)} of {len(MEMO_PROGRAM_IDS)} measured" in " ".join(memo_status_lines(None))
+
+
+def test_an_unmeasured_id_is_named_and_a_measured_one_is_not_nagged_about():
+    """The instruction appears only where it is actionable.
+
+    MUTATION: print "--hunt-memo N settles it" unconditionally and a fully-measured tree nags
+    the operator to re-run a settled check, which is the defect this whole test group is about.
+    """
+    real = solana_chain_check.MEASURED_MEMO_PROGRAM_IDS
+    try:
+        solana_chain_check.MEASURED_MEMO_PROGRAM_IDS = frozenset()
+        none_measured = " ".join(solana_chain_check.memo_status_lines(None))
+        solana_chain_check.MEASURED_MEMO_PROGRAM_IDS = frozenset(MEMO_PROGRAM_IDS)
+        all_measured = " ".join(solana_chain_check.memo_status_lines(None))
+    finally:
+        solana_chain_check.MEASURED_MEMO_PROGRAM_IDS = real
+
+    assert "NOT YET MEASURED" in none_measured
+    assert "Add --hunt-memo" in none_measured, "with nothing measured, say how to fix it"
+    assert "NOT YET MEASURED" not in all_measured
+    assert "--hunt-memo" not in all_measured, "do not send somebody to re-run a settled check"
+
+
+def test_a_hunt_that_confirmed_nothing_reads_differently_from_no_hunt_at_all():
+    """Rule 14: "did nothing" and "did work and found nothing" must not share a line."""
+    assert memo_status_lines(None) != memo_status_lines(False)
+    assert "confirmed NOTHING" in " ".join(memo_status_lines(False))
+    assert "a throttled hunt is not a finding" in " ".join(memo_status_lines(False))
+
+
+def test_the_summary_still_names_the_credit_path_as_the_unproven_half(capsys):
+    """What a PASSED run must keep saying, because this is the part a run has not touched.
+
+    getBalance, getAccountInfo and find_deposits_to_address have never met a real response --
+    every run so far passed no --address and no --mint. A summary that said only "the read path
+    works" would read as more than it is.
+    """
+    print_summary([], 1.0, hunted=True)
+    out = capsys.readouterr().out
+    assert "CREDIT path is still unproven" in out
+    assert "find_deposits_to_address" in out
+    assert "--address" in out and "--mint" in out
+
+    # AND THE MEMO LINES IN THE SUMMARY ARE THE DERIVED ONES, byte for byte. Asserted here
+    # because without it, replacing the loop with a hand-written "still unproven" sentence
+    # survived the whole suite -- which is the exact defect, restored.
+    for line in memo_status_lines(True):
+        assert line in out, "print_summary must emit memo_status_lines(), not its own wording"
+    assert "never seen on a cluster" not in out
+
+
+def test_the_hunt_asks_for_a_LATER_transaction_version_than_the_credit_path():
+    """A REAL MEMO WAS INVISIBLE TO THIS TREE, and the two sites differ for a stated reason.
+
+    The operator's 2026-09-30 re-run: one of fifty v2 reads answered `-32015 Transaction
+    version (1) is not supported by the requesting client`. Versioned transactions are ordinary
+    on Solana, so that is a read lost every run.
+
+    chains/solana.py's deposit reader stays at 0 because `_native_credits` maps an address to a
+    balance index through `message.accountKeys` alone, and a versioned transaction can draw keys
+    from an address lookup table that arrives in `meta.loadedAddresses` -- absent from
+    accountKeys, so a real deposit is silently not credited. Sound, and about the CREDIT path.
+
+    It does not reach the hunt, and that is checked rather than argued: chains/solana_memo.py
+    never mentions accountKeys or loadedAddresses at all, so there is no index to misalign.
+    Asserted below by reading that module, so the day somebody wires positional key handling
+    into the memo parser, this stops being true and says so.
+    """
+    assert MEMO_HUNT_TRANSACTION_VERSION > 0
+
+    memo_source = Path(chains_solana_memo.__file__).read_text(encoding="utf-8")
+    for key in ("accountKeys", "loadedAddresses", "preBalances", "postBalances"):
+        assert key not in memo_source, (
+            f"the memo parser now reads {key}, so it inherits the positional-index hazard that "
+            f"pins the credit path to maxSupportedTransactionVersion 0 -- re-read both comments"
+        )
+
+    # AND EACH SITE NAMES THE OTHER (rule 8: if they genuinely differ, say so at both).
+    check = Path(solana_chain_check.__file__).read_text(encoding="utf-8")
+    adapter = Path(chains_solana.__file__).read_text(encoding="utf-8")
+    assert "chains/solana_memo.py never touches `accountKeys`" in adapter
+    assert "MEMO_HUNT_TRANSACTION_VERSION" in adapter, "the adapter names the hunt's constant"
+    assert "the credit path stays at 0" in check.lower() or "CREDIT path stays at 0" in check
+
+class _WholeClusterStub:
+    """Answers every RPC the check makes, with shapes taken from the operator's real output.
+
+    NOT A NETWORK, and not a paraphrase of the adapter either: `main()` builds a real
+    SolanaAdapter and this replaces `requests.post`, so the adapter's own transport, error
+    handling and result unwrapping all run. Only the wire is fake.
+    """
+
+    def __init__(self, *, signatures=2):
+        self.signatures = signatures
+        self.methods = []
+
+    def __call__(self, _url, data=None, **_kwargs):
+        # `data=json.dumps(payload)`, NOT `json=payload` -- which is how chains/solana.py
+        # actually posts (solana.py:418). The first version of this stub took a `json=` kwarg,
+        # so every request arrived as None and the recorded bodies were a list of Nones. A stub
+        # whose signature does not match the real call site records nothing and proves nothing.
+        payload = _json.loads(data) if data else {}
+        method = payload.get("method", "")
+        self.methods.append(method)
+        return _Ok(self._result(method))
+
+    def _result(self, method):
+        return {
+            "getHealth": "ok",
+            "getVersion": {"solana-core": "4.3.0"},
+            "getGenesisHash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+            "getSlot": 506046940,
+            "getEpochInfo": {"epoch": 1171, "slotIndex": 174942, "absoluteSlot": 506046942},
+            "getMinimumBalanceForRentExemption": 650240,
+            "getSignaturesForAddress": [{"signature": f"sig{n}"} for n in range(self.signatures)],
+            "getTransaction": _memo_transaction("4242"),
+        }.get(method, {})
+
+
+class _Ok:
+    status_code = 200
+
+    def __init__(self, result):
+        self._result = result
+
+    def json(self):
+        return {"jsonrpc": "2.0", "id": 1, "result": self._result}
+
+
+def _run_main(monkeypatch, capsys, argv):
+    """main() end to end over the stub, returning (exit code, printed output)."""
+    _point_config_at_the_stub(monkeypatch)
+    monkeypatch.setattr(chains_solana.requests, "post", _WholeClusterStub())
+    monkeypatch.setattr("sys.argv", argv)
+    code = solana_chain_check.main()
+    return code, capsys.readouterr().out
+
+
+def _point_config_at_the_stub(monkeypatch):
+    """Only the url is overridden. EVERY OTHER KEY COMES FROM THE REAL Config.RPC["SOL"].
+
+    The first version of this built the dict from scratch with url and commitment, and
+    print_banner raised KeyError on 'mint' -- because main() passes that dict straight into
+    SolanaAdapter(**rpc) and reads rpc['mint'] for the banner. A hand-built stub config tests
+    the stub; spreading the real one means a key added to Config later arrives here too.
+    """
+    monkeypatch.setattr(
+        solana_chain_check.Config, "RPC",
+        {**solana_chain_check.Config.RPC,
+         "SOL": {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1"}},
+    )
+
+
+def test_main_runs_without_a_hunt_and_does_not_crash_at_the_summary(monkeypatch, capsys):
+    """THE PLAIN RUN, WHICH IS THE ONE THE OPERATOR USES MOST, AND IT WAS A NameError.
+
+    `hunted` was assigned only inside `if args.hunt_memo > 0`, so every run without the flag
+    would have raised NameError at print_summary. ruff does not flag a conditionally-bound
+    local, the whole suite passed, and deleting the initializer survived every mutation check
+    until this test existed -- because nothing called main() at all.
+
+    That is the shape worth remembering: three mutations in main() survived together, and the
+    reason was not that the assertions were weak. It was that the function had no test.
+    """
+    code, out = _run_main(monkeypatch, capsys, ["solana_chain_check.py"])
+    assert code == 0
+    assert "SUMMARY" in out
+    assert "PASSED" in out
+    assert "measured against a real cluster" in out, "the derived memo line, on a plain run"
+    assert "MEMO PROGRAM" not in out, "no hunt was asked for, so none ran"
+    assert "no hunt ran this time" not in out, (
+        "both ids are measured, so there is nothing for a hunt to settle and nothing to nag about"
+    )
+
+
+def test_main_with_a_hunt_feeds_the_result_into_the_summary(monkeypatch, capsys):
+    """THE RETURN VALUE REACHES THE SUMMARY, which is what discarding it broke.
+
+    MUTATION: drop `hunted` from the print_summary() call and this fails -- with every id
+    measured the wording is the same either way, so the assertion is made against a tree where
+    NOTHING is measured, which is the state that makes the two paths differ.
+    """
+    monkeypatch.setattr(solana_chain_check, "MEASURED_MEMO_PROGRAM_IDS", frozenset())
+    code, out = _run_main(monkeypatch, capsys, ["solana_chain_check.py", "--hunt-memo", "2"])
+
+    assert code == 0, "the hunt is outside the exit code -- a quiet cluster is not a bad adapter"
+    assert "MEMO PROGRAM" in out
+    assert "CONFIRMED" in out, "the stub serves a real memo, so the hunt confirms"
+    assert "0 of 2 measured" in out, "the constant says none; the summary reports the constant"
+    assert "no hunt ran this time" not in out, (
+        "a hunt DID run. That line is only for a run that skipped it -- and it appears here iff "
+        "print_summary was handed None instead of the hunt's result"
+    )
+
+
+def test_main_asks_for_the_transaction_version_the_hunt_declares(monkeypatch, capsys):
+    """END TO END: the constant reaches the wire, not just the module.
+
+    MUTATION: hardcode 0 at the call site inside read_one_transaction and the constant becomes
+    decoration. Checked on the recorded request body rather than on the source.
+    """
+    bodies = []
+
+    class Recording(_WholeClusterStub):
+        def __call__(self, url, data=None, **kwargs):
+            bodies.append(_json.loads(data) if data else {})
+            return super().__call__(url, data=data, **kwargs)
+
+    _point_config_at_the_stub(monkeypatch)
+    monkeypatch.setattr(chains_solana.requests, "post", Recording())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py", "--hunt-memo", "1"])
+    solana_chain_check.main()
+    capsys.readouterr()
+
+    reads = [b for b in bodies if b.get("method") == "getTransaction"]
+    assert reads, "the hunt must actually call getTransaction"
+
+    # THE WHOLE CONFIG, COMPARED AS A DICT LITERAL, and the shape of this assertion is not a
+    # style choice. Reading the version field out by subscript puts its name in a position where
+    # tests/test_address_literals_are_valid.py's scanner treats it as an address-shaped literal
+    # -- thirty alphanumerics with no separator, which is what a base58 address looks like -- and
+    # that gate has already been widened once this session to accommodate a call site, then
+    # reverted, because loosening an address check to quiet a false positive is how a real
+    # malformed address gets through later. A DICT KEY position is exempt by design, so the
+    # expected config is written as a literal and compared whole.
+    #
+    # (This comment was itself the second offender: the scanner reads comment text too, so
+    # spelling the subscript form here to explain the rule broke the rule. Reworded rather than
+    # exempted -- four checks in this suite have now tripped on their own subject matter, and
+    # every time the cheap fix was to stop naming it, not to stop checking for it.)
+    #
+    # Comparing the whole dict is also the stronger assertion: a key ADDED to the request would
+    # slip past two field checks and is caught here.
+    expected = {"encoding": "jsonParsed",
+                "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION}
+    for body in reads:
+        assert body["params"][1] == expected, (
+            "the hunt's getTransaction config must be exactly this -- jsonParsed because "
+            "memo_strings_in() reads the parsed shape only, and the declared version"
+        )

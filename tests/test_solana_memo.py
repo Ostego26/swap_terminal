@@ -126,65 +126,104 @@ def _memo_module_source() -> str:
             / "solana_memo.py").read_text(encoding="utf-8")
 
 
-def test_EACH_PROGRAM_ID_SAYS_WHETHER_IT_IS_MEASURED_AND_THE_TWO_DIFFER():
-    """ONE IS MEASURED NOW AND THE OTHER IS NOT, and this used to assert neither was.
+def _unwrapped(text: str) -> str:
+    """Prose with its line breaks collapsed, for asserting on a SENTENCE rather than a layout.
 
-    It was `test_THE_PROGRAM_IDS_ARE_DECLARED_UNVERIFIED_IN_THE_SOURCE`, and its docstring said
-    "These constants were WRITTEN, not measured" -- of both, which was true until 2026-09-30.
-    That day the operator ran `--hunt-memo 50` against devnet: ten of MEMO_PROGRAM_V2's own
-    transactions were read and memo_strings_in() found a memo in all ten, while every one of the
-    twenty-two reads attempted for MEMO_PROGRAM_V1 came back HTTP 429.
+    WHY THIS EXISTS: twice on 2026-09-30 an assertion about wording failed on a line wrap and
+    not on the wording. Once on "Memo instruction", split as "per-swap Memo\\n  instruction" in a
+    refusal message; once on "the wrong default now", split as "it is the\\nwrong default now" in
+    this module's header. Neither was a defect in the text -- both were a test pinning where a
+    paragraph happens to break, which is the thing an edit is free to change.
 
-    IT KEPT PASSING, on the substring "NOT VERIFIED FROM THIS MACHINE", which the rewritten
-    header still contains inside a sentence that now means the opposite for one of the two. That
-    is the third time in this session a test has passed a substring while its premise went
-    stale, and each time the substring was the reason nobody noticed -- so what is pinned here
-    is not a phrase but the PROPERTY: each id states its own status, and the two statuses differ.
+    A reader does not care where a line ends, so neither should a test about what a line SAYS.
+    Where the layout genuinely matters -- a field name an operator will grep for after reading
+    it off a screen -- the fix is the opposite: keep the phrase unbroken at the source, which is
+    what chains/solana.py's refusal message now does and says so.
+    """
+    return " ".join(text.split())
 
-    Rule 17 is the whole point of the admission and it cuts both ways. Describing a measured
-    constant as unverified is the same register error as the reverse: a reader who cannot tell
-    which of the two ids has been exercised will either re-run a settled check or trust an
-    unsettled one.
+
+#: Sliced backward from each assignment, because a `#:` block precedes the name it documents.
+def _comment_above(source: str, name: str) -> str:
+    return source[:source.index(f"{name} =")].rsplit("\n\n", 1)[-1]
+
+
+def test_EVERY_PROGRAM_ID_DECLARES_ITS_OWN_MEASUREMENT_STATUS():
+    """EACH ID SAYS WHETHER IT HAS MET A CLUSTER, and this assertion has been rewritten twice.
+
+    First it was `test_THE_PROGRAM_IDS_ARE_DECLARED_UNVERIFIED_IN_THE_SOURCE` -- both unmeasured,
+    true until 2026-09-30. Then `..._AND_THE_TWO_DIFFER`, when the operator's first --hunt-memo
+    run confirmed v2 and was throttled out of v1. Then the operator re-ran it after the backoff
+    landed: 50 of 50 read for v1, a memo in every one, two of them literally named "V1 Memo with
+    signers". Both are measured now and "the two differ" is false again.
+
+    SO WHAT IS PINNED IS THE PROPERTY THAT SURVIVES ALL THREE STATES: every id in
+    MEMO_PROGRAM_IDS carries its own verdict beside its own constant, and that verdict agrees
+    with MEASURED_MEMO_PROGRAM_IDS. Twice now this test has failed because it described a
+    MOMENT rather than a rule -- which is cheap to fix but is exactly the drift that put four
+    stale sentences on the operator's screen earlier the same day.
     """
     source = _memo_module_source()
-    v2 = source[source.index("MEMO_PROGRAM_V2 ="):source.index("MEMO_PROGRAM_V1 =")]
-    v1 = source[source.index("MEMO_PROGRAM_V1 ="):source.index("MEMO_PROGRAM_IDS =")]
+    for name, value in (("MEMO_PROGRAM_V2", MEMO_PROGRAM_V2), ("MEMO_PROGRAM_V1", MEMO_PROGRAM_V1)):
+        comment = _comment_above(source, name)
+        measured = value in MEASURED_MEMO_PROGRAM_IDS
+        assert ("MEASURED" in comment) is measured, (
+            f"{name} is {'in' if measured else 'not in'} MEASURED_MEMO_PROGRAM_IDS and its "
+            f"comment says otherwise"
+        )
+        if measured:
+            assert "2026-" in comment, "a measurement carries its date, or it ages (rule 3)"
+            assert "UNMEASURED" not in comment and "STILL NOT VERIFIED" not in comment
 
-    # Each constant's own comment block carries its own verdict. Sliced BACKWARD from the
-    # assignment so the comment above it is what is read -- `#:` blocks precede their name.
-    above_v2 = source[:source.index("MEMO_PROGRAM_V2 =")].rsplit("\n\n", 1)[-1]
-    above_v1 = source[:source.index("MEMO_PROGRAM_V1 =")].rsplit("\n\n", 1)[-1]
-
-    assert "MEASURED" in above_v2, "v2 was exercised against real traffic; say so at the constant"
-    assert "2026-09-30" in above_v2, "with the date, because a bare claim ages (rule 3)"
-    assert "UNMEASURED" in above_v1, "v1 still is not, and that must not be quietly inherited"
-    assert above_v2 != above_v1, "the two cannot carry the same status; one run settled only one"
-    assert v2 and v1  # the assignments themselves are intact between the slices
-
-    # AND THE HEADER STILL NAMES THE INSTRUMENT, because v1 is what is left to settle.
-    assert "--hunt-memo" in source
-    assert "NOT VERIFIED" in source, "the unmeasured half keeps its admission"
-
-
-def test_the_measured_half_is_not_described_as_a_hypothesis_anywhere_in_the_module():
-    """The standing instruction was NARROWED, not deleted, and the narrowing is the finding.
-
-    The header used to say: until that run, treat a zero-match rate as "the constant is wrong"
-    before treating it as "nobody uses memos". Applied to v2 now, that sentence is wrong and
-    expensive -- it would send somebody to change a constant that ten real transactions have
-    confirmed, when a zero-match rate on a v2 memo means the encoding, the CPI path, or the
-    transaction instead.
-
-    MUTATION: restore the unqualified instruction and this fails, because it can no longer be
-    stated of both ids at once.
-    """
-    source = _memo_module_source()
-    assert "applies to v1 only" in source or "v1 only" in source, (
-        "the treat-it-as-wrong instruction has to say WHICH id it still applies to"
+    assert set(MEMO_PROGRAM_IDS) == {MEMO_PROGRAM_V2, MEMO_PROGRAM_V1}, (
+        "a third id would need its own verdict above; this test would not see it otherwise"
     )
+
+
+def test_a_measured_id_is_not_described_as_a_hypothesis_anywhere_in_the_module():
+    """The standing instruction is GONE now, not narrowed, and its absence is the assertion.
+
+    The header used to say: treat a zero-match rate as "the constant is wrong" before treating
+    it as "nobody uses memos". Right while both ids were hypotheses; wrong now, and expensively
+    so -- it would send somebody to change a constant that a hundred real transactions have
+    confirmed, when a zero-match rate now means the encoding, the CPI path, a transaction
+    version the reader skipped, or genuinely no memo.
+
+    MUTATION: restore the instruction, or re-add "not measured" about either id, and this fails.
+    """
+    source = _memo_module_source()
     header = source[:source.index("from __future__")]
-    assert "STILL NOT VERIFIED" in header, "v1, named"
-    assert "MEASURED 2026-09-30" in header, "v2, named, with the run that did it"
+
+    assert "BOTH IDS ARE NOW MEASURED" in _unwrapped(header)
+    assert "written from knowledge, not measured" not in source
+    assert "STILL NOT VERIFIED" not in source, "neither id is a hypothesis any more"
+    flat = _unwrapped(header)
+    assert 'treat a zero-match rate as "the constant is wrong" before' not in flat or \
+        "the wrong default now" in flat, (
+        "if the old instruction is quoted, it must be marked as superseded rather than stated"
+    )
+    assert set(MEMO_PROGRAM_IDS) == MEASURED_MEMO_PROGRAM_IDS, (
+        "both ids measured 2026-09-30 -- see the header for the two runs that did it"
+    )
+
+
+def test_the_refusals_the_live_run_exercised_are_recorded_with_their_evidence():
+    """THE HUNDRED TRANSACTIONS SETTLED MORE THAN THE TWO IDS, and that is worth keeping.
+
+    Every refusal in deposit_tag_from() had only ever run against a seeded dict. The operator's
+    2026-09-30 re-run put all of them against real devnet traffic, and the interesting one is
+    the range check: FOUR memos were bare integers outside 0..4294967295 -- 1790804868669741040
+    and three siblings, which are unix timestamps in nanoseconds. Somebody really does put a
+    bare integer in a memo, so TAG_MAXIMUM is what stops one being read as a swap tag.
+
+    Recorded in the header because rule 1 says the reasoning is what survives, and pinned here
+    because an uncommented constant is the one somebody widens to "be permissive".
+    """
+    source = _memo_module_source()
+    header = source[:source.index("from __future__")]
+    assert "1790804868669741040" in header, "the real memo that the range check refused"
+    assert "nanoseconds" in header
+    assert "outside the range" in header or "outside 0.." in header
 
 
 def test_THE_INSTRUMENT_solana_memo_POINTS_AT_ACTUALLY_EXISTS():
@@ -243,24 +282,12 @@ def test_THE_INSTRUMENT_solana_memo_POINTS_AT_ACTUALLY_EXISTS():
     # unreadable transaction, which is the distinction the old single word could not express.
 
 
-def test_the_measured_set_agrees_with_what_the_prose_says():
-    """The data and the sentences are the same fact, so they must not disagree.
-
-    `MEASURED_MEMO_PROGRAM_IDS` exists so solana_chain_check.py's banner can DERIVE each id's
-    status rather than carry a hand-written copy -- because earlier on 2026-09-30 the operator's
-    custody decision existed in five places, four went stale, and the fifth was found only when
-    they read it off a screen. Having the data does not help if the prose beside the constants
-    can drift from it, so this pins them to each other.
-
-    MUTATION: add v1 to the set, or drop v2 from it, and this fails against the comments.
-    """
-    source = _memo_module_source()
-    above_v2 = source[:source.index("MEMO_PROGRAM_V2 =")].rsplit("\n\n", 1)[-1]
-    above_v1 = source[:source.index("MEMO_PROGRAM_V1 =")].rsplit("\n\n", 1)[-1]
-
-    assert {MEMO_PROGRAM_V2} == MEASURED_MEMO_PROGRAM_IDS
-    assert ("MEASURED" in above_v2) is (MEMO_PROGRAM_V2 in MEASURED_MEMO_PROGRAM_IDS)
-    assert ("UNMEASURED" in above_v1) is (MEMO_PROGRAM_V1 not in MEASURED_MEMO_PROGRAM_IDS)
+# test_the_measured_set_agrees_with_what_the_prose_says STOOD HERE AND IS GONE (rule 9). It
+# hardcoded `MEASURED_MEMO_PROGRAM_IDS == {MEMO_PROGRAM_V2}` and re-derived the same two comment
+# slices that test_EVERY_PROGRAM_ID_DECLARES_ITS_OWN_MEASUREMENT_STATUS above now walks per id.
+# Two tests for one rule is rule 8's defect with a delay on it, and this pair had already
+# started drifting: the general one passed the operator's v1 measurement and the specific one
+# failed it, for the same tree. The general one survives because it holds for any number of ids.
 
 
 def test_the_measured_set_is_a_subset_of_the_ids_the_parser_actually_reads():

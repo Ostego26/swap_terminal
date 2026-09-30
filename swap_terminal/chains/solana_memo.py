@@ -21,13 +21,14 @@ best guess. A deposit that arrives with no memo, two memos, a non-numeric memo o
 range is NOT this swap's and is not anybody's until a human says so.
 
 =============================================================================
-ONE PROGRAM ID IS MEASURED, THE OTHER IS STILL NOT VERIFIED FROM THIS MACHINE
+BOTH PROGRAM IDS HAVE NOW BEEN READ OFF A REAL CLUSTER
 =============================================================================
 
-Both constants below were written from knowledge rather than measured -- nothing in the
-container they were written in can reach a Solana cluster -- and that admission stayed here
-because rule 17 says a reason to believe and a measurement must not share a voice. One half of
-it is now discharged and the other is not, so the two are stated apart:
+Both constants below started as knowledge rather than measurement -- nothing in the container
+they were written in can reach a Solana cluster -- and the admission sat here for five days
+because rule 17 says a reason to believe and a measurement must not share a voice. Both are
+discharged now, and each one's evidence is stated rather than summarized, because "confirmed"
+without the count is the kind of claim this header exists to avoid:
 
   MEMO_PROGRAM_V2   MEASURED 2026-09-30 on devnet, by the operator running
                     `solana_chain_check.py --hunt-memo 50`. Ten transactions of that program's
@@ -37,40 +38,51 @@ it is now discharged and the other is not, so the two are stated apart:
                     tag=none. getTransaction answered with `parsed` present, which is the
                     jsonParsed shape this module reads. The id is right and the reader works.
 
-  MEMO_PROGRAM_V1   STILL NOT VERIFIED. On the same run, every one of the twenty-two reads
-                    attempted for it came back HTTP 429 and the operator stopped the run, so
-                    NOTHING was parsed under this id -- which is evidence about the public
-                    endpoint's rate limit and no evidence at all about the constant.
+  MEMO_PROGRAM_V1   MEASURED 2026-09-30 as well, on the RE-RUN after the throttling was fixed.
+                    Fifty of fifty read, zero throttled, zero unreadable, and a memo found in
+                    every one -- including two that name themselves: "V1 Memo no signers" and
+                    "V1 Memo with signers". The first attempt at this id established nothing
+                    (all twenty-two reads refused with HTTP 429, which is evidence about the
+                    endpoint and none about the constant); the retry-and-back-off in
+                    solana_chain_check.read_one_transaction is what turned that into an answer.
 
-WHY THE UNMEASURED HALF STILL MATTERS, since the measured one covers what most wallets emit:
-v1 is still accepted by the cluster and still emitted by older wallets, so if that id is wrong
-a deposit from one of them parses to no memo and a customer's money sits uncredited while
-everything reports success. `--hunt-memo 5` is what settles it -- a small N finishes inside the
-public endpoint's limit, and the hunt now backs off and abandons an id rather than grinding
-through forty refusals (see solana_chain_check.read_one_transaction).
+BOTH IDS ARE NOW MEASURED, so the standing instruction this header used to carry is GONE rather
+than narrowed. It read: treat a zero-match rate as "the constant is wrong" before treating it as
+"nobody uses memos". That was the right default while the ids were hypotheses and it is the
+wrong default now -- it would send somebody to change a constant that a hundred real
+transactions have confirmed. A zero-match rate is a finding about something ELSE: the encoding,
+the CPI path, a transaction version this reader skipped, or genuinely no memo.
 
-THE STANDING INSTRUCTION IS NARROWED RATHER THAN DROPPED. It used to read: until that run,
-treat a zero-match rate as "the constant is wrong" before treating it as "nobody uses memos".
-That now applies to v1 only. A zero-match rate on a v2 memo is a finding about something else
--- the encoding, the CPI path, or the transaction -- because the id and the reader have both
-been exercised against real traffic.
+WHAT THE HUNDRED TRANSACTIONS ALSO SETTLED, beyond the two ids. Every refusal below fired on
+real traffic, which is better evidence than a seeded test can be:
+
+  not a decimal integer   the overwhelming majority. uuids, hex digests, JSON, "smoke",
+                          "Auto-Claim", "ISO20022:pacs.008:UETR:...", and several memos
+                          carrying an embedded length prefix before their text.
+  outside the range       FOUR memos were integers and outside 0..4294967295 -- 1790804868669741040
+                          and three siblings, which are unix timestamps in nanoseconds. Somebody
+                          really does put a bare integer in a memo, and TAG_MAXIMUM is what
+                          keeps one of them from being read as a swap tag.
+
+Neither refusal had ever been exercised on anything but a seeded dict before this run.
 """
 
 from __future__ import annotations
 
 #: The SPL Memo program, v2. The id a memo instruction is expected to name.
-#: MEASURED 2026-09-30 on devnet -- ten of this program's own transactions read, a memo parsed
-#: out of all ten. See the header. This is the one constant in the Solana path that is no
-#: longer a hypothesis.
+#: MEASURED 2026-09-30 on devnet -- 48 of this program's own transactions read across two runs,
+#: a memo parsed out of every one. See the header.
 MEMO_PROGRAM_V2 = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
 
 #: The original Memo program. Still accepted by the cluster and still emitted by older wallets,
 #: so a reader that knew only v2 would miss a real deposit -- which on this path means a
 #: customer's money sitting uncredited.
 #:
-#: STILL UNMEASURED, and the 2026-09-30 run is why it is worth saying twice: all twenty-two
-#: reads attempted for this id were refused with HTTP 429, so it came out of a run that
-#: CONFIRMED its sibling with nothing established about it. Two constants, one run, one answer.
+#: MEASURED 2026-09-30 on devnet, on the second attempt -- 50 of 50 read, a memo in every one,
+#: two of them literally named "V1 Memo with signers". The FIRST attempt established nothing
+#: about it: all twenty-two reads were refused with HTTP 429, so it came out of a run that
+#: confirmed its sibling with nothing said about this one. Same constant, same endpoint, two
+#: runs, opposite outcomes -- which is why a throttle is not allowed to read as a finding.
 MEMO_PROGRAM_V1 = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo"
 
 MEMO_PROGRAM_IDS = (MEMO_PROGRAM_V2, MEMO_PROGRAM_V1)
@@ -86,7 +98,7 @@ MEMO_PROGRAM_IDS = (MEMO_PROGRAM_V2, MEMO_PROGRAM_V1)
 #:
 #: A MEMBERSHIP SET AND NOT A BOOLEAN PER ID, so adding a third program id cannot forget to
 #: declare itself -- an id absent from here reads as unmeasured, which is the safe direction.
-MEASURED_MEMO_PROGRAM_IDS = frozenset({MEMO_PROGRAM_V2})
+MEASURED_MEMO_PROGRAM_IDS = frozenset({MEMO_PROGRAM_V2, MEMO_PROGRAM_V1})
 
 #: The inclusive range a deposit tag may fall in. THE UPPER BOUND IS XRP'S uint32, deliberately,
 #: and not because Solana imposes it -- a Solana memo is arbitrary UTF-8 and could carry

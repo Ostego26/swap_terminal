@@ -673,6 +673,16 @@ class SolanaAdapter:
         # (rule 16: a fix that cannot be tested here is a proposal, and this says which).
         # Until then the cap stays at 0 and an unreadable transaction is SKIPPED loudly by
         # find_deposits_to_address above rather than crediting anything.
+        #
+        # THE MEMO HUNT ASKS FOR VERSION 1 AND THIS STILL ASKS FOR 0, on purpose, and each site
+        # names the other per rule 8's "if they genuinely differ, the difference is the point".
+        # solana_chain_check.MEMO_HUNT_TRANSACTION_VERSION carries the reasoning: the hunt only
+        # reads memo instructions, and chains/solana_memo.py never touches `accountKeys` at all
+        # (checked by AST 2026-09-30 -- neither `accountKeys` nor `loadedAddresses` appears in
+        # that module), so there is no balance index for a lookup table to misalign. Here there
+        # is, and it is somebody's deposit. The operator's 2026-09-30 run showed the cost of the
+        # cap: one of fifty reads answered -32015, a real memo this tree could not see. On THIS
+        # path that cost is the correct trade until loadedAddresses is merged into `keys`.
         transaction = self.call(
             "getTransaction",
             signature,

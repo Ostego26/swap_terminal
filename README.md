@@ -213,21 +213,34 @@ What was built to it, so nobody re-opens this by reading the table as a menu:
 | a credit with no attributable memo is DROPPED and logged at WARNING | `chains/solana.py::_attributable()` |
 | the customer's page and the operator's chain row | `services/swap_view.ATTRIBUTION_MODELS`, derived from the set above |
 
-**One of the two Memo program IDs is now measured and the other is not.** Both
-were written from knowledge; the operator ran `solana_chain_check.py
---hunt-memo 50` against devnet on 2026-09-30 and:
+**Both Memo program IDs are measured.** Both started as knowledge rather than
+measurement; the operator settled them on devnet 2026-09-30 with
+`solana_chain_check.py --hunt-memo 50`, in two runs:
 
-| id | status |
+| id | evidence |
 |---|---|
-| `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` (v2) | **MEASURED.** Ten of that program's own transactions read, `memo_strings_in()` found a memo in all ten, and `getTransaction` answered in the `jsonParsed` shape this code reads. |
-| `Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo` (v1) | **still unmeasured.** All twenty-two reads attempted for it were refused with HTTP 429, so nothing was parsed -- evidence about the public endpoint, none about the constant. |
+| `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` (v2) | 48 transactions read across the two runs, a memo parsed out of every one. |
+| `Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo` (v1) | 50 of 50 read, a memo in every one — two of them literally named `V1 Memo with signers`. |
 
-v1 still matters even though v2 covers what most wallets emit: v1 is still
-accepted by the cluster and still emitted by older wallets, so a wrong id there
-means a deposit that parses to no memo and a customer's money sitting
-uncredited while everything reports success. **`--hunt-memo 5`** is what settles
-it -- a small N finishes inside the public endpoint's rate limit. A test fails
-if either id's status is ever misstated, in either direction.
+The first attempt established **nothing** about v1: all twenty-two reads were
+refused with HTTP 429, so it came out of a run that confirmed v2 with nothing
+said about v1. The retry-and-back-off in
+`solana_chain_check.read_one_transaction` is what turned that into an answer —
+which is why a throttle is not allowed to read as a finding.
+
+Those hundred transactions also exercised every refusal in `deposit_tag_from()`
+against real traffic for the first time. The interesting one: **four memos were
+bare integers outside `0..4294967295`** — `1790804868669741040` and three
+siblings, unix timestamps in nanoseconds. Somebody really does put a bare
+integer in a memo, so `TAG_MAXIMUM` is what stops one being read as a swap tag.
+
+**Still unproven, and it is the half that matters:** the **credit path**.
+`getBalance`, `getAccountInfo`, `getTokenAccountsByOwner`,
+`getTokenAccountBalance` and `find_deposits_to_address` have never met a real
+response, because every run so far passed no `--address` and no `--mint`. A
+wrong field name in `_native_credits` or `_spl_credits` still passes every
+seeded test in this tree. `solana_chain_check.py --address <wallet>` is the run
+that settles it.
 
 **Also still open, and it is a money question rather than a code one:** no SOL
 pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured

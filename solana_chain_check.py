@@ -239,7 +239,45 @@ def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> None
         lambda: _deposits_line(adapter, address, limit))
 
 
-def print_summary(failures: list[str], elapsed: float) -> int:
+def memo_status_lines(hunted: bool | None) -> list[str]:
+    """What the summary should say about the memo program ids, DERIVED rather than written.
+
+    `hunted` is None when no hunt ran this time, True when one ran and confirmed at least one
+    id, False when one ran and confirmed none. The measured/unmeasured split itself comes from
+    chains/solana_memo.MEASURED_MEMO_PROGRAM_IDS, which is the only place that knows.
+
+    THIS FUNCTION EXISTS BECAUSE THE SUMMARY TOLD THE OPERATOR THE OPPOSITE OF WHAT THE SAME RUN
+    HAD JUST PRINTED. On 2026-09-30 a `--hunt-memo 50` run printed two CONFIRMED lines, one per
+    program id, and then four lines later:
+
+        What is still unproven is the memo PROGRAM IDS, written from documentation and never
+        seen on a cluster: re-run with --hunt-memo N to settle them against real transactions.
+
+    Telling somebody to re-run the thing they had just run, to settle what it had just settled.
+    That is the SIXTH copy of this defect in one day and it is the one with the least excuse:
+    `hunt_memo()` returns whether an id was confirmed, its docstring says it returns that "so a
+    caller can print the difference", and main() threw the value away -- in the same commit
+    where MEASURED_MEMO_PROGRAM_IDS was added specifically so this banner could not drift. I
+    derived the per-id line at the TOP of the hunt and hand-wrote the one at the bottom.
+    """
+    measured = [p for p in MEMO_PROGRAM_IDS if p in MEASURED_MEMO_PROGRAM_IDS]
+    unmeasured = [p for p in MEMO_PROGRAM_IDS if p not in MEASURED_MEMO_PROGRAM_IDS]
+    lines = [
+        f"  memo program ids: {len(measured)} of {len(MEMO_PROGRAM_IDS)} measured against a real "
+        f"cluster{', ' + str(len(unmeasured)) + ' not' if unmeasured else ''}.",
+    ]
+    lines.extend(
+        f"    {program}  <- NOT YET MEASURED; --hunt-memo N settles it" for program in unmeasured
+    )
+    if hunted is False:
+        lines.append("    this run's hunt confirmed NOTHING -- see its own lines above for why; a "
+                     "throttled hunt is not a finding")
+    if hunted is None and unmeasured:
+        lines.append("    no hunt ran this time. Add --hunt-memo N to settle the id(s) above.")
+    return lines
+
+
+def print_summary(failures: list[str], elapsed: float, hunted: bool | None = None) -> int:
     """Rule 14: a run that found nothing and a run that failed must not share a line."""
     print("\nSUMMARY", flush=True)
     total = format_duration(elapsed)
@@ -266,9 +304,14 @@ def print_summary(failures: list[str], elapsed: float) -> int:
     # pasting output back, which is how every one of these gets found.
     print("  The deposit-address strategy IS decided: one shared account plus a per-swap Memo", flush=True)
     print("  instruction, chosen 2026-09-29. get_new_address() refuses BECAUSE of that choice --", flush=True)
-    print("  under a shared account there is no per-swap address to derive. What is still unproven", flush=True)
-    print("  is the memo PROGRAM IDS, written from documentation and never seen on a cluster:", flush=True)
-    print("  re-run with --hunt-memo N to settle them against real transactions.", flush=True)
+    print("  under a shared account there is no per-swap address to derive.", flush=True)
+    # DERIVED, and the two lines this replaces were hand-written and contradicted the same run's
+    # own output four lines earlier. See memo_status_lines().
+    for line in memo_status_lines(hunted):
+        print(line, flush=True)
+    print("  The CREDIT path is still unproven and is the half that matters: getBalance,", flush=True)
+    print("  getAccountInfo and find_deposits_to_address have never met a real response, because", flush=True)
+    print("  this run passed no --address and no --mint. A wrong field name there loses a deposit.", flush=True)
     print(f"  checked in    {total}", flush=True)
     return 0
 
@@ -306,9 +349,20 @@ def main() -> int:
     check_rent(adapter, run)
     check_mint(adapter, run)
     check_address(adapter, address, args.limit, run)
+    # None means NO HUNT RAN, which memo_status_lines() renders differently from a hunt that
+    # ran and confirmed nothing. Initialized here rather than only inside the branch: the first
+    # version of this assigned it only under `if args.hunt_memo > 0`, so every plain run -- the
+    # common case, and the one the operator runs most -- would have hit a NameError at the
+    # summary. ruff does not flag a conditionally-bound local, and the tests that caught it are
+    # the ones that call main() on both paths.
+    hunted: bool | None = None
     if args.hunt_memo > 0:
-        hunt_memo(adapter, args.hunt_memo)
-    return print_summary(failures, time.monotonic() - started)
+        hunted = hunt_memo(adapter, args.hunt_memo)
+    # THE RETURN VALUE IS USED NOW. hunt_memo()'s docstring has always said it returns whether
+    # an id was confirmed "so a caller can print the difference", and this line discarded it --
+    # which is how the summary came to tell the operator the ids were unproven immediately after
+    # printing two CONFIRMED lines.
+    return print_summary(failures, time.monotonic() - started, hunted)
 
 
 def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int,
@@ -414,6 +468,37 @@ MEMO_HUNT_BACKOFF_SECONDS = 1.0
 MEMO_HUNT_PACING_SECONDS = 0.35
 
 
+#: The transaction version the HUNT asks for, and it is deliberately NOT the 0 that
+#: chains/solana.py's deposit reader uses.
+#:
+#: MEASURED ON THE OPERATOR'S 2026-09-30 RE-RUN: one of the fifty v2 reads came back
+#: `-32015 Transaction version (1) is not supported by the requesting client`, so a real memo
+#: was on the cluster and this hunt could not see it. Versioned transactions are ordinary on
+#: Solana now, so that is a read lost on every run, not a curiosity.
+#:
+#: WHY THE CREDIT PATH STAYS AT 0 AND THIS DOES NOT, which is the whole reason this is a
+#: separate constant rather than a change to one shared number. chains/solana.py pins 0 because
+#: `_native_credits` maps a deposit address to a balance index through `message.accountKeys`
+#: ALONE, and a versioned transaction may draw account keys from an ADDRESS LOOKUP TABLE, which
+#: arrive in `meta.loadedAddresses` instead -- grepped 2026-09-29, zero hits in the tree, so
+#: nothing here knows about them. An address that arrives that way is simply absent from
+#: `accountKeys` and a real deposit is silently not credited. That reasoning is sound and it is
+#: about the CREDIT path.
+#:
+#: It does not reach the memo hunt. Checked by AST 2026-09-30 rather than by reading:
+#: chains/solana_memo.py touches `transaction.message.instructions`,
+#: `meta.innerInstructions`, `programId` and `parsed`, and the strings `accountKeys` and
+#: `loadedAddresses` do not appear in that module at all. So there is no index to misalign --
+#: the parser matches on a program id carried by the instruction.
+#:
+#: WHAT IS STILL UNTESTED, AND IT IS A REAL LIMIT (rule 17): whether jsonParsed populates
+#: `programId` for a program invoked through an address lookup table. If it does not, such a
+#: memo is MISSED rather than misread -- the hunt reads the transaction and reports no memo,
+#: which is the same safe direction the parser already takes everywhere else. Nothing here can
+#: settle that; the operator's next run can, and a memo count that rises is the evidence.
+MEMO_HUNT_TRANSACTION_VERSION = 1
+
+
 def read_one_transaction(adapter: SolanaAdapter, signature: str):
     """One getTransaction, retrying a rate limit and giving the two failures separate names.
 
@@ -439,7 +524,8 @@ def read_one_transaction(adapter: SolanaAdapter, signature: str):
         try:
             return adapter.call(
                 "getTransaction", signature,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}), False, ""
+                {"encoding": "jsonParsed",
+                 "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION}), False, ""
         except SolanaRPCError as exc:
             if not exc.throttled:
                 return None, False, f"{type(exc).__name__}: {exc}"
