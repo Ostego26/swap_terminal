@@ -61,11 +61,14 @@ against a synthetic transaction this file builds by hand, which establishes
 that the parser handles the shape -- not that Gridcoin's shape is that one.
 """
 
+import ast
+import contextlib
 import hashlib
 import inspect
 import logging
 import os
 import struct
+import textwrap
 from decimal import Decimal
 from json import dumps as json_dumps
 
@@ -2668,14 +2671,27 @@ def test_create_contract_KEEPS_its_unlock_because_sendtoaddress_needs_one(contra
     would turn a readable refusal into a failure at the send. The redeem and the refund ask
     the wallet for nothing but `sendrawtransaction`, which consults no lock.
 
-    Asserted on the call graph rather than the source text: ensure_fully_unlocked is
-    replaced with a recorder, and what is measured is which of the three paths reaches it.
+    Asserted on the call graph rather than the source text: the unlock context is replaced
+    with a recorder, and what is measured is which of the three paths reaches it.
+
+    THE NAME IT WATCHES CHANGED ON 2026-09-30 and the invariant did not. This patched
+    `ensure_fully_unlocked`, which is gone -- create_contract() now opens the wallet through
+    wallet_open_for_sending(), which delegates to
+    chains/gridcoin_wallet_lock.unlocked_for_payout() and RESTORES STAKING afterwards. Same
+    question, same three paths, one fewer lock sequence in the tree (rule 2: the test
+    changes to pin the stronger invariant rather than the old spelling).
     """
     node = _node_for(contract, prefix=GRIDCOIN_PREFIX)
     client = GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase=FIXTURE_UNLOCK_VALUE)
     client.rpc_call = node.rpc_call
     reached: list[str] = []
-    client.ensure_fully_unlocked = lambda *a, **k: reached.append("unlock")
+
+    @contextlib.contextmanager
+    def _recorder(*_args, **_kwargs):
+        reached.append("unlock")
+        yield
+
+    client.wallet_open_for_sending = _recorder
 
     _drive_redeem(client, node, contract)
     client.refund_contract(
@@ -2685,9 +2701,41 @@ def test_create_contract_KEEPS_its_unlock_because_sendtoaddress_needs_one(contra
     )
     assert reached == [], "neither the redeem nor the refund may unlock"
 
-    assert "self.ensure_fully_unlocked()" in inspect.getsource(GRCClient.create_contract), (
-        "and create_contract KEEPS it: sendtoaddress asks the wallet to build a transaction"
+    # ASSERTED ON THE SYNTAX TREE, NOT ON THE TEXT, and it took three tries to stop doing
+    # the latter. A positional text check against this function trips over its own prose:
+    # the comment above the `with` names wait_for_tx_output while explaining why the wait is
+    # OUTSIDE the window, and the docstring names sendtoaddress while explaining the fee.
+    # Stripping `#` lines fixed the first and not the second. What the check is actually
+    # about is structure -- which statement is inside the with-block -- so it asks the
+    # parser.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(GRCClient.create_contract)))
+    function = tree.body[0]
+    withs = [node for node in ast.walk(function)
+             if isinstance(node, ast.With)
+             and any("wallet_open_for_sending" in ast.unparse(item.context_expr)
+                     for item in node.items)]
+    assert len(withs) == 1, (
+        f"create_contract has {len(withs)} wallet_open_for_sending blocks; it needs exactly "
+        f"one -- sendtoaddress asks the wallet to build a transaction"
     )
+    inside = ast.unparse(withs[0])
+    assert "sendtoaddress" in inside, (
+        "the unlock context does not contain the sendtoaddress call, so it is opening the "
+        "wallet around something that does not need it"
+    )
+    # AND IT WRAPS THAT AND NOTHING ELSE. ensure_fully_unlocked() ran at the top of the
+    # function, so the wallet was open across the decode, the send AND the up-to-60-second
+    # output wait. A `with` around the whole body would satisfy the assertion above and keep
+    # exactly that window, which is the thing this change narrowed.
+    assert len(withs[0].body) == 1, (
+        f"the unlock context holds {len(withs[0].body)} statements; it must hold only the "
+        f"send, or the wallet is open for longer than the one call that needs it"
+    )
+    for forbidden in ("wait_for_tx_output", "decodescript"):
+        assert forbidden not in inside, (
+            f"{forbidden} is inside the unlock window and needs no wallet -- the decode is "
+            f"pure and the wait reads blocks"
+        )
 
 
 def test_no_platform_fee_is_charged_on_any_refund():
@@ -2829,3 +2877,127 @@ def test_with_locktime_REFUSES_a_suffix_too_short_to_hold_one():
         with_locktime(stub, 1)
     assert "cannot hold" in str(raised.value)
     assert "Nothing was modified" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# THE GRC WALLET IS PUT BACK TO STAKING, ALWAYS.
+#
+# ensure_fully_unlocked() was `walletlock` then `walletpassphrase <phrase> 120`, with no
+# restore at all: a GRC HTLC run stopped the operator's wallet staking, discarded its
+# year-long unlock deadline, and left it locked when the 120 seconds expired. Nothing
+# printed. refund_contract()'s docstring recorded that cost on 2026-09-28 and deleted its
+# own call for it; create_contract() genuinely needs the wallet open, so the fix there is
+# the restore rather than the removal.
+#
+# The sequence itself is chains/gridcoin_wallet_lock.py's and has its own tests. What is
+# tested here is that THIS client reaches it, in the right order, with the staking flag on
+# the right call -- and that it still happens when the send raises, which is the case a
+# missing restore is most likely to be found by.
+# ---------------------------------------------------------------------------
+
+
+def _grc_lock_recorder(passphrase=FIXTURE_UNLOCK_VALUE):
+    """A GRCClient whose transport records the wallet calls and answers nothing else."""
+    client = GRCClient("http://127.0.0.1:15715", "u", "p", wallet_passphrase=passphrase)
+    seen: list[tuple] = []
+
+    def rpc_call(method, params=None):
+        seen.append((method, list(params or [])))
+
+    client.rpc_call = rpc_call
+    return client, seen
+
+
+def test_the_grc_unlock_sequence_ENDS_with_the_wallet_staking():
+    """lock -> full unlock -> body -> lock -> unlock FOR STAKING. In that order.
+
+    The staking flag is on the LAST call and must not be on the first: a staking-only
+    unlock cannot send, which is the `-4 Wallet unlocked for staking only` the payout path
+    hit on 2026-09-26 before it used this sequence.
+
+    MUTATION: swap the two unlocks. The order assertion fails and so does the flag one.
+    """
+    client, seen = _grc_lock_recorder()
+    with client.wallet_open_for_sending(settle_seconds=0):
+        seen.append(("-- the send --", []))
+
+    assert [method for method, _ in seen] == [
+        "walletlock", "walletpassphrase", "-- the send --", "walletlock", "walletpassphrase",
+    ], f"the sequence was {[m for m, _ in seen]}"
+
+    opening = seen[1][1]
+    restoring = seen[4][1]
+    assert len(opening) == 2, (
+        f"the OPENING unlock sent {opening[1:]} beside the passphrase; a third parameter is "
+        f"the staking flag, and a staking-only wallet cannot send"
+    )
+    assert restoring[2] is True, "the RESTORING unlock does not set stakingonly"
+    assert restoring[1] > 0, "the staking timeout is not positive; Gridcoin refuses 0 (rpc -8)"
+
+
+def test_the_wallet_is_put_back_EVEN_WHEN_THE_SEND_RAISES():
+    """The case a missing restore is found by, and the one that matters on a live wallet.
+
+    A send that fails leaves the wallet fully unlocked for the rest of the window unless
+    something puts it back. That is rule 13's shape applied to a lock rather than a
+    process: every unlock needs its re-lock, and a re-lock on the happy path only is not
+    one.
+
+    MUTATION: move the restore out of the `finally` in chains/gridcoin_wallet_lock. This
+    fails; the test above still passes, which is why both exist.
+    """
+    client, seen = _grc_lock_recorder()
+
+    class Boom(RuntimeError):
+        pass
+
+    with pytest.raises(Boom), client.wallet_open_for_sending(settle_seconds=0):
+        raise Boom("the daemon refused the send")
+
+    assert [method for method, _ in seen] == [
+        "walletlock", "walletpassphrase", "walletlock", "walletpassphrase",
+    ], f"the wallet was not restored after a failed send: {[m for m, _ in seen]}"
+    assert seen[-1][1][2] is True, "it was locked but not returned to staking"
+
+
+def test_NO_PASSPHRASE_TOUCHES_NOTHING_because_locking_what_we_cannot_unlock_stops_staking():
+    """The early return is load-bearing, not inherited laziness.
+
+    Locking a staking wallet this process cannot then unlock would stop staking and leave
+    it stopped -- strictly worse than doing nothing. An unencrypted wallet needs no unlock
+    at all, and a wallet whose passphrase this process does not hold must not be touched.
+
+    MUTATION: drop the early return and always enter the context. `walletlock` is sent with
+    no passphrase to restore with, and this fails on the first assertion.
+    """
+    client, seen = _grc_lock_recorder(passphrase="")
+    with client.wallet_open_for_sending(settle_seconds=0):
+        seen.append(("-- the send --", []))
+    assert [method for method, _ in seen] == ["-- the send --"], (
+        f"with no passphrase the wallet was still touched: {[m for m, _ in seen]}"
+    )
+
+
+def test_the_client_reaches_the_SHARED_sequence_and_owns_no_copy_of_it():
+    """Rule 8, on a wallet lock -- the last place two implementations should exist.
+
+    The half that gets forgotten is the restore, and forgetting it is silent. So this
+    asserts the client DELEGATES: wallet_open_for_sending() calls
+    chains/gridcoin_wallet_lock.unlocked_for_payout(), and the client's own source contains
+    no walletlock/walletpassphrase sequence of its own.
+    """
+    source = inspect.getsource(grc_module)
+    code = "\n".join(line for line in source.splitlines() if not line.strip().startswith("#"))
+    assert "unlocked_for_payout" in code, "the client no longer delegates to the shared sequence"
+    assert not hasattr(GRCClient, "ensure_fully_unlocked"), (
+        "ensure_fully_unlocked() is back; it is the second lock sequence this change removed"
+    )
+    # The METHOD NAMES may still appear in this module only inside the redaction comment and
+    # the shim -- never as a call built here. `rpc_call("walletpassphrase"` is the shape that
+    # would mean a second sequence.
+    for spelling in ('rpc_call("walletpassphrase"', "rpc_call('walletpassphrase'",
+                     'rpc_call("walletlock"', "rpc_call('walletlock'"):
+        assert spelling not in code, (
+            f"{spelling} appears in the GRC client, which means it is building its own lock "
+            f"sequence again instead of calling the shared one"
+        )

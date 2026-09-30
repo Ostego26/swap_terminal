@@ -148,11 +148,14 @@ _SIGNING_KEY = "signing key"
 # because ruff's S105 reads the NAME and would call this constant a hardcoded
 # password -- it is the LABEL printed in place of one. Renaming is the fix;
 # a `noqa` here would be a suppression standing in for a two-word rename
-# (rule 19). GRCClient.ensure_fully_unlocked() calls
-# `walletpassphrase` with self.wallet_passphrase as parameter 0, on EVERY
+# (rule 19). GRCClient's unlock sequence sends `walletpassphrase` with
+# self.wallet_passphrase as parameter 0 -- when this was written that was EVERY
 # create_contract() and EVERY redeem_contract(), so before this the operator's
-# wallet passphrase went to stderr at DEBUG as well -- a second secret in the
-# same line, found while fixing the first.
+# wallet passphrase went to stderr at DEBUG as well: a second secret in the same
+# line, found while fixing the first. The redeem stopped unlocking on 2026-09-28
+# and create_contract() moved to wallet_open_for_sending() on 2026-09-30, which
+# sends that method TWICE -- open, then restore staking -- so the redaction now
+# covers more calls rather than fewer.
 _WALLET_UNLOCK_PHRASE = "wallet passphrase"
 
 # method -> {parameter index: what that parameter is}. A method absent from

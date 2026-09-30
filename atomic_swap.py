@@ -605,8 +605,9 @@ def prove_every_wallet_will_open(step: Step, clients: dict) -> None:
     lesson. Gridcoin stakes and Bitcoin does not: a GRC wallet's resting state is
     unlocked FOR STAKING, and `walletlock` followed by a plain
     `walletpassphrase <phrase> <timeout>` -- what GRCClient.ensure_fully_unlocked()
-    does -- leaves it not staking, then locked when the timeout expires, with
-    nothing printed. chains/wallet_lock.unlocked_for_payout() delegates GRC to
+    DID, until it was replaced on 2026-09-30 by a wallet_open_for_sending() that
+    delegates here -- leaves it not staking, then locked when the timeout expires,
+    with nothing printed. chains/wallet_lock.unlocked_for_payout() delegates GRC to
     chains/gridcoin_wallet_lock, which restores staking whether the body returned,
     raised or was interrupted. So proving the passphrase here does not cost the
     operator their staking, and the check is over an EMPTY body: open it, put it

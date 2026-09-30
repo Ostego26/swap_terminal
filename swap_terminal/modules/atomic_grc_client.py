@@ -11,11 +11,16 @@ Writes: nothing to disk. THE CHAIN AND THE WALLET: walletlock/walletpassphrase
        change the wallet's lock state; sendtoaddress and sendrawtransaction
        broadcast.
 Can move funds: YES, and this is the only one of the three that UNLOCKS THE
-       WALLET to do it -- but ONLY on create_contract() since 2026-09-28.
-       ensure_fully_unlocked() calls `walletpassphrase` with the configured
-       passphrase and leaves the wallet unlocked for 120 seconds by default --
-       during which anything else with RPC access can spend from it. It is now
-       reached from the ONE path that genuinely needs it: create_contract()
+       WALLET to do it -- ONLY on create_contract(), and since 2026-09-30 only
+       around the single `sendtoaddress` inside it.
+       wallet_open_for_sending() delegates to
+       chains/gridcoin_wallet_lock.unlocked_for_payout(), the same sequence
+       services/payout_service.py uses: lock, full unlock for 60 seconds, the
+       send, then lock and unlock FOR STAKING again -- with the restore in a
+       `finally`, so it runs on success, on exception and on Ctrl-C. It replaced
+       ensure_fully_unlocked(), which unlocked for 120 seconds and never restored
+       staking at all. It is reached from the ONE path that genuinely needs it:
+       create_contract()
        funds with `sendtoaddress`, which asks the wallet to build a transaction.
 
        redeem_contract() and refund_contract() no longer call it. Both sign in
@@ -197,9 +202,11 @@ one a real swap would have to use does not exist yet.
 import logging
 import os
 import time
+from contextlib import contextmanager
 from decimal import Decimal
 
 import requests
+from chains.gridcoin_wallet_lock import unlocked_for_payout
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
 from modules.htlc_fee import platform_fee_coin, usable_platform_fee_address
 from modules.htlc_rpc import (
@@ -227,6 +234,33 @@ from modules.rpc_method_support import rpc_failure_report
 # caller is still one more than this module may assume, which is why the
 # reasoning is about the rule and not about the count.
 logger = logging.getLogger(__name__)
+
+
+class _WalletRpc:
+    """`call(method, *params)` over GRCClient's `rpc_call(method, [params])`.
+
+    TWO CALLING CONVENTIONS EXIST IN THIS TREE AND THIS IS THE BRIDGE, in one place, named.
+    chains/base.RPCAdapter -- which chains/gridcoin_wallet_lock.py is written against, and
+    which services/payout_service.py hands it -- takes `call(method, *params)`. This
+    client's own transport takes `rpc_call(method, [params])`, a list. Passing the client
+    itself where an adapter belongs is a mistake already made once in this session, on the
+    wallet-precondition check, and it surfaced as an AttributeError rather than as anything
+    readable.
+
+    A SHIM RATHER THAN A SECOND LOCK SEQUENCE. The alternative was to reimplement
+    lock/unlock/restore against rpc_call's convention, which is exactly the duplication
+    this change exists to remove -- so the six lines of adaptation go here and the sequence
+    stays in one file. It forwards and nothing else: no retry, no logging, no error
+    translation, because anything it added would be behavior the payout path does not have.
+    """
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client):
+        self._client = client
+
+    def call(self, method: str, *params):
+        return self._client.rpc_call(method, list(params))
 
 
 class GRCClient:
@@ -272,11 +306,12 @@ class GRCClient:
         }
         # REDACTED -- see the BTC client and describe_rpc_payload() in
         # modules/htlc_rpc.py. On THIS client the line carried two
-        # secrets, not one: ensure_fully_unlocked() calls
-        # `walletpassphrase` with the operator's wallet passphrase as
-        # parameter 0. Since 2026-09-28 that is create_contract() ALONE --
-        # the redeem and the refund no longer unlock -- but the redaction
-        # matters exactly as much for one call site as for three.
+        # secrets, not one: the unlock sequence sends `walletpassphrase`
+        # with the operator's wallet passphrase as parameter 0, and it
+        # sends it TWICE now -- once to open the wallet and once to
+        # restore staking. Since 2026-09-28 that is create_contract()
+        # ALONE -- the redeem and the refund no longer unlock -- but the
+        # redaction matters exactly as much for one call site as for four.
         logger.debug("RPC call: %s", describe_rpc_payload(method, params))
         try:
             # The suppression on the requests.post line is a PROPOSAL MARKER,
@@ -348,36 +383,52 @@ class GRCClient:
                 raise Exception("Could not retrieve address balance.") from utxo_error
             return fallback
 
-    def ensure_fully_unlocked(self, timeout=120, delay=3):
-        """
-        Unlocks the Gridcoin wallet if a passphrase is provided.
-        It first locks the wallet (if needed) and then unlocks it for a specified timeout.
-        
-        Args:
-            timeout (int): The duration (in seconds) for which the wallet is unlocked.
-            delay (int): Delay in seconds after unlocking.
-            
-        Raises:
-            Exception: If unlocking the wallet fails.
+    @contextmanager
+    def wallet_open_for_sending(self, settle_seconds: int = 3):
+        """Open the wallet for one send and ALWAYS put it back to staking.
+
+        THIS REPLACED ensure_fully_unlocked(), WHICH HAD NO RESTORE, on 2026-09-30.
+        That method was `walletlock` then `walletpassphrase <phrase> 120`, and what it
+        left behind is the defect: 120 seconds fully unlocked, then the daemon's own
+        auto-lock, and NEVER a return to staking. refund_contract()'s docstring already
+        recorded the first half of that cost on 2026-09-28 --
+
+            "On the operator's Gridcoin wallet -- which is unlocked FOR STAKING ONLY,
+             with a deadline about a year out -- `walletlock` DISCARDS that deadline and
+             STOPS STAKING."
+
+        -- and deleted its own call for it, because the refund path signs in process and
+        needs no wallet. create_contract() genuinely does need one: it funds with
+        `sendtoaddress`, which asks the WALLET to build and sign. So the unlock stays and
+        the RESTORE is what was missing. A GRC HTLC run left the operator's wallet not
+        staking, silently, every time.
+
+        ONE LOCK SEQUENCE IN THIS TREE, NOT TWO. chains/gridcoin_wallet_lock.py already
+        owns it -- lock, full unlock, body, lock, unlock for staking, with the restore in
+        a `finally` so it runs on success, on exception and on KeyboardInterrupt -- and
+        services/payout_service.py has used it since 2026-09-26. This client had its own
+        half of that sequence, which is rule 8's shape on a wallet lock: two
+        implementations, one of them missing the half that matters.
+
+        NO PASSPHRASE MEANS NO LOCKING AT ALL, and that is deliberate rather than
+        inherited. ensure_fully_unlocked() returned early on an empty passphrase, and that
+        early return is load-bearing: locking a staking wallet we then cannot unlock would
+        stop staking and leave it stopped. An unencrypted wallet needs nothing, and a
+        wallet whose passphrase this process does not hold must not be touched.
+
+        THE THREE-SECOND SETTLE IS KEPT, and it is a guess this does not get to remove.
+        ensure_fully_unlocked() slept 3 seconds after unlocking with no reason recorded.
+        Removing it would be an unmeasured change to a fund path on the one chain that
+        cannot be reached from here (rule 16), and its whole cost is three seconds; so it
+        stays, inside the window, named as inherited rather than justified.
         """
         if not self.wallet_passphrase:
             logger.info("Wallet passphrase is not provided. Skipping wallet unlock.")
+            yield
             return
-        try:
-            logger.info("Locking the wallet first (if needed).")
-            # Lock the wallet first (ignore errors if already locked)
-            self.rpc_call("walletlock")
-        except Exception as e:  # noqa: BLE001 -- checked: `walletlock` on an already-locked wallet is an error we do not care about, and the UNLOCK that follows is not caught -- if that fails, it raises and no contract is created.
-            logger.warning(f"Error locking wallet: {e}")
-        
-        logger.info(f"Unlocking the wallet for {timeout} seconds.")
-        try:
-            self.rpc_call("walletpassphrase", [self.wallet_passphrase, timeout])
-            logger.info("Wallet unlocked successfully.")
-        except Exception as e:
-            logger.error(f"Failed to unlock GRC wallet: {e}")
-            raise
-        time.sleep(delay)
+        with unlocked_for_payout(_WalletRpc(self), self.wallet_passphrase):
+            time.sleep(settle_seconds)
+            yield
 
     # No suppression: removing the dead `fee` argument took this signature
     # back under PLR0913's ceiling (rule 19 -- a suppression that reaches zero
@@ -418,7 +469,6 @@ class GRCClient:
             Exception: If the contract creation fails.
         """
         logger.info(f"Creating GRC HTLC contract for {amount_grc} GRC.")
-        self.ensure_fully_unlocked()
         # Build the HTLC redeem script.
         redeem_script = build_htlc_redeem_script(secret_hash, participant_address, refund_address, locktime)
         redeem_hex = redeem_script.hex()
@@ -431,8 +481,17 @@ class GRCClient:
             raise Exception("Failed to decode GRC redeem script to P2SH.")
         
         # Send funds to the P2SH address.
+        #
+        # THE UNLOCK WRAPS THIS CALL AND NOTHING ELSE, which is narrower than what it
+        # replaced: ensure_fully_unlocked() ran at the top of this function, so the wallet
+        # was fully unlocked across the decodescript, the send AND the up-to-60-second
+        # output wait. `sendtoaddress` is the only line here that needs the wallet open --
+        # decodescript is a pure decode and wait_for_tx_output() reads blocks -- so the
+        # window in which this process could spend the wallet shrinks from the whole
+        # function to one call.
         logger.info(f"Sending {amount_grc} GRC to P2SH address {p2sh_addr}.")
-        txid = self.rpc_call("sendtoaddress", [p2sh_addr, float(amount_grc)])
+        with self.wallet_open_for_sending():
+            txid = self.rpc_call("sendtoaddress", [p2sh_addr, float(amount_grc)])
         logger.info(f"Transaction sent with TXID: {txid}")
         
         # Wait for the output to appear, matched on the scriptPubKey HEX rather
@@ -649,7 +708,8 @@ class GRCClient:
         THE WALLET UNLOCK USED TO BE THE ONE GRC-SPECIFIC LINE, AND IT WAS STALE. The
         paragraph here said "GRC adds is that its wallet is encrypted and
         `signrawtransaction` needs it open, which is why ensure_fully_unlocked() is called
-        here exactly as redeem_contract() calls it." That justification was already false
+        here exactly as redeem_contract() calls it." (That method no longer exists; see
+        wallet_open_for_sending().) That justification was already false
         when it was written: redeem_contract()'s own docstring, a hundred lines up, says
         "The old `signrawtransaction` call is gone." The guard outlived its reason.
 
@@ -659,7 +719,10 @@ class GRCClient:
         function is handed. NONE of the three consults the wallet's lock state.
 
         WHAT IT COST, and it is the reason this is a deletion rather than a note.
-        ensure_fully_unlocked() is `walletlock` followed by `walletpassphrase <pass> 120`.
+        ensure_fully_unlocked() WAS `walletlock` followed by `walletpassphrase <pass> 120`
+        -- it is gone as of 2026-09-30, replaced by wallet_open_for_sending(), and this
+        paragraph is kept in the past tense because it is the reason the call was removed
+        from HERE first.
         On the operator's Gridcoin wallet -- which is unlocked FOR STAKING ONLY, with a
         deadline about a year out -- `walletlock` DISCARDS that deadline and STOPS STAKING.
         Gridcoin's own CWallet::ElevateToFull docstring names exactly this cost
