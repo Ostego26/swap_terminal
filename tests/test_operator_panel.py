@@ -33,6 +33,7 @@ import supervisor  # isort: skip -- rootless import; see _entry()
 import workers.common  # isort: skip -- same
 from db import SCHEMA, db_session, dict_factory  # isort: skip -- same
 from services.admin_view import overview  # isort: skip -- same
+from chains.xrp_rpc_map import CONGRUENT, NO_EQUIVALENT, XRP_ONLY  # isort: skip -- same
 from valid_addresses import GRC_PAYOUT  # isort: skip -- a real payout address; see tests/valid_addresses.py
 
 
@@ -1421,6 +1422,15 @@ def test_A_CANDIDATE_OUTPUT_IS_NOT_ANNOUNCED_AS_THE_OPERATORS_FUNDING():
 
 TIP_HEIGHT = 3_298_078
 
+
+class _Console:
+    """The one thing chain_state() wants from a console: somewhere to say things."""
+
+    def say(self, *_args, **_kwargs):
+        pass
+
+
+
 SLEEPER = "import time; time.sleep(120)"
 
 
@@ -1853,3 +1863,61 @@ def test_a_WATERMARK_IS_DELETED_the_moment_the_output_is_found_spent(monkeypatch
     assert watermark == {}, (
         f"the unspent watermark survived the spend, so the memory now says both things: {watermark}"
     )
+
+
+def test_A_TABS_CONSOLE_OFFERS_ONLY_WHAT_THAT_TAB_CAN_ANSWER():
+    """The dropdown on the operator's screen, 2026-09-30, offering 11 impossible methods.
+
+    The XRP tab listed all 25 bitcoin names -- getdifficulty, listunspent, decodescript,
+    getrawmempool and seven more that chains/xrp_rpc_map records as having NO XRP Ledger
+    equivalent -- and none of the five XRPL-only reads that tab is the only place to make.
+    Every one of those eleven would have been refused by the server, correctly, after
+    the operator picked it.
+
+    TWO CAUSES, BOTH MINE, from the commit that added the map. The dropdown was filled
+    ONCE in tick() from a global `rpcs` list, so no tab influenced it; and I published
+    the per-tab list under the key `methods`, which on a bitcoin-family tab already
+    means probe_methods()' capability report. A name collision and a stale global, and
+    the visible symptom of both is a control that can only refuse -- which the comment
+    above loadChain() in that same file already calls a defect.
+
+    MUTATION: fill the dropdown from READ_ONLY_RPCS again. The XRP assertions below
+    fail; nothing else does.
+    """
+    entry = _entry()
+    source = Path(entry.__file__).read_text(encoding="utf-8")
+
+    # The option list comes from the per-tab field, and the global writer is gone.
+    assert 'd.console_methods' in source, "the dropdown is not filled from the tab's own list"
+    assert 'd.rpcs' not in source and '"rpcs"' not in source, (
+        "the global method list still exists; it has one writer and no reader, which is how it "
+        "came to be filling every tab with one vocabulary"
+    )
+
+    console = _Console()
+    for tab in decisions.CHAINS:
+        if tab.kind != "foreign":
+            continue
+        state = decisions.chain_state(tab, console)
+        offered = set(state["console_methods"])
+        protocol = state["protocol"]
+        # `methods` keeps its OTHER meaning and must not carry the console's list.
+        assert state["methods"] == [], (
+            f"{tab.asset} publishes its console list under `methods`, which is the capability "
+            f"report's key on every bitcoin-family tab"
+        )
+        if protocol == "xrpl":
+            assert offered == set(CONGRUENT) | set(XRP_ONLY), (
+                f"the XRP console offers {sorted(offered)}, not the command map's own names"
+            )
+            impossible = offered & set(NO_EQUIVALENT)
+            assert not impossible, (
+                f"the XRP console offers {sorted(impossible)}, which chains/xrp_rpc_map records "
+                f"as having NO equivalent. Every one would be refused after the operator picked it"
+            )
+            assert set(XRP_ONLY) <= offered, (
+                f"the XRP console omits {sorted(set(XRP_ONLY) - offered)} -- reads that tab is "
+                f"the only place to make"
+            )
+        else:
+            assert offered == set(), f"{tab.asset} has no console and offered {sorted(offered)}"

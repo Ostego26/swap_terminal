@@ -349,6 +349,12 @@ async function loadChain(asset) {
   // the mapped reads are ABOUT AN ACCOUNT and need one named; bitcoind's equivalents read a
   // wallet the daemon already holds. A box shown on a bitcoin tab would be a control that
   // cannot do anything, which is the defect the comment above this one is about.
+  // THE DROPDOWN IS THIS TAB'S OWN VOCABULARY. It was filled once, in tick(), from a global
+  // READ_ONLY_RPCS -- so the XRP tab offered all 25 bitcoin names including the eleven that
+  // have NO XRP equivalent, and none of the five XRPL-only reads. Offering a control that can
+  // only be refused is the defect the comment above this block is already about; this is the
+  // same defect arriving through the option list instead of the section.
+  $("method").innerHTML = (d.console_methods || []).map(m => '<option>' + esc(m) + '</option>').join("");
   const xrpl = d.protocol === "xrpl";
   $("rpcaccount").style.display = xrpl ? "" : "none";
   if (xrpl) {
@@ -414,7 +420,6 @@ async function tick() {
   if (pinned) { $("out").scrollTop = $("out").scrollHeight; }
   if (!$("tabs").dataset.built) {
     for (const c of d.chains) { THEMES[c.asset] = c; KINDS[c.asset] = c.kind; }
-    $("method").innerHTML = (d.rpcs || []).map(m => '<option>' + esc(m) + '</option>').join("");
     $("tabs").innerHTML = d.chains.map(c =>
       '<button data-asset="' + esc(c.asset) + '">' + esc(c.asset) +
       '<span class="dot">' + (c.kind === "operator" ? "●" : (c.kind === "regtest" ? "○" : "·")) +
@@ -677,7 +682,6 @@ def state_payload(run: funding_steps.Run, runner: HarnessRunner) -> dict:
         # THE DROPDOWN COMES FROM THE SERVER'S ALLOWLIST, so the page cannot offer a method the
         # server would refuse, and cannot fail to offer one it would allow. Spelled in the page
         # as well, the two would drift and the drift would look like a broken panel.
-        "rpcs": list(decisions.READ_ONLY_RPCS),
     }
     return payload
 
@@ -784,6 +788,14 @@ def chain_payload(asset: str, grc_run: funding_steps.Run, memory: dict | None = 
                 "dot": decisions.DOT_UNASKED,
                 "console": f"{asset!r} is not a chain this panel knows about."}
     state = decisions.chain_state(tab, grc_run.console)
+    # WHAT THIS TAB'S CONSOLE MAY BE ASKED FOR, per tab, decided by the tab's protocol.
+    # chain_state() sets it for the foreign tabs (XRP has a command map; SOL has none); the
+    # bitcoin-family tabs get READ_ONLY_RPCS, which is what the dropdown was filled from ONCE
+    # for every tab until 2026-09-30.
+    state.setdefault("protocol", decisions.console_protocol(tab))
+    if "console_methods" not in state:
+        state["console_methods"] = (list(decisions.READ_ONLY_RPCS)
+                                    if state["protocol"] == "bitcoin" else [])
     state["theme"] = decisions.theme_for(asset)
     state["control"] = {a: decisions.refuse_daemon_control(tab, a) for a in ("start", "stop")}
     # BOTH OF THESE ARE DECISIONS AND NEITHER IS THE PAGE'S. What colour the nav dot is, and

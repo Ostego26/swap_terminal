@@ -340,10 +340,18 @@ def chain_state(tab: ChainTab, console) -> dict:
         # that map rather than from READ_ONLY_RPCS -- see xrp_console_methods() for why the
         # bitcoind allowlist cannot serve it. SOL still has none, and "" is the honest answer.
         protocol = console_protocol(tab)
+        # `console_methods`, NOT `methods`. On a bitcoin-family tab `methods` already means
+        # something else entirely -- probe_methods()' [{method, present, matters}] telling the
+        # operator which RPCs that daemon actually HAS -- and reusing the name put the console's
+        # option list and a capability report under one key. The visible result, on the
+        # operator's screen 2026-09-30: the XRP dropdown offered all 25 bitcoin names,
+        # including the ELEVEN that have no XRP equivalent, and none of the five XRPL-only
+        # reads. A console that can only refuse is worse than no console, which is the exact
+        # defect the comment at the top of loadChain() in operator_panel.py is about.
         return {"asset": tab.asset, "kind": tab.kind, "note": tab.note, "reachable": False,
-                "network": "", "error": "", "funding": None,
+                "network": "", "error": "", "funding": None, "methods": [],
                 "protocol": protocol,
-                "methods": xrp_console_methods() if protocol == "xrpl" else [],
+                "console_methods": xrp_console_methods() if protocol == "xrpl" else [],
                 "configured": not missing, "missing_env": missing,
                 "unconfigured_why": why_foreign_is_unconfigured(tab),
                 "env": list(FOREIGN_ENV.get(tab.asset, ()))}
