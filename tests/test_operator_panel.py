@@ -1663,8 +1663,12 @@ def test_every_overview_FIELD_the_panel_renders_actually_EXISTS(tmp_path):
     # inventory rows, payout rows AND pricing rows, so this walk could check only
     # `w` -- and the hole was found by mutating r.hot_available and watching the test
     # pass. A check that cannot attribute a read cannot verify it.
+    # `workers` IS NOT WALKED HERE ANY MORE. The worker switches moved out of the swapper
+    # region into the daemon-controls pane on 2026-09-30, where they render from
+    # /api/controls rather than from overview() -- so loadSwapper() no longer reads that list,
+    # and the walk below covers what it does read. The controls payload gets its own walk in
+    # test_every_CONTROLS_FIELD_the_panel_renders_actually_EXISTS.
     per_list = {
-        "workers": "w",
         "status_counts": "sc",
         "inventory": "iv",
         "payouts": "po",
@@ -1921,3 +1925,73 @@ def test_A_TABS_CONSOLE_OFFERS_ONLY_WHAT_THAT_TAB_CAN_ANSWER():
             )
         else:
             assert offered == set(), f"{tab.asset} has no console and offered {sorted(offered)}"
+
+
+def test_every_CONTROLS_FIELD_the_panel_renders_actually_EXISTS():
+    """The same walk, for the daemon-controls pane's own payload.
+
+    THE SWAPPER REGION'S VERSION OF THIS TEST EXISTS BECAUSE I SHIPPED `[object Object]` AND
+    `undefined` to the operator's screen by guessing at field names. The controls pane is a
+    second renderer of a second payload written the same afternoon, so it gets the same guard
+    rather than waiting for the same paste.
+
+    MUTATION: rename any read (row.consequence -> row.note, r.state -> r.status). This names
+    the field and the shape it is missing from.
+    """
+    entry = _entry()
+    source = Path(entry.__file__).read_text(encoding="utf-8")
+    script = source[source.index("async function loadControls("):source.index("// THE SWAPPER REGION.")]
+
+    payload = entry.controls_payload()
+    rows = payload["controls"]
+    assert rows, "controls_payload() returned no row, so this test is proving nothing"
+
+    # `r` walks the list building the subtabs; `row` is the selected one.
+    for identifier in ("r", "row"):
+        names = set(re.findall(rf"\b{identifier}\.([a-zA-Z_]\w*)", script))
+        assert names, f"no {identifier}.<field> read was found, so this table is stale"
+        for name in sorted(names):
+            # `classList`/`dataset` are DOM, not payload: only reads on a payload row count.
+            if name in {"classList", "dataset", "toUpperCase", "map", "join", "find", "some"}:
+                continue
+            assert all(name in candidate for candidate in rows), (
+                f"the controls pane renders {identifier}.{name!r}, which is not on every row. "
+                f"A row has {sorted(rows[0])}"
+            )
+
+    # THE TWO REFUSALS ARE READ BY A COMPUTED KEY (row[action + "_refusal"]), which no regex
+    # can attribute -- so they are named here explicitly. Both must exist on every row, because
+    # an absent refusal reads as falsy and ENABLES a button that should be off.
+    for candidate in rows:
+        for field in ("start_refusal", "stop_refusal"):
+            assert field in candidate, (
+                f"{candidate['id']} carries no {field}; an absent refusal reads as falsy in the "
+                f"page and would ENABLE a switch that the server refuses"
+            )
+            assert isinstance(candidate[field], str)
+
+
+def test_the_controls_pane_holds_no_POLICY_of_its_own():
+    """Rule 10, as a property of the file: the refusals are the server's, not a ternary here.
+
+    Six named refusals live in decisions.refuse_daemon_control() and
+    decisions.refuse_worker_control(), which tests call with seeded inputs. A seventh statement
+    of the same rules in JavaScript would be the one nothing can check -- and it would agree on
+    the day it was written (rule 8).
+
+    So the pane may branch on `kind` for exactly two things: which POST body shape to send, and
+    whether a live state exists to show. It may not decide whether a button is allowed.
+    """
+    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    script = source[source.index("async function loadControls("):source.index("// THE SWAPPER REGION.")]
+    code = "\n".join(line for line in script.splitlines() if not line.strip().startswith("//"))
+
+    # The refusal text is READ, never composed.
+    assert '[action + "_refusal"]' in code, "the pane no longer reads the server's refusals"
+    for invented in ("MAY_STOP", "staking", "pid file", "will not START", "will not STOP"):
+        assert invented not in code, (
+            f"{invented!r} appears in the controls pane's script, which means a refusal is being "
+            f"decided or reworded in the browser instead of read from the server"
+        )
+    # And the route comes from the row, so a new process kind cannot need a branch here.
+    assert "row.route" in code, "the POST target is hardcoded rather than carried on the row"

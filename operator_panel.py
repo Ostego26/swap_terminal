@@ -126,6 +126,14 @@ PAGE = r"""<!doctype html>
                   background:var(--card); color:var(--fg); }
   input { width:min(420px, 60vw); }
   .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 8px; }
+  /* THE HIERARCHY IS TWO LEVELS AND HAS TO LOOK LIKE TWO. `nav`, `nav button` and
+     `nav button.on` are already generic, so both new navs inherit the existing look for free
+     (rule 8 -- a second nav style would drift from this one) and all this adds is the weight
+     that says which level you are on. A sub-nav that looks identical to the top nav is how you
+     click the wrong one. */
+  #toptabs { border-bottom-width:2px; margin-bottom:18px; }
+  #toptabs button { font-weight:600; }
+  #daemontabs { margin-bottom:12px; }
   nav button .dot { font-size:11px; margin-left:6px; }
   nav button[data-up="yes"] .dot { color:var(--ok); }
   nav button[data-up="no"]  .dot { color:var(--bad); }
@@ -139,6 +147,29 @@ PAGE = r"""<!doctype html>
 <p class="sub">127.0.0.1 only, by construction. The GRC daemon said this is a test network before
 this port was bound. The seed is never shown here and never leaves the server's environment.</p>
 
+<!-- FOUR TOP-LEVEL TABS, 2026-09-30, at the operator's instruction: "move all the swap shit
+     to it's own tab. create a tab for daemon controls and then under there put subtabs for each
+     daemon's control. make it push putton, organized and laid out sequentially and rationally."
+
+     SEQUENTIAL IS THE ORDER OF THE WORK, not the order the sections were written in. An
+     operator arrives here to do one of four things, and they happen in this order:
+
+       1 Chains    is the thing I need even answering, and what is it
+       2 Daemons   turn on what is not running
+       3 Swaps     what is the swapper actually doing
+       4 Run       start a harness and watch it
+
+     Nothing is hidden by this: every section that existed is inside one of the four, and the
+     pane markup carries its text before any script runs, so a failed fetch leaves a sentence
+     rather than an empty box (rule 14). -->
+<nav id="toptabs">
+  <button data-pane="chains" class="on">1 &middot; Chains</button>
+  <button data-pane="daemons">2 &middot; Daemon controls</button>
+  <button data-pane="swaps">3 &middot; Swaps</button>
+  <button data-pane="run">4 &middot; Run</button>
+</nav>
+
+<div class="pane" data-pane="chains">
 <nav id="tabs">loading the chain list from the server&hellip;</nav>
 <p class="what" style="margin-top:-8px">A dot is <span class="ok">green</span> when that daemon
 answered the LAST time this panel asked, <span class="bad">red</span> when it did not, and grey
@@ -169,7 +200,27 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   enforced on the server, not in this dropdown.</p>
   <pre id="rpcout">(nothing called yet)</pre>
 </section>
+</div><!-- /chains -->
 
+<div class="pane" data-pane="daemons" hidden>
+<section>
+  <h2>Daemon controls</h2>
+  <!-- ONE SUBTAB PER PROCESS, chains and workers together, because the operator asked for all
+       eight in one place. What differs between the two populations is WHAT MAY BE DONE and why
+       not, and that is decided on the server (decisions.refuse_daemon_control and
+       decisions.refuse_worker_control) and carried up as a sentence per button. This page
+       renders those answers and holds no policy of its own -- a branch here on `kind` would be
+       a seventh statement of the same rules, in JavaScript, where nothing can test it. -->
+  <p class="what">Every switch here says what it does, and a switch that is off says WHY rather
+  than being greyed with no reason. The three workers ARE the swapper. The five chains are
+  daemons: this panel starts the two it owns, stops what it started, and refuses the rest in
+  words &mdash; it never guesses a command line for a process that holds somebody's wallet.</p>
+  <nav id="daemontabs">loading the process list from the server&hellip;</nav>
+  <div id="daemonpane" class="sub">pick a process above&hellip;</div>
+</section>
+</div><!-- /daemons -->
+
+<div class="pane" data-pane="swaps" hidden>
 <section id="swappersection">
   <h2>The swapper</h2>
   <!-- ONE OPERATOR SURFACE, 2026-09-30. These regions are the Flask app's /admin, rendered
@@ -183,19 +234,17 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
        empty box (rule 14). -->
   <div id="swapperstate" class="sub">asking the server for swap state&hellip;</div>
 
-  <h3>Workers</h3>
-  <p class="what">These three ARE the swapper. Nothing polls a chain, credits a deposit or pays
-  anybody out while they are stopped &mdash; and every HTTP response still says 200, which is
-  why each row prints what its own absence costs rather than a shared warning. They are
-  <strong>supervisor.py's</strong> processes and they have pid files, which is the handle the
-  daemon switches above do not have: a stop here is proven by polling for the process's
-  ABSENCE, and a recycled pid is detected and NOT signalled.</p>
-  <div id="workers">asking&hellip;</div>
+  <p class="what">The three workers that make these numbers move are switches now, under
+  <strong>2 &middot; Daemon controls</strong> &mdash; one place for every process rather than
+  two. Nothing polls a chain, credits a deposit or pays anybody out while they are stopped, and
+  every HTTP response still says 200.</p>
 
   <h3>Swaps, payouts and inventory</h3>
   <pre id="swapperout">(nothing fetched yet)</pre>
 </section>
+</div><!-- /swaps -->
 
+<div class="pane" data-pane="run" hidden>
 <section>
   <h2>Run</h2>
   <div id="buttons">asking&hellip;</div>
@@ -207,6 +256,7 @@ is a chain this panel cannot speak to but which IS configured: its own check is 
   <div id="verdict" class="sub">nothing has been started from this panel yet</div>
   <pre id="out">(none)</pre>
 </section>
+</div><!-- /run -->
 
 <script>
 const $ = id => document.getElementById(id);
@@ -496,6 +546,121 @@ $("callrpc").onclick = async () => {
   else { $("rpcout").textContent = prefix + "the daemon answered:\n\n" + d.error; }
 };
 
+// ---------------------------------------------------------------------------
+// THE FOUR TOP-LEVEL TABS. Show one pane, hide three, remember which.
+//
+// `hidden` RATHER THAN A CLASS, because it is the attribute that means this, and a browser
+// with no CSS still honors it -- the panel has to render on a machine with no route to the
+// internet and that is exactly when somebody opens it.
+//
+// THE OPEN PANE IS REMEMBERED IN sessionStorage, not in a variable: the page is reloaded
+// constantly while working on the thing it shows, and landing back on tab 1 every time is the
+// kind of small friction that makes an operator stop using a tool.
+// ---------------------------------------------------------------------------
+function showPane(name) {
+  for (const pane of document.querySelectorAll("div.pane")) {
+    pane.hidden = pane.dataset.pane !== name;
+  }
+  for (const b of $("toptabs").querySelectorAll("button")) {
+    b.classList.toggle("on", b.dataset.pane === name);
+  }
+  try { sessionStorage.setItem("pane", name); } catch (e) { /* private window: not remembering is fine */ }
+  if (name === "daemons") { loadControls(); }
+  if (name === "swaps") { loadSwapper(); }
+}
+for (const b of $("toptabs").querySelectorAll("button")) {
+  b.onclick = () => showPane(b.dataset.pane);
+}
+
+// ---------------------------------------------------------------------------
+// DAEMON CONTROLS. One subtab per process, one renderer for all eight.
+//
+// Chains and workers arrive in ONE shape from /api/controls, with their refusals already
+// decided per process -- so this function branches on `kind` for exactly one thing: which POST
+// route acts on it, and the server told it that too (`route`). It holds no policy. Six named
+// refusals live in two Python functions that tests call with seeded inputs; a seventh copy
+// here, in a ternary, would be the one nothing could check (rule 10).
+// ---------------------------------------------------------------------------
+let currentProcess = "";
+
+async function loadControls() {
+  let d;
+  try { d = await (await fetch("/api/controls")).json(); }
+  catch (e) { $("daemonpane").innerHTML = '<span class="bad">the panel stopped answering: ' + esc(e) + "</span>"; return; }
+  const rows = d.controls || [];
+  if (!rows.length) {
+    $("daemontabs").innerHTML = '<span class="what">(none) no process is known to this panel</span>';
+    return;
+  }
+  // The nav is rebuilt on every load so a worker's state reaches its own subtab label. A
+  // running process reads differently from a stopped one AT THE TAB, because that is the
+  // question the tab exists to answer and clicking through eight of them to find out is the
+  // friction this layout is meant to remove.
+  $("daemontabs").innerHTML = rows.map(r => {
+    const live = r.kind === "worker" ? (r.state === "running" ? "\u25cf" : "\u25cb") : "\u00b7";
+    return '<button data-id="' + esc(r.id) + '" class="' + (r.id === currentProcess ? "on" : "") + '">' +
+           esc(r.label) + '<span class="dot">' + live + "</span></button>";
+  }).join("");
+  if (!rows.some(r => r.id === currentProcess)) { currentProcess = rows[0].id; }
+  for (const b of $("daemontabs").querySelectorAll("button")) {
+    b.onclick = () => { currentProcess = b.dataset.id; loadControls(); };
+  }
+  if (d.error) {
+    $("daemonpane").innerHTML = '<p class="bad">' + esc(d.error) + "</p>";
+  }
+  const row = rows.find(r => r.id === currentProcess);
+  if (!row) { return; }
+
+  // WHAT IT IS, WHAT IT COSTS, THEN THE TWO BUTTONS. In that order every time, because an
+  // operator reading a consequence AFTER pressing a button has read it too late.
+  const state = row.kind === "worker"
+    ? '<span class="' + (row.state === "running" ? "ok" : "bad") + '">' + esc(row.state.toUpperCase()) + "</span>" +
+      ' <span class="what">pid ' + esc(row.pid === null || row.pid === undefined ? "(none)" : row.pid) + "</span>"
+    : '<span class="what">state is not polled here &mdash; asking costs one RPC per chain at up to a 30s ' +
+      'timeout, which is a page an operator interrupts. <strong>1 &middot; Chains</strong> is where that ' +
+      'question is asked, with a button.</span>';
+  $("daemonpane").innerHTML =
+    "<h3>" + esc(row.label) + ' <span class="what">(' + esc(row.kind) + ")</span></h3>" +
+    "<p>" + state + "</p>" +
+    '<p class="what">' + esc(row.consequence || "") + "</p>" +
+    '<div class="row" id="switchrow"></div>';
+
+  $("switchrow").innerHTML = [["start", "Start"], ["stop", "Stop"]].map(([action, label]) => {
+    const why = row[action + "_refusal"];
+    return '<button data-action="' + action + '"' + (why ? " disabled" : "") +
+           (action === "stop" ? ' class="stop"' : "") + ">" + label + "</button>" +
+           (why ? '<span class="what">' + esc(why) + "</span>" : "");
+  }).join("");
+
+  for (const b of $("switchrow").querySelectorAll("button:not([disabled])")) {
+    b.onclick = async () => {
+      if (b.dataset.action === "stop" &&
+          !confirm("Stop " + row.label + "?\n\n" + (row.consequence || "") +
+                   "\n\nNothing restarts it but this panel or a shell.")) { return; }
+      b.disabled = true;
+      const body = row.kind === "worker"
+        ? {worker: row.id, action: b.dataset.action}
+        : {asset: row.id, action: b.dataset.action};
+      let res;
+      try {
+        res = await (await fetch(row.route, {method: "POST",
+          headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})).json();
+      } catch (e) { alert("could not reach the panel: " + e); loadControls(); return; }
+      // SUPERVISOR'S AND daemons.py'S OWN WORDS. already-running, not-running and
+      // stale-pidfile are OUTCOMES, not quiet successes, and `failed` means the operator asked
+      // for something and did not get it -- rule 13 calls "skipped" printed beside "ok" a
+      // defect in the output.
+      alert(res.refused ? "REFUSED BY THIS PANEL\n\n" + res.error
+            : res.error ? "the switch failed\n\n" + res.error
+            : res.said ? res.said
+            : (res.ok ? "" : "THIS DID NOT HAPPEN: ") + res.result.worker + ": " + res.result.outcome +
+              (res.result.pid ? " (pid " + res.result.pid + ")" : "") +
+              (res.result.note ? "\n" + res.result.note : ""));
+      loadControls();
+    };
+  }
+}
+
 // THE SWAPPER REGION. One fetch, no chain and no price feed touched: overview() reads the
 // database, the configuration and supervisor's pid files, and its pricing panel reads the price
 // CACHE rather than fetching. That is what makes this safe to poll.
@@ -507,7 +672,6 @@ async function loadSwapper() {
     // ok=false is a REPORT, not an empty table. The region says it could not read and why,
     // because a blank area cannot be told apart from zero swaps (rule 14).
     $("swapperstate").innerHTML = '<span class="bad">swap state could not be read: ' + esc(d.error) + "</span>";
-    $("workers").innerHTML = '<span class="bad">unknown -- the same read failed</span>';
     $("swapperout").textContent = "(not read)";
     return;
   }
@@ -525,47 +689,6 @@ async function loadSwapper() {
     ((o.unresolved_payouts || []).length
       ? '<span class="bad">' + o.unresolved_payouts.length + "</span>"
       : '<span class="ok">0</span>');
-
-  // ONE BUTTON PAIR PER WORKER, WITH ITS OWN COST BESIDE IT. The consequence text is
-  // services/admin_view.worker_stopped_consequence()'s, carried on the row -- not written
-  // here, and not one shared warning for all three, because what a stopped deposit_watcher
-  // costs and what a stopped payout_worker costs are different facts.
-  $("workers").innerHTML = (o.workers || []).map(w => {
-    const running = w.state === "running";
-    return '<div class="row"><strong>' + esc(w.worker) + "</strong> " +
-      '<span class="' + (running ? "ok" : "bad") + '">' + esc((w.state || "unknown").toUpperCase()) + "</span> " +
-      '<span class="what">pid ' + esc(w.pid === null || w.pid === undefined ? "(none)" : w.pid) + "</span> " +
-      '<button data-worker="' + esc(w.worker) + '" data-action="start"' + (running ? " disabled" : "") + ">Start</button>" +
-      '<button class="stop" data-worker="' + esc(w.worker) + '" data-action="stop"' + (running ? "" : " disabled") + ">Stop</button>" +
-      '<div class="what">' + esc(w.stopped_consequence || "") + "</div></div>";
-  }).join("") || '<span class="what">(none) supervisor.worker_commands() named no worker</span>';
-
-  for (const b of $("workers").querySelectorAll("button:not([disabled])")) {
-    b.onclick = async () => {
-      // CONFIRMED IN THE PAGE for a stop, like the daemon switches. No environment variable
-      // arms this one -- a worker holds no wallet lock and stakes nothing -- so the click is
-      // the only deliberate act, and it should be one.
-      if (b.dataset.action === "stop" &&
-          !confirm("Stop " + b.dataset.worker + "?\n\n" +
-                   (b.dataset.worker === "payout_worker"
-                     ? "A stop can land between a broadcast and the row that records it, which is the " +
-                       "window settle_payout.py exists for.\n\n" : "") +
-                   "Nothing restarts it but this button.")) { return; }
-      b.disabled = true;
-      const res = await (await fetch("/api/worker", {method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({worker: b.dataset.worker, action: b.dataset.action})})).json();
-      // SUPERVISOR'S OWN WORD, never a thumbs-up. already-running, not-running and
-      // stale-pidfile are outcomes, not quiet successes, and `failed` means the operator asked
-      // for something and did not get it (rule 13).
-      alert(res.refused ? "REFUSED BY THIS PANEL\n\n" + res.error
-            : res.error ? "the switch failed\n\n" + res.error
-            : (res.ok ? "" : "THIS DID NOT HAPPEN: ") + res.result.worker + ": " + res.result.outcome +
-              (res.result.pid ? " (pid " + res.result.pid + ")" : "") +
-              (res.result.note ? "\n" + res.result.note : ""));
-      loadSwapper();
-    };
-  }
 
   // THE FIELD NAMES ARE admin_view's, and all four of these were WRONG until
   // 2026-09-30: confirmed/available/freshness do not exist, and the panel printed
@@ -607,8 +730,19 @@ setInterval(tick, 1000);
 // THE SWAPPER REGION POLLS SLOWER THAN THE RUN OUTPUT, on purpose. /api/state is a run's
 // stdout and wants to look live; this is a database read plus three pid-file reads, and once
 // every five seconds is the difference between a freshness reading and a busy loop.
-loadSwapper();
-setInterval(loadSwapper, 5000);
+// THE PANE THE OPERATOR LEFT OPEN, or Chains on a first visit.
+let startingPane = "chains";
+try { startingPane = sessionStorage.getItem("pane") || "chains"; } catch (e) { /* private window */ }
+if (!document.querySelector('div.pane[data-pane="' + startingPane + '"]')) { startingPane = "chains"; }
+showPane(startingPane);
+// ONLY THE OPEN PANE POLLS. Three panes fetching on a timer while one is visible is three
+// times the work for nothing, and on this page one of those fetches walks the chain.
+setInterval(() => {
+  const open = document.querySelector("div.pane:not([hidden])");
+  const name = open ? open.dataset.pane : "";
+  if (name === "swaps") { loadSwapper(); }
+  if (name === "daemons") { loadControls(); }
+}, 5000);
 </script></body></html>"""
 
 
@@ -812,27 +946,41 @@ def chain_payload(asset: str, grc_run: funding_steps.Run, memory: dict | None = 
 
 def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page: str,
                  memory: dict | None = None) -> tuple[bytes, str, int]:
-    """Which of the three GETs this is, and its bytes. The routing decision, out of the handler.
+    """Which GET this is, and its bytes. The routing decision, out of the handler.
 
-    THREE ROUTES AND A 404, and it is a function rather than a chain of `elif` inside
-    BaseHTTPRequestHandler for the reason rule 10 gives: a decision reachable only by starting a
-    server and making a request is a decision that gets tested by starting a server and making a
-    request, which nobody does. This one is called with a string.
+    A TABLE, LIKE answer_a_post(), AND FOR THE SAME REASON IT BECAME ONE. This was an if-chain
+    until the controls route made it seven deep and PLR0911 fired -- which is rule 12's reading
+    of that code: a dispatch that has swallowed a decision per branch. Both dispatches in this
+    file now have one shape, because two shapes for one concept is what rule 8 is about even
+    when both are correct.
 
-    It also keeps `build_handler` under ruff's complexity ceiling honestly -- by moving what
-    decides, rather than by raising the ceiling (rule 12).
+    A FUNCTION rather than a chain of `elif` inside BaseHTTPRequestHandler for the reason rule
+    10 gives: a decision reachable only by starting a server and making a request is a decision
+    that gets tested by starting a server and making a request, which nobody does. This one is
+    called with a string.
+
+    /api/chain/<asset> is the one route that is a PREFIX rather than a literal, so it is
+    checked after the table -- and it is checked by startswith() on the same string the table
+    missed, which is why the 404 below is the only remaining exit.
     """
     if path in ("/", "/index.html"):
         return page.encode(), "text/html; charset=utf-8", 200
-    if path == "/api/state":
-        return json.dumps(state_payload(run, runner)).encode(), "application/json", 200
-    if path == "/api/funding":
-        return json.dumps(funding_payload(run, memory)).encode(), "application/json", 200
-    if path.startswith("/api/chain/"):
-        return json.dumps(chain_payload(path.rsplit("/", 1)[-1], run, memory)).encode(), "application/json", 200
-    if path == "/api/swapper":
-        return json.dumps(swapper_payload()).encode(), "application/json", 200
-    return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
+    routes = {
+        "/api/state": lambda: state_payload(run, runner),
+        "/api/funding": lambda: funding_payload(run, memory),
+        "/api/swapper": swapper_payload,
+        "/api/controls": controls_payload,
+    }
+    handler = routes.get(path)
+    if handler is None and path.startswith("/api/chain/"):
+        asset = path.rsplit("/", 1)[-1]
+        # A def rather than a lambda so it closes over `asset` readably; the prefix route
+        # joins the table's calling convention instead of keeping a branch of its own.
+        def handler():
+            return chain_payload(asset, run, memory)
+    if handler is None:
+        return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
+    return json.dumps(handler()).encode(), "application/json", 200
 
 
 def answer_a_post(path: str, raw: bytes, runner: HarnessRunner,
@@ -1030,6 +1178,76 @@ def swapper_payload(run_dir=None) -> dict:
             return {"ok": True, "overview": overview(db, config, build_adapters_from_config(), run_dir=run_dir)}
     except Exception as error:  # noqa: BLE001 -- checked: a missing database file, an unreadable schema, a chain adapter that will not construct and an import failure all mean the same thing to this region -- it cannot show swap state right now -- and every one of them is reported as ok=False with the reason, never as an empty table. A panel that dies here is a panel that cannot tell the operator why.
         return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+
+def controls_payload(run_dir=None) -> dict:
+    """Every process this panel can switch, chains and workers, in ONE shape.
+
+    THE OPERATOR ASKED FOR A DAEMON-CONTROLS TAB WITH A SUBTAB PER DAEMON on 2026-09-30, over
+    all five chains AND the three workers. Two populations, one control surface -- so the
+    question is whether the PAGE learns the difference between them or the SERVER does.
+
+    IT IS THE SERVER, and the reason is the whole history of this file. The two populations
+    differ in exactly one interesting way -- what may be done to them and why not -- and that
+    difference is already six named refusals in two functions
+    (decisions.refuse_daemon_control and decisions.refuse_worker_control). A page that branched
+    on `kind` to decide which buttons to draw would be a seventh statement of the same policy,
+    in JavaScript, where it cannot be tested with seeded inputs. Rule 10 puts a decision at the
+    bottom as a function; this carries the ANSWERS up and leaves the page rendering them.
+
+    So every row has the same fields and the page has ONE renderer:
+
+      id, kind, label       what to name it, and which POST route acts on it
+      state, pid            live for a worker (a pid file, read); NOT polled for a chain
+      start_refusal         "" if the button works, else the sentence saying why not
+      stop_refusal          the same, and it is a DIFFERENT sentence per process
+      consequence           what its absence costs. Per row, never shared.
+
+    A CHAIN'S STATE IS DELIBERATELY NOT POLLED HERE. Reachability is one RPC per chain at up to
+    a 30s timeout, which is the three-minute page rule 14 opens with; the Chains tab's probe
+    button is where that question is asked, and it says so in words. `state` is "not polled"
+    rather than "stopped", because those are different facts and only one of them is knowable
+    without opening a socket (rule 17).
+
+    NEVER RAISES. A worker list that cannot be read reports itself in the return value, because
+    this is the tab an operator opens to start something when nothing is working.
+    """
+    rows = [
+        {
+            "id": tab.asset,
+            "kind": "chain",
+            "label": tab.asset,
+            "route": "/api/daemon",
+            "state": "not polled",
+            "pid": None,
+            "start_refusal": decisions.refuse_daemon_control(tab, "start"),
+            "stop_refusal": decisions.refuse_daemon_control(tab, "stop"),
+            "consequence": tab.note,
+        }
+        for tab in decisions.CHAINS
+    ]
+    try:
+        from services.admin_view import (  # noqa: PLC0415 -- checked: deferred like swapper_payload()'s imports, so this stdlib-only server imports on a host without the Flask app's dependencies.
+            worker_rows,
+        )
+
+        for row in worker_rows(run_dir):
+            name = row["worker"]
+            rows.append({
+                "id": name,
+                "kind": "worker",
+                "label": name,
+                "route": "/api/worker",
+                "state": row.get("state") or "unknown",
+                "pid": row.get("pid"),
+                "start_refusal": decisions.refuse_worker_control(name, "start"),
+                "stop_refusal": decisions.refuse_worker_control(name, "stop"),
+                "consequence": row.get("stopped_consequence") or "",
+            })
+    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value. This is the tab an operator opens to START something when nothing is working, and a worker list that cannot be read must say so rather than rendering as three chains and no workers -- which would read as "there are no workers".
+        return {"ok": False, "controls": rows,
+                "error": f"the worker list could not be read: {type(error).__name__}: {error}"}
+    return {"ok": True, "controls": rows}
 
 
 def answer_a_worker_switch(body: object, run_dir=None) -> tuple[dict, int]:
