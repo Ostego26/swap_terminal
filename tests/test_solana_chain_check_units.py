@@ -52,6 +52,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     MEMO_HUNT_GIVE_UP_AFTER_THROTTLES,
     MEMO_HUNT_RETRIES_PER_READ,
     MEMO_HUNT_TRANSACTION_VERSION,
+    CreditPathObserved,
     _deposits_line,
     _network_line,
     check_rent,
@@ -705,7 +706,9 @@ def test_the_summary_still_names_the_credit_path_as_the_unproven_half(capsys):
     # whether the run read an address rather than asserted unconditionally. It used to be a
     # fixed sentence, so the first run that DID pass an address would have been told its own
     # coverage did not happen.
-    print_summary([], 1.0, hunted=True, read_address=False, read_mint=False)
+    print_summary([], 1.0, hunted=True,
+                  observed=CreditPathObserved(address_read=False, is_spl=False,
+                                              signatures=0, credits=0, refused=0))
     out = capsys.readouterr().out
     assert "CREDIT path: NOT exercised" in out
     assert "find_deposits_to_address" in out
@@ -1018,41 +1021,104 @@ def test_the_banner_prints_where_the_address_came_from(capsys):
 # --- what the run actually covered -----------------------------------------
 
 
+#: The operator's runs, as observations. Both are real: the first is the native run where a
+#: credit was decoded and then refused for having no memo; the second is the --mint run where
+#: _spl_credits' filter matched nothing over eight signatures.
+NATIVE_DECODED = CreditPathObserved(address_read=True, is_spl=False, signatures=1,
+                                    credits=0, refused=1)
+SPL_FILTER_ONLY = CreditPathObserved(address_read=True, is_spl=True, signatures=8,
+                                     credits=0, refused=0)
+NOTHING_READ = CreditPathObserved(address_read=False, is_spl=False, signatures=0,
+                                  credits=0, refused=0)
+
+
 def test_with_no_address_the_summary_says_the_credit_path_did_not_run():
-    text = " ".join(credit_path_lines(read_address=False, read_mint=False))
+    text = " ".join(credit_path_lines(NOTHING_READ))
     assert "NOT exercised" in text
     assert "loses a deposit" in text
 
 
-def test_with_an_address_but_no_mint_only_the_NATIVE_reader_is_claimed():
-    """The mint is its own axis, and reporting them together would let one cover for the other.
+def test_a_READER_WHOSE_FILTER_MATCHED_NOTHING_IS_NOT_REPORTED_AS_EXERCISED():
+    """THE FOURTH FALSE COVERAGE CLAIM, AND THE ONE THAT FORCED THE INTERFACE CHANGE.
 
-    An address without a mint exercises `_native_credits` -- positional indexing into
-    preBalances/postBalances -- and never touches `_spl_credits`, which reads
-    meta.preTokenBalances and derives an associated token account. Two different readers, two
-    different sets of field names written from documentation.
+    The operator's --mint run: eight signatures read, no credits, no drops. The summary said
+    "both credit readers" had been exercised. They had not. `_spl_credits` selects token
+    balances by owner AND mint before touching an amount, and the account's associated token
+    account does not exist -- so the filter matched nothing, the loop body never ran, and
+    `entry["uiTokenAmount"]["decimals"]` and `["amount"]` were never read. Those are exactly the
+    field names that would lose an SPL deposit silently, which is the risk this whole script
+    exists to retire.
+
+    "The reader ran" and "the reader decoded a real amount" are different claims. Only the
+    second retires anything.
+
+    MUTATION: report coverage from whether a mint was passed and this fails.
     """
-    text = " ".join(credit_path_lines(read_address=True, read_mint=False))
-    assert "NATIVE reader was exercised" in text
-    assert "SPL reader was NOT" in text
-    assert "--mint" in text, "name the flag that would cover the other half"
+    text = " ".join(credit_path_lines(SPL_FILTER_ONLY))
+    assert "PARTLY exercised" in text
+    assert "matched nothing" in text
+    assert "WITHOUT decoding" in text
+    assert "still unproven" in text
+    assert "DECODED" not in text, "nothing was decoded; saying so is the defect"
+    assert "8 signature(s)" in text, "rule 3: the denominator it filtered over"
 
 
-def test_with_both_the_summary_claims_both_and_nothing_more():
-    text = " ".join(credit_path_lines(read_address=True, read_mint=True))
-    assert "BOTH native SOL and the SPL mint" in text
-    assert "NOT" not in text.replace("NOTHING", ""), "nothing is still outstanding to name"
-    assert "without sending anything" in text, "and it still says what it did not do"
+def test_a_reader_that_decoded_an_amount_says_so_and_names_the_other_one():
+    """A REFUSED credit counts as decoded, and that distinction is not a technicality.
+
+    The native run decoded the balance delta and THEN the memo check declined it -- so every
+    field name in `_native_credits` had to be right to get that far. A reader that never
+    produced anything cannot make that claim.
+    """
+    text = " ".join(credit_path_lines(NATIVE_DECODED))
+    assert "_native_credits DECODED" in text
+    assert "1 refused" in text
+    assert "_spl_credits (needs --mint)" in text, "name the reader still outstanding, and how"
+    assert "PARTLY" not in text
 
 
-def test_the_three_coverage_reports_are_all_different():
-    """Rule 14: "did nothing", "did half" and "did both" must not share a line."""
-    texts = {
-        " ".join(credit_path_lines(False, False)),
-        " ".join(credit_path_lines(True, False)),
-        " ".join(credit_path_lines(True, True)),
-    }
-    assert len(texts) == 3
+def test_zero_signatures_says_the_reader_was_never_invoked_at_all():
+    """Three ways to end with no credits, and they are not the same fact.
+
+    Nothing read, filter matched nothing, and credits decoded each call for a different next
+    action -- point the address somewhere with activity, point it at an account that received
+    the asset, or nothing.
+    """
+    text = " ".join(credit_path_lines(
+        CreditPathObserved(address_read=True, is_spl=True, signatures=0, credits=0, refused=0)))
+    assert "ZERO signatures" in text
+    assert "never invoked at all" in text
+    assert "Nothing about the readers was established" in text
+
+
+def test_all_five_observed_states_are_distinguishable():
+    """MUTATION: collapse any two and this fails. Five states, four different next actions."""
+    states = [
+        NOTHING_READ,
+        CreditPathObserved(True, True, 0, 0, 0),
+        SPL_FILTER_ONLY,
+        NATIVE_DECODED,
+        CreditPathObserved(True, True, 8, 2, 0),
+    ]
+    assert len({" ".join(credit_path_lines(o)) for o in states}) == 5
+
+
+def test_decoded_an_amount_counts_a_REFUSAL_and_not_only_a_CREDIT():
+    """The property the wording rests on, asserted directly.
+
+    MUTATION: define decoded_an_amount as `bool(self.credits)` and the native run -- which
+    decoded one amount and refused it -- reports as only partly exercised, understating what was
+    actually proven.
+    """
+    assert NATIVE_DECODED.decoded_an_amount is True, "a refusal means the amount was decoded"
+    assert CreditPathObserved(True, True, 8, 2, 0).decoded_an_amount is True
+    assert SPL_FILTER_ONLY.decoded_an_amount is False
+    assert NOTHING_READ.decoded_an_amount is False
+
+
+def test_the_reader_is_named_from_the_adapters_mode_and_not_from_a_string():
+    assert SPL_FILTER_ONLY.reader == "_spl_credits"
+    assert NATIVE_DECODED.reader == "_native_credits"
 
 
 def test_main_with_no_arguments_reads_an_address_and_says_the_credit_path_ran(monkeypatch, capsys):
@@ -1067,8 +1133,54 @@ def test_main_with_no_arguments_reads_an_address_and_says_the_credit_path_ran(mo
     assert "DEFAULTED" in out
     assert "ADDRESS" in out
     assert "(none given" not in out, "the section that was skipped for five days now runs"
-    assert "NATIVE reader was exercised" in text_of(out)
-    assert "CREDIT path: NOT exercised" not in out
+    assert "CREDIT path: NOT exercised" not in out, "an address WAS read"
+
+    # PARTLY, AND THAT IS CORRECT FOR THIS STUB. Its getTransaction credits the memo program's
+    # own account rather than the address under test, so `_native_credits` finds
+    # `address not in keys` and returns nothing -- the filter ran and no amount was decoded.
+    # The summary saying so is the interface change working end to end: it reports what the run
+    # DID, not that --address was passed.
+    assert "PARTLY exercised" in text_of(out)
+    assert "WITHOUT decoding" in text_of(out)
+    assert "DECODED" not in out
+
+
+def test_main_reports_DECODED_when_the_run_actually_credits_the_address(monkeypatch, capsys):
+    """THE OTHER SIDE OF THE SAME INTERFACE, so "partly" is not the only thing it can say.
+
+    Seeded so the transaction really credits the address under test and carries a memo in the
+    allocator's range -- which is a swap deposit, the case the whole path exists for.
+
+    MUTATION: report coverage from the flags again and both this test and the one above pass
+    with the same sentence, which is how three false claims shipped.
+    """
+    address = SOLANA_DEVNET_ACCOUNT
+    crediting = {
+        "transaction": {"message": {
+            "accountKeys": [address],
+            "instructions": [{"program": "spl-memo", "parsed": "4242",
+                              "programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"}],
+        }},
+        "meta": {"preBalances": [0], "postBalances": [2_000_000], "err": None},
+    }
+
+    class Crediting(_WholeClusterStub):
+        def _result(self, method):
+            if method == "getTransaction":
+                return crediting
+            return super()._result(method)
+
+    _point_config_at_the_stub(monkeypatch)
+    monkeypatch.setattr(chains_solana.requests, "post", Crediting(signatures=1))
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py"])
+    code = solana_chain_check.main()
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "_native_credits DECODED" in text_of(out)
+    assert "1 credited" in text_of(out)
+    assert "PARTLY" not in out
+    assert "vout=4242" in out, "the memo tag became the discriminator, on a real-shaped response"
 
 
 def text_of(out: str) -> str:
@@ -1247,27 +1359,21 @@ def test_a_real_credit_still_renders_its_credits():
     assert "vout=4242" in line
     assert "REFUSED" not in line
 
-def test_the_native_coverage_line_names_only_methods_the_native_path_CALLS():
-    """getAccountInfo IS NOT ONE OF THEM, and this line said it was.
+def test_the_native_line_does_not_claim_a_call_the_native_path_never_makes():
+    """getAccountInfo IS SPL-ONLY, and the native line named it until 2026-09-30.
 
-    Measured 2026-09-30 by driving the adapter with a captured transport: on a native run it
-    sends getBalance, getSignaturesForAddress and getTransaction. getAccountInfo is SPL-only --
-    the owner-program read that decides token-program detection, and the mint-decimals read --
-    so naming it claimed coverage of a call that never happened.
+    Measured by driving the adapter with a captured transport: a native run sends getBalance,
+    getSignaturesForAddress and getTransaction. getAccountInfo is the owner-program read that
+    decides token-program detection, and the mint-decimals read -- neither happens without a
+    mint.
 
-    THIRD FALSE COVERAGE CLAIM IN THIS FILE IN THREE COMMITS, and I wrote this one INTO the
-    paragraph that replaced an unconditional claim with a derived one. Derived is not the same as
-    right: `read_address` was true and the sentence beside it was still wrong.
-
-    MUTATION: add getAccountInfo back to the native line and this fails.
+    The line no longer enumerates methods at all, which is the deeper fix: it names the READER
+    and what that reader did, because a method list is a claim about plumbing while the reader is
+    where a wrong field name costs a deposit. This test holds the specific regression anyway,
+    since the method name reappearing would be the same mistake in a new sentence.
     """
-    native = " ".join(credit_path_lines(read_address=True, read_mint=False))
-    assert "getAccountInfo" not in native.split("The SPL reader was NOT")[0], (
-        "getAccountInfo is never called without a mint"
+    native = " ".join(credit_path_lines(NATIVE_DECODED))
+    assert "getAccountInfo" not in native, (
+        "getAccountInfo is never called without a mint, so the native line must not name it"
     )
-    for method in ("getBalance", "getSignaturesForAddress", "getTransaction"):
-        assert method in native, f"{method} does run on the native path and belongs named"
-    assert "getAccountInfo" in native, "named on the SPL side, as what --mint would cover"
-
-    both = " ".join(credit_path_lines(read_address=True, read_mint=True))
-    assert "getAccountInfo" in both and "getTokenAccountBalance" in both
+    assert "_native_credits" in native, "name the reader, which is what was actually exercised"

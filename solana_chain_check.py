@@ -231,10 +231,19 @@ def check_mint(adapter: SolanaAdapter, run) -> None:
         lambda: f"decimals={adapter.mint_decimals()}")
 
 
-def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> None:
+def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> CreditPathObserved:
+    """Run the address section and RETURN what it observed, for the summary to report.
+
+    THE RETURN VALUE IS THE POINT. main() used to hand print_summary() the two flags it had
+    parsed, and the summary inferred coverage from them -- which was wrong three times running,
+    because what a run REQUESTS and what it EXECUTES are different things. See
+    CreditPathObserved. The counts are read off the adapter after the call, so they describe
+    what happened rather than what was asked for.
+    """
     if not address:
         print("\nADDRESS  (none given -- pass --address or set SOL_HOT_WALLET to check one)", flush=True)
-        return
+        return CreditPathObserved(address_read=False, is_spl=adapter.is_spl,
+                                  signatures=0, credits=0, refused=0)
     print(f"\nADDRESS  {address}", flush=True)
     print(f"    {describe_address(address)}", flush=True)
     if adapter.is_spl:
@@ -242,8 +251,18 @@ def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> None
             lambda: _ata_line(adapter, address))
     run("balance", "the token account's balance for an SPL mint, or lamports for native SOL",
         lambda: _balance_line(adapter, address))
+    # COUNTED FROM THE ADAPTER, not from the rendered line. Parsing the sentence this step
+    # prints would make the summary agree with the wording rather than with the run.
+    credited: list[int] = []
     run(f"find_deposits_to_address(limit={limit})", "THE REAL METHOD the deposit watcher calls. '(none)' is a result.",
-        lambda: _deposits_line(adapter, address, limit))
+        lambda: _deposits_line(adapter, address, limit, credited))
+    return CreditPathObserved(
+        address_read=True,
+        is_spl=adapter.is_spl,
+        signatures=adapter.signatures_read,
+        credits=credited[0] if credited else 0,
+        refused=sum(d.credits for d in adapter.unattributable_drops),
+    )
 
 
 def resolve_address(explicit: str, hot_wallet: str) -> tuple[str, str]:
@@ -323,48 +342,82 @@ def memo_status_lines(hunted: bool | None) -> list[str]:
     return lines
 
 
-def credit_path_lines(read_address: bool, read_mint: bool) -> list[str]:
-    """What the run proved about the deposit-credit path, which is the half that loses money.
+class CreditPathObserved(NamedTuple):
+    """What the run ACTUALLY did on the deposit path. Observations, not flags.
 
-    THE DISTINCTION WORTH KEEPING: the cluster section proves the TRANSPORT -- that the adapter
-    can talk to a real node, that its error handling and result unwrapping work. The address
-    section proves the READERS: getBalance, getAccountInfo and find_deposits_to_address, whose
-    field names were written from documentation. A wrong field name there does not raise; it
-    returns nothing, and nothing means "no deposit arrived".
+    WHY THIS REPLACED TWO BOOLEANS, and it is the fourth attempt at this sentence rather than
+    the first. Coverage was reported from which FLAGS were passed -- `read_address` and
+    `read_mint` -- and inferring what executed from what was requested produced a false claim
+    every time the shape of the run changed:
 
-    AND THE MINT IS ITS OWN AXIS. A run with an address but no mint exercises the NATIVE reader
-    (`_native_credits`, positional indexing into preBalances/postBalances) and never touches the
-    SPL one (`_spl_credits`, which reads meta.preTokenBalances and derives an associated token
-    account). Reporting them together would let one cover for the other.
+      2026-09-30  "have never met a real response, because this run passed no --address" printed
+                  unconditionally, so a run that DID pass one was told its coverage never
+                  happened.
+      2026-09-30  the fix for that named getAccountInfo on the native line. getAccountInfo is
+                  SPL-only and is never called without a mint.
+      2026-09-30  the fix for THAT said "both credit readers" for a --mint run in which
+                  `_spl_credits` matched nothing. Its filter ran over eight transactions and
+                  short-circuited; `entry["uiTokenAmount"]["decimals"]` and `["amount"]` -- the
+                  field names that would silently lose an SPL deposit -- were never read.
+
+    Three corrections to one inference is the inference being wrong (rule 19: fix the cause).
+    The counts below come off the adapter after the call, so the report describes the run.
+
+    THE DISTINCTION THAT MATTERS AND THAT FLAGS CANNOT SEE: a reader whose filter matched
+    nothing is not a reader that has been exercised. `_spl_credits` selects token balances by
+    owner AND mint before touching an amount, so over an account with no token account it
+    returns [] without ever decoding one. "It ran" and "it decoded a real amount" are different
+    claims, and only the second retires the risk this whole script exists for.
     """
-    if read_address and read_mint:
-        return ["  CREDIT path: exercised for BOTH native SOL and the SPL mint against real",
-                "  responses -- getBalance, getSignaturesForAddress, getTransaction,",
-                "  getAccountInfo, getTokenAccountBalance, and both credit readers.",
-                "  That is the deepest this check goes without sending anything."]
-    if read_address:
-        # THE METHOD LIST IS WHAT ACTUALLY RAN, MEASURED, and it named getAccountInfo until
-        # 2026-09-30. getAccountInfo is SPL-ONLY -- it is the owner-program read that decides
-        # token-program detection, and the mint-decimals read -- so on a native run it is never
-        # called at all. Driven with a captured transport to check: the native path sends
-        # getBalance, getSignaturesForAddress and getTransaction, and nothing else.
-        #
-        # That is the third false coverage claim in this file in three commits, and I wrote this
-        # one INTO the paragraph that replaced an unconditional claim with a derived one. Being
-        # derived is not the same as being right: `read_address` is true and the sentence beside
-        # it was still wrong about which methods that covers.
-        return ["  CREDIT path: the NATIVE reader was exercised against real responses --",
-                "  getBalance, getSignaturesForAddress, getTransaction, then _native_credits and",
-                "  the memo attribution over what came back. The SPL reader was NOT: _spl_credits,",
-                "  the token-account derivation, getAccountInfo's owner-program and decimals reads",
-                "  and getTokenAccountBalance all need a mint. Pass --mint with an SPL mint."]
-    return ["  CREDIT path: NOT exercised, and it is the half that matters. getBalance,",
-            "  getAccountInfo and find_deposits_to_address did not run, because no address was",
-            "  read. A wrong field name there loses a deposit rather than raising."]
+
+    address_read: bool
+    is_spl: bool
+    signatures: int
+    credits: int
+    refused: int
+
+    @property
+    def reader(self) -> str:
+        return "_spl_credits" if self.is_spl else "_native_credits"
+
+    @property
+    def decoded_an_amount(self) -> bool:
+        """Did the reader get past its filter and decode a real amount from a real response?
+
+        A REFUSED credit counts: the amount was decoded and THEN the memo check declined it, so
+        every field name in the reader had to be right to get that far.
+        """
+        return bool(self.credits or self.refused)
+
+
+def credit_path_lines(observed: CreditPathObserved) -> list[str]:
+    """What the run proved about the deposit-credit path, which is the half that loses money."""
+    if not observed.address_read:
+        return ["  CREDIT path: NOT exercised, and it is the half that matters. getBalance,",
+                "  getAccountInfo and find_deposits_to_address did not run, because no address was",
+                "  read. A wrong field name there loses a deposit rather than raising."]
+
+    other = "_spl_credits (needs --mint)" if not observed.is_spl else "_native_credits (drop --mint)"
+    if observed.decoded_an_amount:
+        return [f"  CREDIT path: {observed.reader} DECODED a real amount from a real response "
+                f"({observed.credits} credited, {observed.refused} refused over "
+                f"{observed.signatures} signature(s)).",
+                "  Every field name in that reader had to be right to get there. The other reader,",
+                f"  {other}, has not decoded one."]
+    if observed.signatures:
+        return [f"  CREDIT path: PARTLY exercised. Discovery and {observed.reader}'s filter ran "
+                f"over {observed.signatures} signature(s)",
+                "  and matched nothing, so the reader returned no credits WITHOUT decoding an",
+                "  amount -- its uiTokenAmount/balance-delta reads are still unproven, and those",
+                "  are the field names that lose a deposit silently. Point --address at an account",
+                "  that has received one."]
+    return [f"  CREDIT path: discovery ran and returned ZERO signatures, so {observed.reader} was",
+            "  never invoked at all. Nothing about the readers was established. Point --address at",
+            "  an account with recent activity."]
 
 
 def print_summary(failures: list[str], elapsed: float, hunted: bool | None = None,
-                  read_address: bool = False, read_mint: bool = False) -> int:
+                  observed: CreditPathObserved | None = None) -> int:
     """Rule 14: a run that found nothing and a run that failed must not share a line."""
     print("\nSUMMARY", flush=True)
     total = format_duration(elapsed)
@@ -401,7 +454,7 @@ def print_summary(failures: list[str], elapsed: float, hunted: bool | None = Non
     # because this run passed no --address and no --mint" -- unconditionally, so the first run
     # that DID pass one would have been told its own coverage did not happen. Same defect as the
     # memo lines two commits ago, in the paragraph written to replace them.
-    for line in credit_path_lines(read_address, read_mint):
+    for line in credit_path_lines(observed or CreditPathObserved(False, False, 0, 0, 0)):
         print(line, flush=True)
     print(f"  checked in    {total}", flush=True)
     return 0
@@ -439,7 +492,7 @@ def main() -> int:
     check_cluster(adapter, run)
     check_rent(adapter, run)
     check_mint(adapter, run)
-    check_address(adapter, address, args.limit, run)
+    observed = check_address(adapter, address, args.limit, run)
     # None means NO HUNT RAN, which memo_status_lines() renders differently from a hunt that
     # ran and confirmed nothing. Initialized here rather than only inside the branch: the first
     # version of this assigned it only under `if args.hunt_memo > 0`, so every plain run -- the
@@ -453,8 +506,7 @@ def main() -> int:
     # an id was confirmed "so a caller can print the difference", and this line discarded it --
     # which is how the summary came to tell the operator the ids were unproven immediately after
     # printing two CONFIRMED lines.
-    return print_summary(failures, time.monotonic() - started, hunted,
-                         read_address=bool(address), read_mint=bool(rpc.get('mint')))
+    return print_summary(failures, time.monotonic() - started, hunted, observed)
 
 
 def what_the_hunt_established(program: str, *, seen: int, read: int, unread: int,
@@ -905,7 +957,8 @@ def _indented(records: list[str], indent: str = "      ") -> str:
     return "".join(lines)
 
 
-def _deposits_line(adapter: SolanaAdapter, address: str, limit: int) -> str:
+def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
+                   credited: list[int] | None = None) -> str:
     """What the deposit watcher would see, including what it would REFUSE to credit.
 
     THE LINE THIS REPLACES WAS FALSE ON THE FIRST RUN THAT REACHED IT. On 2026-09-30 a real
@@ -938,6 +991,12 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int) -> str:
         adapter_logger.removeHandler(captured)
         adapter_logger.propagate = was_propagating
     dropped = adapter.unattributable_drops
+    if credited is not None:
+        # HOW MANY CREDITS THIS CALL PRODUCED, handed back so check_address can report coverage
+        # from the run rather than from the flags. A list rather than a return value because
+        # this function's return value is the line an operator reads, and widening it to a tuple
+        # would put a number into the middle of the output plumbing.
+        credited.append(len(events))
     if dropped:
         # REPORTED FIRST AND AS A PROBLEM, not appended to a "(none)". The credits are real.
         lines = [
