@@ -189,6 +189,33 @@ class Config:
         ("LTC", "BTC"),
         ("XRP", "BTC"),
         ("XRP", "LTC"),
+        # SOL -> GRC, enabled 2026-10-01 at the operator's request. ONE DIRECTION ONLY, and
+        # the asymmetry is the whole point rather than an oversight.
+        #
+        # All three prerequisites the test below enforces are MET for this direction, checked
+        # rather than assumed:
+        #
+        #   adapters     chains/registry builds SOL whenever SOL_RPC_URL is set, and GRC
+        #                always. Measured on the operator's host: adapters ['GRC', 'SOL'].
+        #   a USD price  services/pricing.IDS carries "SOL": "solana" (added 2026-09-29,
+        #                inert until now) and "GRC": "gridcoin-research".
+        #   a fee        the reserve is the TO asset's, and GRC_NETWORK_FEE_RESERVE exists
+        #   reserve      (0.01). This is why the reverse direction is absent: there is no
+        #                SOL_NETWORK_FEE_RESERVE, and inventing one is a pricing decision
+        #                that is not mine (rule 16) -- adding ("GRC", "SOL") without it
+        #                reproduces the GRC->XRP failure this section already records, a
+        #                KeyError rendered into a customer's browser.
+        #
+        # AND ("GRC", "SOL") WOULD NEED A SEND PATH THAT DOES NOT EXIST. chains/solana.py
+        # cannot sign -- it holds no keypair and imports nothing that could -- so a swap whose
+        # TO asset is SOL could be quoted, could take a deposit, and could never be paid out.
+        # That is worse than a refused quote: it strands a customer's coins in a swap the
+        # terminal cannot complete.
+        #
+        # STILL NEEDS SOL_DEPOSIT_ACCOUNT to be set before a SOL swap can be CREATED --
+        # swap_service refuses while it is empty, and solana_chain_check.py now says so in its
+        # summary. A pair being allowed and a swap being creatable are two different gates.
+        ("SOL", "GRC"),
     }
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's

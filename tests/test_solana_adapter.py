@@ -690,11 +690,30 @@ def test_the_registry_builds_sol_once_a_url_is_set():
     assert isinstance(adapters["SOL"], SolanaAdapter)
 
 
-def test_adding_the_adapter_does_not_enable_a_trading_pair():
-    """Enabling a pair is live posture and is the operator's (rule 16). The
-    adapter being reachable for READING must not imply a SOL swap can be
-    quoted."""
-    assert not any("SOL" in pair for pair in Config.ALLOWED_PAIRS)
+def test_SOL_CANNOT_BE_A_PAYOUT_ASSET_WHATEVER_THE_PAIRS_SAY():
+    """This asserted SOL was in NO pair, and on 2026-10-01 the operator enabled SOL -> GRC.
+
+    THE PREMISE MOVED, SO THE TEST DOES (rule 2: its test dies with it or changes to pin the
+    stronger invariant). "The adapter being readable does not enable a pair" was true and is
+    no longer the thing worth holding -- a pair IS enabled now, deliberately. What must stay
+    true is the half that cannot be fixed by a config change:
+
+        SOL may be the INPUT of a pair. It may never be the OUTPUT.
+
+    A pair paying out in SOL could be quoted, could take a customer's deposit, and could never
+    be completed, because send_to_address() raises and this module holds no keypair. That
+    strands coins in a swap the terminal cannot finish, which is strictly worse than a refused
+    quote. tests/test_allowed_pairs_are_serviceable.py's DELIBERATELY_ONE_WAY records the same
+    thing from the pair side; this is the assertion that bites if somebody adds the reverse.
+
+    MUTATION: add ("GRC", "SOL") to ALLOWED_PAIRS and this fails by name.
+    """
+    paying_out_in_sol = [pair for pair in Config.ALLOWED_PAIRS if pair[1] == "SOL"]
+    assert not paying_out_in_sol, (
+        f"{paying_out_in_sol} would pay out in SOL, which cannot pay out at all -- "
+        f"send_to_address() raises and nothing in chains/solana.py can sign. A deposit taken "
+        f"against one of these is stranded in a swap that cannot complete."
+    )
 
 
 # --- the event shape ---------------------------------------------------------

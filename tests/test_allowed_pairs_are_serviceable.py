@@ -102,6 +102,22 @@ KNOWN_UNQUOTABLE = {("GRC", "XRP")}
 DELIBERATELY_ONE_WAY = {
     ("XRP", "BTC"): "the reverse pays out XRP, which cannot pay out at all (no signing key)",
     ("XRP", "LTC"): "the reverse pays out XRP, which cannot pay out at all (no signing key)",
+    # SOL -> GRC, 2026-10-01. The reverse is blocked TWICE, and this test is where that gets
+    # recorded so nobody fixes one half and expects a working pair -- which is the mistake the
+    # paragraph above this table documents me making about XRP.
+    #
+    #   no SOL_NETWORK_FEE_RESERVE   config.py has BTC, LTC and GRC only. Setting it is a
+    #                                pricing decision and the operator's (rule 16).
+    #   no SOL send path             chains/solana.py's send_to_address() raises. It holds no
+    #                                keypair and imports nothing that could, so this is an
+    #                                ABSENCE and not a flag -- "nothing in a .env can arm it",
+    #                                in chains/registry's own words about XRP.
+    #
+    # Either one alone leaves ("GRC", "SOL") broken, so both are named. The forward direction
+    # needs neither: the reserve is the TO asset's (GRC's, which exists) and the payout is in
+    # GRC, which pays out today.
+    ("SOL", "GRC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
+                     "at all (send_to_address raises; no keypair in the module)"),
 }
 
 

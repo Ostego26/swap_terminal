@@ -1150,11 +1150,22 @@ def test_a_clean_asset_prints_the_no_findings_line_and_no_severity_tags():
 # ---------------------------------------------------------------------------
 
 
-def test_required_assets_is_DERIVED_from_the_pairs_and_excludes_what_nothing_trades():
+def test_required_assets_is_DERIVED_from_the_pairs_and_excludes_what_nothing_trades(monkeypatch):
     """The derivation, not a list. A hand-kept copy would be rule 8 on "may this be priced".
 
-    MUTATION: return tuple(IDS). The exemption assertion below fails, and so does the
-    behavioral test after it.
+    THIS TEST ASKED TO BE NOTICED AND THEN WAS. It asserted `untraded` was non-empty with the
+    message "every asset in IDS is now traded, so this test proves nothing -- which is fine,
+    but the exemption below cannot be checked and somebody should notice". Enabling SOL -> GRC
+    on 2026-10-01 made that true and it fired exactly as written. Good test.
+
+    SO THE UNTRADED ASSET IS SEEDED NOW instead of borrowed from the tree. Depending on one
+    existing made the test's strength a side effect of which pairs happened to be enabled --
+    it proved the exclusion while some asset was untraded and silently proved nothing after.
+    A seeded entry holds the invariant whatever the operator enables next, which is the point
+    of asserting a DERIVATION rather than a list.
+
+    MUTATION: return tuple(IDS) from required_assets() and the seeded asset comes back
+    required, so an outage on something nothing trades refuses every quote.
     """
     required = set(pricing.required_assets())
     traded = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
@@ -1163,15 +1174,16 @@ def test_required_assets_is_DERIVED_from_the_pairs_and_excludes_what_nothing_tra
         f"required_assets() is {sorted(required)}, which is not the traded set "
         f"{sorted(traded & set(pricing.IDS))}"
     )
-    untraded = set(pricing.IDS) - traded
-    assert untraded, (
-        "every asset in IDS is now traded, so this test proves nothing -- which is fine, but "
-        "the exemption below cannot be checked and somebody should notice"
+
+    # AN ASSET NO PAIR TRADES, added for the duration of this test. "ZZZ" is not a ticker any
+    # pair can name, so it cannot collide with a real one the operator enables later.
+    monkeypatch.setitem(pricing.IDS, "ZZZ", "a-coin-nothing-trades")
+    seeded = set(pricing.required_assets())
+    assert "ZZZ" not in seeded, (
+        "an asset in IDS that no pair trades must not be required: an outage on it would "
+        "refuse every quote on the terminal, including pairs that do not involve it"
     )
-    assert not (required & untraded), (
-        f"{sorted(required & untraded)} are required and traded by no pair, so an outage on "
-        f"one of them refuses every quote"
-    )
+    assert seeded == required, "and adding it changes nothing else"
 
 
 def test_an_UNTRADED_asset_going_missing_does_not_refuse_a_quote(monkeypatch):
@@ -1183,11 +1195,12 @@ def test_an_UNTRADED_asset_going_missing_does_not_refuse_a_quote(monkeypatch):
     MUTATION: put the untraded asset back in required_assets(). This fails at the fetch.
     """
     traded = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
-    untraded = sorted(set(pricing.IDS) - traded)
-    if not untraded:
-        pytest.skip("every asset in IDS is traded, so none can be missing harmlessly")
-
-    absent = untraded[0]
+    # SEEDED, NOT SKIPPED. This used to pytest.skip when every IDS asset was traded, which is
+    # what happened the moment SOL -> GRC was enabled -- so the behavioral half of the change
+    # would have stopped running with nothing failing. A skip that depends on the operator's
+    # pair set is a test that disables itself.
+    monkeypatch.setitem(pricing.IDS, "ZZZ", "a-coin-nothing-trades")
+    absent = "ZZZ"
     body = {cg_id: {"usd": 100.0, "usd_market_cap": 5e9, "usd_24h_vol": 2e8,
                     "usd_24h_change": 1.0, "last_updated_at": 1790717713}
             for asset, cg_id in pricing.IDS.items() if asset != absent}
