@@ -106,6 +106,139 @@ def worker_commands(python_executable: str = sys.executable) -> dict[str, list[s
     }
 
 
+#: The process table this supervisor reads. A CONSTANT rather than Path("/proc")
+#: inline, so the "this platform has no /proc" branch below can be exercised --
+#: mutation-checked 2026-10-01 and it SURVIVED removing its own guard, because
+#: every machine the suite runs on has /proc and the branch was unreachable from a
+#: test. An untestable branch is one nobody has checked (rule 17), and the whole
+#: point of that branch is to say "could not look" rather than "nothing found".
+PROC_DIR = Path("/proc")
+
+#: The shortest argv a supervised worker can have: [interpreter, script]. Anything
+#: shorter cannot be one, and naming the number is what ruff's PLR2004 asks for --
+#: the alternative was a `noqa` on a comparison whose meaning really does need
+#: saying (rule 19: fix it, do not suppress it). worker_commands() produces exactly
+#: this length, which is where the 2 comes from rather than from a guess.
+WORKER_ARGV_LENGTH = 2
+
+
+def unaccounted_workers(names, run_dir: Path, python_executable: str = sys.executable) -> dict[str, list[int]]:
+    """Worker processes ALIVE that no pid file in `run_dir` accounts for.
+
+    THE SECOND HALF OF RULE 13, and the supervisor only had the first.
+
+    This file's own header argues for pid files over pgrep patterns, and that
+    argument is right -- for SIGNALLING. A pattern matches what a command line
+    happens to look like today, and signalling a pid because a string matched is
+    how a recycled pid gets killed. Nothing here changes that: every signal still
+    goes to a pid read from a pid file and checked against /proc.
+
+    But rule 13 also says "a stop that cannot prove it worked is not a stop.
+    Follow it with a check that the process is gone, and make the ABSENCE the
+    assertion." stop_worker() makes absence the assertion for the pid IN THE FILE,
+    which is a different and weaker claim: it cannot see a worker it has no pid
+    file for. That is precisely how the Mammon incident rule 13 is written from
+    went unnoticed -- "daemon caches that no pid file in warbot.sh names, which is
+    why full_stop has to pgrep -f for them."
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-01. Three workers were observed
+    cycling (deposit_watcher cycle=57, payout_worker cycle=106). Twenty minutes
+    later `stop` reported
+
+        not running       deposit_watcher  <- nothing to stop; pid file was stale
+        not running       payout_worker  <- nothing to stop; pid file was stale
+        not running       reconcile_worker  <- nothing to stop; pid file was stale
+        summary           stopped=0  failed=0  untouched=3
+
+    Every line is TRUE of the pid in each file, and `untouched=3` reads as
+    "nothing needed doing". Whether a worker was still alive under some other pid
+    was not established either way -- and an orphan on the wrong database is
+    exactly what this session had already been chasing for an hour.
+
+    SO: SIGNAL BY PID FILE, VERIFY BY SCAN. The scan reads /proc rather than
+    shelling out to pgrep, so there is no dependency on a tool being installed and
+    no shell at all. It REPORTS and never signals; what to do about an orphan is
+    the operator's, because killing a process this supervisor did not start is not
+    a reporting decision (rule 16).
+
+    Returns {} on a platform without /proc, which is honest: "nothing found"
+    and "could not look" are different, and the caller says which.
+    """
+    commands = worker_commands(python_executable)
+    accounted = set()
+    for name in names:
+        record = read_pid_record(pid_file(run_dir, name))
+        if record:
+            accounted.add(record[0])
+    found: dict[str, list[int]] = {}
+    if not PROC_DIR.is_dir():
+        return found
+    for entry in PROC_DIR.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in accounted or pid == os.getpid():
+            continue
+        argv = _proc_argv(pid)
+        # TWO CONDITIONS, AND THE FIRST DRAFT HAD NEITHER RIGHT.
+        #
+        # It matched the worker's script path as a SUBSTRING of the joined command
+        # line, which reports `vim /.../workers/payout_worker.py`, a grep over it,
+        # or a pytest run of it as a live worker -- on every `status` an operator
+        # runs with the source open. Found by writing the test that kills the
+        # name-match mutation; the mutation had survived, so nothing in the suite
+        # had looked at the false-positive case.
+        #
+        #   an exact argv ELEMENT   so a path that merely CONTAINS the marker, or a
+        #                           file named after it, does not match. This is
+        #                           what the argv list is for; the joined string
+        #                           cannot express it.
+        #   argv[0] is a python     so an editor or a grep holding the script as an
+        #                           argument is not a worker running it. A real
+        #                           worker's argv is exactly [sys.executable,
+        #                           <script>], from worker_commands().
+        #
+        # NOT AIRTIGHT, and the gap is named rather than papered over: `python3 -m
+        # pytest .../payout_worker.py` satisfies both. That is a developer running
+        # the suite, it is transient, and the line it produces says which pid to
+        # look at -- a false positive that resolves itself beats a false negative
+        # that hides an orphan on a live database.
+        if len(argv) < WORKER_ARGV_LENGTH or "python" not in Path(argv[0]).name:
+            continue
+        for name in names:
+            marker = commands.get(name, [None, ""])[-1]
+            if marker and marker in argv[1:]:
+                found.setdefault(name, []).append(pid)
+    return found
+
+
+def unaccounted_lines(names, run_dir: Path, python_executable: str = sys.executable) -> list[str]:
+    """unaccounted_workers() as the block a stop or status prints. (none) is a result.
+
+    Rule 14: an empty result must not print nothing, because "no orphans" and
+    "this check did not run" are the two readings of a blank gap, and only one of
+    them means the stop is proven.
+    """
+    if not PROC_DIR.is_dir():
+        return [
+            "  NOT ESTABLISHED   this platform has no /proc, so whether a worker is alive under another "
+            "pid was NOT checked. The pid-file outcome above is the only evidence"
+        ]
+    found = unaccounted_workers(names, run_dir, python_executable)
+    if not found:
+        return [
+            "  none              no worker process is alive that a pid file does not account for  <- "
+            "/proc scanned; this is what makes the outcome above a PROVEN stop rather than a reported one"
+        ]
+    return [
+        f"  *** ORPHAN ***    {name} is ALIVE at pid {', '.join(str(pid) for pid in pids)} with no pid "
+        f"file naming it. It is still polling whatever database its own shell gave it, and `stop` did NOT "
+        f"touch it. Nothing here signals a process this supervisor did not start -- that is yours "
+        f"(see its banner for the database it opened)"
+        for name, pids in sorted(found.items())
+    ]
+
+
 def pid_file(run_dir: Path, name: str) -> Path:
     return run_dir / f"{name}.pid"
 
@@ -189,8 +322,39 @@ def process_alive(pid: int) -> bool:
     return not _is_zombie(pid)
 
 
+def _proc_argv(pid: int) -> list[str]:
+    """Return /proc/<pid>/cmdline as the argv LIST, or [] if unreadable.
+
+    THE BOUNDARIES MATTER, which the joined string throws away. Added 2026-10-01
+    after unaccounted_workers() matched on a substring of the joined form and
+    reported a non-worker as a live worker: the marker it looks for is a script
+    path, and `vim /.../workers/payout_worker.py` contains that path, as does a
+    grep, a pytest invocation, or any editor with the source open. Every one of
+    those would have printed `*** ORPHAN ***` on an operator's `status` while
+    nothing was running -- the cried-wolf shape this file already fixed once for
+    XRP's get_balance().
+
+    Caught by the test for it failing, which is the only reason it is known: the
+    mutation that replaced the path match with a NAME match survived the suite, so
+    the test written to kill that mutation was the first thing to look at the
+    false-positive case at all.
+
+    An empty list means "cannot tell" -- no /proc, or a process we may not read.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        return []
+    return [part for part in raw.decode("utf-8", "replace").split("\0") if part]
+
+
 def _proc_cmdline(pid: int) -> str:
-    """Return /proc/<pid>/cmdline as a space-joined string, or "" if unreadable.
+    """_proc_argv() joined with spaces, for the callers that want one string.
+
+    Derived rather than read separately, so there is ONE reader of
+    /proc/<pid>/cmdline (rule 8). pid_is_still_ours() wants the joined form
+    because it does a deliberate substring check against a recorded command; the
+    orphan scan wants the list, because a substring is what made it wrong.
 
     Empty string means "cannot tell" -- on a platform without /proc, or for a
     process we may not read. The caller treats "cannot tell" as "do not refuse
@@ -198,11 +362,7 @@ def _proc_cmdline(pid: int) -> str:
     refusing would leave an orphan running, which is the failure this whole
     file exists to prevent.
     """
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except (FileNotFoundError, PermissionError, OSError):
-        return ""
-    return " ".join(part for part in raw.decode("utf-8", "replace").split("\0") if part)
+    return " ".join(_proc_argv(pid))
 
 
 def pid_is_still_ours(pid: int, recorded_command: str) -> bool:
@@ -735,14 +895,25 @@ def command_stop(names: list[str], run_dir: Path, grace_seconds: float) -> int:
                 "Do not assume it stopped."
             )
     _print_block("  outcome", lines)
+    # RULE 13'S "make the absence the assertion", and until 2026-10-01 the absence
+    # asserted was only that of the pid in each file. See unaccounted_workers().
+    _print_block("  still alive?", unaccounted_lines(names, run_dir))
 
     stopped = sum(1 for r in results if r["outcome"] == "stopped")
     failed = sum(1 for r in results if r["outcome"] == "failed")
+    orphans = sum(len(pids) for pids in unaccounted_workers(names, run_dir).values())
+    # ORPHANS ARE COUNTED IN THE SUMMARY LINE, not only in the block above. The
+    # operator's run printed `stopped=0 failed=0 untouched=3`, which reads as
+    # "nothing needed doing"; a summary that cannot say "and one is still running"
+    # is rule 13's "'skipped' plus 'success' in the same output" in the one line
+    # most likely to be the only one read.
     print(
         f"  summary           stopped={stopped}  failed={failed}  "
-        f"untouched={len(results) - stopped - failed}  in {format_duration(time.monotonic() - started_at)}"
+        f"untouched={len(results) - stopped - failed}  orphans={orphans}"
+        f"{'  <- an orphan survived this stop; it is named above' if orphans else ''}"
+        f"  in {format_duration(time.monotonic() - started_at)}"
     )
-    return 1 if failed else 0
+    return 1 if (failed or orphans) else 0
 
 
 def command_status(names: list[str], run_dir: Path) -> int:
@@ -756,6 +927,10 @@ def command_status(names: list[str], run_dir: Path) -> int:
         detail = f"  {state['detail']}" if state["detail"] else ""
         lines.append(f"  {state['state']:<9} {state['worker']} pid={state['pid']}{detail}")
     _print_block("  workers", lines)
+    # Same reason as in command_stop(): a worker reported `stopped` while an orphan
+    # of it polls a database nobody named is the failure rule 13 is written from,
+    # and status is where an operator looks to decide the system is quiet.
+    _print_block("  still alive?", unaccounted_lines(names, run_dir))
     running = sum(1 for name in names if worker_status(name, run_dir)["state"] == "running")
     print(
         f"  summary           running={running}/{len(names)}  <- expected {len(names)} while swaps are open; "

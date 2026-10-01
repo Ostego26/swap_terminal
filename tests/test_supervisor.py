@@ -589,3 +589,238 @@ def test_the_spawn_warning_is_the_original_one_when_every_unlock_is_ready(monkey
     assert warning == ("a payout worker CAN broadcast. Stop now if this database is pointed at a funded "
                        "mainnet wallet.")
     assert "canary-wallet-passphrase" not in warning
+
+
+# --- rule 13's second half: prove the absence, not the pid file's absence -------
+#
+# MEASURED ON THE OPERATOR'S HOST 2026-10-01. Three workers were observed cycling
+# (deposit_watcher cycle=57, payout_worker cycle=106) against the wrong database.
+# Twenty minutes later `stop` reported
+#
+#     not running       deposit_watcher  <- nothing to stop; pid file was stale
+#     not running       payout_worker  <- nothing to stop; pid file was stale
+#     not running       reconcile_worker  <- nothing to stop; pid file was stale
+#     summary           stopped=0  failed=0  untouched=3
+#
+# Every line is TRUE of the pid in each file. `untouched=3` reads as "nothing
+# needed doing", and whether a worker was still alive under some other pid was not
+# established either way. That is the Mammon incident rule 13 is written from --
+# "daemon caches that no pid file in warbot.sh names, which is why full_stop has to
+# pgrep -f for them."
+#
+# Signalling still goes only to a pid read from a pid file and checked against
+# /proc; this file's header is right that a pattern is the wrong thing to signal
+# on. What is added is VERIFICATION, which reports and never signals.
+
+
+def _worker_stand_in(marker: str):
+    """A harmless process whose argv contains a worker's script path.
+
+    A real worker would open a database and talk to chains. What the scan matches
+    on is the script path in /proc/<pid>/cmdline, so a sleep carrying that path in
+    argv exercises the identical code path and nothing else.
+    """
+    # No noqa: S603 is not enabled for tests/, and an unused directive is noise
+    # claiming a check nobody needed (rule 19). The argv is sys.executable, a
+    # literal, and a path from worker_commands() -- no shell, no user string.
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", marker])
+
+
+def test_no_orphan_prints_none_rather_than_nothing(tmp_path):
+    """Rule 14: "no orphans" and "this check did not run" must not share a blank gap.
+
+    The sentence also has to say the scan HAPPENED, because that is what upgrades
+    the pid-file outcome above it from reported to proven.
+    """
+    lines = supervisor.unaccounted_lines(list(supervisor.worker_commands()), tmp_path)
+    assert len(lines) == 1
+    assert "none" in lines[0]
+    assert "/proc scanned" in lines[0]
+    assert "PROVEN stop" in lines[0]
+
+
+def test_a_live_worker_with_no_pid_file_is_reported_as_an_orphan(tmp_path):
+    """THE CASE `untouched=3` COULD NOT SEE."""
+    names = list(supervisor.worker_commands())
+    marker = supervisor.worker_commands()["payout_worker"][-1]
+    process = _worker_stand_in(marker)
+    try:
+        time.sleep(0.5)
+        found = supervisor.unaccounted_workers(names, tmp_path)
+        assert "payout_worker" in found
+        assert process.pid in found["payout_worker"]
+
+        lines = supervisor.unaccounted_lines(names, tmp_path)
+        assert any("*** ORPHAN ***" in line for line in lines)
+        assert any(str(process.pid) in line for line in lines)
+        assert any("`stop` did NOT touch it" in line for line in lines)
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_a_process_a_pid_file_names_is_not_an_orphan(tmp_path):
+    """The whole point of "unaccounted": a supervised worker must not be reported.
+
+    Otherwise every healthy `status` prints an orphan warning, which is the
+    cried-wolf noise that gets a check ignored -- and this file has already fixed
+    that shape once, for XRP's get_balance().
+    """
+    names = list(supervisor.worker_commands())
+    marker = supervisor.worker_commands()["payout_worker"][-1]
+    process = _worker_stand_in(marker)
+    try:
+        time.sleep(0.5)
+        assert supervisor.unaccounted_workers(names, tmp_path), "the premise: it IS found with no pid file"
+
+        (tmp_path / "payout_worker.pid").write_text(f"{process.pid}\n{sys.executable} {marker}\n")
+        assert supervisor.unaccounted_workers(names, tmp_path) == {}
+        assert "none" in supervisor.unaccounted_lines(names, tmp_path)[0]
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_the_scan_never_signals_anything(tmp_path):
+    """It REPORTS. Killing a process this supervisor did not start is the operator's
+    decision (rule 16), not a reporting function's -- and the process this scan
+    finds may be a worker somebody started deliberately from another shell.
+    """
+    names = list(supervisor.worker_commands())
+    marker = supervisor.worker_commands()["payout_worker"][-1]
+    process = _worker_stand_in(marker)
+    try:
+        time.sleep(0.5)
+        supervisor.unaccounted_workers(names, tmp_path)
+        supervisor.unaccounted_lines(names, tmp_path)
+        time.sleep(0.3)
+        assert process.poll() is None, "the scan killed a process it was only supposed to report"
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_the_stop_summary_counts_orphans_and_exits_nonzero(tmp_path, capsys):
+    """The one line most likely to be the only one read.
+
+    `stopped=0 failed=0 untouched=3` cannot say "and one is still running", which
+    is rule 13's "'skipped' plus 'success' in the same output is a defect in the
+    OUTPUT". The exit code moves too: a stop that left something running has not
+    succeeded.
+    """
+    names = ["payout_worker"]
+    marker = supervisor.worker_commands()["payout_worker"][-1]
+    process = _worker_stand_in(marker)
+    try:
+        time.sleep(0.5)
+        code = supervisor.command_stop(names, tmp_path, 0.1)
+        out = capsys.readouterr().out
+
+        assert "orphans=1" in out
+        assert "an orphan survived this stop" in out
+        assert "*** ORPHAN ***" in out
+        assert code != 0, "a stop that left a worker running must not report success"
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_a_clean_stop_still_exits_zero_and_says_the_scan_ran(tmp_path, capsys):
+    """The ratchet guard: the new check must not fail an ordinary quiet stop."""
+    code = supervisor.command_stop(["payout_worker"], tmp_path, 0.1)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "orphans=0" in out
+    assert "an orphan survived" not in out
+    assert "/proc scanned" in out
+
+
+def test_a_log_tail_is_not_mistaken_for_a_worker(tmp_path):
+    """MUTATION-FOUND. Matching the worker NAME instead of its script path survived.
+
+    `tail -f payout_worker.log`, an editor with the file open, and a grep for the
+    name all carry "payout_worker" in their command line and are not workers. A
+    false orphan report is the cried-wolf noise that gets a check ignored -- a
+    shape this file has already fixed once, for XRP's get_balance() -- and here it
+    would appear on every `status` an operator runs while watching a log.
+
+    So the match is on the SCRIPT PATH from worker_commands(), and this is the test
+    that distinguishes the two.
+    """
+    names = list(supervisor.worker_commands())
+    marker = supervisor.worker_commands()["payout_worker"][-1]
+    # The log file beside the script: the same name, one extension apart, which is
+    # exactly what an operator has open in another terminal. This is the SUBSTRING
+    # case -- argv[0] is a python here, so only the exact-element match rejects it.
+    process = _worker_stand_in(f"{marker}.log")
+    try:
+        time.sleep(0.5)
+        assert process.poll() is None, "the stand-in died; this test would pass on nothing"
+        argv = supervisor._proc_argv(process.pid)
+        assert f"{marker}.log" in argv, f"the fixture must carry the near-miss path: {argv}"
+        assert marker not in argv, "the fixture must NOT carry the exact path, or it is a real match"
+
+        assert supervisor.unaccounted_workers(names, tmp_path) == {}, (
+            "a process merely NAMING a worker was reported as that worker"
+        )
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_a_non_python_holding_the_script_path_is_not_a_worker(tmp_path):
+    """MUTATION-FOUND, and the near-miss test above could not catch it.
+
+    Removing the `"python" not in Path(argv[0]).name` check survived the suite,
+    because every stand-in was a python. The case it guards is an editor, a grep or
+    a tail holding the worker's own source path as an EXACT argv element:
+
+        vim    /.../swap_terminal/workers/payout_worker.py
+        grep x /.../swap_terminal/workers/payout_worker.py
+
+    Both satisfy the element match. Only the interpreter check rejects them, and
+    without it every `status` an operator runs with the source open would print
+    *** ORPHAN ***.
+
+    /bin/sh with the path as a trailing argument, NOT `exec -a vim`: dash has no
+    `exec -a`, and the first version of this fixture used it, so /bin/sh printed
+    "exec: -a: not found", the process died instantly, _proc_argv() returned [],
+    and the test passed on a DEAD process while the mutation survived it. Third
+    fixture in this suite to be green for the wrong reason, which is why the
+    liveness and shape assertions below come before the one under test.
+    """
+    names = list(supervisor.worker_commands())
+    marker = supervisor.worker_commands()["payout_worker"][-1]
+    process = subprocess.Popen(["/bin/sh", "-c", "sleep 30", marker])
+    try:
+        time.sleep(0.5)
+        assert process.poll() is None, "the stand-in died; this test would pass on nothing"
+        argv = supervisor._proc_argv(process.pid)
+        assert marker in argv[1:], f"the fixture must hold the script path as an argv element: {argv}"
+        assert "python" not in Path(argv[0]).name, f"the fixture must not be a python: {argv}"
+
+        assert supervisor.unaccounted_workers(names, tmp_path) == {}, (
+            "a non-python holding the script path as an argument was reported as a live worker"
+        )
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_without_proc_the_scan_says_it_could_not_look(tmp_path, monkeypatch):
+    """MUTATION-FOUND. Removing the /proc guard survived, because the suite has /proc.
+
+    "Nothing found" and "could not look" are different answers, and only the first
+    makes a stop proven. On a platform with no /proc the honest line says the
+    pid-file outcome is the ONLY evidence -- the same distinction show_swap.py
+    draws between an empty table and a missing one.
+    """
+    monkeypatch.setattr(supervisor, "PROC_DIR", tmp_path / "no-proc-here")
+    assert supervisor.unaccounted_workers(list(supervisor.worker_commands()), tmp_path) == {}
+
+    lines = supervisor.unaccounted_lines(list(supervisor.worker_commands()), tmp_path)
+    assert len(lines) == 1
+    assert "NOT ESTABLISHED" in lines[0]
+    assert "no /proc" in lines[0]
+    assert "only evidence" in lines[0]
+    assert "none" not in lines[0], "could-not-look must never render as no-orphans"
