@@ -515,13 +515,25 @@ class XRPAdapter:
         info = result.get("info") or {}
         return str(info.get("network_id", info.get("build_version", "unknown")))
 
-    def find_deposits_to_address(self, address: str) -> list[dict]:
+    def find_deposits_to_address(self, address: str, tx_limit: int = 200,
+                                 settled_txids=frozenset()) -> list[dict]:
         """Validated payments to one account, as deposit events.
 
         The filtering and every refusal live in chains/xrp_payments.py -- most
         importantly that the credited figure comes from meta.delivered_amount
         and never from Amount, which is the partial payment exploit. This
         method is transport.
+
+        BOTH tx_limit AND settled_txids ARE ACCEPTED AND IGNORED. XRP discovery
+        is a single `account_tx` call, so there is no per-transaction cost to
+        avoid and nothing to skip. chains/solana.py is the one implementation
+        that uses settled_txids, because Solana discovery costs one
+        getTransaction PER TRANSACTION and re-reading settled history
+        rate-limited a real deposit out of being credited on 2026-10-01 -- the
+        measurement is in that method's comment.
+
+        They are parameters here rather than a branch in the caller so that
+        services/deposit_service.py calls every adapter the same way (rule 8).
         """
         result = self.call(
             _METHOD_ACCOUNT_TX,

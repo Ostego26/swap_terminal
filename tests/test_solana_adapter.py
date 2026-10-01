@@ -1188,3 +1188,108 @@ def test_native_credits_over_the_REAL_devnet_numbers():
     assert adapter._native_credits(
         signature, me, moved, moved["meta"], chains_solana.FINALIZED_RANK,
     )[0]["amount"] == 0.7786992, "a delta, not a balance"
+
+
+# --- settled transactions are not re-read ------------------------------------
+#
+# MEASURED ON THE OPERATOR'S HOST 2026-10-01. A devnet SOL deposit was sent,
+# finalized on chain, and never credited:
+#
+#     SOL deposit scan for CUBnQ5QB... read 0 of 7 listed transaction(s);
+#     7 were unreadable and are named above.
+#     getSignaturesForAddress returned HTTP 429: "Connection rate limits exceeded"
+#
+# This is the only chain here whose discovery costs one RPC call PER TRANSACTION
+# -- Bitcoin-family uses one listtransactions, XRP one account_tx. The scan
+# listed every signature on the shared deposit account and called getTransaction
+# on ALL of them every cycle, including five credited hours earlier.
+#
+# THESE TESTS EXIST BECAUSE A MUTATION ESCAPED. tests/test_deposit_rate_limit.py
+# proves the SERVICE passes the settled set, using a counting stub adapter -- so
+# making the real adapter ignore the argument broke nothing there. Whether this
+# method honours it was unverified, which is the half that has to work.
+
+def test_a_settled_signature_is_never_fetched():
+    """The avoided call, counted on the real adapter.
+
+    MUTATION: drop the `if signature in settled_txids` check and getTransaction
+    is called for the settled signature too -- which is the behaviour that
+    rate-limited a real deposit out of being credited.
+    """
+    # A DIFFERENT signature, and the first draft of this was not one: SIG itself
+    # begins with "5", so `"5" + SIG[1:]` was SIG, both entries in the listing
+    # were the same settled signature, and the test failed asserting that the
+    # "other" one had been fetched. "4" is in base58's alphabet (unlike 0, O, I
+    # and l) and the length is unchanged, so this is a well-formed signature that
+    # is not the settled one.
+    other = "4" + SIG[1:]
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [
+                {"signature": SIG, "err": None, "confirmationStatus": "finalized"},
+                {"signature": other, "err": None, "confirmationStatus": "finalized"},
+            ],
+            "getTransaction": native_tx([OTHER, WALLET], [9_000_000_000, 1_000_000_000],
+                                        [8_000_000_000, 3_000_000_000]),
+        }
+    )
+
+    adapter.find_deposits_to_address(WALLET, settled_txids=frozenset({SIG}))
+
+    fetched = [params[0] for method, params in adapter.calls if method == "getTransaction"]
+    assert SIG not in fetched, "a settled signature must not cost another getTransaction"
+    assert fetched == [other], f"only the unsettled one, got {fetched}"
+
+
+def test_a_settled_signature_is_reported_as_skipped_and_not_as_unreadable():
+    """"Deliberately not re-read" and "could not be read" must not look alike.
+
+    A caller seeing `signatures_listed == 2` and one credit has to tell the scan
+    working from money possibly uncredited. solana_chain_check.py's coverage
+    report makes exactly this kind of claim and was wrong about it once already,
+    which is why unreadable_signatures was exposed in the first place.
+    """
+    # A DIFFERENT signature, and the first draft of this was not one: SIG itself
+    # begins with "5", so `"5" + SIG[1:]` was SIG, both entries in the listing
+    # were the same settled signature, and the test failed asserting that the
+    # "other" one had been fetched. "4" is in base58's alphabet (unlike 0, O, I
+    # and l) and the length is unchanged, so this is a well-formed signature that
+    # is not the settled one.
+    other = "4" + SIG[1:]
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [
+                {"signature": SIG, "err": None, "confirmationStatus": "finalized"},
+                {"signature": other, "err": None, "confirmationStatus": "finalized"},
+            ],
+            "getTransaction": native_tx([OTHER, WALLET], [9_000_000_000, 1_000_000_000],
+                                        [8_000_000_000, 3_000_000_000]),
+        }
+    )
+
+    adapter.find_deposits_to_address(WALLET, settled_txids=frozenset({SIG}))
+
+    assert adapter.signatures_skipped_settled == [SIG]
+    assert adapter.unreadable_signatures == [], "skipped is not unreadable"
+    assert adapter.signatures_listed == 2, "and the listing count still describes the whole account"
+
+
+def test_an_empty_settled_set_reads_everything():
+    """The default, and the behaviour every existing test in this file relies on.
+
+    MUTATION: skip on `signature not in settled_txids` and this fails -- which
+    would stop reading every transaction that is NOT settled, i.e. exactly the
+    new deposits.
+    """
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
+            "getTransaction": native_tx([OTHER, WALLET], [9_000_000_000, 1_000_000_000],
+                                        [8_000_000_000, 3_000_000_000]),
+        }
+    )
+
+    events = adapter.find_deposits_to_address(WALLET)
+
+    assert len(events) == 1, "nothing is settled, so everything is read"
+    assert adapter.signatures_skipped_settled == []

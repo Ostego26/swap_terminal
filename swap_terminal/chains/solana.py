@@ -758,7 +758,8 @@ class SolanaAdapter:
 
     # --- the contract: find_deposits_to_address ------------------------------
 
-    def find_deposits_to_address(self, address: str, tx_limit: int = DEFAULT_SIGNATURE_LIMIT) -> list[dict]:
+    def find_deposits_to_address(self, address: str, tx_limit: int = DEFAULT_SIGNATURE_LIMIT,
+                                 settled_txids=frozenset()) -> list[dict]:
         """Every credit to `address`, in the dict shape deposit_service reads.
 
         Returns dicts with `txid`, `vout`, `address`, `amount` and
@@ -810,12 +811,48 @@ class SolanaAdapter:
         self.signatures_listed = len(signatures)
         events: list[dict] = []
         unreadable: list[str] = []
+        skipped_settled: list[str] = []
         for entry in signatures:
             if entry.get("err") is not None:
                 # A failed transaction moved nothing. See the docstring.
                 continue
             signature = entry.get("signature")
             if not signature:
+                continue
+            # ALREADY SETTLED, SO NOT RE-READ. THIS IS THE RATE-LIMIT FIX.
+            #
+            # MEASURED ON THE OPERATOR'S HOST 2026-10-01, and it is the defect that
+            # stopped a real deposit being credited. Solana discovery is the only
+            # chain here that costs one RPC call PER TRANSACTION -- Bitcoin-family
+            # uses one listtransactions, XRP one account_tx, and this lists
+            # signatures and then calls getTransaction on each. With seven
+            # signatures on the shared account, two open swaps and the reconciler,
+            # that was roughly 24 calls every 15 seconds against the public devnet
+            # endpoint, and it grows without bound as the account accumulates
+            # history. api.devnet.solana.com answered:
+            #
+            #     read 0 of 7 listed transaction(s); 7 were unreadable
+            #     getSignaturesForAddress returned HTTP 429:
+            #       "Connection rate limits exceeded"
+            #
+            # so NOTHING credited, and the signature call itself eventually 429'd
+            # and killed the worker (fixed separately in workers/common.py).
+            #
+            # WHY SKIPPING IS SAFE, and it is a property of the caller rather than
+            # an optimistic assumption. services/deposit_service.
+            # refresh_swap_from_chain() upserts the scanned events and then reads
+            # EVERY stored deposit_events row back out of the database, and makes
+            # every decision -- seen total, confirmed total, status transition --
+            # from those rows. The scan feeds the upsert and nothing else. A
+            # transaction whose stored row already has confirmations at or above
+            # the swap's min_confirmations has nothing left to teach the upsert:
+            # its amount cannot change and its rank cannot rise past the ceiling
+            # the gate reads.
+            #
+            # A deposit still CONFIRMING is therefore never skipped -- the caller
+            # only puts a txid in this set once it has reached the threshold.
+            if signature in settled_txids:
+                skipped_settled.append(signature)
                 continue
             rank = commitment_rank(entry.get("confirmationStatus"))
             # ONE UNREADABLE TRANSACTION MUST NOT END THE SCAN, and until 2026-09-29 it did.
@@ -858,6 +895,13 @@ class SolanaAdapter:
         # the scan correctly skipped it and said so in the log, and the summary still reported
         # the filter as having "run over 10 signature(s) and matched nothing".
         self.unreadable_signatures = list(unreadable)
+        # EXPOSED FOR THE SAME REASON unreadable_signatures IS. A caller that sees
+        # `signatures_listed == 7` and two credits must be able to tell "five were
+        # already settled and deliberately not re-read" from "five could not be
+        # read". The first is the scan working; the second is money possibly
+        # uncredited. solana_chain_check.py's coverage report makes exactly this
+        # kind of claim and was wrong about it once already.
+        self.signatures_skipped_settled = list(skipped_settled)
         if unreadable:
             # Rule 14: a scan that silently examined fewer transactions than it listed must
             # not report the same way as one that read them all.

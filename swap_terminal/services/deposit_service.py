@@ -222,10 +222,56 @@ def attributable_events(events, swap: dict) -> list[dict]:
     return [event for event in events if event.get("vout") is not None and event["vout"] == tag]
 
 
+def settled_txids(db, asset: str) -> frozenset[str]:
+    """Transactions on `asset` with nothing left to teach a scan. One SELECT.
+
+    THE RATE-LIMIT FIX'S OTHER HALF, and it is the half that has to be right.
+    chains/solana.py skips any signature in this set, so a txid included here
+    will NOT be re-read -- and a txid included WRONGLY is a deposit that stops
+    being watched before it is credited.
+
+    THE CONDITION IS `confirmations >= the swap's own min_confirmations`, read
+    from the row rather than from config, because min_confirmations is copied
+    onto each swap AT CREATION. A swap created when SOL_MIN_CONFIRMATIONS was 1
+    must settle at 1 even if the setting is 3 now; using the current config
+    would re-read it forever, and using it the other way round would stop
+    watching a swap that had not reached its own threshold.
+
+    WHY THIS IS SAFE, from the caller rather than from optimism.
+    refresh_swap_from_chain() upserts the scanned events and then reads EVERY
+    stored deposit_events row back out of the database, computing seen_total,
+    confirmed_total, max_confirmations and every status transition from those
+    rows. The scan feeds the upsert and nothing else. A row already at or above
+    the threshold cannot change: its amount is fixed and its rank cannot rise
+    past the ceiling the gate reads. So skipping its transaction changes no
+    decision -- which is a claim tests/test_deposit_rate_limit.py checks by
+    running a refresh with the scan returning nothing for a settled deposit and
+    asserting the swap still advances.
+
+    A DEPOSIT STILL CONFIRMING IS NEVER IN HERE. That is the whole reason the
+    comparison is against the threshold rather than against "has a row".
+    """
+    rows = db.execute(
+        "SELECT DISTINCT d.txid AS txid FROM deposit_events d"
+        " JOIN swaps s ON s.id = d.swap_id"
+        " WHERE s.from_asset = ? AND d.confirmations >= s.min_confirmations",
+        (asset,),
+    ).fetchall()
+    return frozenset(str(row["txid"]) for row in rows)
+
+
 def refresh_swap_from_chain(db, config, adapters: dict, swap: dict) -> dict:
     asset = swap["from_asset"]
     adapter = adapters[asset]
-    events = adapter.find_deposits_to_address(swap["deposit_address"])
+    # SETTLED TRANSACTIONS ARE NOT RE-READ. On Solana each one costs a
+    # getTransaction call, and re-reading the whole history every 15s
+    # rate-limited a real deposit out of being credited on 2026-10-01. See
+    # settled_txids() for why skipping them changes no decision, and
+    # chains/solana.py for the measurement. Every other adapter accepts the
+    # argument and ignores it: their discovery is one call.
+    events = adapter.find_deposits_to_address(
+        swap["deposit_address"], settled_txids=settled_txids(db, asset)
+    )
     record_what_nobody_can_claim(db, asset, adapter)
 
     # FILTER BY TAG BEFORE CREDITING, and this is a money bug that would only
@@ -405,7 +451,15 @@ def reconcile_shared_accounts(db, config, adapters: dict) -> int:
             ).fetchall()
         }
         now = utc_now_iso()
-        events = adapter.find_deposits_to_address(address)
+        # The same skip as refresh_swap_from_chain's, and it matters MORE here:
+        # this scan runs once per cycle whether or not any swap is open, so on a
+        # quiet system it was the entire source of the rate limiting.
+        #
+        # A settled txid is by definition claimed, so leaving it out of `events`
+        # cannot make it look stranded -- unclaimed_rows() would have filtered it
+        # on `credited` anyway, and the two sets are computed from the same
+        # deposit_events rows.
+        events = adapter.find_deposits_to_address(address, settled_txids=settled_txids(db, asset))
         rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES, credited)
         recorded += record_unattributable(db, rows, now=now)
         # AND CLOSE ANY ROW THAT TURNS OUT TO HAVE BEEN CREDITED. Written before this fix, or

@@ -435,7 +435,25 @@ class RPCAdapter:
             return matches
         return [{"txid": txid, "vout": 0, "address": address, "amount": float(amount), "confirmations": confirmations}]
 
-    def find_deposits_to_address(self, address: str, tx_limit: int = 500):
+    def find_deposits_to_address(self, address: str, tx_limit: int = 500, settled_txids=frozenset()):
+        """Credits to one address, as deposit events. ONE `listtransactions` call.
+
+        A docstring at all is new on 2026-10-01: this method had only inline
+        comments, on the one function every Bitcoin-family deposit passes through.
+
+        SETTLED_TXIDS IS ACCEPTED AND IGNORED, and that is the point of it being
+        in the signature. Bitcoin-family discovery is a single listtransactions
+        call for the whole wallet, so there is no per-transaction cost to avoid
+        and nothing to skip. chains/solana.py is the one implementation that uses
+        it, because Solana discovery costs one getTransaction PER TRANSACTION and
+        re-reading settled history rate-limited a real deposit out of being
+        credited -- the measurement is in that method's comment.
+
+        It is a parameter here rather than a branch in the caller so that
+        services/deposit_service.py calls every adapter the same way (rule 8). A
+        `if isinstance(adapter, SolanaAdapter)` in the deposit path would be the
+        chain-specific knowledge in the wrong layer that rule 10 is about.
+        """
         results = []
         # Checked: the 5-argument form (with include_watchonly) is not
         # accepted by every daemon vintage, so its failure means "retry with
