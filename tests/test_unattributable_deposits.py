@@ -33,6 +33,8 @@ from swap_terminal.services.unattributable_deposit_service import (  # noqa: E40
     StrandedDeposit,
     record,
     stranded_rows,
+    unclaimed_events,
+    unclaimed_rows,
 )
 
 #: The real stranded deposit on the operator's devnet account, from eight runs of
@@ -338,4 +340,214 @@ def test_refresh_swap_from_chain_records_the_strandings(db):
     assert after["status"] == "awaiting_deposit", (
         "nor does the swap move: a stranded deposit is a fact about the shared ACCOUNT, and "
         "letting it advance whichever swap was being refreshed is attribution by proximity"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE BIGGER HALF: a deposit whose discriminator matches no swap that will ever credit it.
+#
+# attributable_events() keeps the events whose tag equals THIS swap's -- correct per swap.
+# Across every active swap the leftover is filtered by every call and recorded by none, and
+# unlike the no-memo case nothing even logged it. Counted 2026-10-01: no reconciliation of
+# the shared account existed anywhere in the tree. It affects XRP, which is live.
+# ---------------------------------------------------------------------------
+
+ACTIVE = ("awaiting_deposit", "deposit_seen", "confirming")
+
+
+def an_event(tag, txid="tx1", amount=1.0, confirmations=5):
+    return {"txid": txid, "vout": tag, "address": ACCOUNT, "amount": amount,
+            "confirmations": confirmations}
+
+
+def test_an_event_matching_no_swap_is_unclaimed():
+    """MUTATION: return [] and the hole is back -- every call filters it, none records it."""
+    unclaimed = unclaimed_events([an_event(99)], {7: ("s_1", "awaiting_deposit")}, ACTIVE)
+    assert len(unclaimed) == 1
+    event, why = unclaimed[0]
+    assert event["vout"] == 99
+    assert "no swap on this asset has that discriminator" in why
+
+
+def test_an_event_matching_an_ACTIVE_swap_is_left_entirely_alone():
+    """That swap's own refresh credits it, and two writers deciding one thing is rule 8's defect.
+
+    On this path the two copies disagreeing means somebody is paid twice, which is why this
+    function can see the event and still does nothing with it.
+
+    MUTATION: drop the active check and every credited deposit is ALSO filed as unclaimable --
+    the operator gets a support ticket for every swap that worked.
+    """
+    for status in ACTIVE:
+        assert unclaimed_events([an_event(7)], {7: ("s_1", status)}, ACTIVE) == [], status
+
+
+def test_a_payment_to_a_COMPLETED_swap_is_stranded_too():
+    """THE CATEGORY I WOULD HAVE MISSED by only looking for unmatched tags.
+
+    deposit_service.ACTIVE_STATUSES is ("awaiting_deposit", "deposit_seen", "confirming"), so
+    process_active_swaps() never refreshes a completed swap again -- a late or duplicate
+    payment to its tag is never credited and, before this, never recorded. Read out of the
+    code rather than assumed, which is what turned it up.
+
+    MUTATION: treat any matched tag as claimed and this money goes back to being invisible.
+    """
+    for status in ("completed", "failed", "under_review", "payout_pending"):
+        unclaimed = unclaimed_events([an_event(7)], {7: ("s_done", status)}, ACTIVE)
+        assert len(unclaimed) == 1, status
+        why = unclaimed[0][1]
+        assert "s_done" in why and status in why, "name the swap and its status"
+        assert "never be credited" in why
+
+
+def test_the_rows_carry_the_discriminator_and_the_chain_s_word_for_it():
+    """An integer here, NULL from the no-memo path -- db.py's column comment draws that line.
+
+    And the reason uses the CHAIN's word, derived from swap_service.TAG_ATTRIBUTION: a SOL row
+    saying "DestinationTag" would name a field Solana does not have, which is the live mistake
+    that file's own comment records.
+    """
+    sol = unclaimed_rows([an_event(42)], {}, "SOL", ACTIVE)
+    assert sol[0].discriminator == 42
+    assert "Memo instruction 42" in sol[0].why
+    assert sol[0].amount == 1.0 and sol[0].credits == 1
+    assert sol[0].confirmations == 5, "the event carries one, unlike the adapter's drop"
+
+    xrp = unclaimed_rows([an_event(42)], {}, "XRP", ACTIVE)
+    assert "DestinationTag 42" in xrp[0].why
+
+
+def test_an_event_with_no_discriminator_is_skipped_rather_than_guessed():
+    """The adapters drop those before they become events, so one here is a shape this does not
+    understand -- and guessing would put a row in with no reference to chase.
+    """
+    assert unclaimed_events([{"txid": "t", "vout": None, "address": ACCOUNT, "amount": 1.0}],
+                            {}, ACTIVE) == []
+
+
+def test_reconcile_shared_accounts_records_once_whatever_the_swap_count(db):
+    """END TO END, and the once-per-cycle shape is the point.
+
+    find_deposits_to_address runs once per active swap over the SAME account, which is the
+    measurement chains/xrp.py records: two unattributable payments printed FOUR lines with two
+    swaps open. Reconciliation runs once per cycle per asset, so one stranded deposit is one
+    row however many swaps are open.
+
+    MUTATION: delete the reconcile_shared_accounts() call from process_active_swaps and the
+    table stays empty while every swap refreshes normally -- the state this found.
+    """
+    db.execute(
+        "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
+        " network_fee_reserve, output_amount_estimate, expires_at, created_at)"
+        " VALUES ('q_r','XRP','GRC',1.0,56.38,150,0.01,55.0,"
+        "'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')"
+    )
+    for swap_id, tag in (("s_a", 11), ("s_b", 12)):
+        db.execute(
+            "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address,"
+            " deposit_tag, payout_address, expected_input_amount, actual_input_amount,"
+            " quoted_rate, fee_bps, network_fee_reserve, output_amount_estimate, status,"
+            " min_confirmations, expires_at, created_at, updated_at)"
+            " VALUES (?,'q_r','XRP','GRC',?,?,'GRCpayout',1.0,NULL,56.38,150,0.01,55.0,"
+            "'awaiting_deposit',1,'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00',"
+            "'2026-10-01T00:00:00+00:00')",
+            (swap_id, ACCOUNT, tag),
+        )
+    active = db.execute("SELECT * FROM swaps").fetchall()
+
+    # TWO OPEN SWAPS, and one payment carrying a tag neither of them has.
+    adapter = Adapter(events=[an_event(11), an_event(99, txid="tx_orphan")])
+    recorded = deposit_service.reconcile_shared_accounts(db, {"XRP": adapter}, active)
+
+    assert recorded == 1, "one stranded payment, one row -- not one per open swap"
+    rows = rows_in(db)
+    assert len(rows) == 1
+    assert rows[0]["txid"] == "tx_orphan"
+    assert rows[0]["discriminator"] == 99
+    assert "DestinationTag 99" in rows[0]["why"]
+    assert rows[0]["asset"] == "XRP"
+
+
+def seed_swap(db, swap_id, tag, *, asset="XRP", status="awaiting_deposit"):
+    db.execute(
+        "INSERT OR IGNORE INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate,"
+        " fee_bps, network_fee_reserve, output_amount_estimate, expires_at, created_at)"
+        " VALUES ('q_r',?,'GRC',1.0,56.38,150,0.01,55.0,"
+        "'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')",
+        (asset,),
+    )
+    db.execute(
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag,"
+        " payout_address, expected_input_amount, actual_input_amount, quoted_rate, fee_bps,"
+        " network_fee_reserve, output_amount_estimate, status, min_confirmations, expires_at,"
+        " created_at, updated_at)"
+        " VALUES (?,'q_r',?,'GRC',?,?,'GRCpayout',1.0,NULL,56.38,150,0.01,55.0,?,1,"
+        "'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')",
+        (swap_id, asset, ACCOUNT, tag, status),
+    )
+
+
+def test_reconciliation_skips_an_asset_with_no_adapter(db):
+    """A swap can exist on an asset whose adapter was not constructed -- config.py builds SOL
+    only when SOL_RPC_URL is set. Asking a missing adapter to scan would raise on the live
+    path, in a worker loop, on every cycle.
+
+    THE FIRST VERSION OF THIS TEST WAS VACUOUS and a mutation caught it: it passed `active=[]`,
+    so the loop body never ran and `adapters[asset]` would have raised in no test. An active
+    swap on the asset is what makes the lookup happen.
+    """
+    seed_swap(db, "s_noadapter", 5, asset="SOL")
+    active = db.execute("SELECT * FROM swaps").fetchall()
+    assert deposit_service.reconcile_shared_accounts(db, {}, active) == 0, (
+        "no adapter for SOL, so nothing is scanned and nothing raises"
+    )
+    assert rows_in(db) == []
+
+
+def test_a_COMPLETED_swap_still_claims_its_tag_in_the_db_query(db):
+    """The query reads EVERY swap on the asset, not the active ones.
+
+    Pinned through reconcile_shared_accounts rather than the pure function, because the status
+    filter lives in the SQL and narrowing it there survived a mutation of the pure half: a
+    `status IN ('awaiting_deposit')` in that SELECT makes a completed swap's tag look unknown,
+    so the row would say "no swap has that discriminator" when a swap does -- the wrong reason
+    on the operator's screen, pointing them at the wrong conversation.
+    """
+    seed_swap(db, "s_open", 11)
+    seed_swap(db, "s_done", 12, status="completed")
+    active = [row for row in db.execute("SELECT * FROM swaps").fetchall()
+              if row["status"] == "awaiting_deposit"]
+
+    adapter = Adapter(events=[an_event(12, txid="tx_late")])
+    assert deposit_service.reconcile_shared_accounts(db, {"XRP": adapter}, active) == 1
+
+    row = rows_in(db)[0]
+    assert row["discriminator"] == 12
+    assert "s_done" in row["why"] and "completed" in row["why"], (
+        "the swap it matches and why that swap will not credit it -- NOT 'no swap has it'"
+    )
+    assert "no swap on this asset has" not in row["why"]
+
+
+def test_process_active_swaps_reconciles_the_account_once_per_cycle(db):
+    """DRIVEN THROUGH THE WORKER'S OWN ENTRY POINT, because the call site is what keeps failing.
+
+    `reconcile_shared_accounts(db, adapters, swaps)` deleted from process_active_swaps SURVIVED
+    the first mutation round -- every test above calls it directly. Sixth time in this session
+    a call-site mutation has survived for that reason, and the second time in this file.
+
+    MUTATION: delete the call and the swaps refresh normally while the shared account is never
+    looked at as a whole -- the state this change found.
+    """
+    seed_swap(db, "s_one", 11)
+    adapter = Adapter(events=[an_event(77, txid="tx_nobodys")])
+
+    deposit_service.process_active_swaps(db, {"AMOUNT_TOLERANCE_PCT": 1.0}, {"XRP": adapter})
+
+    rows = rows_in(db)
+    assert len(rows) == 1, "the cycle reconciled the account"
+    assert rows[0]["txid"] == "tx_nobodys"
+    assert rows[0]["discriminator"] == 77
+    assert db.execute("SELECT COUNT(*) AS n FROM deposit_events").fetchone()["n"] == 0, (
+        "and credited nothing: tag 77 is no swap's"
     )

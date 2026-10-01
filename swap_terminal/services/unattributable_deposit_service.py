@@ -51,6 +51,8 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 
+from .swap_service import TAG_ATTRIBUTION
+
 logger = logging.getLogger(__name__)
 
 
@@ -171,3 +173,101 @@ def record(db, rows, *, now: str) -> int:
                 row.asset, row.txid, row.amount, row.asset, row.credits, row.why,
             )
     return inserted
+
+
+def discriminator_name(asset: str) -> str:
+    """The chain's own word for the integer that matches a deposit to a swap.
+
+    DERIVED FROM THE ONE PLACE THAT KNOWS (swap_service.TAG_ATTRIBUTION) rather than spelled
+    again here -- rule 11, and the exact mistake that file's own comment records: a SOL refusal
+    that said "DestinationTag", a field the Solana blockchain does not have.
+
+    IMPORTED AT MODULE LEVEL, and I first wrote this as a deferred import with a `noqa: PLC0415`
+    claiming it broke a cycle. Checked instead of assumed (rule 19: a noqa is a claim you
+    checked): swap_service imports only .helpers and .xrp_tag_service, so there is no cycle to
+    break and the suppression was a claim about nothing.
+    """
+    _variable, name, _network = TAG_ATTRIBUTION.get(asset, ("", "discriminator", ""))
+    return name
+
+
+def unclaimed_events(events, claimed: dict, still_refreshed) -> list[tuple[dict, str]]:
+    """Events at the shared account that NO swap will credit, each with why. PURE.
+
+    THE HOLE THIS CLOSES IS BIGGER THAN THE NO-MEMO ONE AND NOTHING EVEN LOGGED IT.
+    services/deposit_service.attributable_events() keeps the events whose discriminator equals
+    THIS swap's, which is correct per swap. Run across every active swap, the leftover -- an
+    event matching none of them -- is filtered by every call and recorded by none. Counted
+    2026-10-01: no reconciliation of the shared account exists anywhere in the tree, so that
+    money reached no log line and no row.
+
+    `still_refreshed` IS PASSED IN, not copied. The authority is
+    deposit_service.ACTIVE_STATUSES, and that module imports this one -- so importing it back
+    would be a real cycle, and spelling the tuple again here would be rule 8's duplicate with a
+    delay on it. The caller has it; it hands it over.
+
+    `claimed` MAPS discriminator -> (swap_id, status) FOR EVERY SWAP ON THE ASSET, not only the
+    active ones, and that distinction is the reason this returns a REASON per event rather than
+    a bare list. Two different situations, and neither is "nobody has this tag":
+
+        no swap has it          the sender invented a reference, or sent without one and the
+                                chain carried something else in that field
+        a swap has it, and it   deposit_service.ACTIVE_STATUSES is
+        is not active           ("awaiting_deposit", "deposit_seen", "confirming"), so
+                                process_active_swaps() never refreshes that swap again. A
+                                late or duplicate payment to a finished swap is therefore
+                                never credited -- as stranded as one with no tag, and I would
+                                have missed it by only looking for unmatched tags.
+
+    WHAT IS NOT COVERED, said rather than implied (rule 17): an event matching an ACTIVE swap
+    is left entirely alone here, even though this function could see it. That swap's own
+    refresh is what credits it, and a second writer deciding the same thing is rule 8's defect
+    -- two copies of "whose deposit is this" that agree today.
+    """
+    out = []
+    for event in events or []:
+        tag = event.get("vout")
+        if tag is None:
+            # NO DISCRIMINATOR AT ALL is the adapter's case, not this one: chains/solana.py
+            # drops those before they become events, and chains/xrp.py classifies them out. An
+            # event reaching here always carries one, so this is a shape guard rather than a
+            # branch with a story -- and it skips rather than guessing, because an event with
+            # no tag and no adapter drop behind it is a response this code does not understand.
+            continue
+        entry = claimed.get(tag)
+        if entry is None:
+            out.append((event, "no swap on this asset has that discriminator"))
+            continue
+        swap_id, status = entry
+        if status not in still_refreshed:
+            out.append((event, (
+                f"it matches swap {swap_id}, which is {status} -- that swap is no longer "
+                f"refreshed, so this payment will never be credited to it"
+            )))
+    return out
+
+
+def unclaimed_rows(events, claimed: dict, asset: str, still_refreshed) -> list[StrandedDeposit]:
+    """unclaimed_events() as StrandedDeposit rows, with the discriminator recorded.
+
+    THE DISCRIMINATOR IS SET HERE and None from stranded_rows(), which is the distinction
+    db.py's column comment draws: an integer means "sent with a reference that matches no open
+    order", NULL means "sent with no reference at all". Two different support conversations,
+    and the table can tell them apart because these two converters do.
+    """
+    return [
+        StrandedDeposit(
+            asset=asset,
+            txid=event["txid"],
+            address=event["address"],
+            amount=float(event["amount"]),
+            # ONE CREDIT PER EVENT, because an event IS one credit -- the adapters emit one row
+            # per (transaction, account). `credits` exists for the Solana drop, which sums
+            # several credits in one transaction before any event is built.
+            credits=1,
+            why=f"{discriminator_name(asset)} {event['vout']}: {why}",
+            confirmations=int(event.get("confirmations") or 0),
+            discriminator=int(event["vout"]),
+        )
+        for event, why in unclaimed_events(events, claimed, still_refreshed)
+    ]

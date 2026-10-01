@@ -244,6 +244,17 @@ the diagnostic. Eight devnet runs found between one and three such credits
 each. On devnet they are nobody's; on mainnet each one is a deposit a human has
 to match by hand, and the only thing that would tell them is a log line.
 
+BOTH HALVES ARE CLOSED AS OF 2026-10-01. A deposit with no memo is recorded by
+`services/deposit_service.record_what_nobody_can_claim()` off the adapter's own
+drop list; a deposit whose memo matches no swap that will ever credit it is
+recorded by `reconcile_shared_accounts()`, once per cycle, because the question
+"does ANY swap claim this" cannot be answered by a refresh handed one swap. Both
+land in `unattributable_deposits`. Nothing is credited and no swap moves.
+
+The paragraph below is kept because the reasoning is what the schema forced,
+and a reader reaching for the obvious answer should find out why it was not
+taken rather than find it half-built.
+
 AND IT IS NOT A WIRING JOB, WHICH IS THE PART I HAD WRONG. "Route it into
 `under_review`" was the obvious next step and it cannot be done, for a reason
 that is in the schema rather than in anyone's judgment:

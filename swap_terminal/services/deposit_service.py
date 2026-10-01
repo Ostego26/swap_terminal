@@ -57,7 +57,7 @@ from deposit_vout_artifact import multi_vout_groups
 from .helpers import utc_now_iso
 from .swap_service import TAG_ATTRIBUTED_ASSETS, set_swap_status
 from .unattributable_deposit_service import record as record_unattributable
-from .unattributable_deposit_service import stranded_rows
+from .unattributable_deposit_service import stranded_rows, unclaimed_rows
 
 logger = logging.getLogger(__name__)
 
@@ -305,5 +305,60 @@ def process_active_swaps(db, config, adapters: dict) -> list[dict]:
         ACTIVE_STATUSES,
     ).fetchall()
     processed = [refresh_swap_from_chain(db, config, adapters, swap) for swap in swaps]
+    reconcile_shared_accounts(db, adapters, swaps)
     db.commit()
     return processed
+
+
+def reconcile_shared_accounts(db, adapters: dict, active) -> int:
+    """Once per cycle, record what arrived at a shared account that NO swap will credit.
+
+    WHY HERE AND NOT IN refresh_swap_from_chain(). The question is "does any swap claim this
+    discriminator", and the per-swap refresh is handed ONE swap -- it cannot answer it. Asking
+    it per swap would also be the noise-at-scale shape chains/xrp.py already fixed once: that
+    adapter defers its unattributable lines per INSTANCE because find_deposits_to_address runs
+    once per active swap over the same account, and two payments printed four lines. This runs
+    once per cycle per asset, so one stranded deposit is one row and one log line however many
+    swaps are open.
+
+    ONE EXTRA SCAN PER TAG-ATTRIBUTED ASSET PER CYCLE, and that is the cost. With one active
+    swap it doubles the scans for that asset; with ten it adds a eleventh. It buys the only
+    view of the shared account that exists -- attributable_events() sees one swap's slice and
+    discards the rest, which is how money matching no swap came to be filtered by every call
+    and recorded by none.
+
+    THE CLAIMED SET IS EVERY SWAP ON THE ASSET, not the active ones. A payment carrying a
+    COMPLETED swap's tag is never credited either -- ACTIVE_STATUSES is the filter above, so
+    that swap is never refreshed again -- and it is as stranded as one with no tag. Looking
+    only for unmatched tags would have missed a whole category, which is what reading
+    ACTIVE_STATUSES rather than assuming its contents turned up.
+
+    IT CREDITS NOTHING AND CHANGES NO SWAP. Events matching an ACTIVE swap are left entirely
+    alone, even though this function can see them: that swap's own refresh credits them, and a
+    second writer deciding the same thing is rule 8's duplicate on the path where the two
+    copies disagreeing means somebody is paid twice.
+    """
+    recorded = 0
+    for asset in sorted({swap["from_asset"] for swap in active} & set(TAG_ATTRIBUTED_ASSETS)):
+        adapter = adapters.get(asset)
+        if adapter is None:
+            continue
+        # THE SHARED ACCOUNT, TAKEN FROM A SWAP rather than read from config: on a
+        # tag-attributed chain every swap on the asset has the same deposit_address by
+        # definition, and config has already been consulted to put it there. Reading it again
+        # would be a second source for one fact, and the live failure that shape produced on
+        # 2026-09-29 is in config.py's comment on SOL_DEPOSIT_ACCOUNT.
+        addresses = {swap["deposit_address"] for swap in active if swap["from_asset"] == asset}
+        claimed = {
+            int(row["deposit_tag"]): (row["id"], row["status"])
+            for row in db.execute(
+                "SELECT id, status, deposit_tag FROM swaps WHERE from_asset = ?"
+                " AND deposit_tag IS NOT NULL",
+                (asset,),
+            ).fetchall()
+        }
+        for address in sorted(addresses):
+            events = adapter.find_deposits_to_address(address)
+            rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES)
+            recorded += record_unattributable(db, rows, now=utc_now_iso())
+    return recorded
