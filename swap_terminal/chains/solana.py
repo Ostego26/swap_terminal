@@ -149,28 +149,82 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
           discovery had never worked and could not have. Fixed by raising the
           constant to the floor the cluster enforces; see
           chains/solana_units.LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT.
-          THE FIX IS NOT YET CONFIRMED BY A RUN -- the next one settles it.
+          CONFIRMED by every run since (2026-10-01): discovery lists and
+          fetches, and the three lines below depend on it having worked.
 
-  STILL UNEXERCISED
-      getTransaction on the DEPOSIT path. The memo hunt proved getTransaction
-          itself against real traffic, but at its own config; this path sends
-          DISCOVERY_COMMITMENT and was never reached, because discovery failed
-          first. It is documented to enforce the same floor and that is not
-          measured here (rule 17).
-      _native_credits and _spl_credits -- the readers that turn a transaction
-          into a credit. Never run on a real response, and a wrong field name
-          there returns nothing rather than raising, which reads as "no deposit
-          arrived". This is the credit path and it remains the half that matters.
-      getTokenAccountsByOwner, getTokenAccountBalance, and getAccountInfo's
-          owner-program and decimals reads -- all need `--mint`.
+  EXERCISED 2026-10-01, over eight devnet runs the operator pasted back
+      getTransaction on the DEPOSIT path -- at DISCOVERY_COMMITMENT, which the
+          2026-09-30 list had as unexercised because discovery failed before
+          reaching it. Five of five listed signatures fetched.
+      _spl_credits -- PROVEN. It decoded an amount off a real devnet response
+          (`uiTokenAmount.decimals` and `.amount`) and `_attributable` then
+          refused the credit for carrying no memo, which is correct and is
+          still a proof: the decode happens BEFORE the memo check. These are
+          the field names that would lose an SPL deposit silently, and they are
+          the ones this header said were the half that matters.
+      _native_credits -- exercised earlier in the same 2026-10-01 sequence, on
+          a run without `--mint`, which decoded a native credit and refused it
+          the same way. NOT re-confirmed since the targeted-proof work landed,
+          and that is said rather than glossed (rule 17): a `--mint`-less run
+          is what re-establishes it.
+      getAccountInfo's owner-program and decimals reads -- Tokenkeg... and
+          decimals=9, read off the WSOL mint.
+      getTokenAccountBalance -- 103.032164467 WSOL on one run, 0.0 on others.
+      ATA derivation -- checked against the cluster for existence, and the
+          holders found all had NO associated token account, so their balance
+          reads 0.0 while postTokenBalances still credits them. That is the
+          non-canonical-token-account case, measured rather than assumed.
+
+  STILL UNEXERCISED, OR ABSENT
+      getTokenAccountsByOwner -- still needs a run that reaches it.
+      getTokenLargestAccounts -- throttled HTTP 429 on EIGHT consecutive runs
+          against public devnet, every one after three attempts. That is why
+          solana_chain_check.find_a_holder() has a second route through the
+          mint's own traffic; the measurement is the argument for it.
       send_to_address and get_new_address refuse by design and always will.
+          **SO THIS CHAIN CANNOT PAY OUT.** Nothing here signs, so a swap
+          whose TO asset is SOL cannot be completed by this terminal at all.
 
-So the transport is proven, one balance read is proven, and one real defect on
-the deposit path has been found and fixed. The instrument is the same one:
-`solana_chain_check.py`, which needs no arguments since 2026-09-30, plus
-`--mint` for the SPL half. Read-only, one pasteable block, every step announced
-before it runs, and a non-zero exit when any step's response does not have the
-shape this file expects -- which is exactly how the -32602 surfaced.
+=============================================================================
+IS SOL DONE? NO, AND THE THREE REASONS ARE NOT THE SAME KIND OF THING
+=============================================================================
+
+Asked directly on 2026-10-01, and worth answering here rather than in a chat
+log that nobody reading this file will ever see.
+
+  the READ half      DONE and proven against devnet. Transport, balance,
+                     discovery, deposit-path getTransaction, both credit
+                     readers, mint decimals, token program, ATA. The list
+                     above is what each one rests on.
+  the SEND half      DOES NOT EXIST, by design and by absence -- no keypair is
+                     read anywhere in this module. build_transfer_plan()
+                     builds and describes a transfer; nothing signs it. This
+                     is rule 16's line: signing is the operator's.
+  the WIRING         ALLOWED_PAIRS contains ZERO entries with SOL on either
+                     side (counted 2026-10-01), so no SOL swap can be created
+                     today whatever the adapter can do. The deposit side IS
+                     wired -- services/swap_service.TAG_ATTRIBUTED_ASSETS
+                     holds SOL and TAG_ATTRIBUTION maps it to
+                     SOL_DEPOSIT_ACCOUNT with "Memo instruction" as the
+                     discriminator -- and enabling a pair is a live-posture
+                     decision, so it stays the operator's.
+
+One more gap that is neither, and it is the one that touches money: a credit
+this adapter reads and REFUSES (no memo) is reported to the operator by
+solana_chain_check.py and logged at WARNING on the live path, and nothing
+routes it into `under_review`. Eight devnet runs found between one and three
+such credits each. On devnet they are nobody's; on mainnet each one is a
+deposit a human has to match by hand, and the only thing that would tell them
+is a log line.
+
+So the transport is proven, the credit path is proven, one real defect on the
+deposit path was found and fixed, and the chain still cannot send. The
+instrument is the same one throughout: `solana_chain_check.py`, which needs no
+arguments, plus `--mint` for the SPL half and `--find-holder` when the
+endpoint will not say who holds the token. Read-only, one pasteable block,
+every step announced before it runs, and a non-zero exit when any step's
+response does not have the shape this file expects -- which is exactly how the
+-32602 surfaced.
 """
 
 from __future__ import annotations

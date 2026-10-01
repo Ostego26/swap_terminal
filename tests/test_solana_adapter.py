@@ -750,14 +750,20 @@ def test_the_module_header_names_which_rpc_METHODS_met_a_real_cluster():
 
     WHAT IS PINNED IS THE SPLIT, NOT THE SENTENCE. "The adapter works" is not a thing a run
     proves, and a header that said so would be worse than the false one it replaced. So the
-    header lists methods on both sides, and this asserts that the credit path -- the one that
-    decides whether somebody's money is seen -- is still on the unproven side, because it is:
-    every run so far passed no --address and no --mint, so getBalance, getAccountInfo and
-    find_deposits_to_address have never met a real response.
+    header lists methods on both sides, and this asserts the split exists and that every
+    reader appears on exactly one side of it.
 
-    MUTATION: declare the file exercised, or move find_deposits_to_address to the proven
-    side without a run, and this fails. A field-name error in _native_credits still passes
-    every seeded test in this tree, which is exactly why the list has to stay accurate.
+    THIS TEST ASSERTED THE CREDIT READERS WERE UNPROVEN, AND THAT WENT FALSE TOO -- on
+    2026-10-01, when `--mint --find-holder` reached a transaction that credits the holder and
+    _spl_credits decoded an amount off it. The test was right when written and the fact moved,
+    which is rule 2: its test dies with it or changes to pin the stronger invariant. The
+    stronger invariant is the one that survives a reader crossing sides -- EXACTLY ONE side,
+    never both and never neither -- because a header that lists a reader twice has stopped
+    being a claim about anything.
+
+    MUTATION: declare the file exercised wholesale, drop a reader from both lists, or name one
+    in both, and this fails. A field-name error in either reader still passes every seeded
+    test in this tree, which is why the list has to stay accurate rather than merely present.
     """
     source = Path(chains_solana.__file__).read_text(encoding="utf-8")
     header = source[:source.index("from __future__")]
@@ -782,12 +788,20 @@ def test_the_module_header_names_which_rpc_METHODS_met_a_real_cluster():
     # not the readers is how a header could claim the credit path was covered because
     # getSignaturesForAddress answered.
     for reader in ("_native_credits", "_spl_credits"):
-        assert reader in unproven, (
-            f"{reader} has never run on a real response, and it is where a wrong field name "
-            f"silently loses a deposit"
+        assert (reader in proven) != (reader in unproven), (
+            f"{reader} must be named on EXACTLY one side. It is where a wrong field name "
+            f"silently loses a deposit, so 'which side is it on' has to have one answer"
         )
+    assert "_spl_credits -- PROVEN" in proven, (
+        "it decoded an amount off a real devnet response on 2026-10-01, through the targeted "
+        "read -- and the header has to say so, the same way it had to stop saying nothing was "
+        "exercised"
+    )
+    assert "NOT re-confirmed" in proven, (
+        "_native_credits was exercised earlier in that sequence and not since, and the caveat "
+        "is the point: exercised-once and exercised-now are different claims (rule 17)"
+    )
     assert "4.3.0" in proven, "the solana-core build it was proven against (rule 3)"
-    assert "--mint" in unproven, "and the instrument that would settle the SPL half"
 
 
 def test_the_header_records_the_defect_the_live_run_FOUND_rather_than_only_coverage():
@@ -798,17 +812,25 @@ def test_the_header_records_the_defect_the_live_run_FOUND_rather_than_only_cover
     had never worked. A header that listed the method as "unexercised" and moved on would lose
     the finding, and the next reader would treat the fix as unnecessary.
 
-    MUTATION: delete the ATTEMPTED AND FAILED section, or fold it into the unexercised list, and
-    this fails.
+    AND IT STAYS RECORDED AFTER THE FIX IS CONFIRMED, which is what changed on 2026-10-01.
+    This used to assert "NOT YET CONFIRMED BY A RUN", correctly -- the fix was a fix and not a
+    measurement until a run said so. Eight runs have now said so. The finding does NOT get
+    deleted along with the uncertainty: the next reader has to be able to see that `processed`
+    was refused by a real cluster, or the constant looks arbitrary and someone lowers it again.
+
+    MUTATION: delete the ATTEMPTED AND FAILED section, fold it into the unexercised list, or
+    drop the confirmation now that it is confirmed, and this fails.
     """
     source = Path(chains_solana.__file__).read_text(encoding="utf-8")
     header = source[:source.index("from __future__")]
     assert "ATTEMPTED AND FAILED" in header
     assert "-32602" in header, "the error the cluster actually returned"
     assert "LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT" in header, "and where the fix lives"
-    assert "NOT YET CONFIRMED BY A RUN" in header, (
-        "the fix is a fix and not a measurement until a run says so (rule 17)"
+    assert "CONFIRMED by every run since" in header, (
+        "a fix is not a measurement until a run says so, and now one has -- the header tracks "
+        "which of the two it is holding rather than leaving the reader to guess"
     )
+    assert "NOT YET CONFIRMED BY A RUN" not in header, "stale since 2026-10-01"
 
 # ---------------------------------------------------------------------------
 # THE COMMITMENT FLOOR. Found by the operator's 2026-09-30 devnet run, the first
