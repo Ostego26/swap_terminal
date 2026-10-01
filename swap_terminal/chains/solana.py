@@ -162,11 +162,18 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
           still a proof: the decode happens BEFORE the memo check. These are
           the field names that would lose an SPL deposit silently, and they are
           the ones this header said were the half that matters.
-      _native_credits -- exercised earlier in the same 2026-10-01 sequence, on
-          a run without `--mint`, which decoded a native credit and refused it
-          the same way. NOT re-confirmed since the targeted-proof work landed,
-          and that is said rather than glossed (rule 17): a `--mint`-less run
-          is what re-establishes it.
+      _native_credits -- PROVEN, on the `--mint`-less run that closed this.
+          `(0 credited, 1 refused over 8 signature(s))`: it decoded a native
+          credit off `meta.preBalances`/`postBalances` indexed through
+          `message.accountKeys`, and `_attributable` refused it for carrying no
+          memo. BOTH credit readers now rest on a real response.
+          THIS LINE SAID "NOT re-confirmed since the targeted-proof work
+          landed" for exactly one commit, which is the shortest-lived stale
+          claim in this header's three revisions and still a stale claim. The
+          caveat was correct when written and a run settled it ten minutes
+          later; the only reason the fix was two lines rather than a rewrite is
+          that tests/test_solana_adapter.py pins the SPLIT -- each reader named
+          on exactly one side -- instead of the contents of either list.
       getAccountInfo's owner-program and decimals reads -- Tokenkeg... and
           decimals=9, read off the WSOL mint.
       getTokenAccountBalance -- 103.032164467 WSOL on one run, 0.0 on others.

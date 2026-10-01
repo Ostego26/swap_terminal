@@ -797,10 +797,18 @@ def test_the_module_header_names_which_rpc_METHODS_met_a_real_cluster():
         "read -- and the header has to say so, the same way it had to stop saying nothing was "
         "exercised"
     )
-    assert "NOT re-confirmed" in proven, (
-        "_native_credits was exercised earlier in that sequence and not since, and the caveat "
-        "is the point: exercised-once and exercised-now are different claims (rule 17)"
+    assert "_native_credits -- PROVEN" in proven, (
+        "closed by the --mint-less run: 1 credit refused over 8 signatures, decoded off "
+        "preBalances/postBalances. This assertion read 'NOT re-confirmed' for one commit -- "
+        "the caveat was right when written and a run settled it, which is why what gets "
+        "pinned is the split and not the contents"
     )
+    # NO BLACKLIST OF THE OLD PHRASE. I wrote `assert "NOT re-confirmed" not in proven` here
+    # and it failed on the header's own QUOTATION of the sentence it was retiring -- which the
+    # header quotes on purpose, because rule 1 keeps the superseded measurement and the drift
+    # is the point. A keyword check that cannot tell a quotation from a claim is the same defect
+    # this suite keeps finding elsewhere: a test that reads text instead of behavior. The
+    # positive assertion above, plus the exactly-one-side invariant, carry this without it.
     assert "4.3.0" in proven, "the solana-core build it was proven against (rule 3)"
 
 
