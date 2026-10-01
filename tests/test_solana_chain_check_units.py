@@ -1061,7 +1061,7 @@ SPL_DECODED = CreditPathObserved(address_read=True, is_spl=True, signatures=5,
 
 
 def test_with_no_address_the_summary_says_the_credit_path_did_not_run():
-    text = " ".join(credit_path_lines(NOTHING_READ))
+    text = summary_text(NOTHING_READ)
     assert "NOT exercised" in text
     assert "loses a deposit" in text
 
@@ -1082,7 +1082,7 @@ def test_a_READER_WHOSE_FILTER_MATCHED_NOTHING_IS_NOT_REPORTED_AS_EXERCISED():
 
     MUTATION: report coverage from whether a mint was passed and this fails.
     """
-    text = " ".join(credit_path_lines(SPL_FILTER_ONLY))
+    text = summary_text(SPL_FILTER_ONLY)
     assert "PARTLY exercised" in text
     assert "matched nothing" in text
     assert "WITHOUT decoding" in text
@@ -1101,7 +1101,7 @@ def test_a_reader_that_decoded_an_amount_says_so_and_names_the_other_one():
     field name in `_native_credits` had to be right to get that far. A reader that never
     produced anything cannot make that claim.
     """
-    text = " ".join(credit_path_lines(NATIVE_DECODED))
+    text = summary_text(NATIVE_DECODED)
     assert "_native_credits DECODED" in text
     assert "1 refused" in text
     assert "_spl_credits (needs --mint)" in text, "name the reader still outstanding, and how"
@@ -1115,8 +1115,7 @@ def test_zero_signatures_says_the_reader_was_never_invoked_at_all():
     action -- point the address somewhere with activity, point it at an account that received
     the asset, or nothing.
     """
-    text = " ".join(credit_path_lines(
-        CreditPathObserved(address_read=True, is_spl=True, signatures=0, credits=0, refused=0)))
+    text = summary_text(CreditPathObserved(address_read=True, is_spl=True, signatures=0, credits=0, refused=0))
     assert "ZERO signatures" in text
     assert "never invoked at all" in text
     assert "Nothing about the readers was established" in text
@@ -1131,7 +1130,7 @@ def test_all_five_observed_states_are_distinguishable():
         NATIVE_DECODED,
         CreditPathObserved(True, True, 8, 2, 0),
     ]
-    assert len({" ".join(credit_path_lines(o)) for o in states}) == 5
+    assert len({summary_text(o) for o in states}) == 5
 
 
 def test_decoded_an_amount_counts_a_REFUSAL_and_not_only_a_CREDIT():
@@ -1212,6 +1211,21 @@ def test_main_reports_DECODED_when_the_run_actually_credits_the_address(monkeypa
     assert "1 credited" in text_of(out)
     assert "PARTLY" not in out
     assert "vout=4242" in out, "the memo tag became the discriminator, on a real-shaped response"
+
+
+def summary_text(observed) -> str:
+    """credit_path_lines() as one normalized string, for asserting on wording not layout.
+
+    ELEVEN CALL SITES USED `summary_text((...))`, which puts a DOUBLE space at
+    every wrap point because each line already carries the block's two-space indent -- so any
+    assertion straddling a wrap broke the moment the wrapping changed, and five did when
+    _wrapped() replaced the hand-wrapped literals. text_of() was written for exactly this and
+    these sites were not using it. One helper, so the next wrap change touches no test.
+    """
+    # NOT `text_of(summary_text(...))`. The sed that rewrote the eleven call sites matched this
+    # line too and made the helper call itself -- ten RecursionErrors, in the commit that was
+    # removing hand-maintained formatting. Mechanical rewrites hit their own definition.
+    return text_of(" ".join(credit_path_lines(observed)))
 
 
 def text_of(out: str) -> str:
@@ -1421,7 +1435,7 @@ def test_the_native_line_does_not_claim_a_call_the_native_path_never_makes():
     where a wrong field name costs a deposit. This test holds the specific regression anyway,
     since the method name reappearing would be the same mistake in a new sentence.
     """
-    native = " ".join(credit_path_lines(NATIVE_DECODED))
+    native = summary_text(NATIVE_DECODED)
     assert "getAccountInfo" not in native, (
         "getAccountInfo is never called without a mint, so the native line must not name it"
     )
@@ -1845,14 +1859,14 @@ def test_an_unfetched_signature_is_NOT_counted_as_filtered_over():
     """
     partial = CreditPathObserved(address_read=True, is_spl=True, signatures=9,
                                  credits=0, refused=0, unreadable=1)
-    text = " ".join(credit_path_lines(partial))
+    text = summary_text(partial)
     assert "9 FETCHED signature(s)" in text
     assert "1 LISTED but never fetched" in text
     assert "NOT established over the full set" in text
 
     complete = CreditPathObserved(address_read=True, is_spl=True, signatures=10,
                                   credits=0, refused=0, unreadable=0)
-    whole = " ".join(credit_path_lines(complete))
+    whole = summary_text(complete)
     assert "10 FETCHED signature(s)" in whole
     assert "never fetched" not in whole, "nothing was skipped; do not say it was"
     assert text != whole, "a partial scan and a complete one must not read the same"
@@ -2170,15 +2184,13 @@ def test_a_BIGGER_window_is_reported_as_covering_LESS():
     MUTATION: drop the advice, or trigger it whenever anything was unfetched, and this fails --
     the second would nag on a healthy run where the endpoint is coping fine.
     """
-    starved = " ".join(credit_path_lines(
-        CreditPathObserved(address_read=True, is_spl=True, signatures=8,
-                           credits=0, refused=0, unreadable=42)))
+    starved = summary_text(CreditPathObserved(address_read=True, is_spl=True, signatures=8,
+                           credits=0, refused=0, unreadable=42))
     assert "SMALLER --limit will cover MORE" in starved
     assert "the endpoint is the limit, not the window" in starved
 
-    coping = " ".join(credit_path_lines(
-        CreditPathObserved(address_read=True, is_spl=True, signatures=9,
-                           credits=0, refused=0, unreadable=1)))
+    coping = summary_text(CreditPathObserved(address_read=True, is_spl=True, signatures=9,
+                           credits=0, refused=0, unreadable=1))
     assert "SMALLER --limit" not in coping, "one skipped read is not a starved endpoint"
     assert "never fetched" in coping, "but it is still named"
 
@@ -2189,10 +2201,21 @@ def test_the_coverage_line_does_not_print_a_full_stop_before_a_comma():
     Small, and the reason it is pinned rather than just fixed: the comma belongs to the no-skip
     case only, which is exactly the kind of conditional punctuation that comes back.
     """
-    starved = credit_path_lines(CreditPathObserved(True, True, 8, 0, 0, 42))[1]
-    assert ".," not in starved
-    clean = credit_path_lines(CreditPathObserved(True, True, 10, 0, 0, 0))[1]
-    assert clean.endswith(",")
+    for observed in (CreditPathObserved(True, True, 8, 0, 0, 42),
+                     CreditPathObserved(True, True, 10, 0, 0, 0),
+                     CreditPathObserved(True, True, 10, 0, 0, 1)):
+        text = summary_text(observed)
+        assert ".," not in text
+        # THE GLUE IS GONE, NOT JUST THE SYMPTOM. `skipped or ','` existed to attach a
+        # fragment to a count, and an optional clause between the two then orphaned the
+        # fragment -- the 42-unfetched block read "...not the window. and matched nothing",
+        # a lowercase continuation after a full stop. Every piece is a whole sentence now,
+        # so this asserts the general form rather than the one instance.
+        for sentence in text.split(". "):
+            assert sentence[:1] == sentence[:1].upper(), (
+                f"'{sentence[:40]}' continues after a full stop in lower case, which means a "
+                f"fragment is being glued to whatever happens to precede it"
+            )
 
 # ---------------------------------------------------------------------------
 # THE TARGETED PROOF OF _spl_credits. Four runs failed to prove this reader by
@@ -2793,7 +2816,7 @@ def test_the_summary_never_says_the_OTHER_reader_decoded_nothing():
     for observed, named, ran in ((SPL_DECODED, "_native_credits (drop --mint)", "_spl_credits"),
                                  (NATIVE_DECODED, "_spl_credits (needs --mint)",
                                   "_native_credits")):
-        block = " ".join(credit_path_lines(observed))
+        block = summary_text(observed)
         assert f"{ran} DECODED a real amount" in block, "what this run DID establish"
         assert f"{named}, was NOT exercised by this run" in block
         assert "nothing here says whether it works" in block, (
@@ -2806,3 +2829,184 @@ def test_the_summary_never_says_the_OTHER_reader_decoded_nothing():
             "and WHY it was not exercised -- a run reads one or the other, so this is not a gap "
             "the operator left open by accident"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE RUN THAT FIRST EXERCISED THE TARGETED PROOF, 2026-10-01. The scan found nothing, so
+# the step ran, and it WORKED -- then the summary said the opposite:
+#
+#   _spl_credits over 5MVQ2U12Y8NcdV7y... ...
+#     ok   DECODED 1 credit(s) and then REFUSED them ... reads are PROVEN
+#
+#   CREDIT path: PARTLY exercised ... the reader returned no credits WITHOUT decoding
+#   an amount -- its uiTokenAmount/balance-delta reads are still unproven
+#
+# Both computed honestly from what each could see. `observed` is filled in by
+# check_address, which runs BEFORE the targeted step, so the headline conclusion of the
+# run was built from an observation taken before the thing that settled it. Same defect
+# CreditPathObserved was created to stop, in the one direction it did not cover.
+# ---------------------------------------------------------------------------
+
+
+def test_the_targeted_read_decoding_an_amount_reaches_the_summary():
+    """MUTATION: discard prove_the_spl_reader()'s return value -- which is what main() did --
+    and the summary says "still unproven" about a reader the same run just proved.
+    """
+    scan_found_nothing = CreditPathObserved(address_read=True, is_spl=True, signatures=5,
+                                            credits=0, refused=0)
+    assert not scan_found_nothing.decoded_an_amount
+    assert "still unproven" in summary_text(scan_found_nothing), "the state before the step"
+
+    after = scan_found_nothing._replace(targeted_read_decoded=True)
+    assert after.decoded_an_amount, (
+        "a refused credit counts -- the amount is decoded before the memo check, the same rule "
+        "this property already applies to the scan's counts"
+    )
+    text = summary_text(after)
+    assert "still unproven" not in text
+    assert "DECODED a real amount from the TARGETED read" in text, (
+        "and it says WHICH read got there: the scan proves the reader over a window, this "
+        "proves it over one transaction chosen for carrying a credit"
+    )
+    assert "0 credited, 0 refused" not in text, (
+        "the scan's counts are zero in this case, so reporting them would say the opposite of "
+        "what happened"
+    )
+    assert "5 signature(s) in the scan's own window decoded nothing" in text, (
+        "the window's result is still reported, as a fact about the window"
+    )
+
+
+def test_prove_the_spl_reader_hands_back_what_it_established():
+    """The observation, not a flag -- same reason CreditPathObserved exists."""
+    _revealed_by.clear()
+    _revealed_by[_A_HOLDER] = RevealingTx("65bWBunzbNMkN9d5", credits_owner=True)
+    before = CreditPathObserved(address_read=True, is_spl=True, signatures=5,
+                                credits=0, refused=0)
+
+    decoded = solana_chain_check.prove_the_spl_reader(
+        _seeded_adapter({"getTransaction": _spl_transaction("0", "2500000000")}, _A_MINT),
+        _A_HOLDER, make_runner([]), before)
+    assert decoded.targeted_read_decoded is True, "a refused credit IS a decode"
+
+    nothing = solana_chain_check.prove_the_spl_reader(
+        _seeded_adapter({"getTransaction": _spl_transaction("5", "5")}, _A_MINT),
+        _A_HOLDER, make_runner([]), before)
+    assert nothing.targeted_read_decoded is False, "no positive delta, so nothing was decoded"
+
+    _revealed_by.clear()
+    untouched = solana_chain_check.prove_the_spl_reader(
+        _seeded_adapter({}, _A_MINT), "rTYPED", make_runner([]), before)
+    assert untouched == before, "the step never ran, so the observation is unchanged"
+
+
+def test_a_step_that_RAISED_is_not_counted_as_having_decoded():
+    """`any([])` is False, and that is the right answer: a step that died proved nothing.
+
+    MUTATION: default the outcome to True when the list is empty and a run whose targeted read
+    crashed reports the reader as proven.
+    """
+    _revealed_by.clear()
+    _revealed_by[_A_HOLDER] = RevealingTx("65bWBunzbNMkN9d5", credits_owner=True)
+    before = CreditPathObserved(address_read=True, is_spl=True, signatures=5,
+                                credits=0, refused=0)
+    failures = []
+
+    def explode(_method, *_params):
+        raise chains_solana.SolanaRPCError("the endpoint went away")
+
+    adapter = _seeded_adapter({}, _A_MINT)
+    adapter.call = explode
+    after = solana_chain_check.prove_the_spl_reader(adapter, _A_HOLDER,
+                                                    make_runner(failures), before)
+    assert failures, "the step failed and is counted as a failure"
+    assert after.targeted_read_decoded is False
+    assert "still unproven" in summary_text(after)
+
+
+def test_the_proof_step_captures_the_adapters_warning_instead_of_letting_it_escape(capsys):
+    """It printed at column 0 between the step's announcement and its result.
+
+    From the operator's run, and it is the same three lines _CapturedAdapterLogs' docstring
+    already quotes from 2026-09-30, one step over:
+
+        _spl_credits over 5MVQ2U12Y8NcdV7y... ...  <- the one transaction known to CREDIT ...
+    SOL deposit 5MVQ2U12Y8NcdV7yD9bc... CANNOT BE ATTRIBUTED and was NOT credited: ...
+        ok   DECODED 1 credit(s) and then REFUSED them: ...
+
+    The handler existed and was correct; only one of the two readers used it (rule 8).
+
+    MUTATION: drop the `with _capturing_adapter_logs()` and the record reaches the root
+    handler, unindented, mid-step.
+    """
+    adapter = _seeded_adapter({"getTransaction": _spl_transaction("0", "2500000000")}, _A_MINT)
+    capsys.readouterr()
+    line = _spl_reader_line(adapter, _A_HOLDER, "65bWBunzbNMkN9d5")
+    escaped = capsys.readouterr()
+
+    assert "PROVEN" in line, "the step's own result is unchanged"
+    assert "logged:" in line, "the adapter's record is folded INTO the step, indented"
+    assert "CANNOT BE ATTRIBUTED" not in escaped.out + escaped.err, (
+        "and reaches no handler of its own -- a line at column 0 mid-step breaks the block the "
+        "operator pastes back"
+    )
+
+
+def test_main_carries_the_targeted_proof_into_the_summary(monkeypatch, capsys):
+    """END TO END, because the unit tests all passed with main() throwing the result away.
+
+    `observed = prove_the_spl_reader(...)` -> `prove_the_spl_reader(...)` SURVIVED every unit
+    test above: the function returned the right observation and nothing read it. That is the
+    fourth main()-level mutation in this session to survive for exactly that reason, and the
+    only thing that catches it is driving main() and reading the summary.
+
+    THE SEEDED CLUSTER IS THE OPERATOR'S SITUATION, not a convenient one: the owner's own
+    recent window holds a transaction that does not credit it, and the transaction that DOES
+    credit it is reachable only through the mint's traffic. That is why the targeted step
+    exists, and it is the shape four devnet runs kept landing in.
+    """
+    _revealed_by.clear()
+    target, in_the_window = "65bWBunzbNMkN9d5", "4yPFj1mqTVnxbKHd"
+    holder = _A_HOLDER
+
+    class SplitCluster(_WholeClusterStub):
+        def __call__(self, url, data=None, **kwargs):
+            payload = _json.loads(data) if data else {}
+            method, params = payload.get("method", ""), payload.get("params") or []
+            if method == "getTokenLargestAccounts":
+                return _Throttled()
+            if method == "getSignaturesForAddress":
+                # THE MINT'S LISTING AND THE OWNER'S ARE DIFFERENT, which is the whole premise.
+                listed = target if params and params[0] == _A_MINT else in_the_window
+                return _Ok([{"signature": listed, "confirmationStatus": "finalized"}])
+            if method == "getTransaction":
+                if params and params[0] == target:
+                    # Credits the owner, no memo -> DECODED then refused, which is a proof.
+                    return _Ok(_a_crediting_mint_transaction(owner=holder))
+                # In the owner's window and carrying nothing for it: the scan decodes nothing.
+                return _Ok(_a_crediting_mint_transaction(owner="rSOMEONEELSE"))
+            if method == "getAccountInfo":
+                return _Ok({"value": {"data": {"parsed": {"info": {"decimals": 9,
+                                                                   "owner": holder}}},
+                                      "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}})
+            return super().__call__(url, data=data, **kwargs)
+
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(
+        solana_chain_check.Config, "RPC",
+        {**solana_chain_check.Config.RPC,
+         "SOL": {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1",
+                 "mint": _A_MINT}})
+    monkeypatch.setattr(chains_solana.requests, "post", SplitCluster())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py", "--mint", _A_MINT,
+                                     "--find-holder"])
+    solana_chain_check.main()
+    out = text_of(capsys.readouterr().out)
+
+    assert f"_spl_credits over {target}" in out, "the targeted step ran -- the scan found nothing"
+    assert "reads are PROVEN" in out, "and it decoded an amount, then refused it for no memo"
+    assert "DECODED a real amount from the TARGETED read" in out, (
+        "AND THE SUMMARY SAYS SO. This is the assertion the mutation breaks: with the return "
+        "value discarded the summary reads 'still unproven' four lines under 'PROVEN'."
+    )
+    assert "still unproven" not in out

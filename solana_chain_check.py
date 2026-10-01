@@ -61,7 +61,9 @@ import argparse
 import logging
 import re
 import sys
+import textwrap
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -354,7 +356,7 @@ _revealed_by: dict[str, RevealingTx] = {}
 
 
 def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run,
-                         observed: CreditPathObserved) -> None:
+                         observed: CreditPathObserved) -> CreditPathObserved:
     """Run _spl_credits over the one transaction known to credit this owner, if it is still owed.
 
     WHY A TARGETED READ AND NOT A WIDER SCAN. Four runs against public devnet failed to prove
@@ -391,7 +393,7 @@ def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run,
     """
     reveal = _revealed_by.get(owner)
     if reveal is None:
-        return
+        return observed
     if observed.decoded_an_amount:
         # ALREADY PROVEN, SO NOTHING IS SPENT PROVING IT AGAIN. The operator's 2026-10-01 run is
         # the case: find_deposits_to_address read 5 signatures, decoded one amount and refused it
@@ -404,9 +406,16 @@ def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run,
               f"({observed.credits} credited, {observed.refused} refused), so the targeted read "
               f"over {reveal.signature[:16]}... is SKIPPED -- it would spend a getTransaction to "
               f"re-establish what the scan established.", flush=True)
-        return
+        return observed
+    # THE OUTCOME COMES BACK, and the OBSERVATION is what comes back rather than a flag -- same
+    # reason CreditPathObserved exists at all. A list because `run` returns nothing (it prints
+    # through its own `done`), which is the pattern _deposits_line's `credited` already uses.
+    decoded: list[bool] = []
     run(f"_spl_credits over {reveal.signature[:16]}...", _what_the_target_is(reveal),
-        lambda: _spl_reader_line(adapter, owner, reveal.signature))
+        lambda: _spl_reader_line(adapter, owner, reveal.signature, decoded))
+    # NOT `any(decoded) or True`: an empty list means the step RAISED before recording, and a
+    # step that died proved nothing. `any` over an empty list is False, which is correct here.
+    return observed._replace(targeted_read_decoded=any(decoded))
 
 
 def _what_the_target_is(reveal: RevealingTx) -> str:
@@ -425,7 +434,8 @@ def _what_the_target_is(reveal: RevealingTx) -> str:
             "-- so '(none)' here is EXPECTED and proves nothing either way")
 
 
-def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str) -> str:
+def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str,
+                     decoded: list[bool] | None = None) -> str:
     """What the targeted read established about _spl_credits' decoder.
 
     THREE OUTCOMES, AND THE FIRST VERSION OF THIS COLLAPSED TWO INTO A FALSE SENTENCE. It said
@@ -451,22 +461,37 @@ def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str) -> str:
     # per-transaction reader directly, so whatever an earlier step recorded would be read as
     # belonging to this transaction.
     adapter.unattributable_drops = []
-    credits = adapter._credits_in_transaction(signature, owner, FINALIZED_RANK)
+    # CAPTURED, like find_deposits_to_address's call is. Without this the adapter's WARNING for
+    # a dropped credit reaches the root handler mid-step and prints unindented at column 0 --
+    # see _capturing_adapter_logs() for the operator's run that showed it.
+    with _capturing_adapter_logs() as captured:
+        credits = adapter._credits_in_transaction(signature, owner, FINALIZED_RANK)
     dropped = sum(drop.credits for drop in adapter.unattributable_drops)
+    # NOT `already_listed`: the step's label truncates the signature to 16 characters, so the
+    # full one appears nowhere above this and the warning's copy is the only one.
+    logged = _indented(captured.records)
+    if decoded is not None:
+        # DECODED, WHICH INCLUDES REFUSED. The amount is read before the memo check, so a
+        # refusal means every field name in the reader was right -- the same rule
+        # decoded_an_amount already applies to the scan's counts.
+        decoded.append(bool(credits or dropped))
 
     if credits:
         amounts = ", ".join(f"{credit['amount']} (vout={credit['vout']})" for credit in credits)
         return (f"DECODED and ATTRIBUTED {len(credits)} credit(s): {amounts}  <- _spl_credits "
                 f"read uiTokenAmount.decimals and .amount off a REAL response, and the memo "
-                f"carried a usable tag. The last reader with no live evidence now has some.")
+                f"carried a usable tag. The last reader with no live evidence now has some."
+                + logged)
     if dropped:
         return (f"DECODED {dropped} credit(s) and then REFUSED them: no usable memo, so nothing "
                 f"is credited -- which is correct. But the amount WAS decoded off a real "
                 f"response, so _spl_credits' uiTokenAmount.decimals and .amount reads are "
-                f"PROVEN. That is the last reader in this adapter with no live evidence.")
+                f"PROVEN. That is the last reader in this adapter with no live evidence."
+                + logged)
     return ("(none)  <- no POSITIVE delta for this owner and mint in this transaction, so "
             "_spl_credits returned before decoding an amount. A fact about this transaction, "
-            "not about the field names -- and NOT the same as the reader never running.")
+            "not about the field names -- and NOT the same as the reader never running."
+            + logged)
 
 
 def owner_in_post_token_balances(transaction: object, mint: str) -> str:
@@ -899,6 +924,22 @@ class CreditPathObserved(NamedTuple):
     #: the adapter skipped it and said so in its log, and this summary still claimed the filter
     #: had run over all ten.
     unreadable: int = 0
+    #: Did the TARGETED read (prove_the_spl_reader) decode an amount? Added 2026-10-01, because
+    #: the run that first exercised that step printed the step saying
+    #:
+    #:   DECODED 1 credit(s) and then REFUSED them ... reads are PROVEN
+    #:
+    #: and then a SUMMARY saying
+    #:
+    #:   the reader returned no credits WITHOUT decoding an amount -- its
+    #:   uiTokenAmount/balance-delta reads are still unproven
+    #:
+    #: Both lines were computed honestly from what each could see: `observed` is filled in by
+    #: check_address, which runs BEFORE the targeted step, so the headline conclusion of the run
+    #: was built from an observation taken before the thing that settled it. That is the same
+    #: defect this class was created to stop -- a conclusion reported from something other than
+    #: what executed -- in the one direction the class did not cover.
+    targeted_read_decoded: bool = False
 
     @property
     def reader(self) -> str:
@@ -911,15 +952,43 @@ class CreditPathObserved(NamedTuple):
         A REFUSED credit counts: the amount was decoded and THEN the memo check declined it, so
         every field name in the reader had to be right to get that far.
         """
-        return bool(self.credits or self.refused)
+        return bool(self.credits or self.refused or self.targeted_read_decoded)
+
+
+#: What the summary block wraps to. The hand-wrapped literals in this file sit at 78-85
+#: characters rendered, so this is the width they already use rather than a new choice.
+SUMMARY_WIDTH = 84
+
+
+def _wrapped(*sentences: str) -> list[str]:
+    """Prose wrapped to the summary block's width, with its two-space indent. ONE PLACE.
+
+    EVERY HAND-WRAPPED LITERAL IN THIS BLOCK HAS BEEN WRONG AT LEAST ONCE, and the instances
+    were being fixed one at a time: f8c3b1f shipped a 101-character line against neighbours at
+    81; 93b108b fixed that and left a 25-character line reading just "5 FETCHED signature(s),";
+    the next version produced a 179-character sentence and a 367-character one, the second of
+    which is the 42-unfetched case the operator actually hit. Rule 19's test -- does the fix
+    stop the symptom being reported, or stop the cause existing -- says wrap once instead of
+    measuring literals by hand forever.
+
+    IT TAKES SENTENCES, NOT LINES. A caller that hands over pre-broken lines is hand-wrapping
+    again; handing over whole sentences lets the width be the only thing that decides. The
+    variable-length clauses are exactly where this matters, because their rendered length
+    depends on counts nobody can see while writing the f-string.
+    """
+    return [f"  {line}" for line in
+            textwrap.wrap(" ".join(s for s in sentences if s),
+                          width=SUMMARY_WIDTH, break_long_words=False,
+                          break_on_hyphens=False)]
 
 
 def credit_path_lines(observed: CreditPathObserved) -> list[str]:
     """What the run proved about the deposit-credit path, which is the half that loses money."""
     if not observed.address_read:
-        return ["  CREDIT path: NOT exercised, and it is the half that matters. getBalance,",
-                "  getAccountInfo and find_deposits_to_address did not run, because no address was",
-                "  read. A wrong field name there loses a deposit rather than raising."]
+        return _wrapped(
+            "CREDIT path: NOT exercised, and it is the half that matters. getBalance,",
+            "getAccountInfo and find_deposits_to_address did not run, because no address was",
+            "read. A wrong field name there loses a deposit rather than raising.")
 
     # "NOT EXERCISED", NOT "HAS NOT DECODED ONE". The line below used to say the second, and it
     # is a claim about a reader this run never invoked -- CreditPathObserved holds nothing about
@@ -930,13 +999,25 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
     # the other. Caught 2026-10-01 reading the operator's fifth clean --find-holder run, where
     # the summary asserted _native_credits had decoded nothing in a run that never called it.
     other = "_spl_credits (needs --mint)" if not observed.is_spl else "_native_credits (drop --mint)"
+    unexercised = (f"Every field name in that reader had to be right to get there. The other "
+                   f"reader, {other}, was NOT exercised by this run -- a run reads one or the "
+                   f"other, never both, so nothing here says whether it works.")
     if observed.decoded_an_amount:
-        return [f"  CREDIT path: {observed.reader} DECODED a real amount from a real response "
-                f"({observed.credits} credited, {observed.refused} refused over "
-                f"{observed.signatures} signature(s)).",
-                "  Every field name in that reader had to be right to get there. The other reader,",
-                f"  {other}, was NOT exercised by this run -- a run reads one",
-                "  or the other, never both, so nothing here says whether it works."]
+        # WHICH READ GOT THERE, because the two are different evidence and the operator has to
+        # be able to tell them apart. The scan proves the reader over a WINDOW; the targeted
+        # read proves it over ONE transaction chosen for carrying a credit. Reporting the
+        # second as "0 credited, 0 refused over 5 signature(s)" -- which the scan's counts are
+        # when the targeted read is what decoded -- would say the opposite of what happened.
+        if observed.targeted_read_decoded and not (observed.credits or observed.refused):
+            how = (f"CREDIT path: {observed.reader} DECODED a real amount from the TARGETED "
+                   f"read over the one transaction known to credit this owner. The "
+                   f"{observed.signatures} signature(s) in the scan's own window decoded "
+                   f"nothing, which is a fact about that window and not about the reader.")
+        else:
+            how = (f"CREDIT path: {observed.reader} DECODED a real amount from a real response "
+                   f"({observed.credits} credited, {observed.refused} refused over "
+                   f"{observed.signatures} signature(s)).")
+        return _wrapped(how, unexercised)
     if observed.signatures:
         # THE DENOMINATOR IS WHAT WAS FETCHED, NOT WHAT WAS LISTED. "matched nothing over 10" is
         # a claim about ten transactions; if one was never read, a credit may be in it and the
@@ -954,25 +1035,32 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
         # number next (rule 14: the instruction has to be where the number is).
         advice = ""
         if observed.unreadable > observed.signatures:
-            advice = (f" A SMALLER --limit will cover MORE here, not less: every listed signature "
+            advice = (f"A SMALLER --limit will cover MORE here, not less: every listed signature "
                       f"costs a fetch, so a bigger window spends the rate budget on listing. "
                       f"{observed.unreadable} unfetched against {observed.signatures} fetched "
                       f"means the endpoint is the limit, not the window.")
         skipped = ("" if not observed.unreadable else
-                   f" -- plus {observed.unreadable} LISTED but never fetched, so a credit may be "
-                   f"in those and this is NOT established over the full set.{advice}")
-        return [f"  CREDIT path: PARTLY exercised. Discovery ran, and the filter in "
-                f"{observed.reader} ran over",
-                # The comma belongs to the no-skip case only: `skipped` ends in a full stop,
-                # and appending one produced "full set.," on the operator-facing line.
-                f"  {observed.signatures} FETCHED signature(s){skipped or ','}",
-                "  and matched nothing, so the reader returned no credits WITHOUT decoding an",
-                "  amount -- its uiTokenAmount/balance-delta reads are still unproven, and those",
-                "  are the field names that lose a deposit silently. Point --address at an account",
-                "  that has received one."]
-    return [f"  CREDIT path: discovery ran and returned ZERO signatures, so {observed.reader} was",
-            "  never invoked at all. Nothing about the readers was established. Point --address at",
-            "  an account with recent activity."]
+                   f"Plus {observed.unreadable} LISTED but never fetched, so a credit may be in "
+                   f"those and this is NOT established over the full set.")
+        # WHOLE SENTENCES, EACH ONE SELF-CONTAINED, because an optional clause in the middle
+        # orphans a continuation. "and matched nothing" used to be a separate piece attached to
+        # the count, and with `advice` between them the wrapped block read "...not the window.
+        # and matched nothing" -- a lowercase continuation after a full stop. The old
+        # `skipped or ','` existed for the same reason, to glue a fragment onto a count, and it
+        # goes with it: the count's sentence now ends itself.
+        return _wrapped(
+            f"CREDIT path: PARTLY exercised. Discovery ran, and the filter in "
+            f"{observed.reader} ran over {observed.signatures} FETCHED signature(s) and matched "
+            f"nothing, so the reader returned no credits WITHOUT decoding an amount -- its "
+            f"uiTokenAmount/balance-delta reads are still unproven, and those are the field "
+            f"names that lose a deposit silently.",
+            skipped,
+            advice,
+            "Point --address at an account that has received one.")
+    return _wrapped(
+        f"CREDIT path: discovery ran and returned ZERO signatures, so {observed.reader} was",
+        "never invoked at all. Nothing about the readers was established. Point --address at",
+        "an account with recent activity.")
 
 
 def print_summary(failures: list[str], elapsed: float, hunted: bool | None = None,
@@ -1107,7 +1195,7 @@ def main() -> int:
     # refusing a proof the inner one would allow. The map is the authority;
     # test_no_proof_step_runs_when_no_signature_revealed_the_owner pins the refusal and
     # test_main_prints_no_proof_step_for_an_address_the_operator_supplied pins it through main().
-    prove_the_spl_reader(adapter, address, run, observed)
+    observed = prove_the_spl_reader(adapter, address, run, observed)
     # None means NO HUNT RAN, which memo_status_lines() renders differently from a hunt that
     # ran and confirmed nothing. Initialized here rather than only inside the branch: the first
     # version of this assigned it only under `if args.hunt_memo > 0`, so every plain run -- the
@@ -1619,6 +1707,42 @@ def _one_reason_per_group(records: list[str]) -> list[tuple[str, list[str]]]:
     return list(groups.values())
 
 
+@contextmanager
+def _capturing_adapter_logs():
+    """Hold chains.solana's records for the duration of a step, then give them back.
+
+    EXTRACTED 2026-10-01 BECAUSE THE DEFECT RECURRED IN A SECOND PLACE, which is rule 8 exactly
+    -- the handler existed, was correct, and only one of the two readers used it. The targeted
+    proof step calls `_credits_in_transaction` directly and had no capture, so the operator's
+    seventh run printed the adapter's WARNING at column 0 between the step's announcement and
+    its result:
+
+        _spl_credits over 5MVQ2U12Y8NcdV7y... ...  <- the one transaction known to CREDIT ...
+    SOL deposit 5MVQ2U12Y8NcdV7yD9bc... CANNOT BE ATTRIBUTED and was NOT credited: ...
+        ok   DECODED 1 credit(s) and then REFUSED them: ...
+
+    That is the same three lines _CapturedAdapterLogs' own docstring quotes from 2026-09-30, one
+    step over. The addHandler/propagate/finally dance was six lines inlined in one caller, which
+    is how the second caller came to not have it; as a context manager there is one spelling and
+    adding a third reader cannot forget it.
+
+    `propagate = False` for the duration, restored in the finally: without it the record reaches
+    the root handler as well and prints raw, which is the defect above. The restore is in a
+    finally so an exception cannot leave the adapter's logger detached from the root for the
+    rest of the process.
+    """
+    captured = _CapturedAdapterLogs()
+    adapter_logger = logging.getLogger("chains.solana")
+    adapter_logger.addHandler(captured)
+    was_propagating = adapter_logger.propagate
+    adapter_logger.propagate = False
+    try:
+        yield captured
+    finally:
+        adapter_logger.removeHandler(captured)
+        adapter_logger.propagate = was_propagating
+
+
 def _indented(records: list[str], indent: str = "      ",
               already_listed: frozenset[str] = frozenset()) -> str:
     """Log records folded into a step's output, ONE PER DISTINCT REASON, aligned.
@@ -1699,16 +1823,8 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
     """
     # CAPTURED FOR THE DURATION OF THE CALL ONLY, and removed in a finally so an exception
     # cannot leave a handler attached to the adapter's logger for the rest of the process.
-    captured = _CapturedAdapterLogs()
-    adapter_logger = logging.getLogger("chains.solana")
-    adapter_logger.addHandler(captured)
-    was_propagating = adapter_logger.propagate
-    adapter_logger.propagate = False
-    try:
+    with _capturing_adapter_logs() as captured:
         events = adapter.find_deposits_to_address(address, tx_limit=limit)
-    finally:
-        adapter_logger.removeHandler(captured)
-        adapter_logger.propagate = was_propagating
     dropped = adapter.unattributable_drops
     if credited is not None:
         # HOW MANY CREDITS THIS CALL PRODUCED, handed back so check_address can report coverage
