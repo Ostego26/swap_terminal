@@ -228,7 +228,14 @@ def unaccounted_lines(names, run_dir: Path, python_executable: str = sys.executa
     if not found:
         return [
             "  none              no worker process is alive that a pid file does not account for  <- "
-            "/proc scanned; this is what makes the outcome above a PROVEN stop rather than a reported one"
+            # "the VERDICT above", not "a proven stop". This same block prints under
+            # `status`, where there was no stop, and on the operator's 2026-10-01
+            # run it told them /proc had proven a stop they had not asked for. A
+            # line that is true in one caller and false in the other is a wrong
+            # statement in operator-facing output, which rule 16 treats with the
+            # same seriousness as wrong code -- and it was MY line, written the same
+            # hour as the check it describes.
+            "/proc scanned; this is what makes the verdict above PROVEN rather than merely reported"
         ]
     return [
         f"  *** ORPHAN ***    {name} is ALIVE at pid {', '.join(str(pid) for pid in pids)} with no pid "

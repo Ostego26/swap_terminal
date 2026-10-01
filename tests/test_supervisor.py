@@ -636,7 +636,12 @@ def test_no_orphan_prints_none_rather_than_nothing(tmp_path):
     assert len(lines) == 1
     assert "none" in lines[0]
     assert "/proc scanned" in lines[0]
-    assert "PROVEN stop" in lines[0]
+    # "verdict", not "stop": the same block prints under `status`, where no stop
+    # happened, and asserting the word "stop" is what let that wrong sentence ship.
+    assert "PROVEN rather than merely reported" in lines[0]
+    assert "PROVEN stop" not in lines[0], (
+        "this block prints under status too, where there was no stop to prove"
+    )
 
 
 def test_a_live_worker_with_no_pid_file_is_reported_as_an_orphan(tmp_path):
