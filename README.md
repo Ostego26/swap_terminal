@@ -370,18 +370,38 @@ retry is one implementation shared with `--hunt-memo` now (it was welded to
 `getTransaction`, so this helper inherited none of it), and a throttle says so
 in its own words without mentioning field names at all.
 
-Its own field names were written from documentation and are **not measured**:
-no Solana cluster is reachable from the development container (re-checked
-2026-09-30 — `api.devnet.solana.com` still answers 403 through the proxy). That
-is the same risk the rest of the adapter was written with, with one difference
-that makes it acceptable: a wrong field name there makes the *helper* say so,
-naming the path it looked under, and cannot credit anything or misreport what
-was proven.
+Its own field names were written from documentation and were **not measured**
+when that was written: no Solana cluster is reachable from the development
+container (re-checked 2026-09-30 — `api.devnet.solana.com` still answers 403
+through the proxy, and still did on 2026-10-01). The operator settled them by
+running the helper against devnet and pasting the output back; what each read
+rests on is listed in `chains/solana.py`'s header, method by method, including
+the lamport figures behind `_native_credits`.
 
-**Also still open, and it is a money question rather than a code one:** no SOL
-pair is in `Config.ALLOWED_PAIRS` and `SOL_DEPOSIT_ACCOUNT` is unset (measured
-2026-09-30), so no SOL swap can be created yet. Enabling one is live posture and
-the operator's.
+**SOL → GRC IS ENABLED as of 2026-10-01**, and the paragraph this replaces said
+the opposite — "no SOL pair is in `Config.ALLOWED_PAIRS` and
+`SOL_DEPOSIT_ACCOUNT` is unset (measured 2026-09-30), so no SOL swap can be
+created yet". Both halves moved, so it is replaced rather than amended, and the
+old sentence is quoted because the drift is the point: this file has now been
+stale about SOL twice.
+
+What is true now, and only the first of these is a fact about the code:
+
+- `("SOL", "GRC")` is in `Config.ALLOWED_PAIRS`. ONE DIRECTION: `("GRC", "SOL")`
+  is blocked twice over — no `SOL_NETWORK_FEE_RESERVE` exists, and
+  `send_to_address()` raises because nothing in `chains/solana.py` can sign. Both
+  reasons are recorded in `tests/test_allowed_pairs_are_serviceable.py`'s
+  `DELIBERATELY_ONE_WAY`, and `tests/test_solana_adapter.py` fails by name if SOL
+  is ever made a payout asset.
+- **`SOL_DEPOSIT_ACCOUNT` must be set in the environment of every process that
+  needs it, and this file does not claim a current value.** Nothing in the
+  serving path loads a `.env` (`config.py` says so and explains why), so an
+  `export` in one interactive shell reaches only what that shell launches — not a
+  worker started earlier, and not `assets/swap-terminal.desktop`, whose own
+  comment records that the desktop runs it "with a minimal environment". Env
+  state belongs in a run's output rather than in a document, which is why
+  `solana_chain_check.py` prints whether it is set and `services/pair_view.py`
+  disables the pair, naming the variable, while it is not.
 
 Bitcoin, Litecoin and Gridcoin answer this with `getnewaddress`: the *daemon*
 derives a key, stores it in `wallet.dat`, and this application never holds a
