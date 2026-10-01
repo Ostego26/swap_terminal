@@ -129,7 +129,29 @@
   <form id="swap-form" class="form" method="post" action="/api/swaps" novalidate>
     <div class="field">
       <label for="payout_address">Your payout address</label>
-      <input id="payout_address" name="payout_address" type="text" autocomplete="off" spellcheck="false"
+      {#- autocomplete="one-time-code", NOT "off", AND THAT IS NOT A TYPO.
+          MEASURED ON THE OPERATOR'S HOST 2026-10-01, three times. This field
+          carried autocomplete="off" and Brave filled it anyway, with a stale
+          Bitcoin testnet address (2N3bqzcWSDasdmqKkDKUAFU8f5Hk11NZzYN) left over
+          from other work. It got through because Gridcoin shares Bitcoin
+          testnet's 0xc4 P2SH version byte, so the GRC daemon's validateaddress
+          says isvalid: true -- and then said ismine: false, meaning the key is
+          nobody's we hold. 82.65 tGRC was paid to it before anyone looked.
+          Chrome-family browsers document that they IGNORE autocomplete="off" on
+          fields their own heuristics have classified, and a field named
+          `payout_address` is one they classify. The values they do honor are the
+          specific ones; "one-time-code" is chosen over "new-password" because
+          the latter makes a password manager offer to SAVE a crypto address.
+          NOT VERIFIED FROM HERE (rule 17): this container has no browser, so
+          whether Brave 154 honors it is the operator's observation to make, not
+          a claim this comment gets to assert. static/script.js clears the field
+          on load as the belt to this braces, which does not depend on any
+          attribute being respected.
+          The `name` is deliberately unchanged: routes/swaps.py reads
+          `payout_address` and renaming it would break the form and the API for a
+          browser heuristic. -#}
+      <input id="payout_address" name="payout_address" type="text" autocomplete="one-time-code"
+             spellcheck="false" autocapitalize="off" autocorrect="off"
              placeholder="the address you want to be paid at">
     </div>
     <button type="submit" class="primary" id="create-swap" disabled>Create swap</button>

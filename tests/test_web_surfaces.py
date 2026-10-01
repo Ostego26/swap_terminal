@@ -1157,3 +1157,42 @@ def test_a_closed_swap_says_the_listed_address_is_not_accepting_anything(client)
         seed_swap(client, "s_dep00000000000", "awaiting_deposit")
         live = client.get("/swap/s_dep00000000000/fragment")
     assert "Still accepting?" not in live.get_data(as_text=True)
+
+
+def test_the_payout_field_does_not_ask_the_browser_to_autofill_it(client):
+    """autocomplete="off" is IGNORED by Chrome-family browsers. Measured, three times.
+
+    On the operator's host 2026-10-01 this field carried autocomplete="off" and
+    Brave filled it anyway, with a stale Bitcoin testnet address
+    (2N3bqzcWSDasdmqKkDKUAFU8f5Hk11NZzYN) from unrelated work. It passed every
+    server check: Gridcoin shares Bitcoin testnet's 0xc4 P2SH version byte, so
+    validateaddress returns isvalid: true. The daemon later answered
+    ismine: false and 82.65 tGRC had already been broadcast to it.
+
+    WHAT THIS TEST CAN AND CANNOT ESTABLISH (rule 17). It asserts the markup asks
+    for a value those browsers document as honored, and that script.js clears the
+    field as the browser-independent belt to that braces. It CANNOT establish that
+    Brave 154 obeys either -- this container has no browser, and only the operator
+    can observe that.
+
+    MUTATION: put autocomplete="off" back, or drop the clearing function, and the
+    page returns to the state that cost three swaps.
+    """
+    body = client.get("/").get_data(as_text=True)
+    field = [line for line in body.splitlines() if 'id="payout_address"' in line]
+    assert field, "the payout address input is gone entirely"
+    markup = " ".join(field)
+
+    assert 'autocomplete="off"' not in markup, (
+        "Chrome-family browsers ignore autocomplete=off on fields they classify, and this is one"
+    )
+    assert 'autocomplete="one-time-code"' in markup
+    # The name is what routes/swaps.py reads; a browser heuristic is not a reason
+    # to break the form and the API.
+    assert 'name="payout_address"' in markup
+
+    script = client.get("/static/script.js").get_data(as_text=True)
+    assert "clearBrowserFilledPayoutAddress" in script, (
+        "the attribute may be ignored; clearing the field is what does not depend on that"
+    )
+    assert "clearBrowserFilledPayoutAddress();" in script, "declared but never called"

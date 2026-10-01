@@ -335,6 +335,45 @@ function wireLivePolling() {
   window.setInterval(refresh, POLL_MS);
 }
 
+/*
+ * CLEAR WHAT THE BROWSER PUT IN THE PAYOUT FIELD, and this is a safety measure
+ * rather than a convenience.
+ *
+ * MEASURED ON THE OPERATOR'S HOST 2026-10-01, three times in one afternoon.
+ * The field carries autocomplete="off" (and now "one-time-code") and Brave
+ * filled it anyway with a stale Bitcoin testnet address,
+ * 2N3bqzcWSDasdmqKkDKUAFU8f5Hk11NZzYN, left over from unrelated work. It passed
+ * every check the server has: Gridcoin shares Bitcoin testnet's 0xc4 P2SH
+ * version byte, so validateaddress returns isvalid: true. The daemon later
+ * answered ismine: false -- the key belongs to nobody we hold -- and 82.65 tGRC
+ * had already been broadcast to it. A payout is final the moment it is sent.
+ *
+ * So this does not rely on an attribute being honored. It empties the field
+ * after load, which is the one thing that works whatever the browser decides
+ * about autocomplete. A customer who wants their address there types or pastes
+ * it; a browser that wants it there does not get to decide silently.
+ *
+ * TWICE, with a zero-delay timeout for the second: Chrome-family autofill often
+ * runs AFTER DOMContentLoaded, so clearing only once loses the race.
+ *
+ * It is deliberately NOT wired to focus or input events. Clearing on focus
+ * would delete what a customer had already typed if they tabbed away and back,
+ * which would be a worse bug than the one this fixes.
+ *
+ * NOT VERIFIED FROM HERE (rule 17): this container has no browser. That it
+ * empties the field is plain JavaScript; that it beats Brave 154's autofill is
+ * the operator's observation to make.
+ */
+function clearBrowserFilledPayoutAddress() {
+  const field = document.getElementById("payout_address");
+  if (!field) return;
+  field.value = "";
+  window.setTimeout(function () {
+    field.value = "";
+  }, 0);
+}
+
 wireQuoteForm();
 wireSwapForm();
 wireLivePolling();
+clearBrowserFilledPayoutAddress();
