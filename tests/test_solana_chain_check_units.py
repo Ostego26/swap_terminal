@@ -1267,10 +1267,18 @@ class _DepositStub:
         return self._events
 
 
-def _a_drop(credits=1):
+def _a_drop(credits=1, amount=None):
+    """The signature is the real one from the operator's devnet account (2K2Pw1Hz...).
+
+    `amount` defaults to the count rather than to zero: these helpers exist to exercise the
+    COUNT, and a 0.0 amount in a fixture reads as "a zero-value deposit is stranded", which is
+    the one conclusion UnattributableCredit refuses to let a caller reach by omission.
+    """
     return chains_solana.UnattributableCredit(
         signature="2K2Pw1Hz", credits=credits,
-        why="no memo instruction -- unattributable, and a human has to match it")
+        why="no memo instruction -- unattributable, and a human has to match it",
+        amount=float(credits) if amount is None else amount,
+        address="J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM")
 
 
 def test_a_refused_credit_is_NEVER_reported_as_zero_credits_read():
@@ -2310,7 +2318,8 @@ def test_the_drops_are_cleared_so_an_earlier_step_cannot_be_misread_as_this_one(
     transaction proved the decoder when it decoded nothing.
     """
     adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("5", "5")})
-    adapter.unattributable_drops = [chains_solana.UnattributableCredit("earlier", 3, "no memo")]
+    adapter.unattributable_drops = [
+        chains_solana.UnattributableCredit("earlier", 3, "no memo", 3.0, "rEARLIER")]
     line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
     assert line.startswith("(none)"), "a stale drop must not be read as this transaction's"
     assert "PROVEN" not in line
@@ -2780,8 +2789,9 @@ def test_the_stranded_step_elides_what_its_own_list_already_gave():
 
     def drop(signature):
         return chains_solana.UnattributableCredit(
-            signature=signature, credits=1,
-            why="no memo instruction -- unattributable, and a human has to match it")
+            signature=signature, credits=1, amount=1.5,
+            why="no memo instruction -- unattributable, and a human has to match it",
+            address="J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM")
 
     line = _deposits_line(
         LoggingStub(drops=[drop(_SIG_A), drop(_SIG_B)], signatures_read=5), "rADDR", 5)

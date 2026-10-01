@@ -218,11 +218,30 @@ log that nobody reading this file will ever see.
 
 One more gap that is neither, and it is the one that touches money: a credit
 this adapter reads and REFUSES (no memo) is reported to the operator by
-solana_chain_check.py and logged at WARNING on the live path, and nothing
-routes it into `under_review`. Eight devnet runs found between one and three
-such credits each. On devnet they are nobody's; on mainnet each one is a
-deposit a human has to match by hand, and the only thing that would tell them
-is a log line.
+solana_chain_check.py and logged at WARNING on the live path, and NOTHING ELSE
+READS IT. Measured 2026-10-01: `unattributable_drops` is written here and
+appears nowhere else under swap_terminal/ -- the only consumer in the tree is
+the diagnostic. Eight devnet runs found between one and three such credits
+each. On devnet they are nobody's; on mainnet each one is a deposit a human has
+to match by hand, and the only thing that would tell them is a log line.
+
+AND IT IS NOT A WIRING JOB, WHICH IS THE PART I HAD WRONG. "Route it into
+`under_review`" was the obvious next step and it cannot be done, for a reason
+that is in the schema rather than in anyone's judgment:
+
+    deposit_events.swap_id   TEXT NOT NULL, FOREIGN KEY -> swaps(id)   db.py:130
+    under_review             a status on SWAPS, not on deposits
+
+An unattributable deposit belongs to NO swap -- that is the definition of
+unattributable. So there is no row it can be written as and no swap to move
+into `under_review`, and nothing in this tree has a concept for a deposit with
+no swap. Recording one needs a new place to put it: a nullable swap_id (widens
+every existing reader's assumption), a separate orphan table (one more thing to
+reconcile), or an operator-facing report generated from the chain on demand
+(nothing stored, nothing to drift). Which of those is right is not knowable
+from the tree -- it decides what an operator is asked to action -- so it stays
+the operator's (rule 20 draws the line at knowable, and this is the side of it
+where you ask).
 
 So the transport is proven, the credit path is proven, one real defect on the
 deposit path was found and fixed, and the chain still cannot send. The
@@ -288,11 +307,35 @@ class UnattributableCredit(NamedTuple):
     THE RETURN VALUE OF find_deposits_to_address IS UNCHANGED. This is recorded alongside it, so
     the five-method contract services/ and workers/ read is untouched -- a caller that wants the
     drops asks for them.
+
+    IT CARRIES THE AMOUNT SINCE 2026-10-01, AND NOT CARRYING IT WAS THE DEFECT. `credits` is a
+    COUNT -- `len(credits)` at the call site -- and that was every number this type held. So the
+    thing built to say "real money arrived that nobody can claim" could not say HOW MUCH, and
+    every consumer inherited that: the diagnostic prints "1 credit(s) dropped" and a durable
+    record would have stored a row meaning "something arrived". A record of money that omits the
+    amount is not a record of money.
+
+    REQUIRED RATHER THAN DEFAULTED, deliberately. A default of 0.0 would let a future call site
+    forget the amount and write a row saying a zero-value deposit is stranded, which reads as
+    "nothing to chase" -- the one conclusion that must not be reachable by omission (rule 19: a
+    default that makes a check pass is not a fix).
+
+    `amount` IS THE SUM over the dropped credits and `credits` stays the count of them, because
+    a transaction can carry more than one credit to the same account and a human matching it by
+    hand needs both: what arrived, and in how many pieces.
     """
 
     signature: str
     credits: int
     why: str
+    #: Total of the dropped credits, in whole units of the asset -- NOT lamports or base units.
+    #: Same scale as the `amount` key in the event dicts find_deposits_to_address returns, so a
+    #: reader comparing a stranded row against a credited one is comparing like with like.
+    amount: float
+    #: The account the credits landed in: the shared deposit account. Carried rather than
+    #: assumed, so a record says where the money is without the reader reconstructing it from
+    #: configuration that may have changed since.
+    address: str
 
 
 class SolanaRPCError(Exception):
@@ -883,14 +926,22 @@ class SolanaAdapter:
         if tag is None:
             # RECORDED AS WELL AS LOGGED. The log is for an operator reading a file later; this
             # is for the caller deciding what to say on a screen now. See UnattributableCredit.
-            self.unattributable_drops.append(
-                UnattributableCredit(signature=signature, credits=len(credits), why=why))
+            # THE AMOUNT AND THE ADDRESS COME OFF THE CREDITS, which already hold both -- the
+            # old version discarded them and recorded only the count. See UnattributableCredit.
+            stranded = sum(float(credit["amount"]) for credit in credits)
+            self.unattributable_drops.append(UnattributableCredit(
+                signature=signature, credits=len(credits), why=why,
+                # OFF THE CREDITS, not a parameter: _attributable() is handed the credits and
+                # not the address, and every credit in this list was selected BY that account
+                # (owner for SPL, the account key for native), so they agree by construction.
+                # Adding a parameter would have been a second source for one fact.
+                amount=stranded, address=str(credits[0]["address"])))
             logger.warning(
                 "SOL deposit %s to the shared account CANNOT BE ATTRIBUTED and was NOT credited: "
-                "%s. %d credit(s) dropped. The coins arrived and are real; matching them to a "
-                "swap is a human's job, and crediting them to whichever swap was being refreshed "
-                "would pay the wrong person.",
-                signature, why, len(credits),
+                "%s. %d credit(s) dropped, %s SOL in total. The coins arrived and are real; "
+                "matching them to a swap is a human's job, and crediting them to whichever swap "
+                "was being refreshed would pay the wrong person.",
+                signature, why, len(credits), stranded,
             )
             return []
         return [{**credit, "vout": tag} for credit in credits]

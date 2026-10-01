@@ -143,6 +143,68 @@ CREATE TABLE IF NOT EXISTS deposit_events (
 
 CREATE INDEX IF NOT EXISTS idx_deposit_events_swap_id ON deposit_events(swap_id);
 
+-- MONEY THAT ARRIVED AND BELONGS TO NO SWAP. Added 2026-10-01.
+--
+-- WHY IT CANNOT BE A deposit_events ROW, which was the obvious answer and is wrong by
+-- schema rather than by judgment: `deposit_events.swap_id` is NOT NULL with a FOREIGN KEY
+-- to swaps(id), and an unattributable deposit belongs to no swap -- that is the definition
+-- of unattributable. There is no row it can be written as. `under_review` is no better: it
+-- is a status on SWAPS, so there is no swap to move into it either.
+--
+-- WHY NOT A NULLABLE swap_id INSTEAD. Every existing reader of deposit_events assumes the
+-- column is populated -- refresh_swap_from_chain() sums `WHERE swap_id = ?`, the artifact
+-- tooling joins on it -- and a NULL would be invisible to each of them until one query
+-- somewhere forgot to exclude it and credited an orphan to a swap. That is rule 8's defect
+-- with a delay on it: the readers agree today and drift from the day the column changes
+-- meaning. A separate table cannot be read by accident.
+--
+-- NOTHING ON THE ORDER PATH MAY READ THIS. It is a record for a human, not an input to a
+-- decision: no gate, no crediting, no payout may join against it. If a deposit in here
+-- turns out to belong to a swap, a person resolves it and the resolution is the
+-- `resolved_at`/`resolution_note` pair below -- which is also why there is no swap_id to
+-- "fill in later". Filling one in would make this table a second source of truth about who
+-- owns a deposit, and rule 15's "exactly one reader, no decision read from a buffer"
+-- applies to a table in the authority just as much as to a staging file.
+--
+-- KEYED ON (asset, txid) AND NOT (asset, txid, vout). `vout` is the integer discriminator,
+-- and the whole reason a row lands here is that no usable discriminator was found -- so it
+-- cannot be part of the key. One transaction credits one shared account once, which is the
+-- same reasoning chains/solana.py's header gives for using the account index as `vout` at
+-- all: the account model has one net balance delta per account per transaction.
+CREATE TABLE IF NOT EXISTS unattributable_deposits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL,
+    txid TEXT NOT NULL,
+    -- The shared deposit account the money landed in, carried rather than looked up, so a
+    -- row still says where the coins are after the configuration changes.
+    address TEXT NOT NULL,
+    -- Whole units of the asset, the same scale as deposit_events.amount. A record of money
+    -- that omits the amount is not a record of money, which is why chains/solana.py's
+    -- UnattributableCredit makes it a required field rather than a defaulted one.
+    amount REAL NOT NULL,
+    -- How many separate credits in that transaction made up the amount. A human matching it
+    -- by hand needs both numbers: what arrived, and in how many pieces.
+    credits INTEGER NOT NULL,
+    -- The discriminator that WAS found, when one was and it matched no open swap; NULL when
+    -- the deposit carried none at all. Those are two different support conversations: the
+    -- first is "your reference does not match any order", the second is "you sent without a
+    -- reference", and a single table that could not tell them apart would make the operator
+    -- open the chain to find out.
+    discriminator INTEGER,
+    -- The adapter's own reason, in its words, so the row and the log line agree.
+    why TEXT NOT NULL,
+    confirmations INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution_note TEXT,
+    UNIQUE(asset, txid)
+);
+
+-- The query an operator actually runs: what is still outstanding, oldest first.
+CREATE INDEX IF NOT EXISTS idx_unattributable_deposits_unresolved
+    ON unattributable_deposits(resolved_at, first_seen_at);
+
 CREATE TABLE IF NOT EXISTS payouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     swap_id TEXT NOT NULL,

@@ -56,6 +56,8 @@ from deposit_vout_artifact import multi_vout_groups
 
 from .helpers import utc_now_iso
 from .swap_service import TAG_ATTRIBUTED_ASSETS, set_swap_status
+from .unattributable_deposit_service import record as record_unattributable
+from .unattributable_deposit_service import stranded_rows
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,39 @@ def upsert_deposit_event(db, swap_id: str, asset: str, event: dict):
         ),
     )
     return None
+
+
+def record_what_nobody_can_claim(db, asset: str, adapter) -> int:
+    """Put the adapter's unattributable deposits in SQL. Returns how many were new.
+
+    CALLED RIGHT AFTER THE SCAN, where the drops exist. The adapter records them on itself
+    during find_deposits_to_address() and -- counted 2026-10-01 -- nothing under
+    swap_terminal/ read that attribute: the only consumer in the tree was the diagnostic
+    script. So real money arriving in the shared account that no swap could claim reached a
+    log line and nothing else, on the live path, which is rule 5's "a measurement that only
+    exists in a log is not learning" on the one path where the measurement is somebody's
+    deposit.
+
+    hasattr, NOT isinstance OR A FLAG. Three of the four adapters are UTXO chains where the
+    deposit ADDRESS identifies the swap, so nothing can be unattributable and they have no
+    such attribute -- asking for it by name is the honest test, and it keeps this function
+    from needing to know which chains exist. A new tag-attributed adapter is picked up by
+    growing the attribute, not by editing a list here (rule 11: one vocabulary, derived).
+
+    IT CLEARS NOTHING. The adapter owns that list's lifetime -- find_deposits_to_address()
+    resets it per scan -- and clearing it here would mean two owners for one piece of state,
+    with the diagnostic reading an emptied list depending on call order.
+
+    THE RETURN VALUE IS NOT A GATE. Nothing downstream branches on it; the caller discards it
+    and the swap's own crediting is computed exactly as before. A stranded deposit is a fact
+    about the ACCOUNT and this swap has no claim on it either way, so letting it change this
+    swap's outcome would be attributing by proximity -- which is the mistake the whole
+    mechanism exists to refuse.
+    """
+    drops = getattr(adapter, "unattributable_drops", None)
+    if not drops:
+        return 0
+    return record_unattributable(db, stranded_rows(drops, asset), now=utc_now_iso())
 
 
 def warn_on_multi_vout_rows(swap_id: str, rows) -> None:
@@ -180,6 +215,7 @@ def refresh_swap_from_chain(db, config, adapters: dict, swap: dict) -> dict:
     asset = swap["from_asset"]
     adapter = adapters[asset]
     events = adapter.find_deposits_to_address(swap["deposit_address"])
+    record_what_nobody_can_claim(db, asset, adapter)
 
     # FILTER BY TAG BEFORE CREDITING, and this is a money bug that would only
     # appear once XRP went live. For BTC, LTC and GRC the deposit ADDRESS is the
