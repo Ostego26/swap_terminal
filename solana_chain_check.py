@@ -1865,7 +1865,13 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
             f"\n      {coverage_clause(adapter, limit)}",
         ]
         lines.extend(
-            f"\n      {d.signature}\n        {d.credits} credit(s) dropped: {d.why}"
+            # THE AMOUNT, now that UnattributableCredit carries one. This line listed the
+            # signature and the reason and not the number -- which is the thing an operator
+            # needs first to decide whether to go looking, and the reason the field was added.
+            # Named as a delta at the point of print, because the summary's `balance` step a few
+            # lines up shows a different quantity in the same unit (see the adapter's warning).
+            f"\n      {d.signature}\n        {d.amount} credited by this transaction and "
+            f"DROPPED ({d.credits} credit(s)): {d.why}"
             for d in dropped
         )
         # THE ADAPTER'S OWN WARNING, folded in rather than left to cross the block. The

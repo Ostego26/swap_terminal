@@ -3067,3 +3067,31 @@ def test_a_step_line_claims_nothing_about_readers_it_did_not_run():
     assert "was NOT exercised by this run" in summary_text(
         CreditPathObserved(address_read=True, is_spl=True, signatures=5, credits=0, refused=0,
                            targeted_read_decoded=True))
+
+
+def test_a_dropped_credits_AMOUNT_is_on_the_line_and_named_as_a_delta():
+    """The number an operator needs first, and which quantity it is.
+
+    The 2026-10-01 native run printed, four lines apart:
+
+        balance ...  ok  28.7786992 SOL
+        ... 1 credit(s) dropped, 28.7786992 SOL in total
+
+    Two different quantities that happened to print the same number -- the transaction's
+    balance DELTA and the account's whole balance. They are equal exactly when the dropped
+    credit is the account's funding transaction, and nothing on the screen said which it was.
+    The step's own per-drop line meanwhile listed the signature and the reason and no amount at
+    all, which is the number that decides whether anyone goes looking.
+
+    MUTATION: drop the amount from the line, or call it a total, and this fails.
+    """
+    line = _deposits_line(
+        _DepositStub(drops=[_a_drop(credits=1, amount=28.7786992)], signatures_read=8),
+        "rADDR", 10)
+    assert "28.7786992 credited by this transaction" in line, (
+        "the amount, named as a delta rather than as a total or a balance"
+    )
+    assert "in total" not in line, (
+        "'in total' is what made it indistinguishable from the account's balance"
+    )
+    assert "1 credit(s)" in line, "and the count stays -- both numbers matter to a human"

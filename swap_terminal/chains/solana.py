@@ -937,10 +937,20 @@ class SolanaAdapter:
                 # Adding a parameter would have been a second source for one fact.
                 amount=stranded, address=str(credits[0]["address"])))
             logger.warning(
+                # "CREDITED BY THIS TRANSACTION", NOT "IN TOTAL". The operator's 2026-10-01
+                # native run printed `28.7786992 SOL in total` four lines under
+                # `balance ... ok 28.7786992 SOL`, and the two are different quantities that
+                # happened to print the same number: one is this transaction's DELTA
+                # (post[index] - pre[index]) and the other is the account's whole balance. I
+                # could not tell them apart reading the block either, which is rule 14's "state
+                # what the number means, next to the number" -- the reader has the screen, not
+                # the source. They are equal when the dropped credit IS the account's funding
+                # transaction, and that is worth being able to see rather than infer.
                 "SOL deposit %s to the shared account CANNOT BE ATTRIBUTED and was NOT credited: "
-                "%s. %d credit(s) dropped, %s SOL in total. The coins arrived and are real; "
-                "matching them to a swap is a human's job, and crediting them to whichever swap "
-                "was being refreshed would pay the wrong person.",
+                "%s. %d credit(s) dropped, %s SOL credited to it BY THIS TRANSACTION (a balance "
+                "delta, not the account's balance). The coins arrived and are real; matching "
+                "them to a swap is a human's job, and crediting them to whichever swap was "
+                "being refreshed would pay the wrong person.",
                 signature, why, len(credits), stranded,
             )
             return []
