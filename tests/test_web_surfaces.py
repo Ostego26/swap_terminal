@@ -1294,3 +1294,89 @@ def test_the_tag_chain_instruction_states_the_amount(client):
     assert "Send exactly" in body, "the tag branch must state the amount like the address branch"
     assert "1000.00000000" in body, "to 8 places and with the asset named, as the address branch does"
     assert "both halves are\n       needed" in body or "both halves are" in body
+
+
+def test_the_deposit_panel_offers_the_wallet_menu_the_qr_and_the_request(client):
+    """All three on the page, for a SOL swap that is accepting a deposit.
+
+    Asked for 2026-10-01: "creata a clicking submenu of wallets ... make the QR
+    code too". Asserted on the rendered page rather than on payment_options()
+    alone, because the view can be right while the template never reads it --
+    which is how the figures list carried a payout address and no deposit
+    address for weeks.
+    """
+    seed_swap(client, "s_paymenu0000000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_paymenu0000000").get_data(as_text=True)
+
+    assert 'class="wallet-menu"' in body
+    for name in ("Phantom", "Solflare", "Coinbase Wallet"):
+        assert name in body, f"{name} is in the catalog and must reach the page"
+    assert "MetaMask" not in body, "removed at the operator's request; it cannot sign for SOL"
+
+    # The QR, drawn by the server. swap_terminal/qr_svg.py says why not in JS.
+    assert 'class="pay-qr"' in body
+    assert "<svg" in body
+
+    # And the request itself, copyable, for a wallet neither probed nor scanned.
+    assert f"solana:{SOL_DEPOSIT_ACCOUNT}?amount=" in body
+    assert 'aria-label="Copy the payment request"' in body
+
+
+def test_the_page_never_decides_which_chains_a_wallet_supports(client):
+    """Capability is the server's; PRESENCE is the browser's. Keeping them apart.
+
+    A JavaScript file deciding which chains a wallet signs for would be logic the
+    server cannot check, on the page that tells customers where to send money. So
+    script.js probes `window.<provider_path>` and nothing more -- the chain list
+    never reaches it.
+
+    MUTATION: hardcode a chain list in script.js and this fails.
+    """
+    script = client.get("/static/script.js").get_data(as_text=True)
+
+    assert "wireWalletMenu();" in script, "declared but never called"
+    assert "providerAt" in script
+    # The catalog's vocabulary must not appear in the browser.
+    assert '"SOL"' not in script and "'SOL'" not in script, (
+        "the page must not carry a chain list; services/wallet_menu.py owns capability"
+    )
+    # No wallet library: chains/solana_pay.py built the request and the browser
+    # hands it over unaltered.
+    assert "web3.js" not in script
+    assert "@solana" not in script
+
+
+def test_a_wallet_that_is_not_installed_is_disabled_rather_than_dead(client):
+    """The entry has to carry where to get it, since only the browser knows.
+
+    A button that does nothing because an extension is absent is the dead
+    affordance `class="copyable"` was for three weeks.
+    """
+    seed_swap(client, "s_payinst0000000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_payinst0000000").get_data(as_text=True)
+
+    assert "data-install=" in body, "the page needs the install URL to offer it"
+    assert "data-provider=" in body, "and the global to probe for"
+
+    script = client.get("/static/script.js").get_data(as_text=True)
+    assert "button.disabled = true" in script, "an absent wallet must not look clickable"
+    assert "not installed" in script
+
+
+def test_a_closed_swap_is_offered_no_wallet_menu_and_no_qr(client):
+    """Same refusal the deposit panel already makes, for the thing a camera acts on.
+
+    MUTATION: render the panel unconditionally and a `failed` swap shows a
+    scannable code pointing at a swap nothing will advance.
+    """
+    seed_swap(client, "s_payclosed00000", "failed",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_payclosed00000").get_data(as_text=True)
+
+    assert 'class="wallet-menu"' not in body
+    assert 'class="pay-qr"' not in body
+    assert "solana:" not in body
+    # And it still says the swap is closed, which is the thing that matters.
+    assert "no longer accepting" in body

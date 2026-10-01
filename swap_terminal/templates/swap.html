@@ -107,6 +107,75 @@
     <p class="panel-note">{{ deposit.note }}</p>
   {% endif %}
 
+  {#- HOW TO PAY IT. Asked for by the operator 2026-10-01: "creata a clicking submenu of
+      wallets of coinbase, metamask, and phatom" and "make the QR code too".
+
+      EVERY PART OF THIS IS OPTIONAL AND THE ADDRESS ABOVE IS NOT. A customer with no
+      browser wallet, a blocked clipboard and no phone camera can still read the account
+      and the memo and type them into whatever they use. That ordering is deliberate:
+      the instruction is the thing, and this panel is three conveniences wrapped around
+      it. So each piece renders only when it can actually work, and says so when it
+      cannot, rather than leaving a dead button.
+
+      It appears only while the swap accepts a deposit -- services/swap_view.
+      payment_options() returns everything empty otherwise. A scannable code is the most
+      live-looking deposit target there is, and swap.html already refuses to show one for
+      a closed swap (found 2026-09-26 by looking at a rendered `under_review` swap). -#}
+  {% if view.pay.uri %}
+  <div class="pay-options">
+    <h3 class="pay-heading">Or pay it from a wallet</h3>
+
+    {% if view.pay.show_wallets %}
+    {#- THE MENU IS SERVER-RENDERED AND THE PAGE ONLY ENABLES ENTRIES. The catalog in
+        services/wallet_menu.py is the authority on what each wallet CAN sign for;
+        static/script.js probes `window.<provider_path>` and is the authority on what is
+        INSTALLED. Keeping those apart is what stops the page deciding, in JavaScript the
+        server cannot check, which chains a wallet supports.
+
+        A wallet that cannot sign for this chain is SHOWN, disabled, with the reason --
+        not hidden. MetaMask is an Ethereum wallet and cannot hold SOL at all (secp256k1
+        against ed25519), and a customer who has it installed and sees no entry concludes
+        the page is broken and goes on trying. -#}
+    <ul class="wallet-menu" data-pay-uri="{{ view.pay.uri }}">
+      {% for entry in view.pay.wallets %}
+      <li class="wallet-entry{% if not entry.can_sign %} wallet-entry-unusable{% endif %}">
+        {% if entry.can_sign %}
+        <button type="button" class="wallet-button" data-provider="{{ entry.wallet.provider_path }}"
+                data-install="{{ entry.wallet.install_url }}" data-name="{{ entry.wallet.name }}">
+          {{ entry.wallet.name }}
+        </button>
+        <span class="wallet-state" aria-live="polite">checking&#8230;</span>
+        {% else %}
+        <span class="wallet-name-disabled">{{ entry.wallet.name }}</span>
+        <span class="wallet-state">{{ entry.why_not }}</span>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="panel-note">A wallet opens with the amount and the memo already filled in. Nothing
+       moves until you approve it there, and this terminal never sees your key.</p>
+    {% endif %}
+
+    {#- THE QR, drawn on the SERVER. swap_terminal/qr_svg.py has the reasoning: a QR
+        encodes the deposit ADDRESS, so a JavaScript encoder that is compromised or merely
+        buggy draws a different address and a phone obediently pays it, with every
+        server-side check passing because the server was never asked. -#}
+    {% if view.pay.qr %}
+    <figure class="pay-qr">
+      {{ view.pay.qr | safe }}
+      <figcaption class="panel-note">Scan with a phone wallet. It encodes the same account, amount
+         and memo shown above &#8212; drawn by this server, not by anything in your browser.</figcaption>
+    </figure>
+    {% elif view.pay.qr_unavailable %}
+    <p class="panel-note">{{ view.pay.qr_unavailable }}</p>
+    {% endif %}
+
+    {#- The raw request, last and copyable, for a wallet neither probed nor scanned. -#}
+    <p class="field-label">The payment request itself</p>
+    {{ copy_field(view.pay.uri, "the payment request") }}
+  </div>
+  {% endif %}
+
   <p class="panel-note">Quote window: {{ view.window.display }} &#8212; {{ view.window.note }}</p>
 </section>
 

@@ -693,3 +693,83 @@ tbody tr:hover { background: var(--surface-2); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+
+/* --- paying a deposit from a wallet ------------------------------------------
+ *
+ * Added 2026-10-01 for the wallet submenu and the QR. Three conveniences around
+ * an instruction that stands without them, so the layout keeps the account and
+ * the memo above and sets this apart rather than competing with it.
+ */
+.pay-options {
+  margin-top: var(--s4);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line-strong);
+}
+
+.pay-heading {
+  font-size: var(--t-md);
+  margin: 0 0 var(--s2);
+}
+
+.wallet-menu {
+  list-style: none;
+  margin: 0 0 var(--s3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.wallet-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;   /* a long "cannot pay this deposit" reason wraps under the name on a phone */
+}
+
+.wallet-button {
+  font-family: inherit;
+  font-size: var(--t-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--s2) var(--s3);
+  cursor: pointer;
+  min-width: 10rem;
+  text-align: left;
+}
+
+.wallet-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.wallet-state {
+  font-size: var(--t-sm);
+  color: var(--text-muted);
+}
+
+.wallet-name-disabled {
+  font-size: var(--t-sm);
+  color: var(--text-muted);
+  min-width: 10rem;
+}
+
+/* The QR is drawn by the server as inline SVG with no classes of its own
+ * (swap_terminal/qr_svg.py passes svgclass=None), so it is sized here.
+ * max-width keeps it from overflowing a narrow panel; height auto preserves the
+ * square, because a stretched QR is an unscannable QR. */
+.pay-qr {
+  margin: 0 0 var(--s3);
+}
+
+.pay-qr svg {
+  display: block;
+  width: 196px;
+  max-width: 100%;
+  height: auto;
+  background: #fff;   /* a QR needs light quiet zones; dark mode must not invert it */
+  padding: var(--s2);
+  border-radius: var(--radius-sm);
+}

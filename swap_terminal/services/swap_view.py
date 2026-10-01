@@ -93,11 +93,14 @@ from __future__ import annotations
 
 import re
 
+import qr_svg
+from chains.solana_pay import payment_uri
 from microfortnights import format_duration
 from modules.address_authority import check_address
 
 from .helpers import parse_iso
 from .swap_service import DEPOSIT_TAG_COLUMN, TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION
+from .wallet_menu import any_can_sign, wallets_for
 
 # The happy path, in order. This is the rail the customer watches fill, and it
 # is a DISPLAY ordering, not a state machine: the transitions are owned by
@@ -790,6 +793,57 @@ def attention(swap: dict, now_iso: str) -> dict:
     }
 
 
+def payment_options(swap: dict) -> dict:
+    """How a customer can pay this deposit: a request URI, a QR, and a wallet menu.
+
+    ONE FUNCTION so the three stay consistent. The URI is what the QR encodes
+    AND what a wallet is handed, so two builders would be rule 8's duplicate on
+    the string that decides where money goes.
+
+    EVERY FIELD IS EMPTY FOR A CHAIN WITH NO REQUEST FORMAT, rather than absent.
+    A template asking `view.pay.uri` for a GRC swap gets "" and renders nothing;
+    a missing key would raise in Jinja's default-undefined and take out the page
+    for a chain this feature simply does not cover. Rule 14's "(none) is a
+    result" applied to a view dict.
+
+    WHY `uri` CAN BE EMPTY EVEN ON SOL. payment_uri() refuses an absent account
+    or memo rather than producing half an instruction, and that refusal is
+    caught here: a swap in that state already renders deposit.problem on the
+    page, and a second exception from the payment panel would replace a specific
+    explanation with a 500.
+    """
+    asset = swap.get("from_asset", "")
+    accepting = swap.get("status", "") in DEPOSIT_ACCEPTING_STATUSES
+    empty = {"uri": "", "qr": None, "qr_unavailable": "", "wallets": [], "show_wallets": False}
+    if not accepting or asset != "SOL":
+        # SOL only, and named rather than derived from the tag model: XRP is also
+        # tag-attributed but its deposit request format is an X-address, which
+        # services/xrp_tag_service.py refuses to allocate against for reasons
+        # written out there. Wiring XRP in is a separate piece of work, and a
+        # view that quietly produced a Solana URI for it would be worse than one
+        # that produces nothing.
+        return empty
+    try:
+        uri = payment_uri(
+            str(swap.get("deposit_address") or ""),
+            swap.get("expected_input_amount"),
+            swap.get("deposit_tag"),
+        )
+    except ValueError:
+        # CHECKED, and the caller can tell: every field stays empty, so the page
+        # renders no payment panel and the deposit panel's own `problem` line is
+        # what explains the swap. Not a blind catch -- payment_uri() raises
+        # ValueError for exactly two states, both of which that line covers.
+        return empty
+    return {
+        "uri": uri,
+        "qr": qr_svg.render(uri),
+        "qr_unavailable": "" if qr_svg.is_available() else qr_svg.unavailable_reason(),
+        "wallets": wallets_for(asset),
+        "show_wallets": any_can_sign(asset),
+    }
+
+
 def swap_display(swap: dict, now_iso: str) -> dict:
     """Assemble everything the swap page renders. One call, one pass.
 
@@ -807,6 +861,22 @@ def swap_display(swap: dict, now_iso: str) -> dict:
         "rail": stage_rail(swap.get("status", "")),
         "confirmations": confirmation_progress(swap),
         "deposit": deposit_instruction(swap),
+        # HOW TO PAY IT, added 2026-10-01 at the operator's request ("a clicking
+        # submenu of wallets ... make the QR code too").
+        #
+        # Built here rather than in the template so that the one artifact a
+        # customer's wallet acts on is assembled in Python, where a test asserts
+        # on the characters. chains/solana_pay.py's docstring has the full
+        # reasoning: a QR and a wallet request both carry the deposit ADDRESS,
+        # and third-party JavaScript assembling either one can retarget it with
+        # every server-side check still passing.
+        #
+        # ONLY WHILE THE SWAP IS ACCEPTING A DEPOSIT. A closed swap gets no
+        # payment request and no QR -- templates/swap.html already refuses to
+        # show a live-looking deposit target for one (found by looking at a
+        # rendered `under_review` swap on 2026-09-26), and a scannable code is
+        # the most live-looking target there is.
+        "pay": payment_options(swap),
         "window": quote_window(swap, now_iso),
         "on_rail": swap.get("status", "") in STAGE_ORDER,
         "accepting_deposit": swap.get("status", "") in DEPOSIT_ACCEPTING_STATUSES,

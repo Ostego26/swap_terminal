@@ -437,8 +437,89 @@ function wireCopyButtons() {
   });
 }
 
+/*
+ * THE WALLET MENU. The page decides PRESENCE; the server decided CAPABILITY.
+ *
+ * Asked for by the operator 2026-10-01: "creata a clicking submenu of wallets".
+ *
+ * services/wallet_menu.py is the authority on which chains each wallet can sign
+ * for, and it rendered the entries. This file answers the one question only a
+ * browser can: is the extension actually installed. Keeping those apart is the
+ * point -- a JavaScript file deciding which chains a wallet supports would be
+ * logic the server cannot check, on the page that tells customers where to send
+ * money.
+ *
+ * NO WALLET LIBRARY. chains/solana_pay.py built the request and the browser
+ * hands it over unaltered. The usual adapters are a megabyte of third-party code
+ * that would have the deposit address passing through it, and a buggy or
+ * compromised copy substitutes one base58 string for another with every
+ * server-side check still passing.
+ *
+ * WHAT IS NOT ESTABLISHED, and the operator will find out before I do: whether
+ * each extension honours a raw `solana:` request. Phantom and Solflare document
+ * a `request`/`connect` provider API, and signing a transaction through it needs
+ * a transaction OBJECT, which needs transaction construction -- the thing this
+ * design deliberately does not do in the browser. So the click opens the request
+ * URI and lets the wallet interpret it. If an extension ignores it, the honest
+ * fix is for the SERVER to build and serialize the transaction and have the
+ * extension sign that; the primitives for it are already in
+ * chains/solana_address.py and chains/solana_units.py. That is a bigger piece
+ * and is not written on a guess about extension behaviour.
+ *
+ * Until then the button reports what happened rather than pretending: it says
+ * "opening <wallet>" and the QR and the copy fields are right beside it.
+ */
+function providerAt(path) {
+  // A dotted path from `window`, resolved step by step, because
+  // `window.phantom.solana` throws on a host where `phantom` is absent -- which
+  // is every host without that extension, i.e. the common case.
+  return path.split(".").reduce(function (node, key) {
+    return node && node[key] ? node[key] : null;
+  }, window);
+}
+
+function wireWalletMenu() {
+  const menu = document.querySelector(".wallet-menu");
+  if (!menu) return;
+  const uri = menu.getAttribute("data-pay-uri");
+
+  menu.querySelectorAll(".wallet-button").forEach(function (button) {
+    const state = button.parentElement.querySelector(".wallet-state");
+    const name = button.getAttribute("data-name");
+    const found = providerAt(button.getAttribute("data-provider"));
+    if (found) {
+      // "installed" and not "ready": the provider object existing says the
+      // extension is there, not that it will accept this request. Claiming the
+      // stronger thing is what rule 17 is about, in a UI string.
+      if (state) state.textContent = "installed";
+    } else {
+      button.disabled = true;
+      const install = button.getAttribute("data-install");
+      if (state) {
+        state.textContent = "";
+        const link = document.createElement("a");
+        link.href = install;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "not installed \u2014 get it";
+        state.appendChild(link);
+      }
+    }
+  });
+
+  menu.addEventListener("click", function (event) {
+    const button = event.target.closest(".wallet-button");
+    if (!button || button.disabled) return;
+    const state = button.parentElement.querySelector(".wallet-state");
+    if (state) state.textContent = "opening " + button.getAttribute("data-name") + "\u2026";
+    // The request, unaltered, exactly as the server built it.
+    window.location.href = uri;
+  });
+}
+
 wireQuoteForm();
 wireSwapForm();
 wireLivePolling();
 clearBrowserFilledPayoutAddress();
 wireCopyButtons();
+wireWalletMenu();

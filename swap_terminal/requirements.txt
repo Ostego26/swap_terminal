@@ -146,3 +146,34 @@ yfinance>=0.2,<2.0
 # 3.23.0 is the version the 26 tests in tests/test_monero_keys.py pass against,
 # and 4.0 is the next major above it.
 pycryptodome>=3.20,<4.0
+
+# QR codes for a deposit instruction, drawn on the SERVER.
+#
+# Added 2026-10-01 for the deposit page's payment panel, at the operator's
+# request. The alternative to a dependency here was a JavaScript QR encoder on
+# the page, and that is the trade swap_terminal/qr_svg.py and
+# chains/solana_pay.py both refuse for the same reason: a QR encodes the deposit
+# ADDRESS, so an encoder that is compromised or merely buggy draws a different
+# address, a phone obediently pays it, and every server-side check passes because
+# the server was never asked.
+#
+# The other alternative was hand-rolling Reed-Solomon error correction --
+# roughly three hundred lines of finite-field arithmetic whose failure mode is a
+# symbol that scans to the wrong bytes. That is the same call pycryptodome above
+# is justified by, and an easier one: QR is a standardized encoding with
+# published test vectors.
+#
+# MEASURED 2026-10-01 before adding it, because this file's header is explicit
+# that a deployment must not install anything it does not need "onto a host that
+# holds wallet RPC credentials":
+#
+#     pip show segno  ->  Requires:      (empty -- no transitive dependencies)
+#     pure Python, no C extension, no build step
+#     a Solana Pay URI encodes to a version 6 symbol, 49x49, ~2.8KB of SVG
+#
+# IT IS OPTIONAL AT RUNTIME, which is why the version floor is loose. A host
+# without it gets None from qr_svg.render(), the page says the QR is unavailable
+# and why, and the account, memo and wallet menu work unchanged -- a missing
+# drawing library must never take out the one page a customer needs in order to
+# be paid.
+segno>=1.6,<2.0
