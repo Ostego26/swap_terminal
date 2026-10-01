@@ -379,40 +379,91 @@ def worker_status(name: str, run_dir: Path) -> dict:
 def endpoint_summary() -> list[str]:
     """Lines describing what the workers will talk to (rule 14).
 
-    Every parameter that decides the answer is echoed: the database, each
-    chain's RPC endpoint, and the confirmation threshold that governs when a
-    deposit is credited. The default-port note is labeled as what it is -- the
-    port a daemon uses by default -- and NOT presented as a measurement of
-    which network the daemon is actually on. Nothing here connects to anything,
-    so nothing here can honestly claim to know the network; a port number is a
-    reason to believe, not a check (rule 17).
+    ONE LINE OF ITS OWN -- the database -- AND THEN workers/common.endpoint_lines().
+    This function used to render the chains itself, with its own `default_ports`
+    dict and its own `for asset in ("BTC", "LTC", "GRC"):` loop, and that was
+    CLAUDE.md rule 8's "two copies of one rule is a bug with a delay on it"
+    sitting on a SAFETY banner.
+
+    MEASURED 2026-10-01, on the live host, which is what forced this. The
+    operator ran `python3 swap_terminal/supervisor.py start` while rehearsing a
+    devnet-SOL -> testnet-GRC swap and got:
+
+        BTC rpc           127.0.0.1:0  wallet=(default wallet)  <- not a default port for this chain
+        LTC rpc           127.0.0.1:0  wallet=(default wallet)  <- not a default port for this chain
+        GRC rpc           127.0.0.1:25715  wallet=(default wallet)  <- not a default port for this chain
+        network           NOT VERIFIED here -- ...
+        about to spawn    a payout worker CAN broadcast. Stop now if this database is pointed at a funded mainnet wallet.
+
+    Three chains, and NOT ONE WORD ABOUT SOL -- not the endpoint, not the
+    commitment threshold, not whether a Solana adapter was constructed at all --
+    on the banner printed immediately above the line that warns the spawn can
+    move money. The deposit_watcher it was about to start is the process that
+    would or would not see that devnet deposit. The banner could not say which,
+    and it read EXACTLY THE SAME either way. XRP was missing for the same
+    reason: this loop was written when three chains was all there was, and a
+    fourth and fifth arrived somewhere else.
+
+    Two further defects came with the duplication, and both are visible in the
+    paste above:
+
+      `127.0.0.1:0`   An unconfigured chain rendered as a configured one.
+          chains/registry.py SKIPS a port-0 chain, so the banner was naming two
+          adapters that do not exist. endpoint_lines() fixed this on 2026-09-26
+          and the fix never reached here, because here was a second copy.
+      `not a default port for this chain`   Printed against GRC's 25715, which
+          IS the Gridcoin test port. network_target.CHAIN_PORTS knows that;
+          this function's hand-maintained `default_ports` dict had 25779 in it.
+          A hand-written copy of a vocabulary that is derived elsewhere
+          (rule 11), disagreeing with the derivation, and telling the operator
+          their test chain was unrecognized.
+
+    So the chain rendering is now imported rather than reimplemented. There is
+    one answer to "where is each chain and what does it wait for", it lives in
+    the module the workers themselves print from, and a sixth chain cannot
+    arrive in one banner and not the other.
+
+    WHAT IS STILL SAID HERE AND NOT THERE. The database path, because
+    endpoint_lines() is called by three workers that each print their own
+    database line already; and the network disclaimer, because nothing in this
+    process opens a socket, so nothing in this process can honestly claim to
+    know which network a daemon is on. A port number is a reason to believe,
+    not a check (rule 17).
     """
-    default_ports = {
-        8332: "BTC mainnet default port",
-        18332: "BTC testnet default port",
-        9332: "LTC mainnet default port",
-        19332: "LTC testnet default port",
-        15715: "GRC mainnet default port",
-        25779: "GRC testnet default port",
-    }
-    lines = [f"  database          {Config.DB_PATH}"]
-    for asset in ("BTC", "LTC", "GRC"):
-        rpc = Config.RPC[asset]
-        port = int(rpc["port"])
-        hint = default_ports.get(port, "not a default port for this chain")
-        confirmations = getattr(Config, f"{asset}_MIN_CONFIRMATIONS")
-        wallet = rpc["wallet"] or "(default wallet)"
-        lines.append(
-            f"  {asset} rpc           {rpc['host']}:{port}  wallet={wallet}  <- {hint}"
-        )
-        # Confirmations are a COUNT OF BLOCKS and are never rendered in µfn
-        # (rule 6): six confirmations is six confirmations.
-        lines.append(f"  {asset} confirmations {confirmations} blocks before a deposit is credited")
-    lines.append(
+    # DEFERRED, NOT MODULE-SCOPE, and the noqa below is a claim about two
+    # things that were both checked rather than assumed (rule 19).
+    #
+    # Structural: workers.common imports chains.registry, chains.solana and
+    # chains.xrp at module scope. `supervisor.py stop` needs none of that to
+    # send a signal to a pid, and at module scope an ImportError anywhere in
+    # the chain code would propagate out of `import supervisor` and take the
+    # kill path down with it -- the reaper defeated by the thing it reaps
+    # (rule 13). The stop path stays independent of the chain code.
+    #
+    # Measured 2026-10-01, three runs each, warm page cache, on this machine:
+    #
+    #     import supervisor                       0.022 / 0.021 / 0.024 s
+    #     import supervisor, workers.common       0.143 / 0.174 / 0.214 s
+    #
+    # so pulling the chain modules in costs roughly 0.15s of the 0.02s this
+    # module takes on its own -- about eight times the import, paid by every
+    # `start`, `stop` and `status` invocation whether or not a banner is
+    # printed. (A first, cold-cache measurement read 0.95s for workers.common
+    # alone; it is kept here because it is what an operator on a cold host
+    # actually waits, and because a single warm number quoted as "the" cost
+    # would be the measurement-in-prose this repo keeps re-learning.) Not a
+    # large number, but `stop` prints no chain line at all -- `start` (line
+    # ~482) and `status` (line ~547) are the only two callers -- so on the one
+    # subcommand an operator runs when something is already wrong it buys
+    # nothing.
+    from workers.common import endpoint_lines  # noqa: PLC0415 -- measured above
+
+    return [
+        f"  database          {Config.DB_PATH}",
+        *endpoint_lines(),
         "  network           NOT VERIFIED here -- the port above is only the default for a network, "
-        "not proof of one. Ask the daemon (`getblockchaininfo`) before trusting it."
-    )
-    return lines
+        "not proof of one. Ask the daemon (`getblockchaininfo`) before trusting it.",
+    ]
 
 
 def _print_block(title: str, lines: list[str]) -> None:

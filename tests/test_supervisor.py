@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 import supervisor
+from workers.common import endpoint_lines
 
 # A child that ignores SIGTERM, to exercise the SIGKILL escalation. It installs
 # the handler before signalling readiness so there is no window where a TERM
@@ -261,3 +262,87 @@ def test_a_zombie_is_not_alive(tmp_path):
     # The one the supervisor uses:
     assert supervisor.process_alive(child.pid) is False
     child.wait(timeout=10)
+
+
+def test_the_start_banner_names_every_chain_the_workers_will_watch():
+    """The gap this file's banner had on 2026-10-01, pinned so it cannot return.
+
+    MEASURED, from the live host, while the operator was rehearsing a
+    devnet-SOL -> testnet-GRC swap. `python3 swap_terminal/supervisor.py start`
+    printed BTC, LTC and GRC and NOT ONE WORD about SOL or XRP -- immediately
+    above its own line warning that `a payout worker CAN broadcast`. The
+    deposit_watcher it was about to spawn is the process that would or would
+    not see that Solana deposit, and the banner read identically whether or not
+    the supervisor had inherited SOL_RPC_URL at all.
+
+    The cause was rule 8: endpoint_summary() had its own
+    `for asset in ("BTC", "LTC", "GRC"):` loop, a second copy of what
+    workers/common.endpoint_lines() already did, written when three chains was
+    all there was. Two chains arrived in the other copy and not in this one.
+
+    So the assertion is the stronger one rather than "SOL appears": the
+    supervisor's banner must CONTAIN endpoint_lines() verbatim. A test that
+    only looked for the string "SOL" would pass again the moment a sixth chain
+    is added to one copy and not the other, which is the identical defect one
+    chain later.
+    """
+    summary = supervisor.endpoint_summary()
+    chain_lines = endpoint_lines()
+
+    assert chain_lines, "endpoint_lines() returned nothing; there would be nothing to check"
+    for line in chain_lines:
+        assert line in summary, (
+            f"the supervisor banner is missing a chain line that the workers print:\n"
+            f"  missing: {line!r}\n  banner:\n" + "\n".join(f"    {s}" for s in summary)
+        )
+
+    # And every chain the application can be configured for is named, so that a
+    # chain cannot be silently absent from the banner printed above "about to
+    # spawn". Named explicitly, because the loop above would be satisfied by
+    # two implementations that agree on being wrong together.
+    text = "\n".join(summary)
+    for asset in ("BTC", "LTC", "GRC", "SOL", "XRP"):
+        assert any(line.strip().startswith(asset) for line in summary), (
+            f"{asset} is absent from the start banner:\n{text}"
+        )
+
+
+def test_the_start_banner_still_says_the_database_and_refuses_to_claim_a_network():
+    """The two things endpoint_summary() says that endpoint_lines() does not.
+
+    Delegating the chain rendering must not drop them. The database path is
+    what makes the "stop now if this is pointed at a funded mainnet wallet"
+    warning one line above actionable, and the network disclaimer is rule 17
+    in output form: this process opens no socket, so it cannot know which
+    network a daemon is on.
+    """
+    summary = supervisor.endpoint_summary()
+    text = "\n".join(summary)
+
+    assert summary[0].strip().startswith("database"), f"the database must lead the banner:\n{text}"
+    assert str(supervisor.Config.DB_PATH) in summary[0]
+    assert "NOT VERIFIED" in text
+
+
+def test_the_start_banner_never_prints_a_credential():
+    """`user` and `password` are one key away from `host` and `port`.
+
+    Asserted on the supervisor's own banner and not only on the workers',
+    because this is the banner an operator pastes into a chat window when
+    something is wrong -- which is exactly how a leaked RPC password would
+    travel. endpoint_summary() formats no credential today; this is what keeps
+    a future `**rpc` in an f-string from being a silent one.
+    """
+    original = supervisor.Config.RPC
+    poisoned = {
+        asset: {**values, "user": "canary-rpc-user", "password": "canary-rpc-password"}
+        for asset, values in original.items()
+    }
+    supervisor.Config.RPC = poisoned
+    try:
+        text = "\n".join(supervisor.endpoint_summary())
+    finally:
+        supervisor.Config.RPC = original
+
+    assert "canary-rpc-password" not in text
+    assert "canary-rpc-user" not in text
