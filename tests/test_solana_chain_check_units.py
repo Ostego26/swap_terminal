@@ -2766,3 +2766,36 @@ def test_the_stranded_step_elides_what_its_own_list_already_gave():
         "once in the step's list, once as the head of the adapter's raw warning -- that head is "
         "what proves the live path's exact wording"
     )
+
+
+def test_the_summary_never_says_the_OTHER_reader_decoded_nothing():
+    """A run reads one reader or the other, so the other one's state is not observable here.
+
+    From the operator's fifth clean --find-holder run, 2026-10-01. The summary ended:
+
+        Every field name in that reader had to be right to get there. The other reader,
+        _native_credits (drop --mint), has not decoded one.
+
+    _native_credits was never called in that run. CreditPathObserved holds nothing about it and
+    cannot -- `is_spl` decides which reader runs, and only one does. Stated flatly, "has not
+    decoded one" reads as a measurement of that reader across every run: rule 17's failure, a
+    reason to believe something written in the same voice as having checked it.
+
+    MUTATION: restore "has not decoded one" and this fails on either reader.
+    """
+    for observed, named, ran in ((SPL_DECODED, "_native_credits (drop --mint)", "_spl_credits"),
+                                 (NATIVE_DECODED, "_spl_credits (needs --mint)",
+                                  "_native_credits")):
+        block = " ".join(credit_path_lines(observed))
+        assert f"{ran} DECODED a real amount" in block, "what this run DID establish"
+        assert f"{named}, was NOT exercised by this run" in block
+        assert "nothing here says whether it works" in block, (
+            "and the limit of the claim, next to the claim (rule 14)"
+        )
+        assert "has not decoded one" not in block, (
+            "a run that never called a reader has measured nothing about it"
+        )
+        assert "never" in block and "both" in block, (
+            "and WHY it was not exercised -- a run reads one or the other, so this is not a gap "
+            "the operator left open by accident"
+        )

@@ -921,13 +921,22 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
                 "  getAccountInfo and find_deposits_to_address did not run, because no address was",
                 "  read. A wrong field name there loses a deposit rather than raising."]
 
+    # "NOT EXERCISED", NOT "HAS NOT DECODED ONE". The line below used to say the second, and it
+    # is a claim about a reader this run never invoked -- CreditPathObserved holds nothing about
+    # the other one and cannot, since a run is either SPL or native. Stated flatly it reads as a
+    # measurement of that reader's state across every run, which is exactly rule 17's failure:
+    # a reason to believe something written in the same voice as having checked it. What this
+    # run establishes is which reader it exercised; what it owes the operator is how to exercise
+    # the other. Caught 2026-10-01 reading the operator's fifth clean --find-holder run, where
+    # the summary asserted _native_credits had decoded nothing in a run that never called it.
     other = "_spl_credits (needs --mint)" if not observed.is_spl else "_native_credits (drop --mint)"
     if observed.decoded_an_amount:
         return [f"  CREDIT path: {observed.reader} DECODED a real amount from a real response "
                 f"({observed.credits} credited, {observed.refused} refused over "
                 f"{observed.signatures} signature(s)).",
                 "  Every field name in that reader had to be right to get there. The other reader,",
-                f"  {other}, has not decoded one."]
+                f"  {other}, was NOT exercised by this run -- a run reads one or the other, never",
+                "  both, so nothing here says whether it works."]
     if observed.signatures:
         # THE DENOMINATOR IS WHAT WAS FETCHED, NOT WHAT WAS LISTED. "matched nothing over 10" is
         # a claim about ten transactions; if one was never read, a credit may be in it and the
