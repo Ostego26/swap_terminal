@@ -55,7 +55,7 @@ import logging
 from deposit_vout_artifact import multi_vout_groups
 
 from .helpers import utc_now_iso
-from .swap_service import TAG_ATTRIBUTED_ASSETS, set_swap_status
+from .swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION, set_swap_status
 from .unattributable_deposit_service import record as record_unattributable
 from .unattributable_deposit_service import stranded_rows, unclaimed_rows
 
@@ -305,12 +305,12 @@ def process_active_swaps(db, config, adapters: dict) -> list[dict]:
         ACTIVE_STATUSES,
     ).fetchall()
     processed = [refresh_swap_from_chain(db, config, adapters, swap) for swap in swaps]
-    reconcile_shared_accounts(db, adapters, swaps)
+    reconcile_shared_accounts(db, config, adapters)
     db.commit()
     return processed
 
 
-def reconcile_shared_accounts(db, adapters: dict, active) -> int:
+def reconcile_shared_accounts(db, config, adapters: dict) -> int:
     """Once per cycle, record what arrived at a shared account that NO swap will credit.
 
     WHY HERE AND NOT IN refresh_swap_from_chain(). The question is "does any swap claim this
@@ -339,16 +339,31 @@ def reconcile_shared_accounts(db, adapters: dict, active) -> int:
     copies disagreeing means somebody is paid twice.
     """
     recorded = 0
-    for asset in sorted({swap["from_asset"] for swap in active} & set(TAG_ATTRIBUTED_ASSETS)):
+    for asset in sorted(TAG_ATTRIBUTED_ASSETS):
         adapter = adapters.get(asset)
         if adapter is None:
             continue
-        # THE SHARED ACCOUNT, TAKEN FROM A SWAP rather than read from config: on a
-        # tag-attributed chain every swap on the asset has the same deposit_address by
-        # definition, and config has already been consulted to put it there. Reading it again
-        # would be a second source for one fact, and the live failure that shape produced on
-        # 2026-09-29 is in config.py's comment on SOL_DEPOSIT_ACCOUNT.
-        addresses = {swap["deposit_address"] for swap in active if swap["from_asset"] == asset}
+        # THE ACCOUNT COMES FROM CONFIG, AND THE FIRST VERSION TOOK IT FROM AN ACTIVE SWAP.
+        # That was wrong twice over. The small half: swap_service.deposit_account() reads it
+        # from config (`config.get(variable)` for the TAG_ATTRIBUTION variable), so config is
+        # the authority and a swap's deposit_address is a COPY -- my comment claiming the
+        # reverse had it backwards.
+        #
+        # The half that mattered: deriving the ASSET SET from active swaps meant no active swap
+        # => no reconciliation at all. Money arriving at the shared account while nothing is
+        # open was still invisible, and that is the likeliest way a deposit strands -- a sender
+        # who pays late, pays twice, or pays before opening a swap. The feature would have been
+        # blind to exactly the case it exists for, and every test passed because they all seeded
+        # an active swap. Found when the live table came back empty and I went to say why.
+        variable, _name, _network = TAG_ATTRIBUTION[asset]
+        address = (config.get(variable) or "").strip()
+        if not address:
+            # NO CONFIGURED ACCOUNT MEANS NO ACCOUNT TO SCAN, not an error: swap_service
+            # refuses to create a swap on this asset while it is empty, so there is nothing
+            # that could have arrived for it.
+            continue
+        # EVERY SWAP ON THE ASSET, active or not -- see unclaimed_events() on why a completed
+        # swap still claims its tag.
         claimed = {
             int(row["deposit_tag"]): (row["id"], row["status"])
             for row in db.execute(
@@ -357,8 +372,7 @@ def reconcile_shared_accounts(db, adapters: dict, active) -> int:
                 (asset,),
             ).fetchall()
         }
-        for address in sorted(addresses):
-            events = adapter.find_deposits_to_address(address)
-            rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES)
-            recorded += record_unattributable(db, rows, now=utc_now_iso())
+        events = adapter.find_deposits_to_address(address)
+        rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES)
+        recorded += record_unattributable(db, rows, now=utc_now_iso())
     return recorded

@@ -354,6 +354,14 @@ def test_refresh_swap_from_chain_records_the_strandings(db):
 
 ACTIVE = ("awaiting_deposit", "deposit_seen", "confirming")
 
+#: What reconcile_shared_accounts() reads: the shared account per asset, from CONFIG. It used
+#: to take the address from an active swap, which made the whole pass conditional on one being
+#: open -- see that function's comment. The variable names come from
+#: swap_service.TAG_ATTRIBUTION, which is the one place that knows them.
+CONFIG = {"AMOUNT_TOLERANCE_PCT": 1.0,
+          "XRP_DEPOSIT_ACCOUNT": ACCOUNT,
+          "SOL_DEPOSIT_ACCOUNT": ACCOUNT}
+
 
 def an_event(tag, txid="tx1", amount=1.0, confirmations=5):
     return {"txid": txid, "vout": tag, "address": ACCOUNT, "amount": amount,
@@ -453,11 +461,9 @@ def test_reconcile_shared_accounts_records_once_whatever_the_swap_count(db):
             "'2026-10-01T00:00:00+00:00')",
             (swap_id, ACCOUNT, tag),
         )
-    active = db.execute("SELECT * FROM swaps").fetchall()
-
     # TWO OPEN SWAPS, and one payment carrying a tag neither of them has.
     adapter = Adapter(events=[an_event(11), an_event(99, txid="tx_orphan")])
-    recorded = deposit_service.reconcile_shared_accounts(db, {"XRP": adapter}, active)
+    recorded = deposit_service.reconcile_shared_accounts(db, CONFIG, {"XRP": adapter})
 
     assert recorded == 1, "one stranded payment, one row -- not one per open swap"
     rows = rows_in(db)
@@ -497,8 +503,7 @@ def test_reconciliation_skips_an_asset_with_no_adapter(db):
     swap on the asset is what makes the lookup happen.
     """
     seed_swap(db, "s_noadapter", 5, asset="SOL")
-    active = db.execute("SELECT * FROM swaps").fetchall()
-    assert deposit_service.reconcile_shared_accounts(db, {}, active) == 0, (
+    assert deposit_service.reconcile_shared_accounts(db, CONFIG, {}) == 0, (
         "no adapter for SOL, so nothing is scanned and nothing raises"
     )
     assert rows_in(db) == []
@@ -515,11 +520,8 @@ def test_a_COMPLETED_swap_still_claims_its_tag_in_the_db_query(db):
     """
     seed_swap(db, "s_open", 11)
     seed_swap(db, "s_done", 12, status="completed")
-    active = [row for row in db.execute("SELECT * FROM swaps").fetchall()
-              if row["status"] == "awaiting_deposit"]
-
     adapter = Adapter(events=[an_event(12, txid="tx_late")])
-    assert deposit_service.reconcile_shared_accounts(db, {"XRP": adapter}, active) == 1
+    assert deposit_service.reconcile_shared_accounts(db, CONFIG, {"XRP": adapter}) == 1
 
     row = rows_in(db)[0]
     assert row["discriminator"] == 12
@@ -542,7 +544,7 @@ def test_process_active_swaps_reconciles_the_account_once_per_cycle(db):
     seed_swap(db, "s_one", 11)
     adapter = Adapter(events=[an_event(77, txid="tx_nobodys")])
 
-    deposit_service.process_active_swaps(db, {"AMOUNT_TOLERANCE_PCT": 1.0}, {"XRP": adapter})
+    deposit_service.process_active_swaps(db, CONFIG, {"XRP": adapter})
 
     rows = rows_in(db)
     assert len(rows) == 1, "the cycle reconciled the account"
@@ -551,3 +553,53 @@ def test_process_active_swaps_reconciles_the_account_once_per_cycle(db):
     assert db.execute("SELECT COUNT(*) AS n FROM deposit_events").fetchone()["n"] == 0, (
         "and credited nothing: tag 77 is no swap's"
     )
+
+
+def test_the_account_is_reconciled_WITH_NO_OPEN_SWAP_AT_ALL(db):
+    """THE CASE THE FEATURE EXISTS FOR, and the first version was blind to it.
+
+    reconcile_shared_accounts() derived its asset set from the ACTIVE swaps, so no active swap
+    meant no reconciliation -- money arriving at the shared account while nothing was open was
+    still invisible. That is the likeliest way a deposit strands: a sender who pays late, pays
+    twice, or pays before opening a swap. Every test passed because every one of them seeded an
+    active swap, and the hole surfaced only when the live table came back empty and I went to
+    explain why.
+
+    The address comes from CONFIG now, which is where swap_service.deposit_account() reads it
+    (`config.get(variable)` for the TAG_ATTRIBUTION variable). A swap's deposit_address is a
+    copy of that, and taking it from the copy is what made the pass conditional on a swap.
+
+    MUTATION: derive the assets or the address from active swaps again and this fails with an
+    empty table while every other test in this file still passes.
+    """
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0, "nothing open"
+
+    adapter = Adapter(events=[an_event(44, txid="tx_while_closed", amount=2.5)])
+    recorded = deposit_service.reconcile_shared_accounts(db, CONFIG, {"XRP": adapter})
+
+    assert recorded == 1, "the account is scanned because it is CONFIGURED, not because a swap is"
+    row = rows_in(db)[0]
+    assert (row["txid"], row["discriminator"], row["amount"]) == ("tx_while_closed", 44, 2.5)
+    assert "no swap on this asset has that discriminator" in row["why"]
+
+
+def test_an_asset_with_no_configured_account_is_skipped(db):
+    """Nothing could have arrived for an asset whose shared account is unset.
+
+    swap_service refuses to create a swap while the variable is empty -- config.py's comment on
+    SOL_DEPOSIT_ACCOUNT records the live failure that shape produced -- so this is a RESULT and
+    not a reason to scan something address-shaped.
+
+    MUTATION: drop the empty check and the adapter is asked to scan "", which on XRP is an
+    `account_tx` for an invalid account on every cycle of the worker loop.
+    """
+    scanned = []
+
+    class Recording(Adapter):
+        def find_deposits_to_address(self, address, **kwargs):
+            scanned.append(address)
+            return super().find_deposits_to_address(address, **kwargs)
+
+    assert deposit_service.reconcile_shared_accounts(
+        db, {"AMOUNT_TOLERANCE_PCT": 1.0}, {"XRP": Recording()}) == 0
+    assert scanned == [], "no account configured, so no scan attempted"
