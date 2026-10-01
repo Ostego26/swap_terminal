@@ -373,7 +373,72 @@ function clearBrowserFilledPayoutAddress() {
   }, 0);
 }
 
+/*
+ * THE COPY BUTTONS, wired by delegation so the live region can replace its markup
+ * without rewiring anything.
+ *
+ * ASKED FOR BY THE OPERATOR 2026-10-01: "have it to where they can copy it directly
+ * with a little copy icon". Before this, class="copyable" was CSS only --
+ * styles.css sets user-select: all so a click selects the string -- and nothing
+ * here touched the clipboard. The class named an affordance the page did not have.
+ *
+ * THE TEXT COMES FROM THE ELEMENT THE CUSTOMER IS LOOKING AT, not from a data
+ * attribute. A deposit address or a memo tag that differs by one character between
+ * what is displayed and what is copied is money sent somewhere nobody can claim it,
+ * so the displayed node IS the source. templates/_copy_field.html pairs each button
+ * with exactly one .copyable inside one .copy-row.
+ *
+ * IT SAYS WHETHER IT WORKED, both ways (rule 14: never let a result print nothing).
+ * navigator.clipboard needs a secure context and a permission the browser can
+ * refuse. On failure the button says "Select it" and the text is selected for the
+ * customer, which is what user-select: all was always for -- a silent no-op would
+ * leave somebody believing they had copied an address they had not.
+ *
+ * aria-live sits on the .copy-word span -- the only node whose text changes -- so a
+ * screen reader hears the outcome. On the row it would re-announce the address itself
+ * every time the word flipped back.
+ */
+const COPY_FEEDBACK_MS = 1500;
+
+function selectCopyableText(node) {
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function wireCopyButtons() {
+  document.addEventListener("click", async function (event) {
+    const button = event.target.closest(".copy-button");
+    if (!button) return;
+    const row = button.closest(".copy-row");
+    const value = row && row.querySelector(".copyable");
+    if (!value) return;
+    const word = button.querySelector(".copy-word");
+    const text = value.textContent.trim();
+    let outcome = "Copied";
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (error) {
+      // NOT swallowed into a no-op: the customer is told to select it, and the
+      // selection is made for them. A button that silently did nothing would
+      // leave somebody believing they held an address they did not.
+      outcome = "Select it";
+      selectCopyableText(value);
+    }
+    if (word) {
+      const previous = word.textContent;
+      word.textContent = outcome;
+      window.setTimeout(function () {
+        word.textContent = previous;
+      }, COPY_FEEDBACK_MS);
+    }
+  });
+}
+
 wireQuoteForm();
 wireSwapForm();
 wireLivePolling();
 clearBrowserFilledPayoutAddress();
+wireCopyButtons();

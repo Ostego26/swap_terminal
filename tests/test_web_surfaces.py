@@ -1196,3 +1196,101 @@ def test_the_payout_field_does_not_ask_the_browser_to_autofill_it(client):
         "the attribute may be ignored; clearing the field is what does not depend on that"
     )
     assert "clearBrowserFilledPayoutAddress();" in script, "declared but never called"
+
+
+# --- the copy buttons ---------------------------------------------------------
+#
+# ASKED FOR BY THE OPERATOR 2026-10-01: "have it to where they can copy it
+# directly with a little copy icon."
+#
+# Before this, class="copyable" appeared in three places in swap.html and was CSS
+# ONLY -- styles.css sets user-select: all so a click selects the string -- and
+# nothing in static/script.js touched the clipboard. The class named an affordance
+# the page did not have.
+
+def test_the_deposit_instruction_has_a_copy_button_for_every_half(client):
+    """On a tag chain the instruction is a PAIR, so one button is not enough.
+
+    The account alone is the half that produces money which arrived and a swap that
+    cannot claim it -- chains/xrp.py's get_new_address() refusal is written about
+    exactly that. A page offering to copy the account and not the memo would make
+    the easy path the broken one.
+
+    MUTATION: drop one copy_field() call from the tag branch and this fails.
+    """
+    seed_swap(client, "s_copytag0000000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_copytag0000000").get_data(as_text=True)
+
+    assert body.count('class="copy-button"') >= 2, (
+        "both the shared account and the memo tag need their own button"
+    )
+    assert 'aria-label="Copy the shared deposit account"' in body
+    assert 'aria-label="Copy the memo tag"' in body
+
+
+def test_an_address_chain_gets_a_copy_button_too(client):
+    """One macro serves both branches, so neither can grow its own button (rule 8)."""
+    seed_swap(client, "s_copyaddr000000", "awaiting_deposit")
+    body = client.get("/swap/s_copyaddr000000").get_data(as_text=True)
+
+    assert 'class="copy-button"' in body
+    assert 'aria-label="Copy the deposit address"' in body
+
+
+def test_the_copied_value_is_not_duplicated_into_an_attribute(client):
+    """The displayed string IS the source, and that is a correctness property.
+
+    A data-copy="{{ value }}" would be a second copy of the one thing that must
+    never differ: an address that differs by one character between what is shown
+    and what is copied is money sent where nobody can claim it. script.js reads the
+    .copyable element's own text inside the .copy-row.
+
+    MUTATION: put the value in a data attribute and this fails -- which is the
+    design this test exists to forbid, not a bug it caught.
+    """
+    seed_swap(client, "s_copysrc0000000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_copysrc0000000").get_data(as_text=True)
+
+    assert "data-copy=" not in body, "the value must not be duplicated into an attribute"
+    assert 'class="copy-row"' in body, "script.js finds the value through the row"
+
+    script = client.get("/static/script.js").get_data(as_text=True)
+    assert "wireCopyButtons();" in script, "declared but never called"
+    assert '.querySelector(".copyable")' in script, "it has to read the displayed node"
+    # A failure must not be silent: the clipboard API needs a secure context and a
+    # permission the browser can refuse.
+    #
+    # ASSERTED ON CODE-SHAPED STRINGS, not on the words. The first version of these
+    # two checked `"Select it" in script` and `"selectCopyableText" in script`, and a
+    # mutation that replaced the whole catch body with `return;` SURVIVED -- because
+    # the file's own comment quotes the phrase and names the function. That is the
+    # third time in one day a keyword check in this suite could not tell a quotation
+    # from a claim, and the fix is the same each time: match the assignment and the
+    # CALL, which only appear where the behavior is.
+    assert 'outcome = "Select it"' in script, "a refused clipboard has to say so, not no-op"
+    assert "selectCopyableText(value)" in script, "and select the text so the fallback works"
+
+
+def test_the_tag_chain_instruction_states_the_amount(client):
+    """Asked for 2026-10-01: "it should prompt to please deposit 0.01 dsol the amount".
+
+    The address branch has always led with "Send exactly <amount> <asset> to". The
+    tag branch led with the account and the memo and never stated the amount in that
+    panel at all -- a SOL customer was told where and what memo, and had to scroll
+    past the status rail to the figures list for how much.
+
+    It matters beyond labelling: deposit_service halts a swap whose confirmed amount
+    falls outside AMOUNT_TOLERANCE_PCT, and a halt waits for a person.
+    s_612fac62489f2122 has sat in under_review since 2026-09-26 for exactly that.
+
+    MUTATION: remove the amount line from the tag branch -> this fails.
+    """
+    seed_swap(client, "s_amounttag00000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_amounttag00000").get_data(as_text=True)
+
+    assert "Send exactly" in body, "the tag branch must state the amount like the address branch"
+    assert "1000.00000000" in body, "to 8 places and with the asset named, as the address branch does"
+    assert "both halves are\n       needed" in body or "both halves are" in body

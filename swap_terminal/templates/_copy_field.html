@@ -1,0 +1,36 @@
+{#- A value with a copy button. ONE implementation, used wherever a customer has to
+    transfer a string to another program by hand.
+
+    ASKED FOR BY THE OPERATOR 2026-10-01: "have it to where they can copy it directly
+    with a little copy icon". Before this, `class="copyable"` existed in three places
+    and was CSS ONLY -- styles.css:405 sets `user-select: all` so a click selects the
+    whole string, and nothing in static/script.js touched the clipboard. The class
+    promised an affordance the page did not have, which is rule 16's wrong comment
+    wearing a CSS selector.
+
+    WHY A MACRO AND NOT THREE BUTTONS. The deposit instruction on a tag chain is a
+    PAIR -- account plus memo -- and the amount is a third string a customer retypes.
+    Three hand-written buttons would be three chances for one to drift (rule 8), and
+    the drift here is a button that copies the wrong field, which on a shared deposit
+    account means a payment nobody can attribute.
+
+    THE VALUE IS NOT DUPLICATED INTO AN ATTRIBUTE. script.js reads the text of the
+    .copyable element inside this wrapper, so the string a customer sees and the
+    string the button copies are the same characters by construction. A
+    data-copy="{{ value }}" would be a second copy of the one thing that must not
+    differ, and an address that differs by one character is money gone.
+
+    `user-select: all` is KEPT. The button is an addition, not a replacement: it needs
+    a secure context and a permission the browser can refuse, and select-then-copy
+    works when the clipboard API does not. -#}
+{% macro copy_field(value, label, classes="mono breakable") %}
+<div class="copy-row">
+  <p class="copyable {{ classes }}">{{ value }}</p>
+  <button type="button" class="copy-button" aria-label="Copy {{ label }}">
+    {#- aria-live on the WORD and not the row, because the word is the only thing that
+        changes: script.js swaps it to "Copied" or "Select it" and back. A live region
+        around the whole row would re-announce the address itself on every change. -#}
+    <span class="copy-glyph" aria-hidden="true">&#9112;</span><span class="copy-word" aria-live="polite">Copy</span>
+  </button>
+</div>
+{% endmacro %}

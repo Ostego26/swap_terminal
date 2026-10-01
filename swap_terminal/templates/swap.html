@@ -1,3 +1,4 @@
+{% from "_copy_field.html" import copy_field %}
 {% extends "base.html" %}
 {% import "_badges.html" as badges %}
 {% set surface = 'user' %}
@@ -60,7 +61,7 @@
     <p class="panel-note">{{ deposit.note }}</p>
     <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
        {{ view.swap.from_asset }}</strong> to</p>
-    <p class="copyable mono breakable" id="deposit-target">{{ deposit.address }}</p>
+    <div id="deposit-target">{{ copy_field(deposit.address, "the deposit address") }}</div>
   {#- The model was called 'destination_tag' until 2026-09-30. That is the XRP Ledger's own
       field name, and naming the whole model after it is what kept Solana out: SOL attributes
       by a Memo instruction and has no destination tag, so a SOL swap fell into the {% else %}
@@ -71,10 +72,33 @@
   {% elif deposit.model == 'tag' and not deposit.problem %}
     <p class="callout callout-working"><strong>{{ view.swap.from_asset }} works differently from the other chains
        here.</strong> {{ deposit.note }}</p>
+    {#- THE AMOUNT, AND ITS ABSENCE WAS THE DEFECT. Asked for by the operator 2026-10-01:
+        "it should prompt to please deposit 0.01 dsol the amount for the swap at this address
+        to continue."
+
+        They were right that nothing said it. The `address` branch twenty lines above leads
+        with "Send exactly <amount> <asset> to"; this branch led with the account and the
+        memo and NEVER STATED THE AMOUNT ANYWHERE IN THIS PANEL. A SOL customer was told
+        where to send and what to write on it, and had to scroll past the status rail to the
+        figures list to learn how much -- on the one chain where the account is shared and
+        the instruction is already two parts rather than one.
+
+        It matters more than a missing label, because services/deposit_service.py halts a
+        swap whose CONFIRMED amount falls outside AMOUNT_TOLERANCE_PCT (1%) and a halt waits
+        for a person who may not be awake. s_612fac62489f2122 has sat in `under_review`
+        since 2026-09-26 for exactly that -- 1.0 XRP against an expected 5.0 -- on a page
+        that never put the expected figure in the instruction.
+
+        Rendered to 8 decimal places and with the asset named, matching the address branch
+        verbatim, because two phrasings of one instruction is rule 8 arriving as a customer
+        reading two different sentences for the same act. -#}
+    <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
+       {{ view.swap.from_asset }}</strong> to this account, with the memo below &#8212; both halves are
+       needed to continue</p>
     <p class="field-label">Account (shared by every swap)</p>
-    <p class="copyable mono breakable">{{ deposit.address }}</p>
+    {{ copy_field(deposit.address, "the shared deposit account") }}
     <p class="field-label">{{ deposit.discriminator }} &#8212; <strong>this is what identifies your swap</strong></p>
-    <p class="copyable mono tag-value" id="deposit-target">{{ deposit.tag }}</p>
+    <div id="deposit-target">{{ copy_field(deposit.tag, "the memo tag", classes="mono tag-value") }}</div>
     <p class="panel-note">A payment to that account without exactly this tag cannot be matched to your swap. The tag
        is an integer, and <code>0</code> is a legal tag rather than a missing one.</p>
   {% elif deposit.model == 'tag' %}

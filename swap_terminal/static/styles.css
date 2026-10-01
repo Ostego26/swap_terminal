@@ -402,6 +402,50 @@ button:disabled {
 .callout-failed { border-left-color: var(--halted); background: var(--halted-soft); }
 .callout-working { border-left-color: var(--working); background: var(--working-soft); }
 
+/* The copy button and the value it copies, side by side.
+ *
+ * The row is the pairing static/script.js relies on: one .copyable and one
+ * .copy-button per .copy-row, so the button can find its value without the value
+ * being duplicated into an attribute.
+ *
+ * align-items: stretch so the button matches the value's height whether the value
+ * wraps to one line (a memo tag) or several (a base58 address on a phone). */
+.copy-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--s2);
+}
+
+.copy-row .copyable {
+  flex: 1 1 auto;
+  min-width: 0;   /* lets a long address wrap instead of forcing the row wider */
+}
+
+.copy-button {
+  flex: 0 0 auto;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--s2) var(--s3);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  white-space: nowrap;
+}
+
+.copy-button:hover,
+.copy-button:focus-visible {
+  border-color: var(--accent, var(--line-strong));
+}
+
+.copy-glyph {
+  font-size: var(--t-md);
+  line-height: 1;
+}
+
 .copyable {
   font-family: var(--mono);
   font-size: var(--t-md);
