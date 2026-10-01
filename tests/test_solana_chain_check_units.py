@@ -53,16 +53,20 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     MEMO_HUNT_TRANSACTION_VERSION,
     RPC_RETRIES_PER_CALL,
     CreditPathObserved,
+    RevealingTx,
     _deposits_line,
     _indented,
     _network_line,
     _one_reason_per_group,
     _revealed_by,
     _spl_reader_line,
+    _what_the_target_is,
     call_with_backoff,
     check_rent,
     credit_path_lines,
+    credits_the_owner,
     find_a_holder,
+    holder_found_sentence,
     holder_from_mint_traffic,
     hunt_one_program_id,
     make_runner,
@@ -74,6 +78,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     prove_the_spl_reader,
     read_one_transaction,
     resolve_address,
+    scan_the_mints_transactions,
     what_the_hunt_established,
 )
 
@@ -1047,6 +1052,11 @@ SPL_FILTER_ONLY = CreditPathObserved(address_read=True, is_spl=True, signatures=
                                      credits=0, refused=0)
 NOTHING_READ = CreditPathObserved(address_read=False, is_spl=False, signatures=0,
                                   credits=0, refused=0)
+#: The operator's 2026-10-01 --find-holder run: the scan read 5 signatures, DECODED one amount
+#: and refused it for carrying no memo. That is already a proof of the decoder -- the decode
+#: happens before the memo check -- which is why the targeted step is skipped against this.
+SPL_DECODED = CreditPathObserved(address_read=True, is_spl=True, signatures=5,
+                                 credits=0, refused=1)
 
 
 def test_with_no_address_the_summary_says_the_credit_path_did_not_run():
@@ -1673,7 +1683,27 @@ def _throttle_always(*_params):
 
 
 def _a_mint_transaction(owner=_A_HOLDER, mint=_A_MINT):
+    """An ENTRY for this owner and mint, with no amounts -- so it does NOT credit.
+
+    Deliberately minimal, because owner_in_post_token_balances() reads only `mint` and `owner`
+    and this seed is what proves it needs nothing else. credits_the_owner() reads the amounts,
+    so over this seed it is False, which is the entry-only case the search now walks past.
+    """
     return {"meta": {"postTokenBalances": [{"mint": mint, "owner": owner}]}}
+
+
+def _a_crediting_mint_transaction(owner=_A_HOLDER, mint=_A_MINT, *, before="0", after="7000000000"):
+    """The same entry, with a POSITIVE delta -- the transaction the targeted proof wants.
+
+    The distinction between this and _a_mint_transaction() is the one the operator's 2026-10-01
+    run exposed: the search settled for the entry-only shape and the proof step was aimed at a
+    transaction that could not decode an amount.
+    """
+    def side(amount):
+        return [{"accountIndex": 1, "mint": mint, "owner": owner,
+                 "uiTokenAmount": {"amount": amount, "decimals": 9}}]
+
+    return {"meta": {"preTokenBalances": side(before), "postTokenBalances": side(after)}}
 
 
 def test_the_selection_reads_THE_SAME_TWO_KEYS_spl_credits_uses():
@@ -2200,14 +2230,17 @@ def test_the_revealing_signature_is_carried_as_DATA_not_parsed_from_prose():
     _revealed_by.clear()
     adapter = _seeded_adapter({
         "getSignaturesForAddress": [{"signature": "65bWBunzbNMkN9d5"}],
-        "getTransaction": _a_mint_transaction(),
+        "getTransaction": _a_crediting_mint_transaction(),
     })
     found, _throttled, _why = holder_from_mint_traffic(adapter, _A_MINT)
     assert found == _A_HOLDER
-    assert _revealed_by[_A_HOLDER] == "65bWBunzbNMkN9d5"
+    assert _revealed_by[_A_HOLDER] == RevealingTx("65bWBunzbNMkN9d5", credits_owner=True), (
+        "the signature AND what it was chosen for -- an entry is not a credit"
+    )
 
     steps = []
-    prove_the_spl_reader(adapter, _A_HOLDER, lambda label, _why, fn: steps.append((label, fn)))
+    prove_the_spl_reader(adapter, _A_HOLDER,
+                         lambda label, _why, fn: steps.append((label, fn)), SPL_FILTER_ONLY)
     assert steps, "the proof step must run when a revealing signature is known"
     assert "65bWBunzbNMkN9d5" in steps[0][0], "and name the transaction it is aimed at"
 
@@ -2220,7 +2253,8 @@ def test_no_proof_step_runs_when_no_signature_revealed_the_owner():
     """
     _revealed_by.clear()
     steps = []
-    prove_the_spl_reader(_seeded_adapter({}), "rTYPED", lambda *a: steps.append(a))
+    prove_the_spl_reader(_seeded_adapter({}), "rTYPED", lambda *a: steps.append(a),
+                         SPL_FILTER_ONLY)
     assert steps == []
 
 
@@ -2272,16 +2306,17 @@ def test_main_prints_no_proof_step_for_an_address_the_operator_supplied(monkeypa
     assert "FAILED" not in out, f"no step may fail on this seeded cluster: {out}"
 
 
-def test_main_runs_the_targeted_proof_when_find_holder_named_the_address(monkeypatch, capsys):
-    """END TO END, because the wiring was the one mutation that survived its first round.
+def test_main_skips_the_targeted_proof_when_the_scan_already_decoded(monkeypatch, capsys):
+    """END TO END. The scan credits 7.0 here, so the targeted read is owed to nobody.
 
-    Deleting the `if args.find_holder and adapter.is_spl:` call passed every unit test: the
-    function was covered, its call site was not. Third time in this session a main()-level
-    mutation has survived for exactly that reason, which is why this is driven through main()
-    rather than asserted on the source.
+    THIS TEST USED TO ASSERT THE OPPOSITE, and the behavior change is the fix for what the
+    operator's 2026-10-01 run printed: find_deposits_to_address decoded an amount, and the
+    targeted step then spent a sixth getTransaction to re-establish it -- printing "(none)" two
+    lines above a SUMMARY correctly saying the reader was proven. The nearer, more specific line
+    is the one a reader believes.
 
-    MUTATION: remove the call and the proof step vanishes from the output -- the reader stays
-    unproven and nothing says so.
+    MUTATION: drop the `observed.decoded_an_amount` branch and the step runs anyway, spending a
+    read and contradicting the summary.
     """
     _revealed_by.clear()
     holder = _A_HOLDER
@@ -2331,8 +2366,222 @@ def test_main_runs_the_targeted_proof_when_find_holder_named_the_address(monkeyp
     solana_chain_check.main()
     out = text_of(capsys.readouterr().out)
 
-    assert "_spl_credits over 65bWBunzbNMkN9d5" in out, (
-        "the proof step must run and name the transaction it is aimed at"
+    assert "already PROVEN by find_deposits_to_address" in out, (
+        "the skip must say WHY it skipped -- silence here reads as the step having failed"
     )
-    assert "DECODED and ATTRIBUTED" in out
+    assert "65bWBunzbNMkN9d5" in out, "and still name the transaction it would have read"
+    assert "_spl_credits over" not in out, "no getTransaction may be spent re-proving it"
+    assert "(none)  <- no POSITIVE delta" not in out, (
+        "and above all no denial may sit above a summary that says the reader is proven"
+    )
     assert "7.0" in out, "the amount, decoded from uiTokenAmount off a seeded-but-real shape"
+
+# ---------------------------------------------------------------------------
+# AN ENTRY IS NOT A CREDIT. The selection the holder search was missing.
+#
+# The operator's 2026-10-01 run, the line that prompted all of this:
+#
+#   _spl_credits over qGqMZv7Ljqpp7VaZ... ...  <- the ONE transaction known to carry a
+#                                                 balance for this owner
+#     ok   (none)  <- no POSITIVE delta for this owner and mint in this transaction
+#
+# and four lines below it, correctly:
+#
+#   CREDIT path: _spl_credits DECODED a real amount from a real response (0 credited,
+#                1 refused over 5 signature(s)).
+#
+# Both true. The caption promised a balance the selection never checked for, the step was
+# aimed at a transaction that could not decode an amount, and the denial sat above the
+# summary that said the reader was proven.
+# ---------------------------------------------------------------------------
+
+
+def test_credits_the_owner_requires_a_POSITIVE_delta_not_merely_an_entry():
+    """The condition _spl_credits requires, spelled the way _spl_credits spells it.
+
+    MUTATION: `>= 0` instead of `> 0`, or dropping the pre-balance lookup, and a transaction
+    where the owner SENT tokens counts as a credit -- which is the selection error this whole
+    change exists to fix, re-introduced one level down.
+    """
+    assert credits_the_owner(_a_crediting_mint_transaction(), _A_MINT, _A_HOLDER)
+    assert not credits_the_owner(_a_mint_transaction(), _A_MINT, _A_HOLDER), (
+        "an entry with no amounts is not a credit -- this is the operator's qGqMZv7 case"
+    )
+    assert not credits_the_owner(
+        _a_crediting_mint_transaction(before="7000000000", after="0"), _A_MINT, _A_HOLDER,
+    ), "the owner SENT tokens: post - pre is negative, and _spl_credits takes neither"
+    assert not credits_the_owner(
+        _a_crediting_mint_transaction(before="5", after="5"), _A_MINT, _A_HOLDER,
+    ), "pre == post is a delta of zero, and `> 0` is what the reader uses"
+    assert not credits_the_owner(_a_crediting_mint_transaction(owner="rOTHER"),
+                                 _A_MINT, _A_HOLDER), "someone else's credit is not this owner's"
+    assert not credits_the_owner(_a_crediting_mint_transaction(mint="OTHERMINT"),
+                                 _A_MINT, _A_HOLDER), "a different mint at this mint's decimals"
+    assert not credits_the_owner("not a transaction", _A_MINT, _A_HOLDER)
+    assert not credits_the_owner({"meta": {}}, _A_MINT, _A_HOLDER)
+
+
+def test_a_malformed_amount_is_not_a_credit_rather_than_a_crash():
+    """A wrong shape must not take the run down, and must not count as a credit either.
+
+    It only ever PREFERS one signature over another, so "not a credit" is a safe answer and
+    the owner is returned either way. Narrow exception types, not `except Exception` (rule 12).
+    """
+    for broken in ({"amount": "not a number", "decimals": 9},
+                   {"decimals": 9},
+                   "not a dict"):
+        transaction = {"meta": {"postTokenBalances": [
+            {"accountIndex": 1, "owner": _A_HOLDER, "mint": _A_MINT, "uiTokenAmount": broken},
+        ]}}
+        assert not credits_the_owner(transaction, _A_MINT, _A_HOLDER), broken
+
+
+def test_the_search_walks_PAST_an_entry_only_transaction_to_find_a_crediting_one():
+    """Two transactions: the first carries an entry, the second credits. It must pick the second.
+
+    MUTATION: return on the first owner found -- which is what it did before 2026-10-01 -- and
+    the proof step is aimed at a transaction with no positive delta in it.
+    """
+    _revealed_by.clear()
+    crediting = "65bWBunzbNMkN9d5"
+    entry_only = "4yPFj1mqTVnxbKHd"
+
+    # KEYED ON THE SIGNATURE, which _seeded_adapter already supports: a callable response is
+    # handed the real params. The order matters -- entry-only FIRST, so returning on the first
+    # owner found picks the wrong one.
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": entry_only}, {"signature": crediting}],
+        "getTransaction": lambda signature, *_rest: (
+            _a_crediting_mint_transaction() if signature == crediting else _a_mint_transaction()
+        ),
+    }, _A_MINT)
+    found, throttled, why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == (_A_HOLDER, False)
+    assert _revealed_by[_A_HOLDER] == RevealingTx(crediting, credits_owner=True), (
+        f"the CREDITING signature, not the first entry seen. why={why}"
+    )
+    assert "CREDITS this mint" in why
+
+
+def test_an_entry_only_owner_is_still_returned_when_nothing_in_the_window_credits_it():
+    """A fallback, not a gate. The balance and ATA steps want the owner either way.
+
+    MUTATION: require a crediting transaction and --find-holder reports "no holder found" for a
+    mint whose window happens to hold no deposit -- losing an owner it had in hand.
+    """
+    _revealed_by.clear()
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": "4yPFj1mqTVnxbKHd"}],
+        "getTransaction": _a_mint_transaction(),
+    }, _A_MINT)
+    found, throttled, why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == (_A_HOLDER, False)
+    assert _revealed_by[_A_HOLDER].credits_owner is False
+    assert "NONE of the 1 transaction(s) read CREDITS it" in why, (
+        "and it says so BEFORE the step runs, so '(none)' below cannot read as a failure"
+    )
+
+
+def test_a_throttle_mid_walk_discards_the_fallback_rather_than_reporting_it():
+    """Most of the window was never read, so "nothing credits it" would be an overclaim.
+
+    ASSERTED ON THE SCAN ITSELF, not only through holder_from_mint_traffic(). Returning the
+    entry-only candidate alongside the throttle survives a mutation run when only the caller is
+    driven, because the caller checks `throttled_why` first and discards whatever came with it.
+    That makes the contract unobservable from outside -- so it is pinned where it lives, at the
+    seam, rather than left as a comment claiming a behavior nothing can see (rule 17: say which
+    you have).
+    """
+    _revealed_by.clear()
+    entry_only, never_read = "4yPFj1mqTVnxbKHd", "65bWBunzbNMkN9d5"
+
+    def throttle_the_second(signature, *_rest):
+        if signature == never_read:
+            raise chains_solana.SolanaRPCError("rate limited", status_code=429)
+        return _a_mint_transaction()
+
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": entry_only}, {"signature": never_read}],
+        "getTransaction": throttle_the_second,
+    }, _A_MINT)
+    found, throttled, why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == ("", True)
+    assert never_read[:16] in why and "throttled" in why
+    assert _revealed_by == {}, "a cut-short walk leaves no proof target behind it"
+
+    crediting, entry_only_candidate, throttled_why = scan_the_mints_transactions(
+        adapter, _A_MINT, [{"signature": entry_only}, {"signature": never_read}])
+    assert throttled_why, "the throttle is reported"
+    assert (crediting, entry_only_candidate) == (None, None), (
+        "and NEITHER candidate comes back with it. The walk read 1 of 2 transactions, so "
+        "'nothing in this window credits it' is a claim about a window it did not read."
+    )
+
+
+def test_the_caption_says_what_the_transaction_was_chosen_FOR():
+    """Pure. A caption promising a balance over a transaction chosen for an entry is the defect.
+
+    MUTATION: one caption for both and the operator reads "(none)" under "known to CREDIT this
+    owner" and concludes the reader is broken.
+    """
+    crediting = _what_the_target_is(RevealingTx("65bWBunzbNMkN9d5", credits_owner=True))
+    entry_only = _what_the_target_is(RevealingTx("65bWBunzbNMkN9d5", credits_owner=False))
+    assert "CREDIT" in crediting and "EXPECTED" not in crediting
+    assert "does NOT credit" in entry_only and "EXPECTED" in entry_only, (
+        "an empty result over this transaction is the expected outcome, and must be pre-announced"
+    )
+    assert crediting != entry_only
+
+
+def test_holder_found_sentence_distinguishes_a_credit_from_an_entry():
+    """Pure -- no cluster, no map. The two sentences that must not be one."""
+    credit = holder_found_sentence(RevealingTx("65bWBunzbNMkN9d5", credits_owner=True), read=8)
+    entry = holder_found_sentence(RevealingTx("65bWBunzbNMkN9d5", credits_owner=False), read=8)
+    assert "CREDITS this mint" in credit
+    assert "post - pre > 0" in credit, "the condition, named, not just the word 'credit'"
+    assert "NONE of the 8 transaction(s) read CREDITS it" in entry, "with its denominator"
+    assert "postTokenBalances" in credit and "postTokenBalances" in entry, (
+        "both still report the keys the search measured -- that is why --find-holder exists"
+    )
+
+
+def test_the_proof_step_is_skipped_when_the_scan_already_decoded_an_amount():
+    """Rule 3: prefer removing work to doing it faster. The scan's refusal IS the proof.
+
+    MUTATION: run it anyway and a getTransaction is spent to re-establish what is established,
+    which is how "(none)" came to sit above a summary saying the reader was proven.
+    """
+    _revealed_by.clear()
+    _revealed_by[_A_HOLDER] = RevealingTx("65bWBunzbNMkN9d5", credits_owner=True)
+    steps = []
+    prove_the_spl_reader(_seeded_adapter({}, _A_MINT), _A_HOLDER,
+                         lambda *a: steps.append(a), SPL_DECODED)
+    assert steps == [], "no step, so no read"
+
+
+def test_the_skip_is_announced_rather_than_silent(capsys):
+    """Rule 14: a step that did nothing must not look the same as one that was never there.
+
+    MUTATION: `return` without the print and the operator sees the proof step simply absent,
+    with no way to tell it was skipped as owed-to-nobody from never having been wired in.
+    """
+    _revealed_by.clear()
+    _revealed_by[_A_HOLDER] = RevealingTx("65bWBunzbNMkN9d5", credits_owner=True)
+    prove_the_spl_reader(_seeded_adapter({}, _A_MINT), _A_HOLDER,
+                         lambda *a: None, SPL_DECODED)
+    out = capsys.readouterr().out
+    assert "already PROVEN by find_deposits_to_address" in out
+    assert "65bWBunzbNMkN9d5" in out, "name what it would have read, so the skip is checkable"
+    assert "1 refused" in out, "and the evidence it is relying on instead"
+
+
+def test_the_proof_step_still_runs_when_the_scan_decoded_nothing():
+    """The case the whole step exists for, and the one four devnet runs kept landing in."""
+    _revealed_by.clear()
+    _revealed_by[_A_HOLDER] = RevealingTx("65bWBunzbNMkN9d5", credits_owner=True)
+    steps = []
+    prove_the_spl_reader(_seeded_adapter({}, _A_MINT), _A_HOLDER,
+                         lambda label, why, fn: steps.append((label, why)), SPL_FILTER_ONLY)
+    assert len(steps) == 1
+    assert "_spl_credits over 65bWBunzbNMkN9d5" in steps[0][0]
+    assert "CREDIT" in steps[0][1]

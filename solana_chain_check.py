@@ -315,22 +315,51 @@ def owner_of(adapter: SolanaAdapter, token_account: str) -> tuple[str, bool, str
     return owner, False, ""
 
 
-#: owner -> the signature that revealed it, filled in by holder_from_mint_traffic().
+class RevealingTx(NamedTuple):
+    """The transaction that revealed an owner, and whether it CREDITS that owner.
+
+    THE DISTINCTION IS THE WHOLE POINT, and it was missing on 2026-10-01. The map used to hold
+    a bare signature and prove_the_spl_reader() called it "the ONE transaction known to carry a
+    balance for this owner" -- which it was not. owner_in_post_token_balances() selects on the
+    PRESENCE of a postTokenBalances entry for the mint and owner; `_spl_credits` requires a
+    POSITIVE DELTA. An entry exists when the owner sent tokens, or when pre equals post, and in
+    both cases the targeted proof reads a transaction that cannot possibly decode an amount.
+
+    That is exactly what the operator's run did: the proof step printed
+
+        (none)  <- no POSITIVE delta for this owner and mint in this transaction
+
+    aimed at qGqMZv7Ljqpp7VaZ..., chosen only for having an entry. The line was true and the
+    step was spent on a transaction selected for the wrong property.
+
+    A NamedTuple because CreditPathObserved in this file already is one; a second container
+    idiom in one module is rule 8's drift at the smallest possible scale.
+    """
+
+    signature: str
+    #: True when post - pre > 0 for this owner and mint -- the condition _spl_credits requires.
+    #: False means an entry exists and the delta does not qualify, so the proof step will come
+    #: back "(none)" and says up front that it may.
+    credits_owner: bool
+
+
+#: owner -> the RevealingTx, filled in by holder_from_mint_traffic().
 #:
 #: A MODULE-LEVEL MAP RATHER THAN A WIDENED RETURN TUPLE, because find_a_holder() and
 #: after_the_first_route_was_throttled() both return (owner, why) and three call sites would
 #: have to grow a field they do not use. The alternative considered and rejected: parsing the
 #: signature back out of the `why` sentence, which is reading prose as data -- the thing this
 #: file has already been bitten by twice.
-_revealed_by: dict[str, str] = {}
+_revealed_by: dict[str, RevealingTx] = {}
 
 
-def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run) -> None:
-    """Run _spl_credits over the ONE transaction known to carry a balance for this owner.
+def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run,
+                         observed: CreditPathObserved) -> None:
+    """Run _spl_credits over the one transaction known to credit this owner, if it is still owed.
 
-    WHY A TARGETED READ AND NOT A WIDER SCAN. Four runs against public devnet have failed to
-    prove this reader, and the operator's 2026-10-01 output shows exactly why rather than
-    leaving it to guesswork:
+    WHY A TARGETED READ AND NOT A WIDER SCAN. Four runs against public devnet failed to prove
+    this reader, and the 2026-09-30 `--limit 5` output showed why rather than leaving it to
+    guesswork:
 
         GcBBd25S...   the holder --find-holder found in the mint's traffic
         GzprPkmd...   its ASSOCIATED token account -- DOES NOT EXIST
@@ -345,19 +374,55 @@ def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run) -> None:
     So read that transaction. `_credits_in_transaction` is the same per-transaction reader
     find_deposits_to_address calls, and reaching an amount through it exercises
     `entry["uiTokenAmount"]["decimals"]` and `["amount"]` -- the field names that lose an SPL
-    deposit silently, and the last thing in this adapter with no real response behind it.
+    deposit silently.
 
-    IT MAY STILL NOT DECODE, and that is reported rather than smoothed over: `_spl_credits`
-    takes only a POSITIVE delta, so a transaction where this owner's balance fell or did not
-    move yields no credit. That is a fact about the transaction, not about the field names, and
-    the line says which.
+    AND ON 2026-10-01 THE SCAN GOT THERE FIRST, which is why this now takes `observed` and can
+    decline to run. That run decoded one amount over 5 signatures and refused it for carrying no
+    memo -- a refusal is a proof, since the decode happens before the memo check -- and this step
+    went ahead anyway, spending a sixth getTransaction and printing "(none)" two lines above a
+    SUMMARY correctly saying the reader was proven. Rule 3: prefer removing work to doing it
+    faster. The step is owed only when the scan came back with nothing decoded.
+
+    IT MAY STILL NOT DECODE WHEN IT DOES RUN, and that is now pre-announced rather than
+    explained afterwards. `_spl_credits` needs a POSITIVE delta; holder_from_mint_traffic()
+    prefers a transaction that has one and falls back to an entry-only owner when the window
+    holds none, so the caption says which kind it is aimed at before the result appears --
+    see _what_the_target_is() and RevealingTx.
     """
-    signature = _revealed_by.get(owner)
-    if not signature:
+    reveal = _revealed_by.get(owner)
+    if reveal is None:
         return
-    run(f"_spl_credits over {signature[:16]}...",
-        "the ONE transaction known to carry a balance for this owner -- the targeted proof",
-        lambda: _spl_reader_line(adapter, owner, signature))
+    if observed.decoded_an_amount:
+        # ALREADY PROVEN, SO NOTHING IS SPENT PROVING IT AGAIN. The operator's 2026-10-01 run is
+        # the case: find_deposits_to_address read 5 signatures, decoded one amount and refused it
+        # for carrying no memo -- which IS the proof, since the decode happens before the memo
+        # check -- and this step then spent a sixth getTransaction to add nothing. Worse, it
+        # printed "(none)" two lines above a SUMMARY correctly saying the reader was proven, and
+        # the nearer line is the one a reader believes. Rule 3: prefer removing work to doing it
+        # faster.
+        print(f"  _spl_credits: already PROVEN by find_deposits_to_address above "
+              f"({observed.credits} credited, {observed.refused} refused), so the targeted read "
+              f"over {reveal.signature[:16]}... is SKIPPED -- it would spend a getTransaction to "
+              f"re-establish what the scan established.", flush=True)
+        return
+    run(f"_spl_credits over {reveal.signature[:16]}...", _what_the_target_is(reveal),
+        lambda: _spl_reader_line(adapter, owner, reveal.signature))
+
+
+def _what_the_target_is(reveal: RevealingTx) -> str:
+    """The step's own caption, which has to say what the transaction was chosen FOR.
+
+    "the ONE transaction known to carry a balance for this owner" is what this said, and it
+    overstated the selection in exactly the way RevealingTx documents: the transaction was
+    chosen for having a postTokenBalances ENTRY, which is not the positive delta _spl_credits
+    needs. An operator reading a caption that promises a balance and a result of "(none)"
+    concludes the reader is broken.
+    """
+    if reveal.credits_owner:
+        return ("the one transaction known to CREDIT this owner (post - pre > 0) -- the "
+                "targeted proof")
+    return ("the only transaction holding an entry for this owner, and it does NOT credit it "
+            "-- so '(none)' here is EXPECTED and proves nothing either way")
 
 
 def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str) -> str:
@@ -430,6 +495,51 @@ def owner_in_post_token_balances(transaction: object, mint: str) -> str:
     return ""
 
 
+def credits_the_owner(transaction: object, mint: str, owner: str) -> bool:
+    """Would _spl_credits find a POSITIVE delta for this owner and mint in this transaction?
+
+    THE SECOND HALF OF THE SELECTION, and the half owner_in_post_token_balances() does not do.
+    That function answers "is there an entry"; this answers "does the entry qualify", which is
+    the question the targeted proof actually depends on -- see RevealingTx.
+
+    SPELLED THE WAY _spl_credits SPELLS IT (chains/solana.py's `indexed()` plus its delta), so
+    that a transaction this accepts is one that reader can decode: keyed by accountIndex,
+    matched on owner AND mint, pre defaulting to zero when the account did not exist before,
+    and `delta > 0` rather than `>=`. If that reader's arithmetic ever moves this is a second
+    site to change, and so is owner_in_post_token_balances() twenty lines up (rule 8).
+
+    IT IS A PREFERENCE, NOT A GATE. holder_from_mint_traffic() still returns an entry-only
+    owner when no crediting transaction is in the window -- an owner is an owner, and the
+    balance and ATA steps want it either way. What this changes is WHICH signature the proof
+    step is aimed at, and whether the step says up front that it may come back empty.
+    """
+    if not isinstance(transaction, dict):
+        return False
+    meta = transaction.get("meta") or {}
+
+    def indexed(entries):
+        return {
+            int(entry["accountIndex"]): entry
+            for entry in entries or []
+            if isinstance(entry, dict) and entry.get("owner") == owner and entry.get("mint") == mint
+        }
+
+    try:
+        pre, post = indexed(meta.get("preTokenBalances")), indexed(meta.get("postTokenBalances"))
+        for index, entry in post.items():
+            before = int(pre[index]["uiTokenAmount"]["amount"]) if index in pre else 0
+            if int(entry["uiTokenAmount"]["amount"]) - before > 0:
+                return True
+    except (KeyError, TypeError, ValueError):
+        # A MALFORMED ENTRY IS "NOT A CREDIT", not a crash, and the caller cannot mistake the
+        # two because this only ever PREFERS one signature over another -- the owner is returned
+        # either way and the proof step reports its own outcome. Narrow by exception type rather
+        # than `except Exception`: these three are what a wrong shape raises here, and anything
+        # else is a defect in this function that should surface (rule 12, BLE001).
+        return False
+    return False
+
+
 #: How many of the mint's own recent transactions to read looking for a holder. Small, because
 #: each one is a getTransaction and the public endpoint is already rate-limiting this run.
 HOLDER_SEARCH_TRANSACTIONS = 8
@@ -476,8 +586,47 @@ def holder_from_mint_traffic(adapter: SolanaAdapter, mint: str) -> tuple[str, bo
                            f"reference token accounts rather than the mint, so this is a fact "
                            f"about {mint[:8]}..., not about any field name.")
 
+    crediting, entry_only, throttled_why = scan_the_mints_transactions(adapter, mint, entries)
+    if throttled_why:
+        return "", True, throttled_why
+    found = crediting or entry_only
+    if found is None:
+        return "", False, (f"read {len(entries)} of the mint's transactions and none carried a "
+                           f"postTokenBalances entry for it with a readable `owner`. That is a "
+                           f"finding about the response shape: those are the keys _spl_credits "
+                           f"uses.")
+    owner, reveal = found
+    # THE ONE WRITER of _revealed_by, and it stays the one writer: the scan returns candidates
+    # and this decides which becomes the proof step's target. Putting the write inside the scan
+    # would mean a throttled walk could leave a half-filled map behind it.
+    _revealed_by[owner] = reveal
+    return owner, False, holder_found_sentence(reveal, read=len(entries))
+
+
+def scan_the_mints_transactions(
+    adapter: SolanaAdapter, mint: str, entries: list,
+) -> tuple[tuple[str, RevealingTx] | None, tuple[str, RevealingTx] | None, str]:
+    """Walk the mint's transactions. Returns (crediting, entry_only, throttled_why).
+
+    EXTRACTED 2026-10-01 because preferring a crediting transaction over an entry-only one put
+    holder_from_mint_traffic() at C901 12 and PLR0911 7, against ceilings of 10 and 6. Rule 12:
+    extract the decision, do not raise the ceiling -- and the split falls along a real seam, the
+    NETWORK WALK here against the PROSE in holder_found_sentence(), which is pure and testable
+    with no cluster at all.
+
+    BOTH CANDIDATES COME BACK, which is the whole reason this returns a pair rather than one
+    answer. A transaction carrying a postTokenBalances entry for the owner is not necessarily
+    one that CREDITS it -- an entry exists when the owner sent tokens, or when pre equals post
+    -- and only a crediting one can prove _spl_credits' decoder. The caller prefers the first
+    and falls back to the second, because an owner is still an owner for the balance and ATA
+    steps even when nothing in the window credits it.
+
+    `crediting` short-circuits the walk; `entry_only` holds the FIRST such owner seen, so a
+    throttle partway through does not change which fallback a re-run settles on.
+    """
+    entry_only: tuple[str, RevealingTx] | None = None
     for entry in entries:
-        signature = entry.get("signature")
+        signature = entry.get("signature") if isinstance(entry, dict) else None
         if not signature:
             continue
         transaction, tx_throttled, tx_why = call_with_backoff(
@@ -485,26 +634,49 @@ def holder_from_mint_traffic(adapter: SolanaAdapter, mint: str) -> tuple[str, bo
             {"encoding": "jsonParsed", "commitment": DISCOVERY_COMMITMENT,
              "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION})
         if tx_throttled:
-            return "", True, f"reading {signature[:16]}... was throttled: {tx_why}"
+            # A THROTTLE ENDS THE WALK AND IS NOT A FINDING (rule 17), and it discards the
+            # entry-only candidate with it: reporting a fallback owner found before a rate
+            # limit, without saying the walk was cut short, would read as "the window holds no
+            # crediting transaction" when most of the window was never read.
+            return None, None, f"reading {signature[:16]}... was throttled: {tx_why}"
         if transaction is None:
             # ONE UNREADABLE TRANSACTION MUST NOT END THE SEARCH, the same reason owner_of()'s
             # caller walks past an unusable entry: a single odd row would hide every good one.
             continue
         owner = owner_in_post_token_balances(transaction, mint)
-        if owner:
-            # RECORDED AS DATA, not only mentioned in the sentence below. This is the one
-            # transaction KNOWN to carry a postTokenBalances entry for this mint and this owner,
-            # which makes it the only read that can prove _spl_credits' decoder without
-            # gambling on a scan window -- see prove_the_spl_reader().
-            _revealed_by[owner] = signature
-            return owner, False, (
-                f"FOUND in the mint's own traffic: transaction {signature[:16]}... has a "
-                f"postTokenBalances entry for this mint owned by that account. Which also "
-                f"MEASURES `meta.postTokenBalances[].owner` and `.mint` -- the exact keys "
-                f"_spl_credits selects on, and the ones that were unproven.")
-    return "", False, (f"read {len(entries)} of the mint's transactions and none carried a "
-                       f"postTokenBalances entry for it with a readable `owner`. That is a "
-                       f"finding about the response shape: those are the keys _spl_credits uses.")
+        if not owner:
+            continue
+        reveal = RevealingTx(signature, credits_the_owner(transaction, mint, owner))
+        if reveal.credits_owner:
+            return (owner, reveal), entry_only, ""
+        if entry_only is None:
+            entry_only = (owner, reveal)
+    return None, entry_only, ""
+
+
+def holder_found_sentence(reveal: RevealingTx, *, read: int) -> str:
+    """What finding this owner this way established. PURE -- no cluster, no map.
+
+    TWO SENTENCES AND THEY MUST NOT BE ONE. Before 2026-10-01 there was a single sentence
+    saying the transaction "has a postTokenBalances entry", and prove_the_spl_reader() went on
+    to call it "the ONE transaction known to carry a balance for this owner". The operator's run
+    shows what that cost: the proof step read a transaction selected for having an entry, found
+    no positive delta, and printed "(none)" next to a SUMMARY correctly saying the reader was
+    proven -- by the scan, not by the step. A reader takes the nearer, more specific line as the
+    verdict, so the sentence has to say which kind of transaction this is BEFORE the step runs.
+    """
+    if reveal.credits_owner:
+        return (f"FOUND in the mint's own traffic: transaction {reveal.signature[:16]}... "
+                f"CREDITS this mint to that account (post - pre > 0, the condition "
+                f"_spl_credits requires). Which also MEASURES "
+                f"`meta.postTokenBalances[].owner` and `.mint` -- the exact keys _spl_credits "
+                f"selects on, and the ones that were unproven.")
+    return (f"FOUND in the mint's own traffic: transaction {reveal.signature[:16]}... has a "
+            f"postTokenBalances entry for this mint owned by that account -- but NONE of the "
+            f"{read} transaction(s) read CREDITS it (no post - pre > 0). The targeted proof "
+            f"below will say so rather than read as though the reader failed. Finding the owner "
+            f"at all still MEASURES `meta.postTokenBalances[].owner` and `.mint` -- the exact "
+            f"keys _spl_credits selects on.")
 
 
 def after_the_first_route_was_throttled(adapter: SolanaAdapter, mint: str,
@@ -926,7 +1098,7 @@ def main() -> int:
     # refusing a proof the inner one would allow. The map is the authority;
     # test_no_proof_step_runs_when_no_signature_revealed_the_owner pins the refusal and
     # test_main_prints_no_proof_step_for_an_address_the_operator_supplied pins it through main().
-    prove_the_spl_reader(adapter, address, run)
+    prove_the_spl_reader(adapter, address, run, observed)
     # None means NO HUNT RAN, which memo_status_lines() renders differently from a hunt that
     # ran and confirmed nothing. Initialized here rather than only inside the branch: the first
     # version of this assigned it only under `if args.hunt_memo > 0`, so every plain run -- the
