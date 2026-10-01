@@ -497,11 +497,41 @@ function wireWalletMenu() {
       const install = button.getAttribute("data-install");
       if (state) {
         state.textContent = "";
+        // NOT "not installed", AND THE DIFFERENCE COST A ROUND TRIP.
+        //
+        // MEASURED ON THE OPERATOR'S HOST 2026-10-01: "no wallet appears to work
+        // even though coinbase wallet is installed into brave". It was. The
+        // desktop launcher opens the page with
+        //
+        //     --app=<url>  --user-data-dir=<repo>/runtime/browser-profile
+        //
+        // so the window has no toolbar AND a dedicated, empty profile. Browser
+        // extensions live in the user's NORMAL profile, so that window has none
+        // installed at all -- the provider object really is absent, the probe was
+        // right, and the advice it gave ("get it") was wrong about why and told
+        // somebody to install software they already had.
+        //
+        // The dedicated profile is deliberate and measured (see
+        // swap_terminal_desktop.browser_command: on a shared profile the second
+        // launch returned rc=0 in 72ms and the launcher would tear the server
+        // down 72ms after opening the UI), so this is a fact to explain rather
+        // than a setting to change.
+        //
+        // IT NAMES BOTH CAUSES AND CLAIMS NEITHER (rule 17). A page cannot tell
+        // "this profile has no extensions" from "this browser has none
+        // installed" -- there is no reliable way to detect app mode or profile
+        // identity from script -- so it says what is true of both and what to do
+        // about either.
+        const note = document.createElement("span");
+        note.textContent = "not available in this window. If this page was opened by the desktop " +
+          "launcher it uses a separate browser profile with no extensions \u2014 open the same URL " +
+          "in your normal browser instead. Otherwise: ";
+        state.appendChild(note);
         const link = document.createElement("a");
         link.href = install;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.textContent = "not installed \u2014 get it";
+        link.textContent = "install it";
         state.appendChild(link);
       }
     }

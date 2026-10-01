@@ -358,6 +358,28 @@ def browser_command(binary: str, url: str, profile_dir: Path) -> list[str]:
     With a dedicated profile, wait() returned rc=0 at 5.53s when the window
     actually closed.
 
+    WHAT THIS WINDOW CANNOT DO, AND IT TOOK A ROUND TRIP TO FIND. Measured on the
+    operator's host 2026-10-01: "no wallet appears to work even though coinbase
+    wallet is installed into brave", and "the title bar does not show up to where
+    one can click on the wallets for crypto in brave". Both are this argv.
+
+      --app=<url>            no toolbar, so no extensions button to click.
+      --user-data-dir=<dir>  a profile with NO EXTENSIONS INSTALLED. Browser
+          extensions live in the user's normal profile; this one is created empty
+          by the launcher, so a wallet the operator has installed is genuinely
+          absent from this window and `window.coinbaseSolana` really is
+          undefined.
+
+    So the deposit page's wallet menu cannot work here, by construction, and that
+    is a consequence of the 72ms measurement above rather than a bug to fix. The
+    page says so instead of claiming the extension is not installed -- see
+    static/script.js, where that message was corrected after telling the operator
+    to install software they already had.
+
+    THE WORKAROUND IS THE SAME URL IN THE ORDINARY BROWSER, which is why launch()
+    prints it. Same server, same page, with the operator's own extensions
+    present.
+
     --no-sandbox is NOT here and must never be added. Rehearsal needed it because
     that container runs as root; the operator's desktop does not, and shipping it
     would weaken the browser's sandbox on a machine holding wallet RPC credentials.

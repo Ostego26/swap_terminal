@@ -1362,7 +1362,23 @@ def test_a_wallet_that_is_not_installed_is_disabled_rather_than_dead(client):
 
     script = client.get("/static/script.js").get_data(as_text=True)
     assert "button.disabled = true" in script, "an absent wallet must not look clickable"
-    assert "not installed" in script
+    # ASSERTED ON THE ASSIGNMENT, not on the words. This line read
+    # `assert "not installed" in script` and kept passing after the message was
+    # CHANGED, because the comment explaining why that wording was wrong quotes
+    # the old phrase. Fourth time in one day a keyword check in this suite could
+    # not tell a quotation from a claim; the fix is the same each time -- match
+    # code, which only exists where the behavior is.
+    assert 'note.textContent = "not available in this window' in script, (
+        "the message must say the wallet is absent from THIS window, not that it is uninstalled"
+    )
+    # AND IT MUST NOT TELL THE OPERATOR TO INSTALL WHAT THEY ALREADY HAVE.
+    # Measured 2026-10-01: "no wallet appears to work even though coinbase wallet
+    # is installed into brave". It was installed -- in their normal profile. The
+    # desktop launcher opens the page with --user-data-dir pointing at an empty
+    # profile, so the window genuinely has no extensions, and the old message
+    # blamed the user for it.
+    assert "separate browser profile with no extensions" in script
+    assert "open the same URL" in script, "and says what to do instead"
 
 
 def test_a_closed_swap_is_offered_no_wallet_menu_and_no_qr(client):
