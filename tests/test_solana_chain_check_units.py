@@ -63,6 +63,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     _what_the_target_is,
     call_with_backoff,
     check_rent,
+    coverage_clause,
     credit_path_lines,
     credits_the_owner,
     find_a_holder,
@@ -1368,8 +1369,9 @@ def test_a_quiet_account_and_an_uncrediting_one_read_differently():
     quiet = _deposits_line(_DepositStub(signatures_read=0), "rADDR", 10)
     busy = _deposits_line(_DepositStub(signatures_read=10), "rADDR", 10)
 
-    assert "ZERO signatures" in quiet
-    assert "10 signature(s) FETCHED and none credited" in busy, (
+    assert "ZERO signatures were LISTED" in quiet
+    assert "none of them credited this address" in busy
+    assert "All 10 listed signature(s) were FETCHED" in busy, (
         "FETCHED, not read: the word changed on 2026-10-01 because the count did -- it is "
         "listed minus unreadable now, not the length of the signature list"
     )
@@ -1857,12 +1859,75 @@ def test_the_deposits_line_names_what_it_could_not_fetch():
     """And the step's own line too, not just the summary -- that is where a reader looks first."""
     partial = _DepositStub(signatures_read=9, unreadable=["5tG3oZnjMXYr"])
     line = _deposits_line(partial, "rADDR", 10)
-    assert "9 signature(s) FETCHED" in line
-    assert "1 of 10 listed could NOT be fetched" in line
-    assert "not ruled out" in line, "an unfetched transaction leaves the question open"
+    assert "9 of 10 listed signature(s) were fetched" in line
+    assert "1 could NOT be fetched" in line
+    assert "NOT ruled out" in line, "an unfetched transaction leaves the question open"
 
     complete = _DepositStub(signatures_read=10)
     assert "could NOT be fetched" not in _deposits_line(complete, "rADDR", 10)
+
+
+def test_an_account_whose_every_transaction_was_throttled_is_not_called_untouched():
+    """Three signatures LISTED, none fetchable. "Nothing has touched this account" is the
+    opposite conclusion, and it is the one that hides a deposit.
+
+    The branch tested `signatures_read` -- listed MINUS unfetched -- so an account on a
+    rate-limited endpoint came out at read=0 and was reported as quiet. Found 2026-10-01 while
+    giving the stranded-money branch its denominator.
+
+    MUTATION: key on signatures_read again and this fails.
+    """
+    line = _deposits_line(
+        _DepositStub(signatures_read=0, unreadable=["5tG3oZnjMXYr", "4yPFj1mqTVnx", "65bWBunzbN"]),
+        "rADDR", 10)
+    assert "nothing has touched this account" not in line, (
+        "three transactions touched it; none could be read, which is not the same thing"
+    )
+    assert "0 of 3 listed signature(s) were fetched" in line
+    assert "3 could NOT be fetched" in line and "NOT ruled out" in line
+
+
+def test_the_stranded_money_branch_carries_its_denominator_too():
+    """The branch that was missing it, and the one where it matters most.
+
+    Your 2026-10-01 run printed `find_deposits_to_address(limit=5)` on the step line and
+    `over 4 signature(s)` in the SUMMARY, with nothing reconciling them -- 4 listed, or 5 listed
+    with one unfetched? The adapter knew both numbers and this branch did not ask.
+
+    MUTATION: drop the coverage_clause() call here and the stranded report goes back to having
+    no denominator, which is rule 3's named failure.
+    """
+    stranded = _deposits_line(
+        _DepositStub(drops=[_a_drop(credits=1)], signatures_read=4,
+                     unreadable=["5tG3oZnjMXYr"]), "rADDR", 5)
+    assert "WERE READ AND REFUSED" in stranded, "still reported first and as a problem"
+    assert "4 of 5 listed signature(s) were fetched" in stranded
+    assert "1 could NOT be fetched" in stranded and "NOT ruled out" in stranded, (
+        "a stranded credit is already proven here, so a deposit in an unfetched transaction is "
+        "a live possibility rather than a caveat"
+    )
+
+    full = _deposits_line(_DepositStub(drops=[_a_drop(credits=1)], signatures_read=5), "rADDR", 5)
+    assert "All 5 listed signature(s) were FETCHED" in full
+    assert "could NOT be fetched" not in full
+
+
+def test_the_coverage_clause_names_the_limit_only_when_it_differs_from_what_was_listed():
+    """Three numbers that are not the same number, and the operator reads the screen.
+
+    `limit` is what was ASKED for; `signatures_listed` is what the endpoint returned; fewer than
+    the limit is the endpoint having no more to give, not an error -- so the limit is named only
+    where the gap would otherwise be unexplained. Which is exactly what your run needed: the
+    step line said limit=5 and the summary said 4.
+    """
+    matched = coverage_clause(_DepositStub(signatures_read=5), 5)
+    assert "All 5 listed signature(s) were FETCHED, so the window" in matched
+    assert "limit asked for" not in matched, "nothing to explain when the two agree"
+
+    short = coverage_clause(_DepositStub(signatures_read=4), 5)
+    assert "All 4 listed signature(s) were FETCHED (the limit asked for 5)" in short, (
+        "this is your run's case, and the sentence it was missing"
+    )
 
 
 def test_signatures_read_is_listed_minus_unfetched_on_the_real_adapter():

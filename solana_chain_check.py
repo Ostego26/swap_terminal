@@ -1686,10 +1686,18 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         credited.append(len(events))
     if dropped:
         # REPORTED FIRST AND AS A PROBLEM, not appended to a "(none)". The credits are real.
+        #
+        # AND WITH ITS COVERAGE, since 2026-10-01. This branch printed no denominator at all,
+        # so the operator's run showed `find_deposits_to_address(limit=5)` on the step line and
+        # `over 4 signature(s)` in the summary with nothing reconciling them -- 4 listed, or 5
+        # listed and one unfetched? The adapter knows (signatures_listed, unreadable_signatures)
+        # and this was the one branch that did not ask. It is also the branch where it matters
+        # most: a stranded credit is already proven here, so "a deposit in the unfetched ones is
+        # not ruled out" is a live possibility rather than a caveat.
         lines = [
             f"(none) CREDITED -- but {sum(d.credits for d in dropped)} credit(s) across "
             f"{len(dropped)} transaction(s) WERE READ AND REFUSED. Real money arrived that no "
-            f"swap can claim; matching it is a human's job.",
+            f"swap can claim; matching it is a human's job. {coverage_clause(adapter, limit)}",
         ]
         lines.extend(
             f"\n      {d.signature}\n        {d.credits} credit(s) dropped: {d.why}"
@@ -1700,16 +1708,21 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         # was a note explaining a formatting defect instead of fixing it.
         lines.append(_indented(captured.records))
         return "".join(lines)
-    if not events and not adapter.signatures_read:
-        return ("(none)  <- and ZERO signatures were read, so nothing has touched this account "
-                "in the window. A RESULT, not a failure." + _indented(captured.records))
+    if not events and not adapter.signatures_listed:
+        # LISTED, NOT READ, and that is a fix rather than a rename. This tested
+        # `signatures_read`, which is listed MINUS the ones getTransaction could not fetch -- so
+        # an account with three signatures whose every getTransaction was throttled came out at
+        # read=0 and printed "nothing has touched this account in the window". Three things had
+        # touched it and none of them could be read, which is the opposite conclusion and the
+        # one that hides a deposit. Found 2026-10-01 while giving the branch below its
+        # denominator; on a rate-limited public endpoint, all-of-a-small-window throttling is
+        # not a hypothetical.
+        return ("(none)  <- and ZERO signatures were LISTED for it, so nothing has touched this "
+                "account in the window. A RESULT, not a failure." + _indented(captured.records))
     if not events:
-        unread = ("" if not adapter.unreadable_signatures else
-                  f", and {len(adapter.unreadable_signatures)} of {adapter.signatures_listed} "
-                  f"listed could NOT be fetched -- a deposit in those is not credited and is "
-                  f"not ruled out")
-        return (f"(none)  <- {adapter.signatures_read} signature(s) FETCHED and none credited "
-                f"this address{unread}. A RESULT, not a failure." + _indented(captured.records))
+        return (f"(none)  <- none of them credited this address. "
+                f"{coverage_clause(adapter, limit)} A RESULT, not a failure."
+                + _indented(captured.records))
     lines = [f"{len(events)} credit(s):"]
     lines.extend(
         f"\n      {event['txid']}\n        vout={event['vout']} (account index, read from the tx -- never fabricated) "
@@ -1717,6 +1730,38 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         for event in events
     )
     return "".join(lines)
+
+
+def coverage_clause(adapter: SolanaAdapter, limit: int) -> str:
+    """How much of the window was actually read, as one sentence. ONE COPY, used by two branches.
+
+    IT EXISTED IN ONLY ONE OF THEM UNTIL 2026-10-01, and the missing one was the branch that
+    reports stranded money -- see the comment at the `if dropped:` above. Written as a shared
+    function rather than copied, because the two would have read the same on the day they were
+    written and drifted from then on (rule 8), and the drift here is a denominator: rule 3's
+    "a count without what it was counted out of has caused real errors here more than once".
+
+    THREE NUMBERS AND THEY ARE NOT THE SAME NUMBER, which is the whole reason this is a sentence
+    and not a count:
+
+        limit                      what the run ASKED for
+        signatures_listed          what getSignaturesForAddress returned. Fewer than the limit
+                                   means the endpoint had no more to give, not an error.
+        signatures_read            listed minus the ones getTransaction could not fetch. On a
+                                   rate-limited endpoint this is routinely lower, and a deposit
+                                   inside an unfetched transaction is neither credited nor
+                                   ruled out.
+
+    The operator reads the screen, not the source (rule 14), so all three appear whenever they
+    disagree and the sentence says what the gap means.
+    """
+    listed, read = adapter.signatures_listed, adapter.signatures_read
+    asked = "" if listed == limit else f" (the limit asked for {limit})"
+    if read == listed:
+        return f"All {listed} listed signature(s) were FETCHED{asked}, so the window was read in full."
+    return (f"{read} of {listed} listed signature(s) were fetched{asked}; "
+            f"{listed - read} could NOT be fetched -- a deposit inside those is NOT credited "
+            f"and is NOT ruled out.")
 
 
 if __name__ == "__main__":
