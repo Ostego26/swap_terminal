@@ -167,6 +167,25 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
           credit off `meta.preBalances`/`postBalances` indexed through
           `message.accountKeys`, and `_attributable` refused it for carrying no
           memo. BOTH credit readers now rest on a real response.
+          AND THE ARITHMETIC IS CONFIRMED IN LAMPORTS, which the run itself
+          could not show. Transaction 2K2Pw1Hz... read directly off devnet,
+          2026-10-01:
+
+              account index   1
+              preBalances[1]  0
+              postBalances[1] 28778699200
+              delta           28.7786992 SOL
+
+          So `post - pre` is what the reader returns, the `vout` it would record
+          is the account index 1, and base_units_to_amount() divides by
+          SOL_DECIMALS correctly. This was worth reading because the run printed
+          `28.7786992 SOL` for BOTH the dropped credit and the account's whole
+          balance, four lines apart, and a delta equal to the balance is the
+          signature of a funding transaction OR of a reader returning the
+          balance by mistake. It is the first: pre was zero. The equality was a
+          READING until this read made it a measurement (rule 17), and the
+          numbers are here so the next person can re-derive it rather than
+          re-wonder.
           THIS LINE SAID "NOT re-confirmed since the targeted-proof work
           landed" for exactly one commit, which is the shortest-lived stale
           claim in this header's three revisions and still a stale claim. The

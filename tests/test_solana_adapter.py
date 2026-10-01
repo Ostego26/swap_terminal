@@ -1112,3 +1112,60 @@ def test_the_unreadable_list_describes_THIS_scan_only():
     adapter.find_deposits_to_address(WALLET)
     assert adapter.unreadable_signatures == [], "the list must describe the latest scan only"
     assert adapter.signatures_read == 0
+
+def test_native_credits_over_the_REAL_devnet_numbers():
+    """The lamport figures read off devnet 2026-10-01, replayed through the real reader.
+
+    Measured directly, not from a run's rendered output:
+
+        signature       2K2Pw1Hz...
+        account index   1
+        preBalances[1]  0
+        postBalances[1] 28778699200
+        delta           28.7786992 SOL
+
+    WHY THIS IS WORTH A TEST AND NOT ONLY A HEADER NOTE. The run that proved this reader
+    printed 28.7786992 for the dropped credit AND for the account's whole balance, four lines
+    apart. A delta equal to the balance is the signature of a funding transaction or of a
+    reader returning the balance by mistake, and the two are indistinguishable from the
+    screen. Reading preBalances settled it -- pre was zero -- and seeding those exact numbers
+    here keeps the arithmetic pinned to a real response rather than to a round number somebody
+    chose.
+
+    MUTATION: return post instead of post - pre and this still passes on THIS transaction,
+    because pre is zero -- which is why the second case below exists. Together they separate
+    the two readings the header had to go to the chain to tell apart.
+    """
+    adapter = chains_solana.SolanaAdapter(url="http://seeded.invalid")
+    signature = "2K2Pw1HzJs3qH5kY2dRZ1HPvmxKnddCyYt3UoChtXEMxCz5LkHe1N2Gq4Fqg5hxTSwj4sENx65j1iBrDA54BUtMc"
+    me = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+
+    def transaction(pre, post):
+        return {
+            "transaction": {"message": {"accountKeys": [
+                {"pubkey": "SomeFeePayer1111111111111111111111111111111"},
+                {"pubkey": me},
+            ]}},
+            "meta": {"preBalances": [1_000_000, pre], "postBalances": [995_000, post]},
+        }
+
+    real = transaction(0, 28_778_699_200)
+    # CALLS THE PRIVATE READER ON PURPOSE: find_deposits_to_address() needs a cluster, and the
+    # arithmetic is what the chain confirmed. Same reason solana_chain_check._spl_reader_line()
+    # reaches for the per-transaction reader. (No `noqa` -- SLF001 is not in this repo's ruff
+    # selection and RUF100 strips the directive, so the reason stays as a comment.)
+    events = adapter._native_credits(
+        signature, me, real, real["meta"], chains_solana.FINALIZED_RANK)
+    assert len(events) == 1
+    assert events[0]["amount"] == 28.7786992, "post - pre, divided by SOL_DECIMALS"
+    assert events[0]["vout"] == 1, (
+        "the ACCOUNT INDEX off the real response -- index 1, as the chain reported it"
+    )
+    assert events[0]["txid"] == signature
+
+    # THE CASE THE DEVNET TRANSACTION CANNOT DISTINGUISH. Same post, a non-zero pre: a reader
+    # returning the balance would still say 28.7786992 and this says 0.7786992.
+    moved = transaction(28_000_000_000, 28_778_699_200)
+    assert adapter._native_credits(
+        signature, me, moved, moved["meta"], chains_solana.FINALIZED_RANK,
+    )[0]["amount"] == 0.7786992, "a delta, not a balance"
