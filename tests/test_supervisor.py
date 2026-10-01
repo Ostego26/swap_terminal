@@ -438,3 +438,87 @@ def test_confirm_spawned_sleeps_nothing_when_nothing_was_spawned():
     started = time.monotonic()
     assert supervisor.confirm_spawned(already) is already
     assert time.monotonic() - started < 0.2
+
+
+# --- can a payout actually send ----------------------------------------------
+
+def test_the_start_banner_says_a_grc_payout_cannot_unlock_when_no_passphrase_is_set(monkeypatch):
+    """The gap that cost three live rehearsals on 2026-10-01.
+
+    The operator ran a devnet SOL -> testnet GRC swap three times. All three
+    times the whole pipeline worked -- memo attributed, deposit credited, swap
+    advanced, payout worker claimed it -- and all three times the GRC leg died on
+
+        GRIDCOIN_WALLET_PASSPHRASE is not set in this process's environment
+
+    because the supervisor had been started from a shell without it. And all
+    three times this banner said, two lines below, `a payout worker CAN
+    broadcast`. False in the direction that cost the rounds: it could not
+    broadcast at all. The banner warned about the danger of SUCCEEDING and said
+    nothing about a guaranteed failure.
+
+    A worker inherits the shell that spawned it and nothing downstream can see
+    which shell that was, so this is exactly rule 14's "echo the parameters that
+    decide the answer".
+
+    MUTATION: drop unlock_readiness_lines() from endpoint_summary() and this
+    fails while every other banner test passes -- the state of three rehearsals.
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    entry = supervisor.Config.RPC["GRC"]
+    original = {key: entry[key] for key in ("port", "user", "password")}
+    try:
+        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
+        text = "\n".join(supervisor.endpoint_summary())
+    finally:
+        entry.update(original)
+
+    assert "GRIDCOIN_WALLET_PASSPHRASE IS NOT SET" in text
+    assert "WILL refuse before sending" in text
+    # And it says what to do about it, where the operator is looking.
+    assert "shell that starts this process" in text
+
+
+def test_the_banner_never_prints_the_passphrase_or_its_length(monkeypatch):
+    """The one thing this line must never do, asserted rather than intended.
+
+    A banner that helpfully echoed the value would put a wallet passphrase into
+    every log the supervisor writes and into every terminal paste. The length is
+    excluded too: it is not the secret but it narrows one, and nothing on screen
+    needs it.
+    """
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "canary-wallet-passphrase")
+    entry = supervisor.Config.RPC["GRC"]
+    original = {key: entry[key] for key in ("port", "user", "password")}
+    try:
+        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
+        text = "\n".join(supervisor.endpoint_summary())
+    finally:
+        entry.update(original)
+
+    assert "canary-wallet-passphrase" not in text
+    assert "24" not in text.split("GRC payout unlock")[1].split("\n")[0], "not even the length"
+    # It reports PRESENCE and deliberately does not claim correctness: "set" and
+    # "works" are different claims and a wrong passphrase still fails at the send.
+    assert "IS set" in text
+    assert "NOT a claim that it is the right passphrase" in text
+
+
+def test_an_unconfigured_grc_gets_no_unlock_line_at_all(monkeypatch):
+    """A passphrase warning for a chain nobody set up is cried-wolf noise.
+
+    services/payout_service.py already fixed this shape once, for XRP's
+    get_balance() refusal printing every ten seconds. A chain with no adapter
+    watches nothing and pays nothing, so it has no unlock to report.
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    entry = supervisor.Config.RPC["GRC"]
+    original = {key: entry[key] for key in ("port", "user", "password")}
+    try:
+        entry.update({"port": 0, "user": "", "password": ""})
+        text = "\n".join(supervisor.endpoint_summary())
+    finally:
+        entry.update(original)
+
+    assert "payout unlock" not in text
+    assert "not configured" in text, "and it still says the chain is unconfigured"

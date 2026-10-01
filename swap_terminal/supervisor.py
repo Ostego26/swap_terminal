@@ -578,11 +578,24 @@ def endpoint_summary() -> list[str]:
     # ~482) and `status` (line ~547) are the only two callers -- so on the one
     # subcommand an operator runs when something is already wrong it buys
     # nothing.
+    from chains.registry import build_adapters  # noqa: PLC0415 -- measured above
+    from services.payout_service import unlock_readiness_lines  # noqa: PLC0415 -- measured above
     from workers.common import endpoint_lines  # noqa: PLC0415 -- measured above
 
+    # WHICH CHAINS HAVE AN ADAPTER, from the one function that decides it, so the
+    # unlock lines cannot name a chain the chain lines above call unconfigured
+    # (rule 8). build_adapters() opens no socket -- RPCAdapter.__init__ only
+    # stores credentials and computes a URL.
+    configured = build_adapters(Config.RPC).keys()
     return [
         f"  database          {Config.DB_PATH}",
         *endpoint_lines(),
+        # CAN A PAYOUT ACTUALLY SEND. Three devnet SOL -> testnet GRC rehearsals
+        # on 2026-10-01 each ran the whole pipeline correctly and each died on a
+        # missing GRIDCOIN_WALLET_PASSPHRASE, while this banner said "a payout
+        # worker CAN broadcast" two lines below. See
+        # services/payout_service.unlock_readiness_lines().
+        *unlock_readiness_lines(configured),
         "  network           NOT VERIFIED here -- the port above is only the default for a network, "
         "not proof of one. Ask the daemon (`getblockchaininfo`) before trusting it.",
     ]

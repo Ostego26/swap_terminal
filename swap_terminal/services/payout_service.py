@@ -597,3 +597,57 @@ def refresh_wallet_inventory(db, adapters: dict):
                 (asset, balance, reserved, available, now),
             )
     db.commit()
+
+
+def unlock_readiness_lines(configured_assets) -> list[str]:
+    """Whether each payout-unlock chain CAN be unlocked, for a startup banner. PURE-ish.
+
+    Reads os.environ and nothing else. Never returns the passphrase, never
+    returns its length, and never claims it is CORRECT -- only that one is
+    present. "Set" and "works" are different claims and this makes the weaker
+    one (rule 17); a wrong passphrase still fails at the send, and saying
+    otherwise here would be the reassuring answer rather than the measured one.
+
+    WHY THIS EXISTS, MEASURED THREE TIMES ON 2026-10-01. The operator ran a
+    devnet SOL -> testnet GRC rehearsal. All three times the whole pipeline
+    worked -- memo attributed, deposit credited, swap advanced, payout worker
+    claimed it -- and all three times the GRC leg died on
+
+        GRIDCOIN_WALLET_PASSPHRASE is not set in this process's environment
+
+    because the supervisor had been started from a shell without it. And all
+    three times supervisor.py's start banner had said, immediately above the
+    spawn:
+
+        about to spawn    a payout worker CAN broadcast. Stop now if this
+                          database is pointed at a funded mainnet wallet.
+
+    Which was false in the direction that cost three rounds: it could not
+    broadcast at all. The banner warned about the danger of succeeding while
+    saying nothing about a guaranteed failure, and the environment is exactly
+    the kind of parameter rule 14 says to echo -- "echo the parameters that
+    decide the answer", because a worker inherits the shell that spawned it and
+    nothing downstream can see which shell that was.
+
+    `configured_assets` is PASSED IN rather than read from Config here, so the
+    caller decides what "configured" means and this function cannot disagree
+    with the chain lines printed beside it (rule 8). A chain that has no adapter
+    gets no line: a passphrase warning for a chain nobody set up is the
+    cried-wolf noise this file already fixed once for XRP's get_balance().
+    """
+    lines = []
+    for asset in sorted(WALLET_UNLOCK_ASSETS & set(configured_assets)):
+        if os.environ.get(WALLET_UNLOCK_ENV_VAR, ""):
+            lines.append(
+                f"  {asset} payout unlock  {WALLET_UNLOCK_ENV_VAR} IS set in this process, so a payout can "
+                f"attempt the unlock. NOT a claim that it is the right passphrase -- a wrong one still "
+                f"fails at the send."
+            )
+        else:
+            lines.append(
+                f"  {asset} payout unlock  *** {WALLET_UNLOCK_ENV_VAR} IS NOT SET *** so every {asset} payout "
+                f"WILL refuse before sending and the swap will land in 'failed', which nothing retries. A "
+                f"{asset} wallet unlocked for staking cannot send (rpc code -4). Export it in the shell that "
+                f"starts this process; a value set in a file, or in another shell, does not reach here."
+            )
+    return lines

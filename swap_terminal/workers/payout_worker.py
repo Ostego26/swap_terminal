@@ -60,7 +60,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import Config
 from db import SCHEMA, apply_migrations, db_session
-from services.payout_service import process_pending_payouts, refresh_wallet_inventory
+from services.payout_service import (
+    process_pending_payouts,
+    refresh_wallet_inventory,
+    unlock_readiness_lines,
+)
 from workers.common import (
     announce_start,
     build_adapters_from_config,
@@ -85,6 +89,35 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
     )
     adapters = build_adapters_from_config()
     config = get_config_dict()
+
+    # CAN THIS WORKER ACTUALLY UNLOCK, SAID AT STARTUP RATHER THAN PER SWAP.
+    #
+    # Measured three times on 2026-10-01. The operator ran a devnet SOL -> testnet
+    # GRC rehearsal; every time the pipeline worked end to end and every time the
+    # GRC leg died because this process had no GRIDCOIN_WALLET_PASSPHRASE. The
+    # reason was reported correctly -- at the moment of the payout, after the
+    # customer's deposit was already credited, with the swap landing in 'failed'
+    # which nothing retries. Three deposits taken, three swaps dead, one
+    # environment variable.
+    #
+    # The operator's question was the right one: "why do they need the wallet
+    # passphrase AFTER sending." Because nothing asked before. This asks before,
+    # at the only moment where the answer costs nothing: a worker that cannot
+    # unlock cannot pay ANY swap, so it is knowable the instant the process
+    # starts and does not need a customer's money to discover.
+    #
+    # IT WARNS AND KEEPS RUNNING RATHER THAN EXITING, deliberately. Exiting would
+    # make a misconfigured payout worker vanish from `supervisor.py status`, which
+    # is rule 13's orphan problem inverted -- the operator would see a worker
+    # that is not running and have to work out why, instead of a worker that is
+    # running and saying exactly what is wrong with it. It also still does useful
+    # work: refresh_wallet_inventory() keeps the balance rows current, and the
+    # per-swap refusal still fires with its own explanation.
+    #
+    # Nothing here prints the passphrase or its length; see
+    # services/payout_service.unlock_readiness_lines().
+    for line in unlock_readiness_lines(adapters.keys()):
+        print(line, flush=True)
 
     # The constraint that makes a double payout impossible, applied once at
     # startup rather than every cycle (it is idempotent either way). It is a
