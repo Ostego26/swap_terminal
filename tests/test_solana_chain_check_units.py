@@ -2650,3 +2650,119 @@ def test_the_proof_step_still_runs_when_the_scan_decoded_nothing():
     assert len(steps) == 1
     assert "_spl_credits over 65bWBunzbNMkN9d5" in steps[0][0]
     assert "CREDIT" in steps[0][1]
+
+
+# ---------------------------------------------------------------------------
+# A SIGNATURE PRINTED TWICE IS NOT A SECOND KIND OF EVIDENCE.
+#
+# The 2026-10-01 run, after the coverage clause landed. Two stranded credits:
+#
+#   (none) CREDITED -- but 2 credit(s) across 2 transaction(s) WERE READ AND REFUSED. ...
+#     43o7vzDVNQLnQYCt9pJaMX5gkM5zNHVVPQ2AKve6jtCRdf8Tnwaw5AWRYAbGEE3AHEsWqwGt7UffUbqdgneL9JLB
+#       1 credit(s) dropped: no memo instruction -- unattributable ...
+#     51haz3Du7iKBSeeS8FFab63nsWPqUkfjxZgvdiypjwttPUHmzH9fjHMZK1W4iJxaW8uKmn2k5huVLoDHjDw1mk74
+#       1 credit(s) dropped: no memo instruction -- unattributable ...
+#     logged: SOL deposit 43o7vzDVNQLnQYCt... CANNOT BE ATTRIBUTED ...
+#             ... and the SAME reason for 1 more. Every one, for recovery by hand:
+#               51haz3Du7iKBSeeS8FFab...
+#
+# Two facts, four 88-character base58 strings. "Recovery by hand" is a real need and the
+# step's own list is what serves it -- which is why _indented() now takes the set of
+# signatures the caller has already printed, and checks the justification instead of
+# assuming it.
+# ---------------------------------------------------------------------------
+
+_SIG_A = "43o7vzDVNQLnQYCt9pJaMX5gkM5zNHVVPQ2AKve6jtCRdf8Tnwaw5AWRYAbGEE3AHEsWqwGt7UffUbqdgneL9JLB"
+_SIG_B = "51haz3Du7iKBSeeS8FFab63nsWPqUkfjxZgvdiypjwttPUHmzH9fjHMZK1W4iJxaW8uKmn2k5huVLoDHjDw1mk74"
+#: A third, needed to reach the PARTIAL overlap -- see that test for why two cannot.
+_SIG_C = "5rWbN6zPPm6nLnhmasWtsQAfb35sjG8iBBb3LAh9PRHNuL8EQ59GuRykPgG66aY4Cd4a9Rd8jgiz33CkATjtXJoJ"
+
+
+def _a_drop_warning(signature):
+    """The adapter's real wording, taken from the operator's run rather than paraphrased."""
+    return (f"SOL deposit {signature} to the shared account CANNOT BE ATTRIBUTED and was NOT "
+            f"credited: no memo instruction -- unattributable, and a human has to match it. "
+            f"1 credit(s) dropped.")
+
+
+def test_a_signature_the_step_already_listed_is_not_printed_again():
+    """MUTATION: ignore already_listed and the second copy comes back -- your run's defect."""
+    block = _indented([_a_drop_warning(_SIG_A), _a_drop_warning(_SIG_B)],
+                      already_listed=frozenset({_SIG_A, _SIG_B}))
+    assert "and the SAME reason for 1 more, every one already listed above" in block
+    assert block.count(_SIG_B) == 0, "the elided one appears nowhere in the block"
+    assert block.count(_SIG_A) == 1, (
+        "the head record is the adapter's RAW log line and keeps its signature -- that is what "
+        "proves the live path's exact wording, and it is one copy rather than two"
+    )
+
+
+def test_with_nothing_listed_above_every_signature_is_still_printed():
+    """The no-credit branches print no list of their own, so the block is the only record.
+
+    MUTATION: elide unconditionally and a throttled-window run loses the signatures an operator
+    needs to go and look at those transactions by hand.
+    """
+    block = _indented([_a_drop_warning(_SIG_A), _a_drop_warning(_SIG_B)])
+    assert _SIG_B in block, "nothing above it, so nothing may be elided"
+    assert "Every one, for recovery by hand" in block
+    assert "not listed above" not in block, (
+        "that phrasing would send the reader looking for a list they never saw"
+    )
+
+
+def test_only_the_signatures_actually_listed_above_are_elided():
+    """A partial overlap keeps the rest, and says the list is the remainder.
+
+    THREE RECORDS, NOT TWO, and the first version of this test used two and failed. The head
+    record's OWN signature is already excluded from the repeat list, so with two warnings the
+    only candidate is the second one and the overlap can only be total or empty. Reaching the
+    partial case takes three: two listed above, one not. I wrote the two-record version from a
+    reading of the condition instead of tracing it (rule 17).
+    """
+    block = _indented(
+        [_a_drop_warning(_SIG_A), _a_drop_warning(_SIG_B), _a_drop_warning(_SIG_C)],
+        already_listed=frozenset({_SIG_A, _SIG_B}))
+    assert _SIG_C in block, "C was never printed above, so it must survive"
+    assert _SIG_B not in block, "B was, so it goes"
+    assert "Every one not listed above, for recovery by hand" in block
+
+
+def test_the_stranded_step_elides_what_its_own_list_already_gave():
+    """END TO END through _deposits_line, because the wiring is the half that was missing.
+
+    THE STUB HAS TO ACTUALLY LOG. The first version of this used _DepositStub, which logs
+    nothing -- so `captured.records` was empty, the block never rendered, and a mutation
+    removing the `already_listed=` argument SURVIVED. A test driving the wiring of a log
+    capture through something that emits no logs proves the plumbing, not the behavior.
+
+    MUTATION: drop the `already_listed=` argument at the call site and every signature is
+    printed twice -- the function right and uncalled, which is the failure mode three
+    main()-level mutations in this session have already had.
+    """
+    class LoggingStub(_DepositStub):
+        def find_deposits_to_address(self, address, tx_limit=10):
+            # ON THE ADAPTER'S OWN LOGGER, the one _deposits_line attaches its handler to, and
+            # at WARNING because that is the level the live drop path uses.
+            for drop in self.unattributable_drops:
+                logging.getLogger("chains.solana").warning(_a_drop_warning(drop.signature))
+            return super().find_deposits_to_address(address, tx_limit)
+
+    def drop(signature):
+        return chains_solana.UnattributableCredit(
+            signature=signature, credits=1,
+            why="no memo instruction -- unattributable, and a human has to match it")
+
+    line = _deposits_line(
+        LoggingStub(drops=[drop(_SIG_A), drop(_SIG_B)], signatures_read=5), "rADDR", 5)
+    assert "2 credit(s) across 2 transaction(s) WERE READ AND REFUSED" in line
+    assert "logged: SOL deposit" in line, "the capture has to have rendered, or this proves zero"
+    assert "every one already listed above" in line
+    assert line.count(_SIG_B) == 1, (
+        f"{_SIG_B[:16]}... appears {line.count(_SIG_B)} times; it belongs in the step's own "
+        f"list and nowhere else"
+    )
+    assert line.count(_SIG_A) == 2, (
+        "once in the step's list, once as the head of the adapter's raw warning -- that head is "
+        "what proves the live path's exact wording"
+    )

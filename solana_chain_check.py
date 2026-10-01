@@ -1610,7 +1610,8 @@ def _one_reason_per_group(records: list[str]) -> list[tuple[str, list[str]]]:
     return list(groups.values())
 
 
-def _indented(records: list[str], indent: str = "      ") -> str:
+def _indented(records: list[str], indent: str = "      ",
+              already_listed: frozenset[str] = frozenset()) -> str:
     """Log records folded into a step's output, ONE PER DISTINCT REASON, aligned.
 
     COLLAPSED BY REASON, AND THE OPERATOR'S 2026-10-01 RUN IS WHY. `--limit 50` against public
@@ -1627,6 +1628,18 @@ def _indented(records: list[str], indent: str = "      ") -> str:
     and recover a deposit by hand -- dropping them to shorten the block would trade one
     unusable output for another. What is removed is the repetition of the REASON, not the
     evidence.
+
+    `already_listed` IS HOW THAT JUSTIFICATION GETS CHECKED RATHER THAN ASSUMED. It holds the
+    signatures the calling step has already printed above this block, and those are elided here
+    with a count instead. The 2026-10-01 run is why: the stranded-deposit step listed both
+    signatures with their reason, and then this block printed one of them again in full and the
+    other in a "for recovery by hand" list -- two facts, four 88-character base58 strings, and
+    nothing a reader could do with the second copy. "Recovery by hand" is a real need and is
+    exactly what the step's own list serves; repeating it is not a second kind of evidence.
+
+    The set is a PARAMETER rather than read from the adapter, because this helper also folds in
+    warnings for steps that print no list of their own (the no-credit branches) -- there the
+    default empty set keeps every signature, which is the behavior those branches need.
     """
     if not records:
         return ""
@@ -1635,12 +1648,22 @@ def _indented(records: list[str], indent: str = "      ") -> str:
         head, *rest = first.splitlines() or [""]
         lines.append(f"\n{indent}logged: {head}")
         lines.extend(f"\n{indent}        {line}" for line in rest)
-        repeats = len(named) - len(_BASE58_RUN.findall(first))
-        if repeats > 0:
-            extra = [token for token in named if token not in _BASE58_RUN.findall(first)]
-            lines.append(f"\n{indent}        ... and the SAME reason for {len(extra)} more. "
-                         f"Every one, for recovery by hand:")
-            lines.append(f"\n{indent}          " + " ".join(extra))
+        in_the_head = _BASE58_RUN.findall(first)
+        extra = [token for token in named if token not in in_the_head]
+        if not extra:
+            continue
+        unlisted = [token for token in extra if token not in already_listed]
+        if not unlisted:
+            lines.append(f"\n{indent}        ... and the SAME reason for {len(extra)} more, "
+                         f"every one already listed above.")
+            continue
+        # "NOT already listed above" ONLY WHEN SOME WERE, because with an empty already_listed
+        # -- the no-credit branches, which print no list of their own -- that phrasing describes
+        # a list the reader never saw and makes them go looking for it.
+        qualified = "Every one" if len(unlisted) == len(extra) else "Every one not listed above"
+        lines.append(f"\n{indent}        ... and the SAME reason for {len(extra)} more. "
+                     f"{qualified}, for recovery by hand:")
+        lines.append(f"\n{indent}          " + " ".join(unlisted))
     return "".join(lines)
 
 
@@ -1706,7 +1729,11 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         # THE ADAPTER'S OWN WARNING, folded in rather than left to cross the block. The
         # caveat that used to be here -- "the WARNING above this step is the same event" --
         # was a note explaining a formatting defect instead of fixing it.
-        lines.append(_indented(captured.records))
+        # THE SIGNATURES ARE ALREADY ABOVE, every one of them: the loop just above lists each
+        # drop with its reason. Handing that set to _indented() elides the second copy -- see
+        # its docstring for what your 2026-10-01 run printed without this.
+        lines.append(_indented(captured.records,
+                               already_listed=frozenset(d.signature for d in dropped)))
         return "".join(lines)
     if not events and not adapter.signatures_listed:
         # LISTED, NOT READ, and that is a fix rather than a rename. This tested
