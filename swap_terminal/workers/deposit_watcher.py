@@ -26,6 +26,7 @@ was working and one that had wedged on a chain RPC rendered identically, which
 is rule 14's defect in its purest form.
 """
 
+import logging
 import os
 import sys
 import time
@@ -42,6 +43,7 @@ from config import Config
 from db import SCHEMA, db_session
 from services.deposit_service import ACTIVE_STATUSES, process_active_swaps
 from workers.common import (
+    CycleFailures,
     announce_start,
     build_adapters_from_config,
     cycle_line,
@@ -105,82 +107,109 @@ def halted_note(halted: int) -> str:
     )
 
 
+logger = logging.getLogger(__name__)
+
+
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
     should_stop = install_stop_handler()
     announce_start(WORKER_NAME, poll_seconds, os.getpid())
     adapters = build_adapters_from_config()
     config = get_config_dict()
 
+    failures = CycleFailures(WORKER_NAME)
     cycle = 0
     while not should_stop():
         cycle += 1
         started = time.monotonic()
-        with db_session(Config.DB_PATH) as db:
-            db.executescript(SCHEMA)
-            before = db.execute(
-                # The suppression on the next line is a claim that was
-                # checked: the interpolated text is a run of '?' generated
-                # from ACTIVE_STATUSES' LENGTH, and the statuses themselves
-                # are bound as parameters on the line after it. Structure,
-                # not input.
-                f"SELECT COUNT(*) AS n FROM swaps WHERE status IN ({_ACTIVE_PLACEHOLDERS})",  # noqa: S608
-                ACTIVE_STATUSES,
-            ).fetchone()["n"]
-            processed = process_active_swaps(db, config, adapters)
-            pending = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'payout_pending'").fetchone()["n"]
-            # HALTED SWAPS, counted because a halt was invisible until 2026-09-26.
-            #
-            # The operator sent 1 XRP to a swap expecting 5. The tolerance check did
-            # exactly what it should -- refused to credit a wrong amount and moved the
-            # swap to 'under_review' -- and the cycle line printed
-            #
-            #     active_swaps=1 refreshed=1 now_payout_pending=0
-            #
-            # and nothing else. 'under_review' is not in ACTIVE_STATUSES, so the swap
-            # left the polled set silently. The only signal was a 0 where a reader had
-            # to already know to expect 1.
-            #
-            # A halt is the single most important thing this worker can report: it is
-            # the one outcome that will not resolve on its own, because it exists
-            # precisely to wait for a person. Rule 14's "make 'did nothing' look
-            # different from 'did work'" -- a cycle that halted a customer's swap must
-            # not read like one that found nothing to do.
-            #
-            # Counted as a TOTAL rather than a delta on purpose: a delta shows the
-            # transition once and then reads as zero forever, so a swap sitting halted
-            # for a day would be invisible to anyone who started watching after it
-            # happened. The standing count keeps it on screen.
-            #
-            # THIS COUNT AND show_swap.py's LISTING MUST NAME THE SAME SET. The tool
-            # the note hands over reads services/swap_view.HALTED_STATUSES, which is
-            # derived from STATUS_MEANINGS; this is the literal. They are not one
-            # expression because an `IN (?)` built from a tuple's length needs SQL
-            # assembled by interpolation, and that needs an S608 suppression -- rule
-            # 19 does not allow buying a check pass with one. The guard is a test
-            # instead: tests/test_show_swap.py asserts the status this line counts is
-            # exactly the set the tool lists, so a second halted status added to the
-            # vocabulary fails there rather than producing a count of 2 beside a list
-            # of 1.
-            halted = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'under_review'").fetchone()["n"]
-        print(
-            cycle_line(
-                WORKER_NAME,
-                cycle,
-                time.monotonic() - started,
-                {
-                    "active_swaps": before,
-                    "refreshed": len(processed),
-                    "now_payout_pending": pending,
-                    "HALTED_for_review": halted,
-                },
-                # HALTED_for_review is a STANDING CONDITION rather than work this
-                # cycle did, and workers/common.STANDING_COUNTS names it as one.
-                # Counted as work, it made every cycle print WORKED for as long as
-                # a single swap sat halted -- see that constant for the measurement.
-                notes=halted_note(halted),
-            ),
-            flush=True,
-        )
+        # EVERY CYCLE IS GUARDED, and the measurement is in
+        # workers/common.CycleFailures. A devnet DNS lookup failed for a moment on
+        # 2026-10-01 and this worker DIED -- there was no try/except anywhere in any
+        # of the three workers, so one chain being briefly unreachable terminated
+        # the process and stopped deposits being credited on EVERY chain, while
+        # payout_worker went on printing IDLE as though there were simply nothing to
+        # pay. The operator found it with `supervisor.py status` half an hour later.
+        #
+        # `except Exception` and NOT BaseException: KeyboardInterrupt and SystemExit
+        # must still end the process. A Ctrl-C that only logged a failed cycle and
+        # carried on would be a worker the operator cannot stop, which is worse
+        # than the crash this replaces (rule 13).
+        #
+        # This is rule 12's legitimate broad catch, and the test it names is met:
+        # the caller CAN tell the failure from a real answer. A failed cycle prints
+        # FAILED with the exception type, the reason and a count of consecutive
+        # failures -- it does not print IDLE, and it does not print nothing.
+        try:
+            with db_session(Config.DB_PATH) as db:
+                db.executescript(SCHEMA)
+                before = db.execute(
+                    # The suppression on the next line is a claim that was
+                    # checked: the interpolated text is a run of '?' generated
+                    # from ACTIVE_STATUSES' LENGTH, and the statuses themselves
+                    # are bound as parameters on the line after it. Structure,
+                    # not input.
+                    f"SELECT COUNT(*) AS n FROM swaps WHERE status IN ({_ACTIVE_PLACEHOLDERS})",  # noqa: S608
+                    ACTIVE_STATUSES,
+                ).fetchone()["n"]
+                processed = process_active_swaps(db, config, adapters)
+                pending = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'payout_pending'").fetchone()["n"]
+                # HALTED SWAPS, counted because a halt was invisible until 2026-09-26.
+                #
+                # The operator sent 1 XRP to a swap expecting 5. The tolerance check did
+                # exactly what it should -- refused to credit a wrong amount and moved the
+                # swap to 'under_review' -- and the cycle line printed
+                #
+                #     active_swaps=1 refreshed=1 now_payout_pending=0
+                #
+                # and nothing else. 'under_review' is not in ACTIVE_STATUSES, so the swap
+                # left the polled set silently. The only signal was a 0 where a reader had
+                # to already know to expect 1.
+                #
+                # A halt is the single most important thing this worker can report: it is
+                # the one outcome that will not resolve on its own, because it exists
+                # precisely to wait for a person. Rule 14's "make 'did nothing' look
+                # different from 'did work'" -- a cycle that halted a customer's swap must
+                # not read like one that found nothing to do.
+                #
+                # Counted as a TOTAL rather than a delta on purpose: a delta shows the
+                # transition once and then reads as zero forever, so a swap sitting halted
+                # for a day would be invisible to anyone who started watching after it
+                # happened. The standing count keeps it on screen.
+                #
+                # THIS COUNT AND show_swap.py's LISTING MUST NAME THE SAME SET. The tool
+                # the note hands over reads services/swap_view.HALTED_STATUSES, which is
+                # derived from STATUS_MEANINGS; this is the literal. They are not one
+                # expression because an `IN (?)` built from a tuple's length needs SQL
+                # assembled by interpolation, and that needs an S608 suppression -- rule
+                # 19 does not allow buying a check pass with one. The guard is a test
+                # instead: tests/test_show_swap.py asserts the status this line counts is
+                # exactly the set the tool lists, so a second halted status added to the
+                # vocabulary fails there rather than producing a count of 2 beside a list
+                # of 1.
+                halted = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'under_review'").fetchone()["n"]
+            print(
+                cycle_line(
+                    WORKER_NAME,
+                    cycle,
+                    time.monotonic() - started,
+                    {
+                        "active_swaps": before,
+                        "refreshed": len(processed),
+                        "now_payout_pending": pending,
+                        "HALTED_for_review": halted,
+                    },
+                    # HALTED_for_review is a STANDING CONDITION rather than work this
+                    # cycle did, and workers/common.STANDING_COUNTS names it as one.
+                    # Counted as work, it made every cycle print WORKED for as long as
+                    # a single swap sat halted -- see that constant for the measurement.
+                    notes=halted_note(halted),
+                ),
+                flush=True,
+            )
+        except Exception as exc:
+            print(failures.record(cycle, time.monotonic() - started, exc), flush=True)
+            logger.exception("%s cycle=%d failed", WORKER_NAME, cycle)
+        else:
+            failures.clear()
         sleep_until_next_cycle(poll_seconds, should_stop)
 
     print(f"{WORKER_NAME}: stopped cleanly after {cycle} cycle(s)", flush=True)

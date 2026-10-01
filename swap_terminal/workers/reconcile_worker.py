@@ -32,6 +32,7 @@ which is upstream of a payout.
 REAPER: swap_terminal/supervisor.py. See deposit_watcher.py's header.
 """
 
+import logging
 import os
 import sys
 import time
@@ -45,6 +46,7 @@ from db import SCHEMA, db_session
 from services.deposit_service import process_active_swaps
 from services.payout_service import refresh_wallet_inventory
 from workers.common import (
+    CycleFailures,
     announce_start,
     build_adapters_from_config,
     cycle_line,
@@ -57,34 +59,61 @@ WORKER_NAME = "reconcile_worker"
 DEFAULT_POLL_SECONDS = 60
 
 
+logger = logging.getLogger(__name__)
+
+
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
     should_stop = install_stop_handler()
     announce_start(WORKER_NAME, poll_seconds, os.getpid())
     adapters = build_adapters_from_config()
     config = get_config_dict()
 
+    failures = CycleFailures(WORKER_NAME)
     cycle = 0
     while not should_stop():
         cycle += 1
         started = time.monotonic()
-        with db_session(Config.DB_PATH) as db:
-            db.executescript(SCHEMA)
-            refresh_wallet_inventory(db, adapters)
-            processed = process_active_swaps(db, config, adapters)
-            inventory = db.execute("SELECT COUNT(*) AS n FROM wallet_inventory").fetchone()["n"]
-        print(
-            cycle_line(
-                WORKER_NAME,
-                cycle,
-                time.monotonic() - started,
-                {"refreshed_swaps": len(processed), "inventory_rows": inventory},
-                notes=(
-                    "inventory_rows should be 3 (BTC/LTC/GRC); fewer means a getbalance call is failing "
-                    "and refresh_wallet_inventory swallowed it"
+        # EVERY CYCLE IS GUARDED, and the measurement is in
+        # workers/common.CycleFailures. A devnet DNS lookup failed for a moment on
+        # 2026-10-01 and this worker DIED -- there was no try/except anywhere in any
+        # of the three workers, so one chain being briefly unreachable terminated
+        # the process and stopped deposits being credited on EVERY chain, while
+        # payout_worker went on printing IDLE as though there were simply nothing to
+        # pay. The operator found it with `supervisor.py status` half an hour later.
+        #
+        # `except Exception` and NOT BaseException: KeyboardInterrupt and SystemExit
+        # must still end the process. A Ctrl-C that only logged a failed cycle and
+        # carried on would be a worker the operator cannot stop, which is worse
+        # than the crash this replaces (rule 13).
+        #
+        # This is rule 12's legitimate broad catch, and the test it names is met:
+        # the caller CAN tell the failure from a real answer. A failed cycle prints
+        # FAILED with the exception type, the reason and a count of consecutive
+        # failures -- it does not print IDLE, and it does not print nothing.
+        try:
+            with db_session(Config.DB_PATH) as db:
+                db.executescript(SCHEMA)
+                refresh_wallet_inventory(db, adapters)
+                processed = process_active_swaps(db, config, adapters)
+                inventory = db.execute("SELECT COUNT(*) AS n FROM wallet_inventory").fetchone()["n"]
+            print(
+                cycle_line(
+                    WORKER_NAME,
+                    cycle,
+                    time.monotonic() - started,
+                    {"refreshed_swaps": len(processed), "inventory_rows": inventory},
+                    notes=(
+                        "inventory_rows should be 3 (BTC/LTC/GRC); fewer means a getbalance call is failing "
+                        "and refresh_wallet_inventory swallowed it"
+                    ),
                 ),
-            ),
-            flush=True,
-        )
+                flush=True,
+            )
+        except Exception as exc:
+            print(failures.record(cycle, time.monotonic() - started, exc), flush=True)
+            logger.exception("%s cycle=%d failed", WORKER_NAME, cycle)
+        else:
+            failures.clear()
         sleep_until_next_cycle(poll_seconds, should_stop)
 
     print(f"{WORKER_NAME}: stopped cleanly after {cycle} cycle(s)", flush=True)

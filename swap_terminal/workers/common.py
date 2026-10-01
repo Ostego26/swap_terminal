@@ -257,6 +257,77 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
 STANDING_COUNTS = frozenset({"HALTED_for_review", "failed_total"})
 
 
+class CycleFailures:
+    """One worker's run of consecutive failed cycles, and the line each one prints.
+
+    WHY THIS EXISTS, MEASURED 2026-10-01 ON THE OPERATOR'S HOST. A devnet DNS
+    lookup failed for a moment:
+
+        SolanaRPCError: getSignaturesForAddress could not reach
+        https://api.devnet.solana.com: Failed to resolve
+        'api.devnet.solana.com' ([Errno -2] Name or service not known)
+
+    and the deposit watcher DIED. Counted at the time: zero `try` and zero
+    `except` in any of the three workers, so any exception from any chain
+    terminated the process. The operator found it with
+    `supervisor.py status` -- "pid file is stale; process is gone" -- half an
+    hour and one uncredited deposit later.
+
+    THE DAMAGE IS RULE 13'S, INVERTED. An orphan holds a lock and everything
+    downstream reports success. Here the process was GONE and everything
+    downstream reported success: payout_worker went on printing
+    `IDLE pending_at_start=0` every ten seconds, which is exactly what it prints
+    when there is genuinely nothing to pay. Nothing anywhere said "deposits are
+    no longer being credited". A customer's money would arrive, confirm, and sit.
+
+    AND IT TOOK EVERY CHAIN DOWN, NOT ONE. The Solana endpoint was unreachable;
+    BTC, LTC, GRC and XRP deposits stopped being credited too, because they
+    share the loop that died.
+
+    SO A FAILED CYCLE IS REPORTED AND THE LOOP CONTINUES. A worker that keeps
+    running and says FAILED every cycle is strictly better than one that is gone:
+    the operator can see it, `supervisor.py status` still finds it, and a chain
+    that comes back is picked up on the next poll with no intervention.
+
+    THE CONSECUTIVE COUNT IS THE POINT OF THE CLASS. One failed cycle is a blip
+    and the next poll fixes it; two hundred is an outage or a bug, and the two
+    must not read the same. Rule 14's "state what the number means, next to the
+    number" -- a bare FAILED repeated forever is the cried-wolf shape that gets
+    ignored, and `failed_cycles_in_a_row=203` is not.
+    """
+
+    #: Characters of the exception text kept on the cycle line. The full text
+    #: goes to the log via logger.exception(); this is the one-line summary an
+    #: operator skims, and a DNS error's useful part is at the front.
+    REASON_ON_LINE = 300
+
+    def __init__(self, worker_name: str) -> None:
+        self.worker_name = worker_name
+        self.consecutive = 0
+
+    def clear(self) -> None:
+        """A cycle succeeded. Called on the success path, so the count means what it says."""
+        self.consecutive = 0
+
+    def record(self, cycle: int, seconds: float, error: BaseException) -> str:
+        """Count a failed cycle and render its line. Does NOT print or log.
+
+        Returning the string rather than printing it keeps this testable without
+        capturing stdout, and leaves the caller owning its own output stream --
+        the same split cycle_line() already uses.
+        """
+        self.consecutive += 1
+        reason = str(error)[: self.REASON_ON_LINE] or error.__class__.__name__
+        return (
+            f"{self.worker_name} cycle={cycle} FAILED {error.__class__.__name__}: {reason} "
+            f"in {format_duration(seconds)}  <- THIS CYCLE DID NO WORK and credited nothing. "
+            f"failed_cycles_in_a_row={self.consecutive}. The worker is still running and will try "
+            f"again at the next poll; one failure is usually a chain being briefly unreachable, and "
+            f"a count that keeps climbing is an outage or a bug. Nothing was lost -- a deposit "
+            f"already on chain is credited whenever a cycle next succeeds."
+        )
+
+
 def cycle_line(worker_name: str, cycle: int, seconds: float, counts: dict[str, int], notes: str = "") -> str:
     """Render one cycle's result so that idle and productive cycles differ.
 

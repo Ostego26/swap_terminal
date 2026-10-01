@@ -19,9 +19,16 @@ import time
 from pathlib import Path
 
 import pytest
+import workers.deposit_watcher as watcher
 from config import Config
 from workers import deposit_watcher
-from workers.common import announce_start, cycle_line, endpoint_lines, sleep_until_next_cycle
+from workers.common import (
+    CycleFailures,
+    announce_start,
+    cycle_line,
+    endpoint_lines,
+    sleep_until_next_cycle,
+)
 
 
 def test_idle_and_working_cycles_do_not_share_a_line():
@@ -289,3 +296,212 @@ def test_a_cumulative_failure_total_does_not_make_an_idle_payout_cycle_claim_it_
         "payout_worker", 16, 0.04,
         {"pending_at_start": 1, "broadcast": 0, "failed_total": 4},
     )
+
+
+# --- a cycle that raises must not kill the worker -----------------------------
+#
+# MEASURED ON THE OPERATOR'S HOST 2026-10-01. A devnet DNS lookup failed for a
+# moment:
+#
+#     SolanaRPCError: getSignaturesForAddress could not reach
+#     https://api.devnet.solana.com: Failed to resolve 'api.devnet.solana.com'
+#     ([Errno -2] Name or service not known)
+#
+# and the deposit watcher DIED. Counted at the time: zero `try` and zero `except`
+# in any of the three workers. One chain briefly unreachable terminated the
+# process and stopped deposits being credited on EVERY chain -- and payout_worker
+# went on printing `IDLE pending_at_start=0`, which is exactly what it prints when
+# there is genuinely nothing to pay. Nothing said deposits had stopped. A
+# customer's money would arrive, confirm, and sit.
+
+def test_a_failed_cycle_says_FAILED_and_never_IDLE():
+    """The two must not read the same, which is the whole defect.
+
+    `IDLE` means the cycle looked and found nothing. A cycle that could not look
+    found nothing for a completely different reason, and an operator skimming for
+    trouble has to be able to tell them apart (rule 14).
+    """
+    failures = CycleFailures("deposit_watcher")
+    line = failures.record(7, 0.04, RuntimeError("chain unreachable"))
+
+    assert "FAILED" in line
+    assert "IDLE" not in line
+    assert "RuntimeError" in line, "the exception type, because a DNS error and a bad row differ"
+    assert "chain unreachable" in line, "and its reason"
+
+
+def test_the_failed_line_says_the_worker_is_still_running():
+    """An operator reading FAILED must not conclude the process is gone.
+
+    That conclusion is what makes somebody restart a healthy worker, and on this
+    system a restart loses nothing but costs the one thing the line is for: the
+    information that the chain was briefly unreachable and recovered on its own.
+    """
+    line = CycleFailures("payout_worker").record(1, 0.04, OSError("boom"))
+
+    assert "still running" in line
+    assert "try again at the next poll" in line
+    assert "credited nothing" in line, "it has to say what the cycle did NOT do"
+
+
+def test_consecutive_failures_are_counted_and_reset():
+    """One failure is a blip; two hundred is an outage. They must not read alike.
+
+    MUTATION: drop the counter and a worker that has been failing all night looks
+    exactly like one that failed once a second ago -- the cried-wolf shape that
+    gets a repeated line ignored.
+    """
+    failures = CycleFailures("deposit_watcher")
+
+    assert "failed_cycles_in_a_row=1" in failures.record(1, 0.0, RuntimeError("a"))
+    assert "failed_cycles_in_a_row=2" in failures.record(2, 0.0, RuntimeError("b"))
+    assert "failed_cycles_in_a_row=3" in failures.record(3, 0.0, RuntimeError("c"))
+    assert failures.consecutive == 3
+
+    failures.clear()
+    assert failures.consecutive == 0
+    assert "failed_cycles_in_a_row=1" in failures.record(4, 0.0, RuntimeError("d")), (
+        "after a success the count starts over, so it means consecutive and not total"
+    )
+
+
+def test_an_exception_with_no_message_still_names_itself():
+    """`str(exc)` is empty for a bare `RuntimeError()`, and a blank reason is useless.
+
+    Rule 14's "never let an empty result print nothing", on the one line that
+    explains why a cycle did no work.
+    """
+    line = CycleFailures("deposit_watcher").record(1, 0.0, RuntimeError())
+
+    assert "RuntimeError" in line
+    assert "FAILED RuntimeError: RuntimeError" in line, "the class name stands in for the message"
+
+
+def test_the_deposit_watcher_survives_a_raising_cycle_and_keeps_polling(monkeypatch, capsys):
+    """THE BEHAVIORAL TEST. The real main loop, a real exception, a live worker.
+
+    The unit tests above check the LINE; this checks that the loop does not die,
+    which is the thing that actually cost an uncredited deposit. Asserted by
+    running deposit_watcher.main() with process_active_swaps raising and a stop
+    predicate that ends it after three cycles -- so a worker that died on the
+    first one returns early and the cycle count gives it away.
+
+    MUTATION: remove the try/except from the loop and this raises instead of
+    returning 0 -- which is precisely what happened on the operator's host.
+    """
+    seen = {"cycles": 0}
+
+    def exploding_process(*_args, **_kwargs):
+        seen["cycles"] += 1
+        raise RuntimeError("Failed to resolve 'api.devnet.solana.com'")
+
+    monkeypatch.setattr(watcher, "process_active_swaps", exploding_process)
+    monkeypatch.setattr(watcher, "install_stop_handler", lambda: (lambda: seen["cycles"] >= 3))
+    monkeypatch.setattr(watcher, "sleep_until_next_cycle", lambda *_a, **_k: None)
+    monkeypatch.setattr(watcher, "build_adapters_from_config", dict)
+
+    assert watcher.main(poll_seconds=0) == 0, "a worker whose cycle raises must still exit cleanly"
+
+    out = capsys.readouterr().out
+    assert seen["cycles"] == 3, f"the loop must keep polling after a failure, ran {seen['cycles']}"
+    assert out.count("FAILED") == 3, "every failed cycle reports"
+    assert "failed_cycles_in_a_row=3" in out, "and the count climbs across them"
+    assert "api.devnet.solana.com" in out, "the real reason reaches the operator's screen"
+    assert "stopped cleanly" in out, "and the worker still shuts down properly"
+
+
+def test_a_cycle_that_recovers_stops_saying_failed(monkeypatch, capsys):
+    """The other half: a chain that comes back is picked up with no intervention.
+
+    A guard that caught forever and never cleared would leave a healthy worker
+    claiming failure, which is the same unreadable-output defect pointing the
+    other way.
+    """
+    state = {"cycles": 0}
+
+    def flaky_process(*_args, **_kwargs):
+        state["cycles"] += 1
+        if state["cycles"] == 1:
+            raise RuntimeError("briefly unreachable")
+        return []
+
+    monkeypatch.setattr(watcher, "process_active_swaps", flaky_process)
+    monkeypatch.setattr(watcher, "install_stop_handler", lambda: (lambda: state["cycles"] >= 2))
+    monkeypatch.setattr(watcher, "sleep_until_next_cycle", lambda *_a, **_k: None)
+    monkeypatch.setattr(watcher, "build_adapters_from_config", dict)
+
+    assert watcher.main(poll_seconds=0) == 0
+    out = capsys.readouterr().out
+
+    assert out.count("FAILED") == 1, "only the cycle that actually failed"
+    assert "IDLE" in out, "and the recovered cycle reports normally again"
+
+
+def test_the_consecutive_count_restarts_after_a_recovery(monkeypatch, capsys):
+    """fail, succeed, fail -- the second failure must say 1, not 2.
+
+    MEASURED: a mutation deleting `failures.clear()` from the loop SURVIVED every
+    test above, because none of them failed again AFTER recovering. The count was
+    only ever read on a rising run, so a stale one was invisible.
+
+    It matters because the number is what distinguishes a blip from an outage. A
+    counter that never resets turns "failed once an hour ago, fine since" into
+    "failed_cycles_in_a_row=2", and an operator deciding whether to investigate
+    reads that as a worsening trend.
+    """
+    state = {"cycles": 0}
+
+    def alternating(*_args, **_kwargs):
+        state["cycles"] += 1
+        if state["cycles"] in (1, 3):
+            raise RuntimeError(f"failure {state['cycles']}")
+        return []
+
+    monkeypatch.setattr(watcher, "process_active_swaps", alternating)
+    monkeypatch.setattr(watcher, "install_stop_handler", lambda: (lambda: state["cycles"] >= 3))
+    monkeypatch.setattr(watcher, "sleep_until_next_cycle", lambda *_a, **_k: None)
+    monkeypatch.setattr(watcher, "build_adapters_from_config", dict)
+
+    assert watcher.main(poll_seconds=0) == 0
+    out = capsys.readouterr().out
+
+    assert out.count("failed_cycles_in_a_row=1") == 2, (
+        "both failures are the first of their run; a count of 2 means the success between "
+        "them did not clear it"
+    )
+    assert "failed_cycles_in_a_row=2" not in out
+
+
+def test_a_stop_signal_is_not_swallowed_by_the_guard(monkeypatch):
+    """`except Exception`, not BaseException. KeyboardInterrupt must still end it.
+
+    A Ctrl-C that only logged a failed cycle and carried on would be a worker the
+    operator cannot stop, which is worse than the crash this guard replaces
+    (rule 13: a stop that cannot prove it worked is not a stop).
+
+    MUTATION: catch BaseException and this hangs instead of raising.
+    """
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    # THE STOP PREDICATE IS BOUNDED, and that is a fix to this test rather than a
+    # detail. The first version used `lambda: False`, so a mutation that caught
+    # BaseException made the loop run forever and the SUITE HUNG instead of
+    # failing -- measured: pytest had to be killed by a timeout. A hang is a
+    # detectable failure and a terrible one; it gives no name, no line and no
+    # diff. Counting cycles means the mutation completes the loop and fails on
+    # pytest.raises, which is a test result somebody can read.
+    attempts = {"n": 0}
+
+    def interrupted_and_counted(*args, **kwargs):
+        attempts["n"] += 1
+        return interrupted(*args, **kwargs)
+
+    monkeypatch.setattr(watcher, "process_active_swaps", interrupted_and_counted)
+    monkeypatch.setattr(watcher, "install_stop_handler", lambda: (lambda: attempts["n"] >= 5))
+    monkeypatch.setattr(watcher, "sleep_until_next_cycle", lambda *_a, **_k: None)
+    monkeypatch.setattr(watcher, "build_adapters_from_config", dict)
+
+    with pytest.raises(KeyboardInterrupt):
+        watcher.main(poll_seconds=0)
+    assert attempts["n"] == 1, "the interrupt must end the loop on its first cycle, not be caught"

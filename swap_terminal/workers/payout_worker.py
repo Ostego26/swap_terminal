@@ -50,6 +50,7 @@ cycle FINISHES before exit -- on this worker specifically, dying between
 chain with no row in the database.
 """
 
+import logging
 import os
 import sys
 import time
@@ -66,6 +67,7 @@ from services.payout_service import (
     unlock_readiness_lines,
 )
 from workers.common import (
+    CycleFailures,
     announce_start,
     build_adapters_from_config,
     cycle_line,
@@ -76,6 +78,9 @@ from workers.common import (
 
 WORKER_NAME = "payout_worker"
 DEFAULT_POLL_SECONDS = 10
+
+
+logger = logging.getLogger(__name__)
 
 
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
@@ -143,34 +148,58 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
             flush=True,
         )
 
+    failures = CycleFailures(WORKER_NAME)
     cycle = 0
     while not should_stop():
         cycle += 1
         started = time.monotonic()
-        with db_session(Config.DB_PATH) as db:
-            db.executescript(SCHEMA)
-            pending = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'payout_pending'").fetchone()["n"]
-            if pending:
-                # Announce before, not only after: a broadcast is about to
-                # happen and the operator should see that BEFORE the RPC call,
-                # not in a summary line that appears once it has completed.
-                print(f"  {WORKER_NAME} cycle={cycle}: {pending} swap(s) pending payout, broadcasting now", flush=True)
-            refresh_wallet_inventory(db, adapters)
-            completed = process_pending_payouts(db, config, adapters)
-            failed = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'failed'").fetchone()["n"]
-        print(
-            cycle_line(
-                WORKER_NAME,
-                cycle,
-                time.monotonic() - started,
-                {"pending_at_start": pending, "broadcast": len(completed), "failed_total": failed},
-                notes=(
-                    "pending_at_start=0 while swaps are open may mean deposit_watcher is not running; "
-                    "failed_total is cumulative, not this cycle"
+        # EVERY CYCLE IS GUARDED, and the measurement is in
+        # workers/common.CycleFailures. A devnet DNS lookup failed for a moment on
+        # 2026-10-01 and this worker DIED -- there was no try/except anywhere in any
+        # of the three workers, so one chain being briefly unreachable terminated
+        # the process and stopped deposits being credited on EVERY chain, while
+        # payout_worker went on printing IDLE as though there were simply nothing to
+        # pay. The operator found it with `supervisor.py status` half an hour later.
+        #
+        # `except Exception` and NOT BaseException: KeyboardInterrupt and SystemExit
+        # must still end the process. A Ctrl-C that only logged a failed cycle and
+        # carried on would be a worker the operator cannot stop, which is worse
+        # than the crash this replaces (rule 13).
+        #
+        # This is rule 12's legitimate broad catch, and the test it names is met:
+        # the caller CAN tell the failure from a real answer. A failed cycle prints
+        # FAILED with the exception type, the reason and a count of consecutive
+        # failures -- it does not print IDLE, and it does not print nothing.
+        try:
+            with db_session(Config.DB_PATH) as db:
+                db.executescript(SCHEMA)
+                pending = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'payout_pending'").fetchone()["n"]
+                if pending:
+                    # Announce before, not only after: a broadcast is about to
+                    # happen and the operator should see that BEFORE the RPC call,
+                    # not in a summary line that appears once it has completed.
+                    print(f"  {WORKER_NAME} cycle={cycle}: {pending} swap(s) pending payout, broadcasting now", flush=True)
+                refresh_wallet_inventory(db, adapters)
+                completed = process_pending_payouts(db, config, adapters)
+                failed = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'failed'").fetchone()["n"]
+            print(
+                cycle_line(
+                    WORKER_NAME,
+                    cycle,
+                    time.monotonic() - started,
+                    {"pending_at_start": pending, "broadcast": len(completed), "failed_total": failed},
+                    notes=(
+                        "pending_at_start=0 while swaps are open may mean deposit_watcher is not running; "
+                        "failed_total is cumulative, not this cycle"
+                    ),
                 ),
-            ),
-            flush=True,
-        )
+                flush=True,
+            )
+        except Exception as exc:
+            print(failures.record(cycle, time.monotonic() - started, exc), flush=True)
+            logger.exception("%s cycle=%d failed", WORKER_NAME, cycle)
+        else:
+            failures.clear()
         sleep_until_next_cycle(poll_seconds, should_stop)
 
     print(f"{WORKER_NAME}: stopped cleanly after {cycle} cycle(s)", flush=True)
