@@ -88,7 +88,8 @@ from chains.solana_memo import (  # noqa: E402
 from chains.solana_units import (  # noqa: E402
     ACCOUNT_STORAGE_OVERHEAD_BYTES,
     BALANCE_COMMITMENT,
-DISCOVERY_COMMITMENT,
+    DISCOVERY_COMMITMENT,
+    FINALIZED_RANK,
     LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
     RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS,
     RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS,
@@ -314,6 +315,95 @@ def owner_of(adapter: SolanaAdapter, token_account: str) -> tuple[str, bool, str
     return owner, False, ""
 
 
+#: owner -> the signature that revealed it, filled in by holder_from_mint_traffic().
+#:
+#: A MODULE-LEVEL MAP RATHER THAN A WIDENED RETURN TUPLE, because find_a_holder() and
+#: after_the_first_route_was_throttled() both return (owner, why) and three call sites would
+#: have to grow a field they do not use. The alternative considered and rejected: parsing the
+#: signature back out of the `why` sentence, which is reading prose as data -- the thing this
+#: file has already been bitten by twice.
+_revealed_by: dict[str, str] = {}
+
+
+def prove_the_spl_reader(adapter: SolanaAdapter, owner: str, run) -> None:
+    """Run _spl_credits over the ONE transaction known to carry a balance for this owner.
+
+    WHY A TARGETED READ AND NOT A WIDER SCAN. Four runs against public devnet have failed to
+    prove this reader, and the operator's 2026-10-01 output shows exactly why rather than
+    leaving it to guesswork:
+
+        GcBBd25S...   the holder --find-holder found in the mint's traffic
+        GzprPkmd...   its ASSOCIATED token account -- DOES NOT EXIST
+        0.0           so its WSOL lives in some OTHER token account
+        5 of 5 fetched, filter matched nothing
+
+    The scan reads the OWNER's recent signatures. The transaction that revealed the owner came
+    from the MINT's history, so it need not be in that window at all -- and widening the window
+    makes coverage worse on a rate-limited endpoint (measured: 8 of 50 against 9 of 10). No
+    amount of scanning reliably reaches the one transaction already known to contain the entry.
+
+    So read that transaction. `_credits_in_transaction` is the same per-transaction reader
+    find_deposits_to_address calls, and reaching an amount through it exercises
+    `entry["uiTokenAmount"]["decimals"]` and `["amount"]` -- the field names that lose an SPL
+    deposit silently, and the last thing in this adapter with no real response behind it.
+
+    IT MAY STILL NOT DECODE, and that is reported rather than smoothed over: `_spl_credits`
+    takes only a POSITIVE delta, so a transaction where this owner's balance fell or did not
+    move yields no credit. That is a fact about the transaction, not about the field names, and
+    the line says which.
+    """
+    signature = _revealed_by.get(owner)
+    if not signature:
+        return
+    run(f"_spl_credits over {signature[:16]}...",
+        "the ONE transaction known to carry a balance for this owner -- the targeted proof",
+        lambda: _spl_reader_line(adapter, owner, signature))
+
+
+def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str) -> str:
+    """What the targeted read established about _spl_credits' decoder.
+
+    THREE OUTCOMES, AND THE FIRST VERSION OF THIS COLLAPSED TWO INTO A FALSE SENTENCE. It said
+    "the entry exists but its delta is not POSITIVE" whenever the credit list came back empty --
+    and an empty list ALSO happens when the amount was decoded fine and `_attributable` then
+    dropped it for carrying no memo. Driven against a seeded response crediting 2.5 tokens, it
+    printed "delta is not POSITIVE" directly under the adapter's own WARNING saying "1 credit(s)
+    dropped". The decode had happened; the message denied it.
+
+    THE DROPS EXIST PRECISELY TO TELL THOSE APART, and were added two days ago for exactly this
+    distinction -- which makes this the fifth time one of this session's lessons had to be
+    applied a second time. `unattributable_drops` is cleared and then read here, so a refusal
+    counts as PROOF OF THE DECODER rather than as silence: every field name in the reader had to
+    be right to produce an amount for the memo check to then decline.
+
+    IT CALLS A PRIVATE METHOD ON PURPOSE. `_credits_in_transaction` is the same per-transaction
+    reader find_deposits_to_address uses, and aiming at one signature is the whole point -- a
+    scan cannot be. Making it public would widen the five-method contract for a diagnostic's
+    sake. (No `noqa` here: SLF001 is not in this repo's ruff selection, and ruff's RUF100
+    removed the one I first wrote. The reason stays even though the linter does not ask.)
+    """
+    # CLEARED FIRST: only find_deposits_to_address() clears this, and we are calling the
+    # per-transaction reader directly, so whatever an earlier step recorded would be read as
+    # belonging to this transaction.
+    adapter.unattributable_drops = []
+    credits = adapter._credits_in_transaction(signature, owner, FINALIZED_RANK)
+    dropped = sum(drop.credits for drop in adapter.unattributable_drops)
+
+    if credits:
+        amounts = ", ".join(f"{credit['amount']} (vout={credit['vout']})" for credit in credits)
+        return (f"DECODED and ATTRIBUTED {len(credits)} credit(s): {amounts}  <- _spl_credits "
+                f"read uiTokenAmount.decimals and .amount off a REAL response, and the memo "
+                f"carried a usable tag. The last reader with no live evidence now has some.")
+    if dropped:
+        return (f"DECODED {dropped} credit(s) and then REFUSED them: no usable memo, so nothing "
+                f"is credited -- which is correct. But the amount WAS decoded off a real "
+                f"response, so _spl_credits' uiTokenAmount.decimals and .amount reads are "
+                f"PROVEN. That is the last reader in this adapter with no live evidence.")
+    return ("(none)  <- no POSITIVE delta for this owner and mint in this transaction, so "
+            "_spl_credits returned before decoding an amount. A fact about this transaction, "
+            "not about the field names -- and NOT the same as the reader never running.")
+
+
 def owner_in_post_token_balances(transaction: object, mint: str) -> str:
     """The first wallet in this transaction holding `mint`, read the way _spl_credits reads it.
 
@@ -402,6 +492,11 @@ def holder_from_mint_traffic(adapter: SolanaAdapter, mint: str) -> tuple[str, bo
             continue
         owner = owner_in_post_token_balances(transaction, mint)
         if owner:
+            # RECORDED AS DATA, not only mentioned in the sentence below. This is the one
+            # transaction KNOWN to carry a postTokenBalances entry for this mint and this owner,
+            # which makes it the only read that can prove _spl_credits' decoder without
+            # gambling on a scan window -- see prove_the_spl_reader().
+            _revealed_by[owner] = signature
             return owner, False, (
                 f"FOUND in the mint's own traffic: transaction {signature[:16]}... has a "
                 f"postTokenBalances entry for this mint owned by that account. Which also "
@@ -814,6 +909,24 @@ def main() -> int:
     check_rent(adapter, run)
     check_mint(adapter, run)
     observed = check_address(adapter, address, args.limit, run)
+    # ONE GUARD, AND IT IS INSIDE THE FUNCTION. This read
+    # `if args.find_holder and adapter.is_spl:`, and two mutation rounds on 2026-10-01 showed
+    # BOTH halves were inert -- each spelled, in a second and third way, the question
+    # prove_the_spl_reader() already asks as `_revealed_by.get(owner)`:
+    #
+    #   args.find_holder   `_revealed_by` is written at exactly one site
+    #                      (holder_from_mint_traffic, line ~506), reached only from
+    #                      find_a_holder(), called only from the --find-holder branch above.
+    #   adapter.is_spl     find_a_holder() refuses without a mint, so a native run cannot put
+    #                      anything in that map either.
+    #
+    # Deleting either changed no behavior, which is why no test could kill them. That is rule
+    # 8's defect rather than a gap in coverage: three copies of one condition agree on the day
+    # they are written, and the day a second caller fills that map the two outer copies start
+    # refusing a proof the inner one would allow. The map is the authority;
+    # test_no_proof_step_runs_when_no_signature_revealed_the_owner pins the refusal and
+    # test_main_prints_no_proof_step_for_an_address_the_operator_supplied pins it through main().
+    prove_the_spl_reader(adapter, address, run)
     # None means NO HUNT RAN, which memo_status_lines() renders differently from a hunt that
     # ran and confirmed nothing. Initialized here rather than only inside the branch: the first
     # version of this assigned it only under `if args.hunt_memo > 0`, so every plain run -- the

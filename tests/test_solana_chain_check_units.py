@@ -57,6 +57,8 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     _indented,
     _network_line,
     _one_reason_per_group,
+    _revealed_by,
+    _spl_reader_line,
     call_with_backoff,
     check_rent,
     credit_path_lines,
@@ -69,6 +71,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     owner_of,
     print_banner,
     print_summary,
+    prove_the_spl_reader,
     read_one_transaction,
     resolve_address,
     what_the_hunt_established,
@@ -796,6 +799,13 @@ class _WholeClusterStub:
             "getEpochInfo": {"epoch": 1171, "slotIndex": 174942, "absoluteSlot": 506046942},
             "getMinimumBalanceForRentExemption": 650240,
             "getBalance": {"value": 2_000_000_000},
+            # ADDED 2026-10-01, because every SPL main() test through this stub was printing
+            # `FAIL balance unexpected KeyError: 'amount'` and passing anyway -- its assertions
+            # were on other lines. A stub that bakes in a failure the real cluster does not have
+            # teaches the next reader that the SPL balance step is expected to break.
+            "getTokenAccountBalance": {"value": {"amount": "103032164467", "decimals": 9,
+                                                 "uiAmount": 103.032164467,
+                                                 "uiAmountString": "103.032164467"}},
             "getSignaturesForAddress": [{"signature": f"sig{n}"} for n in range(self.signatures)],
             "getTransaction": _memo_transaction("4242"),
         }.get(method, {})
@@ -1313,9 +1323,14 @@ def _raise(*_args):
     raise RuntimeError("the cluster went away mid-poll")
 
 
-def _seeded_adapter(responses):
-    """A real SolanaAdapter with only its transport replaced, so its logger really fires."""
-    adapter = chains_solana.SolanaAdapter(url="http://seeded.invalid")
+def _seeded_adapter(responses, mint=""):
+    """A real SolanaAdapter with only its transport replaced, so its logger really fires.
+
+    `mint` MATTERS FOR THE SPL TESTS and defaulting it to "" cost three failures: without one
+    `is_spl` is False, so _credits_in_transaction takes the NATIVE path and reads accountKeys
+    instead of token balances. A stub adapter in the wrong mode tests the wrong reader.
+    """
+    adapter = chains_solana.SolanaAdapter(url="http://seeded.invalid", mint=mint)
 
     def fake_call(method, *params):
         if method not in responses:
@@ -2076,3 +2091,248 @@ def test_the_coverage_line_does_not_print_a_full_stop_before_a_comma():
     assert ".," not in starved
     clean = credit_path_lines(CreditPathObserved(True, True, 10, 0, 0, 0))[1]
     assert clean.endswith(",")
+
+# ---------------------------------------------------------------------------
+# THE TARGETED PROOF OF _spl_credits. Four runs failed to prove this reader by
+# scanning, and the operator's 2026-10-01 output shows why rather than leaving
+# it to guesswork:
+#
+#   GcBBd25S...  the holder --find-holder found in the MINT's traffic
+#   GzprPkmd...  its ASSOCIATED token account -- DOES NOT EXIST
+#   0.0          so its WSOL lives in some OTHER token account
+#   5 of 5 fetched, filter matched nothing
+#
+# The scan reads the OWNER's recent signatures; the transaction that revealed
+# the owner came from the MINT's history and need not be in that window at all.
+# Widening it makes coverage worse on a rate-limited endpoint (8 of 50 against
+# 9 of 10). So read the one transaction already known to contain the entry.
+# ---------------------------------------------------------------------------
+
+_SPL_MEMO = {"program": "spl-memo", "parsed": "4242",
+             "programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"}
+
+
+def _spl_transaction(before, after, *, memo=False):
+    """A real-shaped getTransaction whose token balance for _A_HOLDER moves by after-before."""
+    entry = {"accountIndex": 1, "owner": _A_HOLDER, "mint": _A_MINT}
+    return {
+        "meta": {
+            "preTokenBalances": [{**entry, "uiTokenAmount": {"amount": before, "decimals": 9}}],
+            "postTokenBalances": [{**entry, "uiTokenAmount": {"amount": after, "decimals": 9}}],
+            "err": None,
+        },
+        "transaction": {"message": {"instructions": [_SPL_MEMO] if memo else []}},
+    }
+
+
+def test_a_decoded_and_attributed_credit_says_the_reader_is_proven():
+    adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("0", "2500000000", memo=True)})
+    line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
+    assert "DECODED and ATTRIBUTED" in line
+    assert "2.5" in line, "the decoded amount, from uiTokenAmount.amount and .decimals"
+    assert "vout=4242" in line, "the memo tag became the discriminator"
+
+
+def test_a_DECODED_THEN_REFUSED_credit_still_PROVES_the_decoder():
+    """THE DEFECT THIS FIXED, AND IT IS THE FIFTH REPEAT OF ONE OF THIS SESSION'S LESSONS.
+
+    The first version returned "the entry exists but its delta is not POSITIVE" whenever the
+    credit list was empty -- and an empty list ALSO happens when the amount decoded fine and
+    _attributable dropped it for carrying no memo. Driven against a response crediting 2.5
+    tokens it printed "delta is not POSITIVE" directly under the adapter's own WARNING saying
+    "1 credit(s) dropped". The decode had happened and the message denied it.
+
+    `unattributable_drops` was added two days ago for exactly this distinction. Every field name
+    in the reader had to be right to produce an amount for the memo check to then decline, so a
+    refusal is PROOF of the decoder, not silence.
+
+    MUTATION: ignore the drops and report the no-delta wording, which is what it did.
+    """
+    adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("0", "2500000000")})
+    line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
+    assert "DECODED 1 credit(s) and then REFUSED" in line
+    assert "are PROVEN" in line
+    assert "not POSITIVE" not in line, (
+        "the amount WAS decoded -- that sentence is the defect this test exists for"
+    )
+    assert "which is correct" in line, "refusing an unattributable credit is the right behavior"
+
+
+def test_no_positive_delta_is_reported_as_a_fact_about_the_TRANSACTION():
+    """The one case where the decoder genuinely did not run, and it must not read as proof."""
+    adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("5", "5")})
+    line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
+    assert line.startswith("(none)")
+    assert "returned before decoding an amount" in line
+    assert "not about the field names" in line
+    assert "PROVEN" not in line
+    assert "NOT the same as the reader never running" in line
+
+
+def test_the_three_outcomes_are_distinguishable():
+    adapter_lines = []
+    for before, after, memo in (("0", "2500000000", True), ("0", "2500000000", False), ("5", "5", False)):
+        adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction(before, after, memo=memo)})
+        adapter_lines.append(_spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq"))
+    assert len(set(adapter_lines)) == 3
+
+
+def test_the_drops_are_cleared_so_an_earlier_step_cannot_be_misread_as_this_one():
+    """MUTATION: drop the clear and a drop recorded by the ADDRESS section is reported here.
+
+    Only find_deposits_to_address() clears that list, and this calls the per-transaction reader
+    directly -- so without the clear, a run whose scan dropped a credit would claim this
+    transaction proved the decoder when it decoded nothing.
+    """
+    adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("5", "5")})
+    adapter.unattributable_drops = [chains_solana.UnattributableCredit("earlier", 3, "no memo")]
+    line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
+    assert line.startswith("(none)"), "a stale drop must not be read as this transaction's"
+    assert "PROVEN" not in line
+
+
+def test_the_revealing_signature_is_carried_as_DATA_not_parsed_from_prose():
+    """holder_from_mint_traffic records it, so the proof step does not re-read the sentence.
+
+    MUTATION: drop the _revealed_by assignment and prove_the_spl_reader() silently does nothing
+    -- the step vanishes from the output and the reader stays unproven with no line saying so.
+    """
+    _revealed_by.clear()
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": "65bWBunzbNMkN9d5"}],
+        "getTransaction": _a_mint_transaction(),
+    })
+    found, _throttled, _why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert found == _A_HOLDER
+    assert _revealed_by[_A_HOLDER] == "65bWBunzbNMkN9d5"
+
+    steps = []
+    prove_the_spl_reader(adapter, _A_HOLDER, lambda label, _why, fn: steps.append((label, fn)))
+    assert steps, "the proof step must run when a revealing signature is known"
+    assert "65bWBunzbNMkN9d5" in steps[0][0], "and name the transaction it is aimed at"
+
+
+def test_no_proof_step_runs_when_no_signature_revealed_the_owner():
+    """An address the operator typed has no known-good transaction, so there is nothing to aim at.
+
+    MUTATION: fall back to any signature and the step would report on a transaction chosen for
+    no reason -- a read that proves nothing while looking like proof.
+    """
+    _revealed_by.clear()
+    steps = []
+    prove_the_spl_reader(_seeded_adapter({}), "rTYPED", lambda *a: steps.append(a))
+    assert steps == []
+
+
+def test_main_prints_no_proof_step_for_an_address_the_operator_supplied(monkeypatch, capsys):
+    """--mint WITHOUT --find-holder: nothing revealed this address, so nothing is aimed at it.
+
+    This is the operator's ordinary SPL run, and it must not grow a proof step that reports on
+    a transaction picked out of the address's recent window -- that read proves the window had
+    a credit in it, not that the decoder works, while printing in the same shape as the real
+    proof.
+
+    It does NOT kill a mutation of the old `if args.find_holder and adapter.is_spl:` call site,
+    and that is the finding rather than a gap in it: both halves were further copies of the
+    guard `_revealed_by.get(owner)` already applies, so deleting either changed no behavior and
+    no test could have killed them. They are gone and the call site is unconditional. What this
+    pins is the OUTCOME those copies were there to protect, measured through main().
+    """
+    _revealed_by.clear()
+
+    class PlainCluster(_WholeClusterStub):
+        def _result(self, method):
+            if method == "getSignaturesForAddress":
+                return [{"signature": "65bWBunzbNMkN9d5", "confirmationStatus": "finalized"}]
+            if method == "getAccountInfo":
+                return {"value": {"data": {"parsed": {"info": {"decimals": 9,
+                                                               "owner": _A_HOLDER}}},
+                                  "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}
+            return super()._result(method)
+
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(
+        solana_chain_check.Config, "RPC",
+        {**solana_chain_check.Config.RPC,
+         "SOL": {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1",
+                 "mint": _A_MINT}})
+    monkeypatch.setattr(chains_solana.requests, "post", PlainCluster())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py", "--mint", _A_MINT,
+                                     "--address", _A_HOLDER])
+    solana_chain_check.main()
+    out = text_of(capsys.readouterr().out)
+
+    assert "_spl_credits over" not in out, (
+        "no transaction revealed this address, so no targeted proof may claim to run"
+    )
+    assert "find_deposits_to_address" in out, (
+        "and the ordinary SPL steps still run -- the absent step is the targeted proof, not the "
+        "whole ADDRESS section"
+    )
+    assert "FAILED" not in out, f"no step may fail on this seeded cluster: {out}"
+
+
+def test_main_runs_the_targeted_proof_when_find_holder_named_the_address(monkeypatch, capsys):
+    """END TO END, because the wiring was the one mutation that survived its first round.
+
+    Deleting the `if args.find_holder and adapter.is_spl:` call passed every unit test: the
+    function was covered, its call site was not. Third time in this session a main()-level
+    mutation has survived for exactly that reason, which is why this is driven through main()
+    rather than asserted on the source.
+
+    MUTATION: remove the call and the proof step vanishes from the output -- the reader stays
+    unproven and nothing says so.
+    """
+    _revealed_by.clear()
+    holder = _A_HOLDER
+
+    class HolderCluster(_WholeClusterStub):
+        # getTokenLargestAccounts THROTTLES, which is the operator's real situation and the only
+        # way the fallback runs. Seeded as {"value": []} first, which is a terminal "no holders"
+        # -- a different outcome entirely, and the fallback never fired.
+        def __call__(self, url, data=None, **kwargs):
+            payload = _json.loads(data) if data else {}
+            if payload.get("method") == "getTokenLargestAccounts":
+                return _Throttled()
+            return super().__call__(url, data=data, **kwargs)
+
+        def _result(self, method):
+            if method == "getSignaturesForAddress":
+                return [{"signature": "65bWBunzbNMkN9d5", "confirmationStatus": "finalized"}]
+            if method == "getTransaction":
+                return {
+                    "meta": {
+                        "preTokenBalances": [{"accountIndex": 1, "owner": holder,
+                                              "mint": _A_MINT,
+                                              "uiTokenAmount": {"amount": "0", "decimals": 9}}],
+                        "postTokenBalances": [{"accountIndex": 1, "owner": holder,
+                                               "mint": _A_MINT,
+                                               "uiTokenAmount": {"amount": "7000000000",
+                                                                 "decimals": 9}}],
+                        "err": None,
+                    },
+                    "transaction": {"message": {"instructions": [_SPL_MEMO]}},
+                }
+            if method == "getAccountInfo":
+                return {"value": {"data": {"parsed": {"info": {"decimals": 9,
+                                                               "owner": holder}}},
+                                  "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}
+            return super()._result(method)
+
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(
+        solana_chain_check.Config, "RPC",
+        {**solana_chain_check.Config.RPC,
+         "SOL": {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1",
+                 "mint": _A_MINT}})
+    monkeypatch.setattr(chains_solana.requests, "post", HolderCluster())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py", "--mint", _A_MINT,
+                                     "--find-holder"])
+    solana_chain_check.main()
+    out = text_of(capsys.readouterr().out)
+
+    assert "_spl_credits over 65bWBunzbNMkN9d5" in out, (
+        "the proof step must run and name the transaction it is aimed at"
+    )
+    assert "DECODED and ATTRIBUTED" in out
+    assert "7.0" in out, "the amount, decoded from uiTokenAmount off a seeded-but-real shape"
