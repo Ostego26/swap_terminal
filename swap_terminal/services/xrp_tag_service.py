@@ -180,6 +180,7 @@ import logging
 import sqlite3
 import time
 
+from chains.solana_address import is_on_curve, is_valid_address
 from chains.xrp_address import is_valid_classic_address, looks_like_x_address
 from chains.xrp_units import (
     FIRST_ALLOCATABLE_TAG,
@@ -235,7 +236,41 @@ RETURNING destination_tag
 """
 
 
-def validate_account(account: str) -> str:
+# WHICH CHAINS ALLOCATE TAGS HERE, AND HOW EACH ONE'S ACCOUNT IS CHECKED.
+#
+# MEASURED 2026-10-01, on the operator's host, with a real devnet SOL -> tGRC
+# rehearsal. The page said `SOL -> GRC  ENABLED`, `POST /api/quotes` returned
+# 201, and `POST /api/swaps` returned 400:
+#
+#     CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp is not a valid XRPL classic
+#     address (checksum verified locally, no network call). NOTHING was written.
+#
+# That is a Solana account, and it is correct that it is not an XRPL address.
+# validate_account() checked EVERY tag-attributed chain's account against the
+# XRP Ledger's base58 alphabet and checksum, because when it was written XRP was
+# the only tag chain. SOL joined TAG_ATTRIBUTED_ASSETS and this function did not
+# learn about it, so the second tag chain was refused at creation by the first
+# chain's address format -- rule 8's two-copies-drift in its other shape, one
+# implementation that silently claims to cover a space it was written for half
+# of.
+#
+# Nothing failed when SOL was added. The pair gated ENABLED, the quote priced,
+# the admin page reported `SOL ... tradeable YES ... tag`, and the only thing
+# that knew otherwise was an HTTP 400 at the moment a customer tried to swap.
+#
+# SO IT IS A TABLE, KEYED BY ASSET, AND AN UNKNOWN ASSET RAISES. A third tag
+# chain that reaches here without an entry gets a refusal naming itself, not
+# XRP's checksum error and not a silent pass. tests/test_xrp_destination_tags.py
+# asserts this table's keys equal services/swap_service.TAG_ATTRIBUTED_ASSETS,
+# so the two cannot drift the way these two just did.
+#
+# THE MODULE IS STILL CALLED xrp_tag_service AND THE TABLE IS STILL
+# xrp_destination_tags, and that is now a wrong name rather than a wrong
+# implementation. The table name is live data and renaming it is a migration;
+# the module name is owed work under rule 9 and is NOT done in the same commit
+# as a fix the operator is waiting on mid-rehearsal. Said here so a reader who
+# finds "xrp" in the path is not misled about what the file owns.
+def _validate_xrp_account(account: str) -> str:
     """The XRPL account tags are allocated against, checked before anything is written.
 
     TWO REFUSALS, both of which would otherwise be silent.
@@ -259,13 +294,6 @@ def validate_account(account: str) -> str:
     this be the account a tag sequence is numbered under?".
     """
     account = (account or "").strip()
-    if not account:
-        raise XRPTagAllocationError(
-            "no XRP account was given to allocate a destination tag against. NOTHING was written. A tag "
-            "means nothing on its own -- it is only an identifier relative to the account it is sent to "
-            "-- so an empty account would number a sequence under the empty string and collide with "
-            "nothing."
-        )
     if looks_like_x_address(account):
         raise XRPTagAllocationError(
             f"{account} is an X-address, which ENCODES A DESTINATION TAG INSIDE ITSELF. NOTHING was "
@@ -284,6 +312,93 @@ def validate_account(account: str) -> str:
             f"because the rows differ in the account column."
         )
     return account
+
+
+def _validate_sol_account(account: str) -> str:
+    """The Solana account tags are allocated against. Same hazard, different alphabet.
+
+    The refusal that matters is identical in shape to XRP's: `account` is a TEXT
+    column and the PRIMARY KEY does not care what is in it, so a malformed
+    account opens a SECOND tag sequence numbered from FIRST_ALLOCATABLE_TAG,
+    overlapping every tag already issued against the real account. Two customers
+    are then told the same memo for different swaps and nothing can see it.
+
+    ON-CURVE IS REQUIRED, and this is the Solana-specific half. A 32-byte base58
+    key that is OFF the curve is an Associated Token Account or another Program
+    Derived Address: syntactically perfect, and no private key exists for it. An
+    off-curve deposit account would be one nobody can ever sweep -- every
+    customer deposit into it would be unrecoverable, which is strictly worse
+    than the tag collision this function is mainly for. chains/solana.py::
+    validate_address() requires the same thing for a PAYOUT address and its
+    docstring has the full reasoning; this is the same check asked about the
+    account we receive into rather than the one we send to.
+
+    NO X-ADDRESS EQUIVALENT. Solana has no single-string form packing an
+    account and a memo together, so XRP's second refusal has no counterpart
+    here. Stated rather than left as an absence (rule 8: if two
+    implementations of one concept genuinely differ, the difference belongs in
+    a comment at both sites) -- the XRP validator above says why it refuses one.
+    """
+    account = (account or "").strip()
+    if not is_valid_address(account):
+        raise XRPTagAllocationError(
+            f"{account} is not a valid Solana account (32 bytes of base58, decoded locally with no "
+            f"network call). NOTHING was written. A typo here would not fail: `account` is a TEXT "
+            f"column, so it would quietly open a SECOND tag sequence numbered from "
+            f"{FIRST_ALLOCATABLE_TAG}, overlapping every memo already issued against the real account "
+            f"-- and the PRIMARY KEY could not object, because the rows differ in the account column."
+        )
+    if not is_on_curve(account):
+        raise XRPTagAllocationError(
+            f"{account} is a valid 32-byte Solana key but is OFF THE CURVE, which means it is a Program "
+            f"Derived Address -- an Associated Token Account or similar -- and NO PRIVATE KEY EXISTS "
+            f"FOR IT. NOTHING was written. Taking deposits into it would make every one of them "
+            f"unrecoverable, because nothing could ever sign a transfer out. Use the wallet account "
+            f"itself; chains/solana.py::validate_address() refuses the same thing for a payout address "
+            f"and its docstring has the reasoning."
+        )
+    return account
+
+
+# Keyed by asset, and an unknown asset raises rather than defaulting. See the
+# block above _validate_xrp_account() for the measurement that made this a table.
+ACCOUNT_VALIDATORS = {
+    "XRP": _validate_xrp_account,
+    "SOL": _validate_sol_account,
+}
+
+
+def validate_account(account: str, asset: str) -> str:
+    """Dispatch to the chain's own account check. `asset` is REQUIRED, not defaulted.
+
+    A default would have hidden exactly the defect this function was split for:
+    SOL reached the XRP validator because nothing made the caller say which
+    chain it was asking about. A default of "XRP" would reproduce that for the
+    third tag chain, which is rule 19's "does it stop the symptom or the cause".
+
+    The empty-account refusal is here rather than in each validator because it
+    is the one reason that is true on every chain: a tag means nothing on its
+    own -- it is only an identifier relative to the account it is sent to -- so
+    an empty account numbers a sequence under the empty string and collides
+    with nothing. One copy (rule 8), and it says the asset it was asked about.
+    """
+    if not (account or "").strip():
+        raise XRPTagAllocationError(
+            f"no {asset} account was given to allocate a deposit tag against. NOTHING was written. A "
+            f"tag means nothing on its own -- it is only an identifier relative to the account it is "
+            f"sent to -- so an empty account would number a sequence under the empty string and "
+            f"collide with nothing."
+        )
+    validator = ACCOUNT_VALIDATORS.get(asset)
+    if validator is None:
+        raise XRPTagAllocationError(
+            f"{asset} allocates deposit tags but no account validator is registered for it, so there "
+            f"is no way to tell a real {asset} account from a typo. NOTHING was written. Add it to "
+            f"services/xrp_tag_service.ACCOUNT_VALIDATORS; an unchecked account opens a second tag "
+            f"sequence under the typo and hands two customers the same tag. Registered: "
+            f"{', '.join(sorted(ACCOUNT_VALIDATORS))}."
+        )
+    return validator(account)
 
 
 def _explain_integrity_error(error: sqlite3.IntegrityError, account: str, swap_id: str) -> str:
@@ -350,7 +465,7 @@ def _explain_integrity_error(error: sqlite3.IntegrityError, account: str, swap_i
     )
 
 
-def allocate_destination_tag(db, account: str, swap_id: str) -> int:
+def allocate_destination_tag(db, account: str, swap_id: str, asset: str) -> int:
     """Allocate the next destination tag for `swap_id` on `account`. THE decision.
 
     Returns the tag as an int. Raises XRPTagAllocationError, having written
@@ -370,7 +485,7 @@ def allocate_destination_tag(db, account: str, swap_id: str) -> int:
     between them cannot leave a swap whose deposit instruction was shown to a
     customer but never recorded.
     """
-    account = validate_account(account)
+    account = validate_account(account, asset)
     if not swap_id:
         raise XRPTagAllocationError(
             "no swap_id was given, so nothing was allocated. A tag with no swap behind it is an "
@@ -449,7 +564,7 @@ def destination_tag_for_swap(db, swap_id: str) -> int | None:
     return int(row["destination_tag"] if isinstance(row, dict) else row[0])
 
 
-def swap_id_for_tag(db, account: str, tag) -> str | None:
+def swap_id_for_tag(db, account: str, tag, asset: str) -> str | None:
     """Which swap a RECEIVED destination tag belongs to, or None.
 
     This is the reverse of allocation and it is the function the deposit path
@@ -470,7 +585,7 @@ def swap_id_for_tag(db, account: str, tag) -> str | None:
     chains/xrp_payments.py::deposit_events_from_transactions() already reports
     as `deferred`. It is never a license to credit the nearest swap.
     """
-    account = validate_account(account)
+    account = validate_account(account, asset)
     tag = validate_destination_tag(tag, allocatable=False)
     row = db.execute(
         "SELECT swap_id FROM xrp_destination_tags WHERE account = ? AND destination_tag = ?",

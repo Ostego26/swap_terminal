@@ -154,14 +154,14 @@ def test_the_first_tag_is_one_and_not_zero(db):
     so a payment carrying it must resolve to no swap rather than to whichever
     swap was created first.
     """
-    assert allocate_destination_tag(db, ACCOUNT_ZERO, "s_one") == FIRST_ALLOCATABLE_TAG
+    assert allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP") == FIRST_ALLOCATABLE_TAG
     assert FIRST_ALLOCATABLE_TAG == 1
     assert RESERVED_DESTINATION_TAG == 0
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, RESERVED_DESTINATION_TAG) is None
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, RESERVED_DESTINATION_TAG, "XRP") is None
 
 
 def test_consecutive_allocations_are_distinct_and_increasing(db):
-    tags = [allocate_destination_tag(db, ACCOUNT_ZERO, s) for s in ("s_one", "s_two", "s_three")]
+    tags = [allocate_destination_tag(db, ACCOUNT_ZERO, s, "XRP") for s in ("s_one", "s_two", "s_three")]
     assert tags == [1, 2, 3]
     assert len(set(tags)) == len(tags)
 
@@ -174,26 +174,26 @@ def test_the_sequence_is_per_account(db):
     second account would start it at whatever the first had reached -- which is
     harmless but tells a reader the scope is something it is not.
     """
-    first = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
-    second = allocate_destination_tag(db, ACCOUNT_ONE, "s_two")
+    first = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
+    second = allocate_destination_tag(db, ACCOUNT_ONE, "s_two", "XRP")
     assert first == second == FIRST_ALLOCATABLE_TAG
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, first) == "s_one"
-    assert swap_id_for_tag(db, ACCOUNT_ONE, second) == "s_two"
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, first, "XRP") == "s_one"
+    assert swap_id_for_tag(db, ACCOUNT_ONE, second, "XRP") == "s_two"
 
 
 def test_a_tag_resolves_back_to_its_own_swap_and_no_other(db):
     """The reverse lookup, which is the function the deposit path needs."""
-    tag_one = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
-    tag_two = allocate_destination_tag(db, ACCOUNT_ZERO, "s_two")
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, tag_one) == "s_one"
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, tag_two) == "s_two"
+    tag_one = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
+    tag_two = allocate_destination_tag(db, ACCOUNT_ZERO, "s_two", "XRP")
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, tag_one, "XRP") == "s_one"
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, tag_two, "XRP") == "s_two"
     assert destination_tag_for_swap(db, "s_one") == tag_one
     assert destination_tag_for_swap(db, "s_two") == tag_two
     # An unallocated tag resolves to nothing rather than to the nearest swap.
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, 9999) is None
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, 9999, "XRP") is None
     assert destination_tag_for_swap(db, "s_three") is None
     # And a tag allocated on one account does not resolve on another.
-    assert swap_id_for_tag(db, ACCOUNT_ONE, tag_one) is None
+    assert swap_id_for_tag(db, ACCOUNT_ONE, tag_one, "XRP") is None
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ def test_the_database_refuses_a_duplicate_tag_on_one_account(db):
     is the claim, because a future caller who writes their own INSERT gets the
     same refusal.
     """
-    tag = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
+    tag = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
     with pytest.raises(sqlite3.IntegrityError) as caught:
         db.execute(
             "INSERT INTO xrp_destination_tags (account, destination_tag, swap_id, allocated_at) "
@@ -219,13 +219,13 @@ def test_the_database_refuses_a_duplicate_tag_on_one_account(db):
             (ACCOUNT_ZERO, tag, "s_two", NOW),
         )
     assert "UNIQUE constraint failed" in str(caught.value)
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, tag) == "s_one"
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, tag, "XRP") == "s_one"
 
 
 def test_one_swap_cannot_hold_two_tags(db):
-    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
+    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
     with pytest.raises(XRPTagAllocationError) as caught:
-        allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
+        allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
     assert "already has a destination tag" in str(caught.value)
     assert destination_tag_for_swap(db, "s_one") == FIRST_ALLOCATABLE_TAG
     rows = db.execute("SELECT COUNT(*) AS n FROM xrp_destination_tags WHERE swap_id = 's_one'").fetchone()
@@ -295,7 +295,7 @@ def test_two_threads_cannot_allocate_the_same_tag(tmp_path):
         start.wait(timeout=30)
         for swap_id in mine:
             try:
-                tag = allocate_destination_tag(conn, ACCOUNT_ZERO, swap_id)
+                tag = allocate_destination_tag(conn, ACCOUNT_ZERO, swap_id, "XRP")
                 conn.commit()
                 with lock:
                     issued.append(tag)
@@ -359,7 +359,7 @@ def test_an_allocated_tag_cannot_be_deleted(db):
     withdrawal, would be credited to a stranger's swap. The trigger is what
     makes that impossible rather than merely discouraged.
     """
-    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
+    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
     with pytest.raises(sqlite3.IntegrityError) as caught:
         db.execute("DELETE FROM xrp_destination_tags")
     assert "never deleted" in str(caught.value)
@@ -367,12 +367,12 @@ def test_an_allocated_tag_cannot_be_deleted(db):
 
 
 def test_an_allocated_tag_cannot_be_repointed_at_another_swap(db):
-    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
+    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
     for column, value in (("swap_id", "s_two"), ("destination_tag", 77), ("account", ACCOUNT_ONE)):
         with pytest.raises(sqlite3.IntegrityError) as caught:
             db.execute(f"UPDATE xrp_destination_tags SET {column} = ?", (value,))  # noqa: S608 -- checked: `column` is one of three literals written on the line above, never input
         assert "immutable once allocated" in str(caught.value)
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, FIRST_ALLOCATABLE_TAG) == "s_one"
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, FIRST_ALLOCATABLE_TAG, "XRP") == "s_one"
 
 
 def test_a_completed_swap_does_not_release_its_tag(db):
@@ -383,12 +383,12 @@ def test_a_completed_swap_does_not_release_its_tag(db):
     completed swap still owns 1 -- so a late payment carrying 1 resolves to the
     swap it was meant for.
     """
-    first = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
+    first = allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
     db.execute("UPDATE swaps SET status = 'completed' WHERE id = 's_one'")
     db.commit()
-    second = allocate_destination_tag(db, ACCOUNT_ZERO, "s_two")
+    second = allocate_destination_tag(db, ACCOUNT_ZERO, "s_two", "XRP")
     assert second == first + 1
-    assert swap_id_for_tag(db, ACCOUNT_ZERO, first) == "s_one"
+    assert swap_id_for_tag(db, ACCOUNT_ZERO, first, "XRP") == "s_one"
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ def test_the_tag_space_is_reported_exhausted_rather_than_overflowing(db):
     )
     db.commit()
     with pytest.raises(XRPTagAllocationError) as caught:
-        allocate_destination_tag(db, ACCOUNT_ZERO, "s_two")
+        allocate_destination_tag(db, ACCOUNT_ZERO, "s_two", "XRP")
     message = str(caught.value)
     assert "EXHAUSTED" in message
     assert str(MAX_DESTINATION_TAG) in message
@@ -543,13 +543,13 @@ def test_a_malformed_account_is_refused_before_anything_is_written(db):
     """
     for bad in ("", "   ", "not-an-address", XRP_ACCOUNT_ZERO_WITH_TYPO):
         with pytest.raises(XRPTagAllocationError):
-            allocate_destination_tag(db, bad, "s_one")
+            allocate_destination_tag(db, bad, "s_one", "XRP")
     assert db.execute("SELECT COUNT(*) AS n FROM xrp_destination_tags").fetchone()["n"] == 0
 
 
 def test_an_x_address_is_refused_because_it_already_carries_a_tag(db):
     with pytest.raises(XRPTagAllocationError) as caught:
-        allocate_destination_tag(db, X_ADDRESS, "s_one")
+        allocate_destination_tag(db, X_ADDRESS, "s_one", "XRP")
     message = str(caught.value)
     assert "X-address" in message
     assert "two tags that disagree" in message
@@ -557,7 +557,7 @@ def test_an_x_address_is_refused_because_it_already_carries_a_tag(db):
 
 
 def test_validate_account_returns_the_stripped_address():
-    assert validate_account(f"  {ACCOUNT_ZERO}  ") == ACCOUNT_ZERO
+    assert validate_account(f"  {ACCOUNT_ZERO}  ", "XRP") == ACCOUNT_ZERO
 
 
 def test_a_tag_for_a_swap_that_does_not_exist_is_refused(db):
@@ -571,10 +571,10 @@ def test_a_tag_for_a_swap_that_does_not_exist_is_refused(db):
     """
     assert db.execute("PRAGMA foreign_keys").fetchone()["foreign_keys"] == 1
     with pytest.raises(XRPTagAllocationError) as caught:
-        allocate_destination_tag(db, ACCOUNT_ZERO, "s_does_not_exist")
+        allocate_destination_tag(db, ACCOUNT_ZERO, "s_does_not_exist", "XRP")
     assert "no swap row" in str(caught.value)
     with pytest.raises(XRPTagAllocationError) as caught:
-        allocate_destination_tag(db, ACCOUNT_ZERO, "")
+        allocate_destination_tag(db, ACCOUNT_ZERO, "", "XRP")
     assert "no swap_id was given" in str(caught.value)
 
 
@@ -602,8 +602,8 @@ def test_an_empty_summary_says_none_rather_than_printing_nothing(db):
     assert f"next would be {FIRST_ALLOCATABLE_TAG}" in empty
     assert "reserved" in empty
 
-    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one")
-    allocate_destination_tag(db, ACCOUNT_ZERO, "s_two")
+    allocate_destination_tag(db, ACCOUNT_ZERO, "s_one", "XRP")
+    allocate_destination_tag(db, ACCOUNT_ZERO, "s_two", "XRP")
     filled = allocation_summary(db, ACCOUNT_ZERO)
     assert "2 allocated" in filled
     assert "highest=2" in filled

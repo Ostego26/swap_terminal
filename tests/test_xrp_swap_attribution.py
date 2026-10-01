@@ -231,12 +231,20 @@ def seeded_db(tmp_path):
     return conn
 
 
-def seed_quote(conn, quote_id):
+def seed_quote(conn, quote_id, from_asset="XRP", to_asset="GRC"):
+    """A priced quote for a pair. The assets are parameters, defaulted to this file's.
+
+    Parameterized 2026-10-01 so tests/test_sol_swap_creation.py can reuse this
+    and seeded_db() rather than growing its own copies -- two seeding helpers for
+    one schema is rule 8's drift arriving in the harness, where it is worse,
+    because a test that seeds a row the application would never write passes
+    while proving nothing.
+    """
     conn.execute(
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps, "
         "network_fee_reserve, output_amount_estimate, created_at, expires_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (quote_id, "XRP", "GRC", 10.0, 1000.0, 150, 0.01, 9850.0,
+        (quote_id, from_asset, to_asset, 10.0, 1000.0, 150, 0.01, 9850.0,
          utc_now_iso(), "2099-01-01T00:00:00+00:00"),
     )
     conn.commit()

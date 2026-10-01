@@ -471,7 +471,12 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     # payment. That is the outcome to want -- a failed creation costs a retry,
     # while a swap that takes a deposit it cannot attribute costs the deposit.
     if needs_tag:
-        swap["deposit_tag"] = allocate_destination_tag(db, deposit_address, swap_id)
+        # from_asset is PASSED, and before 2026-10-01 it was not: the account was
+        # checked against the XRP Ledger's format on every tag chain, so the first
+        # real SOL -> GRC swap was refused 400 with "not a valid XRPL classic
+        # address" for a correct Solana account. See ACCOUNT_VALIDATORS in
+        # services/xrp_tag_service.py for the measurement.
+        swap["deposit_tag"] = allocate_destination_tag(db, deposit_address, swap_id, from_asset)
         db.execute("UPDATE swaps SET deposit_tag = ? WHERE id = ?", (swap["deposit_tag"], swap_id))
 
     db.execute(
