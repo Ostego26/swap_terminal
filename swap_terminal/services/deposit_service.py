@@ -57,7 +57,7 @@ from deposit_vout_artifact import multi_vout_groups
 from .helpers import utc_now_iso
 from .swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION, set_swap_status
 from .unattributable_deposit_service import record as record_unattributable
-from .unattributable_deposit_service import stranded_rows, unclaimed_rows
+from .unattributable_deposit_service import resolve_credited, stranded_rows, unclaimed_rows
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +383,40 @@ def reconcile_shared_accounts(db, config, adapters: dict) -> int:
                 (asset,),
             ).fetchall()
         }
+        # EVERY txid THAT ALREADY HAS A deposit_events ROW FOR THIS ASSET.
+        #
+        # This is what stops the reconciler calling a freshly credited deposit stranded, and
+        # the defect it fixes was measured on the first real SOL deposit this system ever
+        # credited (2026-10-01). The loop above refreshes each active swap and credits its
+        # deposit, which moves that swap OUT of ACTIVE_STATUSES; then this function ran, saw
+        # `payout_pending`, and concluded the payment "will never be credited to it" -- about
+        # the very payment that had just been credited. unclaimed_events() has the full
+        # measurement.
+        #
+        # A JOIN rather than two queries: the question is "txids credited on this asset", and
+        # deposit_events carries swap_id while the asset lives on swaps (rule 20 -- the join
+        # belongs in SQL, where it answers the same way for every reader).
+        credited = {
+            str(row["txid"])
+            for row in db.execute(
+                "SELECT DISTINCT d.txid AS txid FROM deposit_events d"
+                " JOIN swaps s ON s.id = d.swap_id WHERE s.from_asset = ?",
+                (asset,),
+            ).fetchall()
+        }
+        now = utc_now_iso()
         events = adapter.find_deposits_to_address(address)
-        rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES)
-        recorded += record_unattributable(db, rows, now=utc_now_iso())
+        rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES, credited)
+        recorded += record_unattributable(db, rows, now=now)
+        # AND CLOSE ANY ROW THAT TURNS OUT TO HAVE BEEN CREDITED. Written before this fix, or
+        # written legitimately for a payment whose swap was created afterwards -- either way a
+        # stranded row whose txid now has a deposit_events row has been answered, and leaving
+        # it open makes the unresolved count a number that only grows.
+        resolved = resolve_credited(db, asset, credited, now=now)
+        if resolved:
+            logger.info(
+                "%s: %d stranded deposit row(s) CLOSED because a deposit_events row now exists "
+                "for their txid -- they were credited after all and no person needed to act",
+                asset, resolved,
+            )
     return recorded

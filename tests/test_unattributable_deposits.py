@@ -32,6 +32,7 @@ from swap_terminal.services import deposit_service  # noqa: E402
 from swap_terminal.services.unattributable_deposit_service import (  # noqa: E402
     StrandedDeposit,
     record,
+    resolve_credited,
     stranded_rows,
     unclaimed_events,
     unclaimed_rows,
@@ -368,9 +369,17 @@ def an_event(tag, txid="tx1", amount=1.0, confirmations=5):
             "confirmations": confirmations}
 
 
+# NO txid HAS A deposit_events ROW. Spelled as a named constant rather than a bare
+# frozenset() at six call sites, because what it MEANS is the whole point of the
+# 2026-10-01 fix: these tests assert what happens when nothing has been credited yet,
+# which is the case every one of them was written for. The tests that exercise the
+# credited path name their own txids.
+NOTHING_CREDITED: frozenset[str] = frozenset()
+
+
 def test_an_event_matching_no_swap_is_unclaimed():
     """MUTATION: return [] and the hole is back -- every call filters it, none records it."""
-    unclaimed = unclaimed_events([an_event(99)], {7: ("s_1", "awaiting_deposit")}, ACTIVE)
+    unclaimed = unclaimed_events([an_event(99)], {7: ("s_1", "awaiting_deposit")}, ACTIVE, NOTHING_CREDITED)
     assert len(unclaimed) == 1
     event, why = unclaimed[0]
     assert event["vout"] == 99
@@ -387,7 +396,7 @@ def test_an_event_matching_an_ACTIVE_swap_is_left_entirely_alone():
     the operator gets a support ticket for every swap that worked.
     """
     for status in ACTIVE:
-        assert unclaimed_events([an_event(7)], {7: ("s_1", status)}, ACTIVE) == [], status
+        assert unclaimed_events([an_event(7)], {7: ("s_1", status)}, ACTIVE, NOTHING_CREDITED) == [], status
 
 
 def test_a_payment_to_a_COMPLETED_swap_is_stranded_too():
@@ -401,7 +410,7 @@ def test_a_payment_to_a_COMPLETED_swap_is_stranded_too():
     MUTATION: treat any matched tag as claimed and this money goes back to being invisible.
     """
     for status in ("completed", "failed", "under_review", "payout_pending"):
-        unclaimed = unclaimed_events([an_event(7)], {7: ("s_done", status)}, ACTIVE)
+        unclaimed = unclaimed_events([an_event(7)], {7: ("s_done", status)}, ACTIVE, NOTHING_CREDITED)
         assert len(unclaimed) == 1, status
         why = unclaimed[0][1]
         assert "s_done" in why and status in why, "name the swap and its status"
@@ -415,13 +424,13 @@ def test_the_rows_carry_the_discriminator_and_the_chain_s_word_for_it():
     saying "DestinationTag" would name a field Solana does not have, which is the live mistake
     that file's own comment records.
     """
-    sol = unclaimed_rows([an_event(42)], {}, "SOL", ACTIVE)
+    sol = unclaimed_rows([an_event(42)], {}, "SOL", ACTIVE, NOTHING_CREDITED)
     assert sol[0].discriminator == 42
     assert "Memo instruction 42" in sol[0].why
     assert sol[0].amount == 1.0 and sol[0].credits == 1
     assert sol[0].confirmations == 5, "the event carries one, unlike the adapter's drop"
 
-    xrp = unclaimed_rows([an_event(42)], {}, "XRP", ACTIVE)
+    xrp = unclaimed_rows([an_event(42)], {}, "XRP", ACTIVE, NOTHING_CREDITED)
     assert "DestinationTag 42" in xrp[0].why
 
 
@@ -430,7 +439,7 @@ def test_an_event_with_no_discriminator_is_skipped_rather_than_guessed():
     understand -- and guessing would put a row in with no reference to chase.
     """
     assert unclaimed_events([{"txid": "t", "vout": None, "address": ACCOUNT, "amount": 1.0}],
-                            {}, ACTIVE) == []
+                            {}, ACTIVE, NOTHING_CREDITED) == []
 
 
 def test_reconcile_shared_accounts_records_once_whatever_the_swap_count(db):
@@ -603,3 +612,170 @@ def test_an_asset_with_no_configured_account_is_skipped(db):
     assert deposit_service.reconcile_shared_accounts(
         db, {"AMOUNT_TOLERANCE_PCT": 1.0}, {"XRP": Recording()}) == 0
     assert scanned == [], "no account configured, so no scan attempted"
+
+
+# --- the credited check: the false alarm on the first real SOL deposit --------
+#
+# MEASURED 2026-10-01, on the first deposit this system ever credited on a
+# tag-attributed chain. The operator sent 0.05 devnet SOL with memo 2 for swap
+# s_ba72c715150a063b. The Solana path worked -- the memo was read, the amount was
+# read, the credit was seen, the swap advanced -- and the log said:
+#
+#     SOL deposit 5rHDrJYp... CANNOT BE ATTRIBUTED and is now RECORDED in
+#     unattributable_deposits: 0.05 SOL, 1 credit(s), Memo instruction 2: it
+#     matches swap s_ba72c715150a063b, which is payout_pending -- that swap is no
+#     longer refreshed, so this payment will never be credited to it. Nothing is
+#     credited and no swap changed; a person has to match this by hand.
+#
+# Every clause false. The payment HAD been credited; that is the only reason the
+# swap was payout_pending.
+#
+# deposit_service.process_active_swaps() refreshes each active swap and THEN
+# reconciles, in the same call. So the reconciler read a swap that had left
+# ACTIVE_STATUSES *because its own refresh had just credited this event*. "Is the
+# swap still refreshed" was a proxy for "was this payment credited", and the proxy
+# inverts at the moment the credit succeeds -- so EVERY successful tag-chain swap
+# produced a stranded row and a WARNING demanding manual reconciliation.
+#
+# CREDITED_TXID is the real signature of that payment, and STRANDED_TXID the real
+# signature of the duplicate 0.05 the operator sent minutes later from a shell
+# whose variables were still set. That second one IS stranded -- same memo, swap
+# already past refresh, no deposit_events row -- so the pair is the exact live
+# situation this fix has to tell apart, with the real strings.
+CREDITED_TXID = "5rHDrJYpZJA58kg7r11kCL4wcVKCvmuLMaGtUsN5dAgaQ5BU1jEj7bmh5rM7HkCJM8rfooQJpQRvJcGUreRW1mnK"
+STRANDED_TXID = "61otPXfyEEwuUstjmroX5gvkR4v142mT1ZcBAGn5Goy1k1rhWZHKSR2skQZdtdGSNTCHabhabu2PaJxq2Zt6RKAC"
+
+
+def test_a_credited_txid_is_not_stranded_even_though_its_swap_left_the_active_set():
+    """The false alarm, as a unit. MUTATION: drop the credited check -> this fails.
+
+    `payout_pending` is deliberately the status, because that is the one the live
+    swap was in and it is the one a successful credit produces.
+    """
+    event = an_event(2, txid=CREDITED_TXID)
+    claimed = {2: ("s_ba72c715150a063b", "payout_pending")}
+
+    assert unclaimed_events([event], claimed, ACTIVE, {CREDITED_TXID}) == []
+    # And the same event WITHOUT the credit is still stranded, so the test is not
+    # passing because the status branch was removed outright.
+    assert len(unclaimed_events([event], claimed, ACTIVE, NOTHING_CREDITED)) == 1
+
+
+def test_a_duplicate_payment_to_the_same_swap_is_still_stranded():
+    """The narrowing that must NOT happen: a second payment is not covered by the first.
+
+    Both carry memo 2 and both target a swap that is past refresh. The first has a
+    deposit_events row and is credited; the second has none and is money nobody
+    will ever credit, which is the whole reason this table exists. A fix that keyed
+    on the TAG rather than the TXID would have silently swallowed it.
+    """
+    events = [an_event(2, txid=CREDITED_TXID), an_event(2, txid=STRANDED_TXID)]
+    claimed = {2: ("s_ba72c715150a063b", "payout_pending")}
+
+    unclaimed = unclaimed_events(events, claimed, ACTIVE, {CREDITED_TXID})
+    assert len(unclaimed) == 1, "the duplicate must still be reported"
+    assert unclaimed[0][0]["txid"] == STRANDED_TXID
+    assert "never be credited" in unclaimed[0][1]
+
+
+def test_reconcile_reads_the_credited_set_from_deposit_events(db):
+    """END TO END through the real reconciler, against real rows. The row is the authority.
+
+    Seeded exactly as the live host was: one swap on SOL at `payout_pending` with
+    memo 2, a deposit_events row for the credited txid, and the adapter returning
+    BOTH payments. One row must be written, for the duplicate only.
+
+    MUTATION: build `credited` as an empty set in reconcile_shared_accounts and two
+    rows appear -- one of them the support ticket for a swap that worked.
+    """
+    seed_swap(db, "s_live", 2, asset="SOL", status="payout_pending")
+    db.execute(
+        "INSERT INTO deposit_events (swap_id, asset, txid, vout, address, amount,"
+        " confirmations, first_seen_at, last_seen_at)"
+        " VALUES ('s_live','SOL',?,2,?,0.05,3,"
+        "'2026-10-01T18:43:00+00:00','2026-10-01T18:43:00+00:00')",
+        (CREDITED_TXID, ACCOUNT),
+    )
+    adapter = Adapter(events=[an_event(2, txid=CREDITED_TXID, amount=0.05),
+                              an_event(2, txid=STRANDED_TXID, amount=0.05)])
+
+    recorded = deposit_service.reconcile_shared_accounts(db, CONFIG, {"SOL": adapter})
+
+    assert recorded == 1, "only the uncredited duplicate is stranded"
+    rows = rows_in(db)
+    assert len(rows) == 1
+    assert rows[0]["txid"] == STRANDED_TXID
+    assert rows[0]["resolved_at"] is None, "a genuinely stranded row stays open"
+
+
+def test_a_row_written_before_the_credit_is_closed_rather_than_left_open(db):
+    """The self-heal, which is what clears the operator's existing false-positive row.
+
+    Also the legitimate case going forward: a sender who pays a tag whose swap does
+    not exist yet is stranded correctly, and once a swap is created and credits that
+    txid the row has been answered. Leaving it open makes the unresolved count a
+    number that only grows.
+
+    MUTATION: drop the resolve_credited() call and the row stays open forever.
+    """
+    seed_swap(db, "s_live", 2, asset="SOL", status="payout_pending")
+    # The false-positive row, exactly as the live reconciler wrote it.
+    record(db, [StrandedDeposit(
+        asset="SOL", txid=CREDITED_TXID, address=ACCOUNT, amount=0.05, credits=1,
+        discriminator=2, why="it matches swap s_live, which is payout_pending", confirmations=3,
+    )], now="2026-10-01T18:43:05+00:00")
+    assert rows_in(db)[0]["resolved_at"] is None, "setup: the row starts open"
+
+    # The credit then lands in deposit_events, and reconciliation runs again.
+    db.execute(
+        "INSERT INTO deposit_events (swap_id, asset, txid, vout, address, amount,"
+        " confirmations, first_seen_at, last_seen_at)"
+        " VALUES ('s_live','SOL',?,2,?,0.05,3,"
+        "'2026-10-01T18:43:00+00:00','2026-10-01T18:43:00+00:00')",
+        (CREDITED_TXID, ACCOUNT),
+    )
+    deposit_service.reconcile_shared_accounts(db, CONFIG, {"SOL": Adapter(events=[])})
+
+    row = rows_in(db)[0]
+    assert row["resolved_at"] is not None, "a credited txid must not stay open"
+    assert "credited after all" in row["resolution_note"]
+    assert "no person acted on it" in row["resolution_note"], (
+        "a resolved row with no reason is indistinguishable from one a person closed"
+    )
+
+
+def test_resolve_credited_never_overwrites_a_resolution_a_person_wrote(db):
+    """`resolved_at IS NULL` in the WHERE, and it is not incidental.
+
+    An operator who resolved a row by hand wrote a note saying what they did about
+    real money. Overwriting it with "closed automatically" would destroy the only
+    record of that decision.
+    """
+    seed_swap(db, "s_live", 2, asset="SOL", status="payout_pending")
+    record(db, [StrandedDeposit(
+        asset="SOL", txid=CREDITED_TXID, address=ACCOUNT, amount=0.05, credits=1,
+        discriminator=2, why="stranded", confirmations=3,
+    )], now="2026-10-01T18:43:05+00:00")
+    db.execute(
+        "UPDATE unattributable_deposits SET resolved_at = ?, resolution_note = ? WHERE txid = ?",
+        ("2026-10-01T19:00:00+00:00", "refunded by hand, see ticket 12", CREDITED_TXID),
+    )
+
+    closed = resolve_credited(db, "SOL", {CREDITED_TXID}, now="2026-10-01T20:00:00+00:00")
+
+    assert closed == 0
+    row = rows_in(db)[0]
+    assert row["resolution_note"] == "refunded by hand, see ticket 12"
+    assert row["resolved_at"] == "2026-10-01T19:00:00+00:00"
+
+
+def test_resolve_credited_with_nothing_credited_says_zero_rather_than_touching_rows(db):
+    """An empty set is a result (rule 14), and it must not become `IN ()` SQL."""
+    seed_swap(db, "s_live", 2, asset="SOL", status="payout_pending")
+    record(db, [StrandedDeposit(
+        asset="SOL", txid=STRANDED_TXID, address=ACCOUNT, amount=0.05, credits=1,
+        discriminator=2, why="stranded", confirmations=3,
+    )], now="2026-10-01T18:43:05+00:00")
+
+    assert resolve_credited(db, "SOL", NOTHING_CREDITED, now="2026-10-01T20:00:00+00:00") == 0
+    assert rows_in(db)[0]["resolved_at"] is None

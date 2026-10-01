@@ -191,7 +191,7 @@ def discriminator_name(asset: str) -> str:
     return name
 
 
-def unclaimed_events(events, claimed: dict, still_refreshed) -> list[tuple[dict, str]]:
+def unclaimed_events(events, claimed: dict, still_refreshed, credited) -> list[tuple[dict, str]]:
     """Events at the shared account that NO swap will credit, each with why. PURE.
 
     THE HOLE THIS CLOSES IS BIGGER THAN THE NO-MEMO ONE AND NOTHING EVEN LOGGED IT.
@@ -219,6 +219,44 @@ def unclaimed_events(events, claimed: dict, still_refreshed) -> list[tuple[dict,
                                 never credited -- as stranded as one with no tag, and I would
                                 have missed it by only looking for unmatched tags.
 
+    `credited` IS THE SET OF txids THAT ALREADY HAVE A deposit_events ROW, AND IT IS WHY THIS
+    FUNCTION NO LONGER ASKS ABOUT STATUS FIRST. It is REQUIRED, not defaulted, because a
+    default empty set reproduces the defect below silently.
+
+    MEASURED 2026-10-01, on the first real SOL deposit ever credited by this system. The
+    operator sent 0.05 devnet SOL with memo 2 for swap s_ba72c715150a063b, the Solana path
+    worked -- memo read, amount read, credit seen -- and the log said:
+
+        SOL deposit 5rHDrJYp... CANNOT BE ATTRIBUTED and is now RECORDED in
+        unattributable_deposits: 0.05 SOL, 1 credit(s), Memo instruction 2: it matches swap
+        s_ba72c715150a063b, which is payout_pending -- that swap is no longer refreshed, so
+        this payment will never be credited to it. Nothing is credited and no swap changed; a
+        person has to match this by hand.
+
+    Every clause of which was false. The payment HAD been credited -- that is the only reason
+    the swap was payout_pending -- and no person needed to do anything.
+
+    The cause is an ordering this docstring's last paragraph assumed away.
+    deposit_service.process_active_swaps() refreshes every active swap and THEN reconciles, in
+    the same call:
+
+        processed = [refresh_swap_from_chain(...) for swap in swaps]
+        reconcile_shared_accounts(db, config, adapters)
+
+    So by the time the reconciler reads the swap, that swap has left ACTIVE_STATUSES BECAUSE
+    ITS OWN REFRESH JUST CREDITED THIS EVENT. "Is the swap still refreshed" was being used as a
+    proxy for "was this payment credited", and the proxy inverts at the exact moment the credit
+    succeeds. Every successful tag-chain swap would have produced a stranded row and a WARNING
+    demanding manual reconciliation -- the output-that-looks-like-failure half of rule 14, and
+    a log that cries wolf on the happy path is a log nobody reads the day something real
+    happens.
+
+    THE CREDIT IS A ROW, SO THE ROW IS THE QUESTION (rules 5 and 20). deposit_events gets a row
+    the first time a watcher sees the transaction, at zero confirmations, so a txid present
+    there is claimed by definition and needs no inference from a status. A genuinely late or
+    duplicate payment to a finished swap has a DIFFERENT txid, is absent from deposit_events,
+    and is still reported -- which is the case this function exists for and is not weakened.
+
     WHAT IS NOT COVERED, said rather than implied (rule 17): an event matching an ACTIVE swap
     is left entirely alone here, even though this function could see it. That swap's own
     refresh is what credits it, and a second writer deciding the same thing is rule 8's defect
@@ -226,6 +264,13 @@ def unclaimed_events(events, claimed: dict, still_refreshed) -> list[tuple[dict,
     """
     out = []
     for event in events or []:
+        # ALREADY CREDITED, ASKED BEFORE ANYTHING ELSE. A txid with a deposit_events row
+        # belongs to the swap that recorded it, whatever that swap's status is now. Checked
+        # first rather than inside the status branch because it is the stronger fact: a status
+        # is a summary that moves, a deposit_events row is the credit itself.
+        txid = str(event.get("txid") or "")
+        if txid and txid in credited:
+            continue
         tag = event.get("vout")
         if tag is None:
             # NO DISCRIMINATOR AT ALL is the adapter's case, not this one: chains/solana.py
@@ -247,7 +292,7 @@ def unclaimed_events(events, claimed: dict, still_refreshed) -> list[tuple[dict,
     return out
 
 
-def unclaimed_rows(events, claimed: dict, asset: str, still_refreshed) -> list[StrandedDeposit]:
+def unclaimed_rows(events, claimed: dict, asset: str, still_refreshed, credited) -> list[StrandedDeposit]:
     """unclaimed_events() as StrandedDeposit rows, with the discriminator recorded.
 
     THE DISCRIMINATOR IS SET HERE and None from stranded_rows(), which is the distinction
@@ -269,5 +314,52 @@ def unclaimed_rows(events, claimed: dict, asset: str, still_refreshed) -> list[S
             confirmations=int(event.get("confirmations") or 0),
             discriminator=int(event["vout"]),
         )
-        for event, why in unclaimed_events(events, claimed, still_refreshed)
+        for event, why in unclaimed_events(events, claimed, still_refreshed, credited)
     ]
+
+
+def resolve_credited(db, asset: str, credited, *, now: str) -> int:
+    """Close any stranded row whose txid now HAS a deposit_events row. Returns how many.
+
+    THE TABLE SELF-HEALS RATHER THAN ACCUMULATING FALSE POSITIVES, and that is the second half
+    of the 2026-10-01 fix. unclaimed_events() stops CREATING a row for a credited payment;
+    this clears the ones already written -- on the operator's host there is exactly one, from
+    the first real SOL deposit, and without this it would sit in the table forever telling a
+    person to match by hand a payment that was credited correctly.
+
+    It is also the right behavior going forward and not only cleanup. A payment can legitimately
+    be recorded as stranded and credited LATER: a sender who pays before opening a swap, or
+    pays a tag whose swap does not exist yet, lands here first, and if a swap is subsequently
+    created and its refresh credits that txid, the stranded row is answered. Leaving it open
+    would make the unresolved count a number that only ever grows, which is the measurement
+    rule 3 warns about -- a count whose denominator keeps changing underneath it.
+
+    `resolution_note` SAYS WHO CLOSED IT AND WHY, because a resolved row with no reason is
+    indistinguishable from one a person closed by hand, and those two want different follow-up.
+
+    DOES NOT COMMIT; the caller owns the transaction, as everything else on this path does.
+    Rows already resolved are left untouched -- `resolved_at IS NULL` in the WHERE -- so a
+    note written by a person is never overwritten by this one.
+    """
+    txids = [t for t in (credited or ()) if t]
+    if not txids:
+        # Rule 14: an empty result is a result, and the caller reports the count either way.
+        return 0
+    placeholders = ",".join("?" for _ in txids)
+    cursor = db.execute(
+        # The interpolation is a run of '?' generated from the LENGTH of the list -- structure,
+        # not input. Every txid is bound as a parameter below. Same claim as
+        # deposit_service.process_active_swaps() makes for ACTIVE_STATUSES, and checkable from
+        # this line (rule 12's S608 note).
+        f"UPDATE unattributable_deposits SET resolved_at = ?, resolution_note = ?"  # noqa: S608
+        f" WHERE asset = ? AND resolved_at IS NULL AND txid IN ({placeholders})",
+        [
+            now,
+            "credited after all: a deposit_events row exists for this txid, so a swap claimed "
+            "it. Closed automatically by services/unattributable_deposit_service."
+            "resolve_credited(); no person acted on it.",
+            asset,
+            *txids,
+        ],
+    )
+    return int(cursor.rowcount or 0)
