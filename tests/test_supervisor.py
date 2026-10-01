@@ -522,3 +522,70 @@ def test_an_unconfigured_grc_gets_no_unlock_line_at_all(monkeypatch):
 
     assert "payout unlock" not in text
     assert "not configured" in text, "and it still says the chain is unconfigured"
+
+
+def test_the_spawn_warning_does_not_contradict_the_unlock_line(monkeypatch, capsys, tmp_path):
+    """Two sentences in one safety block must not disagree. MEASURED 2026-10-01.
+
+    The commit that added the unlock line produced this, four lines apart:
+
+        GRC payout unlock  *** GRIDCOIN_WALLET_PASSPHRASE IS NOT SET *** so
+                           every GRC payout WILL refuse before sending ...
+        about to spawn     a payout worker CAN broadcast. Stop now if this
+                           database is pointed at a funded mainnet wallet.
+
+    The first was written to fix a banner that was silent about a guaranteed
+    failure; the second was left asserting the opposite. An operator reading top
+    to bottom is told the payout cannot send and then that it can, which is worse
+    than either sentence alone -- they now have to work out which one the program
+    believes, in the block whose whole job is to be read before money moves.
+
+    Asserted through main() rather than on spawn_warning() alone, because the
+    defect was the two lines COEXISTING and only the rendered block shows that.
+
+    MUTATION: restore the unconditional sentence and this fails on the
+    contradiction while every other banner test passes -- the shipped state.
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    entry = supervisor.Config.RPC["GRC"]
+    original = {key: entry[key] for key in ("port", "user", "password")}
+    try:
+        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
+        # _dying_table()'s worker exits immediately, so this spawns and reaps a
+        # harmless `python3 -c` and nothing is left behind -- the banner is what
+        # is under test, not the spawn. main() returns 1 for the death, which is
+        # confirm_spawned() doing its job and not a failure of this test.
+        assert supervisor.main(["start", "--run-dir", str(tmp_path)], commands=_dying_table()) == 1
+    finally:
+        entry.update(original)
+    out = capsys.readouterr().out
+
+    assert "IS NOT SET" in out, "setup: the unlock line must be present for there to be a contradiction"
+    assert "a payout worker CAN broadcast. Stop now" not in out, (
+        "the unconditional sentence contradicts the unlock line four lines above it:\n" + out
+    )
+    # It still carries the mainnet caution, because a chain needing no unlock IS
+    # unaffected by a Gridcoin passphrase -- "nothing can send" would be its own
+    # wrong line.
+    assert "funded mainnet wallet" in out
+    assert "those payouts refuse" in out
+
+
+def test_the_spawn_warning_is_the_original_one_when_every_unlock_is_ready(monkeypatch):
+    """The other half. A version that always hedged would pass the test above.
+
+    When the passphrase IS set the danger is the real one -- the worker will
+    broadcast -- and the warning must say so without qualification.
+    """
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "canary-wallet-passphrase")
+    entry = supervisor.Config.RPC["GRC"]
+    original = {key: entry[key] for key in ("port", "user", "password")}
+    try:
+        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
+        warning = supervisor.spawn_warning()
+    finally:
+        entry.update(original)
+
+    assert warning == ("a payout worker CAN broadcast. Stop now if this database is pointed at a funded "
+                       "mainnet wallet.")
+    assert "canary-wallet-passphrase" not in warning

@@ -601,6 +601,48 @@ def endpoint_summary() -> list[str]:
     ]
 
 
+def spawn_warning() -> str:
+    """The sentence above the spawn, and it has to agree with the unlock line.
+
+    MEASURED 2026-10-01, in the banner of the commit that added the unlock line.
+    Two sentences, four lines apart, in one safety block, disagreeing:
+
+        GRC payout unlock  *** GRIDCOIN_WALLET_PASSPHRASE IS NOT SET *** so every
+                           GRC payout WILL refuse before sending ...
+        about to spawn     a payout worker CAN broadcast. Stop now if this
+                           database is pointed at a funded mainnet wallet.
+
+    I wrote the first one to fix a banner that was silent about a guaranteed
+    failure, and left the second one asserting the opposite. An operator reading
+    top to bottom is told the payout cannot send and then that it can. That is
+    worse than either sentence alone, because the reader now has to work out
+    which of the two the program actually believes -- rule 8's two-copies-drift
+    arriving as a contradiction rather than as a delay, in the block whose whole
+    job is to be read before money can move.
+
+    SO IT IS DERIVED FROM THE SAME FUNCTION, not written twice. When every
+    payout-unlock chain is ready the warning is the original one, because the
+    danger is real: the worker will broadcast. When one is not, the sentence says
+    what will actually happen instead, and keeps the mainnet caution for the
+    chains that need no unlock -- a Bitcoin or Litecoin payout is unaffected by a
+    Gridcoin passphrase, so "nothing can send" would be its own wrong line.
+    """
+    from chains.registry import build_adapters  # noqa: PLC0415 -- see endpoint_summary()
+    from services.payout_service import WALLET_UNLOCK_ENV_VAR, unlock_readiness_lines  # noqa: PLC0415 -- as above
+
+    blocked = [line for line in unlock_readiness_lines(build_adapters(Config.RPC).keys())
+               if "IS NOT SET" in line]
+    if not blocked:
+        return ("a payout worker CAN broadcast. Stop now if this database is pointed at a funded "
+                "mainnet wallet.")
+    return (
+        f"a payout worker CAN broadcast on any chain that needs no wallet unlock -- stop now if this "
+        f"database is pointed at a funded mainnet wallet. It will NOT be able to pay the chain(s) named "
+        f"above: {WALLET_UNLOCK_ENV_VAR} is unset here, so those payouts refuse and their swaps land in "
+        f"'failed', which nothing retries."
+    )
+
+
 def _print_block(title: str, lines: list[str]) -> None:
     print(title)
     if lines:
@@ -617,7 +659,7 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
     print("swap_terminal supervisor: START")
     _print_block("  targets", [f"  workers           {', '.join(names)}", *endpoint_summary()])
     print(f"  run directory     {run_dir}")
-    print("  about to spawn    a payout worker CAN broadcast. Stop now if this database is pointed at a funded mainnet wallet.")
+    print(f"  about to spawn    {spawn_warning()}")
 
     results = [start_worker(name, commands[name], run_dir) for name in names]
     # Every worker is spawned BEFORE the settle is slept, so the wait is paid
