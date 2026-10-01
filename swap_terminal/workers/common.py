@@ -50,6 +50,7 @@ the backstop for a cycle that wedges; it does not replace the handler.
 
 import os
 import signal
+import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -58,9 +59,11 @@ from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
 from config import Config
+from db import db_session
 from log_setup import configure_logging
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, configuring_variable
+from services.deposit_service import ACTIVE_STATUSES
 
 
 def build_adapters_from_config() -> dict:
@@ -186,6 +189,88 @@ def chain_verdict(asset: str, port: int) -> str:
     return f"UNRECOGNIZED port, so which chain this is was NOT established; mainnet is {CHAIN_PORTS[asset].mainnet_port}"
 
 
+def database_census(db_path: str) -> str:
+    """What is actually IN the database this worker just opened. One line.
+
+    WHY THIS LINE EXISTS, AND IT COST AN HOUR OF THE OPERATOR'S EVENING ON
+    2026-10-01.
+
+    Three workers were started from a shell whose SWAP_DB_PATH pointed at the
+    wrong file -- repo_root/runtime/swap_terminal.db instead of
+    repo_root/swap_terminal/swap_terminal.db, a path I put in a block I handed
+    them. They then ran for an hour printing
+
+        deposit_watcher cycle=57 IDLE  active_swaps=0 refreshed=0
+        now_payout_pending=0 HALTED_for_review=0
+
+    while THREE swaps sat in awaiting_deposit in the database every root tool
+    reads. Nothing was wrong with any worker. Nothing failed. The banner even
+    printed the path it was using, correctly, which is what finally identified it
+    -- and that was not enough, because a path is only wrong RELATIVE to what you
+    expected, and the cycle line beside it said `active_swaps=0 is expected only
+    when no swap is open`, which was true of the file it was reading and false of
+    the system.
+
+    So this is rule 13's defect in its exact stated form -- "treat 'skipped' plus
+    'success' in the same output as a defect in the output" -- and rule 14's "make
+    did-nothing look different from did-work", at the level of a whole database: a
+    terminal pointed at an empty file is INDISTINGUISHABLE from a quiet one, and
+    the second is the normal state, so the first reads as normal.
+
+    AND connect_db() CREATES WHAT IT CANNOT FIND. db.py:561 is a bare
+    sqlite3.connect(), which makes a missing file rather than refusing, and no
+    worker applies SCHEMA. So a typo in a path does not fail: it manufactures an
+    empty database and polls it forever. The file at the wrong path even had a
+    schema, because the desktop launcher had passed the same bad value to
+    create_app(), which calls init_db().
+
+    WHAT IT REPORTS, and why a count rather than a verdict. There is no way from
+    inside one worker to know which database is the RIGHT one -- that is the
+    operator's intent, not a fact in the tree (rule 17). What a worker can say is
+    what it found, so the reader can compare it against what they expect:
+
+      no such file, created now   the strongest signal, and the one that would
+                                  have caught this in a second
+      a file with no `swaps`      created but never initialized. NOT the same
+      table                       answer as an empty table, which is the
+                                  distinction show_swap.py and open_swap.py both
+                                  make for the same reason
+      a tally per status          so three awaiting_deposit in the file the
+                                  operator means and zero here is visible on
+                                  one line
+    """
+    path = Path(db_path)
+    # exists() BEFORE connecting, because connect() would create it and then this
+    # line could never report the one state most worth reporting.
+    if not path.exists():
+        return (
+            "DOES NOT EXIST YET. sqlite3.connect() CREATES a missing file and no worker applies the "
+            "schema, so this worker is about to poll a database it manufactured. If you expected swaps "
+            "here, SWAP_DB_PATH is pointing somewhere you did not mean"
+        )
+    try:
+        with db_session(db_path) as db:
+            rows = db.execute(
+                "SELECT status, COUNT(*) AS swaps FROM swaps GROUP BY status ORDER BY status"
+            ).fetchall()
+    except sqlite3.OperationalError as error:
+        # NAMED, not broad. This is what a file created but never initialized
+        # raises ("no such table: swaps"), and it must never render the same way as
+        # a healthy empty table -- that confusion is the whole failure above.
+        return (
+            f"EXISTS BUT HAS NO SWAPS TABLE ({error}). It was created and never initialized; the web app "
+            f"applies the schema on first run. Every cycle below will fail until then"
+        )
+    if not rows:
+        return (
+            "exists, schema present, and holds NO SWAPS AT ALL  <- every cycle will report IDLE and that "
+            "will be correct for THIS file. If you expected swaps, compare this path against the one your "
+            "other tools print"
+        )
+    tally = ", ".join(f"{row['status']} {row['swaps']}" for row in rows)
+    return f"{tally}  <- what is in THIS file. active_swaps counts only {', '.join(ACTIVE_STATUSES)}"
+
+
 def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
     """Print what this worker is about to do, before it does any of it."""
     # FIRST, before the banner, so that anything the banner itself logs is captured.
@@ -196,7 +281,8 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
     configure_logging()
     print(f"{worker_name}: starting", flush=True)
     print(f"  pid             {pid}  <- supervisor.py stop reads this from runtime/{worker_name}.pid", flush=True)
-    print(f"  database        {Config.DB_PATH}", flush=True)
+    print(f"  database        {Config.DB_PATH}  <- {db_path_source(str(Config.DB_PATH))}", flush=True)
+    print(f"  it holds        {database_census(str(Config.DB_PATH))}", flush=True)
     print(f"  poll interval   {format_duration(poll_seconds)}", flush=True)
     print("  chains:", flush=True)
     for line in endpoint_lines():

@@ -15,13 +15,16 @@ so "we just won't print it" is a property that has to be checked rather than
 intended.
 """
 
+import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 import workers.deposit_watcher as watcher
 from config import Config
-from workers import deposit_watcher
+from db import SCHEMA
+from services.deposit_service import ACTIVE_STATUSES
+from workers import common, deposit_watcher
 from workers.common import (
     CycleFailures,
     announce_start,
@@ -505,3 +508,128 @@ def test_a_stop_signal_is_not_swallowed_by_the_guard(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         watcher.main(poll_seconds=0)
     assert attempts["n"] == 1, "the interrupt must end the loop on its first cycle, not be caught"
+
+
+# --- the database a worker actually opened --------------------------------------
+#
+# Added 2026-10-01 after three workers ran for an hour against the wrong file.
+# SWAP_DB_PATH pointed at repo_root/runtime/swap_terminal.db instead of
+# repo_root/swap_terminal/swap_terminal.db -- a path I handed the operator in a
+# block -- and every cycle printed
+#
+#     deposit_watcher cycle=57 IDLE  active_swaps=0 refreshed=0 now_payout_pending=0
+#
+# while THREE swaps sat in awaiting_deposit in the database every root tool reads.
+# Nothing failed. The banner printed the path, correctly, and that was not enough:
+# a path is only wrong relative to what you expected, and `active_swaps=0` carried
+# a note saying it "is expected only when no swap is open", which was true of the
+# file being read and false of the system.
+
+
+def test_a_missing_database_is_named_as_such_before_the_first_cycle(tmp_path):
+    """The one state most worth reporting, and connect() would destroy the evidence.
+
+    db.connect_db() is a bare sqlite3.connect() (db.py:561): it CREATES a missing
+    file rather than refusing, and no worker applies SCHEMA. So a typo in a path
+    does not fail -- it manufactures an empty database and polls it forever. The
+    census has to look BEFORE anything connects, which is why it is exists()-first
+    and not try/except around a query.
+    """
+    verdict = common.database_census(str(tmp_path / "never-created.db"))
+    assert "DOES NOT EXIST YET" in verdict
+    assert "CREATES a missing file" in verdict
+    assert "SWAP_DB_PATH is pointing somewhere you did not mean" in verdict
+
+
+def test_a_file_with_no_swaps_table_does_not_read_as_an_empty_one(tmp_path):
+    """Created-but-never-initialized and healthy-and-empty are different facts.
+
+    They give the same answer to "how many swaps are open" -- none -- and only one
+    of them means every cycle below will fail. show_swap.py and open_swap.py both
+    draw this distinction for the same reason; the workers did not draw it at all.
+    """
+    path = tmp_path / "blank.db"
+    sqlite3.connect(path).close()
+    verdict = common.database_census(str(path))
+    assert "HAS NO SWAPS TABLE" in verdict
+    assert "no such table: swaps" in verdict
+    assert "NO SWAPS AT ALL" not in verdict, "the two states must not render the same way"
+
+
+def test_an_initialized_empty_database_says_IDLE_will_be_correct_for_this_file(tmp_path):
+    """Rule 14: "(none)" is a result, and it has to say what it is a result ABOUT.
+
+    An empty-but-healthy database is the normal state of a fresh install, so it
+    must not read as an alarm -- while still telling a reader that the IDLE cycles
+    they are about to see describe THIS file and nothing else.
+    """
+    path = tmp_path / "fresh.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(SCHEMA)
+    connection.commit()
+    connection.close()
+    verdict = common.database_census(str(path))
+    assert "NO SWAPS AT ALL" in verdict
+    assert "correct for THIS file" in verdict
+    assert "compare this path against the one your other tools print" in verdict
+
+
+def test_the_census_tallies_by_status_so_a_mismatch_is_visible_on_one_line(tmp_path):
+    """THE LINE THAT WOULD HAVE CAUGHT IT IN A SECOND.
+
+    Two awaiting_deposit here against three in the file the operator meant is a
+    comparison a human makes instantly and a cycle counter cannot make at all.
+    """
+    path = tmp_path / "rows.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(SCHEMA)
+    for index, status in enumerate(("awaiting_deposit", "awaiting_deposit", "completed")):
+        connection.execute(
+            "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
+            " network_fee_reserve, output_amount_estimate, expires_at, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"q{index}", "SOL", "GRC", 0.01, 9000.0, 150, 0.01, 88.0, "x", "x"),
+        )
+        connection.execute(
+            "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
+            " expected_input_amount, quoted_rate, fee_bps, network_fee_reserve, output_amount_estimate,"
+            " status, min_confirmations, created_at, updated_at, expires_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"s{index}", f"q{index}", "SOL", "GRC", "a", "b", 0.01, 9000.0, 150, 0.01, 88.0,
+             status, 3, "x", "x", "x"),
+        )
+    connection.commit()
+    connection.close()
+
+    verdict = common.database_census(str(path))
+    assert "awaiting_deposit 2" in verdict
+    assert "completed 1" in verdict
+    # The vocabulary comes from services/deposit_service.ACTIVE_STATUSES rather than
+    # a second spelling here (rule 11), so the census and the counter cannot come to
+    # disagree about what "active" means.
+    for status in ACTIVE_STATUSES:
+        assert status in verdict
+
+
+def test_the_banner_prints_the_census_and_the_paths_provenance(tmp_path, monkeypatch, capsys):
+    """Both halves, because neither alone identified the wrong file.
+
+    The path alone was already being printed and did not catch it. The census
+    alone would not say whether the path came from an export or a default -- and
+    "I exported that" is what makes a wrong path recognizable.
+    """
+    path = tmp_path / "banner.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(SCHEMA)
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(common.Config, "DB_PATH", str(path), raising=False)
+    monkeypatch.setenv("SWAP_DB_PATH", str(path))
+    common.announce_start("deposit_watcher", 30.0, 4242)
+    out = capsys.readouterr().out
+
+    assert f"  database        {path}" in out
+    assert "<- SWAP_DB_PATH" in out, "the provenance of the path is half the signal"
+    assert "  it holds        " in out
+    assert "NO SWAPS AT ALL" in out
