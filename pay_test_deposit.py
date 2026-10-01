@@ -84,6 +84,8 @@ from chains.registry import missing_settings
 from config import Config
 from db import db_session
 from microfortnights import format_duration
+from services.helpers import utc_now_iso
+from services.swap_view import elapsed_seconds, remaining_seconds
 
 #: The cluster this file is allowed to touch, and the only one. Both the CLI
 #: argument and the SOL_RPC_URL check below are pinned to it.
@@ -239,6 +241,62 @@ def open_sol_swap(db, swap_id: str = "") -> dict | None:
     return dict(row) if row else None
 
 
+def open_sol_swap_count(db) -> int:
+    """How many SOL swaps are awaiting a deposit. For the line that says so.
+
+    open_sol_swap() takes ORDER BY created_at DESC LIMIT 1 when no id is given,
+    and its docstring already records that "the newest open swap" was the wrong
+    swap once -- which is why the id is printed. Printing the id answers "which
+    one did it pick"; it does not answer "out of how many", and those are
+    different questions for a reader deciding whether to trust the pick.
+
+    MEASURED 2026-10-01: THREE SOL swaps were open at once, all for 0.01 SOL, all
+    with the same payout address. The id on screen was the only distinguishing
+    mark, and nothing said the other two existed. Rule 3's "state the
+    denominator", on a tool that sends money.
+    """
+    row = db.execute(
+        "SELECT COUNT(*) AS n FROM swaps WHERE from_asset = 'SOL' AND status = 'awaiting_deposit'"
+    ).fetchone()
+    return int(row["n"] if isinstance(row, dict) else row[0])
+
+
+def quote_age_line(swap: dict, now_iso: str) -> str:
+    """How old the rate this swap will pay out at is, and that nothing re-prices it.
+
+    WHY A SEND TOOL SAYS THIS. Established by reading rather than assumed:
+    services/swap_view.quote_window()'s docstring records that NOTHING in the tree
+    sets swaps.status='expired' and no worker reads swaps.expires_at at all -- the
+    only read is get_quote_or_raise(), which guards QUOTE REUSE before a swap
+    exists. So a swap that has been open for hours still pays at the rate it was
+    quoted at, whatever the market has done since.
+
+    MEASURED 2026-10-01: three swaps sat open from 20:36 UTC onward, quoted when
+    1 SOL bought 8995 GRC. Four hours later the same SOL bought 10719 -- GRC had
+    fallen from $0.0141 to $0.0110, so paying the oldest of them would have
+    delivered about 17 GRC less than a fresh quote, roughly 16% short.
+
+    It reports and does not refuse. Paying a stale quote is sometimes exactly what
+    a rehearsal wants, and whether a customer gets the old rate or a new one
+    changes what they are paid -- which is live posture and the operator's
+    decision (rule 16), not a send tool's.
+    """
+    age = elapsed_seconds(swap.get("created_at"), now_iso)
+    window = remaining_seconds(swap.get("expires_at"), now_iso)
+    if age is None:
+        return "(not measurable -- this swap has no readable created_at)"
+    aged = f"quoted {format_duration(age)} ago"
+    if window is None:
+        return f"{aged}; expires_at is unreadable, so whether the window passed was NOT established"
+    if window >= 0:
+        return f"{aged}; {format_duration(window)} left in the quoted window"
+    return (
+        f"{aged}; the quoted window PASSED {format_duration(-window)} ago. NOTHING re-prices a swap -- "
+        f"no worker reads swaps.expires_at and nothing sets status='expired' -- so this will pay out at "
+        f"the OLD rate. Create a new swap if you want the current one"
+    )
+
+
 def deposit_events_for(db, swap_id: str) -> int:
     row = db.execute(
         "SELECT COUNT(*) AS n FROM deposit_events WHERE swap_id = ?", (swap_id,)
@@ -294,10 +352,19 @@ def main() -> int:
     with db_session(Config.DB_PATH) as db:
         swap = open_sol_swap(db, args.swap)
         seen = deposit_events_for(db, swap["id"]) if swap else 0
+        open_count = open_sol_swap_count(db)
     refusals.extend(swap_refusals(swap, seen))
 
     if swap:
+        chosen = (
+            f"named by --swap; {open_count} SOL swap(s) are open"
+            if args.swap
+            else f"the NEWEST of {open_count} open SOL swap(s), picked by created_at DESC. Pass --swap "
+                 f"with an id to choose"
+        )
         print(f"  swap            {swap['id']}  created {swap.get('created_at')}")
+        print(f"  chosen          {chosen}")
+        print(f"  quote           {quote_age_line(swap, utc_now_iso())}")
         print(f"  memo tag        {swap.get('deposit_tag')}  <- the whole memo, undecorated")
         print(f"  amount          {swap.get('expected_input_amount')} SOL  <- read from the row, so it "
               f"cannot disagree with the quote")

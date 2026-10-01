@@ -33,6 +33,7 @@ from services.swap_view import (
     confirmation_progress,
     deposit_instruction,
     quote_window,
+    remaining_seconds,
     shouted_discriminator,
     stage_rail,
     status_meaning,
@@ -496,3 +497,66 @@ def test_an_unreadable_expiry_is_reported_as_unknown():
     window = quote_window(make_swap(expires_at="garbage"), NOW)
     assert window["known"] is False
     assert window["display"] == "(unknown)"
+
+
+# --- time UNTIL a timestamp, which is not elapsed_seconds reversed --------------
+
+
+def test_a_null_expiry_returns_None_instead_of_raising():
+    """FOUND 2026-10-01 BY RUNNING A NEW CALLER, not by reading the old one.
+
+    elapsed_seconds() guards its FIRST parameter and nothing else, so the idiom
+    for "time left" --
+
+        elapsed_seconds(now_iso, swap.get("expires_at"))
+
+    -- puts the nullable value in the unguarded slot, and a NULL reaches
+    datetime.fromisoformat(None) and raises TypeError. That catch is deliberately
+    narrow (ValueError only, because a TypeError "is a different defect and should
+    surface"), which is correct, and it makes the reversed call a crash rather than
+    a None.
+
+    quote_window() had used that exact idiom since it was written, which means a
+    swap with a NULL expires_at would have taken the /swap/<id> page down.
+    swaps.expires_at is NOT NULL in the schema so no row from this codebase trips
+    it -- but "the column says NOT NULL" is a reason to believe, not a check
+    (rule 17), and a migrated or hand-edited row is exactly the kind that would
+    arrive here.
+    """
+    assert remaining_seconds(None, "2026-10-02T00:40:00+00:00") is None
+    assert remaining_seconds("", "2026-10-02T00:40:00+00:00") is None
+
+
+def test_a_malformed_expiry_returns_None_through_the_narrow_catch():
+    """The case quote_window()'s None branch really was reachable for."""
+    assert remaining_seconds("not-a-timestamp", "2026-10-02T00:40:00+00:00") is None
+
+
+def test_the_sign_is_positive_before_the_window_passes_and_negative_after():
+    """THE FIRST DRAFT HAD THIS BACKWARDS, and only running it caught that.
+
+    elapsed_seconds(a, b) is b - a, so elapsed_seconds(now, until) is ALREADY
+    until - now -- the reversed idiom was arithmetically right all along and only
+    its guard was missing. Negating it flipped every verdict: a swap five minutes
+    into a ten-minute window reported "the quoted window PASSED", which would tell
+    an operator to discard a live quote.
+    """
+    now = "2026-10-02T00:40:00+00:00"
+    assert remaining_seconds("2026-10-02T00:45:00+00:00", now) == pytest.approx(300.0)
+    assert remaining_seconds("2026-10-02T00:35:00+00:00", now) == pytest.approx(-300.0)
+    assert remaining_seconds(now, now) == pytest.approx(0.0)
+
+
+# NOT TESTED HERE: that quote_window() reports a live window as live and a passed
+# one as passed. test_a_passed_quote_window_says_the_swap_was_not_canceled() above
+# already covers both, which is also how I know the sign inversion described above
+# would have been caught by this suite before it could ship -- it was caught by
+# running the function first, but it was not relying on that. A third copy of that
+# assertion is rule 9's dead weight: a duplicate test still gets read, and a reader
+# finding two has to work out whether they differ.
+def test_quote_window_survives_an_unreadable_expiry_and_says_so():
+    """The branch whose sentence names the NULL case, now actually reachable for it."""
+    verdict = quote_window({"expires_at": None}, "2026-10-02T00:40:00+00:00")
+    assert not verdict["known"]
+    assert not verdict["passed"], "unknown must never render as expired"
+    assert "no readable quote expiry" in verdict["note"]

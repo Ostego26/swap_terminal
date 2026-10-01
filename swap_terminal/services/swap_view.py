@@ -690,6 +690,53 @@ def deposit_instruction(swap: dict) -> dict:
     }
 
 
+def remaining_seconds(until_iso: str | None, now_iso: str) -> float | None:
+    """Seconds UNTIL an ISO timestamp, negative once it has passed, or None if unreadable.
+
+    WHY THIS EXISTS RATHER THAN A REVERSED elapsed_seconds() CALL, found 2026-10-01
+    by running a new caller instead of reading it.
+
+    elapsed_seconds() guards its FIRST parameter -- `if not since_iso: return None`
+    -- and nothing else. So the idiom for "time left", which is
+
+        elapsed_seconds(now_iso, swap.get("expires_at"))
+
+    puts the NULLABLE value in the slot that has no guard, and a missing timestamp
+    reaches datetime.fromisoformat(None) and raises TypeError. That catch is
+    deliberately narrow (it takes ValueError only, and its comment says a
+    TypeError "is a different defect and should surface"), which is right -- and it
+    means the reversed call is a crash rather than a None.
+
+    quote_window() in this same file has used that exact idiom since it was
+    written, at the line below, and its `remaining is None` branch returns "This
+    swap has no readable quote expiry." That branch is UNREACHABLE for a NULL
+    expires_at: such a swap raises out of the function before reaching it, taking
+    the /swap/<id> page with it. It is reachable for a malformed non-empty string,
+    via the ValueError catch, which is why the branch is not dead -- only the case
+    its sentence names is.
+
+    swaps.expires_at is NOT NULL in the schema (db.py), so a row from this
+    codebase cannot trip it; a hand-edited or migrated row can, and "the column
+    says NOT NULL" is a reason to believe rather than a check (rule 17). The
+    second caller, pay_test_deposit.quote_age_line(), reads the same column and
+    would have had the identical crash -- which is how this was found -- so the
+    fix is one guarded function both use rather than two guards (rule 8).
+    """
+    if not until_iso:
+        return None
+    # DELEGATED, NOT NEGATED, and the first draft of this line got that wrong in a
+    # way only running it caught. elapsed_seconds(a, b) is b - a, so
+    # elapsed_seconds(now_iso, until_iso) is ALREADY until - now: the reversed
+    # idiom quote_window() used was arithmetically right all along and only its
+    # guard was missing. Negating it flipped every verdict -- a swap five minutes
+    # into a ten-minute window printed "the quoted window PASSED" -- which would
+    # have told an operator to throw away a live quote.
+    #
+    # Delegated rather than reimplemented so the parse, the narrow ValueError catch
+    # and the None-for-unreadable contract stay in one place.
+    return elapsed_seconds(now_iso, until_iso)
+
+
 def elapsed_seconds(since_iso: str | None, now_iso: str) -> float | None:
     """Seconds between an ISO timestamp and `now`, or None if it cannot be read.
 
@@ -723,7 +770,7 @@ def quote_window(swap: dict, now_iso: str) -> dict:
     presented as a measurement (rule 17), and it would tell a customer their
     money is gone when it is not.
     """
-    remaining = elapsed_seconds(now_iso, swap.get("expires_at"))
+    remaining = remaining_seconds(swap.get("expires_at"), now_iso)
     if remaining is None:
         return {"known": False, "passed": False, "display": "(unknown)", "note": "This swap has no readable quote expiry."}
     if remaining >= 0:
