@@ -421,6 +421,17 @@ def test_an_endpoint_that_does_not_answer_fails_without_a_traceback(monkeypatch)
 # --- the check that would have saved three rehearsals ------------------------
 
 
+def unlock_row():
+    """The `payout unlock` row, SELECTED BY NAME.
+
+    Three tests here indexed swap_readiness._results[0] and all three broke when
+    check_payout_unlock() gained a `payout chain` line in front of the unlock one
+    (2026-10-01) -- a position is not an identity, and the failure said
+    "assert 'FAIL' == 'SKIP'" about a row the test was not asking about.
+    """
+    return next(row for row in swap_readiness._results if row[1] == "payout unlock")
+
+
 def test_a_missing_gridcoin_passphrase_is_a_FAIL_before_any_swap_exists(monkeypatch):
     """THE PRECONDITION THAT BROKE THREE LIVE RUNS, 2026-10-01.
 
@@ -433,12 +444,11 @@ def test_a_missing_gridcoin_passphrase_is_a_FAIL_before_any_swap_exists(monkeypa
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
     swap_readiness.check_payout_unlock({"GRC": object()})
-    rows = list(swap_readiness._results)
+    row = unlock_row()
 
-    assert len(rows) == 1
-    assert rows[0][0] == FAIL
-    assert "IS NOT SET" in rows[0][2]
-    assert "nothing retries" in rows[0][2]
+    assert row[0] == FAIL
+    assert "IS NOT SET" in row[2]
+    assert "nothing retries" in row[2]
 
 
 def test_a_present_passphrase_claims_presence_and_never_correctness(monkeypatch):
@@ -454,24 +464,69 @@ def test_a_present_passphrase_claims_presence_and_never_correctness(monkeypatch)
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", fixture_value)
     swap_readiness._results.clear()
     swap_readiness.check_payout_unlock({"GRC": object()})
-    detail = swap_readiness._results[0][2]
+    detail = unlock_row()[2]
 
-    assert swap_readiness._results[0][0] == PASS
+    assert unlock_row()[0] == PASS
     assert "NOT a claim that it is the right passphrase" in detail
     assert fixture_value not in detail, "the preflight printed the passphrase"
     assert str(len(fixture_value)) not in detail, "the preflight printed the passphrase's length"
 
 
 def test_a_chain_that_needs_no_unlock_gets_no_warning(monkeypatch):
-    """Cried-wolf noise for a chain nobody set up is what this file fixed once already."""
+    """Cried-wolf noise for a chain nobody set up is what this file fixed once already.
+
+    BTC, not SOL, and the change is the point: SOL is never a TO asset, so a
+    process with only a SOL adapter can pay NOTHING, which is now its own FAIL
+    (see test_nothing_payable_is_a_FAIL_not_a_SKIP). BTC is the destination of two
+    allowed pairs and needs no wallet unlock, which is the case this test is
+    actually about -- the old fixture was exercising the no-payable path and
+    scoring it as "no warning needed".
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"BTC": object()})
+    row = unlock_row()
+
+    assert row[0] == SKIP
+    assert "GRC is the only one that does" in row[2]
+
+
+def test_nothing_payable_is_a_FAIL_not_a_SKIP(monkeypatch):
+    """MEASURED ON THE OPERATOR'S HOST 2026-10-01, and it rendered as a SKIP.
+
+    With GRC_RPC_PASS unset the only adapter was SOL. SOL is deliberately never a
+    TO asset -- config.ALLOWED_PAIRS carries ("SOL","GRC") and not the reverse,
+    because chains/solana.py cannot sign -- so NO swap this terminal allows could
+    ever have been paid. The line printed was
+
+        SKIP  payout unlock   no configured chain needs a wallet unlock to pay out
+
+    which is true, and reads as nothing-to-worry-about. The supervisor's spawn
+    banner had the identical defect in the identical case and said "a payout worker
+    CAN broadcast" one screen later.
+    """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
     swap_readiness.check_payout_unlock({"SOL": object()})
     rows = list(swap_readiness._results)
 
-    assert len(rows) == 1
-    assert rows[0][0] == SKIP
-    assert "GRC is the only one that does" in rows[0][2]
+    assert len(rows) == 1, "it must stop at the payout-chain line rather than also asking about unlocks"
+    assert rows[0][1] == "payout chain"
+    assert rows[0][0] == FAIL
+    assert "NOTHING CAN BE PAID OUT" in rows[0][2]
+    assert "nothing retries" in rows[0][2]
+
+
+def test_a_payable_chain_is_named_so_a_missing_one_is_visible(monkeypatch):
+    """The PASS half, because a version that always failed would pass the test above."""
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "present-for-this-test-only")
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"GRC": object(), "SOL": object()})
+    row = next(r for r in swap_readiness._results if r[1] == "payout chain")
+
+    assert row[0] == PASS
+    assert "GRC" in row[2]
+    assert "SOL" not in row[2], "SOL has an adapter but is no pair's destination, so it is not payable"
 
 
 # --- the pair line and the pricing line must follow ALLOWED_PAIRS ------------

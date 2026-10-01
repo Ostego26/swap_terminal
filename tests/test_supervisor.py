@@ -586,8 +586,16 @@ def test_the_spawn_warning_is_the_original_one_when_every_unlock_is_ready(monkey
     finally:
         entry.update(original)
 
-    assert warning == ("a payout worker CAN broadcast. Stop now if this database is pointed at a funded "
-                       "mainnet wallet.")
+    # PROPERTIES, NOT THE LITERAL SENTENCE. This asserted the exact string, which
+    # broke the moment the warning started naming WHICH chains are payable
+    # (2026-10-01) -- an improvement the test scored as a regression. A literal
+    # assertion on a prose line pins the wording rather than the claim, and the
+    # claim is what matters: unqualified "can broadcast", no "cannot", and the
+    # mainnet caution present.
+    assert "CAN broadcast" in warning
+    assert "CANNOT" not in warning, "a version that always hedged would pass the test above"
+    assert "GRC" in warning, "naming the payable chain is what makes the caution checkable"
+    assert "mainnet wallet" in warning
     assert "canary-wallet-passphrase" not in warning
 
 
@@ -829,3 +837,67 @@ def test_without_proc_the_scan_says_it_could_not_look(tmp_path, monkeypatch):
     assert "no /proc" in lines[0]
     assert "only evidence" in lines[0]
     assert "none" not in lines[0], "could-not-look must never render as no-orphans"
+
+
+# --- the spawn warning must not claim a capability the process lacks -----------
+
+
+def test_the_spawn_warning_says_nothing_can_be_paid_when_nothing_can(monkeypatch):
+    """MEASURED ON THE OPERATOR'S HOST 2026-10-01, one screen after NOT READY.
+
+    With GRC_RPC_PASS unset, chains/registry had built exactly one adapter -- SOL
+    -- and SOL is deliberately never a TO asset (config.ALLOWED_PAIRS carries
+    ("SOL","GRC") and not the reverse, because chains/solana.py cannot sign). So
+    nothing could be paid out at all, and the banner printed, immediately above
+    spawning three workers:
+
+        about to spawn    a payout worker CAN broadcast. Stop now if this
+                          database is pointed at a funded mainnet wallet.
+
+    THE SAME DEFECT THIS FUNCTION WAS WRITTEN TO FIX, ONE CASE OVER. It derives
+    its sentence from unlock_readiness_lines(), which reports a missing PASSPHRASE
+    for a CONFIGURED payout chain. Asked about a process with no payout chain at
+    all, that function correctly returns nothing -- existence is not its question
+    -- so "no blockers" and "nothing to block" rendered identically.
+    """
+    monkeypatch.setattr(supervisor, "build_adapters", lambda rpc: {"SOL": object()}, raising=False)
+    monkeypatch.setattr(
+        "chains.registry.build_adapters", lambda rpc: {"SOL": object()}
+    )
+    warning = supervisor.spawn_warning()
+
+    assert "CANNOT BROADCAST ANYTHING" in warning
+    assert "CAN broadcast" not in warning.replace("CANNOT BROADCAST ANYTHING", ""), (
+        "the all-clear wording must not survive anywhere in the no-payable case"
+    )
+    assert "adapters built: SOL" in warning
+    assert "nothing retries" in warning, "the consequence is what makes this actionable"
+
+
+def test_the_spawn_warning_names_the_payable_chains_when_there_are_some(monkeypatch):
+    """The danger is real when a chain CAN send, and the sentence has to name which.
+
+    "a payout worker CAN broadcast" with no chain named was the original wording,
+    and it cannot be checked against anything. Naming the chains makes the mainnet
+    caution concrete.
+    """
+    monkeypatch.setattr("chains.registry.build_adapters", lambda rpc: {"GRC": object()})
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "present-for-this-test-only")
+    warning = supervisor.spawn_warning()
+
+    assert "CAN broadcast on GRC" in warning
+    assert "CANNOT" not in warning
+    assert "mainnet wallet" in warning
+
+
+def test_a_payable_chain_with_no_passphrase_still_says_which_will_refuse(monkeypatch):
+    """The case this function originally fixed, unchanged by the new first branch."""
+    monkeypatch.setattr("chains.registry.build_adapters", lambda rpc: {"GRC": object()})
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    warning = supervisor.spawn_warning()
+
+    assert "CANNOT BROADCAST ANYTHING" not in warning, (
+        "GRC IS payable here -- the blocker is the unlock, which is a different sentence"
+    )
+    assert "GRIDCOIN_WALLET_PASSPHRASE is unset" in warning
+    assert "nothing retries" in warning

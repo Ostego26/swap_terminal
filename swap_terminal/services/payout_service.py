@@ -599,6 +599,43 @@ def refresh_wallet_inventory(db, adapters: dict):
     db.commit()
 
 
+def payable_assets(configured_assets, allowed_pairs) -> set[str]:
+    """Which assets a payout could actually be BROADCAST on, right now.
+
+    The intersection of two things that are each necessary and neither
+    sufficient: an asset must be the TO leg of an allowed pair, and this process
+    must have an adapter for it.
+
+    WHY THIS EXISTS, MEASURED ON THE OPERATOR'S HOST 2026-10-01. supervisor.py's
+    spawn_warning() printed, immediately above spawning three workers:
+
+        about to spawn    a payout worker CAN broadcast. Stop now if this
+                          database is pointed at a funded mainnet wallet.
+
+    GRC_RPC_PASS was unset, so chains/registry had built exactly one adapter --
+    SOL -- and SOL is deliberately never a TO asset (config.ALLOWED_PAIRS carries
+    ("SOL","GRC") and not the reverse, because chains/solana.py cannot sign). So
+    NOTHING could be paid out at all, and the banner said the opposite, in the
+    direction that costs rounds: the operator had just been told NOT READY by
+    swap_readiness.py one screen earlier.
+
+    THE SAME DEFECT I HAD ALREADY FIXED, ONE CASE OVER. spawn_warning() derives
+    its sentence from unlock_readiness_lines(), which reports a MISSING PASSPHRASE
+    for a configured payout chain. With no payout chain configured at all that
+    function correctly returns nothing -- it is asked about unlock state, not
+    about existence -- so "no blockers" and "nothing to block" rendered the same
+    way. Rule 14's "make did-nothing look different from did-work", at the level
+    of a capability.
+
+    `allowed_pairs` is PASSED rather than read from Config here, for the reason
+    unlock_readiness_lines() takes `configured_assets`: the caller decides what it
+    is describing, and this cannot disagree with the pair list printed beside it
+    (rule 8).
+    """
+    destinations = {to_asset for _, to_asset in allowed_pairs}
+    return destinations & set(configured_assets)
+
+
 def unlock_readiness_lines(configured_assets) -> list[str]:
     """Whether each payout-unlock chain CAN be unlocked, for a startup banner. PURE-ish.
 

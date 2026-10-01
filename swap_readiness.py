@@ -59,7 +59,7 @@ from config import Config
 from db import SCHEMA
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, solana_cluster
-from services.payout_service import unlock_readiness_lines
+from services.payout_service import payable_assets, unlock_readiness_lines
 from services.pricing import fetch_usd_prices
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -130,11 +130,30 @@ def check_payout_unlock(adapters) -> None:
     The passphrase itself is never read into a line, never logged, and its length
     is never reported.
     """
+    # NOTHING PAYABLE IS A FAIL, NOT A SKIP, and it rendered as a SKIP on the
+    # operator's 2026-10-01 run: "no configured chain needs a wallet unlock to pay
+    # out", which is true and reads as nothing-to-worry-about. With GRC_RPC_PASS
+    # unset the only adapter was SOL, SOL is never a TO asset, and therefore NO
+    # swap this terminal allows could ever have been paid. A SKIP beside that is
+    # the same did-nothing-looks-like-did-work the supervisor's spawn warning had
+    # in the identical case (see services/payout_service.payable_assets()).
+    payable = payable_assets(adapters.keys(), Config.ALLOWED_PAIRS)
+    if not payable:
+        record(FAIL, "payout chain",
+               f"NOTHING CAN BE PAID OUT. Adapters built: {', '.join(sorted(adapters)) or '(none)'}; "
+               f"destinations any allowed pair needs: "
+               f"{', '.join(sorted({to for _, to in Config.ALLOWED_PAIRS}))}. A deposit would still be "
+               f"watched and CREDITED, and the payout would then refuse and land the swap in 'failed', "
+               f"which nothing retries")
+        return
+    record(PASS, "payout chain", f"{', '.join(sorted(payable))}  <- has an adapter AND is the destination "
+                                 f"of an allowed pair. A chain missing from here cannot be paid")
+
     lines = unlock_readiness_lines(adapters.keys())
     if not lines:
         record(SKIP, "payout unlock",
-               "no configured chain needs a wallet unlock to pay out  <- GRC is the only one that does, "
-               "and no GRC adapter was built")
+               f"no payable chain needs a wallet unlock  <- GRC is the only one that does, and it is not "
+               f"in {', '.join(sorted(payable))}")
         return
     for line in lines:
         # The shared function returns a whole banner line, label and all. Only the

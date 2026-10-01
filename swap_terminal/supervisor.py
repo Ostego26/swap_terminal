@@ -795,13 +795,40 @@ def spawn_warning() -> str:
     Gridcoin passphrase, so "nothing can send" would be its own wrong line.
     """
     from chains.registry import build_adapters  # noqa: PLC0415 -- see endpoint_summary()
-    from services.payout_service import WALLET_UNLOCK_ENV_VAR, unlock_readiness_lines  # noqa: PLC0415 -- as above
+    from services.payout_service import (  # noqa: PLC0415 -- as above
+        WALLET_UNLOCK_ENV_VAR,
+        payable_assets,
+        unlock_readiness_lines,
+    )
 
-    blocked = [line for line in unlock_readiness_lines(build_adapters(Config.RPC).keys())
-               if "IS NOT SET" in line]
+    adapters = build_adapters(Config.RPC)
+    # NOTHING PAYABLE IS CHECKED FIRST, and this case was missing until
+    # 2026-10-01 -- the same defect as the one above, one case over.
+    #
+    # unlock_readiness_lines() reports a missing PASSPHRASE for a configured payout
+    # chain. Asked about a process with no payout chain at all it correctly returns
+    # nothing, because existence is not its question -- so `blocked` was empty and
+    # this function took the all-clear branch. On the operator's host, with
+    # GRC_RPC_PASS unset, the only adapter was SOL and SOL is deliberately never a
+    # TO asset, so nothing could be paid out and the banner said a worker CAN
+    # broadcast. One screen earlier swap_readiness.py had told them NOT READY.
+    #
+    # "No blockers" and "nothing to block" rendered identically, which is rule 14's
+    # did-nothing-looks-like-did-work at the level of a capability.
+    payable = payable_assets(adapters.keys(), Config.ALLOWED_PAIRS)
+    if not payable:
+        return (
+            f"a payout worker CANNOT BROADCAST ANYTHING. No configured chain is the destination of any "
+            f"allowed pair -- adapters built: {', '.join(sorted(adapters)) or '(none)'}; destinations "
+            f"allowed: {', '.join(sorted({to for _, to in Config.ALLOWED_PAIRS}))}. Deposits will still be "
+            f"watched and CREDITED, and every payout will then refuse and land its swap in 'failed', which "
+            f"nothing retries. Fix the chain configuration before sending anything."
+        )
+
+    blocked = [line for line in unlock_readiness_lines(adapters.keys()) if "IS NOT SET" in line]
     if not blocked:
-        return ("a payout worker CAN broadcast. Stop now if this database is pointed at a funded "
-                "mainnet wallet.")
+        return (f"a payout worker CAN broadcast on {', '.join(sorted(payable))}. Stop now if this database "
+                f"is pointed at a funded mainnet wallet.")
     return (
         f"a payout worker CAN broadcast on any chain that needs no wallet unlock -- stop now if this "
         f"database is pointed at a funded mainnet wallet. It will NOT be able to pay the chain(s) named "
