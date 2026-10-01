@@ -821,14 +821,30 @@ def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
                 f"find_a_holder() were written from documentation and never measured.")
 
 
-def resolve_address(explicit: str, hot_wallet: str) -> tuple[str, str]:
+def resolve_address(explicit: str, hot_wallet: str, deposit_account: str = "") -> tuple[str, str]:
     """Which account to read, and WHY that one. Returns (address, why).
 
-    THREE SOURCES IN PRECEDENCE ORDER, and the third is why this function exists:
+    FOUR SOURCES IN PRECEDENCE ORDER, and the second arrived 2026-10-01 after a run that read
+    the wrong account without saying so:
 
-        --address            what the operator typed. Always wins.
-        SOL_HOT_WALLET       the configured wallet, if there is one.
+        --address              what the operator typed. Always wins.
+        SOL_DEPOSIT_ACCOUNT    where every customer deposit is told to go.
+        SOL_HOT_WALLET         the configured payout wallet, if there is one.
         SOLANA_DEVNET_ACCOUNT  a known-funded devnet account this repository already holds.
+
+    WHY THE DEPOSIT ACCOUNT OUTRANKS THE HOT WALLET, which is the whole point of the change.
+    The ADDRESS section's headline step is find_deposits_to_address -- labeled in this file as
+    "THE REAL METHOD the deposit watcher calls" -- and the watcher calls it on
+    `swap["deposit_address"]`, which for a tag-attributed chain IS SOL_DEPOSIT_ACCOUNT
+    (services/swap_service.deposit_account()). SOL_HOT_WALLET is the PAYOUT side: config.py is
+    explicit that it is a public key for sending, and nothing deposits into it.
+
+    So with SOL_DEPOSIT_ACCOUNT set and SOL_HOT_WALLET unset, this function returned the devnet
+    fallback and the run exercised the deposit path against an account that receives no
+    deposits -- while the summary four lines below printed `SOL_DEPOSIT_ACCOUNT CUBnQ5QB... <-
+    SET`. Two true statements about two different accounts, and nothing reconciled them. That
+    is the same shape as the balance-versus-delta confusion earlier the same day: the step and
+    the summary each correct, the reader unable to tell they were about different things.
 
     WHAT THE THIRD FIXES. Until 2026-09-30 there was no third, so a run with no --address
     printed "(none given -- pass --address or set SOL_HOT_WALLET to check one)" and skipped the
@@ -851,12 +867,22 @@ def resolve_address(explicit: str, hot_wallet: str) -> tuple[str, str]:
     """
     if explicit:
         return explicit, "from --address"
+    if deposit_account:
+        return deposit_account, (
+            "from SOL_DEPOSIT_ACCOUNT -- the account every SOL deposit is told to go to, and "
+            "the one find_deposits_to_address runs against in production. THIS is the deposit "
+            "path"
+        )
     if hot_wallet:
-        return hot_wallet, "from SOL_HOT_WALLET"
+        return hot_wallet, (
+            "from SOL_HOT_WALLET, which is the PAYOUT wallet -- no deposit is told to go there, "
+            "so this proves the read path against a real account and not the deposit path. Set "
+            "SOL_DEPOSIT_ACCOUNT to check that one"
+        )
     return SOLANA_DEVNET_ACCOUNT, (
         "DEFAULTED to the devnet account this repo already knows (chains/solana_address."
-        "SOLANA_DEVNET_ACCOUNT) -- no --address and no SOL_HOT_WALLET. This proves the READ "
-        "PATH and says nothing about your own wallet being configured"
+        "SOLANA_DEVNET_ACCOUNT) -- no --address, no SOL_DEPOSIT_ACCOUNT and no SOL_HOT_WALLET. "
+        "This proves the READ PATH and says nothing about your own wallet being configured"
     )
 
 
@@ -1182,7 +1208,12 @@ def main() -> int:
     rpc = dict(Config.RPC["SOL"])
     if args.mint:
         rpc["mint"] = args.mint
-    address, address_why = resolve_address(args.address, rpc.get("hot_wallet") or "")
+    # SOL_DEPOSIT_ACCOUNT comes off Config DIRECTLY and not out of rpc[], because it is not an
+    # RPC parameter -- it is custody configuration, and config.py keeps it as its own attribute
+    # for that reason. Passed here so the ADDRESS section aims at the account the deposit
+    # watcher actually scans; see resolve_address() for the run that read the wrong one.
+    address, address_why = resolve_address(
+        args.address, rpc.get("hot_wallet") or "", Config.SOL_DEPOSIT_ACCOUNT)
 
     started = time.monotonic()
     print_banner(rpc, address, address_why)

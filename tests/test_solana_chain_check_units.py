@@ -3164,3 +3164,96 @@ def test_main_prints_the_deposit_account_readiness(monkeypatch, capsys):
     configured = text_of(capsys.readouterr().out)
     assert f"SOL_DEPOSIT_ACCOUNT {account}" in configured
     assert "REFUSES to create a SOL swap" not in configured
+
+
+# ---------------------------------------------------------------------------
+# THE ADDRESS SECTION AIMED AT THE WRONG ACCOUNT. Operator's run, 2026-10-01, with
+# SOL_DEPOSIT_ACCOUNT exported for the first time:
+#
+#   address  J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM
+#            <- DEFAULTED ... no --address and no SOL_HOT_WALLET
+#   ...
+#   SOL_DEPOSIT_ACCOUNT  CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp  <- SET
+#
+# Two true statements about two DIFFERENT accounts, four lines apart. The headline step
+# of that section is find_deposits_to_address, which this file labels "THE REAL METHOD
+# the deposit watcher calls" -- and the watcher calls it on swap["deposit_address"],
+# which for a tag-attributed chain is SOL_DEPOSIT_ACCOUNT. So the one step that proves
+# the deposit path was aimed at an account that receives no deposits.
+# ---------------------------------------------------------------------------
+
+_DEPOSIT_ACCOUNT = "CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp"
+_HOT_WALLET = "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN"
+
+
+def test_the_deposit_account_outranks_the_hot_wallet():
+    """SOL_HOT_WALLET is the PAYOUT side; nothing deposits into it.
+
+    MUTATION: swap the two branches, or drop the deposit_account parameter, and the deposit
+    path is exercised against the payout wallet -- a real account, a real balance, and the
+    wrong half of the swap.
+    """
+    address, why = resolve_address("", _HOT_WALLET, _DEPOSIT_ACCOUNT)
+    assert address == _DEPOSIT_ACCOUNT
+    assert "SOL_DEPOSIT_ACCOUNT" in why
+    assert "THIS is the deposit path" in why, (
+        "and it says so, because the reader has to be able to tell which half was proven"
+    )
+
+
+def test_an_explicit_address_still_wins_over_both():
+    """--address is what the operator typed and must never be second-guessed."""
+    address, why = resolve_address("rTYPED", _HOT_WALLET, _DEPOSIT_ACCOUNT)
+    assert (address, why) == ("rTYPED", "from --address")
+
+
+def test_the_hot_wallet_is_used_but_NAMED_as_the_payout_side():
+    """With no deposit account it is still better than the devnet fallback -- a real account
+    of the operator's -- and the line must not let that read as the deposit path.
+
+    MUTATION: keep the old bare "from SOL_HOT_WALLET" and a run proves the read path against
+    the payout wallet while the reader believes the deposit path was checked.
+    """
+    address, why = resolve_address("", _HOT_WALLET, "")
+    assert address == _HOT_WALLET
+    assert "PAYOUT wallet" in why
+    assert "not the deposit path" in why
+    assert "Set SOL_DEPOSIT_ACCOUNT" in why, "and what to do about it (rule 14)"
+
+
+def test_the_devnet_fallback_names_all_three_that_were_absent():
+    """It named two of three after SOL_DEPOSIT_ACCOUNT became a source -- an operator who HAS
+    set it would read "no SOL_HOT_WALLET" and conclude the fallback was unavoidable.
+    """
+    address, why = resolve_address("", "", "")
+    assert address == solana_chain_check.SOLANA_DEVNET_ACCOUNT
+    for variable in ("--address", "SOL_DEPOSIT_ACCOUNT", "SOL_HOT_WALLET"):
+        assert variable in why, f"{variable} was absent too and must be named"
+
+
+def test_main_reads_the_DEPOSIT_account_when_it_is_set(monkeypatch, capsys):
+    """END TO END, because the call site is what was wrong -- the function did not exist.
+
+    MUTATION: stop passing Config.SOL_DEPOSIT_ACCOUNT at the call site and the ADDRESS section
+    goes back to the devnet fallback while the summary says the account is SET.
+    """
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(
+        solana_chain_check.Config, "RPC",
+        {**solana_chain_check.Config.RPC,
+         "SOL": {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1",
+                 "mint": "", "hot_wallet": ""}})
+    monkeypatch.setattr(solana_chain_check.Config, "SOL_DEPOSIT_ACCOUNT", _DEPOSIT_ACCOUNT,
+                        raising=False)
+    monkeypatch.setattr(chains_solana.requests, "post", _WholeClusterStub())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py"])
+    solana_chain_check.main()
+    out = text_of(capsys.readouterr().out)
+
+    assert f"address {_DEPOSIT_ACCOUNT}" in out, "the ADDRESS section reads the deposit account"
+    assert f"ADDRESS {_DEPOSIT_ACCOUNT}" in out, "and the section header names it"
+    assert solana_chain_check.SOLANA_DEVNET_ACCOUNT not in out, (
+        "the devnet fallback must not appear at all: it would mean the deposit path was "
+        "proven against an account nobody deposits into"
+    )
+    assert "THIS is the deposit path" in out
