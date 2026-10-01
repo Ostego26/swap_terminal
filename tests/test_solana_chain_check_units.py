@@ -1370,7 +1370,10 @@ def test_a_quiet_account_and_an_uncrediting_one_read_differently():
     busy = _deposits_line(_DepositStub(signatures_read=10), "rADDR", 10)
 
     assert "ZERO signatures were LISTED" in quiet
-    assert "none of them credited this address" in busy
+    assert "no credit to this address in the signatures read" in busy, (
+        "and NOT 'none of them credited', whose `them` pointed forward to a count that moved "
+        "into coverage_clause() -- a pronoun with no antecedent in front of it"
+    )
     assert "All 10 listed signature(s) were FETCHED" in busy, (
         "FETCHED, not read: the word changed on 2026-10-01 because the count did -- it is "
         "listed minus unreadable now, not the length of the signature list"
@@ -1901,6 +1904,10 @@ def test_the_stranded_money_branch_carries_its_denominator_too():
         _DepositStub(drops=[_a_drop(credits=1)], signatures_read=4,
                      unreadable=["5tG3oZnjMXYr"]), "rADDR", 5)
     assert "WERE READ AND REFUSED" in stranded, "still reported first and as a problem"
+    assert "\n      4 of 5 listed" in stranded, (
+        "on its own indented line, like every other element of this block -- appended to the "
+        "sentence above it made a ~300-character wall the terminal wrapped mid-clause"
+    )
     assert "4 of 5 listed signature(s) were fetched" in stranded
     assert "1 could NOT be fetched" in stranded and "NOT ruled out" in stranded, (
         "a stranded credit is already proven here, so a deposit in an unfetched transaction is "

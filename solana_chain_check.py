@@ -935,8 +935,8 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
                 f"({observed.credits} credited, {observed.refused} refused over "
                 f"{observed.signatures} signature(s)).",
                 "  Every field name in that reader had to be right to get there. The other reader,",
-                f"  {other}, was NOT exercised by this run -- a run reads one or the other, never",
-                "  both, so nothing here says whether it works."]
+                f"  {other}, was NOT exercised by this run -- a run reads one",
+                "  or the other, never both, so nothing here says whether it works."]
     if observed.signatures:
         # THE DENOMINATOR IS WHAT WAS FETCHED, NOT WHAT WAS LISTED. "matched nothing over 10" is
         # a claim about ten transactions; if one was never read, a credit may be in it and the
@@ -1729,7 +1729,11 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         lines = [
             f"(none) CREDITED -- but {sum(d.credits for d in dropped)} credit(s) across "
             f"{len(dropped)} transaction(s) WERE READ AND REFUSED. Real money arrived that no "
-            f"swap can claim; matching it is a human's job. {coverage_clause(adapter, limit)}",
+            f"swap can claim; matching it is a human's job.",
+            # ON ITS OWN INDENTED LINE, matching the per-drop lines below it. Appended to the
+            # sentence above, it made a ~300-character wall that the operator's terminal wrapped
+            # mid-clause, in a block where every other element gets its own line.
+            f"\n      {coverage_clause(adapter, limit)}",
         ]
         lines.extend(
             f"\n      {d.signature}\n        {d.credits} credit(s) dropped: {d.why}"
@@ -1756,7 +1760,13 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         return ("(none)  <- and ZERO signatures were LISTED for it, so nothing has touched this "
                 "account in the window. A RESULT, not a failure." + _indented(captured.records))
     if not events:
-        return (f"(none)  <- none of them credited this address. "
+        # "NO CREDIT TO THIS ADDRESS", NOT "NONE OF THEM". The pronoun had no antecedent: this
+        # read "none of them credited this address" where `them` pointed FORWARD to a count in
+        # the next sentence. It was fine before the count moved into coverage_clause() in
+        # 6f6a69d -- "9 signature(s) FETCHED and none credited this address" -- and factoring
+        # the clause out broke the sentence that used to carry it. Spotted in the operator's
+        # paste, which is where output defects become visible (rule 14).
+        return (f"(none)  <- no credit to this address in the signatures read. "
                 f"{coverage_clause(adapter, limit)} A RESULT, not a failure."
                 + _indented(captured.records))
     lines = [f"{len(events)} credit(s):"]
