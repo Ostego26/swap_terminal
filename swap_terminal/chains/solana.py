@@ -430,14 +430,43 @@ class SolanaAdapter:
         #: UnattributableCredit -- returning [] for "nothing arrived" and for "money arrived
         #: that nobody can claim" is the distinction this exists to restore.
         self.unattributable_drops: list[UnattributableCredit] = []
-        #: How many signatures that same call read, so a caller can tell "no signatures" from
+        #: How many signatures that same call LISTED, so a caller can tell "no signatures" from
         #: "signatures with no credits in them" -- rule 3's denominator.
-        self.signatures_read = 0
+        #:
+        #: RENAMED FROM signatures_read ON 2026-10-01, because it never meant that: it is the
+        #: length of the getSignaturesForAddress result, before any of them is fetched. A name
+        #: that says `read` while counting `listed` is what let the chain check report a filter
+        #: as exercised over ten transactions when one of them was never fetched.
+        self.signatures_listed = 0
+        #: The signatures this same call LISTED and could not fetch -- a throttle, an
+        #: unsupported transaction version, anything. A credit may be in any of them, so a
+        #: caller reporting "no credits found" has to say over how many it actually looked.
+        self.unreadable_signatures: list[str] = []
+
+        # THIS VALIDATION MUST STAY LAST AND IT NEARLY DID NOT. An edit on 2026-10-01 inserted
+        # the signatures_read property between the assignments above and this loop, which put a
+        # `return` in front of it -- so a malformed SOL_SPL_MINT or SOL_HOT_WALLET was accepted
+        # silently and the only thing that noticed was
+        # test_a_typo_in_the_mint_or_hot_wallet_is_refused_at_construction. Worth the comment:
+        # the construction-time refusal is the one guard that stops a typo'd address reaching
+        # every later call, and it is at the bottom of a long __init__ where an insertion lands.
         for label, value in (("SOL_SPL_MINT", self.mint), ("SOL_HOT_WALLET", self.hot_wallet)):
             if value and not is_valid_address(value):
                 raise SolanaAddressError(f"{label}={value!r} is not a valid Solana address")
 
     # --- plumbing ------------------------------------------------------------
+
+    @property
+    def signatures_read(self) -> int:
+        """Listed minus unreadable: how many transactions the last scan actually fetched.
+
+        A PROPERTY SO THE NAME CANNOT LIE AGAIN. It was an attribute assigned `len(signatures)`,
+        which is the LISTED count, and every caller that trusted the word `read` was overstating
+        its own coverage by however many were skipped -- measured on the operator's 2026-10-01
+        run, where one getTransaction answered HTTP 429 and the chain check still reported the
+        reader as having run over all ten.
+        """
+        return self.signatures_listed - len(self.unreadable_signatures)
 
     @property
     def is_spl(self) -> bool:
@@ -644,7 +673,7 @@ class SolanaAdapter:
             address,
             {"limit": int(tx_limit), "commitment": DISCOVERY_COMMITMENT},
         ) or []
-        self.signatures_read = len(signatures)
+        self.signatures_listed = len(signatures)
         events: list[dict] = []
         unreadable: list[str] = []
         for entry in signatures:
@@ -686,6 +715,15 @@ class SolanaAdapter:
                     "deposit is in this transaction it is NOT credited and needs a human.",
                     signature, address, error,
                 )
+        # EXPOSED, NOT ONLY LOGGED, and this is the third log-only fact surfaced in two days
+        # -- after the unattributable drops and the rate limits. A caller that sees zero credits
+        # and `signatures_listed == 10` concludes the reader was exercised over ten
+        # transactions; if one of them could not be read, a credit may be IN it and the
+        # conclusion is wrong. solana_chain_check's coverage report was making exactly that
+        # claim, measured on the operator's 2026-10-01 run: one getTransaction answered HTTP 429,
+        # the scan correctly skipped it and said so in the log, and the summary still reported
+        # the filter as having "run over 10 signature(s) and matched nothing".
+        self.unreadable_signatures = list(unreadable)
         if unreadable:
             # Rule 14: a scan that silently examined fewer transactions than it listed must
             # not report the same way as one that read them all.

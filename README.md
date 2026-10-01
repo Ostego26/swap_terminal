@@ -279,6 +279,29 @@ stranded deposit is still a WARNING in a log and nothing else. Rule 5 says a
 measurement that only exists in a log is not learning. Wiring the drops into
 `under_review` would be a money-path change and is not made here.
 
+**`--find-holder` works, and the fallback measured the key path**, 2026-10-01.
+It found a holder from the mint's own traffic, which read
+`meta.postTokenBalances[].owner` and `.mint` off a real response — the exact
+keys `_spl_credits` selects on. `getTokenAccountBalance` also decoded a real SPL
+amount for the first time: **103.032164467 WSOL** on an ATA that exists.
+
+Two things that run exposed, both fixed:
+
+**The holder it found is a Program Derived Address, and the message called it a
+wallet** — while the ADDRESS section two lines later printed "OFF-CURVE … No
+private key exists for it". Two lines of one paste contradicting each other. A
+PDA owning a token account is entirely ordinary, so the defect was the *word*:
+"wallet" tells a reader a key exists, which is the one thing that is false.
+
+**One `getTransaction` answered HTTP 429, was correctly skipped, and the summary
+still claimed the filter ran over all ten signatures.** `signatures_read` was an
+attribute holding the **listed** count, so every caller trusting the word `read`
+overstated its coverage by however many were skipped. It is a property now —
+listed minus unreadable — and `unreadable_signatures` is exposed rather than
+only logged. A credit may be in a transaction that was never fetched, so
+"matched nothing" is reported over what was *fetched*, with the unread count
+named separately.
+
 **Still unproven: `_spl_credits`' decoder**, and `--mint` alone cannot prove it.
 Measured 2026-09-30 with `--mint` wrapped SOL: `getAccountInfo` returned the
 Token program and `decimals=9`, the associated token account derived and was

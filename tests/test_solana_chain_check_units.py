@@ -1065,7 +1065,10 @@ def test_a_READER_WHOSE_FILTER_MATCHED_NOTHING_IS_NOT_REPORTED_AS_EXERCISED():
     assert "WITHOUT decoding" in text
     assert "still unproven" in text
     assert "DECODED" not in text, "nothing was decoded; saying so is the defect"
-    assert "8 signature(s)" in text, "rule 3: the denominator it filtered over"
+    assert "8 FETCHED signature(s)" in text, (
+        "rule 3: the denominator it filtered over, and FETCHED rather than listed -- see "
+        "test_an_unfetched_signature_is_NOT_counted_as_filtered_over"
+    )
 
 
 def test_a_reader_that_decoded_an_amount_says_so_and_names_the_other_one():
@@ -1211,10 +1214,16 @@ def text_of(out: str) -> str:
 class _DepositStub:
     """Stands in for the adapter, exposing exactly what _deposits_line() reads."""
 
-    def __init__(self, events=(), drops=(), signatures_read=0):
+    def __init__(self, events=(), drops=(), signatures_read=0, unreadable=()):
         self._events = list(events)
         self.unattributable_drops = list(drops)
         self.signatures_read = signatures_read
+        # THE STUB HAS TO CARRY EVERY ATTRIBUTE THE REAL ADAPTER EXPOSES, and this one was
+        # added on 2026-10-01 -- a stub missing a new attribute fails loudly here, which is the
+        # cheap outcome. The expensive one would be a stub that silently returns a default and
+        # lets the test agree with a shape the adapter no longer has.
+        self.unreadable_signatures = list(unreadable)
+        self.signatures_listed = signatures_read + len(self.unreadable_signatures)
         self.min_commitment_rank = 3
 
     def find_deposits_to_address(self, _address, tx_limit=10):
@@ -1333,7 +1342,10 @@ def test_a_quiet_account_and_an_uncrediting_one_read_differently():
     busy = _deposits_line(_DepositStub(signatures_read=10), "rADDR", 10)
 
     assert "ZERO signatures" in quiet
-    assert "10 signature(s) read and none credited" in busy
+    assert "10 signature(s) FETCHED and none credited" in busy, (
+        "FETCHED, not read: the word changed on 2026-10-01 because the count did -- it is "
+        "listed minus unreadable now, not the length of the signature list"
+    )
     assert quiet != busy
     for line in (quiet, busy):
         assert line.startswith("(none)")
@@ -1762,3 +1774,137 @@ def test_a_throttle_mid_fallback_stops_rather_than_reading_the_rest(monkeypatch)
     assert (found, throttled) == ("", True)
     assert "was throttled" in why
     assert "keys _spl_credits uses" not in why, "a throttle is not a shape finding"
+
+def test_an_unfetched_signature_is_NOT_counted_as_filtered_over():
+    """THE OPERATOR'S 2026-10-01 RUN, AND THE FOURTH LOG-ONLY FACT SURFACED IN TWO DAYS.
+
+    One getTransaction answered HTTP 429. The adapter skipped it correctly and said so in its
+    log -- "read 9 of 10 listed transaction(s); 1 were unreadable ... A deposit in any of them is
+    NOT credited" -- and this summary still reported the filter as having run over all ten and
+    matched nothing. A credit may be in the one that was never fetched, so "matched nothing" was
+    not established over the set it named.
+
+    Same shape as the unattributable drops and the rate limits before it: a fact the adapter
+    knew, wrote to a log, and did not expose, so the caller reported a conclusion it had not
+    earned. `signatures_read` is a PROPERTY now -- listed minus unreadable -- so the name cannot
+    claim more than happened, and the unread count is named separately rather than folded in.
+
+    MUTATION: count listed instead of fetched, or drop the `unreadable` clause, and this fails.
+    """
+    partial = CreditPathObserved(address_read=True, is_spl=True, signatures=9,
+                                 credits=0, refused=0, unreadable=1)
+    text = " ".join(credit_path_lines(partial))
+    assert "9 FETCHED signature(s)" in text
+    assert "1 LISTED but never fetched" in text
+    assert "NOT established over the full set" in text
+
+    complete = CreditPathObserved(address_read=True, is_spl=True, signatures=10,
+                                  credits=0, refused=0, unreadable=0)
+    whole = " ".join(credit_path_lines(complete))
+    assert "10 FETCHED signature(s)" in whole
+    assert "never fetched" not in whole, "nothing was skipped; do not say it was"
+    assert text != whole, "a partial scan and a complete one must not read the same"
+
+
+def test_the_deposits_line_names_what_it_could_not_fetch():
+    """And the step's own line too, not just the summary -- that is where a reader looks first."""
+    partial = _DepositStub(signatures_read=9, unreadable=["5tG3oZnjMXYr"])
+    line = _deposits_line(partial, "rADDR", 10)
+    assert "9 signature(s) FETCHED" in line
+    assert "1 of 10 listed could NOT be fetched" in line
+    assert "not ruled out" in line, "an unfetched transaction leaves the question open"
+
+    complete = _DepositStub(signatures_read=10)
+    assert "could NOT be fetched" not in _deposits_line(complete, "rADDR", 10)
+
+
+def test_signatures_read_is_listed_minus_unfetched_on_the_real_adapter():
+    """The property, on the real class, because the stub proves only the stub.
+
+    MUTATION: assign signatures_read = len(signatures) again -- which is what it was -- and this
+    fails. That assignment is the whole defect: a name saying `read` while counting `listed`.
+    """
+    adapter = chains_solana.SolanaAdapter(url="http://seeded.invalid")
+    adapter.signatures_listed = 10
+    adapter.unreadable_signatures = ["a", "b"]
+    assert adapter.signatures_read == 8
+    adapter.unreadable_signatures = []
+    assert adapter.signatures_read == 10
+
+def test_check_address_carries_the_unread_count_into_the_summary(monkeypatch, capsys):
+    """END TO END: a skipped transaction reaches the coverage report, not just the adapter.
+
+    MUTATION: hardcode `unreadable=0` in the observation and this fails. That mutation SURVIVED
+    the first run of this change, because nothing drove a skipped transaction through
+    check_address -- the summary could have gone on overstating its coverage with every unit
+    test green, which is exactly how the original defect shipped.
+    """
+    address = SOLANA_DEVNET_ACCOUNT
+    calls = {"n": 0}
+
+    class OneThrottled(_WholeClusterStub):
+        def _result(self, method):
+            if method == "getSignaturesForAddress":
+                return [{"signature": "THROTTLED", "confirmationStatus": "confirmed"},
+                        {"signature": "FINE", "confirmationStatus": "confirmed"}]
+            return super()._result(method)
+
+        def __call__(self, url, data=None, **kwargs):
+            payload = _json.loads(data) if data else {}
+            if payload.get("method") == "getTransaction":
+                calls["n"] += 1
+                if payload["params"][0] == "THROTTLED":
+                    return _Throttled()
+            return super().__call__(url, data=data, **kwargs)
+
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    _point_config_at_the_stub(monkeypatch)
+    monkeypatch.setattr(chains_solana.requests, "post", OneThrottled())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py"])
+    solana_chain_check.main()
+    out = text_of(capsys.readouterr().out)
+
+    assert address in out
+    assert "1 FETCHED signature(s)" in out, "one of the two was never fetched"
+    assert "1 LISTED but never fetched" in out
+    assert "NOT established over the full set" in out
+    assert "could NOT be fetched" in out, "the step's own line says it too"
+
+
+class _Throttled:
+    status_code = 429
+    text = '{"jsonrpc":"2.0","error":{"code": 429, "message":"Too many requests"}}'
+
+    def json(self):
+        raise AssertionError("a non-200 must never be parsed as a result")
+
+
+def test_the_found_holder_is_never_described_as_a_WALLET():
+    """A PDA holds tokens and has no private key, and the operator's run found one.
+
+    find_a_holder returned 218gaMJkJUkzPrfax8vEYKtpm3aj9dHUvYcnRnvKbLLp calling it "a wallet",
+    and the ADDRESS section two lines later printed "OFF-CURVE ... No private key exists for
+    it". Two lines of one paste contradicting each other, in the script whose job is saying what
+    is known.
+
+    MUTATION: put "wallet" back in either message and this fails. It survived the first mutation
+    run because nothing asserted the wording -- a comment is not a test.
+    """
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": {"value": [{"address": _A_HOLDING_ACCOUNT,
+                                               "uiAmountString": "103.03"}]},
+        "getAccountInfo": {"value": {"data": {"parsed": {"info": {"owner": _A_HOLDER}}}}},
+    })
+    _found, why = find_a_holder(adapter, _A_MINT)
+    assert "wallet" not in why.lower(), (
+        f"a PDA owning a token account is ordinary; calling it a wallet claims a private key "
+        f"exists. Message was: {why}"
+    )
+
+    fallback = _seeded_adapter({
+        "getTokenLargestAccounts": _throttle_always,
+        "getSignaturesForAddress": [{"signature": "5abcDEF1234567890xyz"}],
+        "getTransaction": _a_mint_transaction(),
+    })
+    _found, fallback_why = find_a_holder(fallback, _A_MINT)
+    assert "wallet" not in fallback_why.lower(), fallback_why

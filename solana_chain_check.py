@@ -265,14 +265,21 @@ def check_address(adapter: SolanaAdapter, address: str, limit: int, run) -> Cred
     return CreditPathObserved(
         address_read=True,
         is_spl=adapter.is_spl,
+        # `signatures_read` is a PROPERTY now -- listed minus unreadable. It was an attribute
+        # holding the LISTED count, which is what made this report overstate its own coverage.
         signatures=adapter.signatures_read,
         credits=credited[0] if credited else 0,
         refused=sum(d.credits for d in adapter.unattributable_drops),
+        unreadable=len(adapter.unreadable_signatures),
     )
 
 
 def owner_of(adapter: SolanaAdapter, token_account: str) -> tuple[str, bool, str]:
-    """The WALLET that owns one token account. Returns (owner, throttled, why). Read-only.
+    """The ACCOUNT that owns one token account. Returns (owner, throttled, why). Read-only.
+
+    "ACCOUNT" RATHER THAN "WALLET": the owner may be a Program Derived Address, which holds
+    tokens perfectly well and has no private key. Calling it a wallet told a reader a key
+    exists -- see find_a_holder() for the run where that contradicted the next line of output.
 
     EXTRACTED FROM find_a_holder() because inlining it put that function at PLR0911 7 returns
     against a ceiling of 6, and CLAUDE.md rule 12 is explicit about which way that resolves:
@@ -355,9 +362,10 @@ def holder_from_mint_traffic(adapter: SolanaAdapter, mint: str) -> tuple[str, bo
     getting it at all is evidence that the reader's own selection path is right, which is the
     thing --find-holder exists to make provable.
 
-    THE OWNER IS A WALLET, as it must be: postTokenBalances reports the token account's OWNER
-    alongside its mint, so no second lookup is needed and no token account can be mistaken for a
-    wallet (the mistake owner_of() exists to avoid on the other route).
+    THE OWNER IS THE OWNING ACCOUNT, which is the point: postTokenBalances reports the token
+    account's OWNER alongside its mint, so no second lookup is needed and a token account cannot
+    be mistaken for its owner (the mistake owner_of() exists to avoid on the other route). That
+    owner may be a Program Derived Address -- ordinary, and not a wallet.
 
     STILL UNMEASURED IN ONE RESPECT, and said rather than implied (rule 17): whether the WSOL
     mint's own address has recent signatures at all. Transfers reference token accounts, and only
@@ -395,7 +403,7 @@ def holder_from_mint_traffic(adapter: SolanaAdapter, mint: str) -> tuple[str, bo
         if owner:
             return owner, False, (
                 f"FOUND in the mint's own traffic: transaction {signature[:16]}... has a "
-                f"postTokenBalances entry for this mint owned by that wallet. Which also "
+                f"postTokenBalances entry for this mint owned by that account. Which also "
                 f"MEASURES `meta.postTokenBalances[].owner` and `.mint` -- the exact keys "
                 f"_spl_credits selects on, and the ones that were unproven.")
     return "", False, (f"read {len(entries)} of the mint's transactions and none carried a "
@@ -429,7 +437,23 @@ def after_the_first_route_was_throttled(adapter: SolanaAdapter, mint: str,
 
 
 def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
-    """Ask the cluster for a wallet that actually holds `mint`. Read-only. Returns (owner, why).
+    """Ask the cluster for an ACCOUNT that holds `mint`. Read-only. Returns (owner, why).
+
+    "ACCOUNT", NOT "WALLET", AND THE OPERATOR'S 2026-10-01 RUN IS WHY. This returned
+    218gaMJkJUkzPrfax8vEYKtpm3aj9dHUvYcnRnvKbLLp, described in its own message as "a wallet" --
+    and the ADDRESS section two lines later printed
+
+        valid, OFF-CURVE  <- a Program Derived Address (an Associated Token Account is one).
+        No private key exists for it
+
+    Two lines of one paste contradicting each other. A PDA owning a token account is entirely
+    ordinary -- programs hold tokens -- so the finding is the WORD, not the address. And it is
+    not cosmetic: "wallet" tells a reader a key exists, which is the one thing that is false
+    here, and this script's whole job is saying what is known.
+
+    A PDA IS A PERFECTLY GOOD SUBJECT for what --find-holder is for: `_spl_credits` matches on
+    `postTokenBalances[].owner` and does not care whether that owner can sign. So nothing is
+    filtered out -- only described correctly.
 
     WHY THIS EXISTS. `_spl_credits` is the last reader in this adapter with no real response
     behind it, and it cannot be proven by pointing at an account that holds none of the token:
@@ -483,7 +507,7 @@ def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
                         f"Re-run in a moment.")
         if owner:
             return owner, (f"FOUND by asking the cluster: token account {token_account} holds "
-                           f"{holder.get('uiAmountString', '?')} and is owned by this wallet. "
+                           f"{holder.get('uiAmountString', '?')} and is owned by this account. "
                            f"Two reads, nothing sent.")
     return "", (f"getTokenLargestAccounts named {len(holders)} token account(s) for {mint} and "
                 f"none of them reported a readable `owner` under data.parsed.info -- which is a "
@@ -601,6 +625,12 @@ class CreditPathObserved(NamedTuple):
     signatures: int
     credits: int
     refused: int
+    #: Signatures the scan LISTED and could not fetch. A credit may be in any of them, so a
+    #: report saying the reader "matched nothing" over `signatures` overstates itself by this
+    #: many. Added 2026-10-01 after the operator's run: one getTransaction answered HTTP 429,
+    #: the adapter skipped it and said so in its log, and this summary still claimed the filter
+    #: had run over all ten.
+    unreadable: int = 0
 
     @property
     def reader(self) -> str:
@@ -631,8 +661,15 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
                 "  Every field name in that reader had to be right to get there. The other reader,",
                 f"  {other}, has not decoded one."]
     if observed.signatures:
-        return [f"  CREDIT path: PARTLY exercised. Discovery and {observed.reader}'s filter ran "
-                f"over {observed.signatures} signature(s)",
+        # THE DENOMINATOR IS WHAT WAS FETCHED, NOT WHAT WAS LISTED. "matched nothing over 10" is
+        # a claim about ten transactions; if one was never read, a credit may be in it and the
+        # claim is not established over the full set. The unread count is named, not folded in.
+        skipped = ("" if not observed.unreadable else
+                   f" -- plus {observed.unreadable} LISTED but never fetched, so a credit may be "
+                   f"in those and this is NOT established over the full set")
+        return [f"  CREDIT path: PARTLY exercised. Discovery ran, and the filter in "
+                f"{observed.reader} ran over",
+                f"  {observed.signatures} FETCHED signature(s){skipped},",
                 "  and matched nothing, so the reader returned no credits WITHOUT decoding an",
                 "  amount -- its uiTokenAmount/balance-delta reads are still unproven, and those",
                 "  are the field names that lose a deposit silently. Point --address at an account",
@@ -1316,8 +1353,12 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
         return ("(none)  <- and ZERO signatures were read, so nothing has touched this account "
                 "in the window. A RESULT, not a failure." + _indented(captured.records))
     if not events:
-        return (f"(none)  <- {adapter.signatures_read} signature(s) read and none credited this "
-                f"address. A RESULT, not a failure." + _indented(captured.records))
+        unread = ("" if not adapter.unreadable_signatures else
+                  f", and {len(adapter.unreadable_signatures)} of {adapter.signatures_listed} "
+                  f"listed could NOT be fetched -- a deposit in those is not credited and is "
+                  f"not ruled out")
+        return (f"(none)  <- {adapter.signatures_read} signature(s) FETCHED and none credited "
+                f"this address{unread}. A RESULT, not a failure." + _indented(captured.records))
     lines = [f"{len(events)} credit(s):"]
     lines.extend(
         f"\n      {event['txid']}\n        vout={event['vout']} (account index, read from the tx -- never fabricated) "

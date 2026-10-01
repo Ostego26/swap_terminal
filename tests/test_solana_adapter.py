@@ -1029,3 +1029,56 @@ def test_an_ATTRIBUTABLE_credit_records_no_drop():
     assert len(events) == 1
     assert events[0]["vout"] == 4242, "the memo tag becomes the discriminator"
     assert adapter.unattributable_drops == []
+
+def test_a_SKIPPED_transaction_is_recorded_on_the_adapter_and_not_only_logged():
+    """THE OPERATOR'S 2026-10-01 RUN, END TO END THROUGH THE REAL SCAN.
+
+    One getTransaction answered HTTP 429, the scan skipped it correctly, and the only trace was
+    a log line -- so `find_deposits_to_address` returned [] and a caller could not tell "nothing
+    credited this address over ten transactions" from "over nine, and the tenth is unknown". A
+    credit may be in the one that was never fetched.
+
+    MUTATION: delete `self.unreadable_signatures = list(unreadable)` and this fails. That
+    mutation SURVIVED the first mutation run of this change, because every adapter test seeded
+    only readable transactions -- the attribute stayed at its __init__ default of [] and nothing
+    noticed. A mutation surviving because no test drives the path is the useful kind of
+    survivor.
+    """
+    def sometimes(signature, _config):
+        if signature == "THROTTLED":
+            raise SolanaRPCError("getTransaction returned HTTP 429", status_code=429)
+        return {"transaction": {"message": {"accountKeys": ["rOTHER"], "instructions": []}},
+                "meta": {"preBalances": [0], "postBalances": [0], "err": None}}
+
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": "THROTTLED", "confirmationStatus": "confirmed"},
+                                    {"signature": "FINE", "confirmationStatus": "confirmed"}],
+        "getTransaction": sometimes,
+    })
+    events = adapter.find_deposits_to_address(WALLET)
+
+    assert events == []
+    assert adapter.unreadable_signatures == ["THROTTLED"]
+    assert adapter.signatures_listed == 2
+    assert adapter.signatures_read == 1, "listed minus unreadable -- the name has to be true"
+
+
+def test_the_unreadable_list_describes_THIS_scan_only():
+    """Cleared per call, for the same reason the drops are: a watcher keeps one adapter forever.
+
+    MUTATION: initialize it only in __init__ and a signature skipped an hour ago is reported as
+    unread on every later poll, understating coverage permanently.
+    """
+    responses = {
+        "getSignaturesForAddress": [{"signature": "THROTTLED", "confirmationStatus": "confirmed"}],
+        "getTransaction": lambda *_a: (_ for _ in ()).throw(
+            SolanaRPCError("HTTP 429", status_code=429)),
+    }
+    adapter = make_adapter(responses)
+    adapter.find_deposits_to_address(WALLET)
+    assert adapter.unreadable_signatures == ["THROTTLED"]
+
+    responses["getSignaturesForAddress"] = []
+    adapter.find_deposits_to_address(WALLET)
+    assert adapter.unreadable_signatures == [], "the list must describe the latest scan only"
+    assert adapter.signatures_read == 0
