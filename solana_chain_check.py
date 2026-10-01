@@ -101,17 +101,22 @@ from chains.solana_units import (  # noqa: E402
 )
 from config import Config  # noqa: E402
 from microfortnights import format_duration  # noqa: E402
+from network_target import solana_cluster  # noqa: E402
 
 # The genesis hashes that identify Solana's three public clusters. A cluster
 # cannot lie about this and it does not depend on the URL's hostname, which is
 # why the network is IDENTIFIED rather than inferred from the endpoint: an
 # operator pointing a "devnet" alias at mainnet would otherwise read the word
 # devnet in this banner all the way to a mainnet transfer.
-GENESIS_HASHES = {
-    "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d": "MAINNET-BETA  <- REAL MONEY",
-    "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG": "DEVNET",
-    "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY": "TESTNET",
-}
+#
+# THE TABLE MOVED to network_target.py on 2026-10-01 and is re-exported here under
+# its original name, because swap_readiness.py needed the same three hashes and the
+# only ways to get them were to import this root entry point from another one
+# (rule 10 inverted -- a file importing a file) or to write them out twice (rule
+# 8's defect, and a quiet one: two copies of a hash table agree until a cluster is
+# added to one). The name is kept so every reference here and in
+# tests/test_solana_chain_check_units.py keeps working and keeps testing the one
+# table that now exists.
 
 
 class StepFailed(Exception):
@@ -1672,8 +1677,10 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
 
 def _network_line(adapter: SolanaAdapter) -> str:
     genesis = str(adapter.call("getGenesisHash"))
-    name = GENESIS_HASHES.get(genesis, "UNRECOGNIZED -- a local validator has its own genesis, so this is expected for solana-test-validator")
-    return f"{name}  (genesis {genesis})"
+    # solana_cluster() rather than .get() with the sentence inline: swap_readiness.py
+    # renders the same verdict, and a default spelled at two call sites is two
+    # spellings of one answer (rule 8).
+    return f"{solana_cluster(genesis)}  (genesis {genesis})"
 
 
 def _epoch_line(adapter: SolanaAdapter) -> str:

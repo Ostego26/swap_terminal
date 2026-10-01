@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Can this terminal actually run an XRP <-> GRC swap right now? Read-only preflight.
+"""Can this terminal actually run a swap right now, on the pairs it allows? Read-only preflight.
 
 Role: file (entry point; the operator runs this)
 Reads: the process environment, config.Config, and -- over the network -- the
-      configured XRP endpoint and Gridcoin wallet. One CoinGecko price request.
+      configured XRP endpoint, the configured Solana cluster and the Gridcoin
+      wallet. One CoinGecko price request.
 Writes: nothing. No database, no file, no chain.
 Can send orders: no. It creates no swap, signs nothing, and submits nothing.
 Mainnet-safe: yes, and it REFUSES to poll a mainnet Gridcoin wallet rather than
@@ -22,6 +23,24 @@ So this answers one question -- "would a swap work, and if not, which line do I
 change" -- and answers it before any money moves. Rule 14 throughout: every check
 names what it read and what the number means, an empty result prints (none)
 rather than nothing, and a skipped check is visibly different from a passed one.
+
+IT USED TO ANSWER THAT QUESTION ABOUT THE WRONG SWAP, and that is why the SOL and
+unlock checks below exist. Measured 2026-10-01: this file's title said
+"XRP <-> GRC", check_pair_is_allowed() filtered Config.ALLOWED_PAIRS to pairs
+containing XRP, and there was no SOL check of any kind -- while the direction the
+operator was actually rehearsing, three times that day, was SOL -> GRC. A
+preflight that passes or fails about a leg nobody is running is worse than no
+preflight: it is a verdict, in the register of a measurement, about something
+else.
+
+And the precondition that actually broke those three rehearsals was not checked
+by anything. All three got the whole way through -- memo attributed, deposit
+credited, swap advanced, payout claimed -- and all three died on
+`GRIDCOIN_WALLET_PASSPHRASE is not set in this process`s environment`, because the
+supervisor had been started from a shell without it, landing the swap in 'failed',
+which nothing retries. That check is one line and it is now the first thing
+after the pair list, through payout_service.unlock_readiness_lines() rather than
+a second reading of the same environment variable (rule 8).
 """
 
 from __future__ import annotations
@@ -33,12 +52,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.registry import build_adapters, missing_settings
+from chains.solana_units import SOL_DECIMALS, base_units_to_amount
 from chains.xrp import XRPAdapter
 from chains.xrp_signing import reserve_drops
 from config import Config
 from db import SCHEMA
 from microfortnights import format_duration
-from network_target import CHAIN_PORTS, classify
+from network_target import CHAIN_PORTS, classify, solana_cluster
+from services.payout_service import unlock_readiness_lines
 from services.pricing import fetch_usd_prices
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -51,12 +72,77 @@ def record(state: str, name: str, detail: str) -> None:
     print(f"  {state}  {name:<28} {detail}", flush=True)
 
 
+#: The FROM legs this file has a check for. Derived into the pair line below so
+#: the report can say which allowed pairs it is actually answering about, rather
+#: than implying it covers all of them -- it does not, and BTC and LTC legs are
+#: unchecked here. Naming the gap beats a silent one (rule 14).
+CHECKED_LEGS = ("XRP", "SOL", "GRC")
+
+
 def check_pair_is_allowed() -> None:
-    pairs = sorted(f"{a}->{b}" for a, b in Config.ALLOWED_PAIRS if "XRP" in (a, b))
-    if pairs:
-        record(PASS, "pair allowed", ", ".join(pairs))
-    else:
-        record(FAIL, "pair allowed", "(none) -- no XRP pair in Config.ALLOWED_PAIRS, so no XRP quote can be made")
+    """Every allowed pair, and which of them this preflight actually covers.
+
+    IT USED TO FILTER TO XRP and print the result as `pair allowed`. On the
+    operator's host that rendered as
+
+        PASS  pair allowed    GRC->XRP, XRP->BTC, XRP->GRC, XRP->LTC
+
+    with SOL->GRC -- the pair in ALLOWED_PAIRS that was being rehearsed that
+    afternoon -- absent from a line whose name promises to list what is allowed.
+    Nothing was false; the line simply answered a narrower question than it
+    appeared to.
+    """
+    pairs = sorted(f"{a}->{b}" for a, b in Config.ALLOWED_PAIRS)
+    if not pairs:
+        record(FAIL, "pair allowed",
+               "(none) -- Config.ALLOWED_PAIRS is empty, so no quote of any kind can be made")
+        return
+    covered = sorted(
+        f"{a}->{b}" for a, b in Config.ALLOWED_PAIRS
+        if a in CHECKED_LEGS and b in CHECKED_LEGS
+    )
+    record(PASS, "pair allowed", f"{', '.join(pairs)}  <- all {len(pairs)} in Config.ALLOWED_PAIRS")
+    record(
+        PASS if covered else FAIL,
+        "pairs checked here",
+        f"{', '.join(covered) or '(none)'}  <- {len(covered)} of {len(pairs)}. This preflight checks "
+        f"{', '.join(CHECKED_LEGS)} legs only; a pair with a BTC or LTC leg is ALLOWED and is NOT "
+        f"verified by anything below",
+    )
+
+
+def check_payout_unlock(adapters) -> None:
+    """Whether a payout chain's wallet can be unlocked from THIS process.
+
+    THE PRECONDITION THAT BROKE THREE LIVE REHEARSALS, 2026-10-01, and the one
+    nothing checked. Each run reached the payout and died on
+    GRIDCOIN_WALLET_PASSPHRASE being unset in the supervisor's environment,
+    leaving the swap in 'failed' -- a terminal status nothing retries, so each
+    failure cost a whole new swap and a new deposit.
+
+    Through services/payout_service.unlock_readiness_lines(), which is what the
+    supervisor's start banner prints, so this preflight and that banner cannot
+    come to disagree about whether a payout can be attempted (rule 8). It reports
+    PRESENCE and never correctness: a wrong passphrase still fails at the send,
+    and saying otherwise here would be the reassuring answer rather than the
+    measured one.
+
+    The passphrase itself is never read into a line, never logged, and its length
+    is never reported.
+    """
+    lines = unlock_readiness_lines(adapters.keys())
+    if not lines:
+        record(SKIP, "payout unlock",
+               "no configured chain needs a wallet unlock to pay out  <- GRC is the only one that does, "
+               "and no GRC adapter was built")
+        return
+    for line in lines:
+        # The shared function returns a whole banner line, label and all. Only the
+        # detail belongs in this file's verdict column, so the asset prefix it
+        # already carries is stripped rather than printed twice.
+        detail = line.strip()
+        blocked = "IS NOT SET" in detail
+        record(FAIL if blocked else PASS, "payout unlock", detail)
 
 
 def check_deposit_account() -> str:
@@ -365,18 +451,127 @@ def check_gridcoin() -> None:
     record(lock_state, "GRC wallet lock", lock_detail)
 
 
+def check_solana(adapters) -> None:
+    """The SOL DEPOSIT leg: cluster, deposit account, and the discovery read path.
+
+    SOL IS ONLY EVER A FROM ASSET HERE, which is what these checks are shaped
+    around. config.ALLOWED_PAIRS carries ("SOL", "GRC") and deliberately not the
+    reverse -- chains/solana.py cannot sign, so a swap whose TO asset is SOL could
+    be quoted, could take a deposit, and could never be paid out. So there is no
+    hot-wallet check and no unlock check for SOL; adapter.get_balance() is not
+    called at all, because it reads SOL_HOT_WALLET, which this direction does not
+    use and which being unset is not a defect.
+
+    What CAN go wrong on the deposit leg, in the order it is checked:
+
+      no SOL_RPC_URL           chains/registry builds no SOL adapter, so no SOL
+                               deposit is ever seen. Silent -- the watcher logs
+                               "SOL not configured" once a cycle and keeps going.
+      the wrong cluster        identified by GENESIS HASH, never by the hostname,
+                               because a "devnet" alias can point at mainnet and
+                               the word in a banner would then escort an operator
+                               all the way to a real transfer.
+      no SOL_DEPOSIT_ACCOUNT   create_swap() refuses every SOL swap while it is
+                               empty. A pair being ALLOWED and a swap being
+                               creatable are two different gates, and only the
+                               first one is visible in the pair line above.
+      the account does not     every SOL swap shares this one account; a deposit
+      exist on the cluster     to an account the cluster has never seen cannot be
+                               read back, and on devnet an unfunded account does
+                               not exist.
+    """
+    url = Config.RPC.get("SOL", {}).get("url", "")
+    if not url:
+        record(FAIL, "SOL_RPC_URL",
+               "(unset) -- chains/registry builds no SOL adapter, so no SOL deposit is ever seen and no "
+               "SOL swap can be watched. The watcher does NOT fail on this; it logs 'SOL not configured' "
+               "once a cycle and credits nothing, forever")
+        return
+    if "SOL" not in adapters:
+        record(FAIL, "SOL adapter",
+               f"SOL_RPC_URL is set to {url} but no adapter was built: "
+               f"{', '.join(missing_settings(Config.RPC, 'SOL')) or '(registry gave no reason)'}")
+        return
+
+    adapter = adapters["SOL"]
+    started = time.monotonic()
+    try:
+        genesis = str(adapter.call("getGenesisHash"))
+    except Exception as error:  # noqa: BLE001 -- checked: a dead cluster, an HTTP 429 and a malformed response all mean "the Solana endpoint did not answer", the type and the message are both printed, and the exit code is non-zero. Telling them apart would not change what the operator does next, which is to look at the endpoint. A 429 in particular is what this whole preflight is for: it is the failure that killed a live deposit watcher on 2026-10-01.
+        record(FAIL, "SOL endpoint", f"{type(error).__name__}: {str(error)[:110]}  <- {url}")
+        return
+    cluster = solana_cluster(genesis)
+    # MAINNET is a FAIL here, not a note. Every address and keypair this project has
+    # used is a devnet one, and the only reason to be pointed at mainnet-beta during a
+    # rehearsal is a mistake -- the same judgment check_gridcoin() makes about port
+    # 15715, where looking is itself the hazard.
+    record(FAIL if cluster.startswith("MAINNET") else PASS, "SOL cluster",
+           f"{cluster}  (genesis {genesis})  in {format_duration(time.monotonic() - started)}  "
+           f"<- identified by genesis hash, NOT by the hostname in {url}")
+
+    account = Config.SOL_DEPOSIT_ACCOUNT
+    if not account:
+        record(FAIL, "SOL_DEPOSIT_ACCOUNT",
+               "(unset) -- create_swap() refuses every SOL swap until this names an account you hold the "
+               "key for. The SOL->GRC pair being allowed does not make a SOL swap creatable")
+        return
+    if not adapter.validate_address(account):
+        record(FAIL, "SOL_DEPOSIT_ACCOUNT",
+               f"{account} is not a valid Solana account  <- about half of all 32-byte base58 strings are "
+               f"off-curve and are refused; this is checked before anything is told to send there")
+        return
+
+    started = time.monotonic()
+    try:
+        result = adapter.call("getBalance", account, {"commitment": "finalized"})
+        lamports = int(result["value"] if isinstance(result, dict) else result)
+    except Exception as error:  # noqa: BLE001 -- checked: same judgment as the genesis call. Every failure means "this account's state could not be read", which is reported as a FAIL with the type and message, never as a zero balance -- a swallowed outage reading as an empty account is the shape rule 12 names.
+        record(FAIL, "SOL deposit account", f"{type(error).__name__}: {str(error)[:110]}")
+        return
+    # ZERO IS NOT A FAILURE FOR A DEPOSIT ACCOUNT and that is the opposite of the
+    # XRP and GRC checks above, where a zero balance means nothing can be paid out.
+    # Nothing is ever SENT from this account -- it only receives -- so what matters
+    # is that the cluster knows it, which a successful getBalance establishes.
+    record(PASS, "SOL deposit account",
+           f"{account}  {lamports} lamports ({base_units_to_amount(lamports, SOL_DECIMALS)} SOL)  "
+           f"in {format_duration(time.monotonic() - started)}  <- shared by EVERY SOL swap; attribution is "
+           f"by memo, not by address. A zero balance is fine: nothing is ever sent FROM here")
+
+
 def check_pricing() -> None:
-    """Both legs must have a USD price or no rate can be derived."""
+    """Every asset a CHECKED pair needs must have a USD price, or no rate exists.
+
+    IT USED TO CHECK EXACTLY TWO, XRP and GRC, hardwired. On 2026-10-01 that
+    printed a PASS for a terminal whose live direction was SOL -> GRC, about two
+    assets, one of which was not in the pair being run -- and it would have printed
+    the same PASS with SOL_USD missing entirely, which is the failure that renders
+    in a customer's browser as a KeyError repr (the same shape
+    get_network_fee_reserve() was rewritten for). The assets are derived from
+    CHECKED_LEGS and ALLOWED_PAIRS now, so enabling a pair cannot leave this check
+    silently answering about the old one (rule 11).
+
+    The rate is printed per checked pair rather than as a single number, because
+    "1 XRP = N GRC" says nothing about whether SOL can be quoted.
+    """
     try:
         prices = fetch_usd_prices()
     except Exception as error:  # noqa: BLE001 -- checked: a network failure, a rate limit and a missing asset all mean "no rate can be quoted", and the message distinguishes them for the reader.
         record(FAIL, "pricing", f"{type(error).__name__}: {str(error)[:110]}")
         return
-    xrp, grc = prices.get("XRP_USD"), prices.get("GRC_USD")
-    if not xrp or not grc:
-        record(FAIL, "pricing", f"XRP_USD={xrp} GRC_USD={grc}  <- both are needed to derive a rate")
+    pairs = sorted(
+        (a, b) for a, b in Config.ALLOWED_PAIRS if a in CHECKED_LEGS and b in CHECKED_LEGS
+    )
+    assets = sorted({asset for pair in pairs for asset in pair})
+    usd = {asset: prices.get(f"{asset}_USD") for asset in assets}
+    missing = [asset for asset, price in usd.items() if not price]
+    shown = ", ".join(f"{asset} ${price}" for asset, price in usd.items())
+    if missing:
+        record(FAIL, "pricing",
+               f"no USD price for {', '.join(missing)}  <- every checked pair needs BOTH legs priced, or "
+               f"create_quote() raises and the browser renders the exception. Read: {shown or '(none)'}")
         return
-    record(PASS, "pricing", f"XRP ${xrp} / GRC ${grc} -> 1 XRP = {xrp / grc:.2f} GRC (before fees)")
+    rates = ", ".join(f"1 {a} = {usd[a] / usd[b]:.4f} {b}" for a, b in pairs)
+    record(PASS, "pricing", f"{shown}  ->  {rates or '(no checked pair to rate)'}  <- before fees")
 
 
 def check_schema() -> None:
@@ -388,7 +583,8 @@ def check_schema() -> None:
 
 
 def main() -> int:
-    print("swap readiness -- XRP <-> GRC. Read-only: creates no swap, signs nothing.", flush=True)
+    print("swap readiness -- every pair this terminal allows. Read-only: creates no swap, signs nothing.",
+          flush=True)
     # NOT a hardcoded count. It said "6 preconditions" while the verdict below
     # said "1 of 7 failed", because the GRC lock check only runs once the wallet
     # answers -- so the number is conditional and a literal was wrong half the
@@ -403,10 +599,45 @@ def main() -> int:
     # pricing, or the two checks after it -- from a defect in the preflight
     # rather than in what it was inspecting. A crash here is a bug in this file
     # and must be reported as one, not allowed to mask the report.
+    # BUILT ONCE and passed in, rather than each check calling build_adapters()
+    # for itself. Three callers would be three chances to disagree about what is
+    # configured, and check_payout_unlock() in particular must see the SAME set
+    # the chain checks saw -- a passphrase warning for a chain with no adapter is
+    # the cried-wolf noise rule 14 refuses, and a MISSING warning for one that
+    # does have an adapter is the failure that cost three rehearsals.
+    #
+    # Wrapped, because build_adapters() reads config for every chain and a raise
+    # here would kill the preflight before its first line -- which is the defect
+    # the per-check wrapper below exists for, one level up.
+    try:
+        adapters = build_adapters(Config.RPC)
+    except Exception as error:  # noqa: BLE001 -- checked: this is a reporting tool and the alternative is a traceback instead of a report. It records a FAIL naming the exception, so the exit code is non-zero and the operator sees which call failed; the chain checks below each re-derive what they need and will fail individually with their own sentences.
+        record(FAIL, "adapters (build crashed)",
+               f"{type(error).__name__}: {str(error)[:100]}  <- a bug in chains/registry.py or in config, "
+               f"not in any one chain. Every chain check below will fail for lack of an adapter")
+        adapters = {}
+    # FAIL ON ZERO, and the first run of this line is why. It read
+    #
+    #     PASS  adapters built    (none)
+    #
+    # in a shell with nothing exported: a green verdict on a terminal that cannot
+    # reach a single chain. That is rule 13's "'skipped' plus 'success' in the same
+    # output is a defect in the OUTPUT" and rule 14's "make did-nothing look
+    # different from did-work", in one line, printed by the tool whose whole job is
+    # to not do that.
+    built = ", ".join(sorted(adapters)) or (
+        "(none) -- NOTHING is reachable, so every chain check below fails for the same one reason"
+    )
+    record(FAIL if not adapters else PASS, "adapters built",
+           f"{built}  <- the chains this process can reach at all. A chain absent here is one no worker "
+           f"will touch, silently")
+
     for name, check in (
         ("pair allowed", check_pair_is_allowed),
         ("schema", check_schema),
+        ("payout unlock", lambda: check_payout_unlock(adapters)),
         ("XRP", lambda: check_xrp(check_deposit_account())),
+        ("SOL", lambda: check_solana(adapters)),
         ("GRC", check_gridcoin),
         ("pricing", check_pricing),
     ):
@@ -420,7 +651,8 @@ def main() -> int:
     failures = [(name, detail) for state, name, detail in _results if state == FAIL]
     print("\n" + "=" * 70, flush=True)
     if not failures:
-        print(f"READY: all {len(_results)} checks passed. An XRP <-> GRC swap can be created.", flush=True)
+        print(f"READY: all {len(_results)} checks passed. Every pair named on the `pairs checked here` "
+              f"line above can be created and paid.", flush=True)
         return 0
     print(f"NOT READY: {len(failures)} of {len(_results)} checks failed.\n", flush=True)
     for name, detail in failures:

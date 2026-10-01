@@ -46,9 +46,15 @@ from chains.solana_address import SOLANA_DEVNET_ACCOUNT, is_valid_address  # noq
 from chains.solana_memo import MEASURED_MEMO_PROGRAM_IDS, MEMO_PROGRAM_IDS  # noqa: E402
 from chains.solana_units import DISCOVERY_COMMITMENT  # noqa: E402
 
+# GENESIS_HASHES used to be imported from solana_chain_check; it moved to
+# network_target.py on 2026-10-01 so swap_readiness.py could read the same table
+# without one root entry point importing another (rule 10). The assertions below
+# still belong here, because what they pin is how _network_line() RENDERS the
+# table, which is this file's function.
+from network_target import GENESIS_HASHES  # noqa: E402
+
 import solana_chain_check  # noqa: E402
 from solana_chain_check import (  # noqa: E402 -- the sys.path line above is what puts the repository root on the path; this script lives there (rule 10), not inside the package.
-    GENESIS_HASHES,
     MEMO_HUNT_GIVE_UP_AFTER_THROTTLES,
     MEMO_HUNT_TRANSACTION_VERSION,
     RPC_RETRIES_PER_CALL,

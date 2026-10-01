@@ -272,3 +272,288 @@ def test_the_three_failure_kinds_never_render_the_same_way():
     }
 
     assert len(details) == 3, "each failure kind must read differently"
+
+
+# --- the preflight must answer about the pair being RUN -----------------------
+#
+# Everything below was added 2026-10-01, when the operator asked to run the whole
+# SOL -> GRC rehearsal again and this file's subject turned out to be XRP: the
+# title said "XRP <-> GRC", check_pair_is_allowed() filtered ALLOWED_PAIRS to
+# pairs containing XRP, check_pricing() hardwired XRP_USD and GRC_USD, and there
+# was no SOL check of any kind. A verdict about a leg nobody is running is worse
+# than no verdict, because it is a verdict.
+
+
+class FakeSolana:
+    """The three calls check_solana() makes, and nothing else.
+
+    A stub rather than a mock of the whole adapter: these three are the entire
+    contract that function depends on, and a stub that only answers them fails
+    loudly if a fourth call is ever added, where a permissive mock would silently
+    answer it.
+    """
+
+    def __init__(self, genesis: str, lamports: int = 1_000_000, valid: bool = True):
+        self._genesis = genesis
+        self._lamports = lamports
+        self._valid = valid
+        self.calls: list[str] = []
+
+    def call(self, method, *params):
+        self.calls.append(method)
+        if method == "getGenesisHash":
+            return self._genesis
+        if method == "getBalance":
+            return {"value": self._lamports}
+        raise AssertionError(f"check_solana() made an unexpected call: {method}")
+
+    def validate_address(self, address: str) -> bool:
+        return self._valid
+
+
+DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+
+
+def run_solana(monkeypatch, adapter, account="CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp", url="https://x"):
+    """check_solana() against a stub, returning the recorded (state, name, detail) rows."""
+    monkeypatch.setattr(swap_readiness.Config, "RPC", {"SOL": {"url": url}}, raising=False)
+    monkeypatch.setattr(swap_readiness.Config, "SOL_DEPOSIT_ACCOUNT", account, raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_solana({"SOL": adapter} if adapter is not None else {})
+    return list(swap_readiness._results)
+
+
+def test_a_mainnet_solana_cluster_is_a_failure_and_not_a_note(monkeypatch):
+    """Same judgment check_gridcoin() makes about port 15715: looking is the hazard.
+
+    Every Solana address and keypair in this project is a devnet one. The only
+    reason to be pointed at mainnet-beta during a rehearsal is a mistake, and a
+    PASS beside the word MAINNET is how that mistake survives to a transfer.
+    """
+    rows = run_solana(monkeypatch, FakeSolana(MAINNET_GENESIS))
+    cluster = [row for row in rows if row[1] == "SOL cluster"]
+    assert len(cluster) == 1
+    assert cluster[0][0] == FAIL
+    assert "MAINNET" in cluster[0][2]
+    assert "REAL MONEY" in cluster[0][2]
+
+
+def test_the_cluster_is_identified_by_genesis_and_says_so(monkeypatch):
+    """Because the hostname is a label anybody can point anywhere.
+
+    An operator pointing a "devnet" alias at mainnet would otherwise read the word
+    devnet all the way to a real transfer -- so the line names the genesis hash and
+    states that the URL was NOT what decided it.
+    """
+    rows = run_solana(monkeypatch, FakeSolana(DEVNET_GENESIS), url="https://api.devnet.solana.com")
+    cluster = next(row for row in rows if row[1] == "SOL cluster")
+    assert cluster[0] == PASS
+    assert "DEVNET" in cluster[2]
+    assert DEVNET_GENESIS in cluster[2]
+    assert "NOT by the hostname" in cluster[2]
+
+
+def test_an_unset_rpc_url_says_the_watcher_will_credit_nothing_forever(monkeypatch):
+    """The silence is the defect, and the line has to name it.
+
+    An unconfigured chain does not crash. chains/registry builds no adapter, the
+    deposit watcher logs "SOL not configured" once a cycle, and every SOL swap sits
+    in awaiting_deposit while the deposit is on chain. Rule 13's shape: nothing
+    fails, nothing works.
+    """
+    rows = run_solana(monkeypatch, None, url="")
+    assert rows[0][0] == FAIL
+    assert rows[0][1] == "SOL_RPC_URL"
+    assert "credits nothing, forever" in rows[0][2]
+
+
+def test_an_unset_deposit_account_distinguishes_allowed_from_creatable(monkeypatch):
+    """A pair being in ALLOWED_PAIRS and a swap being creatable are two gates.
+
+    The `pair allowed` line says SOL->GRC is allowed. create_swap() still refuses
+    every SOL swap while SOL_DEPOSIT_ACCOUNT is empty, and only this line says so.
+    """
+    rows = run_solana(monkeypatch, FakeSolana(DEVNET_GENESIS), account="")
+    account = next(row for row in rows if row[1] == "SOL_DEPOSIT_ACCOUNT")
+    assert account[0] == FAIL
+    assert "does not make a SOL swap creatable" in account[2]
+
+
+def test_a_zero_balance_deposit_account_is_a_PASS_unlike_the_payout_chains(monkeypatch):
+    """The opposite verdict to XRP and GRC, and the asymmetry is the point.
+
+    Nothing is ever SENT from the deposit account -- it only receives -- so a zero
+    balance is not a defect there, where for a payout wallet it means nothing can
+    be paid. Reporting them the same way would be rule 14's "state what the number
+    means, next to the number" failed in the direction that stops a good run.
+    """
+    rows = run_solana(monkeypatch, FakeSolana(DEVNET_GENESIS, lamports=0))
+    account = next(row for row in rows if row[1] == "SOL deposit account")
+    assert account[0] == PASS
+    assert "A zero balance is fine" in account[2]
+    assert "nothing is ever sent FROM here" in account[2]
+
+
+def test_an_off_curve_deposit_account_is_refused_before_anything_is_told_to_send(monkeypatch):
+    """About half of all 32-byte base58 strings are off-curve and are not accounts."""
+    adapter = FakeSolana(DEVNET_GENESIS, valid=False)
+    rows = run_solana(monkeypatch, adapter)
+    account = next(row for row in rows if row[1] == "SOL_DEPOSIT_ACCOUNT")
+    assert account[0] == FAIL
+    assert "off-curve" in account[2]
+    assert "getBalance" not in adapter.calls, "a refused address must not be looked up"
+
+
+def test_an_endpoint_that_does_not_answer_fails_without_a_traceback(monkeypatch):
+    """A 429 is the specific failure that killed a live deposit watcher on 2026-10-01."""
+    class Throttled(FakeSolana):
+        def call(self, method, *params):
+            raise RuntimeError("getSignaturesForAddress returned HTTP 429")
+
+    rows = run_solana(monkeypatch, Throttled(DEVNET_GENESIS))
+    endpoint = next(row for row in rows if row[1] == "SOL endpoint")
+    assert endpoint[0] == FAIL
+    assert "RuntimeError" in endpoint[2]
+    assert "429" in endpoint[2]
+
+
+# --- the check that would have saved three rehearsals ------------------------
+
+
+def test_a_missing_gridcoin_passphrase_is_a_FAIL_before_any_swap_exists(monkeypatch):
+    """THE PRECONDITION THAT BROKE THREE LIVE RUNS, 2026-10-01.
+
+    Each one reached the payout -- memo attributed, deposit credited, swap advanced,
+    payout claimed -- and died on GRIDCOIN_WALLET_PASSPHRASE being unset in the
+    supervisor's environment, landing the swap in 'failed', which nothing retries.
+    Three swaps and three deposits for one unexported variable, and no preflight
+    checked it.
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"GRC": object()})
+    rows = list(swap_readiness._results)
+
+    assert len(rows) == 1
+    assert rows[0][0] == FAIL
+    assert "IS NOT SET" in rows[0][2]
+    assert "nothing retries" in rows[0][2]
+
+
+def test_a_present_passphrase_claims_presence_and_never_correctness(monkeypatch):
+    """"Set" and "works" are different claims, and this makes the weaker one (rule 17).
+
+    The passphrase itself must never reach a line, and neither must its length.
+    """
+    # Named `fixture_value`, not `secret`: ruff's S105 flags a string assigned to a
+    # password-shaped NAME, and the honest fix is the name -- this is a test
+    # fixture, not a credential, and a `noqa` claiming so would be the suppression
+    # rule 19 forbids. It is never a real passphrase and never read from anywhere.
+    fixture_value = "not-the-real-one-and-never-printed"
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", fixture_value)
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"GRC": object()})
+    detail = swap_readiness._results[0][2]
+
+    assert swap_readiness._results[0][0] == PASS
+    assert "NOT a claim that it is the right passphrase" in detail
+    assert fixture_value not in detail, "the preflight printed the passphrase"
+    assert str(len(fixture_value)) not in detail, "the preflight printed the passphrase's length"
+
+
+def test_a_chain_that_needs_no_unlock_gets_no_warning(monkeypatch):
+    """Cried-wolf noise for a chain nobody set up is what this file fixed once already."""
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"SOL": object()})
+    rows = list(swap_readiness._results)
+
+    assert len(rows) == 1
+    assert rows[0][0] == SKIP
+    assert "GRC is the only one that does" in rows[0][2]
+
+
+# --- the pair line and the pricing line must follow ALLOWED_PAIRS ------------
+
+
+def test_the_pair_line_lists_every_allowed_pair_not_one_leg(monkeypatch):
+    """It filtered to XRP and called the result `pair allowed`.
+
+    On the operator's host that rendered as a PASS listing four XRP pairs, with
+    SOL->GRC -- the pair being rehearsed that afternoon -- absent from a line whose
+    name promises to list what is allowed.
+    """
+    monkeypatch.setattr(swap_readiness.Config, "ALLOWED_PAIRS",
+                        {("SOL", "GRC"), ("XRP", "GRC"), ("BTC", "LTC")}, raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_pair_is_allowed()
+    allowed = next(row for row in swap_readiness._results if row[1] == "pair allowed")
+    checked = next(row for row in swap_readiness._results if row[1] == "pairs checked here")
+
+    assert "SOL->GRC" in allowed[2]
+    assert "BTC->LTC" in allowed[2], "a pair this file cannot check is still ALLOWED and must be listed"
+    assert "all 3" in allowed[2]
+    assert "SOL->GRC" in checked[2]
+    assert "BTC->LTC" not in checked[2]
+    assert "2 of 3" in checked[2], "the gap between allowed and checked is stated, not implied"
+
+
+def test_pricing_follows_the_allowed_pairs_rather_than_two_hardwired_assets(monkeypatch):
+    """A missing SOL_USD must FAIL, where the old two-asset check would have passed.
+
+    create_quote() raises on a missing price and routes/quotes.py renders str(exc),
+    so the consequence of this check being wrong is an exception repr in a
+    customer's browser -- the same shape get_network_fee_reserve() was rewritten
+    for.
+    """
+    monkeypatch.setattr(swap_readiness.Config, "ALLOWED_PAIRS", {("SOL", "GRC")}, raising=False)
+    monkeypatch.setattr(swap_readiness, "fetch_usd_prices",
+                        lambda *a, **k: {"XRP_USD": 2.5, "GRC_USD": 0.0125})
+    swap_readiness._results.clear()
+    swap_readiness.check_pricing()
+    row = swap_readiness._results[0]
+
+    assert row[0] == FAIL
+    assert "SOL" in row[2]
+    assert "every checked pair needs BOTH legs priced" in row[2]
+
+
+def test_pricing_rates_every_checked_pair_and_not_just_one(monkeypatch):
+    """"1 XRP = N GRC" says nothing about whether SOL can be quoted."""
+    monkeypatch.setattr(swap_readiness.Config, "ALLOWED_PAIRS",
+                        {("SOL", "GRC"), ("XRP", "GRC")}, raising=False)
+    monkeypatch.setattr(swap_readiness, "fetch_usd_prices",
+                        lambda *a, **k: {"XRP_USD": 2.5, "GRC_USD": 0.0125, "SOL_USD": 118.5})
+    swap_readiness._results.clear()
+    swap_readiness.check_pricing()
+    row = swap_readiness._results[0]
+
+    assert row[0] == PASS
+    assert "1 SOL = 9480.0000 GRC" in row[2]
+    assert "1 XRP = 200.0000 GRC" in row[2]
+
+
+def test_zero_adapters_is_a_FAIL_and_not_a_green_line(monkeypatch, capsys):
+    """It printed `PASS  adapters built  (none)` on its first run.
+
+    A green verdict on a terminal that cannot reach a single chain: rule 13's
+    "'skipped' plus 'success' in the same output is a defect in the OUTPUT", printed
+    by the tool whose entire job is to not do that.
+    """
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {})
+    for name in ("check_schema", "check_gridcoin", "check_pricing"):
+        monkeypatch.setattr(swap_readiness, name, lambda: None)
+    monkeypatch.setattr(swap_readiness, "check_xrp", lambda account: None)
+    monkeypatch.setattr(swap_readiness, "check_deposit_account", lambda: "")
+    monkeypatch.setattr(swap_readiness, "check_solana", lambda adapters: None)
+    monkeypatch.setattr(swap_readiness, "check_payout_unlock", lambda adapters: None)
+    monkeypatch.setattr(swap_readiness, "check_pair_is_allowed", lambda: None)
+    swap_readiness._results.clear()
+
+    exit_code = swap_readiness.main()
+    out = capsys.readouterr().out
+
+    assert exit_code == 1, "no chain reachable must not produce a READY verdict"
+    assert "FAIL  adapters built" in out
+    assert "NOTHING is reachable" in out

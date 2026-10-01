@@ -296,7 +296,8 @@ NATIVE_ONLY: dict[str, SolanaEquivalent] = {
         note="IDENTIFIES THE CLUSTER, and a cluster cannot lie about it where a hostname can. "
              "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG is devnet; "
              "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d is MAINNET-BETA and is real money. "
-             "solana_chain_check.GENESIS_HASHES is the table.",
+             "network_target.GENESIS_HASHES is the table (it lived in solana_chain_check.py "
+             "until 2026-10-01, when swap_readiness.py needed it too).",
     ),
     "getSlot": SolanaEquivalent(
         "getSlot", "the integer itself", commitment=True,

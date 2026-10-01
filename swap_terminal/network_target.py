@@ -270,3 +270,52 @@ def mainnet_chains(rpc: dict) -> list[str]:
         for chain in sorted(CHAIN_PORTS)
         if classify(chain, int((rpc.get(chain) or {}).get("port") or 0)) == "MAINNET"
     ]
+
+
+# SOLANA IS IDENTIFIED BY ITS GENESIS HASH, NOT BY A PORT, and that is why it has
+# its own table in a module otherwise keyed on ports.
+#
+# Everything above decides a network from a port number, which is a CONVENTION --
+# a mainnet daemon on a custom -rpcport lands in UNRECOGNIZED, and classify()'s
+# docstring says so rather than claiming safety. Solana has no equivalent
+# convention: one URL scheme serves every cluster, and the hostname is a label
+# anybody can point anywhere. What a cluster cannot lie about is its genesis hash,
+# so the identification is exact here where the port version is conventional.
+#
+# MOVED HERE 2026-10-01 FROM solana_chain_check.py, where it was a module-level
+# dict in a root entry point. That made it unreachable by anything that is not
+# that tool without importing a root entry point from another one, which is rule
+# 10's layering inverted -- a file must not import a file. swap_readiness.py needed
+# the same table, and the alternatives were to import a root tool or to write the
+# three hashes out a second time; the second is rule 8's defect exactly, and it
+# would have been a quiet one, because two copies of a hash table agree until a
+# cluster is added to one of them.
+#
+# chains/solana_rpc_map.py's comment named "solana_chain_check.GENESIS_HASHES" as
+# where to look, and was corrected in the same commit.
+GENESIS_HASHES: dict[str, str] = {
+    "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d": "MAINNET-BETA  <- REAL MONEY",
+    "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG": "DEVNET",
+    "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY": "TESTNET",
+}
+
+#: What an unrecognized genesis hash is called. A local validator generates its
+#: own genesis, so this is the EXPECTED answer for solana-test-validator and is
+#: not a failure -- but it is also what a private fork of mainnet would read as,
+#: which is why it is never rendered as "not mainnet" (the same judgment
+#: classify() makes for UNRECOGNIZED).
+UNRECOGNIZED_CLUSTER = (
+    "UNRECOGNIZED -- a local validator has its own genesis, so this is expected for "
+    "solana-test-validator"
+)
+
+
+def solana_cluster(genesis: str) -> str:
+    """Which Solana cluster a genesis hash identifies. Exact, not inferred.
+
+    One function rather than two `.get(..., default)` call sites, so the default
+    sentence cannot drift between them -- it had no second caller until
+    swap_readiness.py wanted one, which is the moment a repeated default becomes
+    two spellings of one answer.
+    """
+    return GENESIS_HASHES.get(genesis, UNRECOGNIZED_CLUSTER)
