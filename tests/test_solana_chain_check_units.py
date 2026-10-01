@@ -3010,3 +3010,50 @@ def test_main_carries_the_targeted_proof_into_the_summary(monkeypatch, capsys):
         "value discarded the summary reads 'still unproven' four lines under 'PROVEN'."
     )
     assert "still unproven" not in out
+
+
+def test_a_step_line_claims_nothing_about_readers_it_did_not_run():
+    """From the operator's eighth run, and the FOURTH instance of one pattern in this file.
+
+    The line read:
+
+        ... reads are PROVEN. That is the last reader in this adapter with no live evidence.
+
+    Two defects in one sentence. It denies what the clause in front of it just established --
+    the reader cannot both be proven and have no live evidence -- and "the last reader in this
+    adapter" is a superlative over every reader across every run, asserted by a step that read
+    one transaction.
+
+    The three before it: the summary's "has not decoded one" about a reader the run never
+    called; the summary built from an observation taken before the step that settled it; the
+    caption promising "a balance" over a transaction the selection had only checked for an
+    entry. Same shape every time, so this pins the rule rather than the instance -- a step
+    reports its own read, and cross-cutting conclusions belong to the summary, where
+    CreditPathObserved is the authority on what ran.
+
+    MUTATION: put any of those phrases back and this fails on whichever outcome carries it.
+    """
+    outcomes = {
+        "attributed": _spl_transaction("0", "2500000000", memo=True),
+        "refused": _spl_transaction("0", "2500000000"),
+        "no delta": _spl_transaction("5", "5"),
+    }
+    for name, response in outcomes.items():
+        line = _spl_reader_line(_seeded_adapter({"getTransaction": response}, _A_MINT),
+                                _A_HOLDER, "65bWBunzbNMkN9d5")
+        for claim in ("last reader", "no live evidence", "has not decoded",
+                      "still unproven", "_native_credits"):
+            assert claim not in line, (
+                f"the {name} outcome claims '{claim}', which is about readers or runs this "
+                f"step did not touch"
+            )
+        if "PROVEN" in line:
+            assert "no live evidence" not in line, (
+                "and above all it may not deny in one clause what it established in the last"
+            )
+
+    # THE SUMMARY IS WHERE THAT BELONGS, and it still says it -- the rule moves the claim, it
+    # does not delete it.
+    assert "was NOT exercised by this run" in summary_text(
+        CreditPathObserved(address_read=True, is_spl=True, signatures=5, credits=0, refused=0,
+                           targeted_read_decoded=True))

@@ -438,6 +438,18 @@ def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str,
                      decoded: list[bool] | None = None) -> str:
     """What the targeted read established about _spl_credits' decoder.
 
+    A STEP LINE DESCRIBES THE TRANSACTION IT READ, AND NOTHING WIDER. Two of these outcomes
+    used to end with "the last reader in this adapter with no live evidence" -- a superlative
+    about every reader across every run, asserted by a step that read one transaction. It also
+    contradicted the sentence in front of it: your run printed "reads are PROVEN. That is the
+    last reader ... with no live evidence", which denies what it had just established.
+
+    That is the fourth time in this file a line has claimed something its own scope could not
+    see (the summary's "has not decoded one", the summary built from a pre-step observation,
+    the caption promising a balance the selection never checked for). The structural answer is
+    the same each time and is worth stating once: cross-cutting conclusions belong in the
+    SUMMARY, where CreditPathObserved is the authority on what ran. A step reports its own read.
+
     THREE OUTCOMES, AND THE FIRST VERSION OF THIS COLLAPSED TWO INTO A FALSE SENTENCE. It said
     "the entry exists but its delta is not POSITIVE" whenever the credit list came back empty --
     and an empty list ALSO happens when the amount was decoded fine and `_attributable` then
@@ -480,13 +492,13 @@ def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str,
         amounts = ", ".join(f"{credit['amount']} (vout={credit['vout']})" for credit in credits)
         return (f"DECODED and ATTRIBUTED {len(credits)} credit(s): {amounts}  <- _spl_credits "
                 f"read uiTokenAmount.decimals and .amount off a REAL response, and the memo "
-                f"carried a usable tag. The last reader with no live evidence now has some."
+                f"carried a usable tag."
                 + logged)
     if dropped:
         return (f"DECODED {dropped} credit(s) and then REFUSED them: no usable memo, so nothing "
                 f"is credited -- which is correct. But the amount WAS decoded off a real "
                 f"response, so _spl_credits' uiTokenAmount.decimals and .amount reads are "
-                f"PROVEN. That is the last reader in this adapter with no live evidence."
+                f"PROVEN. Which is what this step exists to establish."
                 + logged)
     return ("(none)  <- no POSITIVE delta for this owner and mint in this transaction, so "
             "_spl_credits returned before decoding an amount. A fact about this transaction, "
@@ -748,8 +760,9 @@ def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
     `postTokenBalances[].owner` and does not care whether that owner can sign. So nothing is
     filtered out -- only described correctly.
 
-    WHY THIS EXISTS. `_spl_credits` is the last reader in this adapter with no real response
-    behind it, and it cannot be proven by pointing at an account that holds none of the token:
+    WHY THIS EXISTS. `_spl_credits` was, when this was written on 2026-10-01, the last reader
+    in this adapter with no real response behind it (it has one now, from the operator's run
+    that first exercised this step), and it cannot be proven by pointing at an account that holds none of the token:
     it selects token balances by owner AND mint BEFORE touching an amount, so over an account
     with no token account it returns [] without ever reading
     `entry["uiTokenAmount"]["decimals"]` or `["amount"]`. Those are the field names that would
