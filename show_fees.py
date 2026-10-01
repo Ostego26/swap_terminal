@@ -65,7 +65,7 @@ from db import connect_db
 from fee_ledger import DRIFT_IS_ZERO_COIN, FeeRow, asset_totals, fee_rows
 from microfortnights import format_duration
 from report_block import CONTINUATION, labeled
-from workers.common import get_config_dict, root_tool_command
+from workers.common import db_path_source, get_config_dict, root_tool_command
 
 
 class FeesRefused(RuntimeError):
@@ -96,12 +96,7 @@ def self_command(db_path: str) -> str:
     return root_tool_command(SELF)
 
 
-def _db_source(db_path: str) -> str:
-    """Whether this path came from --db or from SWAP_DB_PATH. Says which, not both."""
-    return "--db" if db_path != str(Config.DB_PATH) else "SWAP_DB_PATH"
-
-
-def header_lines(db_path: str, config: dict) -> list[str]:
+def header_lines(db_path: str, config: dict, explicit_db: str = "") -> list[str]:
     """What this run is about to read, printed BEFORE it reads it (rule 14).
 
     The three parameters below decide every number underneath them, and a pasted
@@ -115,8 +110,8 @@ def header_lines(db_path: str, config: dict) -> list[str]:
     scheduled = float(config["DEFAULT_FEE_BPS"])
     return [
         "swap fees -- READ-ONLY. It changes no fee, collects nothing, writes no row and creates no file.",
-        labeled("database", f"{db_path}  <- {_db_source(db_path)}. Fees earned in any other database are "
-                            f"invisible to this run"),
+        labeled("database", f"{db_path}  <- {db_path_source(db_path, explicit_db)}. Fees earned in any "
+                            f"other database are invisible to this run"),
         labeled("schedule now", f"DEFAULT_FEE_BPS={scheduled:.0f}bps  <- what a swap created RIGHT NOW would "
                                 f"be quoted. Each row below carries the fee_bps IT was quoted, which may "
                                 f"differ"),
@@ -340,7 +335,7 @@ def run(args) -> int:
     db_path = args.db or Config.DB_PATH
     config = get_config_dict()
 
-    for line in header_lines(str(db_path), config):
+    for line in header_lines(str(db_path), config, args.db):
         print(line, flush=True)
     for line in read_report(str(db_path), config):
         print(line, flush=True)

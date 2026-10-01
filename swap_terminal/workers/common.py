@@ -48,6 +48,7 @@ operating system rather than by reading the kill's exit code. The escalation is
 the backstop for a cycle that wedges; it does not replace the handler.
 """
 
+import os
 import signal
 import time
 from collections.abc import Callable
@@ -420,3 +421,59 @@ def sleep_until_next_cycle(poll_seconds: float, should_stop: Callable[[], bool])
         if should_stop():
             return
         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
+#: The environment variable every database path in this project comes from, when
+#: it comes from the environment at all. Named once here because three root tools
+#: print a sentence about it and config.py reads it, and a variable NAME spelled
+#: four times is rule 8's shape with a typo waiting in it.
+DB_PATH_VARIABLE = "SWAP_DB_PATH"
+
+
+def db_path_source(db_path: str, explicit_db: str = "") -> str:
+    """Where a reported database path actually came from. Three answers, not two.
+
+    WHY THIS IS A SHARED FUNCTION AND WHY IT HAS A THIRD CASE, both measured on
+    the operator's host 2026-10-01.
+
+    show_fees.py printed, in a shell where SWAP_DB_PATH was not set at all:
+
+        database   .../swap_terminal/swap_terminal.db  <- SWAP_DB_PATH
+
+    The path was right. The provenance was a fabrication: that value came from
+    `config.DB_PATH`'s built-in default, and the line asserted it came from an
+    environment variable the shell did not have. An operator checking that claim
+    against their own `env` finds it disagreeing and has no way to tell which half
+    is wrong -- which is the precise failure this project has paid for repeatedly,
+    a statement in the register of a measurement (rule 17), here about the one
+    parameter that decides every other number in the report.
+
+    It was a two-case function inferring the answer from `db_path != Config.DB_PATH`,
+    so "not the default" was read as "--db was passed" and "equal to the default"
+    as "SWAP_DB_PATH". Both inferences are wrong in a reachable case: the default
+    IS what you get with nothing set, and `--db` pointed at the default value
+    reports as the environment.
+
+    THREE COPIES EXISTED, which is why the fix is a move and not an edit:
+
+        show_swap.py::_db_source      the two-case version
+        show_fees.py::_db_source      copied from it on 2026-10-01, bug included
+        open_swap.py                  labels the path "the SAME file the workers
+                                      read (SWAP_DB_PATH)" unconditionally -- the
+                                      original defect, never corrected, and the
+                                      one show_swap's docstring records being
+                                      flagged in September
+
+    `explicit_db` is the flag's own value rather than a comparison, so the first
+    case is OBSERVED instead of inferred. It reads os.environ, which is why this
+    lives here next to get_config_dict() rather than in report_block.py, whose
+    header says it reads nothing and would have been made false by this.
+    """
+    if explicit_db:
+        return "--db"
+    if os.environ.get(DB_PATH_VARIABLE, "").strip():
+        return DB_PATH_VARIABLE
+    return (
+        f"the built-in default, because {DB_PATH_VARIABLE} IS NOT SET in this shell. The workers read "
+        f"whatever {DB_PATH_VARIABLE} named in the shell that STARTED them, which may be a different file"
+    )

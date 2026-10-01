@@ -111,7 +111,7 @@ from services.admin_view import halted_swaps, status_counts
 from services.helpers import utc_now_iso
 from services.swap_service import get_swap
 from services.swap_view import HALTED_STATUSES, elapsed_seconds, swap_display
-from workers.common import get_config_dict, root_tool_command
+from workers.common import db_path_source, get_config_dict, root_tool_command
 
 
 class ShowRefused(RuntimeError):
@@ -174,18 +174,7 @@ def amount_text(value, asset: str, absent: str) -> str:
     return f"{value} {asset}"
 
 
-def _db_source(db_path: str) -> str:
-    """Whether this path came from --db or from SWAP_DB_PATH. Says which, not both.
-
-    The header annotated every path as "SWAP_DB_PATH", which is false whenever --db
-    was passed -- flagged by review 2026-09-26. An operator comparing this line
-    against their environment would find it disagreeing and have no way to know the
-    flag had won.
-    """
-    return "--db" if db_path != str(Config.DB_PATH) else "SWAP_DB_PATH"
-
-
-def header_lines(db_path: str, config: dict) -> list[str]:
+def header_lines(db_path: str, config: dict, explicit_db: str = "") -> list[str]:
     """What this run is about to read, printed BEFORE it reads it (rule 14).
 
     Announce before, not only after: the database path is the parameter that
@@ -195,8 +184,8 @@ def header_lines(db_path: str, config: dict) -> list[str]:
     tolerance = float(config["AMOUNT_TOLERANCE_PCT"])
     return [
         "show swap -- READ-ONLY. It changes no status, resolves nothing, writes no row and creates no file.",
-        labeled("database", f"{db_path}  <- {_db_source(db_path)}. The workers read whatever SWAP_DB_PATH "
-                            f"names; a swap in any other database is invisible to both them and this"),
+        labeled("database", f"{db_path}  <- {db_path_source(db_path, explicit_db)}. A swap in any other "
+                            f"database is invisible to both the workers and this"),
         labeled("halted means", f"{', '.join(HALTED_STATUSES)}  <- exactly what deposit_watcher's "
                                 f"HALTED_for_review counts, from services/swap_view.HALTED_STATUSES"),
         labeled("tolerance", f"AMOUNT_TOLERANCE_PCT={tolerance} -> {tolerance * 100:.2f}% either side of "
@@ -487,7 +476,7 @@ def run(args) -> int:
     config = get_config_dict()
     now_iso = utc_now_iso()
 
-    for line in header_lines(db_path, config):
+    for line in header_lines(db_path, config, args.db):
         print(line, flush=True)
     if args.swap:
         print(labeled("showing", f"one swap: {args.swap}"), flush=True)

@@ -256,3 +256,37 @@ def test_the_reprint_command_carries_the_database_it_was_run_against(db_path, ca
     assert "<" not in out.split("show_fees.py --db")[1].split("\n")[0], (
         "a placeholder reached a printed command"
     )
+
+
+def test_the_header_never_claims_an_unset_variable_as_the_source(db_path, capsys, monkeypatch):
+    """THE DEFECT THAT REACHED THE OPERATOR, 2026-10-01, from this exact function.
+
+    In a shell with SWAP_DB_PATH unset, this report printed
+
+        database   .../swap_terminal/swap_terminal.db  <- SWAP_DB_PATH
+
+    The path was correct. The provenance was a fabrication: the value came from
+    config.DB_PATH's built-in default, and the line asserted it came from an
+    environment variable the shell did not have -- about the one parameter that
+    decides every other number in the report. The two-case function could not have
+    said otherwise; it inferred the source from `db_path != Config.DB_PATH`, so
+    "equals the default" read as "came from the environment".
+
+    Now through workers.common.db_path_source(), shared with show_swap.py and
+    open_swap.py, which each held their own copy of the same two-case bug.
+    """
+    monkeypatch.delenv("SWAP_DB_PATH", raising=False)
+    assert show_fees.main(["--db", str(db_path)]) == 0
+    flagged = capsys.readouterr().out
+    assert "<- --db." in flagged
+    assert "<- SWAP_DB_PATH." not in flagged
+
+    monkeypatch.delenv("SWAP_DB_PATH", raising=False)
+    config = show_fees.get_config_dict()
+    from_default = show_fees.header_lines(str(show_fees.Config.DB_PATH), config)
+    assert any("IS NOT SET in this shell" in line for line in from_default)
+    assert not any("<- SWAP_DB_PATH." in line for line in from_default)
+
+    monkeypatch.setenv("SWAP_DB_PATH", str(show_fees.Config.DB_PATH))
+    from_environment = show_fees.header_lines(str(show_fees.Config.DB_PATH), config)
+    assert any("<- SWAP_DB_PATH." in line for line in from_environment)

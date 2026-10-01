@@ -590,11 +590,29 @@ def test_a_database_path_with_a_space_survives_the_printed_command(tmp_path):
     assert f"'{spaced}'" in command, command
 
 
-def test_the_header_says_which_source_the_path_came_from(tmp_path):
-    """It annotated every path as SWAP_DB_PATH, which is false whenever --db won.
+def test_the_header_says_which_source_the_path_came_from(tmp_path, monkeypatch):
+    """Three sources, three answers -- and it used to have two.
 
-    An operator comparing that line against their environment would find it
+    It annotated every path as SWAP_DB_PATH, which is false whenever --db won. An
+    operator comparing that line against their environment would find it
     disagreeing and have no way to know the flag had taken precedence.
+
+    THE THIRD CASE WAS ADDED 2026-10-01 AFTER IT REACHED THE OPERATOR, through
+    show_fees.py, which had copied this function. In a shell with SWAP_DB_PATH
+    unset it printed
+
+        database   .../swap_terminal/swap_terminal.db  <- SWAP_DB_PATH
+
+    The path was right and the provenance was invented: that value is
+    config.DB_PATH's BUILT-IN DEFAULT, and the line asserted an environment
+    variable the shell did not have. The two-case version could not say otherwise,
+    because it inferred the answer from `db_path != Config.DB_PATH` -- so "equals
+    the default" was read as "came from the environment", which is exactly
+    backwards for the one case where nothing is set.
+
+    The flag's value is PASSED now rather than inferred, which also fixes the
+    reachable case the inference got wrong in the other direction: --db pointed at
+    the default value reported as the environment.
     """
     elsewhere = str(tmp_path / "elsewhere.db")
 
@@ -604,16 +622,31 @@ def test_the_header_says_which_source_the_path_came_from(tmp_path):
     # times already, arriving here as a two-line test.
     config = get_config_dict()
 
-    default = show_swap.header_lines(str(Config.DB_PATH), config)
-    flagged = show_swap.header_lines(elsewhere, config)
+    monkeypatch.setenv("SWAP_DB_PATH", str(Config.DB_PATH))
+    from_environment = show_swap.header_lines(str(Config.DB_PATH), config)
+    flagged = show_swap.header_lines(elsewhere, config, elsewhere)
+    # --db holding the SAME value as the default: the case the old inference called
+    # the environment, because it compared values instead of observing the flag.
+    flagged_at_default = show_swap.header_lines(str(Config.DB_PATH), config, str(Config.DB_PATH))
 
-    # THE ANNOTATION MARKER, not the bare word. Both lines mention SWAP_DB_PATH in
-    # their prose -- "The workers read whatever SWAP_DB_PATH names" is true either way
-    # -- so a substring test passes on the explanation and proves nothing. My first
-    # version of this assertion did exactly that and failed against correct code.
-    assert any("<- SWAP_DB_PATH." in line for line in default)
+    monkeypatch.delenv("SWAP_DB_PATH", raising=False)
+    from_default = show_swap.header_lines(str(Config.DB_PATH), config)
+
+    # THE ANNOTATION MARKER, not the bare word. Several lines mention SWAP_DB_PATH
+    # in their prose, so a substring test passes on the explanation and proves
+    # nothing. My first version of this assertion did exactly that and failed
+    # against correct code.
+    assert any("<- SWAP_DB_PATH." in line for line in from_environment)
     assert any("<- --db." in line for line in flagged)
+    assert any("<- --db." in line for line in flagged_at_default), (
+        "--db was passed, so the source is the flag whatever value it holds"
+    )
     assert not any("<- SWAP_DB_PATH." in line for line in flagged), (
         "the path came from --db, so annotating it as SWAP_DB_PATH would disagree with the operator's "
         "own environment and give them no way to know the flag had won"
     )
+    assert any("IS NOT SET in this shell" in line for line in from_default), (
+        "with nothing set the path is a built-in default, and claiming it came from an unset environment "
+        "variable is the defect that reached the operator"
+    )
+    assert not any("<- SWAP_DB_PATH." in line for line in from_default)

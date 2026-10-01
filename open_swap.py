@@ -166,7 +166,7 @@ from services.pricing import fetch_usd_prices
 from services.quote_service import create_quote, validate_pair
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, create_swap, deposit_account
 from services.xrp_tag_service import XRPTagAllocationError
-from workers.common import build_adapters_from_config, get_config_dict
+from workers.common import build_adapters_from_config, db_path_source, get_config_dict
 
 
 class SwapRefused(RuntimeError):
@@ -742,7 +742,7 @@ def fetch_prices_or_refuse(config: dict) -> dict:
     return prices
 
 
-def report_lines(swap: dict, quote: dict, db_path: str, config: dict) -> list[str]:
+def report_lines(swap: dict, quote: dict, db_path: str, config: dict, explicit_db: str = "") -> list[str]:
     """The block the operator reads and pastes back. Pure, over the rows as written.
 
     Every number comes from the `swap` or `quote` dict the services returned, so
@@ -770,8 +770,15 @@ def report_lines(swap: dict, quote: dict, db_path: str, config: dict) -> list[st
         "swap opened. One quote row, one swap row, one audit row -- written by the same service functions the",
         "web form calls. Nothing has been signed and nothing has been broadcast.",
         "",
-        labeled("database", f"{db_path}  <- the SAME file the workers read (SWAP_DB_PATH); a swap in any "
-                            f"other database is invisible to them"),
+        # IT USED TO CLAIM "the SAME file the workers read (SWAP_DB_PATH)" and both
+        # halves were unfounded. The provenance was asserted whether or not
+        # SWAP_DB_PATH was set -- measured 2026-10-01 in a shell where it was not,
+        # via the identical defect copied into show_fees.py -- and the sameness is a
+        # claim about ANOTHER PROCESS's environment, which this one cannot see: the
+        # workers inherit the shell that started them, which may not be this one.
+        # Rule 17's line between a reason to believe something and having checked it.
+        labeled("database", f"{db_path}  <- {db_path_source(db_path, explicit_db)}. A swap in any other "
+                            f"database is invisible to the workers"),
         labeled("swap id", f"{swap['id']}  <- names this swap to every command below, and to /swap/{swap['id']}"),
         labeled("quote id", f"{quote['id']}  <- the rate this swap was created against"),
         labeled("pair", f"{from_asset} -> {to_asset}"),
@@ -1070,7 +1077,7 @@ def run(args) -> int:
 
     written = apply_swap(args, config, adapters, (from_asset, to_asset), db_path)
     print(flush=True)
-    for line in report_lines(written["swap"], written["quote"], db_path, config):
+    for line in report_lines(written["swap"], written["quote"], db_path, config, args.db):
         print(line, flush=True)
     print("\n" + labeled("opened in", format_duration(time.monotonic() - started)), flush=True)
     print(flush=True)
