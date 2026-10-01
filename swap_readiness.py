@@ -45,6 +45,7 @@ a second reading of the same environment variable (rule 8).
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -79,7 +80,59 @@ def record(state: str, name: str, detail: str) -> None:
 CHECKED_LEGS = ("XRP", "SOL", "GRC")
 
 
-def check_pair_is_allowed() -> None:
+class PairRefused(RuntimeError):
+    """--pair named something this terminal cannot answer about. Nothing was read."""
+
+
+def parse_pair(text: str) -> tuple[str, str] | None:
+    """"SOL:GRC" -> ("SOL", "GRC"), or None for no --pair at all.
+
+    Raises PairRefused for a malformed value or a pair outside ALLOWED_PAIRS,
+    rather than quietly checking everything: a typo in a gate's argument that
+    widens the gate is the opposite of what a gate is for.
+    """
+    if not text:
+        return None
+    cleaned = text.upper().replace("->", ":").replace("/", ":").strip()
+    parts = [part.strip() for part in cleaned.split(":") if part.strip()]
+    if len(parts) != 2:  # noqa: PLR2004 -- a pair is two assets; naming the 2 would say less than the sentence below
+        raise PairRefused(
+            f"--pair {text!r} is not a pair. Write it as FROM:TO, for example SOL:GRC. Nothing was read."
+        )
+    pair = (parts[0], parts[1])
+    if pair not in Config.ALLOWED_PAIRS:
+        allowed = ", ".join(sorted(f"{a}:{b}" for a, b in Config.ALLOWED_PAIRS))
+        raise PairRefused(
+            f"--pair {parts[0]}:{parts[1]} is not in Config.ALLOWED_PAIRS, so no quote for it could be "
+            f"made whatever this preflight said. Allowed: {allowed}. Nothing was read."
+        )
+    return pair
+
+
+def legs_to_check(pair: tuple[str, str] | None) -> tuple[str, ...]:
+    """Which chain legs this run should check at all.
+
+    WHY A SCOPE EXISTS, MEASURED 2026-10-01. I handed the operator
+    `swap_readiness.py && supervisor.py start` as a gate so that a broken config
+    could not spawn workers. That gate is UNSATISFIABLE on their host: XRP is not
+    configured and is not going to be -- they are running SOL -> GRC -- so
+    XRP_RPC_URL and XRP_DEPOSIT_ACCOUNT fail forever and the verdict is NOT READY
+    forever. A gate that can never open is not a gate; it is a thing people learn
+    to bypass, which is worse than no gate because the next real failure gets
+    bypassed with it.
+
+    The whole-terminal verdict is still the DEFAULT and still right for "is
+    everything I own working". What was missing is the question an operator
+    actually asks before a run: can THIS pair be created and paid.
+    """
+    if pair is None:
+        return CHECKED_LEGS
+    # Only the legs of the named pair, and only those this file knows how to check
+    # -- a BTC leg is unverified here and saying so is check_pair_is_allowed()'s job.
+    return tuple(leg for leg in CHECKED_LEGS if leg in pair)
+
+
+def check_pair_is_allowed(pair: tuple[str, str] | None = None) -> None:
     """Every allowed pair, and which of them this preflight actually covers.
 
     IT USED TO FILTER TO XRP and print the result as `pair allowed`. On the
@@ -97,21 +150,38 @@ def check_pair_is_allowed() -> None:
         record(FAIL, "pair allowed",
                "(none) -- Config.ALLOWED_PAIRS is empty, so no quote of any kind can be made")
         return
+    legs = legs_to_check(pair)
+    # HOISTED OUT OF THE f-STRING, not a style choice. A multi-line conditional
+    # inside an f-string is PEP 701, which is Python 3.12; ruff accepts it here
+    # because pyproject.toml sets target-version = "py312", and the interpreter in
+    # this environment is 3.11.15, which raises SyntaxError on it.
+    #
+    # THAT IS ALSO THE ANSWER TO AN EARLIER PUZZLE IN THIS SESSION. `ruff check`
+    # reported "All checks passed!" on a file python could not parse, once, and I
+    # could not reproduce it deliberately and said so rather than guessing a cause.
+    # The cause is this: ruff and the interpreter disagree about what is valid
+    # syntax, and ruff is the MORE PERMISSIVE one. So `python -m compileall` beside
+    # ruff is not belt-and-braces; it catches a class ruff cannot see.
+    scoping = (
+        "--pair scoped this run to one pair; every other pair is UNVERIFIED here"
+        if pair
+        else "No --pair given, so this is the whole terminal"
+    )
     covered = sorted(
         f"{a}->{b}" for a, b in Config.ALLOWED_PAIRS
-        if a in CHECKED_LEGS and b in CHECKED_LEGS
+        if a in legs and b in legs and (pair is None or (a, b) == pair)
     )
     record(PASS, "pair allowed", f"{', '.join(pairs)}  <- all {len(pairs)} in Config.ALLOWED_PAIRS")
     record(
         PASS if covered else FAIL,
         "pairs checked here",
-        f"{', '.join(covered) or '(none)'}  <- {len(covered)} of {len(pairs)}. This preflight checks "
-        f"{', '.join(CHECKED_LEGS)} legs only; a pair with a BTC or LTC leg is ALLOWED and is NOT "
-        f"verified by anything below",
+        f"{', '.join(covered) or '(none)'}  <- {len(covered)} of {len(pairs)}. {scoping}. Legs "
+        f"checked: {', '.join(legs)}; a pair with a BTC or LTC leg is ALLOWED and is NOT verified by "
+        f"anything below",
     )
 
 
-def check_payout_unlock(adapters) -> None:
+def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
     """Whether a payout chain's wallet can be unlocked from THIS process.
 
     THE PRECONDITION THAT BROKE THREE LIVE REHEARSALS, 2026-10-01, and the one
@@ -137,14 +207,21 @@ def check_payout_unlock(adapters) -> None:
     # swap this terminal allows could ever have been paid. A SKIP beside that is
     # the same did-nothing-looks-like-did-work the supervisor's spawn warning had
     # in the identical case (see services/payout_service.payable_assets()).
-    payable = payable_assets(adapters.keys(), Config.ALLOWED_PAIRS)
+    # The pair's OWN destination when one was named, so "nothing can be paid" means
+    # "this pair cannot be paid" rather than "no pair anywhere can be".
+    wanted = {pair} if pair else Config.ALLOWED_PAIRS
+    payable = payable_assets(adapters.keys(), wanted)
     if not payable:
+        # The destinations of the SCOPED pairs, not of every allowed pair. Scoped to
+        # SOL:GRC this printed "destinations any allowed pair needs: BTC, GRC, LTC,
+        # XRP", which names three chains the run was not asking about and buries
+        # the one it was -- rule 14's "state what the number means" turned into
+        # noise by a set that did not follow the scope.
+        needed = ", ".join(sorted({to for _, to in wanted}))
         record(FAIL, "payout chain",
                f"NOTHING CAN BE PAID OUT. Adapters built: {', '.join(sorted(adapters)) or '(none)'}; "
-               f"destinations any allowed pair needs: "
-               f"{', '.join(sorted({to for _, to in Config.ALLOWED_PAIRS}))}. A deposit would still be "
-               f"watched and CREDITED, and the payout would then refuse and land the swap in 'failed', "
-               f"which nothing retries")
+               f"destination(s) needed: {needed}. A deposit would still be watched and CREDITED, and the "
+               f"payout would then refuse and land the swap in 'failed', which nothing retries")
         return
     record(PASS, "payout chain", f"{', '.join(sorted(payable))}  <- has an adapter AND is the destination "
                                  f"of an allowed pair. A chain missing from here cannot be paid")
@@ -557,7 +634,7 @@ def check_solana(adapters) -> None:
            f"by memo, not by address. A zero balance is fine: nothing is ever sent FROM here")
 
 
-def check_pricing() -> None:
+def check_pricing(pair: tuple[str, str] | None = None) -> None:
     """Every asset a CHECKED pair needs must have a USD price, or no rate exists.
 
     IT USED TO CHECK EXACTLY TWO, XRP and GRC, hardwired. On 2026-10-01 that
@@ -577,8 +654,10 @@ def check_pricing() -> None:
     except Exception as error:  # noqa: BLE001 -- checked: a network failure, a rate limit and a missing asset all mean "no rate can be quoted", and the message distinguishes them for the reader.
         record(FAIL, "pricing", f"{type(error).__name__}: {str(error)[:110]}")
         return
+    legs = legs_to_check(pair)
     pairs = sorted(
-        (a, b) for a, b in Config.ALLOWED_PAIRS if a in CHECKED_LEGS and b in CHECKED_LEGS
+        (a, b) for a, b in Config.ALLOWED_PAIRS
+        if a in legs and b in legs and (pair is None or (a, b) == pair)
     )
     assets = sorted({asset for pair in pairs for asset in pair})
     usd = {asset: prices.get(f"{asset}_USD") for asset in assets}
@@ -601,9 +680,32 @@ def check_schema() -> None:
         record(FAIL, "schema", "swaps.deposit_tag MISSING -- this checkout predates the tag work")
 
 
-def main() -> int:
-    print("swap readiness -- every pair this terminal allows. Read-only: creates no swap, signs nothing.",
-          flush=True)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Can this terminal create and pay a swap right now? Read-only preflight.",
+        epilog=(
+            "With no --pair it answers about every pair it can check, which is the right question for "
+            "'is everything I own working'. With --pair it answers about ONE pair, which is the question "
+            "to gate a run on -- an unconfigured chain you are not using should not block a direction "
+            "that works."
+        ),
+    )
+    parser.add_argument(
+        "--pair", default="", metavar="FROM:TO",
+        help="scope every check to one pair, e.g. SOL:GRC. The exit code then describes that pair alone.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        pair = parse_pair(args.pair)
+    except PairRefused as refusal:
+        print(f"REFUSED: {refusal}", file=sys.stderr)
+        return 2
+    scope = f"{pair[0]} -> {pair[1]} ONLY" if pair else "every pair this terminal allows"
+    print(f"swap readiness -- {scope}. Read-only: creates no swap, signs nothing.", flush=True)
     # NOT a hardcoded count. It said "6 preconditions" while the verdict below
     # said "1 of 7 failed", because the GRC lock check only runs once the wallet
     # answers -- so the number is conditional and a literal was wrong half the
@@ -651,15 +753,22 @@ def main() -> int:
            f"{built}  <- the chains this process can reach at all. A chain absent here is one no worker "
            f"will touch, silently")
 
+    # SCOPED, and the legs a --pair does not name are SKIPPED RATHER THAN DROPPED.
+    # A check that vanishes leaves a reader unable to tell "not asked" from "not
+    # run" (rule 14), and the tally at the bottom counts what it printed.
+    legs = legs_to_check(pair)
     for name, check in (
-        ("pair allowed", check_pair_is_allowed),
+        ("pair allowed", lambda: check_pair_is_allowed(pair)),
         ("schema", check_schema),
-        ("payout unlock", lambda: check_payout_unlock(adapters)),
+        ("payout unlock", lambda: check_payout_unlock(adapters, pair)),
         ("XRP", lambda: check_xrp(check_deposit_account())),
         ("SOL", lambda: check_solana(adapters)),
         ("GRC", check_gridcoin),
-        ("pricing", check_pricing),
+        ("pricing", lambda: check_pricing(pair)),
     ):
+        if name in CHECKED_LEGS and name not in legs:
+            record(SKIP, name, f"not checked: --pair {pair[0]}:{pair[1]} has no {name} leg")
+            continue
         try:
             check()
         except Exception as error:  # noqa: BLE001 -- checked: this is the outermost handler of a reporting tool, and it does not swallow -- it records a FAIL naming the check, the exception type and the message, which makes the run's exit code non-zero. The alternative is the traceback that already cost a run. Each check has its own narrow handlers inside it; this catches only what THEY missed, which by definition is a defect in this file.
@@ -670,10 +779,10 @@ def main() -> int:
     failures = [(name, detail) for state, name, detail in _results if state == FAIL]
     print("\n" + "=" * 70, flush=True)
     if not failures:
-        print(f"READY: all {len(_results)} checks passed. Every pair named on the `pairs checked here` "
-              f"line above can be created and paid.", flush=True)
+        subject = f"{pair[0]} -> {pair[1]}" if pair else "Every pair named on the `pairs checked here` line"
+        print(f"READY: all {len(_results)} checks passed. {subject} can be created and paid.", flush=True)
         return 0
-    print(f"NOT READY: {len(failures)} of {len(_results)} checks failed.\n", flush=True)
+    print(f"NOT READY for {scope}: {len(failures)} of {len(_results)} checks failed.\n", flush=True)
     for name, detail in failures:
         print(f"  - {name}: {detail}", flush=True)
     print("\nEach line above names the value to change. Nothing was written and no swap exists.", flush=True)

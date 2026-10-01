@@ -192,12 +192,18 @@ def test_a_crashing_check_is_reported_and_does_not_kill_the_run(monkeypatch, cap
 
     monkeypatch.setattr(swap_readiness, "check_schema", explode)
     monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda: swap_readiness.record(PASS, "GRC", "reached"))
-    monkeypatch.setattr(swap_readiness, "check_pricing", lambda: swap_readiness.record(PASS, "pricing", "reached"))
+    # `pair=None`, because check_pricing() gained that parameter when --pair landed.
+    # A zero-argument stub raises TypeError, the outer wrapper catches it and records
+    # "pricing (check crashed)", and this test then failed on its OWN stub rather
+    # than on the thing it tests -- a stub narrower than the real signature, which
+    # is the fixture-narrower-than-reality pattern this suite keeps hitting.
+    monkeypatch.setattr(swap_readiness, "check_pricing",
+                        lambda pair=None: swap_readiness.record(PASS, "pricing", "reached"))
     monkeypatch.setattr(swap_readiness, "check_xrp", lambda account: None)
     monkeypatch.setattr(swap_readiness, "check_deposit_account", lambda: "")
     swap_readiness._results.clear()
 
-    exit_code = swap_readiness.main()
+    exit_code = swap_readiness.main([])
     out = capsys.readouterr().out
 
     assert exit_code == 1, "a crashed check must not produce a READY verdict"
@@ -606,9 +612,116 @@ def test_zero_adapters_is_a_FAIL_and_not_a_green_line(monkeypatch, capsys):
     monkeypatch.setattr(swap_readiness, "check_pair_is_allowed", lambda: None)
     swap_readiness._results.clear()
 
-    exit_code = swap_readiness.main()
+    exit_code = swap_readiness.main([])
     out = capsys.readouterr().out
 
     assert exit_code == 1, "no chain reachable must not produce a READY verdict"
     assert "FAIL  adapters built" in out
     assert "NOTHING is reachable" in out
+
+
+# --- a gate that can never open is not a gate ----------------------------------
+#
+# MEASURED 2026-10-01. I handed the operator `swap_readiness.py && supervisor.py
+# start` so a broken config could not spawn workers. That gate is UNSATISFIABLE on
+# their host: XRP is not configured and is not going to be -- they run SOL -> GRC
+# -- so XRP_RPC_URL and XRP_DEPOSIT_ACCOUNT fail forever and the verdict is NOT
+# READY forever. A gate nobody can satisfy is one people learn to bypass, which is
+# worse than no gate, because the next REAL failure gets bypassed with it.
+
+
+def test_a_scoped_run_skips_the_legs_the_pair_does_not_name(capsys):
+    """SKIPPED, not dropped. A check that vanishes cannot be told from one that
+    did not run (rule 14), and the tally at the bottom counts what it printed."""
+    swap_readiness._results.clear()
+    swap_readiness.main(["--pair", "SOL:GRC"])
+    out = capsys.readouterr().out
+
+    assert "SOL -> GRC ONLY" in out
+    assert "not checked: --pair SOL:GRC has no XRP leg" in out
+    assert "XRP_DEPOSIT_ACCOUNT" not in out, "an XRP check ran for a pair with no XRP leg"
+
+
+def test_an_unconfigured_chain_outside_the_pair_cannot_fail_the_verdict(monkeypatch, capsys):
+    """THE WHOLE POINT. XRP unset must not make SOL->GRC report NOT READY.
+
+    Every SOL and GRC precondition is stubbed to pass here, so the only thing that
+    could fail the run is a leg the pair does not name. Before --pair existed, this
+    configuration returned 1 forever.
+    """
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {"GRC": object(), "SOL": object()})
+    monkeypatch.setattr(swap_readiness, "check_solana", lambda adapters: swap_readiness.record(
+        PASS, "SOL", "stubbed"))
+    monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda: swap_readiness.record(
+        PASS, "GRC wallet", "stubbed"))
+    monkeypatch.setattr(swap_readiness, "check_pricing", lambda pair=None: swap_readiness.record(
+        PASS, "pricing", "stubbed"))
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "present-for-this-test-only")
+    monkeypatch.delenv("XRP_RPC_URL", raising=False)
+    monkeypatch.delenv("XRP_DEPOSIT_ACCOUNT", raising=False)
+    swap_readiness._results.clear()
+
+    code = swap_readiness.main(["--pair", "SOL:GRC"])
+    out = capsys.readouterr().out
+
+    assert code == 0, f"a scoped run failed on a leg outside the pair:\n{out}"
+    assert "READY" in out
+    assert "SOL -> GRC can be created and paid" in out
+
+
+def test_the_unscoped_verdict_still_covers_the_whole_terminal(monkeypatch, capsys):
+    """The default must not become the narrow question.
+
+    "is everything I own working" is a real question and the right default; what
+    was missing is "can THIS pair be created and paid". Adding the second must not
+    quietly replace the first.
+    """
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {})
+    swap_readiness._results.clear()
+    code = swap_readiness.main([])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "every pair this terminal allows" in out
+    assert "XRP_RPC_URL" in out, "the unscoped run must still check every leg it knows"
+
+
+def test_a_pair_outside_ALLOWED_PAIRS_is_refused_rather_than_widening_the_gate(capsys):
+    """A typo in a gate's argument must not check everything instead.
+
+    The dangerous reading of an unrecognized --pair is "scope to nothing, so
+    nothing fails". Exit 2, distinct from both 0 and the 1 that means NOT READY.
+    """
+    swap_readiness._results.clear()
+    code = swap_readiness.main(["--pair", "GRC:SOL"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "not in Config.ALLOWED_PAIRS" in captured.err
+    assert "Nothing was read." in captured.err
+    assert "READY" not in captured.out
+
+
+def test_a_malformed_pair_is_refused_and_says_the_shape(capsys):
+    swap_readiness._results.clear()
+    code = swap_readiness.main(["--pair", "nonsense"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "is not a pair" in captured.err
+    assert "FROM:TO" in captured.err
+
+
+@pytest.mark.parametrize("text", ["sol:grc", "SOL->GRC", "SOL/GRC", " SOL : GRC "])
+def test_the_pair_spellings_an_operator_will_actually_type_are_accepted(text):
+    """Lowercase, an arrow, a slash, stray spaces. Refusing these teaches nothing
+    and costs a round trip, and every one of them is unambiguous."""
+    assert swap_readiness.parse_pair(text) == ("SOL", "GRC")
+
+
+def test_no_pair_means_every_checked_leg():
+    """parse_pair("") is None, and None means the whole terminal -- not an empty
+    scope, which would silently check nothing and report READY."""
+    assert swap_readiness.parse_pair("") is None
+    assert swap_readiness.legs_to_check(None) == swap_readiness.CHECKED_LEGS
+    assert swap_readiness.legs_to_check(("SOL", "GRC")) == ("SOL", "GRC")
