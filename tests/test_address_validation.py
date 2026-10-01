@@ -30,6 +30,8 @@ means NO swap row is written. Only the reason changes, from a false statement
 about the address to a true statement about the daemon.
 """
 
+import logging
+
 import pytest
 from chains.base import RPCAdapter, RPCError
 from db import SCHEMA, connect_db
@@ -440,3 +442,103 @@ def test_owns_address_never_reaches_a_key():
     adapter.owns_address("Sgrcaddr")
 
     assert [method for method, _params in adapter.calls] == ["getaddressinfo"]
+
+
+# --- the reason, which bare None could not carry -----------------------------
+#
+# MEASURED 2026-10-01, and what it misled was the author of this file. A
+# diagnostic asked owns_address() about a Gridcoin payout address from a shell
+# with no GRC_RPC_* exported, so both calls hit 127.0.0.1:80 and died on
+# ECONNREFUSED. It returned None, the harness printed "NOT-ESTABLISHED", and that
+# was reported to the operator as "this daemon has no `ismine` field". It was a
+# transport failure. Measured minutes later from the right shell:
+#
+#     getaddressinfo  -> Method not found (rpc code -32601)
+#     validateaddress -> {"address": ..., "ismine": false, "isvalid": true}
+#
+# The capability was never missing. Gridcoin answers `ismine` on
+# `validateaddress`, exactly as owns_address()'s docstring already described.
+#
+# The two tests above pin `is None` for BOTH causes, so they pass identically
+# whichever it is -- which is the gap, not a flaw in them. A caller has to tell
+# "fix the endpoint and ask again" from "this chain cannot answer".
+
+def test_an_unreachable_daemon_and_a_missing_field_are_both_none_but_say_different_things():
+    """The distinction that was invisible. MUTATION: return a constant `why`.
+
+    Asserted on the REASON and not on the verdict, because the verdict is
+    deliberately None in both cases -- treating an outage as "not yours" is the
+    reassuring answer about the one fact that decides how to read a payout.
+    """
+    outage = StubAdapter(raises={
+        "getaddressinfo": RPCError("connection refused"),
+        "validateaddress": RPCError("connection refused"),
+    }).address_ownership("Sgrcaddr")
+    silent = StubAdapter(responses={
+        "getaddressinfo": {"isvalid": True},
+        "validateaddress": {"isvalid": True},
+    }).address_ownership("Sgrcaddr")
+
+    assert outage.verdict is None and silent.verdict is None, "both are still 'not established'"
+    assert "connection refused" in outage.why
+    assert "no `ismine` field" in silent.why
+    assert outage.why != silent.why, (
+        "an outage and a chain that cannot answer need opposite responses and must not "
+        "produce the same explanation"
+    )
+
+
+def test_the_reason_names_the_method_that_answered():
+    """Gridcoin's real shape, from the measurement above: getaddressinfo absent,
+    validateaddress carrying ismine. The reason has to say which one spoke, because
+    'answered' and 'answered on the fallback' are different facts about the daemon.
+    """
+    grc_shaped = StubAdapter(
+        responses={"validateaddress": {"isvalid": True, "ismine": False}},
+        raises={"getaddressinfo": RPCError("Method not found (rpc code -32601)")},
+    ).address_ownership("Sgrcaddr")
+
+    assert grc_shaped.verdict is False
+    assert "validateaddress" in grc_shaped.why
+
+
+def test_owns_address_still_returns_a_bare_verdict_for_its_existing_callers():
+    """The contract every current caller depends on is unchanged.
+
+    address_ownership() is additive. A change that made owns_address() return the
+    tuple would make `if adapter.owns_address(a):` truthy for a NamedTuple whose
+    verdict is False -- silently inverting the one check that tells a payout to a
+    stranger from a payout to ourselves.
+    """
+    adapter = StubAdapter(responses={"getaddressinfo": {"isvalid": True, "ismine": False}})
+
+    assert adapter.owns_address("Sgrcaddr") is False, "a bool, not a tuple"
+    assert adapter.address_ownership("Sgrcaddr").verdict is False
+
+
+def test_a_not_established_answer_is_logged_loudly_enough_to_be_seen(caplog):
+    """It was at DEBUG, which is invisible by default, and that is why it was missed.
+
+    A payout-address ownership check that cannot answer, on a chain whose daemon
+    normally can, is a condition an operator needs to see. XRP never reaches this
+    code -- chains/xrp.py overrides owns_address because the XRP Ledger has no such
+    question -- so a warning here always means something is actually wrong.
+    """
+    adapter = StubAdapter(raises={
+        "getaddressinfo": RPCError("connection refused"),
+        "validateaddress": RPCError("connection refused"),
+    })
+    with caplog.at_level(logging.WARNING):
+        adapter.address_ownership("Sgrcaddr")
+
+    assert any(record.levelno >= logging.WARNING for record in caplog.records), (
+        "a DEBUG line is invisible by default, which is how this went unnoticed"
+    )
+    text = caplog.text
+    assert "NOT ESTABLISHED" in text
+    # The quoted phrase only, not the word before it: the line reads "NOT 'not
+    # yours'" and an assertion carrying the capitalised NOT is a test pinning
+    # letter case rather than behavior -- the same trap that caught a wrapped
+    # phrase in tests/test_web_surfaces.py earlier the same day.
+    assert "'not yours'" in text, "the log has to say what the answer is NOT"
+    assert "nobody answered" in text

@@ -55,6 +55,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import requests
 
@@ -118,6 +119,19 @@ def rpc_error_from_body(response) -> str | None:
         code = error.get("code")
         return f"{message} (rpc code {code})" if code is not None else str(message)
     return str(error)
+
+
+class AddressOwnership(NamedTuple):
+    """Whether this wallet holds the key for an address, AND why that is the answer.
+
+    `verdict` keeps owns_address()'s three-valued contract -- True, False, or
+    None for "not established" -- and `why` is what bare None could never carry.
+    See RPCAdapter.address_ownership() for the 2026-10-01 measurement that made
+    the reason a return value instead of a DEBUG log line.
+    """
+
+    verdict: bool | None
+    why: str
 
 
 class RPCAdapter:
@@ -220,23 +234,70 @@ class RPCAdapter:
         Read-only: it calls the same two methods validate_address() already calls and
         touches no key.
         """
+        return self.address_ownership(address).verdict
+
+    def address_ownership(self, address: str) -> AddressOwnership:
+        """owns_address() plus the REASON, which bare None could not carry.
+
+        MEASURED 2026-10-01, and the thing it misled was me. A diagnostic asked
+        this about a Gridcoin payout address from a shell with no GRC_RPC_*
+        exported, so both calls hit 127.0.0.1:80 and died on
+        ECONNREFUSED. owns_address() returned None, the harness printed
+        "NOT-ESTABLISHED", and I read that as "this daemon has no `ismine` field"
+        and said so to the operator as a fact. It was a transport failure. The
+        daemon answers `ismine` perfectly well -- measured minutes later from the
+        right shell:
+
+            getaddressinfo  -> Method not found (rpc code -32601)
+            validateaddress -> {"address": ..., "ismine": false, "isvalid": true}
+
+        which is exactly the pre-0.17 surface owns_address()'s docstring already
+        describes. The capability was never missing.
+
+        TWO FAILURES WERE COLLAPSED INTO ONE None, AND THEY NEED OPPOSITE
+        RESPONSES:
+
+          the daemon could not be reached   -- fix the endpoint and ask again.
+                The answer is unknown and knowable.
+          the daemon answered without       -- this chain cannot answer. Asking
+          `ismine`                             again changes nothing.
+
+        The reasons were already being collected into `unanswered` and then
+        logged at DEBUG, which is invisible by default, and dropped. That is
+        precisely the blind-catch failure CLAUDE.md rule 12 names: a broad catch
+        "is never legitimate when the caller cannot tell the failure from a real
+        answer". The handler said so on the way out, at a level nobody sees.
+
+        So the reason is now a RETURN VALUE. owns_address() keeps its bool|None
+        contract for every existing caller, and anything that needs to tell an
+        outage from a capability gap -- a diagnostic, an operator at a prompt --
+        asks this instead. The log moved from DEBUG to WARNING for the same
+        reason: a payout-address ownership check that cannot answer, on a chain
+        whose daemon normally can, is a condition an operator needs to see. XRP
+        does not reach this code (chains/xrp.py overrides owns_address to return
+        None by design, because the XRP Ledger has no such question), so a
+        warning here always means something is actually wrong.
+        """
         unanswered = []
         for method in ("getaddressinfo", "validateaddress"):
             try:
                 result = self.call(method, address)
-            except Exception as exc:  # noqa: BLE001 -- checked: one method failing is not an answer, it is a reason to try the other. The reason is COLLECTED and logged rather than dropped -- ruff's S112 flags a bare continue for exactly that, and falling through to None must mean "not established", never False.
+            except Exception as exc:  # noqa: BLE001 -- checked: one method failing is not an answer, it is a reason to try the other, and `getaddressinfo` is ABSENT on Gridcoin by design (measured: rpc code -32601). The reason is collected and RETURNED in `why`, so the caller can tell a transport failure from a capability gap -- which is what rule 12 asks of a broad catch and what this function previously only whispered at DEBUG.
                 unanswered.append(f"{method}: {exc}")
                 continue
             if isinstance(result, dict) and "ismine" in result:
-                return bool(result["ismine"])
+                return AddressOwnership(bool(result["ismine"]), f"{method} answered ismine")
             unanswered.append(f"{method}: answered, with no `ismine` field")
-        logger.debug(
-            "owns_address(%s) on %s: NOT ESTABLISHED -- %s",
+        why = "; ".join(unanswered)
+        logger.warning(
+            "address_ownership(%s) on %s: NOT ESTABLISHED -- %s. This is NOT 'not yours'; "
+            "it is 'nobody answered'. If the reasons above are connection errors, the daemon "
+            "endpoint is wrong or down and the question is still answerable.",
             address,
             self.asset or "this chain",
-            "; ".join(unanswered),
+            why,
         )
-        return None
+        return AddressOwnership(None, why)
 
     def validate_address(self, address: str) -> bool:
         """Ask the daemon whether an address is valid.
