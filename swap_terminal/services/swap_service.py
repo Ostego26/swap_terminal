@@ -116,6 +116,61 @@ TAG_ATTRIBUTION = {
 DEPOSIT_TAG_COLUMN = "deposit_tag"
 
 
+def why_cannot_take_deposits(config, adapters: dict, asset: str) -> str:
+    """Why this chain cannot be a deposit SOURCE, or "" if it can. The mirror of
+    chains/registry.why_cannot_pay_out(), which asks the same question about the other end.
+
+    WHAT THIS CLOSES, MEASURED 2026-10-01 rather than supposed. services/pair_view.py decides a
+    pair is `enabled` when both chains are reachable AND the TO asset can pay out. It never
+    asked whether the FROM asset can produce a deposit address, so with both shared accounts
+    unset the dropdown offered FOUR pairs that cannot create a swap:
+
+        SOL->GRC   SOL_DEPOSIT_ACCOUNT is not set
+        XRP->BTC   XRP_DEPOSIT_ACCOUNT is not set
+        XRP->GRC   XRP_DEPOSIT_ACCOUNT is not set
+        XRP->LTC   XRP_DEPOSIT_ACCOUNT is not set
+
+    Three of those predate the SOL work. The customer picks the pair, is quoted, accepts, and
+    gets a refusal where the deposit address should be. That is the same defect
+    why_cannot_pay_out()'s docstring records ("badged ENABLED ... a customer would have sent
+    GRC, had it credited, and been left with a swap in `failed`") one door over -- offered and
+    not completable, failing at the start of the flow instead of the end. Cheaper than that
+    one, because nothing has been deposited yet, and still the first thing a customer hits.
+
+    IT CALLS deposit_account() RATHER THAN RE-DERIVING THE RULE (rule 8). That function already
+    knows every way a deposit address can be unavailable -- unset variable, invalid account,
+    a network mismatch -- and a second copy here would agree today and drift.
+
+    ADDRESS-ATTRIBUTED CHAINS RETURN "" WITHOUT BEING PROBED, and that is not laziness: for
+    BTC, LTC and GRC the test deposit_account() applies is get_new_address(), which DERIVES A
+    REAL ADDRESS from the wallet. Calling it to answer a question for a page would burn a fresh
+    address on every page load. Their reachability is what can go wrong and
+    chains/registry.unconfigured_chains() already reports that.
+
+    THE SENTENCE IS SHORTER THAN deposit_account()'S, deliberately, and the difference is
+    stated at both sites per rule 8: this one goes in a badge beside a greyed-out pair, where
+    the reader needs the variable's name; that one is the API refusal a caller gets back, where
+    the reader needs to be told no swap was created and why that is the intended failure.
+    """
+    if asset not in TAG_ATTRIBUTED_ASSETS:
+        return ""
+    if asset not in adapters:
+        # UNREACHABLE IS A DIFFERENT QUESTION, and unconfigured_chains() answers it. Probing
+        # here would raise KeyError on adapters[asset] inside deposit_account(), and two
+        # reasons for one pair leaves the operator to work out which to act on -- the same
+        # reasoning why_cannot_pay_out() gives for returning "" when there is no adapter.
+        return ""
+    variable, _discriminator, _network = TAG_ATTRIBUTION[asset]
+    try:
+        # swap_id="" because this is a PROBE: the tag-attributed branch reads config and
+        # validates the account and allocates nothing, so no tag is burned. open_swap.py:568
+        # already probes it this way.
+        deposit_account(config, adapters, asset, "")
+    except ValueError:
+        return f"{asset} cannot take deposits: {variable} is unset or not a valid account"
+    return ""
+
+
 def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tuple[str, bool]:
     """Where a customer sends the deposit. Returns (address, needs_tag). Writes nothing.
 

@@ -283,7 +283,14 @@ def test_every_pair_reachable_prints_no_unavailable_note():
         can_spend = True
         payout_refusal = ""
 
-    config = {"ALLOWED_PAIRS": {("XRP", "GRC")}, "RPC": {}}
+        def validate_address(self, _address):
+            return True
+
+    # XRP_DEPOSIT_ACCOUNT IS PART OF "REACHABLE" since 2026-10-01: a tag-attributed source
+    # chain with no shared account cannot produce a deposit address, so the pair is
+    # UNAVAILABLE and this test's premise -- every pair reachable -- requires it.
+    config = {"ALLOWED_PAIRS": {("XRP", "GRC")}, "RPC": {},
+              "XRP_DEPOSIT_ACCOUNT": XRP_SHARED_ACCOUNT}
 
     catalog = pair_catalog(config, {"XRP": Payer(), "GRC": Payer()})
 
@@ -1173,22 +1180,48 @@ def test_an_adapter_without_owns_address_is_not_an_error(monkeypatch, tmp_path, 
 # is the overclaim this line exists to remove.
 
 
+#: Real-format, because the validation is real: deposit_account() checks the account through
+#: the adapter AND through the local decode in modules/address_authority, so a placeholder
+#: string would be refused for its FORMAT and the test would pass on the wrong cause.
+XRP_SHARED_ACCOUNT = "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv"
+
+
 class _Payer:
     can_spend = True
     payout_refusal = ""
+
+    # PART OF THE FIVE-METHOD CONTRACT, and needed here since 2026-10-01: pair_view asks
+    # whether the SOURCE chain can produce a deposit address, which for a tag-attributed chain
+    # means validating the shared account through the adapter. A stub that omits it is not
+    # standing in for an adapter -- it would raise AttributeError, and
+    # why_cannot_take_deposits() deliberately does not catch that: every real adapter has this
+    # method (tests/test_address_authority.py asserts it per asset), so its absence is a
+    # contract violation that must surface rather than be reported as "cannot take deposits".
+    def validate_address(self, _address):
+        return True
 
 
 class _ViewOnly:
     can_spend = False
     payout_refusal = "holds no signing key in this test"
 
+    def validate_address(self, _address):
+        return True
 
-def test_two_different_causes_are_both_named():
+
+def test_three_different_causes_are_all_named():
     """MUTATION: return only the first cause, or any single row's reason. This fails.
 
-    BTC and LTC are missing entirely; XRP is present and cannot pay out. Those are
-    different ACTIONS -- export settings, versus a signing decision that is the
-    operator's -- so naming one for both sends them to do the wrong thing.
+    BTC and LTC are missing entirely; XRP is present and cannot pay out; and XRP also cannot
+    TAKE a deposit while its shared account is unset. Three different ACTIONS -- export
+    settings, a signing decision that is the operator's (rule 16), and one custody variable --
+    so naming one for all three sends them to do the wrong thing.
+
+    IT WAS TWO CAUSES UNTIL 2026-10-01 and the third arrived with pair_view's deposit-source
+    test. blocked_by() did not know it and printed its own "Cause NOT ESTABLISHED ... this is a
+    defect in pair_catalog()" fallback, which is exactly what that sentence is for. Renamed
+    rather than left at two: a test called "two causes" that checks three is a test nobody
+    trusts the name of.
     """
     config = {
         "ALLOWED_PAIRS": {("XRP", "GRC"), ("GRC", "XRP"), ("BTC", "GRC"), ("LTC", "GRC")},
@@ -1202,10 +1235,19 @@ def test_two_different_causes_are_both_named():
         "the PAYOUT cause must be the ADAPTER's own sentence, not a paraphrase of it -- "
         f"catalog was: {catalog}"
     )
-    assert "XRP->GRC" in catalog and "XRP->GRC (UNAVAILABLE)" not in catalog, (
-        "XRP->GRC pays out to GRC, which can pay -- it must stay available"
+    assert "XRP cannot take deposits" in catalog, (
+        "the THIRD cause: XRP_DEPOSIT_ACCOUNT is unset in this config, so XRP cannot be a "
+        f"deposit source either. catalog was: {catalog}"
+    )
+    assert "XRP->GRC (UNAVAILABLE)" in catalog, (
+        "and XRP->GRC is unavailable for THAT reason -- GRC can pay out, so the payout half "
+        "is fine and the deposit half is not"
     )
     assert "GRC->XRP (UNAVAILABLE)" in catalog
+    assert "Cause NOT ESTABLISHED" not in catalog, (
+        "every cause present must be named; the fallback firing means blocked_by() has fallen "
+        "behind pair_view again"
+    )
 
 
 def test_the_payout_cause_is_not_described_as_a_missing_setting():

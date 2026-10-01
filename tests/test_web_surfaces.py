@@ -136,6 +136,11 @@ def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(clien
     reachable_assets = {"XRP", "GRC"}
     reachable_adapters = reachable(*reachable_assets)
     monkeypatch.setitem(client.application.config, "ADAPTERS", reachable_adapters)
+    # AND THE SHARED ACCOUNTS, since 2026-10-01: "reachable" now includes being able to
+    # produce a deposit address, and XRP cannot without XRP_DEPOSIT_ACCOUNT. Without this the
+    # test still passes its `not in body` half and fails its `in body` half -- which is the
+    # right answer for an unconfigured terminal and the wrong premise for this test.
+    with_deposit_accounts(client, monkeypatch)
     body = client.get("/").get_data(as_text=True)
 
     for from_asset, to_asset in allowed:
@@ -168,7 +173,7 @@ def test_a_disabled_pair_names_the_variable_that_would_enable_it(client, monkeyp
     network_target.configuring_variable() -- so this asserts the NAME reaches the
     page, not that a particular sentence was written.
     """
-    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable("XRP"))
+    fully_reachable(client, monkeypatch, "XRP")
     body = client.get("/").get_data(as_text=True)
 
     # GRC is in an allowed pair and has no adapter here, so its variable must be
@@ -201,7 +206,7 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
     """
     allowed = client.application.config["ALLOWED_PAIRS"]
     every_asset = {asset for pair in allowed for asset in pair}
-    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable(*every_asset))
+    fully_reachable(client, monkeypatch, *every_asset)
     body = client.get("/").get_data(as_text=True)
 
     for from_asset, to_asset in allowed:
@@ -579,16 +584,57 @@ def test_a_refused_swap_is_logged_and_not_only_returned(client, caplog):
 # tests used object() and correctly stopped passing when that gate landed. A stub
 # that says nothing about itself should not be treated as capable.
 class StubAdapter:
-    """Declares only what pair_view asks of it: can it be paid out to?"""
+    """Declares what pair_view asks of it: can it be paid out to, and is an account valid?
+
+    `validate_address` ARRIVED 2026-10-01 with pair_view's third test. A pair is now offered
+    only when the SOURCE chain can produce a deposit address too, and for a tag-attributed
+    chain that means services/swap_service.deposit_account() validating the shared account --
+    through the adapter. A stub declaring only `can_spend` made every XRP and SOL pair
+    unofferable in these tests, which is the right answer for a chain whose account is unset
+    and the wrong SETUP for a test whose premise is "every chain is reachable".
+    """
 
     def __init__(self, can_spend=True):
         self.can_spend = can_spend
         self.payout_refusal = "" if can_spend else "cannot pay out in this test"
 
+    def validate_address(self, _address):
+        return True
+
+
+#: Real-format shared accounts for the tag-attributed chains, because the validation these go
+#: through is real: deposit_account() calls the adapter AND the local decode in
+#: modules/address_authority, so an obviously fake string would be refused for its FORMAT and
+#: the test would pass for the wrong reason. Both already appear elsewhere in this suite.
+DEPOSIT_ACCOUNTS = {
+    "XRP_DEPOSIT_ACCOUNT": "rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv",
+    "SOL_DEPOSIT_ACCOUNT": "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM",
+}
+
 
 def reachable(*assets, can_spend=True):
     """An adapters dict for `assets`, each able (or not) to be a destination."""
     return {asset: StubAdapter(can_spend=can_spend) for asset in assets}
+
+
+def with_deposit_accounts(client, monkeypatch):
+    """Set the shared accounts the tag-attributed chains need to be OFFERABLE at all.
+
+    ONE PLACE, so the next gate pair_view grows is added here rather than in every test that
+    means "a fully configured terminal". Separate from the adapters because two tests build
+    theirs as a dict literal to express a specific asymmetry -- one chain that can pay out and
+    one that cannot -- and should not have to go through a varargs helper to say that.
+    """
+    for variable, account in DEPOSIT_ACCOUNTS.items():
+        monkeypatch.setitem(client.application.config, variable, account)
+
+
+def fully_reachable(client, monkeypatch, *assets, can_spend=True):
+    """Adapters AND the shared deposit accounts: everything "reachable" now requires."""
+    monkeypatch.setitem(client.application.config, "ADAPTERS",
+                        reachable(*assets, can_spend=can_spend))
+    with_deposit_accounts(client, monkeypatch)
+    return client.application.config["ADAPTERS"]
 
 
 # NOT a credential. A SENTINEL: its only purpose is to be findable, so the leak
@@ -610,7 +656,7 @@ LEAK_SENTINEL = "health-response-must-not-echo-this"
 
 def test_health_reports_which_chains_have_an_adapter_in_this_process(client, monkeypatch):
     """adapter_built is per chain and comes from the adapters dict, not from config."""
-    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable("XRP"))
+    fully_reachable(client, monkeypatch, "XRP")
 
     body = client.get("/api/health").get_json()
 
@@ -654,7 +700,7 @@ def test_health_names_the_missing_settings_and_never_their_values(client, monkey
 def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkeypatch):
     """The line worth reading first: shorter than allowed_pairs means settings did
     not reach this process."""
-    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable("XRP", "GRC"))
+    fully_reachable(client, monkeypatch, "XRP", "GRC")
 
     body = client.get("/api/health").get_json()
 
@@ -667,7 +713,7 @@ def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkey
 def test_health_offerable_equals_allowed_when_every_chain_is_reachable(client, monkeypatch):
     """So the field cannot pass by always being empty."""
     every = {asset for pair in client.application.config["ALLOWED_PAIRS"] for asset in pair}
-    monkeypatch.setitem(client.application.config, "ADAPTERS", reachable(*every))
+    fully_reachable(client, monkeypatch, *every)
 
     body = client.get("/api/health").get_json()
 
@@ -703,7 +749,10 @@ def test_a_destination_that_cannot_pay_out_is_not_offered(client, monkeypatch):
     MUTATION: drop the why_cannot_pay_out() call from allowed_pair_rows(). Only this
     test and the one below fail.
     """
-    # Both chains reachable; only GRC can pay out. Exactly the operator's server.
+    # Both chains reachable, both accounts configured; only GRC can pay out. Exactly the
+    # operator's server. The accounts matter since 2026-10-01: without them BOTH directions
+    # are unofferable for a DIFFERENT reason and this test would pass on the wrong cause.
+    with_deposit_accounts(client, monkeypatch)
     monkeypatch.setitem(
         client.application.config,
         "ADAPTERS",

@@ -357,11 +357,20 @@ def blocked_by(unavailable: list[dict]) -> str:
     is the same overclaim this whole day was spent removing, and I committed a fresh
     one into the line that removes it.
 
-    Two causes, and they are different actions for the operator: a chain with no
-    adapter needs settings exported, and a chain that cannot pay out needs a signing
-    decision that is theirs (rule 16). Naming them separately is the whole point;
+    THREE causes now, and they are three different actions for the operator: a chain
+    with no adapter needs settings exported, a chain that cannot pay out needs a
+    signing decision that is theirs (rule 16), and a chain that cannot take deposits
+    needs one shared-account variable set. Naming them separately is the whole point;
     concatenating every full sentence instead would produce a paragraph nobody reads,
     so each cause names its CHAINS and the fix is one clause.
+
+    THE THIRD ARRIVED 2026-10-01 AND THIS FUNCTION CALLED ITSELF DEFECTIVE, exactly as
+    written: pair_view gained a deposit-source test, four pairs became unavailable for a
+    reason this function did not know, and the fallback below printed "Cause NOT
+    ESTABLISHED ... this is a defect in pair_catalog()". It was. That sentence existing
+    is why the gap took one test run to find instead of reaching an operator as an
+    unexplained UNAVAILABLE -- a wrong explanation is worse than an absent one, and an
+    absent one that names itself as a bug is better than both.
     """
     no_adapter = sorted({asset for row in unavailable for asset in row.get("missing") or []})
     # The adapters' OWN sentences, DEDUPLICATED -- not a paraphrase of them. An earlier
@@ -372,6 +381,12 @@ def blocked_by(unavailable: list[dict]) -> str:
     # says why it cannot pay. Deduplicated because two pairs can share one cause and
     # printing it twice reads as two problems.
     cannot_pay = sorted({row["cannot_pay"] for row in unavailable if row.get("cannot_pay")})
+    # THE SAME TREATMENT FOR THE DEPOSIT SIDE: the sentence comes from
+    # services/swap_service.why_cannot_take_deposits(), which derives the variable's name from
+    # TAG_ATTRIBUTION, so that table stays the one place that knows it (rule 11). Deduplicated
+    # for the same reason as above -- XRP->BTC, XRP->GRC and XRP->LTC share one cause, and
+    # printing it three times reads as three problems.
+    cannot_take = sorted({row["cannot_take"] for row in unavailable if row.get("cannot_take")})
     causes = []
     if no_adapter:
         # The FACT, and the remedy is not restated here: create_swap()'s refusal names
@@ -384,6 +399,7 @@ def blocked_by(unavailable: list[dict]) -> str:
             f"process"
         )
     causes.extend(cannot_pay)
+    causes.extend(cannot_take)
     if not causes:
         # Neither cause recognised. Say that rather than inventing one: a pair marked
         # UNAVAILABLE with no explanation is a bug report, and a wrong explanation is

@@ -35,6 +35,8 @@ knows the other exists.
 
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 
+from .swap_service import why_cannot_take_deposits
+
 
 def allowed_pair_rows(config, adapters) -> list[dict]:
     """Every allowed pair, as a row that says whether it can actually complete.
@@ -73,14 +75,24 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
         # chains/registry.why_cannot_pay_out() for what that would have cost a
         # customer. Only the DESTINATION is asked: a source chain never sends.
         cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
+        # THREE TESTS NOW, AND THE THIRD IS THE OTHER END OF THE SWAP. Measured 2026-10-01:
+        # with both shared accounts unset this function offered SOL->GRC, XRP->BTC, XRP->GRC
+        # and XRP->LTC, every one of which refuses at swap creation for want of a deposit
+        # account. Three of them predated the SOL work. The customer picks the pair, is
+        # quoted, accepts, and gets a refusal where the deposit address should be -- the same
+        # offered-and-not-completable defect as `cannot_pay` above, at the START of the flow.
+        # Only the SOURCE is asked: a destination chain never receives a deposit.
+        cannot_take = ("" if missing or cannot_pay else
+                       why_cannot_take_deposits(config, adapters, from_asset))
         rows.append(
             {
                 "from_asset": from_asset,
                 "to_asset": to_asset,
                 "label": f"{from_asset} -> {to_asset}",
-                "enabled": not missing and not cannot_pay,
+                "enabled": not missing and not cannot_pay and not cannot_take,
                 "missing": missing,
                 "cannot_pay": cannot_pay,
+                "cannot_take": cannot_take,
                 # `(none)` is never right here: a row is either enabled, in which
                 # case the reason says both chains are reachable, or it names every
                 # missing chain. A blank reason beside DISABLED would be rule 14's
@@ -89,7 +101,9 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
                     " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
                     if missing
                     else cannot_pay
-                    or "in ALLOWED_PAIRS, both chains have an adapter here, and the destination can pay out"
+                    or cannot_take
+                    or "in ALLOWED_PAIRS, both chains have an adapter here, the source can take "
+                    "a deposit and the destination can pay out"
                 ),
             }
         )
