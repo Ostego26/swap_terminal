@@ -227,3 +227,65 @@ def test_the_deposit_watcher_reports_halted_swaps():
         "the note must say what the number MEANS -- a bare count does not tell a reader "
         "that nothing will resolve it (rule 14)"
     )
+
+
+def test_a_cumulative_failure_total_does_not_make_an_idle_payout_cycle_claim_it_worked():
+    """The same defect as the test above, one field over, measured 2026-10-01.
+
+    From the operator's own payout_worker.log while they were between steps of a
+    devnet SOL -> testnet GRC rehearsal. Three payouts had failed earlier in the
+    week, so every cycle printed:
+
+        payout_worker cycle=14 WORKED pending_at_start=0 broadcast=0
+        failed_total=3 in 0.0µfn (0.0s)  <- ... failed_total is cumulative, not
+        this cycle
+
+    WORKED, with both counts that describe work at zero, every ten seconds. The
+    line's own note says the figure is cumulative, so the worker was explaining in
+    prose why the marker beside it was wrong.
+
+    WORSE THAN THE HALTED CASE IT MIRRORS, and that is why it gets its own test
+    rather than a parameter on the one above. HALTED_for_review returns to zero
+    when somebody resolves the swap; `failed_total` counts every payout that has
+    EVER failed and never returns to zero, so this latched the first time any
+    payout failed and could not unlatch. On that host it latched 2026-09-26 and
+    nobody noticed for five days.
+
+    STANDING_COUNTS is keyed by the count's NAME and its comment claimed that was
+    enough -- "a second worker reporting the same field gets the same treatment
+    without anybody remembering to ask for it". True, and not sufficient: this is
+    a DIFFERENT field with the identical property, and nobody remembered.
+
+    MUTATION: remove "failed_total" from STANDING_COUNTS and this fails while the
+    halted test still passes.
+    """
+    failures_only = cycle_line(
+        "payout_worker", 14, 0.04,
+        {"pending_at_start": 0, "broadcast": 0, "failed_total": 3},
+    )
+    assert "IDLE" in failures_only, "nothing was pending and nothing was broadcast; the cycle did nothing"
+    assert "failed_total=3" in failures_only, "and the standing total still has to be on screen"
+
+    # A cycle that broadcasts while the total stands still reads WORKED: the
+    # exclusion removes one count from the verdict, it does not suppress it.
+    assert "WORKED" in cycle_line(
+        "payout_worker", 15, 0.04,
+        {"pending_at_start": 1, "broadcast": 1, "failed_total": 3},
+    )
+    # AND A PAYOUT THAT FAILS THIS CYCLE STILL READS WORKED, which is the thing
+    # excluding a cumulative total could plausibly have broken and does not.
+    # `broadcast` stays 0 on a failure, so the verdict rests on
+    # `pending_at_start` -- and that is a sound signal: a payout can only fail if
+    # one was pending, so the cycle genuinely had something to do.
+    #
+    # Checked rather than assumed. The first version of this test asserted IDLE
+    # here and reasoned that "the only thing that could carry it is the standing
+    # total" -- which was wrong, because it forgot the count sitting next to it.
+    # Recorded because the wrong version would have pinned a defect as intended
+    # behavior: a failed payout on a credited swap is the most serious routine
+    # outcome this worker has, and a line reading IDLE for it would be the
+    # did-nothing-looks-like-did-work defect pointing the other way.
+    assert "WORKED" in cycle_line(
+        "payout_worker", 16, 0.04,
+        {"pending_at_start": 1, "broadcast": 0, "failed_total": 4},
+    )

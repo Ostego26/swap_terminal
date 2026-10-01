@@ -231,7 +231,30 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
 # remembering to ask for it. The one spelling here and the one in
 # workers/deposit_watcher.py's counts dict are pinned to each other by
 # tests/test_show_swap.py.
-STANDING_COUNTS = frozenset({"HALTED_for_review"})
+#
+# `failed_total` JOINED 2026-10-01, AND THE PARAGRAPH ABOVE PREDICTED IT WRONGLY.
+# "A second worker reporting the same FIELD gets the same treatment without
+# anybody remembering to ask for it" is true and was not enough: payout_worker
+# reports a different field with the identical property, and nobody remembered.
+#
+# Measured from the operator's own log while they were between steps of a devnet
+# SOL -> testnet GRC rehearsal. Three swaps had failed earlier in the week, so:
+#
+#     payout_worker cycle=14 WORKED pending_at_start=0 broadcast=0 failed_total=3
+#     in 0.0µfn (0.0s)  <- ... failed_total is cumulative, not this cycle
+#
+# WORKED, with both counts that describe work at zero, every ten seconds,
+# forever -- because `failed_total` is a cumulative total of every payout that
+# has ever failed and cycle_line() read any non-zero count as evidence of work.
+# The line's own note says "failed_total is cumulative, not this cycle", so the
+# worker was explaining in prose why the marker beside it was wrong.
+#
+# It is strictly worse than the HALTED_for_review case it mirrors, because
+# `failed_total` NEVER returns to zero. A halted swap gets resolved and the
+# deposit watcher goes back to printing IDLE; a failed payout is permanent, so
+# this one latched the first time any payout failed and could never unlatch. On
+# this host that was 2026-09-26, five days before anybody noticed.
+STANDING_COUNTS = frozenset({"HALTED_for_review", "failed_total"})
 
 
 def cycle_line(worker_name: str, cycle: int, seconds: float, counts: dict[str, int], notes: str = "") -> str:
