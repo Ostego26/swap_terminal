@@ -346,3 +346,95 @@ def test_the_start_banner_never_prints_a_credential():
 
     assert "canary-rpc-password" not in text
     assert "canary-rpc-user" not in text
+
+
+# A worker that dies the instant it is started, which is what an ImportError, a
+# SWAP_DB_PATH that cannot be opened, or a config error raised at
+# class-definition time all look like from the supervisor's side. Exit code 3
+# rather than 1 so the assertions below prove the REAL code is reported and not
+# a hardcoded one.
+DIES_IMMEDIATELY = "import sys; sys.stderr.write('ImportError: no module named nonesuch\\n'); sys.exit(3)"
+
+
+def _dying_table() -> dict[str, list[str]]:
+    return {"dier": [sys.executable, "-c", DIES_IMMEDIATELY]}
+
+
+def test_start_reports_a_worker_that_died_the_instant_it_was_spawned(tmp_path, capsys):
+    """Rule 13 pointed at `start` instead of `stop`: verify the artifact.
+
+    FOUND 2026-10-01, while the operator was restarting the three workers to
+    pick up SOL_RPC_URL. start_worker() returned `"started"` because
+    subprocess.Popen() RETURNED, and nothing asked a second time. A worker that
+    exits immediately produced
+
+        started           deposit_watcher pid=3998319 log=.../deposit_watcher.log
+
+    and a pid file naming a dead process -- three green lines beside a database
+    nothing was polling. stop_worker() has always made the ABSENCE of the
+    process the assertion rather than the kill's exit code; this is the same
+    assertion pointed the other way.
+
+    Four things are asserted, because the previous behavior satisfied a test
+    that only checked the word DIED appeared:
+
+      the outcome is marked, and distinctly (rule 14)
+      the REAL exit code is printed -- 3, not a hardcoded 1
+      the pid file is GONE, because a file naming a dead process is the stale
+          record rule 13 warns about
+      main() returns NON-ZERO, so a launcher chaining off `start` does not
+          carry on as though the workers were up
+    """
+    assert supervisor.main(["start", "--run-dir", str(tmp_path)], commands=_dying_table()) == 1
+    out = capsys.readouterr().out
+
+    assert "DIED" in out, f"a dead worker must not be reported as started:\n{out}"
+    assert "exited 3" in out, f"the real exit code must be printed, not a hardcoded one:\n{out}"
+    assert "died=1" in out
+    assert "spawned=0" in out
+    assert not supervisor.pid_file(tmp_path, "dier").exists(), (
+        "the pid file names a process that is not running; a later `stop` would read it"
+    )
+    # Rule 14: say what happened where the operator is already looking, rather
+    # than leaving them to go and find the log.
+    assert "ImportError: no module named nonesuch" in out
+
+
+def test_start_confirms_a_healthy_worker_is_still_there_rather_than_assuming_it(tmp_path, capsys):
+    """The other half, which a test for the dying case alone would not cover.
+
+    A confirm step that reported DIED for everything would pass the test above.
+    This asserts the live worker is still reported as started, that the line
+    says the check was made, and that the counts are the other way round.
+    """
+    table = _sleeper_table()
+    try:
+        assert supervisor.main(["start", "--run-dir", str(tmp_path)], commands=table) == 0
+        out = capsys.readouterr().out
+        assert "started" in out
+        assert "DIED" not in out
+        assert "died=0" in out
+        assert "spawned=1" in out
+        # The line has to say the question was asked of the operating system,
+        # because "started" on its own is exactly what it printed before.
+        assert "asked of the OS" in out
+    finally:
+        pid_record = supervisor.read_pid_record(supervisor.pid_file(tmp_path, "sleeper"))
+        if pid_record:
+            supervisor.stop_worker("sleeper", tmp_path, grace_seconds=5)
+            _reap_zombie(pid_record[0])
+
+
+def test_confirm_spawned_sleeps_nothing_when_nothing_was_spawned():
+    """`start` on three already-running workers must not pay the settle.
+
+    The operator's own transcript of 2026-10-01 has exactly this case --
+    `spawned=0  already-running=3` -- and it reported `in 0.0µfn (0.0s)`. A
+    settle slept unconditionally would have made a command that did nothing
+    take a second, which is rule 14's "did nothing must not look like did work"
+    arriving as a duration.
+    """
+    already = [{"worker": "a", "outcome": "already-running", "pid": 1}]
+    started = time.monotonic()
+    assert supervisor.confirm_spawned(already) is already
+    assert time.monotonic() - started < 0.2

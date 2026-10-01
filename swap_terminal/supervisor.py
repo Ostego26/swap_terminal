@@ -263,7 +263,129 @@ def start_worker(name: str, argv: list[str], run_dir: Path) -> dict:
     finally:
         log_handle.close()
     write_pid_record(path, process.pid, " ".join(argv))
-    return {"worker": name, "outcome": "started", "pid": process.pid, "argv": argv, "log": str(log_path)}
+    # The Popen object is carried out, and it is NOT printable state -- it exists
+    # so confirm_spawned() can call process.poll(). See that function for why
+    # process_alive() is the wrong question to ask about a child this process
+    # just forked.
+    return {
+        "worker": name,
+        "outcome": "started",
+        "pid": process.pid,
+        "argv": argv,
+        "log": str(log_path),
+        "process": process,
+    }
+
+
+# How long a freshly spawned worker is given to prove it is still there.
+#
+# Paid ONCE for the whole start rather than once per worker -- every worker is
+# spawned first, then the settle is slept, then all of them are polled -- so
+# starting three costs this much in total and not three times this much.
+#
+# 1.0s because the failure being caught is an IMMEDIATE death: an ImportError,
+# a config error at class-definition time, a database path that cannot be
+# opened. Measured on this machine, `import supervisor` alone is 0.022s and
+# `import supervisor, workers.common` 0.143-0.214s, so a worker that is going
+# to die on import has died well inside a second. This is deliberately NOT a
+# readiness check -- it does not wait for the banner, does not open a socket,
+# and makes no claim that the worker can reach any chain. It answers exactly
+# one question: is the process we just forked still a process?
+IMMEDIATE_DEATH_SETTLE_SECONDS = 1.0
+
+
+def confirm_spawned(results: list[dict], settle_seconds: float = IMMEDIATE_DEATH_SETTLE_SECONDS) -> list[dict]:
+    """Ask again whether each freshly spawned worker is still running.
+
+    THE DEFECT THIS EXISTS FOR, found 2026-10-01 while the operator was
+    restarting the workers to pick up SOL_RPC_URL. start_worker() returned
+    `"started"` because subprocess.Popen() RETURNED, and nothing ever asked a
+    second time. A worker that exits immediately -- an ImportError, a
+    SWAP_DB_PATH that cannot be opened, a config error raised at
+    class-definition time -- produced
+
+        started           deposit_watcher pid=3998319 log=.../deposit_watcher.log
+
+    and a pid file naming a dead process. Three green lines, and nothing
+    polling for deposits. That is rule 13's own sentence turned around: "when a
+    deploy depends on new code actually running, verify the artifact, not the
+    deploy", and rule 14's "make 'did nothing' look different from 'did work'"
+    on the one command whose entire job is to say what it just did.
+
+    stop_worker() has always made the ABSENCE of the process the assertion
+    rather than the exit code of the kill. This is the same assertion pointed
+    the other way: the PRESENCE of the process, asked of the operating system
+    after the fact, rather than the return of the call that created it.
+
+    WHY process.poll() AND NOT process_alive(). Not because process_alive()
+    would get the wrong answer -- it would get the right one. The spawned
+    workers are our own children, a child that has exited stays in the process
+    table as a ZOMBIE until its parent reaps it, and bare `os.kill(pid, 0)`
+    succeeds on a zombie; but process_alive() already calls _is_zombie() for
+    exactly that reason and tests/test_supervisor.py::test_a_zombie_is_not_alive
+    pins it. (That paragraph is here because the first draft of this comment
+    asserted the opposite, was wrong, and is the rule 17 failure of writing a
+    plausible reading in the register of a measurement.)
+
+    poll() is used for two things process_alive() cannot give:
+
+      the EXIT CODE.  "exited 1" and "killed by SIGKILL" are different
+          problems with different fixes, and a boolean cannot say which. The
+          code is the most useful token on the line.
+      the REAP.  This process is the parent. Leaving three dead children
+          unreaped would leave three zombies owned by a supervisor that is
+          about to exit -- harmless, since they reparent to init, but it means
+          the supervisor's own report of a death is the one thing that does not
+          clean up after it.
+
+    Returns the same list, with any dead worker's outcome changed to "DIED" and
+    its exit code and last log line attached. The pid file is REMOVED for it,
+    because a file claiming a running process that is not running is the stale
+    record rule 13 warns about -- a later `stop` would read it, find nothing,
+    and have to report an absence it did not cause.
+    """
+    spawned = [result for result in results if result["outcome"] == "started"]
+    if not spawned:
+        return results
+    time.sleep(settle_seconds)
+    for result in spawned:
+        process = result.get("process")
+        if process is None:
+            # A caller that built the result dict by hand rather than through
+            # start_worker(). Nothing to poll, so nothing is claimed either way.
+            continue
+        code = process.poll()
+        if code is None:
+            continue
+        result["outcome"] = "DIED"
+        result["exit_code"] = code
+        result["last_log_line"] = _last_log_line(result.get("log", ""))
+    return results
+
+
+def _last_log_line(log_path: str) -> str:
+    """The last non-empty line of a worker's log, for a worker that just died.
+
+    On a traceback that is the exception, which is the single most useful line
+    on the screen and the one an operator would otherwise have to go and find.
+    Rule 14: say what happened where the operator is already looking.
+
+    Never raises. This runs inside the report of a failure that has already
+    happened, and a report that dies reading a log file has turned one problem
+    into two.
+    """
+    if not log_path:
+        return ""
+    try:
+        lines = [line.strip() for line in Path(log_path).read_text(errors="replace").splitlines()]
+    except OSError as exc:
+        # NOT a blind except: OSError only, and the failure is REPORTED in the
+        # return value rather than becoming an empty string that reads like an
+        # empty log (rule 12's BLE001 note -- the caller must be able to tell a
+        # failure from a real answer).
+        return f"(could not read {log_path}: {exc})"
+    populated = [line for line in lines if line]
+    return populated[-1] if populated else "(the log is empty -- the worker wrote nothing at all)"
 
 
 def stop_worker(name: str, run_dir: Path, grace_seconds: float = DEFAULT_GRACE_SECONDS) -> dict:
@@ -485,10 +607,27 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
     print("  about to spawn    a payout worker CAN broadcast. Stop now if this database is pointed at a funded mainnet wallet.")
 
     results = [start_worker(name, commands[name], run_dir) for name in names]
+    # Every worker is spawned BEFORE the settle is slept, so the wait is paid
+    # once for the whole command rather than once per worker.
+    results = confirm_spawned(results)
+
     lines = []
     for result in results:
         if result["outcome"] == "started":
-            lines.append(f"  started           {result['worker']} pid={result['pid']} log={result.get('log', '?')}")
+            lines.append(
+                f"  started           {result['worker']} pid={result['pid']} log={result.get('log', '?')}"
+                f"  <- still running {format_duration(IMMEDIATE_DEATH_SETTLE_SECONDS)} after the spawn, asked of the OS"
+            )
+        elif result["outcome"] == "DIED":
+            pid_file(run_dir, result["worker"]).unlink(missing_ok=True)
+            lines.append(
+                f"  *** DIED ***      {result['worker']} pid={result['pid']} exited {result['exit_code']} within "
+                f"{format_duration(IMMEDIATE_DEATH_SETTLE_SECONDS)} of being spawned, so it is NOT polling and its pid "
+                f"file has been removed. Log: {result.get('log', '?')}"
+            )
+            last = result.get("last_log_line", "")
+            if last:
+                lines.append(f"                    last log line: {last}")
         else:
             lines.append(
                 f"  ALREADY RUNNING   {result['worker']} pid={result['pid']}  <- nothing was spawned for this one"
@@ -496,11 +635,20 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
     _print_block("  outcome", lines)
 
     started = sum(1 for r in results if r["outcome"] == "started")
-    skipped = len(results) - started
-    # "did nothing" must not look like "did work" (rule 13/14), so the two
-    # counts are always both printed even when one of them is zero.
-    print(f"  summary           spawned={started}  already-running={skipped}  in {format_duration(time.monotonic() - started_at)}")
-    return 0
+    died = sum(1 for r in results if r["outcome"] == "DIED")
+    skipped = len(results) - started - died
+    # "did nothing" must not look like "did work" (rule 13/14), so all three
+    # counts are always printed even when two of them are zero. died= leads the
+    # interpretation because it is the one that means the command failed at the
+    # thing it was for.
+    print(
+        f"  summary           spawned={started}  already-running={skipped}  died={died}  "
+        f"in {format_duration(time.monotonic() - started_at)}"
+        + ("  <- died>0 means a worker is NOT polling; nothing below this line will happen" if died else "")
+    )
+    # Non-zero, so a script or a .desktop launcher that chains off this command
+    # does not carry on as though the workers were up.
+    return 1 if died else 0
 
 
 def command_stop(names: list[str], run_dir: Path, grace_seconds: float) -> int:
