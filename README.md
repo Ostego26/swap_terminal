@@ -302,6 +302,28 @@ only logged. A credit may be in a transaction that was never fetched, so
 "matched nothing" is reported over what was *fetched*, with the unread count
 named separately.
 
+**A BIGGER `--limit` COVERS LESS on a rate-limited endpoint**, measured
+2026-10-01 across two runs against public devnet:
+
+| | fetched |
+|---|---|
+| `--limit 10` | 9 of 10 |
+| `--limit 50` | **8 of 50** |
+
+Every listed signature costs a `getTransaction`, so raising the limit spends the
+rate budget on listing and fewer transactions come back. That is the opposite of
+instinct, so the check now says it on screen whenever more were skipped than
+fetched.
+
+**A live-path implication, and it is the operator's (rule 16).** A deposit
+watcher polling the shared SOL account against a public endpoint would hit this
+on every cycle: 42 of 50 unfetched means a real deposit can sit uncredited while
+the scan returns cleanly. The adapter logs each skip and the summary names the
+count — but nothing escalates, nothing moves a swap to `under_review`, and
+nothing retries the skipped signatures on the next pass. Wiring any of that is a
+money-path change and is **not** made here. It is the same gap as the stranded
+unattributable deposit, reached from a different direction.
+
 **Still unproven: `_spl_credits`' decoder**, and `--mint` alone cannot prove it.
 Measured 2026-09-30 with `--mint` wrapped SOL: `getAccountInfo` returned the
 Token program and `decimals=9`, the associated token account derived and was

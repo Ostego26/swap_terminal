@@ -54,7 +54,9 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     RPC_RETRIES_PER_CALL,
     CreditPathObserved,
     _deposits_line,
+    _indented,
     _network_line,
+    _one_reason_per_group,
     call_with_backoff,
     check_rent,
     credit_path_lines,
@@ -1908,3 +1910,169 @@ def test_the_found_holder_is_never_described_as_a_WALLET():
     })
     _found, fallback_why = find_a_holder(fallback, _A_MINT)
     assert "wallet" not in fallback_why.lower(), fallback_why
+
+# ---------------------------------------------------------------------------
+# FORTY-TWO IDENTICAL WARNINGS. The operator's --limit 50 run on 2026-10-01:
+# 42 of 50 transactions throttled, and the step printed all 42 in full --
+# six lines each, ~300 characters each, every one saying the same thing about
+# a different signature. The line that mattered ("read 8 of 50 listed") was
+# at the bottom of them.
+#
+# Rule 14 says silence is a defect; this is the same defect from the other
+# side, and the memo hunt already fixed it once with "one line for the first,
+# a count for the rest". Third time one of these lessons has had to be applied
+# in a second place.
+# ---------------------------------------------------------------------------
+
+_SIGS = ["5pJoHCc2dkWgEQuHp2Fb5jt3DGkBH9w4hnKQnWwnKZgh",
+         "2aKDXDAnigNcyztHaQrSGPKTigiBygttNt76nYVXCa8L",
+         "57xwuZsVVN3sETxe9PDcihKs8w7yk9Dgdy6yvTUGQfTa"]
+_ACCT = "GcBBd25Sgu2w4EbL9otjxYZ56toWfNaQrKCtFG55CCZx"
+
+
+def _throttle_warnings(signatures=_SIGS):
+    return [f"SOL deposit scan could not read transaction {sig} for account {_ACCT} and SKIPPED "
+            f"it: getTransaction returned HTTP 429. Nothing was credited from it."
+            for sig in signatures]
+
+
+def test_records_that_differ_only_by_signature_are_ONE_group():
+    """The grouping key is the record with its base58 tokens blanked.
+
+    Two warnings differing only in which transaction was throttled are one piece of information
+    repeated. Two differing in their REASON are two findings and both have to be read.
+    """
+    groups = _one_reason_per_group(_throttle_warnings())
+    assert len(groups) == 1
+    first, named = groups[0]
+    assert _SIGS[0] in first
+    assert set(_SIGS) <= set(named), "every signature the group named is kept"
+
+
+def test_records_with_DIFFERENT_reasons_stay_separate():
+    """MUTATION: group by count or by the first N characters and two findings become one."""
+    mixed = [
+        *_throttle_warnings([_SIGS[0]]),
+        f"SOL deposit scan could not read transaction {_SIGS[1]} for account {_ACCT} and SKIPPED "
+        f"it: getTransaction returned -32015 Transaction version (1) is not supported.",
+    ]
+    assert len(_one_reason_per_group(mixed)) == 2, (
+        "a rate limit and an unsupported transaction version are different findings"
+    )
+
+    # SAME LENGTH, DIFFERENT REASON -- and this pair is why. `key = str(len(record))` survived
+    # the mutation run against the pair above, because those two records happen to differ in
+    # length, so a key that ignores the text entirely still separated them. A test that passes
+    # for a reason it is not about is the thing that lets a wrong key ship.
+    throttled = f"transaction {_SIGS[0]} for account {_ACCT}: throttled, nothing credited"
+    unsupported = f"transaction {_SIGS[1]} for account {_ACCT}: version unsupported, none credited"
+    # PADDED BY COMPUTATION, NOT BY EYE. Written out by hand these came to 158 and 155 and the
+    # equal-length assertion failed on its own seed -- which is the same "plausible but wrong
+    # test data" that the base58 suffixes hit two tests up.
+    width = max(len(throttled), len(unsupported))
+    same_length = [throttled.ljust(width, "x"), unsupported.ljust(width, "x")]
+    assert len(same_length[0]) == len(same_length[1]), "the point of this pair is equal length"
+    assert len(_one_reason_per_group(same_length)) == 2, (
+        "grouped by length rather than by what the records SAY"
+    )
+
+    # And the converse: differing ONLY in signature must still be one group even when that
+    # changes nothing about length, which is the normal case.
+    assert len(_one_reason_per_group(_throttle_warnings(_SIGS[:2]))) == 1
+
+
+def test_forty_two_identical_warnings_print_as_ONE_plus_the_signatures():
+    """THE DEFECT, PINNED AT SCALE.
+
+    MUTATION: print every record in full -- which is what it did -- and this fails on the line
+    count. Forty-two six-line blocks is output that says nothing a reader can act on, at volume.
+    """
+    # VALID BASE58 SUFFIXES. The first version of this built them with f"{n:02d}", which
+    # produces "00", "01" ... -- and `0` is NOT in the base58 alphabet, so the token split and
+    # the grouping key differed per record. The test failed on its own seed rather than on the
+    # code, which is the cheap version of the same mistake: invalid data that looks plausible.
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    many = _throttle_warnings([
+        f"{sig[:-2]}{alphabet[n // len(alphabet)]}{alphabet[n % len(alphabet)]}"
+        for n, sig in enumerate(_SIGS * 14)
+    ])
+    folded = _indented(many)
+    assert folded.count("logged:") == 1, (
+        f"printed {folded.count('logged:')} full records for one repeated reason"
+    )
+    assert "and the SAME reason for 41 more" in folded
+
+
+def test_EVERY_signature_is_still_printed_because_recovery_needs_them():
+    """Shortening the block by dropping evidence would trade one unusable output for another.
+
+    An operator recovering a deposit by hand needs the signature. What is removed is the
+    repetition of the REASON, never the signatures.
+
+    MUTATION: truncate the signature list to the first few and this fails.
+    """
+    folded = _indented(_throttle_warnings())
+    for sig in _SIGS:
+        assert sig in folded, f"{sig} is how a human finds that transaction again"
+    assert "for recovery by hand" in folded
+
+
+def test_the_account_named_in_every_record_is_not_repeated_as_a_signature():
+    """It is in the full record already; listing it again as "one more" would be noise.
+
+    MUTATION: collect every base58 token without excluding the ones already shown, and the
+    account address appears in the recovery list once per skipped transaction.
+    """
+    folded = _indented(_throttle_warnings())
+    assert folded.count(_ACCT) == 1, (
+        f"the account appears {folded.count(_ACCT)} times; it is the same account every line"
+    )
+
+
+def test_a_single_record_is_unchanged():
+    """No collapsing to do, and no "and 0 more" line either."""
+    folded = _indented(_throttle_warnings([_SIGS[0]]))
+    assert folded.count("logged:") == 1
+    assert "SAME reason" not in folded
+    assert "for recovery by hand" not in folded
+
+
+def test_a_BIGGER_window_is_reported_as_covering_LESS():
+    """THE SECOND FINDING FROM THAT RUN, AND I CAUSED IT -- I suggested --limit 50.
+
+    MEASURED on the operator's two runs against public devnet:
+
+        --limit 10    9 of 10 fetched
+        --limit 50    8 of 50 fetched
+
+    Every listed signature costs a getTransaction, so raising the limit spends the rate budget
+    on listing and FEWER transactions come back. That is the opposite of everyone's instinct,
+    which is why it has to be on the screen next to the number -- an operator reading "42 never
+    fetched" reaches for a bigger window.
+
+    MUTATION: drop the advice, or trigger it whenever anything was unfetched, and this fails --
+    the second would nag on a healthy run where the endpoint is coping fine.
+    """
+    starved = " ".join(credit_path_lines(
+        CreditPathObserved(address_read=True, is_spl=True, signatures=8,
+                           credits=0, refused=0, unreadable=42)))
+    assert "SMALLER --limit will cover MORE" in starved
+    assert "the endpoint is the limit, not the window" in starved
+
+    coping = " ".join(credit_path_lines(
+        CreditPathObserved(address_read=True, is_spl=True, signatures=9,
+                           credits=0, refused=0, unreadable=1)))
+    assert "SMALLER --limit" not in coping, "one skipped read is not a starved endpoint"
+    assert "never fetched" in coping, "but it is still named"
+
+
+def test_the_coverage_line_does_not_print_a_full_stop_before_a_comma():
+    """Punctuation, and it reached the operator-facing line as "full set.,".
+
+    Small, and the reason it is pinned rather than just fixed: the comma belongs to the no-skip
+    case only, which is exactly the kind of conditional punctuation that comes back.
+    """
+    starved = credit_path_lines(CreditPathObserved(True, True, 8, 0, 0, 42))[1]
+    assert ".," not in starved
+    clean = credit_path_lines(CreditPathObserved(True, True, 10, 0, 0, 0))[1]
+    assert clean.endswith(",")

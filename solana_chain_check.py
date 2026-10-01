@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -664,12 +665,31 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
         # THE DENOMINATOR IS WHAT WAS FETCHED, NOT WHAT WAS LISTED. "matched nothing over 10" is
         # a claim about ten transactions; if one was never read, a credit may be in it and the
         # claim is not established over the full set. The unread count is named, not folded in.
+        # A BIGGER WINDOW MAKES COVERAGE WORSE ON A RATE-LIMITED ENDPOINT, and that is the
+        # opposite of everyone's instinct including mine -- I suggested --limit 50 to the
+        # operator. MEASURED on their two runs against public devnet:
+        #
+        #     --limit 10   9 of 10 fetched
+        #     --limit 50   8 of 50 fetched
+        #
+        # Each listed signature costs a getTransaction, so raising the limit spends the rate
+        # budget on listing instead of reading and FEWER transactions come back. Said on the
+        # screen, because an operator looking at "42 never fetched" will reach for a bigger
+        # number next (rule 14: the instruction has to be where the number is).
+        advice = ""
+        if observed.unreadable > observed.signatures:
+            advice = (f" A SMALLER --limit will cover MORE here, not less: every listed signature "
+                      f"costs a fetch, so a bigger window spends the rate budget on listing. "
+                      f"{observed.unreadable} unfetched against {observed.signatures} fetched "
+                      f"means the endpoint is the limit, not the window.")
         skipped = ("" if not observed.unreadable else
                    f" -- plus {observed.unreadable} LISTED but never fetched, so a credit may be "
-                   f"in those and this is NOT established over the full set")
+                   f"in those and this is NOT established over the full set.{advice}")
         return [f"  CREDIT path: PARTLY exercised. Discovery ran, and the filter in "
                 f"{observed.reader} ran over",
-                f"  {observed.signatures} FETCHED signature(s){skipped},",
+                # The comma belongs to the no-skip case only: `skipped` ends in a full stop,
+                # and appending one produced "full set.," on the operator-facing line.
+                f"  {observed.signatures} FETCHED signature(s){skipped or ','}",
                 "  and matched nothing, so the reader returned no credits WITHOUT decoding an",
                 "  amount -- its uiTokenAmount/balance-delta reads are still unproven, and those",
                 "  are the field names that lose a deposit silently. Point --address at an account",
@@ -1281,15 +1301,61 @@ class _CapturedAdapterLogs(logging.Handler):
         self.records.append(self.format(record))
 
 
+#: A base58 run long enough to be a signature or an address. Used to tell records apart from
+#: each other by their REASON rather than by which transaction they happened to name.
+_BASE58_RUN = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,}")
+
+
+def _one_reason_per_group(records: list[str]) -> list[tuple[str, list[str]]]:
+    """Records grouped by what they SAY, ignoring which transaction they name.
+
+    Returns [(the first record of the group, every base58 token the group named)], in the order
+    the groups first appeared. Pure, so the grouping is testable without a cluster.
+
+    THE KEY IS THE RECORD WITH ITS SIGNATURES BLANKED. Two warnings that differ only in which
+    transaction was throttled are one piece of information repeated; two that differ in their
+    REASON are two findings and both have to be read.
+    """
+    groups: dict[str, tuple[str, list[str]]] = {}
+    for record in records:
+        key = _BASE58_RUN.sub("<base58>", record)
+        first, named = groups.setdefault(key, (record, []))
+        named.extend(_BASE58_RUN.findall(record))
+        groups[key] = (first, named)
+    return list(groups.values())
+
+
 def _indented(records: list[str], indent: str = "      ") -> str:
-    """Log lines folded into a step's output, each continuation line aligned under the first."""
+    """Log records folded into a step's output, ONE PER DISTINCT REASON, aligned.
+
+    COLLAPSED BY REASON, AND THE OPERATOR'S 2026-10-01 RUN IS WHY. `--limit 50` against public
+    devnet got 42 of 50 transactions throttled, and this printed all 42 warnings in full: forty-
+    two six-line blocks, each ~300 characters, each saying the identical thing about a different
+    signature. The one line that mattered -- "read 8 of 50 listed" -- was at the bottom of it.
+
+    THAT IS THE SAME DEFECT AS THE MEMO HUNT'S, in a second place. Rule 14 says silence is a
+    defect; this is the same defect from the other side, which that hunt already fixed once with
+    "one line for the first, a count for the rest" and which did not carry across to the
+    adapter's own warnings. Third time one of these lessons has had to be applied twice.
+
+    EVERY SIGNATURE IS STILL PRINTED, compactly, because they are what an operator needs to go
+    and recover a deposit by hand -- dropping them to shorten the block would trade one
+    unusable output for another. What is removed is the repetition of the REASON, not the
+    evidence.
+    """
     if not records:
         return ""
     lines = []
-    for record in records:
-        first, *rest = record.splitlines() or [""]
-        lines.append(f"\n{indent}logged: {first}")
+    for first, named in _one_reason_per_group(records):
+        head, *rest = first.splitlines() or [""]
+        lines.append(f"\n{indent}logged: {head}")
         lines.extend(f"\n{indent}        {line}" for line in rest)
+        repeats = len(named) - len(_BASE58_RUN.findall(first))
+        if repeats > 0:
+            extra = [token for token in named if token not in _BASE58_RUN.findall(first)]
+            lines.append(f"\n{indent}        ... and the SAME reason for {len(extra)} more. "
+                         f"Every one, for recovery by hand:")
+            lines.append(f"\n{indent}          " + " ".join(extra))
     return "".join(lines)
 
 
