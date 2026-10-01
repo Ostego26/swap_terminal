@@ -87,6 +87,7 @@ from chains.solana_memo import (  # noqa: E402
 from chains.solana_units import (  # noqa: E402
     ACCOUNT_STORAGE_OVERHEAD_BYTES,
     BALANCE_COMMITMENT,
+DISCOVERY_COMMITMENT,
     LAMPORTS_PER_BYTE_FOR_RENT_EXEMPTION,
     RENT_EXEMPT_SYSTEM_ACCOUNT_LAMPORTS,
     RENT_EXEMPT_TOKEN_ACCOUNT_LAMPORTS,
@@ -305,6 +306,128 @@ def owner_of(adapter: SolanaAdapter, token_account: str) -> tuple[str, bool, str
     return owner, False, ""
 
 
+def owner_in_post_token_balances(transaction: object, mint: str) -> str:
+    """The first wallet in this transaction holding `mint`, read the way _spl_credits reads it.
+
+    PURE, AND EXTRACTED because inlining it put holder_from_mint_traffic() at C901 11 against a
+    ceiling of 10 -- rule 12: extract the decision, do not raise the ceiling. It is the decision
+    worth having alone anyway: it is the SELECTION _spl_credits performs, with seeded inputs
+    instead of a cluster, so the key path can be tested without a network.
+
+    THE SAME TWO KEYS, DELIBERATELY. `meta.postTokenBalances[].mint` and `[].owner` are what
+    chains/solana._spl_credits selects on (solana.py's `indexed()`), and the point of finding a
+    holder this way is that getting an answer at all measures that path. Spelling them
+    differently here would make the measurement meaningless -- so if that selection ever moves,
+    this is a second site to change, and it says so (rule 8).
+    """
+    if not isinstance(transaction, dict):
+        return ""
+    balances = ((transaction.get("meta") or {}).get("postTokenBalances")) or []
+    for balance in balances:
+        if not isinstance(balance, dict) or balance.get("mint") != mint:
+            continue
+        owner = balance.get("owner") or ""
+        if owner and is_valid_address(owner):
+            return owner
+    return ""
+
+
+#: How many of the mint's own recent transactions to read looking for a holder. Small, because
+#: each one is a getTransaction and the public endpoint is already rate-limiting this run.
+HOLDER_SEARCH_TRANSACTIONS = 8
+
+
+def holder_from_mint_traffic(adapter: SolanaAdapter, mint: str) -> tuple[str, bool, str]:
+    """A holder of `mint`, found in the mint's own recent transactions. Returns (owner, throttled, why).
+
+    WHY A SECOND STRATEGY EXISTS. getTokenLargestAccounts is the precise way to ask this, and on
+    2026-09-30 / 10-01 the public devnet endpoint refused it twice in a row with HTTP 429 after
+    three attempts each -- measured, from the operator's own runs, not inferred. A flag that
+    cannot get past a rate limit is a flag that does not work, and the fallback below uses
+    ONLY methods this cluster has already answered today:
+
+        getSignaturesForAddress   proven -- it is how --hunt-memo settled both program ids
+        getTransaction            proven -- the same hunt read ten of them
+
+    AND IT MEASURES THE FIELD PATH THAT IS ACTUALLY UNPROVEN, which the largest-accounts route
+    does not. `_spl_credits` selects on `meta.postTokenBalances[].owner` and `.mint`; those are
+    exactly the keys read here. So an owner found this way is not just an address to check --
+    getting it at all is evidence that the reader's own selection path is right, which is the
+    thing --find-holder exists to make provable.
+
+    THE OWNER IS A WALLET, as it must be: postTokenBalances reports the token account's OWNER
+    alongside its mint, so no second lookup is needed and no token account can be mistaken for a
+    wallet (the mistake owner_of() exists to avoid on the other route).
+
+    STILL UNMEASURED IN ONE RESPECT, and said rather than implied (rule 17): whether the WSOL
+    mint's own address has recent signatures at all. Transfers reference token accounts, and only
+    some operations put the mint in a transaction's account keys. If it has none this returns
+    empty and says so -- which is a fact about the mint, not about the field names.
+    """
+    signatures, throttled, why = call_with_backoff(
+        adapter, "getSignaturesForAddress", mint,
+        {"limit": HOLDER_SEARCH_TRANSACTIONS, "commitment": DISCOVERY_COMMITMENT})
+    if throttled:
+        return "", True, f"getSignaturesForAddress({mint[:8]}...) was throttled: {why}"
+    if signatures is None:
+        return "", False, f"getSignaturesForAddress failed: {why}"
+    entries = list(signatures or [])
+    if not entries:
+        return "", False, (f"the mint account has no recent signatures of its own. Transfers "
+                           f"reference token accounts rather than the mint, so this is a fact "
+                           f"about {mint[:8]}..., not about any field name.")
+
+    for entry in entries:
+        signature = entry.get("signature")
+        if not signature:
+            continue
+        transaction, tx_throttled, tx_why = call_with_backoff(
+            adapter, "getTransaction", signature,
+            {"encoding": "jsonParsed", "commitment": DISCOVERY_COMMITMENT,
+             "maxSupportedTransactionVersion": MEMO_HUNT_TRANSACTION_VERSION})
+        if tx_throttled:
+            return "", True, f"reading {signature[:16]}... was throttled: {tx_why}"
+        if transaction is None:
+            # ONE UNREADABLE TRANSACTION MUST NOT END THE SEARCH, the same reason owner_of()'s
+            # caller walks past an unusable entry: a single odd row would hide every good one.
+            continue
+        owner = owner_in_post_token_balances(transaction, mint)
+        if owner:
+            return owner, False, (
+                f"FOUND in the mint's own traffic: transaction {signature[:16]}... has a "
+                f"postTokenBalances entry for this mint owned by that wallet. Which also "
+                f"MEASURES `meta.postTokenBalances[].owner` and `.mint` -- the exact keys "
+                f"_spl_credits selects on, and the ones that were unproven.")
+    return "", False, (f"read {len(entries)} of the mint's transactions and none carried a "
+                       f"postTokenBalances entry for it with a readable `owner`. That is a "
+                       f"finding about the response shape: those are the keys _spl_credits uses.")
+
+
+def after_the_first_route_was_throttled(adapter: SolanaAdapter, mint: str,
+                                        why_not: str) -> tuple[str, str]:
+    """Try the mint's own traffic, and say which route answered. Returns (owner, why).
+
+    EXTRACTED because folding three outcomes into find_a_holder() put it at PLR0911 8 returns
+    against a ceiling of 6 (rule 12: extract the decision). The three are not interchangeable
+    and that is the whole reason they are spelled out: BOTH throttled says re-run; the fallback
+    answering and finding nothing is a finding about the response; the fallback answering with a
+    holder means the run can continue, and it names which route produced the address so a reader
+    is never left guessing which of the two was exercised.
+    """
+    found, second_throttled, second_why = holder_from_mint_traffic(adapter, mint)
+    if found:
+        return found, (f"getTokenLargestAccounts was throttled ({why_not}), so this came from "
+                       f"the mint's own traffic instead. {second_why}")
+    if second_throttled:
+        return "", (f"BOTH routes were throttled. getTokenLargestAccounts: {why_not}. The mint's "
+                    f"own traffic: {second_why}. The endpoint never answered either way, so this "
+                    f"says NOTHING about the field names here or about who holds {mint}. Re-run "
+                    f"in a moment, or against an endpoint that is not rate-limited.")
+    return "", (f"getTokenLargestAccounts was throttled ({why_not}) -- that part says nothing "
+                f"about our code. The fallback through the mint's own traffic DID answer and "
+                f"found nothing usable: {second_why}")
+
+
 def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
     """Ask the cluster for a wallet that actually holds `mint`. Read-only. Returns (owner, why).
 
@@ -332,11 +455,11 @@ def find_a_holder(adapter: SolanaAdapter, mint: str) -> tuple[str, str]:
     largest, throttled, why_not = call_with_backoff(
         adapter, "getTokenLargestAccounts", mint, {"commitment": BALANCE_COMMITMENT})
     if throttled:
-        # A RATE LIMIT IS NOT A FINDING ABOUT OUR FIELD NAMES, and the first version of this
-        # helper said it was. See call_with_backoff().
-        return "", (f"the endpoint THROTTLED this lookup ({why_not}) -- it never answered, so "
-                    f"this says NOTHING about the field names here or about who holds {mint}. "
-                    f"Re-run in a moment, or against an endpoint that is not rate-limited.")
+        # A RATE LIMIT IS NOT A FINDING ABOUT OUR FIELD NAMES (see call_with_backoff) AND IT IS
+        # NOT THE END OF THE ATTEMPT EITHER. The operator's runs showed the public devnet
+        # endpoint refusing getTokenLargestAccounts twice in a row, so falling back is the
+        # difference between a flag that works and one that cannot get past a rate limit.
+        return after_the_first_route_was_throttled(adapter, mint, why_not)
     if largest is None:
         return "", (f"getTokenLargestAccounts failed: {why_not}. The endpoint answered and the "
                     f"answer could not be used, which IS a finding -- the field names in "

@@ -298,6 +298,23 @@ mint, `getAccountInfo` on one names the wallet that owns it, and the check reads
 **that** account — somebody else's holdings prove the reader exactly as well as
 ours would, the same principle as `--hunt-memo`. Nothing is signed or sent.
 
+**`getTokenLargestAccounts` is throttled on public devnet** — measured, two
+runs on 2026-09-30 and 2026-10-01, HTTP 429 after three attempts each. So
+`--find-holder` has a second route, and it is the better one: it reads the
+mint's own recent transactions with `getSignaturesForAddress` and
+`getTransaction` — **both already proven against this cluster** by
+`--hunt-memo` — and takes the owner out of
+`meta.postTokenBalances[].owner` where `.mint` matches.
+
+That is the same selection `_spl_credits` performs. So getting an answer from
+this route does not merely hand over an address to check: **it measures the
+previously unproven key path as a side effect**, and the output says so.
+
+Three outcomes, three different next actions: both routes throttled (re-run);
+the fallback answering with no usable entry (a finding about the response
+shape); the fallback finding a holder (the run continues, naming which route
+produced the address).
+
 **Its first real run answered HTTP 429** and it is retried now. The public
 devnet endpoint rate-limits `getTokenLargestAccounts`, and the first version of
 this helper neither retried it nor told the two apart — it printed "the field

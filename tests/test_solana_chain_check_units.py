@@ -59,9 +59,11 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     check_rent,
     credit_path_lines,
     find_a_holder,
+    holder_from_mint_traffic,
     hunt_one_program_id,
     make_runner,
     memo_status_lines,
+    owner_in_post_token_balances,
     owner_of,
     print_banner,
     print_summary,
@@ -1541,23 +1543,14 @@ def test_the_retry_is_ONE_implementation_shared_by_both_callers():
     assert source.count("for attempt in range") == 1, "exactly one retry loop in this file"
 
 
-def test_a_throttled_holder_lookup_blames_the_ENDPOINT_and_nothing_else():
-    """THE DEFECT, PINNED. The message must not mention the field names at all.
-
-    MUTATION: fall back to the shape-finding wording for a throttle and this fails -- which is
-    the sentence the operator read.
-    """
-    adapter = _seeded_adapter({"getTokenLargestAccounts": _throttle_always})
-    found, why = find_a_holder(adapter, _A_MINT)
-    assert found == ""
-    assert "THROTTLED" in why
-    assert "never answered" in why
-    assert "says NOTHING about the field names" in why
-    assert "never measured" not in why, (
-        "a rate limit is not evidence about our field names, and saying so sends the reader to "
-        "read code that is probably fine"
-    )
-    assert "Re-run in a moment" in why, "rule 14: the instruction has to be on the screen"
+# test_a_throttled_holder_lookup_blames_the_ENDPOINT_and_nothing_else STOOD HERE AND IS GONE
+# (rule 9). It seeded only getTokenLargestAccounts as throttled and asserted the message blamed
+# the endpoint -- correct when a throttle on that route was terminal. Since 2026-10-01 it falls
+# back to the mint's own traffic, so that seed no longer reaches the message it was checking, and
+# its one distinct assertion ("never measured" must not appear in a throttle's wording) moved
+# into test_BOTH_routes_throttled_reads_differently_from_either_one_alone, which seeds the state
+# that actually produces it. Two tests for one rule is rule 8's defect with a delay on it, and
+# keeping this one would have meant seeding a fallback it was not about.
 
 
 def test_a_throttle_is_RETRIED_before_it_is_reported(monkeypatch):
@@ -1636,3 +1629,136 @@ def test_call_with_backoff_does_not_retry_a_failure_that_waiting_cannot_fix():
 
 def _throttle_always(*_params):
     raise SolanaRPCError("returned HTTP 429 from devnet", status_code=429)
+
+# ---------------------------------------------------------------------------
+# THE FALLBACK ROUTE. getTokenLargestAccounts is throttled on public devnet --
+# measured, from the operator's runs on 2026-09-30 and 2026-10-01: HTTP 429
+# after three attempts, twice in a row. A flag that cannot get past a rate
+# limit is a flag that does not work.
+#
+# The fallback uses only methods this cluster HAS answered (getSignaturesFor-
+# Address and getTransaction, both proven by --hunt-memo) and reads
+# meta.postTokenBalances[].owner/.mint -- the exact keys _spl_credits selects
+# on. So an answer from it measures the unproven path as a side effect.
+# ---------------------------------------------------------------------------
+
+
+def _a_mint_transaction(owner=_A_HOLDER, mint=_A_MINT):
+    return {"meta": {"postTokenBalances": [{"mint": mint, "owner": owner}]}}
+
+
+def test_the_selection_reads_THE_SAME_TWO_KEYS_spl_credits_uses():
+    """Pure, seeded, no cluster. If this path is right, _spl_credits' selection is right.
+
+    MUTATION: read `.address` instead of `.owner`, or drop the mint comparison, and this fails.
+    Spelling the keys differently from chains/solana._spl_credits would make the whole
+    measurement meaningless -- which is why both sites say so.
+    """
+    assert owner_in_post_token_balances(_a_mint_transaction(), _A_MINT) == _A_HOLDER
+    assert owner_in_post_token_balances(_a_mint_transaction(mint="OTHER"), _A_MINT) == "", (
+        "an entry for a DIFFERENT mint is not a holder of this one"
+    )
+    assert owner_in_post_token_balances(_a_mint_transaction(owner="not-an-address"), _A_MINT) == ""
+    assert owner_in_post_token_balances({"meta": {"postTokenBalances": []}}, _A_MINT) == ""
+    assert owner_in_post_token_balances({"meta": {}}, _A_MINT) == ""
+    assert owner_in_post_token_balances("not a transaction", _A_MINT) == ""
+
+
+def test_the_fallback_answers_when_the_precise_route_is_throttled(monkeypatch):
+    """THE OPERATOR'S SITUATION, REPRODUCED: 429 on the first route, an answer from the second."""
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    adapter = _seeded_adapter({
+        "getTokenLargestAccounts": _throttle_always,
+        "getSignaturesForAddress": [{"signature": "5abcDEF1234567890xyz"}],
+        "getTransaction": _a_mint_transaction(),
+    })
+    found, why = find_a_holder(adapter, _A_MINT)
+    assert found == _A_HOLDER
+    assert "was throttled" in why, "say the first route failed"
+    assert "mint's own traffic instead" in why, "and which route actually produced the address"
+    assert "MEASURES `meta.postTokenBalances[].owner`" in why, (
+        "getting an answer this way measures the previously unproven key path -- say so"
+    )
+
+
+def test_BOTH_routes_throttled_reads_differently_from_either_one_alone(monkeypatch):
+    """Three outcomes, three next actions, and only one of them is about our code."""
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    both = _seeded_adapter({"getTokenLargestAccounts": _throttle_always,
+                            "getSignaturesForAddress": _throttle_always})
+    _found, why = find_a_holder(both, _A_MINT)
+    assert "BOTH routes were throttled" in why
+    assert "never answered either way" in why
+    assert "NOTHING about the field names" in why
+    assert "Re-run in a moment" in why
+    # THE ASSERTION INHERITED FROM THE TEST THIS REPLACED: a throttle must never carry the
+    # field-name caveat. That sentence is what the operator read on 2026-09-30 for what was
+    # simply a rate limit, and it sends a reader to audit code that is probably fine.
+    assert "never measured" not in why
+
+    quiet = _seeded_adapter({"getTokenLargestAccounts": _throttle_always,
+                             "getSignaturesForAddress": []})
+    _found, quiet_why = find_a_holder(quiet, _A_MINT)
+    assert "DID answer and found nothing usable" in quiet_why
+    assert "no recent signatures of its own" in quiet_why
+    assert "BOTH routes" not in quiet_why
+    assert quiet_why != why
+
+
+def test_a_quiet_mint_is_a_fact_about_the_MINT_and_not_about_a_field_name():
+    """Transfers reference token accounts; only some operations put the mint in the keys.
+
+    MUTATION: report an empty signature list as a shape finding and this fails -- it would send
+    a reader to audit postTokenBalances over a mint that simply has no direct traffic.
+    """
+    adapter = _seeded_adapter({"getSignaturesForAddress": []})
+    found, throttled, why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == ("", False)
+    assert "not about any field name" in why
+    assert "Transfers reference token accounts" in why
+
+
+def test_reading_transactions_and_finding_no_entry_IS_a_shape_finding():
+    """The other empty case, and it IS about our keys -- transactions existed and carried none."""
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": "sigA"}, {"signature": "sigB"}],
+        "getTransaction": {"meta": {"postTokenBalances": []}},
+    })
+    found, throttled, why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == ("", False)
+    assert "read 2 of the mint's transactions" in why, "rule 3: the denominator"
+    assert "those are the keys _spl_credits uses" in why
+
+
+def test_one_unreadable_transaction_does_not_end_the_search(monkeypatch):
+    """MUTATION: return on the first failure and a single odd row hides every good one behind it."""
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    seen = []
+
+    def sometimes(signature, _config):
+        seen.append(signature)
+        if signature == "BAD":
+            raise SolanaRPCError("getTransaction returned HTTP 500", status_code=500)
+        return _a_mint_transaction()
+
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": "BAD"}, {"signature": "GOOD"}],
+        "getTransaction": sometimes,
+    })
+    found, throttled, _why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == (_A_HOLDER, False)
+    assert seen == ["BAD", "GOOD"]
+
+
+def test_a_throttle_mid_fallback_stops_rather_than_reading_the_rest(monkeypatch):
+    """Same rule as the other route: retrying the remainder against a refusing endpoint is waste,
+    and walking past would make the throttle look like a missing field."""
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    adapter = _seeded_adapter({
+        "getSignaturesForAddress": [{"signature": "sigA"}, {"signature": "sigB"}],
+        "getTransaction": _throttle_always,
+    })
+    found, throttled, why = holder_from_mint_traffic(adapter, _A_MINT)
+    assert (found, throttled) == ("", True)
+    assert "was throttled" in why
+    assert "keys _spl_credits uses" not in why, "a throttle is not a shape finding"
