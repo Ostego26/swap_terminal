@@ -435,13 +435,44 @@ def describe_holder(host: str, port: int) -> str:
     return f"{host}:{port} is bound and no `ss` line named it"
 
 
-def server_environment(db_path: str) -> dict:
+def server_environment(db_path: str, host: str, port: int) -> dict:
     """The environment the SERVER gets, and the one the report must describe.
 
     Built explicitly from os.environ rather than inherited implicitly, because the
     launcher must be able to report what the server will see -- and the first
     design reported what the LAUNCHER saw, which under a desktop icon is a
     different thing entirely.
+
+    HOST AND PORT ARE SET HERE, AND BEFORE 2026-10-01 THEY WERE NOT SET ANYWHERE.
+    Measured on the operator's host that day. Another project (casino_web) was
+    holding 127.0.0.1:5000, so the launcher was run as
+    `swap_terminal_desktop.py --port 5057`. It printed
+
+        waiting up to 24.8µfn (30.0s) for http://127.0.0.1:5057/api/health
+
+    and the gunicorn it had just started printed
+
+        bind            127.0.0.1:5000
+        [ERROR] connection to ('127.0.0.1', 5000) failed: [Errno 98] Address already in use
+
+    then died. `--port` reached the readiness poll, the browser URL and the
+    `--status` report, and NEVER reached the server: gunicorn.conf.py builds its
+    bind from os.getenv("SWAP_TERMINAL_PORT", "5000"), and nothing wrote that
+    variable into the child's environment. The argument was honored by every
+    part of this launcher that only talks ABOUT the server and ignored by the
+    one thing that is the server.
+
+    It looked like it worked whenever the default was in force, which is every
+    run until somebody needed a different port -- and the day somebody did, the
+    failure arrived as gunicorn fighting a stranger's process for a port the
+    operator had explicitly asked not to use.
+
+    `host` and `port` were already being passed to run_shim() as argv (`--host`,
+    `--port`) and run_shim() used neither; all three of its parameters were
+    dead. They are gone, and the environment carries the values instead, because
+    an environment variable is what gunicorn.conf.py actually reads. One place
+    decides the bind (rule 8), and it is the place the reader can check against
+    the config file.
 
     THE VOCABULARY TRAP, measured and worth the paragraph. config.py reads
     GRC_RPC_USER / GRC_RPC_PASS / GRC_RPC_HOST / GRC_RPC_PORT, and calls
@@ -452,6 +483,11 @@ def server_environment(db_path: str) -> dict:
     """
     environment = dict(os.environ)
     environment["SWAP_DB_PATH"] = db_path
+    # The two names gunicorn.conf.py reads, and the two app.py's development
+    # server reads. Set as strings because that is what an environment holds;
+    # gunicorn.conf.py does the int conversion on its side.
+    environment["SWAP_TERMINAL_HOST"] = host
+    environment["SWAP_TERMINAL_PORT"] = str(port)
     return environment
 
 
@@ -487,8 +523,21 @@ def chain_report(environment: dict) -> str:
     return done.stdout.rstrip() or f"  the chain report produced nothing (rc={done.returncode})"
 
 
-def run_shim(host: str, port: int, db_path: str) -> int:
+def run_shim() -> int:
     """--shim: own the gunicorn master, and take it down with us. Never called directly.
+
+    TAKES NOTHING, and until 2026-10-01 took `(host, port, db_path)` and used
+    NONE of the three -- the launcher passed them as `--host`, `--port`, `--db`
+    on this process's own command line and the body read no parameter at all.
+    Three dead parameters (rule 9) carrying the one value whose absence was a
+    live defect: gunicorn reads the bind from SWAP_TERMINAL_HOST and
+    SWAP_TERMINAL_PORT in its ENVIRONMENT, and server_environment() now sets
+    both, so there is nothing for an argument to do here. Its docstring has the
+    measurement.
+
+    The parameters are removed rather than wired up because wiring them up would
+    be the second place deciding the bind, which is rule 8's two-copies-drift on
+    the value that determines whether the server comes up at all.
 
     This process exists so that the reap is a GROUP kill we control, rather than a
     hypothesis about what gunicorn does with a signal. It is its own session leader
@@ -735,14 +784,17 @@ def launch(host: str, port: int) -> int:
         return 1
 
     db_path = os.environ.get("SWAP_DB_PATH") or str(REPO_ROOT / "swap_terminal" / "swap_terminal.db")
-    environment = server_environment(db_path)
+    environment = server_environment(db_path, host, port)
     print(f"  database        {db_path}", flush=True)
     print("  chains the SERVER will see (read from its own environment, not this launcher's):", flush=True)
     print(chain_report(environment), flush=True)
 
     shim = subprocess.Popen(  # noqa: S603 -- checked: sys.executable and this file's own absolute path; no value from outside reaches the argv
-        [sys.executable, str(Path(__file__).resolve()), "--shim",
-         "--host", host, "--port", str(port), "--db", db_path],
+        # `--shim` alone. The host, port and database reach the child through
+        # `environment`, which is what gunicorn.conf.py and config.py actually
+        # read; passing them as argv as well was three dead parameters on
+        # run_shim() and no bind (see server_environment()).
+        [sys.executable, str(Path(__file__).resolve()), "--shim"],
         cwd=str(REPO_ROOT), env=environment,
         start_new_session=True,      # the KERNEL setsids between fork and exec, so
         preexec_fn=arm_parent_death_signal,  # noqa: PLW1509 -- checked: this is the POINT. PR_SET_PDEATHSIG must be armed between fork and exec; arming it after exec leaves a window in which a SIGKILL to this launcher orphans the whole tree with no pid record written yet. The documented fork-safety caveat concerns threads, and this launcher is single-threaded.
@@ -840,13 +892,12 @@ def main() -> int:
     parser.add_argument("--host", default=os.environ.get("SWAP_TERMINAL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("SWAP_TERMINAL_PORT", "5000")))
     parser.add_argument("--shim", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--db", default="", help=argparse.SUPPRESS)
     parser.add_argument("--status", action="store_true",
                         help="report what is running and what holds the port. Starts nothing.")
     args = parser.parse_args()
 
     if args.shim:
-        return run_shim(args.host, args.port, args.db)
+        return run_shim()
     if args.status:
         return report_status(args.host, args.port)
     return launch(args.host, args.port)

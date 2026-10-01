@@ -28,6 +28,15 @@ narrower. It governs the development server only:
                           from one server to the other does not silently change
                           what the API is reachable from.
     SWAP_TERMINAL_PORT    5000 by default, and also shared with gunicorn.
+                          `swap_terminal_desktop.py --port N` SETS this in the
+                          server's environment, which is how the launcher's own
+                          readiness poll and gunicorn's `bind` are guaranteed to
+                          name the same port. Until 2026-10-01 it did not, and
+                          `--port 5057` polled 5057 while gunicorn bound 5000 and
+                          died on a port another project was holding; the
+                          agreement is now pinned by
+                          tests/test_desktop_launcher.py, which reads
+                          gunicorn.conf.py's real `bind` rather than its text.
 
 Gunicorn-only settings, all with defaults that need no configuration:
 

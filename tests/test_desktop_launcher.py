@@ -17,6 +17,8 @@ double-click starts a real gunicorn, that a real chromium window's close is seen
 that a real teardown leaves no orphan. Those need the operator's desktop.
 """
 
+import inspect
+import subprocess
 import sys
 from pathlib import Path
 
@@ -302,3 +304,80 @@ def test_a_path_with_a_space_is_refused_rather_than_quoted_and_hoped():
 
     ok, _note = install_desktop_icon.paths_are_safe_for_exec("/usr/bin/python3", Path("/x/launcher.py"))
     assert ok is True
+
+
+# --- the bind: one value, two readers, and they used to disagree --------------
+
+def _gunicorn_bind(environment: dict) -> str:
+    """gunicorn.conf.py's OWN `bind`, read by executing that file.
+
+    Not a grep for the variable name and not a copy of its f-string. The
+    2026-10-01 defect was two places computing one value, so a test that
+    recomputed it here would be a third. The behavioral-verification principle
+    applied to configuration: run the real file, assert on what it produces.
+
+    S603 is not raised in tests (pyproject's per-file ignores), so this is a
+    plain comment rather than a noqa claiming a check nobody asked for (rule 19):
+    the argv is sys.executable plus a literal script, and the only variable is
+    the environment dict under test.
+    """
+    done = subprocess.run(
+        [sys.executable, "-c", "import runpy; print(runpy.run_path('gunicorn.conf.py')['bind'])"],
+        cwd=str(Path(launcher.__file__).resolve().parent),
+        env=environment, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert done.returncode == 0, f"could not read gunicorn.conf.py's bind:\n{done.stderr}"
+    return done.stdout.strip()
+
+
+def test_the_port_the_launcher_polls_is_the_port_gunicorn_binds():
+    """The defect `--port` had on 2026-10-01, verified by behavior not by text.
+
+    MEASURED on the operator's host. Another project was holding 127.0.0.1:5000,
+    so the launcher was run as `--port 5057`. It printed
+
+        waiting up to 24.8µfn (30.0s) for http://127.0.0.1:5057/api/health
+
+    while the gunicorn it had just started printed `bind 127.0.0.1:5000`, failed
+    with `[Errno 98] Address already in use` against the stranger's process, and
+    died. `--port` reached the readiness poll, the browser URL and the status
+    report, and never reached the server -- gunicorn.conf.py reads
+    SWAP_TERMINAL_PORT from the ENVIRONMENT and nothing wrote it.
+
+    THE ASSERTION IS gunicorn.conf.py's OWN `bind`; _gunicorn_bind() above says
+    why it is read by executing that file rather than by matching its text.
+    """
+    port = 5057
+    environment = launcher.server_environment(DB, "127.0.0.1", port)
+
+    assert environment["SWAP_TERMINAL_PORT"] == "5057", "a string, because an environment holds strings"
+    assert environment["SWAP_TERMINAL_HOST"] == "127.0.0.1"
+
+    bind = _gunicorn_bind(environment)
+    assert bind == f"127.0.0.1:{port}", (
+        f"gunicorn would bind {bind!r} while the launcher polls port {port}; "
+        "this is the 2026-10-01 defect"
+    )
+
+
+def test_the_default_port_still_agrees_after_the_fix():
+    """The case that hid the defect for the whole life of the launcher.
+
+    `--port` was broken only when it differed from gunicorn.conf.py's own
+    default, so every run until somebody needed another port looked correct.
+    Asserted explicitly so a future change that wired the port through ONE of
+    the two readers and not the other cannot pass by matching the default.
+    """
+    assert _gunicorn_bind(launcher.server_environment(DB, "127.0.0.1", 5000)) == "127.0.0.1:5000"
+
+
+def test_run_shim_takes_no_arguments_that_decide_the_bind():
+    """Rule 9, and rule 8's reason for the cull rather than the wiring.
+
+    run_shim() took (host, port, db_path) and read none of them; the launcher
+    passed all three as argv. Wiring them up would have made run_shim a SECOND
+    place deciding the bind, which is the two-copies-drift that produced the
+    defect above. So the parameters are gone, and this pins that they stay gone
+    -- a future `run_shim(host, port)` would be the same bug with a new spelling.
+    """
+    assert inspect.signature(launcher.run_shim).parameters == {}
