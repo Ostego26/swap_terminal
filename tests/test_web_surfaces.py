@@ -29,7 +29,7 @@ from db import SCHEMA, dict_factory
 from network_target import configuring_variable
 from services import coinpaprika, market_context, pricing
 from services.wallet_leveling import PEG_ASSETS
-from valid_addresses import GRC_PAYOUT
+from valid_addresses import GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
 # already pointed SWAP_DB_PATH at a temp file by the time this import runs.
@@ -86,6 +86,11 @@ def seed_swap(client, swap_id, status, **overrides):
     # tests/valid_addresses.py.
     deposit_address = overrides.get("deposit_address", GRC_PAYOUT)
     min_conf = overrides.get("min_conf", 6)
+    # NULL by default, which is what every address-attributed chain has. Added
+    # 2026-10-01 so a tag chain's page can be rendered here at all: without it
+    # services/swap_view.deposit_instruction() reports `tag_missing` for every SOL
+    # or XRP swap and the deposit panel renders a problem instead of a target.
+    deposit_tag = overrides.get("deposit_tag")
     write(
         client,
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps, network_fee_reserve,"
@@ -94,14 +99,15 @@ def seed_swap(client, swap_id, status, **overrides):
     )
     write(
         client,
-        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag, payout_address,"
         " expected_input_amount, actual_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, deposit_txid, payout_txid, created_at, updated_at,"
         " credited_at, completed_at, expires_at, failed_reason)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            swap_id, f"q_{swap_id}", asset, "BTC", deposit_address, "bc1addr", 1000.0, None, 1e-7, 150, 0.00002,
-            0.0001, status, min_conf, None, None, iso(600), iso(updated_ago), None, None, iso(-600), None,
+            swap_id, f"q_{swap_id}", asset, "BTC", deposit_address, deposit_tag, "bc1addr", 1000.0, None, 1e-7,
+            150, 0.00002, 0.0001, status, min_conf, None, None, iso(600), iso(updated_ago), None, None,
+            iso(-600), None,
         ),
     )
 
@@ -1032,3 +1038,122 @@ def test_every_admin_route_including_the_peg_check_is_still_a_GET():
     assert "/api/admin/peg" in methods, "the peg route is not registered on the admin blueprint"
     for path, verbs in methods.items():
         assert verbs == {"GET"}, f"{path} accepts {sorted(verbs)}, and this surface is GET-only"
+
+
+# --- the deposit side of the figures list -------------------------------------
+#
+# ASKED FOR BY THE OPERATOR 2026-10-01, immediately after watching a real SOL
+# deposit credit: "there needs to be a listed solana deposit address for the user
+# too on the left."
+#
+# It was a real asymmetry. templates/_swap_live.html's Amounts list carried
+# `Payout address` and said nothing about where the deposit goes -- the address
+# lived only in the panel ABOVE the live region. So a customer comparing what they
+# sent against what they get could read one half off the list and had to scroll
+# back for the other, and the live region is the part the poller replaces, which is
+# the part they are most likely to be looking at.
+
+def test_the_figures_list_names_the_deposit_address_not_only_the_payout_one(client):
+    """The asymmetry, asserted on an address-attributed chain.
+
+    MUTATION: remove the Deposit address row and this fails while every other
+    page test still passes -- which is the state the operator found.
+    """
+    seed_swap(client, "s_dep00000000000", "awaiting_deposit")
+    body = client.get("/swap/s_dep00000000000/fragment").get_data(as_text=True)
+
+    assert "Deposit address" in body, "the list names where the payout goes and must name where the deposit goes"
+    assert GRC_PAYOUT in body
+    # And it is still in the FRAGMENT, not only the full page: the poll replaces
+    # this region, so a row that lived only in swap.html would vanish on the first
+    # refresh.
+    assert "Payout address" in body
+
+
+def test_a_tag_chain_lists_the_account_AND_the_memo_because_the_pair_is_the_instruction(client):
+    """Half an instruction is the failure this repo keeps naming.
+
+    On a tag chain the deposit instruction is the PAIR (account, discriminator).
+    The account alone is the half that produces money which arrived and a swap that
+    cannot claim it -- chains/xrp.py's get_new_address() refusal is written about
+    exactly that. So a list that showed the address without the tag would be worse
+    than one showing neither.
+
+    The field is named with the CHAIN's own word, from
+    services/swap_service.TAG_ATTRIBUTION: a SOL page saying "DestinationTag" would
+    name a field Solana does not have, which is the live mistake that table's
+    comment records.
+
+    MUTATION: drop the tag row and the page hands a customer the shared account
+    with nothing to identify their swap by.
+    """
+    seed_swap(client, "s_soltag00000000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=7)
+    body = client.get("/swap/s_soltag00000000/fragment").get_data(as_text=True)
+
+    assert SOL_DEPOSIT_ACCOUNT in body
+    assert "Memo instruction" in body, "Solana's own word for the field, not XRP's"
+    assert "DestinationTag" not in body, "a SOL page must not name an XRP Ledger field"
+    assert ">7<" in body, "the tag itself has to be on screen, not just its label"
+
+
+def test_a_tag_chain_with_no_tag_says_so_rather_than_rendering_blank(client):
+    """`0` is a legal tag, so an empty cell and a real zero must not look alike.
+
+    README's "Tag 0 is a real tag", and rule 14's "never let an empty result print
+    nothing" -- a blank is ambiguous between "no tag was issued" and "the template
+    broke".
+    """
+    seed_swap(client, "s_solnotag000000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT)
+    body = client.get("/swap/s_solnotag000000/fragment").get_data(as_text=True)
+
+    assert "(none issued)" in body
+
+
+def test_tag_zero_renders_as_zero_and_not_as_missing(client):
+    """The trap the line above is guarding, from the other side.
+
+    A template written with `{% if view.deposit.tag %}` would render tag 0 as
+    "(none issued)" and tell a customer with a perfectly valid tag that they have
+    none. Asserted because the fix is one word (`is none`) and the failure is
+    silent.
+    """
+    seed_swap(client, "s_soltag0zero000", "awaiting_deposit",
+              asset="SOL", deposit_address=SOL_DEPOSIT_ACCOUNT, deposit_tag=0)
+    body = client.get("/swap/s_soltag0zero000/fragment").get_data(as_text=True)
+
+    assert "(none issued)" not in body, "tag 0 is a real tag, not a missing one"
+    assert ">0<" in body
+
+
+def test_a_closed_swap_says_the_listed_address_is_not_accepting_anything(client):
+    """Repeating the address must not reintroduce a defect swap.html already fixed.
+
+    templates/swap.html carries a "Do not send anything to this swap" callout for a
+    closed swap, and its comment records that the need was found by looking at a
+    rendered `under_review` swap on 2026-09-26 -- a live-looking deposit target on a
+    swap nothing advances. Listing the address again down here without the caveat
+    would put that back one panel lower.
+
+    MUTATION: drop the guard row and a `failed` swap's figures list shows a deposit
+    address with nothing saying it is dead.
+    """
+    seed_swap(client, "s_closed00000000", "failed")
+    body = client.get("/swap/s_closed00000000/fragment").get_data(as_text=True)
+
+    assert "Still accepting?" in body
+    assert "<strong>NO</strong>" in body
+    # A phrase that does not straddle the template's line wrap. "nothing advances"
+    # looked right and failed, because _swap_live.html breaks between the two words
+    # -- a keyword check that cannot survive reflowing is a test reading text rather
+    # than behavior, which this suite has been caught by twice today.
+    assert "matching a payment you already made" in body
+
+    # AND IT IS ABSENT WHILE THE SWAP IS LIVE. A guard that always renders is noise
+    # on the happy path, which is the cried-wolf shape this repo keeps paying for.
+    live = client.get("/swap/s_dep00000000000/fragment")
+    if live.status_code == 404:
+        seed_swap(client, "s_dep00000000000", "awaiting_deposit")
+        live = client.get("/swap/s_dep00000000000/fragment")
+    assert "Still accepting?" not in live.get_data(as_text=True)

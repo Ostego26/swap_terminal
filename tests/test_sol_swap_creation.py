@@ -54,12 +54,18 @@ from chains.solana_address import associated_token_address, is_on_curve, is_vali
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, create_swap, deposit_account
 from services.xrp_tag_service import ACCOUNT_VALIDATORS, XRPTagAllocationError, validate_account
 from test_xrp_swap_attribution import GRC_TESTNET_ADDRESS, StubGRC, seed_quote, seeded_db
+from valid_addresses import SOL_DEPOSIT_ACCOUNT
 
-# THE ACCOUNT FROM THE OPERATOR'S HOST, not a synthesized one. It is the real
+# THE ACCOUNT FROM THE OPERATOR'S HOST, not a synthesized one: the real
 # SOL_DEPOSIT_ACCOUNT of the devnet rehearsal and the exact string the 400 above
 # refused, so this file's central assertion is the measurement rather than a
 # reconstruction of it.
-SOL_ACCOUNT = "CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp"
+#
+# Imported from tests/valid_addresses.py rather than spelled here, since
+# 2026-10-01 -- it had been a second copy of one constant for a few hours, and
+# the on-curve reasoning for why it cannot be synthesized belongs in one place
+# beside every other chain's fixture (rule 8).
+SOL_ACCOUNT = SOL_DEPOSIT_ACCOUNT
 
 # An Associated Token Account: 32 valid base58 bytes, OFF the ed25519 curve, so
 # no private key exists for it. Derived rather than typed, because a hand-picked

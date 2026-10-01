@@ -90,6 +90,41 @@
     <dl class="kv">
       <div><dt>Expected in</dt><dd>{{ '%.8f'|format(view.swap.expected_input_amount) }} {{ view.swap.from_asset }}</dd></div>
       <div><dt>Actually seen</dt><dd>{% if view.swap.actual_input_amount is none %}<span class="empty-mark">(none yet)</span>{% else %}{{ '%.8f'|format(view.swap.actual_input_amount) }} {{ view.swap.from_asset }}{% endif %}</dd></div>
+      {#- THE DEPOSIT SIDE, ADDED 2026-10-01 AT THE OPERATOR'S REQUEST, and it was a real
+          asymmetry: this list carried `Payout address` and nothing about where the deposit
+          goes. The address was rendered only in the panel ABOVE the live region, so on a
+          long page, on a phone, or after a poll replaced this region, a customer comparing
+          "what I sent" against "what I get" could read the payout address off this list and
+          had to scroll back for the other half.
+
+          IT COMES FROM view.deposit, THE SAME SOURCE THE PANEL USES, not from
+          view.swap.deposit_address. Two renderings of one fact are fine; two SOURCES for it
+          is rule 8's drift, and the panel's own comment records what that cost once already
+          -- it read `swap["destination_tag"]` while the column was `deposit_tag`, and
+          rendered "NO DESTINATION TAG HAS BEEN ISSUED" for a swap that had one.
+
+          THE TAG ROW IS NOT OPTIONAL DECORATION. On a tag chain the deposit instruction is
+          the PAIR (account, discriminator) and the account alone is half of it -- the half
+          that produces money which arrived and a swap that cannot claim it. So the tag is
+          listed immediately beside the address whenever the model is `tag`, labeled with the
+          CHAIN's own word for the field (services/swap_service.TAG_ATTRIBUTION), and a
+          missing tag says so rather than rendering blank: `0` is a legal tag, so an empty
+          cell and a real zero must not look alike. -#}
+      <div><dt>Deposit address</dt><dd class="mono breakable">{{ view.deposit.address or '(none recorded)' }}</dd></div>
+      {% if view.deposit.model == 'tag' %}
+      <div><dt>{{ view.deposit.discriminator }}</dt><dd class="mono breakable">{% if view.deposit.tag is none %}<span class="empty-mark">(none issued)</span>{% else %}{{ view.deposit.tag }}{% endif %}</dd></div>
+      {% endif %}
+      {#- AND IT SAYS WHEN SENDING THERE WOULD BE A MISTAKE. swap.html's deposit panel carries
+          this warning for a closed swap, and that warning exists because a rendered
+          `under_review` swap was caught on 2026-09-26 showing a live-looking deposit target.
+          Repeating the address down here without the caveat would reintroduce exactly that,
+          one panel lower -- and this region is the one the poller replaces, so it is the part
+          a customer is most likely to be looking at. -#}
+      {% if not view.accepting_deposit %}
+      <div><dt>Still accepting?</dt><dd><strong>NO</strong> &#8212; status is <code>{{ view.status }}</code>, so the
+         address above is for matching a payment you already made. Anything sent now arrives against a swap nothing
+         advances.</dd></div>
+      {% endif %}
       <div><dt>Payout estimate</dt><dd>{{ '%.8f'|format(view.swap.output_amount_estimate) }} {{ view.swap.to_asset }}</dd></div>
       <div><dt>Payout address</dt><dd class="mono breakable">{{ view.swap.payout_address }}</dd></div>
       <div><dt>Deposit txid</dt><dd class="mono breakable">{{ view.swap.deposit_txid or '(none seen)' }}</dd></div>

@@ -138,6 +138,21 @@ LTC_P2SH_SCRIPT_ADDRESS2 = base58.b58encode_check(
 
 XRP_HOT_ACCOUNT = xrp_address("swap_terminal hot account")
 
+# SOLANA, AND THIS ONE IS NOT DERIVED -- it is the operator's real devnet
+# SOL_DEPOSIT_ACCOUNT, measured on their host 2026-10-01, and the account that
+# actually received the first SOL deposit this terminal ever credited.
+#
+# Not synthesized, because a Solana address has a property no phrase-derived
+# fixture reliably has: chains/solana.py::validate_address() and
+# services/xrp_tag_service._validate_sol_account() both require the key to be ON
+# THE ED25519 CURVE, and roughly half of all valid 32-byte strings are not. A
+# fixture built from _hash160 of a phrase would be on-curve by luck, so a test
+# using it would pass or fail for a reason unrelated to what it asserts.
+#
+# It is a DEVNET account and holds no mainnet value; it is a public key, never a
+# secret, and nothing in this tree holds a key for it.
+SOL_DEPOSIT_ACCOUNT = "CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp"
+
 # =======================================================================================
 # BECH32M / TAPROOT FIXTURES, AND THE ENCODER IS DELIBERATELY NOT THE PRODUCTION ONE.
 # =======================================================================================
