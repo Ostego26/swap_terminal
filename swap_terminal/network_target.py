@@ -90,7 +90,15 @@ class ChainPorts(NamedTuple):
 CHAIN_PORTS: dict[str, ChainPorts] = {
     "BTC": ChainPorts(8332, frozenset({18332, 18443}), "BTC_RPC_PORT", "18443 regtest, 18332 testnet"),
     "LTC": ChainPorts(9332, frozenset({19332, 19443}), "LTC_RPC_PORT", "19443 regtest, 19332 testnet"),
-    "GRC": ChainPorts(15715, frozenset({25715, 25779, 9876}), "GRC_RPC_PORT", "25779 testnet"),
+    # THE HINT NAMES BOTH TEST PORTS, and it used to name only 25779 while the
+    # operator's own Gridcoin test daemon listens on 25715. So the sentence a
+    # reader sees when GRC is unconfigured -- "set GRC_RPC_PORT to the test chain
+    # (25779 testnet)" -- named a port they do not run, on the one line whose job
+    # is to tell them what to set. Both are in test_ports and always were; only
+    # the hint was wrong, which is rule 16's "a wrong comment is a bug" in a
+    # string an operator pastes from.
+    "GRC": ChainPorts(15715, frozenset({25715, 25779, 9876}), "GRC_RPC_PORT",
+                      "25715 or 25779 testnet"),
 }
 
 
