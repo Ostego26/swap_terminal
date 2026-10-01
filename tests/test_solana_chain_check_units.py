@@ -66,6 +66,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     coverage_clause,
     credit_path_lines,
     credits_the_owner,
+    deposit_account_lines,
     find_a_holder,
     holder_found_sentence,
     holder_from_mint_traffic,
@@ -3095,3 +3096,71 @@ def test_a_dropped_credits_AMOUNT_is_on_the_line_and_named_as_a_delta():
         "'in total' is what made it indistinguishable from the account's balance"
     )
     assert "1 credit(s)" in line, "and the count stays -- both numbers matter to a human"
+
+
+def test_the_summary_says_whether_the_DEPOSIT_ACCOUNT_is_configured():
+    """"IS decided" and "is set up" read the same to somebody checking readiness.
+
+    Measured on the operator's host 2026-10-01, which is what found this:
+
+        adapters: ['GRC', 'SOL']     <- a SOL adapter IS constructed
+        SOL_DEPOSIT_ACCOUNT: ''     <- and no SOL swap can be created
+
+    So every step of this check can pass against a real cluster while the terminal cannot
+    accept one SOL deposit. SOL_DEPOSIT_ACCOUNT appeared NOWHERE in this file (grepped), though
+    it is the variable that decides where a customer's coins are told to go.
+
+    MUTATION: drop the unset branch, or print the same line either way, and a run against a
+    working cluster reads as ready when no deposit can be taken.
+    """
+    unset = " ".join(deposit_account_lines(""))
+    assert "(unset)" in unset
+    assert "REFUSES to create a SOL swap" in unset, "the consequence, not just the absence"
+    assert "whatever this check proved" in unset, (
+        "and that it is NOT contradicted by the passing steps above it -- the two are about "
+        "different halves"
+    )
+    assert deposit_account_lines("   ") == deposit_account_lines(""), (
+        "whitespace is unset: config.py .strip()s it, so this must agree or the two disagree "
+        "about whether a swap can be created"
+    )
+
+    account = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+    configured = " ".join(deposit_account_lines(account))
+    assert account in configured, (
+        "IN FULL and not truncated: it decides where money is sent, so it has to be checkable "
+        "against the wallet the operator holds, off the paste (rule 14)"
+    )
+    assert "CHECK IT against the wallet you hold" in configured
+    assert "REFUSES" not in configured
+    assert unset != configured
+
+
+def test_main_prints_the_deposit_account_readiness(monkeypatch, capsys):
+    """DRIVEN THROUGH main(), because the call site is the half that keeps failing.
+
+    `for line in deposit_account_lines(...)` deleted from print_summary SURVIVED the first
+    mutation round: the function was covered, its call site was not. Seventh time in this
+    session, and the reason is always the same -- a unit test on a pure function says nothing
+    about whether anybody calls it.
+    """
+    monkeypatch.setattr(solana_chain_check, "RPC_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(
+        solana_chain_check.Config, "RPC",
+        {**solana_chain_check.Config.RPC,
+         "SOL": {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1",
+                 "mint": ""}})
+    monkeypatch.setattr(solana_chain_check.Config, "SOL_DEPOSIT_ACCOUNT", "", raising=False)
+    monkeypatch.setattr(chains_solana.requests, "post", _WholeClusterStub())
+    monkeypatch.setattr("sys.argv", ["solana_chain_check.py"])
+    solana_chain_check.main()
+    unset = text_of(capsys.readouterr().out)
+    assert "SOL_DEPOSIT_ACCOUNT (unset)" in unset
+    assert "REFUSES to create a SOL swap" in unset
+
+    account = "J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM"
+    monkeypatch.setattr(solana_chain_check.Config, "SOL_DEPOSIT_ACCOUNT", account, raising=False)
+    solana_chain_check.main()
+    configured = text_of(capsys.readouterr().out)
+    assert f"SOL_DEPOSIT_ACCOUNT {account}" in configured
+    assert "REFUSES to create a SOL swap" not in configured

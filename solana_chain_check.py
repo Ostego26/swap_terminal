@@ -1076,6 +1076,41 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
         "an account with recent activity.")
 
 
+def deposit_account_lines(account: str) -> list[str]:
+    """Whether the shared account a SOL deposit needs is actually configured. PURE.
+
+    THE SUMMARY SAID THE STRATEGY "IS DECIDED" AND NEVER SAID WHETHER IT WAS SET UP, and those
+    read the same to somebody checking readiness. Measured on the operator's host 2026-10-01,
+    which is what found this:
+
+        adapters: ['GRC', 'SOL']        <- a SOL adapter IS constructed
+        SOL_DEPOSIT_ACCOUNT: ''        <- and no SOL swap can be created
+
+    So the chain's read path can pass every step in this check, against a real cluster, while
+    the terminal cannot accept one SOL deposit -- and nothing in the output said so. This file
+    mentioned SOL_DEPOSIT_ACCOUNT nowhere at all (grepped), though it is the variable that
+    decides where a customer's coins are told to go.
+
+    THE ACCOUNT IS PRINTED IN FULL, not truncated. It is a public address, and it decides where
+    money is sent: an operator has to be able to read it off the paste and check it against the
+    wallet they actually hold (rule 14, echo the parameters that decide the answer). Nothing
+    secret is in it -- config.py's comment is explicit that the SOL hot wallet and this account
+    are public keys and that nothing in chains/solana.py reads a keypair.
+    """
+    if account.strip():
+        return [f"  SOL_DEPOSIT_ACCOUNT  {account.strip()}",
+                "  <- SET, so a SOL swap has somewhere to send deposits. CHECK IT against the "
+                "wallet you hold:",
+                "     every SOL deposit for every swap is told to go here."]
+    return ["  SOL_DEPOSIT_ACCOUNT  (unset)",
+            "  <- so services/swap_service.py REFUSES to create a SOL swap, whatever this "
+            "check proved.",
+            "     The strategy above is decided in CODE; the account it needs is "
+            "unconfigured, and there is",
+            "     no default by design -- an account that decides where money lands is not "
+            "something to infer."]
+
+
 def print_summary(failures: list[str], elapsed: float, hunted: bool | None = None,
                   observed: CreditPathObserved | None = None) -> int:
     """Rule 14: a run that found nothing and a run that failed must not share a line."""
@@ -1105,6 +1140,8 @@ def print_summary(failures: list[str], elapsed: float, hunted: bool | None = Non
     print("  The deposit-address strategy IS decided: one shared account plus a per-swap Memo", flush=True)
     print("  instruction, chosen 2026-09-29. get_new_address() refuses BECAUSE of that choice --", flush=True)
     print("  under a shared account there is no per-swap address to derive.", flush=True)
+    for line in deposit_account_lines(Config.SOL_DEPOSIT_ACCOUNT):
+        print(line, flush=True)
     # DERIVED, and the two lines this replaces were hand-written and contradicted the same run's
     # own output four lines earlier. See memo_status_lines().
     for line in memo_status_lines(hunted):
