@@ -134,15 +134,23 @@ differ only in what the field carrying the integer is CALLED. This sentence said
 "the attribution problem chains/solana.py had to hand back", which was the
 difference between them and is no longer one.)
 
-THAT ALLOCATOR NOW EXISTS, at services/xrp_tag_service.py, and this refusal
-still stands rather than calling it. The reason is written out in full under
-WHAT IS NOT WIRED in that module and is worth one line here: every other
-chain's deposit instruction is ONE address, XRP's is the PAIR (account, tag),
-and `swaps.deposit_address` is one column. Returning the account alone from
-here would satisfy the method signature while handing the customer half of an
-instruction -- a payment to the right account with no tag is exactly the case
-chains/xrp_payments.py reports as deferred and cannot credit. Storing the pair
-is a change to how a swap is created, so it is still not an adapter change.
+THAT ALLOCATOR EXISTS AND IS NOW WIRED, at services/xrp_tag_service.py, called
+by services/swap_service.py::create_swap(). This refusal still stands, and the
+reason is unchanged by the wiring: every other chain's deposit instruction is
+ONE address and XRP's is the PAIR (account, tag). Returning the account alone
+from here would satisfy the method signature while handing the customer half of
+an instruction -- a payment to the right account with no tag is exactly the case
+chains/xrp_payments.py reports as deferred and cannot credit. The pair is stored
+as `swaps.deposit_address` plus `swaps.deposit_tag`, and assembling it is
+create_swap()'s job rather than this method's, which is why get_new_address()
+refuses instead of being taught about tags.
+
+(This paragraph said "the reason is written out in full under WHAT IS NOT WIRED
+in that module" and that `swaps.deposit_address is one column`. Both were true
+when written and both were overtaken -- the section is now WHAT IS WIRED and
+`deposit_tag` is the second column. Corrected 2026-10-01 rather than left, per
+rule 16: a wrong comment is a bug, and this one pointed a reader at a heading
+that no longer exists to learn why something was not done that has been done.)
 """
 
 from __future__ import annotations
@@ -365,11 +373,12 @@ class XRPAdapter:
             f"this adapter does not derive per-swap XRP addresses, and for {label!r} it should not. "
             f"The XRP Ledger attributes deposits with a DESTINATION TAG on a single account: an "
             f"integer per swap, no new key, no funding reserve, and it is what every exchange on this "
-            f"ledger uses. That allocator EXISTS: services/xrp_tag_service.py::"
-            f"allocate_destination_tag(db, account, swap_id). It is not wired into swap creation, "
-            f"because an XRP deposit instruction is the PAIR (account, tag) and swaps.deposit_address is "
-            f"one column -- see WHAT IS NOT WIRED in that module. Deriving a fresh account instead would "
-            f"cost a base reserve per swap AND put a signing key per swap on this host."
+            f"ledger uses. That allocator EXISTS and IS WIRED: services/xrp_tag_service.py::"
+            f"allocate_destination_tag(db, account, swap_id, asset), called by "
+            f"services/swap_service.py::create_swap() after the swap INSERT and inside the same "
+            f"transaction. The pair (account, tag) is stored as swaps.deposit_address plus "
+            f"swaps.deposit_tag. Deriving a fresh account instead would cost a base reserve per swap "
+            f"AND put a signing key per swap on this host."
         )
 
     def owns_address(self, address: str) -> bool | None:

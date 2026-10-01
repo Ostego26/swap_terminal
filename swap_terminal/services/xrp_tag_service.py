@@ -137,41 +137,58 @@ payment resolves to the swap it was actually meant for -- swap_id_for_tag() is
 that lookup -- rather than to somebody else's.
 
 =============================================================================
-WHAT IS NOT WIRED, STATED PLAINLY (rule 17)
+WHAT IS WIRED, AS OF 2026-10-01 -- AND WHAT THIS SECTION USED TO SAY
 =============================================================================
 
-This module is the mechanism. It is NOT connected to swap creation, and XRP is
-not in Config.ALLOWED_PAIRS, so no swap can be created for it and nothing calls
-allocate_destination_tag() in the running application today. Two things stand
-between this and a working XRP deposit path, and both are named here rather
-than left for someone to discover:
+This module is wired into swap creation, for TWO chains, and every one of the
+three claims this section carried until 2026-10-01 is now false. They are quoted
+below rather than deleted, because the drift is the point (rule 1): the text was
+accurate when written, nothing failed as it became wrong, and a reader who
+trusted it would have concluded that XRP tags are unused and that the deposit
+watcher misattributes deposits. That is rule 16's "a wrong comment is a bug",
+sitting in the module that owns the mechanism, under a heading claiming rule 17.
 
-1. `swaps.deposit_address` IS ONE COLUMN AND AN XRP DEPOSIT INSTRUCTION IS A
-   PAIR. Every other chain's instruction is a single address. XRP's is
-   (account, tag), and both halves are mandatory -- a payment to the right
-   account with no tag is the `deferred` case chains/xrp_payments.py reports
-   and cannot credit. services/swap_service.py::create_swap() takes
-   `get_new_address()`'s return value straight into that one column, so wiring
-   this in means deciding how the pair is stored and how it is rendered to the
-   customer. describe_deposit_instruction() below is the rendering; the storage
-   decision is not made here.
+    "It is NOT connected to swap creation"
+        FALSE. services/swap_service.py::create_swap() calls
+        allocate_destination_tag() for every asset in TAG_ATTRIBUTED_ASSETS,
+        after the swap INSERT and inside the same transaction.
 
-2. THE DEPOSIT WATCHER WOULD CREDIT EVERY TAG TO WHICHEVER SWAP IT IS SCANNING
-   FOR. Measured by reading the code, not by running it, and flagged as a
-   finding rather than fixed: services/deposit_service.py::
-   refresh_swap_from_chain() calls
-   `adapter.find_deposits_to_address(swap["deposit_address"])` and then
-   `upsert_deposit_event(db, swap["id"], ...)` for every event returned. For a
-   per-address chain that is correct, because the address IS the swap. For XRP
-   the account is shared, so that scan returns every tagged payment to the
-   account and attributes all of them to the one swap being refreshed. The
-   missing filter is `event["vout"] == the swap's own tag`, and swap_id_for_tag()
-   is the function that answers it -- but adding the filter changes the one
-   function that decides, for EVERY chain, that a deposit is confirmed. That is
-   fund movement (rule 16), so it is reported, not done.
+    "XRP is not in Config.ALLOWED_PAIRS, so no swap can be created for it"
+        FALSE. ("XRP", "GRC") and ("GRC", "XRP") are both in ALLOWED_PAIRS
+        (config.py). SOL -> GRC joined on 2026-10-01 and SOL allocates tags
+        here too, which is what made the XRP-only account validator a live
+        blocker -- see ACCOUNT_VALIDATORS below.
 
-Neither of those is a defect in this module; both are why "the allocator
-exists" is not the same sentence as "XRP deposits work".
+    "nothing calls allocate_destination_tag() in the running application today"
+        FALSE, by the same two lines.
+
+The two blockers the section named are both resolved, and by the designs it
+asked for rather than around them:
+
+1. ONE COLUMN VS A PAIR -> `swaps.deposit_tag`. The section said
+   `swaps.deposit_address` is one column while a tag instruction is the pair
+   (account, tag), and that the storage decision was "not made here". It was
+   made: db.py carries `deposit_tag INTEGER`, NULL for every address-attributed
+   chain, and its comment records why a second column beat packing the pair into
+   one string (an X-address) -- attribution is a JOIN between an event's tag and
+   the swap that owns it, and a join against an opaque string decoded in Python
+   first is the gate-in-the-wrong-place this repo keeps paying for.
+
+2. THE UNFILTERED CREDIT -> `services/deposit_service.attributable_events()`.
+   The section said refresh_swap_from_chain() would credit every tagged payment
+   to whichever swap it was scanning, because the account is shared. That filter
+   now exists, matches `event["vout"]` against the swap's own deposit_tag, uses
+   `is not None` rather than truthiness so that tag 0 is not silently dropped,
+   and logs an error crediting NOTHING when a tag chain's swap has no tag. Its
+   comment says "Fixed now that XRP is being taken live."
+
+So "the allocator exists" and "tag deposits work" are the same sentence now, and
+the thing that is NOT established from here is narrower and still worth stating
+(rule 17): no XRP or SOL deposit has been credited end to end on this host by
+these paths. tests/test_xrp_swap_attribution.py and
+tests/test_sol_swap_creation.py prove creation and attribution against a real
+database with seeded rows; a devnet SOL -> testnet GRC rehearsal was in progress
+the day this was rewritten and had not completed.
 """
 
 from __future__ import annotations
@@ -567,10 +584,18 @@ def destination_tag_for_swap(db, swap_id: str) -> int | None:
 def swap_id_for_tag(db, account: str, tag, asset: str) -> str | None:
     """Which swap a RECEIVED destination tag belongs to, or None.
 
-    This is the reverse of allocation and it is the function the deposit path
-    needs -- see point 2 of "WHAT IS NOT WIRED" in this module's docstring.
-    chains/xrp_payments.py puts the tag in the event's `vout`, so the call is
-    `swap_id_for_tag(db, account, event["vout"])`.
+    This is the reverse of allocation. chains/xrp_payments.py and
+    chains/solana_memo.py both put the tag in the event's `vout`, so the call is
+    `swap_id_for_tag(db, account, event["vout"], asset)`.
+
+    IT IS NOT WHAT THE DEPOSIT PATH CALLS, and the difference is stated here and
+    at the other site per rule 8. services/deposit_service.py needs the lookup in
+    BULK -- attributable_events() filters a whole event list against one swap's
+    tag, and unclaimed_rows() needs every allocated tag on an asset at once -- so
+    it builds a dict from one SELECT over swaps rather than calling this per
+    event. Same question, two shapes: this one answers it for a single arriving
+    tag, that one for a scan. If a third caller appears that wants the single
+    lookup, it belongs here rather than in a third copy.
 
     allocatable=False, and the difference matters. A tag that ARRIVED may be 0:
     the ledger permits it, a real sender can set it, and it decodes back as

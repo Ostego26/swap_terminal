@@ -208,6 +208,17 @@ def attributable_events(events, swap: dict) -> list[dict]:
     # `is not None` and not truthiness: tag 0 is a legal DestinationTag, and
     # `if event.get("vout")` would drop it. Same trap pinned in
     # tests/test_xrp_payments.py.
+    #
+    # THIS DOES NOT CALL services/xrp_tag_service.swap_id_for_tag(), and the
+    # difference is stated here and in that function per rule 8. It answers the
+    # same question -- which swap owns this tag -- for a SINGLE arriving tag,
+    # with its own account validation and a SELECT per call. This filters a
+    # whole event list against ONE swap's already-known tag, so the tag is in
+    # hand and no lookup is needed; unclaimed_rows() below needs every allocated
+    # tag on an asset and builds a dict from one SELECT for the same reason. Two
+    # shapes of one question, not two copies of one rule -- but a third caller
+    # wanting the single lookup belongs in that function rather than in a third
+    # copy here.
     return [event for event in events if event.get("vout") is not None and event["vout"] == tag]
 
 

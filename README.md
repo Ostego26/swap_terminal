@@ -842,8 +842,11 @@ allocator, which is a change to how a swap is created rather than to the adapter
 
 ### The destination-tag allocator — `services/xrp_tag_service.py`
 
-`allocate_destination_tag(db, account, swap_id) -> int`. One account, one integer
-per swap, allocated from 1 upward and **never reused**.
+`allocate_destination_tag(db, account, swap_id, asset) -> int`. One account, one
+integer per swap, allocated from 1 upward and **never reused**. `asset` is required
+and selects the account validator: SOL and XRP both allocate here, and until
+2026-10-01 every account was checked against the XRP Ledger's format, which refused
+the first real SOL swap with "not a valid XRPL classic address".
 
 **Uniqueness is enforced by the database, not by Python.** Two live swaps sharing
 a tag means one customer's deposit is credited against the other's swap and the
