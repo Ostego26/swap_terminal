@@ -60,6 +60,7 @@ from config import Config
 from db import SCHEMA
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, solana_cluster
+from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
 from services.payout_service import payable_assets, unlock_readiness_lines
 from services.pricing import fetch_usd_prices
 
@@ -444,8 +445,8 @@ def explain_grc_failure(error: Exception, port: int) -> str:
         return (
             f"{type(error).__name__}: the wallet IS listening on {port} and REJECTED the "
             f"credentials. The daemon is fine -- do not restart it. Check GRC_RPC_USER and "
-            f"GRC_RPC_PASS against rpcuser/rpcpassword in the conf that wallet actually reads "
-            f"(and check you exported the VALUE, not a placeholder)"
+            f"GRC_RPC_PASS against rpcuser/rpcpassword, and check you exported the VALUE rather "
+            f"than a placeholder. {GRC_CREDENTIALS_ARE_PER_NETWORK}"
         )
     if "refused" in text.lower() or "NewConnectionError" in text or "Max retries" in text:
         return (

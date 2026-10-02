@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
 from network_target import UNCONFIGURED_PORT
+from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK, why_nothing_answered
 
 import swap_readiness
 from swap_readiness import (
@@ -725,3 +726,59 @@ def test_no_pair_means_every_checked_leg():
     assert swap_readiness.parse_pair("") is None
     assert swap_readiness.legs_to_check(None) == swap_readiness.CHECKED_LEGS
     assert swap_readiness.legs_to_check(("SOL", "GRC")) == ("SOL", "GRC")
+
+
+def test_the_401_names_the_testnet_conf_and_not_just_some_conf():
+    """MEASURED TWICE, A WEEK APART, AND THE SECOND TIME THROUGH THIS PATH.
+
+    2026-09-29: the operator's GUI wallet was serving RPC and answering HTTP 401
+    because the credentials had been read out of the MAINNET conf. Two files named
+    gridcoinresearch.conf sit one directory apart under ~/.GridcoinResearch and
+    carry different credentials, and nothing about a 401 says which you used.
+    regtest/daemons.why_nothing_answered() has said so ever since.
+
+    2026-10-02: the identical 401 arrived through swap_readiness.py, whose own
+    message said only "the conf that wallet actually reads". The operator read it
+    and concluded "probably fat fingered the password" -- a plausible reading, and
+    not the cause this project had already measured. Rule 8's drift arriving as a
+    worse DIAGNOSIS rather than a wrong number: both copies looked right in their
+    own file and only one had the finding in it.
+
+    One sentence now, in regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK, imported
+    by both.
+    """
+    detail = swap_readiness.explain_grc_failure(RuntimeError("401 Client Error: Unauthorized"), 25715)
+
+    assert "25715" in detail
+    assert "do not restart it" in detail, "a 401 PROVES the daemon is up"
+    assert "TESTNET gridcoinresearch.conf" in detail
+    assert "`testnet` subdirectory" in detail
+    assert "DIFFERENT credentials" in detail
+    assert "check WHICH FILE before retyping anything" in detail
+
+
+def test_the_two_401_messages_carry_the_same_sentence():
+    """The property that makes the merge real rather than a copy.
+
+    A reader who hits this through the regtest harness and a reader who hits it
+    through the preflight must be told the same thing -- which is only guaranteed
+    while both read one constant.
+    """
+    preflight = swap_readiness.explain_grc_failure(RuntimeError("401 Unauthorized"), 25715)
+    harness = why_nothing_answered(["HTTP 401 Unauthorized"])
+
+    assert GRC_CREDENTIALS_ARE_PER_NETWORK in preflight
+    assert GRC_CREDENTIALS_ARE_PER_NETWORK in harness
+
+
+def test_the_401_guidance_names_a_path_and_never_a_value():
+    """It tells you WHERE to look. Nothing here reads that file or echoes a secret.
+
+    chains/daemon_conf.CONF_FALLBACK_NETWORK excludes GRC deliberately -- its conf
+    is shared by a live staking wallet -- so naming the path is the most this may
+    do, and it must not drift into reading it.
+    """
+    assert "rpcpassword=" not in GRC_CREDENTIALS_ARE_PER_NETWORK
+    assert "rpcuser=" not in GRC_CREDENTIALS_ARE_PER_NETWORK
+    # The variable NAMES are fine to print; a value or an = assignment is not.
+    assert "GRC_RPC_PASS" in GRC_CREDENTIALS_ARE_PER_NETWORK

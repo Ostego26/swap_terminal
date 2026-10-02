@@ -565,6 +565,36 @@ def adapter_for(config: ChainConfig, wallet: str = "") -> RegtestRPC:
 LIVENESS_PROBES = ("uptime", "getblockcount")
 
 
+#: WHERE GRC's TESTNET CREDENTIALS LIVE, in one sentence, in one place.
+#:
+#: MEASURED ON THE OPERATOR'S HOST 2026-09-29. Their GUI wallet
+#: (`gridcoinresearch -testnet`, pid 8897) was serving RPC the whole time and
+#: answering HTTP 401, because the credentials had been read out of the MAINNET
+#: conf. Two files named gridcoinresearch.conf sit one directory apart under
+#: ~/.GridcoinResearch and carry DIFFERENT credentials, and nothing about a 401
+#: says which one you used.
+#:
+#: SHARED BECAUSE IT WAS SPELLED TWICE AND THE OPERATOR SAW THE VAGUER COPY.
+#: why_nothing_answered() below carried this sentence; swap_readiness.
+#: explain_grc_failure() carried its own, which said only "the conf that wallet
+#: actually reads". On 2026-10-02 the operator hit the identical 401 through the
+#: readiness path, read that line, and concluded they had mistyped the password --
+#: a plausible reading, and not the cause this project had already measured. Rule
+#: 8's drift arriving as a worse diagnosis rather than a wrong number: both copies
+#: looked correct in their own file, and only one of them had the finding in it.
+#:
+#: A PATH AND A FILENAME, NEVER A VALUE. This names where to look; nothing in this
+#: repository reads that file (see chains/daemon_conf.CONF_FALLBACK_NETWORK for why
+#: GRC is deliberately excluded from conf resolution), and no credential of theirs
+#: is ever read, logged or echoed.
+GRC_CREDENTIALS_ARE_PER_NETWORK = (
+    "GRC_RPC_USER and GRC_RPC_PASS have to come from the TESTNET gridcoinresearch.conf -- the one "
+    "under the `testnet` subdirectory of ~/.GridcoinResearch -- which carries DIFFERENT credentials "
+    "from the mainnet file beside it. Reading them out of the mainnet conf is the cause this project "
+    "has actually measured for this 401 (2026-09-29), so check WHICH FILE before retyping anything."
+)
+
+
 def why_nothing_answered(reasons: list[str]) -> str:
     """Which of the two utterly different causes a total liveness miss is. NEVER guessed.
 
@@ -593,9 +623,7 @@ def why_nothing_answered(reasons: list[str]) -> str:
         return (
             "the daemon IS answering and REFUSED THE CREDENTIALS (HTTP 401). Do NOT start "
             "another one -- it is already up, and a second process on a staking wallet's "
-            "datadir is a worse problem than this. GRC_RPC_USER and GRC_RPC_PASS have to come "
-            "from the TESTNET gridcoinresearch.conf, which is the one under the `testnet` "
-            "subdirectory and carries DIFFERENT credentials from the mainnet file beside it"
+            f"datadir is a worse problem than this. {GRC_CREDENTIALS_ARE_PER_NETWORK}"
         )
     if "refused" in blob or "reset" in blob or "timed out" in blob or "connection" in blob:
         return (
