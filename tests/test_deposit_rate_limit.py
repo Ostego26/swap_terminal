@@ -27,6 +27,7 @@ credited, and eventually the signature call itself 429'd and killed the worker.
 The guard in workers/common.py keeps the worker alive. This is the cause.
 """
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ import pytest
 from db import SCHEMA, apply_migrations, connect_db
 
 from swap_terminal.services import deposit_service
+from swap_terminal.services.xrp_tag_service import allocate_destination_tag
 
 ACCOUNT = "CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp"
 CONFIG = {"AMOUNT_TOLERANCE_PCT": 0.01, "SOL_DEPOSIT_ACCOUNT": ACCOUNT, "SOL_MIN_CONFIRMATIONS": 3}
@@ -448,3 +450,83 @@ def test_a_swap_already_under_review_is_not_re_flagged_every_cycle(db):
         "SELECT COUNT(*) AS n FROM swap_audit_log WHERE swap_id = 's_halt'"
     ).fetchone()["n"]
     assert audit_after == audit_before, "no second identical audit row"
+
+
+# --- the absence the skip set depends on --------------------------------------
+#
+# unattributable_txids()'s safety argument rests on two claims. One is an
+# invariant (a discriminator is never reissued: the allocator is MAX+1). The
+# other is an ABSENCE -- nothing revives a swap into ACTIVE_STATUSES -- and rule
+# 2's distinction is the whole reason these tests exist: "I could not find a
+# revival path" is not "a revival path cannot exist". Adding one is a reasonable
+# feature (an operator tool that reopens a failed swap to accept a late payment),
+# and the moment it lands the skip set starts hiding the very deposit that tool
+# was built to find. These fail then, instead of the money going quiet.
+
+
+def test_a_FAILED_swap_is_never_refreshed_back_into_an_active_status(db):
+    """The absence, driven through the real function rather than grepped for.
+
+    A grep found exactly one set_swap_status(..., "confirming", ...) outside tests,
+    guarded by `current_status in {"deposit_seen", "awaiting_deposit"}`. That is
+    evidence, not a measurement -- rule 17 -- so this seeds a failed swap with a
+    matching on-chain deposit and asserts the real refresh leaves it failed.
+
+    IF THIS TEST EVER FAILS, DO NOT FIX THE TEST. It means a revival path now
+    exists, and unattributable_deposit_service.unattributable_txids() must stop
+    skipping rows whose `why` came from unclaimed_events() -- read that docstring
+    before changing anything here.
+    """
+    seed_swap(db, "s_failed", 2, status="failed")
+    adapter = CountingAdapter([event(STRANDED[1], 2, confirmations=9)])
+    swap = db.execute("SELECT * FROM swaps WHERE id = 's_failed'").fetchone()
+    deposit_service.refresh_swap_from_chain(db, CONFIG, {"SOL": adapter}, swap)
+    db.commit()
+    after = db.execute("SELECT status FROM swaps WHERE id = 's_failed'").fetchone()
+    assert after["status"] == "failed", (
+        "a failed swap came back to life, so a stranded deposit matching it could now be "
+        "credited -- and the skip set would never let the scanner see it again"
+    )
+
+
+def test_the_allocator_never_REISSUES_a_discriminator(db):
+    """The invariant half -- and it is a real invariant, which my grep had not established.
+
+    If a tag could be reused, "no swap on this asset has that discriminator" could
+    later become "swap Y has it", and swap Y's deposit would be permanently
+    invisible: the scanner skips the txid before any swap ever sees the event. That
+    is the one case in this whole mechanism that loses a customer's money rather
+    than merely freezing a column.
+
+    I ARGUED THIS FROM "nothing outside tests deletes from xrp_destination_tags",
+    WHICH IS THE WEAK FORM. The schema is stronger and I had not read it: a BEFORE
+    DELETE trigger, xrp_destination_tags_are_never_released, ABORTS the delete, and
+    its own message names this hazard -- "a deleted row lets the next tag repeat one
+    already given out, and a late payment carrying it would credit the wrong swap".
+    A sibling trigger blocks re-pointing account, destination_tag or swap_id.
+
+    So this asserts the trigger rather than the absence of callers. The distinction
+    matters: an absence is one commit away from being false, a trigger fails that
+    commit.
+    """
+    seed_swap(db, "s_one", None)
+    seed_swap(db, "s_two", None)
+    first = allocate_destination_tag(db, ACCOUNT, "s_one", "SOL")
+    second = allocate_destination_tag(db, ACCOUNT, "s_two", "SOL")
+    db.commit()
+    assert second > first, "tags must only ever climb"
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        db.execute(
+            "DELETE FROM xrp_destination_tags WHERE destination_tag = ?", (first,)
+        )
+    db.rollback()
+    with pytest.raises(sqlite3.IntegrityError, match="immutable once allocated"):
+        db.execute(
+            "UPDATE xrp_destination_tags SET swap_id = 's_two' WHERE destination_tag = ?",
+            (first,),
+        )
+    db.rollback()
+    assert db.execute(
+        "SELECT MAX(destination_tag) AS m FROM xrp_destination_tags WHERE account = ?",
+        (ACCOUNT,),
+    ).fetchone()["m"] == second, "so MAX() cannot fall and the next tag cannot repeat one"

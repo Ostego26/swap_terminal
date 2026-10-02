@@ -286,6 +286,27 @@ def test_a_database_without_the_table_is_REFUSED_and_not_reported_as_empty(tmp_p
     assert "not that there are no unclaimed deposits" in err
 
 
+def test_last_seen_is_labeled_as_a_READ_and_not_as_a_freshness_check(db_file, capsys):
+    """The column changed meaning on 2026-10-02 and nothing said so.
+
+    record()'s ON CONFLICT advanced last_seen_at every cycle, because every cycle
+    re-read the transaction. The skip set stopped those reads, so the value now
+    freezes at the last pre-skip read. "last seen" reads as "we checked and it is
+    still there"; it is now "when we last looked", and those differ by however long
+    the row has been skipped.
+
+    Printing the raw label would be a quiet lie of the kind rule 1 is about -- a
+    reader trusts the screen. The alternative, re-reading a finalized transaction
+    forever to keep a timestamp fresh, is exactly the 429 toll the fix removed.
+    """
+    seed(db_file, [no_reference(STRANDED_A)])
+    assert show_unattributable.main(["--db", str(db_file)]) == 0
+    out = capsys.readouterr().out
+    assert "last read" in out
+    assert "not a freshness check" in out
+    assert "stops advancing" in out, "and says WHY it will go stale"
+
+
 def test_resolved_rows_show_their_note_under_include_resolved(db_file, capsys):
     seed(db_file, [no_reference(STRANDED_A)])
     conn = connect_db(str(db_file))

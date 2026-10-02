@@ -147,7 +147,20 @@ def deposit_lines(row) -> list[str]:
         labeled("why refused", str(row["why"])),
         labeled("confirmations", str(row["confirmations"])),
         labeled("first seen", str(row["first_seen_at"])),
-        labeled("last seen", str(row["last_seen_at"])),
+        # NOT "last confirmed still present", AND IT USED TO BE. record()'s ON
+        # CONFLICT advanced this on every cycle because every cycle re-read the
+        # transaction. Since the 2026-10-02 skip set the scanner never reads it
+        # again, so the value freezes at the last pre-skip read and a reader who
+        # takes it as "we checked then" is wrong from that moment on. The column
+        # is honest about what it is here rather than quietly changing meaning --
+        # the alternative was re-reading a finalized transaction forever to keep
+        # a timestamp fresh, which is the 429 toll this fix removed.
+        labeled(
+            "last read",
+            f"{row['last_seen_at']}  <- when the scan last READ this on-chain, not "
+            "a freshness check;",
+        ),
+        CONTINUATION + "   it stops advancing once the skip set covers the txid",
     ]
     if row["resolved_at"]:
         note = row["resolution_note"] or "(no note)"

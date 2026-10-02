@@ -188,22 +188,80 @@ def unattributable_txids(db, asset: str) -> frozenset[str]:
     rather than assumed, because never looking at a deposit again is a decision
     about somebody's money.
 
-    All four refusals in chains/solana_memo.deposit_tag_from() read ONLY the
-    transaction's memo instructions -- no memo, two memos, not an integer, outside
-    the allocator's range -- and a finalized transaction's memos cannot change. So
-    a rescan re-derives the identical verdict at the cost of one getTransaction.
+    THE FIRST VERSION OF THIS ARGUMENT ENUMERATED ONE FUNCTION'S REFUSALS AND
+    PRESENTED IT AS THE TABLE'S, and the operator's own live row refuted it within
+    the hour. It said:
+
+        All four refusals in chains/solana_memo.deposit_tag_from() read ONLY the
+        transaction's memo instructions -- no memo, two memos, not an integer,
+        outside the allocator's range -- and a finalized transaction's memos
+        cannot change.
+
+    True of deposit_tag_from(), and deposit_tag_from() is not where every row comes
+    from. TWO functions write this table, and only one of them is memo-content:
+
+        stranded_rows()   <- adapter drops, from deposit_tag_from(). Memo content
+                             only. A finalized transaction's memos cannot change,
+                             so the verdict genuinely cannot move.
+        unclaimed_rows()  <- unclaimed_events(), and BOTH of its reasons read
+                             MUTABLE STATE:
+                               "no swap on this asset has that discriminator"
+                                   reads `claimed`, built over every swap on the
+                                   asset -- a set that grows.
+                               "it matches swap X, which is <status>"
+                                   reads that swap's STATUS, a column that moves.
+
+    The operator's outstanding row on 2026-10-02 is the second kind: 0.05 SOL with
+    memo 2, matching s_ba72c715150a063b, recorded while that swap was not
+    refreshable. Its status has already changed once since (payout_pending ->
+    failed). So the claim "a rescan re-derives the identical verdict" was being made
+    about inputs that demonstrably move.
+
+    WHY SKIPPING IS STILL SAFE, established rather than assumed -- and note that
+    this is a WEAKER argument than immutability, which is the point of writing it
+    out:
+
+      a discriminator is never REISSUED. xrp_tag_service._ALLOCATE_SQL is
+      `COALESCE(MAX(destination_tag), :below_first) + 1` per account -- a monotonic
+      counter -- and nothing outside tests deletes from xrp_destination_tags
+      (grepped 2026-10-02). So "no swap has that discriminator" cannot become "swap
+      Y has it", which was the case that would have cost a real customer their
+      deposit.
+
+      nothing REVIVES a swap into ACTIVE_STATUSES. The only
+      set_swap_status(..., "confirming", ...) outside tests is
+      deposit_service.py:350, guarded by `current_status in {"deposit_seen",
+      "awaiting_deposit"}` -- both already active -- and refresh_swap_from_chain()
+      is reached only for swaps already in ACTIVE_STATUSES. A failed swap stays
+      failed, so "will never be credited to it" stays true.
+
+    THAT SECOND CLAUSE IS AN ABSENCE, NOT AN INVARIANT, and rule 2's distinction is
+    exactly the one that matters here: "I could not find a revival path" is not "a
+    revival path cannot exist". It is one commit away -- an operator tool that
+    reopens a failed swap to accept a late payment is a reasonable thing to want,
+    and the moment it exists this skip set starts hiding the deposit that tool was
+    built to find. tests/test_deposit_rate_limit.py pins the absence so adding one
+    fails a test instead of silently losing money.
+
+    AND last_seen_at FREEZES, which is a cost this change imposes rather than a
+    risk it runs. The column advanced on every cycle because every cycle re-read the
+    transaction; a skipped transaction never reaches record()'s ON CONFLICT, so the
+    value stops at the last pre-skip read. It now means "last read on-chain", not
+    "last confirmed still present", and show_unattributable.py says so on the screen
+    because the operator reads the screen and not this docstring.
 
     AND THE ROW ALREADY HOLDS EVERYTHING A RESCAN WOULD LEARN: the amount, the
     account it landed in, how many credits made it up, the confirmations, and the
     adapter's own reason in its own words. A human matching one of these works
     from the row, which is why the table exists; the chain is not the record here.
 
-    THE ONE CASE WHERE THE VERDICT COULD DIFFER is a widened allocator range --
-    TAG_MINIMUM..TAG_MAXIMUM is the only input to those four branches that is not
-    the transaction itself, so a memo once "outside the range" could later be
-    inside one. That is a code change, not a chain event, and the recourse is the
-    row rather than a rescan: it names the discriminator it saw. Said here because
-    a future reader widening that range needs to know this set exists.
+    THE OTHER CODE CHANGE THAT WOULD MATTER is a widened allocator range --
+    TAG_MINIMUM..TAG_MAXIMUM is the only input to deposit_tag_from()'s branches that
+    is not the transaction itself, so a memo once "outside the range" could later be
+    inside one. Like the revival path above it is a code change rather than a chain
+    event, and the recourse is the row rather than a rescan: it names the
+    discriminator it saw. Said here because a future reader widening that range
+    needs to know this set exists.
 
     RESOLVED ROWS ARE INCLUDED. A resolved deposit has been dealt with by a human,
     which is a stronger reason not to re-read it than an open one.
