@@ -582,6 +582,44 @@ def pair_rows(config, adapters: dict) -> list[dict]:
     return rows
 
 
+def pair_matrix(rows: list[dict]) -> dict[str, dict[str, dict]]:
+    """pair_rows()'s rows, indexed [source][destination]. DERIVED, never recomputed.
+
+    TAKES THE ROWS AND NOT (config, adapters), which is the whole point. A version
+    that took the configuration would evaluate the verdict a second time, and a
+    second evaluation of that verdict is the defect this module was repairing
+    yesterday: services/admin_view.pair_rows() had one of the three conditions
+    services/pair_view.py has, and /admin said ENABLED about a pair / said DISABLED
+    about, in one process. The same shape one layer up would be the same bug.
+
+    So this is an INDEX over rows that already exist. Every cell IS a row -- the
+    same dict object -- so a cell cannot disagree with the list it came from, and
+    `label`, `state` and `short_detail` are whatever pair_rows() put there.
+
+    The diagonal is absent rather than filled with a placeholder: an asset to itself
+    is not an ordered pair, pair_rows() does not emit one, and inventing a row for
+    it here would be this function deciding something. The template renders the
+    diagonal in words instead (rule 14: a blank cell is ambiguous between "not a
+    pair" and "a verdict that failed to render").
+    """
+    matrix: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        matrix.setdefault(row["from_asset"], {})[row["to_asset"]] = row
+    return matrix
+
+
+def pair_assets(rows: list[dict]) -> list[str]:
+    """Every asset that appears on either side of any pair row, sorted.
+
+    READ OFF THE ROWS, for the same reason pair_matrix() is: pair_rows() already
+    unions ALLOWED_PAIRS' assets with ATTRIBUTION_MODELS' keys and its comment
+    records that a hardcoded second copy of that set was deleted on 2026-09-30 as "a
+    hardcoded patch over the drift the derivation removes". Rebuilding the set here
+    would restore exactly that.
+    """
+    return sorted({row["from_asset"] for row in rows} | {row["to_asset"] for row in rows})
+
+
 def _and_list(names) -> str:
     """"BTC", or "BTC and LTC", or "BTC, GRC and LTC".
 
@@ -1052,6 +1090,7 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
     module and neither is reachable from here.
     """
     now = utc_now_iso() if now_iso is None else now_iso
+    _pairs = pair_rows(config, adapters)
     return {
         "generated_at": now,
         "database": config.get("DB_PATH"),
@@ -1063,7 +1102,14 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
         "unresolved_payouts": unresolved_payouts(db),
         "inventory": inventory_rows(db, now),
         "transitions": recent_transitions(db),
-        "pairs": pair_rows(config, adapters),
+        # ONE CALL, THREE SHAPES. The matrix and the asset list are INDEXES over
+        # these rows, not second derivations of them -- see pair_matrix(). `pairs`
+        # itself is kept because /admin's own note counts it, operator_panel.py's
+        # teller pane reads it as a flat list, and a matrix is the wrong shape for
+        # both.
+        "pairs": _pairs,
+        "pair_matrix": pair_matrix(_pairs),
+        "pair_assets": pair_assets(_pairs),
         "chains": chain_rows(config, adapters),
         "workers": worker_rows(run_dir),
         "pricing": pricing_panel(),

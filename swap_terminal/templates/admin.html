@@ -516,31 +516,86 @@
     </tbody>
   </table>
   {% if data.pairs %}
-  <ul class="pair-grid">
-    {% for row in data.pairs %}
-    {# THREE STATES. This used to badge on `row.enabled` alone, so a pair that is
-       allowed but whose chain has no adapter in this process read ENABLED -- on the
-       page an operator opens to find out why a swap was refused, two panels above
-       chain_rows() reporting that same chain as unconfigured. See
-       services/admin_view.pair_rows() for the 2026-09-26 measurement. #}
-    <li class="pair {% if row.state != 'enabled' %}pair-off{% endif %}">
-      <span class="pair-label mono">{{ row.label }}</span>
-      {#- FOUR BRANCHES AND NO {% else %} FALLTHROUGH FOR A KNOWN STATE. The
-          `cannot_complete` state fell into the DISABLED branch for as long as it took
-          to render the page once, which badged an ALLOWED pair that cannot complete
-          with the word for a pair the operator turned off. A state this template does
-          not know now says so in words rather than borrowing the nearest badge --
-          the same refusal services/admin_view.worker_stopped_consequence() and
-          attribution_model_note() both make, and for the same reason. -#}
-      {% if row.state == 'enabled' %}{{ badges.level_badge('ok', 'ENABLED') }}
-      {% elif row.state == 'unreachable' %}{{ badges.level_badge('slow', 'UNREACHABLE') }}
-      {% elif row.state == 'cannot_complete' %}{{ badges.level_badge('failed', 'CANNOT COMPLETE') }}
-      {% elif row.state == 'disabled' %}{{ badges.level_badge('halted', 'DISABLED') }}
-      {% else %}{{ badges.level_badge('unknown', row.state|upper) }}{% endif %}
-      <span class="subtle">{{ row.short_detail }}</span>
-    </li>
-    {% endfor %}
-  </ul>
+  {#- A 5x5 MATRIX, 2026-10-02, APPROVED BY THE OPERATOR AFTER I DECLINED IT UNASKED.
+      Rows are the SOURCE asset, columns the DESTINATION, each cell one pair's verdict.
+
+      WHAT I RAISED AND HOW IT IS HANDLED, because the concern was real even though
+      the answer was yes. In a list, `XRP -> GRC` exists as a literal string a reader
+      can search for and a test can assert on. In a matrix the pair is POSITIONAL --
+      the row says XRP, the column says GRC -- so that literal has to live somewhere
+      or it is gone from the page:
+
+        the cell's `title` AND `aria-label` carry the full "XRP -> GRC" plus its
+        state and its reason. aria-label and not title alone, because a title is
+        invisible to a keyboard user and to a screen reader navigating cells.
+        the row and column headers are real `th scope="row"` / `th scope="col"`,
+        so a screen reader announces "XRP, GRC, CANNOT COMPLETE" when it reads the
+        cell -- which is the pair, spoken, without any attribute at all.
+        the per-asset REMEDY was already moved to the Chains panel above, once per
+        chain, and the per-state CONSEQUENCE is in the legend above this table.
+
+      THE DIAGONAL IS NOT BLANK. An asset to itself is not a pair, and a blank cell
+      is rule 14's ambiguous gap -- indistinguishable from a verdict that failed to
+      render. It says so in words.
+
+      WHAT A PASTE OF THIS LOOKS LIKE, measured rather than assumed, because the
+      operator reads these pages by pasting them back. A browser copy turns cells
+      into tabs and rows into newlines, so the matrix pastes as a header row naming
+      every destination and five tab-aligned rows of states -- six lines where the
+      pill list was fifty-six. The per-pair REASON SENTENCE is the thing a paste
+      loses, and that is the trade taken knowingly: in the measured scenario those
+      sentences were "BTC and GRC unreachable here" eleven times and "not in
+      ALLOWED_PAIRS" nine times, both of which a matrix shows better as a SHAPE --
+      an unconfigured asset is a whole row and a whole column of the same badge,
+      which is one reading instead of twenty. What a paste must not lose is which
+      asset is the problem and what to do, and both are in the Chains panel above. -#}
+  <div class="scroll-x">
+  <table class="matrix">
+    <caption class="subbox-title">Every ordered pair. Row = what a customer sends, column = what they receive.</caption>
+    <thead>
+      <tr>
+        <td class="matrix-corner"><span class="subtle">from &#8595; / to &#8594;</span></td>
+        {% for asset in data.pair_assets %}<th scope="col">{{ asset }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for source in data.pair_assets %}
+      <tr>
+        <th scope="row">{{ source }}</th>
+        {% for destination in data.pair_assets %}
+        {% if source == destination %}
+        {#- Not a pair, and it says so. A dash alone would read as a verdict nobody
+            rendered, which is the distinction rule 14 is about. -#}
+        <td class="matrix-self"><span class="subtle">&#8212; same asset</span></td>
+        {% else %}
+        {% set cell = data.pair_matrix[source][destination] %}
+        {#- THE FULL LABEL, THE STATE AND THE REASON, ON THE CELL ITSELF. aria-label
+            rather than title alone: a title is a mouse affordance and this page is
+            read by keyboard and by screen reader as well as by eye. -#}
+        <td class="matrix-cell{% if cell.state != 'enabled' %} matrix-off{% endif %}"
+            title="{{ cell.label }} &#8212; {{ cell.short_detail }}"
+            aria-label="{{ cell.label }}: {{ cell.state }} &#8212; {{ cell.short_detail }}">
+          {% if cell.state == 'enabled' %}{{ badges.level_badge('ok', 'ENABLED') }}
+          {% elif cell.state == 'unreachable' %}{{ badges.level_badge('slow', 'UNREACHABLE') }}
+          {% elif cell.state == 'cannot_complete' %}{{ badges.level_badge('failed', 'CANNOT COMPLETE') }}
+          {% elif cell.state == 'disabled' %}{{ badges.level_badge('halted', 'DISABLED') }}
+          {#- A state this template does not know says so rather than borrowing the
+              nearest badge. `cannot_complete` fell into a DISABLED {% else %} for as
+              long as it took to render the page once, which is why there is no
+              fallthrough for a known state here. -#}
+          {% else %}{{ badges.level_badge('unknown', cell.state|upper) }}{% endif %}
+        </td>
+        {% endif %}
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="panel-note">{{ data.pairs | length }} ordered pairs over {{ data.pair_assets | length }} assets, every
+     one shown. An asset with no adapter in this process is a whole row AND a whole column of the same badge
+     &#8212; which is the reading a list of pairs could not give, and the <a href="#chains-heading">Chains</a>
+     panel above names what to set for it, once per chain.</p>
   {% else %}
     {{ badges.empty('pair is known', 'Config.ALLOWED_PAIRS') }}
   {% endif %}

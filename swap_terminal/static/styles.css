@@ -596,7 +596,18 @@ button:disabled {
   gap: var(--s2);
 }
 
-.pair-list, .pair-grid, .chips, .cards {
+/* `.pair-list`, `.pair-grid` and `.pair` WERE HERE and are deleted rather than
+ * kept for reference (rule 2: git history is the archive). They styled a grid of
+ * pair PILLS, and the last two call sites went away in the same commit as this
+ * deletion: index.html's became a table on 2026-10-02 and admin.html's became the
+ * pair matrix below. Grepped for the NAMES across templates, static/*.js, tests
+ * and docs rather than for a selector match (rule 2), and the only remaining
+ * mentions are two comments recording what the pills were.
+ *
+ * `.pair-off` and `.pair-label` SURVIVE and are not dead: index.html's pair table
+ * still marks a disabled ROW with the first and names the direction with the
+ * second, which is why they moved out of the deleted block rather than with it. */
+.chips, .cards {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -604,17 +615,7 @@ button:disabled {
   flex-wrap: wrap;
   gap: var(--s2);
 }
-.pair-grid, .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-.pair {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  flex-wrap: wrap;
-  padding: var(--s2) var(--s3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .pair-off { opacity: 0.8; border-style: dashed; }
 .pair-label { font-weight: 650; }
 .chip {
@@ -729,6 +730,66 @@ tbody tr:hover { background: var(--surface-2); }
  * the band owns the spacing when they are side by side, so theirs is dropped or
  * the gap doubles between the band and whatever follows it. */
 .band > .panel { margin-bottom: 0; }
+
+/* --- the pair matrix -------------------------------------------------------
+ *
+ * Rows are the source asset, columns the destination, each cell one pair's
+ * verdict. Added 2026-10-02 at the operator's request, replacing a grid of
+ * twenty pills.
+ *
+ * BOTH HEADERS ARE REAL AND BOTH ARE STICKY, which the global `th` rule only
+ * half provided: it sticks a header to the TOP, which is what a column header
+ * wants, and a matrix also needs the first COLUMN to survive the horizontal
+ * scroll -- a row of five badges with the source asset scrolled off the left
+ * edge is five verdicts about nothing. So the row header sticks left and the
+ * column header sticks top, and the corner cell sticks to both or it slides
+ * out from under them.
+ *
+ * `text-align: center` on the cells, which is the one place in this file that
+ * is right: a badge is a token rather than a value, every cell holds exactly
+ * one, and centering is what makes the diagonal read as a diagonal.
+ */
+.matrix { border-collapse: separate; border-spacing: 0; }
+
+.matrix th[scope="col"] { text-align: center; }
+
+.matrix th[scope="row"] {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  text-align: left;
+  font-size: var(--t-sm);
+  font-weight: 650;
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--mono);
+}
+
+/* The corner is under both sticky headers, so it needs the higher z-index and
+ * both offsets or the column header slides over it on a sideways scroll. */
+.matrix .matrix-corner {
+  position: sticky;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+.matrix-cell { text-align: center; }
+
+/* A pair that cannot be swapped is marked at CELL level as well as by its
+ * badge, because the point of a matrix is the shape: an asset with no adapter
+ * is a whole row and a whole column of the same tint, which reads as one fact
+ * where a list of twenty pairs read as twenty. */
+.matrix-off { background: var(--bg-sunken); }
+
+/* Not a pair. It carries the words "same asset" rather than a dash alone --
+ * see the template; a blank diagonal is indistinguishable from a verdict that
+ * failed to render. */
+.matrix-self { text-align: center; background: var(--bg-sunken); opacity: 0.65; }
 
 /* --- label/value tables, boxes, and digits that line up -----------------
  *

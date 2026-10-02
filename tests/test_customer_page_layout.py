@@ -47,7 +47,7 @@ from db import SCHEMA, dict_factory
 # docstring says it exists so the next gate pair_view grows is added in one
 # place. A second copy here would agree on the day it was written and drift the
 # first time that gate changes, which is the failure mode that rule is about.
-from services.admin_view import chain_rows, pair_rows
+from services.admin_view import chain_rows, pair_assets, pair_matrix, pair_rows
 from services.pair_view import allowed_pair_rows
 from services.swap_view import ATTRIBUTION_MODELS
 from test_web_surfaces import StubAdapter, cold_price_cache, fully_reachable, with_deposit_accounts
@@ -654,18 +654,31 @@ def test_the_label_value_tables_stack_rather_than_scroll_at_phone_width():
 
 
 def _rendered_pairs(body):
-    """Each pill in the Trading pairs panel, as (label, badge word, detail)."""
-    pills = []
-    for pill in re.findall(r'<li class="pair[^"]*">(.*?)</li>', body, flags=re.DOTALL):
-        label = re.search(r'<span class="pair-label[^"]*">(.*?)</span>', pill, flags=re.DOTALL)
-        word = re.search(r'<span class="badge-word">(.*?)</span>', pill, flags=re.DOTALL)
-        detail = re.search(r'<span class="subtle">(.*?)</span>', pill, flags=re.DOTALL)
-        pills.append((
-            html.unescape(re.sub(r"\s+", " ", label.group(1)).strip()) if label else "",
+    """Each cell of the pair matrix, as (label, badge word, detail).
+
+    READS THE `aria-label`, WHICH IS THE POINT. The matrix replaced a list of
+    pills on 2026-10-02, and in a matrix the pair is POSITIONAL -- the row says
+    XRP, the column says GRC -- so `XRP -> GRC` stops existing as a literal unless
+    something carries it. The cell's aria-label does, which is also the route a
+    screen reader takes, so a matrix that dropped the label fails the three
+    verdict tests below rather than merely looking tidier.
+
+    The badge word is read from the cell body rather than from the aria-label, so
+    the two cannot silently diverge: if the cell rendered one state and announced
+    another, the tests comparing them to the customer page would see it.
+    """
+    cells = []
+    for attrs, inner in re.findall(r'<td class="matrix-cell[^"]*"([^>]*)>(.*?)</td>', body, flags=re.DOTALL):
+        announced = re.search(r'aria-label="([^"]*)"', attrs)
+        word = re.search(r'<span class="badge-word">(.*?)</span>', inner, flags=re.DOTALL)
+        spoken = html.unescape(announced.group(1)) if announced else ""
+        label, _, rest = spoken.partition(":")
+        cells.append((
+            re.sub(r"\s+", " ", label).strip(),
             word.group(1).strip() if word else "",
-            html.unescape(re.sub(r"\s+", " ", detail.group(1)).strip()) if detail else "",
+            re.sub(r"\s+", " ", rest).strip(),
         ))
-    return pills
+    return cells
 
 
 def _mixed_adapters(client, monkeypatch, can_spend_assets, cannot_spend_assets):
@@ -999,3 +1012,239 @@ def test_every_empty_state_on_the_operator_page_survived_the_reflow(client):
         "This is the state you want",
     ):
         assert sentence in body, f"an empty region lost the sentence saying what zero means: {sentence!r}"
+
+
+# --- the pair matrix --------------------------------------------------------
+#
+# Approved by the operator 2026-10-02 after I declined it unasked. The reason I
+# declined it is the reason these tests exist: in a list `XRP -> GRC` is a
+# literal string, and in a matrix the pair is POSITIONAL, so the label and the
+# per-pair reason have to be carried somewhere or they leave the page.
+#
+# AND THE HEIGHT ESTIMATE I GAVE WAS WRONG, which is recorded here because the
+# approval was given on the strength of it. I reported "20 pills in 7 rows
+# becomes 5 data rows -- the largest remaining height cut", and that figure was
+# formed before the prose collapse shrank the pills from up to 791 characters to
+# 53. Re-measured on the rendered page after the collapse: the panel goes 362
+# visible words to 319 (-11.9%) and the page 2053 to 2010 (-2.1%), which is about
+# one row of panel height rather than two. What the matrix actually buys is the
+# PASTE -- 27 lines to 15 for this panel, 122 to 110 for the whole page -- and a
+# shape: an unconfigured asset is a whole row and a whole column of one badge.
+
+
+def _paste(markup: str) -> str:
+    """What a browser copy of this markup puts on the clipboard.
+
+    THE OPERATOR READS THESE PAGES BY PASTING THEM BACK, which is stated in
+    CLAUDE.md ("the operator runs commands on the live host and pastes the output
+    back"), so "is it legible as text" is not a secondary concern for this page --
+    it is the primary reading mode, and a matrix is the layout most at risk of
+    failing it.
+
+    Models the copy rather than the DOM: cell ends become tabs and block ends
+    become newlines, then all other whitespace collapses, in that order. A
+    template wraps its source freely inside a cell and a browser collapses that,
+    so an in-cell newline is a space and not a line break. Getting that order
+    wrong splits every matrix row into five lines and makes the matrix look
+    unreadable when it is not, which is a measurement bug arguing against a
+    change.
+    """
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", markup, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    text = re.sub(r"</t[dh]>", "\x00T", text)
+    text = re.sub(
+        r"</?(?:p|div|section|h[1-6]|li|ul|ol|tr|table|thead|tbody|caption|figure|figcaption|br|dl|dt|dd)\b[^>]*>",
+        "\x00N", text,
+    )
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    text = re.sub(r"[ \t\r\n]+", " ", text).replace("\x00T", "\t").replace("\x00N", "\n")
+    lines = []
+    for line in text.split("\n"):
+        cells = [cell.strip() for cell in line.split("\t")]
+        while cells and not cells[-1]:
+            cells.pop()
+        if "\t".join(cells).strip():
+            lines.append("\t".join(cells).strip())
+    return "\n".join(lines)
+
+
+def _panel(markup: str, heading_id: str) -> str:
+    """Exactly the <section> labelled by `heading_id`, matched by section depth.
+
+    A regex cannot do this: the Chains panel nests a `.probe` block and the
+    sections are not self-closing, so `<section.*?</section>` stops at the first
+    close it finds. Needed because the operator page has TWO tables with a row
+    whose first cell is an asset ticker -- the matrix and the Chains table -- and
+    a paste assertion scoped to the whole page matched the wrong one.
+    """
+    start = markup.rindex("<section", 0, markup.index(f'aria-labelledby="{heading_id}"'))
+    depth = 0
+    for match in re.finditer(r"<section\b|</section>", markup[start:]):
+        depth += 1 if match.group(0) != "</section>" else -1
+        if depth == 0:
+            return markup[start : start + match.end()]
+    raise AssertionError(f"the section labelled {heading_id} is never closed")
+
+
+def test_the_matrix_is_a_real_table_in_two_axes(client):
+    """Row headers AND column headers, because the meaning is in both.
+
+    A grid of cells with only one set of headers is a list wearing a table's
+    markup: a screen reader reading a cell would announce the destination and not
+    the source, so half the pair would be missing from the only reading that does
+    not use the eye.
+    """
+    body = client.get("/admin").get_data(as_text=True)
+    matrix = re.search(r'<table class="matrix">(.*?)</table>', body, flags=re.DOTALL)
+    assert matrix, "the pair matrix is gone"
+    inner = matrix.group(1)
+    assets = sorted(set(re.findall(r'<th scope="col">([A-Z]+)</th>', inner)))
+    rows = sorted(set(re.findall(r'<th scope="row">([A-Z]+)</th>', inner)))
+    assert assets and assets == rows, (
+        f"the two axes do not carry the same assets: columns {assets}, rows {rows}"
+    )
+
+    expected = pair_assets(pair_rows(client.application.config, client.application.config["ADAPTERS"]))
+    assert assets == expected, f"the matrix axes are {assets}, the rows know {expected}"
+
+
+def test_every_ordered_pair_has_exactly_one_cell_and_keeps_its_label(client):
+    """THE CONCERN I RAISED WHEN I DECLINED THIS, asserted rather than trusted.
+
+    A matrix makes the pair positional, so `XRP -> GRC` stops being a literal on
+    the page unless something carries it. Each cell's aria-label does -- chosen
+    over `title` alone, because a title is a mouse affordance and is invisible to
+    a keyboard user and to a screen reader.
+    """
+    config = client.application.config
+    rows = pair_rows(config, config["ADAPTERS"])
+    body = client.get("/admin").get_data(as_text=True)
+    rendered = _rendered_pairs(body)
+
+    assert len(rendered) == len(rows), (
+        f"{len(rows)} ordered pairs exist and the matrix drew {len(rendered)} cells"
+    )
+    assert {label for label, _, _ in rendered} == {row["label"] for row in rows}, (
+        "a pair's label is not recoverable from its cell"
+    )
+    # And in the markup itself, so a reader searching the page for the pair finds it.
+    for row in rows:
+        assert row["label"] in html.unescape(body), f"{row['label']!r} is nowhere on the page"
+
+
+def test_the_diagonal_says_it_is_not_a_pair_rather_than_rendering_blank(client):
+    """An asset to itself is not an ordered pair, and a blank cell is ambiguous.
+
+    rule 14: a blank is indistinguishable from a verdict that failed to render,
+    and on a 5x5 grid there are five of them down the middle.
+    """
+    body = client.get("/admin").get_data(as_text=True)
+    selves = re.findall(r'<td class="matrix-self">(.*?)</td>', body, flags=re.DOTALL)
+
+    expected = len(pair_assets(pair_rows(client.application.config, client.application.config["ADAPTERS"])))
+    assert len(selves) == expected, f"{expected} assets but {len(selves)} diagonal cells"
+    for cell in selves:
+        assert "same asset" in cell, f"a diagonal cell renders {cell.strip()!r} instead of saying why"
+
+
+def test_the_matrix_pastes_as_an_aligned_grid_and_not_as_a_column_of_states(client):
+    """THE CHECK THAT COULD HAVE VETOED THIS CHANGE, and it did not.
+
+    A matrix trades per-pair sentences for a shape, and a shape that does not
+    survive a copy would be trading the operator's actual workflow for page
+    height. Measured instead of assumed: the panel pastes as a header row naming
+    every destination plus one tab-aligned row per source.
+
+    27 lines to 15 for this panel, measured at 6f531da against this change.
+    """
+    body = client.get("/admin").get_data(as_text=True)
+    pasted = _paste(_panel(body, "pairs-heading"))
+    header = [line for line in pasted.splitlines() if line.startswith("from ")]
+    assert header, f"the matrix header row did not survive a paste; got:\n{pasted[:400]}"
+
+
+    assets = pair_assets(pair_rows(client.application.config, client.application.config["ADAPTERS"]))
+    columns = header[0].split("\t")[1:]
+    assert columns == assets, (
+        f"a paste of the header names {columns}, which does not identify the columns as {assets}"
+    )
+    for asset in assets:
+        line = [row for row in pasted.splitlines() if row.split("\t")[0] == asset]
+        assert line, f"{asset}'s row did not survive a paste as one line"
+        cells = line[0].split("\t")[1:]
+        assert len(cells) == len(assets), (
+            f"{asset}'s pasted row has {len(cells)} cells for {len(assets)} columns: {line[0]!r}"
+        )
+        assert all(cells), f"{asset}'s pasted row has an empty cell: {line[0]!r}"
+
+
+def test_the_matrix_is_an_index_over_the_rows_and_not_a_second_verdict(client):
+    """Every cell IS the row. Not a copy of it, not a recomputation of it.
+
+    pair_matrix() takes the ROWS rather than (config, adapters) for this reason:
+    a version that took the configuration would evaluate the verdict a second
+    time, and a second evaluation of this particular verdict is the defect fixed
+    on 2026-10-02, where /admin said ENABLED about a pair / said DISABLED about.
+    The same shape one layer up would be the same bug.
+    """
+
+    config = client.application.config
+    rows = pair_rows(config, config["ADAPTERS"])
+    matrix = pair_matrix(rows)
+    assert all(matrix[row["from_asset"]][row["to_asset"]] is row for row in rows), (
+        "a matrix cell is a different object from its row, so the two can drift"
+    )
+    assert sum(len(destinations) for destinations in matrix.values()) == len(rows)
+
+
+def test_the_retired_pair_pill_selectors_have_no_call_site_left(client):
+    """Rule 9: the matrix orphaned three selectors and the cull is the same commit.
+
+    `.pair-list`, `.pair-grid` and `.pair` styled a grid of pills. index.html's
+    pills became a table and admin.html's became this matrix, so all three are
+    deleted from the stylesheet -- and a class deleted while a template still
+    names it renders as unstyled markup with nothing failing, which is why this
+    asserts over the rendered PAGES as well as over the stylesheet.
+    """
+    css = STYLESHEET.read_text()
+    declarations = re.sub(r"/\*.*?\*/", " ", css, flags=re.DOTALL)
+    for retired in (".pair-list", ".pair-grid"):
+        assert retired not in declarations, f"{retired} is still declared"
+    # `.pair-off` and `.pair-label` SURVIVE: index.html's pair table still uses both.
+    assert ".pair-off" in declarations and ".pair-label" in declarations
+    for url in ("/", "/admin"):
+        body = client.get(url).get_data(as_text=True)
+        for retired in ('class="pair-grid', 'class="pair-list', 'class="pair"'):
+            assert retired not in body, f"{retired} still renders on {url}"
+
+
+def test_the_matrixs_row_header_survives_a_sideways_scroll():
+    """A row of five badges with the source asset scrolled off is five verdicts about nothing.
+
+    The matrix is inside `.scroll-x`, which is what the wide tables on this page
+    use, and the global `th` rule only sticks a header to the TOP -- right for a
+    column header, and no help at all for the first COLUMN. So the row header
+    sticks left, the column header sticks top, and the corner cell sticks to both
+    or it slides out from under them.
+
+    ADDED BECAUSE A MUTATION SURVIVED. Changing `position: sticky` to `static` on
+    the row header passed every other test in this file: the markup is identical,
+    the verdicts are identical, and only the behavior under a horizontal scroll
+    changes. That is the class of defect a rendered-output test cannot see.
+
+    NOT BEHAVIORAL, AND IT CANNOT BE (rule 17). There is no browser here, so
+    nothing can observe a scroll. What this establishes is that the declarations
+    exist; whether they hold the column in place is the operator's observation to
+    make.
+    """
+    css = STYLESHEET.read_text()
+    for selector in ('.matrix th[scope="row"]', ".matrix .matrix-corner"):
+        rule = re.search(re.escape(selector) + r"\s*\{(.*?)\}", css, flags=re.DOTALL)
+        assert rule, f"{selector} has no rule"
+        body = rule.group(1)
+        assert "position: sticky" in body, f"{selector} does not stick, so a sideways scroll hides it"
+        assert "left: 0" in body, f"{selector} sticks but names no left offset"
+    corner = re.search(r"\.matrix \.matrix-corner\s*\{(.*?)\}", css, flags=re.DOTALL).group(1)
+    assert "top: 0" in corner, (
+        "the corner must stick to the top as well, or the column header slides over it"
+    )
