@@ -36,12 +36,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 
 import pytest
 from db import SCHEMA, apply_migrations, connect_db
+from valid_addresses import BTC_PARTICIPANT, BTC_REFUND, GRC_PAYOUT, solana_address_for
 
+from swap_terminal.chains.solana import UnattributableCredit
 from swap_terminal.services import deposit_service
 from swap_terminal.services.xrp_tag_service import allocate_destination_tag
 
 ACCOUNT = "CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp"
 CONFIG = {"AMOUNT_TOLERANCE_PCT": 0.01, "SOL_DEPOSIT_ACCOUNT": ACCOUNT, "SOL_MIN_CONFIRMATIONS": 3}
+
+#: The account a swap created BEFORE an operator repointed SOL_DEPOSIT_ACCOUNT still names.
+#: DERIVED rather than typed, which tests/test_address_literals_are_valid.py asks for by
+#: name: a derived address cannot be mistyped, and the phrase says what it is for.
+PREVIOUS_ACCOUNT = solana_address_for("swap_terminal shared scan previous deposit account")
 
 
 class CountingAdapter:
@@ -58,8 +65,14 @@ class CountingAdapter:
     def __init__(self, events):
         self.events = events
         self.read = []
+        # EVERY SCAN, IN ORDER, WITH THE ADDRESS IT ASKED ABOUT. `read` counts the
+        # per-transaction getTransaction cost; this counts the getSignaturesForAddress
+        # that precedes it, which is the call the shared-scan change removes. Measured
+        # 2026-10-02 on the live host: 4 of these per cycle, 818/hour.
+        self.scans = []
 
     def find_deposits_to_address(self, address, tx_limit=None, skip_txids=frozenset()):
+        self.scans.append(address)
         out = []
         for event in self.events:
             if event["txid"] in skip_txids:
@@ -70,6 +83,40 @@ class CountingAdapter:
 
     def validate_address(self, address):
         return True
+
+
+class DroppingAdapter(CountingAdapter):
+    """A CountingAdapter that also carries refused credits, like the real Solana one.
+
+    `unattributable_drops` is what chains/solana.find_deposits_to_address() populates for
+    every credit it could not attribute, and record_what_nobody_can_claim() asks for it BY
+    NAME rather than by isinstance -- so growing the attribute is how a test, or a new
+    tag-attributed adapter, opts in. Three of the four live adapters are UTXO chains and
+    have no such attribute at all, which is why CountingAdapter above does not either.
+    """
+
+    def __init__(self, events, drops=()):
+        super().__init__(events)
+        self._drops = list(drops)
+        # EMPTY UNTIL A SCAN RUNS, which is the real adapter's lifetime and not a detail.
+        # chains/solana.find_deposits_to_address() assigns `self.unattributable_drops = []`
+        # at the top of every call and appends during it, so the list describes THAT scan.
+        # A stub that populated this in __init__ makes "record the drops before the scan"
+        # look correct -- and that mutation SURVIVED against the first version of this
+        # class, which is why the lifetime is reproduced here rather than the value.
+        self.unattributable_drops = []
+
+    def find_deposits_to_address(self, address, tx_limit=None, skip_txids=frozenset()):
+        self.unattributable_drops = list(self._drops)
+        return super().find_deposits_to_address(address, tx_limit=tx_limit, skip_txids=skip_txids)
+
+
+def a_drop(signature, amount=0.25, credits=1):
+    """One refused credit in the shape chains/solana.UnattributableCredit has."""
+    return UnattributableCredit(
+        signature=signature, credits=credits, amount=amount, address=ACCOUNT,
+        why="no usable memo instruction, so nothing says whose money this is",
+    )
 
 
 def event(txid, tag, amount=0.01, confirmations=3):
@@ -530,3 +577,480 @@ def test_the_allocator_never_REISSUES_a_discriminator(db):
         "SELECT MAX(destination_tag) AS m FROM xrp_destination_tags WHERE account = ?",
         (ACCOUNT,),
     ).fetchone()["m"] == second, "so MAX() cannot fall and the next tag cannot repeat one"
+
+
+# --- ONE SCAN PER SHARED ACCOUNT PER CYCLE ------------------------------------
+#
+# MEASURED ON THE OPERATOR'S LIVE HOST 2026-10-02, from
+# swap_terminal/runtime/deposit_watcher.log AND NOWHERE ELSE -- so every figure here is
+# deposit_watcher's own, not a tree-wide total:
+#
+#     scans per cycle                4           3 awaiting_deposit swaps + 1 reconciler
+#     cycle period                   14.5µfn (17.6s)   observed gaps 18, 17, 18, 17, 18
+#     getSignaturesForAddress/hour   818         204.5 cycles x 4
+#     one scan per cycle             204.5/hour
+#     saving, IN THAT PROCESS        614/hour    75% of deposit_watcher's own scans
+#
+# reconcile_worker.py:92 calls the same function at 60s in a SEPARATE PROCESS, with its own
+# adapter and its own connection, and that count was not measured. Nothing in this change
+# dedupes across the two and nothing could; the two tests at the end of this file are about
+# what stops two processes crediting one payment twice, which is a different question.
+#
+# On a tag-attributed chain every swap shares ONE deposit account, so each of those
+# per-swap scans read the same account and got byte-identical results back, and then
+# the reconciler read it again. It scaled with OPEN SWAPS, not with deposits.
+#
+# These tests count SCANS rather than asserting that a parameter was passed, for the
+# same reason the file's own CountingAdapter exists: the thing that cost a credited
+# deposit was a call being made, so the call is what gets measured.
+
+
+def seed_btc_swap(db, swap_id, address, *, status="awaiting_deposit"):
+    """An ADDRESS-attributed swap. Its behavior must not change by one call.
+
+    BTC, LTC and GRC derive a fresh deposit address per swap, so there is nothing
+    shared and nothing to save -- and a change that quietly gave two BTC swaps one
+    scan would credit one customer's deposit against the other's swap, which is the
+    money bug the whole tag filter exists to prevent on the chains that DO share.
+    """
+    db.execute(
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag,"
+        " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
+        " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
+        " VALUES (?,'q','BTC','GRC',?,NULL,?,0.01,8700.0,150,"
+        "0.01,86.0,?,2,'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00',"
+        "'2026-10-01T00:00:00+00:00')",
+        (swap_id, address, GRC_PAYOUT, status),
+    )
+    db.commit()
+
+
+def test_three_open_swaps_and_the_reconciler_make_ONE_scan_not_four(db):
+    """THE CHANGE, counted. Four scans of one account per cycle became one.
+
+    Seeded as the live host was: three awaiting_deposit SOL swaps sharing the one
+    configured deposit account, refreshed through the REAL process_active_swaps().
+
+    MUTATION THAT MUST FAIL -- and it is the call-site shape that has survived four
+    times in this codebase: pass the per-swap scan anyway by reverting the loop to
+    `refresh_swap_from_chain(db, config, adapters, swap)`, or drop `scans=scans` from
+    the reconciler call. Either makes this 4 (or 2) instead of 1.
+    """
+    seed_swap(db, "s_a", 11)
+    seed_swap(db, "s_b", 12)
+    seed_swap(db, "s_c", 13)
+    adapter = CountingAdapter([])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert adapter.scans == [ACCOUNT], (
+        f"one scan of the shared account per cycle; got {len(adapter.scans)} "
+        f"({adapter.scans}). Four was 818 getSignaturesForAddress/hour at a 17.6s cycle"
+    )
+
+
+def test_the_shared_account_is_still_scanned_with_no_open_swap_at_all(db):
+    """The reconciler's scan is the +1, and it must not become a 0.
+
+    A sender who pays late, pays twice, or pays before opening a swap is the
+    likeliest way a deposit strands, and that is exactly the case with no active
+    swap. An optimization that only scanned when a swap was open would have been
+    blind to it -- the same defect reconcile_shared_accounts() already records
+    having had once, when it derived its asset set from the active swaps.
+    """
+    adapter = CountingAdapter([])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert adapter.scans == [ACCOUNT], (
+        "with zero open swaps the shared account is still read once, for the reconciler"
+    )
+
+
+def test_every_sharing_swap_is_credited_from_the_one_scan(db):
+    """The saving must not cost a credit. Both swaps reach payout_pending from one scan.
+
+    Two SOL swaps, two tagged payments, ONE scan. Each swap gets its own
+    deposit_events row at its own tag and its own credit -- which is what the shared
+    event list has to deliver, because handing every swap the same list is only sound
+    if attributable_events() then gives each one its own slice.
+
+    MUTATION: make refresh_swap_from_chain() ignore `scans` and rescan -- this still
+    passes, which is why the scan COUNT is asserted in its own test above. MUTATION
+    that fails here: hand each swap the unfiltered list by removing the
+    attributable_events() call, and both swaps credit both payments.
+    """
+    seed_swap(db, "s_a", 11)
+    seed_swap(db, "s_b", 12)
+    adapter = CountingAdapter([event("tx_for_a", 11, amount=0.01, confirmations=3),
+                               event("tx_for_b", 12, amount=0.01, confirmations=3)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert adapter.scans == [ACCOUNT], "one scan"
+    rows = {r["swap_id"]: dict(r) for r in db.execute(
+        "SELECT swap_id, txid, vout, amount FROM deposit_events ORDER BY swap_id").fetchall()}
+    assert set(rows) == {"s_a", "s_b"}, f"each swap credited from the one scan; got {rows}"
+    assert rows["s_a"]["txid"] == "tx_for_a" and rows["s_a"]["vout"] == 11
+    assert rows["s_b"]["txid"] == "tx_for_b" and rows["s_b"]["vout"] == 12
+    statuses = {r["id"]: r["status"] for r in db.execute("SELECT id, status FROM swaps")}
+    assert statuses == {"s_a": "payout_pending", "s_b": "payout_pending"}, (
+        f"both credited and advanced from a single shared scan; got {statuses}"
+    )
+
+
+def test_one_event_cannot_be_credited_to_two_swaps(db):
+    """THE DOUBLE-CREDIT QUESTION, asked by seeding the thing that should be impossible.
+
+    Two swaps are given the SAME tag by writing the rows directly, which no live path
+    does -- xrp_destination_tags holds PRIMARY KEY (account, destination_tag) and
+    UNIQUE idx_xrp_tag_one_per_swap, with BEFORE triggers that RAISE(ABORT) on delete
+    or re-point, so allocate_destination_tag() cannot produce this. The point is that
+    the shared event list does not depend on that uniqueness holding.
+
+    THE BACKSTOP IS db.py's UNIQUE(asset, txid, vout) ON deposit_events, and this is
+    what it guarantees: upsert_deposit_event() SELECTs on exactly that triple first
+    and UPDATEs confirmations on the row it finds rather than inserting a second one,
+    and it never re-points swap_id. refresh_swap_from_chain() then sums only
+    `WHERE swap_id = ?`. So one payment can become one row owned by one swap, and the
+    second swap credits nothing -- an uncredited swap is a support ticket, a
+    double-credited one is a payout against money that arrived once.
+
+    MUTATION: there is no mutation of THIS change that breaks it, which is the
+    finding. It is pinned here so that a future change to upsert_deposit_event() --
+    an INSERT OR REPLACE, or dropping the SELECT -- fails a test rather than paying
+    somebody twice.
+    """
+    seed_swap(db, "s_first", 11)
+    seed_swap(db, "s_second", 11)
+    adapter = CountingAdapter([event("tx_once", 11, amount=0.01, confirmations=3)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    rows = db.execute("SELECT swap_id, txid, vout FROM deposit_events").fetchall()
+    assert len(rows) == 1, f"UNIQUE(asset, txid, vout) allows exactly one row; got {len(rows)}"
+    credited = db.execute(
+        "SELECT id FROM swaps WHERE credited_at IS NOT NULL ORDER BY id").fetchall()
+    assert [r["id"] for r in credited] == [rows[0]["swap_id"]], (
+        "the payment credits the swap that owns the row and no other"
+    )
+    amounts = db.execute(
+        "SELECT COALESCE(SUM(actual_input_amount), 0) AS total FROM swaps").fetchone()["total"]
+    assert amounts == 0.01, (
+        f"0.01 arrived once and 0.01 is credited in total; {amounts} would be a double count"
+    )
+
+
+def test_a_swap_pointing_at_a_repointed_account_is_still_scanned(db):
+    """The address is the key, and this is the deposit that keying by ASSET would lose.
+
+    `swaps.deposit_address` is a COPY of the configured account taken at creation, so
+    an operator who repoints SOL_DEPOSIT_ACCOUNT leaves every open swap pointing at
+    the OLD account -- the one its customer was actually told to pay into. A shared
+    scan keyed on the asset alone would have scanned only the new account and
+    SILENTLY STOPPED WATCHING that swap.
+
+    MUTATION: key shared_scan_targets() and refresh_swap_from_chain() on the asset
+    instead of (asset, address) and this fails -- the swap is handed the new
+    account's empty event list and is never credited.
+    """
+    seed_swap(db, "s_old_account", 11)
+    db.execute("UPDATE swaps SET deposit_address = ? WHERE id = 's_old_account'", (PREVIOUS_ACCOUNT,))
+    db.commit()
+    adapter = CountingAdapter([event("tx_to_old", 11, amount=0.01, confirmations=3)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert sorted(adapter.scans) == sorted([ACCOUNT, PREVIOUS_ACCOUNT]), (
+        f"both the configured account and the swap's own are scanned; got {adapter.scans}"
+    )
+    row = db.execute("SELECT status, credited_at FROM swaps WHERE id = 's_old_account'").fetchone()
+    assert row["status"] == "payout_pending" and row["credited_at"] is not None, (
+        "a deposit to the account the customer was given is still credited"
+    )
+
+
+def test_two_address_attributed_swaps_still_get_their_own_scan_each(db):
+    """BTC, LTC and GRC are untouched, and the assertion is the scan COUNT.
+
+    Each of these swaps has its OWN deposit address, so there is nothing shared: two
+    swaps must still make two scans, each asking about its own address. Collapsing
+    them would be the money bug in reverse -- one address's events applied to a swap
+    expecting a different address.
+    """
+    seed_btc_swap(db, "b_one", BTC_PARTICIPANT)
+    seed_btc_swap(db, "b_two", BTC_REFUND)
+    adapter = CountingAdapter([])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"BTC": adapter})
+
+    assert sorted(adapter.scans) == sorted([BTC_PARTICIPANT, BTC_REFUND]), (
+        f"one scan per address-attributed swap, each for its own address; got {adapter.scans}"
+    )
+
+
+def test_a_freshly_credited_deposit_is_not_called_stranded_by_the_shared_scan(db):
+    """The 2026-10-01 false alarm, re-pinned under the shared scan.
+
+    The scan now happens BEFORE the loop credits, so its event list is pre-credit --
+    and the reconciler would call the very payment the loop just credited "money
+    nobody will ever claim" if it took its verdict from that list's age. It does not:
+    `claimed` and `credited` are still read from the database AFTER the loop, and
+    only the network read moved up.
+
+    MUTATION: compute `credited` inside scan_shared_accounts() and pass it down, or
+    move the reconcile_shared_accounts() call above the loop, and a stranded row
+    appears for a swap that worked perfectly.
+    """
+    seed_swap(db, "s_fresh", 11)
+    adapter = CountingAdapter([event("tx_fresh", 11, amount=0.01, confirmations=3)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert db.execute("SELECT status FROM swaps WHERE id = 's_fresh'").fetchone()["status"] == (
+        "payout_pending"), "setup: the deposit was credited this cycle"
+    stranded = db.execute("SELECT txid FROM unattributable_deposits").fetchall()
+    assert stranded == [], (
+        f"a deposit credited this cycle is not stranded; got {[r['txid'] for r in stranded]}"
+    )
+
+
+def test_a_payment_matching_no_swap_is_still_recorded_from_the_shared_scan(db):
+    """And the reconciler must still DO its job off the reused list.
+
+    The mirror of the test above: a tagged payment no swap claims has to reach
+    unattributable_deposits, from the same shared event list. A change that fixed the
+    false alarm by never recording anything would pass that test and fail this one.
+    """
+    seed_swap(db, "s_mine", 11)
+    adapter = CountingAdapter([event("tx_nobodys", 999, amount=0.05, confirmations=3)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    stranded = [dict(r) for r in db.execute(
+        "SELECT txid, discriminator FROM unattributable_deposits").fetchall()]
+    assert len(stranded) == 1 and stranded[0]["txid"] == "tx_nobodys", (
+        f"the unclaimed payment is recorded from the one scan; got {stranded}"
+    )
+    assert db.execute(
+        "SELECT COUNT(*) AS n FROM deposit_events").fetchone()["n"] == 0, (
+        "and it credits nothing: no swap claims tag 999"
+    )
+
+
+def test_the_adapter_s_own_drops_are_recorded_even_with_no_open_swap(db):
+    """What moving the reconciler's scan up front BUYS, and it is not only a saved call.
+
+    chains/solana.find_deposits_to_address() records every credit it had to refuse for
+    carrying no usable memo on `unattributable_drops`, and record_what_nobody_can_claim()
+    is what puts those in SQL. Before this change that only happened inside a per-swap
+    refresh, so a cycle with NO open swap read the shared account (the reconciler's scan)
+    and threw the adapter's own refusals away -- real money arriving that nobody can claim,
+    reaching a log line and nothing else, in exactly the situation that strands a deposit
+    most often.
+
+    Now every scan a cycle makes goes through scan_shared_accounts(), which records the
+    drops right where they exist. This is an ADDITION to a diagnostic table and it credits
+    nothing: unattributable_deposits is read by a person and by show_unattributable.py, and
+    no gate anywhere reads it.
+
+    MUTATION: drop the config-account half of shared_scan_targets() and this fails -- the
+    reconciler makes its own scan again, outside the one place that records the drops.
+    """
+    adapter = DroppingAdapter([], drops=[a_drop(signature="tx_no_memo", amount=0.25)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert adapter.scans == [ACCOUNT], "one scan, made through scan_shared_accounts()"
+    rows = db.execute(
+        "SELECT txid, amount, discriminator FROM unattributable_deposits").fetchall()
+    assert len(rows) == 1 and rows[0]["txid"] == "tx_no_memo", (
+        f"the adapter's own refusal is in SQL, not only in a log; got {[dict(r) for r in rows]}"
+    )
+    assert rows[0]["discriminator"] is None, (
+        "no discriminator by construction: the drop exists because no usable memo was found"
+    )
+
+
+def test_a_settled_transaction_is_not_re_read_through_the_SHARED_scan(db):
+    """The 2026-10-01 rate-limit fix, re-pinned at its NEW call site.
+
+    skip_txids() used to be computed inside refresh_swap_from_chain(), once per swap. It is
+    now computed once in scan_shared_accounts(), and a skip set that fails to reach the
+    adapter is invisible: a re-read transaction looks exactly like a first read, and the
+    only symptom is the HTTP 429 that stopped a real deposit being credited.
+
+    MUTATION: drop `skip_txids=` from the shared scan and this fails. It SURVIVED before
+    this test existed, because the only coverage of the skip ran through the per-swap
+    fallback path -- the branch the live workers no longer take.
+    """
+    seed_swap(db, "s_new", 9)
+    seed_swap(db, "s_old", 8)
+    seed_deposit_event(db, "s_old", "tx_settled", 8, confirmations=3)
+    adapter = CountingAdapter([event("tx_settled", 8), event("tx_fresh", 9)])
+
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert adapter.scans == [ACCOUNT], "one scan"
+    assert "tx_settled" not in adapter.read, (
+        f"a settled transaction costs no further getTransaction; read={adapter.read}"
+    )
+    assert "tx_fresh" in adapter.read, "and the unsettled one is still read, so the skip is not total"
+
+
+# --- the two workers run this function in two processes -----------------------
+#
+# workers/reconcile_worker.py:18-20 says so in its own header and a grep confirms it:
+# deposit_watcher.py:153 and reconcile_worker.py:92 both call process_active_swaps(), at 15s
+# and 60s, in SEPARATE PROCESSES with separate adapter instances and separate SQLite
+# connections. Nothing in this change dedupes across them and nothing could: there is no
+# shared memory between two processes.
+#
+# So the question these two tests answer is not "is the scan shared across processes" -- it
+# is not -- but "can two processes holding two scan results credit one payment twice".
+
+
+def test_two_processes_sharing_one_cycle_each_credit_the_deposit_once(db, tmp_path):
+    """Both workers, each with its OWN connection and its OWN scan, over one payment.
+
+    This is the shape of the concurrency the operator's audit trail shows: the same two
+    status transitions recorded twice, 0.83s apart, by the two workers processing one swap.
+    The credit itself must still happen once.
+
+    WHAT MAKES IT ONCE is db.py's UNIQUE(asset, txid, vout) on deposit_events plus the fact
+    that both credit writes are ABSOLUTE ASSIGNMENTS rather than increments: `UPDATE swaps
+    SET credited_at = ?, actual_input_amount = ?` and `UPDATE deposit_events SET credited_at
+    = ? WHERE credited_at IS NULL`. Running them twice writes the same figures twice.
+    """
+    seed_swap(db, "s_both", 11)
+    second = connect_db(str(tmp_path / "t.db"))
+
+    # The deposit_watcher cycle, then the reconcile_worker cycle, each with its own adapter.
+    deposit_service.process_active_swaps(
+        db, CONFIG, {"SOL": CountingAdapter([event("tx_one", 11, amount=0.01, confirmations=3)])})
+    deposit_service.process_active_swaps(
+        second, CONFIG, {"SOL": CountingAdapter([event("tx_one", 11, amount=0.01, confirmations=3)])})
+
+    rows = db.execute("SELECT swap_id, txid, vout FROM deposit_events").fetchall()
+    assert len(rows) == 1, f"one payment, one row, two processes; got {len(rows)}"
+    row = db.execute(
+        "SELECT actual_input_amount, status FROM swaps WHERE id = 's_both'").fetchone()
+    assert row["actual_input_amount"] == 0.01, (
+        f"0.01 arrived once and 0.01 is credited; {row['actual_input_amount']} is a double count"
+    )
+    assert row["status"] == "payout_pending"
+
+
+def test_the_unique_constraint_refuses_a_second_row_for_one_payment(db, tmp_path):
+    """NAME THE CONSTRAINT AND MAKE IT SPEAK. UNIQUE(asset, txid, vout), db.py.
+
+    upsert_deposit_event() SELECTs that triple before inserting, so the two workers almost
+    always take the UPDATE branch. The case that matters is the interleave where BOTH miss
+    the SELECT and both reach the INSERT -- and what stops a second row there is not the
+    application's check-then-act, which has no lock across it, but the constraint. This
+    asserts the constraint itself, by trying the INSERT the losing worker would make.
+
+    The raise is what the workers' `except Exception` turns into a FAILED cycle (visible,
+    retried next cycle) rather than into a second credit.
+    """
+    seed_swap(db, "s_one", 11)
+    deposit_service.process_active_swaps(
+        db, CONFIG, {"SOL": CountingAdapter([event("tx_one", 11, amount=0.01, confirmations=3)])})
+    assert db.execute("SELECT COUNT(*) AS n FROM deposit_events").fetchone()["n"] == 1
+
+    with pytest.raises(sqlite3.IntegrityError) as raised:
+        db.execute(
+            "INSERT INTO deposit_events (swap_id, asset, txid, vout, address, amount,"
+            " confirmations, first_seen_at, last_seen_at)"
+            " VALUES ('s_one','SOL','tx_one',11,?,0.01,3,'2026-10-02T00:00:00+00:00',"
+            "'2026-10-02T00:00:00+00:00')",
+            (ACCOUNT,),
+        )
+    assert "deposit_events.asset" in str(raised.value), (
+        f"the refusal names the constraint that produced it; got {raised.value}"
+    )
+
+
+# --- the decision, called directly with seeded inputs (rule 10) ---------------
+
+def test_shared_scan_targets_names_only_tag_attributed_assets(db):
+    """BTC is absent by construction, not by a hardcoded list.
+
+    services/swap_service.TAG_ATTRIBUTED_ASSETS is the authority and this function
+    reads it, so a new tag-attributed chain is picked up by growing that set rather
+    than by editing this function (rule 11).
+    """
+    seed_swap(db, "s_sol", 11)
+    seed_btc_swap(db, "b_one", BTC_PARTICIPANT)
+    swaps = db.execute("SELECT * FROM swaps ORDER BY id").fetchall()
+
+    targets = deposit_service.shared_scan_targets(
+        swaps, CONFIG, {"SOL": CountingAdapter([]), "BTC": CountingAdapter([])})
+
+    assert targets == [("SOL", ACCOUNT)], (
+        f"only the shared SOL account; the BTC swap's own address is not shared. got {targets}"
+    )
+
+
+def test_shared_scan_targets_is_the_union_of_config_and_every_open_swap(db):
+    """Both halves, and the duplicate collapsed. This is where the saving comes from."""
+    seed_swap(db, "s_current", 11)
+    seed_swap(db, "s_current_too", 12)
+    seed_swap(db, "s_old", 13)
+    db.execute("UPDATE swaps SET deposit_address = ? WHERE id = 's_old'", (PREVIOUS_ACCOUNT,))
+    db.commit()
+    swaps = db.execute("SELECT * FROM swaps ORDER BY id").fetchall()
+
+    targets = deposit_service.shared_scan_targets(swaps, CONFIG, {"SOL": CountingAdapter([])})
+
+    assert targets == sorted([("SOL", ACCOUNT), ("SOL", PREVIOUS_ACCOUNT)]), (
+        f"three swaps on two accounts are two scans, not three. got {targets}"
+    )
+
+
+def test_shared_scan_targets_is_empty_without_an_adapter_or_an_account(db):
+    """Neither is an error, and both must produce no scan rather than a KeyError.
+
+    swap_service refuses to create a swap on an asset whose account variable is
+    empty, and reconcile_shared_accounts() already treats a missing adapter as
+    nothing to scan. `(none)` is the result here too.
+    """
+    seed_swap(db, "s_sol", 11)
+    swaps = db.execute("SELECT * FROM swaps").fetchall()
+
+    assert deposit_service.shared_scan_targets(swaps, CONFIG, {}) == [], "no adapter, no scan"
+    assert deposit_service.shared_scan_targets(
+        swaps, {"AMOUNT_TOLERANCE_PCT": 0.01, "SOL_DEPOSIT_ACCOUNT": "  "},
+        {"SOL": CountingAdapter([])}) == [("SOL", ACCOUNT)], (
+        "an unset account contributes nothing, but the open swap's own address still does"
+    )
+
+
+def test_the_cycle_says_it_scanned_once_and_for_how_many_swaps(db, caplog):
+    """Rule 14: the work that stopped happening still has to be visible.
+
+    Four scans printed four adapter lines. One prints one, and an operator watching
+    the count fall needs the line to say why -- so the remaining line names the
+    account, how many swaps the single result was handed to, and what the per-swap
+    shape would have cost.
+
+    MUTATION: delete the logger.info() from scan_shared_accounts() and this fails,
+    which is the point: an optimization that makes the log quieter about real work
+    is rule 14's defect wearing a performance win.
+    """
+    seed_swap(db, "s_a", 11)
+    seed_swap(db, "s_b", 12)
+    seed_swap(db, "s_c", 13)
+    adapter = CountingAdapter([])
+
+    # The module's own logger name rather than a literal: this file imports it as
+    # swap_terminal.services.deposit_service and the workers import it as
+    # services.deposit_service, so a literal would pin one import path (rule 8).
+    with caplog.at_level("INFO", logger=deposit_service.logger.name):
+        deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    lines = [r.getMessage() for r in caplog.records if "scanned ONCE" in r.getMessage()]
+    assert len(lines) == 1, f"one line per shared account per cycle, not a flood; got {lines}"
+    assert ACCOUNT in lines[0], "the account it read, echoed (rule 14)"
+    assert "3 active swap(s)" in lines[0], "how many swaps the one result served"
+    assert "4 scans" in lines[0], "and what the per-swap shape would have cost"

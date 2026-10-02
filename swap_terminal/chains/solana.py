@@ -51,10 +51,21 @@ Solana has no transaction outputs. But `deposit_events` has
 UNIQUE(asset, txid, vout) and refresh_swap_from_chain() sums every row, so
 `vout` has to be a stable, transaction-local integer that does not collide.
 
-This adapter uses **the account's index in the transaction's account key
-list**. It is read from the transaction, it is stable for a given (signature,
-address) pair, and a transaction credits an account exactly once -- the
-account model has one net balance delta per account per transaction, so one
+**IT IS THE MEMO TAG, AND THIS SECTION SAID THE ACCOUNT INDEX UNTIL 2026-10-02.**
+That was true when it was written and stopped being true when the shared-account
+strategy landed: `_attributable()` now stamps each credit with the transaction's
+memo tag and DROPS a credit that has none, precisely because the account index
+"was never a discriminator and must not be reused as one" -- its own words, one
+screen down. A reader who trusted this paragraph would have concluded that
+services/deposit_service.attributable_events(), which compares `vout` against the
+swap's deposit_tag, was comparing a tag against an account index; on a chain where
+that integer decides whose money a credit is, that is the worst sentence in this
+file to have wrong.
+
+So: `vout` carries the Memo-instruction tag. It is read from the transaction, it
+is the only thing that says which swap a credit belongs to now that every SOL swap
+shares one deposit account, and a transaction credits an account exactly once --
+the account model has one net balance delta per account per transaction, so one
 row per (signature, address) is the correct count rather than a convenient one.
 
 THIS IS SPECIFICALLY NOT chains/base.py's vout=0. That value was FABRICATED by

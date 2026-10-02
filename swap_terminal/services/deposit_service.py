@@ -1,6 +1,10 @@
 """Watch the source chain for a swap's deposit and credit it when confirmed.
 
-Role: submodule -> function (refresh_swap_from_chain is the decision)
+Role: submodule -> function. Three decisions live here as functions:
+       refresh_swap_from_chain (is this deposit credited), shared_scan_targets
+       (which deposit accounts a cycle must read, and how many times) and
+       attributable_events (whose money is this). process_active_swaps is
+       orchestration and holds none of them.
 Reads: the source chain adapter (listtransactions, getrawtransaction),
        swap_terminal.db (swaps, deposit_events)
 Writes: swap_terminal.db (deposit_events, swaps, swap_audit_log)
@@ -47,6 +51,9 @@ suppressing a genuine two-output deposit.
 """
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 # Rootless, the same way chains/base.py reaches script_pub_key.py. No
 # sys.path.insert is needed here: this module is only ever importable as
@@ -283,19 +290,307 @@ def settled_txids(db, asset: str) -> frozenset[str]:
     return frozenset(str(row["txid"]) for row in rows)
 
 
-def refresh_swap_from_chain(db, config, adapters: dict, swap: dict) -> dict:
+#: The scans a cycle has ALREADY PAID FOR, keyed by the (asset, address) pair that was
+#: scanned. Built once by scan_shared_accounts() at the top of process_active_swaps() and
+#: handed down to every consumer, so the hand-off is readable in a signature rather than
+#: appearing as a bare dict of tuples at four call sites.
+SharedScans = dict[tuple[str, str], list[dict]]
+
+
+def _process_name() -> str:
+    """Which worker is printing. Rule 14: a pasted line has to say whose cycle it describes.
+
+    process_active_swaps() runs in TWO processes -- deposit_watcher at 15s and
+    reconcile_worker at 60s (reconcile_worker.py:18-20) -- against one database, so a scan
+    line with no process on it is ambiguous between two schedules, and an operator counting
+    scans per hour off the logs would be adding two populations without being told.
+    `sys.argv[0]`'s stem distinguishes them, since supervisor.py starts each by its own file.
+
+    Falls back to the pid rather than to a guess: an unknown argv[0] is more honestly
+    reported as "pid=1234" than as a worker name that may be wrong (rule 17).
+    """
+    stem = Path(sys.argv[0]).stem if sys.argv and sys.argv[0] else ""
+    return stem or f"pid={os.getpid()}"
+
+
+def shared_scan_targets(swaps, config, adapters: dict) -> list[tuple[str, str]]:
+    """The distinct (asset, address) pairs a cycle must scan ONCE each. THE decision.
+
+    Pure: it reads three dicts and returns a sorted list, so it is callable with seeded
+    inputs and asserted on directly (rule 10). process_active_swaps() is orchestration and
+    holds none of this.
+
+    WHY THIS FUNCTION EXISTS AT ALL -- MEASURED ON THE OPERATOR'S LIVE HOST 2026-10-02.
+    EVERY FIGURE BELOW IS deposit_watcher's ALONE, because that is the only log it was read
+    from (swap_terminal/runtime/deposit_watcher.log), and the denominator matters here more
+    than usual (rule 3):
+
+        scans per cycle                  4          3 awaiting_deposit swaps + 1 reconciler
+        cycle period                     14.5µfn (17.6s)  observed gaps 18, 17, 18, 17, 18
+        getSignaturesForAddress/hour     818        204.5 cycles x 4
+        one scan per cycle               204.5/hour
+        saving, IN THIS PROCESS          614/hour   75% of deposit_watcher's own scans
+
+    THAT IS NOT THE TREE-WIDE TOTAL, AND NOTHING HERE SHOULD BE READ AS ONE.
+    process_active_swaps() runs in TWO processes: workers/deposit_watcher.py:153 at 15s and
+    workers/reconcile_worker.py:92 at 60s, which that worker's own header
+    (reconcile_worker.py:18-20) already states. reconcile_worker makes its OWN N+1 against
+    the same shared account on its own schedule, with its own adapter instance and its own
+    SQLite connection, and no part of this change can dedupe across the two -- there is no
+    shared memory between two processes. reconcile_worker's scan count was NOT measured, so
+    the total is not stated: 818/hour is what deposit_watcher was doing, 204.5/hour is what
+    it will do, and reconcile_worker adds an unmeasured amount on top of both.
+
+    On a tag-attributed chain every swap shares ONE deposit account, so each of those N
+    per-swap scans read the SAME account and got byte-identical results, and then the
+    reconciler read it once more. The cost scales with OPEN SWAPS and not with deposits: N
+    open SOL swaps made N+1 scans per cycle, forever, whether or not anybody had sent
+    anything. Solana is where that hurts, because its discovery costs one getTransaction PER
+    unsettled transaction on top of the getSignaturesForAddress -- the shape that
+    rate-limited a real deposit out of being credited on 2026-10-01.
+
+    ONLY TAG-ATTRIBUTED ASSETS APPEAR HERE, and services/swap_service.TAG_ATTRIBUTED_ASSETS
+    is the authority for which those are -- read, not restated (rule 11: one vocabulary, in
+    one place). BTC, LTC and GRC give every swap its OWN deposit address, so there is nothing
+    to share and nothing to save; they are absent from this set by construction and keep the
+    per-swap scan they have always had, unchanged.
+
+    THE KEY IS THE ADDRESS AND NOT THE ASSET, and that is the half of this change that
+    protects a deposit rather than an RPC budget. `swaps.deposit_address` is a COPY of the
+    configured account, taken when the swap was created -- reconcile_shared_accounts() says
+    so at its own config read, and services/swap_service.deposit_account() is where the copy
+    is made. So an operator who repoints SOL_DEPOSIT_ACCOUNT leaves every already-open swap
+    pointing at the OLD account, which is the account its customer was actually told to pay
+    into. Keying this by asset alone would have scanned only the new account and SILENTLY
+    STOPPED WATCHING those swaps' deposits -- money arriving exactly where we asked for it
+    and never credited. So the target set is the UNION of two things:
+
+      the configured account   what reconcile_shared_accounts() scans, and it is needed even
+                               with zero open swaps: a sender who pays late, pays twice, or
+                               pays before opening a swap is the likeliest way a deposit
+                               strands, and that is the case the reconciler exists for.
+      each active swap's own   what refresh_swap_from_chain() scans. Equal to the configured
+      deposit_address          account in the normal case, which is the whole saving; not
+                               equal after a repoint, which is when the second scan is the
+                               correct answer rather than waste.
+
+    An asset with no adapter, or with no configured account, contributes no target from the
+    config half. Neither is an error: swap_service refuses to create a swap on an asset whose
+    account variable is empty, and reconcile_shared_accounts() already treats both as
+    "nothing to scan". A swap on an asset with no adapter contributes nothing either, because
+    there is nothing to scan WITH -- refresh_swap_from_chain() raises KeyError on
+    adapters[asset] for that swap exactly as it did before this change.
+
+    SORTED, so the log line this feeds and the tests that read it see the same order every
+    cycle. A set would make an operator comparing two pasted cycles wonder whether something
+    had changed (rule 14: pasted output has to be self-describing a day later).
+    """
+    targets: set[tuple[str, str]] = set()
+    for asset in sorted(TAG_ATTRIBUTED_ASSETS):
+        if asset not in adapters:
+            continue
+        variable, _discriminator, _network = TAG_ATTRIBUTION[asset]
+        account = (config.get(variable) or "").strip()
+        if account:
+            targets.add((asset, account))
+    for swap in swaps or ():
+        asset = swap["from_asset"]
+        if asset not in TAG_ATTRIBUTED_ASSETS or asset not in adapters:
+            continue
+        address = (swap["deposit_address"] or "").strip()
+        if address:
+            targets.add((asset, address))
+    return sorted(targets)
+
+
+def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
+    """Scan every shared deposit account ONCE and keep the result for the whole cycle.
+
+    THE ONE-CYCLE LATENCY THIS COSTS, AND WHY IT IS ACCEPTED RATHER THAN RE-SCANNED.
+
+    Before this, each swap got a FRESH scan, so a deposit landing part-way through a cycle
+    was seen by whichever swap was refreshed after it arrived. With one scan up front it
+    waits for the next cycle. The window that changes is the time the scans were in flight,
+    and it is measured rather than guessed -- chains/solana.skip_detail()'s docstring records
+    four consecutive scans on the operator's host 2026-10-02 at 06:50:33,619 / 34,147 /
+    34,674 / 35,201: 0.44µfn (0.527s) apart and 1.31µfn (1.582s) end to end, inside a cycle
+    of 14.5µfn (17.6s).
+
+    SO THE MEAN LATENCY IS UNCHANGED, EXACTLY, and that is arithmetic rather than optimism.
+    Take a swap whose own scan used to happen `d` into a cycle of length `T`, and a deposit
+    whose arrival time is uniform in the cycle. For the `d/T` of arrivals landing before that
+    old scan, the wait grows from (d - t) to (T - t): a penalty of (T - d). For the
+    (T - d)/T landing after it, the wait SHRINKS by `d`, because next cycle's scan is now at
+    the top of the cycle instead of `d` into it. The expected change is
+
+        (d/T) * (T - d)  +  ((T - d)/T) * (-d)  =  0
+
+    for every d. The change is a REDISTRIBUTION: the worst case grows by up to one cycle for
+    the 1.582/17.6 = 9.0% of arrival times that fell inside the old scan window, and the
+    other 91.0% are credited up to 1.3µfn (1.582s) sooner. Nothing is traded away on average;
+    the tail is moved.
+
+    AND ON SOL IT CANNOT DELAY A CREDIT AT ALL, which is a fact about the commitment ladder
+    and was checked rather than assumed. Discovery runs at
+    chains/solana_units.DISCOVERY_COMMITMENT, which is `confirmed`, rank 2 -- forced, being
+    the lowest the history methods accept -- while the credit gate is
+    SOL_MIN_CONFIRMATIONS=3, `finalized`. A SOL deposit is therefore NEVER creditable on the
+    scan that first discovers it: that scan reports rank 2, the gate refuses, and the swap
+    moves to `confirming` to be credited by a LATER cycle. The only thing a one-cycle delay
+    can move on SOL is when `deposit_seen`/`confirming` appears on a status page.
+
+    THE CLAIM THAT min_confirmations "ALREADY TAKES FAR LONGER" THAN A CYCLE IS NOT WHAT THE
+    TREE SAYS, so it is not what this rests on (rule 17: say which you have).
+    chains/solana_units.FINALIZED_RANK's comment puts finalized at roughly 11µfn (13s) beyond
+    confirmed on a healthy cluster, which is LESS than one 14.5µfn (17.6s) cycle, not far
+    more. The argument above does not need it: it is the DISCOVERY commitment being below the
+    GATE that makes the first-sighting scan non-crediting, whatever finalization costs.
+
+    ON XRP IT CAN DELAY A CREDIT, and that is stated rather than smoothed over.
+    XRP_MIN_CONFIRMATIONS is 1 and chains/xrp_payments.py credits a validated payment at rank
+    1, so the first scan that sees an XRP payment can credit it. The bound is one cycle,
+    14.5µfn (17.6s) on deposit_watcher, and the zero-mean arithmetic above applies unchanged.
+
+    THE REJECTED ALTERNATIVE was to re-scan once after the loop whenever any swap changed
+    state. It is worse on three counts, and the third settles it:
+
+      it re-adds the scan exactly when it is most expensive. "Any swap changed state"
+      includes awaiting_deposit -> deposit_seen -> confirming, which on SOL is EVERY cycle of
+      a deposit's confirmation window -- about 11µfn (13s), comparable to one cycle. The
+      saving would evaporate during precisely the period the rate limit was being burned.
+
+      it cannot help the deposit that triggered it. A re-scan after the loop discovers events
+      with nothing left to credit them; crediting them needs a second refresh pass, which to
+      be consistent needs a third scan. There is no fixed point, only a longer cycle.
+
+      it makes the scan count depend on state transitions, so chains/solana._REPORTED_SKIP_SETS
+      no longer has a stable per-cycle baseline and the skip-detail line loses the property
+      that made it readable -- an unchanged set reported as a count.
+
+    THE SKIP SET IS COMPUTED ONCE HERE, which is the second thing this change gives up, and
+    IT CANNOT DOUBLE-CREDIT. Today refresh_swap_from_chain() recomputes skip_txids() per swap,
+    so a transaction settled by swap 1 was already skipped by swap 2 in the same cycle. With
+    one scan there IS no second scan to tighten, so nothing is re-read within a cycle and the
+    total getTransaction count goes DOWN, not up. What does change is that this scan's skip
+    set predates the loop's crediting, so a transaction the reconciler would have skipped
+    (because the loop had just settled it) is read by this single scan instead -- one read,
+    inside a cycle that no longer makes three whole scans.
+
+    WHY ONE SHARED EVENT LIST CANNOT BE CREDITED TWICE, named by constraint rather than by
+    confidence. Three things have to fail together for that, and the first alone is enough:
+
+      attributable_events()        filters the shared list to events whose `vout` equals THIS
+                                   swap's deposit_tag, and tag uniqueness is enforced in SQL
+                                   -- xrp_destination_tags carries PRIMARY KEY (account,
+                                   destination_tag) and UNIQUE idx_xrp_tag_one_per_swap, with
+                                   two BEFORE triggers that RAISE(ABORT) on delete or
+                                   re-point. So at most one swap matches any one event, and a
+                                   swap with no tag credits nothing at all.
+      UNIQUE(asset, txid, vout)    db.py's constraint on deposit_events. Even if two swaps
+                                   somehow matched one event, upsert_deposit_event() SELECTs
+                                   on exactly that triple first and UPDATEs confirmations on
+                                   the existing row rather than inserting a second one. It
+                                   does not re-point swap_id.
+      WHERE swap_id = ?            refresh_swap_from_chain() sums only the rows carrying this
+                                   swap's id, so the row that exists belongs to one swap and
+                                   is counted for one swap.
+
+    Those are the same three constraints the per-swap scan already relied on -- sharing the
+    event list does not weaken any of them, because none of them is a property of WHO
+    scanned.
+
+    AND THE CREDITED/CLAIMED SETS DELIBERATELY DO NOT MOVE. reconcile_shared_accounts() still
+    computes them from the database AFTER the loop has run, because computing them here would
+    reintroduce the 2026-10-01 defect its own comment records: the reconciler calling a
+    freshly credited deposit stranded. Only the SCAN moved up; every verdict stayed where it
+    was.
+
+    RECORDS THE STRANDED DROPS WHERE THEY EXIST. chains/solana.find_deposits_to_address()
+    clears `unattributable_drops` per call, so record_what_nobody_can_claim() has to run
+    against the adapter before the next scan on it -- which is here, immediately after the
+    scan, exactly as it ran immediately after the per-swap scan before. It upserts, and the
+    previous code recorded the same drops N times per cycle for N swaps, so recording them
+    once is the same rows with fewer writes.
+    """
+    scans: SharedScans = {}
+    # ONE SQL READ PER ASSET, NOT PER TARGET. skip_txids() is two SELECTs against
+    # swap_terminal.db and costs no network call, but it answers the same question for every
+    # address on an asset, so asking it twice would be two copies of one answer (rule 8).
+    skips: dict[str, frozenset[str]] = {}
+    for asset, address in shared_scan_targets(swaps, config, adapters):
+        if asset not in skips:
+            skips[asset] = skip_txids(db, asset)
+        adapter = adapters[asset]
+        scans[(asset, address)] = adapter.find_deposits_to_address(address, skip_txids=skips[asset])
+        record_what_nobody_can_claim(db, asset, adapter)
+        # RULE 14: THE WORK THAT STOPPED HAPPENING STILL HAS TO BE VISIBLE. Four scans printed
+        # four adapter lines; one prints one, and an operator reading the log would otherwise
+        # watch the count fall with nothing saying why. This line is what the three removed
+        # ones are replaced by: it names the account, how many swaps the single result was
+        # handed to, and what the per-swap shape would have cost.
+        #
+        # It is NOT a flood, and that distinction is the whole lesson of
+        # chains/solana.skip_detail(), written the day before this. One line per shared
+        # account per cycle, against the four adapter scan lines it replaces, so the log is
+        # net quieter rather than noisier.
+        sharing = sum(
+            1 for swap in (swaps or ())
+            if swap["from_asset"] == asset and (swap["deposit_address"] or "").strip() == address
+        )
+        logger.info(
+            "%s shared deposit account %s scanned ONCE for this cycle of %s; the one result goes "
+            "to %d active swap(s) and the reconciler, where per-swap scanning made %d scans of "
+            "the same account. swaps=%d with ONE scan is this fix working; two scans for one "
+            "asset in a cycle means a swap's deposit_address differs from what config names, "
+            "which is correct and deliberate -- see shared_scan_targets(). PER PROCESS: the "
+            "other worker runs this same function on its own schedule and has its own count, "
+            "so this line is not a tree-wide total.",
+            asset, address, _process_name(), sharing, sharing + 1, sharing,
+        )
+    return scans
+
+
+def refresh_swap_from_chain(db, config, adapters: dict, swap: dict, scans: SharedScans | None = None) -> dict:
     asset = swap["from_asset"]
-    adapter = adapters[asset]
-    # FINISHED TRANSACTIONS ARE NOT RE-READ. On Solana each one costs a
-    # getTransaction call, and re-reading the whole history every 15s
-    # rate-limited a real deposit out of being credited on 2026-10-01. See
-    # skip_txids() for the two sources and for why skipping either changes no
-    # decision, and chains/solana.py for the measurement. Every other adapter
-    # accepts the argument and ignores it: their discovery is one call.
-    events = adapter.find_deposits_to_address(
-        swap["deposit_address"], skip_txids=skip_txids(db, asset)
-    )
-    record_what_nobody_can_claim(db, asset, adapter)
+    # THE CYCLE'S SCAN IS REUSED WHEN THERE IS ONE, AND THAT IS THE WHOLE OPTIMIZATION.
+    #
+    # On a tag-attributed chain every swap shares one deposit account, so this call used to
+    # rescan the SAME account for every swap and get byte-identical results back. Measured on
+    # the live host 2026-10-02, IN deposit_watcher's LOG AND NOWHERE ELSE: 4 scans per cycle
+    # (3 awaiting_deposit swaps + the reconciler) at a 17.6s cycle is 818
+    # getSignaturesForAddress/hour; one scan is 204.5/hour, 614/hour less -- 75% of THAT
+    # PROCESS's scans, not of the tree's. reconcile_worker runs this same function in a second
+    # process at 60s and was not measured; see shared_scan_targets(). What the shape has in
+    # common across both is that it scaled with OPEN SWAPS and not with deposits.
+    #
+    # KEYED ON (asset, deposit_address) AND NOT ON ASSET, so a swap whose deposit_address is
+    # not the account config currently names -- an operator repointed the variable after the
+    # swap was created -- MISSES the shared entry and falls through to its own scan below.
+    # That is the correct answer and not a leak: the old account is where its customer was
+    # told to pay. scan_shared_accounts()/shared_scan_targets() carry the reasoning, and they
+    # put that address in the target set too, so the fallback here is the belt to that braces.
+    #
+    # `scans is None` IS THE ADDRESS-ATTRIBUTED PATH AND EVERY DIRECT CALLER. BTC, LTC and GRC
+    # give each swap its own address, so there is nothing to share and nothing here changes
+    # for them -- they take the else branch exactly as before, scan included.
+    key = (asset, (swap["deposit_address"] or "").strip())
+    if scans is not None and key in scans:
+        events = scans[key]
+    else:
+        adapter = adapters[asset]
+        # FINISHED TRANSACTIONS ARE NOT RE-READ. On Solana each one costs a
+        # getTransaction call, and re-reading the whole history every 15s
+        # rate-limited a real deposit out of being credited on 2026-10-01. See
+        # skip_txids() for the two sources and for why skipping either changes no
+        # decision, and chains/solana.py for the measurement. Every other adapter
+        # accepts the argument and ignores it: their discovery is one call.
+        events = adapter.find_deposits_to_address(
+            swap["deposit_address"], skip_txids=skip_txids(db, asset)
+        )
+        # RIGHT AFTER THE SCAN, WHERE THE DROPS EXIST -- the adapter clears
+        # `unattributable_drops` per call, so this cannot be hoisted out of the branch that
+        # scanned. The shared path does the same thing in scan_shared_accounts(), once.
+        record_what_nobody_can_claim(db, asset, adapter)
 
     # FILTER BY TAG BEFORE CREDITING, and this is a money bug that would only
     # appear once XRP went live. For BTC, LTC and GRC the deposit ADDRESS is the
@@ -384,13 +679,39 @@ def process_active_swaps(db, config, adapters: dict) -> list[dict]:
         f"SELECT * FROM swaps WHERE status IN ({placeholders}) ORDER BY created_at ASC",  # noqa: S608
         ACTIVE_STATUSES,
     ).fetchall()
-    processed = [refresh_swap_from_chain(db, config, adapters, swap) for swap in swaps]
-    reconcile_shared_accounts(db, config, adapters)
+    # ONE SCAN PER SHARED DEPOSIT ACCOUNT, BEFORE THE LOOP, AND ITS RESULT GOES TO EVERY
+    # CONSUMER. This line is the change; scan_shared_accounts() is where it is explained and
+    # shared_scan_targets() is the decision about what gets scanned. Orchestration holds no
+    # part of either (rule 10) -- it builds the scans, hands them down, and nothing else.
+    #
+    # EVERY CONSUMER MEANS BOTH: the loop below AND reconcile_shared_accounts(). Passing it to
+    # the loop alone would have left the reconciler making the fifth scan, which is the one
+    # that runs even when nothing is open -- i.e. it would have fixed the N and left the +1.
+    scans = scan_shared_accounts(db, config, adapters, swaps)
+    processed = [refresh_swap_from_chain(db, config, adapters, swap, scans=scans) for swap in swaps]
+    # AFTER THE LOOP, STILL, AND WITH THE SAME SCAN. Only the network read moved up; the
+    # reconciler's `claimed` and `credited` sets are deliberately still computed from the
+    # database down there, because computing them from PRE-LOOP state would call a freshly
+    # credited deposit stranded -- the 2026-10-01 defect its own comment records, and a
+    # mutation replacing `credited` with an empty set is caught by
+    # tests/test_deposit_rate_limit.py::
+    # test_a_freshly_credited_deposit_is_not_called_stranded_by_the_shared_scan.
+    #
+    # THE CALL'S POSITION, AS OPPOSED TO THE SETS IT READS, TURNS OUT NOT TO BE LOAD-BEARING,
+    # and that is recorded rather than left for the next reader to rediscover. Moving this
+    # line ABOVE the loop survives all 2394 tests, and reading
+    # unattributable_deposit_service.unclaimed_events() says why: an event escapes being
+    # stranded on either of two checks -- its txid is in `credited`, or its swap's status is
+    # still in ACTIVE_STATUSES -- and a swap leaves ACTIVE_STATUSES within a cycle only BY
+    # being credited. So the pre-loop reading is covered by the status check and the post-loop
+    # reading by the credited check, and both decline. The position stays where HEAD had it
+    # because there is no reason to move it, not because a test pins it.
+    reconcile_shared_accounts(db, config, adapters, scans=scans)
     db.commit()
     return processed
 
 
-def reconcile_shared_accounts(db, config, adapters: dict) -> int:
+def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | None = None) -> int:
     """Once per cycle, record what arrived at a shared account that NO swap will credit.
 
     WHY HERE AND NOT IN refresh_swap_from_chain(). The question is "does any swap claim this
@@ -489,7 +810,18 @@ def reconcile_shared_accounts(db, config, adapters: dict) -> int:
         # What changes is last_seen_at and confirmations, which stop advancing --
         # correct, since nothing is looking at the transaction any more, and
         # first_seen_at is the figure a human matching it works from.
-        events = adapter.find_deposits_to_address(address, skip_txids=skip_txids(db, asset))
+        #
+        # AND IT IS THE CYCLE'S ONE SCAN WHEN process_active_swaps() MADE ONE. This function
+        # scanned the shared account a fifth time -- the +1 in the N+1 -- for a result the
+        # swap loop had already fetched from the same address moments earlier. Reusing it is
+        # safe precisely because `claimed` and `credited` above are read from the DATABASE
+        # after the loop ran, so the verdicts this function reaches are computed from
+        # post-credit state even though the events are pre-loop. A direct caller passes no
+        # scans and gets its own scan, which is what every test that calls this function
+        # alone exercises.
+        events = scans.get((asset, address)) if scans is not None else None
+        if events is None:
+            events = adapter.find_deposits_to_address(address, skip_txids=skip_txids(db, asset))
         rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES, credited)
         recorded += record_unattributable(db, rows, now=now)
         # AND CLOSE ANY ROW THAT TURNS OUT TO HAVE BEEN CREDITED. Written before this fix, or
