@@ -18,7 +18,9 @@ Mainnet-safe: yes
 set_swap_status() writes the status and the audit row together, so every
 transition is recorded. It does NOT commit: the caller owns the transaction
 boundary, which is what lets create_swap() insert the swap and its first audit
-row atomically.
+row atomically. Since 2026-10-02 it is a COMPARE-AND-SWAP and returns whether the
+swap moved -- a caller that ignores that return value is back to the defect, which
+is written out at the function.
 """
 
 import logging
@@ -39,19 +41,111 @@ def get_min_confirmations(config, asset: str) -> int:
     return int(config[f"{asset}_MIN_CONFIRMATIONS"])
 
 
-def set_swap_status(db, swap_id: str, new_status: str, message: str | None = None, old_status: str | None = None):
+def set_swap_status(
+    db, swap_id: str, new_status: str, message: str | None = None, old_status: str | None = None
+) -> bool:
+    """Move one swap from the status it is IN to `new_status`, or decline. Returns whether it moved.
+
+    COMPARE-AND-SWAP, AND IT WAS A BARE UPDATE UNTIL NOW. `old_status` existed and was used
+    for ONE thing -- filling in the audit row -- while the write was
+    `UPDATE swaps SET status = ? WHERE id = ?`. So a worker holding a stale read still wrote,
+    and still wrote an audit row describing a transition out of a status the swap had already
+    left.
+
+    MEASURED ON THE OPERATOR'S HOST, FROM THEIR OWN AUDIT TRAIL. The identical two
+    transitions, recorded twice, 0.83s apart, because deposit_watcher (15s) and
+    reconcile_worker (60s) both ran process_active_swaps() over that swap:
+
+        21:37:46.943103  s_95a807c181644190  confirming -> payout_pending  Deposit fully confirmed
+        21:37:46.942952  s_95a807c181644190  awaiting_deposit -> confirming  Deposit detected
+        21:37:46.113918  s_95a807c181644190  confirming -> payout_pending  Deposit fully confirmed
+        21:37:46.113783  s_95a807c181644190  awaiting_deposit -> confirming  Deposit detected
+
+    Exactly one payout row exists for that swap, so nobody was paid twice -- the payout claim
+    guard held, and it held because claim_swap_for_payout() below in payout_service.py already
+    does what this function did not. The damage was a false audit trail, which is the record an
+    operator reads to understand what happened to somebody's money.
+
+    THE WORSE CASE THE SAME DEFECT ALLOWED, and it is why this is a money fix rather than a
+    bookkeeping one: a stale `awaiting_deposit` read could overwrite `payout_pending` with
+    `deposit_seen`, or overwrite `paying` -- the status payout_worker sets to own a send --
+    with a deposit status. Nothing read the UPDATE's rowcount, so no caller could tell.
+
+    `old_status=None` MEANS "WHATEVER IT IS NOW", READ AND THEN COMPARED-AND-SWAPPED. It does
+    NOT mean "skip the check", and that choice is deliberate: an argument that switches the
+    guarantee off is two behaviors behind one name (rule 8), and the one call that forgets it
+    is the one that clobbers. Read-then-CAS is strictly better than the bare UPDATE it
+    replaces even though the read can go stale -- the write is still conditional, so another
+    process that moves the row between the read and the UPDATE makes this one decline instead
+    of overwrite. Every non-test caller in the tree passes `old_status` explicitly (grepped
+    2026-10-02: four in deposit_service, three in payout_service), so the None path is reached
+    only by a swap row that does not exist -- where `current` is None, the CAS matches nothing,
+    and this returns False rather than writing an audit row for a swap that is not there.
+
+    A LOSING CAS IS NOT AN ERROR AND MUST NOT RAISE. refresh_swap_from_chain() is called
+    inside a list comprehension in process_active_swaps(); one exception there kills every
+    other swap's processing in the same cycle, and the worker's `except Exception` turns that
+    into a FAILED cycle on which nothing is credited on any chain. With two workers a lost
+    race is the NORMAL case, so it is a quiet, VISIBLE no-op: False to the caller, one INFO
+    line naming the swap and both statuses, and nothing written.
+
+    THE SAME SHAPE AS payout_service.claim_swap_for_payout(), AND THE DIFFERENCE IS THE POINT
+    (rule 8, stated at both sites). That function is also a conditional UPDATE whose audit row
+    is written only on rowcount == 1, and its docstring carries the measurement that argues
+    for moving a decision into the write. It differs in two ways and they are why it is not
+    merged into this one: it COMMITS, because a claim held in an open transaction blocks the
+    other worker's competing UPDATE for the length of an RPC call, and its return value is a
+    claim of ownership that the caller must act on, not a report that a status moved.
+
+    NO TRIGGER, AND THAT IS CONSIDERED RATHER THAN SKIPPED. db.py's
+    `address_proofs_are_single_use` is the model: the conditional UPDATE is the mechanism and
+    the trigger is the guarantee against a future writer who drops the predicate (see
+    grc_login_service.py's note -- "the mechanism and the guarantee are separate on purpose").
+    A trigger here would have to RAISE(ABORT) on a transition, and the only transitions it
+    could forbid without enumerating every legitimate one are exactly the ones a LOST RACE
+    produces -- so it would turn the normal case into an exception in that list comprehension.
+    It would also abort the hand-written `UPDATE swaps SET status=...` that show_swap.py tells
+    the operator to run. Enumerating which transitions the database should refuse is a live
+    posture decision and it is theirs (rule 16), not a side effect of this fix.
+
+    Returns:
+        True when this call moved the swap and wrote the audit row; False when the swap was
+        not in `old_status` (or does not exist) and NOTHING was written.
+    """
     current = old_status
     if current is None:
         row = db.execute("SELECT status FROM swaps WHERE id = ?", (swap_id,)).fetchone()
         current = row["status"] if row else None
-    db.execute(
-        "UPDATE swaps SET status = ?, updated_at = ? WHERE id = ?",
-        (new_status, utc_now_iso(), swap_id),
-    )
+    moved = db.execute(
+        # `AND status IS ?` and not `AND status = ?`: `current` is None for a swap row that
+        # does not exist, and SQL equality against NULL is never true -- which is the answer
+        # we want, but `IS` says so for the right reason rather than by accident, and it keeps
+        # the one case where the column itself could be NULL from reading as a match.
+        "UPDATE swaps SET status = ?, updated_at = ? WHERE id = ? AND status IS ?",
+        (new_status, utc_now_iso(), swap_id, current),
+    ).rowcount == 1
+    if not moved:
+        # RULE 14: "DID NOTHING" MUST NOT LOOK LIKE "DID WORK". The caller gets False and an
+        # operator gets a line, because the silent version of this is what produced the
+        # duplicated trail above -- nobody could see it until they read the audit table.
+        #
+        # INFO AND NOT WARNING, with the reason in the text: with two workers on two
+        # schedules this is the expected outcome of the loser, so a WARNING here would train
+        # the operator to ignore warnings. It is not a flood either -- set_swap_status() is
+        # called at TRANSITIONS, a handful per swap lifetime, not once per cycle.
+        logger.info(
+            "swap %s was NOT moved to %r and NOTHING was written: it is no longer %r, so "
+            "another process has already advanced it. This is the normal outcome for the "
+            "loser of a status race between deposit_watcher and reconcile_worker, not an "
+            "error -- the winner wrote the transition and its audit row. message=%r",
+            swap_id, new_status, current, message,
+        )
+        return False
     db.execute(
         "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at) VALUES (?, ?, ?, ?, ?)",
         (swap_id, current, new_status, message, utc_now_iso()),
     )
+    return True
 
 
 def get_quote_or_raise(db, quote_id: str) -> dict:

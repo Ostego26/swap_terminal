@@ -123,6 +123,14 @@ def claim_swap_for_payout(db, swap_id: str) -> bool:
     worker. Committing first makes the loser's UPDATE return rowcount 0
     immediately instead of waiting.
 
+    THE SAME SHAPE AS swap_service.set_swap_status() SINCE 2026-10-02, and the difference is
+    stated at both sites (rule 8). That function is now also a conditional UPDATE whose audit
+    row is written only when the UPDATE applied, and this docstring's argument is the one it
+    cites. Two things keep them separate rather than merged: this one COMMITS, because a claim
+    left in an open transaction blocks the other worker's competing UPDATE for the length of
+    an RPC call, and this return value is a claim of OWNERSHIP the caller must act on, where
+    that one reports whether a status moved.
+
     Returns:
         True if this caller owns the payout for `swap_id` and may send.
     """
@@ -139,6 +147,63 @@ def claim_swap_for_payout(db, swap_id: str) -> bool:
     )
     db.commit()
     return True
+
+
+def refuse_payout_before_sending(db, swap: dict, verdict, destination_asset: str, amount) -> None:
+    """Write and announce the refusal of a payout address. Sends nothing, reserves nothing.
+
+    EXTRACTED 2026-10-02 WHEN THE STATUS WRITE BECAME A COMPARE-AND-SWAP, and the reason is
+    rule 12's C901 note rather than tidiness: checking the three set_swap_status() return
+    values put process_pending_payouts() past the complexity and statement ceilings, and the
+    fix for orchestration that has swallowed a decision is to extract the decision -- "what
+    happens to a swap whose payout address we refuse" -- not to raise the ceiling or write a
+    noqa (rule 19). It is also the shape rule 10 asks for: the loop above is orchestration,
+    this is the outcome, and it can now be called with a seeded verdict.
+
+    THE ORDER IS LOAD-BEARING AND IS UNCHANGED. failed_reason first, then the status, then the
+    commit, then the line the operator reads. The reason has to be on the row before the status
+    says 'failed', or a reader who catches the swap between the two sees a failure with no
+    explanation.
+    """
+    db.execute(
+        "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
+        (f"payout address refused before send: {verdict.why}", utc_now_iso(), swap["id"]),
+    )
+    if not set_swap_status(
+        db, swap["id"], "failed",
+        f"NOTHING WAS SENT. Payout address refused: {verdict.why}", old_status="paying",
+    ):
+        # THE CAS DECLINED, WHICH HERE IS AN ANOMALY RATHER THAN A RACE. This caller holds an
+        # exclusive claim on the swap -- claim_swap_for_payout() moved it into 'paying' and
+        # committed -- and since 2026-10-02 nothing else can overwrite 'paying', because every
+        # other writer of swaps.status goes through the same compare-and-swap. So reaching
+        # this line means something moved the swap out from under a committed claim, and the
+        # operator needs the sentence rather than a silent skip (rule 14).
+        #
+        # IT DOES NOT RAISE. Nothing was sent, no inventory was reserved and no payouts row
+        # was written, so there is nothing to undo; raising would turn one anomalous swap into
+        # a FAILED cycle that stops every OTHER swap being paid.
+        logger.error(
+            "swap %s: the payout address was REFUSED and NOTHING WAS SENT, but the swap could "
+            "not be marked failed -- it is no longer 'paying', so another process moved it out "
+            "of a committed payout claim. The refusal reason IS recorded in "
+            "swaps.failed_reason; the status and the audit row are NOT. Read it back with "
+            "show_swap.py --swap %s before retrying anything.",
+            swap["id"], swap["id"],
+        )
+    db.commit()
+    # Rule 14: the refusal names the address AND the reason, on the screen the operator is
+    # actually looking at. `swaps.failed_reason` reached nothing they were watching on
+    # 2026-09-26, which is the measurement recorded at the send-failure logger.error() inside
+    # process_pending_payouts().
+    logger.error(
+        "payout REFUSED BEFORE SENDING for swap %s (%s -> %s, %s %s): address %r is not a valid "
+        "%s address -- %s  <- NOTHING was sent, no inventory was reserved, no payouts row was "
+        "written, and the swap is now 'failed' and will NOT be retried. Money sent to this string "
+        "would be unspendable by anybody.",
+        swap["id"], swap["from_asset"], swap["to_asset"], amount, destination_asset,
+        swap["payout_address"], destination_asset, verdict.why,
+    )
 
 
 def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
@@ -229,27 +294,7 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
         # which is rule 14's "did nothing must not look like did work" turned into a loop.
         verdict = check_address(destination_asset, swap["payout_address"])
         if verdict.refuses:
-            db.execute(
-                "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
-                (f"payout address refused before send: {verdict.why}", utc_now_iso(), swap["id"]),
-            )
-            set_swap_status(
-                db, swap["id"], "failed",
-                f"NOTHING WAS SENT. Payout address refused: {verdict.why}", old_status="paying",
-            )
-            db.commit()
-            # Rule 14: the refusal names the address AND the reason, on the screen the
-            # operator is actually looking at. `swaps.failed_reason` reached nothing they
-            # were watching on 2026-09-26, which is the measurement recorded at the
-            # send-failure logger.error() further down this function.
-            logger.error(
-                "payout REFUSED BEFORE SENDING for swap %s (%s -> %s, %s %s): address %r is not a valid "
-                "%s address -- %s  <- NOTHING was sent, no inventory was reserved, no payouts row was "
-                "written, and the swap is now 'failed' and will NOT be retried. Money sent to this string "
-                "would be unspendable by anybody.",
-                swap["id"], swap["from_asset"], swap["to_asset"], amount, destination_asset,
-                swap["payout_address"], destination_asset, verdict.why,
-            )
+            refuse_payout_before_sending(db, swap, verdict, destination_asset, amount)
             continue
         if verdict.unchecked:
             # Rule 14 again. `.unchecked` rather than `state == NO_VALIDATOR` since
@@ -382,7 +427,19 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
                 "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
                 (str(exc), utc_now_iso(), swap["id"]),
             )
-            set_swap_status(db, swap["id"], "failed", f"Payout failed: {exc}", old_status="paying")
+            if not set_swap_status(db, swap["id"], "failed", f"Payout failed: {exc}", old_status="paying"):
+                # Same anomaly and same reasoning as the address-refusal path above: an
+                # exclusive claim was committed, so 'paying' should still be there. The send
+                # may or may not have reached the chain -- that is what this except clause is
+                # about -- and raising from here would replace a recorded failure with an
+                # unrecorded one.
+                logger.error(
+                    "swap %s: the payout FAILED (%s) and the reason is recorded in "
+                    "swaps.failed_reason and on the payouts row, but the swap could not be "
+                    "marked failed -- it is no longer 'paying', so another process moved it "
+                    "out of a committed payout claim. Read it back with show_swap.py --swap %s.",
+                    swap["id"], exc, swap["id"],
+                )
             db.commit()
             # LOGGED, not only recorded. The reason reached swaps.failed_reason and
             # the audit log; it reached NOTHING the operator was looking at. Their
@@ -530,7 +587,28 @@ def _record_broadcast(db, swap, amount, txid: str, *, old_status: str = "paying"
         "UPDATE swaps SET payout_txid = ?, completed_at = ?, updated_at = ? WHERE id = ?",
         (txid, utc_now_iso(), utc_now_iso(), swap["id"]),
     )
-    set_swap_status(db, swap["id"], "completed", "Payout broadcast", old_status=old_status)
+    if not set_swap_status(db, swap["id"], "completed", "Payout broadcast", old_status=old_status):
+        # THE MONEY IS ALREADY ON THE CHAIN when this fires from the worker, so this is the
+        # one of the three that must be loudest and still must not raise: the payouts row,
+        # swaps.payout_txid and swaps.completed_at above are already written, and an exception
+        # here would leave a broadcast payout looking like a failed cycle.
+        #
+        # THE EXPECTED WAY TO SEE THIS IS settle_payout.py'S STATE B, and it is not an error
+        # there. That tool corrects a swap whose payout was delivered but recorded as failed,
+        # and passes old_status="failed" in BOTH of its states -- in state B the swap half of
+        # the correction already ran, so the swap reads 'completed' and the CAS declines. What
+        # it declines to write is a DUPLICATE audit row claiming failed -> completed a second
+        # time, which is exactly the false trail the compare-and-swap exists to stop. The
+        # payouts row this state B exists to fix is updated above, before this line.
+        logger.error(
+            "swap %s: the payout txid, completed_at and the payouts row ARE recorded, but the "
+            "status was NOT moved to 'completed' and no audit row was written -- the swap is "
+            "no longer %r. If this came from settle_payout.py correcting an already-corrected "
+            "swap, that is expected and the duplicate audit row was refused on purpose; from "
+            "payout_worker it means something moved the swap out of a committed payout claim. "
+            "Read it back with show_swap.py --swap %s.",
+            swap["id"], old_status, swap["id"],
+        )
     release_inventory_after_send(db, destination_asset, amount)
     db.commit()
 

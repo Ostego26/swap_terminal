@@ -54,6 +54,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 # Rootless, the same way chains/base.py reaches script_pub_key.py. No
 # sys.path.insert is needed here: this module is only ever importable as
@@ -569,6 +570,205 @@ def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
     return scans
 
 
+class DepositSums(NamedTuple):
+    """What the stored deposit_events rows add up to, and the band they are judged against.
+
+    ONE ARGUMENT INSTEAD OF FIVE, and that is not only a PLR0913 count. These five move
+    together -- they are all read from the same rows in the same breath -- and passing them
+    as one value is what let the ladder below split into four small functions without each
+    one growing a different subset of them. A function that takes `confirmed_total` without
+    `low` and `high` cannot judge it, and one that takes the band without the total has
+    nothing to judge.
+    """
+
+    has_rows: bool
+    max_confirmations: int
+    confirmed_total: float
+    low: float
+    high: float
+
+
+#: The transition a compare-and-swap REFUSED, as (from, to). None means nothing was refused.
+#: A named alias rather than a bare tuple at five signatures, because "did this lose a race"
+#: is the question the whole ladder answers and it should read the same way at each level.
+RefusedTransition = tuple[str, str] | None
+
+
+def advance_deposit_status(db, swap: dict, sums: DepositSums) -> RefusedTransition:
+    """Move the swap along the deposit ladder. Returns the transition that was REFUSED, or None.
+
+    THIS IS THE DECISION, AND IT USED TO BE INLINE IN refresh_swap_from_chain() (rule 10). It
+    was extracted when every transition became a compare-and-swap on 2026-10-02, for the
+    reason rule 12's C901 note gives: the four `if not set_swap_status(...)` guards pushed that
+    function to complexity 13, and the fix for orchestration that has swallowed a decision is
+    to extract the decision rather than to raise the ceiling or to write a noqa (rule 19).
+    Extracting it also makes the ladder callable with seeded sums, which is how the lost-race
+    behavior is asserted without standing up two workers.
+
+    THE SUMS ARE HANDED OVER, not recomputed. `confirmed_total` is the figure the confirmation
+    gate is built on -- the comparison between "somebody sent us coins" and "we send coins
+    back" -- and computing it twice is rule 8's duplicate on the one line in this module that
+    decides a deposit is confirmed. The caller reads the deposit_events rows and sums them;
+    this applies the ladder to the result.
+
+    RETURNS THE REFUSED TRANSITION RATHER THAN A BOOL, because the caller has to say which
+    transition was lost in the line an operator reads (rule 14: state what the number means,
+    next to the number). None means every applicable transition was applied, which includes
+    the ordinary case of no transition being applicable at all.
+
+    IT STOPS AT THE FIRST REFUSAL, and the `current_status` the second half is handed is the
+    one the first half actually WROTE rather than the one it hoped to. See
+    _abandon_on_lost_status_race() for why stopping is the answer rather than retrying: a
+    refusal means this process's view of the swap is stale, and the measured damage was the
+    loser carrying on with a status it had assigned itself and finding the database agreeing.
+    """
+    current_status, refused = _advance_to_detected(db, swap, sums)
+    if refused is not None:
+        return refused
+    return _settle_confirmed_amount(db, swap, sums, current_status)
+
+
+def _advance_to_detected(db, swap: dict, sums: DepositSums) -> tuple[str, RefusedTransition]:
+    """awaiting_deposit -> deposit_seen/confirming, then deposit_seen -> confirming.
+
+    Returns the status the swap is in AFTER this half, and the transition refused if any.
+    Both, because the second half of the ladder has to be judged against what was written:
+    returning only the refusal would make the caller guess, and guessing is the defect.
+    """
+    current_status = swap["status"]
+    if sums.has_rows and current_status == "awaiting_deposit":
+        new_status = "deposit_seen" if sums.max_confirmations <= 0 else "confirming"
+        if not set_swap_status(db, swap["id"], new_status, "Deposit detected", old_status=current_status):
+            return (current_status, (current_status, new_status))
+        current_status = new_status
+    confirming = (
+        sums.has_rows
+        and 0 < sums.max_confirmations < int(swap["min_confirmations"])
+        and current_status in {"deposit_seen", "awaiting_deposit"}
+    )
+    if confirming and not set_swap_status(
+        db, swap["id"], "confirming", "Deposit is confirming", old_status=current_status
+    ):
+        return (current_status, (current_status, "confirming"))
+    return ("confirming" if confirming else current_status, None)
+
+
+def _settle_confirmed_amount(
+    db, swap: dict, sums: DepositSums, current_status: str
+) -> RefusedTransition:
+    """What a CONFIRMED total does: nothing, a halt for review, or the credit.
+
+    The three outcomes are one branch each and each is its own function below, which is the
+    layering rule 10 asks for -- the confirmation comparison on `confirmed_total` is the gate
+    between "somebody sent us coins" and "we send coins back", and a gate inlined three levels
+    up is a gate that can only be tested by running the whole refresh.
+    """
+    if sums.confirmed_total <= 0:
+        return None
+    if sums.confirmed_total < sums.low or sums.confirmed_total > sums.high:
+        return _halt_for_review(db, swap, sums, current_status)
+    return _credit_confirmed_deposit(db, swap, sums, current_status)
+
+
+def _halt_for_review(
+    db, swap: dict, sums: DepositSums, current_status: str
+) -> RefusedTransition:
+    """An out-of-band amount goes to a person, and the reason is not rewritten on every cycle.
+
+    `current_status == "under_review"` returns early so the failed_reason written the first
+    time survives: the halt is the one outcome that will not resolve on its own, and a reason
+    rewritten every 14.5µfn (17.6s) would lose whatever the first cycle saw.
+    """
+    if current_status == "under_review":
+        return None
+    db.execute(
+        "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
+        (
+            # UNCHANGED WORDING AND UNCHANGED float() COERCION. The operator reads this
+            # string off a status page and a test pins it; the extraction into this function
+            # must not quietly reformat a number on the halt path.
+            f"Confirmed amount {sums.confirmed_total} outside tolerance "
+            f"for expected {float(swap['expected_input_amount'])}",
+            utc_now_iso(), swap["id"],
+        ),
+    )
+    if not set_swap_status(db, swap["id"], "under_review", "Amount outside tolerance", old_status=current_status):
+        return (current_status, "under_review")
+    return None
+
+
+def _credit_confirmed_deposit(
+    db, swap: dict, sums: DepositSums, current_status: str
+) -> RefusedTransition:
+    """The credit: the money is ours, and the swap becomes something payout_worker acts on.
+
+    THE THREE WRITES ARE ABSOLUTE ASSIGNMENTS, not increments, which is the property that
+    makes two processes crediting one payment land on one figure --
+    tests/test_deposit_rate_limit.py pins it. They run BEFORE the status transition and are
+    deliberately not rolled back when that transition is refused: the winner of the race wrote
+    the same figures, so what is on disk is correct either way, and discarding a correct credit
+    because a status write was declined would be the worse direction on the one path where
+    being wrong means somebody's deposit is not credited.
+    """
+    if current_status not in {"confirming", "deposit_seen", "awaiting_deposit"}:
+        return None
+    db.execute(
+        "UPDATE swaps SET credited_at = ?, updated_at = ?, actual_input_amount = ? WHERE id = ?",
+        (utc_now_iso(), utc_now_iso(), sums.confirmed_total, swap["id"]),
+    )
+    db.execute(
+        "UPDATE deposit_events SET credited_at = ? WHERE swap_id = ? AND credited_at IS NULL",
+        (utc_now_iso(), swap["id"]),
+    )
+    if not set_swap_status(db, swap["id"], "payout_pending", "Deposit fully confirmed", old_status=current_status):
+        return (current_status, "payout_pending")
+    return None
+
+
+def _abandon_on_lost_status_race(db, swap: dict, attempted_from: str, attempted_to: str) -> dict:
+    """A refresh that lost the status race: commit what is written, report, and stop. NO raise.
+
+    WHY STOPPING IS THE WHOLE POINT, and it is the half of the fix that a CAS alone does not
+    give. set_swap_status() declining means this process's view of the swap is stale. Carrying
+    on down the transition chain with that view is how the operator's duplicated audit trail
+    was produced: the loser kept going, reached a later branch whose `current_status` it had
+    assigned itself, and found the database agreeing with the status it had invented -- so the
+    second CAS SUCCEEDED and wrote a transition the winner had already written.
+
+    THE WINNER IS PROCESSING THIS SWAP, so there is nothing to recover. deposit_watcher comes
+    back in 14.5µfn (17.6s) with a fresh read; the cost of deferring is at most one cycle, and
+    the alternative is two processes writing one swap's history from two different beliefs
+    about where it started.
+
+    NOT AN EXCEPTION, deliberately. The caller is a list comprehension in
+    process_active_swaps(); one raise there discards every other swap in the cycle and the
+    worker's `except Exception` prints a FAILED cycle on which nothing is credited on any
+    chain. A lost race is the normal case with two workers, and the normal case must not look
+    like a chain outage (rule 14).
+
+    IT COMMITS, because the writes before the refused transition are real and are the same
+    figures the winner wrote: the deposit_events upsert, actual_input_amount, deposit_txid and
+    -- on the payout_pending branch -- credited_at. They are absolute assignments rather than
+    increments, which is the property tests/test_deposit_rate_limit.py already pins for two
+    processes crediting one payment. Rolling them back would discard a correct upsert because
+    a status write was declined.
+
+    RETURNS THE ROW AS IT ACTUALLY IS, re-read, not the stale `swap` dict. The caller's return
+    value feeds the cycle line's count and, for a direct caller, is the swap it then reports
+    on; handing back the pre-race belief would make the loser's own output claim the status it
+    failed to write.
+    """
+    db.commit()
+    logger.info(
+        "swap %s: this refresh LOST THE STATUS RACE attempting %s -> %s and is stopping here "
+        "for this cycle. Nothing further was written for this swap; the deposit_events rows it "
+        "had already upserted are kept, and the process that won the race is advancing it. "
+        "Two workers on two schedules make this the normal outcome, not an error.",
+        swap["id"], attempted_from, attempted_to,
+    )
+    return db.execute("SELECT * FROM swaps WHERE id = ?", (swap["id"],)).fetchone()
+
+
 def refresh_swap_from_chain(db, config, adapters: dict, swap: dict, scans: SharedScans | None = None) -> dict:
     asset = swap["from_asset"]
     # THE CYCLE'S SCAN IS REUSED WHEN THERE IS ONE, AND THAT IS THE WHOLE OPTIMIZATION.
@@ -653,35 +853,15 @@ def refresh_swap_from_chain(db, config, adapters: dict, swap: dict, scans: Share
     )
     expected = float(swap["expected_input_amount"])
     tolerance_pct = float(config["AMOUNT_TOLERANCE_PCT"])
-    low = expected * (1 - tolerance_pct)
-    high = expected * (1 + tolerance_pct)
-    current_status = swap["status"]
-    if rows and current_status == "awaiting_deposit":
-        new_status = "deposit_seen" if max_confirmations <= 0 else "confirming"
-        set_swap_status(db, swap["id"], new_status, "Deposit detected", old_status=current_status)
-        current_status = new_status
-    if rows and 0 < max_confirmations < int(swap["min_confirmations"]) and current_status in {"deposit_seen", "awaiting_deposit"}:
-        set_swap_status(db, swap["id"], "confirming", "Deposit is confirming", old_status=current_status)
-        current_status = "confirming"
-    if confirmed_total > 0:
-        if confirmed_total < low or confirmed_total > high:
-            if current_status != "under_review":
-                db.execute(
-                    "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
-                    (f"Confirmed amount {confirmed_total} outside tolerance for expected {expected}", utc_now_iso(), swap["id"]),
-                )
-                set_swap_status(db, swap["id"], "under_review", "Amount outside tolerance", old_status=current_status)
-                current_status = "under_review"
-        elif current_status in {"confirming", "deposit_seen", "awaiting_deposit"}:
-            db.execute(
-                "UPDATE swaps SET credited_at = ?, updated_at = ?, actual_input_amount = ? WHERE id = ?",
-                (utc_now_iso(), utc_now_iso(), confirmed_total, swap["id"]),
-            )
-            db.execute(
-                "UPDATE deposit_events SET credited_at = ? WHERE swap_id = ? AND credited_at IS NULL",
-                (utc_now_iso(), swap["id"]),
-            )
-            set_swap_status(db, swap["id"], "payout_pending", "Deposit fully confirmed", old_status=current_status)
+    lost = advance_deposit_status(db, swap, DepositSums(
+        has_rows=bool(rows),
+        max_confirmations=max_confirmations,
+        confirmed_total=confirmed_total,
+        low=expected * (1 - tolerance_pct),
+        high=expected * (1 + tolerance_pct),
+    ))
+    if lost is not None:
+        return _abandon_on_lost_status_race(db, swap, *lost)
     db.commit()
     refreshed = db.execute("SELECT * FROM swaps WHERE id = ?", (swap["id"],)).fetchone()
     return refreshed
