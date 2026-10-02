@@ -103,6 +103,49 @@ DEFAULT_POLL_SECONDS = 60
 logger = logging.getLogger(__name__)
 
 
+def backstop_note(written: int, refreshed: int) -> str:
+    """What `transitions_written` MEANS, on the screen rather than in a comment.
+
+    THE EXPLANATION ALREADY EXISTED AND THE OPERATOR COULD NOT SEE IT. It was written
+    as a code comment above the key -- "zero here with refreshed_swaps non-zero is the
+    healthy shape" -- and the printed line carried only inventory_note(). Measured on
+    the operator's host 2026-10-02, the cycle line read:
+
+        reconcile_worker cycle=5 IDLE refreshed_swaps=3 transitions_written=0
+        inventory_rows=1 ... <- expected 3 -- one per CONSTRUCTED adapter (GRC, SOL, XRP)
+
+    One annotation, about the third count. `transitions_written=0` is the field this
+    whole commit added and the one an operator has no prior intuition for, and nothing
+    on the screen said whether 0 was good news.
+
+    That is the identical defect payout_service.inventory_note() was written to fix one
+    field over, and rule 14 states the rule it breaks: "State what the number means,
+    next to the number. The operator reads the screen, not the source."
+
+    ZERO IS THE HEALTHY READING AND MUST SAY SO, because it is the counter-intuitive
+    direction: on every other count on this line, more means more work done, and here
+    non-zero means the BACKSTOP is doing work the primary should have done.
+    """
+    if not refreshed:
+        return (
+            "transitions_written=0 with refreshed_swaps=0 says nothing either way: no "
+            "swap was open, so there was nothing to move"
+        )
+    if written:
+        return (
+            f"transitions_written={written} means THIS 60s loop moved {written} swap "
+            f"status(es) that deposit_watcher's 15s loop had not -- worth a second look "
+            f"while both workers are up, because this loop is the backstop and not the "
+            f"primary. Check deposit_watcher's own last line"
+        )
+    return (
+        "transitions_written=0 is the HEALTHY reading, and it is the only count on this "
+        "line where zero is the good news: deposit_watcher advanced every swap at 15s and "
+        "this 60s backstop pass found nothing left to move. Non-zero means the backstop "
+        "is the one crediting"
+    )
+
+
 def transitions_written(db, swap_ids, *, since: str) -> int:
     """How many audit rows THIS cycle wrote for the swaps it refreshed. One SELECT.
 
@@ -199,7 +242,10 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
         # replaced said "should be 3 (BTC/LTC/GRC)" and printed beside a CORRECT
         # inventory_rows=1 on a host where only GRC and SOL had adapters -- see
         # payout_service.inventory_note()'s docstring for the measurement.
-        notes=inventory_note(adapters, present),
+        # BOTH COUNTS THAT NEED EXPLAINING GET IT. inventory_note() covers
+        # inventory_rows; backstop_note() covers transitions_written, whose
+        # explanation was a code comment the operator never sees.
+        notes=f"{backstop_note(written, len(processed))}. {inventory_note(adapters, present)}",
     )
 
 

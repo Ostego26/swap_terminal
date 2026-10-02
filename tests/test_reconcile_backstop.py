@@ -215,3 +215,64 @@ def test_no_refreshed_swaps_means_zero_without_a_query(db):
     """
     assert reconcile_worker.transitions_written(db, [], since="2026-10-01T00:00:00+00:00") == 0
     assert reconcile_worker.transitions_written(db, None, since="2026-10-01T00:00:00+00:00") == 0
+
+
+# --- what transitions_written MEANS, on the screen -----------------------------
+
+
+def test_zero_transitions_says_it_is_the_HEALTHY_reading():
+    """The explanation existed as a CODE COMMENT and the operator could not see it.
+
+    Measured on their host 2026-10-02, the printed line was:
+
+        reconcile_worker cycle=5 IDLE refreshed_swaps=3 transitions_written=0
+        inventory_rows=1 ... <- expected 3 -- one per CONSTRUCTED adapter (GRC, SOL, XRP)
+
+    One annotation, about the third count. `transitions_written` is the field this
+    worker gained today and the one nobody has prior intuition for, and nothing on
+    screen said whether 0 was good. Rule 14: say what the number means NEXT TO the
+    number -- the operator reads the screen, not the source.
+
+    ZERO IS THE COUNTER-INTUITIVE DIRECTION, which is why it needs the sentence more
+    than the others do: on every other count here more means more work done, and on
+    this one non-zero means the BACKSTOP did work the primary should have.
+    """
+    note = reconcile_worker.backstop_note(0, 3)
+    assert "HEALTHY" in note
+    assert "deposit_watcher" in note, "and names the loop that should have done it"
+    assert "backstop" in note
+
+
+def test_a_NONZERO_count_says_the_backstop_is_doing_the_primarys_work():
+    note = reconcile_worker.backstop_note(2, 3)
+    assert "2" in note
+    assert "HEALTHY" not in note, "the two readings must not render alike"
+    assert "second look" in note
+    assert "deposit_watcher" in note
+
+
+def test_zero_refreshed_swaps_says_zero_transitions_means_NOTHING():
+    """Rule 14's ambiguity case: 0 of 0 is not the healthy-backstop reading, it is
+    'there was nothing to do'. Reporting it as healthy would claim deposit_watcher is
+    keeping up on a host where no swap is open and neither loop has been tested."""
+    note = reconcile_worker.backstop_note(0, 0)
+    assert "nothing to move" in note
+    assert "HEALTHY" not in note
+
+
+def test_the_cycle_LINE_carries_both_notes_and_not_just_the_inventory_one(db):
+    """The wiring, driven through run_cycle(), because the call site is what was wrong.
+
+    backstop_note() being correct is not the fix -- the printed line including it is.
+    EIGHT call-site mutations have survived in this session.
+    """
+    seed_swap(db, "s_note", 12)
+    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter()}, 1, 0.0)
+    assert "transitions_written=" in line, "the count"
+    assert "HEALTHY" in line or "second look" in line, "and what it MEANS, on the line"
+    # BRANCH-AGNOSTIC on purpose. "CONSTRUCTED adapter" appears only in
+    # inventory_note()'s MISSING branch, and this fixture has every adapter present, so
+    # asserting that phrase tested the fixture rather than the wiring. Both branches
+    # name the adapters, so that is what is asserted.
+    assert "constructed adapter" in line.lower(), "the inventory note is still there too"
+    assert "nothing is missing" in line, "and says so for this configuration"
