@@ -674,7 +674,15 @@ tbody tr:hover { background: var(--surface-2); }
 .row-alarm { background: var(--halted-soft); }
 .row-warn { background: var(--slow-soft); }
 
-.probe { margin-top: var(--s5); border-top: 1px solid var(--line); padding-top: var(--s4); }
+/* `.probe` WAS HERE and is deleted rather than kept (rule 2: git history is the
+ * archive). It gave a probe block a top border and a gap so it read as a
+ * subsection at the foot of its parent panel -- Reachability under Chains, the
+ * peg check under Pricing. Both became top-level panels of their own in a band
+ * on 2026-10-02, so a panel that IS a panel no longer needs a rule that made it
+ * look like part of one, and that rule applied to it would add a stray border
+ * under its own heading. Grepped for the class ATTRIBUTE across templates and
+ * static/*.js and for the bare NAME across the tree (rule 2): nothing carries it,
+ * and the remaining mentions of the word are prose about RPC probes. */
 
 /* --- two-up bands of panels -------------------------------------------------
  *

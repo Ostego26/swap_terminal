@@ -875,14 +875,20 @@ def test_the_operator_page_pairs_its_short_panels_into_two_up_bands(client):
     """Two columns at minimum, which is what was asked for."""
     body = client.get("/admin").get_data(as_text=True)
     bands = re.findall(r'<div class="band">(.*?)\n</div>', body, flags=re.DOTALL)
-    assert len(bands) == 2, f"{len(bands)} bands rendered; the template declares two"
+    assert len(bands) == 3, f"{len(bands)} bands rendered; the template declares three"
     paired = [
         [html.unescape(re.sub(r"\s+", " ", head).strip())
          for head in re.findall(r"<h2[^>]*>(.*?)</h2>", band, flags=re.DOTALL)]
         for band in bands
     ]
+    # THE THIRD BAND ARRIVED 2026-10-02 and is the two probes, which were `.probe`
+    # sub-blocks at the foot of Chains and of Pricing until the operator asked for
+    # them to be paired. They are the only two panels of their kind on the page --
+    # nothing here runs on page load, each is one button, each has an idle state
+    # saying so -- so reading them together is "what this page has NOT checked".
     assert paired == [
         ["Payouts claimed but never reported sent", "Workers"],
+        ["Reachability", "The dollar these numbers are quoted in"],
         ["Deposits seen (most recent 25)", "Payouts (most recent 25)"],
     ], f"the bands pair different panels than the template says: {paired}"
 
@@ -1247,4 +1253,60 @@ def test_the_matrixs_row_header_survives_a_sideways_scroll():
     corner = re.search(r"\.matrix \.matrix-corner\s*\{(.*?)\}", css, flags=re.DOTALL).group(1)
     assert "top: 0" in corner, (
         "the corner must stick to the top as well, or the column header slides over it"
+    )
+
+
+def test_the_probes_are_their_own_panels_and_say_what_they_are_about(client, monkeypatch):
+    """THE ADJACENCY THE SPLIT COST, AND THAT IT WAS PAID BACK IN WORDS.
+
+    Reachability's prose was written to sit directly under the Chains table and
+    leaned on it: "one read-only call per configured chain", with a count and no
+    statement of WHICH chains or where that table is. Moving the panel two down
+    without changing the prose would be rule 16's wrong-comment defect arriving as
+    a layout change -- text that is true only because of where it used to be.
+
+    So it names the panel, links to it, and lists the configured assets by ticker.
+    This asserts all three, because a link alone is not a statement of what the
+    button is about to contact.
+    """
+    _mixed_adapters(client, monkeypatch, can_spend_assets=("GRC",), cannot_spend_assets=("XRP",))
+    body = client.get("/admin").get_data(as_text=True)
+
+    assert '<h2 id="reachability-heading">Reachability</h2>' in body, "Reachability is not its own panel"
+    assert '<h2 id="peg-heading">' in body, "the peg check is not its own panel"
+    classes = {token for attr in re.findall(r'class="([^"]*)"', body) for token in attr.split()}
+    assert "probe" not in classes, (
+        "an element still carries the `probe` class, which styles a sub-block of a panel"
+    )
+    assert ".probe" not in re.sub(r"/\*.*?\*/", " ", STYLESHEET.read_text(), flags=re.DOTALL), (
+        "the retired .probe rule is still declared"
+    )
+
+    reachability = _panel(body, "reachability-heading")
+    assert 'href="#chains-heading"' in reachability, "it does not link to the table it is about"
+    assert "Chains" in reachability, "it does not NAME the table it is about"
+    for asset in ("GRC", "XRP"):
+        assert asset in reachability, f"{asset} has an adapter and is not named as a probe target"
+    assert "with an adapter in this process" in reachability
+
+    peg = _panel(body, "peg-heading")
+    assert 'href="#pricing-heading"' in peg, "the peg panel does not link to the prices it is about"
+    assert "not the same as checked and holding" in peg, "the idle sentence did not come with it"
+
+
+def test_a_probe_panel_with_nothing_to_contact_says_that_rather_than_naming_zero(client, monkeypatch):
+    """Zero configured chains is a reading, and "Probe 0 configured chain(s)" is not one.
+
+    rule 14: say what the number MEANS next to the number. An operator seeing a
+    button offering to probe nothing needs to be told that the table above has no
+    adapter in this process, which is the fact, rather than left to infer it from
+    a zero.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+    reachability = _panel(client.get("/admin").get_data(as_text=True), "reachability-heading")
+    assert "no chain in that table has an adapter in this process" in reachability, (
+        "an empty probe target renders a bare count instead of saying what zero means"
+    )
+    assert "nothing to\n     contact" in reachability or "nothing to contact" in re.sub(
+        r"\s+", " ", reachability
     )

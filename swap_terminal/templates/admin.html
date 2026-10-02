@@ -327,26 +327,6 @@
     {{ badges.empty('chain is known to this application', 'the adapters dict and ATTRIBUTION_MODELS') }}
   {% endif %}
 
-  <div class="probe">
-    <h3>Reachability</h3>
-    {# Announce BEFORE (rule 14): the cost and the scale of the probe are stated
-       before it is run, not after it finishes. It is not run on page load
-       because six chains at a 30s timeout is a three-minute page, and a page
-       like that is one an operator interrupts. #}
-    <p class="panel-note">Not probed on page load. Asking makes <strong>one read-only call per configured
-       chain, and a second on a Bitcoin-style daemon to name its network</strong> &#8212;
-       <code>getblockchaininfo</code>, then <code>getinfo</code> for an older build that has no <code>chain</code>
-       key, which is Gridcoin&rsquo;s shape; <code>server_info</code> for XRP. Each can take up to its RPC timeout
-       (30s by default), so the answer can take a while. The network is taken from what the daemon reports, never
-       from its port number &#8212; and a daemon that will not name it says so rather than being reported as a
-       network called something.</p>
-    <p><a class="button" href="{{ url_for('admin.admin_chains_route') }}" id="probe-link">Probe
-       {{ data.chains | selectattr('configured') | list | length }} configured chain(s)</a></p>
-    <div id="probe-result" class="result" aria-live="polite">
-      <p class="result-idle"><span class="empty-mark">(not probed)</span> No chain has been contacted by this page
-         load. Nothing below is a claim about whether a daemon is up.</p>
-    </div>
-  </div>
 </section>
 
 <section class="panel" aria-labelledby="pricing-heading">
@@ -426,21 +406,75 @@
   {% endif %}
   {% endif %}
 
-  <div class="probe">
-    <h3>The dollar these numbers are quoted in</h3>
-    {# Announce BEFORE (rule 14), and say why it is not on the page already. #}
-    <p class="panel-note">{{ data.pricing.peg }} Asking makes <strong>two HTTPS reads</strong> &#8212; one per
-       stablecoin &#8212; carrying no key and touching no chain. The findings come from the same
-       <code>wallet_leveling.peg_findings()</code> that <code>chain_balances.py --level</code> prints, so this page and
-       that command cannot disagree about whether the peg holds.</p>
-    <p><a class="button" href="{{ url_for('admin.admin_peg_route') }}" id="peg-link">Check USDC and USDT against the
-       dollar</a></p>
-    <div id="peg-result" class="result" aria-live="polite">
-      <p class="result-idle"><span class="empty-mark">(not checked)</span> The dollar above is unchecked on this page
-         load. That is not the same as checked and holding.</p>
-    </div>
+</section>
+
+{#- THE TWO PROBES, OUT OF THEIR PARENT PANELS AND INTO A BAND, 2026-10-02 at the
+    operator's request. They were `.probe` sub-blocks at the foot of Chains and of
+    Pricing, which made each parent taller and left two panels' worth of button-and-
+    idle-result stacked in one column.
+
+    THEY BELONG TOGETHER MORE THAN THEY BELONGED WHERE THEY WERE. Both are the same
+    KIND of thing and the only two of their kind on the page: nothing here runs on
+    page load, each is one button that goes and asks, and each renders an idle state
+    saying so in words -- `(not probed)` and `(not checked)`. Reading them as a pair
+    is "what this page has NOT checked", which is a question an operator has.
+
+    THE ADJACENCY I SAID THIS WOULD COST, AND WHAT WAS DONE ABOUT IT. I reported the
+    cost as moving Reachability two panels away from the Chains table its prose is
+    about. The prose was written to sit under that table and leaned on it: "one
+    read-only call per configured chain" and a count from
+    `data.chains | selectattr('configured')`, with no statement of WHICH chains or
+    where the list is. Now that it is not adjacent it says so itself -- it names the
+    Chains panel, links to it, and lists the configured assets by ticker, so the
+    button says what it is about to contact rather than how many. A panel that moved
+    away from its context and did not pick up the context in words would be rule 16's
+    wrong-comment defect arriving as a layout change. -#}
+<div class="band">
+<section class="panel" aria-labelledby="reachability-heading">
+  <h2 id="reachability-heading">Reachability</h2>
+  {# Announce BEFORE (rule 14): the cost and the scale of the probe are stated
+     before it is run, not after it finishes. It is not run on page load
+     because six chains at a 30s timeout is a three-minute page, and a page
+     like that is one an operator interrupts. #}
+  <p class="panel-note">Not probed on page load. This asks the chains listed in
+     <a href="#chains-heading">Chains</a> above
+     {%- set reachable = data.chains | selectattr('configured') | map(attribute='asset') | list %}
+     {%- if reachable %} &#8212; <strong class="mono">{{ reachable | join(', ') }}</strong>, the
+     {{ reachable | length }} with an adapter in this process{% else %} &#8212; and
+     <strong>no chain in that table has an adapter in this process</strong>, so there is nothing to
+     contact{% endif %}.</p>
+  <p class="panel-note">Asking makes <strong>one read-only call per configured chain, and a second on a
+     Bitcoin-style daemon to name its network</strong> &#8212; <code>getblockchaininfo</code>, then
+     <code>getinfo</code> for an older build that has no <code>chain</code> key, which is Gridcoin&rsquo;s
+     shape; <code>server_info</code> for XRP. Each can take up to its RPC timeout (30s by default), so the
+     answer can take a while. The network is taken from what the daemon reports, never from its port number
+     &#8212; and a daemon that will not name it says so rather than being reported as a network called
+     something.</p>
+  <p><a class="button" href="{{ url_for('admin.admin_chains_route') }}" id="probe-link">Probe
+     {{ reachable | length }} configured chain(s)</a></p>
+  <div id="probe-result" class="result" aria-live="polite">
+    <p class="result-idle"><span class="empty-mark">(not probed)</span> No chain has been contacted by this page
+       load. Nothing below is a claim about whether a daemon is up.</p>
   </div>
 </section>
+
+<section class="panel" aria-labelledby="peg-heading">
+  <h2 id="peg-heading">The dollar these numbers are quoted in</h2>
+  {# Announce BEFORE (rule 14), and say why it is not on the page already. #}
+  <p class="panel-note">The prices in <a href="#pricing-heading">Pricing</a> above are quoted in US dollars,
+     by way of two stablecoins. {{ data.pricing.peg }}</p>
+  <p class="panel-note">Asking makes <strong>two HTTPS reads</strong> &#8212; one per stablecoin &#8212;
+     carrying no key and touching no chain. The findings come from the same
+     <code>wallet_leveling.peg_findings()</code> that <code>chain_balances.py --level</code> prints, so this page
+     and that command cannot disagree about whether the peg holds.</p>
+  <p><a class="button" href="{{ url_for('admin.admin_peg_route') }}" id="peg-link">Check USDC and USDT against the
+     dollar</a></p>
+  <div id="peg-result" class="result" aria-live="polite">
+    <p class="result-idle"><span class="empty-mark">(not checked)</span> The dollar used by the panel above is
+       unchecked on this page load. That is not the same as checked and holding.</p>
+  </div>
+</section>
+</div>
 
 <section class="panel" aria-labelledby="pairs-heading">
   <h2 id="pairs-heading">Trading pairs</h2>
