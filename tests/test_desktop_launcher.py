@@ -252,6 +252,13 @@ def test_the_browser_command_never_carries_no_sandbox(tmp_path):
     argv = launcher.browser_command("/usr/bin/chromium", "http://127.0.0.1:5000/", tmp_path / "profile")
 
     assert "--no-sandbox" not in argv
+    # BOTH MODES, because a new argv shape is exactly where this gets copied in.
+    # --window was added 2026-10-02 and returns a different list; checking only the
+    # default would have left it unguarded, and a second near-identical test for it
+    # is rule 9's dead weight.
+    assert "--no-sandbox" not in launcher.browser_command(
+        "/usr/bin/chromium", "http://127.0.0.1:5000/", tmp_path / "profile", app_mode=False
+    )
     assert any(part.startswith("--user-data-dir=") for part in argv), (
         "a dedicated profile is required: on a SHARED one a second launch returned rc=0 in 0.072s "
         "while the first stayed alive, so the launcher would tear the server down 72ms after "
@@ -381,3 +388,64 @@ def test_run_shim_takes_no_arguments_that_decide_the_bind():
     -- a future `run_shim(host, port)` would be the same bug with a new spelling.
     """
     assert inspect.signature(launcher.run_shim).parameters == {}
+
+
+# --- an app-mode window has no way out of it -----------------------------------
+
+
+def test_window_mode_uses_the_operators_own_profile_so_extensions_exist(tmp_path):
+    """MEASURED ON THE OPERATOR'S HOST 2026-10-02: "the brave browser that is opened
+    has no taskbar and i can't figure out how to open it either."
+
+    App mode has no toolbar, no address bar and no menu, so there is no way OUT of
+    that window -- not to the extensions, not to a new tab, not to the URL. The
+    standing advice was "open the same URL in your ordinary browser", which is an
+    instruction they can only follow by leaving the window and finding the browser
+    themselves. That was the thing they were asking how to do.
+
+    --user-data-dir MUST BE ABSENT here, not merely different. A dedicated profile
+    is empty, so an ordinary window pointed at one has a toolbar and still no
+    extensions -- the confusing half of the fix, where the window now looks like it
+    should work and the wallet buttons stay dead.
+    """
+    argv = launcher.browser_command(
+        "/usr/bin/brave", "http://127.0.0.1:5000/", tmp_path / "profile", app_mode=False
+    )
+
+    assert argv == ["/usr/bin/brave", "--new-window", "http://127.0.0.1:5000/"]
+    assert not any(part.startswith("--user-data-dir") for part in argv), (
+        "a dedicated profile has no extensions, which is the whole reason --window exists"
+    )
+    assert not any(part.startswith("--app") for part in argv)
+
+
+def test_app_mode_is_still_the_default_and_unchanged(tmp_path):
+    """The 72ms teardown measurement is why, and --window does not relax it.
+
+    A shared profile returned rc=0 in 0.072s while the first window stayed alive,
+    so a launcher waiting on it tears the server down 72ms after opening the UI.
+    The default keeps --app and the dedicated profile together.
+    """
+    argv = launcher.browser_command("/usr/bin/brave", "http://127.0.0.1:5000/", tmp_path / "profile")
+
+    assert "--app=http://127.0.0.1:5000/" in argv
+    assert f"--user-data-dir={tmp_path / 'profile'}" in argv
+    assert "--new-window" not in argv
+
+
+def test_the_window_flag_reaches_browser_command_as_app_mode_false(monkeypatch):
+    """The flag and the parameter are inverses, and getting that backwards would
+    silently ship the old behavior behind a new flag."""
+    seen = {}
+
+    def fake_launch(host, port, *, app_mode=True):
+        seen["app_mode"] = app_mode
+        return 0
+
+    monkeypatch.setattr(launcher, "launch", fake_launch)
+    assert launcher.main(["--window"]) == 0
+    assert seen["app_mode"] is False
+
+    seen.clear()
+    assert launcher.main([]) == 0
+    assert seen["app_mode"] is True, "app mode must remain the default"

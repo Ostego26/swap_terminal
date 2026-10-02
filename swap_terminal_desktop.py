@@ -349,8 +349,8 @@ def choose_browser(which=shutil.which) -> tuple[str, str]:
     )
 
 
-def browser_command(binary: str, url: str, profile_dir: Path) -> list[str]:
-    """The argv for an app-mode window with its OWN profile.
+def browser_command(binary: str, url: str, profile_dir: Path, *, app_mode: bool = True) -> list[str]:
+    """The argv for the window this launcher opens. App mode by default.
 
     The dedicated --user-data-dir is not tidiness. Measured on a shared profile: a
     second launch returned rc=0 in 0.072s while the first stayed alive, so a
@@ -376,14 +376,43 @@ def browser_command(binary: str, url: str, profile_dir: Path) -> list[str]:
     static/script.js, where that message was corrected after telling the operator
     to install software they already had.
 
-    THE WORKAROUND IS THE SAME URL IN THE ORDINARY BROWSER, which is why launch()
-    prints it. Same server, same page, with the operator's own extensions
-    present.
+    THE WORKAROUND WAS THE SAME URL IN THE ORDINARY BROWSER, pasted by hand, and
+    on 2026-10-02 that turned out not to be enough: "the brave browser that is
+    opened has no taskbar and i can't figure out how to open it either". An app-mode
+    window has no toolbar, no address bar and no menu, so there is no way OUT of it
+    -- not to the extensions, not to a new tab, not to the URL. Telling an operator
+    to open another window is an instruction they can only follow by leaving this
+    one and finding the browser themselves, which is what they were asking how to
+    do.
+
+    SO `app_mode=False` EXISTS, and `--window` reaches it. It drops --app= and
+    --user-data-dir= together, which has to be both or neither:
+
+      --app alone, shared profile      the 72ms teardown measured above. A launcher
+                                       waiting on this window tears the server down
+                                       the instant a second launch returns.
+      ordinary window, own profile     a toolbar, and still no extensions, because
+                                       the profile is empty. Half a fix, and the
+                                       confusing half: the wallet buttons stay dead
+                                       while the window now LOOKS like it should
+                                       work.
+      ordinary window, own profile     what --window does. Toolbar, extensions, the
+      (the user's)                     operator's own Brave. The cost is the 72ms
+                                       problem, so launch() does not wait on this
+                                       window and says so.
+
+    The default is unchanged: app mode, dedicated profile, teardown tied to the
+    window. --window is for the one thing that mode cannot do.
 
     --no-sandbox is NOT here and must never be added. Rehearsal needed it because
     that container runs as root; the operator's desktop does not, and shipping it
     would weaken the browser's sandbox on a machine holding wallet RPC credentials.
     """
+    if not app_mode:
+        # The user's OWN profile, so their extensions are present -- which means no
+        # --user-data-dir at all rather than a different one. A new window in the
+        # running browser, not a new browser.
+        return [binary, "--new-window", url]
     return [
         binary,
         f"--app={url}",
@@ -785,7 +814,7 @@ def _preflight(host: str, port: int) -> tuple[bool, str, int]:
     return True, browser_binary, lock_fd
 
 
-def launch(host: str, port: int) -> int:
+def launch(host: str, port: int, *, app_mode: bool = True) -> int:
     """The default mode: start, open, wait, reap, report. Returns an exit code.
 
     Every print here is deliberate (rule 14): the operator's only feedback during a
@@ -836,13 +865,27 @@ def launch(host: str, port: int) -> int:
         profile = RUNTIME / "browser-profile"
         profile.mkdir(parents=True, exist_ok=True)
         browser = subprocess.Popen(  # noqa: S603 -- checked: the binary came from shutil.which over a literal candidate list, and the url is built from this launcher's own host/port
-            browser_command(browser_binary, f"http://{host}:{port}/", profile),
+            browser_command(browser_binary, f"http://{host}:{port}/", profile, app_mode=app_mode),
             start_new_session=True,
         )
         browser_pgid = browser.pid
-        print(f"  window          browser pid={browser.pid} pgid={browser_pgid} -- CLOSING IT STOPS "
-              f"THE SERVER", flush=True)
-        trigger = _wait_for_either(browser, shim)
+        if app_mode:
+            print(f"  window          browser pid={browser.pid} pgid={browser_pgid} -- CLOSING IT STOPS "
+                  f"THE SERVER", flush=True)
+            trigger = _wait_for_either(browser, shim)
+        else:
+            # NOT WAITED ON, and saying so is the point. --new-window hands the url
+            # to a browser that is probably already running, so this pid exits at
+            # once and means nothing about whether the window is open -- which is
+            # the 72ms measurement in browser_command() arriving from the other
+            # direction. Closing the window therefore does NOT stop the server, and
+            # an operator who believes it does will leave a server and three
+            # workers running against a wallet.
+            print(f"  window          opened in your OWN browser (pid={browser.pid}, which exits "
+                  f"immediately and is NOT the window)", flush=True)
+            print("  CLOSING IT DOES NOT STOP THE SERVER in --window mode. Press Ctrl-C here when "
+                  "you are done, or run `python3 swap_terminal_desktop.py --status`", flush=True)
+            trigger = _wait_for_either(shim, shim)
 
     print(f"\n  teardown        triggered by {trigger}, after {format_duration(time.monotonic() - started)}",
           flush=True)
@@ -909,20 +952,35 @@ def report_status(host: str, port: int) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """An `argv` parameter because every other root tool here has one.
+
+    show_swap.py, show_fees.py, open_swap.py and swap_readiness.py all take it, and
+    the reason is testability: without it a test of a FLAG has to monkeypatch
+    sys.argv, and under pytest the bare parse_args() reads pytest's own arguments.
+    swap_readiness.py hit exactly that on 2026-10-02, two of its tests exiting 2 on
+    "unrecognized arguments: tests/...". Added here while adding --window, so the
+    flag could be asserted at all.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default=os.environ.get("SWAP_TERMINAL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("SWAP_TERMINAL_PORT", "5000")))
+    parser.add_argument(
+        "--window", action="store_true",
+        help="open the page in your OWN browser window instead of a chromeless app window: a toolbar, an "
+             "address bar, and YOUR extensions, so the deposit page's wallet buttons can work. The cost "
+             "is that closing the window no longer stops the server -- Ctrl-C here does.",
+    )
     parser.add_argument("--shim", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--status", action="store_true",
                         help="report what is running and what holds the port. Starts nothing.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.shim:
         return run_shim()
     if args.status:
         return report_status(args.host, args.port)
-    return launch(args.host, args.port)
+    return launch(args.host, args.port, app_mode=not args.window)
 
 
 if __name__ == "__main__":
