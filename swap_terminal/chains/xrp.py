@@ -187,6 +187,7 @@ from .xrp_signing import (
     FEE_ALLOWANCE_DROPS,
     XRPSendNotArmed,
     derive_and_check,
+    network_id_name,
     refuse_partial_payment,
     require_non_mainnet,
     require_reserve_headroom,
@@ -513,7 +514,16 @@ class XRPAdapter:
         """
         result = self.call(_METHOD_SERVER_INFO)
         info = result.get("info") or {}
-        return str(info.get("network_id", info.get("build_version", "unknown")))
+        # NAMED, NOT JUST ECHOED. This returned the bare id until 2026-10-02 and the
+        # operator's reachability panel read "it reports its network as 1" in the panel
+        # whose whole job is telling mainnet from a test network -- see
+        # chains/xrp_signing.network_id_name() for the measurement. The naming lives
+        # beside MAINNET_NETWORK_IDS so this module does not decide which id is mainnet
+        # (rule 8), and it decides nothing either way: the refusal is unchanged.
+        network_id = info.get("network_id")
+        if network_id is None:
+            return str(info.get("build_version", "unknown"))
+        return network_id_name(network_id)
 
     def find_deposits_to_address(self, address: str, tx_limit: int = 200,
                                  skip_txids=frozenset()) -> list[dict]:

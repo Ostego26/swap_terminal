@@ -84,6 +84,70 @@ from .xrp_units import to_drops
 # check is on the id and the URL is only echoed for the reader.
 MAINNET_NETWORK_IDS = frozenset({0})
 
+
+#: What a network_id MEANS, for a human reading it off a screen. Lives beside
+#: MAINNET_NETWORK_IDS because that set is the authority and a second module deciding
+#: which id is mainnet is rule 8's defect on the one question this panel exists to
+#: answer.
+#:
+#: MEASURED, not assumed: chains/xrp.py's header records "rippled 3.4.1 on
+#: s.altnet.rippletest.net, network_id 1", so 1 is testnet on the endpoint this repo
+#: actually talks to. 0 is mainnet by MAINNET_NETWORK_IDS above.
+#:
+#: NO GUESS FOR ANYTHING ELSE. Devnet, sidechains and private networks all have ids
+#: and this repo has measured none of them, so an unrecognized id is reported AS
+#: unrecognized rather than mapped to a plausible name -- the same reasoning
+#: network_target.UNRECOGNIZED_CLUSTER already applies to Solana genesis hashes.
+_NETWORK_ID_NAMES = {1: "testnet"}
+
+
+def network_id_name(network_id) -> str:
+    """Name an XRPL network_id, or say plainly that it is not one we know.
+
+    WHY THIS EXISTS, measured on the operator's host 2026-10-02. The reachability
+    probe printed, in the panel whose entire job is telling mainnet from a test
+    network:
+
+        XRP   ANSWERED   Network, as the daemon itself reports it: 1
+                         answered; it reports its network as 1
+
+    `1` is testnet and the operator was safe. But that panel's own prose promises "a
+    daemon that will not name it says so rather than being reported as a network
+    called something" -- and a bare integer is not a name. GRC on the same screen
+    read `testnet`. So the one chain where the id/name distinction exists was the one
+    chain that showed the id, and the reader had to know that 0 means mainnet to
+    conclude anything at all.
+
+    Rule 14: state what the number MEANS, next to the number. The operator reads the
+    screen, not xrp_signing.py.
+
+    MAINNET IS NAMED IN CAPITALS AND KEEPS THE ID. An operator scanning for the word
+    that should not be there finds it, and the id stays because it is what the daemon
+    said and what chains/xrp_signing.py refuses on -- a name without the id would make
+    the screen and the refusal argue in different vocabularies.
+
+    THIS NAMES ONLY. It decides nothing: the mainnet refusal is
+    MAINNET_NETWORK_IDS above and is untouched, and no caller branches on this string.
+    """
+    if network_id is None:
+        return "no network_id reported"
+    try:
+        as_int = int(network_id)
+    except (TypeError, ValueError):
+        # NOT a blind except, and the value is REPORTED rather than swallowed: a
+        # daemon answering a non-numeric network_id is something to see, not to
+        # normalize into a name.
+        return f"network_id {network_id!r}, which is not a number"
+    if as_int in MAINNET_NETWORK_IDS:
+        return f"MAINNET (network_id {as_int})"
+    known = _NETWORK_ID_NAMES.get(as_int)
+    if known:
+        return f"{known} (network_id {as_int})"
+    return (
+        f"network_id {as_int}, which this repo has not measured -- NOT established as a "
+        f"test network, and not mainnet by MAINNET_NETWORK_IDS"
+    )
+
 # THE ARMING TOKEN. Sending requires this exact string at the call site.
 #
 # A boolean was the obvious choice and it is the wrong one. `send=True` can

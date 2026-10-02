@@ -63,6 +63,7 @@ from chains.xrp_signing import (
     XRPPartialPaymentRefused,
     XRPReserveRefused,
     XRPSendNotArmed,
+    network_id_name,
     refuse_partial_payment,
     require_non_mainnet,
     require_reserve_headroom,
@@ -885,3 +886,77 @@ def test_the_deferral_memory_is_per_instance_so_a_restart_re_reports():
     assert first._reported_deferrals is not second._reported_deferrals
     new_deferrals(["txA  NO DestinationTag"], first._reported_deferrals)
     assert second._reported_deferrals == set(), "a fresh adapter starts with no memory"
+
+
+# --- the network is NAMED, not echoed as an id --------------------------------
+
+
+def test_a_mainnet_id_is_NAMED_in_capitals_and_keeps_the_id():
+    """The panel whose whole job is telling mainnet from a test network must say the word.
+
+    An operator scanning for the word that should not be there has to be able to find
+    it. The id stays alongside because it is what the daemon said and what
+    MAINNET_NETWORK_IDS refuses on -- a name without the id would make the screen and
+    the refusal argue in different vocabularies.
+    """
+    named = network_id_name(0)
+    assert "MAINNET" in named
+    assert "0" in named
+
+
+def test_the_testnet_id_is_named_from_a_MEASURED_mapping():
+    """1 is testnet because chains/xrp.py's header records measuring it against
+    s.altnet.rippletest.net with rippled 3.4.1 -- not because it is the next number
+    after mainnet."""
+    named = network_id_name(1)
+    assert "testnet" in named
+    assert "1" in named
+    assert "MAINNET" not in named
+
+
+def test_an_UNMEASURED_id_is_not_given_a_plausible_name():
+    """Rule 17, and the reason devnet is deliberately absent from the mapping.
+
+    Devnet, sidechains and private networks all have ids and this repo has measured
+    none of them. Mapping 2 to "devnet" from memory is how a confident "testnet" ends
+    up printed beside a daemon that is nothing of the kind. An unrecognized id says it
+    is unrecognized, and says it is NOT established as a test network rather than
+    letting "not mainnet" read as safe.
+    """
+    named = network_id_name(2)
+    assert "not measured" in named
+    assert "NOT established as a test network" in named
+    assert "devnet" not in named.lower(), "a name this repo has not measured"
+    # AND IT SAYS THE MAINNET CHECK PASSED. A mutation that dropped this clause while
+    # keeping "NOT established as a test network" survived the first pass: without it
+    # an operator reads "unrecognized" and cannot tell whether the mainnet refusal
+    # fired, which is the one thing they need from an id they do not recognize.
+    assert "not mainnet by MAINNET_NETWORK_IDS" in named
+
+
+def test_a_MISSING_id_and_a_NON_NUMERIC_id_read_differently():
+    """Two different failures, and neither is a network name. A daemon answering a
+    non-numeric network_id is something to see rather than normalize away, so the
+    value is reported."""
+    assert "no network_id reported" in network_id_name(None)
+    assert "not a number" in network_id_name("mainnet-ish")
+    assert "mainnet-ish" in network_id_name("mainnet-ish"), "the value is shown, not swallowed"
+
+
+def test_the_ADAPTER_returns_the_NAME_and_not_the_bare_id(monkeypatch):
+    """The call site, because echoing the id is what it did and what a revert restores.
+
+    TEN call-site mutations have been attempted in this session. This drives
+    XRPAdapter.network() rather than network_id_name() alone.
+    """
+    # THE FILE'S OWN Recorder, not a hand-stubbed private method. My first version
+    # patched `adapter._rpc`, which does not exist -- a test that patches a name
+    # nothing reads would have passed while testing nothing, had the attribute been
+    # created rather than raising.
+    recorder = Recorder(server_info=server_info(network_id=1))
+    monkeypatch.setattr(requests, "post", recorder)
+    adapter = XRPAdapter("https://s.altnet.rippletest.net:51234")
+    answer = adapter.network()
+    assert recorder.methods == ["server_info"], "the name comes from the daemon's own answer"
+    assert "testnet" in answer, f"the adapter still echoes the bare id: {answer!r}"
+    assert answer != "1"
