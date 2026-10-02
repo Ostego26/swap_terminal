@@ -451,7 +451,7 @@ def test_a_missing_gridcoin_passphrase_is_a_FAIL_before_any_swap_exists(monkeypa
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"GRC": object()})
+    swap_readiness.check_payout_unlock({"GRC": CanSign()})
     row = unlock_row()
 
     assert row[0] == FAIL
@@ -471,7 +471,7 @@ def test_a_present_passphrase_claims_presence_and_never_correctness(monkeypatch)
     fixture_value = "not-the-real-one-and-never-printed"
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", fixture_value)
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"GRC": object()})
+    swap_readiness.check_payout_unlock({"GRC": CanSign()})
     detail = unlock_row()[2]
 
     assert unlock_row()[0] == PASS
@@ -492,7 +492,7 @@ def test_a_chain_that_needs_no_unlock_gets_no_warning(monkeypatch):
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"BTC": object()})
+    swap_readiness.check_payout_unlock({"BTC": CanSign()})
     row = unlock_row()
 
     assert row[0] == SKIP
@@ -515,7 +515,7 @@ def test_nothing_payable_is_a_FAIL_not_a_SKIP(monkeypatch):
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"SOL": object()})
+    swap_readiness.check_payout_unlock({"SOL": CanSign()})
     rows = list(swap_readiness._results)
 
     assert len(rows) == 1, "it must stop at the payout-chain line rather than also asking about unlocks"
@@ -525,11 +525,32 @@ def test_nothing_payable_is_a_FAIL_not_a_SKIP(monkeypatch):
     assert "nothing retries" in rows[0][2]
 
 
+class CanSign:
+    """An adapter that can broadcast. `CanSign()` USED TO STAND IN FOR THIS and stopped
+    being adequate on 2026-10-02.
+
+    These fixtures passed `CanSign()` because only the dict KEYS mattered:
+    services/payout_service.payable_assets() took asset NAMES and asked nothing of the
+    adapter. It now takes the adapters and reads chains/registry.why_cannot_pay_out(),
+    because it was reporting XRP as payable on the operator's host while XRP holds no
+    signing key -- so the VALUE is now the question, and a bare object answers it wrong.
+
+    It answers wrong in the SAFE direction, which is why this is a fixture change rather
+    than a softened check: chains/base.py reads `getattr(adapter, "can_spend", False)`,
+    fail-closed on purpose, so an adapter that does not say is treated as unable to move
+    money. An `CanSign()` is precisely that adapter, and these tests were asserting a
+    PASS for one.
+    """
+
+    can_spend = True
+    payout_refusal = ""
+
+
 def test_a_payable_chain_is_named_so_a_missing_one_is_visible(monkeypatch):
     """The PASS half, because a version that always failed would pass the test above."""
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "present-for-this-test-only")
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"GRC": object(), "SOL": object()})
+    swap_readiness.check_payout_unlock({"GRC": CanSign(), "SOL": CanSign()})
     row = next(r for r in swap_readiness._results if r[1] == "payout chain")
 
     assert row[0] == PASS
@@ -651,7 +672,7 @@ def test_an_unconfigured_chain_outside_the_pair_cannot_fail_the_verdict(monkeypa
     could fail the run is a leg the pair does not name. Before --pair existed, this
     configuration returned 1 forever.
     """
-    monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {"GRC": object(), "SOL": object()})
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {"GRC": CanSign(), "SOL": CanSign()})
     monkeypatch.setattr(swap_readiness, "check_solana", lambda adapters: swap_readiness.record(
         PASS, "SOL", "stubbed"))
     monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda: swap_readiness.record(
@@ -850,7 +871,7 @@ def test_the_lock_line_and_the_unlock_line_read_the_same_variable(monkeypatch):
     """
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "present-for-this-test-only")
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"GRC": object()})
+    swap_readiness.check_payout_unlock({"GRC": CanSign()})
     unlock = unlock_row()
     locked_with = describe_wallet_lock({"unlocked_until": 0}, can_unlock=True)
 
@@ -859,7 +880,7 @@ def test_the_lock_line_and_the_unlock_line_read_the_same_variable(monkeypatch):
 
     monkeypatch.delenv(WALLET_UNLOCK_ENV_VAR, raising=False)
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"GRC": object()})
+    swap_readiness.check_payout_unlock({"GRC": CanSign()})
 
     assert unlock_row()[0] == FAIL
     assert describe_wallet_lock({"unlocked_until": 0}, can_unlock=False)[0] == FAIL
@@ -868,10 +889,17 @@ def test_the_lock_line_and_the_unlock_line_read_the_same_variable(monkeypatch):
 class FakeGridcoin:
     """A Gridcoin adapter that answers the two calls check_gridcoin() makes.
 
+    CARRIES can_spend/payout_refusal as of 2026-10-02: payable_assets() now asks the
+    adapter whether it can sign, and GRC is the one chain in these tests that genuinely
+    can. See CanSign above for why the question moved from the key to the value.
+
     A stub rather than a mock of the whole adapter: get_balance() and
     call("getwalletinfo") are the entire contract that function depends on, and a
     stub answering only those fails loudly if a third call is added.
     """
+
+    can_spend = True
+    payout_refusal = ""
 
     def __init__(self, balance: float = 3780.09254497, unlocked_until: int = 0):
         self._balance = balance
@@ -925,7 +953,7 @@ def test_the_whole_run_is_READY_on_the_operators_actual_state(monkeypatch, capsy
     code rather than a sentence, because the exit code is what the gate reads.
     """
     monkeypatch.setattr(swap_readiness, "build_adapters",
-                        lambda rpc: {"GRC": FakeGridcoin(), "SOL": object()})
+                        lambda rpc: {"GRC": FakeGridcoin(), "SOL": CanSign()})
     monkeypatch.setitem(swap_readiness.Config.RPC["GRC"], "port", 25715)
     monkeypatch.setattr(swap_readiness, "check_solana",
                         lambda adapters: swap_readiness.record(PASS, "SOL", "stubbed"))

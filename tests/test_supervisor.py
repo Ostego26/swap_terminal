@@ -863,9 +863,9 @@ def test_the_spawn_warning_says_nothing_can_be_paid_when_nothing_can(monkeypatch
     all, that function correctly returns nothing -- existence is not its question
     -- so "no blockers" and "nothing to block" rendered identically.
     """
-    monkeypatch.setattr(supervisor, "build_adapters", lambda rpc: {"SOL": object()}, raising=False)
+    monkeypatch.setattr(supervisor, "build_adapters", lambda rpc: {"SOL": CannotSign()}, raising=False)
     monkeypatch.setattr(
-        "chains.registry.build_adapters", lambda rpc: {"SOL": object()}
+        "chains.registry.build_adapters", lambda rpc: {"SOL": CannotSign()}
     )
     warning = supervisor.spawn_warning()
 
@@ -877,6 +877,35 @@ def test_the_spawn_warning_says_nothing_can_be_paid_when_nothing_can(monkeypatch
     assert "nothing retries" in warning, "the consequence is what makes this actionable"
 
 
+class CanSign:
+    """An adapter that can broadcast. A bare placeholder stood in for this until 2026-10-02.
+
+    These fixtures used a plain object because payable_assets() took asset NAMES and asked
+    nothing of the adapter. It now takes the adapters and reads
+    chains/registry.why_cannot_pay_out(), because the banner was naming XRP as payable on
+    the operator's host while XRP holds no signing key. The VALUE is now the question.
+
+    chains/base.py reads `getattr(adapter, "can_spend", False)` -- fail-closed on purpose
+    -- so a placeholder with no attributes is an adapter that CANNOT pay, and a test
+    asserting GRC gets named was asserting a PASS for one.
+    """
+
+    can_spend = True
+    payout_refusal = ""
+
+
+class CannotSign:
+    """An adapter with no signing key, which is what SOL and XRP actually are.
+
+    Spelled out rather than left as a bare placeholder in the nothing-payable test: that
+    test passed for the right reason before and would now pass for a second reason too,
+    and a test that would pass either way is not pinning which.
+    """
+
+    can_spend = False
+    payout_refusal = "holds no signing key, so a payout raises"
+
+
 def test_the_spawn_warning_names_the_payable_chains_when_there_are_some(monkeypatch):
     """The danger is real when a chain CAN send, and the sentence has to name which.
 
@@ -884,7 +913,7 @@ def test_the_spawn_warning_names_the_payable_chains_when_there_are_some(monkeypa
     and it cannot be checked against anything. Naming the chains makes the mainnet
     caution concrete.
     """
-    monkeypatch.setattr("chains.registry.build_adapters", lambda rpc: {"GRC": object()})
+    monkeypatch.setattr("chains.registry.build_adapters", lambda rpc: {"GRC": CanSign()})
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "present-for-this-test-only")
     warning = supervisor.spawn_warning()
 
@@ -895,7 +924,7 @@ def test_the_spawn_warning_names_the_payable_chains_when_there_are_some(monkeypa
 
 def test_a_payable_chain_with_no_passphrase_still_says_which_will_refuse(monkeypatch):
     """The case this function originally fixed, unchanged by the new first branch."""
-    monkeypatch.setattr("chains.registry.build_adapters", lambda rpc: {"GRC": object()})
+    monkeypatch.setattr("chains.registry.build_adapters", lambda rpc: {"GRC": CanSign()})
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     warning = supervisor.spawn_warning()
 
