@@ -747,7 +747,11 @@ def endpoint_summary() -> list[str]:
     # nothing.
     from chains.registry import build_adapters  # noqa: PLC0415 -- measured above
     from services.payout_service import unlock_readiness_lines  # noqa: PLC0415 -- measured above
-    from workers.common import endpoint_lines  # noqa: PLC0415 -- measured above
+    from workers.common import (  # noqa: PLC0415 -- measured above
+        database_census,
+        db_path_source,
+        endpoint_lines,
+    )
 
     # WHICH CHAINS HAVE AN ADAPTER, from the one function that decides it, so the
     # unlock lines cannot name a chain the chain lines above call unconfigured
@@ -755,7 +759,19 @@ def endpoint_summary() -> list[str]:
     # stores credentials and computes a URL.
     configured = build_adapters(Config.RPC).keys()
     return [
-        f"  database          {Config.DB_PATH}",
+        f"  database          {Config.DB_PATH}  <- {db_path_source(str(Config.DB_PATH))}",
+        # WHAT IS IN THAT FILE, by the same function each worker's own banner uses.
+        #
+        # THE SAME GAP, ONE FILE OVER. workers/common.database_census() was added
+        # 2026-10-01 after three workers polled the wrong database for an hour while
+        # every cycle printed IDLE; the lesson there was that the PATH ALONE does not
+        # catch it, because a path is only wrong relative to what you expected. This
+        # banner printed the path alone, two lines above spawning those same workers
+        # -- so the one screen an operator reads BEFORE anything starts had exactly
+        # the weakness the fix was written for, and it took until 2026-10-02 to
+        # notice because the census was going into the worker LOGS where nobody was
+        # looking yet.
+        f"  it holds          {database_census(str(Config.DB_PATH))}",
         *endpoint_lines(),
         # CAN A PAYOUT ACTUALLY SEND. Three devnet SOL -> testnet GRC rehearsals
         # on 2026-10-01 each ran the whole pipeline correctly and each died on a

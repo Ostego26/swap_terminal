@@ -27,6 +27,7 @@ it asks the operating system.
 import contextlib
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -34,6 +35,8 @@ from pathlib import Path
 
 import pytest
 import supervisor
+from db import SCHEMA
+from workers import common
 from workers.common import endpoint_lines
 
 # A child that ignores SIGTERM, to exercise the SIGKILL escalation. It installs
@@ -901,3 +904,49 @@ def test_a_payable_chain_with_no_passphrase_still_says_which_will_refuse(monkeyp
     )
     assert "GRIDCOIN_WALLET_PASSPHRASE is unset" in warning
     assert "nothing retries" in warning
+
+
+def test_the_supervisor_banner_carries_the_census_not_just_the_path(tmp_path, monkeypatch):
+    """THE SAME GAP, ONE FILE OVER, found 2026-10-02.
+
+    workers/common.database_census() was added the day before, after three workers
+    polled the wrong database for an hour while every cycle printed IDLE. The lesson
+    was that the PATH ALONE does not catch it -- a path is only wrong relative to
+    what you expected.
+
+    This banner printed the path alone, two lines above spawning those same workers.
+    So the one screen an operator reads BEFORE anything starts had exactly the
+    weakness the fix was written for, and it went unnoticed because the census was
+    landing in the worker LOGS, which nobody reads until after something has gone
+    wrong.
+    """
+    path = tmp_path / "banner.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(SCHEMA)
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(supervisor.Config, "DB_PATH", str(path), raising=False)
+    monkeypatch.delenv("SWAP_DB_PATH", raising=False)
+
+    lines = supervisor.endpoint_summary()
+    database = next(line for line in lines if line.strip().startswith("database"))
+    holds = next(line for line in lines if "it holds" in line)
+
+    assert str(path) in database
+    assert "IS NOT SET in this shell" in database, "the path's provenance rides with the path"
+    assert "NO SWAPS AT ALL" in holds
+
+
+def test_the_banner_census_and_the_worker_census_are_the_same_function(tmp_path, monkeypatch):
+    """Rule 8. Two spellings of "what is in this database" would drift, and the
+    whole point is that an operator can compare the supervisor's line against the
+    worker's own banner line and have them agree."""
+    path = tmp_path / "shared.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(SCHEMA)
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(supervisor.Config, "DB_PATH", str(path), raising=False)
+
+    holds = next(line for line in supervisor.endpoint_summary() if "it holds" in line)
+    assert common.database_census(str(path)) in holds
