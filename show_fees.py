@@ -79,6 +79,15 @@ class FeesRefused(RuntimeError):
 
 SELF = "show_fees.py"
 
+#: Below this, a CHARGED reserve is shown as "<0.1" rather than rounded to 0.0.
+#:
+#: One decimal is right for a figure that is usually 1-2bps, and wrong for the one
+#: case where the reserve is tiny: a flat 0.01 GRC against a 3133 GRC gross is
+#: 0.032bps, which prints as 0.0. The row WAS charged it, and a zero says it was
+#: not. Half the smallest displayable value, so anything that would round to 0.0
+#: takes the "<0.1" form instead.
+RESERVE_SHOWS_AT_BPS = 0.05
+
 
 
 def self_command(db_path: str) -> str:
@@ -155,9 +164,17 @@ def total_lines(totals: list, rows: list[FeeRow], db_path: str = "") -> list[str
             f"{total.asset}   {total.swaps} delivered payout(s)",
             labeled("received", f"{total.gross:.8f} {total.asset}  <- the realized gross: what each deposit "
                                 f"was worth at the rate that swap was quoted"),
-            labeled("retained", f"{total.retained:.8f} {total.asset}  <- received minus paid out. This "
-                                f"INCLUDES the network fee reserve, which is held back from the payout and "
-                                f"then spent on the chain's own fee"),
+            # THE SENTENCE HERE CARRIED THE RETRACTED CLAIM, and the operator's
+            # 2026-10-02 run showed it still saying "and then spent on the chain's
+            # own fee". It was not spent on the chain's fee -- that is the whole
+            # finding, measured from their own reconciliation -- and the reserve is
+            # now part of this total for only SOME rows. I updated the per-row
+            # display and added the `reserve charged` line below, and left this
+            # sentence asserting the thing both of those exist to correct.
+            labeled("retained", f"{total.retained:.8f} {total.asset}  <- received minus paid out: the fee, "
+                                f"plus the flat reserve on whichever rows predate 2026-10-02. That reserve "
+                                f"was never spent on the chain's fee -- the wallet pays that separately -- "
+                                f"so on those rows it was margin. See `reserve charged` below"),
             labeled("realized fee", f"{total.weighted_bps:.1f}bps  <- retained over received, weighted by "
                                     f"size across {total.swaps} payout(s). NOT the mean of the per-swap "
                                     f"figures: the mean treats a dust swap as equal evidence to a large one"),
@@ -234,7 +251,16 @@ def swap_lines(rows: list[FeeRow]) -> list[str]:
         # "+0.0 reserve" on a row priced without one would imply the reserve is
         # still part of the fee and merely rounded away, which is the opposite of
         # what changed on 2026-10-02.
-        reserve_term = f"+ {row.reserve_bps:.1f} reserve " if row.reserve_charged else ""
+        # A CHARGED RESERVE MUST NEVER PRINT AS ZERO. On the operator's 2026-10-02
+        # run s_e820c23626002c37 read "+ 0.0 reserve" -- its 0.032bps rounding away
+        # at one decimal -- directly above a row with NO reserve term at all. The
+        # two states are "charged a hundredth of a basis point" and "not charged
+        # anything", and `+ 0.0 reserve` beside `+0.0 drift` makes them look the
+        # same. The PRESENCE of the term is the signal, and a zero undermines it.
+        reserve_term = ""
+        if row.reserve_charged:
+            shown = f"{row.reserve_bps:.1f}" if row.reserve_bps >= RESERVE_SHOWS_AT_BPS else "<0.1"
+            reserve_term = f"+ {shown} reserve "
         realized = (
             f"{row.retained_bps:.1f}bps  = {row.fee_bps:.0f} quoted {reserve_term}"
             f"{row.drift_bps:+.1f} drift  <- {mismatch}"

@@ -319,3 +319,63 @@ def test_a_row_priced_without_the_reserve_shows_no_reserve_term(db_path, capsys)
     )
     assert "withheld from 0 of 1 payout(s)" in out
     assert paid != without, "the fixture must differ from the old pricing, or this tests nothing"
+
+
+def test_a_charged_reserve_too_small_to_round_is_never_shown_as_zero(db_path, capsys):
+    """MEASURED ON THE OPERATOR'S 2026-10-02 RUN. s_e820c23626002c37 read
+
+        realized  150.0bps = 150 quoted + 0.0 reserve +0.0 drift
+
+    directly above a row with NO reserve term at all. Its reserve was 0.01 GRC on a
+    3133 GRC gross -- 0.032bps, rounding away at one decimal. The two states are
+    "charged a hundredth of a basis point" and "not charged anything", and
+    `+ 0.0 reserve` beside `+0.0 drift` makes them look identical. The PRESENCE of
+    the term is the whole signal, and a zero undermines it.
+    """
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    # 0.25 SOL at the operator's rate: a gross large enough that 0.01 GRC is
+    # 0.032bps. The reserve IS charged, which is what makes a zero wrong.
+    big = 3133.59547107 / QUOTED_RATE
+    paid = seed_swap(connection, "s_tiny_reserve", Seed(expected_input=big))
+    seed_payout(connection, "s_tiny_reserve", paid)
+    connection.commit()
+    connection.close()
+
+    out = run(db_path, capsys)
+    row = out.split("every delivered payout")[1]
+
+    assert "+ <0.1 reserve" in row, "a charged reserve below the display floor must say so, not round to 0"
+    assert "+ 0.0 reserve" not in row
+    assert "withheld from 1 of 1 payout(s)" in out, "and the asset line must still count it as charged"
+
+
+def test_the_retained_line_does_not_repeat_the_retracted_justification(db_path, capsys):
+    """It said the reserve was "spent on the chain's own fee". It was not.
+
+    From the operator's 2026-10-02 run, AFTER the pricing change shipped: I had
+    updated the per-row display and added the `reserve charged` line, and left this
+    sentence asserting the very thing both of those exist to correct. The reserve
+    was withheld from the customer; the wallet paid the chain separately; the
+    remainder was margin. Measured from their own reconciliation to a difference of
+    zero.
+    """
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    amount = seed_swap(connection, "s_one")
+    seed_payout(connection, "s_one", amount)
+    connection.commit()
+    connection.close()
+
+    out = run(db_path, capsys)
+    retained = next(line for line in out.splitlines() if line.strip().startswith("retained")
+                    and "received minus paid out" in line)
+
+    assert "spent on the chain's own fee" not in retained, (
+        "the retracted claim must be gone from the one line that totals the money"
+    )
+    assert "never spent on the chain's fee" in retained
+    assert "the wallet pays that separately" in retained
+    assert "predate 2026-10-02" in retained, (
+        "and it must say the reserve is in this total for only SOME rows"
+    )
