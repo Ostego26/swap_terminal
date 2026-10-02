@@ -544,3 +544,114 @@ def test_the_ledger_opens_no_socket_and_writes_nothing(db):
             f"{statement} appears in the code of a module whose header says it writes nothing"
         )
     assert connect_db is not None
+
+
+# --- two pricing regimes in one table ------------------------------------------
+#
+# Until 2026-10-02 create_quote() computed max(gross * (1 - f) - reserve, 0) and
+# every payout was short by a flat reserve. After the operator's "fix the
+# regressive reserve" it computes max(gross * (1 - f), 0). Rows written on either
+# side of that sit side by side here forever, so a report over history has to tell
+# them apart -- and the identity it checks differs per row.
+
+
+def seed_new_regime(db, swap_id: str, seed: Seed = DEFAULT_SEED) -> float:
+    """A swap priced WITHOUT the reserve: payout = gross * (1 - f), no subtraction."""
+    paid = seed.expected_input * QUOTED_RATE * (1 - FEE_BPS / 10000.0)
+    seed_swap(db, swap_id, seed)
+    db.execute("UPDATE swaps SET output_amount_estimate = ? WHERE id = ?", (paid, swap_id))
+    return paid
+
+
+def test_an_old_regime_row_is_recognized_as_having_charged_the_reserve(db):
+    paid = seed_swap(db, "s_old")
+    seed_payout(db, "s_old", paid)
+    row = one_row(db)
+
+    assert row.reserve_charged
+    assert row.reconciles
+    assert row.retained_bps == pytest.approx(151.11, abs=0.01)
+
+
+def test_a_new_regime_row_reconciles_without_a_reserve_term(db):
+    """THE FALSE ALARM THIS PREVENTS, checked before shipping the pricing change.
+
+    A new 56 GRC swap measured against the old identity reports a residual of
+    -1.8bps -- far outside RECONCILE_TOLERANCE_BPS -- so every small payout priced
+    after 2026-10-02 would have printed DOES NOT RECONCILE. That line is supposed
+    to mean something is wrong.
+    """
+    paid = seed_new_regime(db, "s_new")
+    seed_payout(db, "s_new", paid)
+    row = one_row(db)
+
+    assert not row.reserve_charged
+    assert row.reconciles, f"residual {row.residual_bps:+.3f}bps"
+    assert row.retained_bps == pytest.approx(150.0, abs=0.01), (
+        "with the reserve out of the payout the realized fee IS the scheduled fee"
+    )
+
+
+def test_the_regime_is_decided_with_drift_in_both_candidates(db):
+    """MY OWN BUG, caught by the suite on the first run of the detection.
+
+    The identities are `gross_fee + drift + reserve` and `gross_fee + drift`, and
+    the first draft compared against the UNDRIFTED pair. A short deposit moves
+    `retained` by the drift, which on a mismatched swap is far larger than the
+    reserve -- a -0.886 GRC drift looked 0.01 closer to the no-reserve identity, so
+    an old-regime row with a short deposit was classified as new and then reported
+    DOES NOT RECONCILE. The exact false alarm the property exists to prevent,
+    reintroduced by dropping a term.
+    """
+    paid = seed_swap(db, "s_short", Seed(actual_input=EXPECTED_INPUT * (1 - TOLERANCE_PCT)))
+    seed_payout(db, "s_short", paid)
+    row = one_row(db)
+
+    assert row.drift_coin < 0, "the premise: this deposit was short"
+    assert abs(row.drift_coin) > row.reserve, "and the drift is larger than the reserve"
+    assert row.reserve_charged, "a short deposit must not be mistaken for the new pricing"
+    assert row.reconciles
+
+
+def test_the_totals_count_and_sum_what_was_withheld(db):
+    """Both figures, because a count does not say what it cost and a total does not
+    say how concentrated it was (rule 3).
+
+    These are real amounts real customers did not receive. A fee report that
+    silently stopped mentioning them would make the change invisible in the one
+    place it is measurable.
+    """
+    old = seed_swap(db, "s_old")
+    seed_payout(db, "s_old", old)
+    new = seed_new_regime(db, "s_new")
+    seed_payout(db, "s_new", new, PayoutSeed(sent_at="2026-10-02T00:06:00+00:00"))
+
+    total = asset_totals(fee_rows(db))[0]
+    assert total.swaps == 2
+    assert total.reserve_charged_swaps == 1
+    assert total.reserve_charged_total == pytest.approx(RESERVE, abs=1e-12)
+    assert total.unreconciled == 0
+
+
+def test_the_six_live_payouts_all_read_as_old_regime_and_all_reconcile(db):
+    """The operator's actual history, so the detection is pinned on real numbers.
+
+    Every one predates the change, so every one must read reserve_charged -- and a
+    detector that answered False anywhere here would report a false DOES NOT
+    RECONCILE on a payout that is on chain.
+    """
+    live = (56.38218516, 83.91969531, 89.32831989, 89.21804120, 89.95694037, 3133.59547107)
+    for index, gross in enumerate(live):
+        expected = gross / QUOTED_RATE
+        paid = seed_swap(db, f"s_live{index}", Seed(expected_input=expected))
+        seed_payout(db, f"s_live{index}", paid,
+                    PayoutSeed(sent_at=f"2026-10-01T0{index}:00:00+00:00"))
+
+    rows = fee_rows(db)
+    assert len(rows) == len(live)
+    assert all(row.reserve_charged for row in rows)
+    assert all(row.reconciles for row in rows)
+    # The spread the operator asked to be fixed, measured here rather than asserted:
+    # the reserve's bps contribution across a sixty-fold range of swap sizes.
+    spread = max(row.reserve_bps for row in rows) / min(row.reserve_bps for row in rows)
+    assert spread > 50, f"the flat reserve's cost varied {spread:.0f}x with swap size"

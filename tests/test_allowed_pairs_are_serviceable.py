@@ -275,7 +275,13 @@ def test_A_RESERVE_ALONE_WOULD_MOVE_THE_REFUSAL_LATER_NOT_REMOVE_IT(tmp_path):
         "it: a reserve moves the XRP refusal from the quote to the swap, and the swap refusal "
         "arrives after a customer has been quoted a number"
     )
-    with db_session(str(db_path)) as db, pytest.raises(ValueError, match="network fee reserve"):
+    # THE REFUSAL'S REASON CHANGED on 2026-10-02 while its shape did not. The reserve
+    # is no longer subtracted from a payout (quote_service.create_quote has the
+    # measurement), so a missing one is no longer "the chain will not deliver this"
+    # -- it is "nobody has recorded what a payout on this chain costs, so the margin
+    # is unknown". Matched on that, because matching the old sentence would be
+    # asserting a justification this repository has retracted.
+    with db_session(str(db_path)) as db, pytest.raises(ValueError, match="costs this desk"):
         create_quote(db, config, "GRC", "XRP", 10)
 
     # WITH A RESERVE SUPPLIED: the quote succeeds and the SWAP is what refuses.

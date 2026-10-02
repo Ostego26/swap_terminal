@@ -290,3 +290,32 @@ def test_the_header_never_claims_an_unset_variable_as_the_source(db_path, capsys
     monkeypatch.setenv("SWAP_DB_PATH", str(show_fees.Config.DB_PATH))
     from_environment = show_fees.header_lines(str(show_fees.Config.DB_PATH), config)
     assert any("<- SWAP_DB_PATH." in line for line in from_environment)
+
+
+def test_a_row_priced_without_the_reserve_shows_no_reserve_term(db_path, capsys):
+    """MUTATION-FOUND. Always printing the term survived the suite.
+
+    "+0.0 reserve" on a row priced without one implies the reserve is still part of
+    the fee and merely rounded away, which is the opposite of what changed on
+    2026-10-02. On a large swap it rounds to 0.0 and looks harmless; on a 56 GRC
+    swap it would print "+1.8 reserve" for an amount the customer was never
+    charged, and the decomposition would not add up.
+    """
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    paid = seed_swap(connection, "s_new", Seed(expected_input=EXPECTED_INPUT))
+    # Priced WITHOUT the reserve: gross * (1 - f), no subtraction.
+    without = EXPECTED_INPUT * QUOTED_RATE * (1 - 150 / 10000.0)
+    connection.execute("UPDATE swaps SET output_amount_estimate = ? WHERE id = 's_new'", (without,))
+    seed_payout(connection, "s_new", without, PayoutSeed(sent_at="2026-10-02T02:00:00+00:00"))
+    connection.commit()
+    connection.close()
+
+    out = run(db_path, capsys)
+
+    assert "150.0bps  = 150 quoted " in out
+    assert "reserve" not in out.split("every delivered payout")[1].split("WHAT THESE NUMBERS SAY")[0], (
+        "a row priced without the reserve must not carry a reserve term at all"
+    )
+    assert "withheld from 0 of 1 payout(s)" in out
+    assert paid != without, "the fixture must differ from the old pricing, or this tests nothing"

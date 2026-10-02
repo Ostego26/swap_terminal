@@ -22,7 +22,33 @@ from .pricing import derive_pair_rate, fetch_usd_prices, last_price_source
 
 
 def get_network_fee_reserve(config, to_asset: str) -> float:
-    """What is held back from the payout for the destination chain's own fee.
+    """What the desk EXPECTS one payout on this chain to cost it. Not charged to the customer.
+
+    IT USED TO BE SUBTRACTED FROM THE PAYOUT, AND THAT WAS WRONG -- not by a
+    little, and the justification for it was measurably false. See
+    create_quote() below for the proof and the arithmetic; in short:
+
+      * `sendtoaddress(address, amount)` delivers `amount` EXACTLY. The fee comes
+        out of the wallet's own inputs, so nothing is taken from the payout.
+        Measured on the operator's host 2026-10-01 to the last digit:
+        `getreceivedbyaddress mmr6ATb3...` read 143.39622296 GRC against two
+        output_amount_estimate values summing to 143.39622296 -- a difference of
+        zero. Had the reserve funded the fee, the recipient would have been
+        0.02 GRC short.
+      * the real fee was 0.001 GRC, not 0.01. The payout transaction moved that
+        wallet's balance by exactly -0.001, which is the fee and nothing else,
+        because the payout address was its own.
+
+    So the reserve was withheld from the customer, the wallet separately paid a
+    tenth of it, and the remainder stayed as margin the schedule does not mention.
+
+    IT IS STILL REQUIRED, and still refuses a pair that has none, for a reason that
+    has changed. It is no longer "the chain will not deliver a payout quoted without
+    it" -- the chain delivers fine. It is that a pair whose chain cost nobody has
+    written down is a pair whose MARGIN is unknown: 150bps of a 56 GRC swap is
+    0.85 GRC and a GRC payout costs 0.001, which is a fine trade, while the same
+    150bps of a dust swap would not cover one transaction. The figure is booked as
+    a cost and reported by show_fees.py; a missing one means nobody has checked.
 
     THE SUBSCRIPT USED TO BE BARE, AND IT REACHED THE OPERATOR AS A KEY'S REPR.
     2026-09-26, from their browser, after XRP<->GRC was added to ALLOWED_PAIRS:
@@ -44,10 +70,11 @@ def get_network_fee_reserve(config, to_asset: str) -> float:
     key = f"{to_asset}_NETWORK_FEE_RESERVE"
     if key not in config:
         raise ValueError(
-            f"No quote: {to_asset} has no network fee reserve, so a payout amount cannot be computed. "
-            f"Set {key} in the environment this process was started with -- it is the amount held back "
-            f"from every {to_asset} payout for that chain's own transaction fee, and defaulting it to "
-            f"zero would quote a payout the chain will not deliver. Nothing was written."
+            f"No quote: nobody has recorded what one {to_asset} payout costs this desk, so the margin on "
+            f"a {to_asset} swap is unknown. Set {key} in the environment this process was started with -- "
+            f"it is the expected chain fee for one payout, which the desk pays out of its own fee and "
+            f"NOT out of the customer's payout. Defaulting it to zero would book a cost of nothing for a "
+            f"transaction that is not free. Nothing was written."
         )
     return float(config[key])
 
@@ -138,7 +165,39 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     fee_bps = int(config["DEFAULT_FEE_BPS"])
     network_fee_reserve = get_network_fee_reserve(config, to_asset)
     gross_output = input_amount * rate
-    output_amount_estimate = max(gross_output * (1 - fee_bps / 10000.0) - network_fee_reserve, 0.0)
+    # THE RESERVE IS NOT SUBTRACTED, and it was until 2026-10-02. The operator's
+    # instruction was "fix the regressive reserve", and what made it regressive is
+    # that a FLAT amount withheld from a percentage fee is a bigger share of a
+    # small payout than of a large one. Measured across their six delivered
+    # payouts, the reserve's contribution to the realized fee ran
+    #
+    #     56 GRC gross    1.8bps        89 GRC gross    1.1bps
+    #     84 GRC gross    1.2bps      3134 GRC gross    0.0bps
+    #
+    # a sixty-fold spread in what a customer paid, decided by nothing but the size
+    # of their swap, on top of a schedule that says 150bps flat.
+    #
+    # AND IT WAS NOT PAYING FOR ANYTHING. `sendtoaddress(address, amount)` delivers
+    # `amount` exactly and takes its fee from the wallet's own inputs, so the
+    # withheld amount never reached a miner. Measured to the last digit on the
+    # operator's host 2026-10-01: `getreceivedbyaddress mmr6ATb3...` read
+    # 143.39622296 GRC against two output_amount_estimate values summing to
+    # 143.39622296 -- difference zero. Had the reserve funded the fee, the
+    # recipient would have been 0.02 GRC short across those two payouts. The real
+    # fee was 0.001 GRC, a tenth of the reserve, and the wallet paid it separately:
+    # the payout transaction moved that wallet's balance by exactly -0.001, because
+    # the payout address was its own.
+    #
+    # So the customer now pays fee_bps and nothing else, at every size, and the
+    # chain fee is a cost the desk carries out of that fee -- which is what a
+    # quoted percentage means everywhere else. get_network_fee_reserve() still
+    # supplies the figure, it is still stored per swap, and show_fees.py reports it
+    # as a COST rather than as part of what was charged.
+    #
+    # max(..., 0.0) stays: a fee fraction at or above 1 would otherwise quote a
+    # negative payout, and the clamp is what services/swap_service.py's
+    # below-minimum refusal reads.
+    output_amount_estimate = max(gross_output * (1 - fee_bps / 10000.0), 0.0)
     now = utc_now()
     quote = {
         "id": new_id("q"),

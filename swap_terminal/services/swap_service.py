@@ -358,26 +358,47 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             f"ALLOWED_PAIRS and both chains are reachable -- but a swap that cannot be paid out takes "
             f"a deposit it can never settle. Nothing was written."
         )
-    # A SWAP THAT PAYS OUT ZERO TAKES A DEPOSIT AND DELIVERS NOTHING.
+    # A SWAP WHOSE OWN FEE CANNOT PAY FOR ITS OWN PAYOUT.
     #
-    # create_quote() computes output_amount_estimate as
-    # max(gross * (1 - fee) - network_fee_reserve, 0.0), so a small enough input
-    # produces exactly 0.0 -- the reserve alone can exceed the whole payout. Flagged
-    # by review 2026-09-26: open_swap.py then printed
-    # "payout (est.) 0.0 GRC  <- what payout_worker broadcasts" and exited 0, so the
-    # deposit instruction went out for a swap that could only ever pay nothing.
+    # THIS GUARD USED TO BE AN ACCIDENT and 2026-10-02 turned it into a decision.
+    # create_quote() computed max(gross * (1 - fee) - network_fee_reserve, 0.0), so
+    # a small enough input clamped to exactly 0.0 and this refused it -- flagged by
+    # review 2026-09-26, when open_swap.py was printing "payout (est.) 0.0 GRC <-
+    # what payout_worker broadcasts" and exiting 0.
     #
-    # Refused HERE and not in the CLI, because the web form reaches the same
-    # arithmetic. This is not a pricing change: the estimate is already what
-    # create_quote() computed and nothing here alters a rate, a fee or a reserve. It
-    # declines to CREATE a swap whose own quote says the customer receives zero.
-    if float(quote["output_amount_estimate"]) <= 0:
+    # The reserve is no longer subtracted from the payout (see
+    # quote_service.create_quote for the measurement that required that), so the
+    # clamp no longer fires and `<= 0` no longer catches anything: every positive
+    # input now prices to a positive payout, however tiny. The floor the clamp was
+    # providing was real and has to be stated rather than lost.
+    #
+    # STATED AS THE THING IT ALWAYS MEANT: the desk's fee on this swap must cover
+    # what the desk pays the chain to deliver it. Below that line the swap loses
+    # money by construction, whatever the customer receives, which is strictly what
+    # the old clamp was groping at and 66x stricter than it:
+    #
+    #   old, at GRC_NETWORK_FEE_RESERVE=0.01   refused a gross at or under 0.01015
+    #   new, same figure                       refuses a gross under 0.667
+    #
+    # Between those two a swap was CREATED whose 150bps fee was a fraction of a
+    # cent against a transaction costing more than it earned. At a 0.05 GRC gross
+    # the fee is 0.00075 and the chain costs 0.001: a loss, accepted.
+    #
+    # The comparison is against the CONFIGURED figure, not the measured 0.001,
+    # deliberately. It is the operator's number for what a payout costs, it is now
+    # conservative by about ten times, and because it no longer touches any
+    # customer's payout, lowering it only widens what this terminal will accept --
+    # which is a decision with a measurement behind it rather than a risk (rule 16).
+    gross = float(quote["input_amount"]) * float(quote["quoted_rate"])
+    retained = gross * float(quote["fee_bps"]) / 10000.0
+    chain_cost = float(quote["network_fee_reserve"])
+    if float(quote["output_amount_estimate"]) <= 0 or retained < chain_cost:
         raise ValueError(
             f"No swap was created: {quote['input_amount']} {from_asset} prices to a payout of "
-            f"{quote['output_amount_estimate']} {to_asset}, which is nothing. The "
-            f"{quote['network_fee_reserve']} {to_asset} network fee reserve and the {quote['fee_bps']} bps "
-            f"fee together exceed the gross output at this rate. Deposit more {from_asset}. Nothing was "
-            f"written."
+            f"{quote['output_amount_estimate']} {to_asset}, on which the {quote['fee_bps']} bps fee is "
+            f"{retained:.8f} {to_asset} -- less than the {chain_cost} {to_asset} one payout on this chain "
+            f"costs. The swap would lose money however the customer's deposit arrives. Deposit more "
+            f"{from_asset}. Nothing was written."
         )
     # THE PAYOUT ADDRESS, DECODED LOCALLY BEFORE THE DAEMON IS ASKED. Added 2026-09-27.
     #

@@ -927,14 +927,26 @@ TINY_AMOUNT = "0.0000001"
 
 
 def test_a_deposit_that_would_pay_out_nothing_is_refused(monkeypatch, tmp_path, capsys):
-    """create_quote() computes max(gross * (1 - fee) - reserve, 0.0), so a small enough
-    input prices to exactly 0.0 -- the GRC network fee reserve alone exceeds the whole
-    payout. This used to print "payout (est.) 0.0 GRC <- what payout_worker
-    broadcasts" and exit 0, handing out a deposit instruction for a swap that could
-    only ever deliver nothing.
+    """A swap whose own fee cannot pay for its own payout is refused before anything
+    is promised.
 
-    Refused in create_swap() rather than here, because the web form reaches the same
-    arithmetic. MUTATION: remove that guard and this fails.
+    THE GUARD THIS PINS USED TO BE AN ACCIDENT. create_quote() computed
+    max(gross * (1 - fee) - reserve, 0.0), so a small enough input clamped to
+    exactly 0.0 and create_swap()'s `<= 0` caught it -- before that, open_swap.py
+    printed "payout (est.) 0.0 GRC <- what payout_worker broadcasts" and exited 0,
+    handing out a deposit instruction for a swap that could only ever deliver
+    nothing.
+
+    The reserve is no longer subtracted from the payout (2026-10-02; see
+    quote_service.create_quote for the measurement), so the clamp never fires and
+    `<= 0` catches nothing: every positive input now prices to a positive payout,
+    however tiny. The floor is stated explicitly instead, as the thing it always
+    meant -- the desk's fee on the swap must cover what the desk pays the chain --
+    and it is 66x stricter than the clamp was: at GRC_NETWORK_FEE_RESERVE=0.01 the
+    old line was a gross of 0.01015 and the new one is 0.667.
+
+    Refused in create_swap() rather than in the CLI, because the web form reaches
+    the same arithmetic. MUTATION: remove that guard and this fails.
     """
     db_path = tmp_path / "zero.db"
 
@@ -947,7 +959,7 @@ def test_a_deposit_that_would_pay_out_nothing_is_refused(monkeypatch, tmp_path, 
 
     assert code == 2
     message = capsys.readouterr().err
-    assert "which is nothing" in message, message
+    assert "less than the" in message, message
     assert "Deposit more XRP" in message, "say what to change"
 
 

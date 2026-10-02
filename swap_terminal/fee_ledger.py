@@ -231,21 +231,66 @@ class FeeRow(NamedTuple):
     drift_bps: float
 
     @property
+    def reserve_charged(self) -> bool:
+        """Was the network fee reserve WITHHELD FROM THIS CUSTOMER'S payout?
+
+        TWO PRICING REGIMES LIVE IN THIS TABLE, and a report over history has to
+        tell them apart. Until 2026-10-02 create_quote() computed
+
+            max(gross * (1 - f) - reserve, 0)
+
+        so every payout was short by a flat reserve. After the operator's "fix the
+        regressive reserve" it computes max(gross * (1 - f), 0) and the reserve is
+        a cost the desk carries. Rows written on either side of that sit side by
+        side here forever.
+
+        SO THE IDENTITY DIFFERS PER ROW, which is why this is derived rather than
+        assumed. Checked before shipping: a NEW 56 GRC swap under the old identity
+        reports a residual of -1.8bps, far outside RECONCILE_TOLERANCE_BPS, so
+        every small new payout would have printed DOES NOT RECONCILE -- a false
+        alarm on the one line that is supposed to mean something is wrong.
+
+        Decided by which identity the row is CLOSER to, not by a date. A date would
+        need a migration boundary nobody recorded, and the arithmetic says it
+        directly: the two candidates differ by the whole reserve, which is orders of
+        magnitude above float noise.
+        """
+        # DRIFT IS IN BOTH CANDIDATES, and leaving it out got this wrong on the
+        # first run. The identities are
+        #
+        #     charged      retained = gross_fee + drift + reserve
+        #     not charged  retained = gross_fee + drift
+        #
+        # and a short deposit moves `retained` by the drift, which on a mismatched
+        # swap is far larger than the reserve. Comparing against the undrifted
+        # candidates made a -0.886 drift look 0.01 closer to the no-reserve
+        # identity, so an old-regime row with a short deposit was classified as new
+        # and then reported DOES NOT RECONCILE -- the exact false alarm this
+        # property was added to prevent, reintroduced by omitting a term.
+        base = self.gross_fee + self.drift_coin
+        return abs(self.retained - (base + self.reserve)) < abs(self.retained - base)
+
+    @property
+    def gross_fee(self) -> float:
+        """The scheduled fee on this swap's realized gross, in the destination asset."""
+        return self.realized_gross * self.fee_bps / 10000.0
+
+    @property
     def reconciles(self) -> bool:
-        """Does retained_bps equal fee_bps + reserve_bps + drift_bps?
+        """Does retained_bps equal the fee, plus the reserve IF it was charged, plus drift?
 
         False means the max(...,0) clamp fired in create_quote() -- the payout
         was zero and the whole gross was retained. It is a real state and the
         report prints such a row with this said out loud, because averaging it
         into a fee total would report a 10000bps fee as if it were a price.
         """
-        expected = self.fee_bps + self.reserve_bps + self.drift_bps
-        return abs(self.retained_bps - expected) <= RECONCILE_TOLERANCE_BPS
+        return abs(self.residual_bps) <= RECONCILE_TOLERANCE_BPS
 
     @property
     def residual_bps(self) -> float:
         """By how much the identity misses, in bps. Zero when it holds."""
-        return self.retained_bps - (self.fee_bps + self.reserve_bps + self.drift_bps)
+        charged = self.reserve_bps if self.reserve_charged else 0.0
+        return self.retained_bps - (self.fee_bps + charged + self.drift_bps)
 
 
 def fee_rows(db) -> list[FeeRow]:
@@ -318,6 +363,16 @@ class AssetTotal(NamedTuple):
     weighted_bps: float
     scheduled_bps: float
     unreconciled: int
+    #: How many of these payouts had the reserve WITHHELD from the customer, and
+    #: what that came to. Both, because the count alone does not say what it cost
+    #: anybody and the total alone does not say how concentrated it was.
+    #:
+    #: It is history as of 2026-10-02 and is reported rather than dropped: these
+    #: are real amounts real customers did not receive, and a fee report that
+    #: silently stopped mentioning them would make the change invisible in the one
+    #: place it is measurable.
+    reserve_charged_swaps: int
+    reserve_charged_total: float
 
 
 def asset_totals(rows: list[FeeRow]) -> list[AssetTotal]:
@@ -355,6 +410,8 @@ def asset_totals(rows: list[FeeRow]) -> list[AssetTotal]:
                 drift=sum(row.drift_coin for row in group),
                 drift_abs=sum(abs(row.drift_coin) for row in group),
                 drifted=sum(1 for row in group if abs(row.drift_coin) > DRIFT_IS_ZERO_COIN),
+                reserve_charged_swaps=sum(1 for row in group if row.reserve_charged),
+                reserve_charged_total=sum(row.reserve for row in group if row.reserve_charged),
                 # Guarded, and the guard is not cosmetic: a gross of zero is
                 # reachable (a swap credited at zero would be), and 0/0 raises
                 # rather than returning something misleading. 0.0 here means

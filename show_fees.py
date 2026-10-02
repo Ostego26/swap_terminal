@@ -167,6 +167,13 @@ def total_lines(totals: list, rows: list[FeeRow], db_path: str = "") -> list[str
                                   f"realized and scheduled. Positive means customers sent MORE than they "
                                   f"were quoted and were paid the quoted amount anyway; negative means they "
                                   f"sent less and were paid in full"),
+            labeled("reserve charged", f"{total.reserve_charged_total:.8f} {total.asset} withheld from "
+                                       f"{total.reserve_charged_swaps} of {total.swaps} payout(s)  <- the "
+                                       f"flat network-fee reserve, SUBTRACTED from what those customers "
+                                       f"received. Stopped on 2026-10-02: it funded nothing (sendtoaddress "
+                                       f"delivers the full amount and the wallet pays the fee separately) "
+                                       f"and being flat it cost a small swap sixty times what it cost a "
+                                       f"large one. Rows priced after that show 0 here"),
             labeled("drift, gross", f"{total.drift_abs:.8f} {total.asset} across {total.drifted} of "
                                     f"{total.swaps} payout(s)  <- READ THIS BESIDE THE NET, NOT INSTEAD OF "
                                     f"IT. Overpaid and underpaid swaps cancel in the net, so a net near zero "
@@ -223,8 +230,13 @@ def swap_lines(rows: list[FeeRow]) -> list[str]:
         # reader scanning a column of sums should never meet one that does not add,
         # whatever a later line admits. So such a row shows the realized figure
         # alone and the reason underneath it.
+        # THE RESERVE TERM APPEARS ONLY WHERE IT WAS ACTUALLY CHARGED. Printing
+        # "+0.0 reserve" on a row priced without one would imply the reserve is
+        # still part of the fee and merely rounded away, which is the opposite of
+        # what changed on 2026-10-02.
+        reserve_term = f"+ {row.reserve_bps:.1f} reserve " if row.reserve_charged else ""
         realized = (
-            f"{row.retained_bps:.1f}bps  = {row.fee_bps:.0f} quoted + {row.reserve_bps:.1f} reserve "
+            f"{row.retained_bps:.1f}bps  = {row.fee_bps:.0f} quoted {reserve_term}"
             f"{row.drift_bps:+.1f} drift  <- {mismatch}"
             if row.reconciles
             else f"{row.retained_bps:.1f}bps  <- NOT a fee rate; see the note below this row"
@@ -269,6 +281,11 @@ def closing_lines(totals: list, config: dict, db_path: str = "") -> list[str]:
         f"services/deposit_service.py credits the swap on the CONFIRMED total and never recomputes that "
         f"payout. Any deposit within {tolerance * 100:.2f}% of the quote is accepted and paid at the quoted "
         f"figure, so the customer's rounding decides which end of the band they land on.",
+        "    The flat network-fee reserve was the OTHER source of that gap and is gone as of 2026-10-02: "
+        "it was withheld from every payout while funding nothing, and being a flat amount against a "
+        "percentage fee it cost a small swap sixty times what it cost a large one. It is now a cost the "
+        "desk carries out of its own fee, and create_swap() refuses a swap whose fee would not cover it. "
+        "Rows above marked with a reserve term predate that and are history, not current pricing.",
         "    Three separate decisions follow from that and all three are the operator's, because each one "
         "changes what a customer is paid or what a desk charges: whether to recompute the payout from the "
         "amount actually received, what the schedule should be, and where the retained fee should go. "
