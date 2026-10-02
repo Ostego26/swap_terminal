@@ -675,6 +675,61 @@ tbody tr:hover { background: var(--surface-2); }
 
 .probe { margin-top: var(--s5); border-top: 1px solid var(--line); padding-top: var(--s4); }
 
+/* --- two-up bands of panels -------------------------------------------------
+ *
+ * Asked for by the operator 2026-10-02: "put all the page data in two colums at
+ * least to reduce the scroll down". The operator page was one column of twelve
+ * stacked panels.
+ *
+ * WHICH PANELS MAY SHARE A ROW IS MEASURED, NOT JUDGED, and the arithmetic plus
+ * the per-table figures are written out at the first `.band` in
+ * templates/admin.html. The short version: each cell of a two-up band is
+ * (1068 - 16) / 2 = 526px, every th/td here is `white-space: nowrap` unless it
+ * carries `breakable`, and a table whose nowrap cells plus padding exceed 526px
+ * would scroll sideways inside its own panel -- which hides columns, where
+ * vertical scroll only delays them. Four of the page's tables measure 607-875px
+ * and span the full width for that reason.
+ *
+ * WHY A GRID AND NOT `column-count: 2`. Multicol balances column heights, which
+ * is exactly what "no dead space" wants, and it was the shorter rule. But a
+ * multicol FRAGMENTS its content and `break-inside: avoid` is a hint a browser
+ * may ignore when an item is taller than the column -- and the item it would
+ * tear in half here is a seven-column table of transaction ids. A grid never
+ * splits an item.
+ *
+ * WHY NOT `grid-auto-flow: dense`. Dense fills a half-empty row with a LATER
+ * item, which reorders the page: on a trial arrangement it hoisted the
+ * Reachability probe up beside Hot-wallet inventory, above the table it is not
+ * about. Panels arriving in an order nobody wrote is worse on an operator page
+ * than a gap. Each band is instead its own one-row grid over panels that are
+ * ALREADY ADJACENT in the template, so nothing is reordered at all.
+ *
+ * UNEQUAL HEIGHTS LEAVE NO DEAD SPACE, which is the thing dense was going to be
+ * for. `align-items` is left at the grid default of `stretch`, so the shorter
+ * panel's own box grows to its neighbor's height: the slack ends up inside a
+ * bordered panel instead of being a hole of page background between two of them.
+ * `auto-fit` collapses the track no item occupies, so a band of two fills the
+ * full width rather than leaving a third of a row empty.
+ *
+ * PHONE WIDTH IS THIS minmax AND NOT A MEDIA QUERY. Two tracks cannot fit until
+ * 2*420 + 16 = 856px, so a band is one column from 856px down -- well clear of
+ * the 560px the rest of this file stacks at. One mechanism rather than a floor
+ * and a breakpoint that could be changed independently and disagree;
+ * tests/test_customer_page_layout.py asserts the floor stays large enough that
+ * two cells cannot fit a 560px screen.
+ */
+.band {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: var(--s4);
+  margin-bottom: var(--s4);
+}
+
+/* The panels inside a band carry their own bottom margin for the stacked case;
+ * the band owns the spacing when they are side by side, so theirs is dropped or
+ * the gap doubles between the band and whatever follows it. */
+.band > .panel { margin-bottom: 0; }
+
 /* --- label/value tables, boxes, and digits that line up -----------------
  *
  * Added 2026-10-02 to one brief from the operator, which is the whole brief:

@@ -52,9 +52,69 @@
      changed, this page went with it.</p>
 </section>
 
+{#- A TWO-UP BAND, and which panels may be in one is MEASURED rather than judged.
+    Asked for by the operator 2026-10-02: "put all the page data in two colums at
+    least to reduce the scroll down".
+
+    THE BUDGET. This page's content box is 1100px of `main` less 2*16px of gutter =
+    1068px. A band's two cells share that less one var(--s4)=16px gap, so each cell
+    is 526px. At var(--t-sm)=14px a monospace glyph is about 8.4px wide, and every
+    `th`/`td` in this stylesheet is `white-space: nowrap` unless it carries
+    `breakable` -- so a table's minimum width is the sum of its nowrap cells plus
+    2*12px of padding per column, and a table over 526px in a 526px cell scrolls
+    sideways. The brief refuses that trade explicitly and it is the right refusal:
+    horizontal scroll inside a panel hides columns, where vertical scroll only
+    delays them.
+
+    Measured on the rendered page 2026-10-02, widest nowrap row per table:
+
+      Payouts claimed but never reported sent    46 chars, 5 cols ->  506px   FITS
+      Payouts (most recent 25)                   31 chars, 7 cols ->  428px   FITS
+      Deposits seen (most recent 25)             45 chars, 7 cols ->  546px   fits, 4% over
+      Workers / Every swap status present        no table                     FITS
+      ---- and the ones that may NOT be banded, same measurement ----
+      Swaps in flight                            71 chars, 8 cols ->  788px
+      Chains                                     71 chars, 6 cols ->  740px + prose cells
+      Hot-wallet inventory                       87 chars, 6 cols ->  875px
+      Status changes (most recent 25)            58 chars, 5 cols ->  607px
+
+    Hot-wallet inventory is the one place this departs from the brief's own NARROW
+    list, and it departs on the number: three 8-decimal amounts plus two badges is
+    875px of nowrap in a 526px cell, which is 349px of horizontal scroll. It spans.
+
+    WHY A GRID AND NOT CSS MULTI-COLUMN. `column-count: 2` balances column heights,
+    which is what "no dead space" wants, and it would have been the shorter rule --
+    but a multicol fragments its content, and `break-inside: avoid` is a hint a
+    browser is allowed to ignore when a panel is taller than the column. The thing
+    it would tear in half is a seven-column table of transaction ids. A grid never
+    splits an item.
+
+    WHY NO `grid-auto-flow: dense`. Dense backfills a half-empty row with a LATER
+    item, which reorders the page: on a trial arrangement it hoisted the
+    Reachability probe up beside Hot-wallet inventory, above the Swaps in flight
+    table it is not about. On an operator page, panels arriving in an order nobody
+    wrote is worse than a gap. Instead each band is its own one-row grid over panels
+    that are ALREADY ADJACENT in the source, so nothing is reordered at all, and
+    `auto-fit` collapses the unused track in a band of two so the pair fills the
+    full width rather than leaving a third of a row empty.
+
+    UNEQUAL HEIGHTS LEAVE NO DEAD SPACE because `align-items` is left at its grid
+    default of `stretch`: the shorter panel's own box grows to its neighbor's
+    height, so the gap is inside a bordered panel instead of being a hole of page
+    background between two of them.
+
+    PHONE WIDTH IS THE minmax AND NOT A MEDIA QUERY. `minmax(480px, 1fr)` cannot fit
+    two tracks until 2*480+16 = 976px, so the band is one column from 976px down --
+    well clear of the 560px the rest of this stylesheet stacks at, and one mechanism
+    rather than a floor and a breakpoint that could disagree. -#}
+<div class="band">
 {# The alarm goes at the top, and it is the one thing on this page that is an
    alarm. A payout row stuck at 'created' means money possibly on chain with no
-   txid recorded, and nothing retries it on purpose. #}
+   txid recorded, and nothing retries it on purpose.
+
+   IT IS STILL FIRST. Sharing a row with Workers does not move it: it is the first
+   cell of the first band, which is the top-left of the page, and it keeps
+   `panel-alarm`'s left border when it has rows. #}
 <section class="panel {% if data.unresolved_payouts %}panel-alarm{% endif %}" aria-labelledby="stuck-heading">
   <h2 id="stuck-heading">Payouts claimed but never reported sent</h2>
   {% if data.unresolved_payouts %}
@@ -112,6 +172,7 @@
     {{ badges.empty('supervised worker is defined', 'supervisor.worker_commands()') }}
   {% endif %}
 </section>
+</div>
 
 <section class="panel" aria-labelledby="flight-heading">
   <h2 id="flight-heading">Swaps in flight</h2>
@@ -209,19 +270,54 @@
      too. The threshold column says what its number MEANS per chain, because three different things share the name
      <code>min_confirmations</code> and only one of them is a count of blocks.</p>
   {% if data.chains %}
+  {#- THE MODEL SENTENCE, ONCE PER MODEL. Measured on the rendered page 2026-10-02:
+      "a fresh address per swap, and the address IS the attribution" appeared THREE
+      times (BTC, GRC, LTC) and the tag sentence TWICE (SOL, XRP), each copy differing
+      from its siblings in about two words. The whole Chains panel was 439 of this
+      page's 3156 visible words -- 13.9%, second only to Trading pairs -- and a
+      measurable share of that was one clause re-rendered per asset.
+
+      So the shared clause is a legend keyed on the models the chains below actually
+      use (`selectattr`/`map`, never a hardcoded list -- a legend that named `address`
+      and `tag` by hand would be the fourth copy of a vocabulary
+      services/swap_view.ATTRIBUTION_MODELS already owns), and each row keeps only
+      the half that is true of that chain alone. Composed, the two are the sentence
+      that used to be on every row: services/admin_view.attribution_model_note() and
+      attribution_asset_detail() are the two halves and each names the other. -#}
+  <table class="kvt">
+    <caption class="subbox-title">How a deposit is attributed, per model &#8212; the row below adds only what differs per chain</caption>
+    <tbody>
+      {% for model in data.chains | map(attribute='attribution') | unique | sort %}
+      <tr>
+        <th scope="row"><code>{{ model }}</code></th>
+        <td>{{ (data.chains | selectattr('attribution', 'equalto', model) | first).attribution_model_note }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   <div class="scroll-x">
   <table>
-    <thead><tr><th>asset</th><th>configured</th><th>tradeable</th><th>deposit attribution</th><th>threshold</th>
-      <th>endpoint</th></tr></thead>
+    <thead><tr><th scope="col">asset</th><th scope="col">configured</th><th scope="col">tradeable</th>
+      <th scope="col">attribution</th><th scope="col">threshold</th>
+      <th scope="col">endpoint, and what is unset</th></tr></thead>
     <tbody>
       {% for row in data.chains %}
       <tr>
         <td>{{ row.asset }}</td>
         <td>{{ badges.level_badge('ok' if row.configured else 'halted', 'YES' if row.configured else 'NO') }}</td>
         <td>{{ badges.level_badge('ok' if row.tradeable else 'halted', 'YES' if row.tradeable else 'NO') }}</td>
-        <td class="breakable"><code>{{ row.attribution }}</code><br><span class="subtle">{{ row.attribution_note }}</span></td>
+        {#- `(nothing specific to this chain)` and not an empty cell: a chain in the
+            unknown model has no per-asset half to print, and the legend above has
+            already said the application has not decided. A blank would be ambiguous
+            between that and a lost value (rule 14). -#}
+        <td class="breakable"><code>{{ row.attribution }}</code><br><span class="subtle">{{ row.attribution_detail or '(nothing specific to this chain)' }}</span></td>
         <td class="breakable">{{ row.threshold_note }}</td>
-        <td class="mono breakable subtle">{{ row.endpoint }}</td>
+        {#- WHY IT IS UNCONFIGURED LIVES HERE NOW, once per asset. It used to be
+            reachable only through the Trading pairs panel four panels down, where
+            services/admin_view.pair_rows() put it on every affected PAIR -- twenty-two
+            copies of one sentence -- while this column said only "(not configured)"
+            and left the remedy somewhere else entirely. -#}
+        <td class="mono breakable subtle">{{ row.endpoint }}{% if row.why_unconfigured %}<br><span class="subtle">{{ row.why_unconfigured }}</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -351,6 +447,74 @@
   <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code>. Disabled pairs are listed rather than hidden,
      because &ldquo;is XRP on?&rdquo; is a question that otherwise gets answered by reading source. Enabling one is a
      configuration change and is not doable from this page.</p>
+  {#- THE STATE VOCABULARY, ONCE PER STATE, AND THIS IS THE SINGLE LARGEST THING ON
+      THE PAGE. Measured on the rendered operator page 2026-10-02, before this change:
+      this panel was 1767 of 3156 visible words -- 56.0% of the entire page -- across
+      twenty pills totaling 9,562 characters, the longest of them 791 characters. The
+      bulk of that was services/admin_view.pair_rows()'s `detail`, which embedded the
+      whole chains/registry.why_unconfigured() paragraph in every affected pair: the
+      ".env ... has to be exported in the shell that starts the server" sentence
+      rendered TWENTY-TWO times (twice on a pair with both sides unconfigured), and
+      "A quote WILL price; create_swap() refuses" eleven times.
+
+      It was ONE source, so no copy could disagree with another -- and that is exactly
+      why it had to be collapsed rather than left alone. A reader scrolling past
+      twenty-two identical paragraphs cannot tell that it is one source; they can only
+      tell that the page is unreadable.
+
+      The reason is per ASSET, not per pair, so the full sentence naming the variables
+      to export is now in the Chains panel above, once per chain. The consequence is
+      per STATE, so it is here, once per state. Each pill names its pair, its state,
+      and which SIDE is unreachable -- and nothing else.
+
+      NOTHING LEFT THE PAGE. `row.short_detail` is a rendering of `row.missing`, which
+      was always on the row; `row.detail` still exists and is still rendered in full by
+      operator_panel.py's teller pane, which has no chains table to point at. Both
+      fields are documented at pair_rows() with the other named. -#}
+  <table class="kvt">
+    <caption class="subbox-title">What each state means, and what it costs</caption>
+    <tbody>
+      <tr>
+        <th scope="row">{{ badges.level_badge('ok', 'ENABLED') }}</th>
+        <td>In <code>Config.ALLOWED_PAIRS</code>, and both chains have an adapter in this process.</td>
+      </tr>
+      <tr>
+        <th scope="row">{{ badges.level_badge('slow', 'UNREACHABLE') }}</th>
+        <td>In <code>Config.ALLOWED_PAIRS</code>, but a chain has no adapter in this process.
+           <strong>A quote WILL price; <code>create_swap()</code> refuses.</strong> The pill names which side;
+           the <a href="#chains-heading">Chains</a> panel above names the variables to export, once per chain.</td>
+      </tr>
+      {#- THE FOURTH STATE, ADDED 2026-10-02, AND ITS ABSENCE WAS A WRONG VERDICT ON
+          A LIVE PAGE. Both chains reachable and the pair still cannot complete:
+          services/admin_view.pair_rows() used to have no such state, so it reported
+          ENABLED for exactly this case -- while the customer page, reading the three
+          conditions in services/pair_view.py, reported DISABLED about the same pair
+          in the same process. The operator page was the wrong one, in the direction
+          that costs money: a deposit on such a pair is CREDITED and the payout then
+          raises, leaving the swap `failed` with the customer's coins already taken.
+
+          IT IS NOT BADGED `DISABLED`, WHICH WAS THE FIRST ATTEMPT AND IS A SECOND
+          WRONG WORD. DISABLED means an operator turned the pair off and nothing
+          happens; this pair is ON and will take money it cannot return. `failed`'s
+          cross glyph says broken where `halted`'s filled square says stopped on
+          purpose, and that is the distinction (templates/_badges.html keeps the
+          glyph and the word carrying the meaning, so this reads correctly in a
+          grayscale paste too). -#}
+      <tr>
+        <th scope="row">{{ badges.level_badge('failed', 'CANNOT COMPLETE') }}</th>
+        <td>In <code>Config.ALLOWED_PAIRS</code> and both chains reachable, and the pair still cannot complete
+           &#8212; the destination holds no signing key, or the source has no deposit account.
+           <strong>A quote WILL price; <code>create_swap()</code> refuses</strong> &#8212; and a deposit that
+           somehow arrived would be credited against a payout that raises. The pill names which END refuses;
+           that asset's row in <a href="#chains-heading">Chains</a> carries its posture.</td>
+      </tr>
+      <tr>
+        <th scope="row">{{ badges.level_badge('halted', 'DISABLED') }}</th>
+        <td>NOT in <code>Config.ALLOWED_PAIRS</code> &#8212; a quote for this pair is refused before anything
+           else happens.</td>
+      </tr>
+    </tbody>
+  </table>
   {% if data.pairs %}
   <ul class="pair-grid">
     {% for row in data.pairs %}
@@ -361,10 +525,19 @@
        services/admin_view.pair_rows() for the 2026-09-26 measurement. #}
     <li class="pair {% if row.state != 'enabled' %}pair-off{% endif %}">
       <span class="pair-label mono">{{ row.label }}</span>
+      {#- FOUR BRANCHES AND NO {% else %} FALLTHROUGH FOR A KNOWN STATE. The
+          `cannot_complete` state fell into the DISABLED branch for as long as it took
+          to render the page once, which badged an ALLOWED pair that cannot complete
+          with the word for a pair the operator turned off. A state this template does
+          not know now says so in words rather than borrowing the nearest badge --
+          the same refusal services/admin_view.worker_stopped_consequence() and
+          attribution_model_note() both make, and for the same reason. -#}
       {% if row.state == 'enabled' %}{{ badges.level_badge('ok', 'ENABLED') }}
       {% elif row.state == 'unreachable' %}{{ badges.level_badge('slow', 'UNREACHABLE') }}
-      {% else %}{{ badges.level_badge('halted', 'DISABLED') }}{% endif %}
-      <span class="subtle">{{ row.detail }}</span>
+      {% elif row.state == 'cannot_complete' %}{{ badges.level_badge('failed', 'CANNOT COMPLETE') }}
+      {% elif row.state == 'disabled' %}{{ badges.level_badge('halted', 'DISABLED') }}
+      {% else %}{{ badges.level_badge('unknown', row.state|upper) }}{% endif %}
+      <span class="subtle">{{ row.short_detail }}</span>
     </li>
     {% endfor %}
   </ul>
@@ -373,6 +546,14 @@
   {% endif %}
 </section>
 
+{#- The second band. These two are the page's two ledgers -- "most recent 25" of
+    what came in and what went out -- so pairing them is a grouping and not only
+    packing, and they were already next to each other. Deposits seen measures 546px
+    against the 526px cell, 4% over, which is a few tens of pixels inside .scroll-x
+    rather than the 262px of hidden columns that banding Swaps in flight would
+    cost. tests/test_customer_page_layout.py measures both and fails if either
+    grows past the budget. -#}
+<div class="band">
 <section class="panel" aria-labelledby="deposits-heading">
   <h2 id="deposits-heading">Deposits seen (most recent 25)</h2>
   <p class="panel-note">New rows are the evidence a chain is being watched at all. If the newest row here is old,
@@ -429,6 +610,7 @@
     {{ badges.empty('payout has ever been written', 'payouts') }}
   {% endif %}
 </section>
+</div>
 
 <section class="panel" aria-labelledby="audit-heading">
   <h2 id="audit-heading">Status changes (most recent 25)</h2>

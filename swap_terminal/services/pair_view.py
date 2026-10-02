@@ -25,17 +25,99 @@ that is where the decision happened to be written" -- is the defect.
 So it sits beside services/swap_view.py and services/admin_view.py, which already
 assemble rows for templates from the same shape of input.
 
-WHAT IT IS NOT. services/admin_view.pair_rows() answers a DIFFERENT question and
-deliberately stays separate: it builds the OPERATOR's full N x N matrix of every
-asset the tree knows, so a chain that was wired and never enabled is visible. This
-builds the CUSTOMER's offer list -- only the allowed pairs. Same two authorities,
-different question, and each names the other (rule 8) so a reader who finds one
-knows the other exists.
+WHAT IT IS NOT. services/admin_view.pair_rows() answers a DIFFERENT question: it
+builds the OPERATOR's full N x N matrix of every asset the tree knows, so a chain
+that was wired and never enabled is visible. This builds the CUSTOMER's offer list
+-- only the allowed pairs.
+
+THE TWO QUESTIONS DIFFER; THE VERDICT DOES NOT, AND SPLITTING THEM COST A WRONG
+ANSWER ON A LIVE PAGE. Until 2026-10-02 admin_view.pair_rows() computed its own
+verdict from `unconfigured_chains()` alone, and the two surfaces then disagreed
+about the same pair in the same process at the same moment:
+
+    /admin   XRP -> GRC   ENABLED      "both chains have an adapter here"
+    /        XRP -> GRC   DISABLED     "XRP cannot take deposits: XRP_DEPOSIT_ACCOUNT
+                                        is unset or not a valid account"
+
+    /admin   GRC -> XRP   ENABLED      "both chains have an adapter here"
+    /        GRC -> XRP   DISABLED     "XRP cannot pay out: it holds no signing key"
+
+The customer page was right, and the operator page was wrong in the direction that
+costs money: it told the operator a pair was fine when a deposit on it would be
+credited and the payout would then raise, leaving the swap `failed` with the
+customer's coins already taken. Worse, /admin contradicted ITSELF -- its Chains
+table printed "payouts=PREVIEW-ONLY unless armed at the call site" for XRP three
+panels above a pairs entry reading ENABLED for a pair ending in XRP.
+
+THE SAME HOLE HAD ALREADY BEEN FOUND TWICE MORE: payout_service.payable_assets()
+had it, which made supervisor.py's spawn banner print "a payout worker CAN
+broadcast on GRC, XRP" (fixed 02c5d56, 2026-10-02), and the swap page itself had
+it until 2026-09-26. Four implementations of one rule, three of them wrong, each
+found separately. That is rule 8's shape exactly, and the repair rule 8 asks for
+is a survivor that owns the concept -- so pair_serviceability() below is the only
+place the three conditions are evaluated, and admin_view.pair_rows() calls it
+instead of reasoning about adapters at all.
 """
 
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 
 from .swap_service import why_cannot_take_deposits
+
+
+def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dict:
+    """Can THIS ordered pair actually complete in THIS process? The only copy.
+
+    THREE CONDITIONS, AND A PAIR NEEDS ALL THREE. Each has its own authority and
+    none of them is re-derived here:
+
+      missing       chains/registry.unconfigured_chains() -- neither side has an
+                    adapter in this process. "We cannot reach that chain."
+      cannot_pay    chains/registry.why_cannot_pay_out() -- we CAN reach the
+                    destination and still cannot pay you. Only the DESTINATION is
+                    asked; a source chain never sends.
+      cannot_take   services/swap_service.why_cannot_take_deposits() -- the source
+                    cannot produce a deposit target. Only the SOURCE is asked; a
+                    destination chain never receives a deposit.
+
+    EVALUATED IN THAT ORDER AND SHORT-CIRCUITED, which is deliberate rather than an
+    optimization. A chain with no adapter cannot be asked whether it can pay out --
+    why_cannot_pay_out() returns "" for an absent adapter precisely because that is
+    a different problem, and reporting both would print two reasons for one pair and
+    leave the operator to work out which to act on. So the first condition that
+    refuses is the one reported.
+
+    `serviceable` is the single boolean every caller branches on. `reason` is prose
+    for a person, and is never blank: an enabled pair gets a sentence saying all
+    three tests passed, because a blank beside a verdict is rule 14's empty gap.
+
+    WHY THIS IS A FUNCTION AND NOT A FLAG ON A ROW. Two callers want different ROW
+    SHAPES -- the customer's offer list is only the allowed pairs, the operator's
+    matrix is every ordered pair of every asset the tree knows -- and only one of
+    them wants to distinguish "not in ALLOWED_PAIRS" from "allowed but not
+    completable". The row shapes are the callers' business; the verdict is not, and
+    it is the verdict that was wrong on a page for want of being shared.
+
+    config.get("RPC") rather than config["RPC"]: a seeded config in a test may not
+    carry the RPC mapping, and why_unconfigured() degrades to naming the chain's
+    primary setting when it is absent rather than raising on a page.
+    """
+    missing = unconfigured_chains(adapters, from_asset, to_asset)
+    cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
+    cannot_take = "" if missing or cannot_pay else why_cannot_take_deposits(config, adapters, from_asset)
+    return {
+        "missing": missing,
+        "cannot_pay": cannot_pay,
+        "cannot_take": cannot_take,
+        "serviceable": not missing and not cannot_pay and not cannot_take,
+        "reason": (
+            " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
+            if missing
+            else cannot_pay
+            or cannot_take
+            or "in ALLOWED_PAIRS, both chains have an adapter here, the source can take "
+            "a deposit and the destination can pay out"
+        ),
+    }
 
 
 def allowed_pair_rows(config, adapters) -> list[dict]:
@@ -68,43 +150,27 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
     """
     rows = []
     for from_asset, to_asset in sorted(config["ALLOWED_PAIRS"]):
-        missing = unconfigured_chains(adapters, from_asset, to_asset)
-        # TWO TESTS, NOT ONE. `missing` is "we cannot reach that chain"; this is "we
-        # can reach the destination and still cannot pay you". GRC -> XRP passed the
-        # first and failed the second, and was badged ENABLED for an afternoon -- see
-        # chains/registry.why_cannot_pay_out() for what that would have cost a
-        # customer. Only the DESTINATION is asked: a source chain never sends.
-        cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
-        # THREE TESTS NOW, AND THE THIRD IS THE OTHER END OF THE SWAP. Measured 2026-10-01:
-        # with both shared accounts unset this function offered SOL->GRC, XRP->BTC, XRP->GRC
-        # and XRP->LTC, every one of which refuses at swap creation for want of a deposit
-        # account. Three of them predated the SOL work. The customer picks the pair, is
-        # quoted, accepts, and gets a refusal where the deposit address should be -- the same
-        # offered-and-not-completable defect as `cannot_pay` above, at the START of the flow.
-        # Only the SOURCE is asked: a destination chain never receives a deposit.
-        cannot_take = ("" if missing or cannot_pay else
-                       why_cannot_take_deposits(config, adapters, from_asset))
+        # THE THREE CONDITIONS ARE NOT EVALUATED HERE ANY MORE, and that is the fix
+        # the module header records: a second evaluation of them, in
+        # services/admin_view.pair_rows(), had only the FIRST of the three and told
+        # the operator a pair was ENABLED that the customer page was refusing in the
+        # same process. The row shape below is unchanged to the key, so this page,
+        # /api/health and open_swap.py see exactly what they saw before.
+        verdict = pair_serviceability(config, adapters, from_asset, to_asset)
         rows.append(
             {
                 "from_asset": from_asset,
                 "to_asset": to_asset,
                 "label": f"{from_asset} -> {to_asset}",
-                "enabled": not missing and not cannot_pay and not cannot_take,
-                "missing": missing,
-                "cannot_pay": cannot_pay,
-                "cannot_take": cannot_take,
+                "enabled": verdict["serviceable"],
+                "missing": verdict["missing"],
+                "cannot_pay": verdict["cannot_pay"],
+                "cannot_take": verdict["cannot_take"],
                 # `(none)` is never right here: a row is either enabled, in which
-                # case the reason says both chains are reachable, or it names every
-                # missing chain. A blank reason beside DISABLED would be rule 14's
-                # empty gap.
-                "reason": (
-                    " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
-                    if missing
-                    else cannot_pay
-                    or cannot_take
-                    or "in ALLOWED_PAIRS, both chains have an adapter here, the source can take "
-                    "a deposit and the destination can pay out"
-                ),
+                # case the reason says all three tests passed, or it names what
+                # refused. A blank reason beside DISABLED would be rule 14's empty
+                # gap, which is why pair_serviceability() never returns one.
+                "reason": verdict["reason"],
             }
         )
     return rows

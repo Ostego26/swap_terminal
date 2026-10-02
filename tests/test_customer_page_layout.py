@@ -47,7 +47,10 @@ from db import SCHEMA, dict_factory
 # docstring says it exists so the next gate pair_view grows is added in one
 # place. A second copy here would agree on the day it was written and drift the
 # first time that gate changes, which is the failure mode that rule is about.
-from test_web_surfaces import fully_reachable
+from services.admin_view import chain_rows, pair_rows
+from services.pair_view import allowed_pair_rows
+from services.swap_view import ATTRIBUTION_MODELS
+from test_web_surfaces import StubAdapter, cold_price_cache, fully_reachable, with_deposit_accounts
 from valid_addresses import GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
 
 import app as app_module  # isort: skip
@@ -628,3 +631,371 @@ def test_the_label_value_tables_stack_rather_than_scroll_at_phone_width():
     )
     assert "tabular-nums" in css, "the numeric alignment rule is gone from the stylesheet"
     assert "font-variant-numeric: tabular-nums;" in css
+
+
+# --- the operator page: two columns, and one verdict ------------------------
+#
+# Added 2026-10-02 for the second brief on this page, "put all the page data in
+# two colums at least to reduce the scroll down", and for the correctness defect
+# that surfaced while doing it: the two surfaces disagreed about the same pair.
+#
+# MEASURED BEFORE ANY OF IT, by rendering /admin through the real app with one
+# row seeded per table, because "the page is too long" is not a measurement:
+#
+#     visible words        3156
+#     of which Trading pairs 1767   56.0%   <- twenty pills, 9,562 characters
+#     of which Chains         439   13.9%
+#     the .env/export sentence rendered 22 times
+#     "A quote WILL price; create_swap() refuses" 11 times
+#
+# So the scroll was mostly ONE SENTENCE, re-rendered. The column layout is worth
+# two panel heights out of twelve; the prose collapse was worth a third of the
+# page. Both are here, and the tests say which is which.
+
+
+def _rendered_pairs(body):
+    """Each pill in the Trading pairs panel, as (label, badge word, detail)."""
+    pills = []
+    for pill in re.findall(r'<li class="pair[^"]*">(.*?)</li>', body, flags=re.DOTALL):
+        label = re.search(r'<span class="pair-label[^"]*">(.*?)</span>', pill, flags=re.DOTALL)
+        word = re.search(r'<span class="badge-word">(.*?)</span>', pill, flags=re.DOTALL)
+        detail = re.search(r'<span class="subtle">(.*?)</span>', pill, flags=re.DOTALL)
+        pills.append((
+            html.unescape(re.sub(r"\s+", " ", label.group(1)).strip()) if label else "",
+            word.group(1).strip() if word else "",
+            html.unescape(re.sub(r"\s+", " ", detail.group(1)).strip()) if detail else "",
+        ))
+    return pills
+
+
+def _mixed_adapters(client, monkeypatch, can_spend_assets, cannot_spend_assets):
+    """Adapters where some chains can sign and some cannot, plus the shared accounts.
+
+    Built from tests/test_web_surfaces.py's StubAdapter rather than a local stub,
+    for the reason that file's own comment gives: it is the one fixture in this
+    suite that DECLARES what the pair authority asks of it, and a stub that
+    declares nothing is treated as unable to pay out on purpose.
+    """
+    adapters = {asset: StubAdapter(can_spend=True) for asset in can_spend_assets}
+    adapters.update({asset: StubAdapter(can_spend=False) for asset in cannot_spend_assets})
+    monkeypatch.setitem(client.application.config, "ADAPTERS", adapters)
+    with_deposit_accounts(client, monkeypatch)
+    return adapters
+
+
+def test_the_two_surfaces_report_every_allowed_pair_the_same_way(client, monkeypatch):
+    """THE TEST THAT WOULD HAVE CAUGHT IT, and it is worth more than either page's own.
+
+    Measured from the operator's rendered pages 2026-10-02, in ONE process at one
+    moment:
+
+        /admin   XRP -> GRC   ENABLED    "both chains have an adapter here"
+        /        XRP -> GRC   DISABLED   "XRP cannot take deposits: XRP_DEPOSIT_ACCOUNT
+                                          is unset or not a valid account"
+        /admin   GRC -> XRP   ENABLED    "both chains have an adapter here"
+        /        GRC -> XRP   DISABLED   "XRP cannot pay out: it holds no signing key"
+
+    The customer page was right. The operator page was wrong in the direction that
+    costs money: it said a pair was fine when a deposit on it would be CREDITED and
+    the payout would then raise, leaving the swap `failed` with the customer's coins
+    already taken. services/admin_view.pair_rows() computed its verdict from
+    unconfigured_chains() alone -- one of the three conditions
+    services/pair_view.py has.
+
+    Each page on its own looked internally consistent, which is why neither page's
+    own assertions found this. Only asking both in one process does, so this asserts
+    agreement over EVERY allowed pair rather than over the two that were reported.
+    """
+    _mixed_adapters(client, monkeypatch, can_spend_assets=("GRC", "BTC", "LTC"),
+                    cannot_spend_assets=("XRP", "SOL"))
+    config = client.application.config
+    adapters = config["ADAPTERS"]
+
+    operator = {row["label"]: row for row in pair_rows(config, adapters)}
+    customer = {row["label"]: row for row in allowed_pair_rows(config, adapters)}
+    assert customer, "no allowed pair rendered at all; the comparison would be vacuous"
+
+    disagreements = {}
+    for label, customer_row in customer.items():
+        operator_row = operator[label]
+        if (operator_row["state"] == "enabled") != customer_row["enabled"]:
+            disagreements[label] = (operator_row["state"], customer_row["enabled"], customer_row["reason"])
+    assert disagreements == {}, (
+        f"{len(disagreements)} of {len(customer)} allowed pairs are reported differently by the "
+        f"two surfaces in one process: {disagreements}"
+    )
+
+
+def test_the_operator_page_does_not_say_enabled_for_a_destination_that_cannot_sign(client, monkeypatch):
+    """A deposit on such a pair is credited and the payout then raises."""
+    _mixed_adapters(client, monkeypatch, can_spend_assets=("GRC",), cannot_spend_assets=("XRP",))
+    body = client.get("/admin").get_data(as_text=True)
+    into_xrp = [pill for pill in _rendered_pairs(body) if pill[0].endswith("-> XRP")]
+    assert into_xrp, "no pair into XRP rendered; the assertion below would be vacuous"
+    for label, word, detail in into_xrp:
+        assert word != "ENABLED", f"{label} reads ENABLED into a chain that holds no signing key"
+        if word == "CANNOT COMPLETE":
+            assert "cannot pay out" in detail, f"{label} does not say which end refuses: {detail!r}"
+
+
+def test_the_operator_page_does_not_say_enabled_for_a_source_with_no_deposit_account(client, monkeypatch):
+    """The other end of the swap, and the other half of the same defect.
+
+    A source chain with no shared deposit account refuses at swap creation, so the
+    customer picks the pair, is quoted, accepts, and gets a refusal where the
+    deposit address should be.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS",
+                        {asset: StubAdapter(can_spend=True) for asset in ("GRC", "XRP")})
+    # The shared accounts deliberately NOT set: that is the operator's host.
+    monkeypatch.setitem(client.application.config, "XRP_DEPOSIT_ACCOUNT", "")
+    body = client.get("/admin").get_data(as_text=True)
+    out_of_xrp = [pill for pill in _rendered_pairs(body) if pill[0].startswith("XRP ->")]
+    assert out_of_xrp, "no pair out of XRP rendered"
+    for label, word, detail in out_of_xrp:
+        assert word != "ENABLED", f"{label} reads ENABLED out of a chain that cannot take a deposit"
+        if word == "CANNOT COMPLETE":
+            assert "cannot take deposits" in detail, f"{label} does not say which end refuses: {detail!r}"
+
+
+def test_the_page_does_not_contradict_its_own_chains_table(client, monkeypatch):
+    """One page said PREVIEW-ONLY in one table and ENABLED in another, about one asset.
+
+    chain_rows() prints each chain's endpoint line, and for an adapter that holds no
+    signing key that line says so. The pairs panel, three panels down, read ENABLED
+    for pairs ending in that same asset. A reader then has to work out which of the
+    two the program believes -- and the page gave them no way to.
+    """
+    _mixed_adapters(client, monkeypatch, can_spend_assets=("GRC",), cannot_spend_assets=("XRP",))
+    body = client.get("/admin").get_data(as_text=True)
+
+    unpayable = {
+        row["asset"] for row in chain_rows(client.application.config, client.application.config["ADAPTERS"])
+        if row["configured"] and not getattr(client.application.config["ADAPTERS"][row["asset"]], "can_spend", False)
+    }
+    assert unpayable, "no configured-but-unpayable chain in this fixture"
+    for pill_label, word, _ in _rendered_pairs(body):
+        destination = pill_label.split("->")[-1].strip()
+        if destination in unpayable:
+            assert word != "ENABLED", (
+                f"the pairs panel says ENABLED for {pill_label!r} while the Chains table reports "
+                f"{destination} as unable to pay out"
+            )
+
+
+def test_cannot_complete_is_not_badged_with_the_word_for_a_pair_an_operator_turned_off(client, monkeypatch):
+    """DISABLED and CANNOT COMPLETE are different facts and must not share a word.
+
+    DISABLED means an operator took the pair out of ALLOWED_PAIRS and nothing
+    happens. CANNOT COMPLETE means the pair is ON and will take money it cannot
+    return. The first render of the new state fell through the template's
+    `{% else %}` into DISABLED, which is a second wrong word for it.
+    """
+    _mixed_adapters(client, monkeypatch, can_spend_assets=("GRC",), cannot_spend_assets=("XRP",))
+    body = client.get("/admin").get_data(as_text=True)
+    words = {word for _, word, _ in _rendered_pairs(body)}
+    assert "CANNOT COMPLETE" in words, f"the fourth state never rendered; words were {sorted(words)}"
+    assert "CANNOT COMPLETE" in body
+    # The legend has to define every word the pills use, or the word is a puzzle.
+    for word in words:
+        assert body.count(f'badge-word">{word}<') >= 2, (
+            f"{word!r} appears on a pill but is not defined in the state legend above it"
+        )
+
+
+def test_the_env_remedy_sentence_is_printed_once_per_asset_not_once_per_pair(client, monkeypatch):
+    """The single largest reduction in page length, asserted as a count.
+
+    Measured before: 22 occurrences, because services/admin_view.pair_rows() put
+    the whole chains/registry.why_unconfigured() paragraph on every affected PAIR.
+    The reason is per ASSET, so the ceiling is the number of chains the page knows.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+    body = html.unescape(client.get("/admin").get_data(as_text=True))
+    remedy = "Nothing in the serving path reads a .env"
+    occurrences = body.count(remedy)
+
+    assert occurrences >= 1, "the remedy sentence left the page entirely"
+    assert occurrences <= len(ATTRIBUTION_MODELS), (
+        f"the remedy sentence renders {occurrences} times against {len(ATTRIBUTION_MODELS)} chains; "
+        f"once per asset is the granularity the fact has, and anything more is once per PAIR again"
+    )
+    # And it has to be reachable from the pair, or the collapse moved it out of sight.
+    assert "names the variables to export" in body, (
+        "the pairs panel must point at where the remedy went"
+    )
+
+
+def test_the_attribution_clause_is_printed_once_per_model_not_once_per_chain(client):
+    """Three address chains shared one opener; two tag chains shared one sentence."""
+    body = html.unescape(client.get("/admin").get_data(as_text=True))
+    assert body.count("a fresh address per swap, and the address IS the attribution") == 1, (
+        "the address-model clause is not exactly once on the page"
+    )
+    assert body.count("get_new_address() refuses by design") == 1
+    assert "How a deposit is attributed, per model" in body, "the legend has no heading"
+    # The per-chain half still has to be there, per chain: it is the part that varies.
+    for derivation in ("bitcoind stores in wallet.dat", "litecoind stores in wallet.dat"):
+        assert derivation in body, f"{derivation!r} left the page with the collapse"
+    assert "DestinationTag" in body and "Memo instruction" in body
+
+
+def test_the_chains_table_says_what_is_unset_rather_than_only_that_it_is(client, monkeypatch):
+    """The remedy's new home, and it was previously nowhere in this table.
+
+    `endpoint` read "(not configured -- no adapter was constructed)" and stopped,
+    so the table that lists chains could tell an operator a chain was off and not
+    what to export. That was only in the pairs panel, four panels down, twenty-two
+    times.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+    body = html.unescape(client.get("/admin").get_data(as_text=True))
+    assert "endpoint, and what is unset" in body, "the column does not say it carries the remedy"
+    assert "not configured -- no adapter was constructed" in body, "the old reading must still be there"
+    assert "GRC_RPC_PORT" in body, "the variable to export is not on the page"
+
+
+# --- the bands --------------------------------------------------------------
+
+
+def test_the_operator_page_pairs_its_short_panels_into_two_up_bands(client):
+    """Two columns at minimum, which is what was asked for."""
+    body = client.get("/admin").get_data(as_text=True)
+    bands = re.findall(r'<div class="band">(.*?)\n</div>', body, flags=re.DOTALL)
+    assert len(bands) == 2, f"{len(bands)} bands rendered; the template declares two"
+    paired = [
+        [html.unescape(re.sub(r"\s+", " ", head).strip())
+         for head in re.findall(r"<h2[^>]*>(.*?)</h2>", band, flags=re.DOTALL)]
+        for band in bands
+    ]
+    assert paired == [
+        ["Payouts claimed but never reported sent", "Workers"],
+        ["Deposits seen (most recent 25)", "Payouts (most recent 25)"],
+    ], f"the bands pair different panels than the template says: {paired}"
+
+
+def test_the_alarm_panel_is_still_the_first_thing_after_the_page_header(client):
+    """Sharing a row with Workers must not demote it.
+
+    A payout row stuck at 'created' means money possibly on chain with no txid
+    recorded. It is the first cell of the first band, which is the top-left of the
+    page.
+    """
+    body = client.get("/admin").get_data(as_text=True)
+    assert body.index("stuck-heading") < body.index("workers-heading") < body.index("flight-heading")
+
+    # THE FIRST CELL OF THE FIRST BAND, not merely "before Workers". A mutation
+    # that prepended another panel into the band satisfied the ordering assertions
+    # above while pushing the alarm out of the top-left cell, which is the position
+    # this test exists to hold: a payout row stuck at 'created' means money possibly
+    # on chain with no txid recorded.
+    first_band = re.search(r'<div class="band">(.*?)\n</div>', body, flags=re.DOTALL).group(1)
+    sections = re.findall(r'<section class="panel[^"]*"[^>]*aria-labelledby="([^"]+)"', first_band)
+    assert sections[0] == "stuck-heading", (
+        f"the alarm is not the first cell of the first band; the band holds {sections}"
+    )
+    assert sections == ["stuck-heading", "workers-heading"], f"the first band holds {sections}"
+
+
+def test_no_wide_table_was_put_in_a_half_width_band(client):
+    """MEASURED, because the brief's own classification disagreed with the numbers.
+
+    A band cell is (1068 - 16) / 2 = 526px: `main` is max-width 1100 less two 16px
+    gutters, less one var(--s4) gap, halved. Every th/td in styles.css is
+    `white-space: nowrap` unless it carries `breakable`, so a table's minimum width
+    is the sum of its nowrap cells plus 2*12px of padding per column. At
+    var(--t-sm) = 14px a monospace glyph is about 8.4px.
+
+    Hot-wallet inventory is the panel the brief listed as NARROW and the
+    measurement refuses: three 8-decimal amounts plus two badges is 87 characters
+    over 6 columns, about 875px, which in a 526px cell is 349px of hidden columns.
+    It spans.
+
+    THIS IS ARITHMETIC OVER DECLARED VALUES AND NOT A RENDERED MEASUREMENT (rule
+    17). There is no browser here. What it pins is that a banded table cannot grow
+    past the budget without this failing, which is the thing that would silently
+    reintroduce horizontal scroll.
+    """
+    body = client.get("/admin").get_data(as_text=True)
+    budget_px = 526
+    for band in re.findall(r'<div class="band">(.*?)\n</div>', body, flags=re.DOTALL):
+        for table in re.findall(r"<table(?! class=\"kvt\").*?</table>", band, flags=re.DOTALL):
+            columns = len(re.findall(r"<th", re.search(r"<thead>(.*?)</thead>", table, re.DOTALL).group(1))) \
+                if "<thead>" in table else 0
+            widest = 0
+            for row in re.finditer(r"<tr[^>]*>(.*?)</tr>", table, flags=re.DOTALL):
+                nowrap = [
+                    len(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", cell)).strip())
+                    for cell, attrs in zip(
+                        re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row.group(1), flags=re.DOTALL),
+                        re.findall(r"<t[dh]([^>]*)>", row.group(1)),
+                        strict=False,
+                    )
+                    if "breakable" not in attrs
+                ]
+                widest = max(widest, sum(nowrap))
+            estimated = widest * 8.4 + columns * 24
+            # 110%: Deposits seen measures 546px against 526, which is a few tens of
+            # pixels inside .scroll-x rather than the hundreds that hide columns.
+            assert estimated <= budget_px * 1.1, (
+                f"a banded table needs about {estimated:.0f}px of nowrap content in a {budget_px}px "
+                f"cell ({widest} chars over {columns} columns); it belongs at full width"
+            )
+
+
+def test_a_band_cannot_be_two_columns_on_a_phone():
+    """ONE MECHANISM, NOT A FLOOR PLUS A BREAKPOINT THAT COULD DISAGREE.
+
+    `.band` is `repeat(auto-fit, minmax(Npx, 1fr))` and nothing else decides its
+    column count, so the phone behavior IS N: two tracks cannot fit until
+    2N + gap. This asserts N is large enough that a 560px screen gets one column,
+    which is what makes the separate media query the rest of this file uses
+    unnecessary here rather than merely absent.
+
+    NOT BEHAVIORAL, for the reason the other stylesheet tests give: no browser.
+    """
+    css = STYLESHEET.read_text()
+    band = re.search(r"\.band\s*\{(.*?)\}", css, flags=re.DOTALL)
+    assert band, "the .band rule is gone"
+    floor = re.search(r"minmax\((\d+)px,\s*1fr\)", band.group(1))
+    assert floor, f"the band does not size its columns with a minmax floor: {band.group(1)!r}"
+    pixels = int(floor.group(1))
+    assert 2 * pixels + 16 > 560, (
+        f"two {pixels}px tracks plus a 16px gap is {2 * pixels + 16}px, which fits a 560px phone"
+    )
+    assert "grid-auto-flow" not in band.group(1), (
+        "dense reorders the page: it hoisted a probe panel above the table it is about"
+    )
+
+
+def test_every_empty_state_on_the_operator_page_survived_the_reflow(client):
+    """The sentences that say what zero MEANS are the point of those regions.
+
+    An empty system renders `(none)` per region, and the three probe panels render
+    `(not probed)`, `(not fetched)` and `(not checked)` with a sentence each saying
+    that unchecked is not the same as checked and holding. Moving panels into bands
+    must not drop any of them.
+
+    cold_price_cache() FIRST, AND THE REASON IS A FAILURE THIS TEST ALREADY HAD.
+    services/pricing._cache is process-wide, so a test module that ran earlier and
+    seeded it leaves the page rendering a priced table where this expects
+    `(not fetched)`. This passed alone and failed in the full suite for exactly
+    that, which is the shape CLAUDE.md's "diff the full suite line-by-line rather
+    than comparing failure counts" is for -- a pass in isolation said nothing.
+
+    IMPORTED, NOT REIMPLEMENTED (rule 8): tests/test_web_surfaces.py already owns
+    that reset and its docstring already names the hazard ("the cache is
+    process-wide, and another test in this file leaves it warm"). A second copy of
+    the field list here would drift the first time the cache grows a key.
+    """
+    cold_price_cache()
+    body = re.sub(r"\s+", " ", html.unescape(client.get("/admin").get_data(as_text=True)))
+    for marker in ("(none)", "(not probed)", "(not fetched)", "(not checked)"):
+        assert marker in body, f"{marker} left the page"
+    for sentence in (
+        "No chain has been contacted by this page load",
+        "nothing has been priced since this process started",
+        "not the same as checked and holding",
+        "This is the state you want",
+    ):
+        assert sentence in body, f"an empty region lost the sentence saying what zero means: {sentence!r}"

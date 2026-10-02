@@ -64,11 +64,16 @@ from time import time
 
 from chains.base import RPCAdapter
 from chains.daemon_network import chain_network, is_named
-from chains.registry import unconfigured_chains, why_unconfigured
+from chains.registry import why_unconfigured
 from microfortnights import format_duration
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
+# THE PAIR VERDICT COMES FROM pair_view AND IS NOT COMPUTED IN THIS FILE.
+# pair_rows()'s docstring records what the second copy cost: /admin said ENABLED
+# for a pair / said DISABLED about, in one process at one moment, because this
+# module knew one of the three conditions pair_view has had since 2026-10-01.
 from .helpers import parse_iso, utc_now_iso
+from .pair_view import pair_serviceability
 from .swap_service import TAG_ATTRIBUTION
 from .swap_view import (
     ADDRESS_DERIVATIONS,
@@ -406,10 +411,46 @@ def pair_rows(config, adapters: dict) -> list[dict]:
     chain_rows() below already reported GRC as unconfigured, so the admin surface
     contradicted itself two panels apart.
 
-      ENABLED      in ALLOWED_PAIRS, and both chains have an adapter here
-      UNREACHABLE  in ALLOWED_PAIRS, but a chain has no adapter in THIS process.
-                   A quote will price and create_swap() will refuse.
-      DISABLED     not in ALLOWED_PAIRS. Refused before anything else happens.
+      ENABLED        in ALLOWED_PAIRS, both chains reachable, the source can take
+                     a deposit and the destination can pay out.
+      UNREACHABLE    in ALLOWED_PAIRS, but a chain has no adapter in THIS process.
+                     A quote will price and create_swap() will refuse.
+      CANNOT COMPLETE
+                     in ALLOWED_PAIRS, both chains reachable, and the pair still
+                     cannot complete -- the destination holds no signing key, or
+                     the source has no deposit account. ADDED 2026-10-02; see the
+                     next paragraph for the page this state was missing from.
+      DISABLED       not in ALLOWED_PAIRS. Refused before anything else happens.
+
+    THREE STATES WERE NOT ENOUGH EITHER, AND THE FOURTH WAS MISSING FROM A LIVE
+    PAGE. Measured 2026-10-02 from the operator's own rendered surfaces, in one
+    process at one moment:
+
+        /admin   XRP -> GRC   ENABLED    "both chains have an adapter here"
+        /        XRP -> GRC   DISABLED   "XRP cannot take deposits:
+                                          XRP_DEPOSIT_ACCOUNT is unset"
+        /admin   GRC -> XRP   ENABLED    "both chains have an adapter here"
+        /        GRC -> XRP   DISABLED   "XRP cannot pay out: it holds no signing key"
+
+    The customer page was right. This one was wrong in the direction that costs
+    money: it told the operator a pair was fine when a deposit on it would be
+    CREDITED and the payout would then raise, leaving the swap `failed` with the
+    customer's coins already taken. And it contradicted its own page -- chain_rows()
+    prints "payouts=PREVIEW-ONLY unless armed at the call site" for XRP three panels
+    above a pairs entry that read ENABLED for a pair ending in XRP.
+
+    THE CAUSE WAS THAT THIS FUNCTION COMPUTED THE VERDICT ITSELF, from
+    unconfigured_chains() alone -- one of the three conditions services/pair_view.py
+    has had since 2026-10-01. It no longer computes anything: it calls
+    pair_view.pair_serviceability(), which is the single evaluation of all three, and
+    this function's remaining job is the one thing that genuinely differs, which is
+    the N x N shape and the DISABLED state the customer's list has no use for.
+
+    Four implementations of that rule existed and three were wrong. The swap page's
+    was fixed 2026-09-26, payout_service.payable_assets() 2026-10-02 (02c5d56, which
+    had made supervisor.py's spawn banner print "a payout worker CAN broadcast on
+    GRC, XRP"), and this one is the fourth. Each was found separately, by somebody
+    looking. That is the argument for the survivor owning the concept.
 
     ALLOWED_PAIRS remains the authority for what this terminal is WILLING to swap,
     and this still does not re-derive it; the adapters dict is the authority for
@@ -426,6 +467,31 @@ def pair_rows(config, adapters: dict) -> list[dict]:
 
     The disabled rows are shown rather than hidden, because "XRP is off" is the
     answer to a question an operator will otherwise ask by reading source.
+
+    TWO DETAIL STRINGS, AND THE DIFFERENCE IS THE POINT (rule 8's second clause:
+    "if they genuinely differ, the difference belongs in a comment at BOTH sites,
+    naming the other one"). The two readers of these rows are not in the same
+    situation:
+
+      `detail`        the LONG, self-contained reason, including the full
+                      why_unconfigured() sentence naming the variables to export.
+                      Read by operator_panel.py's teller pane (line ~764,
+                      `esc(r.state) + " -- " + esc(r.detail)`), which is a
+                      standalone desktop pane with NO chains table on it. It has
+                      nowhere to point, so the sentence has to travel with the row.
+      `short_detail`  names only WHICH SIDE is unreachable. Read by
+                      templates/admin.html, where the Chains panel is three
+                      panels up on the same page and already says what to set --
+                      once per asset rather than once per pair.
+
+    WHY THAT SPLIT EXISTS AT ALL, measured on the rendered page 2026-10-02: this
+    function's `detail` put the whole why_unconfigured() paragraph on every
+    affected pair, and `/admin` printed the .env/export sentence TWENTY-TWO times
+    (twice on a pair with both sides unconfigured). The Trading pairs panel was
+    1767 of the page's 3156 visible words -- 56.0% of the entire operator page --
+    and nearly all of it was one sentence, re-rendered. One source, so the copies
+    could not disagree; and unreadable anyway, because a reader scrolling past
+    twenty-two of them cannot tell that it IS one source.
     """
     allowed = set(config["ALLOWED_PAIRS"])
     # `| {"SOL"}` STOOD HERE UNTIL 2026-09-30 and is gone because it is now redundant, proven
@@ -440,19 +506,53 @@ def pair_rows(config, adapters: dict) -> list[dict]:
             if from_asset == to_asset:
                 continue
             enabled = (from_asset, to_asset) in allowed
-            missing = unconfigured_chains(adapters, from_asset, to_asset) if enabled else []
+            # ONE CALL, AND IT IS THE ONLY PLACE THE VERDICT COMES FROM. Skipped for
+            # a pair that is not in ALLOWED_PAIRS, because the reason it is refused
+            # is the pair list: naming a missing adapter instead would send the
+            # operator to configure a chain that would change nothing.
+            verdict = (
+                pair_serviceability(config, adapters, from_asset, to_asset)
+                if enabled
+                else {"missing": [], "cannot_pay": "", "cannot_take": "", "serviceable": False, "reason": ""}
+            )
+            missing = verdict["missing"]
             if not enabled:
                 state, detail = "disabled", (
                     "NOT in Config.ALLOWED_PAIRS -- a quote for this pair is refused before anything else happens"
                 )
+                short_detail = "not in ALLOWED_PAIRS"
             elif missing:
                 state, detail = "unreachable", (
                     "in Config.ALLOWED_PAIRS, but not reachable from this process: "
-                    + " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
+                    + verdict["reason"]
                     + " A quote WILL price; create_swap() refuses."
                 )
+                # NAMES THE SIDE AND STOPS. Which variable to export is in the
+                # Chains panel on the same page, once per asset; what the state
+                # costs ("a quote WILL price; create_swap() refuses") is in that
+                # panel's own note, once per page. `missing` is already on the
+                # row, so this is a rendering of it and not a second derivation.
+                short_detail = f"{_and_list(missing)} unreachable here"
+            elif not verdict["serviceable"]:
+                # THE STATE THAT WAS MISSING. Both chains reachable and the pair
+                # still cannot complete, which is the case that read ENABLED on this
+                # page while the customer page refused it. The reason is the
+                # authority's own sentence -- why_cannot_pay_out() or
+                # why_cannot_take_deposits() -- carried verbatim, so the two surfaces
+                # cannot word one refusal two ways.
+                state, detail = "cannot_complete", (
+                    "in Config.ALLOWED_PAIRS and both chains have an adapter here, but this pair cannot "
+                    "complete: " + verdict["reason"] + " A quote WILL price; create_swap() refuses."
+                )
+                # Which END refuses, named for the pill. The sentence itself is in
+                # this panel's state legend, once per state, and the asset's own
+                # row in the Chains table carries its payout and deposit posture.
+                short_detail = (
+                    f"{to_asset} cannot pay out" if verdict["cannot_pay"] else f"{from_asset} cannot take deposits"
+                )
             else:
-                state, detail = "enabled", "in Config.ALLOWED_PAIRS, and both chains have an adapter here"
+                state, detail = "enabled", verdict["reason"]
+                short_detail = "reachable, can take a deposit, can pay out"
             rows.append(
                 {
                     "from_asset": from_asset,
@@ -466,10 +566,37 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                     "reachable": enabled and not missing,
                     "state": state,
                     "missing": missing,
+                    # CARRIED THROUGH FROM THE AUTHORITY, 2026-10-02, so a reader of
+                    # these rows can see WHICH of the three conditions refused
+                    # without re-asking the registry. templates/admin.html uses them
+                    # to cross-check its own Chains table, and
+                    # tests/test_customer_page_layout.py asserts the two surfaces
+                    # report every pair the same way.
+                    "cannot_pay": verdict["cannot_pay"],
+                    "cannot_take": verdict["cannot_take"],
+                    "serviceable": enabled and verdict["serviceable"],
                     "detail": detail,
+                    "short_detail": short_detail,
                 }
             )
     return rows
+
+
+def _and_list(names) -> str:
+    """"BTC", or "BTC and LTC", or "BTC, GRC and LTC".
+
+    chains/registry.why_unconfigured() joins a list of variable names exactly
+    this way. That is two copies of one rule and they are NOT merged, for the
+    reason rule 8 allows: this one is in a template-facing view module and that
+    one is inside the sentence it builds, and importing a private join helper
+    across that boundary to save four lines would couple the admin page's
+    wording to the registry's. The difference is named here and the other site is
+    named with it, which is what rule 8 asks for when two copies genuinely stay.
+    """
+    names = list(names)
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + f" and {names[-1]}"
 
 
 def chain_rows(config, adapters: dict) -> list[dict]:
@@ -499,13 +626,35 @@ def chain_rows(config, adapters: dict) -> list[dict]:
     for asset in sorted(ATTRIBUTION_MODELS):
         adapter = adapters.get(asset)
         threshold = config.get(f"{asset}_MIN_CONFIRMATIONS")
+        model = ATTRIBUTION_MODELS.get(asset, "unknown")
         rows.append(
             {
                 "asset": asset,
                 "configured": adapter is not None,
                 "endpoint": _endpoint_text(asset, adapter),
-                "attribution": ATTRIBUTION_MODELS.get(asset, "unknown"),
-                "attribution_note": _attribution_note(asset),
+                # WHY IT IS UNCONFIGURED, AND THIS ROW IS NOW THE ONLY PLACE ON
+                # THE PAGE THAT SAYS IT. Added 2026-10-02. It was previously
+                # reachable ONLY through pair_rows()'s `detail`, which meant the
+                # sentence naming the variables to export rendered once per
+                # affected PAIR -- twenty-two times on the operator's page -- and
+                # zero times in the table of chains, whose `endpoint` column said
+                # "(not configured -- no adapter was constructed)" and left the
+                # reader to find the remedy in the pairs panel four panels down.
+                # The reason is per ASSET, so it belongs on the asset's row.
+                # "" for a configured chain, so the template renders nothing
+                # rather than an empty-looking sentence.
+                "why_unconfigured": "" if adapter is not None else why_unconfigured(asset, config.get("RPC")),
+                "attribution": model,
+                # SPLIT IN TWO, 2026-10-02, because the first half was the same
+                # words on every chain in the model and the second half is the
+                # only part that varies. The page renders the model halves once
+                # each in a legend and the asset halves once per row; composed,
+                # they are the sentence that used to be on every row. Three
+                # address chains shared the "a fresh address per swap, and the
+                # address IS the attribution" opener and two tag chains shared
+                # the whole tag sentence bar two words.
+                "attribution_model_note": attribution_model_note(model),
+                "attribution_detail": attribution_asset_detail(asset),
                 "threshold": threshold,
                 # services/swap_view.threshold_note() -- the SAME sentence the
                 # customer's confirmation panel prints. This module carried its
@@ -537,14 +686,57 @@ def _endpoint_text(asset: str, adapter) -> str:
     return f"{asset}  rpc={host}:{port} wallet={wallet}"
 
 
-def _attribution_note(asset: str) -> str:
-    """One sentence on how a deposit is matched to a swap on this chain.
+def attribution_model_note(model: str) -> str:
+    """How an attribution MODEL works. One sentence per model, never per asset.
 
-    BRANCHES ON THE MODEL, NAMES THE DERIVATION PER ASSET, and the second half is
-    the repair. Both tables live in services/swap_view.py and neither is restated
-    here -- the customer's page and this page answer "how is a deposit
-    attributed" from one place (rule 8), the same arrangement threshold_note()
-    already has.
+    SPLIT OUT OF _attribution_note() 2026-10-02, AND THE NUMBER IS WHY. That
+    function returned one sentence per ASSET, and the leading clause of it was
+    identical across every asset in a model -- so the Chains table printed
+
+        "a fresh address per swap, and the address IS the attribution."
+
+    three times (BTC, GRC, LTC) and
+
+        "one shared <chain> account, one integer per swap carried as its
+         <field>; get_new_address() refuses by design"
+
+    twice (SOL, XRP), differing in two words. Measured on the rendered page the
+    same day: the address opener appeared 3 times and the Chains panel was 439 of
+    the page's 3156 visible words, 13.9%, second only to Trading pairs.
+
+    The model note goes in a legend above the table, once per model that any
+    chain uses; attribution_asset_detail() below carries the only part that
+    varies. Composed, the two halves are the sentence that used to be on every
+    row -- which is what lets the collapse be proven to lose nothing rather than
+    asserted to.
+
+    An unknown model gets a sentence that says the application has not decided,
+    rather than borrowing the nearest model's -- the same refusal
+    worker_stopped_consequence() makes for an unknown worker, and for the same
+    reason: a page that guesses is worse than a page that says it does not know.
+    """
+    if model == "address":
+        return "a fresh address per swap, and the address IS the attribution."
+    if model == "tag":
+        # PHRASED SO IT READS CORRECTLY FOR BOTH CHAINS IN THE MODEL, which the
+        # first attempt at the per-asset version did not: "one integer Memo
+        # instruction per swap" is garbled, because on Solana the integer is
+        # CARRIED BY the memo rather than being the memo. The integer is what
+        # both chains have in common and the field is where each one puts it, so
+        # the sentence says that -- and the field's name per chain is in the
+        # asset detail, where the thing that varies belongs.
+        return ("one shared account per chain, one integer per swap carried in that chain's own field; "
+                "get_new_address() refuses by design.")
+    return "not decided in this application -- get_new_address() refuses and the custody choice is the operator's."
+
+
+def attribution_asset_detail(asset: str) -> str:
+    """The part of the attribution answer that is true of THIS asset and no other.
+
+    NAMES THE DERIVATION PER ASSET, and that is the repair this function is. Both
+    tables live in services/swap_view.py and neither is restated here -- the
+    customer's page and this page answer "how is a deposit attributed" from one
+    place (rule 8), the same arrangement threshold_note() already has.
 
     THE DEFAULT BRANCH HAS NOW RENDERED FOR TWO CHAINS IT WAS FALSE ABOUT, which is why the
     table it reads is DERIVED rather than merely corrected. Measured 2026-09-27 by calling this
@@ -583,16 +775,23 @@ def _attribution_note(asset: str) -> str:
     borrowing the nearest chain's, which is the same refusal
     worker_stopped_consequence() makes further down this file, and for the same reason:
     a page that guesses is worse than a page that says it does not know.
+
+    RETURNS "" FOR THE UNKNOWN MODEL, deliberately. There is nothing asset-specific
+    to say about a chain the application has not decided about, and
+    attribution_model_note() already says the application has not decided. A
+    placeholder here would be a second sentence saying the same nothing -- and the
+    template renders `(nothing specific to this chain)` for the empty case, so the
+    cell is never a blank gap (rule 14).
     """
     model = ATTRIBUTION_MODELS.get(asset, "unknown")
     if model == "address":
         derivation = ADDRESS_DERIVATIONS.get(asset)
         if derivation is None:
             return (
-                f"a fresh address per swap, and the address IS the attribution. HOW {asset} derives that address "
-                f"is not recorded here -- add it to ADDRESS_DERIVATIONS in services/swap_view.py"
+                f"HOW {asset} derives that address is not recorded here -- add it to ADDRESS_DERIVATIONS "
+                f"in services/swap_view.py"
             )
-        return f"a fresh address per swap, and the address IS the attribution. Derived by {derivation}"
+        return f"Derived by {derivation}"
     if model == "tag":
         # NAMED PER ASSET, from the one table that knows. XRP's discriminator is a
         # DestinationTag on the XRP Ledger; SOL's is a Memo instruction on Solana. This line
@@ -602,13 +801,8 @@ def _attribution_note(asset: str) -> str:
         # "derived by the daemon's getnewaddress" for every address chain and is now split per
         # asset for exactly this reason. Rule 8: the copies agree on the day they are written.
         _, discriminator, network = TAG_ATTRIBUTION[asset]
-        # PHRASED SO IT READS CORRECTLY FOR BOTH, which the first attempt did not: "one
-        # integer Memo instruction per swap" is garbled, because on Solana the integer is
-        # CARRIED BY the memo rather than being the memo. The integer is the thing both chains
-        # have in common and the field is where each one puts it, so the sentence says that.
-        return (f"one shared {network} account, one integer per swap carried as its "
-                f"{discriminator}; get_new_address() refuses by design")
-    return "not decided in this application -- get_new_address() refuses and the custody choice is the operator's"
+        return f"{network}; the integer is carried as its {discriminator}"
+    return ""
 
 
 # What a STOPPED worker costs, per worker. Written out because the three

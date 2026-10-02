@@ -287,6 +287,32 @@ def test_the_config_echo_is_an_allowlist_and_cannot_reach_a_credential():
     assert "GRC_MIN_CONFIRMATIONS" in [row["key"] for row in echoed]
 
 
+class _DeclaringAdapter:
+    """An adapter stub that declares what the pair authority asks of it.
+
+    chains/registry.why_cannot_pay_out() reads `can_spend` and fails closed, and
+    services/swap_service.why_cannot_take_deposits() asks the adapter to validate
+    the shared account for a tag-attributed chain. A stub that answers neither is
+    an adapter that cannot complete a swap, which is a real state and not the
+    "fully configured terminal" these tests mean.
+
+    The same shape as tests/test_web_surfaces.py's StubAdapter, and NOT imported
+    from it: that one is the web suite's fixture for a Flask client and carries a
+    `payout_refusal` string those tests assert on. Two fixtures, named at both
+    sites (rule 8's second clause), because merging them would couple this unit
+    test file to the surface suite's assertions.
+    """
+
+    can_spend = True
+
+    def validate_address(self, _address):
+        return True
+
+
+def _declaring_adapters(*assets):
+    return {asset: _DeclaringAdapter() for asset in (assets or ("BTC", "GRC", "LTC", "XRP", "SOL"))}
+
+
 def test_pair_rows_read_allowed_pairs_and_mark_everything_else_disabled():
     """MUTATION: have pair_rows() list only the enabled pairs.
 
@@ -296,9 +322,28 @@ def test_pair_rows_read_allowed_pairs_and_mark_everything_else_disabled():
 
     Every chain is reachable here, so `enabled` and `reachable` agree and the
     original assertion still reads as written. The two come apart in the next test.
+
+    THE ADAPTERS ARE DECLARING STUBS AND NOT `object()`, CHANGED 2026-10-02. This
+    test built `{asset: object() for ...}` and asserted the states were exactly
+    {"enabled", "disabled"} -- which stopped being true when pair_rows() started
+    reading pair_view.pair_serviceability(), because
+    chains/registry.why_cannot_pay_out() reads `getattr(adapter, "can_spend",
+    False)` and a bare object() therefore CANNOT pay out. The states became
+    {"enabled" -> "cannot_complete", "disabled"} and this test failed.
+
+    The test's fixture was the defect, not the code, and this repo has already
+    established that: tests/test_web_surfaces.py's StubAdapter carries the same
+    correction in its own comment -- "These four tests used object() and correctly
+    stopped passing when that gate landed. A stub that says nothing about itself
+    should not be treated as capable." The gate fails closed on purpose, so a new
+    adapter that forgets to declare `can_spend` is never silently offered as a
+    destination. A test whose stub forgets it is asserting against that gate.
+
+    So the stub declares what the authority asks of it, and the bare-object() case
+    is asserted BELOW as its own case -- for the answer it should give, which is
+    "cannot complete", not "enabled".
     """
-    adapters = {asset: object() for asset in ("BTC", "GRC", "LTC", "XRP", "SOL")}
-    rows = pair_rows(seeded_config(), adapters)
+    rows = pair_rows(seeded_config(), _declaring_adapters())
     enabled = {row["label"] for row in rows if row["enabled"]}
     assert enabled == {"GRC -> BTC", "BTC -> GRC"}
     disabled = {row["label"] for row in rows if not row["enabled"]}
@@ -307,6 +352,33 @@ def test_pair_rows_read_allowed_pairs_and_mark_everything_else_disabled():
     # Nothing here mutates the authority.
     assert seeded_config()["ALLOWED_PAIRS"] == {("GRC", "BTC"), ("BTC", "GRC")}
     assert {row["state"] for row in rows} == {"enabled", "disabled"}
+
+
+def test_an_adapter_that_declares_nothing_is_not_reported_as_a_working_pair():
+    """The fail-closed gate, asserted on this surface rather than assumed from it.
+
+    chains/registry.why_cannot_pay_out() treats an adapter with no `can_spend`
+    attribute as unable to pay, deliberately: assuming it CAN means a new adapter
+    that forgets the declaration is silently offered as a destination, which is the
+    expensive direction. This asserts the operator page inherits that, because
+    before 2026-10-02 it did not -- pair_rows() asked only whether an adapter
+    EXISTED, so a non-declaring adapter read ENABLED here while the customer page
+    read DISABLED about the same pair in the same process.
+    """
+    rows = {row["label"]: row for row in pair_rows(seeded_config(), {
+        asset: object() for asset in ("BTC", "GRC", "LTC", "XRP", "SOL")
+    })}
+    for label in ("GRC -> BTC", "BTC -> GRC"):
+        row = rows[label]
+        assert row["state"] == "cannot_complete", (
+            f"{label} reads {row['state']!r} for an adapter that declares no can_spend"
+        )
+        assert row["enabled"] is True, "still in ALLOWED_PAIRS -- that half has not changed"
+        assert row["serviceable"] is False
+        assert row["cannot_pay"], "the destination's refusal must be carried, not just flagged"
+        assert "quote WILL price" in row["detail"], (
+            "the operator needs to know the quote is not the check -- that is how they got here"
+        )
 
 
 def test_an_allowed_pair_whose_chain_has_no_adapter_reads_unreachable_not_enabled():
@@ -383,7 +455,14 @@ def test_the_solana_row_reports_the_memo_strategy_the_operator_chose():
     evidence that the custody question is open.
     """
     rows = {row["asset"]: row for row in chain_rows(seeded_config(), {})}
-    note = rows["SOL"]["attribution_note"]
+    # THE ROW CARRIES TWO HALVES SINCE 2026-10-02, not one `attribution_note`.
+    # admin_view.attribution_model_note() holds the clause that is the same for
+    # every chain in a model and attribution_asset_detail() holds the only part
+    # that varies; the page renders the first once in a legend and the second once
+    # per row, because the shared clause was being printed three times (address)
+    # and twice (tag) on one page. Composed here in the order the page reads them,
+    # so every assertion below is still about what a reader sees.
+    note = f"{rows['SOL']['attribution_model_note']} {rows['SOL']['attribution_detail']}"
 
     assert rows["SOL"]["attribution"] == "tag"
     assert "Memo instruction" in note, "SOL's own field name, not XRP's DestinationTag"
@@ -418,7 +497,12 @@ def test_an_address_chain_with_no_recorded_derivation_says_so_rather_than_guessi
     original = dict(ADDRESS_DERIVATIONS)
     ADDRESS_DERIVATIONS.pop("BTC")
     try:
-        gap = admin_view._attribution_note("BTC")
+        # attribution_asset_detail(), not the former _attribution_note(). That
+        # function was split in two on 2026-10-02 and the half this test is about
+        # is the per-ASSET one: the derivation is what varies per chain, so the gap
+        # where a derivation should be is a gap in the asset's half. The model half
+        # is asserted separately below, for the thing IT must not do.
+        gap = admin_view.attribution_asset_detail("BTC")
     finally:
         ADDRESS_DERIVATIONS.clear()
         ADDRESS_DERIVATIONS.update(original)
@@ -426,6 +510,15 @@ def test_an_address_chain_with_no_recorded_derivation_says_so_rather_than_guessi
     assert "not recorded here" in gap
     assert "ADDRESS_DERIVATIONS" in gap, "say where to add it, so the reader does not have to find the table"
     assert "getnewaddress" not in gap, "an unknown derivation must not borrow another chain's"
+    # AND THE SHARED HALF MUST NOT NAME A DERIVATION AT ALL. The split created a
+    # new way to reintroduce exactly the defect this test exists for: putting
+    # "derived by the daemon's getnewaddress" into the MODEL note would make it
+    # true of three chains and false of the fourth again, this time from a legend
+    # rendered once, where it would look authoritative.
+    assert "getnewaddress" not in admin_view.attribution_model_note("address"), (
+        "the per-model clause must not name any one chain's derivation"
+    )
+    assert "wallet.dat" not in admin_view.attribution_model_note("address")
 
 
 def test_chain_rows_never_render_an_rpc_password():
