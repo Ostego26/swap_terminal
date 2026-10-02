@@ -569,6 +569,70 @@ class PayoutUnlockUnavailable(RuntimeError):
     """
 
 
+def inventory_note(adapters: dict, present: set) -> str:
+    """What `inventory_rows` means, with its REAL denominator. THE decision, so it is testable.
+
+    THE LINE THIS REPLACES TOLD THE OPERATOR A HEALTHY SYSTEM WAS BROKEN. It read:
+
+        inventory_rows should be 3 (BTC/LTC/GRC); fewer means a getbalance call is
+        failing and refresh_wallet_inventory swallowed it
+
+    Measured on the operator's host 2026-10-02, where it printed beside
+    `inventory_rows=1`. Wrong three ways at once:
+
+      THE DENOMINATOR IS NOT 3. refresh_wallet_inventory() iterates
+      `adapters.items()`, so it is however many adapters were CONSTRUCTED. BTC and
+      LTC were unconfigured, so no adapter existed for either and no row could ever
+      appear. A hardcoded count is rule 3's missing denominator in its most direct
+      form: a number compared against something it was not counted out of.
+
+      THE NAMES WERE STALE. BTC/LTC/GRC predates SOL and XRP joining the adapter
+      table. On that host the constructed adapters were GRC and SOL.
+
+      "SWALLOWED" WAS FALSE, and it is the clause that does the damage. SOL's
+      get_balance() refuses by design when SOL_HOT_WALLET is unset -- that is a
+      configuration fact the start banner already prints, not a lost error -- and the
+      except branch is not silent either: it logs a WARNING naming the asset and the
+      reason, once per process. So the annotation accused the code of the exact defect
+      the code had been written to avoid, and sent a reader looking for a swallowed
+      exception that was not there.
+
+    An annotation that makes a working system read as broken is worse than no
+    annotation: it spends the operator's attention and teaches them to discount the
+    next one. Rule 14 asks for what the number MEANS next to the number, and this is
+    the half of that rule that is easy to satisfy wrongly.
+
+    PURE, and takes `present` rather than reading the table, so a test can assert
+    every combination without a database.
+    """
+    configured = sorted(adapters)
+    if not configured:
+        return (
+            "inventory_rows=0 is CORRECT: no adapter is constructed at all, so there is "
+            "nothing to poll. Check the start banner for which assets are unconfigured"
+        )
+    missing = [asset for asset in configured if asset not in present]
+    if not missing:
+        return (
+            f"inventory_rows={len(configured)} is every constructed adapter "
+            f"({', '.join(configured)}), so nothing is missing"
+        )
+    return (
+        f"expected {len(configured)} -- one per CONSTRUCTED adapter "
+        f"({', '.join(configured)}), not a fixed number. Missing: {', '.join(missing)}. "
+        f"A missing row means that asset's get_balance() raised; it is NOT swallowed -- "
+        f"refresh_wallet_inventory logs a WARNING naming the asset and the reason, once "
+        f"per process, so look for it earlier in this log. An asset whose hot wallet is "
+        f"unset refuses by design and is expected here"
+    )
+
+
+def inventory_assets(db) -> set:
+    """Which assets actually have a wallet_inventory row. The `present` half of the note."""
+    rows = db.execute("SELECT asset FROM wallet_inventory").fetchall()
+    return {str(row["asset"]) for row in rows}
+
+
 def refresh_wallet_inventory(db, adapters: dict):
     now = utc_now_iso()
     for asset, adapter in adapters.items():

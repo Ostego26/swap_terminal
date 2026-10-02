@@ -44,7 +44,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import Config
 from db import SCHEMA, db_session
 from services.deposit_service import process_active_swaps
-from services.payout_service import refresh_wallet_inventory
+from services.payout_service import (
+    inventory_assets,
+    inventory_note,
+    refresh_wallet_inventory,
+)
 from workers.common import (
     CycleFailures,
     announce_start,
@@ -60,6 +64,47 @@ DEFAULT_POLL_SECONDS = 60
 
 
 logger = logging.getLogger(__name__)
+
+
+def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> str:
+    """One reconcile cycle: do the work, return the line that describes it.
+
+    EXTRACTED SO THE WIRING CAN BE TESTED, and the reason is a mutation that
+    SURVIVED. inventory_note() replaced a literal annotation that told the operator a
+    healthy system was broken; its own tests passed, and reverting main()'s call site
+    to the old literal ALSO passed, because every test asserted on the function and
+    none on the caller. That is the fourth call-site mutation to survive in this
+    session -- a right function whose result the caller discards or ignores -- and the
+    cycle body being inline in a while loop is what made it untestable.
+
+    This is rule 10's shape: main() is orchestration and must hold no decision, and
+    "what does this cycle's line say" is a decision. It is also rule 12's C901 note in
+    miniature -- a main() that has swallowed the work is what pushes the complexity up.
+
+    WHAT IS STILL NOT COVERED, said rather than implied (rule 17): main() calling THIS
+    function is one line in a loop and no test drives it. That seam is far narrower
+    than the one it replaces -- deleting it means the worker prints nothing at all
+    every cycle, which `supervisor.py status` now shows as a frozen last line -- but it
+    is not zero, and claiming otherwise would be the same overstatement the note itself
+    was fixing.
+    """
+    refresh_wallet_inventory(db, adapters)
+    processed = process_active_swaps(db, config, adapters)
+    # READ BACK FROM THE TABLE, not assumed from which adapters were asked. An adapter
+    # whose get_balance() raised wrote no row, and that difference is exactly what the
+    # note reports.
+    present = inventory_assets(db)
+    return cycle_line(
+        WORKER_NAME,
+        cycle,
+        time.monotonic() - started,
+        {"refreshed_swaps": len(processed), "inventory_rows": len(present)},
+        # DERIVED FROM THE CONSTRUCTED ADAPTERS, never hardcoded. The string this
+        # replaced said "should be 3 (BTC/LTC/GRC)" and printed beside a CORRECT
+        # inventory_rows=1 on a host where only GRC and SOL had adapters -- see
+        # payout_service.inventory_note()'s docstring for the measurement.
+        notes=inventory_note(adapters, present),
+    )
 
 
 def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
@@ -93,22 +138,8 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
         try:
             with db_session(Config.DB_PATH) as db:
                 db.executescript(SCHEMA)
-                refresh_wallet_inventory(db, adapters)
-                processed = process_active_swaps(db, config, adapters)
-                inventory = db.execute("SELECT COUNT(*) AS n FROM wallet_inventory").fetchone()["n"]
-            print(
-                cycle_line(
-                    WORKER_NAME,
-                    cycle,
-                    time.monotonic() - started,
-                    {"refreshed_swaps": len(processed), "inventory_rows": inventory},
-                    notes=(
-                        "inventory_rows should be 3 (BTC/LTC/GRC); fewer means a getbalance call is failing "
-                        "and refresh_wallet_inventory swallowed it"
-                    ),
-                ),
-                flush=True,
-            )
+                line = run_cycle(db, config, adapters, cycle, started)
+            print(line, flush=True)
         except Exception as exc:
             print(failures.record(cycle, time.monotonic() - started, exc), flush=True)
             logger.exception("%s cycle=%d failed", WORKER_NAME, cycle)
