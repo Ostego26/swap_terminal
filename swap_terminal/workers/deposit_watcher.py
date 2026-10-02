@@ -13,6 +13,17 @@ Can move funds: no. It never calls sendtoaddress and never signs anything.
 Mainnet-safe: yes to run against mainnet; it is read-only with respect to the
        chain.
 
+THE SECOND LOOP THAT DOES THIS, named here because a reader who finds one must
+be told the other exists (rule 8). workers/reconcile_worker.py calls the same
+process_active_swaps() every 60s, in its own process, as a BACKSTOP: this file
+is the primary at 15s, and if this process dies nothing revives it --
+supervisor.py has no respawn -- so that loop is the only thing still crediting
+deposits until a person looks. Its header carries the established reasoning, the
+measurement of the duplicated audit rows the two produced, and what makes the
+duplication harmless now (the compare-and-swap in
+services/swap_service.set_swap_status()). Do not remove either without reading
+that header.
+
 REAPER: swap_terminal/supervisor.py. `supervisor.py start deposit_watcher`
 spawns it and writes runtime/deposit_watcher.pid; `supervisor.py stop` sends
 SIGTERM, waits, escalates to SIGKILL and then proves the process is gone. A

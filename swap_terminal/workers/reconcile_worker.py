@@ -11,23 +11,59 @@ Can move funds: no -- it calls neither sendtoaddress nor any signing method.
        one step upstream of a broadcast.
 Mainnet-safe: yes; read-only with respect to the chain.
 
-IT DOES THE SAME WORK AS deposit_watcher, MORE SLOWLY, AND THAT IS THE POINT
-WORTH KNOWING BEFORE CHANGING EITHER.
+IT DOES THE SAME WORK AS deposit_watcher, MORE SLOWLY, AND IT IS A BACKSTOP RATHER
+THAN A DESIGN. READ THIS BEFORE CHANGING EITHER.
 
 Measured by reading both files on 2026-09-24: this worker's cycle is
 `refresh_wallet_inventory()` plus `process_active_swaps()` at 60s;
 deposit_watcher's is `process_active_swaps()` alone at 15s. So
 process_active_swaps() runs in two loops on two schedules against one database.
 That is not (quite) rule 8's duplicate logic -- there is one implementation,
-called twice -- but it has the same consequence: with both workers running,
-every active swap is refreshed on two independent clocks, and the two can
-interleave the way tests/test_payout_concurrency.py shows two payout workers
-can. Nothing observed here has proven that harmful for the deposit path, and
-saying so is not the same as having checked it (rule 17): what was checked is
-that the two call the same function, not what happens when their cycles
-overlap. Whether this loop should exist at all is a question for the operator,
-because merging it into deposit_watcher changes when deposits get credited,
-which is upstream of a payout.
+called twice -- but it has the same consequence: every active swap is refreshed
+on two independent clocks.
+
+IT WAS HARMFUL, AND THAT IS NOW CHECKED RATHER THAN DISCLAIMED. This paragraph
+used to say "nothing observed here has proven that harmful for the deposit path,
+and saying so is not the same as having checked it (rule 17)". It has been
+checked, and the answer was yes. From the operator's own audit trail, the
+identical two transitions recorded TWICE 0.83s apart on s_95a807c181644190 --
+`awaiting_deposit -> confirming` and `confirming -> payout_pending` -- because
+both loops processed that swap at once. Exactly one payout row existed, so the
+payout claim guard held and nobody was paid twice; the damage was a false audit
+trail, which is the record a person reads to find out what happened to somebody's
+money.
+
+WHAT MAKES IT HARMLESS NOW is services/swap_service.set_swap_status(), which
+since 2026-10-02 is a compare-and-swap: a stale worker's write is refused instead
+of applied, no audit row is written for a transition that did not happen, and
+services/deposit_service.refresh_swap_from_chain() abandons that swap for the
+cycle rather than carrying on from a status it did not write. The loser of the
+race now costs one cycle of latency on one swap.
+
+WHY THE CALL STAYS, established rather than assumed. It is NOT a designed
+backstop: it arrived in this repository's first commit (43661f4, 2026-09-24,
+"Initial import of prior work") with no comment, no commit message and no test
+claiming the intent, and the paragraph above is the nearest thing to a record of
+why. But it IS the only other path that credits a deposit, because
+supervisor.py has start, stop and status and NO respawn -- grepped 2026-10-02:
+no restart command, no watchdog, nothing that revives a dead worker. So if
+deposit_watcher dies, this 60s loop is what keeps crediting customers' deposits
+until a person runs `supervisor.py status` and notices. The duplication costs
+60 extra shared-account scans per hour against deposit_watcher's 204.5; the
+alternative costs every uncredited deposit between a crash and a human.
+Removing the only redundant crediting path is a live posture change on the
+strength of an untestable resilience argument, and it is the operator's call
+(rule 16), not a tidy-up.
+
+SO THE DUPLICATION IS MEASURABLE INSTEAD OF HIDDEN. `transitions_written` on this
+worker's cycle line is how many audit rows THIS pass wrote for the swaps it
+refreshed, and it is zero exactly when deposit_watcher is healthy and doing the
+work. `refreshed_swaps` is how many swaps are open, not how many this loop moved,
+so it is in workers/common.STANDING_COUNTS along with `inventory_rows` -- without
+that, this worker printed WORKED on every cycle of its life for re-reading swaps
+another process had already advanced, which is rule 13's "skipped plus success in
+the same output" in the one worker an operator would check to find out whether the
+backstop is carrying the load.
 
 REAPER: swap_terminal/supervisor.py. See deposit_watcher.py's header.
 """
@@ -44,6 +80,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import Config
 from db import SCHEMA, db_session
 from services.deposit_service import process_active_swaps
+from services.helpers import utc_now_iso
 from services.payout_service import (
     inventory_assets,
     inventory_note,
@@ -64,6 +101,50 @@ DEFAULT_POLL_SECONDS = 60
 
 
 logger = logging.getLogger(__name__)
+
+
+def transitions_written(db, swap_ids, *, since: str) -> int:
+    """How many audit rows THIS cycle wrote for the swaps it refreshed. One SELECT.
+
+    WHY THIS NUMBER EXISTS, and it is the measurable half of the two-loops defect. Before
+    it, this worker's line reported `refreshed_swaps` -- how many swaps are OPEN -- and
+    nothing distinguished a pass that credited a deposit from a pass that re-read three
+    swaps deposit_watcher had already advanced four times over. An operator could not tell
+    from the screen whether this loop was carrying the crediting or idling behind a healthy
+    watcher, which is exactly the question the backstop exists to answer (rule 14: state
+    what the number means, next to the number).
+
+    IT IS A COUNT IN SQL AND NOT A TALLY IN PYTHON (rule 20). swap_audit_log is written by
+    set_swap_status() inside process_active_swaps(), several layers below this function, so
+    a counter threaded back up would be a second place that knows what a transition is.
+    The rows are the record; counting the rows is the question.
+
+    SCOPED TO THE SWAPS THIS CYCLE PROCESSED, not to a time window alone, so payout_worker
+    claiming an unrelated swap in the same second cannot inflate it. THE REMAINING
+    IMPRECISION IS NAMED RATHER THAN SMOOTHED OVER (rule 3: state the denominator): a swap
+    this cycle advanced INTO `payout_pending` can be claimed by payout_worker before this
+    SELECT runs, and that claim's `payout_pending -> paying` row is inside both the window
+    and the id set. So this can read one higher than the transitions this loop itself wrote.
+    It is a visibility figure, not a gate, and nothing branches on it.
+
+    AN EMPTY SWAP LIST ANSWERS 0 WITHOUT A QUERY, because `IN ()` is not valid SQLite and
+    because zero refreshed swaps genuinely wrote zero transitions. Rule 14: that is a
+    result, and the line prints it rather than leaving a gap.
+    """
+    ids = [str(swap_id) for swap_id in swap_ids or ()]
+    if not ids:
+        return 0
+    # The interpolated text is a run of '?' generated from the LENGTH of `ids`; every id
+    # and the timestamp are bound as parameters below. Structure, not input -- the same
+    # claim services/deposit_service.process_active_swaps() makes for ACTIVE_STATUSES, and
+    # checkable from these three lines (rule 12's S608 note).
+    placeholders = ",".join("?" for _ in ids)
+    row = db.execute(
+        f"SELECT COUNT(*) AS n FROM swap_audit_log"  # noqa: S608
+        f" WHERE created_at >= ? AND swap_id IN ({placeholders})",
+        (since, *ids),
+    ).fetchone()
+    return int(row["n"] or 0)
 
 
 def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> str:
@@ -88,8 +169,14 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
     is not zero, and claiming otherwise would be the same overstatement the note itself
     was fixing.
     """
+    # THE WALL CLOCK, not `started`. `started` is time.monotonic(), which is the right
+    # thing to measure a duration with and cannot be compared against a timestamp column
+    # (rule 6's boundary: seconds where an API demands them, and this one demands an ISO
+    # string). Taken BEFORE the work so nothing this cycle writes falls outside it.
+    cycle_began = utc_now_iso()
     refresh_wallet_inventory(db, adapters)
     processed = process_active_swaps(db, config, adapters)
+    written = transitions_written(db, [row["id"] for row in processed], since=cycle_began)
     # READ BACK FROM THE TABLE, not assumed from which adapters were asked. An adapter
     # whose get_balance() raised wrote no row, and that difference is exactly what the
     # note reports.
@@ -98,7 +185,16 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
         WORKER_NAME,
         cycle,
         time.monotonic() - started,
-        {"refreshed_swaps": len(processed), "inventory_rows": len(present)},
+        {
+            "refreshed_swaps": len(processed),
+            # THE ONE COUNT ON THIS LINE THAT MEANS THIS LOOP DID THE WORK. See the
+            # module docstring: zero here with refreshed_swaps non-zero is the healthy
+            # shape -- deposit_watcher advanced them at 15s and this 60s pass found
+            # nothing left to move. Non-zero means this loop is the one crediting, which
+            # on a host where both workers are up is worth a second look.
+            "transitions_written": written,
+            "inventory_rows": len(present),
+        },
         # DERIVED FROM THE CONSTRUCTED ADAPTERS, never hardcoded. The string this
         # replaced said "should be 3 (BTC/LTC/GRC)" and printed beside a CORRECT
         # inventory_rows=1 on a host where only GRC and SOL had adapters -- see

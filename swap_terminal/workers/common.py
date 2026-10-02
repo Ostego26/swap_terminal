@@ -341,7 +341,29 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
 # deposit watcher goes back to printing IDLE; a failed payout is permanent, so
 # this one latched the first time any payout failed and could never unlatch. On
 # this host that was 2026-09-26, five days before anybody noticed.
-STANDING_COUNTS = frozenset({"HALTED_for_review", "failed_total"})
+#
+# `inventory_rows` AND `refreshed_swaps` JOINED 2026-10-02, and they are the third and
+# fourth fields with the identical property -- which finally settles that this is a
+# PROPERTY OF THE FIELD and not a list of two exceptions. Both are reconcile_worker's,
+# and between them they meant that worker could NEVER print IDLE:
+#
+#     reconcile_worker cycle=N WORKED refreshed_swaps=3 inventory_rows=2 in ...
+#
+# `inventory_rows` is how many wallet_inventory rows exist after the refresh, so on a
+# host where any adapter answers it is non-zero on every cycle forever. `refreshed_swaps`
+# is how many swaps are OPEN, not how many this cycle moved -- and reconcile_worker is
+# the SECOND loop to refresh them (deposit_watcher does the same work at 15s, see that
+# file's header), so on a healthy host it re-reads swaps the watcher has already
+# advanced and reports WORKED for doing nothing. That is the case rule 13 names
+# directly: "treat 'skipped' plus 'success' in the same output as a defect in the
+# output", and it is worse here than in the two cases above, because this is the worker
+# an operator would look at to find out whether the BACKSTOP is carrying the load.
+#
+# What reconcile_worker now reports as work is `transitions_written` -- the audit rows
+# its own pass wrote -- and that figure is zero exactly when deposit_watcher is healthy.
+STANDING_COUNTS = frozenset({
+    "HALTED_for_review", "failed_total", "inventory_rows", "refreshed_swaps",
+})
 
 
 class CycleFailures:
