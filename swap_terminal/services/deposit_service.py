@@ -57,7 +57,7 @@ from deposit_vout_artifact import multi_vout_groups
 from .helpers import utc_now_iso
 from .swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION, set_swap_status
 from .unattributable_deposit_service import record as record_unattributable
-from .unattributable_deposit_service import resolve_credited, stranded_rows, unclaimed_rows
+from .unattributable_deposit_service import resolve_credited, stranded_rows, unattributable_txids, unclaimed_rows
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,29 @@ def attributable_events(events, swap: dict) -> list[dict]:
     return [event for event in events if event.get("vout") is not None and event["vout"] == tag]
 
 
+def skip_txids(db, asset: str) -> frozenset[str]:
+    """Every txid a scan of this asset need not read again. TWO sources, one set.
+
+    settled_txids() names transactions that reached a swap and passed its
+    confirmation threshold. unattributable_txids() names transactions that reached
+    NO swap and were recorded for a human instead. Between them they are every
+    transaction whose verdict is final, and each source's own docstring carries the
+    argument for why re-reading it changes no decision.
+
+    ONE SET BECAUSE THE ADAPTER ASKS ONE QUESTION. It does not care why a
+    transaction is finished with; it cares whether to spend a getTransaction on it.
+    Two parameters would make every adapter take an argument shaped around this
+    service's table layout.
+
+    THE PARAMETER WAS CALLED `settled_txids` AND THAT NAME IS NOW A LIE -- an
+    unattributable transaction is not settled, it is the opposite: nothing was
+    credited and somebody still has to act. Renamed through the three adapters in
+    the same change rather than left as a correct value under a wrong name, which
+    is the wrong-comment-is-a-bug rule applied to an identifier a caller reads.
+    """
+    return settled_txids(db, asset) | unattributable_txids(db, asset)
+
+
 def settled_txids(db, asset: str) -> frozenset[str]:
     """Transactions on `asset` with nothing left to teach a scan. One SELECT.
 
@@ -263,14 +286,14 @@ def settled_txids(db, asset: str) -> frozenset[str]:
 def refresh_swap_from_chain(db, config, adapters: dict, swap: dict) -> dict:
     asset = swap["from_asset"]
     adapter = adapters[asset]
-    # SETTLED TRANSACTIONS ARE NOT RE-READ. On Solana each one costs a
+    # FINISHED TRANSACTIONS ARE NOT RE-READ. On Solana each one costs a
     # getTransaction call, and re-reading the whole history every 15s
     # rate-limited a real deposit out of being credited on 2026-10-01. See
-    # settled_txids() for why skipping them changes no decision, and
-    # chains/solana.py for the measurement. Every other adapter accepts the
-    # argument and ignores it: their discovery is one call.
+    # skip_txids() for the two sources and for why skipping either changes no
+    # decision, and chains/solana.py for the measurement. Every other adapter
+    # accepts the argument and ignores it: their discovery is one call.
     events = adapter.find_deposits_to_address(
-        swap["deposit_address"], settled_txids=settled_txids(db, asset)
+        swap["deposit_address"], skip_txids=skip_txids(db, asset)
     )
     record_what_nobody_can_claim(db, asset, adapter)
 
@@ -459,7 +482,14 @@ def reconcile_shared_accounts(db, config, adapters: dict) -> int:
         # cannot make it look stranded -- unclaimed_rows() would have filtered it
         # on `credited` anyway, and the two sets are computed from the same
         # deposit_events rows.
-        events = adapter.find_deposits_to_address(address, settled_txids=settled_txids(db, asset))
+        #
+        # AN ALREADY-RECORDED UNATTRIBUTABLE TXID IS THE SAME SHAPE OF SAFE, and it
+        # is the half that was missing: record_unattributable() UPSERTs, so a row
+        # left out of `events` keeps the row it already has rather than losing it.
+        # What changes is last_seen_at and confirmations, which stop advancing --
+        # correct, since nothing is looking at the transaction any more, and
+        # first_seen_at is the figure a human matching it works from.
+        events = adapter.find_deposits_to_address(address, skip_txids=skip_txids(db, asset))
         rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES, credited)
         recorded += record_unattributable(db, rows, now=now)
         # AND CLOSE ANY ROW THAT TURNS OUT TO HAVE BEEN CREDITED. Written before this fix, or

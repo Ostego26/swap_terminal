@@ -40,6 +40,7 @@ from pathlib import Path
 
 import chains.solana as chains_solana
 import pytest
+import requests
 from chains.registry import build_adapters
 from chains.solana import SolanaAdapter, SolanaRPCError, deposit_event
 from chains.solana_address import SolanaAddressError
@@ -1212,7 +1213,7 @@ def test_native_credits_over_the_REAL_devnet_numbers():
 def test_a_settled_signature_is_never_fetched():
     """The avoided call, counted on the real adapter.
 
-    MUTATION: drop the `if signature in settled_txids` check and getTransaction
+    MUTATION: drop the `if signature in skip_txids` check and getTransaction
     is called for the settled signature too -- which is the behaviour that
     rate-limited a real deposit out of being credited.
     """
@@ -1234,7 +1235,7 @@ def test_a_settled_signature_is_never_fetched():
         }
     )
 
-    adapter.find_deposits_to_address(WALLET, settled_txids=frozenset({SIG}))
+    adapter.find_deposits_to_address(WALLET, skip_txids=frozenset({SIG}))
 
     fetched = [params[0] for method, params in adapter.calls if method == "getTransaction"]
     assert SIG not in fetched, "a settled signature must not cost another getTransaction"
@@ -1267,9 +1268,9 @@ def test_a_settled_signature_is_reported_as_skipped_and_not_as_unreadable():
         }
     )
 
-    adapter.find_deposits_to_address(WALLET, settled_txids=frozenset({SIG}))
+    adapter.find_deposits_to_address(WALLET, skip_txids=frozenset({SIG}))
 
-    assert adapter.signatures_skipped_settled == [SIG]
+    assert adapter.signatures_skipped == [SIG]
     assert adapter.unreadable_signatures == [], "skipped is not unreadable"
     assert adapter.signatures_listed == 2, "and the listing count still describes the whole account"
 
@@ -1277,7 +1278,7 @@ def test_a_settled_signature_is_reported_as_skipped_and_not_as_unreadable():
 def test_an_empty_settled_set_reads_everything():
     """The default, and the behaviour every existing test in this file relies on.
 
-    MUTATION: skip on `signature not in settled_txids` and this fails -- which
+    MUTATION: skip on `signature not in skip_txids` and this fails -- which
     would stop reading every transaction that is NOT settled, i.e. exactly the
     new deposits.
     """
@@ -1292,4 +1293,261 @@ def test_an_empty_settled_set_reads_everything():
     events = adapter.find_deposits_to_address(WALLET)
 
     assert len(events) == 1, "nothing is settled, so everything is read"
-    assert adapter.signatures_skipped_settled == []
+    assert adapter.signatures_skipped == []
+
+
+# --- the branches nothing exercised ------------------------------------------
+#
+# MEASURED 2026-10-02 with `coverage run --branch` over the Solana suite rather
+# than by reading the file. chains/solana.py came out at 87% with these decision
+# points on the money path never taken:
+#
+#   solana.py:821    a listing entry with no `signature`
+#   solana.py:994    a transaction whose meta.err is set, inside the reader
+#   solana.py:1097   an SPL delta that is not positive -- a DEBIT
+#   solana_memo:175  the TWO MEMOS refusal
+#   solana_memo:184  the OUT OF RANGE refusal
+#   solana_memo:147  a memo whose `parsed` is a dict rather than a string
+#
+# The two memo refusals matter more than the percentage does: the argument that
+# made it safe to skip a recorded-unattributable transaction FOREVER is that all
+# four refusals in deposit_tag_from() read only immutable memo content. Two of
+# those four had no test, so the reasoning rested on code nobody had run.
+
+
+def test_a_listing_entry_with_no_signature_is_skipped(caplog):
+    """getSignaturesForAddress is a cluster response, so a malformed entry is not
+    impossible -- and `signature` is what every later call is keyed on. Skipped
+    rather than passed to getTransaction as None, which would read as an error
+    about the cluster instead of about the entry."""
+    adapter = make_adapter({
+        "getSignaturesForAddress": [
+            {"signature": None, "err": None, "confirmationStatus": "finalized"},
+            {"err": None, "confirmationStatus": "finalized"},
+            {"signature": SIG, "err": None, "confirmationStatus": "finalized"},
+        ],
+        "getTransaction": native_tx([WALLET], [0], [1_000_000]),
+    })
+    events = adapter.find_deposits_to_address(WALLET)
+
+    assert [e["txid"] for e in events] == [SIG]
+    assert adapter.signatures_listed == 3
+    read = [params[0] for method, params in adapter.calls if method == "getTransaction"]
+    assert read == [SIG], f"a None signature reached getTransaction: {read}"
+
+
+def test_a_failed_transaction_is_not_credited_even_when_the_listing_omits_err():
+    """BOTH err checks exist, and only the listing's was tested.
+
+    find_deposits_to_address skips an entry whose listing carries err, and
+    _credits_in_transaction skips one whose META carries it. A listing that says
+    err=None for a transaction whose meta says otherwise is the case the second
+    check is for -- and crediting it would credit a deposit that moved nothing
+    while consuming a fee, which is the one branch in this file whose docstring
+    says it "would cost money if it were wrong"."""
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
+        "getTransaction": native_tx([WALLET], [0], [1_000_000], err={"InstructionError": [0, "Custom"]}),
+    })
+    events = adapter.find_deposits_to_address(WALLET)
+
+    assert events == [], "a transaction whose meta.err is set moved nothing"
+    assert adapter.unreadable_signatures == [], "it was READ fine; it just failed on chain"
+
+
+def test_an_spl_debit_is_not_credited():
+    """post - pre <= 0 is money LEAVING the account, and `delta > 0` is what keeps
+    it out. Crediting a debit would credit a deposit that never arrived."""
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
+        "getTransaction": {
+            "meta": {
+                "err": None,
+                "preTokenBalances": [token_balance(1, WALLET, mint, 5_000_000)],
+                "postTokenBalances": [token_balance(1, WALLET, mint, 1_000_000)],
+            },
+            "transaction": {"message": {"accountKeys": [{"pubkey": WALLET}],
+                                        "instructions": [memo_instruction(FIXTURE_TAG)]}},
+        },
+    }, mint=mint)
+
+    assert adapter.find_deposits_to_address(WALLET) == []
+
+
+def test_an_spl_balance_that_does_not_move_is_not_credited():
+    """delta == 0, the boundary. `>= 0` would credit an event of nothing."""
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    adapter = make_adapter({
+        "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
+        "getTransaction": {
+            "meta": {
+                "err": None,
+                "preTokenBalances": [token_balance(1, WALLET, mint, 5_000_000)],
+                "postTokenBalances": [token_balance(1, WALLET, mint, 5_000_000)],
+            },
+            "transaction": {"message": {"accountKeys": [{"pubkey": WALLET}],
+                                        "instructions": [memo_instruction(FIXTURE_TAG)]}},
+        },
+    }, mint=mint)
+
+    assert adapter.find_deposits_to_address(WALLET) == []
+
+
+# --- the transport, which is where a 429 actually lands -----------------------
+#
+# MEASURED 2026-10-02 over the WHOLE suite, after a first run that excluded
+# tests/test_solana_memo.py and reported gaps that were an artifact of the
+# selection rather than of the code. The corrected baseline is 92%, and `call()`
+# -- the one function every other branch depends on -- had four untaken paths.
+#
+# These matter more than their line count: `call()` is where HTTP 429 arrives,
+# and the operator spent two days with 429s re-read on every cycle. Everything
+# above tests what happens to a response; nothing tested what happens when there
+# ISN'T one.
+
+
+def transport(exc=None, *, status=200, body=None, text=""):
+    """A real SolanaAdapter whose requests.post is stubbed, so call() is the code
+    under test rather than something above it.
+
+    Patched on the module's `requests`, not on the adapter, because call() reaches
+    for it by name -- a stub on the instance would miss the line being tested.
+    """
+    class FakeResponse:
+        status_code = status
+
+        def __init__(self):
+            self.text = text
+
+        def json(self):
+            return body
+
+    class FakeRequests:
+        RequestException = requests.RequestException
+
+        @staticmethod
+        def post(*_args, **_kwargs):
+            if exc is not None:
+                raise exc
+            return FakeResponse()
+
+    return FakeRequests
+
+
+def test_a_transport_failure_becomes_a_SolanaRPCError_naming_the_url(monkeypatch):
+    """"The cluster could not be asked" is never an answer about a deposit.
+
+    This is the path a DNS failure took on 2026-10-01, when the deposit watcher
+    died on one -- the exception has to carry the endpoint, because the first
+    question is always which URL did not answer.
+    """
+    adapter = SolanaAdapter(url="http://unreachable.invalid")
+    monkeypatch.setattr(chains_solana, "requests",
+                        transport(exc=requests.RequestException("Name or service not known")))
+
+    with pytest.raises(SolanaRPCError) as raised:
+        adapter.call("getSlot")
+
+    assert "could not reach http://unreachable.invalid" in str(raised.value)
+    assert "Name or service not known" in str(raised.value)
+    assert raised.value.status_code is None, (
+        "there was no HTTP response, so there is no status -- and throttled must not read True"
+    )
+    assert not raised.value.throttled
+
+
+def test_an_http_429_carries_its_status_so_a_caller_can_tell_it_from_a_failure(monkeypatch):
+    """THE OPERATOR'S TWO DAYS OF 429s, at the layer they arrive on.
+
+    SolanaRPCError.throttled is what distinguishes a rate limit from a real
+    failure, and it reads status_code rather than parsing the sentence. A 429
+    whose status was dropped would be indistinguishable from a broken cluster.
+    """
+    adapter = SolanaAdapter(url="https://api.devnet.solana.com")
+    monkeypatch.setattr(chains_solana, "requests", transport(
+        status=429,
+        text='{"jsonrpc":"2.0","error":{"code": 429, "message":"Too many requests"}}',
+    ))
+
+    with pytest.raises(SolanaRPCError) as raised:
+        adapter.call("getTransaction", SIG)
+
+    assert raised.value.status_code == 429
+    assert raised.value.throttled, "a 429 must be recognizable AS a rate limit, not just as a failure"
+    assert "Too many requests" in str(raised.value)
+
+
+def test_a_json_rpc_error_object_is_raised_rather_than_returned(monkeypatch):
+    """HTTP 200 with an `error` member is a failure the status line does not show.
+
+    Returning data["result"] here would hand the caller a KeyError, or worse a
+    None that reads as "no deposits".
+    """
+    adapter = SolanaAdapter(url="http://seeded.invalid")
+    monkeypatch.setattr(chains_solana, "requests", transport(
+        body={"jsonrpc": "2.0", "id": "getTransaction",
+              "error": {"code": -32015, "message": "Transaction version (1) is not supported"}},
+    ))
+
+    with pytest.raises(SolanaRPCError) as raised:
+        adapter.call("getTransaction", SIG)
+
+    assert "-32015" in str(raised.value)
+    assert raised.value.status_code is None, "the HTTP call succeeded; only the RPC failed"
+
+
+def test_a_response_with_neither_result_nor_error_is_refused(monkeypatch):
+    """The shape that would otherwise become a silent None.
+
+    `data.get("result")` on this body is None, and None from a deposit scan reads
+    as "nothing arrived" -- which is the one wrong answer this module's header
+    says must never be fabricated.
+    """
+    adapter = SolanaAdapter(url="http://seeded.invalid")
+    monkeypatch.setattr(chains_solana, "requests", transport(body={"jsonrpc": "2.0", "id": "getSlot"}))
+
+    with pytest.raises(SolanaRPCError, match="neither a result nor an error"):
+        adapter.call("getSlot")
+
+
+def test_an_unset_url_refuses_before_any_request(monkeypatch):
+    """There is deliberately no default endpoint, and the refusal says why.
+
+    A default would point at somebody's cluster, and the wrong one silently is
+    worse than none loudly.
+    """
+    adapter = SolanaAdapter(url="")
+    # The stub RAISES if it is reached, which is the assertion -- a list nothing
+    # appends to, checked empty, is a line that cannot fail (rule 9).
+    monkeypatch.setattr(chains_solana, "requests", transport(exc=AssertionError("must not be reached")))
+
+    with pytest.raises(SolanaRPCError, match="no Solana RPC endpoint is configured"):
+        adapter.call("getSlot")
+
+
+def test_the_endpoint_line_says_the_url_is_unset_rather_than_printing_nothing(monkeypatch):
+    """Rule 14 on the startup banner: an empty value must not render as a blank.
+
+    This is the line the supervisor prints above spawning three workers, and
+    "rpc=" with nothing after it reads as a display bug rather than as a missing
+    setting.
+    """
+    line = SolanaAdapter(url="").endpoint_line()
+
+    assert "SOL_RPC_URL is UNSET" in line
+    assert "every call will refuse" in line
+    assert "SOL_HOT_WALLET unset" in line
+
+
+def test_the_endpoint_line_truncates_a_url_at_the_query_string():
+    """If an operator puts an API key in the URL, this is where they would see it.
+
+    The banner is pasted back routinely, so the query string is dropped -- not
+    because this configuration carries credentials there, but because one could.
+    """
+    line = SolanaAdapter(url="https://example.invalid/rpc?api-key=SECRETVALUE").endpoint_line()
+
+    assert "https://example.invalid/rpc" in line
+    assert "SECRETVALUE" not in line
+    assert "api-key" not in line

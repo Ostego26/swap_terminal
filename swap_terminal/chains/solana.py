@@ -759,7 +759,7 @@ class SolanaAdapter:
     # --- the contract: find_deposits_to_address ------------------------------
 
     def find_deposits_to_address(self, address: str, tx_limit: int = DEFAULT_SIGNATURE_LIMIT,
-                                 settled_txids=frozenset()) -> list[dict]:
+                                 skip_txids=frozenset()) -> list[dict]:
         """Every credit to `address`, in the dict shape deposit_service reads.
 
         Returns dicts with `txid`, `vout`, `address`, `amount` and
@@ -811,7 +811,7 @@ class SolanaAdapter:
         self.signatures_listed = len(signatures)
         events: list[dict] = []
         unreadable: list[str] = []
-        skipped_settled: list[str] = []
+        skipped: list[str] = []
         for entry in signatures:
             if entry.get("err") is not None:
                 # A failed transaction moved nothing. See the docstring.
@@ -819,7 +819,7 @@ class SolanaAdapter:
             signature = entry.get("signature")
             if not signature:
                 continue
-            # ALREADY SETTLED, SO NOT RE-READ. THIS IS THE RATE-LIMIT FIX.
+            # ALREADY FINISHED WITH, SO NOT RE-READ. THIS IS THE RATE-LIMIT FIX.
             #
             # MEASURED ON THE OPERATOR'S HOST 2026-10-01, and it is the defect that
             # stopped a real deposit being credited. Solana discovery is the only
@@ -850,9 +850,29 @@ class SolanaAdapter:
             # the gate reads.
             #
             # A deposit still CONFIRMING is therefore never skipped -- the caller
-            # only puts a txid in this set once it has reached the threshold.
-            if signature in settled_txids:
-                skipped_settled.append(signature)
+            # only puts a settled txid in this set once it has reached the threshold.
+            #
+            # THE SET GAINED A SECOND SOURCE ON 2026-10-02, and the first version of
+            # this fix was half of one. `settled_txids` was a JOIN from
+            # deposit_events to swaps, so it could only ever name a transaction that
+            # reached a swap -- and the two transactions actually burning the
+            # operator's rate limit had reached none. They were recorded in
+            # `unattributable_deposits`, which is what unattributable MEANS, so
+            # nothing could skip them and they were re-read every cycle for two
+            # days:
+            #
+            #     could not read transaction 5rHDrJYp... HTTP 429 ... SKIPPED it
+            #     could not read transaction 61otPXfy... HTTP 429 ... SKIPPED it
+            #     read 5 of 7 listed transaction(s); 2 were unreadable
+            #
+            # The rate limit those two burned is what made a REAL deposit come back
+            # as "read 5 of 7". services/deposit_service.skip_txids() is now both
+            # sources, and the parameter is `skip_txids` rather than
+            # `settled_txids` because an unattributable transaction is not settled
+            # -- it is the opposite, nothing credited and somebody still owed an
+            # answer.
+            if signature in skip_txids:
+                skipped.append(signature)
                 continue
             rank = commitment_rank(entry.get("confirmationStatus"))
             # ONE UNREADABLE TRANSACTION MUST NOT END THE SCAN, and until 2026-09-29 it did.
@@ -897,11 +917,11 @@ class SolanaAdapter:
         self.unreadable_signatures = list(unreadable)
         # EXPOSED FOR THE SAME REASON unreadable_signatures IS. A caller that sees
         # `signatures_listed == 7` and two credits must be able to tell "five were
-        # already settled and deliberately not re-read" from "five could not be
-        # read". The first is the scan working; the second is money possibly
+        # already finished with and deliberately not re-read" from "five could not
+        # be read". The first is the scan working; the second is money possibly
         # uncredited. solana_chain_check.py's coverage report makes exactly this
         # kind of claim and was wrong about it once already.
-        self.signatures_skipped_settled = list(skipped_settled)
+        self.signatures_skipped = list(skipped)
         if unreadable:
             # Rule 14: a scan that silently examined fewer transactions than it listed must
             # not report the same way as one that read them all.

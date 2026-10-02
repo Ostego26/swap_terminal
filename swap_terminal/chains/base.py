@@ -435,7 +435,7 @@ class RPCAdapter:
             return matches
         return [{"txid": txid, "vout": 0, "address": address, "amount": float(amount), "confirmations": confirmations}]
 
-    def find_deposits_to_address(self, address: str, tx_limit: int = 500, settled_txids=frozenset()):
+    def find_deposits_to_address(self, address: str, tx_limit: int = 500, skip_txids=frozenset()):
         """Credits to one address, as deposit events. ONE `listtransactions` call.
 
         A docstring at all is new on 2026-10-01: this method had only inline

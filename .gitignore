@@ -40,3 +40,4 @@ id.json
 # everybody trusts, which is the wrong trade for the one component in this tree
 # whose failure mode is "the cryptography is wrong".
 tools/dleq_helper/dleq_helper
+.coverage

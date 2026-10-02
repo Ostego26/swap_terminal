@@ -112,6 +112,52 @@ def stranded_rows(drops, asset: str, *, confirmations: int = 0) -> list[Stranded
     ]
 
 
+def unattributable_txids(db, asset: str) -> frozenset[str]:
+    """Every txid already RECORDED as unattributable for this asset. For the deposit scan to skip.
+
+    THE 429 LEAK THIS CLOSES, measured on the operator's host across 2026-10-01
+    and 10-02. Two signatures sat in this table and the Solana scan re-read both
+    on every cycle, forever:
+
+        SOL deposit scan could not read transaction 5rHDrJYp... HTTP 429 ... SKIPPED it
+        SOL deposit scan could not read transaction 61otPXfy... HTTP 429 ... SKIPPED it
+        SOL deposit scan for CUBnQ5QB... read 5 of 7 listed transaction(s); 2 were unreadable
+
+    deposit_service.settled_txids() is a JOIN from deposit_events to swaps, so it
+    can only ever name a transaction that reached a swap. These never did -- that
+    is what unattributable MEANS -- so nothing could skip them, and the rate limit
+    they burned is what made a REAL deposit come back as "read 5 of 7".
+
+    WHY SKIPPING FOREVER IS SAFE, and this is the part that had to be established
+    rather than assumed, because never looking at a deposit again is a decision
+    about somebody's money.
+
+    All four refusals in chains/solana_memo.deposit_tag_from() read ONLY the
+    transaction's memo instructions -- no memo, two memos, not an integer, outside
+    the allocator's range -- and a finalized transaction's memos cannot change. So
+    a rescan re-derives the identical verdict at the cost of one getTransaction.
+
+    AND THE ROW ALREADY HOLDS EVERYTHING A RESCAN WOULD LEARN: the amount, the
+    account it landed in, how many credits made it up, the confirmations, and the
+    adapter's own reason in its own words. A human matching one of these works
+    from the row, which is why the table exists; the chain is not the record here.
+
+    THE ONE CASE WHERE THE VERDICT COULD DIFFER is a widened allocator range --
+    TAG_MINIMUM..TAG_MAXIMUM is the only input to those four branches that is not
+    the transaction itself, so a memo once "outside the range" could later be
+    inside one. That is a code change, not a chain event, and the recourse is the
+    row rather than a rescan: it names the discriminator it saw. Said here because
+    a future reader widening that range needs to know this set exists.
+
+    RESOLVED ROWS ARE INCLUDED. A resolved deposit has been dealt with by a human,
+    which is a stronger reason not to re-read it than an open one.
+    """
+    rows = db.execute(
+        "SELECT txid FROM unattributable_deposits WHERE asset = ?", (asset,)
+    ).fetchall()
+    return frozenset(str(row["txid"]) for row in rows)
+
+
 def record(db, rows, *, now: str) -> int:
     """Write or touch one row per stranded deposit. Returns how many were NEW.
 
