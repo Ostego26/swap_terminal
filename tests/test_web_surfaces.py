@@ -18,7 +18,9 @@ swap_display() and asserted on the dict would pass through every one of those.
 So: seed rows, ask the app for the page, and assert on the bytes it returned.
 """
 
+import html
 import logging
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -165,9 +167,14 @@ def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(clien
     assert listed == len(allowed), f"{len(allowed)} pairs allowed, {listed} listed on the page"
     # The markup, not the bare word: the panel-note above the list explains what
     # DISABLED means, so a substring test would pass on the explanation alone.
-    assert 'badge-word">DISABLED<' in body, "an unreachable pair must be badged DISABLED, not ENABLED"
-    assert 'badge-word">ENABLED<' in body, "a reachable pair must still be badged ENABLED"
-    assert "pair-off" in body, "a DISABLED pair must carry admin.html's own pair-off marker"
+    # THE WORDS CHANGED ON 2026-10-02 AND THE INVARIANT DID NOT. This page badged
+    # ENABLED or DISABLED -- two words for what pair_serviceability() answers in
+    # three states -- and now carries AVAILABLE / OFFLINE / UNAVAILABLE from
+    # services/pair_view.customer_availability(). What this test is about is that an
+    # unreachable pair is not marked like a reachable one, which is unchanged.
+    assert 'badge-word">OFFLINE<' in body, "an unreachable pair must not be marked available"
+    assert 'badge-word">AVAILABLE<' in body, "a reachable pair must still be marked available"
+    assert "swaptile-unreachable" in body, "an unreachable pair must be distinguishable at tile level"
 
 
 def test_a_disabled_pair_names_the_variable_that_would_enable_it(client, monkeypatch):
@@ -185,8 +192,27 @@ def test_a_disabled_pair_names_the_variable_that_would_enable_it(client, monkeyp
     # GRC is in an allowed pair and has no adapter here, so its variable must be
     # on the page. Read from the authority rather than spelled, for the same
     # reason the pair list is.
-    assert configuring_variable("GRC") in body, "the page must say what to set"
-    assert ".env" in body, (
+    # INVERTED ON 2026-10-02, AND THE INVERSION IS THE CHANGE. Operator instruction:
+    # "the user screen should just have graphical indicators to what's availble for
+    # them to swap." A customer has no shell on this host, cannot export anything,
+    # and this sentence names internal configuration -- its audience is the operator,
+    # who has /admin. It is also a small disclosure: this page is served on the same
+    # port as /admin, whose own banner says anyone who can reach it can read
+    # everything, and naming unset RPC variables to an unauthenticated reader has no
+    # upside.
+    #
+    # NOTHING LEFT THE SYSTEM'S REPORTING, which is what keeps this inside rule 14,
+    # and the second half ASSERTS that rather than trusting it: the variable has to
+    # be on /admin, where it renders once per asset in the Chains table.
+    assert configuring_variable("GRC") not in body, (
+        "the customer page must not name an environment variable: its reader has no shell here"
+    )
+    assert ".env" not in body, "and must not explain this server's configuration to a customer"
+    operator_page = client.get("/admin").get_data(as_text=True)
+    assert configuring_variable("GRC") in operator_page, (
+        "the variable left the customer page and did NOT arrive on the operator page"
+    )
+    assert ".env" in operator_page, (
         "the reason must say the value has to be in the PROCESS environment -- a "
         "value in a file only is the exact way this failed"
     )
@@ -771,7 +797,13 @@ def test_a_destination_that_cannot_pay_out_is_not_offered(client, monkeypatch):
     assert 'value="GRC:XRP"' not in body, (
         "XRP cannot pay out, so GRC -> XRP must not be offered -- a deposit into it is stranded"
     )
-    assert "pair-off" in body, "the unofferable pair must still be LISTED, with its reason"
+    assert "swaptile-unavailable" in body, (
+        "the unofferable pair must still be LISTED and marked unusable, not hidden"
+    )
+    assert "GRC &#8594; XRP" in body, (
+        "and it must still be NAMED: a pair that vanishes is indistinguishable from one that "
+        "was never configured, which is why this page lists unusable pairs at all"
+    )
 
 
 def test_the_reason_says_it_cannot_pay_rather_than_that_it_is_unreachable(client, monkeypatch):
@@ -789,7 +821,43 @@ def test_the_reason_says_it_cannot_pay_rather_than_that_it_is_unreachable(client
 
     body = client.get("/").get_data(as_text=True)
 
-    assert "cannot pay out in this test" in body, "the adapter's own refusal must reach the page"
+    # THE DISTINCTION SURVIVES AND IS NOW MACHINE-CHECKABLE. This asserted that the
+    # adapter's refusal SENTENCE reached the customer page, because prose was the
+    # only place the distinction lived. Since 2026-10-02 the page marks the two
+    # causes differently by STATE -- `unavailable` for a chain that cannot pay out at
+    # all, `unreachable` for one merely not reachable from this process -- so the same
+    # distinction is asserted on the rendered state instead of on a sentence. That is
+    # stronger: a reworded sentence cannot break it and a wrong state cannot pass it.
+    #
+    # BOTH CAUSES ARE IN THIS ONE RENDER, which is what makes it a test of the
+    # distinction rather than of one case: XRP has an adapter and holds no signing
+    # key, and BTC has no adapter at all.
+    states = {
+        html.unescape(re.sub(r"\s+", " ", label)).strip(): state
+        for state, label in re.findall(
+            r'<li class="swaptile swaptile-([a-z]+)">\s*<span class="pair-label">(.*?)</span>',
+            body, flags=re.DOTALL,
+        )
+    }
+    into_xrp = states.get("GRC → XRP")
+    offline_pair = states.get("BTC → GRC")
+    assert into_xrp == "unavailable", (
+        f"GRC -> XRP is marked {into_xrp!r}; a chain that holds no signing key is not merely "
+        f"offline, and telling a customer to come back later would be a promise nothing keeps"
+    )
+    assert offline_pair == "unreachable", (
+        f"BTC -> GRC is marked {offline_pair!r}; BTC has no adapter here, which is offline"
+    )
+    assert into_xrp != offline_pair, (
+        "cannot-pay-out and not-reachable render the same marker, so a customer cannot tell "
+        "whether coming back later would help"
+    )
+    # The adapter's own refusal still has to reach an operator, so it has to be on
+    # /admin -- per asset, in the Chains table's can send / can receive column.
+    operator_page = client.get("/admin").get_data(as_text=True)
+    assert "cannot pay out in this test" in operator_page, (
+        "the adapter's refusal left the customer page and did NOT arrive on the operator page"
+    )
     assert "XRP_RPC_URL is unset" not in body, (
         "XRP IS configured here; naming its endpoint variable would be the wrong remedy"
     )
@@ -1281,7 +1349,7 @@ def test_the_tag_chain_instruction_states_the_amount(client):
     panel at all -- a SOL customer was told where and what memo, and had to scroll
     past the status rail to the figures list for how much.
 
-    It matters beyond labelling: deposit_service halts a swap whose confirmed amount
+    It matters beyond labeling: deposit_service halts a swap whose confirmed amount
     falls outside AMOUNT_TOLERANCE_PCT, and a halt waits for a person.
     s_612fac62489f2122 has sat in under_review since 2026-09-26 for exactly that.
 

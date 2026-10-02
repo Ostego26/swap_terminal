@@ -617,6 +617,61 @@ button:disabled {
 }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .pair-off { opacity: 0.8; border-style: dashed; }
+
+/* --- the customer's availability indicators --------------------------------
+ *
+ * Operator instruction 2026-10-02: "the user screen should just have graphical
+ * indicators to what's availble for them to swap." One tile per allowed
+ * direction, each carrying the pair, a badge and one sentence.
+ *
+ * `minmax(15rem, 1fr)` AND NOT A PIXEL FLOOR, which is the one place on this page
+ * that should scale with the reader's text size rather than against it: a tile's
+ * width is set by its longest line of WORDS, so a reader at 200% text gets fewer,
+ * wider tiles instead of three columns of two-word lines. 15rem is 240px at the
+ * default size, so a 360px phone gets one column with its 16px gutters intact --
+ * which is the requirement, and it falls out of the floor rather than needing a
+ * media query to enforce it.
+ *
+ * THE STATE IS A SHAPE AND A WORD BEFORE IT IS A COLOR. The badge inside each tile
+ * carries a glyph and a word (templates/_badges.html), so these read in grayscale
+ * and in a paste; the border treatments below are the third channel, and they are
+ * the same ones .status-card uses for the same states so a reader who has seen one
+ * page recognizes the other.
+ */
+.swapgrid {
+  list-style: none;
+  margin: 0 0 var(--s3);
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--s2);
+}
+
+/* A ROW, not a stack: the pair and its marker sit side by side with the marker
+ * pushed to the right edge, so a column of tiles has its markers aligned and the
+ * grid can be read down rather than tile by tile. `flex-wrap` so a long pair and
+ * a long word still fit at 360px by wrapping inside the tile instead of widening
+ * it. */
+.swaptile {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-left-width: 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.swaptile .pair-label { font-size: var(--t-md); }
+
+/* Solid for ready, dashed for waiting, heavy for stopped -- the same vocabulary
+ * as .level-ok / .level-waiting / .level-halted on the swap status page. */
+.swaptile-available { border-left-color: var(--ok); }
+.swaptile-unreachable { border-left-color: var(--waiting); border-left-style: dashed; }
+.swaptile-unavailable { border-left-color: var(--halted); background: var(--bg-sunken); }
 .pair-label { font-weight: 650; }
 .chip {
   display: inline-flex;

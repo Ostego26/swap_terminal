@@ -176,6 +176,101 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
     return rows
 
 
+#: WHAT A CUSTOMER IS TOLD, as a table rather than as branches in a template.
+#:
+#: Operator instruction 2026-10-02: "the user screen should just have graphical
+#: indicators to what's availble for them to swap."
+#:
+#: THREE STATES AND NOT THE OPERATOR'S FOUR. services/admin_view.pair_rows() has
+#: enabled / unreachable / cannot_complete / disabled, and the fourth exists only
+#: because that page shows every ordered pair including the ones NOT in
+#: ALLOWED_PAIRS. This page lists the allowed pairs only, so there is no such row
+#: to describe and a fourth state here would be vocabulary copied because it
+#: exists.
+#:
+#: WHY TWO UNAVAILABLE STATES AND NOT ONE, which is the judgment call in this
+#: table. A customer deciding whether to come back later is asking a different
+#: question from a customer deciding whether to pick another pair, and the two
+#: causes answer it differently:
+#:
+#:   `missing`      no adapter for a chain in THIS server process. That is a
+#:                  configuration or a daemon, and it is the kind of thing that
+#:                  changes without a release. "Not reachable right now" is true
+#:                  and useful.
+#:   cannot_pay /   the destination holds no signing key, or the source has no
+#:   cannot_take    deposit account. Neither changes while this server runs as it
+#:                  is. Telling that customer to come back later would be a
+#:                  promise nothing is going to keep.
+#:
+#: NEITHER NOTE PROMISES ANYTHING AND NEITHER NAMES A VARIABLE. "Not reachable
+#: right now" is a statement about now, not a forecast; the operator-facing
+#: remedy ("export BTC_RPC_PORT in the shell that starts the server") has moved
+#: to /admin entirely, where its reader is and where that reader has a shell.
+#:
+#: The GLYPHS are templates/_badges.html's existing ones, reused rather than
+#: invented: a check, an ellipsis and a filled square are three distinct SHAPES,
+#: so the indicator survives a grayscale paste and a screen reader reads the word
+#: beside each one. Color is the third channel here as it is everywhere else on
+#: these pages.
+_CUSTOMER_AVAILABILITY = {
+    "available": {
+        "available": True,
+        "level": "ok",
+        "word": "AVAILABLE",
+        "note": "Ready to quote now.",
+    },
+    "unreachable": {
+        "available": False,
+        "level": "waiting",
+        "word": "OFFLINE",
+        "note": "One of these two chains is not reachable from this server right now.",
+    },
+    "unavailable": {
+        "available": False,
+        "level": "halted",
+        "word": "UNAVAILABLE",
+        "note": "This terminal cannot complete this direction.",
+    },
+}
+
+
+#: The three states in reading order, for the page's key. DERIVED from the table
+#: above rather than spelled a second time: a legend that listed them by hand would
+#: be rule 8's shape, and the first thing to drift would be a state the key does not
+#: explain -- which is a glyph a customer cannot look up.
+CUSTOMER_STATES = tuple(
+    {"key": key, **value} for key, value in _CUSTOMER_AVAILABILITY.items()
+)
+
+
+def customer_availability(row: dict) -> dict:
+    """What to show a CUSTOMER for one pair row. The only place that decides it.
+
+    Takes a row from allowed_pair_rows() -- so the verdict is
+    pair_serviceability()'s and is not re-derived here, which is the arrangement
+    the 2026-10-02 defect was about: a second evaluation of this verdict had
+    /admin and / disagreeing about the same pair in one process.
+
+    A FUNCTION AND NOT BRANCHES IN THE TEMPLATE (rule 10). "What does a customer
+    see for this pair" is a decision, and a decision in a template cannot be
+    called with seeded inputs -- which is precisely how the customer page came to
+    badge a reachable-but-unpayable pair DISABLED while /admin called it
+    CANNOT COMPLETE: templates/index.html had `'ENABLED' if pair.enabled else
+    'DISABLED'`, a binary, and nothing could test the third case because there
+    was nowhere for it to live.
+
+    `key` is returned so a caller can style or group on the state without
+    re-deriving it from the booleans.
+    """
+    if row["enabled"]:
+        key = "available"
+    elif row["missing"]:
+        key = "unreachable"
+    else:
+        key = "unavailable"
+    return {"key": key, **_CUSTOMER_AVAILABILITY[key]}
+
+
 def offerable_pairs(rows: list[dict]) -> list[dict]:
     """The rows a caller may actually OFFER: allowed, and both chains reachable.
 

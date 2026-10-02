@@ -298,7 +298,8 @@
   <div class="scroll-x">
   <table>
     <thead><tr><th scope="col">asset</th><th scope="col">configured</th><th scope="col">tradeable</th>
-      <th scope="col">attribution</th><th scope="col">threshold</th>
+      <th scope="col">attribution</th><th scope="col">can send / can receive</th>
+      <th scope="col">threshold</th>
       <th scope="col">endpoint, and what is unset</th></tr></thead>
     <tbody>
       {% for row in data.chains %}
@@ -311,6 +312,28 @@
             already said the application has not decided. A blank would be ambiguous
             between that and a lost value (rule 14). -#}
         <td class="breakable"><code>{{ row.attribution }}</code><br><span class="subtle">{{ row.attribution_detail or '(nothing specific to this chain)' }}</span></td>
+        {#- THE TWO ENDS OF A SWAP, PER CHAIN. An asset that cannot pay out cannot
+            pay out in any pair, so this is the row that answers "why is XRP off
+            everywhere" -- which an operator was previously answering by reading
+            twelve pair verdicts. "can send" is whether a deposit can be taken FROM
+            this chain (services/swap_service.why_cannot_take_deposits); "can
+            receive" is whether a payout can be made TO it
+            (chains/registry.why_cannot_pay_out). Both are the authorities the pair
+            verdict itself uses, so a row here cannot disagree with a cell in the
+            matrix below.
+
+            YES IS A READING AND SO IS NO, and the refusal sentence renders beside
+            the NO rather than only its existence -- that sentence names the signing
+            key or the unset account, and until 2026-10-02 it was reachable only
+            from the CUSTOMER page, whose reader cannot act on it. -#}
+        <td class="breakable">
+          <span class="subtle">send</span>
+          {{ badges.level_badge('halted' if row.cannot_take else 'ok', 'NO' if row.cannot_take else 'YES') }}
+          {% if row.cannot_take %}<br><span class="subtle">{{ row.cannot_take }}</span>{% endif %}
+          <br><span class="subtle">receive</span>
+          {{ badges.level_badge('halted' if row.cannot_pay else 'ok', 'NO' if row.cannot_pay else 'YES') }}
+          {% if row.cannot_pay %}<br><span class="subtle">{{ row.cannot_pay }}</span>{% endif %}
+        </td>
         <td class="breakable">{{ row.threshold_note }}</td>
         {#- WHY IT IS UNCONFIGURED LIVES HERE NOW, once per asset. It used to be
             reachable only through the Trading pairs panel four panels down, where
@@ -510,7 +533,19 @@
     <tbody>
       <tr>
         <th scope="row">{{ badges.level_badge('ok', 'ENABLED') }}</th>
-        <td>In <code>Config.ALLOWED_PAIRS</code>, and both chains have an adapter in this process.</td>
+        {#- ALL THREE CONDITIONS, CORRECTED 2026-10-02. This said "and both chains
+            have an adapter in this process", which was the TWO-condition verdict
+            services/admin_view.pair_rows() used before it started reading
+            pair_view.pair_serviceability(). The verdict gained a third condition in
+            the same commit and this sentence did not, so the page defined ENABLED as
+            something weaker than what it takes to be badged ENABLED -- a wrong
+            sentence on the page an operator uses to decide (rule 16), introduced by
+            the commit that fixed the verdict and found by auditing the customer
+            page's reasons against this one. -#}
+        <td>In <code>Config.ALLOWED_PAIRS</code>, both chains have an adapter in this process, the source can
+           take a deposit and the destination can pay out. All three, which is what
+           <code>pair_serviceability()</code> checks &#8212; the <strong>can send / can receive</strong> column
+           in <a href="#chains-heading">Chains</a> above is the per-chain half of it.</td>
       </tr>
       <tr>
         <th scope="row">{{ badges.level_badge('slow', 'UNREACHABLE') }}</th>

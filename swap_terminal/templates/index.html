@@ -50,53 +50,105 @@
 
 <section class="panel" aria-labelledby="pairs-heading">
   <h2 id="pairs-heading">What can be swapped right now</h2>
-  <p class="panel-note">Read from <code>Config.ALLOWED_PAIRS</code> <em>and</em> from the chain adapters this server
-     process actually built, when this page was built. A pair needs both: ALLOWED_PAIRS is what this terminal
-     is willing to swap, and an adapter is what it can reach. A pair marked DISABLED is allowed but
-     unreachable &#8212; the reason beside it says what to set. The form below offers only the enabled ones.</p>
+  {#- THE OLD NOTE WAS FALSE ABOUT TWO OF ITS OWN ROWS, and that is the smaller half
+      of why this panel changed. It read "A pair marked DISABLED is allowed but
+      unreachable -- the reason beside it says what to set." XRP is REACHABLE and both
+      XRP pairs were badged DISABLED, so the sentence described neither of them; and
+      "says what to set" was wrong too, because nothing can be set to give XRP a
+      signing key -- the reason itself said "Nothing in a .env can arm it". Rule 16
+      counts a wrong comment as a bug, and a wrong sentence on a customer-facing page
+      is worse than one in a docstring.
+
+      It also described this page's own internals to its reader. What replaces it says
+      what a customer can do and where the detail lives, and names no setting. -#}
+  <p class="panel-note">Checked against this server when the page was built. An indicator says whether a
+     direction can be quoted right now; the form below offers exactly the ones marked available, so what you
+     see here and what you can pick cannot differ.</p>
   {% if pairs %}
-  {#- TABULATED 2026-10-02 on the operator's brief, "it's too spread out and needs to
-      be tabulated and boxed". This was a `.pair-list`, which is
-      `display: flex; flex-wrap: wrap` -- six pills of varying width reflowing across
-      however many rows the viewport allowed, each pill carrying a direction, a badge
-      and (only when disabled) a reason. So the badges landed at a different x on every
-      pill, nothing could be read down a column, and the reason for a DISABLED pair
-      appeared inline in the middle of a wrapping row where the next pill began
-      immediately after it.
+  {#- GRAPHICAL INDICATORS, 2026-10-02. Operator instruction, verbatim: "the user
+      screen should just have graphical indicators to what's availble for them to
+      swap."
 
-      Three columns answer the three questions in order: what direction, is it
-      available, and if not what to set. Every value in a column starts at the same x
-      because a table cell is what guarantees that.
+      WHAT LEFT THIS PAGE AND WHY IT IS NOT A RULE 14 DELETION. The third column of
+      the table this replaces rendered services/pair_view's `reason`, which for an
+      unreachable chain is chains/registry.why_unconfigured():
 
-      THE STATUS COLUMN IS NOT COLOR, AND THE SAME BADGE MACRO STILL DRAWS IT. The
-      level was the literal 'ok' and the label the literal 'ENABLED' until 2026-09-26,
-      so every allowed pair claimed to work whether or not a single chain was
-      configured; both still come from the row.
+          BTC has no adapter in this process: BTC_RPC_PORT, BTC_RPC_USER and
+          BTC_RPC_PASS are unset (or 0) in the environment this process was started
+          with. Nothing in the serving path reads a .env, so it has to be exported in
+          the shell that starts the server ...
 
-      `pair-off` is kept as the row's marker rather than a new class name: admin.html
-      already renders a disabled pair with it, and a second vocabulary for one state is
-      rule 8 with a stylesheet attached. -#}
-  <div class="scroll-x">
-  <table>
-    <thead><tr><th scope="col">direction</th><th scope="col">status</th><th scope="col">what would change it</th></tr></thead>
+      A CUSTOMER CANNOT ACT ON ONE WORD OF THAT. They have no shell on this machine,
+      they cannot export anything, and the sentence names internal configuration. Its
+      audience is the operator, and the operator has /admin -- where, since the
+      2026-10-02 pass, it renders once per asset in the Chains table rather than once
+      per pair. The distinction that makes this safe is AUDIENCE, not brevity:
+      nothing left the SYSTEM's reporting.
+
+      AUDITED RATHER THAN ASSUMED, across the four scenarios that produce each branch
+      of allowed_pair_rows(): every reason this page rendered was searched for in the
+      rendered /admin. Two were reachable ONLY here -- why_cannot_pay_out()'s and
+      why_cannot_take_deposits()'s sentences -- and both were added to /admin's Chains
+      table, per asset, in the same commit as this change, BEFORE they left here.
+
+      AND IT WAS A SMALL DISCLOSURE. That paragraph told an unauthenticated reader
+      which RPC variables are unset on this host. /admin's own banner says anyone who
+      can reach this port can read it; the customer page is on the same port. Naming
+      internal configuration gaps to a customer has no upside, and I agree with that
+      reading of it -- though the instruction stands either way.
+
+      THE INDICATOR IS A SHAPE AND A WORD BEFORE IT IS A COLOR, which is this
+      stylesheet's rule everywhere and matters most here: check / ellipsis / filled
+      square are three distinct glyphs from templates/_badges.html, reused rather than
+      invented, so the tiles are legible in grayscale, in a paste, and to a screen
+      reader reading the word beside each glyph.
+
+      THREE STATES, decided in services/pair_view.customer_availability() and not
+      here -- a template is where a decision cannot be called with seeded inputs, and
+      this page's previous `'ENABLED' if pair.enabled else 'DISABLED'` was a binary
+      with nowhere for a third case to live, which is exactly how it came to badge a
+      reachable-but-unpayable pair DISABLED while /admin called it CANNOT COMPLETE. -#}
+  {#- THE KEY, ONCE PER STATE. Iterated from services/pair_view.CUSTOMER_STATES so a
+      state cannot exist without an entry here explaining it -- a glyph with no key is
+      a glyph a customer cannot look up, and this page had exactly that problem in the
+      other direction until 2026-10-02, when it had two words for three states. -#}
+  <table class="kvt">
+    <caption class="subbox-title">What the markers mean</caption>
     <tbody>
-      {% for pair in pairs %}
-      <tr class="{% if not pair.enabled %}pair-off{% endif %}">
-        <td><span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span></td>
-        <td>{{ badges.level_badge('ok' if pair.enabled else 'halted', 'ENABLED' if pair.enabled else 'DISABLED') }}</td>
-        {#- AN ENABLED PAIR'S CELL IS NOT BLANK. In the pill layout the reason simply
-            did not render for a working pair, which a flex row absorbed invisibly. A
-            table cell does not absorb it: an empty third column is ambiguous between
-            "nothing to report" and "the reason was lost", and a column of five blanks
-            beside one sentence reads as five broken rows (rule 14). So an enabled pair
-            states the thing that is true of it, which is that no setting is missing. -#}
-        <td class="breakable">{% if pair.enabled %}<span class="empty-mark">(nothing)</span>
-          <span class="subtle">both chains reachable; this pair is offered below</span>{% else %}<span class="subtle">{{ pair.reason }}</span>{% endif %}</td>
+      {% for state in customer_states %}
+      <tr>
+        <th scope="row">{{ badges.level_badge(state.level, state.word) }}</th>
+        <td>{{ state.note }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
-  </div>
+  <ul class="swapgrid">
+    {% for pair in pairs %}
+    {#- ONE LINE PER TILE, AND THE SENTENCE IS NOT ON IT. The first version carried
+        pair.customer.note inside every tile, and a paste of thirteen tiles then held
+        "One of these two chains is not reachable from this server right now." eleven
+        times -- the same once-per-row duplication this session removed from /admin,
+        reintroduced on the page with the least room for it. The sentence is per
+        STATE, so it is in the key above, once each.
+
+        NOTHING IS BLANK AND "available" IS NOT AN ABSENCE: the badge carries a glyph
+        AND a word for all three states, so a tile's content is the same shape
+        whichever state it is in, and the key explains every word that can appear.
+
+        A span rather than a block for the pair, so the tile is one line in a paste:
+        "BTC -> GRC ✓AVAILABLE". With a block it was three. -#}
+    <li class="swaptile swaptile-{{ pair.customer.key }}">
+      <span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
+      {{ badges.level_badge(pair.customer.level, pair.customer.word) }}
+    </li>
+    {% endfor %}
+  </ul>
+  {#- A COUNT WITH ITS DENOMINATOR (rule 3), because "1 direction available" and
+      "1 of 13" are different readings and only the second says whether something is
+      wrong. The per-state meanings are in the key above and are not repeated here. -#}
+  <p class="panel-note"><strong>{{ pairs | selectattr('customer.available') | list | length }} of
+     {{ pairs | length }}</strong> directions can be quoted right now.</p>
   {% else %}
     {{ badges.empty('trading pair is enabled', 'Config.ALLOWED_PAIRS on the server') }}
     <p class="panel-note">Nothing can be swapped until an operator enables a pair. The form below is disabled

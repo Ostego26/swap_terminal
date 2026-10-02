@@ -64,7 +64,7 @@ from time import time
 
 from chains.base import RPCAdapter
 from chains.daemon_network import chain_network, is_named
-from chains.registry import why_unconfigured
+from chains.registry import why_cannot_pay_out, why_unconfigured
 from microfortnights import format_duration
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
@@ -74,7 +74,7 @@ from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 # module knew one of the three conditions pair_view has had since 2026-10-01.
 from .helpers import parse_iso, utc_now_iso
 from .pair_view import pair_serviceability
-from .swap_service import TAG_ATTRIBUTION
+from .swap_service import TAG_ATTRIBUTION, why_cannot_take_deposits
 from .swap_view import (
     ADDRESS_DERIVATIONS,
     ATTRIBUTION_MODELS,
@@ -691,6 +691,20 @@ def chain_rows(config, adapters: dict) -> list[dict]:
                 # address chains shared the "a fresh address per swap, and the
                 # address IS the attribution" opener and two tag chains shared
                 # the whole tag sentence bar two words.
+                # THE TWO ENDS, PER ASSET, ADDED 2026-10-02. Both were reachable
+                # only through a PAIR before this -- pair_view's `reason` on the
+                # customer page and pair_rows()'s short_detail in the matrix cell --
+                # and both are facts about one chain, not about a pair. An asset
+                # that cannot pay out cannot pay out in any pair, and the operator
+                # asking "why is XRP off everywhere" was reading twelve pair rows
+                # for one answer.
+                #
+                # THE SAME TWO AUTHORITIES THE VERDICT USES, called directly rather
+                # than re-derived: chains/registry.why_cannot_pay_out() and
+                # services/swap_service.why_cannot_take_deposits(). "" means the
+                # chain can, which is what both functions return for no refusal.
+                "cannot_pay": why_cannot_pay_out(adapters, asset),
+                "cannot_take": why_cannot_take_deposits(config, adapters, asset),
                 "attribution_model_note": attribution_model_note(model),
                 "attribution_detail": attribution_asset_detail(asset),
                 "threshold": threshold,

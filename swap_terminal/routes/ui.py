@@ -70,7 +70,12 @@ not own it.
 from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from services.helpers import utc_now_iso
-from services.pair_view import allowed_pair_rows, offerable_pairs
+from services.pair_view import (
+    CUSTOMER_STATES,
+    allowed_pair_rows,
+    customer_availability,
+    offerable_pairs,
+)
 from services.swap_service import get_swap
 from services.swap_view import swap_display
 
@@ -80,6 +85,19 @@ bp = Blueprint("ui", __name__)
 @bp.get("/")
 def index():
     pairs = allowed_pair_rows(current_app.config, current_app.config["ADAPTERS"])
+    # WHAT A CUSTOMER IS SHOWN, attached here and decided in
+    # services/pair_view.customer_availability() -- not branched on in the
+    # template. Operator instruction 2026-10-02: "the user screen should just have
+    # graphical indicators to what's availble for them to swap." The template had
+    # `'ENABLED' if pair.enabled else 'DISABLED'`, a binary with nowhere for a
+    # third case to live, which is why it badged a reachable-but-unpayable pair
+    # DISABLED while /admin called it CANNOT COMPLETE in the same process.
+    #
+    # ONE INDICATOR PER ROW, derived from the row the verdict already produced, so
+    # the tiles cannot disagree with `offerable` below. The agreement is asserted
+    # in tests/test_customer_page_layout.py rather than left to inspection.
+    for row in pairs:
+        row["customer"] = customer_availability(row)
     # The select iterates `offerable`; the list iterates `pairs`. Two names for two
     # jobs, filtered in Python rather than in the template so the rule stays where a
     # test can call it -- and through services/pair_view.offerable_pairs(), which
@@ -89,6 +107,7 @@ def index():
     return render_template(
         "index.html",
         pairs=pairs,
+        customer_states=CUSTOMER_STATES,
         offerable=offerable,
         quote_ttl_seconds=current_app.config["QUOTE_TTL_SECONDS"],
         fee_bps=current_app.config["DEFAULT_FEE_BPS"],

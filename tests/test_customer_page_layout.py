@@ -48,7 +48,7 @@ from db import SCHEMA, dict_factory
 # place. A second copy here would agree on the day it was written and drift the
 # first time that gate changes, which is the failure mode that rule is about.
 from services.admin_view import chain_rows, pair_assets, pair_matrix, pair_rows
-from services.pair_view import allowed_pair_rows
+from services.pair_view import CUSTOMER_STATES, allowed_pair_rows
 from services.swap_view import ATTRIBUTION_MODELS
 from test_web_surfaces import StubAdapter, cold_price_cache, fully_reachable, with_deposit_accounts
 from valid_addresses import GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
@@ -166,37 +166,69 @@ def value_for(markup: str, label: str) -> str:
 # --- every box renders, and every box has a heading ------------------------
 
 
-def test_the_swap_form_lists_its_pairs_as_a_table_with_column_headings(client):
-    """The pair list is a table, and its three columns are named.
+def test_every_allowed_direction_gets_exactly_one_indicator(client):
+    """One tile per allowed direction, each naming the direction.
 
-    It was a `.pair-list`, which is `display: flex; flex-wrap: wrap` -- pills of
-    varying width reflowing across the viewport, so the badge landed at a
-    different x on every one and nothing could be read down a column.
+    THIS TEST PINNED A TABLE UNTIL 2026-10-02 and the table was the previous
+    answer to the previous brief ("tabulated and boxed"). The operator then asked
+    for "graphical indicators to what's availble for them to swap", so the three
+    columns -- direction, status, what would change it -- became a grid of tiles
+    and the third column's operator-facing prose left the page entirely.
+
+    What survives from the old assertion is the half that is not about the layout:
+    one indicator per allowed direction, no direction missing, and the direction
+    still NAMED. A pair that is silently absent is indistinguishable from one that
+    was never configured, which is the reason this page lists unusable pairs at
+    all.
     """
     body = client.get("/").get_data(as_text=True)
-    for heading in ("direction", "status", "what would change it"):
-        assert f">{heading}</th>" in body, f"the pair table lost its {heading!r} column heading"
     allowed = client.application.config["ALLOWED_PAIRS"]
-    rendered = body.count('class="pair-label"')
-    assert rendered == len(allowed), (
-        f"{len(allowed)} pairs are allowed and the table rendered {rendered} direction cells"
+    tiles = re.findall(r'<li class="swaptile swaptile-([a-z]+)">(.*?)</li>', body, flags=re.DOTALL)
+    assert len(tiles) == len(allowed), (
+        f"{len(allowed)} directions are allowed and the page drew {len(tiles)} indicators"
+    )
+    named = {
+        html.unescape(re.sub(r"\s+", " ", re.search(r'<span class="pair-label">(.*?)</span>', inner,
+                                                    flags=re.DOTALL).group(1))).strip()
+        for _, inner in tiles
+    }
+    assert named == {f"{source} \u2192 {destination}" for source, destination in allowed}, (
+        f"the indicators name {sorted(named)}"
     )
 
 
-def test_an_enabled_pairs_reason_cell_is_not_a_blank(client, monkeypatch):
-    """A table cell that could be empty says what is true of it instead.
+def test_no_indicator_is_blank_and_every_marker_it_uses_is_explained(client, monkeypatch):
+    """A tile is never an absence, and no glyph appears that the key does not define.
 
-    In the pill layout the reason simply did not render for a working pair and a
-    flex row absorbed the absence invisibly. A table cell does not: a column of
-    five blanks beside one sentence reads as five broken rows, and rule 14 is
-    explicit that a blank gap is ambiguous between "nothing to report" and "the
-    query broke".
+    THIS TEST PINNED A TABLE CELL UNTIL 2026-10-02: in the pill layout before that,
+    a working pair's reason simply did not render and a flex row absorbed the
+    absence, so the table version made it say "(nothing) both chains reachable".
+    The tiles carry no per-row sentence at all -- it was one sentence repeated
+    eleven times in a paste, which is the duplication this session removed from
+    /admin and would have reintroduced here.
+
+    So the invariant moves up a level and gets stronger: a tile's content is a
+    glyph AND a word for every state, which is the same SHAPE whichever state it
+    is in, so "available" is never the absence of something. And every word a tile
+    can show is defined in the key above it, iterated from the one table that
+    defines the states -- a marker with no key entry is a marker a customer cannot
+    look up.
     """
     allowed = client.application.config["ALLOWED_PAIRS"]
     fully_reachable(client, monkeypatch, *{asset for pair in allowed for asset in pair})
     body = client.get("/").get_data(as_text=True)
-    assert "(nothing)" in body, "an enabled pair rendered an empty third column"
-    assert "both chains reachable" in body, "and it must say WHY there is nothing to report"
+
+    tiles = re.findall(r'<li class="swaptile swaptile-[a-z]+">(.*?)</li>', body, flags=re.DOTALL)
+    assert tiles, "no indicator rendered at all"
+    for inner in tiles:
+        assert '<span class="badge-glyph"' in inner, "a tile carries no glyph, so it fails in grayscale"
+        word = re.search(r'<span class="badge-word">(.*?)</span>', inner, flags=re.DOTALL)
+        assert word and word.group(1).strip(), "a tile carries no word, so it fails for a screen reader"
+        # The key has to define it. Two occurrences: the key row and this tile.
+        assert body.count(f'badge-word">{word.group(1).strip()}<') >= 2, (
+            f"{word.group(1).strip()!r} appears on a tile and is not in the key above it"
+        )
+    assert "What the markers mean" in body, "the key has no heading"
 
 
 def test_the_terms_box_puts_the_three_scattered_figures_in_one_table(client):
@@ -1075,7 +1107,7 @@ def _paste(markup: str) -> str:
 
 
 def _panel(markup: str, heading_id: str) -> str:
-    """Exactly the <section> labelled by `heading_id`, matched by section depth.
+    """Exactly the <section> labeled by `heading_id`, matched by section depth.
 
     A regex cannot do this: the Chains panel nests a `.probe` block and the
     sections are not self-closing, so `<section.*?</section>` stops at the first
@@ -1089,7 +1121,7 @@ def _panel(markup: str, heading_id: str) -> str:
         depth += 1 if match.group(0) != "</section>" else -1
         if depth == 0:
             return markup[start : start + match.end()]
-    raise AssertionError(f"the section labelled {heading_id} is never closed")
+    raise AssertionError(f"the section labeled {heading_id} is never closed")
 
 
 def test_the_matrix_is_a_real_table_in_two_axes(client):
@@ -1310,3 +1342,257 @@ def test_a_probe_panel_with_nothing_to_contact_says_that_rather_than_naming_zero
     assert "nothing to\n     contact" in reachability or "nothing to contact" in re.sub(
         r"\s+", " ", reachability
     )
+
+
+# --- the customer's availability indicators ---------------------------------
+#
+# Operator instruction 2026-10-02, verbatim: "the user screen should just have
+# graphical indicators to what's availble for them to swap."
+#
+# The page was a three-column table whose third column rendered
+# chains/registry.why_unconfigured() per pair -- a paragraph naming which RPC
+# variables are unset and telling the reader to export them in the shell that
+# starts the server. A customer has no shell on this host. The audience for that
+# text is the operator, who has /admin.
+
+
+def _tiles(body):
+    """Each indicator as (state key, direction, badge word)."""
+    found = []
+    for state, inner in re.findall(r'<li class="swaptile swaptile-([a-z]+)">(.*?)</li>', body, flags=re.DOTALL):
+        label = re.search(r'<span class="pair-label">(.*?)</span>', inner, flags=re.DOTALL)
+        word = re.search(r'<span class="badge-word">(.*?)</span>', inner, flags=re.DOTALL)
+        found.append((
+            state,
+            html.unescape(re.sub(r"\s+", " ", label.group(1)).strip()) if label else "",
+            word.group(1).strip() if word else "",
+        ))
+    return found
+
+
+def test_no_operator_facing_remedy_text_reaches_the_customer_page(client, monkeypatch):
+    """THE CHANGE, ASSERTED AS AN ABSENCE, AND IT IS ALSO A DISCLOSURE FIX.
+
+    The removed paragraph told an unauthenticated reader which RPC variables are
+    unset on this host, on the same port as /admin, whose own banner says anyone
+    who can reach it can read everything. I agree with that reading of it; the
+    instruction stands either way.
+
+    Asserted over the configuration's own variable names rather than a hardcoded
+    list, so a chain added later cannot leak a name this test never heard of.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {})
+    body = client.get("/").get_data(as_text=True)
+
+    for phrase in (
+        "_RPC_PORT", "_RPC_USER", "_RPC_PASS", "_RPC_URL", "_DEPOSIT_ACCOUNT",
+        ".env", "export", "adapter", "environment this process was started with",
+    ):
+        assert phrase not in body, f"the customer page names {phrase!r}, which its reader cannot act on"
+    for asset in client.application.config["RPC"]:
+        assert f"{asset}_RPC" not in body, f"{asset}'s RPC settings are named to a customer"
+
+
+def test_every_reason_that_left_the_customer_page_is_on_the_operator_page(client, monkeypatch):
+    """THE RULE 14 CHECK, and it is the condition this change had to meet.
+
+    Nothing may leave the system's reporting; what changed is which surface
+    carries it. So for each cause, the sentence a customer no longer sees has to
+    be findable on /admin -- and the two that were NOT there before this change
+    (why_cannot_pay_out()'s and why_cannot_take_deposits()'s) were added to the
+    Chains table, per asset, in the same commit.
+
+    Asked of both surfaces in ONE process, which is the only way the question
+    means anything: each page on its own looks internally consistent.
+    """
+    # Every chain reachable, no shared deposit accounts, XRP unable to sign: that
+    # renders all three causes at once.
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {
+        **{asset: StubAdapter(can_spend=True) for asset in ("BTC", "GRC", "LTC", "SOL")},
+        "XRP": StubAdapter(can_spend=False),
+    })
+    monkeypatch.setitem(client.application.config, "XRP_DEPOSIT_ACCOUNT", "")
+    monkeypatch.setitem(client.application.config, "SOL_DEPOSIT_ACCOUNT", "")
+
+    customer = client.get("/").get_data(as_text=True)
+    operator = client.get("/admin").get_data(as_text=True)
+    rows = allowed_pair_rows(client.application.config, client.application.config["ADAPTERS"])
+
+    causes = {row["cannot_pay"] for row in rows if row["cannot_pay"]}
+    causes |= {row["cannot_take"] for row in rows if row["cannot_take"]}
+    assert causes, "this fixture produced no refusal at all; the assertion would be vacuous"
+    for cause in causes:
+        assert cause not in customer, f"an operator-facing reason is still on the customer page: {cause!r}"
+        assert cause in operator, (
+            f"this reason is on NEITHER page, so it left the system's reporting: {cause!r}"
+        )
+
+
+def test_the_indicators_and_the_form_cannot_disagree(client, monkeypatch):
+    """A direction shown as available that the form does not offer is a new contradiction.
+
+    Exactly the kind removed between /admin and / earlier today, so it is pinned
+    rather than left to inspection: the set of directions marked available must be
+    the set of options the select renders, both ways.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {
+        "GRC": StubAdapter(can_spend=True), "XRP": StubAdapter(can_spend=False),
+    })
+    with_deposit_accounts(client, monkeypatch)
+    body = client.get("/").get_data(as_text=True)
+
+    marked = {direction for state, direction, _ in _tiles(body) if state == "available"}
+    offered = {
+        f"{source} → {destination}"
+        for source, destination in re.findall(r'<option value="([A-Z]+):([A-Z]+)"', body)
+    }
+    assert marked == offered, (
+        f"marked available but not offered: {sorted(marked - offered)}; "
+        f"offered but not marked available: {sorted(offered - marked)}"
+    )
+
+
+def test_an_offline_direction_and_an_unusable_one_are_different_markers(client, monkeypatch):
+    """A customer deciding whether to come back later needs these to differ.
+
+    `missing` is a chain this process cannot reach, which changes without a
+    release. cannot_pay / cannot_take do not change while this server runs as it
+    is, so telling that customer to come back later would be a promise nothing is
+    going to keep. Both causes are in one render here.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {
+        "GRC": StubAdapter(can_spend=True), "XRP": StubAdapter(can_spend=False),
+    })
+    with_deposit_accounts(client, monkeypatch)
+    states = {direction: state for state, direction, _ in _tiles(client.get("/").get_data(as_text=True))}
+
+    assert states.get("GRC → XRP") == "unavailable", (
+        f"a destination that holds no signing key is marked {states.get('GRC ' + chr(8594) + ' XRP')!r}"
+    )
+    assert states.get("BTC → GRC") == "unreachable", "a chain with no adapter here is offline"
+    assert states["GRC → XRP"] != states["BTC → GRC"], (
+        "the two causes share a marker, so a customer cannot tell whether to come back"
+    )
+
+
+def test_the_markers_are_legible_as_pasted_text(client, monkeypatch):
+    """THE CHECK THAT COULD HAVE VETOED THIS, applied to the indicators.
+
+    This operator reads these pages by pasting them back, so an indicator that is
+    a colored border and nothing else would have failed at their actual workflow.
+    Each tile pastes as ONE line -- the direction and then a glyph and a word --
+    and the key above pastes as three tab-separated lines. Measured: the panel is
+    twenty lines for thirteen directions.
+    """
+    monkeypatch.setitem(client.application.config, "ADAPTERS", {
+        "GRC": StubAdapter(can_spend=True), "XRP": StubAdapter(can_spend=False),
+    })
+    with_deposit_accounts(client, monkeypatch)
+    pasted = _paste(_panel(client.get("/").get_data(as_text=True), "pairs-heading"))
+    lines = pasted.splitlines()
+
+    for state, direction, word in _tiles(client.get("/").get_data(as_text=True)):
+        matching = [line for line in lines if line.startswith(direction)]
+        assert matching, f"{direction} ({state}) did not survive a paste at all"
+        assert len(matching) == 1, f"{direction} pasted as {len(matching)} lines: {matching}"
+        assert word in matching[0], (
+            f"{direction} pasted as {matching[0]!r}, which does not say whether it is usable"
+        )
+    # And the three markers are distinguishable from each other as text.
+    words = {word for _, _, word in _tiles(client.get("/").get_data(as_text=True))}
+    assert len(words) >= 2, "this fixture should render at least two different markers"
+    assert all(any(word in line for line in lines) for word in words)
+
+
+def test_the_tiles_are_one_column_at_phone_width():
+    """360px, which is the requirement, and it falls out of the floor.
+
+    The grid's floor is in `rem` rather than `px` deliberately: a tile's width is
+    set by its longest line of WORDS, so a reader at 200% text size gets fewer,
+    wider tiles instead of three columns of two-word lines. 15rem is 240px at the
+    default size, so two tracks need 480px plus a gap and cannot fit a 360px
+    screen with its gutters -- no media query required, and one mechanism rather
+    than a floor and a breakpoint that could disagree.
+
+    NOT BEHAVIORAL (rule 17): no browser here. It establishes the floor is big
+    enough, which is the thing a later change could break silently.
+    """
+    css = STYLESHEET.read_text()
+    rule = re.search(r"\.swapgrid\s*\{(.*?)\}", css, flags=re.DOTALL)
+    assert rule, "the indicator grid has no rule"
+    floor = re.search(r"minmax\((\d+(?:\.\d+)?)rem,\s*1fr\)", rule.group(1))
+    assert floor, f"the grid does not size its columns with a rem minmax: {rule.group(1)!r}"
+    pixels = float(floor.group(1)) * 16
+    assert 2 * pixels + 8 > 360 - 32, (
+        f"two {pixels:.0f}px tracks fit a 360px phone less its 16px gutters, so the tiles "
+        f"would be two columns there"
+    )
+
+
+def test_no_customer_facing_note_promises_a_chain_will_come_back():
+    """ADDED BECAUSE A MUTATION SURVIVED, and the claim it broke was mine.
+
+    services/pair_view.customer_availability()'s own comment says "neither note
+    promises anything and neither names a variable" -- and nothing checked the
+    first half. Rewriting the OFFLINE note to "Temporarily down, try again in a
+    few minutes" passed every other test in this file.
+
+    It matters more than tone. `missing` means no adapter for a chain in THIS
+    server process, and nothing in this application knows whether or when that
+    changes: it is a daemon somebody else starts or a variable somebody else
+    exports. A page that tells a customer to come back in a few minutes is making
+    a forecast out of a fact, which is the register rule 17 is about, aimed at a
+    customer instead of at the operator.
+
+    So the note may say what IS true now and may not say what WILL be. Asserted
+    over the table rather than over the rendered page, because the table is where
+    the words are chosen and a new state would get its note from the same place.
+    """
+
+    assert CUSTOMER_STATES, "the state table is empty, so there is nothing to show"
+    for state in CUSTOMER_STATES:
+        note = state["note"].lower()
+        for promise in (
+            "try again", "come back", "minutes", "shortly", "soon", "will be back",
+            "later", "wait a", "check back",
+        ):
+            assert promise not in note, (
+                f"the {state['key']!r} note promises something this application cannot know: "
+                f"{state['note']!r} contains {promise!r}"
+            )
+        # And no note may name a setting: that is the operator's text, not this page's.
+        for internal in ("_RPC", "_DEPOSIT_ACCOUNT", ".env", "export", "adapter"):
+            assert internal.lower() not in note, (
+                f"the {state['key']!r} note names {internal!r}, which its reader cannot act on"
+            )
+        assert note.strip(), f"the {state['key']!r} state has no note at all"
+
+
+def test_the_operator_legend_defines_ENABLED_as_all_three_conditions(client):
+    """ADDED BECAUSE A MUTATION SURVIVED, on a defect I introduced and then fixed.
+
+    /admin's state legend said ENABLED means "in Config.ALLOWED_PAIRS, and both
+    chains have an adapter in this process" -- which was the TWO-condition verdict
+    pair_rows() used before it started reading pair_view.pair_serviceability().
+    The verdict gained a third condition in that same commit and this sentence did
+    not, so the page defined ENABLED as something weaker than what it takes to be
+    badged ENABLED. Found by auditing the customer page's reasons against this
+    one, fixed, and then a mutation put it back without failing anything.
+
+    The three conditions are pair_serviceability()'s, so the legend has to name
+    all three or it is describing a different gate from the one that ran.
+    """
+    body = html.unescape(client.get("/admin").get_data(as_text=True))
+    legend = re.sub(
+        r"\s+", " ", body[body.index("What each state means") : body.index("Every ordered pair")]
+    )
+    for condition in (
+        "Config.ALLOWED_PAIRS",
+        "adapter in this process",
+        "can take a deposit",
+        "can pay out",
+    ):
+        assert condition in legend, (
+            f"the ENABLED legend does not name {condition!r}, so it defines ENABLED as something "
+            f"other than what pair_serviceability() checks"
+        )
