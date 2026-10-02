@@ -83,7 +83,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from chains.gridcoin import GridcoinAdapter
 from chains.registry import missing_settings
 from chains.solana import SolanaAdapter
-from chains.solana_units import SOL_DECIMALS, amount_to_base_units, base_units_to_amount
+from chains.solana_units import (
+    SOL_DECIMALS,
+    amount_to_base_units,
+    base_units_to_amount,
+    decimal_amount,
+)
 from config import Config
 from db import db_session
 from microfortnights import format_duration
@@ -353,18 +358,30 @@ def sender_funding(keypair: str, amount: float) -> SenderFunding:
         ))
 
     needed = amount_to_base_units(amount, SOL_DECIMALS) + FEE_HEADROOM_LAMPORTS
-    held = base_units_to_amount(lamports, SOL_DECIMALS)
+    # decimal_amount() ON EVERY FIGURE, not str() or an f-string's default.
+    # Measured on the operator's host 2026-10-02: this line printed
+    #
+    #     against 0.25005 needed (0.25 plus 5e-05 for the fee)
+    #
+    # because base_units_to_amount() returns a float and a float's repr goes
+    # exponential at both ends -- 0.00005 is str()'d as "5e-05". Scientific
+    # notation in a money figure, on the screen somebody reads immediately before
+    # sending. chains/solana_units.decimal_amount() already existed for exactly
+    # this (it was private to solana_pay.py, for the URI; see its docstring for the
+    # measurement), so it moved rather than being written twice (rule 8).
+    held = decimal_amount(base_units_to_amount(lamports, SOL_DECIMALS))
+    want = decimal_amount(base_units_to_amount(needed, SOL_DECIMALS))
+    headroom = decimal_amount(base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS))
+    sending = decimal_amount(amount)
     if lamports >= needed:
         return SenderFunding(None, (
-            f"{held} SOL in {sender}, against {base_units_to_amount(needed, SOL_DECIMALS)} needed "
-            f"({amount} plus {base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS)} for the fee) "
-            f"<- asked of the cluster just now"
+            f"{held} SOL in {sender}, against {want} needed "
+            f"({sending} plus {headroom} for the fee) <- asked of the cluster just now"
         ))
     return SenderFunding(
         Refusal(
-            f"the sending keypair {sender} holds {held} SOL and this transfer needs "
-            f"{base_units_to_amount(needed, SOL_DECIMALS)} SOL "
-            f"({amount} plus {base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS)} for the fee)",
+            f"the sending keypair {sender} holds {held} SOL and this transfer needs {want} SOL "
+            f"({sending} plus {headroom} for the fee)",
             "fund it with `solana airdrop 1 --url devnet` (devnet airdrops are rate-limited, so retry "
             "rather than assuming it failed), or create a smaller swap. Nothing was sent.",
         ),

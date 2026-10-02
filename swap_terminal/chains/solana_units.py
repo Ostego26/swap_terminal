@@ -191,6 +191,55 @@ def amount_to_base_units(amount: float, decimals: int) -> int:
     return int(Decimal(str(amount)) * (Decimal(10) ** decimals))
 
 
+def decimal_amount(amount) -> str:
+    """The amount as a plain decimal string. NEVER a float's repr.
+
+    MOVED HERE 2026-10-02 from chains/solana_pay.py, where it was private and a
+    second caller needed it. pay_test_deposit.py's funding line printed
+
+        against 0.25005 needed (0.25 plus 5e-05 for the fee)
+
+    on the operator's host -- scientific notation in a money figure, on the screen
+    somebody reads immediately before sending. Writing a second formatter is rule
+    8's defect with the measurement in this docstring already paid for, so the
+    survivor owns the concept and lives where the other amount conversions do
+    (base_units_to_amount and its inverse, above).
+
+    `str(0.01)` happens to be "0.01", and that is luck rather than a property.
+    Two shapes break it, and both are reachable from a swaps row:
+
+        a small amount         str(1e-07) is "1e-07", which is not a decimal
+                               number to any URI parser. SOL has 9 decimals, so
+                               0.0000001 SOL is an ordinary quantity here.
+        a repeating binary     str(0.1 + 0.2) is "0.30000000000000004". A quote
+        fraction               priced to an awkward figure can land one of
+                               these in expected_input_amount.
+
+    Decimal(str(amount)) rather than Decimal(amount): the former takes the
+    shortest decimal that round-trips the float, which is the number a human saw
+    on the page. Decimal(float) would expand the full binary expansion --
+    0.01 becomes 0.01000000000000000020816681711721685... -- and a wallet asking
+    its owner to approve that is a wallet nobody approves.
+
+    normalize() drops trailing zeros so 1.0 becomes "1" rather than "1.0", and
+    format(value, "f") is what turns an exponent back into positional notation.
+    normalize() produces exponents in BOTH directions -- "1E-7" for 0.0000001
+    and "1E+1" for 10 -- and the "f" presentation type handles both.
+
+    MEASURED WHILE WRITING THIS, and recorded because the first version was
+    wrong in a way that looked careful. It special-cased an integral amount with
+    `str(value.to_integral_value())`, reasoning that an integer would otherwise
+    normalize to an exponent. It does -- and to_integral_value() on an ALREADY
+    NORMALIZED Decimal("1E+1") returns Decimal("1E+1"), so the branch written to
+    avoid "1E+1" returned exactly that. The check that caught it was running the
+    function over 0.01, 1e-07, 0.1+0.2, 10, 0.5 and 1.0 and reading the output,
+    which took less time than the paragraph defending the branch.
+
+    format(value, "f") alone is correct for every one of those, so the branch is
+    gone rather than fixed (rule 9: the helper whose only caller was wrong).
+    """
+    return format(Decimal(str(amount)).normalize(), "f")
+
 def float_is_exact_for(base_units: int) -> bool:
     """True when this base-unit count survives the app's float columns intact.
 

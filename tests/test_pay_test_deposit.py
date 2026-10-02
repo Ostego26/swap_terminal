@@ -28,6 +28,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
@@ -285,7 +287,15 @@ def test_a_sufficient_balance_is_REPORTED_not_merely_allowed(monkeypatch):
     funding = tool.sender_funding(KEYPAIR, AMOUNT)
 
     assert funding.refusal is None
-    assert "1.0 SOL" in funding.line
+    # "1 SOL", not "1.0": decimal_amount() normalizes, which is what also turns
+    # the fee headroom from "5e-05" into "0.00005". A round balance printing
+    # without a trailing ".0" is the same property.
+    assert "1 SOL" in funding.line
+    assert "0.00005 for the fee" in funding.line, (
+        "the fee headroom printed as 5e-05 on the operator's host -- scientific notation in a money "
+        "figure, on the screen read immediately before sending"
+    )
+    assert "e-0" not in funding.line, "no figure on this line may be in scientific notation"
     assert PUBKEY in funding.line
     assert "asked of the cluster just now" in funding.line, (
         "the line must say the figure was MEASURED, not assumed"
@@ -336,3 +346,29 @@ def test_main_prints_the_funding_line_whatever_the_verdict(monkeypatch, capsys):
     assert "sender funded   stubbed" in out, (
         "main() must print the line on the PASSING path -- that is the case that was silent"
     )
+
+
+@pytest.mark.parametrize(
+    ("lamports", "forbidden"),
+    [
+        (100, "1e-07"),                 # 0.0000001 SOL -- one of nine decimals
+        (50_000, "5e-05"),              # the fee headroom, the figure that showed it
+        (1_000_000_000, "1.0 SOL"),     # a round amount must not carry a trailing .0
+    ],
+)
+def test_no_money_figure_on_the_funding_line_is_in_scientific_notation(monkeypatch, lamports, forbidden):
+    """base_units_to_amount() returns a FLOAT, and a float's repr goes exponential
+    at both ends. Every amount on this line goes through decimal_amount().
+
+    Parametrized over the three shapes that reach it rather than the one that was
+    observed: 5e-05 is what the operator saw, and 1e-07 is an ordinary quantity on
+    a nine-decimal chain, so fixing only the observed one would have left the
+    hazard in place for a different value.
+    """
+    stub_cli(monkeypatch)
+    stub_cluster(monkeypatch, lamports=lamports)
+    line = tool.sender_funding(KEYPAIR, AMOUNT).line
+
+    assert forbidden not in line, f"{forbidden!r} reached a line somebody reads before sending"
+    assert "e-0" not in line
+    assert "e+" not in line
