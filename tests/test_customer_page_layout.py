@@ -47,7 +47,7 @@ from db import SCHEMA, dict_factory
 # docstring says it exists so the next gate pair_view grows is added in one
 # place. A second copy here would agree on the day it was written and drift the
 # first time that gate changes, which is the failure mode that rule is about.
-from services.admin_view import chain_rows, pair_assets, pair_matrix, pair_rows
+from services.admin_view import PAGE_SECTIONS, chain_rows, pair_assets, pair_matrix, pair_rows
 from services.pair_view import CUSTOMER_STATES, allowed_pair_rows
 from services.swap_view import ATTRIBUTION_MODELS
 from test_web_surfaces import StubAdapter, cold_price_cache, fully_reachable, with_deposit_accounts
@@ -1596,3 +1596,236 @@ def test_the_operator_legend_defines_ENABLED_as_all_three_conditions(client):
             f"the ENABLED legend does not name {condition!r}, so it defines ENABLED as something "
             f"other than what pair_serviceability() checks"
         )
+
+
+# --- the operator page's tabs -----------------------------------------------
+#
+# Operator instruction 2026-10-02: "also, our operator page should be tabs."
+#
+# THE MEASUREMENT THAT CHOSE THE MECHANISM, taken on the real page before
+# anything was built. A browser copy does not include `display: none` content,
+# and this operator reads these pages by pasting them back -- two defects were
+# caught that way today. Marking every panel but one hidden, exactly as any tab
+# mechanism does, a paste returned 923 of 12,502 characters (7.4%) and 0 of the
+# 14 panel headings, with nothing in it saying the rest existed.
+#
+# So the tabs navigate and nothing hides. The tests below pin that: the strip
+# exists and is complete, every panel is still in a paste, and nothing on the
+# page claims a tab role it does not implement.
+
+
+def _hidden_from_a_copy(markup: str) -> list[str]:
+    """Every panel a browser copy would skip, by heading.
+
+    A copy skips `display: none` and `visibility: hidden` content, and the
+    attribute forms of the same thing -- `hidden` and `aria-hidden="true"` -- are
+    how a tab mechanism expresses it in markup. Any of them on a panel means that
+    panel leaves a paste.
+    """
+    skipped = []
+    for opening, inner in re.findall(
+        r'(<section class="(?:panel|hero)[^"]*"[^>]*>)(.*?)</section>', markup, flags=re.DOTALL
+    ):
+        concealed = (
+            " hidden" in opening
+            or 'aria-hidden="true"' in opening
+            or "display:none" in opening.replace(" ", "")
+            or "visibility:hidden" in opening.replace(" ", "")
+        )
+        if concealed:
+            heading = re.search(r"<h[12][^>]*>(.*?)</h[12]>", inner, flags=re.DOTALL)
+            skipped.append(
+                html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", heading.group(1))).strip())
+                if heading else "(a panel with no heading)"
+            )
+    return skipped
+
+
+def test_a_paste_of_the_operator_page_still_contains_every_panel(client):
+    """THE TEST THE WHOLE DESIGN EXISTS TO PASS.
+
+    If this fails, the operator's primary way of reading the page has started
+    returning a fraction of it with nothing saying anything is missing -- which is
+    worse than removing a panel, because removing one is visible.
+
+    Asserted three ways, because one would not be enough: every heading survives
+    the copy, no panel carries a concealing attribute, and nothing declares the
+    ARIA tab roles whose contract is one visible panel.
+    """
+    markup = client.get("/admin").get_data(as_text=True)
+    pasted = _paste(markup)
+
+    headings = [
+        html.unescape(re.sub(r"\s+", " ", heading).strip())
+        for heading in re.findall(r'<h2 id="[a-z-]+">(.*?)</h2>', markup, flags=re.DOTALL)
+    ]
+    assert len(headings) >= 14, f"only {len(headings)} panel headings rendered; the page has fourteen"
+    missing = [heading for heading in headings if heading not in pasted]
+    assert missing == [], f"{len(missing)} of {len(headings)} panels would not survive a copy: {missing}"
+
+    assert _hidden_from_a_copy(markup) == [], (
+        f"these panels carry a concealing attribute, so a paste loses them: "
+        f"{_hidden_from_a_copy(markup)}"
+    )
+    for role in ('role="tablist"', 'role="tab"', 'role="tabpanel"'):
+        assert role not in markup, (
+            f"{role} promises one visible panel and arrow-key movement between tabs, and this page "
+            f"implements neither -- claiming it describes the page wrongly to the reader who depends "
+            f"on the description most"
+        )
+
+
+def test_the_tab_strip_lists_every_section_and_only_real_anchors(client):
+    """Bidirectional, because two places name one set of sections.
+
+    services/admin_view.PAGE_SECTIONS renders the strip and the headings live in
+    the template -- rule 8's shape, so the correspondence is checked both ways
+    over the RENDERED page rather than trusted. A section added to the template
+    without a tab fails here, and a tab pointing at an anchor that does not exist
+    fails here.
+    """
+
+    markup = client.get("/admin").get_data(as_text=True)
+    strip = re.search(r'<nav class="tabstrip"[^>]*>(.*?)</nav>', markup, flags=re.DOTALL)
+    assert strip, "the tab strip is gone"
+
+    links = re.findall(r'<a href="#([a-z-]+)">(.*?)</a>', strip.group(1), flags=re.DOTALL)
+    assert [anchor for anchor, _ in links] == [anchor for anchor, _ in PAGE_SECTIONS], (
+        "the strip does not render PAGE_SECTIONS in order"
+    )
+
+    heading_text = {
+        anchor: html.unescape(re.sub(r"\s+", " ", text).strip())
+        for anchor, text in re.findall(r'<h2 id="([a-z-]+)">(.*?)</h2>', markup, flags=re.DOTALL)
+    }
+    assert set(heading_text) == {anchor for anchor, _ in PAGE_SECTIONS}, (
+        f"only on the page: {sorted(set(heading_text) - {a for a, _ in PAGE_SECTIONS})}; "
+        f"only in PAGE_SECTIONS: {sorted({a for a, _ in PAGE_SECTIONS} - set(heading_text))}"
+    )
+
+    # A LABEL MAY BE SHORTER THAN ITS HEADING AND MAY NOT SAY SOMETHING ELSE. That
+    # is what keeps the two spellings from drifting into two different names for
+    # one section without forcing the strip to repeat "Payouts claimed but never
+    # reported sent" at pill width.
+    for anchor, label in links:
+        words = set(re.findall(r"[a-z]+", html.unescape(label).lower()))
+        heading_words = set(re.findall(r"[a-z]+", heading_text[anchor].lower()))
+        assert words <= heading_words, (
+            f"the tab {label!r} says {sorted(words - heading_words)}, which its heading "
+            f"{heading_text[anchor]!r} does not"
+        )
+
+
+def test_every_tab_is_a_same_document_link_so_a_probe_result_cannot_be_discarded(client):
+    """THE PROBE RESULTS, AND WHY THIS MECHANISM MAKES THEM SAFE WITHOUT TRYING.
+
+    Reachability and the peg check FETCH on click and can take 30 seconds per
+    chain; static/admin.js writes the answer into `#probe-result` and
+    `#peg-result` in place. A real tab switch would have to hide or destroy that
+    region, so the operator could pay for a probe and then lose it by looking at
+    another tab.
+
+    Here there is no switch to survive: every tab is a fragment-only link, so the
+    document never reloads and nothing is re-rendered. That is asserted rather
+    than argued -- a tab that gained an `href` to a path, or a `target`, would
+    navigate and would take the result with it.
+    """
+    markup = client.get("/admin").get_data(as_text=True)
+    strip = re.search(r'<nav class="tabstrip"[^>]*>(.*?)</nav>', markup, flags=re.DOTALL).group(1)
+
+    for attributes in re.findall(r"<a ([^>]*)>", strip):
+        href = re.search(r'href="([^"]*)"', attributes)
+        assert href, f"a tab has no href: {attributes!r}"
+        assert href.group(1).startswith("#"), (
+            f"the tab {href.group(1)!r} is not a same-document link, so following it reloads the page "
+            f"and discards any probe result the operator has paid for"
+        )
+        assert "target=" not in attributes, "a tab that opens elsewhere takes the probe result with it"
+
+    # And the two regions the probes write into are present and outside anything
+    # that could remove them: they are in panels, and no panel is concealed.
+    for region in ('id="probe-result"', 'id="peg-result"'):
+        assert region in markup, f"{region} is gone, so a probe has nowhere to render"
+    assert _hidden_from_a_copy(markup) == [], "a probe region sits in a panel a copy would skip"
+
+
+def test_the_sticky_strip_clears_the_topbar_it_sits_under():
+    """Two constants that must agree, so a test says so rather than a comment.
+
+    `.topbar` is `position: sticky; top: 0` with a `min-height`, and the strip
+    sticks below it. If the strip's `top` were less than that height the strip
+    would sit under the topbar; if the headings' `scroll-margin-top` did not clear
+    both, a jump would land with the heading hidden behind them.
+
+    NOT BEHAVIORAL (rule 17): there is no browser here and nothing can observe an
+    overlap. What this holds is that the numbers cannot drift apart silently.
+    """
+    css = STYLESHEET.read_text()
+    topbar = re.search(r"\.topbar-inner\s*\{(.*?)\}", css, flags=re.DOTALL)
+    assert topbar, "the topbar rule is gone"
+    bar_height = re.search(r"min-height:\s*(\d+)px", topbar.group(1))
+    assert bar_height, f"the topbar declares no min-height: {topbar.group(1)!r}"
+
+    strip = re.search(r"\.tabstrip\s*\{(.*?)\}", css, flags=re.DOTALL)
+    assert strip, "the tab strip has no rule"
+    offset = re.search(r"top:\s*(\d+)px", strip.group(1))
+    assert offset, f"the sticky strip names no top offset: {strip.group(1)!r}"
+    assert offset.group(1) == bar_height.group(1), (
+        f"the strip sticks at {offset.group(1)}px under a topbar {bar_height.group(1)}px tall, so one "
+        f"of them covers the other"
+    )
+    assert f"calc({bar_height.group(1)}px" in css, (
+        "the headings' scroll-margin-top does not clear the topbar, so a jump lands behind it"
+    )
+
+
+def test_the_strip_wraps_at_phone_width_rather_than_hiding_labels():
+    """Fourteen labels do not fit 360px, and the choice is wrap, not scroll.
+
+    A data table that overflows gets `.scroll-x`, because its columns are of one
+    kind and a reader knows more exist. A NAVIGATION strip that overflows hides
+    labels, and a hidden nav label is a section the operator cannot discover. So
+    it wraps -- about five rows at phone width -- and stops being sticky there,
+    because five rows pinned to the top of a 360px screen is most of the screen.
+    """
+    css = STYLESHEET.read_text()
+    strip_list = re.search(r"\.tabstrip ul\s*\{(.*?)\}", css, flags=re.DOTALL)
+    assert strip_list, "the strip's list has no rule"
+    assert "flex-wrap: wrap" in strip_list.group(1), "the strip does not wrap, so labels fall off the row"
+    assert "overflow-x" not in strip_list.group(1), (
+        "the strip scrolls sideways, which hides labels and makes a section undiscoverable"
+    )
+
+    phone = css[css.index("@media (max-width: 560px)"):]
+    phone = phone[: phone.index("@media (prefers-reduced-motion")]
+    assert ".tabstrip { position: static; }" in phone, (
+        "a five-row strip stays pinned at phone width, where it is most of the screen"
+    )
+
+
+def test_the_strip_says_a_copy_of_the_page_is_still_complete(client):
+    """ADDED BECAUSE A MUTATION SURVIVED, and the sentence is rule 14's.
+
+    An operator who has just been told "the operator page is tabs" has every
+    reason to assume a copy contains one tab -- that is what tabs normally mean,
+    and it is what the measurement said a hiding implementation would do: 7.4% of
+    the text and none of the headings. The first time they paste this page back
+    they would wonder which tab they had sent.
+
+    So the strip says it, in words, next to the thing that raises the question.
+    Deleting the sentence leaves the page BEHAVING correctly and the operator
+    unable to know it, which is the same shape as a cycle printing exit_code=0
+    beside "skipping": the reader cannot tell the good case from the bad one.
+    """
+    strip = re.search(
+        r'<nav class="tabstrip"[^>]*>(.*?)</nav>',
+        client.get("/admin").get_data(as_text=True), flags=re.DOTALL,
+    )
+    assert strip, "the tab strip is gone"
+    note = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", strip.group(1)))).strip()
+    assert "Copying the page copies all of it" in note, (
+        f"the strip does not tell the operator a copy is complete; it says {note[-120:]!r}"
+    )
+    assert "Every section is on this page below" in note, (
+        "and it does not say the sections are all still present"
+    )

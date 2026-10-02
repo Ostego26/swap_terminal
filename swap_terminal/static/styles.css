@@ -782,6 +782,78 @@ tbody tr:hover { background: var(--surface-2); }
  * tests/test_customer_page_layout.py asserts the floor stays large enough that
  * two cells cannot fit a 560px screen.
  */
+/* --- the tab strip ---------------------------------------------------------
+ *
+ * Operator instruction 2026-10-02: "also, our operator page should be tabs."
+ * These NAVIGATE rather than hide, and templates/admin.html carries the
+ * measurement that decided it: with the inactive panels hidden, a paste of this
+ * page returns 7.4% of its text and none of its fourteen headings.
+ *
+ * STICKY AT THE TOPBAR'S OWN HEIGHT, which is a coupling and is named as one.
+ * `.topbar` is `position: sticky; top: 0` with `min-height: 56px`, so a strip
+ * sticking at 0 would sit under it. 56px is that same number, and
+ * tests/test_customer_page_layout.py asserts the two values agree -- two
+ * constants that must match is rule 8's shape, and the check is cheaper than a
+ * calc() nobody can verify without a browser.
+ *
+ * WRAPS, NEVER SCROLLS SIDEWAYS. Fourteen labels do not fit 360px. A data table
+ * that overflows gets `.scroll-x` because its columns are of one kind and the
+ * reader knows more exist; a NAVIGATION strip that overflows hides labels, and a
+ * hidden nav label is a section the operator cannot discover. So it wraps to as
+ * many rows as it needs -- about five at phone width -- and the strip stops being
+ * sticky there, because five rows pinned to the top of a 360px screen is most of
+ * the screen.
+ */
+.tabstrip {
+  position: sticky;
+  top: 56px;
+  z-index: 4;
+  margin: 0 0 var(--s4);
+  padding: var(--s2) 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.tabstrip ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+.tabstrip a {
+  display: inline-block;
+  padding: var(--s1) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: var(--t-sm);
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.tabstrip a:hover { background: var(--surface-2); color: var(--ink); }
+
+.tabstrip .panel-note { margin: var(--s1) 0 0; font-size: var(--t-xs); }
+
+/* WHICH SECTION YOU JUMPED TO, WITHOUT A LINE OF JAVASCRIPT. `:target` matches the
+ * heading the URL's fragment names, so the page marks it on arrival and unmarks it
+ * when the operator jumps elsewhere. A script setting aria-current would do the
+ * same thing and would be one more moving part that nothing here can observe
+ * working, since there is no browser in the container this was written in. */
+h2:target {
+  box-shadow: -0.5rem 0 0 0 var(--accent);
+}
+
+/* The sticky strip would otherwise cover the heading it just jumped to. On the
+ * scroll TARGET, which is the heading, because that is the element the fragment
+ * names. */
+.panel h2[id] { scroll-margin-top: calc(56px + var(--s6)); }
+
 .band {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
@@ -997,6 +1069,14 @@ tbody tr:hover { background: var(--surface-2); }
    * rather than shrinking the labels into illegibility or scrolling sideways. */
   .rail { grid-template-columns: repeat(3, 1fr); }
   .form.inline { grid-template-columns: 1fr; }
+
+  /* FIVE ROWS OF LABELS PINNED TO THE TOP IS MOST OF A 360px SCREEN. The strip
+   * wraps rather than scrolling sideways (a hidden nav label is an undiscoverable
+   * section), so at phone width it scrolls away with the page instead of staying
+   * stuck. scroll-margin-top drops with it, since nothing is covering the
+   * heading any more. */
+  .tabstrip { position: static; }
+  .panel h2[id] { scroll-margin-top: var(--s3); }
 
   /* THE LABEL/VALUE TABLES STACK; THE WIDE DATA TABLES SCROLL. Both choices are
    * deliberate and they go opposite ways on purpose.

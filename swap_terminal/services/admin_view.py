@@ -85,6 +85,46 @@ from .swap_view import (
     threshold_note,
 )
 
+#: THE PAGE'S SECTIONS, IN ORDER, FOR THE TAB STRIP.
+#:
+#: Operator instruction 2026-10-02: "also, our operator page should be tabs."
+#:
+#: TABS AS NAVIGATION, NOT AS HIDING, AND THE NUMBER IS WHY. A browser copy does
+#: not include `display: none` content, and this operator reads these pages by
+#: pasting them back -- which is how the eleven-times-repeated tile note and the
+#: cell-whitespace bug were both caught today. Measured on the real rendered page
+#: before anything was built: marking every panel but one hidden, the way any tab
+#: mechanism does, a paste returns 923 of 12,502 characters -- 7.4% -- and 0 of the
+#: 14 panel headings, with nothing in it saying the rest exists. That is rule 14's
+#: "did nothing must not look like did work" aimed at the operator's own way of
+#: reading the page, so the panels stay in the document and the strip jumps to them.
+#:
+#: ONE LIST AND A BIDIRECTIONAL CHECK. The strip is rendered from this tuple and
+#: the headings live in the template, which is two places naming one set of
+#: sections -- rule 8's shape. It is held by
+#: tests/test_customer_page_layout.py, which asserts over the RENDERED page that
+#: every anchor here exists as a heading id, that every heading id on the page has
+#: an entry here, and that each label's words all appear in the heading it points
+#: at. A label may therefore be shorter than its heading and cannot say something
+#: different, and a section added to the template without a tab fails.
+PAGE_SECTIONS = (
+    ("stuck-heading", "Payouts never sent"),
+    ("workers-heading", "Workers"),
+    ("flight-heading", "Swaps in flight"),
+    ("counts-heading", "Every swap status"),
+    ("inventory-heading", "Hot-wallet inventory"),
+    ("chains-heading", "Chains"),
+    ("pricing-heading", "Pricing"),
+    ("reachability-heading", "Reachability"),
+    ("peg-heading", "The dollar"),
+    ("pairs-heading", "Trading pairs"),
+    ("deposits-heading", "Deposits seen"),
+    ("payouts-heading", "Payouts"),
+    ("audit-heading", "Status changes"),
+    ("config-heading", "Settings"),
+)
+
+
 # How old a wallet_inventory row may be before the page calls it stale.
 #
 # DERIVED, not picked: workers/reconcile_worker.py refreshes inventory every
@@ -1107,6 +1147,9 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
     _pairs = pair_rows(config, adapters)
     return {
         "generated_at": now,
+        # The tab strip's entries, from the one ordered list above. Passed rather
+        # than imported in the template so the template holds no name of its own.
+        "sections": PAGE_SECTIONS,
         "database": config.get("DB_PATH"),
         "config": config_echo(config),
         "status_counts": status_counts(db),

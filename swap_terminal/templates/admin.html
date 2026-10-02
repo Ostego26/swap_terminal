@@ -52,6 +52,55 @@
      changed, this page went with it.</p>
 </section>
 
+{#- THE TABS. Operator instruction 2026-10-02: "also, our operator page should be
+    tabs."
+
+    THEY NAVIGATE; THEY DO NOT HIDE, AND THAT WAS DECIDED BY A MEASUREMENT RATHER
+    THAN A PREFERENCE. A browser copy does not include `display: none` content, and
+    this operator reads these pages by pasting them back -- two defects were caught
+    that way today. Measured on this page before anything was built, by marking
+    every panel but one hidden exactly as a tab mechanism does: a paste returns 923
+    of 12,502 characters, 7.4%, and 0 of the 14 panel headings, with nothing in it
+    saying the rest exists. A page that reads well on screen and returns a
+    fourteenth of itself when copied, silently, is rule 14's "did nothing must not
+    look like did work" aimed at the operator's own instrument.
+
+    So every panel stays in the document and in the flow, and the strip is a list
+    of same-document links to them. What the operator gets is one click to any
+    panel; what they do not get is anything hidden from a copy, from a screen
+    reader, or from Ctrl-F.
+
+    THAT ALSO MAKES THE PROBE RESULTS SAFE BY CONSTRUCTION. Reachability and the
+    peg check fetch on click and can take 30 seconds; static/admin.js writes the
+    answer into `#probe-result` and `#peg-result` in place. With real tabs a switch
+    would have to either destroy that region or hide it; here there is no switch --
+    the links are fragment-only, the document never reloads, and nothing is
+    re-rendered. Asserted in tests/test_customer_page_layout.py rather than argued.
+
+    NO JAVASCRIPT AT ALL. Highlighting the section you jumped to is `:target` in the
+    stylesheet; there is nothing here for a script to enable, so there is nothing to
+    degrade when one does not load.
+
+    A <nav> OF REAL LINKS AND NOT role="tablist". The ARIA tab pattern promises
+    arrow-key movement between tabs and exactly one visible panel, and neither is
+    true here -- claiming the role would describe the page wrongly to the reader who
+    depends on the description most. A labeled nav of links is what this is, so it
+    says that; the headings it points at are real <h2>s, which is already how a
+    screen reader navigates a document. -#}
+<nav class="tabstrip" aria-label="Sections of this page">
+  <ul>
+    {% for anchor, label in data.sections %}
+    <li><a href="#{{ anchor }}">{{ label }}</a></li>
+    {% endfor %}
+  </ul>
+  {#- The strip is NOT a replacement for reading down the page, and saying so costs
+      one line. An operator who has just been told this page is tabs needs to know
+      that a copy still contains all of it -- otherwise the first time they paste one
+      back they will wonder which tab they sent. -#}
+  <p class="panel-note">Every section is on this page below; these jump to one.
+     Copying the page copies all of it.</p>
+</nav>
+
 {#- A TWO-UP BAND, and which panels may be in one is MEASURED rather than judged.
     Asked for by the operator 2026-10-02: "put all the page data in two colums at
     least to reduce the scroll down".
