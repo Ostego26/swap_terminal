@@ -156,10 +156,17 @@ def outstanding(db, asset: str | None = None, *, include_resolved: bool = False)
     OUTSTANDING IS THE DEFAULT, resolved rows on request. A dealt-with deposit is
     history; an undealt-with one is somebody still owed an answer, and mixing them
     makes the operator count. Note that this is the OPPOSITE default from
-    unattributable_txids() above, which deliberately includes resolved rows --
-    there the question is "may the scanner skip this" and resolved is a stronger
-    yes. Same table, two questions, and the difference is stated at both sites
-    (rule 8) because a reader who found one would otherwise assume the other.
+    skippable_unattributable_txids() below, which deliberately INCLUDES resolved
+    rows -- there the question is "may the scanner skip this" and resolved is a
+    stronger yes. Same table, two questions, and the difference is stated at both
+    sites (rule 8) because a reader who found one would otherwise assume the other.
+
+    AND THE TWO ARE NOT COMPLEMENTS, which is the trap now that the skip set has
+    been narrowed (2026-10-02). This function's rows are "somebody is still owed an
+    answer"; that function's are "no later swap can ever claim this". An unresolved
+    row whose discriminator no swap holds appears HERE as outstanding and is absent
+    THERE, because the scan must keep reading it -- a future swap allocated that tag
+    is what answers it. Neither list is the other's negation.
     """
     rows = db.execute(
         OUTSTANDING_SQL,
@@ -168,106 +175,135 @@ def outstanding(db, asset: str | None = None, *, include_resolved: bool = False)
     return list(rows)
 
 
-def unattributable_txids(db, asset: str) -> frozenset[str]:
-    """Every txid already RECORDED as unattributable for this asset. For the deposit scan to skip.
+#: The txids of recorded unattributable deposits that NO later swap can ever claim.
+#:
+#: THREE DISJOINT REASONS, each of which makes a rescan pointless rather than merely
+#: expensive, and the fourth shape -- the one this predicate deliberately leaves OUT --
+#: is what the whole narrowing is about. See skippable_unattributable_txids() below.
+_SKIPPABLE_SQL = """
+SELECT u.txid AS txid
+FROM unattributable_deposits u
+WHERE u.asset = ?
+  AND (
+        -- A HUMAN HAS DEALT WITH IT. Stronger than any of the others: whatever the
+        -- chain says next, somebody has already written the answer down.
+        u.resolved_at IS NOT NULL
+        -- NO DISCRIMINATOR AT ALL, so no swap can ever match it.
+        -- deposit_service.attributable_events() credits an event only when its `vout`
+        -- EQUALS the swap's deposit_tag, and NULL equals nothing. A payment with no
+        -- memo and no tag is unclaimable by construction, not by circumstance.
+        OR u.discriminator IS NULL
+        -- ITS DISCRIMINATOR IS ALREADY SPOKEN FOR BY A SWAP THAT WILL NEVER BE
+        -- REFRESHED AGAIN. Tags are allocated MAX+1 per account and never reissued
+        -- (xrp_tag_service._ALLOCATE_SQL, plus two BEFORE triggers that RAISE(ABORT)
+        -- on delete and on re-point), so no FUTURE swap can take this tag either.
+        -- The one swap that holds it has left the refreshed set, so nothing will
+        -- credit this payment.
+        OR EXISTS (
+            SELECT 1 FROM swaps s
+            WHERE s.from_asset = u.asset
+              AND s.deposit_tag = u.discriminator
+              AND s.status NOT IN ({statuses})
+        )
+  )
+"""
 
-    THE 429 LEAK THIS CLOSES, measured on the operator's host across 2026-10-01
-    and 10-02. Two signatures sat in this table and the Solana scan re-read both
-    on every cycle, forever:
 
-        SOL deposit scan could not read transaction 5rHDrJYp... HTTP 429 ... SKIPPED it
-        SOL deposit scan could not read transaction 61otPXfy... HTTP 429 ... SKIPPED it
-        SOL deposit scan for CUBnQ5QB... read 5 of 7 listed transaction(s); 2 were unreadable
+def skippable_unattributable_txids(db, asset: str, still_refreshed) -> frozenset[str]:
+    """Recorded unattributable txids a scan need not read again. NOT all of them.
 
-    deposit_service.settled_txids() is a JOIN from deposit_events to swaps, so it
-    can only ever name a transaction that reached a swap. These never did -- that
-    is what unattributable MEANS -- so nothing could skip them, and the rate limit
-    they burned is what made a REAL deposit come back as "read 5 of 7".
+    THE DEFECT THIS FUNCTION'S PREVIOUS VERSION WAS, established by running it rather
+    than by reading it. It was `SELECT txid FROM unattributable_deposits WHERE asset = ?`
+    -- every recorded row, forever -- and deposit_service.skip_txids() unions it into the
+    set handed to every adapter. So the moment a payment was recorded here, no scan read
+    it again, which made resolve_credited()'s own promise unreachable:
 
-    WHY SKIPPING FOREVER IS SAFE, and this is the part that had to be established
-    rather than assumed, because never looking at a deposit again is a decision
-    about somebody's money.
+        a sender who pays before opening a swap, or pays a tag whose swap does not exist
+        yet, lands here first, and if a swap is subsequently created and its refresh
+        credits that txid, the stranded row is answered
 
-    THE FIRST VERSION OF THIS ARGUMENT ENUMERATED ONE FUNCTION'S REFUSALS AND
-    PRESENTED IT AS THE TABLE'S, and the operator's own live row refuted it within
-    the hour. It said:
+    Nothing could credit that txid, because nothing would ever see the event again.
+    Measured 2026-10-02 against the real schema: record one row for txid `tx_x` and
+    `deposit_service.skip_txids(db, "SOL")` returns `{'tx_x'}` from that call onward.
 
-        All four refusals in chains/solana_memo.deposit_tag_from() read ONLY the
-        transaction's memo instructions -- no memo, two memos, not an integer,
-        outside the allocator's range -- and a finalized transaction's memos
-        cannot change.
+    AND THE PROMISED PATH IS REACHABLE, which had to be established rather than assumed
+    because the honest alternative was deleting the promise instead of the skip. Run
+    2026-10-02 through the real allocator: insert six swaps and call
+    xrp_tag_service.allocate_destination_tag() for each on one account and it returns
+    1, 2, 3, 4, 5, 6. The allocator is `COALESCE(MAX(destination_tag), :below_first) + 1`,
+    so every integer above the current high-water mark is a tag a LATER swap will be
+    handed. A sender who puts memo 5 on a payment while only tags 1 and 2 exist is
+    recorded here with discriminator 5 -- "no swap on this asset has that discriminator"
+    -- and the fifth swap created after that genuinely owns the money. That is the case
+    the old skip set made permanently invisible, and it is somebody's deposit.
 
-    True of deposit_tag_from(), and deposit_tag_from() is not where every row comes
-    from. TWO functions write this table, and only one of them is memo-content:
+    SO THE SET NARROWS TO WHAT CANNOT MOVE, and the three clauses are in _SKIPPABLE_SQL
+    above with the argument for each beside it. What is deliberately NOT skipped is the
+    one remaining shape: unresolved, carrying a discriminator, and no swap holds that
+    discriminator yet. That is exactly the row a future allocation can claim.
 
-        stranded_rows()   <- adapter drops, from deposit_tag_from(). Memo content
-                             only. A finalized transaction's memos cannot change,
-                             so the verdict genuinely cannot move.
-        unclaimed_rows()  <- unclaimed_events(), and BOTH of its reasons read
-                             MUTABLE STATE:
-                               "no swap on this asset has that discriminator"
-                                   reads `claimed`, built over every swap on the
-                                   asset -- a set that grows.
-                               "it matches swap X, which is <status>"
-                                   reads that swap's STATUS, a column that moves.
+    THE PREVIOUS VERSION'S OWN REASONING POINTED HERE AND WAS READ THE OTHER WAY. It
+    argued, correctly, that "a resolved deposit has been dealt with by a human, which is
+    a stronger reason not to re-read it than an open one" -- and then skipped the open
+    ones too. The narrowing is the OPPOSITE of the obvious one: resolved rows are still
+    skipped, and the unresolved ones come back into the scan.
 
-    The operator's outstanding row on 2026-10-02 is the second kind: 0.05 SOL with
-    memo 2, matching s_ba72c715150a063b, recorded while that swap was not
-    refreshable. Its status has already changed once since (payout_pending ->
-    failed). So the claim "a rescan re-derives the identical verdict" was being made
-    about inputs that demonstrably move.
+    WHAT IT COSTS, measured rather than estimated, because re-reading is the exact cost
+    the 2026-10-01 rate-limit fix removed and that rate limit cost a real credited
+    deposit. On Solana a non-skipped signature is one getTransaction per scan. With one
+    scan per shared account per cycle (scan_shared_accounts()) and the measured cycle of
+    14.5µfn (17.6s), each re-read row costs 204.5 getTransaction/hour on deposit_watcher,
+    plus 60/hour on reconcile_worker's 60s loop -- 264.5/hour per claimable row.
 
-    WHY SKIPPING IS STILL SAFE, established rather than assumed -- and note that
-    this is a WEAKER argument than immutability, which is the point of writing it
-    out:
+    ON THE OPERATOR'S HOST TODAY THAT IS ZERO, and that is why the precise predicate was
+    worth writing instead of "skip only the resolved rows". Their one unresolved row is
+    `61otPXfy...`, 0.05 SOL with memo 2, recorded against swap s_ba72c715150a063b -- which
+    is `failed`, so the third clause skips it and the scan count does not move. The coarse
+    version would have spent 264.5 getTransaction/hour re-reading a payment that the
+    no-revival argument below says can never be credited.
 
-      a discriminator is never REISSUED. xrp_tag_service._ALLOCATE_SQL is
-      `COALESCE(MAX(destination_tag), :below_first) + 1` per account -- a monotonic
-      counter -- and nothing outside tests deletes from xrp_destination_tags
-      (grepped 2026-10-02). So "no swap has that discriminator" cannot become "swap
-      Y has it", which was the case that would have cost a real customer their
-      deposit.
+    THE NO-REVIVAL ARGUMENT IS AN ABSENCE, NOT AN INVARIANT, and rule 2's distinction is
+    the one that matters: "I could not find a revival path" is not "a revival path cannot
+    exist". The third clause rests on it -- a swap that has left
+    deposit_service.ACTIVE_STATUSES is never refreshed again, so the payment matching its
+    tag is never credited. An operator tool that reopens a failed swap to accept a late
+    payment is a reasonable thing to want, and the moment it exists this clause starts
+    hiding the deposit that tool was built to find.
+    tests/test_deposit_rate_limit.py::test_a_FAILED_swap_is_never_refreshed_back_into_an_active_status
+    pins the absence so adding one fails a test instead of losing money quietly.
 
-      nothing REVIVES a swap into ACTIVE_STATUSES. The only
-      set_swap_status(..., "confirming", ...) outside tests is
-      deposit_service.py:350, guarded by `current_status in {"deposit_seen",
-      "awaiting_deposit"}` -- both already active -- and refresh_swap_from_chain()
-      is reached only for swaps already in ACTIVE_STATUSES. A failed swap stays
-      failed, so "will never be credited to it" stays true.
+    `still_refreshed` IS PASSED IN, not imported, for the reason unclaimed_events() already
+    gives for the same tuple: the authority is deposit_service.ACTIVE_STATUSES and that
+    module imports this one, so importing it back would be a real cycle and spelling the
+    statuses again here would be rule 8's duplicate with a delay on it. It is REQUIRED
+    rather than defaulted, because a default of "every status" would silently skip every
+    row with a matched discriminator and a default of "none" would silently skip none --
+    two different wrong answers from an argument nobody passed.
 
-    THAT SECOND CLAUSE IS AN ABSENCE, NOT AN INVARIANT, and rule 2's distinction is
-    exactly the one that matters here: "I could not find a revival path" is not "a
-    revival path cannot exist". It is one commit away -- an operator tool that
-    reopens a failed swap to accept a late payment is a reasonable thing to want,
-    and the moment it exists this skip set starts hiding the deposit that tool was
-    built to find. tests/test_deposit_rate_limit.py pins the absence so adding one
-    fails a test instead of silently losing money.
+    AND last_seen_at UNFREEZES FOR EXACTLY THE RE-READ ROWS. The column stopped advancing
+    for every recorded row when the skip was total, because a skipped transaction never
+    reaches record()'s ON CONFLICT. It now advances again for the claimable rows -- the
+    ones a person is most likely to be waiting on -- and still freezes for the three
+    skippable shapes. show_unattributable.py already labels the column "when the scan last
+    READ this on-chain", which is true of both halves and is why that line needs no change.
 
-    AND last_seen_at FREEZES, which is a cost this change imposes rather than a
-    risk it runs. The column advanced on every cycle because every cycle re-read the
-    transaction; a skipped transaction never reaches record()'s ON CONFLICT, so the
-    value stops at the last pre-skip read. It now means "last read on-chain", not
-    "last confirmed still present", and show_unattributable.py says so on the screen
-    because the operator reads the screen and not this docstring.
-
-    AND THE ROW ALREADY HOLDS EVERYTHING A RESCAN WOULD LEARN: the amount, the
-    account it landed in, how many credits made it up, the confirmations, and the
-    adapter's own reason in its own words. A human matching one of these works
-    from the row, which is why the table exists; the chain is not the record here.
-
-    THE OTHER CODE CHANGE THAT WOULD MATTER is a widened allocator range --
-    TAG_MINIMUM..TAG_MAXIMUM is the only input to deposit_tag_from()'s branches that
-    is not the transaction itself, so a memo once "outside the range" could later be
-    inside one. Like the revival path above it is a code change rather than a chain
-    event, and the recourse is the row rather than a rescan: it names the
-    discriminator it saw. Said here because a future reader widening that range
-    needs to know this set exists.
-
-    RESOLVED ROWS ARE INCLUDED. A resolved deposit has been dealt with by a human,
-    which is a stronger reason not to re-read it than an open one.
+    THE ROW STILL HOLDS EVERYTHING A RESCAN WOULD LEARN -- the amount, the account, the
+    credit count, the confirmations and the adapter's own reason -- so re-reading is not
+    how a human matches one of these. It is only how a LATER SWAP gets handed the event.
     """
+    # The interpolation is a run of '?' generated from the LENGTH of `still_refreshed`;
+    # the statuses themselves are bound as parameters on the line below, as is the asset.
+    # Structure, not input -- the same claim deposit_service.process_active_swaps() makes
+    # for the identical tuple, and checkable from these three lines.
+    #
+    # NO `noqa: S608` HERE, AND THAT IS NOT AN OVERSIGHT. ruff does not flag `.format()`
+    # on a module constant, so a suppression would be a claim about a finding that was
+    # never made -- RUF100 says so out loud, and rule 19 says a noqa is a claim you
+    # checked rather than a way to decorate a line. The reasoning above is the claim.
+    statuses = ",".join("?" for _ in still_refreshed)
     rows = db.execute(
-        "SELECT txid FROM unattributable_deposits WHERE asset = ?", (asset,)
+        _SKIPPABLE_SQL.format(statuses=statuses),
+        (asset, *still_refreshed),
     ).fetchall()
     return frozenset(str(row["txid"]) for row in rows)
 
@@ -493,6 +529,14 @@ def resolve_credited(db, asset: str, credited, *, now: str) -> int:
     created and its refresh credits that txid, the stranded row is answered. Leaving it open
     would make the unresolved count a number that only ever grows, which is the measurement
     rule 3 warns about -- a count whose denominator keeps changing underneath it.
+
+    THAT PARAGRAPH WAS UNREACHABLE FOR A DAY AND IS NOT ANYMORE, said here because a promise
+    in a docstring is a claim about the system and this one was false. The 2026-10-02 rate-limit
+    fix put EVERY recorded txid into deposit_service.skip_txids(), so the "refresh credits that
+    txid" step above could never happen: nothing read the transaction again. The skip set is now
+    narrowed to the rows no later swap can claim -- see skippable_unattributable_txids(), which
+    carries the measurement and the three clauses -- and a payment carrying a discriminator that
+    no swap holds yet is read on every scan, exactly so this function has something to close.
 
     `resolution_note` SAYS WHO CLOSED IT AND WHY, because a resolved row with no reason is
     indistinguishable from one a person closed by hand, and those two want different follow-up.

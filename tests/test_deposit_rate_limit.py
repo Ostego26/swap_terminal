@@ -295,23 +295,47 @@ STRANDED = (
 )
 
 
-def seed_unattributable(db, txid: str, *, asset: str = "SOL", resolved: str | None = None) -> None:
-    """One recorded unattributable deposit, through the real table."""
+def seed_unattributable(
+    db, txid: str, *, asset: str = "SOL", resolved: str | None = None,
+    discriminator: int | None = None,
+) -> None:
+    """One recorded unattributable deposit, through the real table.
+
+    `discriminator` DEFAULTS TO None BECAUSE THE OPERATOR'S FIRST TWO ROWS WERE None --
+    no memo at all -- and it is a parameter because that column is now what decides
+    whether the scan reads the transaction again. unattributable_deposit_service.
+    skippable_unattributable_txids() skips a NULL discriminator by construction (no swap
+    can ever match it) and keeps reading an integer one that no swap holds yet, because a
+    later allocation can hand that tag to a swap that owns the money.
+    """
     db.execute(
         "INSERT INTO unattributable_deposits (asset, txid, address, amount, credits,"
         " discriminator, why, confirmations, first_seen_at, last_seen_at, resolved_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (asset, txid, ACCOUNT, 0.05, 1, None,
+        (asset, txid, ACCOUNT, 0.05, 1, discriminator,
          "no memo instruction -- unattributable, and a human has to match it",
          3, "2026-10-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00", resolved),
     )
     db.commit()
 
 
-def test_a_recorded_unattributable_txid_is_in_the_skip_set(db):
-    """The set the adapter is handed, built from BOTH sources."""
+def skippable(db, asset="SOL"):
+    """The real narrowed predicate, asked the way skip_txids() asks it."""
+    return deposit_service.skippable_unattributable_txids(
+        db, asset, deposit_service.ACTIVE_STATUSES
+    )
+
+
+def test_a_recorded_unattributable_txid_WITH_NO_DISCRIMINATOR_is_in_the_skip_set(db):
+    """The set the adapter is handed, built from BOTH sources.
+
+    NO DISCRIMINATOR IS THE UNCLAIMABLE SHAPE, and that is why this row is skipped
+    rather than because it is recorded. attributable_events() credits an event only
+    when its `vout` EQUALS a swap's deposit_tag, and NULL equals nothing -- so no
+    swap, present or future, can ever take this payment.
+    """
     seed_unattributable(db, STRANDED[0])
-    assert deposit_service.unattributable_txids(db, "SOL") == {STRANDED[0]}
+    assert skippable(db) == {STRANDED[0]}
     assert deposit_service.skip_txids(db, "SOL") == {STRANDED[0]}
     assert deposit_service.settled_txids(db, "SOL") == frozenset(), (
         "it reached no swap, which is exactly why settled_txids could never name it"
@@ -340,6 +364,151 @@ def test_the_skip_set_is_per_asset(db):
     seed_unattributable(db, STRANDED[0], asset="GRC")
     assert deposit_service.skip_txids(db, "SOL") == frozenset()
     assert deposit_service.skip_txids(db, "GRC") == {STRANDED[0]}
+
+
+# --- the rows the scan must KEEP reading --------------------------------------
+#
+# THE DEFECT THESE PIN, AND IT WAS MINE, SHIPPED 2026-10-02. skip_txids() was
+# settled_txids() | every row in unattributable_deposits, so a payment recorded here
+# was never read from the chain again -- which made
+# unattributable_deposit_service.resolve_credited()'s own documented path unreachable:
+# "a sender who pays ... a tag whose swap does not exist yet, lands here first, and if a
+# swap is subsequently created and its refresh credits that txid, the stranded row is
+# answered". Nothing could credit it, because nothing would ever see the event again.
+#
+# The narrowing is the OPPOSITE of the obvious one: resolved rows stay skipped, and the
+# unresolved ones come back -- but only the unresolved ones a later swap could actually
+# claim, which is what keeps the 429 cost at zero on the operator's host.
+
+
+def test_the_allocator_WILL_hand_a_later_swap_a_tag_above_the_high_water_mark(db):
+    """The load-bearing claim, driven through the real allocator rather than read off it.
+
+    The whole narrowing rests on this: a sender can put a reference on a payment that no
+    swap holds YET, and a swap created afterwards is genuinely handed that number.
+    `_ALLOCATE_SQL` is `COALESCE(MAX(destination_tag), :below_first) + 1`, so every
+    integer above the current mark is a future tag. Asserted by allocating, because
+    "I read the SQL and it looks monotonic" is a hypothesis (rule 17).
+    """
+    allocated = []
+    for i in range(6):
+        seed_swap(db, f"s_alloc{i}", None)
+        allocated.append(allocate_destination_tag(db, ACCOUNT, f"s_alloc{i}", "SOL"))
+    db.commit()
+    assert allocated == [1, 2, 3, 4, 5, 6], (
+        f"a payment referencing 5 while only 1 and 2 existed is a payment the FIFTH later "
+        f"swap owns; got {allocated}"
+    )
+
+
+def test_a_row_whose_tag_NO_swap_holds_is_READ_AGAIN(db):
+    """The claimable shape, as a call MADE rather than as a set computed.
+
+    Nothing holds tag 5, so tag 5 is still to be allocated and this payment may turn out
+    to be a swap's. The scan has to keep reading it or the event never reaches the swap
+    that owns it.
+    """
+    seed_unattributable(db, STRANDED[1], discriminator=5)
+    assert skippable(db) == frozenset(), "a claimable row is not skippable"
+
+    seed_swap(db, "s_live", 11)
+    adapter = CountingAdapter([event(STRANDED[1], 5, amount=0.05), event("tx_real", 11)])
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    assert STRANDED[1] in adapter.read, (
+        f"the claimable payment was skipped, so no later swap can ever be handed it; "
+        f"read={adapter.read}"
+    )
+
+
+def test_a_payment_recorded_BEFORE_its_swap_existed_is_credited_to_the_LATER_swap(db):
+    """THE PROMISED PATH, END TO END, and the reason defect 1 is a money defect.
+
+    resolve_credited()'s docstring promises this and the total skip set made it
+    impossible. Here the payment arrives referencing tag 5 before any swap holds it, is
+    recorded as unattributable, and THEN the swap that owns tag 5 is created. The real
+    process_active_swaps() must credit it and the stranded row must close itself.
+
+    MUTATION -- AND THIS IS THE CALL-SITE ONE. Revert deposit_service.skip_txids() to
+    `settled_txids(db, asset) | <every row in unattributable_deposits>` and this fails:
+    the event is skipped, deposit_events stays empty, the swap sits in awaiting_deposit
+    and the stranded row stays open forever. A narrowed predicate whose CALLER still
+    unions the wide set is a correct function nobody asked.
+    """
+    seed_unattributable(db, STRANDED[1], discriminator=5)
+    seed_swap(db, "s_later", 5)
+
+    adapter = CountingAdapter([event(STRANDED[1], 5, amount=0.01, confirmations=3)])
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+
+    credited = db.execute(
+        "SELECT swap_id, txid FROM deposit_events WHERE txid = ?", (STRANDED[1],)
+    ).fetchall()
+    assert [dict(row) for row in credited] == [{"swap_id": "s_later", "txid": STRANDED[1]}], (
+        f"the payment reached no swap; deposit_events={[dict(r) for r in credited]}"
+    )
+    swap = db.execute("SELECT status FROM swaps WHERE id = 's_later'").fetchone()
+    assert swap["status"] == "payout_pending"
+    row = db.execute(
+        "SELECT resolved_at, resolution_note FROM unattributable_deposits WHERE txid = ?",
+        (STRANDED[1],),
+    ).fetchone()
+    assert row["resolved_at"] is not None, (
+        "the stranded row stayed open on a payment that WAS credited, which is the false "
+        "positive resolve_credited() exists to close"
+    )
+    assert "credited after all" in row["resolution_note"]
+
+
+def test_the_operator_s_OWN_unresolved_row_is_still_skipped(db):
+    """THE COST HALF, measured against their actual row rather than a hypothetical.
+
+    Their one unresolved row is 61otPXfy..., 0.05 SOL with memo 2, against swap
+    s_ba72c715150a063b -- which is `failed`. A failed swap is never refreshed again
+    (the test below drives that through the real function), tags are never reissued, so
+    no swap present or future can claim this payment. Re-reading it would cost 204.5
+    getTransaction/hour on deposit_watcher's 14.5µfn (17.6s) cycle plus 60/hour on
+    reconcile_worker, against an endpoint that answers HTTP 429 -- for a verdict that
+    cannot change. That is why the predicate is precise instead of "skip only resolved".
+    """
+    seed_swap(db, "s_failed", 2, status="failed")
+    seed_unattributable(db, STRANDED[1], discriminator=2)
+
+    assert skippable(db) == {STRANDED[1]}
+
+    seed_swap(db, "s_live", 11)
+    adapter = CountingAdapter([event(STRANDED[1], 2, amount=0.05), event("tx_real", 11)])
+    deposit_service.process_active_swaps(db, CONFIG, {"SOL": adapter})
+    assert adapter.read == ["tx_real"], (
+        f"a payment no swap can ever claim cost a getTransaction; read={adapter.read}"
+    )
+
+
+def test_a_row_whose_tag_belongs_to_an_ACTIVE_swap_is_READ(db):
+    """The clause is "a swap that will never be refreshed again", not "any swap".
+
+    A row can be recorded while no swap holds its tag and then the tag gets allocated.
+    At that moment the row becomes CLAIMABLE, so a predicate that skipped on "some swap
+    holds this tag" would hide the deposit at the exact instant it became creditable.
+    """
+    seed_swap(db, "s_active", 5, status="confirming")
+    seed_unattributable(db, STRANDED[1], discriminator=5)
+    assert skippable(db) == frozenset(), (
+        "its swap is still refreshed, so its own refresh is what credits this payment"
+    )
+
+
+def test_a_RESOLVED_row_is_skipped_even_when_its_tag_is_unclaimed(db):
+    """Resolution outranks claimability, which is the previous version's own argument.
+
+    "A resolved deposit has been dealt with by a human, which is a stronger reason not to
+    re-read it than an open one." That sentence survives the narrowing unchanged -- it was
+    always right, and it was the open rows it was wrongly applied to.
+    """
+    seed_unattributable(
+        db, STRANDED[1], discriminator=5, resolved="2026-10-02T00:00:00+00:00"
+    )
+    assert skippable(db) == {STRANDED[1]}
 
 
 def test_the_stranded_signatures_are_not_read_again_on_a_refresh(db):

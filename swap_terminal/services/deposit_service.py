@@ -64,7 +64,12 @@ from deposit_vout_artifact import multi_vout_groups
 from .helpers import utc_now_iso
 from .swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION, set_swap_status
 from .unattributable_deposit_service import record as record_unattributable
-from .unattributable_deposit_service import resolve_credited, stranded_rows, unattributable_txids, unclaimed_rows
+from .unattributable_deposit_service import (
+    resolve_credited,
+    skippable_unattributable_txids,
+    stranded_rows,
+    unclaimed_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +238,24 @@ def skip_txids(db, asset: str) -> frozenset[str]:
     """Every txid a scan of this asset need not read again. TWO sources, one set.
 
     settled_txids() names transactions that reached a swap and passed its
-    confirmation threshold. unattributable_txids() names transactions that reached
-    NO swap and were recorded for a human instead. Between them they are every
-    transaction whose verdict is final, and each source's own docstring carries the
-    argument for why re-reading it changes no decision.
+    confirmation threshold. skippable_unattributable_txids() names transactions that
+    reached NO swap, were recorded for a human instead, AND cannot be claimed by any
+    later swap. Between them they are every transaction whose verdict is final, and
+    each source's own docstring carries the argument for why re-reading it changes no
+    decision.
+
+    THE SECOND SOURCE IS NOT "EVERY RECORDED ROW", and it was for one day. Written
+    2026-10-02 as `SELECT txid FROM unattributable_deposits WHERE asset = ?`, it made
+    unattributable_deposit_service.resolve_credited()'s own promise unreachable: a
+    payment recorded before its swap existed was never read again, so the swap created
+    afterwards could not be handed the event that was already its money. The narrowed
+    predicate and the cost of narrowing it are in that function's docstring -- the
+    measurement is that on the operator's host the re-read set is empty, so the scan
+    count does not move.
+
+    ACTIVE_STATUSES IS HANDED OVER rather than imported there, the same way
+    unclaimed_events() takes `still_refreshed`: this module is the authority for that
+    tuple and it imports that one, so the dependency only goes one way (rule 8).
 
     ONE SET BECAUSE THE ADAPTER ASKS ONE QUESTION. It does not care why a
     transaction is finished with; it cares whether to spend a getTransaction on it.
@@ -249,7 +268,7 @@ def skip_txids(db, asset: str) -> frozenset[str]:
     the same change rather than left as a correct value under a wrong name, which
     is the wrong-comment-is-a-bug rule applied to an identifier a caller reads.
     """
-    return settled_txids(db, asset) | unattributable_txids(db, asset)
+    return settled_txids(db, asset) | skippable_unattributable_txids(db, asset, ACTIVE_STATUSES)
 
 
 def settled_txids(db, asset: str) -> frozenset[str]:
@@ -804,12 +823,16 @@ def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | N
         # on `credited` anyway, and the two sets are computed from the same
         # deposit_events rows.
         #
-        # AN ALREADY-RECORDED UNATTRIBUTABLE TXID IS THE SAME SHAPE OF SAFE, and it
-        # is the half that was missing: record_unattributable() UPSERTs, so a row
-        # left out of `events` keeps the row it already has rather than losing it.
-        # What changes is last_seen_at and confirmations, which stop advancing --
-        # correct, since nothing is looking at the transaction any more, and
-        # first_seen_at is the figure a human matching it works from.
+        # AN ALREADY-RECORDED UNATTRIBUTABLE TXID IS THE SAME SHAPE OF SAFE ONLY WHEN
+        # NO LATER SWAP CAN CLAIM IT, which is what skippable_unattributable_txids()
+        # now decides and what the first version of this comment got wrong: it skipped
+        # every recorded row, including the ones a future tag allocation answers.
+        # record_unattributable() UPSERTs, so a row left out of `events` keeps the row
+        # it already has rather than losing it. What changes for a SKIPPED row is
+        # last_seen_at and confirmations, which stop advancing -- correct, since nothing
+        # is looking at that transaction any more, and first_seen_at is the figure a
+        # human matching it works from. A RE-READ row keeps advancing both, and is also
+        # the row resolve_credited() below can close once a swap claims its tag.
         #
         # AND IT IS THE CYCLE'S ONE SCAN WHEN process_active_swaps() MADE ONE. This function
         # scanned the shared account a fifth time -- the +1 in the N+1 -- for a result the

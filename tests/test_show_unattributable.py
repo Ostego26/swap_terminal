@@ -37,7 +37,7 @@ from swap_terminal.services.unattributable_deposit_service import (  # noqa: E40
     outstanding,
     record,
     resolve_credited,
-    unattributable_txids,
+    skippable_unattributable_txids,
 )
 
 #: The operator's two real stranded devnet signatures, the ones that were burning a
@@ -146,18 +146,31 @@ def test_include_resolved_shows_BOTH_and_marks_which(db_file):
 def test_the_default_is_the_OPPOSITE_of_the_scanners_skip_set(db_file):
     """Same table, two questions, deliberately different defaults -- stated at both sites.
 
-    outstanding() hides resolved rows: a dealt-with deposit is history. 
-    unattributable_txids() INCLUDES them: there the question is "may the scanner skip
-    this", and a human having dealt with it is a stronger yes than an open row. A
-    reader who found one of these and assumed the other would either re-open the 429
-    leak or hide outstanding money.
+    outstanding() hides resolved rows: a dealt-with deposit is history.
+    skippable_unattributable_txids() INCLUDES them: there the question is "may the
+    scanner skip this", and a human having dealt with it is a stronger yes than an open
+    row. A reader who found one of these and assumed the other would either re-open the
+    429 leak or hide outstanding money.
+
+    AND THEY ARE NOT COMPLEMENTS, which is the stronger invariant this now pins and the
+    reason the old assertion here was wrong. It asserted the skip set held BOTH rows --
+    which was true, and was the 2026-10-02 defect: STRANDED_B carries discriminator 4242
+    that no swap holds, so a swap allocated 4242 later owns that payment and the scan has
+    to keep reading it. STRANDED_A has no discriminator at all AND is resolved, so it is
+    skippable twice over. One row is outstanding-and-not-skippable, the other is
+    resolved-and-skippable; neither list is the other's negation.
     """
     seed(db_file, [no_reference(STRANDED_A), wrong_reference(STRANDED_B)])
     conn = connect_db(str(db_file))
     resolve_credited(conn, "SOL", [STRANDED_A], now=LATER)
     conn.commit()
     assert [row["txid"] for row in outstanding(conn, "SOL")] == [STRANDED_B]
-    assert unattributable_txids(conn, "SOL") == frozenset({STRANDED_A, STRANDED_B})
+    assert skippable_unattributable_txids(
+        conn, "SOL", ("awaiting_deposit", "deposit_seen", "confirming")
+    ) == frozenset({STRANDED_A}), (
+        "the resolved no-discriminator row is skippable; the unresolved one carrying a "
+        "discriminator no swap holds must still be read, or no later swap can claim it"
+    )
 
 
 def test_the_asset_filter_is_per_asset(db_file):
