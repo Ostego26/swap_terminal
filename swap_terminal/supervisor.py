@@ -381,20 +381,53 @@ def pid_is_still_ours(pid: int, recorded_command: str) -> bool:
     strictly worse than failing to stop a process that is already gone.
 
     Returns True when the recorded command still appears in the live process's
-    command line, and also when we have no way to check (no /proc, or no
-    command recorded), because in that case the pid file remains the best
-    evidence we have.
+    command line, and when there is genuinely no way to check -- no /proc at all, or
+    no command recorded. It returns FALSE when /proc EXISTS and answers that the pid
+    has no cmdline, because that is an answer rather than an absence of one. The
+    comment at that branch carries the measurement that changed it.
     """
     if not recorded_command:
         return True
     live = _proc_cmdline(pid)
-    if not live:
-        return True
-    # The recorded command is the argv joined with spaces, so a prefix match on
-    # the script path is the stable part: a worker that re-execs itself keeps
-    # the path and may lose the interpreter's absolute form.
-    marker = recorded_command.rsplit(maxsplit=1)[-1]
-    return marker in live
+    if live:
+        # The recorded command is the argv joined with spaces, so a prefix match on
+        # the script path is the stable part: a worker that re-execs itself keeps
+        # the path and may lose the interpreter's absolute form.
+        marker = recorded_command.rsplit(maxsplit=1)[-1]
+        return marker in live
+    # AN EMPTY CMDLINE ON A PLATFORM THAT HAS /proc IS NOT "CANNOT TELL", AND
+    # TREATING IT AS ONE SIGNALLED A PROCESS THAT WAS NEVER OURS.
+    #
+    # This returned True for every empty read, with the reasoning recorded in
+    # _proc_cmdline()'s docstring: the pid file is the best evidence available and
+    # refusing would leave an orphan running, which is rule 13's whole subject. That
+    # trade is sound for the case it was written for -- a platform with no /proc, where
+    # the question can never be answered -- and wrong for the case it was also catching.
+    #
+    # MEASURED 2026-10-02, 400 trials: _proc_cmdline() read EMPTY for a just-spawned
+    # LIVE process 152 times, 38%. Between fork and exec a process has no cmdline, so a
+    # stop racing a spawn asked "is this ours", could not tell, answered yes, and
+    # SIGTERMed it. test_stop_refuses_to_signal_a_recycled_pid caught it as
+    # `assert 'stopped' == 'stale-pidfile'` -- the bystander it spawns to PROVE the
+    # guard works was the process the guard killed -- and it read as a flake because it
+    # only fires inside that window.
+    #
+    # ON LINUX AN EMPTY CMDLINE FOR A LIVE PID IS NEVER ONE OF OUR WORKERS: a zombie
+    # (nothing to signal), a kernel thread (not ours, not signallable), or a process
+    # mid-fork (not yet the thing the pid file names). /proc answering "empty" is an
+    # ANSWER, and the answer is no.
+    #
+    # THE NO-/proc CASE IS UNCHANGED and still fails open, because there the original
+    # reasoning holds exactly: nothing can distinguish our worker from a stranger, and
+    # an orphan holding a lock while every cycle prints exit_code=0 is the documented
+    # live failure. This is not a reversal of that trade -- it is the trade applied only
+    # where the question is genuinely unanswerable.
+    #
+    # WHAT IT COSTS, said rather than implied: a `stop` that races its own `start` now
+    # reports stale-pidfile instead of stopping. That is loud -- the outcome is named in
+    # the output and counted separately -- and full_stop's pattern kills remain the
+    # second path, which is what they are for.
+    return not PROC_DIR.exists()
 
 
 def start_worker(name: str, argv: list[str], run_dir: Path) -> dict:

@@ -1073,3 +1073,86 @@ def test_a_stopped_workers_log_is_STILL_printed(tmp_path):
     (tmp_path / "reconcile_worker.log").write_text("Traceback: boom\n")
     lines = supervisor.status_log_lines(tmp_path, "reconcile_worker", "stopped")
     assert any("Traceback: boom" in line for line in lines)
+
+
+# --- the pid-reuse guard fails CLOSED when /proc gave an answer ----------------
+
+
+#: This file's platform premise, stated once.
+PROC_DIR_EXISTS = supervisor.PROC_DIR.exists()
+
+
+def test_an_EMPTY_cmdline_for_a_live_pid_is_an_ANSWER_and_the_answer_is_NO():
+    """The defect that read as a flake, and it was a SIGTERM to a stranger.
+
+    pid_is_still_ours() returned True for EVERY empty cmdline read, with the reasoning
+    in _proc_cmdline()'s docstring: the pid file is the best evidence available, and
+    refusing would leave an orphan running. Sound for the case it was written for -- no
+    /proc, where the question cannot be answered -- and wrong for the case it was also
+    catching.
+
+    MEASURED 2026-10-02 over 400 trials: _proc_cmdline() read EMPTY for a just-spawned
+    LIVE process 152 times (38%), because between fork and exec there is no cmdline.
+    So a stop racing a spawn asked "is this ours", could not tell, said yes, and
+    signalled it. test_stop_refuses_to_signal_a_recycled_pid caught it as
+    `assert 'stopped' == 'stale-pidfile'` -- the bystander it spawns to PROVE the guard
+    works was the process the guard killed.
+
+    On Linux an empty cmdline for a LIVE pid is never one of our workers: a zombie, a
+    kernel thread, or a process mid-fork. None of those is the thing the pid file names.
+    """
+    assert PROC_DIR_EXISTS, "this test's premise is a platform that has /proc"
+    bystander = subprocess.Popen([sys.executable, "-c", SLEEPING_CHILD])
+    try:
+        # The real window, not a stub: ask before the child has necessarily exec'd.
+        verdicts = []
+        for _ in range(60):
+            child = subprocess.Popen([sys.executable, "-c", SLEEPING_CHILD])
+            verdicts.append(
+                supervisor.pid_is_still_ours(child.pid, "/usr/bin/python3 /x/workers/payout_worker.py")
+            )
+            child.kill()
+            child.wait(timeout=10)
+        assert not any(verdicts), (
+            f"the guard claimed {sum(verdicts)} of {len(verdicts)} unrelated processes as ours; "
+            f"each one is a SIGTERM to a process this repo never started"
+        )
+    finally:
+        bystander.send_signal(signal.SIGKILL)
+        bystander.wait(timeout=10)
+
+
+def test_the_NO_PROC_case_still_fails_OPEN_because_the_question_is_unanswerable(monkeypatch):
+    """The half of the original trade that was RIGHT and must not be lost.
+
+    With no /proc, nothing distinguishes our worker from a stranger -- and an orphan
+    holding a lock while every cycle prints exit_code=0 is the documented live failure
+    (rule 13). So that case still answers yes. The change is narrower than "fail
+    closed": it fails closed only where /proc gave an answer.
+    """
+    monkeypatch.setattr(supervisor, "PROC_DIR", Path("/nonexistent-proc-for-this-test"))
+    monkeypatch.setattr(supervisor, "_proc_cmdline", lambda _pid: "")
+    assert supervisor.pid_is_still_ours(4242, "/usr/bin/python3 /x/workers/payout_worker.py"), (
+        "on a platform with no /proc the pid file is still the best evidence there is"
+    )
+
+
+def test_a_RECORDED_command_that_matches_is_still_ours():
+    """The ordinary path, so a version that always refused would not pass the two above."""
+    own = f"{sys.executable} -c {SLEEPING_CHILD}"
+    child = subprocess.Popen([sys.executable, "-c", SLEEPING_CHILD])
+    try:
+        # WAIT FOR THE EXEC rather than assuming it. This is the same 38% window the
+        # test above measures, and a positive test that raced it would be the flake
+        # again with the sign flipped.
+        for _ in range(500):
+            if supervisor._proc_cmdline(child.pid):
+                break
+            time.sleep(0.002)
+        assert supervisor._proc_cmdline(child.pid), "the child never exec'd; the test below is vacuous"
+        assert supervisor.pid_is_still_ours(child.pid, own), (
+            "a live process whose recorded command matches its cmdline IS ours"
+        )
+    finally:
+        child.send_signal(signal.SIGKILL)
+        child.wait(timeout=10)
