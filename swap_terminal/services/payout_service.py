@@ -2,12 +2,23 @@
 
 Role: submodule -> function (process_pending_payouts is the decision)
 Reads: swap_terminal.db (swaps, payouts, wallet_inventory), the destination
-       adapter (getbalance)
+       adapter (getbalance), and THE PROCESS ENVIRONMENT for two secrets it
+       never stores and never logs -- GRIDCOIN_WALLET_PASSPHRASE (see
+       WALLET_UNLOCK_ENV_VAR) and, since 2026-10-02, XRP_PAYOUT_SECRET_SEED
+       (see chains/xrp_payout_seed.py, which owns the name)
 Writes: swap_terminal.db (payouts, wallet_inventory, swaps, swap_audit_log)
        AND THE CHAIN
-Can move funds: YES. `adapters[destination_asset].send_to_address(...)` on the
-       line inside process_pending_payouts' try block is the only broadcast in
-       the Flask suite. It is final the instant it is relayed.
+Can move funds: YES. `broadcast_payout(...)` on the line inside
+       process_pending_payouts' try block is the only broadcast in the Flask
+       suite. It is final the instant it is relayed.
+
+       THIS FIELD NAMED `adapters[destination_asset].send_to_address(...)` until
+       2026-10-02, which was the call site itself rather than a function. It is
+       broadcast_payout() now -- one call site, one function, and the only place
+       that decides which keywords a chain's send needs. Corrected rather than
+       left: a header naming a line that is no longer there sends a reader
+       looking for the broadcast in the wrong place, and this is the one file
+       where that matters most.
 Mainnet-safe: NO -- running this against a funded mainnet wallet is operating
        the payout path, not inspecting it.
 
@@ -51,10 +62,12 @@ from contextlib import nullcontext
 
 from chains.gridcoin_wallet_lock import GridcoinLockError, unlocked_for_payout
 from chains.registry import why_cannot_pay_out
+from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_seed_is_present
+from chains.xrp_signing import CONFIRM_XRP_SEND
 from modules.address_authority import check_address
 
 from .helpers import utc_now_iso
-from .swap_service import set_swap_status
+from .swap_service import SHARED_ACCOUNT_PAYOUT_ASSETS, payout_source_account, set_swap_status
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +219,127 @@ def refuse_payout_before_sending(db, swap: dict, verdict, destination_asset: str
     )
 
 
+class PayoutSigningUnavailable(RuntimeError):
+    """This process cannot sign for that chain, so no send was attempted.
+
+    Its own type for the reason PayoutUnlockUnavailable below has one: it is
+    categorically different from a send that FAILED. No transaction was created,
+    nothing reached any server, no fee was claimed, and the remedy is an
+    environment variable rather than an investigation.
+    """
+
+
+def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -> str:
+    """Send one payout on `asset`, with whatever that chain's send actually needs. Returns the txid.
+
+    THE DECISION THIS HOLDS is "which keywords does this chain's send require", and
+    it is extracted into a function rather than written inline in
+    process_pending_payouts() for rule 10's reason: it is the thing that decides
+    whether money moves, so it has to be callable with seeded inputs and asserted on
+    directly. Inline, the only way to test it would be to run the loop against a
+    database.
+
+    WHAT IT REPLACED, AND WHAT THAT COST. Until 2026-10-02 the call site was
+
+        txid = adapter.send_to_address(swap["payout_address"], amount)
+
+    two positional arguments for every chain. For BTC, LTC and GRC that is the whole
+    of the send: the daemon holds the wallet, picks the inputs and signs. For XRP it
+    is a REFUSAL -- chains/xrp.py previews by default and requires an arming token at
+    the call site -- so every XRP payout raised XRPSendNotArmed and the swap landed
+    in `failed` WITH THE CUSTOMER'S DEPOSIT ALREADY CREDITED. The customer page said
+    so, in those words, and the operator asked for the opposite: "we should be able
+    to swap any coin for another of any combination."
+
+    TWO BLOCKERS WERE CLAIMED AND ONLY ONE WAS THE REAL ONE. The page's sentence read
+    "it holds no signing key, AND services/payout_service.py calls send_to_address()
+    without the arming token". Both were true; they were different problems. Arming
+    this call site alone would have changed XRPSendNotArmed into XRPSendNotArmed's
+    second branch ("armed but no signing seed was supplied"), because there was no
+    environment variable, no Config field and no path of any kind by which a seed
+    could reach the adapter. chains/xrp_payout_seed.py is what was actually missing.
+
+    THE REFUSALS HERE COME BEFORE ANY NETWORK CALL, which is the ordering rule 14
+    asks for: a host missing a variable learns so immediately rather than after two
+    round trips to a rippled server. Both are named, both say which variable, and
+    neither creates a transaction. Everything after them is the adapter's own guard
+    sequence, which runs in this order and is documented at
+    chains/xrp.py::preview_payout():
+
+        local    the destination is not an X-address; its checksum decodes; the
+                 source decodes; the amount is more than zero drops
+        network  server_info, and xrp_signing.require_non_mainnet() refuses network
+                 id 0, a MISSING id and an unreadable id -- decided from what the
+                 SERVER reports and never from the url
+        network  account_info on the SOURCE, then the reserve arithmetic in integer
+                 drops
+        armed    the exact token from this function, and a non-empty seed
+        key      derive_and_check(): the seed's own account must equal the source
+                 this run announced, or nothing is signed
+        tx       refuse_partial_payment() on the SERIALIZED transaction
+        ledger   submit_and_wait(), then tesSUCCESS AND validated AND a hash
+
+    THE SEED IS NEVER BOUND TO A NAME IN THIS FUNCTION. signing_seed() is called in
+    the argument list and its value is consumed by send_to_address() immediately: it
+    is never a local, never a dict value, never part of this function's return, and
+    never interpolated into any message raised from here. The pre-flight check uses
+    signing_seed_is_present(), which returns a bool. tests/test_xrp_payout_wiring.py
+    captures every log record at DEBUG -- including repr(record.args), where a value
+    survives whether or not a handler formats the message -- and asserts the seed is
+    in none of them, in no exception string, and in no return value.
+
+    EVERY OTHER CHAIN IS UNCHANGED, BYTE FOR BYTE. An asset outside
+    SHARED_ACCOUNT_PAYOUT_ASSETS gets `send_to_address(address, amount)`, the same
+    two positional arguments it always got. That is deliberate rather than
+    incidental: adding keywords to a BTC send would be a change to the one function
+    in this suite that moves money, for no behavioral gain.
+    """
+    if asset not in SHARED_ACCOUNT_PAYOUT_ASSETS:
+        return adapter.send_to_address(address, amount)
+
+    # Raises ValueError, named and with the variable in it, when XRP_DEPOSIT_ACCOUNT
+    # is unset or is not a payable account. services/swap_service.create_swap()
+    # already refuses to CREATE a swap in that state, so reaching this means the
+    # variable was removed between creation and payout -- which is exactly when a
+    # loud refusal before any network call is what is wanted.
+    source = payout_source_account(config, asset)
+    if not signing_seed_is_present():
+        raise PayoutSigningUnavailable(
+            f"{asset} payouts are signed in this process and {SIGNING_SEED_ENV_VAR} is not set in its "
+            f"environment, so NOTHING was signed, nothing was submitted and no fee was claimed. The "
+            f"swap was created while it WAS set -- chains/xrp.py reads it at adapter construction and "
+            f"services/swap_service.create_swap() refuses without it -- so it has been removed since. "
+            f"Export {SIGNING_SEED_ENV_VAR} in the shell that starts this worker; a value set in a "
+            f"file, or in another shell, does not reach here. The account that pays is {source}."
+        )
+    return adapter.send_to_address(
+        address,
+        amount,
+        source=source,
+        # CALLED IN THE ARGUMENT LIST ON PURPOSE. Assigning it to a local first is
+        # the obvious spelling and it is the one that leaks: a local survives into
+        # a traceback's frame locals, which anything that formats an exception with
+        # a rich traceback renderer will print. Consumed here, it exists for the
+        # duration of the call and is named nowhere.
+        seed=signing_seed(),
+        # THE ARMING TOKEN, SPELLED BY IMPORTING THE CONSTANT rather than by copying
+        # its text. chains/xrp_signing.py compares for EXACT equality, so a copied
+        # literal that drifted by one character would refuse every payout with a
+        # message about the token -- and `grep -rn CONFIRM_XRP_SEND` is meant to
+        # enumerate every site in this tree that can send XRP, which a local copy
+        # of the string would hide from.
+        confirm_send=CONFIRM_XRP_SEND,
+        # NO DESTINATION TAG, and the absence is a decision rather than an omission.
+        # `swaps` has a deposit_tag column and no payout_tag column: a tag on the
+        # way OUT is the customer's exchange's identifier, this terminal never
+        # collects one, and passing a wrong one would misroute a payment inside
+        # their exchange with no way to recover it. A customer whose destination
+        # needs a tag therefore cannot be paid by this path, which is a known
+        # limitation and the honest one: preview_payout() refuses an X-address
+        # outright for the same reason rather than silently dropping its tag.
+    )
+
+
 def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
     """Broadcast the payout for every swap that is waiting for one.
 
@@ -351,7 +485,13 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
             recorded = False
             try:
                 with payout_unlock_context(destination_asset, adapter):
-                    txid = adapter.send_to_address(swap["payout_address"], amount)
+                    # broadcast_payout() rather than adapter.send_to_address() since
+                    # 2026-10-02: XRP's send needs a source account, a signing seed and
+                    # an arming token, and every other chain's needs exactly the two
+                    # positional arguments this line used to pass. The dispatch is a
+                    # function so it can be tested with a stub adapter and a seeded
+                    # environment; see its docstring for the full refusal order.
+                    txid = broadcast_payout(adapter, destination_asset, config, swap["payout_address"], amount)
                     # RECORDED INSIDE THE CONTEXT, BEFORE THE RE-LOCK CAN RAISE.
                     #
                     # This block sat AFTER the `with` until 2026-09-26, and the first

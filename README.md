@@ -928,6 +928,55 @@ swap can be created**: `create_swap()` refuses every XRP swap while
 `XRP_DEPOSIT_ACCOUNT` is unset, because which account customer deposits land in
 is a custody decision and has no safe default.
 
+### Arming the XRP payout — two variables, both unset by default
+
+Until 2026-10-02 the XRP payout could not run unattended at all, and the
+customer page said why: *"XRP cannot pay out: it holds no signing key, and
+`services/payout_service.py` calls `send_to_address()` without the arming token."*
+Two blockers in one sentence, and **the first was the real one** — there was no
+environment variable, no `Config` field and no path of any kind by which a seed
+could reach the adapter, so arming the call site alone would have turned one
+refusal into another. `chains/xrp_payout_seed.py` is what was missing;
+`services/payout_service.broadcast_payout()` is the wiring.
+
+Two variables arm it and **both are unset by default**, which is why nothing
+changes on a host that does not set them:
+
+| variable | what it is | unset means |
+| --- | --- | --- |
+| `XRP_PAYOUT_SECRET_SEED` | the family seed that signs. A secret. Read from the environment at use time, never from `Config` (which is echoed on `/admin` through an allowlist), never logged, never in `argv` | `can_spend` is False, `create_swap()` refuses an XRP-destination swap, nothing is taken |
+| `XRP_DEPOSIT_ACCOUNT` | the account a payout DEBITS, which is the same one deposits are paid INTO — one balance, both directions, exactly as the single Gridcoin wallet works | `create_swap()` refuses before a swap row exists |
+
+A seed that does not derive `XRP_DEPOSIT_ACCOUNT` is refused by
+`chains/xrp_signing.derive_and_check()` **before anything is signed**, so a
+mismatch between the two costs a refusal rather than a payment from an account
+nobody announced.
+
+**Mainnet is still unreachable from this path.** `require_non_mainnet()` decides
+from the `network_id` the SERVER reports, not from the URL, and refuses a mainnet
+id, a missing id and an unreadable one. Neither variable changes that and there
+is no flag that does.
+
+To try one real testnet payout through the worker's own code path — the seed is
+typed into a prompt, so it reaches neither `argv` (world-readable via `ps`) nor
+shell history:
+
+```
+cd ~/swap_terminal
+read -rsp 'XRP testnet seed (not echoed): ' XRP_PAYOUT_SECRET_SEED; echo; export XRP_PAYOUT_SECRET_SEED
+export XRP_DEPOSIT_ACCOUNT=rYOUR_TESTNET_ACCOUNT
+python3 xrp_payout_verify.py --via-service --to rDESTINATION --amount 1          # previews and refuses
+python3 xrp_payout_verify.py --via-service --to rDESTINATION --amount 1 --send   # signs and submits
+```
+
+`--via-service` runs `broadcast_payout()`, the function a customer's swap goes
+through, with the worker's own configuration. The endpoint stays pinned to the
+testnet and `XRP_RPC_URL` is ignored, because reading it would be the flag this
+file promises not to have. **The preview is the default**, and a preview that
+stops anywhere earlier than the arming check now says so and exits non-zero —
+it used to print "that refusal is the DEFAULT and is correct" for an unreachable
+endpoint, which made a connection reset read as a working guard.
+
 ### Opening a swap from the shell — `open_swap.py`
 
 Dry run by default; `--apply` writes the rows. It exists because the rest of the

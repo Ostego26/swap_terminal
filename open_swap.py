@@ -352,7 +352,9 @@ def blocked_by(unavailable: list[dict]) -> str:
         GRC->XRP (UNAVAILABLE) ... UNAVAILABLE means allowed but not completable from
         this process: BTC has no adapter in this process: BTC_RPC_PORT ... unset
 
-    GRC -> XRP is unavailable because XRP cannot PAY OUT -- it holds no signing key --
+    GRC -> XRP is unavailable because XRP cannot PAY OUT -- on the day that was measured,
+    for want of a signing key; since 2026-10-02 it is because XRP_PAYOUT_SECRET_SEED is
+    unset, which is the same verdict reached through a variable rather than an absence --
     and has nothing to do with BTC_RPC_PORT. One row's reason presented as every row's
     is the same overclaim this whole day was spent removing, and I committed a fresh
     one into the line that removes it.
@@ -884,7 +886,12 @@ def apply_swap(args, config: dict, adapters: dict, pair: tuple[str, str], db_pat
                                   f"<- False means it was already there, which is the normal case"),
                 flush=True,
             )
-            quote = create_quote(db, config, from_asset, to_asset, args.amount)
+            # `adapters=` so the CLI path gets the same quote-time gate the web
+            # form does. services/quote_service.require_deliverable_sol_payout()
+            # needs a chain to ask for the smallest deliverable SOL payout, and
+            # a gate that only one of two entry points applies is not a gate
+            # (rule 19). The dict is the one this file already built above.
+            quote = create_quote(db, config, from_asset, to_asset, args.amount, adapters=adapters)
             print(
                 labeled("quote", f"{quote['id']}  rate {quote['quoted_rate']} {to_asset} per {from_asset}, "
                                  f"estimated payout {quote['output_amount_estimate']} {to_asset}"),

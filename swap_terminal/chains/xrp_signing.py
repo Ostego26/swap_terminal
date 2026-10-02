@@ -59,9 +59,22 @@ No key path, no key file reader, no environment variable name. This module
 cannot find a seed; it can only be handed one. That is what keeps
 chains/xrp.py's promise ("holds no key, reads no key path") true even though
 the adapter can now sign: the seed has to come from a caller who already had
-it, which on this tree is the operator running a fixture, and NOT from the
+it.
+
+WHO THAT CALLER IS CHANGED ON 2026-10-02 and this paragraph used to name the
+answer that was true before: "the operator running a fixture, and NOT from the
 payout worker, which calls send_to_address() with two positional arguments and
-therefore gets a refusal.
+therefore gets a refusal". The payout worker IS now a caller --
+services/payout_service.broadcast_payout() reads XRP_PAYOUT_SECRET_SEED from
+its own environment and passes it -- so a reader who trusted that clause would
+conclude an XRP payout cannot happen unattended, which is the opposite of the
+truth.
+
+NOTHING IN THIS FILE MOVED. Every guard below is unchanged, the arming token is
+still required at the call site, and the environment variable's name appears
+nowhere in this module: it lives in chains/xrp_payout_seed.py, which is the one
+place that knows it. require_send_confirmation() below is still what refuses an
+unarmed call, and it is still reached by any caller that forgets.
 """
 
 from __future__ import annotations
@@ -305,11 +318,28 @@ def require_send_confirmation(token: str, seed: str) -> None:
     (`"ignInvalid" in str(status)`), and a substring test on an arming token is
     that defect on the side where it costs money rather than an exit code.
 
-    THE DEFAULT IS THE REFUSAL, which is the property that matters. A caller
-    that passes neither argument -- services/payout_service.py:219 calls
-    `send_to_address(address, amount)` with two positional arguments and
-    nothing else -- lands here and is refused. A forgotten opt-in cannot
+    THE DEFAULT IS THE REFUSAL, which is the property that matters. A caller that
+    passes neither argument lands here and is refused, so a forgotten opt-in cannot
     degrade into a send.
+
+    THE EXAMPLE THIS PARAGRAPH USED TO GIVE IS NOW THE OTHER WAY ROUND, and both
+    halves are worth keeping because together they are the test:
+
+      every other chain   services/payout_service.broadcast_payout() calls
+                          `adapter.send_to_address(address, amount)` -- two
+                          positional arguments, no keywords -- for BTC, LTC, GRC
+                          and anything else. That is the call this paragraph cited
+                          as XRP's, and if XRP ever stops being special-cased
+                          there it lands here and refuses rather than sending.
+      XRP                 the same function passes source=, seed= and
+                          confirm_send=CONFIRM_XRP_SEND, so it reaches the
+                          signature. tests/test_xrp_payout_wiring.py mutation-checks
+                          that by reverting the call site to the two-argument form
+                          and asserting the payout refuses and the swap fails.
+
+    AND SETTING THE ENVIRONMENT VARIABLE IS NOT ARMING. chains/xrp.py does not
+    import chains/xrp_payout_seed.signing_seed(), so an armed-looking host whose
+    call site passes no seed still arrives at the second refusal below.
     """
     if token != CONFIRM_XRP_SEND:
         raise XRPSendNotArmed(

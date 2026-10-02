@@ -64,3 +64,28 @@ if str(APP_ROOT) not in sys.path:
 # empty schema.
 _TEST_DB_DIR = tempfile.mkdtemp(prefix="swap_terminal_tests_")
 os.environ.setdefault("SWAP_DB_PATH", str(Path(_TEST_DB_DIR) / "swap_terminal_test.db"))
+
+# 3. THE XRP SIGNING SEED IS REMOVED FROM THIS PROCESS'S ENVIRONMENT. Added
+#    2026-10-02 with chains/xrp_payout_seed.py.
+#
+#    XRPAdapter reads that variable at CONSTRUCTION to decide `can_spend`, and
+#    `can_spend` decides whether services/swap_service.create_swap() will create an
+#    XRP-destination swap at all. So a developer or an operator who has the variable
+#    exported -- which is exactly the state a host that pays XRP out is in -- would
+#    run this suite against a DIFFERENT posture from CI, and the tests that assert
+#    the default refusal would fail on their machine and pass in CI. A suite whose
+#    result depends on the shell that started it is a suite nobody can use to
+#    establish anything.
+#
+#    REMOVED RATHER THAN DEFAULTED, and the direction matters: the refusing state is
+#    the one every test but the three that arm it deliberately should see, and the
+#    three do it with monkeypatch.setenv, which reverts. os.environ.setdefault()
+#    would have been the wrong tool twice over -- it cannot unset, and a default
+#    value here would be a string this harness invented standing in for a secret.
+#
+#    THIS IS AN IMPORT-TIME SIDE EFFECT and that is what rule 12 names as a hazard,
+#    so: it is confined to the test harness, it is the same mechanism the
+#    SWAP_DB_PATH line above already relies on for the same reason (Config reads the
+#    environment at class-definition time, so a fixture would be too late), and the
+#    thing it removes is a secret rather than a setting.
+os.environ.pop("XRP_PAYOUT_SECRET_SEED", None)

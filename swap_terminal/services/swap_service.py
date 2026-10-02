@@ -338,6 +338,90 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
     return account, True
 
 
+# ASSETS WHOSE PAYOUT IS DEBITED FROM THE ONE SHARED ACCOUNT CUSTOMERS DEPOSIT INTO,
+# rather than from a wallet a local daemon owns and picks inputs from.
+#
+# BTC, LTC and GRC are not here and must not be: their adapter calls
+# `sendtoaddress` and the DAEMON chooses which coins to spend, so there is no source
+# address for this process to name. XRP has no daemon of ours and no wallet -- a
+# Payment names its own `Account` field, and that field is what gets debited -- so
+# the source is a value this process has to supply and therefore a value it has to
+# be configured with.
+#
+# SOL IS DELIBERATELY ABSENT, and not by oversight. Solana's payout path is its own
+# change, and whether a SOL payout needs a source named here is that change's
+# question to answer -- this set is read by services/payout_service.broadcast_payout()
+# to decide which keywords a send gets, so a row added speculatively would start
+# passing a source to an adapter that may not take one. Deliberately NOT written as a
+# claim about chains/solana.py's current state either: a comment that says what
+# another in-flight file does today is stale by the time it is read, which is rule
+# 16's wrong comment with a short fuse. Add SOL in the change that gives SOL a
+# signing path, not before.
+SHARED_ACCOUNT_PAYOUT_ASSETS = frozenset({"XRP"})
+
+
+def payout_source_account(config, asset: str) -> str:
+    """The account an `asset` payout DEBITS. Reads config, writes nothing, touches no network.
+
+    THE MIRROR OF deposit_account() ABOVE, and it lives beside it so that the one
+    question "which account does this chain use" has one answer in one file (rule 8).
+    It reads the SAME variable through the SAME table: TAG_ATTRIBUTION[asset][0]. A
+    second spelling of "XRP_DEPOSIT_ACCOUNT" is what rule 8 calls a bug with a delay
+    on it, and this one would be the worst kind -- the deposit side and the payout
+    side quietly pointing at two different accounts, with deposits arriving in one
+    and payouts debiting another, each file looking correct on its own.
+
+    ONE ACCOUNT FOR BOTH DIRECTIONS IS THE DESIGN AND IS WORTH SAYING OUT LOUD. An
+    XRP swap's customer deposit lands in XRP_DEPOSIT_ACCOUNT, and an XRP payout to
+    some other customer is debited from it. That is exactly what the single Gridcoin
+    wallet already does -- deposits in, payouts out, one balance -- and it is why
+    there is no second variable to configure. It is also why the reserve check in
+    chains/xrp_signing.require_reserve_headroom() matters: the account funds payouts
+    and must stay above its reserve, and that figure comes from a live account_info
+    read rather than from anything cached.
+
+    RAISES ValueError FOR AN UNSET OR UNUSABLE ACCOUNT, with the variable named, and
+    returns only a value that passed a local decode. Raising rather than returning ""
+    is the same choice deposit_account() makes and for the same reason: an empty
+    string here would flow into a Payment's `Account` field and produce an
+    account_info error several layers from the cause.
+
+    WHY A LOCAL DECODE AND NOT THE ADAPTER'S validate_address(). On this one chain
+    the adapter's yes is the weaker answer -- XRPAdapter.validate_address() accepts
+    ANY X-address without verifying its checksum, which is the review finding
+    chains/xrp.py records -- and an X-address is specifically wrong here: it packs a
+    destination tag into the string, and a Payment's `Account` field takes a classic
+    address. So this uses modules/address_authority, the same authority the payout
+    worker's burn guard uses on the destination.
+
+    AN ASSET NOT IN SHARED_ACCOUNT_PAYOUT_ASSETS RETURNS "" rather than raising. Its
+    payout has no source for this process to name, the adapter's daemon picks the
+    inputs, and services/payout_service.broadcast_payout() passes no source keyword
+    at all for it.
+    """
+    if asset not in SHARED_ACCOUNT_PAYOUT_ASSETS:
+        return ""
+    variable, _discriminator, network = TAG_ATTRIBUTION[asset]
+    account = (config.get(variable) or "").strip()
+    if not account:
+        raise ValueError(
+            f"{asset} payouts are debited from one shared account and {variable} is not set, so there "
+            f"is no account to pay FROM. It is the same account {asset} deposits are paid INTO -- one "
+            f"balance, both directions, exactly as the single Gridcoin wallet works -- and it is a "
+            f"custody decision with no default. Set {variable} to the account whose seed is in "
+            f"XRP_PAYOUT_SECRET_SEED; a mismatch between the two is refused before signing by "
+            f"chains/xrp_signing.derive_and_check()."
+        )
+    verdict = check_address(asset, account)
+    if verdict.refuses:
+        raise ValueError(
+            f"{variable} ({account}) cannot be a {network} payout source -- {verdict.why}. Refused "
+            f"locally, with no daemon asked and nothing written. A Payment's `Account` field must be a "
+            f"CLASSIC address: an X-address packs a destination tag into the string and belongs on the "
+            f"destination side, not here."
+        )
+    return account
+
 
 def _refuse_unusable_deposit_address(config, asset: str, address: str, source: str) -> None:
     """Raise unless `address` can actually receive `asset` on the network we believe we are on.
@@ -437,10 +521,16 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     # /api/swaps does not come from the page, so the gate that matters is here.
     #
     # GRC -> XRP on 2026-09-26: an XRP adapter exists and reaches the testnet, so the
-    # check above passes. XRPAdapter holds no signing key and payout_service calls
-    # send_to_address() unarmed, so the payout RAISES -- the customer's GRC would be
+    # check above passes. XRPAdapter held no signing key and payout_service called
+    # send_to_address() unarmed, so the payout RAISED -- the customer's GRC would be
     # taken, credited, and the swap left in `failed` needing a person. Refusing
     # before the swap row exists is the only stage at which nothing has been taken.
+    #
+    # BOTH CLAUSES WERE FIXED ON 2026-10-02 and this gate is unchanged by that, which
+    # is the point of leaving the paragraph. The adapter can sign and this call site
+    # is wired, so `can_spend` is now the answer to "is XRP_PAYOUT_SECRET_SEED set in
+    # this process" -- and with it unset, which is the default, this check refuses
+    # exactly as it did. What changed is that the operator has a way to make it pass.
     #
     # Checked BEFORE validate_address(), deliberately: for XRP that validator accepts
     # any X-address without verifying its checksum (found by review the same day), so
@@ -452,6 +542,39 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             f"ALLOWED_PAIRS and both chains are reachable -- but a swap that cannot be paid out takes "
             f"a deposit it can never settle. Nothing was written."
         )
+    # AND THE ACCOUNT THE PAYOUT WOULD BE DEBITED FROM MUST EXIST, which the check
+    # above cannot ask. Added 2026-10-02 with the XRP payout wiring, to close a hole
+    # that wiring would otherwise have opened.
+    #
+    # why_cannot_pay_out() reads `can_spend` off the ADAPTER, and XRPAdapter sets that
+    # from one question: is XRP_PAYOUT_SECRET_SEED present in this process. The
+    # adapter has no Config and cannot be asked the second question -- is
+    # XRP_DEPOSIT_ACCOUNT set -- so a host with the seed exported and the account
+    # unset would pass the gate above, create the swap, TAKE AND CREDIT THE
+    # CUSTOMER'S DEPOSIT, and then refuse at
+    # services/payout_service.broadcast_payout() with nothing left to do but find a
+    # person. That is the precise failure the whole GRC -> XRP paragraph in
+    # chains/xrp.py is about, arriving through the one door the adapter cannot see.
+    #
+    # So it is asked HERE, where the config IS in scope and where nothing has been
+    # written or taken yet, and a refusal costs a retry. Two variables, two checks,
+    # both before the row exists.
+    #
+    # payout_source_account() RETURNS "" FOR EVERY CHAIN THAT HAS NO SOURCE TO NAME
+    # (BTC, LTC, GRC -- their daemon picks the inputs), so this adds no condition to
+    # them and the `ValueError` can only come from a SHARED_ACCOUNT_PAYOUT_ASSETS
+    # destination. It is re-raised with the "No swap was created" framing the rest of
+    # this function uses rather than allowed to propagate raw, because its own
+    # sentence is written for the payout worker and says nothing about a swap.
+    try:
+        payout_source_account(config, to_asset)
+    except ValueError as error:
+        raise ValueError(
+            f"No swap was created: {error} The {from_asset}->{to_asset} pair is in ALLOWED_PAIRS, both "
+            f"chains are reachable and {to_asset} has a signing seed -- but the account it would pay "
+            f"FROM is not configured, so the payout would refuse after the deposit had already been "
+            f"credited. Nothing was written."
+        ) from error
     # A SWAP WHOSE OWN FEE CANNOT PAY FOR ITS OWN PAYOUT.
     #
     # THIS GUARD USED TO BE AN ACCIDENT and 2026-10-02 turned it into a decision.

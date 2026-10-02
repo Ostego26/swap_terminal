@@ -13,9 +13,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
-from chains.xrp_signing import CONFIRM_XRP_SEND
+import requests
+from chains.xrp_signing import (
+    CONFIRM_XRP_SEND,
+    XRPMainnetRefused,
+    XRPReserveRefused,
+    XRPSendNotArmed,
+)
 
-from xrp_payout_verify import TESTNET_URL, arming_arguments
+from xrp_payout_verify import TESTNET_URL, arming_arguments, report_preview_refusal
 
 SEED = "s" * 31
 
@@ -67,3 +73,63 @@ def test_the_endpoint_is_pinned_to_testnet():
     """
     assert "altnet.rippletest.net" in TESTNET_URL
     assert "s1.ripple.com" not in TESTNET_URL
+
+
+def test_the_expected_preview_refusal_exits_zero_and_says_every_guard_before_it_ran(capsys):
+    """XRPSendNotArmed is the one outcome a preview is SUPPOSED to produce.
+
+    A preview withholds the arming token, so reaching that guard proves everything
+    ahead of it ran: the addresses decoded, the server answered, the network was not
+    mainnet, the balance was read and the reserve fit. Exit 0, and the message says
+    so rather than just "that was expected".
+    """
+    code = report_preview_refusal(XRPSendNotArmed("this XRP send was NOT armed"))
+
+    printed = capsys.readouterr()
+    assert code == 0
+    assert "DEFAULT and is correct" in printed.out
+    assert "every guard before it ran" in printed.out
+
+
+def test_an_unreachable_endpoint_is_NOT_reported_as_the_expected_refusal(capsys):
+    """THE DEFECT THIS FIXES, measured in this container 2026-10-02.
+
+    Both preview paths in xrp_payout_verify.py printed, unconditionally:
+
+        ConnectionError: ('Connection aborted.', ConnectionResetError(104, ...))
+
+        That refusal is the DEFAULT and is correct: this was a preview.
+
+    It was neither. The XRP testnet is unreachable from the container this was
+    written in, so NO guard ran at all -- and the script called the outcome expected
+    and exited 0. "Skipped" and "success" in the same output is the defect rule 13
+    names, in the one script whose whole job is establishing whether the payout path
+    works.
+
+    MUTATION: make report_preview_refusal() return 0 unconditionally. This test fails
+    on the exit code AND on the absence of the warning, and
+    test_the_expected_preview_refusal... above still passes -- which is the pair that
+    makes the branch load-bearing rather than decorative.
+    """
+    code = report_preview_refusal(requests.ConnectionError("Connection reset by peer"))
+
+    printed = capsys.readouterr()
+    assert code == 1, "an unreachable endpoint must not exit 0; nothing was established"
+    assert "THIS IS NOT THE PREVIEW REFUSAL" in printed.out
+    assert "DEFAULT and is correct" not in printed.out
+
+
+def test_a_guard_that_fired_EARLIER_than_arming_is_also_not_the_expected_refusal(capsys):
+    """A mainnet id and a reserve shortfall are real answers, and they are not THIS one.
+
+    Both mean the preview stopped before the arming check, so it established less
+    than a clean preview does -- and a mainnet refusal in particular is the single
+    most important thing in this file's output not to render as "working as
+    intended".
+    """
+    for error in (XRPMainnetRefused("reports network_id 0, which is MAINNET"),
+                  XRPReserveRefused("short by 500000 drops")):
+        code = report_preview_refusal(error)
+        printed = capsys.readouterr()
+        assert code == 1, f"{type(error).__name__} must not exit 0"
+        assert "THIS IS NOT THE PREVIEW REFUSAL" in printed.out

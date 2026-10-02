@@ -6,13 +6,35 @@ Writes: nothing to disk. ONE Payment transaction to a NON-MAINNET XRP Ledger,
         and only when a caller passes the exact arming token from
         chains/xrp_signing.py plus a signing seed. Everything else, including
         send_to_address()'s default mode, is a read.
-Can move funds: CONDITIONALLY, AND NEVER ON MAINNET, AND NEVER BY
-        CONFIGURATION. This module holds no key, reads no key path, and has no
-        Config field or RPC dict key that would give it one -- so no .env edit
-        and no environment variable can arm a payout. A seed and the arming
+Can move funds: CONDITIONALLY, AND NEVER ON MAINNET. A seed and the arming
         token both have to be passed at the call site, and before either is
         used the SERVER is asked for its network_id and a mainnet id refuses.
         See the four structural properties in send_to_address()'s docstring.
+
+        THIS FIELD USED TO ALSO SAY "AND NEVER BY CONFIGURATION", and that
+        stopped being true of the SYSTEM on 2026-10-02 even though it is still
+        true of this FILE. Corrected rather than left, because a header is the
+        first thing a reader trusts and the gap between those two readings is
+        the whole safety argument:
+
+          of this module    unchanged. It holds no key, reads no key path, has
+                            no Config field and no RPC dict key that would give
+                            it one, and does not import
+                            xrp_payout_seed.signing_seed(). Setting an
+                            environment variable does NOT let this module sign:
+                            send_to_address() still refuses without a seed
+                            passed as an argument, which
+                            tests/test_xrp_payout_wiring.py asserts by calling
+                            it that way with the variable set.
+          of the system     CHANGED. services/payout_service.py now reads
+                            XRP_PAYOUT_SECRET_SEED from its own environment and
+                            passes it here, so a process started with that
+                            variable set CAN pay out, unattended. That is what
+                            the operator asked for ("we should be able to swap
+                            any coin for another of any combination") and it is
+                            the same exposure GRIDCOIN_WALLET_PASSPHRASE already
+                            carries. chains/xrp_payout_seed.py's header lists
+                            every narrowing applied to it.
 Mainnet-safe: yes, and stronger than that -- mainnet is UNREACHABLE from this
         module's payout path, including in preview mode. Every read method is
         mainnet-safe in the ordinary sense: they are reads.
@@ -111,17 +133,21 @@ chains/xrp_signing.py:
                              same as reading a safe one.
   the arming token           an exact string, not a boolean, so no truthy value
                              or drifted positional argument can supply it.
-  no key anywhere here       no seed, no key path, no Config field, no
-                             environment variable. The seed is an argument. So
-                             there is no .env edit that arms this.
+  no key in THIS file        no seed, no key path, no Config field and no RPC
+                             dict key, and signing_seed() is not imported. The
+                             seed is an argument. Setting the environment
+                             variable does not arm THIS module -- only a caller
+                             that passes the value can.
 
-That still leaves the custody question exactly where it was: whether this
-terminal should hold an XRP hot wallet at all, and which account it should be,
-is the operator's (rule 16). Nothing here decides it, and nothing here is wired
-to the payout worker. (This used to say "the custody question chains/solana.py
-hands back" -- Solana's was handed back and then ANSWERED, on 2026-09-29, so the
-comparison now points at a decided question. XRP's own is still open, which is
-the only part this paragraph was ever about.)
+That leaves the custody question answered by the operator rather than here, and
+2026-10-02 is the day they answered it: a payout worker started with
+XRP_PAYOUT_SECRET_SEED set holds an XRP hot wallet and can spend it, and
+XRP_DEPOSIT_ACCOUNT names which account. Both are unset by default and both
+refuse rather than guessing, so the decision is made by supplying the values and
+not by deploying this file. (This paragraph used to end "nothing here is wired to
+the payout worker", which was true until the call site was wired the same day. It
+is corrected rather than deleted because the sentence is the one a reader would
+have trusted to conclude this path is dead.)
 
 get_new_address() also refuses, but for a happier reason. XRP does not need
 one: a DESTINATION TAG is a per-swap identifier on a single account, costs
@@ -183,6 +209,16 @@ from .xrp_payments import XRPPaymentError, deposit_events_from_transactions
 # (rule 10), and they are each callable with seeded arguments -- which is what
 # makes it possible to disable one at a time and watch a test fail, rather than
 # having to run a whole send to find out whether a check is load-bearing.
+# THE SEED'S VARIABLE NAME AND ITS PRESENCE, AND DELIBERATELY NOT ITS VALUE.
+#
+# signing_seed() lives in that module too and is NOT imported here. That is the
+# property that keeps this file unable to sign on its own: the environment can say
+# that a seed EXISTS, which is what can_spend below reports, and the value reaches
+# send_to_address() only as an argument from services/payout_service.py. An import
+# of signing_seed() here would make configuration alone sufficient to arm a payout,
+# and tests/test_xrp_payout_wiring.py fails behaviorally if one is ever added --
+# the variable set, no seed argument, and the refusal is the assertion.
+from .xrp_payout_seed import SIGNING_SEED_ENV_VAR, missing_seed_refusal, signing_seed_is_present
 from .xrp_signing import (
     FEE_ALLOWANCE_DROPS,
     XRPSendNotArmed,
@@ -262,30 +298,48 @@ class XRPAdapter:
 
     # SEE chains/base.RPCAdapter.can_spend for why this name and not another.
     #
-    # False, and it is a statement of FACT rather than a policy switch: this
-    # adapter holds no seed and has no Config field that would give it one, and
-    # services/payout_service.py calls send_to_address() with two positional
-    # arguments and no arming token -- so an XRP payout raises XRPSendNotArmed
-    # and the swap lands in `failed`.
+    # THESE TWO CLASS-LEVEL VALUES ARE THE FAIL-CLOSED FALLBACK AND ARE DELIBERATELY
+    # THE REFUSING PAIR. __init__ overrides both per instance from
+    # chains/xrp_payout_seed.signing_seed_is_present(), so anything that reads them
+    # off the CLASS -- a stub, a reflective check, a reader who never constructed an
+    # adapter -- gets "cannot pay out". That is the safe direction, and it is the
+    # same direction chains/registry.why_cannot_pay_out() already fails in when the
+    # attribute is missing entirely.
     #
-    # THAT MATTERS NOW IN A WAY IT DID NOT THIS MORNING. ALLOWED_PAIRS gained
-    # ('GRC','XRP') on 2026-09-26 on the operator's instruction, so the swap page
-    # offered GRC -> XRP and badged it ENABLED. A customer following that path
-    # would have sent GRC, had it credited, and then watched the payout refuse
-    # permanently with their deposit already taken -- a stranded swap needing a
-    # person, which is what the tolerance halt exists to avoid one stage earlier.
+    # WHAT THIS USED TO SAY, AND WHY IT HAD TO CHANGE (2026-10-02). Both values were
+    # hardcoded and the sentence read "it holds no signing key, and
+    # services/payout_service.py calls send_to_address() without the arming token".
+    # BOTH CLAUSES WERE TRUE AND THEY NAMED TWO DIFFERENT BLOCKERS. The first was the
+    # real one: there was no environment variable, no Config field, no RPC dict key
+    # and no path of any kind by which a seed could reach this adapter, so arming the
+    # call site ALONE would have turned one refusal into another. The second was only
+    # the call site, and it is now wired --
+    # services/payout_service.broadcast_payout() passes the source account, the seed
+    # and the arming token.
     #
-    # It also closes a second hazard a review found the same day: validate_address()
-    # accepts ANY X-address without checking its checksum, so a typo would have
-    # been fixed as a swap's FINAL payout address. A chain that cannot be a
-    # destination cannot have a payout address at all.
+    # So the refusal is now DERIVED from the one question that remains -- is a
+    # signing seed present in this process -- rather than written out. Both halves of
+    # the old sentence became false the moment the call site was wired, and a
+    # customer page printing a confident false reason is rule 16's wrong comment on a
+    # surface a customer reads.
+    #
+    # THE HAZARD THE OLD COMMENT RECORDED IS UNCHANGED, AND IT IS WHY THE DEFAULT
+    # STILL REFUSES. ALLOWED_PAIRS gained ('GRC','XRP') on 2026-09-26 on the
+    # operator's instruction, so the swap page offers GRC -> XRP. A customer
+    # following that path while nothing can sign would send GRC, have it credited,
+    # and then watch the payout refuse permanently with their deposit already taken
+    # -- a stranded swap needing a person. With the seed unset, which is every
+    # checkout and every test run, services/swap_service.create_swap() still refuses
+    # before the swap row exists, which is the only stage at which nothing has been
+    # taken.
+    #
+    # The second hazard the old comment named is also unchanged: validate_address()
+    # accepts ANY X-address without checking its checksum. It is closed one layer up
+    # rather than here -- preview_payout() refuses an X-address outright, and
+    # modules/address_authority.py decodes the destination before the send -- so
+    # enabling payouts does not reopen it.
     can_spend = False
-    payout_refusal = (
-        "cannot pay out: it holds no signing key, and services/payout_service.py calls "
-        "send_to_address() without the arming token, so an XRP payout raises and the swap lands "
-        "in `failed` with the deposit already credited. Wiring that call site is the operator's "
-        "(rule 16: fund movement comes back). Nothing in a .env can arm it."
-    )
+    payout_refusal = missing_seed_refusal()
 
     def __init__(
         self,
@@ -297,6 +351,23 @@ class XRPAdapter:
             raise XRPRPCError("XRPAdapter needs a rippled JSON-RPC url; there is no sensible default")
         self.url = url
         self.timeout = float(timeout)
+        # WHETHER THIS PROCESS CAN SIGN, SETTLED ONCE PER ADAPTER AND NOT PER CALL.
+        #
+        # Read here rather than in a property for a measured reason: on 2026-10-02 the
+        # defect this replaces was the spawn banner and the customer page disagreeing
+        # about XRP IN ONE PROCESS. A property re-reads os.environ on every access, so
+        # two surfaces rendered from the same adapter could still answer differently if
+        # anything mutated the environment between them. One read at construction makes
+        # that impossible: every surface in a process sees the same answer, and the
+        # answer is the one the shell that started it supplied.
+        #
+        # NO SEED IS STORED, ONLY A BOOLEAN AND A SENTENCE. signing_seed_is_present()
+        # returns bool(...) and missing_seed_refusal() names the VARIABLE, never its
+        # value. tests/test_xrp_adapter.py walks vars() on a constructed instance and
+        # asserts no attribute name or value looks like key material, so this is
+        # checked by construction rather than by this comment.
+        self.can_spend = signing_seed_is_present()
+        self.payout_refusal = "" if self.can_spend else missing_seed_refusal()
         # Deferred lines already printed by THIS adapter instance. See
         # find_deposits_to_address() for why it is per-instance rather than
         # per-call or global: an unattributable payment is one fact, and it should
@@ -321,23 +392,53 @@ class XRPAdapter:
         the payout posture -- an operator who expects this chain to pay needs to
         learn that here rather than from a refusal hours later.
 
-        THE PAYOUT WORD CHANGED ON 2026-09-26 and the old one would now be a
-        lie. It read `payouts=REFUSED (holds no signing key)`, which was true
-        while send_to_address() refused unconditionally. It still holds no
-        signing key -- that part is unchanged and is why the line still says it
-        -- but the method now previews by default and can submit when a caller
-        arms it, so `REFUSED` would tell an operator the mechanism does not
-        exist. Rule 16: a wrong comment is a bug, and a wrong banner line is a
-        wrong comment an operator reads every cycle.
+        THE PAYOUT WORD HAS NOW CHANGED TWICE, and both old spellings would be lies
+        today. Rule 16: a wrong banner line is a wrong comment an operator reads every
+        cycle.
 
-        NOT stated as a boolean, because the honest answer is not one. What the
-        banner can promise is the two properties that no configuration changes:
-        this process holds no key, and mainnet is refused by network id.
+          until 2026-09-26   `payouts=REFUSED (holds no signing key)`. True while
+                             send_to_address() refused unconditionally.
+          until 2026-10-02   `payouts=PREVIEW-ONLY unless armed at the call site
+                             (holds no signing key; ...)`. True while no caller in
+                             this tree had a seed to pass -- but
+                             services/payout_service.broadcast_payout() now reads
+                             one from the environment, so "holds no signing key" told
+                             an operator their worker could not pay when it could.
+
+        IT IS A BOOLEAN NOW, AND THAT IS THE CHANGE. This docstring used to say the
+        honest answer was not one, and that was correct while the answer depended on
+        a call site a banner cannot see. It depends on one environment variable now,
+        which the banner CAN see, so it says which state this process is in -- and
+        rule 14's "make did-nothing look different from did-work" applies to a
+        capability as much as to a cycle.
+
+        THE ARMED STATE IS THE LOUD ONE. Asterisks on `CAN SPEND`, in the same shape
+        services/payout_service.unlock_readiness_lines() uses, because an operator
+        scanning a banner for the thing that should not be there has to find it: this
+        line appearing on a host pointed at a funded account is the one combination
+        that moves money without anybody asking. The UNARMED state names the variable
+        instead, so the operator who WANTED a payout knows exactly what to export.
+
+        WHAT NEITHER STATE CHANGES, and it is still printed in both: mainnet is
+        refused from the id the SERVER reports rather than from this url. There is no
+        variable that turns that off.
         """
+        if self.can_spend:
+            posture = (
+                f"payouts=*** ARMED, THIS PROCESS CAN SPEND XRP *** ({SIGNING_SEED_ENV_VAR} is set, so "
+                f"payouts sign locally and submit. NOT a claim the seed is correct -- a wrong one is "
+                f"refused by derive_and_check() before signing. Mainnet is still refused by server "
+                f"network_id, not by url)"
+            )
+        else:
+            posture = (
+                f"payouts=PREVIEW-ONLY ({SIGNING_SEED_ENV_VAR} is NOT set, so every payout refuses "
+                f"before signing and no XRP swap can be created; mainnet refused by server network_id, "
+                f"not by url)"
+            )
         return (
             f"  XRP  rpc={self.url} min_confirmations={describe_min_confirmations(self.min_confirmations)} "
-            f"payouts=PREVIEW-ONLY unless armed at the call site (holds no signing key; mainnet refused "
-            f"by server network_id, not by url)"
+            f"{posture}"
         )
 
     def call(self, method: str, params: dict | None = None):
@@ -415,10 +516,48 @@ class XRPAdapter:
         return describe_address(address)
 
     def get_balance(self) -> float:
+        """Refuses, because this adapter still holds no account. Payouts no longer do.
+
+        THE SENTENCE BELOW USED TO SAY "payouts are refused" AND THAT BECAME FALSE on
+        2026-10-02, when services/payout_service.broadcast_payout() began passing a
+        source account and a seed. Corrected rather than left (rule 16: a wrong
+        comment is a bug, and this one would have a reader conclude the payout path
+        is dead while it signs).
+
+        WHAT IS STILL TRUE is the part that matters: this adapter has no account of
+        its own, so it cannot answer "what is MY balance". The account is
+        XRP_DEPOSIT_ACCOUNT -- one shared account that both receives deposits and
+        pays out, the XRP Ledger equivalent of the single Gridcoin wallet -- and it
+        is supplied at the call site rather than held here, for the reason
+        preview_payout() gives at length: an adapter that held a hot-wallet account
+        would be one configuration value away from being a payout path.
+
+        WHAT THIS COSTS, SO IT IS NOT DISCOVERED LATER: refresh_wallet_inventory()
+        calls get_balance() on every adapter, so XRP gets no wallet_inventory row and
+        the operator sees no XRP figure on the admin page.
+        services/payout_service.inventory_note() already reports that as expected
+        rather than as a swallowed error ("an asset whose hot wallet is unset refuses
+        by design and is expected here").
+
+        IT COSTS NO SAFETY, and that is why it is acceptable rather than owed work.
+        Nothing gates a payout on wallet_inventory -- grepped, 2026-10-02: the only
+        readers are services/admin_view.py's display query and this file's own
+        reserve/release bookkeeping. The real funding gate is
+        xrp_signing.require_reserve_headroom(), which runs on a LIVE account_info
+        read inside every preview, in integer drops, against the reserve the server
+        itself reports. A cached inventory figure would be the weaker of the two
+        answers.
+
+        account_balance(address) is the reader for a known account, and
+        xrp_balances.py is the operator-facing report built on it.
+        """
         raise XRPRPCError(
-            "get_balance() needs the hot-wallet account this terminal pays out from, and this adapter "
-            "has none -- payouts are refused (see the class docstring). Wire an account here only "
-            "alongside the signing decision, not before it."
+            f"get_balance() answers 'what is MY balance' and this adapter has no account of its own, "
+            f"deliberately -- see this method's docstring. The account XRP payouts are debited from is "
+            f"XRP_DEPOSIT_ACCOUNT, supplied at the call site by services/payout_service.py, and "
+            f"account_balance(address) is how to read one. This refusal does NOT mean payouts are "
+            f"disabled: that question is {SIGNING_SEED_ENV_VAR} being set, which this adapter reports "
+            f"through can_spend. Nothing gates a payout on this call."
         )
 
     def account_balance(self, address: str) -> float:
@@ -806,24 +945,38 @@ class XRPAdapter:
                             wrote.
           no stored key     this adapter holds no seed, reads no key path, and
                             has no Config field or RPC dict key that would give
-                            it one. The seed arrives as an argument from a caller
-                            that already had it. So CONFIGURATION ALONE CANNOT
-                            ARM THIS: there is no .env edit that results in a
-                            payout.
-          the caller        services/payout_service.py:219 calls
-                            `send_to_address(swap["payout_address"], amount)` --
-                            two positional arguments and no keywords. It
-                            therefore gets XRPSendNotArmed with the preview in
-                            the message, and the swap lands in `failed` with the
-                            reason recorded. THAT CALL SITE WAS NOT WIRED UP and
-                            wiring it is the operator's (CLAUDE.md rule 16: fund
-                            movement comes back).
+                            it one, and it does not import
+                            xrp_payout_seed.signing_seed(). The seed arrives as
+                            an argument from a caller that already had it, so
+                            SETTING THE ENVIRONMENT VARIABLE DOES NOT ARM THIS
+                            METHOD -- a call with no seed still refuses, with
+                            the variable set.
+          the caller        services/payout_service.broadcast_payout() calls
+                            this with source=, seed= and
+                            confirm_send=CONFIRM_XRP_SEND when the destination
+                            asset is XRP, and with the two positional arguments
+                            and nothing else for every other chain. It refuses
+                            BEFORE reaching this method when either
+                            XRP_PAYOUT_SECRET_SEED or XRP_DEPOSIT_ACCOUNT is
+                            unset, so a half-configured host costs no network
+                            round trip.
 
-        AND XRP IS STILL NOT TRADEABLE. Config.ALLOWED_PAIRS is unchanged and
-        names no XRP pair, so services/quote_service.py cannot produce an XRP
-        quote and services/swap_service.py cannot create an XRP swap -- which
-        means the payout worker never reaches this method with an XRP swap at
-        all. Enabling a pair is live posture and is the operator's.
+        WHAT THESE TWO ENTRIES SAID UNTIL 2026-10-02, because the correction is the
+        change: the first ended "CONFIGURATION ALONE CANNOT ARM THIS: there is no
+        .env edit that results in a payout", and the second said the call site made
+        two positional arguments and "WAS NOT WIRED UP and wiring it is the
+        operator's". The operator asked for it to be wired, in those words, so the
+        second is done; and the first is now true of this method and false of the
+        process, which is the distinction the module header draws at length.
+
+        XRP IS A TRADEABLE PAIR AND HAS BEEN SINCE 2026-09-26. This docstring said
+        "Config.ALLOWED_PAIRS is unchanged and names no XRP pair", which was already
+        wrong when it was written: ALLOWED_PAIRS carries ('XRP','GRC'), ('GRC','XRP'),
+        ('XRP','BTC') and ('XRP','LTC'). What actually kept the payout worker from
+        reaching this method was can_spend being False, which refuses the swap at
+        creation -- and that is still what gates it, now from the seed's presence
+        rather than from a constant. ALLOWED_PAIRS is NOT changed by this work:
+        enabling a pair is live posture and remains the operator's.
 
         WHY submit_and_wait() AND NOT submit(). submit() returns when the server
         has accepted the blob for relay, which is not the same as the ledger

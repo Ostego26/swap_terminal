@@ -138,6 +138,20 @@ LTC_P2SH_SCRIPT_ADDRESS2 = base58.b58encode_check(
 
 XRP_HOT_ACCOUNT = xrp_address("swap_terminal hot account")
 
+# THE CUSTOMER'S XRP ADDRESS -- the other end of an XRP payout, and it has to be a
+# SECOND one rather than a reuse of the account above.
+#
+# Added 2026-10-02 with tests/test_xrp_payout_wiring.py. chains/xrp.py's payout path
+# names the source and the destination separately and
+# chains/xrp_signing.derive_and_check() refuses when the seed does not derive the
+# SOURCE -- so a test that used one address for both would be asserting the guard
+# against itself and would pass with the guard deleted.
+#
+# Derived by the same xrp_address() construction as everything else here, so it is
+# correctly shaped by checksum rather than by somebody having typed it carefully, and
+# ALL_VALID below sweeps it into the clean gate automatically.
+XRP_CUSTOMER_PAYOUT = xrp_address("xrp customer payout destination")
+
 # SOLANA, AND THIS ONE IS NOT DERIVED -- it is the operator's real devnet
 # SOL_DEPOSIT_ACCOUNT, measured on their host 2026-10-01, and the account that
 # actually received the first SOL deposit this terminal ever credited.

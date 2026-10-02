@@ -49,8 +49,6 @@ recorded in the commit message, which is only possible when one test depends on
 one guard.
 """
 
-import json
-
 import pytest
 import requests
 from chains.xrp import XRPAdapter, XRPRPCError, new_deferrals
@@ -73,6 +71,14 @@ from chains.xrp_signing import (
 from config import Config
 from services.swap_service import deposit_account
 
+# MOVED OUT, NOT COPIED (rule 8). The recorder and the two seeded response builders
+# used to be defined below and tests/test_xrp_payout_wiring.py needs the identical
+# ones; the values in them were MEASURED off rippled 3.4.1 and two copies would
+# drift silently -- a second copy that seeded `Balance` as an int instead of a string
+# would pass against a parser that mishandles the real shape and keep passing. Every
+# value moved unchanged; see that module's docstring for the measurements.
+from xrp_seeded_transport import MAINNET_URL, TESTNET_URL, Recorder, account_info, server_info
+
 # The XRP Ledger's own reserved accounts, used here for the same reason
 # tests/test_xrp_address.py uses them: they are addresses whose checksums are
 # fixed by the protocol rather than values this file invented, and neither can
@@ -80,81 +86,6 @@ from services.swap_service import deposit_account
 # destination in every test that does not need real key derivation.
 ACCOUNT_ZERO = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
 ACCOUNT_ONE = "rrrrrrrrrrrrrrrrrrrrBZbvji"
-
-TESTNET_URL = "https://s.altnet.rippletest.net:51234/"
-MAINNET_URL = "https://s1.ripple.com:51234/"
-
-
-# --- the fake transport ------------------------------------------------------
-#
-# A Recorder, and the reason it records
-# rather than merely answering is that half the assertions in this file are
-# about calls that must NOT have happened. "The exception was raised" does not
-# distinguish a guard that refused before reading the account from one that
-# refused after; the call list does.
-
-
-class FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self._payload
-
-
-class Recorder:
-    """Stands in for requests.post, answering rippled calls by METHOD NAME.
-
-    Keyed by method rather than ordered, unlike an ordered queue,
-    because the order of server_info and account_info is itself under test: a
-    queue would answer whichever call came first with the server_info payload
-    and the assertions would pass for the wrong reason.
-    """
-
-    def __init__(self, **by_method):
-        self.by_method = by_method
-        self.calls = []
-
-    def __call__(self, url, **kwargs):
-        body = json.loads(kwargs["data"])
-        self.calls.append({"url": url, "method": body["method"], "params": body["params"]})
-        return FakeResponse({"result": self.by_method.get(body["method"], {"status": "success"})})
-
-    @property
-    def methods(self):
-        return [call["method"] for call in self.calls]
-
-
-def server_info(network_id=1, base_reserve=1, owner_reserve=0.2, base_fee=None):
-    """A server_info result in the shape confirmed live on 2026-09-25.
-
-    reserve_base_xrp came back as a NUMBER (1) and not a string, network_id as 1
-    on s.altnet.rippletest.net. base_fee_xrp is None by default here precisely
-    because it was NOT among the fields confirmed that day -- so the default
-    path through these tests is the one where the adapter falls back to
-    xrp_signing.FEE_ALLOWANCE_DROPS and says so.
-    """
-    ledger = {"reserve_base_xrp": base_reserve, "reserve_inc_xrp": owner_reserve}
-    if base_fee is not None:
-        ledger["base_fee_xrp"] = base_fee
-    return {"status": "success", "info": {"network_id": network_id, "build_version": "3.4.1", "validated_ledger": ledger}}
-
-
-def account_info(drops="100000000", owner_count=0):
-    """100 XRP by default -- the XRPL testnet faucet's own grant, measured 2026-09-26.
-
-    Balance is a STRING because that is how the ledger sends drop counts, so a
-    JavaScript client cannot round them through a double. A test that seeded it
-    as an int would pass against a parser that mishandles the real shape.
-    """
-    data = {"Balance": drops}
-    if owner_count is not None:
-        data["OwnerCount"] = owner_count
-    return {"status": "success", "account_data": data}
-
 
 @pytest.fixture
 def post(monkeypatch):
@@ -490,18 +421,51 @@ def test_the_preview_announces_before_it_reads_anything(post, capsys):
     assert "4242" in out
 
 
-def test_the_banner_no_longer_claims_payouts_are_refused():
-    """It said `payouts=REFUSED (holds no signing key)` until 2026-09-26.
+def test_the_banner_says_which_payout_posture_this_process_is_actually_in(monkeypatch):
+    """It has said three different things and the first two are now lies.
 
-    Half of that is still true and half became a lie the moment the mechanism
-    existed. Rule 16: a wrong comment is a bug, and a banner line an operator
-    reads every cycle is a comment.
+      until 2026-09-26   `payouts=REFUSED (holds no signing key)`
+      until 2026-10-02   `payouts=PREVIEW-ONLY ... (holds no signing key; ...)`
+      now                one of two lines, chosen by whether the seed is present
+
+    This test used to assert `"holds no signing key" in line`, and that clause is
+    what had to go: services/payout_service.broadcast_payout() reads a seed from the
+    environment, so a banner telling the operator their worker holds no key would be
+    wrong in the direction that matters -- it would say a funded host cannot spend
+    while it can. Rule 2: the test changes to pin the stronger invariant.
+
+    THE STRONGER INVARIANT IS THAT THE TWO STATES ARE DISTINGUISHABLE. Rule 14's
+    "make did-nothing look different from did-work", applied to a capability: a
+    banner that printed the same sentence either way would be no banner at all, and
+    the armed line has to be findable by an operator scanning for the thing that
+    should not be there. Hence the asterisks, asserted on.
+
+    BOTH STATES ARE SET EXPLICITLY rather than inherited. tests/conftest.py removes
+    the variable at import so the default is deterministic, and this test still
+    delenv's before the unarmed half -- a test that asserts a default must not
+    depend on another file having arranged it.
     """
-    line = adapter().endpoint_line()
-    assert "PREVIEW-ONLY" in line
-    assert "payouts=REFUSED" not in line
-    assert "holds no signing key" in line
-    assert "mainnet refused by server network_id, not by url" in line
+    monkeypatch.delenv("XRP_PAYOUT_SECRET_SEED", raising=False)
+    unarmed = adapter().endpoint_line()
+    assert "payouts=PREVIEW-ONLY" in unarmed
+    assert "payouts=REFUSED" not in unarmed, "the 2026-09-26 lie must not come back"
+    assert "XRP_PAYOUT_SECRET_SEED is NOT set" in unarmed, "rule 14: name the variable that decides it"
+    assert "ARMED" not in unarmed
+    assert "mainnet refused by server network_id, not by url" in unarmed
+
+    monkeypatch.setenv("XRP_PAYOUT_SECRET_SEED", "never-decoded-by-this-test")
+    armed = adapter().endpoint_line()
+    assert "*** ARMED, THIS PROCESS CAN SPEND XRP ***" in armed, (
+        "the armed state must be findable by an operator scanning a banner for it"
+    )
+    assert "PREVIEW-ONLY" not in armed, "a process that can spend must not describe itself as preview-only"
+    # The one promise neither state may drop, because no variable turns it off.
+    # Case-folded because the two lines start the sentence differently -- "mainnet
+    # refused by..." mid-clause in one and "Mainnet is still refused by..." as its
+    # own sentence in the other -- and the PROMISE is what is under test here, not
+    # the capitalization. The unarmed half above asserts its exact wording.
+    assert "mainnet" in armed.lower()
+    assert "network_id" in armed
 
 
 # --- XRP is tradeable, and what still gates it ------------------------------

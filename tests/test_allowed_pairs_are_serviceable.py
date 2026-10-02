@@ -43,6 +43,7 @@ from time import time
 import pytest
 from chains.registry import why_cannot_pay_out
 from chains.xrp import XRPAdapter
+from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR
 from config import Config
 from db import SCHEMA, db_session, dict_factory
 from services import pricing
@@ -59,19 +60,36 @@ PAIRS = sorted(Config.ALLOWED_PAIRS)
 #: OTHER pair missing a reserve is an unknown break and fails the strict test.
 #:
 #: IT IS BROKEN TWICE OVER, and until 2026-09-30 this only recorded the first:
-#: XRP has no fee reserve (so the quote refuses) AND XRP cannot pay out at all
+#: XRP has no fee reserve (so the quote refuses) AND XRP could not pay out at all
 #: (so the swap would refuse even with one). See DELIBERATELY_ONE_WAY below for
 #: the measurement, and test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE for the
 #: assertion. Fixing the reserve alone would not make this pair work -- it would
 #: make it fail LATER, after a customer had been quoted a number.
+#:
+#: THE SECOND HALF CHANGED ON 2026-10-02 and the pair is still broken, so this row
+#: stays. "XRP cannot pay out at all" is now "XRP pays out when the operator sets
+#: XRP_PAYOUT_SECRET_SEED and XRP_DEPOSIT_ACCOUNT", which is a switch rather than an
+#: absence -- the signing path, the arming token and the call-site wiring all exist.
+#: What has NOT changed is this row's own reason: XRP_NETWORK_FEE_RESERVE still does
+#: not exist, so a GRC->XRP quote still refuses before any of that is reached, and
+#: setting the reserve remains a pricing decision and the operator's (rule 16).
 KNOWN_UNQUOTABLE = {("GRC", "XRP")}
 
 #: PAIRS THAT ARE DELIBERATELY ONE-WAY, each with the reason. This test caught my
 #: own asymmetry on the commit that added these two, which is what it is for.
 #:
 #: XRP->BTC and XRP->LTC take XRP as the INPUT and pay out to an asset that can
-#: pay. The reverse of each -- BTC->XRP, LTC->XRP -- would pay out IN XRP, and XRP
-#: cannot pay out at all.
+#: pay. The reverse of each -- BTC->XRP, LTC->XRP -- would pay out IN XRP, which
+#: needs TWO things this host does not have by default: the fee reserve below, and
+#: the two custody variables that arm the XRP payout.
+#:
+#: UNTIL 2026-10-02 THIS READ "and XRP cannot pay out at all", which was true and is
+#: no longer. The payout path is built, wired to services/payout_service.py and
+#: refuses by default; an operator who exports XRP_PAYOUT_SECRET_SEED and
+#: XRP_DEPOSIT_ACCOUNT can pay XRP out. Adding BTC->XRP or LTC->XRP to ALLOWED_PAIRS
+#: is still a separate live-posture decision and is still theirs, and it still needs
+#: XRP_NETWORK_FEE_RESERVE first -- see test_A_RESERVE_ALONE_WOULD_MOVE_THE_REFUSAL
+#: for why the reserve without the custody variables is worse than neither.
 #:
 #: THE SENTENCE THAT WAS HERE NAMED THE WRONG BLOCKER AND SENT ME TO DO THE WRONG
 #: WORK. It said: "When XRP_NETWORK_FEE_RESERVE is set, all four XRP-payout
@@ -92,16 +110,26 @@ KNOWN_UNQUOTABLE = {("GRC", "XRP")}
 #: the swap. That is strictly worse than today, which is why the reserve is not
 #: being added here and why it would not help if it were.
 #:
-#: WHAT WOULD ACTUALLY UNBLOCK THESE: arming the XRP payout -- a signing key
-#: reaching payout_service's send_to_address() call site. chains/registry's own
-#: refusal says "Nothing in a .env can arm it", it is fund movement, and rule 16
-#: puts it with the operator. The reserve is ALSO needed, and is a pricing
-#: decision they own as well (services/quote_service.get_network_fee_reserve()
-#: refuses rather than defaulting to zero, deliberately). Two operator decisions,
-#: not one environment variable.
+#: WHAT WOULD ACTUALLY UNBLOCK THESE, AND IT IS STILL TWO OPERATOR DECISIONS AND
+#: NOT ONE VARIABLE. This paragraph used to end "chains/registry's own refusal says
+#: 'Nothing in a .env can arm it'", which was true until 2026-10-02 and is not:
+#:
+#:   the payout      DONE as a mechanism. chains/xrp.py signs, the arming token is
+#:                   required at the call site, and
+#:                   services/payout_service.broadcast_payout() passes a source
+#:                   account, the seed and the token. It refuses by default and the
+#:                   operator arms it by exporting XRP_PAYOUT_SECRET_SEED and
+#:                   XRP_DEPOSIT_ACCOUNT -- which IS a .env-shaped action now, so
+#:                   the old sentence has to go rather than be softened. Still fund
+#:                   movement, still theirs (rule 16); what changed is that there
+#:                   is something for them to decide rather than code to write.
+#:   the reserve     UNCHANGED and still absent.
+#:                   services/quote_service.get_network_fee_reserve() refuses rather
+#:                   than defaulting to zero, deliberately, and setting the number
+#:                   is a pricing decision they own.
 DELIBERATELY_ONE_WAY = {
-    ("XRP", "BTC"): "the reverse pays out XRP, which cannot pay out at all (no signing key)",
-    ("XRP", "LTC"): "the reverse pays out XRP, which cannot pay out at all (no signing key)",
+    ("XRP", "BTC"): "the reverse pays out XRP, which needs XRP_NETWORK_FEE_RESERVE (absent) plus the two XRP custody variables",
+    ("XRP", "LTC"): "the reverse pays out XRP, which needs XRP_NETWORK_FEE_RESERVE (absent) plus the two XRP custody variables",
     # SOL -> GRC, 2026-10-01. The reverse is blocked TWICE, and this test is where that gets
     # recorded so nobody fixes one half and expects a working pair -- which is the mistake the
     # paragraph above this table documents me making about XRP.
@@ -225,7 +253,7 @@ def test_every_DELIBERATELY_one_way_pair_is_actually_enabled_and_actually_one_wa
         )
 
 
-def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE():
+def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE(monkeypatch):
     """Two blockers, not one, and the comment here named only the cheaper one.
 
     THIS TEST EXISTS BECAUSE ITS OWN FILE MISLED ME. DELIBERATELY_ONE_WAY said that setting
@@ -234,23 +262,64 @@ def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE():
     unblock three pairs. It would not. A comment that names the wrong blocker sends the next
     person to do the wrong work, which is why this is a test and not a corrected sentence.
 
+    THE NEWS ARRIVED ON 2026-10-02 AND THIS TEST IS WHERE IT WAS CAUGHT. It used to assert
+    `"no signing key" in refusal` and `".env" in refusal`, and it predicted its own failure:
+    "If XRP is ever armed, this test starts failing and the failure IS the news." It did fail,
+    for exactly that reason, and the body is rewritten rather than relaxed -- rule 2: a test
+    changes to pin the STRONGER invariant or it dies with the code it pinned.
+
+    WHAT IS STRONGER NOW. The old version pinned one direction: XRP cannot pay out, full stop.
+    The real property has two directions and the second is the one that could regress
+    silently:
+
+      unset -> REFUSES   which is the default, every checkout and every test run, and the
+                         refusal must NAME the variable so the operator can act on it
+                         (rule 14) rather than reading a flat "cannot pay out"
+      set   -> PERMITS   so the mechanism is not merely a differently-worded refusal. A guard
+                         that refuses in both states would pass the first assertion forever
+                         and nobody would notice the payout path was dead.
+
     ASSERTED FROM THE ADAPTER ITSELF rather than from a list of chains: any asset whose
-    adapter cannot pay out is unavailable as a payout leg no matter what else is configured,
-    and the reason has to say so. If XRP is ever armed, this test starts failing and the
-    failure IS the news -- at which point DELIBERATELY_ONE_WAY can empty, for the right
-    reason.
+    adapter cannot pay out is unavailable as a payout leg no matter what else is configured.
+
+    THE SEED HERE IS NOT A SEED. The adapter reads only `bool()` of the variable -- see
+    chains/xrp_payout_seed.signing_seed_is_present() -- so this value is never decoded,
+    never signed with and reaches no network. The url is unreachable.invalid for the same
+    reason: construction makes no call, and if that ever changes this test fails loudly.
+
+    AND THE RESERVE IS STILL NOT THE BLOCKER, which is what this test is named for.
+    XRP_NETWORK_FEE_RESERVE is unrelated to either state below and is asserted still absent
+    by test_the_KNOWN_unquotable_pair_is_STILL_broken_and_says_so.
     """
-    adapter = XRPAdapter(url="http://unreachable.invalid", min_confirmations=1)
-    assert adapter.can_spend is False, (
-        "XRPAdapter.can_spend is no longer False. If the payout is armed, say so here and in "
-        "DELIBERATELY_ONE_WAY -- and check that the reserve exists before enabling a pair"
+    url = "http://unreachable.invalid"
+
+    monkeypatch.delenv(SIGNING_SEED_ENV_VAR, raising=False)
+    unarmed = XRPAdapter(url=url, min_confirmations=1)
+    assert unarmed.can_spend is False, (
+        f"with {SIGNING_SEED_ENV_VAR} unset, XRPAdapter.can_spend must be False -- that is what "
+        f"stops services/swap_service.create_swap() taking a deposit it cannot settle"
     )
-    refusal = why_cannot_pay_out({"XRP": adapter}, "XRP")
+    refusal = why_cannot_pay_out({"XRP": unarmed}, "XRP")
     assert refusal, "an adapter that cannot spend gave no reason"
-    assert "no signing key" in refusal, "the reason no longer names the actual blocker"
-    assert ".env" in refusal, (
-        "the reason no longer says that configuration cannot fix this, which is the sentence "
-        "that stops somebody adding a reserve and expecting the pair to work"
+    assert SIGNING_SEED_ENV_VAR in refusal, (
+        "the refusal no longer names the variable that would fix it, which is the whole of its "
+        "usefulness to an operator reading it off a customer page or a spawn banner"
+    )
+    assert "XRP_DEPOSIT_ACCOUNT" in refusal, (
+        "the refusal no longer names the SECOND variable. Both are needed, and naming one sends "
+        "the reader to do half the work -- which is the exact mistake this test is named after"
+    )
+
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, "not-a-real-seed-and-never-decoded")
+    armed = XRPAdapter(url=url, min_confirmations=1)
+    assert armed.can_spend is True, (
+        f"with {SIGNING_SEED_ENV_VAR} set, XRPAdapter.can_spend must be True. If this fails the "
+        f"payout path is unreachable from the worker no matter what the operator exports, and the "
+        f"wiring is dead code"
+    )
+    assert why_cannot_pay_out({"XRP": armed}, "XRP") == "", (
+        "an armed adapter still reports a payout refusal, so the customer page would refuse a swap "
+        "the worker could actually pay"
     )
 
 
