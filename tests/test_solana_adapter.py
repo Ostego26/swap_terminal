@@ -58,7 +58,38 @@ WALLET = "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN"
 WALLET_WSOL_ATA = "2TJwPdpDwgGrcQjW5K5E2uNxEqBTNkQsZ46axFy5bNm3"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 OTHER = "SysvarRent111111111111111111111111111111111"
+@pytest.fixture(autouse=True)
+def _reset_reported_skip_sets():
+    """chains.solana._REPORTED_SKIP_SETS is a PROCESS-lifetime cache, so tests leak into
+    each other through it.
+
+    FOUND BY IT HAPPENING, within a minute of adding the cache. The new
+    test_the_cache_is_PER_ADDRESS left WALLET populated, so
+    test_the_skipped_signatures_are_LOGGED_and_not_only_set_as_an_attribute -- which
+    passed in isolation -- got the "named in full earlier in this log" branch on its
+    FIRST scan and its full-listing assertion failed. Order-dependent, and it would
+    have been order-dependent in whichever direction the file happened to be written.
+
+    The cache has to be process-level to do its job: the adapter is rebuilt every
+    cycle, so a per-instance cache reports in full every time, which is the flood it
+    exists to stop. AUTOUSE rather than cleared by hand in each test, because a reset
+    somebody has to remember is a reset that gets forgotten the next time a test is
+    added -- and the symptom is a failure in a DIFFERENT test, which is the expensive
+    kind to diagnose.
+    """
+    chains_solana._REPORTED_SKIP_SETS.clear()
+    yield
+    chains_solana._REPORTED_SKIP_SETS.clear()
+
+
 SIG = "5j7s6NiJS3JAkvgkoc18WVAsiSaci2pxB2A6ueCJP4tprA2TFg9wSyTLeYouxPBJEMzJinENTkpA52YStRW5Dia7"
+#: A SECOND real signature, so the two-element skip-set tests use a valid alphabet.
+#: The operator's own stranded devnet deposit, from their 2026-10-02 log. Real rather
+#: than generated because two earlier seeds in this suite were invalid base58: they
+#: were built with f"{n:02d}" and `0` is not in the alphabet.
+OTHER_SIG = (
+    "61otPXfyEEwuUstjmroX5gvkR4v142mT1ZcBAGn5Goy1k1rhWZHKSR2skQZdtdGSNTCHabhabu2PaJxq2Zt6RKAC"
+)
 SIG2 = "4k8t7OjKT4KBlwhlpd29XWBtjTbdj3qyC3B7vfDKQ5uqsB3UGh0xTzUMfZpvyQCKFNaKjoFOUlqB63ZTtSX6Ejb8"
 
 
@@ -1586,6 +1617,93 @@ def test_the_skipped_signatures_are_LOGGED_and_not_only_set_as_an_attribute(capl
     assert "did not re-read 1" in caplog.text
     assert "rate-limit toll" in caplog.text, "and what the number MEANS, next to it"
     assert adapter.signatures_skipped == [settled], "the attribute still carries it too"
+
+
+def test_the_SAME_skip_set_is_not_re_listed_on_every_scan(caplog):
+    """An 800-character line every 527ms, measured on the operator's host.
+
+    Naming every skipped signature was right at two and a flood at nine, and the
+    list is UNBOUNDED -- it is every settled or refused transaction the shared
+    deposit account has ever had. Four consecutive scans printed the identical nine
+    signatures within 1.6 seconds.
+
+    The COUNT stays on every line, because that is what the operator checks against
+    show_unattributable.py's outstanding rows. Only the signature list is
+    conditional, and a line that cannot be read is its own kind of silence.
+    """
+    settled = {SIG, OTHER_SIG}
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [
+                {"signature": SIG, "err": None, "confirmationStatus": "finalized"},
+                {"signature": OTHER_SIG, "err": None, "confirmationStatus": "finalized"},
+            ],
+            # SEEDED BECAUSE THE FIRST SCAN GENUINELY READS OTHER_SIG -- it is not in
+            # that scan's skip set. Without this the stub raises, which is the stub
+            # working: an unseeded call means the test's premise was wrong about what
+            # the adapter would do.
+            "getTransaction": native_tx([OTHER, WALLET], [5, 100], [5, 100]),
+        }
+    )
+    with caplog.at_level(logging.INFO):
+        adapter.find_deposits_to_address(WALLET, skip_txids=settled)
+    first = caplog.text
+    assert SIG in first, "the first scan names them in full"
+    assert "skipping:" in first
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        adapter.find_deposits_to_address(WALLET, skip_txids=settled)
+    second = caplog.text
+    assert "did not re-read 2" in second, "the COUNT is on every line, unconditionally"
+    assert SIG not in second, "but the unchanged list is not re-dumped"
+    assert "named in full earlier in this log" in second, "and says where they are"
+
+
+def test_a_CHANGED_skip_set_names_only_what_is_NEW(caplog):
+    """A new settlement or refusal is news; the nine already reported are not.
+    Reprinting the whole set to show the tenth signature is the flood again."""
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [
+                {"signature": SIG, "err": None, "confirmationStatus": "finalized"},
+                {"signature": OTHER_SIG, "err": None, "confirmationStatus": "finalized"},
+            ],
+            # SEEDED BECAUSE THE FIRST SCAN GENUINELY READS OTHER_SIG: it is not in
+            # that scan's skip set. Without this the stub raises, and the stub raising
+            # is it working -- an unseeded call means the test was wrong about what the
+            # adapter would do, which is better than a stub that invents a response.
+            "getTransaction": native_tx([OTHER, WALLET], [5, 100], [5, 100]),
+        }
+    )
+    with caplog.at_level(logging.INFO):
+        adapter.find_deposits_to_address(WALLET, skip_txids={SIG})
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        adapter.find_deposits_to_address(WALLET, skip_txids={SIG, OTHER_SIG})
+    out = caplog.text
+    assert "now also skipping" in out
+    assert OTHER_SIG in out, "the new one is named"
+    assert SIG not in out, "the one already reported is not repeated"
+
+
+def test_the_cache_is_PER_ADDRESS(caplog):
+    """Two deposit accounts have two independent skip sets, and reporting one must
+    not suppress the other's first full listing."""
+    assert chains_solana.skip_detail(WALLET, [SIG]).startswith(" skipping:")
+    assert chains_solana.skip_detail(OTHER, [SIG]).startswith(" skipping:"), (
+        "a different account has not been told anything yet"
+    )
+    assert "named in full earlier" in chains_solana.skip_detail(WALLET, [SIG])
+
+
+def test_an_EMPTY_skip_set_is_reported_EVERY_scan_and_never_cached(caplog):
+    """skipped=0 against a non-empty unattributable_deposits table is the 429 leak
+    returning. Suppressing it as `unchanged` would hide the regression the line
+    exists to catch -- so the empty case is never cached."""
+    assert "(none)" in chains_solana.skip_detail(WALLET, [])
+    assert "(none)" in chains_solana.skip_detail(WALLET, []), "and again, not cached"
+    assert WALLET not in chains_solana._REPORTED_SKIP_SETS
 
 
 def test_a_scan_that_skipped_NOTHING_still_prints_a_line(caplog):

@@ -425,6 +425,66 @@ HTTP_TOO_MANY_REQUESTS = 429
 DEFAULT_SIGNATURE_LIMIT = 500
 
 
+#: The last skip set reported IN FULL, per deposit address. Module level because the
+#: question it answers is "has this changed since I last told you", which is per
+#: PROCESS rather than per adapter instance -- the adapter is rebuilt every cycle, so
+#: a per-instance cache would report in full every time, which is the behavior being
+#: fixed. Same shape and same reason as payout_service._REPORTED_INVENTORY_FAILURES.
+_REPORTED_SKIP_SETS: dict[str, frozenset] = {}
+
+
+def skip_detail(address: str, skipped: list) -> str:
+    """The signature list, in full when it is NEWS and as a count when it is not.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-02, hours after the line was added.
+    Naming every skipped signature was right when there were two; at nine it is an
+    800-character log line, and the scans arrived 527ms apart:
+
+        06:50:33,619  ... did not re-read 9 of them: <9 full signatures>
+        06:50:34,147  ... did not re-read 9 of them: <the same 9>
+        06:50:34,674  ... did not re-read 9 of them: <the same 9>
+        06:50:35,201  ... did not re-read 9 of them: <the same 9>
+
+    The list is also UNBOUNDED: it is every settled or refused transaction the shared
+    deposit account has ever had, so it grows for the life of the account and the line
+    grows with it.
+
+    THIS IS NOT A WALK-BACK OF RULE 14, it is that rule applied to a line that had
+    become unreadable. "Say what you are doing while you do it" is defeated by output
+    nobody can scan -- the flood buries the WARNINGs it sits between, which is exactly
+    the "a log that cries wolf on the happy path is a log nobody reads the day
+    something real happens" failure already recorded in
+    unattributable_deposit_service.unclaimed_events(). A line that cannot be read is
+    its own kind of silence.
+
+    SO THE COUNT IS ALWAYS THERE and only the DETAIL is conditional. The count is what
+    the operator checks (skipped=9 against the outstanding rows show_unattributable.py
+    prints); the signatures matter the first time and when the set CHANGES, because a
+    change is a new settlement or a new refusal and that is news. An unchanged set is
+    the normal path and says nothing the count does not.
+
+    THE EMPTY CASE IS STILL EXPLICIT AND NEVER CACHED. `(none)` is a result, and
+    skipped=0 against a non-empty unattributable_deposits table is the 429 leak
+    returning, so it is reported on every scan rather than suppressed as unchanged.
+    """
+    current = frozenset(skipped)
+    if not current:
+        return " Nothing was skipped: (none)."
+    previous = _REPORTED_SKIP_SETS.get(address)
+    if previous == current:
+        return (
+            f" The same {len(current)} signature(s) as the previous scan for this "
+            f"account; they were named in full earlier in this log."
+        )
+    _REPORTED_SKIP_SETS[address] = current
+    # THE DIFFERENCE, not the whole set, once a baseline exists. What the reader needs
+    # on a change is which signature is new -- reprinting the nine they have already
+    # seen to show them the tenth is the flood again, one line later.
+    added = sorted(current - previous) if previous else sorted(current)
+    label = "now also skipping" if previous else "skipping"
+    return f" {label}: {', '.join(added)}."
+
+
 def assert_amount_fits_a_float(signature: str, address: str, base_units: int) -> None:
     """Refuse a credit too large to survive the application's float columns.
 
@@ -937,12 +997,12 @@ class SolanaAdapter:
         # silently: a re-read transaction looks exactly like a first read.
         logger.info(
             "SOL deposit scan for %s listed %d transaction(s) and deliberately did not "
-            "re-read %d of them (already settled or already recorded unattributable): %s. "
+            "re-read %d of them (already settled or already recorded unattributable). "
             "skipped=%d is the rate-limit toll this scan did NOT pay; 0 with a non-empty "
             "unattributable_deposits table for SOL means the skip set did not reach the "
-            "adapter.",
-            address, len(signatures), len(skipped),
-            ", ".join(skipped) if skipped else "(none)", len(skipped),
+            "adapter.%s",
+            address, len(signatures), len(skipped), len(skipped),
+            skip_detail(address, skipped),
         )
         if unreadable:
             # Rule 14: a scan that silently examined fewer transactions than it listed must
