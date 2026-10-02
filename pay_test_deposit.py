@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -81,6 +82,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.gridcoin import GridcoinAdapter
 from chains.registry import missing_settings
+from chains.solana import SolanaAdapter
+from chains.solana_units import SOL_DECIMALS, amount_to_base_units, base_units_to_amount
 from config import Config
 from db import db_session
 from microfortnights import format_duration
@@ -241,6 +244,97 @@ def open_sol_swap(db, swap_id: str = "") -> dict | None:
     return dict(row) if row else None
 
 
+#: Lamports left unspent so the transfer's own fee and a little slack are covered.
+#:
+#: A Solana signature costs 5000 lamports and this transaction carries one, plus a
+#: memo instruction. 50_000 is ten times that, which is 0.00005 SOL -- far below
+#: anything worth saving and far above anything the fee can become. It is NOT a
+#: rent-exempt allowance: the recipient is the shared deposit account, which
+#: already holds a balance (readiness prints it), so no account is being created.
+FEE_HEADROOM_LAMPORTS = 50_000
+
+
+def sender_pubkey(keypair: str) -> str:
+    """The PUBLIC key of a keypair file, via the CLI. "" when it cannot be had.
+
+    NO KEY MATERIAL IS READ HERE. `solana address --keypair <path>` prints the
+    public key and nothing else; this process never opens the file, exactly as it
+    never opens it to sign. That is the same boundary transfer_command() draws, and
+    it is what makes a balance check possible without crossing it.
+
+    RESOLVED WITH shutil.which, NOT A BARE NAME. ruff's S607 flags a partial
+    executable path, and which() is the answer this repo already uses --
+    swap_terminal_desktop.py resolves the browser binary that way. A suppression
+    claiming "solana is on PATH" would be the kind rule 19 forbids, and resolving
+    it makes "the CLI is not installed" an explicit case rather than an OSError two
+    lines later.
+
+    "" means NOT ESTABLISHED, never "no such key": no CLI, a CLI that failed, or
+    empty output. The caller must not turn that into a refusal.
+
+    Its own function because sender_refusal() was at seven returns and ruff's
+    PLR0911 ceiling is six -- and the honest fix for that is to extract the part
+    that is really a separate question (rule 19, and rule 10's "the decision is the
+    smallest testable piece"), not to raise the ceiling.
+    """
+    solana = shutil.which("solana")
+    if not solana:
+        return ""
+    try:
+        found = subprocess.run(  # noqa: S603 -- checked: argv is a which()-resolved absolute path, a literal subcommand and flag, and the keypair path this tool was given. No shell, no user string.
+            [solana, "address", "--keypair", keypair],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return found.stdout.strip() if found.returncode == 0 else ""
+
+
+def sender_refusal(keypair: str, amount: float) -> Refusal | None:
+    """Refuse unless the SENDING keypair can actually cover the transfer.
+
+    WHY THIS EXISTS. Every other refusal in this file is about configuration or
+    about the swap; nothing asked whether the money is there. So the tool printed
+
+        about to send   solana transfer ... 0.25 ...
+
+    and handed the send to the CLI, which is where an insufficient balance would
+    surface -- after this file had announced it was sending. Rule 14's "announce
+    before, not only after" cuts both ways: a block that says it is about to do
+    something has claimed it can.
+
+    It matters more at 0.25 SOL than it did at 0.01. Every earlier rehearsal sent
+    0.01; the operator's 2026-10-02 swap is twenty-five times that, and the funding
+    keypair has been paying for a day of rehearsals.
+
+    A FAILURE TO ASK IS NOT A REFUSAL. No CLI, no public key, or a cluster that
+    will not answer all return None and let the send proceed -- because "I could not
+    check your balance" is not "you have no money", and refusing on it would block
+    a send that would have worked. The send's own failure is then the honest
+    answer. Rule 17's line between a reason to believe and having checked.
+    """
+    sender = sender_pubkey(keypair)
+    if not sender:
+        return None
+    try:
+        adapter = SolanaAdapter(**Config.RPC["SOL"])
+        result = adapter.call("getBalance", sender, {"commitment": "finalized"})
+        lamports = int(result["value"] if isinstance(result, dict) else result)
+    except Exception:  # noqa: BLE001 -- checked: the caller CANNOT tell this from a real answer, so it does not try to. Every failure returns None, which this function's docstring states means "not checked" and never "insufficient", so a cluster that will not answer cannot block a send that would have worked.
+        return None
+
+    needed = amount_to_base_units(amount, SOL_DECIMALS) + FEE_HEADROOM_LAMPORTS
+    if lamports >= needed:
+        return None
+    return Refusal(
+        f"the sending keypair {sender} holds {base_units_to_amount(lamports, SOL_DECIMALS)} SOL and this "
+        f"transfer needs {base_units_to_amount(needed, SOL_DECIMALS)} SOL "
+        f"({amount} plus {base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS)} for the fee)",
+        "fund it with `solana airdrop 1 --url devnet` (devnet airdrops are rate-limited, so retry rather "
+        "than assuming it failed), or create a smaller swap. Nothing was sent.",
+    )
+
+
 def open_sol_swap_count(db) -> int:
     """How many SOL swaps are awaiting a deposit. For the line that says so.
 
@@ -325,7 +419,18 @@ def transfer_command(keypair: str, account: str, amount, tag) -> list[str]:
     ]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """An `argv` parameter because every other root tool here has one.
+
+    show_swap.py, show_fees.py, open_swap.py, swap_readiness.py and
+    swap_terminal_desktop.py all take it. The reason is testability, and it was
+    earned twice on 2026-10-02: a mutation deleting the funding check's CALL from
+    this function survived the whole suite, because every test called the refusal
+    directly and nothing drove main() -- a check written correctly and wired to
+    nothing, which is indistinguishable from no check. Without this parameter a
+    test must monkeypatch sys.argv, and a bare parse_args() under pytest reads
+    pytest's own arguments, which cost swap_readiness.py two tests the same day.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--keypair", required=True,
                         help="path to the SENDING devnet keypair. Never read by this process; "
@@ -335,7 +440,7 @@ def main() -> int:
                              "whose id is printed before anything is sent.")
     parser.add_argument("--dry-run", action="store_true",
                         help="run every check and print the command, send nothing.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     print("pay test deposit -- DEVNET SOL ONLY, and there is no flag that changes that")
     print(f"  database        {Config.DB_PATH}")
@@ -374,6 +479,9 @@ def main() -> int:
             refusals.append(ownership)
         else:
             print("  payout owned    YES -- the GRC wallet holds the key, asked of the daemon just now")
+        funding = sender_refusal(args.keypair, float(swap["expected_input_amount"]))
+        if funding:
+            refusals.append(funding)
 
     if refusals:
         print(f"\n  REFUSED: {len(refusals)} reason(s). NOTHING was sent and nothing was written.")
