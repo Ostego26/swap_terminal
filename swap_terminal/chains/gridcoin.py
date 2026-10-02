@@ -22,6 +22,19 @@ once. A wallet lock is the last place two implementations should exist: the half
 that gets forgotten is the restore, and forgetting it leaves an operator's wallet
 not staking with nothing printed.
 
+AND THERE IS ONE MORE GRIDCOIN-SPECIFIC THING, AND IT IS NOT IN THIS FILE.
+chains/grc_message_signing.py wraps `verifymessage` -- the read-only signature
+check behind the address-proof panel (services/grc_login_service.py). It is a
+free function taking an adapter rather than a method here, for two reasons worth
+knowing before anybody moves it: a method would need a live adapter to test,
+where a function takes a stub, and `verifymessage` is a Bitcoin-family method
+that BTC and LTC answer identically -- so putting it on the GRC subclass would
+be the wrong place for it the moment a second chain wants it. A reader who comes
+to this file looking for the signing surface must be told where it is (rule 8),
+which is what this paragraph is for. IT DOES NOT UNLOCK THE WALLET EITHER, and
+it does not need to: the establishment, read out of Gridcoin's own source, is in
+that module's docstring.
+
 Rule 11 wants the per-chain facts to live in these subclasses -- decimals (8
 for all three Bitcoin-derived chains), the confirmation requirement and the
 dust threshold -- rather than only an asset string. They are not here yet: the

@@ -1,9 +1,11 @@
 """Flask entry point for the brokered swap terminal.
 
 Role: entry point (HTTP API for quotes, swaps and rates)
-Reads: swap_terminal.db (quotes, swaps, deposit_events, payouts), BTC/LTC/GRC
-       wallet RPC (getnewaddress, validateaddress), CoinGecko simple/price
-Writes: swap_terminal.db (quotes, swaps, swap_audit_log)
+Reads: swap_terminal.db (quotes, swaps, deposit_events, payouts,
+       address_proof_challenges), BTC/LTC/GRC wallet RPC (getnewaddress,
+       validateaddress, verifymessage), CoinGecko simple/price
+Writes: swap_terminal.db (quotes, swaps, swap_audit_log,
+       address_proof_challenges)
 Can move funds: no -- this process never calls sendtoaddress. It DERIVES a
        deposit address (`getnewaddress`) and records intent; the payout is
        broadcast by workers/payout_worker.py. Note the wallet RPC credentials
@@ -56,6 +58,7 @@ from log_setup import configure_logging
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, mainnet_chains, startup_lines
 from routes.admin import bp as admin_bp
+from routes.grc_login import bp as grc_login_bp
 from routes.health import bp as health_bp
 from routes.quotes import bp as quotes_bp
 from routes.rates import bp as rates_bp
@@ -195,6 +198,13 @@ def create_app() -> Flask:
     # for the authentication question, which is named rather than solved.
     app.register_blueprint(ui_bp)
     app.register_blueprint(admin_bp)
+    # routes/grc_login.py owns the address-proof panel: a customer proves they
+    # hold the key to a GRC address by signing a challenge in their OWN wallet.
+    # Its own blueprint rather than part of ui_bp because it is the one customer
+    # surface that writes a row on a GET (it issues the challenge) and the one
+    # that reaches a chain daemon on a POST -- both named in that file's header.
+    # It can move no funds, and nothing on the payout path reads what it records.
+    app.register_blueprint(grc_login_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(quotes_bp)
     app.register_blueprint(rates_bp)

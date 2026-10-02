@@ -1,0 +1,181 @@
+{#
+  PROVE YOU OWN A GRIDCOIN ADDRESS BY SIGNING A CHALLENGE.
+
+  Role: template partial (rendering only; every decision is already made in
+        services/grc_login_service.py::proof_panel() and verify_address_proof())
+  Reads: the `panel` dict proof_panel() returns
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  INCLUDE IT WITH:   {% include "_grc_address_proof.html" %}
+  and a `panel` in the context. templates/grc_address_proof_page.html does
+  exactly that and is the standalone page routes/grc_login.py serves today.
+
+  NOT YET INCLUDED IN swap.html, ON PURPOSE. A concurrent change is restructuring
+  swap.html, index.html, base.html, _swap_live.html, _badges.html,
+  _copy_field.html and styles.css into a boxed layout; editing any of those here
+  would have collided. This partial therefore depends on NONE of them -- it does
+  not import _badges.html's macros and it does not use a styles.css class -- so
+  the include is a one-line addition whenever that work lands, with no further
+  edits to this file.
+
+  THERE IS NO PASSWORD, PASSPHRASE, PRIVATE KEY OR SEED FIELD ON THIS PANEL, AND
+  THERE NEVER WILL BE. That is the operator's standing instruction and it is the
+  whole reason this design -- sign on your own machine, paste back a signature --
+  was chosen over the alternatives. The two inputs below are an ADDRESS and a
+  SIGNATURE, both of which are public values. A signature proves you hold a key
+  without revealing it; a private key IS the thing. Do not blur them.
+
+  If anyone adds a third input here, the questions to answer first are in
+  services/grc_login_service.Submission's docstring.
+
+  RULE 14 GOVERNS MOST OF THIS FILE. The panel says what is happening at every
+  step -- what to sign, where to sign it, what to paste back, how long there is,
+  and what the last attempt did -- and an empty "proven addresses" region renders
+  `(none)` with what was looked for, never a blank gap. A blank region is
+  ambiguous between "this swap has proven nothing" and "the query broke", and the
+  reader cannot tell which from the screen.
+
+  `data-outcome` on the result block is the machine-readable half of the same
+  thing, so a test can assert on WHICH outcome a page is showing rather than
+  pattern-matching prose that a later edit will reword.
+#}
+
+{#
+  `aria-labelledby` is spelled the way the HTML specification spells it, with two
+  l's. That is NOT a British spelling slipping through rule 18: the rule is
+  American English in what a human READS and nothing at all in what a machine
+  PARSES, and this is an attribute name a browser matches exactly. Renaming it
+  would break the accessible name. Noted because a spelling gate over this file
+  will match it and the next reader has to know it is deliberate.
+#}
+<section class="grcproof" aria-labelledby="grcproof-heading">
+  <h2 class="grcproof-heading" id="grcproof-heading">Prove you own a {{ panel.asset }} address</h2>
+
+  <p class="grcproof-intro">
+    This proves that you hold the key to a {{ panel.asset }} address, by having you sign a
+    one-time message with your own wallet.
+    <strong>It never asks for a private key, a seed phrase or a wallet passphrase, and it never
+    will.</strong> Everything secret stays on your machine: you sign there, and only the
+    signature travels.
+  </p>
+
+  <p class="grcproof-scope">
+    What it does <em>not</em> do: proving an address here does not change your payout address,
+    your price, your amount, or anything else about swap
+    <span class="grcproof-mono">{{ panel.swap_id }}</span>. It is a record that you control the
+    address, nothing more.
+  </p>
+
+  {% if panel.result %}
+  {#
+    THE RESULT OF THE LAST ATTEMPT, RENDERED FIRST because it is what the person
+    who just pressed the button is looking for. `headline` and `detail` are both
+    printed: the headline is scannable, and the detail is the sentence that says
+    what was and was not recorded. Neither is built here -- both come from the
+    decision function, so the page and the log agree about what happened.
+  #}
+  <div class="grcproof-result grcproof-result-{{ 'proven' if panel.result.proven else ('unavailable' if panel.result_is_unavailable else 'refused') }}"
+       data-outcome="{{ panel.result.outcome }}" role="status">
+    <p class="grcproof-result-headline">
+      <span class="grcproof-result-mark" aria-hidden="true">{% if panel.result.proven %}&#10003;{% elif panel.result_is_unavailable %}&#63;{% else %}&#10007;{% endif %}</span>
+      <span class="grcproof-result-word">{% if panel.result.proven %}PROVEN{% elif panel.result_is_unavailable %}NOT CHECKED{% else %}REFUSED{% endif %}</span>
+      {{ panel.result.headline }}
+    </p>
+    <p class="grcproof-result-detail">{{ panel.result.detail }}</p>
+  </div>
+  {% endif %}
+
+  <ol class="grcproof-steps">
+    <li>
+      <span class="grcproof-step-label">Copy this challenge.</span>
+      It is valid for {{ panel.ttl_display }} from when it was issued, and
+      {% if panel.expired %}
+      <strong>it has now expired</strong> &#8212; reload this page to get a fresh one.
+      {% else %}
+      has <strong>{{ panel.remaining_display }}</strong> left (expires {{ panel.expires_at }}).
+      {% endif %}
+      It can be used <strong>once</strong>.
+      <code class="grcproof-challenge">{{ panel.challenge }}</code>
+    </li>
+    <li>
+      <span class="grcproof-step-label">Sign it in your own wallet, on your own machine.</span>
+      In the Gridcoin client's console, replacing the placeholder with the address you want to
+      prove:
+      <code class="grcproof-command">{{ panel.sign_command }}</code>
+      In the graphical client it is <em>File &#8594; Sign message</em>: put your address in the
+      first box, the challenge in the second, and press Sign.
+      <span class="grcproof-note">
+        Nothing from this step leaves your machine except the signature it prints. We never see
+        your key, and we do not want to.
+      </span>
+    </li>
+    <li>
+      <span class="grcproof-step-label">Paste the address and the signature back here.</span>
+      The signature is a long base64 string, usually ending in <span class="grcproof-mono">=</span>.
+      <span class="grcproof-warn">
+        If what you are about to paste looks like a <em>key</em> &#8212; 51 or 52 characters, or
+        64 hex digits, or a row of words &#8212; stop. That is the secret, not the signature. This
+        page will refuse it, but the safer move is not to paste it anywhere.
+      </span>
+    </li>
+  </ol>
+
+  <form class="grcproof-form" method="post" action="/swap/{{ panel.swap_id }}/address-proof">
+    {#
+      The challenge travels back in a hidden field rather than being looked up
+      server-side from the swap. That is what makes "a challenge for swap A does
+      not prove an address for swap B" a thing the server can CHECK: it has both
+      halves in front of it and matches them, instead of assuming.
+    #}
+    <input type="hidden" name="challenge" value="{{ panel.challenge }}">
+
+    <label class="grcproof-label" for="grcproof-address">Your {{ panel.asset }} address</label>
+    <input class="grcproof-input" id="grcproof-address" name="address" type="text"
+           autocomplete="off" spellcheck="false"
+           placeholder="the address you signed with">
+
+    <label class="grcproof-label" for="grcproof-signature">The signature your wallet printed</label>
+    <textarea class="grcproof-input grcproof-textarea" id="grcproof-signature" name="signature"
+              rows="3" autocomplete="off" spellcheck="false"
+              placeholder="base64, about 88 characters, usually ending in ="></textarea>
+
+    <button class="grcproof-submit" type="submit">Check the signature</button>
+    <p class="grcproof-formnote">
+      We check it by asking our own {{ panel.asset }} daemon to verify the signature. That is a
+      read-only calculation: it uses no wallet and no key, not even ours.
+    </p>
+  </form>
+
+  <h3 class="grcproof-subheading">Addresses proven for this swap</h3>
+  {% if panel.proven %}
+  <table class="grcproof-table">
+    <thead>
+      <tr><th scope="col">address</th><th scope="col">proven</th><th scope="col">ago</th></tr>
+    </thead>
+    <tbody>
+      {% for row in panel.proven %}
+      <tr>
+        <td class="grcproof-mono">{{ row.address }}</td>
+        <td>{{ row.proven_at }}</td>
+        <td>{{ row.age_display }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  {#
+    `(none)` IS A RESULT AND A BLANK GAP IS NOT (rule 14). It also says what was
+    looked for, so a reader can tell "nothing has been proven" from "the question
+    was asked about the wrong swap". _badges.html has an `empty()` macro that does
+    this -- it is not imported here because this partial deliberately depends on
+    none of the templates being restructured concurrently; see the header.
+  #}
+  <p class="grcproof-empty">
+    <span class="grcproof-empty-mark">(none)</span>
+    no address has been proven for this swap yet
+    <span class="grcproof-empty-params">&#8592; looked for: proven {{ panel.asset }} proofs on swap {{ panel.swap_id }}</span>
+  </p>
+  {% endif %}
+</section>

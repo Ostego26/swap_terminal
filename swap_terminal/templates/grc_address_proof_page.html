@@ -1,0 +1,38 @@
+{#
+  A standalone page holding nothing but the address-proof panel.
+
+  Role: template (page shell; no logic and no decision)
+  Reads: the `panel` dict services/grc_login_service.proof_panel() returns
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  WHY IT EXTENDS NOTHING. base.html is being restructured concurrently, so a
+  `{% extends "base.html" %}` here would have bound this page to a shape that is
+  changing underneath it -- and the whole point of keeping this change
+  self-contained is that neither side has to wait for the other. It is a complete
+  document instead: doctype, charset, viewport, one stylesheet of its own.
+
+  IT IS NOT THE DESTINATION. The panel belongs on the swap page; this page is how
+  it is reachable and testable before that include lands. When the swap page is
+  ready, _grc_address_proof.html goes into it and this file stays as the
+  no-JavaScript direct-link fallback -- a swap is a wait measured in blocks, so a
+  customer who closes the tab needs a URL to come back to, which is the same
+  reason routes/ui.py gives for /swap/<id> being a link rather than a view.
+#}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prove a {{ panel.asset }} address &#183; swap {{ panel.swap_id }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='grc_address_proof.css') }}">
+</head>
+<body class="grcproof-page">
+  <main class="grcproof-main">
+    <p class="grcproof-breadcrumb">
+      <a href="/swap/{{ panel.swap_id }}">&#8592; back to swap {{ panel.swap_id }}</a>
+    </p>
+    {% include "_grc_address_proof.html" %}
+  </main>
+</body>
+</html>

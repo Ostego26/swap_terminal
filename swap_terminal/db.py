@@ -3,9 +3,11 @@
 Role: submodule (persistence; holds no decision of its own)
 Reads: swap_terminal.db
 Writes: swap_terminal.db -- creates quotes, swaps, deposit_events, payouts,
-       wallet_inventory, market_context, swap_audit_log and xrp_destination_tags
-       if they are absent, plus the two triggers that make an allocated XRP
-       destination tag immutable and undeletable
+       wallet_inventory, market_context, swap_audit_log, xrp_destination_tags
+       and address_proof_challenges if they are absent, plus the two triggers
+       that make an allocated XRP destination tag immutable and undeletable and
+       the three that make an address-proof challenge single-use, unrepointable
+       and -- once it has proven something -- undeletable
 Can move funds: no
 Mainnet-safe: yes
 
@@ -315,6 +317,169 @@ CREATE TABLE IF NOT EXISTS swap_audit_log (
     created_at TEXT NOT NULL,
     FOREIGN KEY (swap_id) REFERENCES swaps(id)
 );
+-- PROVING OWNERSHIP OF AN ADDRESS BY SIGNATURE. Added 2026-10-02 at the operator's
+-- request for "GRC login ability", which they specified as: let someone prove they own a
+-- Gridcoin address by signing a challenge with their own wallet.
+--
+-- THE FLOW, so the columns make sense. This page issues a CHALLENGE bound to one swap. The
+-- customer signs it on THEIR OWN MACHINE, in their own client (`signmessage <address>
+-- "<challenge>"`). They paste back the ADDRESS and the SIGNATURE. This desk calls
+-- `verifymessage` on our own daemon, which is pure signature math, and on success the
+-- address is recorded as PROVEN for that swap.
+--
+-- NO PRIVATE KEY, SEED, WIF OR PASSPHRASE EVER REACHES THIS SYSTEM, and that is the entire
+-- reason this design was chosen over every alternative rather than a nice property of it.
+-- Nothing in this table can hold one: there is no key column, no passphrase column, and the
+-- one thing a customer could plausibly paste in error is refused before it is ever read --
+-- see secret_key_shapes.py and services/grc_login_service.py.
+--
+-- THERE IS NO `signature` COLUMN, and leaving it out is a decision rather than an omission.
+-- A signature is not a secret -- it reveals nothing but that the key exists -- but it IS
+-- REPLAYABLE against the message it signed. Storing it would create a durable list of
+-- (challenge, signature) pairs whose only use is to prove the same thing again, and the one
+-- thing that must never happen to a challenge is being accepted twice. The same reasoning
+-- keeps it out of the log (rule 7's "never delete evidence" does not ask for evidence that
+-- only helps an attacker: the EVIDENCE here is that the address was proven, and that is
+-- `proven_address` plus `proven_at`).
+--
+-- NOTHING ON THE PAYOUT PATH READS THIS TABLE, AS OF THIS COMMIT. A proven address does not
+-- change what gets paid, where it gets paid, how much, or whether a swap may proceed.
+-- Wiring it into payout authorization would change where money goes, which is live posture
+-- and the operator's call (rule 16) -- so it is recorded and not consulted. If that changes,
+-- the gate belongs in SQL as a view over this table joined to swaps (rules 5 and 20), not as
+-- a Python check at a send site.
+--
+-- WHY ONE TABLE AND NOT TWO (challenges + proofs). A proof IS a consumed challenge, and
+-- splitting them would put "has this challenge been used?" in two places that can disagree
+-- -- rule 8's bug with a delay on it, on the exact invariant that stops a replay. With one
+-- row, consumption and proof are the same write: a single conditional UPDATE sets
+-- proven_address and proven_at only if proven_at IS NULL, so there is no check-then-write
+-- window. That window is not hypothetical in this repository: two payout workers paid one
+-- swap twice through a correct-looking Python guard on 2026-09-24
+-- (tests/test_payout_concurrency.py), and the fix had this shape.
+CREATE TABLE IF NOT EXISTS address_proof_challenges (
+    -- THE CHALLENGE STRING ITSELF IS THE PRIMARY KEY. It is generated with `secrets`
+    -- (192 bits of CSPRNG nonce; never `random`), so it is unguessable, and making it the
+    -- key is what lets single-use be expressed as one UPDATE against one row instead of a
+    -- SELECT followed by an UPDATE. A surrogate integer id would have needed a UNIQUE index
+    -- on this column anyway, and then the key would not be the thing the customer signs.
+    challenge TEXT PRIMARY KEY,
+    -- WHICH SWAP THIS CHALLENGE BELONGS TO. The binding is what stops a signature captured
+    -- for swap A from proving an address on swap B: the consuming UPDATE matches on
+    -- (challenge, swap_id), so a challenge presented against the wrong swap updates zero
+    -- rows. The challenge TEXT also contains the swap id for a human reading it, which is
+    -- visibly redundant on purpose -- the column is the authority and the text is for the
+    -- person pasting it.
+    swap_id TEXT NOT NULL,
+    -- WHICH CHAIN'S ADDRESS IS BEING PROVEN. "GRC" is the only value any code writes today.
+    -- It is a column rather than an assumption because `verifymessage` is a Bitcoin-family
+    -- method that Litecoin and Bitcoin answer identically, so the second chain to want this
+    -- needs no migration -- and because a proof with no chain on it is ambiguous the moment
+    -- there is a second one. The same shape as services/xrp_tag_service.ACCOUNT_VALIDATORS,
+    -- which became a table keyed by asset after the one-chain version silently refused the
+    -- second chain.
+    asset TEXT NOT NULL,
+    -- WHEN IT WAS ISSUED. Kept alongside expires_at rather than derived from it, because the
+    -- TTL may change and a row has to keep saying what window it was actually given.
+    issued_at TEXT NOT NULL,
+    -- WHEN IT STOPS BEING ACCEPTABLE. THE EXPIRY IS A SQL PREDICATE, NOT A PYTHON
+    -- COMPARISON (rules 5 and 20): the consuming UPDATE carries
+    -- `julianday(expires_at) > julianday(:now)`, so a challenge cannot be accepted late even
+    -- by a caller who forgot to look. A Python check before the write would be the same
+    -- stale-read window the single-use rule above is built to avoid, and it would be
+    -- answerable only by whoever ran it.
+    --
+    -- WHY EXPIRE AT ALL, given the challenge is already single-use. A challenge that never
+    -- expires is a signature request that stays live forever: it sits in the customer's
+    -- terminal history, in a support ticket, in a screenshot. Single-use bounds how MANY
+    -- times a captured signature can be used; expiry bounds how LONG a captured challenge is
+    -- worth capturing. ISO text, and julianday() rather than a string comparison because
+    -- julianday parses the UTC offset instead of trusting two strings to be formatted alike.
+    expires_at TEXT NOT NULL,
+    -- THE ADDRESS THAT WAS PROVEN, and NULL until one is. A NULL pair (this and proven_at)
+    -- is an outstanding challenge; a non-NULL pair is a proof. That is the whole state
+    -- machine, and it is two columns rather than a `status` string so that no row can claim
+    -- a status its data does not support.
+    proven_address TEXT,
+    proven_at TEXT,
+    -- A HALF-WRITTEN PROOF IS NOT A PROOF. Without this, `UPDATE ... SET proven_at = ?`
+    -- alone would mark the challenge consumed while recording no address -- a row that
+    -- blocks any further attempt and proves nothing, which is the worst of both outcomes for
+    -- the customer. Expressed as a CHECK and not a convention because the two columns are
+    -- what every reader of this table joins on. NAMED, so the IntegrityError says which rule
+    -- was broken (the xrp_tag_is_allocatable constraint is named for the same reason, and
+    -- the message it produces was measured).
+    CONSTRAINT address_proof_is_whole CHECK ((proven_address IS NULL) = (proven_at IS NULL)),
+    FOREIGN KEY (swap_id) REFERENCES swaps(id)
+);
+
+-- The two queries that exist: "is there still an unexpired, unconsumed challenge for this
+-- swap?" (so a page reload does not invalidate what the customer is part-way through
+-- signing) and "what has this swap proven?". Both start from swap_id and discriminate on
+-- proven_at, which is this index read in either direction.
+CREATE INDEX IF NOT EXISTS idx_address_proof_challenges_swap
+    ON address_proof_challenges(swap_id, proven_at, expires_at);
+
+-- SINGLE USE, AS SOMETHING THE DATABASE WILL NOT LET ANYONE UNDO.
+--
+-- The conditional UPDATE in services/grc_login_service.py is the MECHANISM -- it is what
+-- makes consumption atomic. This trigger is the GUARANTEE, and the difference matters: the
+-- mechanism depends on every future writer remembering to carry `AND proven_at IS NULL`, and
+-- a writer who forgets gets a green test and a replayable proof. The trigger cannot be
+-- forgotten.
+--
+-- WHAT A REPLAY WOULD COST, which is why this is enforced rather than conventional. A
+-- signature over a fixed message is valid forever: it is in the customer's shell history and
+-- in whatever they pasted it into. If the same challenge could be consumed twice, anyone who
+-- ever saw one signature could prove ownership of that address again at any later time,
+-- including after the customer stopped controlling the key. Single-use is what makes a
+-- captured signature worthless the moment it has been used once.
+--
+-- WHEN OLD.proven_at IS NOT NULL, so an outstanding challenge can still be consumed -- the
+-- trigger forbids rewriting a PROOF, not writing one.
+--
+-- EACH OF THE THREE MESSAGES BELOW BEGINS WITH ITS OWN TRIGGER'S NAME, and that is not
+-- decoration. MEASURED 2026-10-02: SQLite's RAISE(ABORT, msg) puts ONLY msg in the
+-- IntegrityError -- the trigger name appears nowhere in it -- so a reader who finds one of
+-- these strings in a log has nothing to grep for unless the message says which rule fired.
+-- A named CHECK does carry its name ("CHECK constraint failed: address_proof_is_whole"), which
+-- is why address_proof_is_whole above needs no prefix and these three do.
+CREATE TRIGGER IF NOT EXISTS address_proofs_are_single_use
+BEFORE UPDATE ON address_proof_challenges
+WHEN OLD.proven_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'address_proofs_are_single_use: a challenge that has already proven an address is immutable. A message signature is valid forever, so re-accepting a spent challenge would let anyone who ever saw that signature prove the address again at any later time');
+END;
+
+-- The binding columns are immutable from the moment the row exists, proven or not.
+--
+-- Separate from the trigger above because it fires on a DIFFERENT condition: that one
+-- protects a completed proof, this one protects the QUESTION. Re-pointing a live challenge
+-- at another swap would hand that swap a proof its customer never produced -- the same hazard
+-- xrp_destination_tags_are_never_repointed exists for, one table over, and the reason that
+-- one's comment gives applies verbatim here.
+CREATE TRIGGER IF NOT EXISTS address_proof_challenges_are_not_repointed
+BEFORE UPDATE OF challenge, swap_id, asset, issued_at, expires_at ON address_proof_challenges
+BEGIN
+    SELECT RAISE(ABORT, 'address_proof_challenges_are_not_repointed: challenge, swap_id, asset, issued_at and expires_at are immutable once the challenge is issued. Re-pointing a live challenge at another swap would give that swap a proof its customer never produced, and extending expires_at would revive a challenge the customer has already been told is dead');
+END;
+
+-- A RECORDED PROOF IS EVIDENCE AND IS NEVER DELETED (rule 7).
+--
+-- Narrowed to rows that actually carry a proof, which is the one place this diverges from
+-- xrp_destination_tags_are_never_released. There, allocation reads MAX() over every row, so
+-- deleting ANY row lets the sequence go backward and a late payment credit a stranger's swap
+-- -- nothing may be deleted at all. Here, an UNCONSUMED challenge that has expired is inert:
+-- it can never be accepted again (the UPDATE's own predicate refuses it), it feeds no
+-- sequence, and keeping it forever is housekeeping rather than safety. A PROVEN row is the
+-- record of what a customer demonstrated, and deleting one would destroy the only evidence
+-- that it happened.
+CREATE TRIGGER IF NOT EXISTS address_proofs_are_never_deleted
+BEFORE DELETE ON address_proof_challenges
+WHEN OLD.proven_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'address_proofs_are_never_deleted: a row recording a proven address is evidence and is never deleted. An expired challenge that proved nothing may be deleted freely -- it feeds no sequence and can never be accepted again');
+END;
 """
 
 

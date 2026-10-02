@@ -1,0 +1,302 @@
+/*
+ * Styles for the address-proof panel, and for nothing else.
+ *
+ * Role: stylesheet (presentation only)
+ * Reads: nothing
+ * Writes: nothing
+ * Can move funds: no
+ * Mainnet-safe: yes
+ *
+ * A SEPARATE FILE FROM styles.css, ON PURPOSE. styles.css is being restructured
+ * concurrently into a boxed/tabulated layout; adding rules to it would have
+ * collided. Every selector here is prefixed `grcproof-`, so when this panel is
+ * included into the swap page the two stylesheets cannot reach into each other's
+ * rules -- and if the restructured styles.css later wants to own this panel, the
+ * whole of this file can be deleted in one move rather than untangled.
+ *
+ * COLOR IS THE THIRD CHANNEL, NEVER THE FIRST. The result block carries a GLYPH
+ * and a WORD -- a check and "PROVEN", a cross and "REFUSED", a question mark and
+ * "NOT CHECKED" -- so the three states are legible in a grayscale print, in a
+ * pasted screenshot, and to a reader who cannot distinguish the colors.
+ * _badges.html's header sets out that rule for the badges it owns, and this
+ * follows it rather than inventing a second convention.
+ *
+ * THE THREE STATES ARE DELIBERATELY NOT TWO. "Refused" and "not checked" look
+ * different here because they mean different things: one is an answer about what
+ * the customer pasted, the other is a problem at our end with no verdict in it.
+ * Rendering both in red would undo in CSS the distinction the whole feature is
+ * built to preserve.
+ */
+
+:root {
+  --grcproof-ink: #1b1f23;
+  --grcproof-muted: #57606a;
+  --grcproof-rule: #d0d7de;
+  --grcproof-surface: #ffffff;
+  --grcproof-code-surface: #f3f5f7;
+  --grcproof-proven: #1a7f37;
+  --grcproof-refused: #a40e26;
+  --grcproof-unavailable: #8a6d00;
+  --grcproof-warn-surface: #fff8e5;
+}
+
+.grcproof-page {
+  margin: 0;
+  background: var(--grcproof-code-surface);
+  color: var(--grcproof-ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.grcproof-main {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.grcproof-breadcrumb {
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+}
+
+.grcproof {
+  background: var(--grcproof-surface);
+  border: 1px solid var(--grcproof-rule);
+  border-radius: 6px;
+  padding: 1.25rem 1.25rem 1.5rem;
+}
+
+.grcproof-heading {
+  margin: 0 0 0.75rem;
+  font-size: 1.3rem;
+}
+
+.grcproof-subheading {
+  margin: 1.75rem 0 0.5rem;
+  font-size: 1.05rem;
+  border-top: 1px solid var(--grcproof-rule);
+  padding-top: 1rem;
+}
+
+.grcproof-intro,
+.grcproof-scope {
+  margin: 0 0 0.75rem;
+}
+
+.grcproof-scope {
+  color: var(--grcproof-muted);
+  font-size: 0.95rem;
+}
+
+/* The steps are an ordered list because the order is the instruction: copy,
+ * sign elsewhere, paste back. A set of paragraphs would let a reader start in
+ * the middle, and the middle is the step that happens on their machine. */
+.grcproof-steps {
+  margin: 1rem 0;
+  padding-left: 1.4rem;
+}
+
+.grcproof-steps > li {
+  margin-bottom: 1.1rem;
+}
+
+.grcproof-step-label {
+  display: block;
+  font-weight: 600;
+}
+
+.grcproof-note,
+.grcproof-warn {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.grcproof-note {
+  color: var(--grcproof-muted);
+}
+
+/* The "do not paste your key" warning is given a surface of its own because it
+ * is the one line on this panel whose being skipped costs the reader money. */
+.grcproof-warn {
+  background: var(--grcproof-warn-surface);
+  border-left: 3px solid var(--grcproof-unavailable);
+  padding: 0.5rem 0.65rem;
+}
+
+.grcproof-challenge,
+.grcproof-command {
+  display: block;
+  margin-top: 0.45rem;
+  padding: 0.55rem 0.65rem;
+  background: var(--grcproof-code-surface);
+  border: 1px solid var(--grcproof-rule);
+  border-radius: 4px;
+  /* The challenge is matched character for character by the server, so it must
+   * wrap rather than scroll out of sight: a value a reader cannot see all of is
+   * a value they will copy half of, and the refusal that follows reads as "my
+   * key is wrong" rather than "I copied 70 of 74 characters". */
+  font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.grcproof-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.grcproof-form {
+  margin: 1.25rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.grcproof-label {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-top: 0.6rem;
+}
+
+.grcproof-input {
+  font: 0.9rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--grcproof-rule);
+  border-radius: 4px;
+  background: var(--grcproof-surface);
+  color: var(--grcproof-ink);
+}
+
+.grcproof-textarea {
+  resize: vertical;
+}
+
+.grcproof-submit {
+  margin-top: 0.9rem;
+  align-self: flex-start;
+  font: 600 0.95rem/1 system-ui, sans-serif;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--grcproof-ink);
+  border-radius: 4px;
+  background: var(--grcproof-ink);
+  color: var(--grcproof-surface);
+  cursor: pointer;
+}
+
+.grcproof-formnote {
+  margin: 0.6rem 0 0;
+  font-size: 0.88rem;
+  color: var(--grcproof-muted);
+}
+
+.grcproof-result {
+  margin: 0 0 1.1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--grcproof-rule);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: var(--grcproof-code-surface);
+}
+
+.grcproof-result-headline {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+
+.grcproof-result-detail {
+  margin: 0;
+  font-size: 0.93rem;
+}
+
+.grcproof-result-mark {
+  font-weight: 700;
+  margin-right: 0.3rem;
+}
+
+/* The WORD, boxed, so the state survives a grayscale paste with no color at all. */
+.grcproof-result-word {
+  display: inline-block;
+  margin-right: 0.45rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid currentcolor;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+
+.grcproof-result-proven {
+  border-left-color: var(--grcproof-proven);
+  color: var(--grcproof-proven);
+}
+
+.grcproof-result-refused {
+  border-left-color: var(--grcproof-refused);
+  color: var(--grcproof-refused);
+}
+
+.grcproof-result-unavailable {
+  border-left-color: var(--grcproof-unavailable);
+  color: var(--grcproof-unavailable);
+}
+
+.grcproof-result-detail {
+  color: var(--grcproof-ink);
+}
+
+.grcproof-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.grcproof-table th,
+.grcproof-table td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--grcproof-rule);
+}
+
+.grcproof-table th {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--grcproof-muted);
+}
+
+/* `(none)` is a result, and it is styled as one rather than as an absence. */
+.grcproof-empty {
+  margin: 0;
+  color: var(--grcproof-muted);
+  font-size: 0.92rem;
+}
+
+.grcproof-empty-mark {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  color: var(--grcproof-ink);
+}
+
+.grcproof-empty-params {
+  display: block;
+  font-size: 0.85rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --grcproof-ink: #e6edf3;
+    --grcproof-muted: #9198a1;
+    --grcproof-rule: #3d444d;
+    --grcproof-surface: #0d1117;
+    --grcproof-code-surface: #161b22;
+    --grcproof-proven: #3fb950;
+    --grcproof-refused: #ff7b72;
+    --grcproof-unavailable: #d29922;
+    --grcproof-warn-surface: #26211a;
+  }
+
+  .grcproof-submit {
+    border-color: var(--grcproof-rule);
+    background: var(--grcproof-code-surface);
+    color: var(--grcproof-ink);
+  }
+}
