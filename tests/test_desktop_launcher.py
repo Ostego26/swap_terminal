@@ -449,3 +449,73 @@ def test_the_window_flag_reaches_browser_command_as_app_mode_false(monkeypatch):
     seen.clear()
     assert launcher.main([]) == 0
     assert seen["app_mode"] is True, "app mode must remain the default"
+
+
+def test_ctrl_c_in_window_mode_is_an_outcome_and_not_a_traceback(monkeypatch, capsys):
+    """MEASURED ON THE OPERATOR'S HOST 2026-10-02, on the path --window PRINTS.
+
+    --window tells them "Press Ctrl-C here when you are done". They did, and got
+
+        KeyboardInterrupt
+          File ".../swap_terminal_desktop.py", line 932, in _wait_for_either
+            time.sleep(WAIT_TICK_SECONDS)
+
+    above a teardown that had worked perfectly -- gunicorn logged its own clean
+    shutdown three lines later. A traceback on a documented success path is rule
+    14's defect in its most expensive form: it tells a reader something broke, and
+    the next thing they do is go looking for what.
+
+    It was always true of this loop and became a DEFECT when an instruction started
+    pointing at it.
+    """
+    class NeverExits:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    class Interrupts:
+        """time.sleep raises, exactly as Ctrl-C makes it."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, _seconds):
+            self.calls += 1
+            raise KeyboardInterrupt
+
+    sleeper = Interrupts()
+    monkeypatch.setattr(launcher.time, "sleep", sleeper)
+    shim = NeverExits()
+
+    trigger = launcher._wait_for_either(shim, shim)
+    out = capsys.readouterr().out
+
+    assert trigger == "ctrl-c", "the interrupt must become a named trigger the teardown can report"
+    assert sleeper.calls == 1
+    assert "Ctrl-C" in out
+    assert "not a failure" in out, (
+        "the line has to say so outright: the operator had just been told to press it"
+    )
+
+
+def test_a_closed_window_and_a_dead_server_are_still_distinguished(monkeypatch):
+    """The two outcomes that existed before, unchanged by catching the interrupt.
+
+    A version that returned "ctrl-c" for everything would pass the test above.
+    """
+    class Exited:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    class Alive:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(launcher.time, "sleep", lambda _s: None)
+    assert launcher._wait_for_either(Exited(), Alive()) == "window-closed"
+    assert launcher._wait_for_either(Alive(), Exited()) == "server-died"

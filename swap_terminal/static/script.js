@@ -517,15 +517,39 @@ function wireWalletMenu() {
         // down 72ms after opening the UI), so this is a fact to explain rather
         // than a setting to change.
         //
-        // IT NAMES BOTH CAUSES AND CLAIMS NEITHER (rule 17). A page cannot tell
+        // IT NAMES THE CAUSES AND CLAIMS NONE (rule 17). A page cannot tell
         // "this profile has no extensions" from "this browser has none
-        // installed" -- there is no reliable way to detect app mode or profile
-        // identity from script -- so it says what is true of both and what to do
-        // about either.
+        // installed" from "the extension is installed and declined to inject
+        // here" -- there is no reliable way to detect app mode, profile identity
+        // or another extension's injection policy from script.
+        //
+        // THE WORDING CHANGED 2026-10-02 BECAUSE ITS ADVICE BECAME A DEAD END.
+        // It used to lead with the empty-profile explanation and say "open the
+        // same URL in your normal browser instead". The operator did exactly
+        // that -- swap_terminal_desktop.py --window, which opens in their own
+        // Brave, and the launcher confirmed "Opening in existing browser
+        // session" -- and all three wallets still reported absent. So for that
+        // case the profile explanation is REFUTED, and a message that keeps
+        // offering it sends a reader back down a path they have already walked.
+        //
+        // What is NOT established is which of the remaining causes it is. Wallet
+        // extensions commonly restrict injection by origin, and
+        // http://127.0.0.1 is the kind of origin they restrict -- that is a
+        // plausible reading and not a measurement, so it is offered as one of
+        // two possibilities rather than as the answer. The message now says how
+        // to rule the profile out, which is the half a reader CAN settle.
+        //
+        // "did not inject a provider" rather than "not available": the page
+        // knows exactly one thing here -- that the global is absent -- and
+        // saying that is honest where "not available" invites the reader to
+        // conclude the software is missing.
         const note = document.createElement("span");
-        note.textContent = "not available in this window. If this page was opened by the desktop " +
-          "launcher it uses a separate browser profile with no extensions \u2014 open the same URL " +
-          "in your normal browser instead. Otherwise: ";
+        note.textContent = "did not inject a provider on this page. Two things can cause that and " +
+          "this page cannot tell them apart: a browser profile with no extensions (the desktop " +
+          "launcher's default window is one \u2014 run it with --window to use your own), or an " +
+          "extension that declines to inject on a plain http://127.0.0.1 origin, which several " +
+          "wallets do. Check the first by opening this URL in your normal browser; if it still says " +
+          "this, it is not the profile. Or: ";
         state.appendChild(note);
         const link = document.createElement("a");
         link.href = install;

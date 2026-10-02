@@ -922,14 +922,35 @@ def _wait_for_either(browser: subprocess.Popen, shim: subprocess.Popen) -> str:
     the launcher waiting on a window that still rendered from cache, and the final
     report was byte-identical to a clean run.
     """
-    while True:
-        if browser.poll() is not None:
-            return "window-closed"
-        if shim.poll() is not None:
-            print(f"\n  THE SERVER DIED while the window was still open (shim status "
-                  f"{shim.returncode}). Closing the window.", flush=True)
-            return "server-died"
-        time.sleep(WAIT_TICK_SECONDS)
+    # KeyboardInterrupt IS AN OUTCOME HERE, NOT AN ERROR, and until 2026-10-02 it
+    # arrived as a traceback through time.sleep(). That was always true and became
+    # a defect when --window started PRINTING "Press Ctrl-C here when you are
+    # done": an instruction whose documented path ends in a stack trace. The
+    # operator did exactly as told and got
+    #
+    #     KeyboardInterrupt
+    #       File ".../swap_terminal_desktop.py", line 932, in _wait_for_either
+    #         time.sleep(WAIT_TICK_SECONDS)
+    #
+    # above a teardown that had worked perfectly. A traceback on a success path is
+    # rule 14's defect in its most expensive form -- it tells a reader something
+    # broke, and the next thing they do is go looking for what.
+    #
+    # Returned as a trigger so the teardown below runs unchanged and names it, the
+    # same as a closed window or a dead server.
+    try:
+        while True:
+            if browser.poll() is not None:
+                return "window-closed"
+            if shim.poll() is not None:
+                print(f"\n  THE SERVER DIED while the window was still open (shim status "
+                      f"{shim.returncode}). Closing the window.", flush=True)
+                return "server-died"
+            time.sleep(WAIT_TICK_SECONDS)
+    except KeyboardInterrupt:
+        print("\n  Ctrl-C          taking the server down. This is the documented way out of "
+              "--window mode, not a failure.", flush=True)
+        return "ctrl-c"
 
 
 def report_status(host: str, port: int) -> int:

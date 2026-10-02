@@ -1368,17 +1368,47 @@ def test_a_wallet_that_is_not_installed_is_disabled_rather_than_dead(client):
     # the old phrase. Fourth time in one day a keyword check in this suite could
     # not tell a quotation from a claim; the fix is the same each time -- match
     # code, which only exists where the behavior is.
-    assert 'note.textContent = "not available in this window' in script, (
-        "the message must say the wallet is absent from THIS window, not that it is uninstalled"
+    assert 'note.textContent = "did not inject a provider on this page' in script, (
+        "the page knows exactly one thing -- the global is absent -- and must say that, not that "
+        "the wallet is uninstalled or unavailable"
     )
     # AND IT MUST NOT TELL THE OPERATOR TO INSTALL WHAT THEY ALREADY HAVE.
     # Measured 2026-10-01: "no wallet appears to work even though coinbase wallet
-    # is installed into brave". It was installed -- in their normal profile. The
-    # desktop launcher opens the page with --user-data-dir pointing at an empty
-    # profile, so the window genuinely has no extensions, and the old message
-    # blamed the user for it.
-    assert "separate browser profile with no extensions" in script
-    assert "open the same URL" in script, "and says what to do instead"
+    # is installed into brave". It was installed -- in their normal profile, while
+    # the launcher's default window uses an empty one.
+    assert "profile with no extensions" in script
+
+    # NOR MAY IT LEAD WITH AN EXPLANATION THAT HAS BEEN REFUTED. Measured
+    # 2026-10-02: the message said "open the same URL in your normal browser
+    # instead", the operator ran the launcher with --window (which the launcher
+    # confirmed with "Opening in existing browser session"), and all three wallets
+    # STILL reported absent. For that case the profile explanation is dead, and a
+    # message that keeps offering it sends a reader back down a path they have
+    # already walked.
+    #
+    # The second cause is offered as a POSSIBILITY, not an answer: wallet
+    # extensions commonly restrict injection by origin and http://127.0.0.1 is the
+    # kind they restrict, which is a plausible reading rather than something this
+    # project has measured.
+    assert "http://127.0.0.1 origin" in script, (
+        "the origin is the other candidate cause and must be named"
+    )
+    assert "cannot tell them apart" in script, "and neither cause may be claimed as the answer"
+    # FRAGMENTS THAT DO NOT CROSS A CONCATENATION BOUNDARY. The message is built
+    # from several quoted pieces joined with +, so a phrase that spans two of them
+    # is not a contiguous substring of the file. This assertion first read
+    # "if it still says this, it is not the profile" and failed against correct
+    # code for exactly that reason -- the second time today a check in this suite
+    # has been written against prose as a reader sees it rather than as the source
+    # holds it.
+    assert "it is not the profile" in script, (
+        "the one half a reader CAN settle has to be spelled out, because the operator settled it "
+        "and the message did not acknowledge that was possible"
+    )
+    assert "opening this URL in your normal browser" in script, "and how to settle it"
+    assert "open the same URL in your normal browser instead" not in script, (
+        "the refuted advice must be gone, not merely demoted"
+    )
 
 
 def test_a_closed_swap_is_offered_no_wallet_menu_and_no_qr(client):
