@@ -341,10 +341,39 @@ class Config:
         # mainnet on it; an unset URL instead makes every call refuse with a
         # message saying so, which is the loud version of the same fact.
         #
-        # SOL_HOT_WALLET is a PUBLIC key. Nothing in chains/solana.py reads,
-        # loads or derives a private key, and there is no environment variable
-        # here for a keypair path -- unlike the Node bridge's
-        # SOLANA_PAYER_KEYPAIR_PATH, which is what signs over there.
+        # SOL_HOT_WALLET is a PUBLIC key, and nothing in chains/solana.py reads,
+        # loads or derives a private key -- still true, and now checked rather
+        # than claimed: tests/test_solana_adapter.py::
+        # test_the_module_references_no_keypair_anywhere tokenizes that file and
+        # refuses the names Keypair, secret_key, from_secret_key, sign,
+        # sign_message and partial_sign.
+        #
+        # THE REST OF THIS COMMENT WAS HALF RIGHT AND IS CORRECTED, 2026-10-02.
+        # It read: "there is no environment variable here for a keypair path --
+        # unlike the Node bridge's SOLANA_PAYER_KEYPAIR_PATH, which is what
+        # signs over there."
+        #
+        # THE CLAUSE ABOUT THE NODE BRIDGE WAS AND IS TRUE, established by
+        # reading it rather than by recalling it: grc-sol-swap/abstergo_exchange/
+        # server.js:143 loads that keypair, and sendSolPayout() at :245 builds a
+        # SystemProgram.transfer and calls sendAndConfirmTransaction with it --
+        # a real signed transfer, which its own module header declares ("Can
+        # move funds: YES"). (services/solana.js does NOT sign: it imports
+        # Keypair and never uses it, and passes `owner: userAddress` as a string
+        # to a Serum order with `price: 1, // This should be dynamic`. A reader
+        # looking there for the signer finds nothing, which is why the sentence
+        # names server.js.)
+        #
+        # THE CLAUSE ABOUT THIS TREE IS THE ONE THAT WENT WRONG, because a
+        # Python payout path landed. SOL_PAYOUT_KEYPAIR_PATH is now read -- by
+        # chains/solana_signing.py, at call time, after an exact-string arming
+        # token has already matched, and on devnet only. It is deliberately NOT
+        # a field in this dict: Config reads the environment at class-definition
+        # time, so a key path here would be baked into every process that
+        # imports config, including the read-only deposit watcher. Nothing in
+        # this file names a key for any chain, which is the property worth
+        # keeping; "no such variable exists anywhere" is not, and was the half
+        # that stopped being true.
         "SOL": {
             "url": _env("SOL_RPC_URL", ""),
             "commitment": _env("SOL_RPC_COMMITMENT", "processed"),

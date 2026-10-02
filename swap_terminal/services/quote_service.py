@@ -15,10 +15,41 @@ reaching a swap. It reads ALLOWED_PAIRS from config rather than carrying its
 own list, so there is one vocabulary (rule 11).
 """
 
+import time
 from datetime import timedelta
+
+from chains.solana_signing import below_new_account_floor
+from chains.solana_units import SOL_DECIMALS, SYSTEM_ACCOUNT_SPACE, amount_to_base_units, decimal_amount
 
 from .helpers import new_id, utc_now
 from .pricing import derive_pair_rate, fetch_usd_prices, last_price_source
+
+#: SECONDS a cluster's rent-exempt minimum is reused for. Seconds because it is
+#: a `time.monotonic()` difference (rule 6: seconds stay where the interface
+#: demands them, and the conversion happens at the print -- nothing prints this
+#: one, it only compares).
+#:
+#: WHY A CACHE AT ALL, and why this long. The figure is a CLUSTER parameter: it
+#: changes only when a feature gate activates, and chains/solana_units.py
+#: records the last such change (SIMD-0437, 6_960 -> 5_080 lamports per byte,
+#: in five separately gated steps). The quote path already makes one external
+#: HTTP request for prices behind RATE_CACHE_SECONDS, so one RPC per ten
+#: minutes is the same cost class as what is already there -- that is a
+#: structural argument and NOT a measured latency: no Solana endpoint is
+#: reachable from the environment this was written in, so nothing here has
+#: timed a real call.
+#:
+#: IT IS NEVER A SUBSTITUTE FOR ASKING. An empty cache asks the cluster, and a
+#: cluster that cannot be asked REFUSES the quote rather than falling back to a
+#: compiled-in number -- which is the failure chains/solana_units.py's rent
+#: section is a monument to.
+RENT_FLOOR_CACHE_SECONDS = 600.0
+
+#: {cache key: (monotonic deadline, lamports)}. Keyed by the endpoint so a
+#: process pointed at a different cluster cannot reuse the first one's answer --
+#: which is the whole hazard, since devnet and mainnet-beta have answered
+#: different figures during a feature rollout.
+_RENT_FLOOR_CACHE: dict[str, tuple[float, int]] = {}
 
 
 def get_network_fee_reserve(config, to_asset: str) -> float:
@@ -77,6 +108,102 @@ def get_network_fee_reserve(config, to_asset: str) -> float:
             f"transaction that is not free. Nothing was written."
         )
     return float(config[key])
+
+
+def new_account_floor_lamports(adapter, *, now=None) -> int:
+    """The cluster's rent-exempt minimum for a 0-byte account, cached per endpoint.
+
+    ASKED, NOT ASSUMED. SolanaAdapter.rent_exempt_minimum() calls
+    getMinimumBalanceForRentExemption, and SYSTEM_ACCOUNT_SPACE is 0 because a
+    plain wallet account holds no data -- chains/solana_units.py names both and
+    records the operator's 2026-09-30 devnet reading of 650,240 lamports for
+    that size. No figure is hardcoded here: the module that DID carry hardcoded
+    reference values spent weeks saying 890,880 while every cluster answered
+    650,240, and nothing failed while it did.
+
+    `now` is a parameter so a test can expire the cache without sleeping.
+    """
+    moment = time.monotonic() if now is None else float(now)
+    key = f"{getattr(adapter, 'url', '') or '(no url)'}|{getattr(adapter, 'mint', '') or 'native'}"
+    cached = _RENT_FLOOR_CACHE.get(key)
+    if cached and cached[0] > moment:
+        return cached[1]
+    lamports = int(adapter.rent_exempt_minimum(SYSTEM_ACCOUNT_SPACE))
+    _RENT_FLOOR_CACHE[key] = (moment + RENT_FLOOR_CACHE_SECONDS, lamports)
+    return lamports
+
+
+def require_deliverable_sol_payout(config, adapters, to_asset: str, output_amount: float) -> None:
+    """Refuse a SOL payout too small to create the account it would be sent to.
+
+    OPERATOR INSTRUCTION, 2026-10-02: "refuse at quote too." The payout-time
+    refusal (chains/solana_signing.require_destination_rent) was built first and
+    was not enough on its own: by the time a payout runs, the customer's deposit
+    has been taken and credited, so a refusal there leaves a swap in `failed`
+    needing a person. Refused here, nothing has been taken and the customer gets
+    a number they can act on.
+
+    WHAT THIS CAN AND CANNOT ASK, established from the code rather than assumed.
+    create_quote() takes (db, config, from_asset, to_asset, input_amount) and
+    create_swap() takes the payout_address -- so AT QUOTE TIME THERE IS NO
+    DESTINATION. "Does that account exist" is unanswerable here, and the only
+    honest test is the conservative one: a payout below the floor cannot be
+    delivered to a NEW account, whichever address arrives later. A payout ABOVE
+    the floor is never refused here, so this cannot reject a swap that would
+    have worked.
+
+    The precise test -- "does THIS address exist, and if it does then any amount
+    is deliverable" -- is answerable only once an address exists, and the place
+    for it is services/swap_service.create_swap(), which has both the address
+    and the adapters. IT IS NOT IMPLEMENTED THERE as of 2026-10-02 and that is
+    named rather than left as a gap: this refusal is strictly conservative, so
+    nothing that passes it is refused later for the same reason, and a customer
+    never sees the round trip the operator's instruction exists to remove.
+
+    NATIVE SOL ONLY. An SPL payout has a different and larger rent question --
+    an associated token account is 165 bytes, its minimum was 1,488,440 on the
+    operator's devnet run, and WHO pays it is a decision nobody has made -- so
+    an SPL-configured adapter is skipped here rather than quoted against the
+    wrong figure. chains/solana.py's payout path refuses an SPL send outright,
+    so no quote this passes can become an SPL payout by accident.
+
+    THE FEE RESERVE IS A DIFFERENT NUMBER AND IS NOT THIS ONE.
+    SOL_NETWORK_FEE_RESERVE is what one payout costs the DESK (the 5,000-lamport
+    signature fee), it is checked by services/swap_service.create_swap() against
+    the desk's own fee, and it is not deducted from anybody's payout. This floor
+    is a MINIMUM ON THE PAYOUT AMOUNT imposed by the runtime. Two numbers, two
+    jobs; confusing them would either refuse a deliverable swap or accept an
+    undeliverable one.
+    """
+    if to_asset != "SOL":
+        return
+    adapter = (adapters or {}).get("SOL")
+    if adapter is None:
+        raise ValueError(
+            "No quote: this terminal cannot reach the Solana network right now, so it cannot establish "
+            "the smallest payout the network will accept. Nothing was written. Try again shortly, or "
+            "choose a different payout coin."
+        )
+    if getattr(adapter, "is_spl", False):
+        return
+    floor_lamports = new_account_floor_lamports(adapter)
+    if below_new_account_floor(amount_to_base_units(output_amount, SOL_DECIMALS), floor_lamports):
+        # CUSTOMER-FACING, AND IT NAMES NO INTERNAL SETTING. Commit 6ae5838
+        # stripped operator-facing text off the customer page on 2026-10-02 for
+        # exactly this reason, so this says what the limit is and what to do
+        # about it, in SOL, and nothing about keypairs, clusters or config.
+        #
+        # decimal_amount() rather than an f-string float, because
+        # chains/solana_pay.py already records what a float's repr does to a
+        # small amount: 5e-05 is not a number a person can read off a screen
+        # and type back.
+        floor_sol = decimal_amount(floor_lamports / 10 ** SOL_DECIMALS)
+        raise ValueError(
+            f"No quote: a payout of {decimal_amount(output_amount)} SOL is too small to deliver. The "
+            f"Solana network will not create a brand-new account holding less than {floor_sol} SOL, so a "
+            f"payout under that cannot arrive at an address that has never been used. Deposit more and "
+            f"the quote will work. Nothing was written."
+        )
 
 
 def validate_pair(config, from_asset: str, to_asset: str) -> None:
@@ -153,7 +280,7 @@ def _confidence_for_display(config, from_asset: str, to_asset: str, notional_usd
     return {"available": True, "legs": legs}
 
 
-def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float) -> dict:
+def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float, *, adapters=None) -> dict:  # noqa: PLR0913 -- checked: the first five ARE the quote (where to write it, the settings, the pair, the size) and the sixth is the only object that can ask a chain a question. Bundling them would add a type without removing a parameter. It is KEYWORD-ONLY, which is the same property the arming token on the payout path relies on: a positional argument that drifted one place cannot land in it. Same judgment recorded at chains/xrp.py:773 and chains/solana.py's __init__.
     from_asset = from_asset.upper().strip()
     to_asset = to_asset.upper().strip()
     input_amount = float(input_amount)
@@ -198,6 +325,34 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     # negative payout, and the clamp is what services/swap_service.py's
     # below-minimum refusal reads.
     output_amount_estimate = max(gross_output * (1 - fee_bps / 10000.0), 0.0)
+    # AND A SOL PAYOUT HAS A FLOOR THE NETWORK IMPOSES, checked HERE -- after
+    # the payout figure exists and BEFORE the quote row is written, so a refusal
+    # leaves nothing behind. See require_deliverable_sol_payout() for what it
+    # can ask at this stage and what it deliberately cannot.
+    #
+    # `adapters` IS OPTIONAL IN THE SIGNATURE AND ALL THREE REAL CALLERS PASS IT:
+    # routes/quotes.py passes current_app.config["ADAPTERS"], open_swap.py passes
+    # the dict it already built, and operator_panel.answer_a_teller_quote()
+    # passes the one _teller_db_and_config() returns. THIS COMMENT SAID "BOTH
+    # REAL CALLERS" AND COUNTED TWO, 2026-10-02: the third was discarding its
+    # adapters into `_adapters` and calling without them, so the teller pane
+    # would have refused a *->SOL quote the web form accepts -- two spellings of
+    # one answer, which is rule 8's defect with a delay on it. Counted by
+    # `grep -rn "create_quote(" --include=*.py`, not recalled. It is optional
+    # because tests and future
+    # callers that quote a pair with no chain adapter exist, and because a
+    # required argument would have been a breaking change to a function whose
+    # three callers are in three different layers -- so the default is None and
+    # a SOL-destined quote with no SOL adapter REFUSES rather than skipping the
+    # check (rule 19: a gate that can be silently bypassed is not a gate).
+    #
+    # IT CANNOT FIRE TODAY, and that is said out loud rather than discovered:
+    # Config.ALLOWED_PAIRS names no pair whose TO asset is SOL (counted
+    # 2026-10-02 -- SOL appears only as a source), so validate_pair() above
+    # refuses every *->SOL quote before this line is reached. This is the gate
+    # for the moment the operator enables one, which is exactly when nobody
+    # would remember to add it.
+    require_deliverable_sol_payout(config, adapters, to_asset, output_amount_estimate)
     now = utc_now()
     quote = {
         "id": new_id("q"),

@@ -1,17 +1,33 @@
 """The Solana adapter: an account-model chain behind the same five-method contract.
 
 Role: module (owns the Solana stage of the adapter contract; every decision it
-      makes is a function in chains/solana_address.py or chains/solana_units.py)
+      makes is a function in chains/solana_address.py, chains/solana_units.py,
+      chains/solana_signing.py or chains/solana_transaction.py)
 Reads: a Solana JSON-RPC endpoint -- getBalance, getSignaturesForAddress,
        getTransaction, getSignatureStatuses, getSlot, getAccountInfo,
-       getTokenAccountBalance, getMinimumBalanceForRentExemption, getHealth
-Writes: nothing. No file, no database, no chain.
-Can move funds: NO, AND THAT IS THE DELIBERATE HALF OF THIS FILE. Both
-       fund-moving methods of the contract -- get_new_address() and
-       send_to_address() -- REFUSE, with a message naming the decision the
-       operator has to make first. Nothing here loads, reads, derives or holds
-       a keypair; there is no code path in this module that can sign.
-Mainnet-safe: yes, entirely. Every implemented method is a read.
+       getTokenAccountBalance, getMinimumBalanceForRentExemption, getHealth,
+       getGenesisHash, getLatestBlockhash
+Writes: THE SOLANA CHAIN, through sendTransaction, and only from
+       send_to_address() when it is armed with the exact token
+       chains/solana_signing.CONFIRM_SOL_SEND and only on devnet. No file and
+       no database.
+Can move funds: YES WHEN ARMED, and that sentence replaced "NO, AND THAT IS
+       THE DELIBERATE HALF OF THIS FILE" on 2026-10-02 at the operator's
+       instruction ("we should be able to swap any coin for another of any
+       combination"). What is unchanged is that THIS MODULE HOLDS NO KEYPAIR
+       AND READS NO KEY PATH: the secret's entire lifetime is one call to
+       chains/solana_signing.signed_transfer_wire(), which returns bytes, so
+       this file broadcasts a transaction it could not have produced.
+       tests/test_solana_adapter.py::test_the_module_references_no_keypair_
+       anywhere tokenizes this file and still refuses the names Keypair,
+       secret_key, from_secret_key, sign, sign_message and partial_sign.
+       get_new_address() still refuses unconditionally, for a reason that is
+       about the deposit strategy rather than about custody.
+Mainnet-safe: yes, BY REFUSAL rather than by absence. Every read is a read, and
+       the one write refuses any cluster whose genesis hash is not devnet's --
+       mainnet-beta, testnet, an unrecognized hash and a missing one all raise,
+       in the preview as well as in the send. There is no flag, environment
+       variable or argument that turns that off.
 
 =============================================================================
 WHAT THE CONTRACT ACTUALLY IS -- MEASURED, NOT ASSUMED
@@ -90,8 +106,14 @@ duplicates and the difference is real:
     native SOL only                  native SOL or an SPL token, from the
     (SystemProgram.transfer)         start -- the operator holds wGRC, which
                                      is an SPL token and not native SOL
-    SIGNS AND BROADCASTS, from       CANNOT SIGN. No keypair is read, loaded
-    SOLANA_PAYER_KEYPAIR_PATH        or referenced anywhere in this module.
+    SIGNS AND BROADCASTS, from       SIGNS AND BROADCASTS TOO, since
+    SOLANA_PAYER_KEYPAIR_PATH,       2026-10-02 -- but DEVNET ONLY, refusing by
+    on whatever cluster              default, armed by an exact string at the
+    DEVNET_RPC_URL points at         call site, and from a keypair read by
+    (a variable NAME, not a          chains/solana_signing.py and never by this
+    guarantee -- its own header      module. The cluster is identified by its
+    says so)                         GENESIS HASH, which is the check the Node
+                                     side does not have.
     swap_intents.json is its         swap_terminal.db, via the services the
     authority                        contract is called from
     needs no Solana DEPOSIT          get_new_address() is a Solana DEPOSIT
@@ -121,10 +143,17 @@ WHAT IS IMPLEMENTED AND WHAT IS A PROPOSAL (CLAUDE.md rule 16)
                              per-swap address to derive, so callers go through
                              services/swap_service.deposit_account(). See the
                              method.
-                             send_to_address -- signing and broadcasting.
-                             build_transfer_plan() builds and DESCRIBES the
-                             transfer for inspection; it does not sign, and
-                             this module holds no key to sign with.
+  PREVIEWS, THEN SENDS WHEN   send_to_address -- which refused
+  ARMED                       unconditionally until 2026-10-02 and now previews
+                              by default. build_transfer_plan() still builds
+                              and DESCRIBES the transfer without a key;
+                              preview_payout() adds the cluster, the payer, the
+                              destination's existence, the rent floor and the
+                              balance arithmetic; and the signature happens in
+                              chains/solana_signing.py, which this module hands
+                              a plan and gets bytes back from. THE BROADCAST
+                              HAS NEVER RUN AGAINST A CLUSTER -- see the
+                              PROPOSAL note at the end of this header.
 
 **PART OF THIS FILE HAS NOW MET A REAL CLUSTER, AND THE LINE BETWEEN THE TWO
 HALVES IS DRAWN BY METHOD.** This header said "NOTHING IN THIS FILE HAS BEEN
@@ -218,9 +247,16 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
           against public devnet, every one after three attempts. That is why
           solana_chain_check.find_a_holder() has a second route through the
           mint's own traffic; the measurement is the argument for it.
-      send_to_address and get_new_address refuse by design and always will.
-          **SO THIS CHAIN CANNOT PAY OUT.** Nothing here signs, so a swap
-          whose TO asset is SOL cannot be completed by this terminal at all.
+      get_new_address refuses by design and always will -- the shared-account
+          deposit strategy has no per-swap address to derive.
+      send_to_address, getLatestBlockhash and sendTransaction. **THE PAYOUT
+          PATH HAS NEVER TOUCHED A CLUSTER.** Every guard on it is tested
+          against seeded responses and the serialization is cross-checked
+          against @solana/web3.js byte for byte (chains/solana_transaction.py's
+          header has the numbers), and NONE of that is a broadcast:
+          api.devnet.solana.com answers 403 at this container's proxy,
+          re-measured 2026-10-02. So the send is a PROPOSAL under rule 16 and
+          the first real one is the operator's run.
 
 =============================================================================
 IS SOL DONE? NO, AND THE THREE REASONS ARE NOT THE SAME KIND OF THING
@@ -233,10 +269,22 @@ log that nobody reading this file will ever see.
                      discovery, deposit-path getTransaction, both credit
                      readers, mint decimals, token program, ATA. The list
                      above is what each one rests on.
-  the SEND half      DOES NOT EXIST, by design and by absence -- no keypair is
-                     read anywhere in this module. build_transfer_plan()
-                     builds and describes a transfer; nothing signs it. This
-                     is rule 16's line: signing is the operator's.
+  the SEND half      BUILT 2026-10-02, DEVNET ONLY, AND UNEXERCISED. This
+                     paragraph said "DOES NOT EXIST, by design and by absence"
+                     and that was true until the operator asked for it. What
+                     exists now: preview_payout() applies seven guards in
+                     order, send_to_address() refuses every caller that does
+                     not pass CONFIRM_SOL_SEND exactly, the cluster is
+                     identified by genesis hash, the keypair is read from
+                     SOL_PAYOUT_KEYPAIR_PATH by chains/solana_signing.py and
+                     never by this module, the transaction is serialized by
+                     chains/solana_transaction.py and parsed back out of its
+                     own bytes before broadcast, and the settlement is asserted
+                     rather than assumed. What does NOT exist is a run: no
+                     transaction built here has reached any cluster. Rule 16's
+                     line has moved rather than gone -- the first broadcast,
+                     mainnet, and flipping can_spend are all still the
+                     operator's.
   the WIRING         ALLOWED_PAIRS contains ZERO entries with SOL on either
                      side (counted 2026-10-01), so no SOL swap can be created
                      today whatever the adapter can do. The deposit side IS
@@ -298,9 +346,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import NamedTuple
 
 import requests
+from microfortnights import format_duration
 
 from .solana_address import (
     TOKEN_PROGRAM_ID,
@@ -311,11 +361,22 @@ from .solana_address import (
     is_valid_address,
 )
 from .solana_memo import deposit_tag_from
+from .solana_signing import (
+    SolanaSendNotArmed,
+    SolanaSplSendRefused,
+    keypair_path_from_environment,
+    require_destination_rent,
+    require_devnet,
+    require_lamport_headroom,
+    require_send_confirmation,
+    signed_transfer_wire,
+)
 from .solana_units import (
     BALANCE_COMMITMENT,
     DISCOVERY_COMMITMENT,
     FINALIZED_RANK,
     SOL_DECIMALS,
+    SYSTEM_ACCOUNT_SPACE,
     TOKEN_ACCOUNT_SPACE,
     amount_to_base_units,
     base_units_to_amount,
@@ -434,6 +495,42 @@ HTTP_TOO_MANY_REQUESTS = 429
 # own cap is 1000. 500 matches chains/base.py's listtransactions default so the
 # two adapters agree about how far back "recent" reaches.
 DEFAULT_SIGNATURE_LIMIT = 500
+
+
+# --- the payout path's own settings (CLAUDE.md rule 6 governs how they PRINT) -
+
+#: SECONDS to keep asking whether a broadcast transaction has settled, and
+#: SECONDS between asks. Named in seconds because they are a `time.monotonic()`
+#: difference and a `time.sleep()` argument -- rule 6 is explicit that seconds
+#: stay where an interface demands them and the conversion happens at the
+#: print, which is what format_duration() does on every line below.
+#:
+#: 90s is bounded by the thing that actually expires: a recent blockhash is
+#: valid for 150 slots, which is roughly 60-90 seconds of wall clock, so a
+#: transaction that has not been seen by then will never land with THAT
+#: blockhash. Waiting longer would be waiting for something that cannot
+#: happen; waiting less would report "we do not know" about a transaction that
+#: was still perfectly alive.
+CONFIRMATION_DEADLINE_SECONDS = 90.0
+CONFIRMATION_POLL_SECONDS = 2.0
+
+#: Preflight is left ON, and that is the conservative choice rather than the
+#: convenient one. skipPreflight=True sends the transaction without simulating
+#: it, which is what a high-throughput trader wants and is exactly wrong here:
+#: preflight is where an InsufficientFundsForRent, an expired blockhash, a
+#: wrong signer or a malformed instruction is caught BEFORE the transaction is
+#: forwarded to a leader. A payout refused by simulation costs a retry; one
+#: forwarded and then rejected costs a credited deposit sitting against a
+#: failed swap.
+SKIP_PREFLIGHT = False
+
+#: The commitment the preflight simulation runs at, AND the commitment the
+#: blockhash is fetched at. THE SAME ONE, deliberately: a blockhash read at a
+#: looser commitment than the preflight check is a blockhash the simulating
+#: node may not know yet, which answers "Blockhash not found" for a
+#: transaction that is perfectly good. BALANCE_COMMITMENT is `finalized`,
+#: which is also the only rung whose answer cannot be rolled back.
+BROADCAST_COMMITMENT = BALANCE_COMMITMENT
 
 
 #: The last skip set reported IN FULL, per deposit address. Module level because the
@@ -587,15 +684,22 @@ class SolanaAdapter:
     # and mint_decimals() reads it from the chain rather than assuming.
     decimals = SOL_DECIMALS
 
-    # SEE chains/base.RPCAdapter.can_spend. False because send_to_address() below
-    # RAISES: this module holds no keypair, reads no keypair path, and imports
-    # nothing that could sign. That is an absence rather than a gate, which is
-    # what makes the declaration a fact rather than a setting.
+    # SEE chains/base.RPCAdapter.can_spend. STILL False on 2026-10-02, and the
+    # reason changed underneath it: send_to_address() can now sign and broadcast
+    # when it is armed, so this is no longer the absence it used to report. It
+    # stays False because what it gates is LIVE POSTURE -- chains/registry.
+    # payout_refusal() reads it to tell an operator which pairs cannot be
+    # serviced, and Config.ALLOWED_PAIRS names no pair that pays out in SOL.
+    # Flipping it would make the payout worker try to pay SOL swaps with a path
+    # that has never reached a cluster, and that is the operator's call (rule
+    # 16: fund movement comes back), not a consequence of this file compiling.
     can_spend = False
     payout_refusal = (
-        "cannot pay out: it holds no keypair and imports nothing that could sign, so "
-        "send_to_address() raises. build_transfer_plan() produces everything up to the "
-        "signature; the signature is the operator's (rule 16)."
+        "has a payout path as of 2026-10-02, and it is NOT enabled: devnet only, refusing "
+        "unless armed with chains/solana_signing.CONFIRM_SOL_SEND at the call site, and never "
+        "broadcast against any cluster from the environment it was written in. The payout "
+        "worker calls send_to_address() with two positional arguments, so it gets a preview and "
+        "a refusal. Enabling it is live posture and is the operator's (rule 16)."
     )
 
     def __init__(  # noqa: PLR0913, PLR0917 -- checked: these six ARE the connection, exactly as RPCAdapter's six are. They arrive as **Config.RPC["SOL"], a dict built for this signature, so bundling them into an object would add a type without removing a parameter.
@@ -784,6 +888,41 @@ class SolanaAdapter:
 
     # --- the contract: get_balance -------------------------------------------
 
+    def balance_lamports(self, address: str = "") -> int:
+        """An account's balance in LAMPORTS -- integers, for the money path.
+
+        SPLIT OUT OF get_balance() ON 2026-10-02 RATHER THAN COPIED, because
+        the payout path needs the integer and get_balance() needs the float,
+        and two reads of getBalance that unwrap the response separately is rule
+        8's bug with a delay on it. get_balance() now divides this by
+        SOL_DECIMALS for the native case; nothing else changed about it.
+
+        WHY THE PAYOUT PATH CANNOT USE THE FLOAT. A balance check decides
+        whether a transfer fits, and the comparison has to be exact: the app
+        carries amounts as floats (db.py's REAL columns) and
+        chains/solana_units.py records that above 2^53 base units a float stops
+        being able to hold a distinct lamport. Reading the integer the cluster
+        actually reported and keeping it an integer all the way into
+        require_lamport_headroom() means there is no float on the money path at
+        any point.
+
+        `address` defaults to the configured hot wallet, which is what
+        get_balance() asks about. Any other account is a read like any other.
+        """
+        target = (address or self.hot_wallet or "").strip()
+        if not target:
+            raise SolanaRPCError(
+                "no Solana account was given and SOL_HOT_WALLET is unset, so there is no balance to read. "
+                "Set SOL_HOT_WALLET to the PUBLIC key of the wallet this terminal pays out from. This "
+                "adapter never reads a private key."
+            )
+        result = self.call("getBalance", target, {"commitment": BALANCE_COMMITMENT})
+        # Both shapes are real: the documented response is
+        # {"context": ..., "value": lamports}, and a bare integer is what a
+        # stub or an older proxy returns. Handled in one place rather than at
+        # each caller.
+        return int(result["value"] if isinstance(result, dict) else result)
+
     def get_balance(self) -> float:
         """The hot wallet's spendable balance, as the float the app carries.
 
@@ -809,9 +948,7 @@ class SolanaAdapter:
                 "PUBLIC key of the wallet this terminal pays out from. This adapter never reads a private key."
             )
         if not self.is_spl:
-            result = self.call("getBalance", self.hot_wallet, {"commitment": BALANCE_COMMITMENT})
-            lamports = int(result["value"] if isinstance(result, dict) else result)
-            return base_units_to_amount(lamports, SOL_DECIMALS)
+            return base_units_to_amount(self.balance_lamports(self.hot_wallet), SOL_DECIMALS)
         account = self.associated_token_account(self.hot_wallet)
         try:
             result = self.call("getTokenAccountBalance", account, {"commitment": BALANCE_COMMITMENT})
@@ -1204,7 +1341,13 @@ class SolanaAdapter:
         """
         return key.get("pubkey", "") if isinstance(key, dict) else str(key)
 
-    # --- the contract: the two that refuse -----------------------------------
+    # --- the contract: one refusal, and the payout path ----------------------
+    #
+    # get_new_address() refuses unconditionally and always will: the shared-
+    # account strategy has no per-swap address to derive. send_to_address()
+    # PREVIEWS by default and refuses every unarmed caller, which is a
+    # different kind of no -- see its docstring for the five properties that
+    # make the default safe, and chains/solana_signing.py for every guard.
 
     def get_new_address(self, label: str) -> str:
         """REFUSES, AND THE REASON CHANGED ON 2026-09-29 WITHOUT THIS METHOD NOTICING.
@@ -1253,27 +1396,422 @@ class SolanaAdapter:
             "  See README.md, 'Solana deposit addresses' -- it records the decision and what was built to it."
         )
 
-    def send_to_address(self, address: str, amount: float) -> str:
-        """REFUSES. Signing and broadcasting are the operator's (CLAUDE.md rule 16).
+    def genesis_hash(self) -> str:
+        """The cluster's genesis hash -- what a cluster CANNOT lie about.
 
-        THIS MODULE CANNOT SIGN. It holds no keypair, reads no keypair path,
-        and imports nothing that could -- so this is not a policy that a flag
-        turns off, it is an absence. The refusal is the honest report of that
-        absence rather than a gate over a working implementation.
-
-        build_transfer_plan() below is the half that IS built: it resolves the
-        destination (including the associated token account and whether it
-        exists), computes the base-unit amount at the right decimals, prices
-        the fee and any rent the operator would be paying, and returns all of
-        it for inspection. Everything up to the signature.
+        One RPC read, kept as a method so the payout path and any diagnostic
+        ask the same question the same way. chains/solana_rpc_map.py already
+        records getGenesisHash as the identification of a cluster and why a
+        hostname is not one; chains/solana_signing.require_devnet() is what
+        DECIDES on the answer, and this only fetches it.
         """
-        plan = self.build_transfer_plan(address, amount)
-        raise NotImplementedError(
-            "this adapter cannot sign or broadcast a Solana transfer, and holds no key that could.\n"
-            f"{plan['description']}\n"
-            "  Signing and broadcasting are the operator's (CLAUDE.md rule 16: fund movement comes back).\n"
-            "  build_transfer_plan() produced everything above without a key; the signature is the missing step."
+        return str(self.call("getGenesisHash") or "").strip()
+
+    def latest_blockhash(self) -> tuple[str, int]:
+        """A fresh blockhash to sign over, and the block height it expires at.
+
+        THIS IS A SIGNING NONCE, NOT THE TIP, which is the sentence
+        chains/solana_rpc_map.py's `getbestblockhash` entry leads with. A
+        Solana transaction embeds a recent blockhash to bound its lifetime:
+        roughly 150 slots, after which the transaction can never be accepted --
+        and that expiry is the only thing that makes a signed-but-unbroadcast
+        transaction safe to abandon.
+
+        FETCHED AT BROADCAST_COMMITMENT, which is the same commitment the
+        preflight simulation uses. See that constant for why the two must
+        match.
+
+        NOT CALLED BY preview_payout(), on purpose. A blockhash read during a
+        preview would be most of a minute old by the time an operator finished
+        reading the preview and armed the send, and a transaction signed over
+        an expired blockhash is rejected after it reaches a node. So the
+        preview shows everything EXCEPT the nonce, and the nonce is fetched
+        immediately before signing.
+        """
+        result = self.call("getLatestBlockhash", {"commitment": BROADCAST_COMMITMENT}) or {}
+        value = result.get("value") if isinstance(result, dict) else None
+        value = value or {}
+        blockhash = str(value.get("blockhash") or "").strip()
+        if not blockhash:
+            raise SolanaRPCError(
+                f"getLatestBlockhash returned no blockhash: {str(result)[:200]}. NOTHING was signed. A "
+                "transaction cannot be built without one, and this path will not substitute any other "
+                "hash for it."
+            )
+        return blockhash, int(value.get("lastValidBlockHeight") or 0)
+
+    def preview_payout(self, address: str, amount: float, *, retain_lamports: int = 0) -> dict:
+        """Everything about a SOL payout except the signature. Read-only.
+
+        THIS IS THE DEFAULT MODE of send_to_address(), not a separate feature,
+        and it is modeled on chains/xrp.py's preview_payout() which was modeled
+        on build_transfer_plan() below. It reads the cluster, does every
+        conversion, applies every guard that can be applied without a key, and
+        returns the result plus a `description` an operator reads before arming
+        anything (rule 14: echo the parameters that decide the answer, so a
+        pasted block is self-describing a day later).
+
+        IT DOES NOT DUPLICATE build_transfer_plan() -- it calls it (rule 8).
+        That function already owns the destination validation, the decimals,
+        the truncation to base units and the per-signature fee, and it is the
+        half of this path that existed before any of it could sign. What is
+        added here is everything that needs the CLUSTER and the PAYER: which
+        cluster this is, what the payer holds, whether the destination account
+        exists, and the rent-exempt floor that applies when it does not.
+
+        THE ORDER OF THE GUARDS IS THE DESIGN, cheapest-and-most-fatal first:
+
+          1  an SPL mint            refused with no network call at all. Only
+                                    the native transfer is built.
+          2  the destination        build_transfer_plan(): base58, length,
+             and the amount         ON-CURVE, and an amount that does not
+                                    truncate to zero. All local.
+          3  the payer              SOL_HOT_WALLET must be set, and must not be
+                                    the destination. Local.
+          4  the CLUSTER            getGenesisHash, and require_devnet()
+                                    refuses mainnet-beta, testnet, an
+                                    unrecognized genesis and a missing one.
+                                    Everything below is unreachable anywhere
+                                    but devnet, INCLUDING in preview mode --
+                                    wanting a preview is not a reason to let
+                                    this path talk to mainnet.
+          5  the destination        getAccountInfo. A native transfer to an
+             account                address with no account CREATES it, and
+                                    the runtime then holds the new account to
+                                    a rent-exempt minimum.
+          6  the rent floor         getMinimumBalanceForRentExemption(0),
+                                    asked of the CLUSTER, and only when the
+                                    destination does not exist. A payout below
+                                    it would be rejected rather than arriving
+                                    small, so it is refused here.
+          7  the payer's balance    getBalance in lamports, and integer
+                                    arithmetic against the fee and what the
+                                    payer must retain.
+
+        WHY STEP 6 IS A REFUSAL AND NOT A DEDUCTION, because the distinction
+        cost a wrong answer upstream: the rent-exempt minimum of a NEW system
+        account is a FLOOR ON THE PAYOUT AMOUNT, not a cost somebody pays. The
+        165-byte figure build_transfer_plan() prices for an SPL transfer is a
+        different quantity -- that one really is a deposit into a new token
+        account -- and it does not apply to a native transfer at all. On the
+        operator's configuration (SOL_SPL_MINT empty) the only chain cost of a
+        payout is the 5,000-lamport signature fee.
+
+        Raises rather than returning a refusal in a field. A dict with
+        `ok: False` in it is the shape every caller forgets to check, and on
+        this path the cost of forgetting is a send.
+        """
+        if self.is_spl:
+            raise SolanaSplSendRefused(
+                f"this adapter is configured for the SPL mint {self.mint}, and the payout path builds only "
+                f"the NATIVE SOL transfer. NOTHING was read from the cluster and nothing was signed. An "
+                f"SPL transfer is a different instruction (the Token program's TransferChecked, over two "
+                f"associated token accounts, at the mint's own decimals) and chains/solana_transaction.py "
+                f"lays out one shape: SystemProgram.transfer. Paying a token holder in lamports because "
+                f"the code could serialize that instead is the silent failure this refusal exists to stop."
+            )
+        plan = dict(self.build_transfer_plan(address, amount))
+        payer = (self.hot_wallet or "").strip()
+        if not payer:
+            raise SolanaRPCError(
+                "SOL_HOT_WALLET is unset, so this payout has no payer and NOTHING was read from the "
+                "cluster. It must be the PUBLIC key of the account the payout debits -- which is also the "
+                "account the signing keypair has to derive to, because chains/solana_signing.py refuses a "
+                "key that derives anything else. An unannounced payer is an account nobody checked."
+            )
+        if payer == plan["destination"]:
+            raise SolanaRPCError(
+                f"the payout destination is the payer itself ({payer}), so this transfer would move "
+                f"nothing and pay a fee to do it. NOTHING was read from the cluster. It is also not a "
+                f"shape this path can build: a self-transfer de-duplicates the account key list, which "
+                f"shifts every instruction index."
+            )
+        plan["payer"] = payer
+
+        # Rule 14: announce BEFORE, not only after. Everything below this line
+        # makes network calls, and an operator watching a blinking cursor
+        # cannot tell working from hung -- which on this path resolves with a
+        # Ctrl-C.
+        print(
+            f"  SOL payout preview  {plan['amount']} SOL ({plan['base_units']} lamports) "
+            f"{payer} -> {plan['destination']}",
+            flush=True,
         )
+        print(f"  SOL payout preview  reading the cluster's genesis hash and balances from {self.url}", flush=True)
+
+        cluster = require_devnet(self.genesis_hash(), self.url)
+        destination_exists = self.account_exists(plan["destination"])
+        if destination_exists:
+            rent_minimum = 0
+            rent_source = (
+                "not asked: the destination account already exists, so no account is created and no "
+                "rent-exempt minimum applies"
+            )
+        else:
+            rent_minimum = self.rent_exempt_minimum(SYSTEM_ACCOUNT_SPACE)
+            rent_source = (
+                f"{rent_minimum} lamports, read from the CLUSTER with "
+                f"getMinimumBalanceForRentExemption({SYSTEM_ACCOUNT_SPACE}) rather than from a constant -- "
+                f"chains/solana_units.py records that this repository's reference figures were stale on "
+                f"every cluster for weeks"
+            )
+        rent_line = require_destination_rent(destination_exists, plan["base_units"], rent_minimum)
+        balance = self.balance_lamports(payer)
+        retain = self.rent_exempt_minimum(SYSTEM_ACCOUNT_SPACE) + int(retain_lamports)
+        headroom = require_lamport_headroom(balance, plan["base_units"], plan["fee_lamports"], retain)
+
+        plan.update(
+            {
+                "cluster": cluster,
+                "destination_exists": destination_exists,
+                "rent_minimum_lamports": rent_minimum,
+                "balance_lamports": balance,
+                "retain_lamports": retain,
+                "signed": False,
+                "broadcast": False,
+            }
+        )
+        plan["description"] = "\n".join(
+            [
+                "  SOL PAYOUT PREVIEW (nothing signed, nothing broadcast):",
+                f"    cluster       {cluster}",
+                f"    from          {payer}  (the account this DEBITS)",
+                f"    to            {plan['destination']}",
+                f"    amount        {plan['amount']} SOL = {plan['base_units']} lamports",
+                f"    network fee   {plan['fee_lamports']} lamports  <- per SIGNATURE, not per byte",
+                f"    destination   {'EXISTS on this cluster' if destination_exists else 'DOES NOT EXIST -- this transfer would CREATE it'}",
+                f"    rent floor    {rent_source}",
+                f"    rent verdict  {rent_line}",
+                f"    payer retains {retain} lamports  <- the payer's own rent-exempt minimum from the "
+                f"cluster plus {int(retain_lamports)} passed in by the caller",
+                f"    headroom      {headroom}",
+                "    blockhash     NOT fetched for a preview: it expires in ~150 slots, so it is read "
+                "immediately before signing instead",
+            ]
+        )
+        return plan
+
+    def send_to_address(self, address: str, amount: float, *, confirm_send: str = "", retain_lamports: int = 0) -> str:
+        """PREVIEWS by default. Signs and broadcasts only when armed, and only on devnet.
+
+        WHAT CHANGED ON 2026-10-02, AND WHAT DID NOT. This method used to refuse
+        unconditionally, and the refusal was an ABSENCE: nothing in this module
+        imported anything that could sign, so it could not have signed if the
+        check had been deleted. A payout path exists now, and the honest
+        statement of what replaced that absence is FIVE structural properties,
+        not one of which is a configuration value:
+
+          the cluster       preview_payout() asks the CLUSTER for its genesis
+                            hash and chains/solana_signing.require_devnet()
+                            refuses mainnet-beta, testnet, an unrecognized
+                            genesis and a missing one. The url is echoed and
+                            never consulted, because a hostname resolves to
+                            whatever DNS says today. There is no flag,
+                            environment variable or argument that turns this
+                            off, and the PREVIEW path runs it too -- so
+                            mainnet cannot even be previewed against.
+          the arming token  confirm_send must equal
+                            chains/solana_signing.CONFIRM_SOL_SEND exactly. A
+                            caller that omits it gets the preview and a
+                            refusal. Deliberately NOT a boolean: a truthy
+                            variable, a parsed config value or a positional
+                            argument that drifted one place could each produce
+                            a send nobody wrote.
+          no key here       THIS MODULE STILL HOLDS NO KEYPAIR AND READS NO KEY
+                            PATH, and that is checked rather than claimed:
+                            tests/test_solana_adapter.py::
+                            test_the_module_references_no_keypair_anywhere
+                            tokenizes this file and refuses the names Keypair,
+                            secret_key, from_secret_key, sign, sign_message and
+                            partial_sign. The secret's whole lifetime is one
+                            call to chains/solana_signing.signed_transfer_wire(),
+                            which returns bytes. This adapter broadcasts a
+                            transaction it could not have produced.
+          the caller        services/payout_service.py:354 calls
+                            `send_to_address(swap["payout_address"], amount)` --
+                            two positional arguments and no keywords. It
+                            therefore gets SolanaSendNotArmed with the preview
+                            in the message, and the swap lands in `failed` with
+                            the reason recorded. THAT CALL SITE WAS NOT WIRED
+                            UP and wiring it is the operator's (rule 16: fund
+                            movement comes back).
+          can_spend         still False, so chains/registry.payout_refusal()
+                            still reports SOL as unable to pay out and
+                            Config.ALLOWED_PAIRS still names no pair that pays
+                            out in SOL. Flipping either is live posture and is
+                            the operator's.
+
+        AND THE BROADCAST ITSELF IS A PROPOSAL (rule 16), which is the one
+        sentence in this docstring that matters most. No transaction built by
+        this path has ever reached a cluster: api.devnet.solana.com answers 403
+        at this container's proxy -- re-measured 2026-10-02 -- so the
+        serialization is verified against an independent implementation
+        (chains/solana_transaction.py's header has the measurement) and the
+        broadcast is verified against nothing. The first real send is the
+        operator's run, and it should be for the smallest amount that clears
+        the rent floor the preview prints.
+
+        Returns the transaction signature, which is Solana's transaction id.
+        Raises on every refusal, and the class of the exception says WHICH
+        guard fired (see chains/solana_signing.py).
+        """
+        plan = self.preview_payout(address, amount, retain_lamports=retain_lamports)
+
+        # The arming check comes AFTER the preview and BEFORE anything that
+        # could sign, which is the order that makes the default useful: an
+        # unarmed caller gets the full preview inside the refusal message
+        # rather than a bare "not armed", so an operator who then arms it is
+        # arming something they have read. chains/xrp.py records the same
+        # ordering and the one defect it had: the description must be emitted
+        # EXACTLY ONCE, so the unarmed path carries it in the exception and the
+        # live print happens below, immediately before the irreversible step.
+        try:
+            require_send_confirmation(confirm_send, keypair_path_from_environment())
+        except SolanaSendNotArmed as error:
+            raise SolanaSendNotArmed(f"{error}\n{plan['description']}") from error
+
+        print(plan["description"], flush=True)
+        return self._sign_and_broadcast(plan, confirm_send)
+
+    def _sign_and_broadcast(self, plan: dict, confirm_send: str) -> str:
+        """The only code in chains/solana.py downstream of a signature.
+
+        Separate from send_to_address() rather than inlined, and the split is
+        exactly where the guards end and the irreversible part begins:
+        everything above this call is a read or a refusal, and the first
+        statement inside it fetches the nonce that makes a signature possible.
+
+        It still holds no key. chains/solana_signing.signed_transfer_wire()
+        takes the plan, the blockhash and the arming token, reads the keypair
+        from the file SOL_PAYOUT_KEYPAIR_PATH names, derives the public key and
+        REFUSES if it is not the payer this plan announced, signs, verifies its
+        own signature, parses the signed bytes back and compares them against
+        the plan. What comes back here is a base64 string and a signature.
+        """
+        blockhash, last_valid_height = self.latest_blockhash()
+        print(
+            f"  SOL payout  blockhash {blockhash} valid through block height {last_valid_height} "
+            f"<- a signing NONCE, not the tip; after that height this transaction can never be accepted",
+            flush=True,
+        )
+        # THE TOKEN IS A PARAMETER AND NEVER ADAPTER STATE. An attribute
+        # holding it would leave the instance armed for every later call --
+        # and services/payout_service.refresh_wallet_inventory() reuses one
+        # adapter object across a whole cycle.
+        signed = signed_transfer_wire(plan, blockhash, confirm_send)
+        print(f"  SOL payout  {signed['derivation']}", flush=True)
+        print(f"  SOL payout  signing key {signed['keypair_file']}", flush=True)
+        print(
+            f"  SOL payout  broadcasting {len(signed['wire'])} bytes, skipPreflight={SKIP_PREFLIGHT} "
+            f"preflightCommitment={BROADCAST_COMMITMENT}  <- preflight ON so a rent, blockhash or signer "
+            f"fault is caught before a leader sees this",
+            flush=True,
+        )
+        signature = str(
+            self.call(
+                "sendTransaction",
+                signed["base64"],
+                {
+                    "encoding": "base64",
+                    "skipPreflight": SKIP_PREFLIGHT,
+                    "preflightCommitment": BROADCAST_COMMITMENT,
+                },
+            )
+            or ""
+        ).strip()
+        if not signature:
+            raise SolanaRPCError(
+                "sendTransaction returned no signature. THIS IS NOT PROOF NOTHING WAS SENT: the "
+                f"transaction was signed and handed to {self.url}, and a response this path cannot read "
+                f"is not a refusal. The signature this process computed is {signed['signature']} -- look "
+                f"it up on the cluster before retrying, because a retry that duplicates a landed transfer "
+                f"pays twice."
+            )
+        if signature != signed["signature"]:
+            raise SolanaRPCError(
+                f"the cluster returned signature {signature} and this process signed "
+                f"{signed['signature']}. THIS IS NOT PROOF NOTHING WAS SENT. A transaction's signature is "
+                f"computed locally from its own bytes, so two different values mean the endpoint did not "
+                f"broadcast what it was given. Look BOTH signatures up before doing anything else."
+            )
+        return self._await_settlement(signature)
+
+    def _await_settlement(self, signature: str) -> str:
+        """Poll until the cluster has settled the transaction, and ASSERT the outcome.
+
+        Rule 13's "a stop that cannot prove it worked is not a stop", applied
+        to a send: sendTransaction returning a signature means a node accepted
+        the bytes for forwarding, which is NOT the same as the transaction
+        having executed. A transfer that fails on chain -- insufficient funds,
+        a rent violation, an expired blockhash -- has a real signature and did
+        nothing, and recording that signature as a completed payout is how a
+        customer is told they were paid when they were not.
+
+        So the assertion is the OUTCOME rather than the absence of an
+        exception, and a failed transaction raises here rather than returning.
+
+        Every line is announced with its elapsed time in microfortnights
+        (rule 6, through the one conversion in swap_terminal/microfortnights.py)
+        because this loop is the longest silence on the path -- up to
+        CONFIRMATION_DEADLINE_SECONDS of it, which is where an operator reaches
+        for Ctrl-C.
+        """
+        started = time.monotonic()
+        polls = 0
+        while True:
+            status = self.signature_status(signature)
+            polls += 1
+            elapsed = time.monotonic() - started
+            # THIS GUARD WAS WRITTEN `if False and status["err"] is not None`
+            # AND WAS THEREFORE DEAD, found 2026-10-02 by the test that names
+            # it (tests/test_solana_payout.py::test_a_transaction_the_cluster_
+            # REJECTS_raises_rather_than_returning_a_signature, the one red
+            # test in the suite). Measured with the guard disabled: a transfer
+            # the cluster rejected -- confirmationStatus `finalized` with
+            # err={"InstructionError": [0, "Custom"]} -- fell through to the
+            # rank check, where signature_status() collapses a failed
+            # transaction to rank 0 on purpose, so the loop polled for the full
+            # CONFIRMATION_DEADLINE_SECONDS and then raised the TIMEOUT
+            # message: "THIS IS NOT PROOF IT DID NOT LAND ... do NOT retry
+            # blind." That is the wrong sentence about the one outcome the
+            # cluster had already stated definitively. A definite on-chain
+            # FAILURE was reported as "we do not know", which is the exact
+            # confusion the paragraph above says this function exists to
+            # prevent, and it cost 90s of silence per occurrence on the way
+            # there (74.4µfn, 90.0s). `if False and X` is not a check; it is a
+            # check somebody switched off.
+            if status["err"] is not None:
+                raise SolanaRPCError(
+                    f"the transaction was broadcast and the cluster REJECTED it: err={status['err']!r}. "
+                    f"signature={signature}. No value was delivered. Raised rather than returned so that "
+                    f"a failed transfer cannot be written into `payouts` as a broadcast one. Nothing is "
+                    f"retried here: fix what the error names, then preview again."
+                )
+            if int(status["rank"]) >= int(self.min_commitment_rank):
+                print(
+                    f"  SOL payout  SETTLED at rank {status['rank']} (>= the configured "
+                    f"{self.min_commitment_rank}) after {polls} poll(s) in {format_duration(elapsed)}  "
+                    f"signature={signature}",
+                    flush=True,
+                )
+                return signature
+            if elapsed >= CONFIRMATION_DEADLINE_SECONDS:
+                raise SolanaRPCError(
+                    f"the transaction was broadcast and has NOT reached rank {self.min_commitment_rank} "
+                    f"after {format_duration(elapsed)} and {polls} poll(s); it is at rank "
+                    f"{status['rank']} and the cluster "
+                    f"{'knows it' if status['known'] else 'does not know it yet'}. "
+                    f"signature={signature}. THIS IS NOT PROOF IT DID NOT LAND -- a blockhash is valid "
+                    f"for roughly 150 slots and a transaction can settle after this gave up waiting. Look "
+                    f"the signature up; do NOT retry blind, because a retry that duplicates a landed "
+                    f"transfer pays twice and on this chain that is final."
+                )
+            print(
+                f"  SOL payout  waiting for settlement: rank {status['rank']} of "
+                f"{self.min_commitment_rank}, poll {polls}, {format_duration(elapsed)} elapsed",
+                flush=True,
+            )
+            time.sleep(CONFIRMATION_POLL_SECONDS)
 
     # --- the proposal half: built, described, unsigned -----------------------
 
@@ -1392,12 +1930,35 @@ class SolanaAdapter:
         return self.associated_token_address_for(owner)
 
     def token_account_exists(self, token_account: str) -> bool:
-        """True if the account is already on chain, so no rent is owed to create it.
+        """True if the token account is already on chain, so no rent is owed to create it.
 
         This is the read that turns "somebody pays rent" from a hypothetical
         into a number an operator can decide about.
+
+        A ONE-LINE DELEGATION SINCE 2026-10-02, and both names stay on purpose.
+        The question "does this account exist" is not token-specific -- the
+        native payout path has to ask it about a customer's WALLET, because a
+        native transfer to an address with no account CREATES that account and
+        the runtime then holds it to a rent-exempt minimum. Writing a second
+        getAccountInfo for that would be rule 8's two copies of one read. So
+        account_exists() below owns the call, and this name survives because it
+        is what the SPL callers and their tests read, and because the rent it
+        implies is a DIFFERENT quantity: 165 bytes of token account, not a
+        0-byte system account.
         """
-        result = self.call("getAccountInfo", token_account, {"encoding": "base64", "commitment": BALANCE_COMMITMENT})
+        return self.account_exists(token_account)
+
+    def account_exists(self, address: str) -> bool:
+        """True if there is an account at this address on this cluster.
+
+        The general form of token_account_exists(), which now calls it. Asked
+        with encoding base64 and no data slice because only the EXISTENCE of
+        the account matters here -- `value` is null for an address nothing has
+        ever been sent to, and on Solana an account that holds nothing IS
+        nothing (chains/solana_rpc_map.py's validateaddress note makes the same
+        point about valid-versus-in-use).
+        """
+        result = self.call("getAccountInfo", address, {"encoding": "base64", "commitment": BALANCE_COMMITMENT})
         return bool((result or {}).get("value"))
 
     def rent_exempt_minimum(self, space: int = TOKEN_ACCOUNT_SPACE) -> int:
@@ -1423,6 +1984,42 @@ class SolanaAdapter:
         """The cluster's current slot. A DIAGNOSTIC, never the gate."""
         return int(self.call("getSlot", self._commitment()))
 
+    def signature_status(self, signature: str) -> dict:
+        """One signature's rung on the commitment ladder AND its error, separately.
+
+        SPLIT OUT OF commitment_rank_for() ON 2026-10-02 rather than copied,
+        and the split exists because the two readers need DIFFERENT answers
+        from one response:
+
+          the deposit side   wants a rank, and wants a FAILED transaction to
+                             rank 0 forever, because a failed transaction moved
+                             nothing and is never creditable however settled it
+                             is. That collapse is correct there and is kept.
+          the payout side    has to tell "not confirmed yet" from "confirmed
+                             and FAILED". Under the collapse they are the same
+                             number, so a payout waiting for confirmation would
+                             poll a failed transaction until its deadline and
+                             then report a timeout -- which reads as "we do not
+                             know" when the cluster has already said no.
+
+        So this returns both and commitment_rank_for() below reads the rank out
+        of it. One getSignatureStatuses call, one place that unwraps it.
+        """
+        result = self.call("getSignatureStatuses", [signature], {"searchTransactionHistory": True})
+        values = (result or {}).get("value") or [None]
+        status = values[0] or {}
+        error = status.get("err") if status else None
+        if not status or error is not None:
+            # A failed transaction moved nothing, so its rank is the same 0 an
+            # unknown signature gets. `err` is what distinguishes them, and it
+            # is returned rather than folded in.
+            return {"rank": commitment_rank(None), "err": error, "known": bool(status)}
+        return {
+            "rank": commitment_rank(status.get("confirmationStatus")),
+            "err": None,
+            "known": True,
+        }
+
     def commitment_rank_for(self, signature: str) -> int:
         """The rung this signature has reached on the commitment ladder.
 
@@ -1430,18 +2027,12 @@ class SolanaAdapter:
         rank out of the deposit event dicts -- and provided because an operator
         asking "why has this not credited yet" needs to be able to ask about
         one signature without running a whole poll.
+
+        A failed transaction ranks 0 no matter how settled it is; see
+        signature_status() above, which this now reads and which keeps the
+        error for the one caller that needs to see it.
         """
-        result = self.call("getSignatureStatuses", [signature], {"searchTransactionHistory": True})
-        values = (result or {}).get("value") or [None]
-        status = values[0]
-        if not status:
-            return commitment_rank(None)
-        if status.get("err") is not None:
-            # A failed transaction moved nothing, so it is never creditable no
-            # matter how settled it is. Reporting its commitment level would be
-            # reporting how firmly the chain agrees that nothing happened.
-            return commitment_rank(None)
-        return commitment_rank(status.get("confirmationStatus"))
+        return int(self.signature_status(signature)["rank"])
 
     def describe_signature(self, signature: str) -> str:
         """One pasteable line about a signature's settlement (rule 14)."""

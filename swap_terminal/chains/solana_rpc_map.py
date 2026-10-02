@@ -255,8 +255,15 @@ NO_EQUIVALENT: dict[str, str] = {
     ),
     "decoderawtransaction": (
         "there is no server method, because there is nothing to ask a server: a transaction is "
-        "decoded LOCALLY by solders/solana-py. Asking a remote node to parse a blob you already "
-        "hold would be a round trip for a pure function."
+        "decoded LOCALLY. Asking a remote node to parse a blob you already hold would be a round "
+        "trip for a pure function. THIS LINE SAID 'by solders/solana-py' until 2026-10-02, which "
+        "sent a reader to install either of two libraries this repository deliberately does not "
+        "depend on and neither of which is present on the operator's host (measured: both raise "
+        "ModuleNotFoundError). The local decoder in this tree is "
+        "chains/solana_transaction.parse_transfer_transaction(), and it is deliberately NOT "
+        "general: it reads exactly the one-instruction native SOL transfer the payout path builds "
+        "and refuses every other shape, because its job is checking our own artifact before a "
+        "broadcast rather than parsing arbitrary transactions."
     ),
     "getrawmempool": (
         "there is no mempool. A client forwards a transaction to the current leader rather than "

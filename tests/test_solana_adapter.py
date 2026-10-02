@@ -41,9 +41,11 @@ from pathlib import Path
 import chains.solana as chains_solana
 import pytest
 import requests
+import valid_addresses
 from chains.registry import build_adapters
 from chains.solana import SolanaAdapter, SolanaRPCError, deposit_event
 from chains.solana_address import SolanaAddressError
+from chains.solana_signing import SolanaSendNotArmed, devnet_genesis_hash
 from chains.solana_units import (
     BALANCE_COMMITMENT,
     COMMITMENT_RANKS,
@@ -53,6 +55,11 @@ from chains.solana_units import (
 )
 from config import Config
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION
+
+#: Devnet's genesis hash, DERIVED from network_target.GENESIS_HASHES rather than
+#: pasted, so a test fixture cannot disagree with the table the payout path
+#: refuses on.
+DEVNET_GENESIS = devnet_genesis_hash()
 
 WALLET = "BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN"
 WALLET_WSOL_ATA = "2TJwPdpDwgGrcQjW5K5E2uNxEqBTNkQsZ46axFy5bNm3"
@@ -99,6 +106,14 @@ def make_adapter(responses: dict, **kwargs) -> SolanaAdapter:
     `responses` maps an RPC method name to either a value or a callable taking
     the call's params. Everything else on the adapter -- validation, decoding,
     arithmetic, the branches -- is the shipped code.
+
+    ITS SIBLING IS tests/test_solana_payout.py::payout_adapter(), and the
+    difference is deliberate rather than a second copy (rule 8): this one
+    answers each method with ONE value, which is all a read needs, while the
+    payout path has to poll getSignatureStatuses and see a DIFFERENT answer each
+    time -- a transaction that is unknown, then confirmed. A sequence cannot be
+    expressed here, and a reader who finds one helper should know the other
+    exists.
     """
     adapter = SolanaAdapter(url="http://seeded.invalid", **kwargs)
     calls = []
@@ -573,11 +588,56 @@ def test_get_new_address_refuses_because_the_chosen_strategy_has_no_per_swap_add
         assert stale not in message, f"the refusal still offers a decision already made: {stale!r}"
 
 
-def test_send_to_address_refuses_and_holds_no_key_that_could_sign():
-    adapter = make_adapter({"getAccountInfo": {"value": {"owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}})
-    with pytest.raises(NotImplementedError) as exc:
-        adapter.send_to_address(WALLET, 1.0)
-    assert "cannot sign or broadcast" in str(exc.value)
+def test_the_exact_call_the_payout_worker_makes_is_REFUSED_AND_BROADCASTS_NOTHING():
+    """THE PREMISE OF THIS TEST MOVED ON 2026-10-02, SO THE TEST DID (rule 2).
+
+    It was `test_send_to_address_refuses_and_holds_no_key_that_could_sign` and
+    it asserted `"cannot sign or broadcast" in str(exc.value)` -- because
+    send_to_address() refused unconditionally and the refusal was an ABSENCE:
+    nothing in chains/solana.py imported anything that could sign.
+
+    A payout path exists now, so "it cannot sign" is no longer the invariant
+    worth holding and asserting it would be asserting something false. The
+    stronger invariant, and the one that decides whether a customer's deposit
+    can be stranded, is this: THE CALL SITE THAT EXISTS IN THE LIVE WORKER IS
+    STILL REFUSED, and nothing reaches the chain.
+
+    services/payout_service.py:354 calls
+    `adapter.send_to_address(swap["payout_address"], amount)` -- two positional
+    arguments, no keywords. That is the exact call made here. It must land on
+    the arming guard, and `sendTransaction` must appear nowhere in the call log,
+    which is an assertion about what was DONE rather than about which exception
+    came back.
+
+    MUTATION: delete the `require_send_confirmation(...)` call from
+    send_to_address() and this fails on the refusal; delete the arming check
+    inside require_send_confirmation() and it fails on `sendTransaction` being
+    in the call list.
+    """
+    adapter = make_adapter(
+        {
+            "getGenesisHash": DEVNET_GENESIS,
+            "getAccountInfo": {"value": {"lamports": 1}},
+            "getMinimumBalanceForRentExemption": 650_240,
+            "getBalance": {"value": 5_000_000_000},
+        },
+        hot_wallet=WALLET,
+    )
+    with pytest.raises(SolanaSendNotArmed) as exc:
+        adapter.send_to_address(valid_addresses.SOL_PAYOUT, 1.0)
+
+    message = str(exc.value)
+    assert "was NOT armed" in message
+    assert "CONFIRM_SOL_SEND" not in message or "AUTHORIZE-THIS-SOL-SEND" in message, (
+        "the refusal must spell the token it wants, not name the constant"
+    )
+    # The PREVIEW travels with the refusal, so an operator who then arms it is
+    # arming something they have read (chains/xrp.py records the same ordering
+    # and the doubled-output defect it had).
+    assert "SOL PAYOUT PREVIEW" in message
+    assert "sendTransaction" not in [method for method, _params in adapter.calls], (
+        "an unarmed call must not reach the chain"
+    )
 
 
 def test_the_module_references_no_keypair_anywhere():
@@ -732,19 +792,37 @@ def test_SOL_CANNOT_BE_A_PAYOUT_ASSET_WHATEVER_THE_PAIRS_SAY():
 
         SOL may be the INPUT of a pair. It may never be the OUTPUT.
 
-    A pair paying out in SOL could be quoted, could take a customer's deposit, and could never
-    be completed, because send_to_address() raises and this module holds no keypair. That
-    strands coins in a swap the terminal cannot finish, which is strictly worse than a refused
-    quote. tests/test_allowed_pairs_are_serviceable.py's DELIBERATELY_ONE_WAY records the same
-    thing from the pair side; this is the assertion that bites if somebody adds the reverse.
+    AND THE REASON CHANGED ON 2026-10-02 WITHOUT THE ASSERTION CHANGING. This paragraph said
+    a SOL payout "could never be completed, because send_to_address() raises and this module
+    holds no keypair". A payout path exists now -- devnet only, refusing unless armed with
+    chains/solana_signing.CONFIRM_SOL_SEND at the call site, reading its keypair from
+    SOL_PAYOUT_KEYPAIR_PATH in chains/solana_signing.py and never here -- so that sentence
+    would now be wrong, and a reader who trusted it would conclude the wrong thing in either
+    direction.
+
+    WHAT STILL MAKES THE ASSERTION RIGHT, and it is now three things rather than an absence:
+
+      can_spend is False     so chains/registry.why_cannot_pay_out() refuses the pair, and
+                             services/swap_service.create_swap() refuses the swap.
+      the worker is unarmed  services/payout_service.py:354 passes two positional arguments,
+                             so it gets a preview and SolanaSendNotArmed.
+      nothing has broadcast  no transaction this path builds has reached any cluster, from any
+                             environment, ever. The serialization is cross-checked against
+                             @solana/web3.js byte for byte and that is not the same claim.
+
+    So a pair paying out in SOL would still take a customer's deposit and still fail to
+    complete, which is strictly worse than a refused quote. Enabling one is live posture and
+    is the operator's (rule 16). tests/test_allowed_pairs_are_serviceable.py's
+    DELIBERATELY_ONE_WAY records the same thing from the pair side.
 
     MUTATION: add ("GRC", "SOL") to ALLOWED_PAIRS and this fails by name.
     """
     paying_out_in_sol = [pair for pair in Config.ALLOWED_PAIRS if pair[1] == "SOL"]
     assert not paying_out_in_sol, (
-        f"{paying_out_in_sol} would pay out in SOL, which cannot pay out at all -- "
-        f"send_to_address() raises and nothing in chains/solana.py can sign. A deposit taken "
-        f"against one of these is stranded in a swap that cannot complete."
+        f"{paying_out_in_sol} would pay out in SOL, and SOL is not enabled to pay out: the "
+        f"adapter's can_spend is False, the payout worker calls send_to_address() unarmed, and no "
+        f"transaction this path builds has ever reached a cluster. A deposit taken against one of "
+        f"these is stranded in a swap that cannot complete."
     )
 
 
@@ -1245,7 +1323,7 @@ def test_a_settled_signature_is_never_fetched():
     """The avoided call, counted on the real adapter.
 
     MUTATION: drop the `if signature in skip_txids` check and getTransaction
-    is called for the settled signature too -- which is the behaviour that
+    is called for the settled signature too -- which is the behavior that
     rate-limited a real deposit out of being credited.
     """
     # A DIFFERENT signature, and the first draft of this was not one: SIG itself
@@ -1307,7 +1385,7 @@ def test_a_settled_signature_is_reported_as_skipped_and_not_as_unreadable():
 
 
 def test_an_empty_settled_set_reads_everything():
-    """The default, and the behaviour every existing test in this file relies on.
+    """The default, and the behavior every existing test in this file relies on.
 
     MUTATION: skip on `signature not in skip_txids` and this fails -- which
     would stop reading every transaction that is NOT settled, i.e. exactly the
