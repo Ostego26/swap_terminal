@@ -216,6 +216,55 @@ class Config:
         # swap_service refuses while it is empty, and solana_chain_check.py now says so in its
         # summary. A pair being allowed and a swap being creatable are two different gates.
         ("SOL", "GRC"),
+        # SOL -> BTC and SOL -> LTC, enabled 2026-10-02 at the operator's request ("can we
+        # please enable all trading pairs"). TWO of the nine unenabled pairs, not nine, and
+        # the arithmetic for why is recorded here so nobody re-reads the request as unfinished.
+        #
+        # Measured against this file and services/pricing.IDS before adding anything:
+        #
+        #     asset  USD price  fee reserve
+        #     BTC    yes        2e-05
+        #     GRC    yes        0.01
+        #     LTC    yes        0.001
+        #     SOL    yes        MISSING
+        #     XRP    yes        MISSING
+        #
+        # These two need NOTHING in config. SOL is the source, so the missing
+        # SOL_NETWORK_FEE_RESERVE does not apply -- the reserve is the TO asset's, and both
+        # BTC and LTC have one. Both destinations can sign (bitcoind and litecoind hold the
+        # key), both assets are priced, and SOL takes deposits through the memo path that is
+        # already live for SOL -> GRC.
+        #
+        # They read UNREACHABLE until BTC_RPC_* / LTC_RPC_* are exported in the shell that
+        # starts the server, and that is the honest reading rather than a defect: the pair is
+        # willing, the chain is absent. create_swap() refuses meanwhile.
+        #
+        # THE OTHER SEVEN ARE NOT A CONFIG CHANGE AND ARE NOT MINE. Every one has SOL or XRP
+        # as its DESTINATION:
+        #
+        #     BTC -> SOL   GRC -> SOL   LTC -> SOL   XRP -> SOL
+        #     BTC -> XRP   LTC -> XRP   SOL -> XRP
+        #
+        # and each needs TWO things that do not exist, not one:
+        #
+        #   a fee reserve   SOL_NETWORK_FEE_RESERVE / XRP_NETWORK_FEE_RESERVE. Inventing one
+        #                   is a pricing decision and the operator's (rule 16).
+        #                   tests/test_allowed_pairs_are_serviceable.py refuses to guess and
+        #                   fails by name until the number exists -- which is the mechanism
+        #                   that keeps "we enabled a pair nobody can trade" visible.
+        #   a send path     chains/solana.py holds no keypair and imports nothing that could
+        #                   sign. chains/xrp.py holds no signing key and
+        #                   services/payout_service.py calls send_to_address() without the
+        #                   arming token. So even WITH a reserve, a swap into either could be
+        #                   quoted, could take a deposit, and could never be paid out.
+        #
+        # That second one is why these seven are not merely unfinished config. The paragraph
+        # above already records it for ("GRC", "SOL") in the operator's own words -- "it
+        # strands a customer's coins in a swap the terminal cannot complete" -- and ("GRC",
+        # "XRP") is in this set TODAY as the live proof: it is allowed, it reads CANNOT
+        # COMPLETE on both surfaces, and it has been broken since 2026-09-26.
+        ("SOL", "BTC"),
+        ("SOL", "LTC"),
     }
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's

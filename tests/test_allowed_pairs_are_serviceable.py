@@ -118,6 +118,24 @@ DELIBERATELY_ONE_WAY = {
     # GRC, which pays out today.
     ("SOL", "GRC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
                      "at all (send_to_address raises; no keypair in the module)"),
+    # SOL -> BTC and SOL -> LTC, 2026-10-02, at the operator's request to "enable all trading
+    # pairs". Blocked in reverse for EXACTLY the same two reasons as ("SOL", "GRC") above, and
+    # named per pair rather than by pointing at that entry, because this table's whole job is
+    # that a reader finds the reason at the row they are looking at.
+    #
+    # The forward direction needs nothing: the reserve is the TO asset's, and BTC (2e-05) and
+    # LTC (0.001) both have one; both destinations hold their own signing key in wallet.dat;
+    # both assets are priced in services/pricing.IDS; and SOL takes deposits through the memo
+    # path already live for SOL -> GRC.
+    #
+    # They read UNREACHABLE until BTC_RPC_* / LTC_RPC_* are exported in the serving shell.
+    # That is the pair being willing and the chain being absent, which is a different fact
+    # from the reverse direction being impossible -- and the two must not be confused, which
+    # is why this entry exists rather than the pairs simply being left out.
+    ("SOL", "BTC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
+                     "at all (send_to_address raises; no keypair in the module)"),
+    ("SOL", "LTC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
+                     "at all (send_to_address raises; no keypair in the module)"),
 }
 
 
