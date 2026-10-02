@@ -46,6 +46,7 @@ a second reading of the same environment variable (rule 8).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -61,7 +62,11 @@ from db import SCHEMA
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, solana_cluster
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
-from services.payout_service import payable_assets, unlock_readiness_lines
+from services.payout_service import (
+    WALLET_UNLOCK_ENV_VAR,
+    payable_assets,
+    unlock_readiness_lines,
+)
 from services.pricing import fetch_usd_prices
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -349,7 +354,7 @@ def check_xrp(account: str) -> None:
 _LOCK_FIELDS = ("unlocked_until",)
 
 
-def describe_wallet_lock(info: dict) -> tuple[str, str]:
+def describe_wallet_lock(info: dict, *, can_unlock: bool = False) -> tuple[str, str]:
     """What state a Gridcoin wallet is in for PAYING. Returns (state, detail).
 
     THE OPERATIONAL FACT this exists for, from the operator 2026-09-26: a
@@ -393,12 +398,36 @@ def describe_wallet_lock(info: dict) -> tuple[str, str]:
         # for a staking-only unlock as well. Both cannot send, so the VERDICT is
         # right either way -- but "which field distinguishes staking-only" is still
         # unmeasured, and a line that showed its inputs would have answered it.
+        # A LOCKED WALLET IS NOT A BLOCKER WHEN THE PASSPHRASE IS PRESENT, and this
+        # returned FAIL regardless -- a verdict contradicted by the last clause of
+        # its own sentence, which said "payout_worker performs the full unlock
+        # itself when GRIDCOIN_WALLET_PASSPHRASE is set; this line is about the
+        # resting state".
+        #
+        # MEASURED ON THE OPERATOR'S HOST 2026-10-02. Every other precondition for
+        # SOL -> GRC passed, and this one line held the whole run at NOT READY --
+        # for the CORRECT resting state of a staking wallet. Locked is what a GRC
+        # wallet should be at rest; chains/gridcoin_wallet_lock.unlock_for_sending()
+        # exists precisely to open it for one send and lock it again after, and it
+        # unlocks from locked, which is what `walletpassphrase` is for.
+        #
+        # So the severity depends on a fact this function could not see, and now
+        # takes: whether anything can perform that unlock. `can_unlock` is PASSED
+        # rather than read from os.environ here, the same shape
+        # payout_service.unlock_readiness_lines() uses, so this cannot disagree with
+        # the `payout unlock` line printed beside it (rule 8).
+        if can_unlock:
+            return PASS, (
+                f"wallet is LOCKED ({present}) -- which is the CORRECT resting state, not a problem. "
+                f"GRIDCOIN_WALLET_PASSPHRASE is set, so payout_worker performs the full unlock for one "
+                f"send and locks it again afterwards (chains/gridcoin_wallet_lock.unlock_for_sending). "
+                f"Leaving a staking wallet fully unlocked is the state to avoid, and this is not it"
+            )
         return FAIL, (
-            f"wallet is LOCKED ({present}) -- a GRC payout cannot send, and it is not staking "
-            f"either. This is now UNAMBIGUOUS: measured 2026-09-26, a staking-only unlock sets "
-            f"unlocked_until to its timeout rather than leaving it at 0, so a 0 here means "
-            f"locked and nothing else. payout_worker performs the full unlock itself when "
-            f"GRIDCOIN_WALLET_PASSPHRASE is set; this line is about the resting state"
+            f"wallet is LOCKED ({present}) and NOTHING CAN UNLOCK IT: a GRC payout cannot send, it is "
+            f"not staking either, and GRIDCOIN_WALLET_PASSPHRASE is unset in this process. This is "
+            f"UNAMBIGUOUS: measured 2026-09-26, a staking-only unlock sets unlocked_until to its "
+            f"timeout rather than leaving it at 0, so a 0 here means locked and nothing else"
         )
     # A timestamp is NOT reported as "can send", and the 2026-09-26 measurement
     # CONFIRMED that caution rather than removing it: a staking-only unlock does set
@@ -544,7 +573,13 @@ def check_gridcoin() -> None:
     except Exception as error:  # noqa: BLE001 -- checked: the balance call above already succeeded, so any failure here is specifically about getwalletinfo -- an older daemon without it, or a changed response. Reported with its type and message, and as SKIP rather than PASS, so an unknown lock state never reads as a usable one.
         record(SKIP, "GRC wallet lock", f"getwalletinfo failed: {type(error).__name__}: {str(error)[:90]}")
         return
-    lock_state, lock_detail = describe_wallet_lock(info if isinstance(info, dict) else {})
+    # THE SAME ENVIRONMENT READ the `payout unlock` line above makes, through the
+    # same constant, so the two lines cannot disagree about whether an unlock is
+    # possible (rule 8). Presence only -- the value is never read here.
+    can_unlock = bool(os.environ.get(WALLET_UNLOCK_ENV_VAR, "").strip())
+    lock_state, lock_detail = describe_wallet_lock(
+        info if isinstance(info, dict) else {}, can_unlock=can_unlock
+    )
     record(lock_state, "GRC wallet lock", lock_detail)
 
 

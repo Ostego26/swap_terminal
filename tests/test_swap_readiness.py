@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 
 from network_target import UNCONFIGURED_PORT
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK, why_nothing_answered
+from services.payout_service import WALLET_UNLOCK_ENV_VAR
 
 import swap_readiness
 from swap_readiness import (
@@ -782,3 +783,160 @@ def test_the_401_guidance_names_a_path_and_never_a_value():
     assert "rpcuser=" not in GRC_CREDENTIALS_ARE_PER_NETWORK
     # The variable NAMES are fine to print; a value or an = assignment is not.
     assert "GRC_RPC_PASS" in GRC_CREDENTIALS_ARE_PER_NETWORK
+
+
+# --- a locked wallet is the CORRECT resting state, not a blocker ----------------
+
+
+def test_a_locked_wallet_with_a_passphrase_available_is_a_PASS():
+    """MEASURED ON THE OPERATOR'S HOST 2026-10-02, and this one line held the run.
+
+    Every other precondition for SOL -> GRC passed. This check returned FAIL for
+    `unlocked_until: 0` regardless of anything else, so the whole run reported NOT
+    READY and the `&&` gate refused to start the workers -- for the CORRECT resting
+    state of a staking wallet.
+
+    The verdict was contradicted by the last clause of its own sentence:
+
+        wallet is LOCKED ... payout_worker performs the full unlock itself when
+        GRIDCOIN_WALLET_PASSPHRASE is set; this line is about the resting state
+
+    It knew the unlock would happen and failed anyway. Locked is what a GRC wallet
+    SHOULD be at rest -- chains/gridcoin_wallet_lock.unlock_for_sending() opens it
+    for one send and locks it again, and it unlocks from locked, which is what
+    `walletpassphrase` is for. Leaving a staking wallet fully unlocked is the state
+    to avoid, and that is the opposite of this one.
+    """
+    state, detail = describe_wallet_lock({"unlocked_until": 0}, can_unlock=True)
+
+    assert state == PASS
+    assert "CORRECT resting state" in detail
+    assert "unlock_for_sending" in detail, "the line must name what performs the unlock"
+    assert "{'unlocked_until': 0}" in detail, "it still echoes what it read"
+
+
+def test_a_locked_wallet_with_no_passphrase_is_still_a_FAIL():
+    """The other half. A version that always passed would satisfy the test above.
+
+    With nothing able to unlock it, a locked wallet means the payout refuses and
+    the swap lands in 'failed', which nothing retries -- the failure that cost
+    three rehearsals on 2026-10-01.
+    """
+    state, detail = describe_wallet_lock({"unlocked_until": 0}, can_unlock=False)
+
+    assert state == FAIL
+    assert "NOTHING CAN UNLOCK IT" in detail
+    assert "GRIDCOIN_WALLET_PASSPHRASE is unset" in detail
+    assert "CORRECT resting state" not in detail
+
+
+def test_the_unlock_capability_defaults_to_absent():
+    """So a caller that forgets to pass it FAILS rather than passing silently.
+
+    The safe direction for a default on a money path: an omitted argument must not
+    manufacture a capability the process may not have.
+    """
+    state, _ = describe_wallet_lock({"unlocked_until": 0})
+    assert state == FAIL
+
+
+def test_the_lock_line_and_the_unlock_line_read_the_same_variable(monkeypatch):
+    """They must not disagree about whether an unlock is possible (rule 8).
+
+    `payout unlock` and `GRC wallet lock` are two lines in one block, four apart,
+    and this session has already shipped one contradiction between two sentences in
+    that same block (supervisor.spawn_warning). Both read
+    payout_service.WALLET_UNLOCK_ENV_VAR.
+    """
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "present-for-this-test-only")
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"GRC": object()})
+    unlock = unlock_row()
+    locked_with = describe_wallet_lock({"unlocked_until": 0}, can_unlock=True)
+
+    assert unlock[0] == PASS
+    assert locked_with[0] == PASS, "one line says an unlock can be attempted; the other must agree"
+
+    monkeypatch.delenv(WALLET_UNLOCK_ENV_VAR, raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"GRC": object()})
+
+    assert unlock_row()[0] == FAIL
+    assert describe_wallet_lock({"unlocked_until": 0}, can_unlock=False)[0] == FAIL
+
+
+class FakeGridcoin:
+    """A Gridcoin adapter that answers the two calls check_gridcoin() makes.
+
+    A stub rather than a mock of the whole adapter: get_balance() and
+    call("getwalletinfo") are the entire contract that function depends on, and a
+    stub answering only those fails loudly if a third call is added.
+    """
+
+    def __init__(self, balance: float = 3780.09254497, unlocked_until: int = 0):
+        self._balance = balance
+        self._unlocked_until = unlocked_until
+
+    def get_balance(self) -> float:
+        return self._balance
+
+    def call(self, method, *params):
+        if method == "getwalletinfo":
+            return {"unlocked_until": self._unlocked_until}
+        raise AssertionError(f"check_gridcoin() made an unexpected call: {method}")
+
+
+def test_check_gridcoin_reads_the_passphrase_from_the_environment(monkeypatch):
+    """MUTATION-FOUND. Hardcoding can_unlock=True at the call site survived.
+
+    describe_wallet_lock() takes the capability as an argument so it cannot
+    disagree with the `payout unlock` line, and the CALL SITE is what supplies it.
+    Every test for the new branches called describe_wallet_lock() directly, so the
+    one line that reads os.environ was exercised by nothing -- an argument threaded
+    correctly into a function nobody checked was threaded.
+
+    The operator's real numbers: 3780.09254497 GRC on a locked wallet.
+    """
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {"GRC": FakeGridcoin()})
+    monkeypatch.setitem(swap_readiness.Config.RPC["GRC"], "port", 25715)
+
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "present-for-this-test-only")
+    swap_readiness._results.clear()
+    swap_readiness.check_gridcoin()
+    with_passphrase = next(r for r in swap_readiness._results if r[1] == "GRC wallet lock")
+
+    monkeypatch.delenv(WALLET_UNLOCK_ENV_VAR, raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_gridcoin()
+    without = next(r for r in swap_readiness._results if r[1] == "GRC wallet lock")
+
+    assert with_passphrase[0] == PASS, "a locked wallet plus a passphrase is the correct resting state"
+    assert "CORRECT resting state" in with_passphrase[2]
+    assert without[0] == FAIL, "the SAME wallet, with nothing able to unlock it"
+    assert "NOTHING CAN UNLOCK IT" in without[2]
+
+
+def test_the_whole_run_is_READY_on_the_operators_actual_state(monkeypatch, capsys):
+    """END TO END, on the configuration that reported NOT READY for one wrong reason.
+
+    Their 2026-10-02 run: every SOL and GRC precondition passing, 3780.09 GRC in a
+    LOCKED wallet, GRIDCOIN_WALLET_PASSPHRASE set. The verdict was NOT READY and the
+    `&&` gate refused to start the workers. It is READY, and this asserts the exit
+    code rather than a sentence, because the exit code is what the gate reads.
+    """
+    monkeypatch.setattr(swap_readiness, "build_adapters",
+                        lambda rpc: {"GRC": FakeGridcoin(), "SOL": object()})
+    monkeypatch.setitem(swap_readiness.Config.RPC["GRC"], "port", 25715)
+    monkeypatch.setattr(swap_readiness, "check_solana",
+                        lambda adapters: swap_readiness.record(PASS, "SOL", "stubbed"))
+    monkeypatch.setattr(swap_readiness, "check_pricing",
+                        lambda pair=None: swap_readiness.record(PASS, "pricing", "stubbed"))
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "present-for-this-test-only")
+    swap_readiness._results.clear()
+
+    code = swap_readiness.main(["--pair", "SOL:GRC"])
+    out = capsys.readouterr().out
+
+    assert code == 0, f"the gate must open on this configuration:\n{out}"
+    assert "READY" in out
+    assert "SOL -> GRC can be created and paid" in out
