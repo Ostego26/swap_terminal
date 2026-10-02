@@ -1551,3 +1551,56 @@ def test_the_endpoint_line_truncates_a_url_at_the_query_string():
     assert "https://example.invalid/rpc" in line
     assert "SECRETVALUE" not in line
     assert "api-key" not in line
+
+
+# --- the skip count is OBSERVABLE, not just an attribute ----------------------
+
+
+def test_the_skipped_signatures_are_LOGGED_and_not_only_set_as_an_attribute(caplog):
+    """`signatures_skipped` was set here and read by NOTHING outside this test file.
+
+    Grepped 2026-10-02 across the whole tree, excluding tests/: exactly one hit, the
+    assignment itself. Its own comment four lines up claims the attribute is exposed
+    "FOR THE SAME REASON unreadable_signatures IS" -- and unreadable gets a
+    logger.warning, so a reader comparing the two would conclude both surface. One
+    did.
+
+    THE COST WAS A MEASUREMENT I HANDED THE OPERATOR THAT DID NOT EXIST. After the
+    2026-10-02 skip-set fix I told them to read the before/after off "the watcher
+    log's signatures_skipped= counter". There was no such line in any log. A number
+    that only exists as an attribute on a local object is not observable on a live
+    host, which is the same shape as log_setup.py's finding: a test asserting on a
+    log that never leaves the process proves nothing about production.
+    """
+    settled = SIG
+    adapter = make_adapter(
+        {
+            "getSignaturesForAddress": [
+                {"signature": settled, "err": None, "confirmationStatus": "finalized"}
+            ],
+        }
+    )
+    with caplog.at_level(logging.INFO):
+        assert adapter.find_deposits_to_address(WALLET, skip_txids={settled}) == []
+    assert settled in caplog.text, "the skipped signature is NAMED, not just counted"
+    assert "did not re-read 1" in caplog.text
+    assert "rate-limit toll" in caplog.text, "and what the number MEANS, next to it"
+    assert adapter.signatures_skipped == [settled], "the attribute still carries it too"
+
+
+def test_a_scan_that_skipped_NOTHING_still_prints_a_line(caplog):
+    """Rule 14: `(none)` is a result, and a blank gap is ambiguous between the two
+    cases that matter here.
+
+    `skipped=0` with rows in unattributable_deposits for SOL means the skip set never
+    reached the adapter -- the 429 leak back, and back SILENTLY, because a re-read
+    transaction is indistinguishable from a first read in every other log line. If
+    the line were emitted only when something was skipped, that regression would
+    render as absence, which is what the un-fixed state already rendered as.
+    """
+    adapter = make_adapter({"getSignaturesForAddress": []})
+    with caplog.at_level(logging.INFO):
+        assert adapter.find_deposits_to_address(WALLET) == []
+    assert "did not re-read 0" in caplog.text
+    assert "(none)" in caplog.text
+    assert adapter.signatures_skipped == []

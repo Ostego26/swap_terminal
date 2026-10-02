@@ -922,6 +922,28 @@ class SolanaAdapter:
         # uncredited. solana_chain_check.py's coverage report makes exactly this
         # kind of claim and was wrong about it once already.
         self.signatures_skipped = list(skipped)
+        # AND NOW IT IS LOGGED, which the comment above has been claiming since it was
+        # written. `signatures_skipped` was set here and read by NOTHING outside the test
+        # suite -- grepped 2026-10-02, one hit in the whole tree, this line. The comment
+        # four lines up says the attribute is exposed "FOR THE SAME REASON
+        # unreadable_signatures IS", and unreadable gets the logger.warning below; this
+        # one got the attribute and no line. So the number that proves the 2026-10-02
+        # skip-set fix is working was unobservable on the live host, and I told the
+        # operator to read it off the worker log. It was not there to read.
+        #
+        # ALWAYS PRINTED, INCLUDING AT ZERO (rule 14: `(none)` is a result). A scan that
+        # skipped nothing and a scan whose skip set failed to load must not render
+        # identically -- the second is the 429 leak coming back, and it comes back
+        # silently: a re-read transaction looks exactly like a first read.
+        logger.info(
+            "SOL deposit scan for %s listed %d transaction(s) and deliberately did not "
+            "re-read %d of them (already settled or already recorded unattributable): %s. "
+            "skipped=%d is the rate-limit toll this scan did NOT pay; 0 with a non-empty "
+            "unattributable_deposits table for SOL means the skip set did not reach the "
+            "adapter.",
+            address, len(signatures), len(skipped),
+            ", ".join(skipped) if skipped else "(none)", len(skipped),
+        )
         if unreadable:
             # Rule 14: a scan that silently examined fewer transactions than it listed must
             # not report the same way as one that read them all.
