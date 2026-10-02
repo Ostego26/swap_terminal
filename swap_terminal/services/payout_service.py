@@ -50,6 +50,7 @@ import sqlite3
 from contextlib import nullcontext
 
 from chains.gridcoin_wallet_lock import GridcoinLockError, unlocked_for_payout
+from chains.registry import why_cannot_pay_out
 from modules.address_authority import check_address
 
 from .helpers import utc_now_iso
@@ -663,12 +664,37 @@ def refresh_wallet_inventory(db, adapters: dict):
     db.commit()
 
 
-def payable_assets(configured_assets, allowed_pairs) -> set[str]:
+def payable_assets(adapters, allowed_pairs) -> set[str]:
     """Which assets a payout could actually be BROADCAST on, right now.
 
-    The intersection of two things that are each necessary and neither
-    sufficient: an asset must be the TO leg of an allowed pair, and this process
-    must have an adapter for it.
+    THREE things, each necessary and none sufficient: the asset must be the TO leg
+    of an allowed pair, this process must have an adapter for it, and that adapter
+    must be able to SIGN.
+
+    THE THIRD ONE WAS MISSING UNTIL 2026-10-02 AND THIS FUNCTION REPEATED ITS OWN
+    DEFECT. Measured on the operator's host the moment they exported XRP_RPC_URL:
+    supervisor.py's spawn_warning() printed, immediately above spawning three
+    workers,
+
+        about to spawn    a payout worker CAN broadcast on GRC, XRP. Stop now if
+                          this database is pointed at a funded mainnet wallet.
+
+    while the same process's own customer page said of GRC -> XRP:
+
+        XRP cannot pay out: it holds no signing key, and services/payout_service.py
+        calls send_to_address() without the arming token, so an XRP payout raises
+        and the swap lands in `failed` with the deposit already credited.
+
+    Both sentences, in one process, about one asset. XRP holds no signing key, so
+    nothing could be broadcast on it and the banner named it anyway.
+
+    That is the identical failure the paragraph below records -- the banner claiming
+    a payout capability the process does not have -- which is why the signature
+    changed from `configured_assets` (asset NAMES) to `adapters`: the old parameter
+    made the question unaskable. A set of strings cannot be asked whether it can
+    sign, so the check could not have been written without changing the shape, and
+    passing names rather than adapters is what let the defect be reintroduced by a
+    function written to fix it.
 
     WHY THIS EXISTS, MEASURED ON THE OPERATOR'S HOST 2026-10-01. supervisor.py's
     spawn_warning() printed, immediately above spawning three workers:
@@ -697,7 +723,17 @@ def payable_assets(configured_assets, allowed_pairs) -> set[str]:
     (rule 8).
     """
     destinations = {to_asset for _, to_asset in allowed_pairs}
-    return destinations & set(configured_assets)
+    reachable = destinations & set(adapters)
+    # AND THE ADAPTER MUST BE ABLE TO SIGN, which this function did not ask until
+    # 2026-10-02 and which is the whole difference between "an adapter exists" and
+    # "a payout could be broadcast".
+    #
+    # why_cannot_pay_out() IS THE AUTHORITY AND IS NOT RE-DERIVED HERE (rule 8).
+    # services/pair_view.py:77 and services/swap_service.py:354 already read it;
+    # this was the third spelling of the same question and the only one that
+    # answered differently, so it now reads the same function rather than a fourth
+    # copy of the rule.
+    return {asset for asset in reachable if not why_cannot_pay_out(adapters, asset)}
 
 
 def unlock_readiness_lines(configured_assets) -> list[str]:

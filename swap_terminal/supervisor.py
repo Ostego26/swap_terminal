@@ -904,7 +904,7 @@ def spawn_warning() -> str:
     #
     # "No blockers" and "nothing to block" rendered identically, which is rule 14's
     # did-nothing-looks-like-did-work at the level of a capability.
-    payable = payable_assets(adapters.keys(), Config.ALLOWED_PAIRS)
+    payable = payable_assets(adapters, Config.ALLOWED_PAIRS)
     if not payable:
         return (
             f"a payout worker CANNOT BROADCAST ANYTHING. No configured chain is the destination of any "

@@ -216,7 +216,7 @@ def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
     # The pair's OWN destination when one was named, so "nothing can be paid" means
     # "this pair cannot be paid" rather than "no pair anywhere can be".
     wanted = {pair} if pair else Config.ALLOWED_PAIRS
-    payable = payable_assets(adapters.keys(), wanted)
+    payable = payable_assets(adapters, wanted)
     if not payable:
         # The destinations of the SCOPED pairs, not of every allowed pair. Scoped to
         # SOL:GRC this printed "destinations any allowed pair needs: BTC, GRC, LTC,
