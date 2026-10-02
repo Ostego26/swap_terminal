@@ -290,8 +290,28 @@ def sender_pubkey(keypair: str) -> str:
     return found.stdout.strip() if found.returncode == 0 else ""
 
 
-def sender_refusal(keypair: str, amount: float) -> Refusal | None:
-    """Refuse unless the SENDING keypair can actually cover the transfer.
+class SenderFunding(NamedTuple):
+    """What was learned about the sender's balance, and the line that says so.
+
+    BOTH, because a verdict with no sentence is a check nobody can see ran.
+    Measured on the operator's host 2026-10-02, on code written two hours
+    earlier: sender_refusal() returned None for "verified and sufficient" AND
+    for "could not ask", so the dry run printed nothing in either case. The
+    operator's block showed `payout owned YES` and then silence about funding,
+    and there was no way to tell a passed check from a skipped one.
+
+    That is rule 14's "make did-nothing look different from did-work" in the one
+    file whose next statement hands money to the Solana CLI -- and it is the same
+    defect class this session has been removing from the operator's tooling all
+    evening, shipped into it by me.
+    """
+
+    refusal: Refusal | None
+    line: str
+
+
+def sender_funding(keypair: str, amount: float) -> SenderFunding:
+    """Whether the SENDING keypair can cover the transfer, and what was established.
 
     WHY THIS EXISTS. Every other refusal in this file is about configuration or
     about the swap; nothing asked whether the money is there. So the tool printed
@@ -307,31 +327,48 @@ def sender_refusal(keypair: str, amount: float) -> Refusal | None:
     0.01; the operator's 2026-10-02 swap is twenty-five times that, and the funding
     keypair has been paying for a day of rehearsals.
 
-    A FAILURE TO ASK IS NOT A REFUSAL. No CLI, no public key, or a cluster that
-    will not answer all return None and let the send proceed -- because "I could not
-    check your balance" is not "you have no money", and refusing on it would block
-    a send that would have worked. The send's own failure is then the honest
-    answer. Rule 17's line between a reason to believe and having checked.
+    A FAILURE TO ASK IS NOT A REFUSAL, and it is not silence either. No CLI, no
+    public key, or a cluster that will not answer all let the send proceed --
+    because "I could not check your balance" is not "you have no money", and
+    refusing on it would block a send that would have worked. But the LINE says
+    which happened, so the operator is never left to guess whether the check ran.
+    Rule 17's line between a reason to believe and having checked, printed rather
+    than merely obeyed.
     """
     sender = sender_pubkey(keypair)
     if not sender:
-        return None
+        return SenderFunding(None, (
+            "NOT CHECKED -- `solana address --keypair` did not answer, so the sender's balance is "
+            "unknown. The send will proceed and the CLI's own failure is the only thing that will "
+            "catch an empty keypair"
+        ))
     try:
         adapter = SolanaAdapter(**Config.RPC["SOL"])
         result = adapter.call("getBalance", sender, {"commitment": "finalized"})
         lamports = int(result["value"] if isinstance(result, dict) else result)
-    except Exception:  # noqa: BLE001 -- checked: the caller CANNOT tell this from a real answer, so it does not try to. Every failure returns None, which this function's docstring states means "not checked" and never "insufficient", so a cluster that will not answer cannot block a send that would have worked.
-        return None
+    except Exception as error:  # noqa: BLE001 -- checked: every failure means "the balance could not be read", the line below says so and names the exception, and nothing turns it into a refusal. A cluster that will not answer must not block a send that would have worked, and the HTTP 429s this devnet account draws make that a live case.
+        return SenderFunding(None, (
+            f"NOT CHECKED -- {type(error).__name__} reading {sender}'s balance "
+            f"({str(error)[:70]}). Unknown, NOT insufficient: the send proceeds"
+        ))
 
     needed = amount_to_base_units(amount, SOL_DECIMALS) + FEE_HEADROOM_LAMPORTS
+    held = base_units_to_amount(lamports, SOL_DECIMALS)
     if lamports >= needed:
-        return None
-    return Refusal(
-        f"the sending keypair {sender} holds {base_units_to_amount(lamports, SOL_DECIMALS)} SOL and this "
-        f"transfer needs {base_units_to_amount(needed, SOL_DECIMALS)} SOL "
-        f"({amount} plus {base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS)} for the fee)",
-        "fund it with `solana airdrop 1 --url devnet` (devnet airdrops are rate-limited, so retry rather "
-        "than assuming it failed), or create a smaller swap. Nothing was sent.",
+        return SenderFunding(None, (
+            f"{held} SOL in {sender}, against {base_units_to_amount(needed, SOL_DECIMALS)} needed "
+            f"({amount} plus {base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS)} for the fee) "
+            f"<- asked of the cluster just now"
+        ))
+    return SenderFunding(
+        Refusal(
+            f"the sending keypair {sender} holds {held} SOL and this transfer needs "
+            f"{base_units_to_amount(needed, SOL_DECIMALS)} SOL "
+            f"({amount} plus {base_units_to_amount(FEE_HEADROOM_LAMPORTS, SOL_DECIMALS)} for the fee)",
+            "fund it with `solana airdrop 1 --url devnet` (devnet airdrops are rate-limited, so retry "
+            "rather than assuming it failed), or create a smaller swap. Nothing was sent.",
+        ),
+        f"{held} SOL in {sender} -- NOT ENOUGH, see the refusal below",
     )
 
 
@@ -479,9 +516,10 @@ def main(argv: list[str] | None = None) -> int:
             refusals.append(ownership)
         else:
             print("  payout owned    YES -- the GRC wallet holds the key, asked of the daemon just now")
-        funding = sender_refusal(args.keypair, float(swap["expected_input_amount"]))
-        if funding:
-            refusals.append(funding)
+        funding = sender_funding(args.keypair, float(swap["expected_input_amount"]))
+        print(f"  sender funded   {funding.line}")
+        if funding.refusal:
+            refusals.append(funding.refusal)
 
     if refusals:
         print(f"\n  REFUSED: {len(refusals)} reason(s). NOTHING was sent and nothing was written.")

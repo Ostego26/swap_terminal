@@ -127,7 +127,7 @@ def test_a_short_balance_refuses_and_states_both_figures(monkeypatch):
     stub_cli(monkeypatch)
     stub_cluster(monkeypatch, lamports=int(0.1 * LAMPORTS_PER_SOL))
 
-    refusal = tool.sender_refusal(KEYPAIR, AMOUNT)
+    refusal = tool.sender_funding(KEYPAIR, AMOUNT).refusal
 
     assert refusal is not None
     assert PUBKEY in refusal.what
@@ -144,10 +144,10 @@ def test_exactly_enough_including_the_fee_does_not_refuse(monkeypatch):
     stub_cli(monkeypatch)
 
     stub_cluster(monkeypatch, lamports=needed)
-    assert tool.sender_refusal(KEYPAIR, AMOUNT) is None
+    assert tool.sender_funding(KEYPAIR, AMOUNT).refusal is None
 
     stub_cluster(monkeypatch, lamports=needed - 1)
-    assert tool.sender_refusal(KEYPAIR, AMOUNT) is not None, (
+    assert tool.sender_funding(KEYPAIR, AMOUNT).refusal is not None, (
         "one lamport short of the fee headroom must still refuse"
     )
 
@@ -160,7 +160,7 @@ def test_the_amount_alone_without_fee_headroom_is_refused(monkeypatch):
     """
     stub_cli(monkeypatch)
     stub_cluster(monkeypatch, lamports=int(AMOUNT * LAMPORTS_PER_SOL))
-    assert tool.sender_refusal(KEYPAIR, AMOUNT) is not None
+    assert tool.sender_funding(KEYPAIR, AMOUNT).refusal is not None
 
 
 def test_a_cluster_that_will_not_answer_does_NOT_refuse(monkeypatch):
@@ -173,13 +173,13 @@ def test_a_cluster_that_will_not_answer_does_NOT_refuse(monkeypatch):
     """
     stub_cli(monkeypatch)
     stub_cluster(monkeypatch, raises=True)
-    assert tool.sender_refusal(KEYPAIR, AMOUNT) is None
+    assert tool.sender_funding(KEYPAIR, AMOUNT).refusal is None
 
 
 def test_an_unknown_public_key_does_NOT_refuse(monkeypatch):
     """Same judgment one step earlier: no CLI means no check, not no funds."""
     stub_cli(monkeypatch, missing=True)
-    assert tool.sender_refusal(KEYPAIR, AMOUNT) is None
+    assert tool.sender_funding(KEYPAIR, AMOUNT).refusal is None
 
 
 def test_the_fee_headroom_is_well_above_a_signature_and_well_below_anything_real():
@@ -226,7 +226,8 @@ def drive_main(monkeypatch, funding: tool.Refusal | None):
     monkeypatch.setattr(tool, "deposit_events_for", lambda db, swap_id: 0)
     monkeypatch.setattr(tool, "open_sol_swap_count", lambda db: 1)
     monkeypatch.setattr(tool, "ownership_refusal", lambda address: None)
-    monkeypatch.setattr(tool, "sender_refusal", lambda keypair, amount: funding)
+    monkeypatch.setattr(tool, "sender_funding",
+                        lambda keypair, amount: tool.SenderFunding(funding, "stubbed"))
     return tool.main(["--keypair", KEYPAIR, "--dry-run"])
 
 
@@ -260,3 +261,78 @@ def test_main_proceeds_when_funding_is_sufficient(monkeypatch, capsys):
     assert "--with-memo 10" in out, "the memo is the whole discriminator"
     assert "dry run" in out
     assert "REFUSED" not in out
+
+
+# --- a check nobody can see ran is not a check ---------------------------------
+
+
+def test_a_sufficient_balance_is_REPORTED_not_merely_allowed(monkeypatch):
+    """MEASURED ON THE OPERATOR'S HOST 2026-10-02, two hours after I wrote the check.
+
+    sender_refusal() returned None for "verified and sufficient" AND for "could not
+    ask", so the dry run printed nothing in either case. Their block read
+
+        payout owned    YES -- the GRC wallet holds the key, asked of the daemon just now
+        about to send   solana transfer ... 0.25 ...
+
+    with silence in between, and there was no way to tell a passed check from a
+    skipped one -- in the file whose next statement hands money to the Solana CLI.
+    Rule 14's "make did-nothing look different from did-work", shipped by me into
+    the tooling this session has been removing it from all evening.
+    """
+    stub_cli(monkeypatch)
+    stub_cluster(monkeypatch, lamports=int(1.0 * LAMPORTS_PER_SOL))
+    funding = tool.sender_funding(KEYPAIR, AMOUNT)
+
+    assert funding.refusal is None
+    assert "1.0 SOL" in funding.line
+    assert PUBKEY in funding.line
+    assert "asked of the cluster just now" in funding.line, (
+        "the line must say the figure was MEASURED, not assumed"
+    )
+
+
+def test_an_unaskable_balance_says_NOT_CHECKED_rather_than_nothing(monkeypatch):
+    """Unknown and sufficient must not render the same way.
+
+    Either lets the send proceed -- "I could not check your balance" is not "you
+    have no money" -- and only one of them means the sender was verified.
+    """
+    stub_cli(monkeypatch, missing=True)
+    no_cli = tool.sender_funding(KEYPAIR, AMOUNT)
+    assert no_cli.refusal is None
+    assert "NOT CHECKED" in no_cli.line
+    assert "solana address --keypair" in no_cli.line
+
+    stub_cli(monkeypatch)
+    stub_cluster(monkeypatch, raises=True)
+    no_cluster = tool.sender_funding(KEYPAIR, AMOUNT)
+    assert no_cluster.refusal is None
+    assert "NOT CHECKED" in no_cluster.line
+    assert "RuntimeError" in no_cluster.line
+    assert "NOT insufficient" in no_cluster.line, (
+        "the distinction is the whole point: unknown must never read as empty"
+    )
+
+    assert no_cli.line != no_cluster.line, "the two reasons it could not ask must be distinguishable"
+
+
+def test_an_insufficient_balance_carries_both_the_line_and_the_refusal(monkeypatch):
+    """The line is not a substitute for the refusal, and vice versa."""
+    stub_cli(monkeypatch)
+    stub_cluster(monkeypatch, lamports=int(0.1 * LAMPORTS_PER_SOL))
+    funding = tool.sender_funding(KEYPAIR, AMOUNT)
+
+    assert funding.refusal is not None
+    assert "NOT ENOUGH" in funding.line
+    assert "0.1 SOL" in funding.line
+    assert "see the refusal below" in funding.line, "the line must point at where the detail is"
+
+
+def test_main_prints_the_funding_line_whatever_the_verdict(monkeypatch, capsys):
+    """The call site, because a line returned and never printed is the same silence."""
+    drive_main(monkeypatch, None)
+    out = capsys.readouterr().out
+    assert "sender funded   stubbed" in out, (
+        "main() must print the line on the PASSING path -- that is the case that was silent"
+    )
