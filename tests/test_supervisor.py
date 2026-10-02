@@ -950,3 +950,97 @@ def test_the_banner_census_and_the_worker_census_are_the_same_function(tmp_path,
 
     holds = next(line for line in supervisor.endpoint_summary() if "it holds" in line)
     assert common.database_census(str(path)) in holds
+
+
+# --- status names the log file (and the last line in it) ----------------------
+#
+# The supervisor computed `run_dir / f"{name}.log"` inside start_worker() and
+# nowhere else, so `status` -- the command an operator runs an hour later when
+# nothing seems to be happening -- printed three pid lines and no path. On
+# 2026-10-02 the path was guessed instead, three times, and every guess was wrong
+# the same way: run_dir is BASE_DIR / "runtime" with BASE_DIR being
+# supervisor.py's own directory, so logs are under swap_terminal/runtime/ and not
+# ./runtime/ at the repository root. The information was in the process printing
+# the answer.
+
+
+def test_the_log_path_has_ONE_definition_and_it_is_under_the_supervisors_own_directory(tmp_path):
+    """The derivation, asserted directly, because the bug was its spelling.
+
+    Every wrong guess assumed run_dir was relative to the repository root. It is
+    not: DEFAULT_RUN_DIR is BASE_DIR / "runtime" and BASE_DIR is
+    Path(supervisor.__file__).parent.
+    """
+    assert supervisor.worker_log_path(tmp_path, "deposit_watcher") == tmp_path / "deposit_watcher.log"
+    # Asserted as PARTS rather than as one path equality. The parts are what the
+    # guesses got wrong -- the parent directory, not the spelling of "runtime" --
+    # and ruff's SIM300 reads a module constant as the literal side, so the whole
+    # path comparison only passes written backwards. The parts say more anyway.
+    assert supervisor.DEFAULT_RUN_DIR.name == "runtime"
+    assert supervisor.DEFAULT_RUN_DIR.parent == Path(supervisor.__file__).resolve().parent
+    assert supervisor.DEFAULT_RUN_DIR.parent.name == "swap_terminal", (
+        "the logs are under swap_terminal/runtime/, which is the fact three guesses got wrong"
+    )
+
+
+def test_status_PRINTS_the_log_path_for_every_worker(tmp_path, capsys):
+    """The wiring, driven through main() rather than the formatter.
+
+    status_log_lines() being correct is not the fix -- command_status() calling it
+    is. Three mutations in this session survived a right function whose call site
+    discarded the result, so the call site is what is driven here.
+    """
+    table = {name: [sys.executable, "-c", SLEEPING_CHILD]
+             for name in ("deposit_watcher", "payout_worker", "reconcile_worker")}
+    assert supervisor.main(["status", "--run-dir", str(tmp_path)], commands=table) == 0
+    out = capsys.readouterr().out
+    for name in table:
+        assert str(tmp_path / f"{name}.log") in out, f"{name}'s log path is not on the screen"
+
+
+def test_status_shows_the_LAST_LOG_LINE_so_quiet_and_wedged_look_different(tmp_path, capsys):
+    """Rule 14's actual subject: `running pid=1234` says nothing about which it is.
+
+    A tail on a quiet log and a tail on a wedged process render identically, and
+    that is what makes an operator Ctrl-C a healthy cycle. The last line answers it
+    at a glance, which is why status prints it rather than only naming the file.
+    """
+    (tmp_path / "sleeper.log").write_text(
+        "2026-10-02T12:00:00Z INFO cycle_start\n"
+        "2026-10-02T12:00:01Z INFO did not re-read 1 transaction(s)\n"
+        "\n"
+    )
+    assert supervisor.main(["status", "--run-dir", str(tmp_path)], commands=_sleeper_table()) == 0
+    out = capsys.readouterr().out
+    assert "did not re-read 1 transaction(s)" in out, "the last NON-EMPTY line, not the blank one"
+
+
+def test_an_empty_log_says_so_rather_than_printing_a_blank(tmp_path, capsys):
+    """`(none)`-shaped: an empty log and a log that could not be read are different
+    facts, and a blank line beside `running` is ambiguous between both and a
+    healthy quiet worker."""
+    (tmp_path / "sleeper.log").write_text("")
+    assert supervisor.main(["status", "--run-dir", str(tmp_path)], commands=_sleeper_table()) == 0
+    out = capsys.readouterr().out
+    assert "the worker wrote nothing at all" in out
+
+
+def test_a_MISSING_log_reads_differently_for_stopped_and_for_running(tmp_path):
+    """A running worker with no log file is a real anomaly: start_worker opens the
+    handle BEFORE spawning, so the file exists by the time a pid does. A stopped
+    worker with no log file is just a worker that has never run, which is not news.
+    Collapsing the two would hide the first."""
+    stopped = supervisor.status_log_lines(tmp_path, "deposit_watcher", "stopped")
+    running = supervisor.status_log_lines(tmp_path, "deposit_watcher", "running")
+    assert "no log file yet" in stopped[0]
+    assert "NO LOG FILE" in running[0]
+    assert stopped != running, "the two cases must not render identically"
+
+
+def test_a_stopped_workers_log_is_STILL_printed(tmp_path):
+    """The log of a worker that is not running is the only evidence of why it
+    stopped, which makes it the thing most worth printing -- a status that goes
+    quiet about it withholds exactly what is being asked for."""
+    (tmp_path / "reconcile_worker.log").write_text("Traceback: boom\n")
+    lines = supervisor.status_log_lines(tmp_path, "reconcile_worker", "stopped")
+    assert any("Traceback: boom" in line for line in lines)

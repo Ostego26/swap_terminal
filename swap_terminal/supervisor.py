@@ -413,7 +413,7 @@ def start_worker(name: str, argv: list[str], run_dir: Path) -> dict:
             return {"worker": name, "outcome": "already-running", "pid": pid, "argv": argv}
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = run_dir / f"{name}.log"
+    log_path = worker_log_path(run_dir, name)
     # The child's stdout and stderr go to a file rather than being inherited:
     # an operator who closes the starting terminal must not take the workers
     # with it, and a worker whose output goes nowhere is rule 14's silence.
@@ -530,8 +530,35 @@ def confirm_spawned(results: list[dict], settle_seconds: float = IMMEDIATE_DEATH
     return results
 
 
+def worker_log_path(run_dir: Path, name: str) -> Path:
+    """Where a worker's log lives. THE definition, and it used to be inline in one place.
+
+    `run_dir / f"{name}.log"` was spelled once, inside start_worker(), so only the
+    spawn path could name it. command_status() therefore could not print it, and
+    nothing else in the tree could either.
+
+    THE COST, measured by paying it three times on 2026-10-02: I handed the operator
+    `runtime/deposit_watcher.log`, then `tail -f` on two more paths that did not
+    exist. All three were guesses, and all three were wrong the same way -- run_dir
+    is BASE_DIR / "runtime" where BASE_DIR is supervisor.py's OWN directory, so the
+    logs are under swap_terminal/runtime/ and not ./runtime/ at the repository root.
+    Each wrong path cost a round trip and told the operator nothing about their
+    workers.
+
+    A path that only the code that WRITES it can name is a path every reader has to
+    guess (rule 14: echo the parameters that decide the answer). This is the smallest
+    function that fixes that, and it is the only place the expression now exists.
+    """
+    return run_dir / f"{name}.log"
+
+
 def _last_log_line(log_path: str) -> str:
-    """The last non-empty line of a worker's log, for a worker that just died.
+    """The last non-empty line of a worker's log.
+
+    NO LONGER ONLY FOR A WORKER THAT JUST DIED, which is what this said when it was
+    written and what limited it to the start path. status_log_lines() calls it for
+    every worker in every state, because "running, and this is the last thing it
+    said" is the answer to the question `status` is actually asked.
 
     On a traceback that is the exception, which is the single most useful line
     on the screen and the one an operator would otherwise have to go and find.
@@ -553,6 +580,52 @@ def _last_log_line(log_path: str) -> str:
         return f"(could not read {log_path}: {exc})"
     populated = [line for line in lines if line]
     return populated[-1] if populated else "(the log is empty -- the worker wrote nothing at all)"
+
+
+def status_log_lines(run_dir: Path, name: str, state: str) -> list[str]:
+    """Where this worker's log is, and the last thing in it. THE decision, so it is testable.
+
+    WHY STATUS NEEDS THIS AND start DOES NOT COVER IT. start_worker() already
+    prints `log=<path>` on its spawn line, and that was treated as sufficient. It
+    is not: the spawn line scrolls away, and the operator who wants the log is the
+    one asking an hour later why nothing is happening. `status` is the command they
+    run then, and it printed the run directory and three pid lines -- no path.
+
+    So the path got guessed instead, three times on 2026-10-02, and every guess was
+    wrong the same way (./runtime/ rather than swap_terminal/runtime/). The
+    information existed in the process that printed the answer.
+
+    THE LAST LOG LINE IS THE POINT, not a decoration. Rule 14's whole subject is
+    that `tail -f` on a quiet log and `tail -f` on a wedged process render
+    identically, and `running pid=1234` with no output says nothing about which one
+    is happening. The last line plus a timestamp does, at a glance, which is what
+    the operator needs before deciding whether to Ctrl-C something healthy.
+
+    ARGUMENT ORDER MATCHES worker_log_path(run_dir, name) on purpose. I first wrote
+    this one as (name, run_dir, state) and its own tests called it the other way --
+    two orderings for the same pair, in two functions one line apart, which is how a
+    positional-argument swap gets written and not noticed.
+
+    FOR A STOPPED WORKER IT IS STILL PRINTED, and that is deliberate: the log of a
+    worker that is NOT running is the only evidence of why it stopped. A status
+    that goes quiet about a stopped worker's log is withholding the one thing being
+    asked for.
+    """
+    log_path = worker_log_path(run_dir, name)
+    if not log_path.exists():
+        # `(none)` RATHER THAN SILENCE (rule 14). A missing log and a log with
+        # nothing in it are different facts, and for a `running` worker a missing
+        # log is a real anomaly -- the handle is opened before the spawn, so the
+        # file exists by the time a pid does.
+        missing = "(no log file yet)" if state == "stopped" else (
+            "(NO LOG FILE, and this worker is not stopped -- start_worker opens the "
+            "handle before spawning, so a running worker's log should exist)"
+        )
+        return [f"                    log {log_path}  {missing}"]
+    return [
+        f"                    log {log_path}",
+        f"                    last {_last_log_line(str(log_path))}",
+    ]
 
 
 def stop_worker(name: str, run_dir: Path, grace_seconds: float = DEFAULT_GRACE_SECONDS) -> dict:
@@ -976,6 +1049,12 @@ def command_status(names: list[str], run_dir: Path) -> int:
         state = worker_status(name, run_dir)
         detail = f"  {state['detail']}" if state["detail"] else ""
         lines.append(f"  {state['state']:<9} {state['worker']} pid={state['pid']}{detail}")
+        # THE LOG PATH AND THE LAST LINE, which this block computed and discarded
+        # until 2026-10-02. worker_status() returns state/worker/pid/detail and the
+        # path was reachable only from start_worker(), so `status` could not name
+        # the file the operator needs -- and three guessed paths were handed over
+        # instead. status_log_lines() is the only place that decides it.
+        lines.extend(status_log_lines(run_dir, name, state["state"]))
     _print_block("  workers", lines)
     # Same reason as in command_stop(): a worker reported `stopped` while an orphan
     # of it polls a database nobody named is the failure rule 13 is written from,
