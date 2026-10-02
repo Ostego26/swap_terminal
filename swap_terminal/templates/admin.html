@@ -34,12 +34,19 @@
   <p class="lede">Nothing on this page changes anything. There is no button that retries a payout, enables a pair,
      cancels a swap or restarts a worker &#8212; every one of those moves funds or touches armed state, and those
      belong to you at a shell, not to a web page.</p>
-  <dl class="echo">
-    <div><dt>Database</dt><dd class="mono breakable">{{ data.database }}</dd></div>
-    <div><dt>Rendered at</dt><dd class="mono">{{ data.generated_at }}</dd></div>
-    <div><dt>Stale thresholds</dt><dd>inventory {{ data.thresholds.inventory_stale_after }} &#183;
-      deposit quiet {{ data.thresholds.deposit_quiet_after }}</dd></div>
-  </dl>
+  {#- The echoed parameters, tabulated 2026-10-02 with the customer pages. These
+      three are the ones rule 14 means by "echo the parameters that decide the
+      answer", and they are read by someone checking which database a pasted page
+      came from -- which is reading DOWN a column of values, the thing an auto-fit
+      grid of three cells across cannot offer. -#}
+  <table class="kvt">
+    <tbody>
+      <tr><th scope="row">Database</th><td class="mono breakable">{{ data.database }}</td></tr>
+      <tr><th scope="row">Rendered at</th><td class="mono">{{ data.generated_at }}</td></tr>
+      <tr><th scope="row">Stale thresholds</th><td>inventory {{ data.thresholds.inventory_stale_after }} &#183;
+        deposit quiet {{ data.thresholds.deposit_quiet_after }}</td></tr>
+    </tbody>
+  </table>
   <p class="panel-note warn"><strong>This page is not authenticated.</strong> Anyone who can reach this port can read
      every swap id, deposit address, payout address and balance below. The default bind is 127.0.0.1; if that was
      changed, this page went with it.</p>
@@ -57,15 +64,15 @@
      case the money may be on chain with nothing recorded. Nothing retries these automatically, by design.</p>
   <div class="scroll-x">
   <table>
-    <thead><tr><th>payout</th><th>swap</th><th>asset</th><th>amount</th><th>created</th></tr></thead>
+    <thead><tr><th scope="col">payout</th><th scope="col">swap</th><th scope="col">asset</th><th scope="col" class="num">amount</th><th scope="col">created</th></tr></thead>
     <tbody>
       {% for row in data.unresolved_payouts %}
       <tr class="row-alarm">
         <td>{{ row.id }}</td>
         <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
         <td>{{ row.asset }}</td>
-        <td>{{ '%.8f'|format(row.amount) }}</td>
-        <td>{{ row.created_at }}</td>
+        <td class="num">{{ '%.8f'|format(row.amount) }}</td>
+        <td class="mono">{{ row.created_at }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -125,17 +132,19 @@
      all. &ldquo;Unchanged for&rdquo; is time since <code>updated_at</code>; confirmations are counts.</p>
   <div class="scroll-x">
   <table aria-describedby="inflight-table-note">
-    <thead><tr><th>swap</th><th>status</th><th>pair</th><th>expected in</th><th>seen in</th><th>confirmations</th>
-      <th>state</th><th>unchanged for</th></tr></thead>
+    <thead><tr><th scope="col">swap</th><th scope="col">status</th><th scope="col">pair</th>
+      <th scope="col" class="num">expected in</th><th scope="col" class="num">seen in</th>
+      <th scope="col" class="num">confirmations</th>
+      <th scope="col">state</th><th scope="col">unchanged for</th></tr></thead>
     <tbody>
       {% for row in data.in_flight %}
       <tr>
         <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.id) }}">{{ row.id }}</a></td>
         <td><code>{{ row.status }}</code></td>
         <td>{{ row.from_asset }}&#8594;{{ row.to_asset }}</td>
-        <td>{{ '%.8f'|format(row.expected_input_amount) }}</td>
-        <td>{% if row.actual_input_amount is none %}<span class="empty-mark">(none)</span>{% else %}{{ '%.8f'|format(row.actual_input_amount) }}{% endif %}</td>
-        <td>{{ row.max_confirmations if row.max_confirmations is not none else 0 }} / {{ row.min_confirmations }}</td>
+        <td class="num">{{ '%.8f'|format(row.expected_input_amount) }}</td>
+        <td class="num">{% if row.actual_input_amount is none %}<span class="empty-mark">(none)</span>{% else %}{{ '%.8f'|format(row.actual_input_amount) }}{% endif %}</td>
+        <td class="num">{{ row.max_confirmations if row.max_confirmations is not none else 0 }} / {{ row.min_confirmations }}</td>
         <td>{{ badges.level_badge(row.attention.level) }}</td>
         <td>{{ row.attention.waited or '(not applicable)' }}</td>
       </tr>
@@ -172,14 +181,14 @@
   {% if data.inventory %}
   <div class="scroll-x">
   <table>
-    <thead><tr><th>asset</th><th>confirmed</th><th>reserved</th><th>available</th><th>updated</th><th>reading</th></tr></thead>
+    <thead><tr><th scope="col">asset</th><th scope="col" class="num">confirmed</th><th scope="col" class="num">reserved</th><th scope="col" class="num">available</th><th scope="col">updated</th><th scope="col">reading</th></tr></thead>
     <tbody>
       {% for row in data.inventory %}
       <tr class="{% if row.fresh.state != 'fresh' %}row-warn{% endif %}">
         <td>{{ row.asset }}</td>
-        <td>{{ '%.8f'|format(row.hot_confirmed) }}</td>
-        <td>{{ '%.8f'|format(row.hot_reserved) }}</td>
-        <td>{{ '%.8f'|format(row.hot_available) }}</td>
+        <td class="num">{{ '%.8f'|format(row.hot_confirmed) }}</td>
+        <td class="num">{{ '%.8f'|format(row.hot_reserved) }}</td>
+        <td class="num">{{ '%.8f'|format(row.hot_available) }}</td>
         <td class="mono">{{ row.updated_at }}</td>
         <td>{{ badges.freshness_badge(row.fresh) }}</td>
       </tr>
@@ -266,21 +275,34 @@
        the first <code>/api/rates</code>; on a freshly restarted app this is the ordinary reading and not a
        fault</span></p>
   {% else %}
-  <dl class="kv">
-    <dt>Feed that answered</dt>
-    <dd class="mono">{{ data.pricing.source or '(the cache recorded no source)' }}</dd>
-    <dt>Fetched</dt>
-    <dd>{{ data.pricing.age }} ago
-        {% if data.pricing.expired %}<span class="subtle">&#8592; past its TTL of {{ data.pricing.ttl }}; the next
-        quote re-fetches</span>{% else %}<span class="subtle">&#8592; within its TTL of {{ data.pricing.ttl }}; the
-        next quote reuses this</span>{% endif %}</dd>
-  </dl>
+  {#- This <dl> was the one site where the deleted `.kv` grid got FLAT dt/dd
+      children rather than wrapped ones, so its four elements were four cells of a
+      four-column auto-fit grid: label, value, label, value, across one row. The
+      feed's name and the freshness note each started wherever the previous cell
+      ended. Two rows, one value column. -#}
+  <table class="kvt">
+    <tbody>
+      <tr>
+        <th scope="row">Feed that answered</th>
+        <td class="mono">{{ data.pricing.source or '(the cache recorded no source)' }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Fetched</th>
+        <td>{{ data.pricing.age }} ago
+          {% if data.pricing.expired %}<span class="subtle">&#8592; past its TTL of {{ data.pricing.ttl }}; the next
+          quote re-fetches</span>{% else %}<span class="subtle">&#8592; within its TTL of {{ data.pricing.ttl }}; the
+          next quote reuses this</span>{% endif %}</td>
+      </tr>
+    </tbody>
+  </table>
 
   {% if data.pricing.assets %}
   <div class="scroll-x">
   <table>
-    <thead><tr><th>asset</th><th>USD</th><th>market cap</th><th>24h volume</th><th>24h change</th>
-      <th>depth</th><th>what that reading means</th></tr></thead>
+    <thead><tr><th scope="col">asset</th><th scope="col" class="num">USD</th>
+      <th scope="col" class="num">market cap</th><th scope="col" class="num">24h volume</th>
+      <th scope="col" class="num">24h change</th>
+      <th scope="col">depth</th><th scope="col">what that reading means</th></tr></thead>
     <tbody>
       {% for row in data.pricing.assets %}
       {# The verdict is services/market_context.turnover_finding()'s, decided in
@@ -292,10 +314,10 @@
       {% set level = {'OK': 'ok', 'THIN': 'halted'}.get(row.turnover_verdict, 'unknown') %}
       <tr>
         <td class="mono">{{ row.asset }}</td>
-        <td class="mono">{{ '%.8f'|format(row.price_usd) }}</td>
-        <td class="mono subtle">{% if row.market_cap_usd %}{{ '{:,.0f}'.format(row.market_cap_usd) }}{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
-        <td class="mono subtle">{% if row.volume_24h_usd %}{{ '{:,.0f}'.format(row.volume_24h_usd) }}{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
-        <td class="mono subtle">{% if row.change_24h_pct is not none %}{{ '%+.2f'|format(row.change_24h_pct) }}%{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
+        <td class="num">{{ '%.8f'|format(row.price_usd) }}</td>
+        <td class="num subtle">{% if row.market_cap_usd %}{{ '{:,.0f}'.format(row.market_cap_usd) }}{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
+        <td class="num subtle">{% if row.volume_24h_usd %}{{ '{:,.0f}'.format(row.volume_24h_usd) }}{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
+        <td class="num subtle">{% if row.change_24h_pct is not none %}{{ '%+.2f'|format(row.change_24h_pct) }}%{% else %}<span class="empty-mark">(not given)</span>{% endif %}</td>
         <td>{{ badges.level_badge(level, row.turnover_verdict) }}</td>
         <td class="breakable subtle">{{ row.turnover_note }}</td>
       </tr>
@@ -358,17 +380,19 @@
   {% if data.deposits %}
   <div class="scroll-x">
   <table>
-    <thead><tr><th>swap</th><th>asset</th><th>txid</th><th>vout</th><th>amount</th><th>confirmations</th>
-      <th>last seen</th></tr></thead>
+    <thead><tr><th scope="col">swap</th><th scope="col">asset</th><th scope="col">txid</th>
+      <th scope="col" class="num">vout</th><th scope="col" class="num">amount</th>
+      <th scope="col" class="num">confirmations</th>
+      <th scope="col">last seen</th></tr></thead>
     <tbody>
       {% for row in data.deposits %}
       <tr>
         <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
         <td>{{ row.asset }}</td>
         <td class="mono breakable">{{ row.txid }}</td>
-        <td>{{ row.vout }}</td>
-        <td>{{ '%.8f'|format(row.amount) }}</td>
-        <td>{{ row.confirmations }}</td>
+        <td class="num">{{ row.vout }}</td>
+        <td class="num">{{ '%.8f'|format(row.amount) }}</td>
+        <td class="num">{{ row.confirmations }}</td>
         <td>{{ badges.freshness_badge(row.seen) }}</td>
       </tr>
       {% endfor %}
@@ -385,14 +409,14 @@
   {% if data.payouts %}
   <div class="scroll-x">
   <table>
-    <thead><tr><th>id</th><th>swap</th><th>asset</th><th>amount</th><th>status</th><th>txid</th><th>sent</th></tr></thead>
+    <thead><tr><th scope="col">id</th><th scope="col">swap</th><th scope="col">asset</th><th scope="col" class="num">amount</th><th scope="col">status</th><th scope="col">txid</th><th scope="col">sent</th></tr></thead>
     <tbody>
       {% for row in data.payouts %}
       <tr class="{% if row.status == 'created' %}row-alarm{% endif %}">
         <td>{{ row.id }}</td>
         <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
         <td>{{ row.asset }}</td>
-        <td>{{ '%.8f'|format(row.amount) }}</td>
+        <td class="num">{{ '%.8f'|format(row.amount) }}</td>
         <td><code>{{ row.status }}</code></td>
         <td class="mono breakable">{{ row.txid or '(none)' }}</td>
         <td>{{ row.sent_at or '(not sent)' }}</td>
@@ -421,7 +445,14 @@
         <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
         <td><code>{{ row.old_status or '(new)' }}</code></td>
         <td><code>{{ row.new_status }}</code></td>
-        <td>{{ row.message or '' }}</td>
+        {#- `''` WAS A BLANK GAP AND THIS PAGE'S OWN RULE FORBIDS ONE (rule 14).
+            A status transition with no message is the ordinary case, so most of
+            this column rendered as nothing -- and a column of nothing is
+            ambiguous between "no message was recorded" and "the message column
+            did not come through", which on an audit trail is exactly the
+            distinction an operator is reading it for. Found 2026-10-02 while
+            marking the numeric columns in this file. -#}
+        <td class="breakable">{{ row.message or '(no message recorded)' }}</td>
       </tr>
       {% endfor %}
     </tbody>

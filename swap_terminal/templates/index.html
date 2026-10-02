@@ -55,25 +55,108 @@
      is willing to swap, and an adapter is what it can reach. A pair marked DISABLED is allowed but
      unreachable &#8212; the reason beside it says what to set. The form below offers only the enabled ones.</p>
   {% if pairs %}
-  <ul class="pair-list">
-    {% for pair in pairs %}
-    {# The level was the literal 'ok' and the label the literal 'ENABLED' until
-       2026-09-26, so every allowed pair claimed to work whether or not a single
-       chain was configured. Both now come from the row. #}
-    {# `pair-off` and `subtle` rather than new class names: admin.html:252 already
-       renders a disabled pair exactly this way, and a second vocabulary for one
-       state is rule 8 with a stylesheet attached. #}
-    <li class="pair {% if not pair.enabled %}pair-off{% endif %}">
-      <span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
-      {{ badges.level_badge('ok' if pair.enabled else 'halted', 'ENABLED' if pair.enabled else 'DISABLED') }}
-      {% if not pair.enabled %}<span class="subtle">{{ pair.reason }}</span>{% endif %}</li>
-    {% endfor %}
-  </ul>
+  {#- TABULATED 2026-10-02 on the operator's brief, "it's too spread out and needs to
+      be tabulated and boxed". This was a `.pair-list`, which is
+      `display: flex; flex-wrap: wrap` -- six pills of varying width reflowing across
+      however many rows the viewport allowed, each pill carrying a direction, a badge
+      and (only when disabled) a reason. So the badges landed at a different x on every
+      pill, nothing could be read down a column, and the reason for a DISABLED pair
+      appeared inline in the middle of a wrapping row where the next pill began
+      immediately after it.
+
+      Three columns answer the three questions in order: what direction, is it
+      available, and if not what to set. Every value in a column starts at the same x
+      because a table cell is what guarantees that.
+
+      THE STATUS COLUMN IS NOT COLOR, AND THE SAME BADGE MACRO STILL DRAWS IT. The
+      level was the literal 'ok' and the label the literal 'ENABLED' until 2026-09-26,
+      so every allowed pair claimed to work whether or not a single chain was
+      configured; both still come from the row.
+
+      `pair-off` is kept as the row's marker rather than a new class name: admin.html
+      already renders a disabled pair with it, and a second vocabulary for one state is
+      rule 8 with a stylesheet attached. -#}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th scope="col">direction</th><th scope="col">status</th><th scope="col">what would change it</th></tr></thead>
+    <tbody>
+      {% for pair in pairs %}
+      <tr class="{% if not pair.enabled %}pair-off{% endif %}">
+        <td><span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span></td>
+        <td>{{ badges.level_badge('ok' if pair.enabled else 'halted', 'ENABLED' if pair.enabled else 'DISABLED') }}</td>
+        {#- AN ENABLED PAIR'S CELL IS NOT BLANK. In the pill layout the reason simply
+            did not render for a working pair, which a flex row absorbed invisibly. A
+            table cell does not absorb it: an empty third column is ambiguous between
+            "nothing to report" and "the reason was lost", and a column of five blanks
+            beside one sentence reads as five broken rows (rule 14). So an enabled pair
+            states the thing that is true of it, which is that no setting is missing. -#}
+        <td class="breakable">{% if pair.enabled %}<span class="empty-mark">(nothing)</span>
+          <span class="subtle">both chains reachable; this pair is offered below</span>{% else %}<span class="subtle">{{ pair.reason }}</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
   {% else %}
     {{ badges.empty('trading pair is enabled', 'Config.ALLOWED_PAIRS on the server') }}
     <p class="panel-note">Nothing can be swapped until an operator enables a pair. The form below is disabled
        because there is no direction it could submit.</p>
   {% endif %}
+</section>
+
+{#- THE TERMS, COLLECTED, 2026-10-02. These three numbers decide what a customer
+    gets, and before this they were spelled in three different prose sentences in
+    three different panels: the fee and the quote TTL inside the "Get a quote"
+    note, the tolerance band inside the "Already have a swap?" note at the bottom
+    of the page. A customer who wanted to know the cost of a swap had to read two
+    paragraphs a screen apart and do the collecting themselves. That is the
+    operator's "too spread out" with numbers in it.
+
+    THE PROSE SENTENCES ARE DELIBERATELY LEFT WHERE THEY ARE, and this is not an
+    oversight. Each one says what its number DOES at the point of acting on it --
+    "a quote fixes the rate for ...", "amounts outside the band are held for a
+    human rather than paid out" -- and deleting the figure out of those sentences
+    to avoid printing it twice would take the number away from the button it
+    governs. Two RENDERINGS of one fact are fine; two SOURCES for it are rule 8's
+    drift, and there is one source here: every figure below and every figure in
+    those sentences is the same `fee_bps` / `quote_ttl_seconds` / `tolerance_pct`
+    the route handler passed, so they cannot disagree. _swap_live.html's own
+    comment on the deposit address makes the same call for the same reason.
+
+    RULE 6 ON THE TTL. The window is reported in microfortnights with the seconds
+    in parentheses, because WHAT_IT_DECIDES names an environment variable an
+    operator may have to edit and that variable is in seconds -- the reader must
+    not have to do the multiplication to connect the two. -#}
+<section class="panel" aria-labelledby="terms-heading">
+  <h2 id="terms-heading">What a swap costs, and how long a price lasts</h2>
+  <table class="kvt">
+    <thead><tr><th scope="col">term</th><th scope="col" class="num">value</th><th scope="col">what it decides</th></tr></thead>
+    <tbody>
+      <tr>
+        <th scope="row">Service fee</th>
+        <td class="num">{{ fee_bps }}</td>
+        <td>basis points, taken out of the payout. {{ (fee_bps / 100) | round(2) }}% of the amount swapped.</td>
+      </tr>
+      <tr>
+        <th scope="row">Quote validity</th>
+        <td class="num">{{ (quote_ttl_seconds / 1.2096) | round(1) }}&#181;fn</td>
+        <td>how long a quoted rate is held ({{ quote_ttl_seconds }}s). Past it, ask for another quote; nothing
+           in this system cancels a swap when a window passes.</td>
+      </tr>
+      <tr>
+        <th scope="row">Amount tolerance</th>
+        <td class="num">{{ (tolerance_pct * 100) | round(2) }}%</td>
+        <td>how far the confirmed deposit may differ from the expected amount. Outside the band the swap is
+           <strong>held for a human</strong> rather than paid out at a rate nobody quoted.</td>
+      </tr>
+      <tr>
+        <th scope="row">Network fee</th>
+        <td><span class="empty-mark">(not fixed)</span></td>
+        <td>the destination chain's own fee, held back out of the payout. It is a chain cost and not this
+           terminal's, so it is not a figure this page can fix in advance.</td>
+      </tr>
+    </tbody>
+  </table>
 </section>
 
 <div class="two-col">

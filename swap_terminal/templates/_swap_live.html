@@ -18,6 +18,28 @@
   glyph, its own word and its own border treatment -- and the detail sentence
   always names what is being waited ON, because "please wait" tells a customer
   watching a blockchain nothing they did not already know.
+
+  TABULATED AND BOXED, 2026-10-02. The operator's whole brief was "it's too
+  spread out and needs to be tabulated and boxed", and this fragment was the
+  worst of it: nine figures in a dl.kv whose grid was
+  `repeat(auto-fit, minmax(230px, 1fr))`, which at this page's own declared
+  widths resolves to FOUR columns (the arithmetic is written out in
+  static/styles.css above `.kvt`). So "Expected in" and "Actually seen" -- the
+  two numbers a customer opens this page to compare -- were dealt into whichever
+  of four cells they landed in, with no guarantee of sharing a row, let alone a
+  left margin.
+
+  Every group here is now a titled box holding a `table.kvt`, which has exactly
+  one x position for its values by construction. The nine-figure list is split
+  in two, because the two halves want opposite alignment and one column cannot
+  be both: AMOUNTS are right-aligned tabular digits with the ticker in its own
+  cell, so decimal points line up down the column; ADDRESSES AND IDS are
+  left-aligned monospace that wraps. A single list had them sharing a column,
+  which is why no amount in it was ever aligned against the one above it.
+
+  NOTHING WAS REMOVED. Every row, sentence and marker that rendered before this
+  change still renders -- counted by rendering the real fragment before and
+  after and diffing the figure labels, not by reading the diff.
 #}
 <div class="live" data-status="{{ view.status }}" data-level="{{ view.attention.level }}">
 
@@ -27,11 +49,32 @@
       <h2 class="status-headline">{{ view.attention.headline }}</h2>
     </div>
     <p class="status-detail">{{ view.attention.detail }}</p>
-    <dl class="status-meta">
-      <div><dt>Raw status</dt><dd><code>{{ view.status }}</code>{% if not view.status_known %}
-        &#8592; this page has no description for that value{% endif %}</dd></div>
-      <div><dt>Unchanged for</dt><dd>{{ view.attention.waited or '(not applicable)' }}</dd></div>
-    </dl>
+    {# Two rows, so they are a table rather than a flex row with var(--s5) of air
+       between the pair. The `(not applicable)` is kept verbatim: a swap with no
+       waited figure has to say so, and a blank cell reads as a broken query
+       (rule 14). #}
+    <table class="kvt">
+      <tbody>
+        <tr>
+          <th scope="row">Raw status</th>
+          <td><code>{{ view.status }}</code>{% if not view.status_known %}
+            &#8592; this page has no description for that value{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row">Unchanged for</th>
+          <td>{{ view.attention.waited or '(not applicable)' }}</td>
+        </tr>
+      </tbody>
+    </table>
+    {#- THE RECORDED REASON MOVED UP HERE, 2026-10-02, and it is the clearest case
+        of the operator's "related facts are far apart". It used to render at the
+        BOTTOM of the amounts list, three boxes below the status card that says the
+        swap failed -- so the screen stated the outcome in one place and the cause
+        in another, with a progress rail, a confirmation meter and nine figures in
+        between. A failure and its reason are one fact. -#}
+    {% if view.swap.failed_reason %}
+    <p class="callout callout-failed"><strong>Recorded reason:</strong> {{ view.swap.failed_reason }}</p>
+    {% endif %}
   </div>
 
   {# The rail. `state` per step was decided in Python; this only draws it. A
@@ -65,20 +108,45 @@
     <div class="meter" role="img" aria-label="{{ conf.seen }} of {{ conf.threshold }} confirmations">
       <div class="meter-fill" style="width: {{ conf.percent }}%"></div>
     </div>
-    {# The unit is PER CHAIN and comes from services/swap_view.threshold_note().
-       It used to read "these are blocks" for every chain, which is false for
-       XRP -- a validated ledger has no depth to accumulate -- and false for
-       Solana, whose number is a commitment rung. Rule 6's unit laundering,
-       arriving as a sentence rather than as a number. #}
-    <p class="panel-note">What the threshold means here: {{ conf.meaning }}.</p>
-    <p class="panel-note">Where it came from: {{ conf.source }}. This is a count, not a clock &#8212; nothing here
-       can predict when the next one arrives, and this page will not pretend to.</p>
-    {% if conf.rows == 0 %}
-      {{ badges.empty('deposit has been seen on chain yet', 'deposit_events rows for this swap') }}
-    {% else %}
-    <p class="panel-note">{{ conf.rows }} deposit row(s) recorded for this swap; the count above is the highest
-       confirmation depth among them.</p>
-    {% endif %}
+    {#- THREE SENTENCES BECAME THREE ROWS. Each of these was a separate
+        <p class="panel-note"> running the full 72ch measure, so the reader had to
+        find the subject of each one inside its own prose: "What the threshold means
+        here: ...", "Where it came from: ...", "N deposit row(s) recorded...". They
+        are label/value pairs and they are now labeled as such, which also puts the
+        three subjects in one column instead of three sentence openings.
+
+        The unit is PER CHAIN and comes from services/swap_view.threshold_note().
+        It used to read "these are blocks" for every chain, which is false for XRP
+        -- a validated ledger has no depth to accumulate -- and false for Solana,
+        whose number is a commitment rung. Rule 6's unit laundering, arriving as a
+        sentence rather than as a number. -#}
+    <table class="kvt">
+      <tbody>
+        <tr>
+          <th scope="row">What the threshold means here</th>
+          <td>{{ conf.meaning }}.</td>
+        </tr>
+        <tr>
+          <th scope="row">Where it came from</th>
+          <td>{{ conf.source }}.</td>
+        </tr>
+        <tr>
+          <th scope="row">Deposit rows recorded</th>
+          {#- 0 IS A MEASUREMENT AND IT DOES NOT GET A BARE CELL. `(none)` with what
+              was looked for, exactly as before this table existed: a reader has to be
+              able to tell "no deposit has been seen" from "the query that counts them
+              broke", and an empty or bare-zero cell is ambiguous between the two
+              (rule 14). The count also says what it is counted OUT OF -- the highest
+              depth among those rows is the number in the meter above, which is the
+              only reason this row belongs in this box. -#}
+          <td>{% if conf.rows == 0 %}{{ badges.empty('deposit has been seen on chain yet', 'deposit_events rows for this swap') }}{% else %}<span class="num">{{ conf.rows }}</span>
+            row(s) recorded for this swap; the count above (<strong>{{ conf.seen }}</strong>) is the highest
+            confirmation depth among them.{% endif %}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="panel-note">This is a count, not a clock &#8212; nothing here can predict when the next one arrives,
+       and this page will not pretend to.</p>
   </section>
 
   {# Amounts. The estimate is labeled as an estimate, and the tolerance halt is
@@ -87,51 +155,99 @@
      instead of being paid out at a rate nobody quoted. #}
   <section class="panel" aria-labelledby="amount-heading">
     <h3 id="amount-heading">Amounts</h3>
-    <dl class="kv">
-      <div><dt>Expected in</dt><dd>{{ '%.8f'|format(view.swap.expected_input_amount) }} {{ view.swap.from_asset }}</dd></div>
-      <div><dt>Actually seen</dt><dd>{% if view.swap.actual_input_amount is none %}<span class="empty-mark">(none yet)</span>{% else %}{{ '%.8f'|format(view.swap.actual_input_amount) }} {{ view.swap.from_asset }}{% endif %}</dd></div>
-      {#- THE DEPOSIT SIDE, ADDED 2026-10-01 AT THE OPERATOR'S REQUEST, and it was a real
-          asymmetry: this list carried `Payout address` and nothing about where the deposit
-          goes. The address was rendered only in the panel ABOVE the live region, so on a
-          long page, on a phone, or after a poll replaced this region, a customer comparing
-          "what I sent" against "what I get" could read the payout address off this list and
-          had to scroll back for the other half.
+    {#- THREE COLUMNS, NOT TWO, AND THE TICKER IS THE THIRD. A cell reading
+        "0.01000000 BTC" is right-aligned on the "C", which pushes every decimal
+        point in the column to a different place depending on how long the ticker
+        is -- so the one thing right alignment exists to deliver is lost by putting
+        the unit in the same cell. Digits in `.num`, ticker in `.unit`. -#}
+    <table class="kvt">
+      <tbody>
+        <tr>
+          <th scope="row">Expected in</th>
+          <td class="num">{{ '%.8f'|format(view.swap.expected_input_amount) }}</td>
+          <td class="unit">{{ view.swap.from_asset }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Actually seen</th>
+          {#- `(none yet)` and not a blank: nothing has arrived is a reading, and on
+              this row it is the reading a customer checks first. -#}
+          <td class="num">{% if view.swap.actual_input_amount is none %}<span class="empty-mark">(none yet)</span>{% else %}{{ '%.8f'|format(view.swap.actual_input_amount) }}{% endif %}</td>
+          <td class="unit">{{ view.swap.from_asset }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Payout estimate</th>
+          <td class="num">{{ '%.8f'|format(view.swap.output_amount_estimate) }}</td>
+          <td class="unit">{{ view.swap.to_asset }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
 
-          IT COMES FROM view.deposit, THE SAME SOURCE THE PANEL USES, not from
-          view.swap.deposit_address. Two renderings of one fact are fine; two SOURCES for it
-          is rule 8's drift, and the panel's own comment records what that cost once already
-          -- it read `swap["destination_tag"]` while the column was `deposit_tag`, and
-          rendered "NO DESTINATION TAG HAS BEEN ISSUED" for a swap that had one.
+  <section class="panel" aria-labelledby="where-heading">
+    {#- SPLIT OUT OF THE AMOUNTS LIST, 2026-10-02. Same rows, same sources, its own
+        box -- because an address wants `white-space: normal` and wraps to three
+        lines on a phone, while an amount wants `nowrap`, right alignment and
+        tabular digits. One column cannot be both, and when they shared one the
+        amounts were the half that lost. -#}
+    <h3 id="where-heading">Addresses and transaction ids</h3>
+    <table class="kvt">
+      <tbody>
+        {#- THE DEPOSIT SIDE, ADDED 2026-10-01 AT THE OPERATOR'S REQUEST, and it was a real
+            asymmetry: this list carried `Payout address` and nothing about where the deposit
+            goes. The address was rendered only in the panel ABOVE the live region, so on a
+            long page, on a phone, or after a poll replaced this region, a customer comparing
+            "what I sent" against "what I get" could read the payout address off this list and
+            had to scroll back for the other half.
 
-          THE TAG ROW IS NOT OPTIONAL DECORATION. On a tag chain the deposit instruction is
-          the PAIR (account, discriminator) and the account alone is half of it -- the half
-          that produces money which arrived and a swap that cannot claim it. So the tag is
-          listed immediately beside the address whenever the model is `tag`, labeled with the
-          CHAIN's own word for the field (services/swap_service.TAG_ATTRIBUTION), and a
-          missing tag says so rather than rendering blank: `0` is a legal tag, so an empty
-          cell and a real zero must not look alike. -#}
-      <div><dt>Deposit address</dt><dd class="mono breakable">{{ view.deposit.address or '(none recorded)' }}</dd></div>
-      {% if view.deposit.model == 'tag' %}
-      <div><dt>{{ view.deposit.discriminator }}</dt><dd class="mono breakable">{% if view.deposit.tag is none %}<span class="empty-mark">(none issued)</span>{% else %}{{ view.deposit.tag }}{% endif %}</dd></div>
-      {% endif %}
-      {#- AND IT SAYS WHEN SENDING THERE WOULD BE A MISTAKE. swap.html's deposit panel carries
-          this warning for a closed swap, and that warning exists because a rendered
-          `under_review` swap was caught on 2026-09-26 showing a live-looking deposit target.
-          Repeating the address down here without the caveat would reintroduce exactly that,
-          one panel lower -- and this region is the one the poller replaces, so it is the part
-          a customer is most likely to be looking at. -#}
-      {% if not view.accepting_deposit %}
-      <div><dt>Still accepting?</dt><dd><strong>NO</strong> &#8212; status is <code>{{ view.status }}</code>, so the
-         address above is for matching a payment you already made. Anything sent now arrives against a swap nothing
-         advances.</dd></div>
-      {% endif %}
-      <div><dt>Payout estimate</dt><dd>{{ '%.8f'|format(view.swap.output_amount_estimate) }} {{ view.swap.to_asset }}</dd></div>
-      <div><dt>Payout address</dt><dd class="mono breakable">{{ view.swap.payout_address }}</dd></div>
-      <div><dt>Deposit txid</dt><dd class="mono breakable">{{ view.swap.deposit_txid or '(none seen)' }}</dd></div>
-      <div><dt>Payout txid</dt><dd class="mono breakable">{{ view.swap.payout_txid or '(not broadcast)' }}</dd></div>
-    </dl>
-    {% if view.swap.failed_reason %}
-    <p class="callout callout-failed"><strong>Recorded reason:</strong> {{ view.swap.failed_reason }}</p>
-    {% endif %}
+            IT COMES FROM view.deposit, THE SAME SOURCE THE PANEL USES, not from
+            view.swap.deposit_address. Two renderings of one fact are fine; two SOURCES for it
+            is rule 8's drift, and the panel's own comment records what that cost once already
+            -- it read `swap["destination_tag"]` while the column was `deposit_tag`, and
+            rendered "NO DESTINATION TAG HAS BEEN ISSUED" for a swap that had one.
+
+            THE TAG ROW IS NOT OPTIONAL DECORATION. On a tag chain the deposit instruction is
+            the PAIR (account, discriminator) and the account alone is half of it -- the half
+            that produces money which arrived and a swap that cannot claim it. So the tag is
+            listed immediately beside the address whenever the model is `tag`, labeled with the
+            CHAIN's own word for the field (services/swap_service.TAG_ATTRIBUTION), and a
+            missing tag says so rather than rendering blank: `0` is a legal tag, so an empty
+            cell and a real zero must not look alike. -#}
+        <tr>
+          <th scope="row">Deposit address</th>
+          <td class="mono breakable">{{ view.deposit.address or '(none recorded)' }}</td>
+        </tr>
+        {% if view.deposit.model == 'tag' %}
+        <tr>
+          <th scope="row">{{ view.deposit.discriminator }}</th>
+          <td class="mono breakable">{% if view.deposit.tag is none %}<span class="empty-mark">(none issued)</span>{% else %}{{ view.deposit.tag }}{% endif %}</td>
+        </tr>
+        {% endif %}
+        {#- AND IT SAYS WHEN SENDING THERE WOULD BE A MISTAKE. swap.html's deposit panel carries
+            this warning for a closed swap, and that warning exists because a rendered
+            `under_review` swap was caught on 2026-09-26 showing a live-looking deposit target.
+            Repeating the address down here without the caveat would reintroduce exactly that,
+            one panel lower -- and this region is the one the poller replaces, so it is the part
+            a customer is most likely to be looking at. -#}
+        {% if not view.accepting_deposit %}
+        <tr class="row-alarm">
+          <th scope="row">Still accepting?</th>
+          <td><strong>NO</strong> &#8212; status is <code>{{ view.status }}</code>, so the address above is for
+             matching a payment you already made. Anything sent now arrives against a swap nothing advances.</td>
+        </tr>
+        {% endif %}
+        <tr>
+          <th scope="row">Payout address</th>
+          <td class="mono breakable">{{ view.swap.payout_address }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Deposit txid</th>
+          <td class="mono breakable">{{ view.swap.deposit_txid or '(none seen)' }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Payout txid</th>
+          <td class="mono breakable">{{ view.swap.payout_txid or '(not broadcast)' }}</td>
+        </tr>
+      </tbody>
+    </table>
   </section>
 </div>

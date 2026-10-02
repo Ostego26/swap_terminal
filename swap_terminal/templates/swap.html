@@ -20,15 +20,80 @@
   decides which model applies and this template draws whichever it returned --
   including the case where a tag has not been issued, where it refuses to show a
   send target at all.
+
+  TABULATED AND BOXED, 2026-10-02, on one brief from the operator: "it's too
+  spread out and needs to be tabulated and boxed". What changed here, and what
+  deliberately did not:
+
+    the swap's own facts      were a run-on lede (`GRC -> BTC · created ...`) and,
+                              for the quote window, a line at the very BOTTOM of
+                              the deposit panel below the QR. Now one titled box
+                              with a three-row table at the top of the page.
+    the deposit instruction   its sentences are unchanged TO THE CHARACTER and
+                              are now wrapped in a titled .subbox, so the pair
+                              (account, discriminator) reads as one instruction
+                              rather than as four field labels in the panel's
+                              flow beside three conveniences. A layout pass does
+                              not re-word the line that says how much to send.
+    both data tables          amount and asset are separate columns, and the
+                              amount, vout and confirmation cells carry `.num`
+                              (tabular-nums, right-aligned). A cell reading
+                              "0.01000000 GRC" right-aligns on the "C", which
+                              moves every decimal point in the column.
+
+  NOTHING WAS REMOVED AND NOTHING WAS REWORDED except the two moves named above,
+  both of which still render the same value from the same services/swap_view.py
+  call. tests/test_customer_page_layout.py renders the real template and asserts
+  every box's heading, the empty cases, and that the copy buttons still carry the
+  exact untruncated value.
 #}
 
 {% block content %}
 <section class="hero hero-tight">
   <p class="eyebrow">Swap</p>
   <h1 class="mono breakable">{{ view.swap.id }}</h1>
-  <p class="lede">{{ view.swap.from_asset }} &#8594; {{ view.swap.to_asset }} &#183; created {{ view.swap.created_at }}</p>
   <p class="panel-note">This page reloads its own status every 15s while it is open. Nothing is decided in your
      browser: each refresh asks the server what the status means.</p>
+</section>
+
+{#- THE SWAP'S OWN FACTS, BOXED AND TABULATED, 2026-10-02. These three were
+    scattered: the direction and the created timestamp were a single run-on lede
+    (`GRC -> BTC · created 2026-...`), where the dot between them is doing the work
+    of a column, and THE QUOTE WINDOW WAS AT THE BOTTOM OF THE DEPOSIT PANEL --
+    below the wallet menu, the QR and the raw payment request, roughly a screen and
+    a half from anything else about the swap itself. That is the operator's "related
+    facts are far apart" in its most literal form: a fact about the QUOTE filed
+    under how to pay a deposit.
+
+    It is its own box ahead of the deposit panel rather than merged into it,
+    because the deposit panel is the thing a customer ACTS on and this is reference.
+    Three rows, one column of values, one x position.
+
+    NOTHING POLLED GOES IN HERE. static/script.js replaces `#swap-live` on a timer
+    and nothing else, so a status, a confirmation count or an amount placed in this
+    box would freeze at its first-render value while the box two below it moved --
+    and a page showing two different answers to one question is worse than a page
+    showing one answer far away. Everything here is fixed for the life of the swap
+    except the quote window, which is a countdown the next full page load re-reads
+    and which says so in its own note. -#}
+<section class="panel" aria-labelledby="identity-heading">
+  <h2 id="identity-heading">This swap</h2>
+  <table class="kvt">
+    <tbody>
+      <tr>
+        <th scope="row">Direction</th>
+        <td>{{ view.swap.from_asset }} &#8594; {{ view.swap.to_asset }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Created</th>
+        <td class="mono">{{ view.swap.created_at }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Quote window</th>
+        <td>{{ view.window.display }} &#8212; {{ view.window.note }}</td>
+      </tr>
+    </tbody>
+  </table>
 </section>
 
 {# Deposit instructions come FIRST on this page, above the status, because until
@@ -50,7 +115,15 @@
      deposit &#8212; its status is <code>{{ view.status }}</code>, and anything sent now would arrive against a swap
      that is not being advanced. The address is shown below for reference only, so you can match it to a payment you
      have already made.</p>
-  <p class="mono breakable subtle">{{ deposit.address or '(none recorded)' }}</p>
+  <div class="subbox">
+    {#- A TITLE, BECAUSE A BOX WITHOUT ONE IS A RECTANGLE. This address used to be a
+        bare monospace line directly under the "do not send anything" callout, which
+        left it reading as part of the warning's sentence rather than as the swap's
+        recorded deposit target. `(none recorded)` is kept: a closed swap that never
+        had an address must say so rather than show an empty box (rule 14). -#}
+    <h3 class="subbox-title">Deposit target, for reference only</h3>
+    <p class="mono breakable subtle">{{ deposit.address or '(none recorded)' }}</p>
+  </div>
   {% elif deposit.problem %}
   <p class="callout callout-halted"><strong>Do not send anything yet.</strong> {{ deposit.problem }}</p>
   {% endif %}
@@ -58,10 +131,18 @@
   {% if not view.accepting_deposit %}
     {# Nothing more: the reference line above is all a closed swap gets. #}
   {% elif deposit.model == 'address' and not deposit.problem %}
-    <p class="panel-note">{{ deposit.note }}</p>
-    <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
-       {{ view.swap.from_asset }}</strong> to</p>
-    <div id="deposit-target">{{ copy_field(deposit.address, "the deposit address") }}</div>
+    {#- BOXED, 2026-10-02, AND THE SENTENCE INSIDE IS UNCHANGED TO THE CHARACTER.
+        The amount phrasing here and in the tag branch below are deliberately
+        identical -- that branch's own comment records why -- so this edit wraps the
+        instruction in a titled box and touches nothing in it. A layout pass does
+        not get to re-word the line that says how much money to send. -#}
+    <div class="subbox">
+      <h3 class="subbox-title">Where to send it</h3>
+      <p class="panel-note">{{ deposit.note }}</p>
+      <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
+         {{ view.swap.from_asset }}</strong> to</p>
+      <div id="deposit-target">{{ copy_field(deposit.address, "the deposit address") }}</div>
+    </div>
   {#- The model was called 'destination_tag' until 2026-09-30. That is the XRP Ledger's own
       field name, and naming the whole model after it is what kept Solana out: SOL attributes
       by a Memo instruction and has no destination tag, so a SOL swap fell into the {% else %}
@@ -92,15 +173,29 @@
         Rendered to 8 decimal places and with the asset named, matching the address branch
         verbatim, because two phrasings of one instruction is rule 8 arriving as a customer
         reading two different sentences for the same act. -#}
-    <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
-       {{ view.swap.from_asset }}</strong> to this account, with the memo below &#8212; both halves are
-       needed to continue</p>
-    <p class="field-label">Account (shared by every swap)</p>
-    {{ copy_field(deposit.address, "the shared deposit account") }}
-    <p class="field-label">{{ deposit.discriminator }} &#8212; <strong>this is what identifies your swap</strong></p>
-    <div id="deposit-target">{{ copy_field(deposit.tag, "the memo tag", classes="mono tag-value") }}</div>
-    <p class="panel-note">A payment to that account without exactly this tag cannot be matched to your swap. The tag
-       is an integer, and <code>0</code> is a legal tag rather than a missing one.</p>
+    {#- BOXED, 2026-10-02. This is the branch the box matters most for: the
+        instruction on a tag chain is a PAIR, and the account and the discriminator
+        were two field-labeled copy rows sitting in the panel's own flow, with the
+        wallet menu, the QR and the raw request below them in the same flow and at
+        the same indentation. Nothing drew a line around "these two strings together
+        are the instruction". Now one bordered box holds exactly the pair and its
+        caveat, and the three conveniences stay outside it where swap.html's own
+        comment says they belong.
+
+        Every sentence inside is unchanged to the character, for the reason the
+        address branch above gives: a layout pass does not re-word the money. -#}
+    <div class="subbox">
+      <h3 class="subbox-title">Where to send it, and the tag that claims it</h3>
+      <p class="field-label">Send exactly <strong>{{ '%.8f'|format(view.swap.expected_input_amount) }}
+         {{ view.swap.from_asset }}</strong> to this account, with the memo below &#8212; both halves are
+         needed to continue</p>
+      <p class="field-label">Account (shared by every swap)</p>
+      {{ copy_field(deposit.address, "the shared deposit account") }}
+      <p class="field-label">{{ deposit.discriminator }} &#8212; <strong>this is what identifies your swap</strong></p>
+      <div id="deposit-target">{{ copy_field(deposit.tag, "the memo tag", classes="mono tag-value") }}</div>
+      <p class="panel-note">A payment to that account without exactly this tag cannot be matched to your swap. The
+         tag is an integer, and <code>0</code> is a legal tag rather than a missing one.</p>
+    </div>
   {% elif deposit.model == 'tag' %}
     <p class="panel-note">{{ deposit.note }}</p>
   {% else %}
@@ -176,7 +271,13 @@
   </div>
   {% endif %}
 
-  <p class="panel-note">Quote window: {{ view.window.display }} &#8212; {{ view.window.note }}</p>
+  {#- The `Quote window:` line was HERE and is now a row of the "This swap" table at
+      the top of the page. It was the last thing in this panel, under the wallet
+      menu, the QR and the raw payment request -- a fact about the quote filed under
+      how to pay a deposit, roughly a screen and a half from the swap's other
+      facts. Moved, not dropped: view.window.display and view.window.note both still
+      render, from the same services/swap_view.quote_window() call, and
+      tests/test_customer_page_layout.py pins that they reach the page. -#}
 </section>
 
 {# The live region. Its id is what static/script.js replaces; everything inside
@@ -192,16 +293,29 @@
      Confirmations are counts.</p>
   <div class="scroll-x">
   <table aria-describedby="deposit-table-note">
-    <thead><tr><th>txid</th><th>vout</th><th>amount</th><th>confirmations</th><th>first seen</th><th>credited</th></tr></thead>
+    {#- THE ASSET IS ITS OWN COLUMN, 2026-10-02, AND THAT IS THE WHOLE POINT OF THE
+        CHANGE. The amount cell used to read `0.01000000 GRC`, right-aligned -- which
+        aligns on the "C" and puts every decimal point in the column at a different x
+        depending on how many characters the ticker spends, so the one thing right
+        alignment buys is lost by keeping the unit in the cell. Splitting them, plus
+        `.num`'s tabular-nums, is what makes a column of eight-decimal amounts
+        readable as magnitudes rather than as strings.
+
+        It costs a seventh column in a table that already scrolls sideways inside
+        .scroll-x, and that is the trade taken knowingly: the brief asks for
+        alignment on amounts specifically, and this table was already wide enough to
+        need the scroller before the column was added. -#}
+    <thead><tr><th scope="col">txid</th><th scope="col" class="num">vout</th><th scope="col" class="num">amount</th><th scope="col">asset</th><th scope="col" class="num">confirmations</th><th scope="col">first seen</th><th scope="col">credited</th></tr></thead>
     <tbody>
       {% for event in view.swap.deposit_events %}
       <tr>
         <td class="mono breakable">{{ event.txid }}</td>
-        <td>{{ event.vout }}</td>
-        <td>{{ '%.8f'|format(event.amount) }} {{ event.asset }}</td>
-        <td>{{ event.confirmations }}</td>
-        <td>{{ event.first_seen_at }}</td>
-        <td>{{ event.credited_at or '(not credited)' }}</td>
+        <td class="num">{{ event.vout }}</td>
+        <td class="num">{{ '%.8f'|format(event.amount) }}</td>
+        <td class="unit">{{ event.asset }}</td>
+        <td class="num">{{ event.confirmations }}</td>
+        <td class="mono">{{ event.first_seen_at }}</td>
+        <td class="mono">{{ event.credited_at or '(not credited)' }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -221,15 +335,20 @@
      broadcast.</p>
   <div class="scroll-x">
   <table aria-describedby="payout-table-note">
-    <thead><tr><th>status</th><th>amount</th><th>txid</th><th>created</th><th>sent</th></tr></thead>
+    {#- Amount and asset split for the reason the deposit table above gives. `(none)`
+        for an unbroadcast txid and `(not sent)` for an unsent row are both kept
+        verbatim: a payout row with no txid is the one row on this page where a blank
+        cell would be read as "it went out and we lost the id" (rule 14). -#}
+    <thead><tr><th scope="col">status</th><th scope="col" class="num">amount</th><th scope="col">asset</th><th scope="col">txid</th><th scope="col">created</th><th scope="col">sent</th></tr></thead>
     <tbody>
       {% for payout in view.swap.payouts %}
       <tr>
         <td>{{ payout.status }}</td>
-        <td>{{ '%.8f'|format(payout.amount) }} {{ payout.asset }}</td>
+        <td class="num">{{ '%.8f'|format(payout.amount) }}</td>
+        <td class="unit">{{ payout.asset }}</td>
         <td class="mono breakable">{{ payout.txid or '(none)' }}</td>
-        <td>{{ payout.created_at }}</td>
-        <td>{{ payout.sent_at or '(not sent)' }}</td>
+        <td class="mono">{{ payout.created_at }}</td>
+        <td class="mono">{{ payout.sent_at or '(not sent)' }}</td>
       </tr>
       {% endfor %}
     </tbody>

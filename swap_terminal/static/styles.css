@@ -509,19 +509,17 @@ button:disabled {
 .status-head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
 .status-headline { margin: 0; font-size: var(--t-lg); }
 .status-detail { margin: var(--s2) 0 var(--s3); max-width: var(--measure); color: var(--ink-soft); }
-.status-meta { display: flex; gap: var(--s5); flex-wrap: wrap; margin: 0; }
-.status-meta dt, .kv dt, .echo dt {
-  font-size: var(--t-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-faint);
-  font-weight: 650;
-}
-.status-meta dd, .kv dd, .echo dd { margin: 0; font-size: var(--t-sm); }
 
-.kv, .echo { display: grid; gap: var(--s3); margin: 0; }
-.kv { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
-.echo { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: var(--s3); }
+/* `.status-meta`, `.kv` and `.echo` WERE HERE and are deleted rather than left
+ * for reference (rule 2: git history is the archive). All three were
+ * `display: grid` with `repeat(auto-fit, minmax(230..240px, 1fr))` over a <dl>,
+ * and all three are now `table.kvt` below -- one mechanism for one concept
+ * (rule 8), so there is no longer a second label/value vocabulary that can
+ * drift from the first. Their four former call sites were
+ * _swap_live.html (status-meta, kv), admin.html (echo, kv), and every one was
+ * converted in the same commit; grepped for the class NAMES across templates,
+ * static/*.js and tests, not just for imports (rule 2), and nothing else
+ * referenced them. */
 
 /* --- the progress rail -------------------------------------------------- */
 
@@ -677,6 +675,139 @@ tbody tr:hover { background: var(--surface-2); }
 
 .probe { margin-top: var(--s5); border-top: 1px solid var(--line); padding-top: var(--s4); }
 
+/* --- label/value tables, boxes, and digits that line up -----------------
+ *
+ * Added 2026-10-02 to one brief from the operator, which is the whole brief:
+ * "it's too spread out and needs to be tabulated and boxed".
+ *
+ * WHAT WAS WRONG, AND IT IS ARITHMETIC OVER THE TOKENS IN THIS FILE RATHER
+ * THAN AN IMPRESSION. Every label/value pair on both customer pages lived in a
+ * <dl> whose grid was `repeat(auto-fit, minmax(230px, 1fr))`. At this page's own
+ * declared widths that resolves to FOUR columns: `main` is max-width 1100px with
+ * var(--gutter)=16px each side (1068px of content), `.panel` takes var(--s4)=16px
+ * of padding each side (1036px inside), and with the grid's var(--s3)=12px gap,
+ * 4*230 + 3*12 = 956 fits where 5*230 + 4*12 = 1198 does not.
+ *
+ * So the status page's nine figures were dealt across four columns, and a
+ * value's left edge landed at one of FOUR x positions depending on which cell
+ * it fell into. "Expected in" and "Actually seen" -- the two numbers a customer
+ * is there to compare -- were not guaranteed to share a margin, or even a row.
+ * That is the ragged the brief names, and the auto-fit grid cannot fix it at
+ * any column count above one, because the columns are what produce it.
+ *
+ * NOT VERIFIED IN A BROWSER (rule 17). The container this was written in has
+ * none, and no screenshot was taken. The column count above is arithmetic over
+ * declared values and is checkable by reading them; whether the result LOOKS
+ * better is the operator's to say, and this comment does not claim it.
+ *
+ * A two-column table has exactly ONE x position for every value, by
+ * construction rather than by a width that happens to agree. So each group is
+ * now a `table.kvt` with a `th scope="row"` label and one `td` value.
+ *
+ * WHY NOT `grid-template-columns: max-content 1fr` ON THE <dl>, which aligns
+ * too and is the smaller diff. Because a <dl> of nine pairs is not announced as
+ * a nine-row table with row headers and `th scope="row"` is, so the same change
+ * buys the alignment and the semantics instead of just the alignment.
+ */
+.kvt {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 var(--s2);
+  font-size: var(--t-sm);
+}
+
+/* The label column shrinks to its content. `width: 1%` on a table that is
+ * width: 100% is the ordinary way to say that: the percentage loses to the
+ * cell's minimum content width, and the value column absorbs the remainder. */
+.kvt th[scope="row"] {
+  width: 1%;
+  white-space: nowrap;
+  text-align: left;
+  vertical-align: top;
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  font-weight: 650;
+  /* The global `th` rule sticks headers to the top, which is correct for the
+   * WIDE data tables it was written for -- a column header that scrolls out of
+   * view is the problem it solves. A ROW header is in the first column, never
+   * scrolls out of view vertically, and sticking it parks the label over the
+   * page heading above it. */
+  position: static;
+  background: transparent;
+}
+
+.kvt td {
+  text-align: left;
+  vertical-align: top;
+  /* The global `th, td` rule is `white-space: nowrap`, which is right for a
+   * txid in a six-column table and wrong for every value here: a 44-character
+   * base58 account would push the table wider than the panel instead of
+   * wrapping inside its own column. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Tighter than the global 8px/12px, because "too spread out" is about the space
+ * BETWEEN rows and not the space between boxes. 4px of vertical padding against
+ * the global 8px takes 8px off every row's height while the 1px rule between
+ * rows still separates them; the gap between boxes is deliberately unchanged,
+ * since collapsing that is what stops a group reading as a group. */
+.kvt th,
+.kvt td { padding: var(--s1) var(--s2); }
+.kvt th[scope="row"] { padding-right: var(--s4); }
+.kvt tbody tr:last-child th,
+.kvt tbody tr:last-child td { border-bottom: 0; }
+
+/* A cell holding a NUMBER.
+ *
+ * This is the single highest-value rule in the file for a page full of amounts.
+ * `tabular-nums` asks the font for the fixed-advance digit set, so 0.01000000
+ * and 1000.00000000 put their decimal points in the same place instead of
+ * drifting by the proportional widths of the digits that happen to be in them;
+ * right alignment is what makes a column of them readable as magnitudes. The
+ * mono family is belt to that braces, since not every system-ui face ships a
+ * tabular set and every mono one is tabular already.
+ *
+ * The ASSET goes in its own `.unit` cell rather than inside this one. A cell
+ * reading "0.01000000 BTC" is right-aligned on the "C", which un-aligns every
+ * decimal point in the column -- so the digits and the ticker are two columns.
+ */
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.unit { color: var(--ink-soft); white-space: nowrap; }
+
+/* A titled box INSIDE a panel. A box with no title is a rectangle and not a
+ * grouping, so .subbox-title is not optional markup: every .subbox in the
+ * templates carries one, and tests/test_customer_page_layout.py asserts the
+ * heading text renders for each. */
+.subbox {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: var(--s3);
+  margin: 0 0 var(--s3);
+}
+.subbox > :last-child { margin-bottom: 0; }
+.subbox-title {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  font-weight: 650;
+}
+
+/* A .kvt directly inside a .subbox sits on the sub-box's own background, so its
+ * row rules would double up with the border. One or the other. */
+.subbox .kvt th,
+.subbox .kvt td { border-bottom-color: var(--line); }
+
 /* --- phone ------------------------------------------------------------- */
 
 @media (max-width: 560px) {
@@ -687,7 +818,45 @@ tbody tr:hover { background: var(--surface-2); }
    * rather than shrinking the labels into illegibility or scrolling sideways. */
   .rail { grid-template-columns: repeat(3, 1fr); }
   .form.inline { grid-template-columns: 1fr; }
-  .status-meta { gap: var(--s3); }
+
+  /* THE LABEL/VALUE TABLES STACK; THE WIDE DATA TABLES SCROLL. Both choices are
+   * deliberate and they go opposite ways on purpose.
+   *
+   * A .kvt has labels up to 29 characters ("Where the threshold came from") and
+   * values including 44-character base58 accounts. Two columns of that inside a
+   * 360px screen leaves the value column a few characters wide, so it wraps to
+   * roughly one word per line while the label column keeps its full width --
+   * which is worse than what was there before the table. So th and td become
+   * blocks: the label is a small uppercase line and the value is underneath it
+   * at full panel width, which is the shape the old <dl> had on a phone anyway.
+   * Not scrolled, because the value is the thing being read and a value you
+   * have to drag sideways to finish is not readable.
+   *
+   * The six-column deposit and payout tables keep .scroll-x and slide sideways
+   * instead. They cannot stack into anything a reader can scan -- six stacked
+   * labels per row, times N rows -- and sideways scroll was already this page's
+   * answer for them before this change, so it stays its answer. */
+  .kvt tbody tr {
+    display: block;
+    border-bottom: 1px solid var(--line);
+  }
+  .kvt tbody tr:last-child { border-bottom: 0; }
+  .kvt th[scope="row"],
+  .kvt td {
+    display: block;
+    width: auto;
+    border-bottom: 0;
+  }
+  .kvt th[scope="row"] {
+    white-space: normal;
+    padding: var(--s2) 0 0;
+  }
+  .kvt td { padding: 0 0 var(--s2); }
+  /* Right alignment is what makes a COLUMN of digits readable. Stacked, there
+   * is no column, and a right-aligned lone value just floats away from its
+   * label. tabular-nums is kept: it costs nothing and still helps a reader
+   * compare two stacked amounts. */
+  .kvt td.num { text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -747,12 +916,25 @@ tbody tr:hover { background: var(--surface-2); }
 
 .wallet-state {
   font-size: var(--t-sm);
-  color: var(--text-muted);
+  /* --ink-faint, NOT --text-muted. This read `var(--text-muted)` from the day
+   * the wallet menu landed (2026-10-01) until 2026-10-02, and that name is
+   * declared nowhere in this file -- grepped the same day: two uses, zero
+   * declarations. An unresolvable var() with no fallback makes the whole
+   * declaration invalid at computed-value time, so `color` fell back to
+   * inherit and this note drew in full --ink. The effect was that a wallet's
+   * "checking..." state and an unusable wallet's reason rendered at the same
+   * weight as the deposit instruction they sit beside, which is the opposite of
+   * what the panel's own comment in swap.html says it is for: the instruction
+   * is the thing and these are conveniences around it. */
+  color: var(--ink-faint);
 }
 
 .wallet-name-disabled {
   font-size: var(--t-sm);
-  color: var(--text-muted);
+  /* Same undefined token, same fix -- and it was in BOTH of the two rules the
+   * wallet menu added, which is why this is recorded as one defect in two
+   * places rather than a typo. */
+  color: var(--ink-faint);
   min-width: 10rem;
 }
 
