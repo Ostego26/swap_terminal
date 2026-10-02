@@ -112,6 +112,62 @@ def stranded_rows(drops, asset: str, *, confirmations: int = 0) -> list[Stranded
     ]
 
 
+OUTSTANDING_SQL = """
+SELECT
+    asset,
+    txid,
+    address,
+    amount,
+    credits,
+    discriminator,
+    why,
+    confirmations,
+    first_seen_at,
+    last_seen_at,
+    resolved_at,
+    resolution_note,
+    -- DERIVED HERE AND NOT IN THE CALLER, because "has a human dealt with this"
+    -- is the question the table exists to answer and it must answer the same way
+    -- for every reader (rule 20). A root tool recomputing `resolved_at IS NULL`
+    -- would be the second place that definition lived.
+    CASE WHEN resolved_at IS NULL THEN 1 ELSE 0 END AS outstanding
+FROM unattributable_deposits
+WHERE (:asset IS NULL OR asset = :asset)
+  AND (:include_resolved = 1 OR resolved_at IS NULL)
+-- Oldest first, matching idx_unattributable_deposits_unresolved's own comment
+-- about "the query an operator actually runs": the deposit somebody has been
+-- waiting longest on is the one at the top.
+ORDER BY first_seen_at ASC, id ASC
+"""
+
+
+def outstanding(db, asset: str | None = None, *, include_resolved: bool = False) -> list:
+    """The rows an operator reads when somebody's money did not reach a swap.
+
+    WHY THIS EXISTS, measured 2026-10-02. Nothing in the tree could show these
+    rows. Four files reference the table -- the recorder, the adapter, the schema
+    and pay_test_deposit.py -- and not one of them lists it, so the only way to
+    see two days of unclaimed SOL was a hand-written SELECT. I wrote that SELECT
+    for the operator and got the column name wrong (`reason`; it is `why`), which
+    is the argument for the tool rather than an embarrassment: a query typed fresh
+    each time is a query that can be wrong each time, against the one table in
+    this schema whose rows are money nobody can claim.
+
+    OUTSTANDING IS THE DEFAULT, resolved rows on request. A dealt-with deposit is
+    history; an undealt-with one is somebody still owed an answer, and mixing them
+    makes the operator count. Note that this is the OPPOSITE default from
+    unattributable_txids() above, which deliberately includes resolved rows --
+    there the question is "may the scanner skip this" and resolved is a stronger
+    yes. Same table, two questions, and the difference is stated at both sites
+    (rule 8) because a reader who found one would otherwise assume the other.
+    """
+    rows = db.execute(
+        OUTSTANDING_SQL,
+        {"asset": asset, "include_resolved": 1 if include_resolved else 0},
+    ).fetchall()
+    return list(rows)
+
+
 def unattributable_txids(db, asset: str) -> frozenset[str]:
     """Every txid already RECORDED as unattributable for this asset. For the deposit scan to skip.
 
