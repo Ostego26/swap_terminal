@@ -159,12 +159,29 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
     follows it. The caller takes the enabled SUBSET for anything that OFFERS a
     pair, so a form still cannot offer something the server would refuse.
 
-    `reason` is prose for a person and is the only part of the row that should ever
-    be shown next to DISABLED. It is built by chains/registry.why_unconfigured(),
-    which names the environment variable through
-    network_target.configuring_variable() -- so the page, the workers' startup
-    banner, /api/health and create_swap()'s refusal all name the same variable from
-    one place (rule 8).
+    `reason` is prose for an OPERATOR, and both halves of what this paragraph used to
+    say about it were wrong by 2026-10-03:
+
+      "the only part of the row that should ever be shown next to DISABLED" --
+      templates/index.html stopped rendering `reason` at all on 2026-10-02, at the
+      operator's own instruction ("the user screen should just have graphical
+      indicators"). A customer sees the label, the badge and a per-STATE note; the
+      per-pair reason is /admin's. A sentence telling the next reader to put it
+      beside a customer-facing badge would undo that deliberately.
+
+      "names the environment variable through configuring_variable()", singular --
+      measured, why_unconfigured() names up to THREE per chain
+      (BTC_RPC_PORT, BTC_RPC_USER and BTC_RPC_PASS), and only the port comes from
+      configuring_variable(). The two credential names are built in
+      chains/registry.missing_settings(). Naming one variable where three are needed
+      sends a reader to check the setting that was already correct, which is the
+      failure registry.py's own docstring warns about -- and this file was committing
+      it in prose while calling the function that does it right.
+
+    What is unchanged and is the point: the sentence comes from ONE place
+    (chains/registry.why_unconfigured()), so this page, the workers' startup banner,
+    /api/health and create_swap()'s refusal cannot word one refusal four ways
+    (rule 8).
 
     config.get("RPC") rather than config["RPC"]: a seeded config in a test may not
     carry the RPC mapping, and why_unconfigured() degrades to naming the chain's
