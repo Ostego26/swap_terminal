@@ -136,6 +136,22 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+# THE REDUNDANT ALIAS IS THE POINT, not a typo. `import x as x` is PEP 484's
+# explicit re-export form, and it is what stops `ruff --fix` deleting this line as
+# an unused import -- which it did once, taking every
+# `from chains.solana_units import amount_to_base_units` with it and failing
+# tests/test_solana_units.py at collection.
+#
+# RULE 12's SANCTIONED CASE, and the noqa says what was checked: ruff accepts this
+# form only in __init__.py, and the house requirement is that the old import path
+# keeps working for the Solana call sites and tests that use it (renaming those
+# would be churn with no reader benefit). "Where the house style and a lint rule
+# genuinely disagree, the house style wins and the disagreement gets a noqa with a
+# reason." The alternative spellings were tried: a plain import is deleted by
+# --fix, and a partial __all__ would claim this module exports one name when it
+# exports a dozen.
+from .coin_amounts import amount_to_base_units as amount_to_base_units  # noqa: PLC0414
+
 # --- amounts -----------------------------------------------------------------
 
 # 1 SOL = 10^9 lamports. Native SOL's decimals; an SPL mint carries its own.
@@ -173,22 +189,15 @@ def base_units_to_amount(base_units: int, decimals: int) -> float:
     return float(Decimal(int(base_units)) / (Decimal(10) ** decimals))
 
 
-def amount_to_base_units(amount: float, decimals: int) -> int:
-    """Convert a float amount to integer base units, rounding DOWN.
-
-    Rounds down (truncates) rather than to-nearest, and the direction is
-    deliberate on a payout path: rounding up would send a fraction of a unit
-    more than was quoted, every time, out of the hot wallet. Truncation errs
-    toward keeping it.
-
-    Decimal(str(amount)) rather than Decimal(amount), because the second
-    converts the float's exact binary value -- Decimal(0.1) is
-    0.1000000000000000055511151231257827... -- and truncating THAT is a
-    different answer from truncating the decimal number the operator typed.
-    """
-    if decimals < 0:
-        raise ValueError(f"decimals cannot be negative, got {decimals}")
-    return int(Decimal(str(amount)) * (Decimal(10) ** decimals))
+# amount_to_base_units() USED TO BE DEFINED HERE and moved to
+# chains/coin_amounts.py on 2026-10-03, when chains/base.py became its second
+# caller: it is chain-agnostic arithmetic that already rounded DOWN for the payout
+# reason, and rule 8 says the shared version goes where both callers can reach it.
+#
+# It is imported at the top of this module rather than re-exported with __all__,
+# so `from chains.solana_units import amount_to_base_units` keeps working for the
+# Solana call sites and tests that ask for it by this path -- renaming those would
+# be churn with no reader benefit.
 
 
 def decimal_amount(amount) -> str:

@@ -67,6 +67,7 @@ import requests
 # key-holding system.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from chains.coin_amounts import fit_to_chain_precision
 from script_pub_key import pays_address
 
 logger = logging.getLogger(__name__)
@@ -347,7 +348,73 @@ class RPCAdapter:
         return float(self.call("getbalance"))
 
     def send_to_address(self, address: str, amount: float) -> str:
-        return self.call("sendtoaddress", address, float(amount))
+        """Pay `amount` to `address`. The amount is FITTED to the chain's precision first.
+
+        IT USED TO SEND THE RAW FLOAT, AND BTC AND LTC COULD NOT HAVE PAID OUT AT
+        ALL. Measured 2026-10-03 on the operator's regtest node. A quoted payout is
+        a float with as many decimals as the arithmetic produced, and this is what
+        went on the wire:
+
+            2701.3495803173805   ->  "2701.3495803173805"    13 decimals
+            0.00041198765432109  ->  "0.00041198765432109"   17 decimals
+
+        Bitcoin Core parses an amount with ParseFixedPoint(value, 8), which REJECTS
+        more than eight decimals rather than rounding. Proven with
+        createrawtransaction, which runs the same parser and broadcasts nothing:
+
+            0.00041198765432109  ->  error code -3, "Invalid amount"
+            4.1e-07              ->  ACCEPTED, an output of 0x29 = 41 satoshis
+
+        GRC->BTC and GRC->LTC are in ALLOWED_PAIRS and pass every gate, so the send
+        would have failed with "Invalid amount" AFTER the customer's deposit was
+        confirmed and irreversible -- the same ordering as the insufficient-funds
+        failure the funding gate was added for that morning.
+
+        GRIDCOIN MASKED IT, which is why five swaps settled without finding it: its
+        RPC accepted 2701.3495803173805 and rounded on chain to 2701.34958032,
+        exactly as the payout transaction the operator pasted shows.
+
+        AND ONE EXPECTATION WAS REFUTED (rule 17): I expected exponent notation to
+        fail too, since small payouts serialize as "4.1e-07". Core accepted it. So
+        the defect is the decimal COUNT alone and no string formatting is needed --
+        a fitted float serializes either within eight decimals or in an exponent
+        form the parser handles.
+
+        DOWN, NEVER NEAREST. chains/coin_amounts.fit_to_chain_precision() inherits
+        that from amount_to_base_units(), whose own reason is that rounding up
+        sends a fraction more than was quoted out of the hot wallet every time. The
+        customer is short by at most one satoshi; the desk is never over.
+
+        THE REDUCTION IS LOGGED, not silent. A payout the operator reconciles
+        against a chain explorer differs from the quote in its last digit, and a
+        number that changed without saying so is the defect rule 14 is about.
+        """
+        fitted, changed = fit_to_chain_precision(float(amount), self.asset)
+        # A POSITIVE PAYOUT THAT FITS TO ZERO IS REFUSED HERE, NOT SENT. Found by
+        # measuring the fit rather than by reasoning about it: 1e-09 BTC is a tenth
+        # of a satoshi, so it quantizes to 0.0, and `sendtoaddress(address, 0.0)`
+        # is a daemon error ("amount must be positive") dressed up as our own
+        # arithmetic. The refusal names the cause instead, because "Invalid amount"
+        # arriving from a daemon for a payout WE reduced to zero is the hardest
+        # kind of message to trace back.
+        #
+        # THE RIGHT PLACE FOR THIS IS create_swap(), AND THAT IS THE OPERATOR'S
+        # (rule 16). A payout refused here has already taken the customer's
+        # deposit; refusing at creation costs a retry, which is the whole argument
+        # services/payout_capacity.py was built on the same day. What stops it being
+        # done here is that the threshold is not zero -- Bitcoin Core also rejects
+        # an output below its DUST limit, which is a few hundred satoshis and
+        # depends on the output type, and no part of this tree measures it yet.
+        # Refusing exactly-zero is the half that needs no threshold.
+        if fitted <= 0 < float(amount):
+            raise RPCError(
+                f"a {self.asset or 'this chain'} payout of {amount!r} fits to {fitted!r} at "
+                f"{self.asset or 'this chain'}'s precision, which is nothing: the amount is smaller than "
+                f"the chain's smallest unit. NOTHING was sent. {changed}"
+            )
+        if changed:
+            logger.info("%s payout amount %s  <- %s", self.asset or "?", fitted, changed)
+        return self.call("sendtoaddress", address, fitted)
 
     def get_transaction(self, txid: str) -> dict:
         # Checked: `gettransaction` only knows wallet transactions, so its
