@@ -126,12 +126,33 @@ _ENDPOINT_VARIABLES: dict[str, str] = {
 def configuring_variable(chain: str) -> str:
     """The environment variable that makes this chain reachable. Never raises.
 
-    Verified against config.py 2026-09-26 rather than recalled: BTC/LTC/GRC read
-    <CHAIN>_RPC_PORT (config.py:204 for GRC), XRP reads XRP_RPC_URL
-    (config.py:134) and SOL reads
-    SOL_RPC_URL (config.py:192). chains/registry.build_adapters() skips a chain
-    whose value is falsy, which is what makes this the variable that decides
-    whether an adapter exists at all.
+    Verified against config.py 2026-09-26 and re-verified 2026-10-03 rather than
+    recalled: BTC/LTC/GRC read <CHAIN>_RPC_PORT, XRP reads XRP_RPC_URL and SOL
+    reads SOL_RPC_URL, all inside Config.RPC.
+    chains/registry.build_adapters() skips a chain whose value is falsy, which is
+    what makes this the variable that decides whether an adapter EXISTS at all.
+
+    THE LINE NUMBERS THAT USED TO BE IN THIS PARAGRAPH WERE ALL THREE WRONG, and
+    they are gone rather than refreshed. It cited config.py:204 for GRC's port,
+    :134 for XRP_RPC_URL and :192 for SOL_RPC_URL; measured 2026-10-03 the reads
+    are at 390, 272 and 378, and line 204 is inside the ALLOWED_PAIRS comment
+    block. A line number is a citation that rots on every edit above it and says
+    nothing when it rots, so the test is the reference instead:
+    tests/test_network_target.test_configuring_variable_matches_what_config_py_actually_reads()
+    greps config.py's source for each returned name, which cannot go stale
+    silently.
+
+    THIS IS THE PRIMARY NAME ONLY, AND IT IS NOT THE WHOLE SET for a
+    Bitcoin-derived chain. Since 2026-09-26 chains/registry.build_adapters() also
+    requires <CHAIN>_RPC_USER and <CHAIN>_RPC_PASS -- an adapter built from an
+    empty credential pair 401s on every call -- so a caller that prints only this
+    name for BTC, LTC or GRC names one variable where three are needed.
+    chains/registry.missing_settings() returns the complete list and
+    chains/registry.why_unconfigured() is the sentence built from it; use those
+    wherever an operator has to go and export something. This function exists for
+    the ONE value that decides reachability, and the distinction is named here
+    because the difference is two variables an operator would otherwise have to
+    discover by retrying.
 
     The `<CHAIN>_RPC_PORT` fallback for an unknown chain matches what describe()
     and require_configured() already do two functions below, so a chain added to

@@ -42,9 +42,32 @@ mainnet wallet and not the testnet wallet" -- which is the shape CLAUDE.md rule
 13 warns about: nothing crashed, nothing warned, and the only symptom was
 somebody noticing.
 
-All five are now conditional on the one value that cannot be defaulted, and the
-test is identical for each: a URL for SOL and XRP, a port for BTC, LTC, GRC and
-config.py defaults those ports to network_target.UNCONFIGURED_PORT.
+All five are now conditional on the values that cannot be defaulted, and the
+test is _REQUIRED_SETTINGS below -- one entry per chain, so there is one table to
+read rather than a sentence that has to be kept in step with it.
+
+THAT SENTENCE USED TO READ "the one value that cannot be defaulted ... a URL for
+SOL and XRP, a port for BTC, LTC, GRC", AND IT WAS WRONG BY TWO VARIABLES PER
+CHAIN as of the 2026-09-26 credential fix two paragraphs below. Re-measured
+2026-10-03 by calling the real function with a config built from an environment
+carrying no BTC_RPC_* or LTC_RPC_* at all:
+
+    missing_settings(Config.RPC, "BTC") -> ['BTC_RPC_PORT', 'BTC_RPC_USER', 'BTC_RPC_PASS']
+    missing_settings(Config.RPC, "LTC") -> ['LTC_RPC_PORT', 'LTC_RPC_USER', 'LTC_RPC_PASS']
+
+ONE for SOL and XRP (a URL), THREE for BTC, LTC and GRC (a port and both halves
+of the HTTP credential). The header kept saying "one value" and naming only the
+port while the code three lines down had been testing all three for a week --
+which is the precise failure this file's own missing_settings() docstring warns
+about on the operator's behalf: a message that names one variable where three
+are needed sends a reader to check the setting that was already correct. A header
+is read at a glance and trusted at a glance, so a stale one is cheaper to
+believe than the code is to read (CLAUDE.md rule 16: a wrong comment is a bug).
+
+config.py defaults the three ports to network_target.UNCONFIGURED_PORT and the
+user/password pairs to "", so every key is PRESENT and falsiness is the test --
+see missing_settings() below, which says why that is deliberate rather than
+incidental.
 
 The reason a missing port must SKIP rather than guess is the one the Solana
 paragraph below already gives, plus a second one that only applies to the older
@@ -126,7 +149,9 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # mislead the next reader.
     # `not missing_settings(...)` rather than `rpc[asset].get("port")`, since
     # 2026-09-26: a port with no password builds an adapter that 401s on every
-    # call. See _REQUIRED_SETTINGS above for the run that measured it.
+    # call. See _REQUIRED_SETTINGS BELOW in this file for the run that measured
+    # it -- this said "above", which is the one direction a reader cannot find it
+    # in, since the table is defined after this function rather than before it.
     adapters = {
         asset: cls(**rpc[asset])
         for asset, cls in _BITCOIN_DERIVED.items()
@@ -183,7 +208,24 @@ def missing_settings(rpc: Mapping[str, Mapping], asset: str) -> list[str]:
     something. The primary one comes from network_target.configuring_variable() so
     it cannot drift from CHAIN_PORTS or from the workers' startup banner; the
     credential names are derived as <ASSET>_RPC_USER and <ASSET>_RPC_PASS, which
-    config.py:157-206 uses for all three Bitcoin-derived chains without exception.
+    config.py uses for all three Bitcoin-derived chains without exception -- grep
+    `_env("BTC_RPC_USER"` and its five siblings in Config.RPC rather than trusting
+    a line number. This cited "config.py:157-206", and on 2026-10-03 those lines
+    were in the middle of the ALLOWED_PAIRS comment block: the real reads are in
+    Config.RPC's BTC, LTC and GRC entries, which had moved about 160 lines down
+    the file since the citation was written. A line number is a reference that
+    rots on every edit ABOVE it, so this names the thing to search for instead.
+
+    THE DERIVATION IS SPELLED HERE AND NOT IN config.py, which is the one piece of
+    drift this function is exposed to: configuring_variable() is checked against
+    config.py's source by
+    tests/test_network_target.test_configuring_variable_matches_what_config_py_actually_reads(),
+    but that test only ever covered the PRIMARY name. The two credential suffixes
+    are now covered the same way by
+    tests/test_offline_reason_names_the_variables.py, so a rename of
+    BTC_RPC_PASS in config.py fails a test instead of producing a reason that
+    names a variable nothing reads -- the exact shape of the 2026-09-26 incident
+    recorded above, where the operator's value sat under GRC_TESTNET_RPC_PASS.
 
     Falsy rather than absent, on purpose: config.py defaults every one of these to
     "" or to UNCONFIGURED_PORT, so a key is always PRESENT and the question is
@@ -240,9 +282,24 @@ def why_unconfigured(asset: str, rpc: Mapping[str, Mapping] | None = None) -> st
     sent them to check the one variable that was already correct. With `rpc` it
     names exactly what missing_settings() found.
 
-    Names the variable via network_target.configuring_variable() rather than
-    spelling it here, so this cannot drift from the workers' startup banner or
+    NAMES EVERY MISSING VARIABLE, NOT ONE. missing_settings() returns a list and
+    this joins all of it, because for a Bitcoin-derived chain there are THREE
+    things that can be missing and naming only the first would send an operator
+    back for a second round after exporting it. Measured 2026-10-03 against a
+    config built with no BTC_RPC_* exported at all, which is the state the
+    operator reported the page in:
+
+        BTC has no adapter in this process: BTC_RPC_PORT, BTC_RPC_USER and
+        BTC_RPC_PASS are unset (or 0) in the environment this process was started
+        with. ...
+
+    The primary name comes from network_target.configuring_variable() rather than
+    being spelled here, so it cannot drift from the workers' startup banner or
     from config.py (rule 8 -- three copies of a variable name is a typo waiting).
+    The two credential names are derived by missing_settings() above; that
+    derivation is the one string in this path that is NOT taken from
+    network_target, and it is pinned against config.py's source by
+    tests/test_offline_reason_names_the_variables.py.
 
     The .env sentence is the part that actually resolves the 2026-09-26 incident
     and it is not incidental: config.py's own header says nothing in the serving
