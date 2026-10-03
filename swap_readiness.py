@@ -754,8 +754,20 @@ def chain_precheck(asset: str, port: int) -> tuple[bool, str, str]:
     for LTC would be rule 8's defect with two delays on it, and the thing being
     copied is a refusal to read a real wallet.
 
-    gridcoin_precheck() below is kept as a one-line wrapper because tests and
-    chain_balances.py import it by name.
+    gridcoin_precheck() below is kept as a one-line wrapper because check_gridcoin()
+    (line 821) and tests/test_swap_readiness.py call it by name -- the test file
+    both imports it and monkeypatches it on this module in three places.
+
+    THAT SENTENCE USED TO SAY "tests and chain_balances.py import it by name", AND
+    chain_balances.py DOES NOT. Measured 2026-10-03 by grepping the tree for both
+    names: chain_balances.py contains neither `gridcoin_precheck` nor
+    `chain_precheck`, and the only importers of this module anywhere are
+    tests/test_swap_readiness.py and tests/test_htlc_assets.py. It has its own
+    network check and it is a DIFFERENT mechanism rather than a copy -- it asks the
+    DAEMON which network it is on (chains/daemon_network.chain_network), where this
+    classifies the PORT before any socket opens. Both are legitimate and each is
+    named here so a reader of one is told the other exists (rule 8); what was wrong
+    was the claim about who calls this.
 
     THE DECISION ITSELF MOVED TO network_target.may_read_a_wallet() ON 2026-10-03,
     and this is now the PASS/FAIL wrapper around it. wallet_custody.py needed the
