@@ -79,7 +79,7 @@ unarmed call, and it is still reached by any caller that forgets.
 
 from __future__ import annotations
 
-from .xrp_units import to_drops
+from .xrp_units import to_drops_round_half_up
 
 # MAINNET, IDENTIFIED BY THE NETWORK'S OWN ID RATHER THAN BY A HOSTNAME.
 #
@@ -428,14 +428,21 @@ def reserve_drops(base_reserve_xrp, owner_reserve_xrp=None, owner_count=None) ->
     server from the container this was written in, so the absent case is
     handled and labeled instead of assumed away.
     """
-    base = to_drops(base_reserve_xrp)
+    # to_drops_round_half_up(), NOT to_drops(). to_drops() became TRUNCATING on
+    # 2026-10-03 by operator decision so that no payout exceeds its quote, and a
+    # RESERVE wants the opposite direction for the reason this docstring already
+    # gives: rounded down it understates what the account must retain, which is
+    # how this terminal comes to believe it has spendable balance it does not.
+    # This site therefore keeps the rounding it has always had. Both functions are
+    # in chains/xrp_units.py and each names the other.
+    base = to_drops_round_half_up(base_reserve_xrp)
     if owner_count is None or owner_reserve_xrp is None:
         return base, (
             f"{base} drops = base reserve only. OwnerCount or reserve_inc_xrp was ABSENT from the "
             f"server's response, so any owner reserve is NOT included and this figure UNDERSTATES the "
             f"true reserve for an account that owns ledger objects."
         )
-    increment = to_drops(owner_reserve_xrp)
+    increment = to_drops_round_half_up(owner_reserve_xrp)
     owned = int(owner_count)
     total = base + increment * owned
     return total, (

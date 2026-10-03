@@ -72,7 +72,7 @@ WHAT XRP DOES DIFFERENTLY FROM EVERY CHAIN ALREADY HERE
    makes it dangerous.
 """
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 DROPS_PER_XRP = 1_000_000
 XRP_DECIMALS = 6
@@ -169,40 +169,18 @@ class XRPTagError(ValueError):
     """
 
 
-def to_drops(amount) -> int:
-    """XRP as a decimal quantity -> drops as an integer.
+def _to_drops(amount, rounding: str) -> int:
+    """One drop conversion, with the rounding direction supplied by the caller.
 
-    Via Decimal(str(amount)) rather than multiplying the float: `0.1 * 10**6` is not reliably
-    100000 in binary floating point, and the error falls whichever way the
-    representation happens to land.
+    THE ARITHMETIC IS HERE ONCE AND THE DIRECTION IS A PARAMETER, which is rule
+    8's shape: two callers below want opposite directions for reasons that are
+    genuinely different, and the alternative was two copies of the
+    Decimal(str(...)) * DROPS_PER_XRP conversion that would agree on the day they
+    were written and drift afterwards.
 
-    ROUND_HALF_UP, AND IT IS THE ONLY CONVERSION IN THIS TERMINAL THAT CAN SEND
-    MORE THAN WAS ASKED FOR. Named here because the difference is real rather
-    than an oversight, and rule 8 asks that such a difference be recorded at
-    BOTH sites naming the other one. The other site is
-    chains/coin_amounts.fit_to_chain_precision(), which TRUNCATES for BTC, LTC
-    and GRC, and whose docstring argues the direction at length: rounding up
-    sends a fraction of a unit more than was quoted out of the hot wallet every
-    time. chains/coin_amounts.amount_to_base_units() truncates for SOL for the
-    same reason. chains/payout_quantization.py is the one module that dispatches
-    to both and carries the comparison in its header.
-
-    WHAT THE DIFFERENCE COSTS, MEASURED 2026-10-03 over 60,000 random amounts
-    between 1e-9 and 1e7 XRP: 24,850 of them -- 41.4% -- come back as MORE XRP
-    than was passed in, by at most half a drop (0.0000005 XRP). Examples in each
-    direction, the third being the payout that found the recording defect this
-    comment is part of:
-
-        0.0040178           -> 4018 drops = 0.004018     UP   by 0.2 drops
-        1.1996736819422498  -> 1199674 drops = 1.199674  UP   by 0.26 drops
-        3.3155893288590605  -> 3315589 drops = 3.315589  DOWN by 0.33 drops
-
-    IT IS LEFT AS IT IS DELIBERATELY. This is what chains/xrp.py has called on
-    every payout and every preview since XRP was wired up, so ROUND_HALF_UP is
-    what the ledger has already been receiving; switching it to truncation would
-    change what gets sent by up to one drop, which is live posture and the
-    operator's call (rule 16). It is written down here so that the next reader
-    comparing the two does not have to rediscover which way each one goes.
+    Via Decimal(str(amount)) rather than multiplying the float: `0.1 * 10**6` is
+    not reliably 100000 in binary floating point, and the error falls whichever
+    way the representation happens to land.
     """
     try:
         quantity = Decimal(str(amount))
@@ -216,7 +194,133 @@ def to_drops(amount) -> int:
         raise XRPUnitError(f"{amount!r} is not a finite number of XRP")
     if quantity < 0:
         raise XRPUnitError(f"{amount!r} is negative; neither a deposit nor a payout can be")
-    return int((quantity * DROPS_PER_XRP).to_integral_value(rounding=ROUND_HALF_UP))
+    return int((quantity * DROPS_PER_XRP).to_integral_value(rounding=rounding))
+
+
+def to_drops(amount) -> int:
+    """XRP as a decimal quantity -> drops as an integer, TRUNCATED toward zero.
+
+    THIS IS THE AMOUNT CONVERSION: the drop count a payment carries. For the
+    reserve and the fee, which want the opposite direction, see
+    to_drops_round_half_up() below.
+
+    =========================================================================
+    IT ROUNDED HALF UP UNTIL 2026-10-03, AND THE OPERATOR CHANGED IT
+    =========================================================================
+
+    OPERATOR DECISION 2026-10-03, in their words: "make it all match". This is
+    the one conversion in the terminal that did not, so this is the one that
+    moved. It is a LIVE POSTURE CHANGE -- it changes what the XRP Ledger
+    receives -- and it is recorded as the operator's rather than as a cleanup,
+    because rule 16 puts that decision with them and they made it.
+
+    WHY TRUNCATION AND NOT HALF-UP, which is the half a future reader will
+    otherwise flip back. chains/coin_amounts.fit_to_chain_precision() carries an
+    invariant in so many words -- "the desk never sends more than it quoted" --
+    and under ROUND_HALF_UP that sentence was FALSE for XRP. Measured on the same
+    day it was also false for GRC, from the other end: Gridcoin's own daemon
+    rounds an over-precise amount half up, so the desk could overpay even on a
+    chain whose quantizer truncates (the four-behavior table in
+    chains/payout_quantization.py has that measurement, 9 of 9 rows). Truncation
+    everywhere makes an invariant this tree already documents TRUE on all five
+    chains, instead of adding a caveat to it. The direction was chosen to make an
+    existing claim hold, not for symmetry.
+
+    WHAT IT COSTS, MEASURED rather than argued, over the seeded 60,000-draw
+    sample in tests/test_payout_quantization._sample_amounts() (60,015 positive
+    amounts once the named figures are included):
+
+        24,854 of 60,015   quantize to a DIFFERENT drop count than before
+                           (24,850 of the 60,000 random draws, 4 of the 15
+                           named positives -- the two halves reconcile exactly)
+        1 drop             the largest change, and the largest possible one:
+                           half-up and truncation differ by at most one base
+                           unit by construction
+        0 of 60,015        now quantize UPWARD, on this chain or any other
+
+    So a customer whose payout used to round up receives one drop less --
+    0.000001 XRP -- and no payout can now exceed its quote on any chain.
+
+    THE SUPERSEDED MEASUREMENT IS KEPT, because the drift is the point (rule 1).
+    What this docstring said until 2026-10-03, and it was true when written:
+
+        ROUND_HALF_UP, AND IT IS THE ONLY CONVERSION IN THIS TERMINAL THAT CAN
+        SEND MORE THAN WAS ASKED FOR. [...] Measured 2026-10-03 over 60,000
+        random amounts between 1e-9 and 1e7 XRP: 24,850 of them -- 41.4% --
+        come back as MORE XRP than was passed in, by at most half a drop
+        (0.0000005 XRP). Examples in each direction, the third being the payout
+        that found the recording defect this comment is part of:
+
+            0.0040178           -> 4018 drops = 0.004018     UP   by 0.2 drops
+            1.1996736819422498  -> 1199674 drops = 1.199674  UP   by 0.26 drops
+            3.3155893288590605  -> 3315589 drops = 3.315589  DOWN by 0.33 drops
+
+        IT IS LEFT AS IT IS DELIBERATELY. This is what chains/xrp.py has called
+        on every payout and every preview since XRP was wired up, so
+        ROUND_HALF_UP is what the ledger has already been receiving; switching
+        it to truncation would change what gets sent by up to one drop, which
+        is live posture and the operator's call (rule 16).
+
+    The first two of those three examples now read 4017 drops = 0.004017 and
+    1199673 drops = 1.199673. The THIRD DOES NOT MOVE, and that one matters
+    beyond the example: 3.3155893288590605 XRP is 3315589.3288590605 drops, whose
+    fractional part is 0.329 and therefore below the half that would have
+    separated the two roundings. So the one real XRP payout this terminal has on
+    a ledger -- swap s_539d922e9ef0a5d8, 3315589 drops read off the testnet, and
+    the `payouts` row corrected to 3.315589 against it -- is unaffected by this
+    change, and correct_payout_amounts.py does not start refusing a row it
+    already fixed. Verified by this file's own arithmetic rather than taken on
+    trust, and pinned by a test.
+
+    THE OTHER FOUR CONVERSIONS ARE UNCHANGED and already truncated:
+    chains/coin_amounts.fit_to_chain_precision() for BTC, LTC and GRC and
+    chains/coin_amounts.amount_to_base_units() for SOL.
+    chains/payout_quantization.py is the one module that dispatches to all of
+    them and carries the comparison in its header, including the four-behavior
+    table of what each DAEMON does with an over-precise amount -- which is a
+    different question from this one and is why that table still exists.
+    """
+    return _to_drops(amount, ROUND_DOWN)
+
+
+def to_drops_round_half_up(amount) -> int:
+    """XRP -> drops, rounded HALF UP. For the RESERVE and the FEE, never an amount.
+
+    SPLIT OUT OF to_drops() ON 2026-10-03, when to_drops() became truncating by
+    operator decision (see its docstring). This function exists so that change
+    moved what the operator asked to move -- the amount a payment carries -- and
+    NOTHING ELSE. The two callers here are:
+
+        chains/xrp.XRPAdapter's server read      base_fee_xrp -> fee_drops
+        chains/xrp_signing.reserve_drops()       reserve_base_xrp, reserve_inc_xrp
+
+    and at both of those the conservative direction is the OPPOSITE of a
+    payout's. A payout rounded up spends more than was quoted; a RESERVE rounded
+    down makes this terminal believe it has spendable balance it does not, which
+    is the exact failure chains/xrp_units.py's point 3 and
+    reserve_drops()' own docstring both already warn about ("guessing it low
+    would let this path commit to a payment the ledger refuses after claiming a
+    fee"). Inheriting a payout's direction at a reserve check would have been a
+    change to whether a swap may proceed, which is fund movement and not mine
+    (rule 16).
+
+    SO THIS IS NOT A SECOND ROUNDING RULE, IT IS THE SAME ONE THOSE TWO SITES
+    ALREADY HAD. Behavior at both is byte-identical to before 2026-10-03.
+
+    MEASURED, AND IT IS A NO-OP ON EVERY VALUE THIS TREE HAS EVER SEEN: the
+    reserve and fee figures rippled reports are derived from integer drop
+    counts, so they land exactly on a drop and every rounding agrees. The
+    measured payloads in tests/xrp_seeded_transport.py, read off
+    s.altnet.rippletest.net, are reserve_base_xrp=1, reserve_inc_xrp=0.2 and
+    base_fee_xrp=1e-05 -- 1,000,000, 200,000 and 10 drops, all exact.
+
+    NOT MEASURED, and stated as the hypothesis it is (rule 17): that no rippled
+    build ever reports a reserve at a fractional drop. No live server was
+    reachable from the container this was written in, so the direction is
+    PRESERVED rather than reasoned away -- which costs nothing if the hypothesis
+    holds and is correct if it does not.
+    """
+    return _to_drops(amount, ROUND_HALF_UP)
 
 
 def from_drops(drops) -> float:

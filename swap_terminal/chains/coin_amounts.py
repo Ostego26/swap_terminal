@@ -7,7 +7,7 @@ Writes: nothing
 Can move funds: no -- but it DECIDES the number a payout sends, so it is on the
       order path and the truncation direction below is the live-money decision
       in this file.
-Live-safe: yes.
+Mainnet-safe: yes.
 
 WHY THIS EXISTS, MEASURED 2026-10-03 ON THE OPERATOR'S REGTEST NODE.
 
@@ -106,22 +106,55 @@ def fit_to_chain_precision(amount: float, asset: str) -> tuple[float, str]:
     desk never sends more than it quoted. Rounding to nearest would overpay half
     the time, every time, out of the hot wallet.
 
-    AND chains/xrp_units.to_drops() DOES THE OPPOSITE, WHICH IS NAMED HERE
-    BECAUSE IT IS A REAL DIFFERENCE RATHER THAN AN OVERSIGHT -- rule 8 asks that
-    a genuine difference be recorded at BOTH sites naming the other, the other
-    site is to_drops()'s own docstring, and chains/payout_quantization.py is the
-    one module that dispatches to both. to_drops() uses ROUND_HALF_UP, so an XRP
-    payout can be rounded UP to the next whole drop. Measured 2026-10-03 over
-    60,000 random amounts between 1e-9 and 1e7 XRP: 24,850 of them -- 41.4% --
-    quantize UPWARD, by at most half a drop (0.0000005 XRP). Four chains in this
-    terminal truncate and one rounds half up.
+    ALL FIVE CONVERSIONS IN THIS TERMINAL NOW GO THE SAME WAY, AND ONE OF THEM
+    DID NOT UNTIL 2026-10-03. chains/xrp_units.to_drops() used ROUND_HALF_UP, so
+    an XRP payout could be rounded UP to the next whole drop -- which made the
+    sentence two paragraphs above ("the desk never sends more than it quoted")
+    FALSE for one of this terminal's five chains, in a docstring that stated it
+    without qualification. Operator decision 2026-10-03, in their words "make it
+    all match": to_drops() truncates. Measured over the seeded sample in
+    tests/test_payout_quantization.py, 60,015 positive amounts per chain: 0
+    quantize upward on any chain, where XRP read 24,854 of 60,015 before. The
+    invariant is now true as written rather than true with an exception.
 
-    THAT ASYMMETRY IS NOT RESOLVED HERE, and the reason is rule 16 rather than
-    indifference: to_drops() is what chains/xrp.py has always called on every
-    payout, so ROUND_HALF_UP is what the ledger has been receiving all along.
-    Changing it would change what gets sent, which is live posture and the
-    operator's decision. What changed on 2026-10-03 is only that the `payouts`
-    row records the figure the chain actually sends, whichever way it rounded.
+    THE SUPERSEDED TEXT IS KEPT, because a measurement in prose ages and this one
+    aged in five hours (rule 1). Until 2026-10-03 this paragraph read:
+
+        AND chains/xrp_units.to_drops() DOES THE OPPOSITE, WHICH IS NAMED HERE
+        BECAUSE IT IS A REAL DIFFERENCE RATHER THAN AN OVERSIGHT [...] Four
+        chains in this terminal truncate and one rounds half up.
+
+        THAT ASYMMETRY IS NOT RESOLVED HERE, and the reason is rule 16 rather
+        than indifference: to_drops() is what chains/xrp.py has always called on
+        every payout, so ROUND_HALF_UP is what the ledger has been receiving all
+        along. Changing it would change what gets sent, which is live posture
+        and the operator's decision.
+
+    AND THE INVARIANT WAS FALSE FOR GRC TOO, FROM THE OTHER END -- which is the
+    half this file could not have seen, because it is not about this function's
+    direction at all. GRIDCOIN'S OWN DAEMON ROUNDS HALF UP. Handed an amount with
+    more than eight decimals it does not truncate as this function does and does
+    not reject as modern Core does; it takes the figure through a C++ double and
+    rounds to nearest. Measured on the operator's host 2026-10-03 against their 9
+    GRC payout rows: 9 of 9 fit ROUND_HALF_UP and only 6 of 9 fit truncation, the
+    6 being exactly the rows where the two cannot differ. Three rows are one
+    satoshi of GRC above what this function computes. So for those three sends
+    THE DESK DID PAY MORE THAN IT QUOTED, by a chain's rounding rather than by
+    this function's.
+
+    THE FORWARD PATH IS NOT AFFECTED BY THAT, and the reason is an ordering
+    rather than a rounding: since 54892d5 services/payout_service.
+    amount_decided_and_logged() quantizes BEFORE the send, so Gridcoin is handed
+    a figure already at eight decimals and every rounding agrees on it. The three
+    rows above predate that fix. There is a test for this exact claim rather than
+    an argument for it (rule 17).
+
+    WHERE THE WHOLE COMPARISON LIVES, so it is written once (rule 8): the
+    four-behavior table in chains/payout_quantization.py's header -- what modern
+    Core, Gridcoin, xrpl-py and Solana each do with an over-precise amount, with
+    the Gridcoin source references that establish the cause. That module is the
+    one that dispatches to all five conversions, which is why the cross-chain
+    comparison is there and not duplicated here or in to_drops().
 
     AN UNKNOWN ASSET IS RETURNED UNTOUCHED, with a sentence saying so. This table
     covers the chains that send a decimal amount; XRP and SOL are absent because

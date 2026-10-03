@@ -126,6 +126,70 @@ row, so this tool prints both numbers and writes neither. Picking one would
 bury it.
 
 =============================================================================
+THE DISAGREEMENT HAPPENED, IT IS EXPLAINED, AND THERE IS NOW A FLAG FOR IT
+=============================================================================
+
+Run with --apply against the operator's host on 2026-10-03 it corrected 12 rows
+and REFUSED 3, all GRC, for exactly that disagreement. The refusal was right and
+the explanation came afterwards, which is the order this tool was built for.
+
+WHAT THE THREE ROWS ARE. Gridcoin's daemon ROUNDS an over-precise amount, HALF
+UP, where chains/coin_amounts.fit_to_chain_precision() TRUNCATES. Measured over
+all 9 of the operator's GRC payout rows: 9 of 9 fit round-half-up and only 6 of
+9 fit truncation, and the 6 are exactly the rows whose remainder beyond the
+eighth decimal is below 0.5 -- where the two roundings cannot differ. The three
+that discriminate are the three that were refused:
+
+    payouts.id=6   recorded 82.65089987734812   chain 82.65089988   quantizer 82.65089987
+    payouts.id=7   recorded 87.97839509528555   chain 87.9783951    quantizer 87.97839509
+    payouts.id=17  recorded 2701.3495803173805  chain 2701.34958032 quantizer 2701.34958031
+
+One satoshi of GRC each. The cause, verified in Gridcoin 5.5.1.0's own source
+rather than inferred, and the full four-behavior table of what each daemon does
+with an over-precise amount, are in chains/payout_quantization.py's header. THE
+THREE CHAIN FIGURES ABOVE ARE THE OPERATOR'S MEASUREMENT, read off their own
+daemon; nothing in this container can reach it and they were not re-run here
+(rule 17).
+
+SO THE QUANTIZER IS NOT WRONG ABOUT GRC'S PRECISION -- it is right that eight
+decimals is what the chain can express, and the payout service now quantizes
+BEFORE the send (54892d5) so no future GRC payout can reach the daemon's
+rounding at all. These three were sent before that fix existed. The operator's
+2026-10-03 decision to make every chain truncate did NOT resolve them, and must
+not be read a month from now as having done so: the quantizer still truncates,
+the chain still rounded, and the disagreement on these three rows is permanent.
+
+WHICH IS WHY THE FLAG IS NAMED FOR WHAT IT TRUSTS AND NOT FOR WHAT IT
+OVERRIDES. --trust-the-chain-over-the-quantizer corrects such a row to THE
+CHAIN'S OWN FIGURE. It is not --force and it is not general: it reaches the
+chain/quantizer disagreement and nothing else. Without it, nothing about this
+tool's behavior changes -- the row is still refused and the run still exits 5.
+
+=============================================================================
+WHAT THE FLAG DOES NOT REACH, AND WHY THAT IS STRUCTURAL RATHER THAN A CHECK
+=============================================================================
+
+chains/payout_on_chain.py refuses to READ a transaction in nine distinct
+situations -- a partial XRP payment (delivered_amount below the intended
+Amount), a Solana balance delta of zero or less, two outputs paying the
+destination different values, no output paying the destination at all, a
+response with neither a `details` nor a `vout` list, an unvalidated or failed
+transaction, a pruned history, an unreadable cluster answer, and a row with no
+txid. EVERY ONE of them returns ChainAmount(None, why).
+
+A None amount cannot reach the disagreement branch, because that branch sits
+below `if chain.amount is None` and only ever compares two real numbers. So
+those nine are not refusals this flag could widen to even by accident: they
+remain what they are today, ARITHMETIC ONLY corrections that carry the chain's
+reason for not answering into the audit row. The flag's reach is bounded by the
+shape of the data rather than by a list of exclusions that could fall out of
+date, and there is a test asserting it per refusal kind.
+
+THE COMPARE-AND-SWAP IS ALSO UNTOUCHED. A row that changed between the read and
+the write is refused by apply_correction() regardless of this flag, which is a
+third kind of refusal and the one that protects against a concurrent writer.
+
+=============================================================================
 ONE TRANSACTION PER ROW, AND WHY NOT ONE FOR ALL FIFTEEN
 =============================================================================
 
@@ -219,6 +283,31 @@ REFUSE = "REFUSE"
 FROM_CHAIN = "CHAIN-VERIFIED"
 FROM_ARITHMETIC = "ARITHMETIC ONLY"
 
+#: The third authority, reachable ONLY with --trust-the-chain-over-the-quantizer.
+#: It is a separate string rather than FROM_CHAIN because the two are different
+#: claims: FROM_CHAIN means the chain and the quantizer AGREED and the chain's
+#: figure was taken, and this one means they did NOT agree and the chain's figure
+#: was taken anyway, on an operator's explicit instruction. A reader a year from
+#: now has to be able to tell those apart in the audit row, which is the whole
+#: reason the audit row names its authority at all.
+FROM_CHAIN_OVER_QUANTIZER = "CHAIN OVER QUANTIZER (they disagreed)"
+
+#: The flag, spelled once so the parser, the refusals and the footer cannot drift
+#: apart (rule 8). NAMED FOR WHAT IT TRUSTS, not for what it overrides: `--force`
+#: would be a claim about this tool's own checks, where this is a claim about
+#: which of two authorities is right about one chain, and only that.
+TRUST_CHAIN_FLAG = "--trust-the-chain-over-the-quantizer"
+
+#: What each authority prints beside the figure it produced. A DICT RATHER THAN AN
+#: `if`, so adding a fourth authority without deciding how it prints raises a
+#: KeyError here instead of silently inheriting the blank marker that means "the
+#: chain confirmed this" (rule 14: make the states look different).
+AUTHORITY_MARKERS = {
+    FROM_CHAIN: "",
+    FROM_ARITHMETIC: "*** NOT VERIFIED ON CHAIN ***  ",
+    FROM_CHAIN_OVER_QUANTIZER: "*** CHAIN AND QUANTIZER DISAGREED -- CHAIN TAKEN AS AUTHORITATIVE ***  ",
+}
+
 #: The ChainAmount handed to plan_for_payout() before any chain has been asked.
 #: A sentence rather than an empty string so that a row which turns out not to
 #: need correcting still has a readable provenance in the dry run.
@@ -239,7 +328,7 @@ class Correction(NamedTuple):
     why: str
 
 
-def plan_for_payout(row, chain: ChainAmount) -> Correction:
+def plan_for_payout(row, chain: ChainAmount, *, trust_chain_over_quantizer: bool = False) -> Correction:
     """What to do with one payout row, given what the chain said. THE DECISION.
 
     At the bottom where it can be called with seeded rows and a seeded chain
@@ -262,13 +351,31 @@ def plan_for_payout(row, chain: ChainAmount) -> Correction:
                         quantizer is this terminal's own derivation of what the
                         adapter sent, which is weaker evidence than the chain's
                         own answer and is not nothing.
-      chain disagrees   REFUSED, with both numbers. The quantizer being wrong
-                        about a chain is a bigger finding than this row -- see
-                        this module's docstring.
+      chain disagrees   REFUSED, with both numbers -- unless
+                        trust_chain_over_quantizer, which corrects to the
+                        CHAIN's figure under its own authority. The quantizer
+                        being wrong about a chain is a bigger finding than this
+                        row, which is why the default refuses; see this module's
+                        docstring for the disagreement that actually occurred
+                        and for why an explicit flag rather than a default.
       chain agrees      corrected to the CHAIN's figure, not to the quantized
                         one. They are equal by the branch above; writing the
                         chain's own number is what makes the row's provenance
                         the observation rather than the arithmetic.
+
+    `trust_chain_over_quantizer` DEFAULTS TO FALSE, AND THAT DEFAULT IS THE
+    SAFETY PROPERTY, not a convenience. A caller that does not pass it gets
+    2026-10-03's behavior exactly: the row is refused, nothing is written, and
+    the run exits 5. It is keyword-only so no positional call can set it by
+    accident, and there is a test that fails if the default flips.
+
+    IT CANNOT WIDEN TO ANY OTHER REFUSAL, by the shape of the code rather than
+    by a check. It is read in ONE branch, below `if chain.amount is None`, so
+    every situation in which chains/payout_on_chain.py declines to read a
+    transaction -- a partial XRP payment, a non-positive Solana delta, two
+    outputs paying the destination different values, and the six others --
+    arrives here as `chain.amount is None` and takes the ARITHMETIC ONLY branch
+    above, flag or no flag.
 
     THE AGREEMENT TEST QUANTIZES THE CHAIN'S FIGURE TOO, rather than comparing
     raw floats. A chain's amount is already at its own precision, so quantizing
@@ -283,9 +390,15 @@ def plan_for_payout(row, chain: ChainAmount) -> Correction:
     txid = (row["txid"] or "").strip()
     if not txid:
         return Correction(SKIP, recorded, None, "", (
+            # "MISSTATEMENT" RATHER THAN "OVERSTATEMENT" SINCE 2026-10-03. Every
+            # correction this tool made used to reduce the figure, so the word was
+            # exact; --trust-the-chain-over-the-quantizer writes a LARGER figure on
+            # a row the chain rounded up, and that one is an understatement. The
+            # argument is unchanged either way -- a proposal recorded as a send is
+            # the worse record -- so only the noun had to stop claiming a direction.
             f"no txid, status={row['status']!r} -- this row records a PROPOSAL, not a send. Quantizing "
             f"it would make an amount this desk never sent look like one it did, which is a worse "
-            f"record than the overstatement being corrected"
+            f"record than the misstatement being corrected"
         ))
     quantized, note = quantize_for_chain(recorded, asset)
     if quantized == recorded:
@@ -298,13 +411,30 @@ def plan_for_payout(row, chain: ChainAmount) -> Correction:
             f"{note}. THE CHAIN WAS NOT ASKED OR COULD NOT ANSWER: {chain.how}"
         ))
     if quantize_for_chain(chain.amount, asset)[0] != quantized:
-        return Correction(REFUSE, recorded, None, "", (
+        # BOTH FIGURES ARE IN THIS SENTENCE AND IT IS SHARED BY BOTH OUTCOMES, so
+        # the refusal an operator reads and the audit row a reader finds a year
+        # later cannot disagree about what the disagreement WAS (rule 8). The
+        # correction below embeds it verbatim rather than restating it.
+        disagreement = (
             f"THE CHAIN AND THE QUANTIZER DISAGREE. The chain says {chain.amount!r} {asset} "
             f"({chain.how}); chains/payout_quantization.quantize_for_chain({recorded!r}, {asset!r}) "
-            f"says {quantized!r}. NOTHING was written for this row: that disagreement means the "
-            f"quantizer is wrong about {asset}, which decides what every FUTURE payout records, "
-            f"reserves and sends -- a bigger finding than this row, and correcting the row would "
-            f"bury it"
+            f"says {quantized!r}"
+        )
+        if not trust_chain_over_quantizer:
+            return Correction(REFUSE, recorded, None, "", (
+                f"{disagreement}. NOTHING was written for this row: that disagreement means the "
+                f"quantizer is wrong about {asset}, which decides what every FUTURE payout records, "
+                f"reserves and sends -- a bigger finding than this row, and correcting the row would "
+                f"bury it. To correct it to the CHAIN's figure anyway, re-run with "
+                f"{TRUST_CHAIN_FLAG}"
+            ))
+        return Correction(CORRECT, recorded, chain.amount, FROM_CHAIN_OVER_QUANTIZER, (
+            f"{disagreement}. THE CHAIN WAS TAKEN AS AUTHORITATIVE and {chain.amount!r} {asset} was "
+            f"written, because {TRUST_CHAIN_FLAG} was passed. The quantizer's {quantized!r} is NOT "
+            f"retracted by this: it is what this terminal would send today, and the chain's figure is "
+            f"what the chain did send on a transaction that is already final and cannot be unsent. "
+            f"The two differ for {asset} on a historical row because the daemon rounded an "
+            f"over-precise amount that this terminal no longer hands it"
         ))
     return Correction(CORRECT, recorded, chain.amount, FROM_CHAIN, (
         f"the chain's own figure: {chain.how}. It matches quantize_for_chain({recorded!r}, {asset!r}) "
@@ -381,6 +511,44 @@ def apply_correction(db, row, plan: Correction) -> tuple[bool, str]:
     )
 
 
+def misstatement(recorded: float, corrected: float) -> str:
+    """"overstated by X" or "UNDERSTATED by X", with the word chosen from the sign.
+
+    A FIXED "overstated by" LABEL PRINTED A NEGATIVE NUMBER, and that was a
+    defect this session INTRODUCED and then read in the output (2026-10-03):
+
+        recorded    2701.3495803173805
+        correct to  2701.34958032
+        overstated by -0.0000000026195 GRC
+
+    Every correction before --trust-the-chain-over-the-quantizer existed reduced
+    the figure, because all five quantizers truncate -- so the label was right
+    for every case that could occur and a constant was the honest way to write
+    it. The flag creates the other case for the first time: Gridcoin ROUNDED UP,
+    so the chain's figure is LARGER than the record, and the record was an
+    UNDERSTATEMENT. A minus sign in front of a word that says the opposite is
+    rule 14's "state what the number means, next to the number" inverted -- the
+    reader has to notice the sign and then distrust the label.
+
+    difference() was already honest about this: its docstring says "overstated
+    (positive) or understated (negative)". It was only the printed label that
+    assumed one direction, which is why the sign lives here and not there.
+
+    UNDERSTATED IS SHOUTED AND OVERSTATED IS NOT, deliberately. An overstatement
+    means the desk's record claimed more than it paid. An UNDERSTATEMENT means
+    the chain moved MORE MONEY than the record admits, which is the direction an
+    operator reconciling a wallet balance needs to see without looking for a
+    minus sign.
+    """
+    amount = difference(recorded, corrected)
+    # :f rather than the Decimal's own repr, which is exponent notation for a
+    # figure this small -- 9.7888E-10 is the same number as 0.00000000097888 and
+    # only one of them can be counted against a satoshi by eye (rule 14).
+    if amount < 0:
+        return f"UNDERSTATED by {-amount:f}"
+    return f"overstated by {amount:f}"
+
+
 def describe(row, plan: Correction) -> list[str]:
     """The lines one row prints. A chain-verified row and an arithmetic one differ here.
 
@@ -393,21 +561,26 @@ def describe(row, plan: Correction) -> list[str]:
             f"status={row['status']}")
     if plan.verdict != CORRECT:
         return [f"  {plan.verdict:<8} {head}", f"           {plan.why}"]
-    marker = "" if plan.authority == FROM_CHAIN else "*** NOT VERIFIED ON CHAIN ***  "
+    marker = AUTHORITY_MARKERS[plan.authority]
+    # "WHICH THE CHAIN CANNOT SEND" IS TRUE OF EVERY RECORDED FIGURE HERE -- each
+    # one carries more decimals than its chain can express, which is what made it
+    # correctable -- but it is not the whole story on a row the chain ROUNDED UP,
+    # where the chain sent a figure the record understates. plan.why carries that
+    # distinction in full and the line below now agrees with it rather than
+    # asserting one direction.
     return [
         f"  {plan.verdict:<8} {head}",
-        f"           recorded    {plan.recorded!r}  <- what the quote computed, which the chain cannot send",
+        f"           recorded    {plan.recorded!r}  <- what the quote computed, which the chain cannot "
+        f"express at its own precision",
         f"           correct to  {plan.corrected!r}  <- {marker}{plan.authority}",
-        # :f rather than the Decimal's own repr, which is exponent notation for a
-        # figure this small -- 9.7888E-10 is the same number as 0.00000000097888 and
-        # only one of them can be counted against a satoshi by eye (rule 14).
-        f"           overstated by {difference(plan.recorded, plan.corrected):f} {row['asset']}"
+        f"           {misstatement(plan.recorded, plan.corrected)} {row['asset']}"
         f"   txid={row['txid']}",
         f"           {plan.why}",
     ]
 
 
-def plans_for(rows, adapters, *, ask_chain: bool, say) -> list[tuple[dict, Correction]]:
+def plans_for(rows, adapters, *, ask_chain: bool, say,
+              trust_chain_over_quantizer: bool = False) -> list[tuple[dict, Correction]]:
     """Every row paired with its verdict, asking the chain ONLY where a write would happen.
 
     TWO CALLS OF THE SAME PURE FUNCTION, which is the cheap way to get both
@@ -417,6 +590,18 @@ def plans_for(rows, adapters, *, ask_chain: bool, say) -> list[tuple[dict, Corre
     zero RPC calls and a second run is both idempotent and silent on the wire. The
     second call re-decides with the chain's real answer, which is where a
     disagreement becomes a refusal.
+
+    THAT SAVING IS MEASURED AND PINNED, not assumed to survive a refactor (rule
+    3). On the operator's host on 2026-10-03, after --apply had corrected 12 of
+    23 rows, the second dry run asked the chain 3 times rather than 23 -- once
+    per row still needing a correction, which by then was only the three refused
+    ones. tests/test_correct_payout_amounts.py counts the calls, because an
+    innocuous-looking move of the `if` would turn a silent no-op run into 23
+    network round trips with nothing on screen to say so.
+
+    THE FLAG IS PASSED ONLY TO THE SECOND CALL'S DECISION, and the first call
+    cannot be affected by it: NOT_ASKED carries `amount=None`, so the
+    disagreement branch the flag governs is unreachable there.
 
     `say` is the printer, injected so a test can collect the progress lines rather
     than have them go to a terminal. The lines are part of what this function is
@@ -436,7 +621,8 @@ def plans_for(rows, adapters, *, ask_chain: bool, say) -> list[tuple[dict, Corre
             chain = delivered_to_destination(
                 adapters.get(row["asset"]), row["asset"], row["txid"], row["destination_address"],
             )
-            plan = plan_for_payout(row, chain)
+            plan = plan_for_payout(row, chain,
+                                   trust_chain_over_quantizer=trust_chain_over_quantizer)
         planned.append((row, plan))
     return planned
 
@@ -449,8 +635,8 @@ def build_parser() -> argparse.ArgumentParser:
                      "default."),
         epilog=("A row with no txid records a proposal rather than a send and is never corrected. A row "
                 "whose chain answers with a figure the quantizer disagrees with is refused rather than "
-                "resolved either way: that disagreement is a defect in the quantizer, which decides "
-                "what every future payout sends."),
+                f"resolved either way, unless {TRUST_CHAIN_FLAG} says which of the two to believe. "
+                "Every other kind of refusal is out of that flag's reach by construction."),
     ))
 
 
@@ -461,6 +647,18 @@ def _parser_with_arguments(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--no-chain", action="store_true",
                         help="ask no chain, so it is safe with every daemon down. Every correction is "
                              "then ARITHMETIC ONLY and says so per row and in its audit row.")
+    # `dest` IS SPELLED OUT because argparse would derive
+    # `trust_the_chain_over_the_quantizer` from the flag, and the keyword this
+    # reaches on plan_for_payout() is `trust_chain_over_quantizer`. Two spellings
+    # of one concept is rule 8's defect; naming the destination here means the
+    # flag's wording can be read as English without the function's keyword having
+    # to match it word for word.
+    parser.add_argument(TRUST_CHAIN_FLAG, dest="trust_chain_over_quantizer", action="store_true",
+                        help="when a chain's own figure disagrees with the quantizer, correct the row to "
+                             "THE CHAIN's figure instead of refusing it. Still needs --apply to write. "
+                             "This is NOT a general override: it reaches that one disagreement and no "
+                             "other refusal. The audit row records both figures and says the chain was "
+                             "taken as authoritative.")
     return parser
 
 
@@ -478,6 +676,13 @@ def _announce(args, db_path: str) -> None:
     print(labeled("writes", "payouts.amount on rows WITH a txid, plus one swap_audit_log row per "
                             "correction in the same transaction. Nothing else, and no status moves"),
           flush=True)
+    print(labeled("disagreements", f"CORRECTED TO THE CHAIN'S FIGURE ({TRUST_CHAIN_FLAG}) -- a row whose "
+                                   f"chain contradicts the quantizer is written from the chain, with "
+                                   f"both figures in its audit row"
+                                   if args.trust_chain_over_quantizer else
+                                   f"REFUSED (the default) -- a row whose chain contradicts the quantizer "
+                                   f"is left alone and this run exits 5. {TRUST_CHAIN_FLAG} is what "
+                                   f"corrects one"), flush=True)
     print("  this tool SIGNS NOTHING and BROADCASTS NOTHING. The transactions it reads are final.",
           flush=True)
 
@@ -502,22 +707,172 @@ def _report(planned: list[tuple[dict, Correction]], *, applied: list[str]) -> No
         print(f"  {line}", flush=True)
 
 
+def _rerun_command(args, db_path: str, *extra: str) -> str:
+    """The command an operator pastes to repeat this run with `extra` added.
+
+    IT ECHOES BACK THE FLAGS THAT DECIDED THIS ANSWER rather than printing a bare
+    invocation (rule 14: "echo the parameters that decide the answer"). --db is
+    included only when it was given, because the default is already printed on
+    the `database` line above and a reader who did not pass it did not choose it.
+
+    TRUST_CHAIN_FLAG IS ECHOED TOO, AND LEAVING IT OUT WAS A DEFECT I SHIPPED
+    AND THEN READ (2026-10-03). With the flag on and three rows disagreeing, the
+    footer counted 15 correctable and then offered:
+
+        python3 correct_payout_amounts.py --apply --db ...
+
+    which is a DIFFERENT run: without the flag it corrects 12 and refuses 3. The
+    count and the command disagreed by three rows, which is the same defect as
+    the "0 row(s)" footer this function was written to remove -- a sentence true
+    about the run the reader just did and false about the one it tells them to
+    do. Found by reading the output, which is the only place it was visible, and
+    there is now a test.
+
+    IT CANNOT BE ECHOED TWICE: the one caller that passes it as `extra` is in the
+    branch reached only when `args.trust_chain_over_quantizer` is False.
+    """
+    flags = [f"--{word}" for word in ("no-chain",) if getattr(args, word.replace("-", "_"))]
+    if args.trust_chain_over_quantizer:
+        flags.append(TRUST_CHAIN_FLAG)
+    if args.db:
+        flags.append(f"--db {db_path}")
+    return " ".join(["python3", SELF, *extra, *flags])
+
+
+def _summary_line(db_path: str, *, rows: int, correctable: int, verified: int,
+                  over_quantizer: int) -> str:
+    """The one-line count. `(none)` when there is nothing to break down (rule 14).
+
+    "0 OF THOSE 0" IS WHY THIS IS A FUNCTION. The line read `0 correctable of 23
+    payout row(s); 0 of those 0 verified against the chain itself, 0 from
+    arithmetic alone` on the operator's second run, which is arithmetically
+    correct and reads like a defect -- three zeros and a division of an empty set
+    into two empty halves. Rule 14 asks that an empty result print `(none)` rather
+    than nothing; the companion is that a BREAKDOWN of an empty set is not a
+    result either, and printing it makes a reader check whether the tool broke.
+
+    So the breakdown appears only when there is something to break down. The
+    count itself always appears, with its denominator, because `0 correctable of
+    23` is the answer and is not an empty result.
+    """
+    if not correctable:
+        return (f"0 correctable of {rows} payout row(s) in {db_path}; (none) to verify, so there is no "
+                f"chain/arithmetic split to report")
+    provenance = [f"{verified} of those {correctable} verified against the chain itself"]
+    if over_quantizer:
+        provenance.append(f"{over_quantizer} corrected to the chain's figure OVER a quantizer "
+                          f"disagreement ({TRUST_CHAIN_FLAG})")
+    provenance.append(f"{correctable - verified - over_quantizer} from arithmetic alone")
+    return f"{correctable} correctable of {rows} payout row(s) in {db_path}; " + ", ".join(provenance)
+
+
+def _footer(args, db_path: str, *, correctable: int, refusals: int) -> list[str]:
+    """What to do next, which is a DIFFERENT sentence in each of four states.
+
+    THE DEFECT THIS REPLACES, measured on the operator's host 2026-10-03 on the
+    second dry run after --apply had corrected 12 rows. The run reported
+    `CORRECT 0 row(s) / (none)` and `REFUSE 3 row(s)` correctly, and then ended:
+
+        DRY RUN: nothing written. To correct the 0 row(s) above:
+            python3 correct_payout_amounts.py --apply
+
+    Three things wrong with that in the state the reader was actually in. "the 0
+    row(s) above" is a sentence about an empty set. The command offered would
+    have written nothing. And the footer's SHAPE was identical whether there were
+    twelve rows to correct or none, so a reader skimming saw a call to action
+    that was not one -- which is rule 14's "make 'did nothing' look different
+    from 'did work'", failing in the one place a reader looks last.
+
+    It is the same class of defect as the `credited (none) -- the deposit was
+    never accepted` line fixed earlier the same day: a sentence that was true
+    when it was written and false in the state the reader reaches it in.
+
+    THE FOUR STATES, and the counts that distinguish them are already computed by
+    the caller rather than recounted here:
+
+      correctable, no refusals      the original footer: the count and the
+                                    command.
+      nothing correctable, none     say plainly that every row already agrees
+      refused                       with its chain, and offer NO command --
+                                    there is nothing for --apply to write.
+      nothing correctable, rows     do not offer a bare --apply, which cannot
+      refused                       resolve them. Name the one flag that can.
+      correctable AND refused       both, corrections first, so the refusals are
+                                    not buried under a command that skips them.
+
+    RETURNED RATHER THAN PRINTED, so the four states can be asserted on directly
+    with seeded counts (rule 10). An applied run gets the refusal half only: it
+    has already written what it could, and a command telling it to write again
+    would be wrong, but the refusals still need naming.
+    """
+    lines: list[str] = []
+    if args.apply:
+        if refusals and not args.trust_chain_over_quantizer:
+            lines.append(f"\n{refusals} row(s) were REFUSED and nothing was written for them. The only "
+                         f"thing that writes a row whose chain contradicts the quantizer is:\n"
+                         f"    {_rerun_command(args, db_path, '--apply', TRUST_CHAIN_FLAG)}")
+        return lines
+    if correctable:
+        lines.append(f"\nDRY RUN: nothing written. To correct the {correctable} row(s) above:\n"
+                     f"    {_rerun_command(args, db_path, '--apply')}")
+    elif not refusals:
+        lines.append("\nDRY RUN, AND THERE IS NOTHING TO DO: every payout row already records a figure "
+                     "its chain can express, so no row would be written even with --apply. No command "
+                     "is offered because there is no work to run one on.")
+    if refusals and not args.trust_chain_over_quantizer:
+        lines.append(f"\n{refusals} row(s) were REFUSED, and --apply alone would write NOTHING for them "
+                     f"-- it skips every refusal. The only thing that writes a row whose chain "
+                     f"contradicts the quantizer is the flag that says which of the two to believe:\n"
+                     f"    {_rerun_command(args, db_path, '--apply', TRUST_CHAIN_FLAG)}\n"
+                     f"  Read the REFUSE section above first: it prints both figures for every one of "
+                     f"them, and that flag writes the CHAIN's.")
+    return lines
+
+
+def refusal_before_reading(args, db_path: str) -> str | None:
+    """Why this run must not start at all, or None. Nothing has been read yet.
+
+    BOTH REFUSALS ARE THE SAME DECISION -- "this invocation cannot do what it
+    says" -- so they live together at the bottom where they can be called with
+    seeded args and no database (rule 10). Keeping them inline grew main() past
+    ruff's C901 ceiling, which rule 12 says to answer by extracting the decision
+    rather than by raising the ceiling.
+
+    THE TWO FLAGS CONTRADICT EACH OTHER IN WORDS. --no-chain asks no chain, so
+    there is no chain figure to prefer over the quantizer and the branch
+    TRUST_CHAIN_FLAG governs is unreachable: the flag would be silently inert.
+    Refused rather than warned-and-continued, because an operator who passed
+    both holds a belief about this run that is wrong, and rule 14's complaint is
+    precisely about a run that looks like it did something it did not.
+
+    A MISSING DATABASE IS REFUSED BEFORE sqlite3.connect(), WHICH CREATES ONE.
+    show_swap.py guards the same way and its header says why: a tool that
+    connects to a mistyped path leaves an empty database behind and then reports
+    "(none)", which is indistinguishable from a database whose payouts are all
+    correct. Here it would also mean an --apply run that wrote nothing and said
+    so cheerfully.
+    """
+    if args.trust_chain_over_quantizer and args.no_chain:
+        return (f"{TRUST_CHAIN_FLAG} and --no-chain cannot both be given. The first says to believe the "
+                f"chain's own figure over the quantizer's; the second says not to ask any chain. With no "
+                f"chain answer there is no disagreement to resolve and the flag would change nothing. "
+                f"Drop one of them.")
+    if not Path(db_path).exists():
+        return (f"{db_path} does not exist. NOT created -- connecting would make an empty database and "
+                f"every count below would read 0 for a file nothing uses. Check SWAP_DB_PATH, or pass "
+                f"--db with the path the workers read.")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     started = time.monotonic()
     db_path = args.db or str(Config.DB_PATH)
     _announce(args, db_path)
 
-    # REFUSED BEFORE sqlite3.connect(), WHICH CREATES A MISSING FILE. show_swap.py
-    # guards the same way and its header says why: a tool that connects to a
-    # mistyped path leaves an empty database behind and then reports "(none)",
-    # which is indistinguishable from a database whose payouts are all correct.
-    # Here it would also mean an --apply run that wrote nothing and said so
-    # cheerfully.
-    if not Path(db_path).exists():
-        print(f"  REFUSED: {db_path} does not exist. NOT created -- connecting would make an empty "
-              f"database and every count below would read 0 for a file nothing uses. Check "
-              f"SWAP_DB_PATH, or pass --db with the path the workers read.", file=sys.stderr)
+    refusal = refusal_before_reading(args, db_path)
+    if refusal:
+        print(f"  REFUSED: {refusal}", file=sys.stderr)
         return 2
 
     adapters = {} if args.no_chain else build_adapters(Config.RPC)
@@ -541,7 +896,9 @@ def main(argv: list[str] | None = None) -> int:
                                      f"in: {', '.join(str(row['id']) for row in mismatched)}. The chain "
                                      f"read uses payouts.asset, which is what the send used"), flush=True)
 
-        planned = plans_for(rows, adapters, ask_chain=not args.no_chain, say=lambda line: print(line, flush=True))
+        planned = plans_for(rows, adapters, ask_chain=not args.no_chain,
+                            say=lambda line: print(line, flush=True),
+                            trust_chain_over_quantizer=args.trust_chain_over_quantizer)
         applied: list[str] = []
         if args.apply:
             for row, plan in planned:
@@ -555,18 +912,34 @@ def main(argv: list[str] | None = None) -> int:
     refusals = sum(1 for _row, plan in planned if plan.verdict == REFUSE)
     verified = sum(1 for _row, plan in planned
                    if plan.verdict == CORRECT and plan.authority == FROM_CHAIN)
-    print(labeled("summary", f"{corrections} correctable of {len(rows)} payout row(s) in {db_path}; "
-                             f"{verified} of those {corrections} verified against the chain itself, "
-                             f"{corrections - verified} from arithmetic alone"), flush=True)
-    if not args.apply:
-        print(f"\nDRY RUN: nothing written. To correct the {corrections} row(s) above:\n"
-              f"    python3 {SELF} --apply" + (" --no-chain" if args.no_chain else "")
-              + (f" --db {db_path}" if args.db else ""), flush=True)
+    over_quantizer = sum(1 for _row, plan in planned
+                         if plan.verdict == CORRECT and plan.authority == FROM_CHAIN_OVER_QUANTIZER)
+    print(labeled("summary", _summary_line(db_path, rows=len(rows), correctable=corrections,
+                                           verified=verified, over_quantizer=over_quantizer)), flush=True)
+    if over_quantizer:
+        # THE DISAGREEMENT DOES NOT STOP BEING A FINDING BECAUSE A ROW WAS
+        # CORRECTED. The flag resolves the ROW; it says nothing about the chain,
+        # and a reader who sees only "corrected" would conclude otherwise.
+        print(labeled("WARNING", f"{over_quantizer} row(s) were written from the chain DESPITE the "
+                                 f"quantizer disagreeing. That disagreement is still real: on the "
+                                 f"operator's host it is Gridcoin rounding an over-precise amount half "
+                                 f"up where the quantizer truncates, on sends made before the payout "
+                                 f"service began quantizing first. Each audit row holds BOTH figures"),
+              flush=True)
+    for line in _footer(args, db_path, correctable=corrections, refusals=refusals):
+        print(line, flush=True)
     print(labeled("done in", format_duration(time.monotonic() - started)), flush=True)
     # A refusal is not a failure of this run and it is not a success either: the
     # rows that could be corrected were, and something was found that a person has
     # to look at. Rule 13 -- "did nothing" and "did work" must not share an exit
     # code any more than they share a line.
+    #
+    # WITH TRUST_CHAIN_FLAG A DISAGREEMENT IS NO LONGER A REFUSAL, so a run that
+    # resolves all three of the operator's rows exits 0 -- which is correct and is
+    # not the flag hiding anything: the WARNING above fires on exactly those rows
+    # and every audit row carries both figures. What the exit code reports is
+    # "something is still unresolved", and after an explicit instruction to
+    # resolve it, nothing is.
     return 5 if refusals else 0
 
 

@@ -79,7 +79,7 @@ from __future__ import annotations
 import logging
 import random
 import sqlite3
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 import pytest
 from chains.base import RPCError
@@ -327,53 +327,264 @@ def test_the_quantizer_CALLS_the_conversion_the_adapter_calls(asset):
         assert quantized == expected, f"{asset}: {amount!r} did not go through the adapter's own conversion"
 
 
-def test_ONLY_XRP_can_quantize_a_payout_UPWARD():
-    """The asymmetry between the five conversions, measured rather than described.
+def test_NO_CHAIN_can_quantize_a_payout_UPWARD_any_more():
+    """All five conversions truncate. THIS TEST ASSERTED THE OPPOSITE UNTIL 2026-10-03.
 
-    chains/coin_amounts.fit_to_chain_precision() TRUNCATES, and its docstring
-    argues the direction at length: the desk never sends more than it quoted.
-    chains/xrp_units.to_drops() uses ROUND_HALF_UP, so an XRP payout can be
-    rounded UP to the next whole drop.
+    IT WAS CALLED test_ONLY_XRP_can_quantize_a_payout_UPWARD AND IT WAS
+    DELIBERATELY INVERTED, by operator decision the same day, in their words:
+    "make it all match". chains/xrp_units.to_drops() used ROUND_HALF_UP and now
+    uses ROUND_DOWN, so the one chain that could round a payout up no longer
+    can. This is a LIVE POSTURE change -- it changes what the XRP Ledger
+    receives -- and the inversion is the point of the test rather than an
+    accident of it.
 
-    Measured 2026-10-03 over the 60,000 random amounts in _sample_amounts():
-    24,850 of them -- 41.4% -- quantize upward for XRP, by at most half a drop
-    (0.0000005 XRP). Zero do for BTC, LTC, GRC or SOL.
+    THE SUPERSEDED ASSERTION AND ITS MEASUREMENT ARE KEPT (rule 1), because a
+    test that quietly flips direction is indistinguishable from a test that was
+    always wrong. What this function asserted until 2026-10-03:
 
-    THE EXACT COUNT IS IN THIS DOCSTRING AND NOT IN AN ASSERTION, deliberately:
-    pinning 24850 would make this test fail the day a Python release changes
-    `random`'s internals, for a reason that has nothing to do with payouts. What
-    is asserted is the part that is a property rather than a sample -- the four
-    chains that can never round up, and the half-drop bound on the one that can.
+        xrp_over = [a for a in sample if quantize_for_chain(a, "XRP")[0] > a]
+        assert len(xrp_over) > len(sample) // 3, (
+            "XRP's ROUND_HALF_UP should round a large minority of amounts up;
+             measured 41.4% on 2026-10-03. Finding none means to_drops()
+             stopped rounding half up, which CHANGES WHAT IS SENT and is the
+             operator's call"
+        )
+        half_a_drop = Decimal(1) / 2 / DROPS_PER_XRP
+        worst = max(... for a in xrp_over)
+        assert worst == half_a_drop
+        assert "rounded UP" in quantize_for_chain(ALREADY_QUANTIZED * 10 + 8e-07, "XRP")[1]
 
-    NOT FIXED HERE, AND THAT IS RULE 16 RATHER THAN INDIFFERENCE. to_drops() is
-    what chains/xrp.py has always called, so ROUND_HALF_UP is what the ledger
-    has been receiving all along; switching it to truncation would change what
-    gets sent by up to one drop. This change makes the RECORD agree with it and
-    leaves the direction to the operator.
+    and its docstring recorded "24,850 of them -- 41.4% -- quantize upward for
+    XRP, by at most half a drop (0.0000005 XRP). Zero do for BTC, LTC, GRC or
+    SOL."
 
-    MUTATION: change to_drops()'s rounding to ROUND_DOWN. The XRP half of this
-    fails, which is what makes it a measurement of the live behavior rather than
-    a restatement of the constant.
+    THE OLD FIGURE AND THE NEW ONE RECONCILE EXACTLY, which is worth stating
+    because they have different denominators and look like two measurements
+    (rule 3). The old text counted the 60,000 random draws and found 24,850.
+    _sample_amounts() also carries 16 named figures, 15 of them positive, of
+    which 4 round up -- so the same sample read 24,854 of 60,015 positive
+    amounts. Both are the same measurement with a different denominator stated.
+
+    MEASURED AFTER THE CHANGE, over those same 60,015: 0 quantize upward on any
+    of the five chains, and the largest change to any XRP drop count is 1 drop,
+    which is also the largest possible by construction.
+
+    MUTATION RUN 2026-10-03: put ROUND_HALF_UP back in to_drops(). The XRP case
+    fails on 24,854 upward amounts, and the drop-delta assertion keeps passing
+    (half-up and truncation differ by at most one drop in EITHER direction), so
+    the upward assertion is the one carrying this test.
     """
     sample = [amount for amount in _sample_amounts() if amount > 0]
 
-    for asset in ("BTC", "LTC", "GRC", "SOL"):
+    for asset in EVERY_CHAIN:
         over = [a for a in sample if quantize_for_chain(a, asset)[0] > a]
-        assert over == [], f"{asset} quantized {len(over)} amounts UPWARD; it must only ever truncate"
+        assert over == [], (
+            f"{asset} quantized {len(over)} of {len(sample)} amounts UPWARD -- for instance "
+            f"{over[0]!r}. Every conversion in this terminal truncates since 2026-10-03, which is what "
+            f"makes chains/coin_amounts.py's documented invariant ('the desk never sends more than it "
+            f"quoted') true rather than true-with-an-exception. Finding one CHANGES WHAT IS SENT"
+        )
 
-    xrp_over = [a for a in sample if quantize_for_chain(a, "XRP")[0] > a]
-    assert len(xrp_over) > len(sample) // 3, (
-        "XRP's ROUND_HALF_UP should round a large minority of amounts up; measured 41.4% on "
-        "2026-10-03. Finding none means to_drops() stopped rounding half up, which CHANGES WHAT "
-        "IS SENT and is the operator's call"
+    # THE DROP COUNT MOVED BY AT MOST ONE, which is the cost of the change and is
+    # asserted rather than described. Both roundings are compared on the same
+    # sample through the same Decimal arithmetic the implementation uses.
+    moved = 0
+    for amount in sample:
+        exact = Decimal(str(amount)) * DROPS_PER_XRP
+        down = int(exact.to_integral_value(rounding=ROUND_DOWN))
+        half_up = int(exact.to_integral_value(rounding=ROUND_HALF_UP))
+        assert half_up - down in (0, 1), (
+            f"{amount!r}: half-up and truncation differ by {half_up - down} drops, not 0 or 1. They "
+            f"cannot differ by more than one base unit, so this is an arithmetic error rather than a "
+            f"rounding preference"
+        )
+        assert to_drops(amount) == down, f"{amount!r}: to_drops() is no longer truncating"
+        moved += half_up != down
+    assert moved > len(sample) // 3, (
+        f"only {moved} of {len(sample)} drop counts changed direction; measured 24,854 of 60,015 on "
+        f"2026-10-03. Finding none would mean this test is comparing one rounding against itself and "
+        f"could not notice the direction flipping back"
     )
-    half_a_drop = Decimal(1) / 2 / DROPS_PER_XRP
-    worst = max(Decimal(str(quantize_for_chain(a, "XRP")[0])) - Decimal(str(a)) for a in xrp_over)
-    assert worst == half_a_drop, (
-        f"the most XRP can be rounded up by is half a drop ({half_a_drop}); measured {worst}"
+
+    assert "truncated DOWN" in quantize_for_chain(ALREADY_QUANTIZED * 10 + 8e-07, "XRP")[1], (
+        "a payout that was reduced has to say so in words, not just in digits. This same amount "
+        "produced 'rounded UP' before 2026-10-03"
     )
-    assert "rounded UP" in quantize_for_chain(ALREADY_QUANTIZED * 10 + 8e-07, "XRP")[1], (
-        "a payout rounded UPWARD has to say so in words, not just in digits"
+
+
+#: The one real XRP payout this terminal has on a ledger, and the drop count the
+#: XRP testnet reported for it. Transaction
+#: 799F8DED7CFB657411C5B1B9BE500C79CD62F07CF5634D2817804E89BDED7935 on swap
+#: s_539d922e9ef0a5d8, read as `Amount "3315589"`, Fee "10", tesSUCCESS,
+#: validated true. `payouts.id=23` was corrected to 3.315589 against it.
+THE_ONE_REAL_XRP_PAYOUT = (3.3155893288590605, 3315589)
+
+
+def test_the_one_REAL_XRP_payout_is_UNAFFECTED_by_the_rounding_change():
+    """The row corrected an hour before the direction flipped must not start disagreeing.
+
+    WHY THIS IS A TEST AND NOT A PARAGRAPH. `payouts.id=23` was corrected to
+    3.315589 XRP on 2026-10-03 against `meta.delivered_amount` read off the
+    testnet ledger. Later the same day to_drops() became truncating. If that
+    change had moved this amount's drop count, the quantizer would now disagree
+    with the ledger about a row that was already fixed, and
+    correct_payout_amounts.py would begin REFUSING it -- a tool reporting a fresh
+    finding about a row it had itself resolved, which is about the most
+    confusing output this tree could produce.
+
+    IT DOES NOT MOVE, AND THE ARITHMETIC IS THE WHOLE REASON: 3.3155893288590605
+    XRP is 3315589.3288590605 drops exactly, and the fractional part is 0.329 --
+    BELOW the half that is the only place truncation and half-up can differ. So
+    both roundings answer 3315589. Asserted here on both roundings rather than
+    only the live one, because "it happens to be below a half" is the fact that
+    makes the claim true and a test of the live rounding alone would not say so.
+
+    THE 3315589 IS A LEDGER READING, not this code's output written down after
+    the fact. See THE_ONE_REAL_XRP_PAYOUT above for the transaction.
+
+    MUTATION RUN 2026-10-03: ROUND_HALF_UP back in to_drops(). This test KEEPS
+    PASSING, and that is correct and is the point -- the claim is that this
+    particular payout is insensitive to the direction, so a test that failed
+    under the other direction would be asserting the opposite of what is wanted.
+    What catches the direction change is
+    test_NO_CHAIN_can_quantize_a_payout_UPWARD_any_more.
+    """
+    booked, ledger_drops = THE_ONE_REAL_XRP_PAYOUT
+    exact = Decimal(str(booked)) * DROPS_PER_XRP
+
+    assert exact == Decimal("3315589.3288590605"), "the arithmetic this claim rests on"
+    assert exact - int(exact) < Decimal("0.5"), (
+        "the fractional drop is what makes the two roundings agree; above a half they would differ"
+    )
+    assert int(exact.to_integral_value(rounding=ROUND_DOWN)) == ledger_drops
+    assert int(exact.to_integral_value(rounding=ROUND_HALF_UP)) == ledger_drops
+    assert to_drops(booked) == ledger_drops, "the live conversion no longer matches the ledger"
+    assert quantize_for_chain(booked, "XRP")[0] == from_drops(ledger_drops) == 3.315589
+
+
+@pytest.mark.parametrize("asset", EVERY_CHAIN)
+def test_quantizing_is_still_a_FIXED_POINT_on_every_chain_after_the_change(asset):
+    """Idempotence is the whole license for quantizing before the adapter quantizes again.
+
+    IF THIS FAILS, THE SERVICE AND THE ADAPTER DISAGREE ABOUT WHAT GETS SENT, and
+    that is the one outcome the 2026-10-03 rounding change had to not produce.
+    services/payout_service.amount_decided_and_logged() quantizes, records and
+    reserves one figure; chains/base.RPCAdapter.send_to_address() and
+    chains/xrp.XRPAdapter.preview_payout() then quantize AGAIN on the way out. The
+    recorded number equals the broadcast number only because the second pass finds
+    a fixed point.
+
+    MEASURED after XRP's to_drops() became truncating, over the 60,015 positive
+    amounts in _sample_amounts(): 0 non-idempotent on BTC, LTC, GRC, XRP or SOL.
+    The same property was measured before the change and held then too; this
+    re-runs it in the new direction rather than inheriting the old result, since
+    the old one was measured against a rounding that no longer exists (rule 17).
+
+    THIS IS NOT A DUPLICATE of the existing idempotence test over the same
+    sample: that one establishes the property as such, and this one re-establishes
+    it per chain specifically under truncation, with the failure message naming
+    the consequence. They would both have to be deleted for the fixed point to
+    stop being checked, which on this path is the right number.
+
+    MUTATION RUN 2026-10-03: `return int(...)` -> `return int(...) + 1` in
+    chains/xrp_units._to_drops(). The XRP case fails with a first offender;
+    the other four are untouched, which is what localizes it.
+    """
+    offenders = [
+        amount for amount in _sample_amounts() if amount > 0
+        and quantize_for_chain(quantize_for_chain(amount, asset)[0], asset)[0]
+        != quantize_for_chain(amount, asset)[0]
+    ]
+
+    assert offenders == [], (
+        f"{asset}: {len(offenders)} amounts are not fixed points, first {offenders[0]!r}. The adapter "
+        f"quantizes again after the service, so a non-fixed-point means the figure RECORDED and the "
+        f"figure BROADCAST are different numbers"
+    )
+
+
+def test_GRIDCOIN_rounding_an_over_precise_amount_cannot_reach_the_FORWARD_path(tmp_path, monkeypatch):
+    """The forward path is safe from the daemon's half-up by ORDERING, and here is the proof.
+
+    THE FINDING THIS ANSWERS, measured on the operator's host 2026-10-03. Gridcoin
+    5.5.1.0's RPC takes an amount through a C++ double and rounds it HALF UP
+    (`roundint64(dAmount * COIN)`), where
+    chains/coin_amounts.fit_to_chain_precision() TRUNCATES. Of the operator's 9
+    GRC payout rows, 9 of 9 fit half-up and only 6 of 9 fit truncation -- the 6
+    being exactly the rows whose remainder beyond the eighth decimal is below
+    0.5. On the three that discriminate the daemon sent one satoshi MORE than the
+    quantizer computes.
+
+    SO THE QUESTION THIS TEST SETTLES IS WHETHER THAT CAN STILL HAPPEN, and the
+    answer is no -- not because the rounding changed, but because since 54892d5
+    the amount is quantized BEFORE the send. An 8-decimal figure has no ninth
+    decimal for the daemon to round, so half-up and truncation agree on it and
+    the daemon's behavior is unreachable.
+
+    PROVEN BY BEHAVIOR, NOT BY THE ORDERING BEING VISIBLE IN THE SOURCE
+    (CLAUDE.md "Verify by behavior, never by reading the code"). The real
+    amount_decided_and_logged() runs against a seeded swap row carrying the
+    recorded figure of the operator's worst case, payouts.id=17 -- the row with
+    the largest remainder, 0.738 beyond the eighth decimal, where the two
+    roundings differ by a full satoshi. Then GRIDCOIN'S OWN ARITHMETIC is applied
+    to whatever that function produced, and asserted to be the same number.
+
+    THE DAEMON'S ARITHMETIC IS REPRODUCED FROM ITS SOURCE, at tag 5.5.1.0:
+    src/wallet/rpcwallet.cpp:396 sendtoaddress -> AmountFromValue, which is
+    src/rpc/server.cpp:105-114 `roundint64(dAmount * COIN)`, which is
+    src/util.h:155-158 `(int64_t)(d > 0 ? d + 0.5 : d - 0.5)`. That is written out
+    as `int(value * 1e8 + 0.5)` below -- a double multiply and a truncating cast,
+    in that order, which is what the C++ does. NOT Decimal, deliberately: using
+    Decimal here would test a model of the daemon rather than the daemon's own
+    floating-point behavior, and the difference between those two is 4 in 200,000
+    amounts (the tie cases, measured 2026-10-03 and recorded in
+    chains/payout_quantization.py's header).
+
+    NOTHING IS BROADCAST AND NO DAEMON IS CONTACTED. This asserts on the figure
+    the service decided, and applies the daemon's published arithmetic to it in
+    this process.
+
+    MUTATION RUN 2026-10-03: in amount_decided_and_logged(), `return quantized`
+    -> `return amount`. This fails -- the unquantized 2701.3495803173805 reaches
+    `gridcoin_would_send` as 2701.34958032 against a quantizer answer of
+    2701.34958031 -- which is precisely the defect's signature and the reason the
+    assertion is on the daemon's figure rather than on the service's alone.
+    """
+    # The operator's payouts.id=17, the worst of the three discriminating rows:
+    # 2701.3495803173805 has 0.73805 beyond the eighth decimal, so truncation and
+    # half-up differ by a whole satoshi on it.
+    recorded = 2701.3495803173805
+    db_path = str(tmp_path / "forward.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA)
+    apply_migrations(conn)
+    conn.close()
+    swap = {"id": "s_6cd1a920cbe5739e", "to_asset": "GRC", "output_amount_estimate": recorded,
+            "expected_input_amount": 5.0, "actual_input_amount": 5.0, "quoted_rate": 540.27,
+            "fee_bps": 150, "network_fee_reserve": 0.001}
+
+    decided = amount_decided_and_logged(swap)
+
+    def gridcoin_would_send(value: float) -> float:
+        """Gridcoin 5.5.1.0's AmountFromValue, in its own order of operations."""
+        return int(value * 1e8 + 0.5) / 1e8
+
+    quantizer, _why = quantize_for_chain(recorded, "GRC")
+    assert decided == quantizer == 2701.34958031, "the service no longer quantizes before the send"
+    assert gridcoin_would_send(decided) == decided, (
+        f"Gridcoin would send {gridcoin_would_send(decided)!r} for a figure this desk records as "
+        f"{decided!r}. The two agree ONLY while the amount is quantized before the send; if they "
+        f"differ, the daemon's half-up rounding is back on the payout path and the desk overpays"
+    )
+    # And the same arithmetic on the UNQUANTIZED figure is what the operator's
+    # three refused rows record -- which is the measurement this test exists to
+    # bound, kept here so the contrast is in one place.
+    assert gridcoin_would_send(recorded) == 2701.34958032, (
+        "the daemon's half-up on an over-precise amount -- the chain figure the operator read off "
+        "their own daemon for payouts.id=17"
+    )
+    assert gridcoin_would_send(recorded) != quantizer, (
+        "if these were equal there would have been no disagreement to explain and no row refused"
     )
 
 

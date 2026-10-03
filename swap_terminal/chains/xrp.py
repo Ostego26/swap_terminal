@@ -249,6 +249,7 @@ from .xrp_units import (
     from_drops,
     from_drops_decimal,
     to_drops,
+    to_drops_round_half_up,
     validate_min_confirmations,
 )
 
@@ -881,7 +882,15 @@ class XRPAdapter:
                 f"subtracts."
             )
         else:
-            fee_drops = to_drops(base_fee_xrp)
+            # to_drops_round_half_up(), NOT to_drops(), AND THE DIFFERENCE IS
+            # DELIBERATE. to_drops() became TRUNCATING on 2026-10-03 by operator
+            # decision ("make it all match") so that no payout exceeds its quote.
+            # That direction is right for an amount and wrong for a fee: a fee
+            # allowance rounded DOWN understates what the ledger will charge, and
+            # this figure is what the reserve check subtracts. So this site keeps
+            # the rounding it has always had, byte for byte. Both functions live in
+            # chains/xrp_units.py and each names the other.
+            fee_drops = to_drops_round_half_up(base_fee_xrp)
             fee_source = (
                 f"{fee_drops} drops, read from server_info.validated_ledger.base_fee_xrp. The fee "
                 f"actually paid is autofilled by xrpl-py at submit time and rises with load."

@@ -524,6 +524,23 @@ class RPCAdapter:
         RPC accepted 2701.3495803173805 and rounded on chain to 2701.34958032,
         exactly as the payout transaction the operator pasted shows.
 
+        AND THE DIRECTION OF THAT ROUNDING WAS ESTABLISHED LATER THE SAME DAY: it
+        is HALF UP, so 2701.34958032 is one satoshi MORE than the 2701.34958031
+        fit_to_chain_precision() computes from the same input. Measured over the
+        operator's 9 GRC payout rows -- 9 of 9 fit round-half-up, 6 of 9 fit
+        truncation, and the 6 are exactly the rows where the two cannot differ --
+        and traced to Gridcoin 5.5.1.0's AmountFromValue(), which is the pre-0.17
+        `roundint64(dAmount * COIN)` form rather than ParseFixedPoint. The full
+        table of what each daemon does with an over-precise amount, with the
+        source references, is in chains/payout_quantization.py's header; it is
+        written once and pointed at (rule 8).
+
+        NOTHING ON THIS PATH REACHES THAT BEHAVIOR ANY MORE. Since 54892d5 the
+        payout service quantizes before the send, and this method quantizes again
+        below, so the figure Gridcoin is handed already has eight decimals and
+        every rounding agrees on it. The masking is history, not a live tolerance
+        being relied on.
+
         AND ONE EXPECTATION WAS REFUTED (rule 17): I expected exponent notation to
         fail too, since small payouts serialize as "4.1e-07". Core accepted it. So
         the defect is the decimal COUNT alone and no string formatting is needed --
