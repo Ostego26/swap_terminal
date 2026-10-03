@@ -457,8 +457,12 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                      A quote will price and create_swap() will refuse.
       CANNOT COMPLETE
                      in ALLOWED_PAIRS, both chains reachable, and the pair still
-                     cannot complete -- the destination holds no signing key, or
-                     the source has no deposit account. ADDED 2026-10-02; see the
+                     cannot complete. THREE causes, not the two this line listed
+                     until 2026-10-03: the destination holds no signing key, the
+                     source has no deposit account, or nobody has recorded what a
+                     payout on the destination costs this desk. The third refuses
+                     at the QUOTE while the other two price a quote and refuse the
+                     swap, so `detail` says which stage. ADDED 2026-10-02; see the
                      next paragraph for the page this state was missing from.
       DISABLED       not in ALLOWED_PAIRS. Refused before anything else happens.
 
@@ -553,7 +557,8 @@ def pair_rows(config, adapters: dict) -> list[dict]:
             verdict = (
                 pair_serviceability(config, adapters, from_asset, to_asset)
                 if enabled
-                else {"missing": [], "cannot_pay": "", "cannot_take": "", "serviceable": False, "reason": ""}
+                else {"missing": [], "cannot_pay": "", "cannot_take": "", "cannot_quote": "",
+                      "serviceable": False, "reason": ""}
             )
             missing = verdict["missing"]
             if not enabled:
@@ -580,16 +585,37 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                 # authority's own sentence -- why_cannot_pay_out() or
                 # why_cannot_take_deposits() -- carried verbatim, so the two surfaces
                 # cannot word one refusal two ways.
+                # WHERE THE REFUSAL LANDS DEPENDS ON WHICH CONDITION REFUSED, and this
+                # sentence said "A quote WILL price" unconditionally until 2026-10-02.
+                # For the fourth condition that is backwards: a pair with no fee
+                # reserve refuses AT THE QUOTE and never reaches create_swap(). An
+                # operator reading "a quote WILL price" about GRC -> XRP would go
+                # looking for the bug in the swap path, where it is not.
+                stage = (
+                    "A quote REFUSES; nothing reaches create_swap()."
+                    if verdict["cannot_quote"]
+                    else "A quote WILL price; create_swap() refuses."
+                )
                 state, detail = "cannot_complete", (
                     "in Config.ALLOWED_PAIRS and both chains have an adapter here, but this pair cannot "
-                    "complete: " + verdict["reason"] + " A quote WILL price; create_swap() refuses."
+                    "complete: " + verdict["reason"] + " " + stage
                 )
-                # Which END refuses, named for the pill. The sentence itself is in
-                # this panel's state legend, once per state, and the asset's own
+                # WHICH CONDITION REFUSED, named for the pill. The sentence itself is
+                # in this panel's state legend, once per state, and the asset's own
                 # row in the Chains table carries its payout and deposit posture.
-                short_detail = (
-                    f"{to_asset} cannot pay out" if verdict["cannot_pay"] else f"{from_asset} cannot take deposits"
-                )
+                #
+                # THE THIRD BRANCH IS NOT COSMETIC. This was a two-way expression, so
+                # a pair refused by the fee reserve -- neither cannot_pay nor
+                # cannot_take -- fell through to the else and the pill read
+                # "GRC cannot take deposits" about the chain this desk pays out of
+                # every day. A pill that names the wrong end is worse than no pill:
+                # it is a measurement-shaped statement that is false.
+                if verdict["cannot_pay"]:
+                    short_detail = f"{to_asset} cannot pay out"
+                elif verdict["cannot_take"]:
+                    short_detail = f"{from_asset} cannot take deposits"
+                else:
+                    short_detail = f"no {to_asset} fee reserve, so no quote"
             else:
                 state, detail = "enabled", verdict["reason"]
                 short_detail = "reachable, can take a deposit, can pay out"
@@ -614,6 +640,7 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                     # report every pair the same way.
                     "cannot_pay": verdict["cannot_pay"],
                     "cannot_take": verdict["cannot_take"],
+                    "cannot_quote": verdict["cannot_quote"],
                     "serviceable": enabled and verdict["serviceable"],
                     "detail": detail,
                     "short_detail": short_detail,

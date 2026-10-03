@@ -61,6 +61,7 @@ instead of reasoning about adapters at all.
 
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 
+from .quote_service import why_cannot_quote
 from .swap_service import why_cannot_take_deposits
 
 
@@ -78,6 +79,23 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dic
       cannot_take   services/swap_service.why_cannot_take_deposits() -- the source
                     cannot produce a deposit target. Only the SOURCE is asked; a
                     destination chain never receives a deposit.
+      cannot_quote  services/quote_service.why_cannot_quote() -- everything can
+                    move and nobody has recorded what a payout on the destination
+                    costs this desk, so no price can be put on it. Only the
+                    DESTINATION is asked, for the same reason cannot_pay is.
+
+    THERE WERE THREE UNTIL 2026-10-02 AND THE FOURTH WAS FOUND ON THE OPERATOR'S
+    SCREEN. With XRP_PAYOUT_SECRET_SEED exported, GRC -> XRP passes all three
+    above, so the customer page rendered
+
+        GRC -> XRP   AVAILABLE   Ready to quote now.
+
+    and the quote then refused for want of XRP_NETWORK_FEE_RESERVE. The page
+    promises in its own lede that "the form below offers exactly the ones marked
+    available, so what you see here and what you can pick cannot differ", and the
+    pair it offered was one the next click could not price. Being QUOTABLE is a
+    condition of completing a swap exactly as being payable is, and leaving it out
+    meant this function answered a narrower question than every caller was asking.
 
     EVALUATED IN THAT ORDER AND SHORT-CIRCUITED, which is deliberate rather than an
     optimization. A chain with no adapter cannot be asked whether it can pay out --
@@ -104,18 +122,22 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dic
     missing = unconfigured_chains(adapters, from_asset, to_asset)
     cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
     cannot_take = "" if missing or cannot_pay else why_cannot_take_deposits(config, adapters, from_asset)
+    cannot_quote = "" if missing or cannot_pay or cannot_take else why_cannot_quote(config, to_asset)
     return {
         "missing": missing,
         "cannot_pay": cannot_pay,
         "cannot_take": cannot_take,
-        "serviceable": not missing and not cannot_pay and not cannot_take,
+        "cannot_quote": cannot_quote,
+        "serviceable": not missing and not cannot_pay and not cannot_take and not cannot_quote,
         "reason": (
             " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
             if missing
             else cannot_pay
             or cannot_take
+            or cannot_quote
             or "in ALLOWED_PAIRS, both chains have an adapter here, the source can take "
-            "a deposit and the destination can pay out"
+            "a deposit, the destination can pay out and this desk has recorded what "
+            "a payout on it costs"
         ),
     }
 
@@ -166,6 +188,7 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
                 "missing": verdict["missing"],
                 "cannot_pay": verdict["cannot_pay"],
                 "cannot_take": verdict["cannot_take"],
+                "cannot_quote": verdict["cannot_quote"],
                 # `(none)` is never right here: a row is either enabled, in which
                 # case the reason says all three tests passed, or it names what
                 # refused. A blank reason beside DISABLED would be rule 14's empty

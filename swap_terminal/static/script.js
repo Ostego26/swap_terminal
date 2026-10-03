@@ -179,7 +179,19 @@ function wireQuoteForm() {
     } catch (error) {
       latestQuote = null;
       if (createButton) createButton.disabled = true;
-      say(region, "No quote: " + error.message, "result-error");
+      // THE PREFIX IS ADDED ONLY IF THE SERVER DID NOT ALREADY SAY IT. The house
+      // shape for a refused quote is a message that begins "No quote:" --
+      // services/quote_service.py writes three of them and tests/test_solana_payout.py
+      // asserts that shape -- and prepending it unconditionally doubled it on the
+      // operator's screen 2026-10-02:
+      //
+      //     No quote: No quote: nobody has recorded what one XRP payout costs this desk
+      //
+      // The prefix still exists for the errors that are NOT the server's prose: a
+      // dropped connection arrives here as "Failed to fetch", and a bare
+      // "Failed to fetch" in the quote region does not say what failed.
+      var message = error.message || "the server gave no reason";
+      say(region, message.indexOf("No quote:") === 0 ? message : "No quote: " + message, "result-error");
     }
   });
 }

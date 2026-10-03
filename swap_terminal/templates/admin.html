@@ -385,8 +385,18 @@
             this chain (services/swap_service.why_cannot_take_deposits); "can
             receive" is whether a payout can be made TO it
             (chains/registry.why_cannot_pay_out). Both are the authorities the pair
-            verdict itself uses, so a row here cannot disagree with a cell in the
-            matrix below.
+            verdict itself uses, so a row here cannot CONTRADICT a cell in the matrix
+            below.
+
+            IT CAN STILL BE INCOMPLETE, AND SAYING SO IS THE POINT (2026-10-03).
+            The pair verdict asks a THIRD authority these two columns have no row
+            for -- services/quote_service.why_cannot_quote(), which is about the
+            DESK and not about a chain -- so both cells here can read YES while the
+            pair reads CANNOT COMPLETE because no fee reserve exists for the
+            destination. That is not a disagreement; it is a cause this table is
+            not the place for, and the pair's own pill names it. A reader who
+            treated two YESes as a promise would be wrong for exactly one reason,
+            and this is it.
 
             YES IS A READING AND SO IS NO, and the refusal sentence renders beside
             the NO rather than only its existence -- that sentence names the signing
@@ -637,10 +647,20 @@
           grayscale paste too). -#}
       <tr>
         <th scope="row">{{ badges.level_badge('failed', 'CANNOT COMPLETE') }}</th>
-        <td>In <code>Config.ALLOWED_PAIRS</code> and both chains reachable, and the pair still cannot complete
-           &#8212; the destination holds no signing key, or the source has no deposit account.
-           <strong>A quote WILL price; <code>create_swap()</code> refuses</strong> &#8212; and a deposit that
-           somehow arrived would be credited against a payout that raises. The pill names which END refuses;
+        {#- THE THIRD CAUSE ARRIVED 2026-10-03 AND IT REFUSES AT A DIFFERENT STAGE,
+            which is why this cell no longer says "A quote WILL price" for all of
+            them. A destination with no <code>&lt;ASSET&gt;_NETWORK_FEE_RESERVE</code>
+            refuses at the QUOTE and never reaches create_swap(); the other two
+            price a quote and refuse the swap. An operator who read "a quote WILL
+            price" about GRC -&gt; XRP would go looking in the swap path, where the
+            bug is not. The pill names the cause, so the two stages are
+            distinguishable without opening the source. -#}
+        <td>In <code>Config.ALLOWED_PAIRS</code> and both chains reachable, and the pair still cannot complete.
+           Three causes, and they do not refuse at the same stage: the destination holds no signing key, or the
+           source has no deposit account &#8212; <strong>a quote WILL price and <code>create_swap()</code>
+           refuses</strong>, so a deposit that somehow arrived would be credited against a payout that raises
+           &#8212; or nobody has recorded what a payout on the destination costs this desk, in which case
+           <strong>the quote itself refuses</strong> and nothing is promised. The pill names the cause;
            that asset's row in <a href="#chains-heading">Chains</a> carries its posture.</td>
       </tr>
       <tr>

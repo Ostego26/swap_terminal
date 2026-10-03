@@ -98,16 +98,63 @@ def get_network_fee_reserve(config, to_asset: str) -> float:
     reserve is a PRICING decision and belongs to the operator (rule 16), so a missing
     one refuses the quote and says which setting to add.
     """
+    refusal = why_cannot_quote(config, to_asset)
+    if refusal:
+        # "Nothing was written." is appended HERE and is not part of the shared
+        # reason, because it is true of an ATTEMPT and this is the only caller that
+        # is one. services/pair_view.py asks the same question about a pair nobody
+        # has picked yet, and telling that reader nothing was written would imply
+        # something had been tried. Rule 14: say what the number means to the
+        # reader who is actually there.
+        raise ValueError(f"{refusal} Nothing was written.")
+    return float(config[f"{to_asset}_NETWORK_FEE_RESERVE"])
+
+
+def why_cannot_quote(config, to_asset: str) -> str:
+    """Why a quote paying out in `to_asset` would refuse, or "" if it would price.
+
+    THE SAME TEST AS get_network_fee_reserve()'s, ASKED WITHOUT RAISING, so a
+    surface that lists pairs can show the refusal before a customer picks one.
+    get_network_fee_reserve() is DERIVED from this rather than repeating the
+    condition (rule 8); the raise is one line above.
+
+    WHY THIS FUNCTION EXISTS, measured on the operator's own screen 2026-10-02.
+    services/pair_view.pair_serviceability() evaluated THREE conditions -- an
+    adapter for each chain, the destination can pay out, the source can take a
+    deposit -- and GRC -> XRP passes all three on a host that has exported
+    XRP_PAYOUT_SECRET_SEED. So the customer page rendered
+
+        GRC -> XRP   AVAILABLE   Ready to quote now.
+        2 of 13 directions can be quoted right now
+
+    and the quote for it refused, from this function, for want of
+    XRP_NETWORK_FEE_RESERVE. The page's own lede promises "the form below offers
+    exactly the ones marked available, so what you see here and what you can pick
+    cannot differ", and it differed.
+
+    THE THREE CONDITIONS WERE NOT WRONG; THEY WERE INCOMPLETE. Being quotable is a
+    FOURTH condition with its own authority, and the authority is this file --
+    which is why the fix is a function here that pair_view calls, and not a
+    `hasattr(Config, ...)` written a second time in pair_view. A second copy of
+    this test is rule 8's shape, and the tree has already paid for exactly that
+    on exactly this verdict: four implementations of the pay-out test, three of
+    them wrong (see services/pair_view.py's header).
+
+    PURE CONFIG, NO NETWORK AND NO ADAPTER, which is what lets a page call it for
+    every pair on every render. It is also why it answers only about the
+    DESTINATION: a reserve is keyed on the asset being paid out, and a source
+    chain never sends.
+    """
     key = f"{to_asset}_NETWORK_FEE_RESERVE"
     if key not in config:
-        raise ValueError(
+        return (
             f"No quote: nobody has recorded what one {to_asset} payout costs this desk, so the margin on "
             f"a {to_asset} swap is unknown. Set {key} in the environment this process was started with -- "
             f"it is the expected chain fee for one payout, which the desk pays out of its own fee and "
             f"NOT out of the customer's payout. Defaulting it to zero would book a cost of nothing for a "
-            f"transaction that is not free. Nothing was written."
+            f"transaction that is not free."
         )
-    return float(config[key])
+    return ""
 
 
 def new_account_floor_lamports(adapter, *, now=None) -> int:

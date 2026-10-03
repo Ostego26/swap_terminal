@@ -27,6 +27,7 @@ from pathlib import Path
 from time import time
 
 import pytest
+from config import Config
 from db import SCHEMA, dict_factory
 from network_target import configuring_variable
 from services import coinpaprika, market_context, pricing
@@ -153,8 +154,12 @@ def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(clien
 
     for from_asset, to_asset in allowed:
         option = f'value="{from_asset}:{to_asset}"'
-        if from_asset in reachable_assets and to_asset in reachable_assets:
-            assert option in body, f"{from_asset}->{to_asset} is reachable and must be offered"
+        # `and quotable(...)`: see quotable() above. Reachable is necessary and, since
+        # 2026-10-03, not sufficient -- a pair whose destination has no fee reserve is
+        # correctly NOT offered even with both chains up, and asserting it must be
+        # offered was this test asserting the defect.
+        if from_asset in reachable_assets and to_asset in reachable_assets and quotable((from_asset, to_asset)):
+            assert option in body, f"{from_asset}->{to_asset} is reachable and quotable and must be offered"
         else:
             assert option not in body, (
                 f"{from_asset}->{to_asset} was offered, but one of its chains has no adapter -- "
@@ -241,10 +246,26 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
     fully_reachable(client, monkeypatch, *every_asset)
     body = client.get("/").get_data(as_text=True)
 
-    for from_asset, to_asset in allowed:
+    # THE PREMISE NARROWED ON 2026-10-03 AND THE GUARD IT PROVIDES DID NOT.
+    # "Every chain reachable" no longer implies "every pair offered": a pair whose
+    # destination has no fee reserve refuses at the quote and must not be offered.
+    # The split is asserted both ways below, so a function that marked everything
+    # disabled still fails here -- which is the one thing this test exists for.
+    expected = [pair for pair in sorted(allowed) if quotable(pair)]
+    assert expected, (
+        "no allowed pair has a destination fee reserve, so this test would assert nothing. "
+        "That is a real finding, not a setup problem -- read config.py"
+    )
+    for from_asset, to_asset in expected:
         assert f'value="{from_asset}:{to_asset}"' in body, (from_asset, to_asset)
+    for from_asset, to_asset in sorted(set(allowed) - set(expected)):
+        assert f'value="{from_asset}:{to_asset}"' not in body, (
+            f"{from_asset}->{to_asset} was offered and no {to_asset}_NETWORK_FEE_RESERVE exists, so the "
+            f"quote for it refuses -- the form offered a pair the next click cannot price"
+        )
     assert 'badge-word">DISABLED<' not in body, "nothing is unreachable here, so nothing may be badged DISABLED"
-    assert "pair-off" not in body, "no pair may be marked off when every pair is reachable"
+    if len(expected) == len(allowed):
+        assert "pair-off" not in body, "no pair may be marked off when every pair is reachable and quotable"
 
     # And nothing else -- with the disabled set DERIVED, not written out.
     #
@@ -669,6 +690,37 @@ def fully_reachable(client, monkeypatch, *assets, can_spend=True):
     return client.application.config["ADAPTERS"]
 
 
+def quotable(pair) -> bool:
+    """Would a quote for this pair PRICE, independent of whether the chains are up?
+
+    THE FOURTH CONDITION, ADDED TO pair_serviceability() ON 2026-10-03, and four
+    tests in this file failed the moment it landed -- correctly. Each asserted that
+    reachability alone implied the pair was offered, which had been true and is not:
+    a destination with no <ASSET>_NETWORK_FEE_RESERVE refuses at the quote, so a
+    pair whose chains are both up can still not be offered.
+
+    WHY THIS SPELLS THE CONDITION AGAIN INSTEAD OF CALLING why_cannot_quote(),
+    which is the one place in this tree where rule 8 asks for the opposite. A test
+    that derives its expectation from the function under test passes for any
+    implementation of it, including an empty one -- it would assert only that the
+    page agrees with itself, which is exactly the property that was TRUE on
+    2026-10-02 while the page was wrong. So this is a deliberate second opinion,
+    kept to one expression, named, and tested against the real surfaces below.
+
+    READ OFF Config AND NOT OFF client.application.config, deliberately. The app
+    copies Config's uppercase attributes in at startup, so for the reserve the two
+    agree -- and reading the CLASS means a test that monkeypatches a reserve into the
+    app config gets a real disagreement here rather than a silent agreement. No test
+    in this file does that today; if one ever needs to, it should pass its own
+    expectation rather than teach this helper to read two sources.
+
+    tests/test_an_available_pair_can_actually_be_quoted.py is the other half: it
+    asserts the badge and a REAL create_quote() agree, which is the end-to-end
+    property. This one keeps the four tests here honest about their premise.
+    """
+    return hasattr(Config, f"{pair[1]}_NETWORK_FEE_RESERVE")
+
+
 # NOT a credential. A SENTINEL: its only purpose is to be findable, so the leak
 # test below can search the whole response body for it. A value that looked like a
 # real credential would make the test weaker, not stronger -- the same reasoning
@@ -736,7 +788,13 @@ def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkey
 
     body = client.get("/api/health").get_json()
 
-    assert body["offerable_pairs"] == ["GRC->XRP", "XRP->GRC"]
+    # GRC->XRP DROPPED OUT ON 2026-10-03 AND IT IS RIGHT THAT IT DID. Both chains are
+    # reachable in this test, and XRP_NETWORK_FEE_RESERVE does not exist, so a quote for
+    # GRC->XRP refuses -- which is the thing the operator hit on a live page the day before
+    # (it read AVAILABLE and would not price). Derived rather than written out, so this
+    # expectation follows config.py if the reserve is ever set.
+    expected = [f"{a}->{b}" for a, b in sorted([("GRC", "XRP"), ("XRP", "GRC")]) if quotable((a, b))]
+    assert body["offerable_pairs"] == expected
     assert set(body["offerable_pairs"]) < set(body["allowed_pairs"]), (
         "with only XRP and GRC reachable, the offerable set must be a strict subset"
     )
@@ -749,7 +807,12 @@ def test_health_offerable_equals_allowed_when_every_chain_is_reachable(client, m
 
     body = client.get("/api/health").get_json()
 
-    assert body["offerable_pairs"] == body["allowed_pairs"]
+    # "EQUALS" BECAME "EQUALS, LESS THE UNQUOTABLE ONES" ON 2026-10-03, and the guard
+    # survives the change: the endpoint still cannot pass by reporting an empty list,
+    # because `expected` is non-empty and asserted to be.
+    expected = [f"{a}->{b}" for a, b in sorted(client.application.config["ALLOWED_PAIRS"]) if quotable((a, b))]
+    assert expected, "no allowed pair is quotable, so this assertion would be vacuous"
+    assert body["offerable_pairs"] == expected
 
 
 def test_health_offerable_pairs_is_empty_rather_than_absent_when_nothing_is_reachable(client, monkeypatch):
