@@ -1,0 +1,510 @@
+"""Is the desk's hot wallet distinct from the operator's own? One decision per chain.
+
+Role: submodule (the function layer -- every function here is pure, takes
+      already-read answers as arguments, and returns a verdict plus the sentence
+      that explains it)
+Reads: nothing. No environment, no file, no database, no socket. Every input is
+      an argument, which is what lets a test assert every combination without a
+      daemon (rule 10: the thing that decides is the smallest testable piece).
+Writes: nothing
+Can move funds: no. Nothing here signs, sends, derives a key, or names a
+      passphrase. It does not even open the socket whose answers it judges --
+      wallet_custody.py does that and hands the answers in.
+Mainnet-safe: yes, trivially: it has no I/O at all. The mainnet REFUSAL lives in
+      network_target.may_read_a_wallet(), one layer out, because refusing has to
+      happen before a socket opens and this module never opens one.
+
+WHY THIS EXISTS, AND WHAT IT CANNOT DO
+
+The operator's instruction, 2026-10-03: "these two hot wallets are used by the
+swap terminal machine NOT THE USER." This is a CUSTODIAL desk -- the customer
+deposits to an address the desk owns and the desk pays out of its own inventory
+-- so the deposit leg must move coins OUT of the customer's wallet and INTO the
+desk's, and the payout leg must move coins OUT of the desk's and INTO the
+customer's. Neither happens if the desk's wallet and the operator's own wallet
+are the same wallet.
+
+ON THIS HOST THEY ARE, AND THE CONFIGURATION IS WHY. Measured 2026-10-03 against
+this tree, in an environment with nothing exported:
+
+    BTC_RPC_WALLET -> ''        config.py:447
+    LTC_RPC_WALLET -> ''        config.py:455
+    GRC_RPC_WALLET -> ''        config.py:520
+
+chains/base.RPCAdapter.url appends `/wallet/<name>` ONLY when that value is
+non-empty, so an empty one addresses `http://host:port` with no wallet path --
+which is the daemon's DEFAULT wallet, the same wallet an operator's own
+`gridcoinresearchd getnewaddress` reaches. Verified by construction the same day:
+
+    RPCAdapter(wallet="")         -> http://127.0.0.1:25715
+    RPCAdapter(wallet="desk_hot") -> http://127.0.0.1:25715/wallet/desk_hot
+
+THE HONEST LIMIT, AND IT IS THE WHOLE REASON THIS MODULE IS SHAPED THE WAY IT IS.
+No RPC field, and nothing on any chain, says whose money a coin is. There is no
+`isdesks` beside `ismine`. So this module can establish WHICH WALLET an endpoint
+serves and whether that wallet is the one a bare CLI call reaches, and it CANNOT
+establish that the coins in a named wallet were never the operator's own. Every
+verdict that could be mistaken for the stronger claim says so in its own
+sentence, and what_this_cannot_establish() states the limit once at the top of
+the report, because a diagnostic that implies a proof it does not have is worse
+than no diagnostic -- rule 17's "a hypothesis in the register of a measurement",
+arriving as a green verdict.
+
+FIVE STATES, NOT TWO, FOR THE SAME REASON services/payout_capacity.FundingVerdict
+HAS THREE: "could not ask" is not an answer, and collapsing it into either answer
+is how a gate comes to report "fine" for a question it never asked. The shape is
+deliberately that function's and modules/address_authority.check_address()'s,
+rather than a third vocabulary for one idea (rule 8).
+
+ONE WALLET PER DAEMON IS NOT ALWAYS A DEFECT, AND THE VOCABULARY HAS TO SAY SO.
+XRP and SOL deposits are attributed by a tag or a memo against ONE shared desk
+account -- services/swap_service.payout_source_account() reads the same variable
+as deposit_account() through TAG_ATTRIBUTION, and its docstring explains why at
+length. So for those chains "the deposit account and the payout account are the
+same" is the design and BY_DESIGN is the verdict, not a finding. The finding on
+those chains is a payout whose DESTINATION is the desk's own account, which is a
+different question and has its own function.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+#: The desk's wallet or account was established as a DIFFERENT one from the
+#: daemon's default wallet (BTC/LTC/GRC) or from the account on the other side of
+#: the swap (SOL). It is NOT a statement about whose coins are in it.
+SEPARATED = "SEPARATED"
+
+#: Established that one wallet or account serves both the desk and whatever the
+#: check compared it against. This is the state the operator's host is in on
+#: BTC, LTC and GRC today, and it is what makes a deposit a self-transfer.
+NOT_SEPARATED = "NOT SEPARATED"
+
+#: The question does not apply: one desk account serving both directions is the
+#: custodial design on the tag-attributed chains. Never a defect.
+#:
+#: "BY DESIGN" AND NOT "ONE DESK ACCOUNT, BY DESIGN", WHICH IS WHAT IT SAID FIRST.
+#: Every state here is printed in report_block's label column, which is
+#: LABEL_WIDTH = 16 wide, and the longer spelling rendered as
+#:
+#:     ONE DESK ACCOUN 0 of 6  (none)
+#:
+#: in wallet_custody.py's own tally -- a word cut mid-syllable with nothing saying
+#: a tool did it, which is exactly the ambiguity report_block.clipped() exists to
+#: refuse. The sentence beside the state already says "one desk account ... which
+#: is the custodial design", so the column loses nothing by being short enough to
+#: fit. tests/test_custody_separation.py pins every state against LABEL_WIDTH.
+BY_DESIGN = "BY DESIGN"
+
+#: Two values that have to name one account name two different ones. Always a
+#: defect, and on XRP it is one that refuses at SIGNING time -- after a deposit
+#: is confirmed and irreversible.
+MISCONFIGURED = "MISCONFIGURED"
+
+#: The payout wallet DOES hold the key for the deposit address it was asked
+#: about. Correct for a custodial desk, and never a finding.
+#:
+#: ITS OWN WORD RATHER THAN SEPARATED/NOT SEPARATED, BECAUSE THAT VOCABULARY IS
+#: INVERTED FOR THIS ONE QUESTION and the first draft got it wrong. "Does the
+#: payout wallet hold the key for this swap's own deposit address" wants YES on a
+#: custodial desk -- the desk derived that address with getnewaddress in the
+#: wallet it pays out of -- so rendering the yes as NOT SEPARATED put a correct
+#: answer in the same bucket as the defect and made the exit code non-zero for it.
+#: The brief for this work says it in one line: one desk account is CORRECT for a
+#: custodial desk, do not report it as a defect. Two questions, two vocabularies,
+#: is the honest shape; one vocabulary stretched over both is how a report comes
+#: to disagree with the design it is inspecting.
+DESK_OWNS = "DESK OWNS IT"
+
+#: The payout wallet does NOT hold the key for the deposit address it was asked
+#: about. Always a defect on a custodial desk: a deposit it cannot see is a
+#: deposit it cannot spend.
+NOT_THE_DESKS = "NOT THE DESK'S"
+
+#: Nobody answered, or the question cannot be asked on this chain. NEVER a green
+#: verdict by default: the reason is always carried, and a caller that renders
+#: this as "fine" has reintroduced the defect this module exists to remove.
+NOT_ESTABLISHED = "NOT ESTABLISHED"
+
+#: Every state, so a caller can render a legend and a test can assert the set is
+#: closed. Ordered worst-known-first is deliberately NOT done: these are not
+#: ranked, because NOT_ESTABLISHED is not "between" two answers -- it is the
+#: absence of one.
+#:
+#: EVERY ONE OF THEM FITS report_block.LABEL_WIDTH, which is what lets
+#: wallet_custody.py print the state as the label column with no truncation.
+#: tests/test_custody_separation.py pins that, because the alternative is a state
+#: cut mid-word with nothing saying a tool did it -- which is what
+#: "ONE DESK ACCOUNT, BY DESIGN" did before it became "BY DESIGN".
+STATES = (SEPARATED, NOT_SEPARATED, BY_DESIGN, DESK_OWNS, NOT_THE_DESKS, MISCONFIGURED, NOT_ESTABLISHED)
+
+
+class CustodyVerdict(NamedTuple):
+    """One state from STATES, and the sentence an operator acts on.
+
+    `why` is never empty, including for SEPARATED. That is the difference from a
+    bare boolean and it is the point: a SEPARATED verdict has to carry what it
+    did NOT establish, or a reader takes it for the stronger claim.
+    """
+
+    state: str
+    why: str
+
+
+def wallet_label(asset: str, configured_wallet: str) -> str:
+    """How to NAME the wallet an endpoint addresses, in a status line. One spelling.
+
+    MERGED FROM TWO SITES ON 2026-10-03 (rule 8). Both of these rendered the same
+    phrase for the same question, and neither said what it meant:
+
+        workers/common.endpoint_lines()      wallet = rpc["wallet"] or "(default wallet)"
+        services/admin_view._endpoint_text() wallet = getattr(...) or "(default wallet)"
+
+    "(default wallet)" is accurate and tells an operator nothing. It is the one
+    line on a worker's startup banner and on the admin page's Chains table where
+    the custody question is visible, and it rendered as a parenthetical that reads
+    like a default being fine. What it actually means is that this endpoint has no
+    `/wallet/<name>` path, so the daemon routes the call to whichever wallet it
+    serves by default -- the same wallet an operator's own CLI gets with no
+    `-rpcwallet` argument.
+
+    So the phrase now names the VARIABLE that would separate them, because the
+    operator reads the screen and not config.py (rule 14), and it stays short
+    enough for a banner: the long form is wallet_custody.py's job.
+    """
+    name = (configured_wallet or "").strip()
+    if name:
+        return name
+    return f"(default -- {asset}_RPC_WALLET unset, so this is the wallet a bare CLI call reaches)"
+
+
+def script_chain_verdict(
+    asset: str,
+    configured_wallet: str,
+    walletinfo: object,
+    read_error: str = "",
+    loaded_wallets: tuple[str, ...] | None = None,
+) -> CustodyVerdict:
+    """BTC, LTC and GRC: which wallet does the desk's endpoint actually serve?
+
+    THE INPUTS ARE ANSWERS, NOT A CONNECTION. `walletinfo` is whatever
+    `getwalletinfo` returned, `read_error` is the string form of whatever it raised
+    instead, and `loaded_wallets` is `listwallets`. Both RPCs are reads.
+    wallet_custody.py makes the calls -- after network_target.may_read_a_wallet()
+    has refused a non-test port -- so that this decision can be asserted on with
+    seeded inputs rather than against a daemon (rule 10, and the repository's
+    "verify by behavior" principle needs a function it can seed).
+
+    WHY `walletname` AND NOT THE CONFIG VALUE. Asserting on config text would be
+    the defect CLAUDE.md names last: "never accept 'the code contains a check for
+    X' as evidence X is enforced." `GRC_RPC_WALLET` being set says what this
+    process ASKED for; `getwalletinfo().walletname` is what the daemon IS SERVING
+    on that endpoint, and the two can disagree -- which is its own finding and
+    gets MISCONFIGURED rather than a guess.
+
+    `listwallets` IS WHAT MAKES THE POSITIVE VERDICT MORE THAN A NAME, and this is
+    the part a config read could never reach. Bitcoin Core refuses a bare wallet
+    RPC with rpc code -19 ("Wallet file not specified") when more than one wallet
+    is loaded, so a daemon with the desk wallet AND another wallet loaded is one
+    where an operator's bare `getnewaddress` cannot silently land in the desk's
+    wallet -- the daemon itself enforces the separation. A daemon with ONE loaded
+    wallet, even a named one, routes a bare call straight to it. Same name, two
+    very different states, and only the second answer distinguishes them.
+
+    EMPTY `configured_wallet` IS NOT_SEPARATED WHATEVER THE WALLET IS CALLED. With
+    no `/wallet/<name>` in the URL the daemon picks, and so does the operator's
+    CLI; whether that wallet happens to have a name is not the question.
+    """
+    if read_error:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{asset}: getwalletinfo did not answer ({read_error}), so WHICH wallet this endpoint "
+            f"serves was not established. This is not a clean verdict and must not be read as one -- "
+            f"a daemon that is down, a refused login and an unloaded wallet all land here, and none "
+            f"of them says anything about custody"
+        ))
+    if not isinstance(walletinfo, dict):
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{asset}: getwalletinfo returned {type(walletinfo).__name__} rather than an object, so "
+            f"which wallet this endpoint serves was not established. Treat this as a defect in the "
+            f"caller or in the daemon's reply, not as a configuration problem"
+        ))
+    if "walletname" not in walletinfo:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{asset}: getwalletinfo answered with no `walletname` field, so which wallet this "
+            f"endpoint serves was not established. Older daemons predate that field -- asking again "
+            f"changes nothing, which is a different problem from a daemon that did not answer"
+        ))
+    serving = str(walletinfo["walletname"])
+    asked_for = (configured_wallet or "").strip()
+    shown = serving or "(unnamed)"
+    if not asked_for:
+        return CustodyVerdict(NOT_SEPARATED, (
+            f"{asset}: {asset}_RPC_WALLET is unset, so this process addresses the daemon with no "
+            f"/wallet/<name> path and the daemon routes to the wallet it serves by DEFAULT -- "
+            f"{shown}. That is the same wallet an operator's own CLI reaches with no -rpcwallet, so "
+            f"the desk's deposit addresses and the operator's own coins are in ONE wallet: a "
+            f"customer deposit from that wallet is a self-transfer and moves no custody. Set "
+            f"{asset}_RPC_WALLET to a wallet created for the desk"
+        ))
+    if serving != asked_for:
+        return CustodyVerdict(MISCONFIGURED, (
+            f"{asset}: this process asked for wallet {asked_for!r} and the daemon says it is serving "
+            f"{shown!r}. Those have to be one wallet and they are two names, so which wallet the "
+            f"desk's addresses and payouts belong to was NOT established -- do not treat either name "
+            f"as the answer until the daemon and {asset}_RPC_WALLET agree"
+        ))
+    others = tuple(name for name in (loaded_wallets or ()) if name != serving)
+    if others:
+        enforced = (
+            f" The daemon also has {len(others)} other wallet(s) loaded ({', '.join(n or '(unnamed)' for n in others)}), "
+            f"so a bare wallet RPC with no -rpcwallet is REFUSED by the daemon itself (rpc code -19, "
+            f"'Wallet file not specified') rather than silently landing here. That is the strongest "
+            f"separation an RPC read can show."
+        )
+    else:
+        enforced = (
+            " WEAKER THAN IT LOOKS: listwallets reports this as the ONLY loaded wallet, so a bare "
+            "wallet RPC with no -rpcwallet still routes here -- an operator's own `getnewaddress` "
+            "lands in the desk's wallet. Load the operator's wallet alongside it, or keep the "
+            "operator's coins on a different daemon."
+            if loaded_wallets is not None else
+            " listwallets was not read, so whether a bare CLI call also reaches this wallet was not "
+            "established."
+        )
+    return CustodyVerdict(SEPARATED, (
+        f"{asset}: {asset}_RPC_WALLET={asked_for} and the daemon confirms it is serving {shown}, "
+        f"reached through /wallet/{asked_for}.{enforced} WHAT THIS DOES NOT ESTABLISH: that the coins "
+        f"in this wallet were never the operator's own. No RPC field says whose money a coin is, so a "
+        f"named wallet separates the KEYS and nothing here can audit the funding"
+    ))
+
+
+def deposit_address_verdict(
+    asset: str, swap_id: str, deposit_address: str, owns: bool | None, ownership_why: str = ""
+) -> CustodyVerdict:
+    """Does the payout wallet hold the key for THIS swap's own deposit address?
+
+    `owns` IS chains/base.RPCAdapter.address_ownership()'s THREE-VALUED ANSWER,
+    passed through rather than recomputed: True, False, or None for "nobody
+    answered". That method already carries the 2026-10-01 measurement for why the
+    reason is a return value -- a transport failure read as "this chain has no
+    `ismine` field" and was reported as a fact. `ownership_why` is its `why`.
+
+    ismine=True IS CORRECT HERE AND IS NOT THE DEFECT. On a custodial desk the
+    deposit address is derived by `getnewaddress` in the desk's own wallet
+    (services/swap_service.deposit_account() -> derive_deposit_address()), so the
+    desk owning it is the design. What it does NOT establish is that the deposit
+    moved custody: when the payout wallet IS the daemon's default wallet, a
+    deposit sent FROM that same wallet is a self-transfer. That is the state
+    script_chain_verdict() reports, and it is why these two lines are read
+    together rather than either one alone.
+
+    ismine=False IS the defect, and a loud one: the swap's deposit address is not
+    in the wallet this process pays out of, so a deposit into it cannot be spent
+    by the payout path. The commonest cause is a wallet variable changed after the
+    swap row was written.
+
+    DESK_OWNS AND NOT_THE_DESKS RATHER THAN SEPARATED AND NOT_SEPARATED, because
+    the separation vocabulary is INVERTED for this question and the first draft of
+    this function used it. See DESK_OWNS's own comment for the measurement: a
+    correct answer landed in the same bucket as the defect and made the exit code
+    non-zero for being right.
+    """
+    label = f"{asset} swap {swap_id}" if swap_id else asset
+    if owns is None:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{label}: whether the payout wallet holds the key for its deposit address "
+            f"{deposit_address} was NOT established ({ownership_why or 'no reason was returned'}). "
+            f"This is 'nobody answered', NOT 'not ours' -- if the reason above is a connection error "
+            f"the question is still answerable from a shell with the right variables exported"
+        ))
+    if owns:
+        return CustodyVerdict(DESK_OWNS, (
+            f"{label}: the payout wallet reports ismine=true for its own deposit address "
+            f"{deposit_address}, which is CORRECT for a custodial desk -- the desk derived that "
+            f"address in its own wallet. It does NOT establish that the deposit moved custody: if "
+            f"the line above says this is the daemon's default wallet, a deposit sent from that same "
+            f"wallet is a self-transfer and the only thing that moved was the fee"
+        ))
+    return CustodyVerdict(NOT_THE_DESKS, (
+        f"{label}: the payout wallet reports ismine=false for its own deposit address "
+        f"{deposit_address}. On a custodial desk that is a DEFECT rather than separation: the desk "
+        f"derived this address with getnewaddress in the wallet it pays out of, so a deposit it "
+        f"cannot see is a deposit it cannot spend. Check whether {asset}_RPC_WALLET changed after "
+        f"this swap row was written"
+    ))
+
+
+def xrp_desk_account_verdict(
+    configured_account: str, derived_account: str, derive_error: str = ""
+) -> CustodyVerdict:
+    """XRP: does XRP_DEPOSIT_ACCOUNT name the account the payout seed controls?
+
+    ONE DESK ACCOUNT IS THE DESIGN AND IS NOT A FINDING. An XRP customer's deposit
+    lands in XRP_DEPOSIT_ACCOUNT and an XRP payout is debited from it --
+    services/swap_service.payout_source_account() reads the SAME variable through
+    the SAME table as deposit_account(), and says why at length. Reporting that as
+    a custody defect would be this tool disagreeing with the design it is
+    inspecting.
+
+    THE CASE THAT COSTS MONEY IS "SET TO SOMETHING ELSE", which is why the
+    comparison is a line of its own. chains/xrp_signing.derive_and_check() refuses
+    a seed paired with an account it does not control -- but it refuses at PAYOUT
+    time, after the customer's deposit is confirmed and irreversible.
+    xrp_payout_account.agreement_line() is the operator-facing spelling of the
+    same comparison and names the same refusal; this is the verdict form, for a
+    report that has four other chains to print beside it.
+
+    THE SEED IS NEVER AN INPUT HERE. This function takes the DERIVED ACCOUNT, a
+    public value, so the seed cannot reach it, cannot be printed from it, and
+    cannot appear in a pasted report. xrp_payout_account.derived_account() is what
+    reads the environment and it never puts the seed in its own output either.
+    """
+    configured = (configured_account or "").strip()
+    derived = (derived_account or "").strip()
+    if derive_error:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"XRP: the desk's own account could not be derived ({derive_error}), so whether "
+            f"XRP_DEPOSIT_ACCOUNT names an account this terminal can sign for was NOT established. "
+            f"The seed itself is never printed by this tool"
+        ))
+    if not configured:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            "XRP: XRP_DEPOSIT_ACCOUNT is unset, so there is no desk account to compare against "
+            "anything. Every XRP swap is refused while it is empty, so this is a configuration gap "
+            "rather than a custody finding"
+        ))
+    if not derived:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"XRP: XRP_DEPOSIT_ACCOUNT={configured}, and no account was derived from a signing seed "
+            f"in this process, so whether this terminal holds the key for it was NOT established. "
+            f"Export XRP_PAYOUT_SECRET_SEED in the shell you run this from, or accept that the "
+            f"pairing is unverified here"
+        ))
+    if configured == derived:
+        return CustodyVerdict(BY_DESIGN, (
+            f"XRP: XRP_DEPOSIT_ACCOUNT={configured} is exactly the account the payout seed controls. "
+            f"One desk account takes deposits IN and has payouts debited OUT of it, which is the "
+            f"custodial design (services/swap_service.payout_source_account()), NOT a defect. The "
+            f"custody question on this chain is whether a PAYOUT left it -- see the payout line"
+        ))
+    return CustodyVerdict(MISCONFIGURED, (
+        f"XRP: XRP_DEPOSIT_ACCOUNT={configured} but the payout seed in this process controls "
+        f"{derived}. Deposits would land in one account and payouts would be signed for another, so "
+        f"chains/xrp_signing.derive_and_check() refuses the payout -- at PAYOUT time, after the "
+        f"customer's deposit is confirmed and irreversible. Fix the variable, not the check"
+    ))
+
+
+def xrp_payout_destination_verdict(desk_account: str, swap_id: str, payout_address: str) -> CustodyVerdict:
+    """XRP: did this swap's payout actually leave the desk's account?
+
+    THE CHECK THE 2026-10-03 SWAP NEEDED. A payout whose destination is the desk's
+    own account moves nothing: the Payment is validated, the fee is paid, the
+    ledger shows tesSUCCESS, and the balance comes back to where it started. That
+    renders identically to a successful payout in every surface this tree has.
+
+    WHAT IT CANNOT ESTABLISH, and the limit is absolute rather than a gap to fill
+    later: whether an address the desk does NOT control belongs to the customer.
+    The XRP Ledger has no owner field, chains/xrp.XRPAdapter.owns_address()
+    returns None by design for exactly that reason, and a desk cannot tell its
+    operator's second faucet account from a stranger's. So the honest verdict for
+    "it left" is that it left, and nothing more.
+    """
+    desk = (desk_account or "").strip()
+    paid = (payout_address or "").strip()
+    label = f"XRP swap {swap_id}" if swap_id else "XRP"
+    if not desk or not paid:
+        missing = "the desk's account" if not desk else "this swap's payout address"
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{label}: {missing} is empty, so whether the payout left the desk's account was NOT "
+            f"established. Nothing was read from the ledger"
+        ))
+    if desk == paid:
+        return CustodyVerdict(NOT_SEPARATED, (
+            f"{label}: the payout address IS the desk's own account {desk}, so this payout moved no "
+            f"custody -- it debited and credited one account and paid a fee to do it. The ledger "
+            f"reports tesSUCCESS for it and every surface in this tree renders it as paid"
+        ))
+    return CustodyVerdict(SEPARATED, (
+        f"{label}: the payout address {paid} is NOT the desk's account {desk}, so this payout left "
+        f"the desk. WHAT THIS DOES NOT ESTABLISH: that {paid} is the customer's. The XRP Ledger has "
+        f"no owner field and this terminal cannot tell a customer's account from a second account "
+        f"the operator holds, so 'it left the desk' is the whole of the claim"
+    ))
+
+
+def solana_account_verdict(deposit_account: str, hot_wallet: str) -> CustodyVerdict:
+    """SOL: are SOL_DEPOSIT_ACCOUNT and SOL_HOT_WALLET set, and are they two accounts?
+
+    DIFFERENT FROM XRP, which is why it is a different function rather than the
+    same one with a flag. XRP has ONE variable by design and
+    services/swap_service.SHARED_ACCOUNT_PAYOUT_ASSETS is frozenset({"XRP"}) alone;
+    Solana has TWO -- a deposit account that a memo attributes against, and a hot
+    wallet the payout is debited from -- so on this chain two accounts is the
+    configured shape and one account is a choice somebody made.
+
+    config.py's own comment carries the custody difference that makes this worth a
+    line: "an XRP account is funded past a base reserve and holds nothing else; a
+    Solana deposit account is an ordinary keypair's public key, and whoever holds
+    that key holds every deposit between arrival and payout."
+
+    NO NETWORK READ AT ALL. Both values are public keys from config, compared as
+    strings. Whether either account exists on a cluster, and what it holds, is
+    sol_payout_preview.py's question and deliberately not this one -- a custody
+    report that needs a reachable cluster reports nothing on an unreachable one.
+    """
+    deposit = (deposit_account or "").strip()
+    hot = (hot_wallet or "").strip()
+    if not deposit and not hot:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            "SOL: neither SOL_DEPOSIT_ACCOUNT nor SOL_HOT_WALLET is set, so there are no accounts to "
+            "compare. No SOL swap can be created or paid in this state, so this is a configuration "
+            "gap rather than a custody finding"
+        ))
+    if not deposit or not hot:
+        missing = "SOL_DEPOSIT_ACCOUNT" if not deposit else "SOL_HOT_WALLET"
+        present = "SOL_HOT_WALLET" if not deposit else "SOL_DEPOSIT_ACCOUNT"
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"SOL: {missing} is unset and {present} is set, so whether the deposit account and the "
+            f"payout account are two different accounts was NOT established. Set both -- they are "
+            f"separate custody decisions and neither has a default"
+        ))
+    if deposit == hot:
+        return CustodyVerdict(NOT_SEPARATED, (
+            f"SOL: SOL_DEPOSIT_ACCOUNT and SOL_HOT_WALLET are the SAME account ({deposit}). Unlike "
+            f"XRP, Solana has two variables here precisely so they can be two accounts, so one "
+            f"account is a choice rather than the design: every deposit lands in the account that "
+            f"pays every payout, and whoever holds that one key holds both"
+        ))
+    return CustodyVerdict(SEPARATED, (
+        f"SOL: deposits land in {deposit} and payouts are debited from {hot} -- two different "
+        f"accounts. WHAT THIS DOES NOT ESTABLISH: whose keypairs those are. Both values are public "
+        f"keys read from config, nothing on a Solana cluster says who holds a key, and this tool "
+        f"never opens a keypair file"
+    ))
+
+
+def what_this_cannot_establish() -> tuple[str, ...]:
+    """The limits of the whole report, stated BEFORE any verdict is printed.
+
+    AT THE TOP RATHER THAN IN A FOOTNOTE, because the failure this guards against
+    is a reader taking a SEPARATED line for proof that the desk's coins were never
+    the operator's. That claim is not available from any RPC on any of these five
+    chains, and a diagnostic whose limits are at the bottom has already been
+    misread by the time they are reached.
+
+    A TUPLE OF LINES RATHER THAN ONE PARAGRAPH, so the entry point can print them
+    through report_block without re-wrapping prose, and so a test can assert that
+    the ownership limit is one of them rather than searching a blob.
+    """
+    return (
+        "no chain and no RPC says WHOSE money a coin is. There is no `isdesks` beside `ismine`, so "
+        "nothing below can establish that the coins in a wallet were never the operator's own.",
+        "a NAMED wallet separates the KEYS the desk signs with from the default wallet an operator's "
+        "CLI reaches. It says nothing about how that wallet was funded.",
+        "an address this desk does not control is not thereby the CUSTOMER's. The desk cannot tell a "
+        "customer's account from a second account the operator holds, on any of these five chains.",
+        "NOT ESTABLISHED is never a pass. Where a daemon did not answer, the line says so and the "
+        "reason is printed -- a green verdict is never the default here.",
+    )

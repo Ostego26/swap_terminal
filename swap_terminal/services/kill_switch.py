@@ -204,7 +204,15 @@ WORKER_ARMS = {
         "poll interval, and a broadcast transaction cannot be recalled."
     ),
     "reconcile_worker": (
-        "refreshes the hot-wallet inventory and the reconciliation rows. Read-only against every "
+        # "balance rows" rather than "inventory", 2026-10-03, for the reason
+        # db.py's wallet_inventory DDL now carries at length: what this worker
+        # refreshes is `getbalance` against the whole wallet each endpoint serves,
+        # not a measure of coins committed to the desk. The two surfaces that
+        # RENDER it say the same word (services/admin_view.py and
+        # templates/admin.html), and a spawn warning that called it inventory
+        # while the page called it a balance would be one process using two names
+        # for one number.
+        "refreshes the hot-wallet balance rows and the reconciliation rows. Read-only against every "
         "chain; it sends nothing."
     ),
 }

@@ -141,12 +141,22 @@
       ---- and the ones that may NOT be banded, same measurement ----
       Swaps in flight                            71 chars, 8 cols ->  788px
       Chains                                     71 chars, 6 cols ->  740px + prose cells
-      Hot-wallet inventory                       87 chars, 6 cols ->  875px
+      Hot-wallet balance                         98 chars, 6 cols ->  967px
       Status changes (most recent 25)            58 chars, 5 cols ->  607px
 
-    Hot-wallet inventory is the one place this departs from the brief's own NARROW
+    Hot-wallet balance is the one place this departs from the brief's own NARROW
     list, and it departs on the number: three 8-decimal amounts plus two badges is
-    875px of nowrap in a 526px cell, which is 349px of horizontal scroll. It spans.
+    967px of nowrap in a 526px cell, which is 441px of horizontal scroll. It spans.
+
+    THE PANEL WAS CALLED "Hot-wallet inventory" IN THIS COMMENT UNTIL 2026-10-03,
+    at a heading it no longer has (the figure is a whole-wallet `getbalance`, not
+    committed desk stock -- see the panel's own note). The figure was re-measured
+    rather than adjusted by the three characters the column rename added, because
+    the widest row here is a BODY row and not the header: seeded with one GRC row at
+    3780.08554497 confirmed and the same available, the rendered table measures 98
+    nowrap characters over 6 columns. The 87 this line used to carry was taken from
+    a different seed and no longer describes anything. Either number puts it well
+    past the 526px cell, which is the only thing the measurement decides.
 
     WHY A GRID AND NOT CSS MULTI-COLUMN. `column-count: 2` balances column heights,
     which is what "no dead space" wants, and it would have been the shorter rule --
@@ -157,7 +167,7 @@
 
     WHY NO `grid-auto-flow: dense`. Dense backfills a half-empty row with a LATER
     item, which reorders the page: on a trial arrangement it hoisted the
-    Reachability probe up beside Hot-wallet inventory, above the Swaps in flight
+    Reachability probe up beside Hot-wallet balance, above the Swaps in flight
     table it is not about. On an operator page, panels arriving in an order nobody
     wrote is worse than a gap. Instead each band is its own one-row grid over panels
     that are ALREADY ADJACENT in the source, so nothing is reordered at all, and
@@ -300,15 +310,30 @@
 </section>
 
 <section class="panel" aria-labelledby="inventory-heading">
-  <h2 id="inventory-heading">Hot-wallet inventory</h2>
+  <h2 id="inventory-heading">Hot-wallet balance, not committed inventory</h2>
+  {#- WHAT THE NUMBER MEASURES, SAID HERE RATHER THAN IMPLIED BY THE TABLE'S NAME.
+      Changed 2026-10-03. The heading said "Hot-wallet inventory" and the column said
+      "confirmed", and neither was true of the figure: services/payout_service.
+      refresh_wallet_inventory() stores `float(adapter.get_balance())`, which on a
+      Bitcoin-derived chain is `getbalance` with no arguments -- the whole wallet. With
+      GRC_RPC_WALLET empty, which is config.py's default, that wallet is the daemon's
+      DEFAULT wallet: the one an operator's own CLI reaches, personal coins included.
+      Nothing about how the figure is computed or used changed; only the words. -#}
   <p class="panel-note">Written by the reconcile worker, which polls every 60s. A row older than
      {{ data.thresholds.inventory_stale_after }} is marked STALE, because at that age the refresh is not happening
      rather than having happened recently. <strong>A stale balance is not a small balance</strong> &#8212; it is a
      number nobody has checked.</p>
+  <p class="panel-note"><strong>The whole-wallet column is the WHOLE wallet.</strong> It is
+     <code>getbalance</code> with no arguments against whatever wallet this process&rsquo;s endpoint serves &#8212;
+     every address in it, change included &#8212; and not a measure of coins committed to the desk. Where
+     <code>BTC_RPC_WALLET</code>, <code>LTC_RPC_WALLET</code> or <code>GRC_RPC_WALLET</code> is unset, the endpoint
+     has no <code>/wallet/&lt;name&gt;</code> path and the daemon routes to its default wallet, so any coins the
+     operator holds there are inside this figure. The Chains panel below names the wallet per chain;
+     <code>wallet_custody.py</code> is the tool that says whether it is the desk&rsquo;s own.</p>
   {% if data.inventory %}
   <div class="scroll-x">
   <table>
-    <thead><tr><th scope="col">asset</th><th scope="col" class="num">confirmed</th><th scope="col" class="num">reserved</th><th scope="col" class="num">available</th><th scope="col">updated</th><th scope="col">reading</th></tr></thead>
+    <thead><tr><th scope="col">asset</th><th scope="col" class="num">whole wallet</th><th scope="col" class="num">reserved</th><th scope="col" class="num">available</th><th scope="col">updated</th><th scope="col">reading</th></tr></thead>
     <tbody>
       {% for row in data.inventory %}
       <tr class="{% if row.fresh.state != 'fresh' %}row-warn{% endif %}">
@@ -324,7 +349,7 @@
   </table>
   </div>
   {% else %}
-    {{ badges.empty('wallet inventory row has ever been written', 'wallet_inventory') }}
+    {{ badges.empty('wallet balance row has ever been written', 'wallet_inventory') }}
     <p class="panel-note">Expected to hold one row per configured chain. Empty means the reconcile worker has never
        completed a cycle against this database &#8212; not that the wallets are empty.</p>
   {% endif %}

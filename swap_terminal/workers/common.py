@@ -63,6 +63,7 @@ from db import db_session
 from log_setup import configure_logging
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, configuring_variable
+from services.custody_separation import wallet_label
 from services.deposit_service import ACTIVE_STATUSES
 
 
@@ -101,7 +102,17 @@ def endpoint_lines() -> list[str]:
     lines = []
     for asset in ("BTC", "LTC", "GRC"):
         rpc = Config.RPC[asset]
-        wallet = rpc["wallet"] or "(default wallet)"
+        # wallet_label() RATHER THAN `or "(default wallet)"`, 2026-10-03. This line
+        # and services/admin_view._endpoint_text() spelled that same phrase for the
+        # same question (rule 8's two copies), and both said something true that
+        # told the operator nothing: an empty wallet value means this endpoint has
+        # no /wallet/<name> path, so the daemon routes to whichever wallet it
+        # serves by default -- the one a bare CLI call reaches. On the operator's
+        # host that is why a 500 GRC customer deposit on 2026-10-03 moved only the
+        # 0.001 fee: the desk's deposit address and the operator's own coins were
+        # in one wallet, and the banner line that could have said so said
+        # "(default wallet)".
+        wallet = wallet_label(asset, str(rpc["wallet"] or ""))
         confirmations = getattr(Config, f"{asset}_MIN_CONFIRMATIONS")
         # AN UNCONFIGURED CHAIN SAYS SO, matching what SOL and XRP say below.
         #

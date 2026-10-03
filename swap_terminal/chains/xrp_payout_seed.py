@@ -221,6 +221,62 @@ def missing_seed_refusal() -> str:
     )
 
 
+def derived_payout_account() -> tuple[str, str]:
+    """The PUBLIC account this process's signing seed controls, or ("", why not). NEVER RAISES.
+
+    ADDED 2026-10-03 FOR wallet_custody.py, AND IT REMOVED A DUPLICATE RATHER THAN
+    ADDING ONE. signing_seed_decodes() below already called Wallet.from_seed() and
+    threw the wallet away; it now calls this and keeps its own sentence, so the
+    derivation exists ONCE in this module instead of twice (rule 8). Net change to
+    the number of places in this module that decode a seed: zero.
+
+    THE SEED NEVER LEAVES THIS MODULE FOR THIS QUESTION, which is the whole reason
+    the reader is here and not in the caller. A diagnostic that wanted the desk's
+    XRP account would otherwise call signing_seed() and derive the wallet itself,
+    which is a third place in the tree holding a live seed in a local variable.
+    This returns a classic address -- a public value, safe in a pasted report --
+    and the seed is never in the return value, never in the refusal, and never
+    logged.
+
+    WHAT IT IS NOT: ownership. Deriving the account a seed controls says nothing
+    about whether XRP_DEPOSIT_ACCOUNT names that account; comparing the two is
+    services/custody_separation.xrp_desk_account_verdict(), and the refusal before
+    signing is chains/xrp_signing.derive_and_check().
+
+    THE OTHER SPELLING, NAMED BECAUSE A READER WHO FINDS ONE MUST BE TOLD THE OTHER
+    EXISTS (rule 8): xrp_payout_account.derived_account(seed) takes a seed as an
+    ARGUMENT and reports its SHAPE when it will not decode -- a length, a prefix
+    family, whether it carries quote characters -- because that tool's whole job is
+    to help an operator fix a bad export. The two genuinely differ: that one is
+    given a value and diagnoses it, this one reads the environment and will not
+    hand the value back. Neither can be expressed as the other without giving a
+    caller either the seed or a tool that cannot see it.
+
+    OFFLINE BY CONSTRUCTION. Deriving a classic address is base58check plus a key
+    derivation; no rippled is contacted, so this is safe where no network is
+    reachable.
+    """
+    seed = signing_seed()
+    if not seed:
+        return "", f"{SIGNING_SEED_ENV_VAR} is not set in this process"
+    try:
+        # Imported here, not at module scope: this module is imported by the
+        # customer page's path and xrpl-py is an optional dependency, so a missing
+        # one must degrade to a sentence rather than an ImportError at import time.
+        from xrpl.wallet import Wallet  # noqa: PLC0415
+    except ImportError:
+        return "", ("xrpl-py is not importable in this interpreter, so whether the seed decodes was "
+                    "NOT established -- and a payout could not sign either way")
+    try:
+        wallet = Wallet.from_seed(seed)
+    except Exception as error:  # noqa: BLE001 -- checked: returns "" plus the exception TYPE in the sentence, so no caller can read a failure as an account. str(error) is excluded because xrpl-py has echoed the offending seed in its own messages.
+        return "", (f"{SIGNING_SEED_ENV_VAR} is set but does NOT decode as a seed "
+                    f"({type(error).__name__}); run xrp_payout_account.py, which reports its shape "
+                    f"without printing it. chains/xrp_signing.py uses the same Wallet.from_seed(), so "
+                    f"every XRP payout would fail at signing -- after the deposit is irreversible")
+    return str(wallet.classic_address), ""
+
+
 def signing_seed_decodes() -> tuple[bool, str]:
     """Does the seed in this process DECODE. (yes/no, the sentence). No network, no value.
 
@@ -262,24 +318,18 @@ def signing_seed_decodes() -> tuple[bool, str]:
     rippled is contacted, so this is safe in a banner that prints before any
     network is reachable.
     """
-    seed = signing_seed()
-    if not seed:
-        return False, f"{SIGNING_SEED_ENV_VAR} is not set in this process"
-    try:
-        # Imported here, not at module scope: this module is imported by the
-        # customer page's path and xrpl-py is an optional dependency, so a missing
-        # one must degrade to a sentence rather than an ImportError at import time.
-        from xrpl.wallet import Wallet  # noqa: PLC0415
-    except ImportError:
-        return False, ("xrpl-py is not importable in this interpreter, so whether the seed decodes was "
-                       "NOT established -- and a payout could not sign either way")
-    try:
-        Wallet.from_seed(seed)
-    except Exception as error:  # noqa: BLE001 -- checked: returns False with the exception TYPE in the sentence. str(error) is excluded because xrpl-py has echoed the offending seed in its own messages.
-        return False, (f"{SIGNING_SEED_ENV_VAR} is set but does NOT decode as a seed "
-                       f"({type(error).__name__}); run xrp_payout_account.py, which reports its shape "
-                       f"without printing it. chains/xrp_signing.py uses the same Wallet.from_seed(), so "
-                       f"every XRP payout would fail at signing -- after the deposit is irreversible")
+    # THE DERIVATION IS derived_payout_account()'s, AND USED TO BE SPELLED AGAIN
+    # HERE. Both copies called Wallet.from_seed() on signing_seed() and produced
+    # the same three refusals; this one discarded the wallet and that one keeps
+    # its address. Two copies of a decode is rule 8's bug with a delay on it, and
+    # the delay would have been measured in refusals that disagree -- a diagnostic
+    # saying the seed decodes while a banner said it does not, from one process.
+    #
+    # What stays here is the AFFIRMATIVE sentence, which is this function's own:
+    # an address is not a thing a banner wants to print, and "decodes" is.
+    address, refusal = derived_payout_account()
+    if not address:
+        return False, refusal
     return True, f"{SIGNING_SEED_ENV_VAR} decodes as a seed, so a payout can derive its signing wallet"
 
 

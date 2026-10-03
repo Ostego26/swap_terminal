@@ -204,6 +204,53 @@ def classify(chain: str, port: int) -> str:
     return "UNRECOGNIZED"
 
 
+def may_read_a_wallet(chain: str, port: int) -> tuple[bool, str]:
+    """May a tool OPEN A SOCKET to this Bitcoin-derived wallet? (connect?, the sentence).
+
+    LOOKING IS THE HAZARD, which is the whole reason this is a decision taken
+    BEFORE a socket opens rather than a label applied after. `getbalance` or
+    `getwalletinfo` against Gridcoin port 15715 prints the operator's real staking
+    balance into whatever terminal, transcript or pasted block the output lands in.
+    That happened on 2026-09-25 -- 157,797 GRC into a chat log -- and the fix then
+    was this shape: classify the port first, and refuse. Not "connect and warn".
+
+    MOVED HERE 2026-10-03 FROM swap_readiness.chain_precheck(), WHICH NOW WRAPS IT,
+    because a second tool needed the identical refusal and rule 10 forbids a module
+    importing a root entry point -- so the only two options were an upward import
+    or a second copy of a refusal to read a real wallet. The sentences are moved
+    verbatim, which is why tests/test_swap_readiness.py's assertions on them are
+    unchanged: the wrapper adds the PASS/FAIL column that is that file's own and
+    this layer has no opinion about.
+
+    wallet_custody.py is the second caller. It reads `getwalletinfo` and
+    `validateaddress`, so it is subject to exactly the same hazard, and it refuses
+    through this function rather than deciding for itself what a safe port is.
+
+    (connect, detail) RATHER THAN A BOOLEAN, because every refusing branch has a
+    DIFFERENT remedy and a caller that printed its own sentence for a bare False
+    would be a second place in this tree spelling the mainnet refusal.
+    """
+    known = CHAIN_PORTS.get(chain)
+    verdict = classify(chain, port)
+    variable = known.port_variable if known else f"{chain}_RPC_PORT"
+    hint = known.test_hint if known else f"no {chain} port convention is in CHAIN_PORTS"
+    if verdict == "UNCONFIGURED":
+        return False, f"(unconfigured) -- set {variable} to the test chain ({hint})"
+    if verdict == "MAINNET":
+        return False, (
+            f"port {port} is MAINNET and this did NOT connect. A preflight will not read a real "
+            f"wallet, because reading it means printing the balance. Set {variable} to a "
+            f"test chain ({hint})"
+        )
+    if verdict == "UNRECOGNIZED":
+        return False, (
+            f"port {port} is not a {chain} port this tree knows, so which chain it is was NOT "
+            f"established -- and an unknown port may be a mainnet daemon on a custom -rpcport. "
+            f"Refusing to connect rather than guessing"
+        )
+    return True, f"port {port} is a test chain (mainnet is {known.mainnet_port})"
+
+
 def describe(chain: str, host: str, port: int) -> str:
     """One line naming the chain a reader is about to act on, for a startup banner.
 

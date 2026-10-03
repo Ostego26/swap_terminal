@@ -58,6 +58,7 @@ from chains.wallet_hint import (
 from chains.wallet_lock import encryption_state
 from config import Config
 from regtest.daemons import CHAIN_DEFAULTS
+from services.custody_separation import wallet_label
 from services.wallet_leveling import (
     DEFAULT_TARGET_USD,
     PEG_ASSETS,
@@ -204,7 +205,20 @@ def report_chain(console: Console, chain: str, adapters: dict) -> Decimal | None
     except Exception as error:  # noqa: BLE001 -- checked: getbalances is absent on older daemons (Gridcoin among them) and its absence costs only these two reporting lines. NAMED in the output below rather than swallowed, and `spendable` came from a separate call that already succeeded.
         extra = f"not reported ({type(error).__name__}: {error})"
 
-    console.say(f"    spendable {spendable:.8f} {chain}")
+    # WHICH WALLET THE FIGURE CAME OUT OF, added 2026-10-03. This block printed
+    # four amounts and never said which wallet they belonged to, and on this tree
+    # that is the question: BTC_RPC_WALLET / LTC_RPC_WALLET / GRC_RPC_WALLET are
+    # all `_env(..., "")`, so an unset one addresses the daemon with no
+    # /wallet/<name> path and the daemon routes to its DEFAULT wallet -- the same
+    # one an operator's own CLI reaches. A pasted balance that does not name its
+    # wallet cannot be told apart a day later from a balance of a different one,
+    # which is rule 14's "echo the parameters that decide the answer".
+    #
+    # wallet_label() rather than a fourth spelling of "(default wallet)": the
+    # phrase lives in services/custody_separation.py and is shared with the worker
+    # banner and the admin page's Chains table (rule 8).
+    console.say(f"    wallet    {wallet_label(chain, getattr(adapter, 'wallet', '') or '')}")
+    console.say(f"    spendable {spendable:.8f} {chain}  <- the WHOLE wallet named above, not desk stock")
     if extra:
         console.say(f"    immature  {extra}")
         console.say(f"    pending   {extra}")

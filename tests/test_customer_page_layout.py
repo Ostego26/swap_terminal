@@ -556,12 +556,18 @@ def test_the_operator_tables_mark_their_numeric_columns(client):
     # three `amount` columns (stuck payouts, deposits, payouts), so un-marking one
     # left the other two satisfying the assertion. The invariant is that no amount
     # column is left unmarked, which is what the absence below says.
-    for column in ("amount", "confirmed", "reserved", "available", "vout", "confirmations"):
+    # "whole wallet" WAS "confirmed" UNTIL 2026-10-03, and the rename is the point
+    # rather than churn: wallet_inventory.hot_confirmed is `getbalance` with no
+    # arguments -- the whole wallet the endpoint serves, personal coins included on
+    # a host where GRC_RPC_WALLET is empty -- so "confirmed" under a heading that
+    # said "inventory" named desk stock the figure does not measure. The invariant
+    # this test holds is unchanged: no numeric column on that page is unmarked.
+    for column in ("amount", "whole wallet", "reserved", "available", "vout", "confirmations"):
         assert f'<th scope="col">{column}</th>' not in body, (
             f"a {column!r} column on the operator page is not marked numeric"
         )
     assert '<th scope="col" class="num">amount</th>' in body, "no amount column rendered at all"
-    assert 'class="num">confirmed</th>' in body, "the balance table did not render"
+    assert 'class="num">whole wallet</th>' in body, "the balance table did not render"
     numeric_cells = body.count('class="num"')
     assert numeric_cells >= 6, f"only {numeric_cells} numeric cells or headers on a page of amounts"
 

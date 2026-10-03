@@ -256,6 +256,27 @@ SERVICE_SIDE = frozenset({
     # tool was written for was created a week before it was resolved.
     "resolve_halted_swap.py",
     "swap_readiness.py",
+    # wallet_custody.py, added 2026-10-03. SERVICE SIDE, and this one is not a
+    # judgment call: the question it asks is "which wallet does the BROKERED
+    # TERMINAL's endpoint serve", so an answer about any other daemon is not a
+    # weaker answer, it is an answer to a different question.
+    #
+    # A conf fallback here would be the worst instance of the wrong-number-under-
+    # the-right-label failure this register exists to prevent, because the label is
+    # the word SEPARATED. Resolve a daemon from gridcoin.conf, find a named wallet
+    # loaded on it, and this tool prints "the desk's wallet is distinct from the
+    # default" about a daemon the desk does not use -- an operator would read that
+    # as the custody question answered and stop looking. The state it would be
+    # hiding is the one measured on their host on 2026-10-03: GRC_RPC_WALLET empty,
+    # the desk sharing the operator's own default wallet, 500 GRC moving as a
+    # self-transfer.
+    #
+    # It is also why this tool refuses through network_target.may_read_a_wallet()
+    # rather than deciding for itself what a safe port is: the wallet reads it
+    # makes (getwalletinfo, listwallets, validateaddress) carry a balance, and the
+    # service-side rule and the mainnet refusal are the same requirement -- ask
+    # exactly the daemon the terminal asks, and only when its port says test chain.
+    "wallet_custody.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
 # check removed it: it reads swap_terminal.db and resolves no chain at all, so a

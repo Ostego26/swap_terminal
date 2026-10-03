@@ -222,6 +222,40 @@ CREATE TABLE IF NOT EXISTS payouts (
 
 CREATE INDEX IF NOT EXISTS idx_payouts_swap_id ON payouts(swap_id);
 
+-- THE TABLE IS CALLED INVENTORY AND hot_confirmed IS A WALLET BALANCE. The name
+-- stays -- it is an identifier, and renaming a column on a live-money system is a
+-- posture change and a large diff with no reader benefit -- but what the column
+-- HOLDS is written down here, because every surface that rendered it took the
+-- table's name for the number's meaning until 2026-10-03.
+--
+-- MEASURED BEHAVIORALLY THAT DAY, not read off the source: calling
+-- services/payout_service.refresh_wallet_inventory() against a stub adapter made
+-- exactly one RPC call, `getbalance`, and stored hot_confirmed equal to what it
+-- returned. chains/base.RPCAdapter.get_balance() is `getbalance` with NO
+-- arguments, so on a Bitcoin-derived chain this is the WHOLE wallet the endpoint
+-- serves: every address, change included.
+--
+-- AND ON THIS TREE'S DEFAULTS THAT IS THE OPERATOR'S OWN WALLET. BTC_RPC_WALLET,
+-- LTC_RPC_WALLET and GRC_RPC_WALLET are all `_env(..., "")` (config.py:447, 455,
+-- 520), and chains/base.RPCAdapter.url appends `/wallet/<name>` only for a
+-- non-empty value -- so an unset one addresses the daemon with no wallet path and
+-- the daemon routes to its DEFAULT wallet, the one `gridcoinresearchd
+-- getnewaddress` reaches. Whatever the operator holds there is inside
+-- hot_confirmed, recorded as desk stock.
+--
+--   hot_confirmed   the whole wallet, from get_balance(). NOT committed desk stock.
+--   hot_reserved    the sum of payouts claimed and not yet sent, which IS a desk
+--                   figure: reserve_inventory() adds and release_inventory_after_send()
+--                   subtracts, per payout.
+--   hot_available   hot_confirmed - hot_reserved, so it inherits the above.
+--
+-- NOTHING GATES A PAYOUT ON THIS TABLE, established by grep 2026-10-02 and
+-- re-established behaviorally 2026-10-03: zeroing hot_confirmed and re-running
+-- services/payout_capacity.largest_fundable_payout() returned the SAME ceiling,
+-- because that function calls adapter.get_balance() itself. The readers are
+-- services/admin_view.py's display query, this file's reserve bookkeeping, and
+-- rescue_payout.py's release. wallet_custody.py is the tool that says which wallet
+-- an endpoint actually serves.
 CREATE TABLE IF NOT EXISTS wallet_inventory (
     asset TEXT PRIMARY KEY,
     hot_confirmed REAL NOT NULL DEFAULT 0,

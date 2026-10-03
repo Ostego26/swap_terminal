@@ -522,7 +522,10 @@ def test_an_empty_system_renders_none_in_every_region(client):
     for phrase in (
         "no payout is stuck",
         "no swap is in flight",
-        "no wallet inventory row has ever been written",
+        # "balance" rather than "inventory" since 2026-10-03: the figure the panel
+        # holds is the whole wallet from `getbalance`, not coins committed to the
+        # desk, and the empty-state sentence says the same word the heading does.
+        "no wallet balance row has ever been written",
         "no deposit has ever been recorded",
         "no payout has ever been written",
         "no status change has been recorded",
@@ -550,6 +553,56 @@ def test_a_stale_inventory_row_renders_differently_from_a_fresh_one(client):
     assert "badge-fresh-stale" in body
     assert "STALE" in body
     assert "row-warn" in body, "the stale row must also be distinguishable at row level"
+
+
+def test_the_balance_panel_says_what_the_number_MEASURES(client):
+    """It said "Hot-wallet inventory ... confirmed", and the figure is neither.
+
+    MEASURED BEHAVIORALLY 2026-10-03, not read off the source: calling
+    services/payout_service.refresh_wallet_inventory() against a stub adapter made
+    exactly one RPC call, `getbalance`, and stored hot_confirmed equal to what it
+    returned. chains/base.RPCAdapter.get_balance() is `getbalance` with NO
+    arguments, so that is the WHOLE wallet the endpoint serves -- and with
+    GRC_RPC_WALLET empty, which is config.py's default and was the live state that
+    day, the endpoint has no /wallet/<name> path and the daemon routes to its
+    DEFAULT wallet, the one the operator's own CLI reaches. Their personal coins
+    were inside the figure, under a heading that called it inventory.
+
+    NOTHING ABOUT HOW THE FIGURE IS COMPUTED OR USED WAS CHANGED, which is the
+    other half of what this test pins: the column, the refresh and every reader are
+    untouched (that is live posture and the operator's call). Only the words moved.
+
+    MUTATION (ran, caught): delete the second panel-note paragraph from
+    templates/admin.html. Every assertion but the heading fails.
+    MUTATION (ran, caught): put the heading back to "Hot-wallet inventory". The
+    first assertion fails -- and so does
+    tests/test_customer_page_layout.py::test_the_tab_strip_lists_every_section_and_only_real_anchors,
+    because the tab label and the heading are two spellings of one section.
+
+    MUTATION (ran, SURVIVED, AND IT IS A REAL LIMIT RATHER THAN A FIXABLE ONE): add
+    `hidden` to that paragraph's own tag. The text is still in the response body,
+    so every assertion above passes while a human sees nothing. There is no browser
+    in this suite -- tests/test_customer_page_layout.py says the same thing about
+    its width arithmetic -- so "present in the markup" is the strongest claim
+    available here, and it is stated rather than left to be discovered.
+    """
+    write(
+        client,
+        "INSERT INTO wallet_inventory (asset, hot_confirmed, hot_reserved, hot_available, updated_at)"
+        " VALUES (?,?,?,?,?)",
+        ("GRC", 3780.08554497, 0.0, 3780.08554497, iso(NOW_OFFSETS["fresh"])),
+    )
+    body = client.get("/admin").get_data(as_text=True)
+
+    assert "Hot-wallet balance, not committed inventory" in body, "the heading still names desk stock"
+    assert '<th scope="col" class="num">whole wallet</th>' in body, "the column still says confirmed"
+    assert "getbalance</code> with no arguments" in body, (
+        "say WHICH call the figure came from; a reader cannot check 'the whole wallet' against anything"
+    )
+    for variable in ("BTC_RPC_WALLET", "LTC_RPC_WALLET", "GRC_RPC_WALLET"):
+        assert variable in body, f"the panel does not name {variable}, which is what decides the answer"
+    assert "wallet_custody.py" in body, "name the tool that says whether the wallet is the desk's own"
+    assert "not a measure of coins committed to the desk" in body
 
 
 def test_the_admin_page_names_the_threshold_that_decided_stale(client):

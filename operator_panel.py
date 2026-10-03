@@ -894,8 +894,19 @@ async function loadSwapper() {
   // 55.52645238097888 is a float's repr, not an amount of money, and the two
   // surfaces must not disagree about how much was paid.
   const amount = n => (typeof n === "number" ? n.toFixed(8) : String(n));
+  // "whole wallet" AND NOT "confirmed", 2026-10-03, and the words are the fix.
+  // services/payout_service.refresh_wallet_inventory() stores
+  // `float(adapter.get_balance())`, and chains/base.RPCAdapter.get_balance() is
+  // `getbalance` with NO arguments -- the whole wallet the endpoint serves, every
+  // address, change included. Measured behaviorally that day against a stub
+  // adapter: one RPC call, `getbalance`, and hot_confirmed equal to its result.
+  // With GRC_RPC_WALLET empty, which is config.py's default, that wallet is the
+  // daemon's DEFAULT wallet -- the one an operator's own CLI reaches -- so coins
+  // the operator holds there are inside the figure. templates/admin.html says the
+  // same thing in the same words, because this panel and that page render one
+  // payload and must not disagree about what a number is (rule 8).
   const inv = (o.inventory || []).map(iv =>
-    "  " + iv.asset + "  confirmed " + amount(iv.hot_confirmed) +
+    "  " + iv.asset + "  whole wallet " + amount(iv.hot_confirmed) +
     "  reserved " + amount(iv.hot_reserved) + "  available " + amount(iv.hot_available) +
     "  " + (iv.fresh ? iv.fresh.state.toUpperCase() + " " + iv.fresh.age_display : "(no reading)")).join("\n");
   const pay = (o.payouts || []).slice(0, 8).map(po =>
@@ -906,7 +917,11 @@ async function loadSwapper() {
       "\n  priced by " + o.pricing.source + ", " + o.pricing.age + " ago"
     : "  (not fetched) nothing has been priced since this process started";
   $("swapperout").textContent =
-    "HOT-WALLET INVENTORY\n" + (inv || "  (none) the reconcile worker has written no row") +
+    "HOT-WALLET BALANCE -- the WHOLE wallet each endpoint serves, not committed desk stock.\n" +
+    "  With BTC_RPC_WALLET / LTC_RPC_WALLET / GRC_RPC_WALLET unset the daemon routes to its\n" +
+    "  default wallet, so coins the operator holds there are in these numbers. Ask\n" +
+    "  wallet_custody.py which wallet each endpoint actually serves.\n" +
+    (inv || "  (none) the reconcile worker has written no row") +
     "\n\nPAYOUTS (most recent 8)\n" + (pay || "  (none) no payout row exists") +
     "\n\nPRICING, out of the cache -- this page fetched nothing\n" + price;
 }

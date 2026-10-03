@@ -62,7 +62,7 @@ from config import Config
 from db import SCHEMA
 from microfortnights import format_duration
 from modules.htlc_assets import MODE_BROKERED_ONLY, settlement_verdict
-from network_target import CHAIN_PORTS, classify, solana_cluster
+from network_target import may_read_a_wallet, solana_cluster
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
 from report_block import clipped
 from services.payout_capacity import as_amount, largest_fundable_payout
@@ -713,8 +713,20 @@ def payout_ceiling_note(adapters, asset: str) -> str:
     ceiling, how = largest_fundable_payout(adapters, asset, reserve)
     if ceiling < 0:
         return f"  <- must be > 0 to pay a {asset} leg; the ceiling was NOT established ({how})"
+    # "THIS WALLET" IS THE WHOLE WALLET, and the ceiling is measured off it rather
+    # than off wallet_inventory. Established behaviorally 2026-10-03 rather than
+    # read off the source: zeroing wallet_inventory.hot_confirmed and re-running
+    # services/payout_capacity.largest_fundable_payout() returned the same ceiling,
+    # because it calls adapter.get_balance() directly -- `getbalance` with no
+    # arguments. So on a host with an empty <ASSET>_RPC_WALLET this ceiling is
+    # computed from the daemon's default wallet, personal coins included, which is
+    # a larger number than the desk's own stock. Nothing about the gate changed:
+    # how the ceiling is computed and what it authorizes is live posture and the
+    # operator's call (rule 16). Only the sentence says what was measured.
     return (f"  <- the largest single {asset} payout this wallet can fund is {as_amount(ceiling)} {asset} ({how}). "
-            f"A swap quoting more than that is REFUSED at creation, before any deposit is taken")
+            f"That is the WHOLE wallet the endpoint serves, not desk stock -- wallet_custody.py says which "
+            f"wallet that is. A swap quoting more than that is REFUSED at creation, before any deposit "
+            f"is taken")
 
 
 def get_network_fee_reserve_or_blank(asset: str):
@@ -745,39 +757,27 @@ def chain_precheck(asset: str, port: int) -> tuple[bool, str, str]:
     gridcoin_precheck() below is kept as a one-line wrapper because tests and
     chain_balances.py import it by name.
 
-    Extracted because it is the one decision in this file with a cost attached,
-    and rule 10 puts the deciding thing at the bottom where it can be called with
-    seeded inputs. Inline, the only way to test "does it refuse mainnet" would be
-    to point it at a mainnet wallet.
+    THE DECISION ITSELF MOVED TO network_target.may_read_a_wallet() ON 2026-10-03,
+    and this is now the PASS/FAIL wrapper around it. wallet_custody.py needed the
+    identical refusal -- it reads getwalletinfo and validateaddress, so the same
+    hazard applies -- and rule 10 forbids a module importing a root entry point, so
+    the alternatives were an upward import or a second copy of a refusal to read a
+    real wallet. network_target.py already owned CHAIN_PORTS and classify(), which
+    is the whole of the input, so the survivor owns the concept there (rule 8).
+
+    What stayed here is the PASS/FAIL column, which is this file's own vocabulary
+    and is what record() prints -- a shared module has no business knowing it.
+    Every sentence is unchanged, which is why the assertions in
+    tests/test_swap_readiness.py did not move either.
 
     LOOKING IS THE HAZARD, which is what makes this different from every other
-    check here. A get_balance() against port 15715 prints the operator's real
-    staking balance into whatever terminal, transcript or pasted block this
-    output lands in. That happened on 2026-09-25 -- 157,797 GRC into a chat log
-    -- and the fix then was the same as the shape here: classify the port BEFORE
-    opening the socket, not after. Labeling a balance mainnet once you have
-    already fetched and printed it is the wrong altitude.
-
-    So a mainnet port returns connect=False. Not "connect and warn".
+    check here, and the measurement is kept at the new site: a get_balance()
+    against Gridcoin port 15715 put 157,797 GRC of the operator's real staking
+    balance into a chat log on 2026-09-25. Classify the port BEFORE opening the
+    socket. A mainnet port returns connect=False -- not "connect and warn".
     """
-    ports = CHAIN_PORTS[asset]
-    verdict = classify(asset, port)
-    if verdict == "UNCONFIGURED":
-        return False, FAIL, (f"(unconfigured) -- set {ports.port_variable} to the test chain "
-                             f"({ports.test_hint})")
-    if verdict == "MAINNET":
-        return False, FAIL, (
-            f"port {port} is MAINNET and this did NOT connect. A preflight will not read a real "
-            f"wallet, because reading it means printing the balance. Set {ports.port_variable} to a "
-            f"test chain ({ports.test_hint})"
-        )
-    if verdict == "UNRECOGNIZED":
-        return False, FAIL, (
-            f"port {port} is not a {asset} port this tree knows, so which chain it is was NOT "
-            f"established -- and an unknown port may be a mainnet daemon on a custom -rpcport. "
-            f"Refusing to connect rather than guessing"
-        )
-    return True, PASS, f"port {port} is a test chain (mainnet is {ports.mainnet_port})"
+    connect, detail = may_read_a_wallet(asset, port)
+    return connect, (PASS if connect else FAIL), detail
 
 
 def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
@@ -853,14 +853,22 @@ def check_gridcoin(pays_out_grc: bool = True) -> None:
     if pays_out_grc:
         state = PASS if balance > 0 else FAIL
         record(state, "GRC wallet",
-               f"{balance} GRC on port {port} (test chain)"
+               f"{balance} GRC on port {port} (test chain) -- the WHOLE wallet, not desk stock"
                + payout_ceiling_note(adapters, "GRC") + "  "
                f"in {format_duration(time.monotonic() - started)}")
     else:
+        # "the wallet that will DERIVE the deposit address and RECEIVE the deposit"
+        # was true and was the whole problem, measured on the operator's host
+        # 2026-10-03: with GRC_RPC_WALLET unset that is the daemon's DEFAULT wallet,
+        # so a customer sending from their own wallet sends to an address in it, and
+        # the 500 GRC deposit moved the 0.001 fee and nothing else. The line now
+        # says which wallet, and names the tool that renders a verdict on it.
         record(PASS, "GRC wallet",
-               f"{balance} GRC on port {port} (test chain)  <- GRC is the SOURCE in this run, so nothing "
-               f"sends GRC and this balance is NOT a precondition. It is the wallet that will DERIVE the "
-               f"deposit address and RECEIVE the deposit  in {format_duration(time.monotonic() - started)}")
+               f"{balance} GRC on port {port} (test chain) -- the WHOLE wallet, not desk stock  <- GRC "
+               f"is the SOURCE in this run, so nothing sends GRC and this balance is NOT a "
+               f"precondition. It is the wallet that will DERIVE the deposit address and RECEIVE the "
+               f"deposit, and wallet_custody.py says whether that wallet is the desk's own or the "
+               f"daemon's default  in {format_duration(time.monotonic() - started)}")
 
     # A SEPARATE CHECK, because a funded wallet that cannot send is a different
     # failure from an empty one and rule 14 forbids rendering them the same way.
@@ -959,11 +967,37 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
         record(FAIL, f"{asset} wallet", f"{type(error).__name__}: {clipped(str(error), 120)}"
                                         + (f"  <- {hint}" if hint else ""))
         return
+    # WHICH WALLET, AND WHAT AN UNNAMED ONE MEANS. Added 2026-10-03. This line
+    # already had `walletname` in hand and printed it as decoration -- `loaded
+    # (desk_hot)` or a bare `loaded` -- while the fact it carries is the custody
+    # question: a wallet the DAEMON serves by default is the wallet an operator's
+    # own CLI reaches, so the desk's deposit addresses and the operator's own coins
+    # are in one wallet. On the operator's host that is why a 500 GRC customer
+    # deposit on 2026-10-03 moved only the 0.001 fee: `category: send` AND
+    # `category: receive` for one address, a self-transfer, no custody moved.
+    #
+    # THIS IS A LABEL AND NOT A NEW CHECK, deliberately. A FAIL here would make
+    # this gate unsatisfiable on their host today -- a shared wallet does not stop
+    # a swap working, that swap COMPLETED -- which is the failure legs_to_check()'s
+    # own docstring names: a gate that can never open is one people learn to
+    # bypass. The verdict lives in wallet_custody.py, which this line names.
     name = (info or {}).get("walletname", "")
+    # .get() AND NOT [..], because an absent key and an empty value mean the same
+    # thing here -- no named wallet was configured for this chain -- and config.py
+    # always defines the key while a seeded RPC mapping in a test need not.
+    asked_for = str(Config.RPC[asset].get("wallet") or "")
+    custody = (
+        f" Serving {name or '(unnamed)'}, and {asset}_RPC_WALLET is unset, so this endpoint has no "
+        f"/wallet/<name> path and the daemon routes to its DEFAULT wallet -- the one a bare CLI call "
+        f"reaches. Run wallet_custody.py for the verdict."
+        if not asked_for else
+        f" Serving {name or '(unnamed)'} through /wallet/{asked_for}. wallet_custody.py says whether "
+        f"a bare CLI call also reaches it."
+    )
     record(PASS, f"{asset} wallet",
            f"loaded{f' ({name})' if name else ''}  <- getwalletinfo answered, so getnewaddress can derive "
            f"a deposit address. An adapter that merely CONNECTS cannot: rpc -18 is what a daemon with no "
-           f"wallet loaded returns  in {format_duration(time.monotonic() - started)}")
+           f"wallet loaded returns.{custody}  in {format_duration(time.monotonic() - started)}")
 
     if not pays_out:
         record(SKIP, f"{asset} balance",
@@ -977,7 +1011,8 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
         record(FAIL, f"{asset} balance", f"{type(error).__name__}: {clipped(str(error), 120)}")
         return
     record(PASS if balance > 0 else FAIL, f"{asset} balance",
-           f"{balance} {asset} on port {port}" + payout_ceiling_note(adapters, asset))
+           f"{balance} {asset} on port {port} -- the WHOLE wallet named above (getbalance with no "
+           f"arguments), not coins committed to the desk" + payout_ceiling_note(adapters, asset))
 
 
 def check_solana(adapters) -> None:

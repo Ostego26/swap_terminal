@@ -73,6 +73,7 @@ from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 # pair_rows()'s docstring records what the second copy cost: /admin said ENABLED
 # for a pair / said DISABLED about, in one process at one moment, because this
 # module knew one of the three conditions pair_view has had since 2026-10-01.
+from .custody_separation import wallet_label
 from .helpers import parse_iso, utc_now_iso
 from .pair_view import pair_serviceability
 from .swap_service import TAG_ATTRIBUTION, why_cannot_take_deposits
@@ -113,7 +114,16 @@ PAGE_SECTIONS = (
     ("workers-heading", "Workers"),
     ("flight-heading", "Swaps in flight"),
     ("counts-heading", "Every swap status"),
-    ("inventory-heading", "Hot-wallet inventory"),
+    # "balance" AND NOT "inventory", 2026-10-03. The word was wrong about the
+    # number: wallet_inventory.hot_confirmed is whatever the destination adapter's
+    # get_balance() returned, which on a Bitcoin-derived chain is `getbalance`
+    # with no arguments -- the WHOLE wallet. Measured behaviorally the same day by
+    # calling services/payout_service.refresh_wallet_inventory() with a stub
+    # adapter: one RPC call, `getbalance`, and hot_confirmed came back exactly
+    # equal to it. On a host where GRC_RPC_WALLET is empty that wallet is the
+    # daemon's default wallet, so the figure includes every coin the operator put
+    # there by hand. "Inventory" names committed desk stock; this is a balance.
+    ("inventory-heading", "Hot-wallet balance"),
     ("chains-heading", "Chains"),
     ("pricing-heading", "Pricing"),
     ("reachability-heading", "Reachability"),
@@ -412,7 +422,30 @@ def unresolved_payouts(db) -> list[dict]:
 
 
 def inventory_rows(db, now_iso: str) -> list[dict]:
-    """Hot-wallet inventory, each row carrying its own freshness verdict."""
+    """The hot-wallet BALANCE rows, each carrying its own freshness verdict.
+
+    WHAT hot_confirmed ACTUALLY HOLDS, because the table's name says otherwise and
+    the page used to repeat it. services/payout_service.refresh_wallet_inventory()
+    sets it to `float(adapter.get_balance())`, and chains/base.RPCAdapter.
+    get_balance() is `getbalance` with NO arguments -- the whole wallet the
+    endpoint serves, every address in it, change included. Measured behaviorally
+    2026-10-03 by running that function against a stub adapter: exactly one RPC
+    call, `getbalance`, and the stored hot_confirmed equal to what it returned.
+
+    SO IT IS NOT DESK STOCK. With BTC_RPC_WALLET / LTC_RPC_WALLET / GRC_RPC_WALLET
+    empty -- which is config.py's default and was the state on the operator's host
+    that day -- the endpoint has no /wallet/<name> path and the daemon routes to
+    its DEFAULT wallet, the one an operator's own CLI reaches. Every coin the
+    operator happens to hold there is in this number. wallet_custody.py is the
+    tool that answers which wallet an endpoint serves; this function only reports
+    the figure, and the panel beside it says what the figure measures.
+
+    NOTHING WAS CHANGED ABOUT HOW IT IS COMPUTED OR USED. Rule 16: how inventory
+    is computed and what gates read it is live posture and the operator's call.
+    The table, the column, the refresh and every reader are untouched -- only the
+    words around the number moved, from a claim about desk stock to what was
+    measured.
+    """
     rows = db.execute(
         "SELECT asset, hot_confirmed, hot_reserved, hot_available, updated_at FROM wallet_inventory ORDER BY asset ASC"
     ).fetchall()
@@ -836,7 +869,15 @@ def _endpoint_text(asset: str, adapter) -> str:
         return line().strip()
     host = getattr(adapter, "host", "?")
     port = getattr(adapter, "port", "?")
-    wallet = getattr(adapter, "wallet", "") or "(default wallet)"
+    # wallet_label() RATHER THAN `or "(default wallet)"`, 2026-10-03. This file
+    # and workers/common.endpoint_lines() spelled that same fallback phrase for
+    # the same question, which is rule 8's two-copies shape -- and both of them
+    # said something true that told the operator nothing. An empty wallet value
+    # means this endpoint has no /wallet/<name> path, so the daemon routes to
+    # whichever wallet it serves by default: the one a bare CLI call reaches. That
+    # is the custody question, visible on this row and nowhere else on the page,
+    # and it rendered as a parenthetical that reads like a default being fine.
+    wallet = wallet_label(asset, getattr(adapter, "wallet", "") or "")
     return f"{asset}  rpc={host}:{port} wallet={wallet}"
 
 
@@ -984,7 +1025,7 @@ WORKER_STOPPED_CONSEQUENCES = {
         "the customer is not paid -- and every HTTP response still says 200."
     ),
     "reconcile_worker": (
-        "the hot-wallet inventory stops being refreshed, so the balances on this page go stale. "
+        "the hot-wallet balance rows stop being refreshed, so the balances on this page go stale. "
         "A stale balance is not a small balance -- it is a number nobody has checked."
     ),
 }

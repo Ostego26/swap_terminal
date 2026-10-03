@@ -130,6 +130,22 @@ GRC_PARTICIPANT = base58_testnet("grc testnet participant")
 GRC_REFUND = base58_testnet("grc testnet refund")
 GRC_SECOND_PAYOUT = base58_testnet("swap_terminal test fixture GRC second payout")
 
+# A GRC DEPOSIT address, which is a different ROLE from a payout and needed its own
+# fixture for the same reason XRP_CUSTOMER_PAYOUT did: a custody test asks whether the
+# payout WALLET holds the key for the swap's own DEPOSIT address, so naming one address
+# for both ends would assert the guard against itself.
+#
+# Added 2026-10-03 with tests/test_custody_separation.py. The real address from that
+# day's incident -- a 500 GRC deposit that moved only the 0.001 fee because it was a
+# self-transfer inside the operator's own wallet -- is in that file's PROSE, where it
+# belongs: it is evidence about one run, and nothing in the test depends on its value,
+# only on its being a GRC testnet address distinct from the other fixtures. A literal
+# there would also have put the tree over the ceiling in
+# tests/test_address_literals_are_valid.py, which is the gate working as intended rather
+# than an obstacle: "use tests/valid_addresses.py rather than writing one" is exactly
+# what it asks for, and raising the ceiling would have been rule 19's forbidden move.
+GRC_DESK_DEPOSIT = base58_testnet("grc deposit address derived in the desk's own wallet")
+
 BTC_PARTICIPANT = bech32_address("tb", "btc testnet participant")
 BTC_REFUND = bech32_address("tb", "btc testnet refund")
 BTC_REGTEST_DEPOSIT = bech32_address("bcrt", "btc regtest deposit")
