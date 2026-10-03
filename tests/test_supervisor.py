@@ -1156,3 +1156,77 @@ def test_a_RECORDED_command_that_matches_is_still_ours():
     finally:
         child.send_signal(signal.SIGKILL)
         child.wait(timeout=10)
+
+
+def test_an_ALREADY_RUNNING_worker_is_NOT_described_by_the_capability_banner(tmp_path, capsys):
+    """The banner said a payout worker CAN broadcast beside a worker it did not spawn.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-03, and it cost a credited swap:
+
+        about to spawn    a payout worker CAN broadcast on GRC, SOL, XRP.
+        ...
+        ALREADY RUNNING   payout_worker pid=2065613  <- nothing was spawned for this one
+
+    The running worker had been started BEFORE the SOL payout was armed. It refused
+    the payout with "this adapter cannot sign or broadcast a Solana transfer, and
+    holds no key that could" -- a string that no longer exists anywhere in the tree
+    -- and the swap landed `failed` with 10 GRC already credited.
+
+    Both lines were true. The banner describes the code ON DISK and is printed
+    BEFORE the spawn, so it cannot know which workers are already up; the outcome
+    line says nothing was spawned. A capability claim beside a did-nothing line is
+    rule 13's exact failure ("treat 'skipped' plus 'success' in the same output as a
+    defect in the output"), and the reader has no way to tell the two apart.
+
+    THREE THINGS NOW SAY SO, and this asserts all three because each is read by a
+    different reader: the banner scopes its own claim, the per-worker line corrects
+    it where an operator looks for that worker, and the summary names the remedy.
+
+    MUTATION: drop any one of them. Its assertion here fails, and the output goes
+    back to claiming a capability for a process that may not have it.
+    """
+    table = _sleeper_table()
+    first = supervisor.start_worker("sleeper", table["sleeper"], tmp_path)
+    try:
+        capsys.readouterr()
+        supervisor.command_start(["sleeper"], tmp_path, table)
+        body = capsys.readouterr().out
+
+        assert "WORKERS SPAWNED BY THIS COMMAND, IF ANY" in body, (
+            "the capability banner does not scope itself to what this command spawns, so it reads as a "
+            "claim about every running worker"
+        )
+        assert "THE CODE IT LOADED WHEN IT STARTED" in body, (
+            "the ALREADY RUNNING line does not say the process may be running older code, which is the "
+            "fact that cost a swap"
+        )
+        assert "says nothing about this process" in body, body
+        assert "NOT RELOADED" in body and "`stop` then `start`" in body, (
+            "nothing tells the operator that start cannot reload code, which is the remedy they need"
+        )
+    finally:
+        supervisor.stop_worker("sleeper", tmp_path, grace_seconds=5.0)
+        _reap_zombie(first["pid"])
+
+
+def test_the_NOT_RELOADED_line_is_ABSENT_when_everything_was_actually_spawned(tmp_path, capsys):
+    """A line printed on every successful start is a line people stop reading (rule 14).
+
+    So it must appear only when something was skipped -- otherwise the warning that
+    matters is buried in the warning that never does.
+    """
+    table = _sleeper_table()
+    capsys.readouterr()
+    supervisor.command_start(["sleeper"], tmp_path, table)
+    body = capsys.readouterr().out
+    status = supervisor.worker_status("sleeper", tmp_path)
+    try:
+        assert "spawned=1" in body, body
+        assert "NOT RELOADED" not in body, (
+            "the reload warning printed on a start that spawned everything, which trains the reader to "
+            "skip it on the run where it is true"
+        )
+    finally:
+        supervisor.stop_worker("sleeper", tmp_path, grace_seconds=5.0)
+        if status.get("pid"):
+            _reap_zombie(status["pid"])

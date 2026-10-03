@@ -999,7 +999,20 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
     print("swap_terminal supervisor: START")
     _print_block("  targets", [f"  workers           {', '.join(names)}", *endpoint_summary()])
     print(f"  run directory     {run_dir}")
-    print(f"  about to spawn    {spawn_warning()}")
+    # "IF ANY" IS NOT HEDGING, IT IS THE SCOPE. This line is printed BEFORE the
+    # spawn, so it cannot know which workers are already running -- and it describes
+    # the code ON DISK, which is not necessarily the code a running worker loaded.
+    # Measured on the operator's host 2026-10-03, this exact banner said
+    #
+    #     about to spawn    a payout worker CAN broadcast on GRC, SOL, XRP.
+    #     ...
+    #     ALREADY RUNNING   payout_worker pid=2065613  <- nothing was spawned
+    #
+    # and the running worker had been started before the SOL payout was armed. It
+    # refused the payout with "holds no key that could", a string that no longer
+    # exists in the tree. A capability claim beside a did-nothing line is rule 13's
+    # exact failure, and it cost a credited swap.
+    print(f"  about to spawn    WORKERS SPAWNED BY THIS COMMAND, IF ANY: {spawn_warning()}")
 
     results = [start_worker(name, commands[name], run_dir) for name in names]
     # Every worker is spawned BEFORE the settle is slept, so the wait is paid
@@ -1026,8 +1039,13 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
             if last:
                 lines.append(f"                    last log line: {last}")
         else:
+            # THE CAPABILITY LINE ABOVE DOES NOT DESCRIBE THIS PROCESS, and saying so
+            # here rather than only in the summary is deliberate: an operator reads
+            # the line for the worker they care about, not the tally underneath it.
             lines.append(
-                f"  ALREADY RUNNING   {result['worker']} pid={result['pid']}  <- nothing was spawned for this one"
+                f"  ALREADY RUNNING   {result['worker']} pid={result['pid']}  <- nothing was spawned for "
+                f"this one, so it is still running THE CODE IT LOADED WHEN IT STARTED. The capability "
+                f"line above describes the code on disk NOW and says nothing about this process"
             )
     _print_block("  outcome", lines)
 
@@ -1043,6 +1061,22 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
         f"in {format_duration(time.monotonic() - started_at)}"
         + ("  <- died>0 means a worker is NOT polling; nothing below this line will happen" if died else "")
     )
+    # AND THE REMEDY, WHERE THE READER IS. `start` on a running worker is a NO-OP:
+    # it cannot reload code, and an operator who has just pulled a change and run
+    # `start` reasonably believes they are now running it. On the operator's host
+    # 2026-10-03 that belief cost a credited swap -- the payout worker predated the
+    # SOL arming, refused with a string no longer in the tree, and the swap landed
+    # `failed` with 10 GRC already taken.
+    #
+    # Printed only when something was skipped, because a line that appears on every
+    # successful start is a line people stop reading (rule 14).
+    if skipped:
+        print(
+            f"  NOT RELOADED      {skipped} worker(s) were already running and `start` did NOT restart "
+            f"them. It cannot reload code: a running process keeps whatever it imported. If you have "
+            f"just changed or pulled code, run `stop` then `start` -- and `stop` PROVES the old "
+            f"processes are gone before this spawns new ones"
+        )
     # Non-zero, so a script or a .desktop launcher that chains off this command
     # does not carry on as though the workers were up.
     return 1 if died else 0
