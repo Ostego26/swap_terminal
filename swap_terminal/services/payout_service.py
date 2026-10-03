@@ -90,6 +90,124 @@ from .swap_service import SHARED_ACCOUNT_PAYOUT_ASSETS, payout_source_account, s
 logger = logging.getLogger(__name__)
 
 
+def amount_decided_and_logged(swap) -> float:
+    """payout_amount() plus the one log line its reason is for.
+
+    EXTRACTED BECAUSE THE BRANCH PUT process_pending_payouts() PAST C901, and rule
+    12 says a function past that ceiling is orchestration that has swallowed a
+    decision -- the fix is to extract it, not to raise the ceiling or write a noqa.
+    The decision here is "is this payout worth telling the operator about".
+
+    THE REASON IS LOGGED, NOT DISCARDED. ruff caught `amount_reason` unused on the
+    first attempt, which is this tree's recurring defect in miniature: a function
+    that explains itself and a caller that throws the explanation away.
+
+    LOGGED ONLY WHEN THE FIGURE DIFFERS from the quoted estimate. A line on every
+    payout saying "the deposit matched" is noise that trains an operator to skim
+    past the one that says it did not, and a difference is the only case where
+    anybody later asks why the payout was not the quoted number.
+    """
+    amount, reason = payout_amount(swap)
+    if amount != float(swap["output_amount_estimate"]):
+        logger.info("swap %s: payout amount %s differs from the quote -- %s", swap["id"], amount, reason)
+    return amount
+
+
+def payout_amount(swap) -> tuple[float, str]:
+    """What to pay: the QUOTED figure, scaled by how much actually arrived. The decision.
+
+    OPERATOR INSTRUCTION 2026-10-03, on being told the amount was not fully locked:
+    "goddamit. we need to fix this."
+
+    WHAT WAS WRONG. The payout was `swap["output_amount_estimate"]` verbatim, which
+    services/quote_service.create_quote() computed from the EXPECTED deposit, while
+    the fee is charged against what actually arrived. fee_ledger.py derives the
+    consequence exactly -- with G the realized gross, E the quoted gross:
+
+        retained = G - paid = G - E*(1-f)
+        drift    = retained - G*f = (1-f)*(G - E)
+
+    So any difference between the deposit and the quote was kept (deposit over) or
+    given away (deposit under), silently, at (1-f) of it. A customer who sent 0.9%
+    less than quoted was paid as though they had sent the full amount.
+
+    THE FIX SCALES THE QUOTE. IT DOES NOT RE-DERIVE IT, and that distinction is the
+    whole of this docstring:
+
+        paid = output_amount_estimate * (actual_input / expected_input)
+
+    MY FIRST ATTEMPT RE-DERIVED IT as `actual * quoted_rate * (1 - f)`, which is
+    algebraically identical ONLY WHILE the stored estimate follows today's formula.
+    tests/test_address_authority.py's fixture caught it: it seeds rate=0.001,
+    fee_bps=150, expected=actual=100.0 and output_amount_estimate=0.0975, while
+    100 * 0.001 * 0.985 = 0.0985. The stored figure was computed by the SUPERSEDED
+    formula that also deducted the network fee reserve (0.0985 - 0.001 = 0.0975),
+    which this tree stopped doing on 2026-10-01.
+
+    So re-deriving would have paid 0.0985 on a swap whose customer was quoted
+    0.0975 -- changing the amount on a deposit that matched the quote exactly, which
+    is the opposite of what was asked for. Scaling cannot do that: with
+    actual == expected the ratio is 1 and the quoted figure is paid unchanged, by
+    construction, whatever formula produced it and however often that formula
+    changes afterwards.
+
+    THE DRIFT STILL GOES TO ZERO. Substituting paid = E_est * G/E into
+    fee_ledger.py's identity gives drift = 0 for any E_est, so the realized fee
+    equals the schedule at every size -- which is the property the fix is for.
+
+    BOUNDED BY ±AMOUNT_TOLERANCE_PCT, AND THAT IS WHY THIS IS SAFE RATHER THAN
+    OPEN-ENDED. A deposit outside the band never reaches 'payout_pending':
+    services/deposit_service.py halts it to 'under_review' (measured 2026-10-03 at
+    deposit_service.py:695). So the ratio is within 1% of 1.0 today, in either
+    direction, and reserve_inventory() reserves against THIS figure because the
+    caller uses one local for both.
+
+    RETURNS THE REASON ALONGSIDE, because a payout that differs from the number a
+    customer was quoted has to be explainable from the row a year later, and "it was
+    recomputed" is not an explanation anybody can audit.
+
+    TWO GUARDS ON THE RATIO, neither of them hypothetical:
+
+      actual_input_amount IS NULL   pays the quoted figure and SAYS SO. A
+                                    'payout_pending' swap always has it --
+                                    deposit_service writes it with credited_at --
+                                    so this is unreachable in the live path and is
+                                    recorded rather than defaulted silently.
+      expected_input_amount <= 0    pays the quoted figure and says so, because the
+                                    ratio is undefined. A swap cannot be created
+                                    with a non-positive input, so this is the same
+                                    kind of unreachable, and dividing anyway would
+                                    turn an impossible row into a ZeroDivisionError
+                                    inside the payout loop.
+    """
+    estimate = float(swap["output_amount_estimate"])
+    actual = swap["actual_input_amount"]
+    expected = swap["expected_input_amount"]
+    if actual is None:
+        return estimate, (
+            "paid the QUOTED figure because actual_input_amount is NULL, which should be impossible "
+            "for a payout_pending swap -- deposit_service writes it with credited_at. Investigate: "
+            "this payout was priced on the expected deposit, not the real one"
+        )
+    actual = float(actual)
+    expected = float(expected or 0.0)
+    if expected <= 0:
+        return estimate, (
+            f"paid the QUOTED figure because expected_input_amount is {expected}, so the ratio to the "
+            f"real deposit is undefined. A swap cannot be created with a non-positive input; "
+            f"investigate this row"
+        )
+    if actual == expected:
+        return estimate, f"the deposit matched the quote exactly ({actual}), so the quoted figure is paid"
+    scaled = max(estimate * (actual / expected), 0.0)
+    return scaled, (
+        f"SCALED from the deposit that arrived: expected {expected}, actual {actual}, ratio "
+        f"{actual / expected}. Quoted {estimate} -> paid {scaled}. The quoted RATE and the quoted "
+        f"FIGURE are both honored; only the quantity is adjusted. Before 2026-10-03 the quoted figure "
+        f"was paid verbatim and this difference was kept or given away"
+    )
+
+
 def reserve_inventory(db, asset: str, amount: float):
     row = db.execute("SELECT * FROM wallet_inventory WHERE asset = ?", (asset,)).fetchone()
     now = utc_now_iso()
@@ -437,7 +555,9 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
     completed = []
     for swap in swaps:
         destination_asset = swap["to_asset"]
-        amount = float(swap["output_amount_estimate"])
+        # FROM THE DEPOSIT THAT ARRIVED, not the one that was quoted. See
+        # payout_amount() for the arithmetic and why the difference was silent.
+        amount = amount_decided_and_logged(swap)
 
         if not claim_swap_for_payout(db, swap["id"]):
             # Another worker owns this payout. Not an error and not a failure:
@@ -658,7 +778,11 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
                 swap["id"],
                 swap["from_asset"],
                 swap["to_asset"],
-                swap.get("output_amount_estimate"),
+                # THE AMOUNT ACTUALLY ATTEMPTED, not the quoted estimate. These were the
+                # same figure until 2026-10-03 and are not any more, and a failure log
+                # naming a number that was never sent is how an investigation starts
+                # from the wrong premise.
+                amount,
                 swap["to_asset"],
                 swap["payout_address"],
                 exc,
