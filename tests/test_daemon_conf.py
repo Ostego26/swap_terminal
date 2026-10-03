@@ -239,6 +239,22 @@ SERVICE_SIDE = frozenset({
     # identified by genesis hash through the same adapter the worker builds, so a
     # preview that says DEVNET is a statement about the endpoint the send will use.
     "sol_payout_preview.py",
+    # resolve_halted_swap.py, added 2026-10-03. SERVICE SIDE, and it resolves a
+    # chain for exactly one reason: to ask whether the destination wallet can fund
+    # the payout it is about to hand to payout_worker.
+    #
+    # That makes the classification forced rather than chosen. The question is not
+    # "can some GRC wallet pay 55.45 GRC", it is "can the wallet THIS WORKER WILL
+    # SPEND FROM pay it" -- so it has to resolve what the worker resolves. A conf
+    # fallback would read a balance off a different wallet and print it under the
+    # label `funding`, which is the wrong-number-under-the-right-label failure the
+    # entries above are on this list to avoid, on a line an operator reads
+    # immediately before authorizing a payout.
+    #
+    # The check exists because moving a swap to payout_pending BYPASSES the funding
+    # gate: services/swap_service.create_swap() asks at CREATION, and the swap this
+    # tool was written for was created a week before it was resolved.
+    "resolve_halted_swap.py",
     "swap_readiness.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
