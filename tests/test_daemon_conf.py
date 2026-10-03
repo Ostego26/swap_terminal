@@ -209,6 +209,24 @@ DIRECT_DRIVERS = frozenset({
 SERVICE_SIDE = frozenset({
     "open_swap.py",
     "settle_payout.py",
+    # show_payout_fees.py, added 2026-10-03. SERVICE SIDE, and the reason is the
+    # same one settle_payout.py is on this list for, one step further on: it reads
+    # the fee the wallet PAID on a payout this terminal sent, which means it has to
+    # ask the daemon holding that transaction.
+    #
+    # A conf fallback here would not be a convenience, it would be a wrong answer
+    # that looks like a measurement. Resolve a different daemon and `gettransaction`
+    # does not know the txid, so the payout lands in `unread` -- and the operator
+    # reads "0 of 7 payouts answered with a fee" about seven payouts their service
+    # made and their wallet recorded. The register's own words: strictly worse than
+    # refusing until the variables are exported.
+    #
+    # MEASURED THE DAY IT WAS CLASSIFIED, which is why this is not a coin flip. On
+    # the operator's host, against the service's own exported settings, all 7 of 7
+    # GRC payouts answered: mean fee 0.00100000, low and high identical. That is the
+    # outcome this side of the register produces; the other side could have produced
+    # it only by luck of the conf naming the same wallet.
+    "show_payout_fees.py",
     "swap_readiness.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
