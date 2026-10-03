@@ -1458,3 +1458,91 @@ def test_a_daemon_wallet_chain_still_warns_that_apply_WILL_refuse():
 
     assert "NOT ESTABLISHED" in line
     assert "will refuse rather than take a deposit" in line
+
+
+def test_the_SETTLEMENT_verdict_reaches_BOTH_the_dry_run_and_the_apply_receipt(monkeypatch, tmp_path, capsys):
+    """Before depositing, the operator is told this terminal is not either atomic driver.
+
+    THE DEFECT, 2026-10-03. This tree holds two atomic settlement mechanisms --
+    atomic_swap.py (P2SH HTLC on both legs) and atomic_swap_xrp.py (an XRP escrow under
+    a PREIMAGE-SHA-256 condition against one) -- and NOTHING THIS TOOL PRINTED SAID
+    WHICH ONE A PAIR USED, or that it used neither. Measured the same day: grepping
+    swap_terminal/services, workers and routes for `atomic` and `htlc` finds three
+    mentions, all comments, and zero imports. So every swap this tool opens is
+    custodial, and for XRP:GRC an atomic driver covers the same pair and has completed
+    it OK=15 FAIL=0.
+
+    BOTH PATHS ARE ASSERTED, because they are two call sites and a fix to one is not a
+    fix to the other. The dry run is where the decision to deposit is made; the --apply
+    receipt is the block that carries the deposit address and is what gets pasted back
+    and read a day later, so the sentence has to travel with the address rather than be
+    left behind in the run that produced it.
+
+    MUTATIONS RUN 2026-10-03, both of them, against this whole file: deleting the
+    `wrapped("settlement", ...)` line from run() gave 1 failed, 78 passed -- this test,
+    on the dry-run assertion at the header -- and deleting the one in report_lines()
+    gave 1 failed, 78 passed, this test, on the receipt assertion. Two call sites, two
+    separate failures, nothing else in the file noticing either, which is why this test
+    covers both halves rather than one.
+    """
+    stub_prices(monkeypatch)
+    db_path = tmp_path / "settlement.db"
+
+    # THE HEADER, from the real dry run, which is where the decision to deposit is made.
+    run_tool(monkeypatch, ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+                           "--db", str(db_path)])
+    dry = capsys.readouterr().out
+    assert "settlement" in dry, "the dry run is where the decision to deposit is made"
+    assert "atomic_swap_xrp.py" in dry, "the driver that DOES cover XRP -> GRC must be named"
+    assert "CUSTODIAL" in dry, "and that this terminal is not it"
+    assert "RUN GREEN" in dry, "XRP -> GRC completed OK=15 FAIL=0 on 2026-09-29 and the record says so"
+
+    # THE RECEIPT, asserted on report_lines() rather than by counting the word in the
+    # --apply stdout. The first draft of this test asserted
+    # `applied.count("settlement") >= 2` and DID NOT CATCH the mutation that removes the
+    # receipt line -- the wrapped sentence spans several lines and the count was never
+    # the 1-versus-2 the assertion assumed. A count of a word across a wrapped block is
+    # not a measurement of whether a block is present, and the mutation run is what
+    # established that rather than a reading of the code.
+    run_tool(monkeypatch, ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+                           "--db", str(db_path), "--apply"])
+    capsys.readouterr()
+    swap = swap_row(db_path)[0]
+    connection = connect_db(str(db_path))
+    try:
+        quote = connection.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
+    finally:
+        connection.close()
+    receipt = "\n".join(report_lines(swap, quote, str(db_path), real_config()))
+    assert "settlement" in receipt, (
+        "the receipt that carries the deposit address must carry the settlement sentence too; a header-only "
+        "line is lost the moment the block is pasted back"
+    )
+    assert "atomic_swap_xrp.py" in receipt and "CUSTODIAL" in receipt
+    assert "RUN GREEN" in receipt
+
+
+def test_a_SAME_ASSET_PAIR_is_refused_at_the_argument_and_names_the_real_cause(monkeypatch, tmp_path):
+    """`--pair GRC:GRC` said "Unsupported trading pair". True, and the wrong cause.
+
+    It reached services/quote_service.validate_pair() and came back as a pair not in
+    Config.ALLOWED_PAIRS -- which sends the operator to look at that set for an entry
+    that could not be there, since a swap moves value between two DIFFERENT chains.
+
+    It also matters structurally as of 2026-10-03: the settlement verdict printed in the
+    header raises on two equal assets, deliberately, because a settlement mechanism is a
+    property of two different chains. A refusal belongs where the pair is parsed rather
+    than as a traceback out of a display line.
+
+    MUTATION: removed the `parts[0] == parts[1]` branch from parse_pair() and this test
+    failed with "DID NOT RAISE SwapRefused" -- 1 failed, 78 passed in this file,
+    measured 2026-10-03. It fails at parse_pair() rather than on the ValueError, because
+    it exercises the parser directly; the traceback the guard prevents is what a real
+    `--pair GRC:GRC` run would have produced from the header's settlement line, which is
+    the reason the refusal moved here rather than being left to validate_pair().
+    """
+    with pytest.raises(SwapRefused, match="both sides"):
+        parse_pair("GRC:GRC")
+    with pytest.raises(SwapRefused, match="wallet transfer"):
+        parse_pair("xrp/xrp")
+    assert parse_pair("GRC:XRP") == ("GRC", "XRP"), "a real pair is unaffected"

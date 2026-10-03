@@ -43,16 +43,21 @@ import inspect
 import pathlib
 
 import pytest
-from modules.atomic_btc_client import BTCClient
-from modules.atomic_grc_client import GRCClient
-from modules.atomic_ltc_client import LTCClient
+from modules.htlc_assets import script_client_classes
 from modules.htlc_contract_api import (
     AMOUNT_KEYWORD,
     UnknownContractChain,
     create_contract_kwargs,
 )
 
-CLIENTS = {"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}
+# THE THIRD COPY OF THIS DICT, UNTIL 2026-10-03. It was
+# `{"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}` here, the same dict in a
+# different key order at atomic_swap.py:148, and a third at atomic_swap_xrp.py:1224
+# under a comment claiming the map was "imported rather than re-implemented". A test
+# fixture is not exempt from rule 8: a test carrying its own copy of the vocabulary is a
+# test that keeps passing on the day a fourth chain is added to the two real ones and
+# not to it, which is precisely the chain nobody would have checked this signature for.
+CLIENTS = script_client_classes()
 
 ARGUMENTS = {
     "amount": 1,
@@ -111,7 +116,7 @@ def test_the_POSITIONAL_call_that_shipped_would_NOT_bind_to_LTC():
     for chain in ("BTC", "GRC"):
         inspect.signature(CLIENTS[chain].create_contract).bind(object(), *positional)
 
-    bound = inspect.signature(LTCClient.create_contract).bind(object(), *positional)
+    bound = inspect.signature(CLIENTS["LTC"].create_contract).bind(object(), *positional)
     # It BINDS -- five positional parameters accept five positional arguments --
     # and every one of them lands in the wrong place. That is the finding: arity
     # is not the check, and a stub with the right arity proves nothing.

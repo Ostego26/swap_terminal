@@ -836,3 +836,43 @@ def test_the_credited_line_on_the_real_report_distinguishes_waiting_from_refused
     assert "nothing has arrived" not in one_row, (
         "a row exists, so the swap-wide 'nothing arrived' sentence is false here"
     )
+
+
+def test_the_SETTLEMENT_verdict_is_on_the_block_for_an_existing_swap(halted, capsys):
+    """On a swap that already exists, "is anything holding this but trust?" is live.
+
+    THE DEFECT, 2026-10-03: this tree holds two atomic settlement mechanisms --
+    atomic_swap.py for a P2SH HTLC on both legs, atomic_swap_xrp.py for an XRP escrow
+    under a PREIMAGE-SHA-256 condition against one -- and nothing on any screen said
+    which one a pair used, or that the brokered terminal used neither. Measured the same
+    day: swap_terminal/services, workers and routes mention an atomic driver three
+    times, all in comments, with zero imports.
+
+    On an EXISTING swap the question is not hypothetical. The deposit may already be in
+    a desk-owned address, and this block is what an operator reads to find out what
+    state the swap is in.
+
+    THE VERDICT COMES FROM modules/htlc_assets.py AND IS NOT RE-DERIVED HERE, so this
+    block and /admin's matrix cannot disagree about one pair -- which they did on
+    2026-10-02 about serviceability, in one process, for exactly that reason.
+
+    MUTATION: removed `*settlement_block(from_asset, to_asset)` from swap_lines() and
+    this file reported 1 failed, 29 passed -- this test, on the `settlement` assertion.
+    Measured 2026-10-03. Nothing else in the file noticed, which is the argument for an
+    end-to-end assertion here rather than leaving the function's unit test in
+    tests/test_htlc_assets.py to stand for the call site: that one passes under this
+    mutation, because the function is untouched.
+    """
+    assert run_tool(["--db", str(halted), "--swap", "s_halt"]) == 0
+    out = capsys.readouterr().out
+
+    assert "settlement" in out
+    assert "atomic_swap_xrp.py" in out, "the driver that covers XRP -> GRC must be named, not implied"
+    assert "CUSTODIAL" in out, "and the block must say this swap is not using it"
+    assert "RUN GREEN" in out, "XRP -> GRC completed OK=15 FAIL=0 on 2026-09-29"
+    # THE COLUMN STILL HOLDS. The settlement value is the longest this tool prints and
+    # wraps onto continuation lines, so the label row is the only one that must land in
+    # the column -- which is what report_block.wrapped() is for.
+    for line in out.splitlines():
+        if line.startswith("  ") and line[2:3] not in ("", " "):
+            assert line[LABEL_WIDTH + 1] == " ", f"the label column overflows: {line!r}"

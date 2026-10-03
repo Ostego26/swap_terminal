@@ -112,10 +112,13 @@ from chains.wallet_hint import which_wallets_are_on_disk
 from chains.wallet_lock import encryption_state, unlocked_for_payout
 from config import Config
 from microfortnights import format_duration
-from modules.atomic_btc_client import BTCClient
-from modules.atomic_grc_client import GRCClient
 from modules.atomic_htlc_scripts import p2sh_script_for
-from modules.atomic_ltc_client import LTCClient
+from modules.htlc_assets import (
+    ESCROW_HTLC_ASSETS,
+    NO_HTLC_REASON,
+    script_client_classes,
+    settlement_verdict,
+)
 from modules.htlc_chain_read import (
     adapter_for,
     claim_scriptsig_hex,
@@ -141,11 +144,30 @@ from step_console import Console
 # does not exist or is not loaded" instead, so the CODE is what both have in common.
 NO_WALLET_LOADED_CODE = "-18"
 
-# The assets whose legs this file can build: the three with a P2SH HTLC and a client
+# The assets whose legs this file can build: the ones with a P2SH HTLC and a client
 # exposing create, redeem AND refund. XRP is absent for a PROTOCOL reason rather than
 # missing work -- see the module docstring -- and adding it here would be a claim no code
 # can honor.
-CLIENTS = {"BTC": BTCClient, "GRC": GRCClient, "LTC": LTCClient}
+#
+# READ FROM modules/htlc_assets.py SINCE 2026-10-03, NOT SPELLED HERE. This line was
+# `{"BTC": BTCClient, "GRC": GRCClient, "LTC": LTCClient}` and atomic_swap_xrp.py:1224
+# was `{"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}` -- one dict, two key
+# orders, two files, with a comment at the second one claiming it was "imported rather
+# than re-implemented". A third copy sat in tests/test_htlc_contract_api.py:55. Three
+# spellings of one fact is rule 8's bug with a delay on it, and the delay here would be
+# the day somebody adds a fourth script chain to one of them.
+#
+# script_client_classes() builds it from modules/htlc_timelock.SECONDS_PER_BLOCK and
+# REFUSES if the two halves disagree -- a chain with a block interval and no client, or a
+# client for a chain whose interval nobody recorded. A fresh dict per call, so the
+# monkeypatching in tests/test_atomic_swap_driver.py still reaches only this file.
+CLIENTS = script_client_classes()
+# STILL DERIVED FROM CLIENTS AND NOT FROM SCRIPT_HTLC_ASSETS, and the difference is
+# deliberate: the vocabulary is every chain whose block interval this tree knows, and
+# this file can only build a leg where a client also exists. They are equal today (a
+# test asserts it), and if they ever diverge this file must claim the smaller set --
+# a `--from` choice it cannot honor is a refusal arriving after the operator has
+# already typed an amount.
 ASSETS = tuple(sorted(CLIENTS))
 
 # DERIVED, not listed (rule 11). Six directed pairs because three assets, and a fourth
@@ -1243,18 +1265,48 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def print_pairs(console: Console) -> int:
-    """Every directed pair, derived from ASSETS, plus an honest line on what is missing."""
+    """Every directed pair, derived from ASSETS, plus an honest line on what is missing.
+
+    THE "NOT here" SECTION IS DERIVED AS OF 2026-10-03, and it had to be, because it was
+    wrong. It said of the XRP driver: "Its --chain flag offers btc and ltc but REFUSES
+    them: it funds with Gridcoin's createhtlc, and the fix is to route it through the
+    clients above". Both runners moved onto those clients on 2026-09-29, XRP<->LTC
+    completed OK=15 FAIL=0 the same day, and atomic_swap_xrp.CAN_FUND_THE_HTLC has held
+    all three chains since. So this file told an operator a working pair was refused,
+    which is rule 16's wrong comment on the one screen whose whole job is to answer
+    "which pairs can I run".
+
+    It cannot say that again, because every word of it now comes from
+    modules/htlc_assets.settlement_verdict() -- the same function the brokered surfaces
+    read -- so the sentence here and the sentence on the swap page cannot disagree
+    (rule 8). Per DIRECTION, because the two directions of one pair are different
+    claims: XRP -> GRC has txids and GRC -> XRP has never been run.
+    """
     console.banner(f"{len(ASSET_PAIRS)} directed pairs this file drives, from {len(ASSETS)} assets")
+    # EACH PAIR WITH ITS EVIDENCE, not a bare list. Six lines reading `--from X --to Y`
+    # tell an operator what the flags are and nothing about which of them has ever
+    # completed -- and one of them has: BTC -> GRC, OK=13 FAIL=0 on 2026-09-30. The
+    # word comes from modules/htlc_assets.PROVEN_SCRIPT_PAIRS, so it cannot claim a run
+    # that is not in the record.
     for source, destination in ASSET_PAIRS:
-        console.say(f"  --from {source} --to {destination}")
+        verdict = settlement_verdict(source, destination)
+        console.say(f"  --from {source} --to {destination}   "
+                    f"{'RUN GREEN' if verdict['proven'] else 'covered, NOT RUN'}")
     console.say("")
     console.say("NOT here, and each for a PROTOCOL reason rather than missing work:")
-    console.say("  XRP  no script. Uses EscrowCreate with a PREIMAGE-SHA-256 condition, which")
-    console.say("       is a hashlock but not a P2SH one. XRP<->GRC has its own working driver")
-    console.say("       (atomic_swap_xrp.py, both directions, live on testnet). Its --chain flag")
-    console.say("       offers btc and ltc but REFUSES them: it funds with Gridcoin's createhtlc,")
-    console.say("       and the fix is to route it through the clients above, which build the P2SH.")
-    console.say("  SOL  no HTLC. The stub that existed could not run and was deleted (c4ea027).")
+    for escrow_asset in ESCROW_HTLC_ASSETS:
+        console.say(f"  {escrow_asset}  no script. It commits with EscrowCreate and a PREIMAGE-SHA-256")
+        console.say("       condition -- a hashlock, but not a P2SH one -- so its legs are a different")
+        console.say("       protocol and cannot be a row above. A DIFFERENT DRIVER covers them:")
+        for chain in ASSETS:
+            for source, destination in ((escrow_asset, chain), (chain, escrow_asset)):
+                verdict = settlement_verdict(source, destination)
+                console.say(f"         {source} -> {destination}   {verdict['driver']}   "
+                            f"{'RUN GREEN' if verdict['proven'] else 'covered, NOT RUN'}")
+    for asset in sorted(NO_HTLC_REASON):
+        short, _long = NO_HTLC_REASON[asset]
+        console.say(f"  {asset}  {short}. No atomic driver reaches it in either direction, so every")
+        console.say(f"       {asset} swap this tree can do is the BROKERED, custodial one.")
     return 0
 
 

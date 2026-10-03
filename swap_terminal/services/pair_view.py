@@ -66,6 +66,7 @@ instead of reasoning about adapters at all.
 """
 
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
+from modules.htlc_assets import settlement_verdict
 
 from .quote_service import why_cannot_establish_payout_floor, why_cannot_quote
 from .swap_service import why_cannot_take_deposits
@@ -236,6 +237,20 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
                 "to_asset": to_asset,
                 "label": f"{from_asset} -> {to_asset}",
                 "enabled": verdict["serviceable"],
+                # HOW THIS PAIR WOULD SETTLE, AND THAT IT DOES NOT SETTLE THAT WAY
+                # HERE. Added 2026-10-03. Serviceability and settlement are different
+                # questions and neither answers the other: GRC -> XRP can be
+                # SERVICEABLE (reachable, payable, quotable) and is settled
+                # CUSTODIALLY, while atomic_swap_xrp.py covers that exact pair with a
+                # hashlock. Nothing on any surface in this tree said which of the two
+                # mechanisms applied, and the operator could not tell.
+                #
+                # Carried as the whole verdict dict rather than as a flattened string,
+                # for the reason `cannot_pay` and friends are carried above: a reader
+                # of these rows can see WHICH mechanism and whether it has been RUN
+                # without re-asking, and nothing re-derives a verdict that is decided
+                # in exactly one place (modules/htlc_assets.settlement_verdict()).
+                "settlement": settlement_verdict(from_asset, to_asset),
                 "missing": verdict["missing"],
                 "cannot_pay": verdict["cannot_pay"],
                 "cannot_take": verdict["cannot_take"],

@@ -66,6 +66,7 @@ from chains.base import RPCAdapter
 from chains.daemon_network import chain_network, is_named
 from chains.registry import why_cannot_pay_out, why_unconfigured
 from microfortnights import format_duration
+from modules.htlc_assets import settlement_verdict
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
 # THE PAIR VERDICT COMES FROM pair_view AND IS NOT COMPUTED IN THIS FILE.
@@ -550,6 +551,18 @@ def pair_rows(config, adapters: dict) -> list[dict]:
             if from_asset == to_asset:
                 continue
             enabled = (from_asset, to_asset) in allowed
+            # COMPUTED ONCE PER CELL AND NOT PER KEY. The first draft called
+            # settlement_verdict() twice in the row literal below -- once for the dict
+            # and once for the headline -- which is two evaluations of one decision in
+            # one row, the shape this whole file's docstring is about.
+            #
+            # NOT SKIPPED FOR A DISABLED PAIR, unlike pair_serviceability() above. The
+            # reason that one is skipped is that naming a missing adapter for a pair the
+            # operator has not enabled sends them to configure a chain that would change
+            # nothing. Settlement is the opposite case: "this pair is not enabled AND an
+            # atomic driver covers it, run green" is exactly what an operator deciding
+            # whether to enable it needs, and it costs no socket to say.
+            settlement = settlement_verdict(from_asset, to_asset)
             # ONE CALL, AND IT IS THE ONLY PLACE THE VERDICT COMES FROM. Skipped for
             # a pair that is not in ALLOWED_PAIRS, because the reason it is refused
             # is the pair list: naming a missing adapter instead would send the
@@ -652,6 +665,20 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                     "serviceable": enabled and verdict["serviceable"],
                     "detail": detail,
                     "short_detail": short_detail,
+                    # HOW IT WOULD SETTLE, from the one place that decides it
+                    # (modules/htlc_assets.settlement_verdict()), the same dict
+                    # services/pair_view.allowed_pair_rows() carries. Added 2026-10-03.
+                    #
+                    # IT IS NOT A STATE AND DOES NOT TOUCH `state`, which is deliberate:
+                    # every pair on this page settles CUSTODIALLY, so a settlement badge
+                    # beside the verdict column would be the same value on all twenty
+                    # cells and tell a reader nothing. What varies, and what an operator
+                    # wants, is WHICH atomic driver covers the pair and whether it has
+                    # ever been RUN -- so it rides on the cell's label rather than on its
+                    # pill. `settlement_headline` is the short form, spelled by that
+                    # module rather than assembled here.
+                    "settlement": settlement,
+                    "settlement_headline": settlement["headline"],
                 }
             )
     return rows

@@ -107,7 +107,8 @@ from config import Config
 from db import connect_db
 from deposit_vout_artifact import multi_vout_groups
 from microfortnights import format_duration
-from report_block import CONTINUATION, labeled
+from modules.htlc_assets import settlement_line
+from report_block import CONTINUATION, labeled, wrapped
 from services.admin_view import halted_swaps, status_counts
 from services.helpers import utc_now_iso
 from services.swap_service import get_swap
@@ -508,6 +509,35 @@ def what_the_seen_total_counts(swap: dict) -> str:
                  "total when the swap is credited")
 
 
+def settlement_block(from_asset: str, to_asset: str) -> list[str]:
+    """The settlement verdict for a swap's own pair, or a result saying it is unknowable.
+
+    THE GUARD IS THE WHOLE REASON THIS IS A FUNCTION. swap_lines() reads
+    `swap.get("from_asset") or "?"`, so a row written by an older schema, or one whose
+    assets failed to load, arrives here as "?" on both sides -- and
+    settlement_mode("?", "?") raises ValueError, because two equal assets are not a
+    swap. A terminal block that crashes on a malformed row is worse than one that says
+    it cannot tell: the operator is reading this block precisely BECAUSE something about
+    the swap is wrong.
+
+    So the refusal is a RESULT and not an exception, with the two values echoed (rule 14:
+    `(none)` is a result, and a blank gap is ambiguous between no answer and a broken
+    one). The same shape applies if one side alone is missing: the verdict depends on
+    both assets, and half a pair has no verdict.
+    """
+    unknown = [
+        name for name, value in (("from_asset", from_asset), ("to_asset", to_asset))
+        if not value or value == "?"
+    ]
+    if unknown or from_asset == to_asset:
+        cause = ("could not be read: " + ", ".join(unknown)) if unknown else "both sides name the same asset"
+        return wrapped("settlement", f"NOT ESTABLISHED -- this swap's pair reads {from_asset!r} -> "
+                                     f"{to_asset!r} and a settlement mechanism is a property of two DIFFERENT "
+                                     f"assets, so there is no verdict to give. The swaps row is what is wrong, "
+                                     f"not the terminal: {cause}.")
+    return wrapped("settlement", settlement_line(from_asset, to_asset))
+
+
 def swap_lines(view: dict, now_iso: str) -> list[str]:
     """One swap in full, from the dict services/swap_view.swap_display() returns.
 
@@ -531,6 +561,17 @@ def swap_lines(view: dict, now_iso: str) -> list[str]:
         f"swap {swap.get('id')}   {from_asset} -> {to_asset}",
         labeled("status", f"{view['status']}  <- {attention['headline']} [{attention['level']}]"),
         labeled("what it means", attention["detail"]),
+        # HOW THIS SWAP SETTLES. Added 2026-10-03, for the same reason open_swap.py
+        # gained it: this tree has two atomic drivers and the brokered terminal is
+        # neither, and no screen said which mechanism a pair used. On an EXISTING swap
+        # the question is live rather than hypothetical -- the deposit may already be in
+        # a desk-owned address, and "is anything holding this but trust?" is the thing a
+        # reader of this block is actually asking.
+        #
+        # Derived from from_asset and to_asset, which are the swap's own row. Nothing
+        # here re-derives the verdict: modules/htlc_assets.settlement_mode() is the only
+        # place it is decided, so this block and the swap page cannot disagree.
+        *settlement_block(from_asset, to_asset),
     ]
     if not view["status_known"]:
         # "status unknown", not "status vocabulary": the label column is 16 wide

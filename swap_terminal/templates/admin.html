@@ -727,9 +727,19 @@
         {#- THE FULL LABEL, THE STATE AND THE REASON, ON THE CELL ITSELF. aria-label
             rather than title alone: a title is a mouse affordance and this page is
             read by keyboard and by screen reader as well as by eye. -#}
+        {#- SETTLEMENT RIDES ON THE CELL'S LABEL, 2026-10-03, and not on its pill.
+            This tree has two atomic drivers (atomic_swap.py, atomic_swap_xrp.py) and
+            this terminal is NEITHER -- grepped services/, workers/ and routes/ for
+            `atomic` and `htlc`: three mentions, all comments, zero imports -- so every
+            cell on this matrix settles custodially and a settlement BADGE would read
+            the same twenty times. What varies is which driver covers the pair and
+            whether it has ever been RUN, which is the sentence an operator wanted and
+            no surface in this tree carried. `settlement_headline` is the short form,
+            spelled by modules/htlc_assets.py rather than assembled in this template
+            (rule 10: a decision is not a branch in a view). -#}
         <td class="matrix-cell{% if cell.state != 'enabled' %} matrix-off{% endif %}"
-            title="{{ cell.label }} &#8212; {{ cell.short_detail }}"
-            aria-label="{{ cell.label }}: {{ cell.state }} &#8212; {{ cell.short_detail }}">
+            title="{{ cell.label }} &#8212; {{ cell.short_detail }} &#8212; {{ cell.settlement_headline }}"
+            aria-label="{{ cell.label }}: {{ cell.state }} &#8212; {{ cell.short_detail }}. Settlement: {{ cell.settlement_headline }}">
           {% if cell.state == 'enabled' %}{{ badges.level_badge('ok', 'ENABLED') }}
           {% elif cell.state == 'unreachable' %}{{ badges.level_badge('slow', 'UNREACHABLE') }}
           {% elif cell.state == 'cannot_complete' %}{{ badges.level_badge('failed', 'CANNOT COMPLETE') }}
@@ -751,6 +761,20 @@
      one shown. An asset with no adapter in this process is a whole row AND a whole column of the same badge
      &#8212; which is the reading a list of pairs could not give, and the <a href="#chains-heading">Chains</a>
      panel above names what to set for it, once per chain.</p>
+  {#- WHAT A BADGE ON THIS MATRIX DOES NOT SAY, stated once per page rather than once
+      per cell. The measured reason for "once per page": this panel's per-pair `detail`
+      used to render the same remedy sentence twenty-two times, 1767 of the page's 3156
+      visible words. A settlement note on every cell would repeat that mistake with a
+      different sentence. -#}
+  <p class="panel-note"><strong>Every pair above settles custodially, whatever its badge says.</strong>
+     <code>ENABLED</code> means this terminal can take the deposit and pay out &#8212; into an address this desk
+     owns, and out of the desk&#8217;s own inventory. There is no hashlock on any of it and nothing is atomic:
+     a customer is trusting the desk between the deposit confirming and the payout broadcasting. Two atomic
+     drivers DO exist in this tree (<code>atomic_swap.py</code> for a P2SH HTLC on both legs,
+     <code>atomic_swap_xrp.py</code> for an XRP escrow against one) and <em>nothing in
+     <code>services/</code>, <code>workers/</code> or <code>routes/</code> calls either</em> &#8212; wiring
+     them in is a separate change and the operator&#8217;s. Which driver covers a given pair, and whether that
+     pair has ever been RUN rather than merely covered, is on each cell&#8217;s label and tooltip.</p>
   {% else %}
     {{ badges.empty('pair is known', 'Config.ALLOWED_PAIRS') }}
   {% endif %}

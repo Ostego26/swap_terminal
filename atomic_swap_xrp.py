@@ -276,9 +276,13 @@ from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_ac
 from chains.xrp_units import DROPS_PER_XRP  # noqa: E402 -- same
 from config import Config  # noqa: E402 -- same
 from microfortnights import format_duration  # noqa: E402 -- same
-from modules.atomic_btc_client import BTCClient  # noqa: E402 -- same
-from modules.atomic_grc_client import GRCClient  # noqa: E402 -- same
-from modules.atomic_ltc_client import LTCClient  # noqa: E402 -- same
+from modules.htlc_assets import (  # noqa: E402 -- same
+    CHAIN_FIRST,
+    PROVEN_LIVE,
+    SCRIPT_HTLC_ASSETS,
+    XRP_FIRST,
+    script_client_classes,
+)
 from modules.htlc_chain_read import claim_scriptsig_hex  # noqa: E402 -- same
 from modules.htlc_spend import preimage_from_scriptsig  # noqa: E402 -- same
 
@@ -352,43 +356,16 @@ def chain_amount_for_rate(xrp_drops: int, xrp_per_chain_unit: Decimal) -> Decima
     xrp = Decimal(xrp_drops) / Decimal(DROPS_PER_XRP)
     return (xrp / xrp_per_chain_unit).quantize(Decimal(1).scaleb(-GRC_DECIMALS), rounding=ROUND_DOWN)
 
-#: The chains a full swap has actually COMPLETED on, and the evidence. Absence from this
-#: table is not a gap in the table -- it is the honest state of a chain, and the banner
-#: says so out loud rather than letting silence read as reassurance.
-PROVEN_LIVE: dict[str, str] = {
-    # EARNED 2026-09-29, ON THIS PATH, BY A RUN. It was emptied earlier the same day when
-    # both runners moved off Gridcoin's createhtlc/claimhtlc onto the chain clients: the
-    # 2026-09-27 evidence belonged to the route that produced it, and carrying it across
-    # would have told an operator a failure was a regression on a route nothing had taken.
-    # This entry is a different run, of this code, with its own txids.
-    "GRC": (
-        "xrp-first COMPLETED on this code path 2026-09-29, OK=15 FAIL=0: XRP escrow "
-        "56E03AA90B97BD8E.. (OfferSequence 21051299), GRC HTLC 25749c35389772e9.. at vout 1 "
-        "on P2SH 2N775AaLXRuxBoXS8q.., claim c8ec9f79e541bfa7.. crediting 66.09001328 GRC, "
-        "XRP finish C72EBF3F56D97180.. and B's balance +1000000 drops. The secret was read "
-        "back out of the claim's 237-byte scriptSig, not out of memory. A failure here is a "
-        "regression, not a discovery."
-    ),
-    # EARNED 2026-09-29, the second chain and the first one this driver could not fund at
-    # all that morning. It took three attempts and each failure was a real defect the seeded
-    # tests could not have found: the script client read Config.RPC directly so a
-    # conf-resolved daemon failed at step 5b; then create_contract() was called positionally
-    # in the BTC/GRC order, which LTC does not share.
-    "LTC": (
-        "xrp-first COMPLETED on this code path 2026-09-29, OK=15 FAIL=0: XRP escrow "
-        "27627931A82718BF.. (OfferSequence 21051302), LTC HTLC 6e06a4c906c1d5db.. at vout 1 on "
-        "P2SH QbWXa1K6v74M7qWcZN8bXNPu4WMJMybuFh, claim 7bd4f0ef9602c2a1.. paying 0.02217136 LTC "
-        "to rltc1qrlv7f9majkfujxn6cgspgx998nc60umpjce6vv, XRP finish 0DEB63047A0CDDE3.. and B's "
-        "balance 118999970 -> 119999970 drops. The secret was read back out of the claim's "
-        "236-byte scriptSig. Priced at the live rate, 44.90069981 XRP per LTC from CoinPaprika, "
-        "not a hand-supplied figure. A failure here is a regression, not a discovery."
-    ),
-    # chain-first is NOT listed, on EITHER chain. It is the same five acts in the other order
-    # and shares every function, but it has not been run on this path and sharing code is not
-    # evidence -- that is the whole reason this table is keyed by what ran rather than by what
-    # should work. Two of the three defects the LTC run found were in code both directions
-    # share, and the xrp-first tests were green for all of them.
-}
+# PROVEN_LIVE MOVED TO modules/htlc_assets.py ON 2026-10-03 and is imported above,
+# content unchanged. It is the record of which XRP<->script swaps have actually
+# COMPLETED on this code path, and five surfaces needed it the moment the settlement
+# decision was surfaced -- this driver's banner, open_swap.py, show_swap.py,
+# swap_readiness.py and the web pair list. Rule 10 forbids a module importing a root
+# entry point, so leaving the table here would have forced either an upward import or
+# a second copy of the evidence, and a second copy of evidence is the worst thing in
+# this file to duplicate: the whole point of say_what_has_actually_run() is that an
+# operator can tell a regression from a discovery. say_what_has_actually_run() still
+# reads and prints it exactly as before.
 
 #: What to CALL each chain in a line an operator reads. Only ever cosmetic -- nothing
 #: branches on it -- but the banner said "(Gridcoin testnet)" beside a BTC leg until
@@ -435,47 +412,65 @@ READ_POLL_SECONDS = 2.0
 # the initiator is the role the timelock policy is written against
 # (modules/htlc_timelock.py) and naming it after the desire would invert on every
 # reading.
-#: The script chains this driver can put the non-XRP leg on. Not a new list: it is
-#: exactly the keys of modules/htlc_timelock.SECONDS_PER_BLOCK, which already carried
-#: BTC=600, LTC=150 and GRC=90 before this driver could use any of them but GRC, and
-#: exactly the assets atomic_swap.py's CLIENTS drives. A fourth copy of the vocabulary
-#: would be rule 8's defect with a delay on it, so this derives rather than declares.
-SCRIPT_CHAINS = tuple(sorted(SECONDS_PER_BLOCK))
+#: The script chains this driver can put the non-XRP leg on. Not a new list, and since
+#: 2026-10-03 not a second DERIVATION either: it is
+#: modules/htlc_assets.SCRIPT_HTLC_ASSETS, which is itself the keys of
+#: modules/htlc_timelock.SECONDS_PER_BLOCK -- the table that already carried BTC=600,
+#: LTC=150 and GRC=90 before this driver could use any of them but GRC.
+#:
+#: This line read `tuple(sorted(SECONDS_PER_BLOCK))` and said a fourth copy of the
+#: vocabulary "would be rule 8's defect with a delay on it", which was right about the
+#: hazard and one level too high up: the same expression also had to be written wherever
+#: else the question was asked, and on 2026-10-03 it had to be asked in a fifth place
+#: (modules/htlc_assets.settlement_mode, for the surfaces that show an operator how a
+#: pair settles). One derivation, read by everybody, is what rule 11 asks for.
+SCRIPT_CHAINS = SCRIPT_HTLC_ASSETS
 #: GRC unless told otherwise, because every recorded run of this driver was GRC and a
 #: changed default would silently re-point an operator's existing command.
 DEFAULT_CHAIN = "GRC"
 
 #: The chains whose HTLC this driver can actually FUND. Not the chains it can reason
-#: about -- it converts timelocks, prices legs and validates networks for all three -- but
-#: the ones where steps 6 and 7 have a method to call.
+#: about -- it converts timelocks, prices legs and validates networks for every chain in
+#: SCRIPT_CHAINS -- but the ones where the funding step has a client to call.
 #:
-#: MEASURED 2026-09-29, AND THIS IS THE GAP THE --chain FLAG DID NOT CLOSE. Both runners
-#: fund the script leg with `adapter.call("createhtlc", ...)`, and createhtlc is a
-#: GRIDCOIN RPC. bitcoind and litecoind have no such method; they answer "Method not
-#: found". Everything before step 6 succeeds on BTC -- the adapter, the regtest network,
-#: the bech32 addresses, the commitment -- which is precisely what makes refusing here
-#: rather than there necessary.
+#: THIS COMMENT DESCRIBED A MECHANISM THE DRIVER STOPPED USING, UNTIL 2026-10-03, and the
+#: refusal it governs had already been corrected without it. What stood here said both
+#: runners fund the script leg with `adapter.call("createhtlc", ...)`, that bitcoind and
+#: litecoind answer "Method not found", and -- in its last paragraph -- that "routing
+#: steps 6 and 7 through the clients is the work, and it is not done". Every clause was
+#: false by the end of 2026-09-29: both runners fund through modules/script_leg.py and
+#: the chain clients, XRP<->GRC and XRP<->LTC each completed OK=15 FAIL=0 on that path,
+#: and PROVEN_LIVE carries their txids. The three console.say() lines at the guard itself
+#: were rewritten that day and this block was not, so the file explained its own constant
+#: one way and refused in another. Rule 16: a wrong comment is a bug, and this one sat
+#: directly above the value a reader checks to find out which chains work.
 #:
-#: WHY IT REFUSES BEFORE STEP 1 RATHER THAN FAILING AT STEP 6. In xrp-first the XRP
-#: ESCROW IS FUNDED AT STEP 5. A --run that discovered the missing method at step 6 would
-#: have one leg funded on a live chain and no way to fund the other -- the exact
-#: one-sided state every timelock in this file exists to prevent, arriving through the
-#: driver instead of through a counterparty.
+#: DERIVED FROM THE CLIENT MAP RATHER THAN FROM SCRIPT_CHAINS, which is the change that
+#: makes the guard mean something again. It read `frozenset(SCRIPT_CHAINS)`, so it was
+#: equal to the vocabulary by construction and the branch below it could not fire for any
+#: input -- a guard whose condition is `x in <everything>`. Read off
+#: modules/htlc_assets.script_client_classes() it answers the question it is named for:
+#: a chain somebody adds to modules/htlc_timelock.SECONDS_PER_BLOCK without a client is
+#: in SCRIPT_CHAINS, is NOT in here, and is refused before a single network call.
 #:
-#: THE FIX IS NOT A NEW METHOD. modules/atomic_btc_client.py and
-#: modules/atomic_grc_client.py already expose create_contract()/redeem_contract()/
-#: refund_contract() and build the P2SH themselves -- atomic_swap.py funds HTLCs on all
-#: three chains through exactly that interface, and neither client mentions createhtlc.
-#: So this driver has a SECOND implementation of "fund an HTLC on a script chain" that
-#: works on one chain where the first works on three: rule 8's defect, found by running
-#: the thing rather than by reading it. Routing steps 6 and 7 through the clients is the
-#: work, and it is not done.
-CAN_FUND_THE_HTLC = frozenset(SCRIPT_CHAINS)
+#: WHY THAT REFUSAL MATTERS AND IS NOT TIDINESS. In xrp-first the XRP ESCROW IS FUNDED
+#: BEFORE THE SCRIPT LEG. A --run that discovered the missing client at the funding step
+#: would have one leg live on a real chain and no way to fund the other -- the one-sided
+#: state every timelock in this file exists to prevent, arriving through the driver
+#: instead of through a counterparty.
+CAN_FUND_THE_HTLC = frozenset(script_client_classes())
 
-XRP_FIRST = "xrp-first"
-CHAIN_FIRST = "chain-first"
+# XRP_FIRST and CHAIN_FIRST are IMPORTED from modules/htlc_assets.py as of 2026-10-03,
+# not spelled here. They were two string literals in this file and the settlement
+# decision that module now owns has to name the same two -- two copies of one vocabulary
+# that must stay equal, in two files, with nothing checking (rule 11). DIRECTIONS is
+# rebuilt here rather than imported because this file adds the legacy spelling to its own
+# argparse `choices` and the decision module has no business knowing a CLI alias.
+#
 #: The pre-2026-09-29 spelling of CHAIN_FIRST, when this driver could only put the
-#: non-XRP leg on Gridcoin. Accepted and mapped, never carried further.
+#: non-XRP leg on Gridcoin. Accepted and mapped, never carried further -- which is why it
+#: stays HERE: it is an interface detail of this entry point, not part of the vocabulary
+#: a decision is made against.
 LEGACY_CHAIN_FIRST = "grc-first"
 DIRECTIONS = (XRP_FIRST, CHAIN_FIRST)
 
@@ -1218,10 +1213,17 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
 
 
 #: The chain clients that own the P2SH, keyed the same way everything else here is.
-#: Imported rather than re-implemented -- these are the ones atomic_swap.py swaps BTC,
-#: LTC and GRC against each other with, and a second construction of the same three would
-#: be the duplication this whole change removed.
-SCRIPT_CLIENTS = {"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}
+#:
+#: NOW ACTUALLY IMPORTED, which this comment claimed and the line did not do. It read
+#: `{"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}` while saying the map was
+#: "imported rather than re-implemented" -- and atomic_swap.py:148 held the same dict in
+#: a different key order, with tests/test_htlc_contract_api.py:55 holding a third. Three
+#: spellings of one fact, one of them under a comment asserting there was one.
+#: modules/htlc_assets.script_client_classes() is that one place now.
+#:
+#: A fresh dict rather than the module's own object, so a test monkeypatching this
+#: driver's map does not reach atomic_swap.py's.
+SCRIPT_CLIENTS = dict(script_client_classes())
 
 
 def build_script_client(chain: str, rpc: dict):

@@ -42,6 +42,8 @@ here is the other half of rule 8: a reader who finds this module is told the
 other spellings exist, so nobody concludes from this file that the tree has one.
 """
 
+import textwrap
+
 # THE LABEL COLUMN, spelled once for every tool that prints one.
 #
 # Labels are 15 characters or fewer so there is always a gap before the value.
@@ -120,3 +122,60 @@ def clipped(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}... (+{len(text) - limit} more chars, cut by this tool to keep the line readable)"
+
+
+# HOW WIDE A WRAPPED VALUE IS, and this number is a CHOICE rather than a measurement
+# (rule 17: say which you have).
+#
+# What was measured, 2026-10-03: the longest SOURCE line in the three tools that print
+# these blocks is 128 characters (open_swap.py 121, show_swap.py 128, show_fees.py 110),
+# and several of their VALUES are assembled from three or four concatenated string
+# fragments, so what renders already runs well past 150 columns on one line. There is no
+# established terminal width in this repository -- grepped for one and found none.
+#
+# 100 is chosen because it is under what the files themselves are written to, so a
+# wrapped block pasted back into a diff or an issue does not re-wrap a second time, and
+# because the label column is 16 of it. If an operator wants it narrower, `width` is an
+# argument; the default is not a claim about anybody's terminal.
+WRAP_WIDTH = 100
+
+
+def wrapped(label: str, value: str, width: int = WRAP_WIDTH) -> list[str]:
+    """A labeled line whose value is too long for one, as a LIST of lines.
+
+    The first line is exactly what labeled() would produce; every line after it is
+    indented by CONTINUATION, so the value reads as one paragraph in the value column
+    rather than wrapping under the label.
+
+    WHY THIS IS HERE AND NOT IN THE THREE TOOLS. open_swap.py, show_swap.py and
+    swap_readiness.py all gained a settlement verdict on 2026-10-03, and that verdict is
+    a sentence rather than a number -- the first value in these blocks long enough that
+    one line is not a sensible rendering. Three tools wrapping it with their own
+    textwrap call and their own width is rule 8's shape at exactly the size this module's
+    own header warns about ("two spellings of one layout, agreeing on the day they are
+    written"), and the first thing to drift would be the indent, which is the whole
+    reason a value column exists.
+
+    `replace_whitespace=False` is NOT passed: the values here are single-paragraph
+    sentences built from f-strings, and collapsing runs of spaces is what makes a
+    wrapped line start where the column does. `break_long_words=False` IS, because the
+    long tokens in these sentences are txids, addresses and filenames, and a txid split
+    across two lines cannot be copied.
+
+    A value that already fits comes back as one line, identical to labeled(), so a
+    caller does not have to decide which function to use.
+    """
+    # WRAPPED TO `width` MINUS THE INDENT, so `width` means the width of the finished
+    # LINE rather than of the text inside it. The first draft passed `width` straight to
+    # textwrap and every continuation line came out 18 characters longer than the number
+    # the caller asked for -- the label column plus its two leading spaces, added after
+    # the wrapping had already happened.
+    body = textwrap.wrap(
+        value,
+        width=max(width - len(CONTINUATION), 1),
+        initial_indent="",
+        subsequent_indent="",
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or ["(none)"]
+    return [labeled(label, body[0])] + [CONTINUATION + line for line in body[1:]]

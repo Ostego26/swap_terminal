@@ -758,6 +758,17 @@ async function loadTeller() {
       : '<span class="bad">NO pair can be quoted from this process.</span> Every one is listed below with the reason.') +
     ' <span class="what">database <code>' + esc(d.database) + "</code></span></p>" +
     '<p class="what">' + esc(settings) + "  &#8592; the settings these numbers come out of</p>" +
+    // HOW ANY OF THEM SETTLES, SAID ONCE RATHER THAN PER PAIR. Added 2026-10-03. The
+    // rows carry a per-pair `settlement` from modules/htlc_assets.py and this pane
+    // shows the part that does not vary: there are two atomic drivers in this tree and
+    // this terminal calls neither, so every quotable pair here is custodial. The
+    // per-pair half -- which driver covers it and whether it has ever been RUN -- is on
+    // /admin's matrix, where there is room for it; repeating it twenty times in this
+    // pane is the mistake that panel's own pairs table already made once.
+    '<p class="what"><strong>Every pair above settles CUSTODIALLY.</strong> The deposit goes to an address ' +
+    'this desk owns and the payout leaves the desk&#8217;s own inventory &#8212; no hashlock, nothing atomic. ' +
+    'atomic_swap.py and atomic_swap_xrp.py do exist and nothing in services/, workers/ or routes/ calls ' +
+    'either; /admin names which driver covers each pair.</p>' +
     (blocked.length
       ? '<details><summary class="what">' + blocked.length + " pair(s) cannot be quoted here &#8212; why</summary>" +
         blocked.map(r => '<div class="what"><strong>' + esc(r.label) + "</strong> " +

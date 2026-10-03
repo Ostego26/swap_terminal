@@ -61,6 +61,7 @@ from chains.xrp_signing import reserve_drops
 from config import Config
 from db import SCHEMA
 from microfortnights import format_duration
+from modules.htlc_assets import MODE_BROKERED_ONLY, settlement_verdict
 from network_target import CHAIN_PORTS, classify, solana_cluster
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
 from report_block import clipped
@@ -208,6 +209,46 @@ def check_pair_is_allowed(pair: tuple[str, str] | None = None) -> None:
         f"{', '.join(covered) or '(none)'}  <- {len(covered)} of {len(pairs)}. {scoping}. Legs "
         f"checked: {', '.join(legs)}; {gap}",
     )
+
+
+def check_settlement(pair: tuple[str, str] | None = None) -> None:
+    """HOW each pair in scope would settle, and that NONE of them settles that way here.
+
+    ADDED 2026-10-03, AND THE DEFECT WAS THAT NOTHING ANSWERED THIS. This tree holds two
+    atomic drivers -- atomic_swap.py for a P2SH HTLC on both legs, atomic_swap_xrp.py for
+    an XRP escrow against one -- and the brokered terminal every other check in this file
+    is about is NEITHER of them. Grepped swap_terminal/services, workers and routes for
+    `atomic` and `htlc`: three mentions, all comments, zero imports. So every pair this
+    preflight reports READY is a pair that will settle CUSTODIALLY, and a reader could
+    not tell that from any line this file printed.
+
+    NOT A PASS/FAIL CONDITION, which is why every line here is PASS and says why. A
+    brokered pair is not a broken pair -- custodial settlement is what this terminal IS
+    -- so a FAIL would be the cried-wolf noise rule 14 refuses, and a SKIP would read as
+    "not checked" when it was. What it reports is a FACT the other checks assume, and the
+    verdict column stays honest by having the detail carry the whole claim.
+
+    ONE LINE PER DIRECTED PAIR, with the SHORT form of the verdict
+    (modules/htlc_assets.settlement_verdict()["headline"]), because this file prints a
+    column rather than a paragraph. The long form is what open_swap.py and show_swap.py
+    print, from the same function, so the two cannot disagree -- and that matters here
+    more than elsewhere: services/admin_view.pair_rows() once rendered its long reason
+    twenty-two times on one page, 1767 of 3156 visible words, which is how a single
+    correct sentence becomes unreadable.
+    """
+    pairs = sorted(Config.ALLOWED_PAIRS) if pair is None else [pair]
+    if not pairs:
+        record(PASS, "settlement", "(none) -- Config.ALLOWED_PAIRS is empty, so there is no pair to settle "
+                                   "by any mechanism")
+        return
+    atomic = [p for p in pairs if settlement_verdict(*p)["mode"] != MODE_BROKERED_ONLY]
+    record(PASS, "settlement", f"{len(pairs)} pair(s) in scope, {len(atomic)} of which an atomic driver "
+                               f"COVERS and 0 of which this terminal settles atomically  <- every swap this "
+                               f"file reports READY is CUSTODIAL: the deposit goes to a desk-owned address "
+                               f"and the payout leaves the desk's own inventory, with no hashlock")
+    for from_asset, to_asset in pairs:
+        verdict = settlement_verdict(from_asset, to_asset)
+        record(PASS, f"{from_asset}->{to_asset} settles", verdict["headline"])
 
 
 def _why_each_destination_refuses(adapters, wanted) -> str:
@@ -1206,6 +1247,12 @@ def main(argv: list[str] | None = None) -> int:
     legs = legs_to_check(pair)
     for name, check in (
         ("pair allowed", lambda: check_pair_is_allowed(pair)),
+        # DIRECTLY AFTER "pair allowed", because it answers the question that line
+        # provokes: these are the pairs, and this is what settling one of them actually
+        # means here. Not in CHECKED_LEGS -- it is per PAIR rather than per leg, and it
+        # needs no daemon, no network and no wallet, so there is nothing for a --pair
+        # scope to skip beyond the scoping it already does itself.
+        ("settlement", lambda: check_settlement(pair)),
         ("schema", check_schema),
         ("payout unlock", lambda: check_payout_unlock(adapters, pair)),
         # The scope reaches check_deposit_account() so it can tell an XRP DEPOSIT from

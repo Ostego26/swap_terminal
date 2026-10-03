@@ -159,7 +159,8 @@ from config import Config
 from db import SCHEMA, apply_migrations, connect_db, db_session
 from microfortnights import format_duration
 from modules.address_authority import check_address
-from report_block import CONTINUATION, labeled
+from modules.htlc_assets import settlement_line
+from report_block import CONTINUATION, labeled, wrapped
 from requests.exceptions import RequestException
 from services.pair_view import allowed_pair_rows
 from services.payout_capacity import as_amount, largest_fundable_payout
@@ -260,6 +261,21 @@ def parse_pair(text: str) -> tuple[str, str]:
                 raise SwapRefused(
                     f"--pair {text!r} does not name two assets. Write it as FROM{separator}TO, for example "
                     f"XRP{separator}GRC. Nothing was written."
+                )
+            # A SAME-ASSET PAIR IS REFUSED HERE, from 2026-10-03, rather than three
+            # checks later. `--pair GRC:GRC` used to reach validate_pair() and come back
+            # as "Unsupported trading pair", which is true and names the wrong cause --
+            # the operator goes looking at Config.ALLOWED_PAIRS for an entry that could
+            # not be there. It also now matters structurally: the settlement verdict
+            # printed in the header above raises on two equal assets, deliberately,
+            # because a mechanism is a property of two DIFFERENT chains, and a refusal
+            # belongs where the pair is parsed rather than as a traceback from a
+            # display line.
+            if parts[0] == parts[1]:
+                raise SwapRefused(
+                    f"--pair {text!r} names {parts[0]} on both sides, and a swap moves value between two "
+                    f"DIFFERENT chains. Nothing was written. If you meant to send {parts[0]} to yourself, "
+                    f"that is a wallet transfer rather than a swap and this terminal is not it."
                 )
             return parts[0], parts[1]
     raise SwapRefused(
@@ -790,6 +806,13 @@ def report_lines(swap: dict, quote: dict, db_path: str, config: dict, explicit_d
         labeled("swap id", f"{swap['id']}  <- names this swap to every command below, and to /swap/{swap['id']}"),
         labeled("quote id", f"{quote['id']}  <- the rate this swap was created against"),
         labeled("pair", f"{from_asset} -> {to_asset}"),
+        # ON THE RECEIPT TOO, NOT ONLY IN THE HEADER. This block is the thing an
+        # operator pastes back and reads a day later (rule 14), and it is the one that
+        # carries the deposit address -- so the sentence saying the deposit is custodial
+        # has to travel with the address rather than being left behind in the run that
+        # produced it. Immediately above `deposit account`, for the same reason the
+        # header line sits above the amount.
+        *wrapped("settlement", settlement_line(from_asset, to_asset)),
         labeled("deposit account", f"{swap['deposit_address']}  <- send the deposit HERE"),
         tag_line,
         labeled("expected input", f"{swap['expected_input_amount']} {from_asset}  <- send EXACTLY this. "
@@ -1107,6 +1130,20 @@ def run(args) -> int:
     print(labeled("mode", mode), flush=True)
     print(labeled("database", db_path), flush=True)
     print(labeled("pair", f"{from_asset} -> {to_asset}"), flush=True)
+    # HOW THIS SWAP SETTLES, PRINTED BEFORE THE DEPOSIT TARGET AND BEFORE --apply.
+    #
+    # This tree has two atomic drivers and this terminal is neither of them, and until
+    # 2026-10-03 nothing on any screen said so. The operator did not know which
+    # mechanism a given pair used and was right not to: a GRC -> XRP swap opened here is
+    # CUSTODIAL -- their coins go to an address this desk owns and come back out of the
+    # desk's inventory -- while atomic_swap_xrp.py covers that exact pair with a
+    # hashlock. Both facts are true at once and only one of them was visible.
+    #
+    # It goes directly under `pair`, because the pair is what it qualifies, and ABOVE
+    # the deposit target, because the one decision it informs is whether to send. A line
+    # printed after the address would arrive after the reader had what they came for.
+    for line in wrapped("settlement", settlement_line(from_asset, to_asset)):
+        print(line, flush=True)
     print(labeled("amount", f"{args.amount} {from_asset}  <- what you will deposit"), flush=True)
     print(labeled("payout address", f"{args.payout_address}  <- where {to_asset} is sent; FINAL once the "
                                     f"swap exists"), flush=True)
