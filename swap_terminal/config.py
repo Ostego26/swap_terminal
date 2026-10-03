@@ -111,9 +111,68 @@ class Config:
     # who copies Gridcoin's 6 here would otherwise stall every SOL swap
     # forever, silently, because no deposit can reach rank 6.
     SOL_MIN_CONFIRMATIONS = _env_int("SOL_MIN_CONFIRMATIONS", "3")
+    # THE FOUR RESERVES, AND AS OF 2026-10-03 TWO OF THEM ARE MEASURED.
+    #
+    # What this number is: what the desk EXPECTS one payout on this chain to cost
+    # it. It is NOT taken out of the customer's payout -- `sendtoaddress(address,
+    # amount)` delivers `amount` exactly and the fee comes from the wallet's own
+    # inputs, measured to the last digit on the operator's host 2026-10-01
+    # (services/quote_service.get_network_fee_reserve() carries that arithmetic).
+    # It is a BOOKKEEPING figure, and it is what makes a swap's margin knowable.
+    #
+    # Until today all three that existed were bare defaults with no provenance
+    # between them, and the operator asked the obvious question: what should they
+    # be? show_payout_fees.py was built to answer it from their own host rather
+    # than from anybody's recollection, and it did.
+    #
+    #   BTC  0.00002   UNMEASURED. Nothing has ever been paid out in BTC, and
+    #                  Bitcoin's fee is a market rather than a constant, so a fixed
+    #                  figure here is wrong most days by construction. This is the
+    #                  one that still needs work, and the work is a fee-rate read
+    #                  (estimatesmartfee) rather than a number typed in.
+    #   LTC  0.001     UNMEASURED for the same reason -- no LTC payout has ever
+    #                  been made. Left as it was rather than guessed at.
+    #   GRC  0.001     MEASURED on the operator's host 2026-10-03, 7 of 7 broadcast
+    #                  payouts, `gettransaction` on each: mean 0.00100000 with low
+    #                  and high IDENTICAL. Gridcoin charges a flat 0.001.
+    #                  WAS 0.01, which was ten times the fee -- and the 2026-10-01
+    #                  hand reading of a single wallet that first said so turned out
+    #                  to generalize to every GRC payout this desk has ever made.
+    #                  Changed at the operator's explicit instruction, 2026-10-03:
+    #                  "set src to measured 0.001 -- 7/7, zero variance, your host".
+    #   XRP  0.00001   MEASURED on the operator's host 2026-10-03, read from their
+    #                  own rippled: server_info.validated_ledger.base_fee_xrp, 10
+    #                  drops. Printed by show_payout_fees.py as "READ FROM THE
+    #                  SERVER, not the tree". It had NO value at all before this,
+    #                  which is why every quote paying out in XRP refused.
+    #
+    # THE XRP FIGURE IS A FLOOR, NOT A CEILING, and the distinction is the chain's
+    # rather than this desk's: the fee actually paid is autofilled by xrpl-py at
+    # submit time and RISES WITH LOAD. 10 drops is what an unloaded ledger charges
+    # and has charged for years. A fee escalation would cost more than this books,
+    # which is the opposite direction from GRC's old 0.01 and is the direction that
+    # understates a cost rather than overstating it.
     BTC_NETWORK_FEE_RESERVE = _env_float("BTC_NETWORK_FEE_RESERVE", "0.00002")
     LTC_NETWORK_FEE_RESERVE = _env_float("LTC_NETWORK_FEE_RESERVE", "0.001")
-    GRC_NETWORK_FEE_RESERVE = _env_float("GRC_NETWORK_FEE_RESERVE", "0.01")
+    GRC_NETWORK_FEE_RESERVE = _env_float("GRC_NETWORK_FEE_RESERVE", "0.001")
+    # ADDING THIS LINE IS A POSTURE CHANGE AND IT IS THE OPERATOR'S, MADE 2026-10-03.
+    #
+    # Until now ("GRC", "XRP") was in ALLOWED_PAIRS and every quote for it refused
+    # here, which is what the operator saw from their browser on 2026-10-02. With a
+    # reserve, that quote PRICES -- and on a host where XRP_PAYOUT_SECRET_SEED is
+    # exported the swap can then be created and paid. So this line turns GRC -> XRP
+    # from a pair that refused into a pair that trades.
+    #
+    # tests/test_allowed_pairs_are_serviceable.py predicted its own failure here and
+    # said what to do about it: "When XRP_NETWORK_FEE_RESERVE is set, this test fails
+    # and KNOWN_UNQUOTABLE should be emptied -- a tolerated break that outlives its
+    # fix is a lie in the test suite." Done in the same commit (rule 19).
+    #
+    # WHAT THIS DOES NOT DO: ("BTC", "XRP") and ("LTC", "XRP") are still NOT in
+    # ALLOWED_PAIRS. The reserve was one of two things they needed and it is no
+    # longer the blocker; enabling them is a separate decision and still the
+    # operator's.
+    XRP_NETWORK_FEE_RESERVE = _env_float("XRP_NETWORK_FEE_RESERVE", "0.00001")
     # ClassVar annotations: these are shared configuration read by every
     # request, not per-instance defaults. Config is never instantiated --
     # app.py copies its uppercase attributes into app.config -- so the

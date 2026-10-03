@@ -30,6 +30,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+from config import Config
 
 from show_payout_fees import (
     MEASURABLE,
@@ -154,14 +155,26 @@ def test_the_two_chains_this_tool_cannot_ask_print_a_figure_and_its_provenance()
 
 
 def test_an_absent_reserve_says_the_quote_REFUSES_rather_than_printing_None():
-    """XRP_NETWORK_FEE_RESERVE does not exist, and that is the live consequence.
+    """An asset with no reserve must say what that COSTS, not print None.
 
     `None` beside a setting name tells the operator nothing. What they need is that
     every quote paying out in that asset refuses -- which is what they hit on
     2026-10-02 and the reason they asked the question this tool answers.
+
+    THE EXAMPLE MOVED FROM XRP TO SOL ON 2026-10-03 and the property did not. This
+    test used XRP, whose reserve the operator then set from a figure read off their
+    own rippled; SOL's is still absent, so it is the live instance now. Written
+    against whichever asset ACTUALLY lacks one rather than a hardcoded ticker, so
+    the next reserve to be set moves the example again instead of failing the test
+    for the wrong reason -- and the skip says so out loud if none is left.
     """
+    absent = [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC")
+              if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE")]
+    if not absent:
+        pytest.skip("every asset has a reserve now, so there is no absent one to report -- and this "
+                    "test and the (absent) branch it covers should be reconsidered together")
     lines, say = _collect()
-    report_asset("XRP", {"fees": [], "booked": [0.0], "unread": []}, say)
+    report_asset(absent[0], {"fees": [], "booked": [0.0], "unread": []}, say)
     assert "REFUSES" in lines[0], lines[0]
     assert "None" not in lines[0]
 
@@ -265,9 +278,16 @@ def test_main_gives_EVERY_asset_its_reserve_line_including_the_ones_with_no_payo
             f"{asset} got no reserve line. An asset with no payouts still has a reserve, or lacks one, "
             f"and that is the fact an operator setting them needs"
         )
-    # XRP's is the one that is ABSENT, and the consequence has to be on the screen.
-    assert "XRP_NETWORK_FEE_RESERVE=(absent -- every quote paying out in this asset REFUSES)" in body, body
-    # And the figure the tree knows, for the chain this tool cannot ask.
+    # SOL'S IS THE ONE THAT IS ABSENT, and the consequence has to be on the screen.
+    # This was XRP's until 2026-10-03, when the operator set XRP_NETWORK_FEE_RESERVE
+    # from a figure read off their own rippled. Derived from Config rather than
+    # hardcoded, so setting SOL's moves the example instead of failing this test.
+    absent = [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC")
+              if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE")]
+    for asset in absent:
+        assert f"{asset}_NETWORK_FEE_RESERVE=(absent -- every quote paying out in this asset REFUSES)" in body, body
+    # And the figures, which must print whether or not a reserve is configured: the
+    # question "what should this be set to" is asked about the ones already set too.
     assert "0.00001 XRP" in body, "XRP printed no figure, so the question that prompted this tool is unanswered"
     assert "0.000005 SOL" in body, "SOL printed no figure"
 

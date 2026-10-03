@@ -185,14 +185,33 @@ CANNOT_PAY_OPENING = f"XRP cannot pay out: {SIGNING_SEED_ENV_VAR} is not set"
 #: services/quote_service.why_cannot_quote()'s refusal, same treatment.
 CANNOT_QUOTE_OPENING = "No quote: nobody has recorded what one XRP payout costs this desk"
 
-#: THE MEASUREMENT OF 2026-10-03, as a table: posture -> {label -> expected word}.
-#: The reasons are asserted per posture below rather than squeezed in here, since
-#: three of them are multi-sentence operator prose.
+#: THE MEASUREMENT, as a table: posture -> {label -> expected word}.
+#:
+#: TWO ROWS CHANGED LATER THE SAME DAY, AND THE CHANGE IS A LIVE POSTURE CHANGE.
+#: As first measured on 2026-10-03, GRC -> XRP was UNAVAILABLE in all four postures
+#: because no XRP_NETWORK_FEE_RESERVE existed. The operator then set it to 0.00001,
+#: from a figure read off their own rippled
+#: (server_info.validated_ledger.base_fee_xrp, 10 drops), and the two seed-set rows
+#: flipped:
+#:
+#:     (True, False)   GRC -> XRP   UNAVAILABLE  ->  AVAILABLE
+#:     (True, True)    GRC -> XRP   UNAVAILABLE  ->  AVAILABLE
+#:
+#: So GRC -> XRP is now a pair that TRADES on a host with the seed exported, where
+#: for seven days it was a pair that refused every quote. That is the whole content
+#: of the change and it is why this table is not simply edited quietly: the
+#: assertion message tells the next reader a changed verdict is live posture.
+#:
+#: THE SEED-UNSET ROWS DID NOT MOVE, and that is the half worth keeping. Without a
+#: signing seed XRP still cannot pay out, so the pair is still refused -- by
+#: `cannot_pay` now rather than by `cannot_quote`. The page is therefore what stops
+#: a customer being quoted a number on an unarmed host, which is the hazard
+#: tests/test_allowed_pairs_are_serviceable.py spent three days declining to open.
 EXPECTED_WORDS = {
     (False, False): {"XRP -> GRC": "UNAVAILABLE", "GRC -> XRP": "UNAVAILABLE"},
     (False, True): {"XRP -> GRC": "AVAILABLE", "GRC -> XRP": "UNAVAILABLE"},
-    (True, False): {"XRP -> GRC": "UNAVAILABLE", "GRC -> XRP": "UNAVAILABLE"},
-    (True, True): {"XRP -> GRC": "AVAILABLE", "GRC -> XRP": "UNAVAILABLE"},
+    (True, False): {"XRP -> GRC": "UNAVAILABLE", "GRC -> XRP": "AVAILABLE"},
+    (True, True): {"XRP -> GRC": "AVAILABLE", "GRC -> XRP": "AVAILABLE"},
 }
 
 #: The two notes a customer can actually read for these rows, from
@@ -209,11 +228,17 @@ NOTE_UNAVAILABLE = "This terminal cannot complete this direction."
 def test_the_WORD_each_posture_renders_for_both_XRP_directions(seed, deposit_account, monkeypatch):
     """The badge word, measured 2026-10-03, for all four XRP postures.
 
-    THE ASYMMETRY IS THE FINDING. XRP -> GRC turns AVAILABLE on the DEPOSIT
-    account alone and is indifferent to the seed; GRC -> XRP is UNAVAILABLE in
-    every one of the four, because even fully armed it has no
-    XRP_NETWORK_FEE_RESERVE. "Export the seed and GRC -> XRP comes up" is the
-    claim this parametrization refutes.
+    THE ASYMMETRY IS STILL THE FINDING, and half of it reversed when the operator
+    set the reserve. XRP -> GRC turns AVAILABLE on the DEPOSIT account alone and is
+    indifferent to the seed -- unchanged, because XRP is the SOURCE there and
+    why_cannot_pay_out() is only asked about the destination. GRC -> XRP is the
+    mirror: indifferent to the ACCOUNT and turning AVAILABLE on the SEED alone.
+
+    "Export the seed and GRC -> XRP comes up" is a claim this parametrization
+    REFUTED for seven days and now confirms, and the difference is one
+    configuration line rather than any code. That is exactly why the table carries
+    its dates: the sentence was false when written and is true now, and a reader
+    who finds only one of those two states has to be told which they are looking at.
 
     MUTATION 2026-10-03: changing services/swap_service.why_cannot_take_deposits()
     to return "" for XRP flips XRP -> GRC to AVAILABLE in the two unset-account
@@ -305,42 +330,65 @@ def test_GRC_to_XRP_with_NO_seed_names_BOTH_custody_variables_and_not_can_spend(
     assert row["cannot_pay"] == row["reason"]
 
 
-def test_GRC_to_XRP_WITH_a_seed_is_STILL_unavailable_for_want_of_the_reserve(monkeypatch):
-    """Arming the seed does NOT bring this pair up, and this is where that is recorded.
+def test_GRC_to_XRP_IS_NOW_THE_SEED_ALONE_AND_THE_REASON_NAMES_WHICH(monkeypatch):
+    """The seed is the only switch on this pair now, and the refusal must say so.
 
-    MEASURED 2026-10-03: with XRP_PAYOUT_SECRET_SEED set, GRC -> XRP's reason
-    changes from the payout refusal to services/quote_service.why_cannot_quote()'s
-    -- XRP_NETWORK_FEE_RESERVE does not exist in config.py -- and the badge stays
-    UNAVAILABLE. Both halves are asserted, because a test that only checked the
-    word would pass while the page named the wrong variable to export.
+    THIS TEST WAS test_GRC_to_XRP_WITH_a_seed_is_STILL_unavailable_for_want_of_the_reserve
+    and it asserted that arming the seed did NOT bring the pair up. That was
+    measured and true on 2026-10-03, and its own docstring said what its failure
+    would mean: "if XRP_NETWORK_FEE_RESERVE is ever set, GRC -> XRP becomes
+    AVAILABLE, that is a live-posture change and the operator's (rule 16), and this
+    assertion is where it surfaces rather than on a customer's screen."
 
-    THIS TEST FAILING IS NEWS AND NOT A CHORE, the same way
-    tests/test_allowed_pairs_are_serviceable.py's known-break test is: if
-    XRP_NETWORK_FEE_RESERVE is ever set, GRC -> XRP becomes AVAILABLE, that is a
-    live-posture change and the operator's (rule 16), and this assertion is where
-    it surfaces rather than on a customer's screen.
+    IT SURFACED THERE. The operator set the reserve to 0.00001 later the same day,
+    from a figure read off their own rippled, and this test failed by name. So it is
+    rewritten to pin the stronger invariant rather than deleted (rule 2) -- the
+    posture it guarded has ended, and the one that replaced it has a hazard of its
+    own worth holding.
+
+    WHAT IS STRONGER. The old version pinned one state: this pair cannot come up.
+    The real property has two, and the second is the one that could regress
+    silently:
+
+      seed SET     -> AVAILABLE, and the quote must actually price. Otherwise the
+                      page offers a direction the next click refuses, which is the
+                      defect this whole file was opened for.
+      seed UNSET   -> UNAVAILABLE, and the reason must be the PAYOUT refusal naming
+                      the seed. A reserve exists now, so `cannot_quote` is empty and
+                      a reason that still mentioned the reserve would send the
+                      operator to set a variable that is already set.
+
+    THE SECOND IS WHAT KEEPS A CUSTOMER FROM BEING QUOTED A NUMBER NOBODY CAN PAY.
+    With the reserve in place the quote prices on an unarmed host too, so the badge
+    is the only thing standing between a teller and a promise the desk cannot keep.
     """
-    config, adapters = _build(seed=True, deposit_account=True, monkeypatch=monkeypatch)
-    assert "XRP_NETWORK_FEE_RESERVE" not in config, (
-        "XRP_NETWORK_FEE_RESERVE now exists, so GRC -> XRP is quotable and this test measures a "
-        "posture that has ended. Read tests/test_allowed_pairs_are_serviceable.py before "
-        "editing: a reserve moves the refusal from before the promise to after it"
+    armed_config, armed_adapters = _build(seed=True, deposit_account=True, monkeypatch=monkeypatch)
+    assert "XRP_NETWORK_FEE_RESERVE" in armed_config, (
+        "the reserve is gone again. If that was deliberate, git history holds the version of this "
+        "test that asserted its absence -- but a pair enabled with no reserve refuses every quote"
     )
-    row = _rows(config, adapters)["GRC -> XRP"]
-    assert row["customer"]["word"] == "UNAVAILABLE", (
-        "GRC -> XRP went AVAILABLE with a seed exported and no fee reserve, so the page is now "
-        "offering a direction the next click cannot price"
+    armed = _rows(armed_config, armed_adapters)["GRC -> XRP"]
+    assert armed["customer"]["word"] == "AVAILABLE", (
+        f"GRC -> XRP is armed and priced and still reads {armed['customer']['word']!r}. Both custody "
+        f"halves and the reserve are present, so a refusal here means a fourth condition nobody has "
+        f"named: {armed['reason'][:160]}"
     )
-    assert row["reason"].startswith(CANNOT_QUOTE_OPENING), (
-        f"GRC -> XRP with a seed reads {row['reason']!r}; measured as starting "
-        f"{CANNOT_QUOTE_OPENING!r} on 2026-10-03"
+    assert not armed["cannot_quote"], (
+        f"the pair is still refused for want of a fee reserve on a config that has one: "
+        f"{armed['cannot_quote'][:160]}"
     )
-    assert "XRP_NETWORK_FEE_RESERVE" in row["reason"], (
-        "the quote refusal no longer names the setting that would fix it, which leaves an "
-        "operator with an UNAVAILABLE pair and nothing to export"
+
+    unarmed_config, unarmed_adapters = _build(seed=False, deposit_account=True, monkeypatch=monkeypatch)
+    unarmed = _rows(unarmed_config, unarmed_adapters)["GRC -> XRP"]
+    assert unarmed["customer"]["word"] == "UNAVAILABLE", (
+        "GRC -> XRP went AVAILABLE with NO signing seed. The quote prices now, so the badge is the "
+        "only thing stopping a customer being quoted a payout this desk cannot sign"
     )
-    assert row["cannot_quote"] == row["reason"]
-    assert not row["cannot_pay"], (
-        "an armed adapter still reports a payout refusal, so the two conditions have been "
-        "confused and the reason a reader acts on is the wrong one"
+    assert unarmed["reason"].startswith(CANNOT_PAY_OPENING), (
+        f"the unarmed refusal reads {unarmed['reason'][:160]!r}; it must be the payout refusal, which "
+        f"names {SIGNING_SEED_ENV_VAR} -- the one thing left to export"
+    )
+    assert not unarmed["cannot_quote"], (
+        "the unarmed pair is refused for the RESERVE, which is set. That reason would send the "
+        "operator to configure a number that is already there and leave the seed unexported"
     )

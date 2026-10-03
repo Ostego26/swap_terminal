@@ -23,16 +23,24 @@ were added on 2026-09-26 and the operator got this from their browser:
 
     No quote: 'XRP_NETWORK_FEE_RESERVE'
 
-str(KeyError(...)), rendered to a person. The message is a sentence now, but the
-PAIR IS STILL BROKEN: no XRP reserve exists, so every GRC->XRP quote refuses,
-four days later. Setting that number is a pricing decision and the operator's
-(rule 16) -- so this test does not invent one. It fails, by name, until the
-number exists or the pair is removed.
+str(KeyError(...)), rendered to a person. The message is a sentence now, and AS OF
+2026-10-03 THE PAIR IS NO LONGER BROKEN: the operator set
+XRP_NETWORK_FEE_RESERVE=0.00001, from a figure read off their own rippled
+(server_info.validated_ledger.base_fee_xrp, 10 drops) rather than from anybody's
+recollection. GRC -> XRP quotes.
 
-That is deliberate: a failing test is how "we enabled a pair nobody can trade"
-stops being invisible. It is NOT a ratchet and has no baseline file (rule 19) --
-there is one known instance, it is named in the assertion, and the test goes
-green the moment either half is resolved.
+THE EXEMPTION THIS FILE CARRIED FOR SEVEN DAYS IS GONE WITH IT. KNOWN_UNQUOTABLE
+held exactly one entry from 2026-09-26, and the test guarding it predicted its own
+failure and said what to do -- "a tolerated break that outlives its fix is a lie in
+the test suite". Both the set and that test are DELETED rather than emptied
+(rule 19: a ratchet that reaches zero gets deleted along with its baseline), which
+is why the parametrized reserve test below now covers EVERY enabled pair with no
+exclusion. That is the property this file always meant to hold.
+
+THE OTHER TWO RESERVES ARE STILL UNMEASURED and that is named rather than tidied
+away: no BTC or LTC payout has ever been made, so 0.00002 and 0.001 are the
+defaults they always were. Bitcoin's fee is a market rather than a constant, so
+that one wants a fee-rate read and not a typed figure.
 """
 
 from __future__ import annotations
@@ -47,33 +55,26 @@ from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR
 from config import Config
 from db import SCHEMA, db_session, dict_factory
 from services import pricing
+from services.pair_view import pair_serviceability
 from services.pricing import IDS
 from services.quote_service import create_quote
-from services.swap_service import create_swap
-from valid_addresses import GRC_PAYOUT, XRP_HOT_ACCOUNT
+from valid_addresses import GRC_PAYOUT
 from workers.common import get_config_dict
 
 PAIRS = sorted(Config.ALLOWED_PAIRS)
 
-#: The pair enabled without a reserve, and the only one this test tolerates as a
-#: KNOWN break -- listed so the failure names it as known rather than as new. Any
-#: OTHER pair missing a reserve is an unknown break and fails the strict test.
+#: KNOWN_UNQUOTABLE IS GONE, 2026-10-03, AND THAT IS THE POINT RATHER THAN A LOSS.
 #:
-#: IT IS BROKEN TWICE OVER, and until 2026-09-30 this only recorded the first:
-#: XRP has no fee reserve (so the quote refuses) AND XRP could not pay out at all
-#: (so the swap would refuse even with one). See DELIBERATELY_ONE_WAY below for
-#: the measurement, and test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE for the
-#: assertion. Fixing the reserve alone would not make this pair work -- it would
-#: make it fail LATER, after a customer had been quoted a number.
+#: It held exactly one entry -- ("GRC", "XRP") -- from 2026-09-26, when the pair was
+#: enabled with no XRP fee reserve, until the operator set
+#: XRP_NETWORK_FEE_RESERVE=0.00001 from a figure read off their own rippled. The set
+#: is empty, so by rule 19 the set and the test that guarded it are DELETED rather
+#: than kept as an empty container somebody might refill.
 #:
-#: THE SECOND HALF CHANGED ON 2026-10-02 and the pair is still broken, so this row
-#: stays. "XRP cannot pay out at all" is now "XRP pays out when the operator sets
-#: XRP_PAYOUT_SECRET_SEED and XRP_DEPOSIT_ACCOUNT", which is a switch rather than an
-#: absence -- the signing path, the arming token and the call-site wiring all exist.
-#: What has NOT changed is this row's own reason: XRP_NETWORK_FEE_RESERVE still does
-#: not exist, so a GRC->XRP quote still refuses before any of that is reached, and
-#: setting the reserve remains a pricing decision and the operator's (rule 16).
-KNOWN_UNQUOTABLE = {("GRC", "XRP")}
+#: The parametrized test below no longer excludes anything, which means it now holds
+#: the whole property it always meant to: EVERY enabled pair has a reserve for its
+#: payout asset. That is strictly stronger than the version with an exemption, and it
+#: is the shape the tolerated break was always a detour around.
 
 #: PAIRS THAT ARE DELIBERATELY ONE-WAY, each with the reason. This test caught my
 #: own asymmetry on the commit that added these two, which is what it is for.
@@ -128,8 +129,15 @@ KNOWN_UNQUOTABLE = {("GRC", "XRP")}
 #:                   than defaulting to zero, deliberately, and setting the number
 #:                   is a pricing decision they own.
 DELIBERATELY_ONE_WAY = {
-    ("XRP", "BTC"): "the reverse pays out XRP, which needs XRP_NETWORK_FEE_RESERVE (absent) plus the two XRP custody variables",
-    ("XRP", "LTC"): "the reverse pays out XRP, which needs XRP_NETWORK_FEE_RESERVE (absent) plus the two XRP custody variables",
+    # THE REASON CHANGED ON 2026-10-03 AND THE ROWS STAY. These said the reverse
+    # "needs XRP_NETWORK_FEE_RESERVE (absent) plus the two XRP custody variables".
+    # The reserve is set now, measured off the operator's own rippled, so only the
+    # custody half is left -- and the row has to say which, because a row naming a
+    # blocker that is already cleared sends the next reader to do work that is done
+    # (the mistake the paragraph above this table records me making about this exact
+    # variable).
+    ("XRP", "BTC"): "the reverse pays out XRP, which needs the two XRP custody variables (the fee reserve is set as of 2026-10-03)",
+    ("XRP", "LTC"): "the reverse pays out XRP, which needs the two XRP custody variables (the fee reserve is set as of 2026-10-03)",
     # SOL -> GRC, 2026-10-01. The reverse is blocked TWICE, and this test is where that gets
     # recorded so nobody fixes one half and expects a working pair -- which is the mistake the
     # paragraph above this table documents me making about XRP.
@@ -182,8 +190,8 @@ def test_every_pair_has_a_usd_price_for_both_assets():
             )
 
 
-@pytest.mark.parametrize("pair", [p for p in PAIRS if p not in KNOWN_UNQUOTABLE])
-def test_every_pair_NOT_known_broken_has_a_network_fee_reserve(pair):
+@pytest.mark.parametrize("pair", PAIRS)
+def test_EVERY_pair_has_a_network_fee_reserve(pair):
     """The payout asset needs a reserve or the quote refuses.
 
     MUTATION: add ("BTC", "XRP") to ALLOWED_PAIRS and this fails -- that pair pays
@@ -197,24 +205,6 @@ def test_every_pair_NOT_known_broken_has_a_network_fee_reserve(pair):
         f"refuses every quote for it. A reserve is a pricing decision and is never defaulted to "
         f"zero -- set it, or remove the pair"
     )
-
-
-def test_the_KNOWN_unquotable_pair_is_STILL_broken_and_says_so():
-    """This fails when the break is FIXED, which is the point.
-
-    ("GRC", "XRP") has been enabled and unquotable since 2026-09-26. When
-    XRP_NETWORK_FEE_RESERVE is set, this test fails and KNOWN_UNQUOTABLE should
-    be emptied -- a tolerated break that outlives its fix is a lie in the test
-    suite, and rule 19 says a ratchet that reaches zero gets deleted along with
-    its baseline.
-    """
-    for _from_asset, to_asset in sorted(KNOWN_UNQUOTABLE):
-        key = f"{to_asset}_NETWORK_FEE_RESERVE"
-        assert not hasattr(Config, key), (
-            f"{key} now exists, so ('GRC', '{to_asset}') is quotable and is no longer a known "
-            f"break. Remove it from KNOWN_UNQUOTABLE -- and if that empties the set, delete it "
-            f"and this test with it"
-        )
 
 
 def test_the_pair_set_is_SYMMETRIC_or_says_which_direction_is_missing():
@@ -323,17 +313,47 @@ def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE(monkeypatch):
     )
 
 
-def test_A_RESERVE_ALONE_WOULD_MOVE_THE_REFUSAL_LATER_NOT_REMOVE_IT(tmp_path):
-    """MEASURED, not reasoned: with a reserve the quote SUCCEEDS and the swap refuses.
+def test_THE_RESERVE_IS_SET_NOW_AND_THE_PAGE_IS_WHAT_CLOSES_THE_HAZARD_IT_OPENED(tmp_path):
+    """The reserve exists, so the quote PRICES -- and an unarmed host must not offer it.
 
-    That is worse than today rather than better. The current refusal happens before anything
-    is promised; with a reserve set, a teller reads a number out to a customer and then cannot
-    open the swap. This is the evidence behind not adding XRP_NETWORK_FEE_RESERVE, and it is
-    behavioral -- seeded rows through the real services, per swap_terminal/CLAUDE.md.
+    THIS TEST WAS test_A_RESERVE_ALONE_WOULD_MOVE_THE_REFUSAL_LATER_NOT_REMOVE_IT and
+    it asserted that XRP_NETWORK_FEE_RESERVE was ABSENT. The operator set it on
+    2026-10-03 from a figure read off their own rippled
+    (server_info.validated_ledger.base_fee_xrp, 10 drops), so that assertion is now
+    false and the test is rewritten to pin the stronger invariant rather than
+    relaxed (rule 2).
 
-    MUTATION: add XRP_NETWORK_FEE_RESERVE to config.py. This test still passes, because it
-    supplies its own -- what changes is that the operator's quote path starts promising XRP
-    payouts it cannot deliver, which is exactly what this records as the cost.
+    WHAT THE OLD TEST MEASURED, AND IT WAS RIGHT AT THE TIME:
+
+        without XRP_NETWORK_FEE_RESERVE   create_quote() refuses
+        with it set to 0.00001            create_quote() SUCCEEDS and create_swap()
+                                          refuses -- "XRP cannot pay out: it holds
+                                          no signing key"
+
+    and it concluded the reserve "moves the refusal from BEFORE the promise to AFTER
+    it: a teller quotes a customer a number and then cannot open the swap. That is
+    strictly worse than today." That reasoning is why the reserve was not added for
+    three days, and it was correct about the arithmetic.
+
+    WHAT CHANGED IS NOT THE ARITHMETIC, IT IS THE PAGE. On 2026-10-03
+    services/pair_view.pair_serviceability() gained a fourth condition, so a pair is
+    offered only when it can also be QUOTED -- and the three it already asked
+    include whether the destination can pay out. On an UNARMED host XRP cannot pay
+    out, so GRC -> XRP reads UNAVAILABLE and the customer form never offers it. The
+    quote-then-refuse path the old test feared is no longer reachable from the
+    surface a customer uses.
+
+    So this asserts the two halves that now matter together, because either alone is
+    the old hazard:
+
+      the quote PRICES          the reserve is real and does its job
+      the page REFUSES the pair unarmed, so nobody is quoted a number they cannot be
+                                paid
+
+    MUTATION: drop `cannot_pay` from pair_serviceability()'s conjunction. The quote
+    still prices, the page starts offering the pair, and the second assertion fails
+    -- which is exactly the teller-quotes-then-cannot-open sequence, reachable
+    again.
     """
     if ("GRC", "XRP") not in Config.ALLOWED_PAIRS:
         pytest.skip("GRC->XRP is no longer enabled, so there is nothing to measure here")
@@ -356,46 +376,55 @@ def test_A_RESERVE_ALONE_WOULD_MOVE_THE_REFUSAL_LATER_NOT_REMOVE_IT(tmp_path):
     config = dict(get_config_dict())
     config["DB_PATH"] = str(db_path)
 
-    # AS IT IS TODAY: the quote refuses, early, naming the setting.
-    assert "XRP_NETWORK_FEE_RESERVE" not in config, (
-        "XRP_NETWORK_FEE_RESERVE has been added to config.py. Read this test before keeping "
-        "it: a reserve moves the XRP refusal from the quote to the swap, and the swap refusal "
-        "arrives after a customer has been quoted a number"
+    assert "XRP_NETWORK_FEE_RESERVE" in config, (
+        "the reserve is gone again. If that was deliberate, this test should go back to the version in "
+        "git history that asserted its absence -- but a pair enabled with no reserve refuses every quote"
     )
-    # THE REFUSAL'S REASON CHANGED on 2026-10-02 while its shape did not. The reserve
-    # is no longer subtracted from a payout (quote_service.create_quote has the
-    # measurement), so a missing one is no longer "the chain will not deliver this"
-    # -- it is "nobody has recorded what a payout on this chain costs, so the margin
-    # is unknown". Matched on that, because matching the old sentence would be
-    # asserting a justification this repository has retracted.
-    with db_session(str(db_path)) as db, pytest.raises(ValueError, match="costs this desk"):
-        create_quote(db, config, "GRC", "XRP", 10)
 
-    # WITH A RESERVE SUPPLIED: the quote succeeds and the SWAP is what refuses.
-    config["XRP_NETWORK_FEE_RESERVE"] = 0.00001
-
-    class _Payable:
-        asset, can_spend = "GRC", True
-
-        def get_new_address(self, _label):
-            return GRC_PAYOUT
-
-        def validate_address(self, _address):
-            return True
-
-        def describe_address(self, _address):
-            return "a stub address"
-
-        def why_cannot_pay_out(self):
-            return ""
-
+    # HALF ONE: the quote prices. The reserve is doing its job.
     with db_session(str(db_path)) as db:
         quote = create_quote(db, config, "GRC", "XRP", 10)
-        assert quote["output_amount_estimate"] > 0, (
-            "the quote priced to zero, so this measures nothing about what a customer is told"
-        )
-        with pytest.raises(ValueError, match="cannot pay out"):
-            create_swap(db, config, {"GRC": _Payable(),
-                                     "XRP": XRPAdapter(url="http://unreachable.invalid",
-                                                       min_confirmations=1)},
-                        quote["id"], XRP_HOT_ACCOUNT)
+    assert quote["output_amount_estimate"] > 0, (
+        "the quote priced to zero, so this measures nothing about what a customer is told"
+    )
+
+    # HALF TWO: with no seed exported, the page does not offer the pair -- so the
+    # number above is never shown to anybody. THE SEED HERE IS NOT A SEED and none is
+    # set: the adapter reads only bool() of the variable
+    # (chains/xrp_payout_seed.signing_seed_is_present()), the url is unreachable, and
+    # construction makes no call.
+    verdict = pair_serviceability(
+        config,
+        {"GRC": _Payable(), "XRP": XRPAdapter(url="http://unreachable.invalid", min_confirmations=1)},
+        "GRC", "XRP",
+    )
+    assert verdict["serviceable"] is False, (
+        "an unarmed host offered GRC -> XRP. The quote prices now, so offering it is the "
+        "teller-quotes-a-number-then-cannot-open-the-swap sequence this test is named after"
+    )
+    assert verdict["cannot_pay"], (
+        f"the pair was refused for something other than the payout, so this test is not measuring the "
+        f"unarmed case: {verdict['reason'][:120]}"
+    )
+    assert not verdict["cannot_quote"], (
+        "the pair is still refused for want of a fee reserve, so the operator's 2026-10-03 setting did "
+        "not reach this config"
+    )
+
+
+class _Payable:
+    """A GRC chain that can pay out and validate, so only XRP's posture is measured."""
+
+    asset, can_spend = "GRC", True
+
+    def get_new_address(self, _label):
+        return GRC_PAYOUT
+
+    def validate_address(self, _address):
+        return True
+
+    def describe_address(self, _address):
+        return "a stub address"
+
+    def why_cannot_pay_out(self):
+        return ""
