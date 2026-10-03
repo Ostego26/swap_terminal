@@ -331,3 +331,74 @@ def deposit_events_from_transactions(entries, address: str, min_confirmations: i
         scan.events.append(event)
     _reject_duplicate_tags(scan.events)
     return scan
+
+
+# ---------------------------------------------------------------------------
+# THE OUTGOING DIRECTION, added 2026-10-03. Everything above reads payments that
+# arrived FOR this desk; this reads one payment this desk SENT, so that a
+# `payouts` row claiming "we sent X" can be checked against the ledger.
+#
+# IT IS HERE AND NOT IN THE NEW CALLER, and the reason is the partial-payment
+# section at the top of this file. `meta.delivered_amount` versus `Amount` is the
+# single most expensive thing this module knows, and a second module that reads a
+# Payment's figure for itself is rule 8's two copies of one rule on exactly the
+# field that has drained real exchanges. So the caller
+# (chains/payout_on_chain.py) asks this function, and the knowledge stays in one
+# place.
+# ---------------------------------------------------------------------------
+FIELD_AMOUNT = "Amount"
+
+
+def delivered_drops_to(entry: dict, address: str) -> tuple[int, int | None]:
+    """One `tx` response -> (delivered drops, intended drops) for a Payment to `address`.
+
+    THE DECISION: what the LEDGER says this transaction moved, for a destination
+    the caller already knows from its own records. Pure -- the response is passed
+    in, so it is callable with a seeded dict (rule 10).
+
+    BOTH NUMBERS, AND THE SECOND ONE IS NOT A FALLBACK. `delivered` comes from
+    `meta.delivered_amount` through the same _delivered_drops() the deposit path
+    uses, and it is the authority. `intended` is `Amount`, returned ONLY so a
+    caller can notice the two disagree -- which on a payment this desk sent would
+    mean it carried tfPartialPayment, and that is a finding rather than a
+    rounding. A caller that reads `intended` as the amount delivered has written
+    the exploit this module's header is about; it is returned second and named
+    `intended` for that reason. None when `Amount` is absent or is an issued
+    currency object, because then there is no integer to compare.
+
+    RAISES XRPPaymentError on everything that is not a validated, successful
+    Payment to `address`. Not one of those refusals has a useful number behind
+    it: a tec* result claims a fee and delivers nothing, an unvalidated ledger
+    can still change, and a payment to somebody else says nothing about this
+    payout. Returning a figure for any of them would put a number on the screen
+    under the label "what the chain sent".
+    """
+    tx, meta = _unwrap(entry)
+    tx_hash = tx.get(FIELD_HASH) or entry.get(FIELD_HASH) or "(no hash in the response)"
+    if tx.get(FIELD_TRANSACTION_TYPE) != PAYMENT_TYPE:
+        raise XRPPaymentError(
+            f"transaction {tx_hash} is a {tx.get(FIELD_TRANSACTION_TYPE)!r}, not a {PAYMENT_TYPE}. A "
+            f"payout is a Payment, so this hash does not describe one and no amount was read."
+        )
+    if tx.get(FIELD_DESTINATION) != address:
+        raise XRPPaymentError(
+            f"transaction {tx_hash} pays {tx.get(FIELD_DESTINATION)!r}, and the row under correction "
+            f"names {address!r}. NOT read: an amount from a payment to somebody else would be a "
+            f"number under the wrong label."
+        )
+    result = meta.get(FIELD_TRANSACTION_RESULT)
+    if result != SUCCESS_RESULT:
+        raise XRPPaymentError(
+            f"transaction {tx_hash} has {FIELD_TRANSACTION_RESULT}={result!r}, not {SUCCESS_RESULT}, so "
+            f"it delivered nothing -- a tec* code is included in a ledger and claims a fee while "
+            f"transferring no value."
+        )
+    validated = entry.get(FIELD_VALIDATED, tx.get(FIELD_VALIDATED))
+    if validated is not True:
+        raise XRPPaymentError(
+            f"transaction {tx_hash} reports validated={validated!r}. An unvalidated ledger can still "
+            f"change, so this is not yet evidence of what was delivered."
+        )
+    delivered = _delivered_drops(meta, tx_hash)
+    intended = tx.get(FIELD_AMOUNT)
+    return delivered, (int(intended) if isinstance(intended, str) and intended.isdigit() else None)

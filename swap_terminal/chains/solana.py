@@ -1363,7 +1363,15 @@ class SolanaAdapter:
         return [{**credit, "vout": tag} for credit in credits]
 
     def _native_credits(self, signature: str, address: str, transaction: dict, meta: dict, rank: int) -> list[dict]:
-        """Native SOL: postBalances[i] - preBalances[i] for the account's index."""
+        """Native SOL: postBalances[i] - preBalances[i] for the account's index.
+
+        THE SAME SUBTRACTION EXISTS ONCE MORE IN THIS FILE, at module level, as
+        native_delta_lamports() -- added 2026-10-03 for the OUTGOING direction, so a
+        `payouts` row can be checked against what the cluster says it delivered. The
+        three ways the two genuinely differ are written out at that function; a reader
+        who finds one must be told the other exists (rule 8), and the one thing they
+        must never differ about is this subtraction and _account_key().
+        """
         keys = [self._account_key(key) for key in (transaction.get("transaction", {}).get("message", {}).get("accountKeys") or [])]
         pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
         if address not in keys:
@@ -2151,3 +2159,65 @@ class SolanaAdapter:
             f"min_commitment_rank={self.min_commitment_rank} "
             f"<- a RUNG on Solana's commitment ladder (3=finalized), NOT a count of blocks"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE OUTGOING DIRECTION, added 2026-10-03, for chains/payout_on_chain.py.
+#
+# SolanaAdapter._native_credits() above does the same subtraction and this is NOT
+# a second copy of it by oversight -- rule 8's second bullet: "if they genuinely
+# differ, the difference is the point and belongs in a comment at BOTH sites,
+# naming the other one." The differences, and each one is load-bearing:
+#
+#   direction      _native_credits() reads money arriving at the desk's own
+#                  deposit account, and a non-positive delta means "not a
+#                  deposit", so it returns []. This reads money LEAVING for a
+#                  customer's address, where a non-positive delta on the
+#                  destination of a payout this desk recorded as broadcast is a
+#                  contradiction, so it is returned as the number it is and the
+#                  caller refuses the row rather than seeing an empty list.
+#   attribution    the deposit path needs a memo to know whose money it is
+#                  (_attributable()). This one is already attributed: the
+#                  `payouts` row names the signature.
+#   shape          the deposit path returns deposit-event dicts with a rank; this
+#                  returns one integer, because the question is "how many
+#                  lamports", not "is this creditable".
+#
+# What they must NEVER differ about is the subtraction itself, which is why both
+# go through _account_key() for the two real accountKeys shapes.
+# ---------------------------------------------------------------------------
+
+
+def native_delta_lamports(transaction: dict, address: str) -> tuple[int | None, str]:
+    """How many lamports `address`'s balance moved in this transaction. (delta, why).
+
+    THE DECISION, pure and seedable (rule 10): the response is passed in, so no
+    socket is opened here and a test can hand it a recorded getTransaction reply.
+
+    `delta` is None when the question cannot be answered, and `why` always says
+    which case it is -- never a 0, because "this address was not in the
+    transaction" and "its balance did not move" are different facts and a zero
+    would render them identically (rule 14).
+    """
+    meta = transaction.get("meta") or {}
+    if meta.get("err") is not None:
+        return None, (f"the cluster reports err={meta['err']!r}, so this transaction FAILED and moved "
+                      f"nothing. A failed signature is not evidence of a payout")
+    # SolanaAdapter._account_key is reached deliberately: the two real accountKeys
+    # shapes are this module's own knowledge and this function lives IN this module,
+    # one screen below that staticmethod. A second copy of the isinstance check is
+    # rule 8's shape, and SLF is not in this repository's declared ruff selection, so
+    # no suppression is involved either way.
+    keys = [SolanaAdapter._account_key(key)
+            for key in (transaction.get("transaction", {}).get("message", {}).get("accountKeys") or [])]
+    pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
+    if address not in keys:
+        return None, (f"{address} is not among the {len(keys)} account key(s) of this transaction, so "
+                      f"it neither paid nor was paid by it")
+    index = keys.index(address)
+    if index >= len(pre) or index >= len(post):
+        return None, (f"{address} is at account index {index} but the balance arrays are "
+                      f"{len(pre)}/{len(post)} long. Refusing to guess from a response this shape")
+    delta = int(post[index]) - int(pre[index])
+    return delta, (f"postBalances[{index}] - preBalances[{index}] = {post[index]} - {pre[index]} = "
+                   f"{delta} lamports")

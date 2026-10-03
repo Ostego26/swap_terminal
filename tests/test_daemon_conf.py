@@ -207,6 +207,27 @@ DIRECT_DRIVERS = frozenset({
 #: worse than refusing until the variables are exported. Changing how the service
 #: resolves its daemons is live posture and the operator's (rule 16).
 SERVICE_SIDE = frozenset({
+    # correct_payout_amounts.py, added 2026-10-03. SERVICE SIDE, and the reason is
+    # show_payout_fees.py's one step further on: it reads the transactions THIS
+    # TERMINAL broadcast, by the txids in its own `payouts` rows, in order to write
+    # a corrected amount back into those rows.
+    #
+    # A conf fallback here would be worse than a wrong read, because this one
+    # WRITES. Resolve a different Gridcoin daemon and `gettransaction` does not know
+    # the txid, so every GRC row degrades to ARITHMETIC ONLY -- which the tool then
+    # prints and records honestly, and the operator reads as "my daemon could not be
+    # reached" about a daemon that is running and holds the transaction. The
+    # correction still lands, with its provenance quietly weakened, which is the
+    # wrong-number-under-the-right-label failure of this register with the label
+    # being the word VERIFIED.
+    #
+    # It is also the half that could be genuinely wrong rather than merely weaker: a
+    # daemon that is NOT the one that paid could know a DIFFERENT transaction with
+    # the same txid only by collision, but it can and does know transactions paying
+    # the same reused address -- and the read matches on the destination address. The
+    # register's own words apply: strictly worse than refusing until the variables
+    # are exported.
+    "correct_payout_amounts.py",
     "open_swap.py",
     "settle_payout.py",
     # show_payout_fees.py, added 2026-10-03. SERVICE SIDE, and the reason is the
