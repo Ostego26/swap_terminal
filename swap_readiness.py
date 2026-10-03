@@ -63,6 +63,7 @@ from db import SCHEMA
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, solana_cluster
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
+from report_block import clipped
 from services.payout_service import (
     WALLET_UNLOCK_ENV_VAR,
     payable_assets,
@@ -859,7 +860,7 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
         info = adapter.call("getwalletinfo")
     except Exception as error:  # noqa: BLE001 -- checked: a down daemon, a refused login and an unloaded wallet all mean "this leg cannot run", the type and message are printed, and the hint below names the remedy for the one that has one. Telling them further apart would not change what the operator does next.
         hint = which_wallets_are_on_disk(adapter, asset)
-        record(FAIL, f"{asset} wallet", f"{type(error).__name__}: {str(error)[:120]}"
+        record(FAIL, f"{asset} wallet", f"{type(error).__name__}: {clipped(str(error), 120)}"
                                         + (f"  <- {hint}" if hint else ""))
         return
     name = (info or {}).get("walletname", "")
@@ -877,7 +878,7 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
     try:
         balance = float(adapter.get_balance())
     except Exception as error:  # noqa: BLE001 -- checked: reported with its type and message, and the leg is FAILED rather than passed on an unknown balance.
-        record(FAIL, f"{asset} balance", f"{type(error).__name__}: {str(error)[:120]}")
+        record(FAIL, f"{asset} balance", f"{type(error).__name__}: {clipped(str(error), 120)}")
         return
     record(PASS if balance > 0 else FAIL, f"{asset} balance",
            f"{balance} {asset} on port {port}  <- must be > 0 to pay a {asset} leg")

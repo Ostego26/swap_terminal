@@ -1601,3 +1601,32 @@ def test_a_missing_adapter_names_the_variable_rather_than_the_absence(monkeypatc
 
     assert rows["BTC"][0] == FAIL
     assert "BTC_RPC" in rows["BTC"][2], "the line has to name a variable the operator can export"
+
+
+def test_the_wallet_line_says_when_it_cut_the_daemons_message(monkeypatch):
+    """The call site, because the function being right is not the thing that failed.
+
+    Four times this session a correct function's CALL SITE discarded or bypassed
+    its result -- payable_assets(), show_payout_fees.report_asset(),
+    check_gridcoin() and check_deposit_account() -- so clipped() being tested in
+    tests/test_report_block.py is necessary and is not sufficient. This asserts
+    the marker reaches the row the operator reads.
+
+    The message is bitcoind's real -18 text at its real length, which is what
+    reached their screen as "... (Note: A default wallet is no".
+    """
+    long_error = (
+        "No wallet is loaded. Load a wallet using loadwallet or create a new one with createwallet. "
+        "(Note: A default wallet is no longer automatically created)"
+    )
+    adapter = FakeBitcoinLike(error=RuntimeError(long_error))
+    monkeypatch.setitem(swap_readiness.Config.RPC, "BTC", {"port": 18443})
+    swap_readiness._results.clear()
+    swap_readiness.check_bitcoin_like("BTC", {"BTC": adapter}, pays_out=True)
+    line = _rows_by_name()["BTC wallet"][2]
+
+    assert "cut by this tool" in line, (
+        "a sentence that stops mid-word with no marker is ambiguous between a truncated daemon "
+        "message, a dropped terminal line, and a tool clipping it -- and only the last needs no action"
+    )
+    assert "regtest_htlc_harness" in line, "the clip must not swallow the hint that follows it"

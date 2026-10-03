@@ -67,3 +67,56 @@ def labeled(label: str, value: str) -> str:
     they do not.
     """
     return f"  {label:<{LABEL_WIDTH}}{value}"
+
+
+def clipped(text: str, limit: int) -> str:
+    """A long message cut to `limit`, SAYING SO. Short text is returned untouched.
+
+    MEASURED ON THE OPERATOR'S SCREEN 2026-10-03, which is why this is a function
+    and not an inline slice. swap_readiness.py printed a daemon's own error at
+    `str(error)[:120]`, and the line that reached them read:
+
+        FAIL  BTC wallet  RPCError: No wallet is loaded. Load a wallet using
+                          loadwallet or create a new one with createwallet. (Note:
+                          A default wallet is no  <- this daemon has 1 wallet(s) ...
+
+    "A default wallet is no" is a sentence that stops mid-word, with nothing
+    saying a tool did it. The reader has three readings and no way to choose: the
+    daemon sent a truncated message, the terminal dropped the rest, or something
+    cut it deliberately. Only the third is true, and it is the only one that
+    requires no action. That ambiguity is rule 14's defect exactly -- a blank gap
+    is ambiguous between zero rows and a query that broke -- one layer down, in
+    the middle of a string instead of at the end of a block.
+
+    So the marker names the cutter and the size of what was dropped, because a
+    reader who needs the tail needs to know there IS a tail and roughly how much:
+    a 9-character overrun is a lost clause, a 2000-character one is a stack trace
+    that belongs somewhere other than a status line.
+
+    WHY `limit` IS AN ARGUMENT AND NOT A CONSTANT HERE. The two callers in
+    swap_readiness.py both pass 120, and a shared default would make that look
+    like a decided width when it is not -- the sites that clip in this tree pass
+    80, 120 and 200, and nothing has established which is right for a given
+    column. One spelling of the MARKER is what rule 8 asks for; one spelling of
+    every width would be a guess dressed as a standard.
+
+    STILL CLIPPING WITHOUT A MARKER, counted 2026-10-03 by grepping the tree for
+    `[:80]`, `[:120]`, `[:160]` and `[:200]` outside tests -- seven sites, named
+    rather than baselined (rule 19):
+
+        swap_terminal_desktop.py:972            note[:80]
+        swap_terminal/services/payout_service.py:1041   str(exc)[:200]
+        swap_terminal/chains/solana_fee_quote.py:311    str(result)[:200]
+        swap_terminal/chains/solana.py:1519             str(result)[:200]
+        swap_terminal/chains/solana.py:1995             str(value)[:200]
+        rescue_payout.py:178                    swap['failed_reason'][:200]
+        fund_testnets.py:328                    response.text[:200]
+
+    Not swept here, for rule 12's reason: those are files this change is not
+    otherwise in, and a nine-file diff for a display marker on a live-money
+    system buys less than it costs. Each is one call to this function when
+    somebody is next in that file.
+    """
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... (+{len(text) - limit} more chars, cut by this tool to keep the line readable)"
