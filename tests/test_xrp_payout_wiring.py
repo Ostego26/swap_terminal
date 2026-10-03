@@ -191,6 +191,20 @@ def _no_ambient_seed(monkeypatch):
 class SeededLedger:
     """The rippled server AND the submit call, stood in for together.
 
+    IT HAS A SECOND IMPORTER SINCE 2026-10-03 AND THAT IS WHY IT IS NAMED HERE
+    (rule 8: a reader who finds one site must be told the other exists).
+    tests/test_payout_quantization.py imports this class to measure that the
+    `payouts` row carries the same drop count as the Payment's Amount field --
+    it does `from test_xrp_payout_wiring import SeededLedger` rather than
+    rebuilding it.
+
+    IT STAYS HERE RATHER THAN MOVING TO tests/xrp_seeded_transport.py, which is
+    where the other shared rippled stand-ins live, for one reason: it closes over
+    this file's `pytest.importorskip("xrpl.transaction")`, so moving it would make
+    that support module import xrpl-py at import time -- and xrpl-py is an OPTIONAL
+    dependency whose absence must skip tests rather than break collection. A
+    pointer back to that module is in the importer.
+
     ONE fixture rather than two, and not only because six fixtures put this file over
     ruff's PLR0913 -- a suppression there would have been the lazy half of rule 19.
     They are one object: a ledger answers reads and accepts transactions, and every

@@ -175,6 +175,34 @@ def to_drops(amount) -> int:
     Via Decimal(str(amount)) rather than multiplying the float: `0.1 * 10**6` is not reliably
     100000 in binary floating point, and the error falls whichever way the
     representation happens to land.
+
+    ROUND_HALF_UP, AND IT IS THE ONLY CONVERSION IN THIS TERMINAL THAT CAN SEND
+    MORE THAN WAS ASKED FOR. Named here because the difference is real rather
+    than an oversight, and rule 8 asks that such a difference be recorded at
+    BOTH sites naming the other one. The other site is
+    chains/coin_amounts.fit_to_chain_precision(), which TRUNCATES for BTC, LTC
+    and GRC, and whose docstring argues the direction at length: rounding up
+    sends a fraction of a unit more than was quoted out of the hot wallet every
+    time. chains/coin_amounts.amount_to_base_units() truncates for SOL for the
+    same reason. chains/payout_quantization.py is the one module that dispatches
+    to both and carries the comparison in its header.
+
+    WHAT THE DIFFERENCE COSTS, MEASURED 2026-10-03 over 60,000 random amounts
+    between 1e-9 and 1e7 XRP: 24,850 of them -- 41.4% -- come back as MORE XRP
+    than was passed in, by at most half a drop (0.0000005 XRP). Examples in each
+    direction, the third being the payout that found the recording defect this
+    comment is part of:
+
+        0.0040178           -> 4018 drops = 0.004018     UP   by 0.2 drops
+        1.1996736819422498  -> 1199674 drops = 1.199674  UP   by 0.26 drops
+        3.3155893288590605  -> 3315589 drops = 3.315589  DOWN by 0.33 drops
+
+    IT IS LEFT AS IT IS DELIBERATELY. This is what chains/xrp.py has called on
+    every payout and every preview since XRP was wired up, so ROUND_HALF_UP is
+    what the ledger has already been receiving; switching it to truncation would
+    change what gets sent by up to one drop, which is live posture and the
+    operator's call (rule 16). It is written down here so that the next reader
+    comparing the two does not have to rediscover which way each one goes.
     """
     try:
         quantity = Decimal(str(amount))

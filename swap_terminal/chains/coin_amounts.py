@@ -106,6 +106,23 @@ def fit_to_chain_precision(amount: float, asset: str) -> tuple[float, str]:
     desk never sends more than it quoted. Rounding to nearest would overpay half
     the time, every time, out of the hot wallet.
 
+    AND chains/xrp_units.to_drops() DOES THE OPPOSITE, WHICH IS NAMED HERE
+    BECAUSE IT IS A REAL DIFFERENCE RATHER THAN AN OVERSIGHT -- rule 8 asks that
+    a genuine difference be recorded at BOTH sites naming the other, the other
+    site is to_drops()'s own docstring, and chains/payout_quantization.py is the
+    one module that dispatches to both. to_drops() uses ROUND_HALF_UP, so an XRP
+    payout can be rounded UP to the next whole drop. Measured 2026-10-03 over
+    60,000 random amounts between 1e-9 and 1e7 XRP: 24,850 of them -- 41.4% --
+    quantize UPWARD, by at most half a drop (0.0000005 XRP). Four chains in this
+    terminal truncate and one rounds half up.
+
+    THAT ASYMMETRY IS NOT RESOLVED HERE, and the reason is rule 16 rather than
+    indifference: to_drops() is what chains/xrp.py has always called on every
+    payout, so ROUND_HALF_UP is what the ledger has been receiving all along.
+    Changing it would change what gets sent, which is live posture and the
+    operator's decision. What changed on 2026-10-03 is only that the `payouts`
+    row records the figure the chain actually sends, whichever way it rounded.
+
     AN UNKNOWN ASSET IS RETURNED UNTOUCHED, with a sentence saying so. This table
     covers the chains that send a decimal amount; XRP and SOL are absent because
     they send integers, and silently applying eight decimals to a chain nobody

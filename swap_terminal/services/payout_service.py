@@ -24,9 +24,17 @@ Can move funds: YES. `broadcast_payout(...)` on the line inside
        "whoa we have to be able to swap TO SOL too"). It is armed by
        SOL_PAYOUT_KEYPAIR_PATH, which this module never reads and never names
        as a value -- chains/solana_signing.py reads it, inside the one call
-       that signs -- and it is refused on devnet's genesis hash alone. No pair
-       in Config.ALLOWED_PAIRS pays out in SOL as of that date (measured), so
-       this branch is reachable only once the operator enables one.
+       that signs -- and it is refused on devnet's genesis hash alone.
+
+       THIS FIELD SAID "no pair in Config.ALLOWED_PAIRS pays out in SOL as of
+       that date (measured), so this branch is reachable only once the operator
+       enables one", AND IT IS NOW WRONG. Re-measured 2026-10-03 later the same
+       day: ALLOWED_PAIRS carries ("GRC","SOL"), ("BTC","SOL") and
+       ("LTC","SOL"), enabled by 79c4808 on the operator's instruction "whoa we
+       have to be able to swap TO SOL too". Five destination assets, not four.
+       Corrected rather than left, because a header that says a branch is
+       unreachable is the sentence a reader trusts before deciding how carefully
+       to read it (rule 16: a wrong comment is a bug).
 Mainnet-safe: NO -- running this against a funded mainnet wallet is operating
        the payout path, not inspecting it.
 
@@ -74,6 +82,12 @@ from chains.gridcoin_wallet_lock import (
     GridcoinLockError,
     unlocked_for_payout,
 )
+
+# QUANTIZATION BEFORE THE RECORD, NOT AFTER THE SEND. See
+# amount_decided_and_logged() for the ledger reading that measured the defect, and
+# chains/payout_quantization.py's header for why that module is not
+# chains/coin_amounts.py (a measured import cycle, reproduced in both directions).
+from chains.payout_quantization import quantize_for_chain
 from chains.registry import why_cannot_pay_out
 
 # THE ARMING TOKEN ONLY, AND DELIBERATELY NOT chains/solana_payout_keypair.
@@ -96,7 +110,7 @@ logger = logging.getLogger(__name__)
 
 
 def amount_decided_and_logged(swap) -> float:
-    """payout_amount() plus the one log line its reason is for.
+    """payout_amount(), QUANTIZED TO WHAT THE CHAIN WILL SEND, plus the log lines for both.
 
     EXTRACTED BECAUSE THE BRANCH PUT process_pending_payouts() PAST C901, and rule
     12 says a function past that ceiling is orchestration that has swallowed a
@@ -111,11 +125,81 @@ def amount_decided_and_logged(swap) -> float:
     payout saying "the deposit matched" is noise that trains an operator to skim
     past the one that says it did not, and a difference is the only case where
     anybody later asks why the payout was not the quoted number.
+
+    ==================================================================
+    THE QUANTIZATION, ADDED 2026-10-03: THE ROW RECORDED A NUMBER THE
+    CHAIN HAD NOT SENT
+    ==================================================================
+
+    Measured that day on the completed swap s_539d922e9ef0a5d8 (GRC -> XRP), by
+    reading the XRP testnet ledger for the transaction the `payouts` row names:
+
+        payouts.amount    3.3155893288590605 XRP
+        the ledger        Amount 3315589 drops = 3.315589 XRP, tesSUCCESS,
+                          validated true
+
+    0.00000032885906 XRP of overstatement -- less than one drop, so the ledger
+    cannot express the number the database claimed was paid. The same defect on
+    the other chains the same day: an LTC payout booked 1.1996736819422498 and
+    broadcast 1.19967368, and a GRC payout booked 2701.3495803173805 and
+    broadcast 2701.34958031.
+
+    THE CAUSE WAS WHERE THE QUANTIZATION HAPPENED, not whether it happened. Every
+    adapter already reduced the figure to its chain's precision -- 8 decimals in
+    chains/base.RPCAdapter.send_to_address(), drops in
+    chains/xrp.XRPAdapter.preview_payout(), lamports in
+    chains/solana.SolanaAdapter.build_transfer_plan() -- and every one of them
+    returns only a txid, so this service could not learn what had been sent even
+    in principle. The figure it reserved, INSERTed and released was the booked
+    one at every step.
+
+    SO IT IS QUANTIZED HERE, ONCE, BEFORE ANYTHING IS WRITTEN. process_pending_
+    payouts() uses one local for reserve_inventory(), the payouts INSERT,
+    broadcast_payout() and release_inventory_after_send(), so quantizing the
+    value this function returns makes all four the chain's own figure. The record
+    matches the chain BY CONSTRUCTION rather than by coincidence.
+
+    AND THE BROADCAST AMOUNT DOES NOT MOVE, which is the hard constraint on this
+    change. The adapter quantizes AGAIN after this function has, so the only way
+    the sent figure could change is if quantizing twice differed from quantizing
+    once. It does not, on any of the five chains, measured over 60,016 amounts
+    per chain in tests/test_payout_quantization.py rather than argued:
+    chains/payout_quantization.quantize_for_chain() returns a FIXED POINT of the
+    adapter's own conversion.
+
+    A POSITIVE PAYOUT THAT QUANTIZES TO NOTHING KEEPS THE REQUESTED FIGURE, and
+    that branch is the one place this function does not simply take the quantized
+    number. 1e-09 BTC is a tenth of a satoshi: it quantizes to 0.0, and passing
+    0.0 to the adapter reaches `sendtoaddress(address, 0.0)` -- a daemon error
+    about a positive amount, for a figure WE reduced to zero, which is the
+    hardest kind of message to trace back. chains/base.py already refuses that
+    case before asking the daemon ("fits to 0.0 ... which is nothing"), with the
+    chain's precision in the message, and that refusal is reached only by a
+    caller that has NOT pre-quantized. So the requested figure goes through and
+    the existing refusal fires exactly as it did before this change -- same
+    exception, same `payouts` row, same 'failed' status, nothing sent.
+    tests/test_coin_amounts.py pins the adapter end of that; a payout of zero is
+    deliberately NOT turned into a precision complaint there, and widening the
+    adapter's guard to catch it would have broken the decision that test records.
     """
     amount, reason = payout_amount(swap)
     if amount != float(swap["output_amount_estimate"]):
         logger.info("swap %s: payout amount %s differs from the quote -- %s", swap["id"], amount, reason)
-    return amount
+    destination_asset = swap["to_asset"]
+    quantized, quantization = quantize_for_chain(amount, destination_asset)
+    if quantization:
+        # Rule 14: two correct numbers that disagree in their last digits is exactly
+        # where "state what the number means, next to the number" earns its keep. An
+        # operator reconciling this row against a block explorer needs to be told
+        # which figure is on the chain, and that the other one is the quote.
+        logger.info(
+            "swap %s: payout %s -> %s, the figure %s can actually send and the figure that will be "
+            "RECORDED -- %s",
+            swap["id"], amount, quantized, destination_asset, quantization,
+        )
+    if quantized <= 0 < amount:
+        return amount
+    return quantized
 
 
 def payout_amount(swap) -> tuple[float, str]:
@@ -1116,13 +1200,15 @@ def payable_assets(adapters, allowed_pairs) -> set[str]:
                           database is pointed at a funded mainnet wallet.
 
     GRC_RPC_PASS was unset, so chains/registry had built exactly one adapter --
-    SOL -- and SOL is deliberately never a TO asset (config.ALLOWED_PAIRS carries
-    ("SOL","GRC") and not the reverse; the parenthetical here said "because
-    chains/solana.py cannot sign", which stopped being true on 2026-10-02 when the
-    payout path was built and is doubly wrong since 2026-10-03, when the call site
-    was armed -- the reason is now simply that the operator has not enabled an
-    output pair, and ALLOWED_PAIRS is where that decision lives). So
-    NOTHING could be paid out at all, and the banner said the opposite, in the
+    SOL -- and on 2026-10-01 SOL was never a TO asset, so NOTHING could be paid
+    out at all. (THAT PARENTHETICAL HAS BEEN WRONG TWICE AND IS CORRECTED RATHER
+    THAN EXTENDED A THIRD TIME. It first said "because chains/solana.py cannot
+    sign", which stopped being true on 2026-10-02 when the payout path was built.
+    It then said the operator had not enabled an output pair, which stopped being
+    true later on 2026-10-03: 79c4808 added ("GRC","SOL"), ("BTC","SOL") and
+    ("LTC","SOL") to ALLOWED_PAIRS. What remains true is the only part this
+    function is about -- with no GRC adapter built, a GRC -> SOL swap has no
+    source chain either.) The banner said the opposite, in the
     direction that costs rounds: the operator had just been told NOT READY by
     swap_readiness.py one screen earlier.
 

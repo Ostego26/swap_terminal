@@ -27,9 +27,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
-from chains.base import RPCAdapter, RPCError
+from chains.base import RPCError
 from chains.coin_amounts import CHAIN_DECIMALS, amount_to_base_units, fit_to_chain_precision
 from chains.solana_units import amount_to_base_units as reexported
+from recording_rpc_adapter import RecordingRPCAdapter
 from valid_addresses import BTC_REGTEST_DEPOSIT
 
 
@@ -135,18 +136,13 @@ def test_the_truncation_is_one_implementation_not_two():
 # written by somebody who needed a plausible string for one test.
 
 
-class RecordingAdapter(RPCAdapter):
-    """An RPCAdapter whose `call` records instead of opening a socket."""
-
-    asset = "BTC"
-
-    def __init__(self):
-        super().__init__(user="u", password="p", host="127.0.0.1", port=18443)  # noqa: S106 -- not a credential: this stub never opens a socket, and RPCAdapter.__init__ requires the pair.
-        self.calls = []
-
-    def call(self, method, *params):
-        self.calls.append((method, params))
-        return "deadbeef"
+# RecordingAdapter MOVED TO tests/recording_rpc_adapter.py ON 2026-10-03, when
+# tests/test_payout_quantization.py became its second caller and needed the same
+# class for three assets rather than for BTC alone. Rule 8: the shared version goes
+# where both callers can reach it, and two copies of one stand-in drift exactly as
+# two copies of one rule do. It is the REAL RPCAdapter with `call` overridden, which
+# is what makes the assertions below about send_to_address()'s own fitting rather
+# than about a stub's bookkeeping.
 
 
 def test_the_send_puts_a_FITTED_amount_on_the_wire():
@@ -156,7 +152,7 @@ def test_the_send_puts_a_FITTED_amount_on_the_wire():
     the assertion is on what reaches `call` -- not on the return value, which was
     always a plausible txid.
     """
-    adapter = RecordingAdapter()
+    adapter = RecordingRPCAdapter("BTC")
 
     adapter.send_to_address(BTC_REGTEST_DEPOSIT, 0.00041198765432109)
 
@@ -172,7 +168,7 @@ def test_a_payout_that_fits_to_NOTHING_is_refused_before_the_daemon_is_asked():
     that raised after calling would satisfy a message-only assertion while having
     already asked the daemon.
     """
-    adapter = RecordingAdapter()
+    adapter = RecordingRPCAdapter("BTC")
 
     with pytest.raises(RPCError, match="which is nothing"):
         adapter.send_to_address(BTC_REGTEST_DEPOSIT, 1e-09)
@@ -187,7 +183,7 @@ def test_a_genuinely_zero_amount_is_not_turned_into_a_refusal_about_precision():
     means something else went wrong upstream; claiming it was "smaller than the
     chain's smallest unit" would send the reader to the wrong place.
     """
-    adapter = RecordingAdapter()
+    adapter = RecordingRPCAdapter("BTC")
 
     adapter.send_to_address(BTC_REGTEST_DEPOSIT, 0.0)
 
