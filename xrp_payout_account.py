@@ -47,15 +47,16 @@ on its own. So there is one value to set here, not two.
 from __future__ import annotations
 
 import contextlib
+import io
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from chains import xrp_testnet
 from chains.xrp_address import is_valid_classic_address
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed
-from chains.xrp_testnet import saved_faucet_accounts
 from config import Config
 from report_block import CONTINUATION, labeled
 
@@ -197,7 +198,44 @@ def agreement_line(derived: str, configured: str) -> str:
                 f"check")
 
 
-def saved_key_verdicts() -> list[tuple[str, str, str]]:
+def read_saved_keys() -> list[tuple[Path, str, str]]:
+    """Every saved faucet keyfile, ONCE, with the helper's own chatter discarded.
+
+    TWO DEFECTS IN ONE, BOTH MEASURED ON THE OPERATOR'S SCREEN 2026-10-03.
+
+    chains/xrp_testnet.saved_faucet_accounts() prints a provenance line per file --
+    "xrp-testnet-...json: address under 'address', secret under 'seed' (value not
+    shown)" -- to STDOUT. Two callers here meant TWO sets of those lines, and
+    because they print as a side effect of the READ they landed ABOVE the "saved
+    keys" label that introduces them:
+
+            xrp-testnet-20260925T233739Z.json: address under 'address', ...
+            xrp-testnet-20260925T233156Z.json: address under 'address', ...
+          saved keys      2 faucet keyfile(s) in ~/.config/swap_terminal/keys/
+                          xrp-testnet-20260925T233739Z.json  rnjG8n16...  USABLE
+                          xrp-testnet-20260925T233156Z.json  rBfM7je6...  USABLE
+            xrp-testnet-20260925T233739Z.json: address under 'address', ...
+            xrp-testnet-20260925T233156Z.json: address under 'address', ...
+
+    Rule 14's "pasted output has to be self-describing a day later" -- this block
+    is not, and nothing in it says why the same two files are named three times.
+
+    SO: ONE READ, AND THE CHATTER IS DISCARDED RATHER THAN REDIRECTED. It is not
+    this tool's report: the verdict lines already name the file, the address and
+    what is wrong with it, which is strictly more than the key names say. The lines
+    stay valuable to the helper's OTHER callers -- xrp_send_tagged.py prints them
+    as its account listing -- so the function is not changed; this wrapper just
+    does not forward them.
+
+    It is also the reason seed_for_export() and saved_key_verdicts() take their
+    accounts as an argument: one read, one place (rule 8), rather than two reads
+    whose chatter had to be suppressed twice in two different ways.
+    """
+    with contextlib.redirect_stdout(io.StringIO()):
+        return xrp_testnet.saved_faucet_accounts()
+
+
+def saved_key_verdicts(accounts=None) -> list[tuple[str, str, str]]:
     """Every saved faucet keyfile, as (filename, address, verdict). NO SECRET IS RETURNED.
 
     WHY THIS IS HERE, 2026-10-03. xrp_payout_account.py found that
@@ -221,7 +259,7 @@ def saved_key_verdicts() -> list[tuple[str, str, str]]:
     Offline: base58check and a key derivation, no rippled.
     """
     verdicts = []
-    for path, address, secret in saved_faucet_accounts():
+    for path, address, secret in (read_saved_keys() if accounts is None else accounts):
         derived, refusal = derived_account(secret)
         if refusal:
             verdict = f"NOT USABLE -- the stored secret does not decode ({refusal.split('. ')[0]})"
@@ -234,7 +272,7 @@ def saved_key_verdicts() -> list[tuple[str, str, str]]:
     return verdicts
 
 
-def seed_for_export() -> tuple[str, str]:
+def seed_for_export(accounts=None) -> tuple[str, str]:
     """The newest USABLE saved secret, for command substitution only. (secret, why not).
 
     THE ONE PLACE IN THIS TOOL THAT RETURNS A SECRET, and main() will only write it
@@ -267,9 +305,7 @@ def seed_for_export() -> tuple[str, str]:
     # with a second cause. That line is useful to its other callers and is not
     # removed; it is sent to STDERR, where the operator still sees which file was
     # used and the shell does not capture it.
-    with contextlib.redirect_stdout(sys.stderr):
-        accounts = saved_faucet_accounts()
-    for _path, address, secret in accounts:
+    for _path, address, secret in (read_saved_keys() if accounts is None else accounts):
         derived, refusal = derived_account(secret)
         if not refusal and derived == address:
             return secret, ""
@@ -338,14 +374,15 @@ def main() -> int:
         # "don't know, help me resolve this" -- which is the correct response to a
         # message that says a value is bad and nothing about where a good one lives.
         print(flush=True)
-        verdicts = saved_key_verdicts()
+        accounts = read_saved_keys()
+        verdicts = saved_key_verdicts(accounts)
         print(labeled("saved keys", f"{len(verdicts)} faucet keyfile(s) in "
                                     f"~/.config/swap_terminal/keys/" if verdicts else
                                     "(none) in ~/.config/swap_terminal/keys/ -- no saved faucet account "
                                     "to fall back on"), flush=True)
         for name, address, verdict in verdicts:
             print(CONTINUATION + f"{name}  {address}  {verdict}", flush=True)
-        _secret, why_not = seed_for_export()
+        _secret, why_not = seed_for_export(accounts)
         print(flush=True)
         if why_not:
             print(f"Nothing was written and no variable was changed. {why_not[0].upper()}{why_not[1:]}.",

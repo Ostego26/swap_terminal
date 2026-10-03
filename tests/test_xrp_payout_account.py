@@ -387,3 +387,57 @@ def test_the_export_mode_writes_the_secret_ALONE_to_a_pipe(key_directory, monkey
 
     assert code == 0
     assert captured.out == SEED, "exactly the seed, with nothing around it"
+
+
+def test_the_saved_key_block_does_not_print_the_helpers_chatter(key_directory, capsys):
+    """The same two files were named THREE times, measured on the operator's screen.
+
+    chains/xrp_testnet.saved_faucet_accounts() prints a provenance line per file as
+    a side effect of READING, so two callers produced two sets of them -- and
+    because the print happens during the read, the first set landed ABOVE the
+    "saved keys" label that introduces the block:
+
+            xrp-testnet-...233739Z.json: address under 'address', secret under 'seed'
+            xrp-testnet-...233156Z.json: address under 'address', secret under 'seed'
+          saved keys      2 faucet keyfile(s) in ~/.config/swap_terminal/keys/
+                          xrp-testnet-...233739Z.json  rnjG8n16...  USABLE
+                          xrp-testnet-...233156Z.json  rBfM7je6...  USABLE
+            xrp-testnet-...233739Z.json: address under 'address', secret under 'seed'
+            xrp-testnet-...233156Z.json: address under 'address', secret under 'seed'
+
+    Rule 14: pasted output has to be self-describing a day later, and nothing in
+    that block says why the same files appear three times.
+
+    The helper is NOT changed -- xrp_send_tagged.py prints those lines as its
+    account listing -- so what is asserted is that THIS tool does not forward them.
+    """
+    derived, _ = derived_account(SEED)
+    _keyfile(key_directory, "xrp-testnet-1.json", derived, SEED)
+
+    accounts = xrp_payout_account.read_saved_keys()
+    captured = capsys.readouterr()
+
+    assert len(accounts) == 1
+    assert "secret under" not in captured.out, "the helper's chatter must not reach this tool's report"
+    assert "secret under" not in captured.err, "and must not be merely moved to stderr, where it still prints"
+
+
+def test_the_keyfiles_are_read_ONCE_and_handed_to_both_consumers(key_directory, monkeypatch):
+    """Two reads is how the duplicate chatter happened, so one read is the fix.
+
+    Counting the calls rather than the lines: suppressing the output twice in two
+    different places would satisfy the test above while still reading the directory
+    twice, and the next caller added would print a third set.
+    """
+    derived, _ = derived_account(SEED)
+    _keyfile(key_directory, "xrp-testnet-1.json", derived, SEED)
+    reads = []
+    real = xrp_testnet.saved_faucet_accounts
+    monkeypatch.setattr(xrp_testnet, "saved_faucet_accounts",
+                        lambda: (reads.append(1), real())[1])
+
+    accounts = xrp_payout_account.read_saved_keys()
+    xrp_payout_account.saved_key_verdicts(accounts)
+    xrp_payout_account.seed_for_export(accounts)
+
+    assert len(reads) == 1, f"the directory was read {len(reads)} times for one report"
