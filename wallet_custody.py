@@ -4,12 +4,18 @@
 Role: file (operator entry point at the repository root per CLAUDE.md rule 10;
       every decision it prints is a function in
       services/custody_separation.py, callable with seeded inputs)
-Reads: config.Config for the endpoints and the custody variables;
+Reads: config.Config for the endpoints and the custody variables; the process
+      ENVIRONMENT for the operator's own GRC endpoint (GRC_OPERATOR_RPC_*, read
+      through gridcoin_credentials.operator_endpoint() and from nowhere else --
+      never a .conf, never a .env);
       swap_terminal.db (the `swaps` table only, and only with --swap);
       and over the network, per Bitcoin-derived chain whose port classifies as a
       TEST chain: getwalletinfo, listwallets, and -- only with --swap --
-      validateaddress/getaddressinfo. XRP: no network call at all. SOL: no
-      network call at all.
+      validateaddress/getaddressinfo. Against the operator's own GRC daemon, when
+      it is named and its port classifies as a test chain: ONE read,
+      validateaddress/getaddressinfo for the desk's deposit address, and nothing
+      that carries a balance. XRP: no network call at all. SOL: no network call
+      at all.
 Writes: NOTHING. Not a row, not a file, not a wallet. The database path is
       checked with Path.exists() before connect(), because sqlite3.connect()
       CREATES a missing file and a read-only tool that leaves an empty database
@@ -82,6 +88,19 @@ they are holding. What this establishes is narrower and true:
   per swap      whether the payout wallet reports ismine for that swap's own
                 deposit address. True is CORRECT for a custodial desk and is not
                 the finding; the finding is that line read beside the wallet line.
+  GRC           and ONLY GRC: whether the OPERATOR's OWN daemon reports ismine for
+                the desk's deposit address. Measured 2026-10-03 on their Gridcoin
+                v5.5.1.0 testnet daemon, `help` lists none of createwallet,
+                loadwallet, listwallets or unloadwallet -- one wallet per datadir,
+                no -rpcwallet, no /wallet/<name>, no `walletname` field -- so the
+                BTC/LTC route CANNOT work here and no configuration can make it.
+                Asking the other daemon is the only separation evidence available,
+                and it is stronger than a config read: an `ismine: false` from the
+                daemon holding the operator's coins is an observation about a KEY.
+                `ismine: true` from both is proof of ONE wallet -- or of a
+                wallet.dat that was copied, which no other check in this tree
+                could detect. The desk address comes from the swap row, never from
+                getnewaddress, because that is a wallet WRITE.
   XRP           whether XRP_DEPOSIT_ACCOUNT is the account the payout seed
                 controls. ONE desk account serving both directions is the
                 custodial design here, not a defect -- and whether a payout LEFT
@@ -117,19 +136,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from chains.base import AddressOwnership
+from chains.gridcoin import GridcoinAdapter
 from chains.registry import build_adapters, why_unconfigured
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, derived_payout_account
 from config import Config
 from db import connect_db
+from gridcoin_credentials import (
+    OPERATOR_PORT_VARIABLE,
+    OPERATOR_REQUIRED_VARIABLES,
+    OPERATOR_RPC_TIMEOUT_SECONDS,
+    OperatorEndpoint,
+    operator_endpoint,
+)
 from microfortnights import format_duration
 from network_target import may_read_a_wallet
 from report_block import CONTINUATION, labeled, wrapped
 from services.custody_separation import (
     BY_DESIGN,
+    DESK_OWNERSHIP_FROM_STATE,
     DESK_OWNS,
     NOT_ESTABLISHED,
     SEPARATED,
     STATES,
+    cross_daemon_ownership_verdict,
     deposit_address_verdict,
     script_chain_verdict,
     solana_account_verdict,
@@ -143,6 +173,31 @@ from workers.common import db_path_source, get_config_dict, root_tool_command
 #: Named here rather than written into three loops, and deliberately in the same
 #: order chains/registry and swap_readiness use so two reports scan alike.
 SCRIPT_CHAINS = ("BTC", "LTC", "GRC")
+
+#: The one chain whose separation is established by asking a SECOND daemon, and
+#: the only chain where that is the only route available.
+#:
+#: MEASURED ON THE OPERATOR'S GRIDCOIN v5.5.1.0 TESTNET DAEMON, 2026-10-03:
+#:
+#:     gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
+#:       -> (none of the multiwallet RPCs exist on this build)
+#:
+#: So Gridcoin has ONE wallet per datadir -- no -rpcwallet, no /wallet/<name>
+#: endpoint, no `walletname` field -- and the `GRC wallet` line above answers
+#: NOT ESTABLISHED for a field that does not exist rather than for a field nobody
+#: configured. BTC and LTC do carry those RPCs (docs/hot_wallet_separation_runbook.md
+#: has the createwallet steps that worked for both), so they need no second daemon
+#: and deliberately do not get this line: a check that asked a second endpoint on a
+#: chain where the first endpoint can answer would be two mechanisms for one
+#: question (rule 8).
+CROSS_DAEMON_CHAIN = "GRC"
+
+#: The check name the cross-daemon line reads the DESK's half of its comparison
+#: from, and it is spelled once here because script_chain_lines() produces it as
+#: f"{asset} deposit addr". The two have to agree or the cross-daemon verdict
+#: silently loses the desk's answer and reports "not read" forever --
+#: tests/test_custody_separation.py pins them against each other for that reason.
+DESK_DEPOSIT_CHECK = f"{CROSS_DAEMON_CHAIN} deposit addr"
 
 #: The states that mean the question was answered AND the answer is the one a
 #: custodial desk wants. Everything else -- NOT SEPARATED, NOT THE DESK'S,
@@ -169,8 +224,14 @@ def build_parser() -> argparse.ArgumentParser:
             "the operator's own accounts? Read-only -- it derives no address, signs nothing, and "
             "reads no key file."
         ),
+        # DERIVED FROM GOOD_STATES RATHER THAN RESPELLED, and it had already drifted:
+        # this sentence said "SEPARATED or ONE DESK ACCOUNT" after that state was
+        # renamed to BY DESIGN (because the longer spelling was cut mid-word in the
+        # tally column), and it never named DESK OWNS IT at all. A hand-maintained
+        # copy of a vocabulary is rule 8's bug with a delay on it, and the delay on
+        # this one expired the same day it was written.
         epilog=(
-            "Exit 0 only when every line answered SEPARATED or ONE DESK ACCOUNT. NOT ESTABLISHED is "
+            f"Exit 0 only when every line answered one of: {', '.join(GOOD_STATES)}. NOT ESTABLISHED is "
             "never a pass: a daemon that did not answer exits non-zero with the reason printed, "
             "because a green verdict by default is the defect this tool exists to remove."
         ),
@@ -179,8 +240,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--swap", default="", metavar="SWAP_ID",
         help=(
             "Also answer the per-swap questions for this swap: is its deposit address inside the "
-            "payout wallet, and (XRP) did its payout leave the desk's account. Without it those two "
-            "lines say they were not asked, rather than being silently absent."
+            "payout wallet, (GRC) does the OPERATOR's own daemon hold the key for it, and (XRP) did "
+            "its payout leave the desk's account. Without it those lines say they were not asked, "
+            "rather than being silently absent. The GRC cross-daemon question NEEDS a swap: its "
+            "address is the swap's own deposit_address, because the alternative -- getnewaddress -- "
+            "is a wallet WRITE."
         ),
     )
     parser.add_argument(
@@ -227,6 +291,51 @@ def swap_row(args) -> tuple[dict | None, str]:
     return dict(row), f"swap {row['id']}  {row['from_asset']} -> {row['to_asset']}  status={row['status']}"
 
 
+def operator_daemon_note() -> str:
+    """host:port of the operator's own GRC daemon for the header, or what is unset.
+
+    NEVER A CREDENTIAL. OperatorEndpoint.label is host:port by construction and
+    this function returns nothing else; gridcoin_credentials.operator_endpoint()'s
+    refusal names only variable NAMES. A header line that echoed what was SET
+    would echo GRC_OPERATOR_RPC_PASS on the one run somebody pastes.
+
+    A SENTENCE AND NOT A BLANK WHEN UNSET, because rule 14's `(none)` is a result:
+    an absent second endpoint means the GRC separation question goes unanswered,
+    and a header that said nothing about it would leave the reader to discover
+    that forty lines down.
+    """
+    endpoint, _refusal = operator_endpoint()
+    if endpoint is None:
+        return (
+            f"(not named) -- {', '.join(OPERATOR_REQUIRED_VARIABLES)} unset, so the "
+            f"{CROSS_DAEMON_CHAIN} cross-daemon ownership question is NOT asked"
+        )
+    # THE PORT IS CLASSIFIED FOR THE HEADER TOO, and it was not at first: with
+    # GRC_OPERATOR_RPC_PORT=15715 this line read "127.0.0.1:15715 <- asked ONE
+    # read", promising a read that cross_daemon_lines() then refuses to make. A
+    # header that announces work the tool will not do is rule 14's defect in the one
+    # place rule 14 is about -- and it announces it about a MAINNET daemon, which is
+    # the one holding real coins. Same may_read_a_wallet() as the refusal itself, so
+    # the two cannot disagree.
+    connect, why_port = may_read_a_wallet(CROSS_DAEMON_CHAIN, endpoint.port)
+    if not connect:
+        # AND THE VARIABLE IT NAMES IS CORRECTED, because may_read_a_wallet()'s
+        # sentence is the chain-level one and says "Set GRC_RPC_PORT" -- the DESK's
+        # variable. Following it here would repoint the desk's own endpoint and
+        # leave this one untouched. The shared sentence is not edited (one mainnet
+        # refusal in this tree, rule 8); the caller that borrowed it says which
+        # variable is its own.
+        return (
+            f"{endpoint.label}  <- WILL NOT BE READ: {why_port}. The variable to change for THIS "
+            f"endpoint is {OPERATOR_PORT_VARIABLE}, not the {CROSS_DAEMON_CHAIN}_RPC_PORT that "
+            f"sentence names -- that one is the desk's"
+        )
+    return (
+        f"{endpoint.label}  <- {why_port}; asked ONE read with --swap: ismine for the desk's "
+        f"{CROSS_DAEMON_CHAIN} deposit address"
+    )
+
+
 def header_lines(args, row_note: str) -> list[str]:
     """What is about to be read, and with what, BEFORE a socket opens.
 
@@ -242,6 +351,13 @@ def header_lines(args, row_note: str) -> list[str]:
         "",
         labeled("chains asked", f"{', '.join(SCRIPT_CHAINS)} by wallet; XRP and SOL by account"),
         labeled("swap scope", row_note),
+        # THE SECOND ENDPOINT, ECHOED BEFORE IT IS USED (rule 14), and as host:port
+        # only: OperatorEndpoint.label carries no credential and the refusal names
+        # variable NAMES rather than values, so this line is safe to paste. On GRC
+        # this is the ONLY separation evidence available -- the daemon family has no
+        # multiwallet RPCs and so no `walletname` to compare -- which is why an
+        # unset endpoint is announced up here rather than discovered at the verdict.
+        labeled("operator daemon", operator_daemon_note()),
         labeled("database", "(not opened) -- no --swap, so nothing reads swap_terminal.db"
                 if not args.swap else str(Path(args.db) if args.db else Path(get_config_dict()["DB_PATH"]))),
         "",
@@ -326,6 +442,111 @@ def script_chain_lines(asset: str, adapters: dict, row: dict | None) -> list[tup
     owned = deposit_address_verdict(asset, str(row["id"]), deposit_address, ownership.verdict, ownership.why)
     lines.append((f"{asset} deposit addr", owned.state, owned.why))
     return lines
+
+
+def read_operator_ownership(endpoint: OperatorEndpoint, address: str) -> AddressOwnership:
+    """ONE read against the operator's own daemon: `ismine` for the desk's address.
+
+    validateaddress / getaddressinfo AND NOTHING ELSE. chains/base.
+    RPCAdapter.address_ownership() tries both and returns the three-valued answer
+    plus the reason, so this function adds a connection and no behavior. It calls
+    no getwalletinfo and no getbalance against the operator's daemon ON PURPOSE:
+    those carry a balance, and 157,797 GRC of the operator's real staking balance
+    reached a chat log on 2026-09-25 because something read one. `ismine` is a
+    boolean about one address and carries no amount.
+
+    NO WALLET PATH, AND THAT IS NOT AN OMISSION. `wallet=""` addresses the daemon
+    as `http://host:port` with no /wallet/<name> segment, which is the wallet a
+    bare `gridcoinresearchd` CLI call reaches -- and on this daemon family it is
+    the ONLY wallet there is (measured 2026-10-03: no multiwallet RPCs exist). The
+    operator's coins are in it, which is exactly why its answer is the evidence.
+
+    IT CANNOT RAISE, which is why there is no try/except here and no `noqa` to
+    justify. address_ownership() catches per method, collects the reasons and
+    returns AddressOwnership(None, why) -- the shape that let the 2026-10-01
+    transport failure be told apart from a capability gap instead of collapsing
+    into one None.
+    """
+    adapter = GridcoinAdapter(
+        user=endpoint.user,
+        password=endpoint.password,
+        host=endpoint.host,
+        port=endpoint.port,
+        wallet="",
+        timeout=OPERATOR_RPC_TIMEOUT_SECONDS,
+    )
+    return adapter.address_ownership(address)
+
+
+def cross_daemon_lines(row: dict | None, results: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    """GRC only: ask the OPERATOR's daemon whether the DESK's deposit address is theirs.
+
+    THE ORDER IS THE ORDER THAT COSTS LEAST, the same order script_chain_lines()
+    uses and for the same reason. No GRC deposit leg is answered from the database
+    row with no socket; the second endpoint's variables are resolved from the
+    ENVIRONMENT next, and an unset one refuses before anything is built; the PORT
+    is classified by network_target.may_read_a_wallet() after that and before any
+    connection, so a mainnet or unrecognized port is refused with no socket opened;
+    and only then is the operator's daemon asked one read.
+
+    THE DESK'S HALF IS NOT RE-READ. It is translated back out of the state this
+    run already recorded for DESK_DEPOSIT_CHECK, through
+    services/custody_separation.DESK_OWNERSHIP_FROM_STATE. A second socket to the
+    desk's endpoint asking the question it was already asked is two chances for one
+    report to disagree with itself (rule 8), and the answer is already on the
+    screen two lines up.
+
+    NOTHING HERE PRINTS A CREDENTIAL. The only rendering of the second endpoint is
+    OperatorEndpoint.label, which is host:port; the password is read by
+    requests' basic auth inside RPCAdapter.call() and reaches no string this
+    function builds. gridcoin_credentials.operator_endpoint()'s refusals name
+    variable NAMES and never values, for the same reason.
+    """
+    name = f"{CROSS_DAEMON_CHAIN} operator daemon"
+    swap_id = str(row["id"]) if row is not None else ""
+    # EMPTY ADDRESS IS THE ONE INPUT THAT ROUTES STRAIGHT TO THE VERDICT, because
+    # "no --swap", "a swap whose deposit leg is another chain" and "a row with no
+    # deposit address" are one answer -- this check cannot run -- and
+    # cross_daemon_ownership_verdict()'s first branch already says it in the words
+    # an operator acts on. A second sentence here would be a second spelling of it.
+    if row is None or str(row["from_asset"]) != CROSS_DAEMON_CHAIN:
+        verdict = cross_daemon_ownership_verdict(CROSS_DAEMON_CHAIN, swap_id, "", "", None)
+        return [(name, verdict.state, verdict.why)]
+    deposit_address = str(row["deposit_address"] or "")
+    if not deposit_address:
+        verdict = cross_daemon_ownership_verdict(CROSS_DAEMON_CHAIN, swap_id, "", "", None)
+        return [(name, verdict.state, verdict.why)]
+    endpoint, refusal = operator_endpoint()
+    if endpoint is None:
+        return [(name, NOT_ESTABLISHED, (
+            f"{CROSS_DAEMON_CHAIN}: {refusal}. Without it the GRC separation question is UNANSWERED "
+            f"rather than answered either way -- this daemon family has no `walletname` to compare, "
+            f"so the second daemon is the only route there is"
+        ))]
+    connect, why_port = may_read_a_wallet(CROSS_DAEMON_CHAIN, endpoint.port)
+    if not connect:
+        return [(name, NOT_ESTABLISHED, (
+            f"{CROSS_DAEMON_CHAIN}: the operator's endpoint is {endpoint.label} and {why_port}. NO "
+            f"SECOND SOCKET WAS OPENED, so nothing about GRC custody was established -- and that is "
+            f"the safe direction: a mainnet daemon is the one holding real coins, and this check "
+            f"would be reading it. Set {OPERATOR_PORT_VARIABLE} to the operator's TESTNET rpcport "
+            f"-- and note that the sentence above names {CROSS_DAEMON_CHAIN}_RPC_PORT, which is the "
+            f"DESK's variable rather than this one"
+        ))]
+    started = time.monotonic()
+    ownership = read_operator_ownership(endpoint, deposit_address)
+    elapsed = format_duration(time.monotonic() - started)
+    desk_state = next((state for check, state, _why in results if check == DESK_DEPOSIT_CHECK), "")
+    verdict = cross_daemon_ownership_verdict(
+        CROSS_DAEMON_CHAIN,
+        swap_id,
+        deposit_address,
+        endpoint.label,
+        ownership.verdict,
+        ownership.why,
+        DESK_OWNERSHIP_FROM_STATE.get(desk_state),
+    )
+    return [(name, verdict.state, f"{verdict.why}  [{why_port}; one read in {elapsed}]")]
 
 
 def xrp_lines(row: dict | None) -> list[tuple[str, str, str]]:
@@ -460,6 +681,13 @@ def run(args) -> int:
     for index, asset in enumerate(SCRIPT_CHAINS, start=1):
         print(f"  asking {index}/{len(SCRIPT_CHAINS)} {asset} ...", flush=True)
         results.extend(script_chain_lines(asset, adapters, row))
+    # AFTER the loop and not inside it: this line reads the DESK's recorded answer
+    # for the GRC deposit address out of `results`, so the chain lines have to exist
+    # before it runs. It is announced separately because it is a SECOND endpoint --
+    # an operator watching the counter above would otherwise see one more round trip
+    # than the "3/3" they were promised (rule 14).
+    print(f"  asking the operator's own {CROSS_DAEMON_CHAIN} daemon (second endpoint) ...", flush=True)
+    results.extend(cross_daemon_lines(row, results))
     results.extend(xrp_lines(row))
     results.extend(solana_lines())
 
@@ -471,7 +699,15 @@ def run(args) -> int:
     print("\n".join(lines), flush=True)
     print(labeled("this report", root_tool_command("wallet_custody.py", *(["--swap", args.swap] if args.swap else []))),
           flush=True)
-    print(CONTINUATION + "<- safe against a live cycle: two RPC reads per chain and no write anywhere", flush=True)
+    # THIS SENTENCE USED TO SAY "two RPC reads per chain", AND THAT STOPPED BEING
+    # TRUE when the cross-daemon GRC check landed on 2026-10-03: with --swap there
+    # is a third read on the deposit chain (validateaddress) and a FOURTH against a
+    # SECOND daemon, the operator's own. A closing line that undercounts the reads
+    # is the wrong-comment bug (rule 16) on the one line whose job is to tell an
+    # operator what this is about to do to their host.
+    print(CONTINUATION + "<- safe against a live cycle: at most four RPC READS (getwalletinfo and "
+                         "listwallets per chain, plus validateaddress on the deposit chain and one "
+                         "against the operator's own GRC daemon) and no write anywhere", flush=True)
     return code
 
 

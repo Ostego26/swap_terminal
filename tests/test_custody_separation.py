@@ -49,14 +49,24 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from typing import ClassVar
 
 import pytest
 from chains.base import AddressOwnership
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, derived_payout_account, signing_seed_decodes
+from gridcoin_credentials import (
+    OPERATOR_CREDENTIAL_VARIABLE,
+    OPERATOR_HOST_VARIABLE,
+    OPERATOR_PORT_VARIABLE,
+    OPERATOR_REQUIRED_VARIABLES,
+    OPERATOR_USER_VARIABLE,
+    operator_endpoint,
+)
 from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, may_read_a_wallet
 from report_block import LABEL_WIDTH
 from services.custody_separation import (
     BY_DESIGN,
+    DESK_OWNERSHIP_FROM_STATE,
     DESK_OWNS,
     MISCONFIGURED,
     NOT_ESTABLISHED,
@@ -64,6 +74,7 @@ from services.custody_separation import (
     NOT_THE_DESKS,
     SEPARATED,
     STATES,
+    cross_daemon_ownership_verdict,
     deposit_address_verdict,
     script_chain_verdict,
     solana_account_verdict,
@@ -924,3 +935,762 @@ def test_the_decode_check_still_answers_both_ways_after_the_derivation_was_merge
     decodes, why = signing_seed_decodes()
     assert decodes is False, "a ten-character value is not a seed; a 29-character base58 one is"
     assert SIGNING_SEED_ENV_VAR in why
+
+
+# --- GRC: the cross-daemon ownership check ------------------------------------
+#
+# WHY THIS SECTION EXISTS AND WHY IT IS GRC-ONLY, MEASURED 2026-10-03 ON THE
+# OPERATOR'S GRIDCOIN v5.5.1.0 TESTNET DAEMON (their measurement, pasted back; no
+# network path from this test environment to it, so it is cited and not re-run --
+# rule 17, say which you have):
+#
+#     gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
+#       -> (none of the multiwallet RPCs exist on this build)
+#
+# So Gridcoin has ONE wallet per datadir: no -rpcwallet, no /wallet/<name>
+# endpoint, no `walletname` field. After the operator separated BTC and LTC into a
+# `desk_hot` wallet, six of wallet_custody.py's seven checks answered and this was
+# the one that could not:
+#
+#     NOT ESTABLISHED  GRC wallet: getwalletinfo answered with no `walletname`
+#                      field, so which wallet this endpoint serves was not
+#                      established.
+#
+# and no configuration could have changed that. The separation is instead PROVEN
+# from the other direction: ask the daemon holding the OPERATOR's coins whether the
+# DESK's deposit address is `ismine`. Their daemon on that day: datadir
+# /home/mpjones26/.GridcoinResearch, rpcport 25715, in_sync true, balance
+# 3780.08554497. The desk address is swap s_539d922e9ef0a5d8's own deposit_address,
+# moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz, read from swap_terminal.db -- never from
+# getnewaddress, which is a wallet WRITE.
+#
+# EVERY TEST BELOW WAS MUTATION-CHECKED and names its mutation and what it caught.
+
+#: A second endpoint for the operator's own daemon, as the tests export it. 25715
+#: is a REAL test port -- network_target.CHAIN_PORTS["GRC"].test_ports is
+#: {25715, 25779, 9876} -- which is what lets the happy-path tests get past
+#: may_read_a_wallet() without a daemon existing anywhere.
+#:
+#: THE PASSWORD IS A CANARY RATHER THAN A PLACEHOLDER. It is a value no report,
+#: refusal or header line may ever contain, and three tests below assert its
+#: absence. "secret" or "x" would have been satisfiable by accident.
+#:
+#: CREDENTIAL AND NOT PASS IN THE NAME, for the same reason
+#: gridcoin_credentials.OPERATOR_CREDENTIAL_VARIABLE is spelled that way: ruff
+#: S105 reads a ...PASS... constant assigned a string literal as a hardcoded
+#: credential, which is exactly the shape it should flag. The forbidden move
+#: (rule 19) would have been a `noqa` asserting the checker is wrong; this value
+#: is a canary a test proves is NOT printed, so the name now says so.
+OPERATOR_CREDENTIAL_CANARY = "NOT-A-PASSWORD-Qx9-UNIQUE-DO-NOT-PRINT"
+
+
+def export_operator_endpoint(monkeypatch, port: str = "25715", host: str = "") -> None:
+    """Export the four GRC_OPERATOR_RPC_* variables into one test's environment.
+
+    monkeypatch, so the export is undone at teardown: these name an endpoint and
+    carry a credential, and a test that leaked them into the process would change
+    what every later test in the session resolves.
+    """
+    monkeypatch.setenv(OPERATOR_PORT_VARIABLE, port)
+    monkeypatch.setenv(OPERATOR_USER_VARIABLE, "operatorrpc")
+    monkeypatch.setenv(OPERATOR_CREDENTIAL_VARIABLE, OPERATOR_CREDENTIAL_CANARY)
+    if host:
+        monkeypatch.setenv(OPERATOR_HOST_VARIABLE, host)
+    else:
+        monkeypatch.delenv(OPERATOR_HOST_VARIABLE, raising=False)
+
+
+class RecordingGridcoinAdapter:
+    """Stands in for chains/gridcoin.GridcoinAdapter and RECORDS THAT IT WAS BUILT.
+
+    Construction is recorded as well as calls, because the property several tests
+    below protect is "no second socket was opened" -- and a version that built the
+    adapter, connected, and then reported NOT ESTABLISHED would satisfy a
+    verdict-only assertion while doing the exact thing the check refuses to do.
+
+    It also keeps the kwargs it was handed, so one test can assert `wallet=""` --
+    the operator's daemon has exactly one wallet and there is no /wallet/<name>
+    path to ask for on this daemon family.
+    """
+
+    # ClassVar, so reset() can rebind them for each test and every instance the
+    # production code constructs shares one record. Per-instance lists would hide
+    # the thing these assert: that NO instance was built at all.
+    built: ClassVar[list[dict]] = []
+    asked: ClassVar[list[str]] = []
+    answer: ClassVar[AddressOwnership] = AddressOwnership(False, "validateaddress answered ismine")
+
+    def __init__(self, **kwargs):
+        type(self).built.append(kwargs)
+
+    def address_ownership(self, address: str) -> AddressOwnership:
+        type(self).asked.append(address)
+        return type(self).answer
+
+    @classmethod
+    def reset(cls, answer: AddressOwnership) -> None:
+        cls.built = []
+        cls.asked = []
+        cls.answer = answer
+
+
+def test_an_unset_second_endpoint_REFUSES_and_names_only_variable_NAMES(monkeypatch):
+    """The refusal an operator sees first, and the secret it must not contain.
+
+    CREDENTIALS ARE THE HARD PART OF THIS CHECK. The password is read from the
+    ENVIRONMENT and from nowhere else -- never gridcoinresearch.conf, never a
+    .env -- and this repository has already published a live
+    GRIDCOIN_RPC_PASSWORD once, through a `.env.bak` that reached GitHub
+    (CLAUDE.md rule 2). So the refusal names the VARIABLES that are unset and
+    never what any of them is set to.
+
+    MUTATION (ran, caught): return (None, "") with no sentence. The
+    name-the-variables assertions fail, and the operator would be told the check
+    did not run without being told what to export. (A FIRST ATTEMPT AT THIS
+    MUTATION WAS A NO-OP and is recorded because a no-op scored as SURVIVED is
+    indistinguishable from a weak test until somebody reads the diff: it prefixed
+    the sentence rather than emptying it, so every assertion still had the whole
+    sentence to match against.)
+
+    MUTATION (ran, caught): resolve each operator variable with a fallback to the
+    desk's own GRC_RPC_* name. operator_endpoint() then returns an endpoint and
+    `endpoint is None` fails -- which is the whole point of there being no
+    fallback: asking the DESK daemon whether it owns the desk's own address always
+    answers yes, and reporting that as "one wallet serves both" is a
+    guaranteed-wrong answer in the register of a measurement. (THE FIRST RUN OF
+    THIS MUTATION SURVIVED, and the test was the reason: it set only two of the
+    desk's three variables, so the mutant refused for the ordinary
+    missing-variable reason and never exercised its fallback. All three are set
+    below, which is the state the operator's host is actually in.)
+    """
+    for name in OPERATOR_REQUIRED_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    # ALL THREE of the desk's own variables, because a fallback mutation resolves
+    # name-by-name and a partly set desk endpoint would refuse for the ordinary
+    # reason instead -- which is how the first version of this test scored a
+    # fallback mutation as CAUGHT when it had not been exercised at all. These are
+    # the names config.py:516-519 reads, and on the operator's host all three are
+    # set, which is exactly the state a fallback would succeed in.
+    monkeypatch.setenv("GRC_RPC_PORT", "25715")
+    monkeypatch.setenv("GRC_RPC_USER", "gridcoinrpc")
+    monkeypatch.setenv("GRC_RPC_PASS", OPERATOR_CREDENTIAL_CANARY)
+
+    endpoint, refusal = operator_endpoint()
+
+    assert endpoint is None, (
+        "an unset operator endpoint must REFUSE rather than fall back to the desk's own credentials"
+    )
+    for name in OPERATOR_REQUIRED_VARIABLES:
+        assert name in refusal, f"the refusal has to name {name}; it is what the operator exports"
+    assert OPERATOR_CREDENTIAL_CANARY not in refusal, f"a credential reached the refusal: {refusal}"
+    assert "environment" in refusal.lower(), "say where the password is read from, since it is not a conf file"
+    assert "gridcoinresearch.conf" in refusal, (
+        "name the file it does NOT read: an operator whose conf holds the password will otherwise "
+        "assume this found it there"
+    )
+
+
+def test_a_PARTLY_set_endpoint_refuses_and_names_only_the_missing_ones(monkeypatch):
+    """Two of three exported is not configured, and the refusal says WHICH one is not.
+
+    MUTATION (ran, caught): require only GRC_OPERATOR_RPC_PORT and default the
+    other two. `endpoint is None` fails, and the tool would authenticate with an
+    empty password and report the resulting 401 as NOT ESTABLISHED -- "the daemon
+    did not answer" for a question it never asked properly.
+    """
+    monkeypatch.setenv(OPERATOR_PORT_VARIABLE, "25715")
+    monkeypatch.setenv(OPERATOR_USER_VARIABLE, "operatorrpc")
+    monkeypatch.delenv(OPERATOR_CREDENTIAL_VARIABLE, raising=False)
+
+    endpoint, refusal = operator_endpoint()
+
+    assert endpoint is None
+    assert OPERATOR_CREDENTIAL_VARIABLE in refusal.split("Unset:")[1].split(".")[0], (
+        "the missing list has to hold the one that is actually missing"
+    )
+    assert OPERATOR_PORT_VARIABLE not in refusal.split("Unset:")[1].split(".")[0], (
+        "do not list a variable the operator already exported; they will go and re-export it"
+    )
+
+
+def test_an_EMPTY_export_counts_as_unset_rather_than_as_a_credential(monkeypatch):
+    """`export GRC_OPERATOR_RPC_PASS=` is what a failed command substitution leaves.
+
+    gridcoin_credentials._first_set() already carries the measurement: a rotation
+    script wrote an empty password into a live .env that way on 2026-09-25.
+    Treating it as configured authenticates with nothing and reports the daemon as
+    broken.
+
+    MUTATION (ran, caught): test `name in os.environ` instead of emptiness.
+    `endpoint is None` fails on both parameters below.
+    """
+    monkeypatch.setenv(OPERATOR_PORT_VARIABLE, "25715")
+    monkeypatch.setenv(OPERATOR_USER_VARIABLE, "operatorrpc")
+    monkeypatch.setenv(OPERATOR_CREDENTIAL_VARIABLE, "")
+    assert operator_endpoint()[0] is None, "an empty password is not a password"
+
+    monkeypatch.setenv(OPERATOR_CREDENTIAL_VARIABLE, "   ")
+    assert operator_endpoint()[0] is None, "a whitespace-only export is the same failure with spaces"
+
+
+def test_a_non_integer_port_refuses_and_names_the_mainnet_port_it_is_not(monkeypatch):
+    """A port that is not a number cannot be classified, so nothing is opened.
+
+    MUTATION (ran, caught): `int(raw_port or 0)` with no try/except. A non-numeric
+    value then raises ValueError out of a reporting tool instead of producing a
+    line, and this test fails with that exception rather than a refusal.
+    """
+    export_operator_endpoint(monkeypatch, port="25715x")
+
+    endpoint, refusal = operator_endpoint()
+
+    assert endpoint is None
+    assert OPERATOR_PORT_VARIABLE in refusal
+    assert str(CHAIN_PORTS["GRC"].mainnet_port) in refusal, (
+        "name the mainnet port as the one that will be refused, so a reader does not try it"
+    )
+    assert OPERATOR_CREDENTIAL_CANARY not in refusal
+
+
+def test_the_endpoints_printable_label_is_host_and_port_and_carries_NO_credential(monkeypatch):
+    """`label` is what every report line, header and refusal prints. It is host:port.
+
+    MUTATION (ran, caught): include `self.user` and `self.password` in `label`, as
+    a connection string would. The canary assertion fails -- and that string is
+    pasted into chat logs by design, which is how 157,797 GRC of the operator's
+    real staking balance reached one on 2026-09-25.
+    """
+    export_operator_endpoint(monkeypatch, host="127.0.0.1")
+    endpoint, refusal = operator_endpoint()
+
+    assert refusal == ""
+    assert endpoint.label == "127.0.0.1:25715"
+    assert OPERATOR_CREDENTIAL_CANARY not in endpoint.label
+    assert endpoint.user not in endpoint.label, "not the user either; it is half a credential"
+    assert endpoint.password == OPERATOR_CREDENTIAL_CANARY, "the value is still available to basic auth"
+
+
+def test_an_unset_host_defaults_to_loopback_rather_than_refusing(monkeypatch):
+    """HOST has a default and the other three do not, which is config.py's own split.
+
+    config.py:518 defaults GRC_RPC_HOST to 127.0.0.1 for the same reason: a second
+    DATADIR on this host is the separation this check is for, and a daemon on
+    another machine is a different conversation.
+
+    MUTATION (ran, caught): add OPERATOR_HOST_VARIABLE to
+    OPERATOR_REQUIRED_VARIABLES. This refuses a correctly configured endpoint and
+    the label assertion fails.
+    """
+    export_operator_endpoint(monkeypatch)
+    endpoint, _refusal = operator_endpoint()
+
+    assert endpoint is not None
+    assert endpoint.label == "127.0.0.1:25715"
+
+
+# --- the decision itself, with seeded answers ---------------------------------
+
+def test_ismine_FALSE_from_the_operators_daemon_is_the_PROOF_of_separation():
+    """The one positive verdict Gridcoin can produce, and what it refuses to claim.
+
+    A `false` from the daemon holding the operator's coins is an observation about
+    a KEY, not a reading of a config value -- which is why it is available on the
+    pre-0.17 RPC surface Gridcoin actually has while `walletname` is not.
+
+    MUTATION (ran, caught): return NOT_SEPARATED for operator_owns=False. This
+    fails, and so does the exit-code coupling below, since SEPARATED is in
+    GOOD_STATES and NOT_SEPARATED is not.
+
+    MUTATION (ran, SURVIVED at first, now caught): drop the "no OTHER wallet of
+    the operator's" clause and keep the generic "WHAT THIS DOES NOT ESTABLISH"
+    sentence about funding. The first version of this test asserted only
+    `"DOES NOT ESTABLISH" in why`, which the funding clause satisfies on its own --
+    so a verdict that silently claimed the operator holds this key NOWHERE would
+    have passed. One daemon and one datadir were asked; a second datadir, a
+    restored backup and a watch-only import were not and could not be. The
+    assertion is now the specific clause.
+    """
+    verdict = cross_daemon_ownership_verdict(
+        "GRC", SWAP_ID, GRC_DEPOSIT, "127.0.0.1:25715", False, "validateaddress answered ismine", True
+    )
+
+    assert verdict.state == SEPARATED
+    assert verdict.state in wallet_custody.GOOD_STATES
+    assert "ismine=false" in verdict.why
+    assert "127.0.0.1:25715" in verdict.why, "name the endpoint that answered, or the claim is uncheckable"
+    assert "no OTHER wallet of the operator's holds this key" in verdict.why, (
+        "ONE daemon and ONE datadir were asked. A verdict that does not say so reads as proof the "
+        "operator holds this key nowhere, which is not available from one endpoint"
+    )
+    # THE REASON AND NOT ONLY THE CLAIM, and this pair of assertions is where a
+    # mutation SURVIVED on the first pass. The mutation deleted "ONE daemon and ONE
+    # datadir were asked, and a second datadir, a restored backup or a watch-only
+    # import was not and could not be" while leaving the claim phrase above intact,
+    # and the test passed -- so a verdict that stated the limit without saying WHY
+    # it holds would have been scored as correct. An operator who is told "this does
+    # not establish that no other wallet holds the key" and not told that exactly one
+    # datadir was asked has no way to know what second thing to go and check.
+    assert "ONE daemon and ONE datadir were asked" in verdict.why, (
+        "the limit needs its reason: say that one endpoint and one datadir were asked"
+    )
+    assert "watch-only" in verdict.why, (
+        "name the three things that were not asked -- a second datadir, a restored backup, a "
+        "watch-only import -- because they are what an operator would otherwise have to guess at"
+    )
+    assert "funding is unaudited" in verdict.why, "the funding limit holds here as everywhere else"
+
+
+def test_ismine_TRUE_from_BOTH_daemons_is_proof_they_are_the_SAME_wallet():
+    """One key in two wallets is one wallet -- or a wallet.dat that was copied.
+
+    THE COPY IS THE REASON THIS SENTENCE NAMES IT. Two independently created
+    wallets do not share a key, so the only other way to reach this state is
+    copying wallet.dat into the second datadir -- which copies the operator's keys
+    and is the exact opposite of separating them. No other check in this tree could
+    detect it, which is why docs/hot_wallet_separation_runbook.md now states it
+    first and loudest.
+
+    MUTATION (ran, caught): return SEPARATED when the operator's daemon answers
+    true, on the reasoning that the two endpoints are two daemons. This fails here
+    and in the exit-code test: a self-transfer would be reported as custody moving.
+    """
+    verdict = cross_daemon_ownership_verdict(
+        "GRC", SWAP_ID, GRC_DEPOSIT, "127.0.0.1:25715", True, "validateaddress answered ismine", True
+    )
+
+    assert verdict.state == NOT_SEPARATED
+    assert verdict.state not in wallet_custody.GOOD_STATES
+    assert "BOTH daemons hold the key" in verdict.why
+    assert "wallet.dat" in verdict.why, "name the mechanism that produces this state from two datadirs"
+    assert "self-transfer" in verdict.why, "say what it COSTS, not only that the wallets are one"
+
+
+def test_ismine_TRUE_from_the_operator_alone_is_still_NOT_SEPARATED_and_says_which_half():
+    """The desk's half being unread does not soften the operator's answer.
+
+    `ismine: true` from the daemon holding the operator's coins is already the
+    finding: the key the desk derived is in the operator's wallet. What the desk
+    answers cannot make that untrue, so the verdict does not wait for it -- and
+    the sentence says which half was read, because "NOT SEPARATED" alone would be
+    the same words as the two-answer case above.
+
+    MUTATION (ran, caught): require desk_owns is True before returning
+    NOT_SEPARATED, returning NOT_ESTABLISHED otherwise. This fails, and the state
+    moves out of the exit-code's bad set for a daemon that reported the defect.
+    """
+    verdict = cross_daemon_ownership_verdict(
+        "GRC", SWAP_ID, GRC_DEPOSIT, "127.0.0.1:25715", True, "validateaddress answered ismine", None
+    )
+
+    assert verdict.state == NOT_SEPARATED
+    assert "not read" in verdict.why, "say that the desk's half was not read rather than implying it was"
+    assert "BOTH daemons hold the key" not in verdict.why, (
+        "do not claim the desk answered; only the operator's daemon did"
+    )
+
+
+def test_ismine_FALSE_from_BOTH_is_the_desk_being_unable_to_SPEND_its_own_deposit():
+    """Separated from the operator, and still a defect -- the louder of the two.
+
+    An address NEITHER wallet holds is a deposit nobody can spend. Folding it into
+    SEPARATED would print a green line over an unspendable deposit, which is the
+    shape of failure this whole module exists to refuse, so it gets the state the
+    vocabulary already has for it.
+
+    MUTATION (ran, caught): return SEPARATED whenever operator_owns is False,
+    ignoring desk_owns. This fails, and the exit code would read 0 for a swap the
+    desk cannot settle.
+    """
+    verdict = cross_daemon_ownership_verdict(
+        "GRC", SWAP_ID, GRC_DEPOSIT, "127.0.0.1:25715", False, "validateaddress answered ismine", False
+    )
+
+    assert verdict.state == NOT_THE_DESKS
+    assert verdict.state not in wallet_custody.GOOD_STATES
+    assert "NEITHER daemon" in verdict.why
+    assert "cannot spend" in verdict.why
+
+
+def test_every_cross_daemon_state_is_a_DIFFERENT_one_so_a_constant_cannot_satisfy_it():
+    """Five inputs, four distinct states. A constant-returning function fails here.
+
+    This is the companion to test_every_verdict_state_is_a_DIFFERENT_string, one
+    level down: that one pins the vocabulary, this one pins that THIS function
+    actually ranges over it. Without it, each test above could be satisfied by a
+    function that answered one way and carried a sentence mentioning every clause.
+
+    MUTATION (ran, caught): return CustodyVerdict(SEPARATED, <the long sentence>)
+    from every branch. This fails on the set size and names what collapsed.
+    """
+    states = [
+        cross_daemon_ownership_verdict("GRC", SWAP_ID, "", "", None).state,
+        cross_daemon_ownership_verdict("GRC", SWAP_ID, GRC_DEPOSIT, "h:1", None, "refused").state,
+        cross_daemon_ownership_verdict("GRC", SWAP_ID, GRC_DEPOSIT, "h:1", True, "", True).state,
+        cross_daemon_ownership_verdict("GRC", SWAP_ID, GRC_DEPOSIT, "h:1", False, "", True).state,
+        cross_daemon_ownership_verdict("GRC", SWAP_ID, GRC_DEPOSIT, "h:1", False, "", False).state,
+    ]
+
+    assert states == [NOT_ESTABLISHED, NOT_ESTABLISHED, NOT_SEPARATED, SEPARATED, NOT_THE_DESKS], (
+        f"the cross-daemon verdict no longer distinguishes its cases: {states}"
+    )
+    assert len(set(states)) == 4, f"four distinct answers collapsed to {len(set(states))}: {states}"
+    for state in states:
+        assert state in STATES, f"{state!r} is outside the closed set, so the tally has no row for it"
+
+
+@pytest.mark.parametrize(
+    ("operator_owns", "operator_why", "marker"),
+    [
+        (None, "validateaddress: Connection refused", "Connection refused"),
+        (None, "validateaddress: answered, with no `ismine` field", "no `ismine` field"),
+        (None, "", "no reason was returned"),
+    ],
+)
+def test_an_unanswered_operator_daemon_is_NOT_ESTABLISHED_and_never_green(
+    operator_owns, operator_why, marker
+):
+    """"Nobody answered" is not "not theirs", and chains/base.py has the measurement.
+
+    On 2026-10-01 a diagnostic asked this from a shell with no GRC_RPC_* exported,
+    both calls died on ECONNREFUSED, the None was read as "this daemon has no
+    `ismine` field" and reported to the operator as a fact. It was a transport
+    failure.
+
+    MUTATION (ran, caught): return SEPARATED for operator_owns=None, on the
+    reasoning that a daemon which cannot see the address at least did not claim it.
+    All three parameters fail -- and that is the reassuring-answer error rule 17
+    names, arriving as a green verdict and a zero exit code.
+    """
+    verdict = cross_daemon_ownership_verdict(
+        "GRC", SWAP_ID, GRC_DEPOSIT, "127.0.0.1:25715", operator_owns, operator_why
+    )
+
+    assert verdict.state == NOT_ESTABLISHED
+    assert verdict.state not in wallet_custody.GOOD_STATES
+    assert marker in verdict.why
+    assert "nobody answered" in verdict.why.lower()
+
+
+def test_no_GRC_deposit_leg_says_so_and_does_not_default_to_either_answer():
+    """The check REQUIRES --swap, and the reason it cannot invent an address.
+
+    The desk address is the swap's own `deposit_address` from swap_terminal.db. The
+    alternative -- `getnewaddress` -- would answer the same question and is a
+    WALLET WRITE: it derives and stores a key. A read-only audit that paid for its
+    answer with a new key would be spending the thing it audits.
+
+    MUTATION (ran, caught): return SEPARATED when there is no address, on the
+    reasoning that nothing was found in the operator's wallet. This fails.
+    """
+    verdict = cross_daemon_ownership_verdict("GRC", "", "", "", None)
+
+    assert verdict.state == NOT_ESTABLISHED
+    assert "--swap" in verdict.why
+    assert "WALLET WRITE" in verdict.why, (
+        "say why the address comes from the database, or somebody will 'fix' this with getnewaddress"
+    )
+    assert "no second socket was opened" in verdict.why
+
+
+def test_the_desk_half_is_translated_from_the_state_rather_than_read_twice():
+    """DESK_OWNERSHIP_FROM_STATE is the only mapping, and None is its honest default.
+
+    wallet_custody.py has already asked the DESK's endpoint `ismine` for this
+    address and rendered it through deposit_address_verdict(). The cross-daemon
+    line translates that recorded state back instead of opening a second socket to
+    the same daemon and asking the question again -- two reads of one fact are two
+    chances for one report to disagree with itself (rule 8).
+
+    MUTATION (ran, caught): add NOT_ESTABLISHED: False to the mapping, so an
+    unanswered desk reads as "the desk does not own it". The None assertion fails,
+    and the cross-daemon verdict would then report NOT THE DESK'S -- "neither
+    daemon holds the key" -- for a desk daemon that was simply unreachable.
+    """
+    assert DESK_OWNERSHIP_FROM_STATE[DESK_OWNS] is True
+    assert DESK_OWNERSHIP_FROM_STATE[NOT_THE_DESKS] is False
+    for state in STATES:
+        if state not in (DESK_OWNS, NOT_THE_DESKS):
+            assert DESK_OWNERSHIP_FROM_STATE.get(state) is None, (
+                f"{state!r} is not an `ismine` answer and must map to None, not to a bool"
+            )
+    # The two mapped states are exactly the two deposit_address_verdict() produces
+    # from a bool, which is what makes the translation lossless rather than a guess.
+    assert deposit_address_verdict("GRC", SWAP_ID, GRC_DEPOSIT, True).state == DESK_OWNS
+    assert deposit_address_verdict("GRC", SWAP_ID, GRC_DEPOSIT, False).state == NOT_THE_DESKS
+
+
+# --- the entry point: the port is classified before any second socket ---------
+
+def test_the_cross_daemon_check_reads_the_DESK_state_under_the_name_it_is_printed_as():
+    """Two spellings of one check name would silently lose the desk's answer forever.
+
+    script_chain_lines() produces the deposit-address line as
+    f"{asset} deposit addr" and cross_daemon_lines() looks it up by
+    DESK_DEPOSIT_CHECK. If those drift, `next(...)` finds nothing, the desk's half
+    reads as "not read" on every run, and NOTHING FAILS -- the report is merely
+    permanently less informative, which is the invisible drift rule 8 is about.
+
+    MUTATION (ran, caught): change DESK_DEPOSIT_CHECK to "GRC deposit address".
+    This fails on the equality.
+    """
+    daemon = RecordingDaemon(walletname="", ismine=True)
+    # 25715 because the port decides whether the deposit-address line is reached at
+    # all: may_read_a_wallet() refuses the UNCONFIGURED default this test
+    # environment has, and the wallet line is then the only line. The first version
+    # of this test did not set it and failed on that, which is the port
+    # classification working rather than an obstacle.
+    rpc = dict(wallet_custody.Config.RPC["GRC"], port=25715)
+    original = wallet_custody.Config.RPC["GRC"]
+    wallet_custody.Config.RPC["GRC"] = rpc
+    try:
+        lines = wallet_custody.script_chain_lines("GRC", {"GRC": daemon}, swap_row())
+    finally:
+        wallet_custody.Config.RPC["GRC"] = original
+    names = [name for name, _state, _why in lines]
+
+    assert wallet_custody.DESK_DEPOSIT_CHECK in names, (
+        f"cross_daemon_lines() looks up {wallet_custody.DESK_DEPOSIT_CHECK!r} and script_chain_lines() "
+        f"printed {names}"
+    )
+    assert wallet_custody.CROSS_DAEMON_CHAIN == "GRC", (
+        "BTC and LTC carry the multiwallet RPCs, so they answer from one endpoint and must not grow "
+        "a second-daemon line (rule 8: two mechanisms for one question)"
+    )
+
+
+def test_a_MAINNET_operator_port_opens_NO_second_socket_at_all(monkeypatch):
+    """Looking is the hazard, and the operator's MAINNET daemon is the one with coins.
+
+    ASSERTED AS "NO ADAPTER WAS BUILT AND NO CALL WAS MADE", not merely as the
+    verdict: a version that connected, asked, and then reported NOT ESTABLISHED
+    would satisfy a verdict-only assertion while doing the exact thing this
+    prevents. The classification runs through the SAME
+    network_target.may_read_a_wallet() the desk's endpoint goes through, so there
+    is one mainnet refusal in this tree rather than two.
+
+    MUTATION (ran, caught): ask first and classify afterwards. `built` is non-empty
+    and this fails. MUTATION (ran, caught): classify with a locally written
+    `port != 15715` test instead of may_read_a_wallet(). The UNRECOGNIZED case in
+    the next test then passes a socket through, which that test catches.
+    """
+    export_operator_endpoint(monkeypatch, port=str(CHAIN_PORTS["GRC"].mainnet_port))
+    RecordingGridcoinAdapter.reset(AddressOwnership(False, "should never be reached"))
+    monkeypatch.setattr(wallet_custody, "GridcoinAdapter", RecordingGridcoinAdapter)
+
+    lines = wallet_custody.cross_daemon_lines(swap_row(), [])
+
+    assert RecordingGridcoinAdapter.built == [], "an adapter was constructed against a MAINNET port"
+    assert RecordingGridcoinAdapter.asked == [], "a socket was opened to a MAINNET port"
+    assert [state for _name, state, _why in lines] == [NOT_ESTABLISHED]
+    assert "NO SECOND SOCKET WAS OPENED" in lines[0][2]
+    assert "MAINNET" in lines[0][2]
+    assert OPERATOR_CREDENTIAL_CANARY not in lines[0][2], "a credential reached a printed report line"
+
+
+def test_an_UNRECOGNIZED_operator_port_also_opens_no_socket(monkeypatch):
+    """Any daemon can be started on any -rpcport, so "not the mainnet port" is not safe.
+
+    MUTATION (ran, caught): accept any port that is not the mainnet one. `built`
+    becomes non-empty for port 34567 and this fails -- and that port may be a
+    mainnet daemon on a custom -rpcport, which is the reasoning
+    may_read_a_wallet() already records.
+    """
+    export_operator_endpoint(monkeypatch, port="34567")
+    RecordingGridcoinAdapter.reset(AddressOwnership(False, "should never be reached"))
+    monkeypatch.setattr(wallet_custody, "GridcoinAdapter", RecordingGridcoinAdapter)
+
+    lines = wallet_custody.cross_daemon_lines(swap_row(), [])
+
+    assert RecordingGridcoinAdapter.built == []
+    assert RecordingGridcoinAdapter.asked == []
+    assert lines[0][1] == NOT_ESTABLISHED
+    assert "34567" in lines[0][2]
+
+
+def test_an_unconfigured_second_endpoint_opens_no_socket_and_names_what_to_export(monkeypatch):
+    """No variables, no adapter, and a line that says the GRC question went unanswered.
+
+    MUTATION (ran, caught): build the adapter before resolving the endpoint, with
+    host/port defaults. `built` is non-empty and this fails -- and the tool would
+    be connecting to a port nobody named.
+    """
+    for name in OPERATOR_REQUIRED_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    RecordingGridcoinAdapter.reset(AddressOwnership(False, "should never be reached"))
+    monkeypatch.setattr(wallet_custody, "GridcoinAdapter", RecordingGridcoinAdapter)
+
+    lines = wallet_custody.cross_daemon_lines(swap_row(), [])
+
+    assert RecordingGridcoinAdapter.built == []
+    assert lines[0][1] == NOT_ESTABLISHED
+    for name in OPERATOR_REQUIRED_VARIABLES:
+        assert name in lines[0][2]
+
+
+def test_a_swap_with_no_GRC_deposit_leg_resolves_NO_variables_and_opens_no_socket(monkeypatch):
+    """An XRP->GRC swap's deposit address is on XRP, so there is nothing to ask about.
+
+    ASSERTED AS "NO SOCKET", because the cheap wrong version asks the operator's
+    daemon whether it owns an XRP address: `validateaddress` answers isvalid=false
+    with no `ismine`, which renders as NOT ESTABLISHED and looks identical to a
+    daemon that is down.
+
+    MUTATION (ran, caught): drop the from_asset test and pass whatever
+    `deposit_address` holds. `asked` becomes non-empty, carrying the XRP address.
+    """
+    export_operator_endpoint(monkeypatch)
+    RecordingGridcoinAdapter.reset(AddressOwnership(False, "should never be reached"))
+    monkeypatch.setattr(wallet_custody, "GridcoinAdapter", RecordingGridcoinAdapter)
+
+    lines = wallet_custody.cross_daemon_lines(
+        swap_row(from_asset="XRP", to_asset="GRC", deposit_address=PAID_XRP), []
+    )
+
+    assert RecordingGridcoinAdapter.asked == [], "the operator's daemon was asked about an XRP address"
+    assert RecordingGridcoinAdapter.built == []
+    assert lines[0][1] == NOT_ESTABLISHED
+    assert "--swap" in lines[0][2]
+    assert PAID_XRP not in lines[0][2], "do not print the other chain's address as though it were the subject"
+
+
+def test_a_test_port_asks_ONE_read_with_NO_wallet_path_and_renders_the_verdict(monkeypatch):
+    """The happy path, behaviorally: one address asked, once, with wallet="".
+
+    NO /wallet/<name> PATH, AND THAT IS NOT AN OMISSION. Measured on the operator's
+    Gridcoin v5.5.1.0 daemon 2026-10-03: `help` lists none of createwallet,
+    loadwallet, listwallets or unloadwallet, so there is one wallet per datadir and
+    no wallet path to ask for. `wallet=""` addresses http://host:port, which is the
+    wallet a bare `gridcoinresearchd` CLI call reaches -- the one holding the
+    operator's coins, which is exactly why its answer is the evidence.
+
+    MUTATION (ran, caught): pass wallet="desk_hot". The kwargs assertion fails, and
+    the URL would become /wallet/desk_hot -- a path this daemon family does not
+    serve, so every run would report NOT ESTABLISHED for a reachable daemon.
+
+    MUTATION (ran, caught): call address_ownership twice (once per method, as an
+    earlier draft of read_operator_ownership did before it delegated). The
+    one-element `asked` assertion fails.
+    """
+    export_operator_endpoint(monkeypatch)
+    RecordingGridcoinAdapter.reset(AddressOwnership(False, "validateaddress answered ismine"))
+    monkeypatch.setattr(wallet_custody, "GridcoinAdapter", RecordingGridcoinAdapter)
+    desk_said = [(wallet_custody.DESK_DEPOSIT_CHECK, DESK_OWNS, "the desk derived it")]
+
+    lines = wallet_custody.cross_daemon_lines(swap_row(), desk_said)
+
+    assert RecordingGridcoinAdapter.asked == [GRC_DEPOSIT], (
+        "exactly one read, for the swap's own deposit address and nothing else"
+    )
+    assert len(RecordingGridcoinAdapter.built) == 1
+    kwargs = RecordingGridcoinAdapter.built[0]
+    assert kwargs["wallet"] == "", (
+        "the operator's daemon has one wallet per datadir and serves no /wallet/<name> path"
+    )
+    assert kwargs["port"] == 25715
+    assert kwargs["password"] == OPERATOR_CREDENTIAL_CANARY, "basic auth still gets the credential"
+
+    name, state, why = lines[0]
+    assert state == SEPARATED
+    assert name == f"{wallet_custody.CROSS_DAEMON_CHAIN} operator daemon"
+    assert "127.0.0.1:25715" in why
+    assert "the other half of this proof" in why, "the desk's recorded DESK_OWNS answer has to reach it"
+    assert OPERATOR_CREDENTIAL_CANARY not in why, f"a credential reached a printed report line: {why}"
+    assert "µfn" in why, "rule 6: the elapsed figure this line prints is in microfortnights"
+
+
+def test_the_header_line_announces_the_second_endpoint_without_its_credential(monkeypatch):
+    """Rule 14: echo the parameters that decide the answer, BEFORE the socket opens.
+
+    And rule 14's `(none)` half: an unset second endpoint means the GRC separation
+    question goes unanswered, so the header says so rather than leaving the reader
+    to discover it forty lines down.
+
+    MUTATION (ran, caught): return "" from operator_daemon_note() when the endpoint
+    is unset. The variable-naming assertion fails and the header renders a blank
+    value, which is ambiguous between "unset" and "this line broke". (A first
+    attempt at this mutation was a NO-OP -- `"" or (<the sentence>)` is the
+    sentence -- and it is recorded rather than quietly replaced, because a no-op
+    mutation reported as SURVIVED sends the next reader looking for a weakness in
+    the test that is not there.)
+
+    MUTATION (ran, caught): return f"{endpoint.host}:{endpoint.port} user={endpoint.user}
+    pass={endpoint.password}" as a connection string would. The canary assertion fails.
+    """
+    for name in OPERATOR_REQUIRED_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    note = wallet_custody.operator_daemon_note()
+    assert note, "a blank value cannot be told from a broken line"
+    for name in OPERATOR_REQUIRED_VARIABLES:
+        assert name in note
+    assert "NOT asked" in note, "say what does not happen as a result, not only that a variable is unset"
+
+    export_operator_endpoint(monkeypatch)
+    note = wallet_custody.operator_daemon_note()
+    assert note.startswith("127.0.0.1:25715")
+    assert OPERATOR_CREDENTIAL_CANARY not in note, f"a credential reached the header: {note}"
+    assert "ismine" in note, "say what the one read against that endpoint is"
+
+    # A MAINNET PORT MUST NOT BE ANNOUNCED AS A READ, and the first version of this
+    # header did exactly that: with GRC_OPERATOR_RPC_PORT=15715 it printed
+    # "127.0.0.1:15715  <- asked ONE read", promising a read cross_daemon_lines()
+    # then refuses to make, about the daemon holding the operator's REAL coins.
+    #
+    # MUTATION (ran, caught): drop the may_read_a_wallet() call from
+    # operator_daemon_note() and always print the "asked ONE read" form. Both
+    # assertions below fail.
+    export_operator_endpoint(monkeypatch, port=str(CHAIN_PORTS["GRC"].mainnet_port))
+    note = wallet_custody.operator_daemon_note()
+    assert "WILL NOT BE READ" in note, (
+        "a header that announces a read of a MAINNET wallet has announced the thing the tool refuses"
+    )
+    # may_read_a_wallet()'s sentence is the CHAIN-level one and names GRC_RPC_PORT,
+    # the DESK's variable. It is not edited -- there is one mainnet refusal in this
+    # tree -- so the borrower has to say which variable is its own, or the operator
+    # repoints the desk's endpoint and leaves this one exactly as it was.
+    assert OPERATOR_PORT_VARIABLE in note, (
+        "the refusal's borrowed sentence names the desk's variable; say which one belongs to THIS "
+        "endpoint or the operator changes the wrong line"
+    )
+
+
+def test_the_report_names_no_wallet_WRITE_and_no_credential_FILE_anywhere(monkeypatch):
+    """The second endpoint added a connection, not a capability. Walked as an AST.
+
+    This is the companion to test_the_custody_report_names_no_wallet_WRITE_anywhere_in_its_source,
+    extended to the files the cross-daemon check added: a credential read from a
+    FILE is the thing rule 16 and this repository's own leak history forbid, and
+    `wallet.dat` is the file the runbook now warns about first.
+
+    MUTATION (ran, caught): add `open(Path.home() / ".GridcoinResearch" / "gridcoinresearch.conf")`
+    to gridcoin_credentials.py to read rpcpassword out of it. The `open` assertion
+    fails. MUTATION (ran, caught): add `adapter.call("getnewaddress", "x")` to
+    read_operator_ownership(). The method-name assertion fails.
+    """
+    for relative in ("wallet_custody.py", "swap_terminal/gridcoin_credentials.py"):
+        tree = ast.parse((REPO_ROOT / relative).read_text())
+        literals = {
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            # A docstring or a long sentence is prose; an RPC method or a filename
+            # is a bare token. The same split the older test uses, for the reason
+            # it records: these docstrings NAME getnewaddress in order to say it is
+            # never called.
+            and " " not in node.value and "\n" not in node.value
+        }
+        names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        called = {
+            node.func.id for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        for method in WALLET_WRITING_METHODS:
+            assert method not in literals, f"{relative} passes {method!r} as an RPC method name"
+            assert method not in names, f"{relative} calls .{method}()"
+        assert "open" not in called, (
+            f"{relative} opens a file. The second endpoint's credential is read from the ENVIRONMENT "
+            f"only -- a conf parser here puts an rpcpassword in this process and one careless print "
+            f"from a pasted report"
+        )
+        assert "wallet.dat" not in literals, f"{relative} names wallet.dat as a path it touches"
+        assert "read_text" not in names and "open" not in names, (
+            f"{relative} reads a file through a path method"
+        )

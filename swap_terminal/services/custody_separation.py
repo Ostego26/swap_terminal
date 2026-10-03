@@ -335,6 +335,158 @@ def deposit_address_verdict(
     ))
 
 
+#: How the desk's own deposit-address verdict translates back into the tri-state
+#: `ismine` answer the cross-daemon comparison needs.
+#:
+#: DERIVED FROM THE STATE RATHER THAN READ TWICE (rule 8). wallet_custody.py has
+#: already asked the DESK's endpoint `ismine` for this swap's deposit address and
+#: rendered the answer through deposit_address_verdict(), so the cross-daemon line
+#: translates that recorded state back instead of opening a second socket to the
+#: same daemon and asking the same question. Two reads of one fact are two chances
+#: for one report to disagree with itself.
+#:
+#: NOT_ESTABLISHED and every other state map to None through .get(), which is the
+#: honest answer: "the desk's half was not read" is not "the desk does not own it".
+DESK_OWNERSHIP_FROM_STATE = {DESK_OWNS: True, NOT_THE_DESKS: False}
+
+
+def cross_daemon_ownership_verdict(  # noqa: PLR0913, PLR0917 -- checked: these six are the question. The two chains of custody (which address, from which swap), the endpoint being named in the sentence, and the two daemons' answers plus the operator daemon's reason. Bundling them into an object would add a type without removing an argument, which is the same decision chains/base.RPCAdapter.__init__ records.
+    asset: str,
+    swap_id: str,
+    deposit_address: str,
+    operator_endpoint_label: str,
+    operator_owns: bool | None,
+    operator_why: str = "",
+    desk_owns: bool | None = None,
+) -> CustodyVerdict:
+    """GRC: does the OPERATOR's own daemon hold the key for the DESK's deposit address?
+
+    THE ONLY SEPARATION QUESTION GRIDCOIN CAN ANSWER, and the reason is measured
+    rather than assumed. On the operator's Gridcoin v5.5.1.0 testnet daemon,
+    2026-10-03:
+
+        gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
+          -> (none of the multiwallet RPCs exist on this build)
+
+    So Gridcoin has ONE wallet per datadir: no `-rpcwallet`, no `/wallet/<name>`
+    endpoint, no `walletname` field. script_chain_verdict() therefore answers
+    NOT ESTABLISHED on GRC and always will -- not for want of configuration, but
+    because the field it reads does not exist on this daemon family. Six of
+    wallet_custody.py's seven checks answered on 2026-10-03 and that was the
+    seventh.
+
+    SO THE QUESTION IS ASKED FROM THE OTHER DIRECTION, AND THE EVIDENCE IS
+    BEHAVIORAL RATHER THAN CONFIGURAL. With no name to ask for, ask the daemon
+    that holds the OPERATOR's coins whether the DESK's deposit address is `ismine`.
+    A `false` from it is an observation about a KEY -- the operator's wallet does
+    not hold the key the desk derived -- which is strictly stronger than any
+    reading of a config value, and it is available on the pre-0.17 RPC surface
+    Gridcoin actually has (`validateaddress` carries `ismine`; measured 2026-10-01
+    in chains/base.address_ownership()'s own docstring).
+
+    THE DESK ADDRESS COMES FROM THE DATABASE AND NEVER FROM A WALLET WRITE. It is
+    the swap's own `deposit_address` -- for swap s_539d922e9ef0a5d8,
+    moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz, derived by the terminal in the GRC wallet
+    it was pointed at. `getnewaddress` would have answered the same question and is
+    a WALLET WRITE: it derives and stores a key. A read-only diagnostic that wrote
+    a key to ask whether a wallet is separate would be paying for the answer with
+    the thing it is auditing.
+
+    FOUR DISTINCT ANSWERS, and the two that matter are opposite proofs:
+
+      operator says false, desk says true or was not read -> SEPARATED. The daemon
+          holding the operator's coins does not hold this key.
+      operator says false AND desk says false -> NOT THE DESK'S. Separated from the
+          operator, and a defect anyway: an address NEITHER wallet holds is a
+          deposit nobody can spend. Not folded into SEPARATED, because a green line
+          over an unspendable deposit is the shape of failure this whole module
+          exists to refuse.
+      operator says true -> NOT SEPARATED. The operator's own wallet holds the key
+          the desk derived. Two independently created wallets do not share a key,
+          so this is one wallet -- or a wallet.dat that was COPIED, which is the
+          hazard docs/hot_wallet_separation_runbook.md states first and loudest,
+          and which no other check in this tree could detect.
+      nobody answered, or there is no GRC deposit leg -> NOT ESTABLISHED, with the
+          reason. Never a green default.
+
+    WHAT A `false` DOES NOT ESTABLISH, and both limits are in the sentence rather
+    than in this docstring, because the operator reads the screen (rule 14):
+
+      - that no OTHER wallet of the operator's holds the key. One daemon was asked,
+        about one datadir. A second datadir, a hardware wallet, a watch-only
+        import, an old backup -- none of them were asked and none of them could be.
+      - that the desk's coins were never the operator's. Funding is unaudited here
+        exactly as it is everywhere else in this module: no chain and no RPC says
+        whose money a coin is.
+    """
+    label = f"{asset} swap {swap_id}" if swap_id else asset
+    if not deposit_address:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{asset}: no {asset} deposit address was available, so no cross-daemon ownership "
+            f"question was asked and no second socket was opened. This check needs --swap with a "
+            f"{asset} DEPOSIT leg: the desk address it asks about is the swap's own "
+            f"`deposit_address` from swap_terminal.db, because the alternative -- getnewaddress -- "
+            f"is a WALLET WRITE and a read-only tool must not pay for an answer with a new key"
+        ))
+    if operator_owns is None:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{label}: whether the OPERATOR's own daemon holds the key for the desk's deposit "
+            f"address {deposit_address} was NOT established "
+            f"({operator_why or 'no reason was returned'}). "
+            f"This is 'nobody answered', NOT 'not theirs' -- and on Gridcoin it is the "
+            f"ONLY separation question available, because this daemon family has no multiwallet "
+            f"RPCs and so no `walletname` to compare. Nothing about GRC custody follows from this "
+            f"line in either direction"
+        ))
+    if operator_owns:
+        both = (
+            " The desk's own endpoint answers ismine=true for it too, so BOTH daemons hold the key: "
+            "that is one wallet reached through two endpoints, or a wallet.dat that was copied."
+            if desk_owns
+            else " The desk's own half of this comparison was not read, so whether BOTH hold it is "
+                 "not established -- but one `ismine=true` from the operator's daemon is already the "
+                 "finding, whatever the desk answers."
+        )
+        return CustodyVerdict(NOT_SEPARATED, (
+            f"{label}: the OPERATOR's own daemon at {operator_endpoint_label} reports ismine=true for "
+            f"the desk's deposit address {deposit_address}, so the operator's wallet holds the key the "
+            f"desk derived.{both} Two independently created wallets do not share a key -- a customer "
+            f"deposit into this address moves coins from the operator's wallet to the operator's "
+            f"wallet, which is a self-transfer that costs a fee and moves no custody. Point the desk "
+            f"at a daemon with its own -datadir (docs/hot_wallet_separation_runbook.md), and NEVER "
+            f"copy wallet.dat into it: copying the wallet copies these keys and reproduces exactly "
+            f"this state"
+        ))
+    if desk_owns is False:
+        return CustodyVerdict(NOT_THE_DESKS, (
+            f"{label}: NEITHER daemon holds the key for this swap's deposit address "
+            f"{deposit_address} -- the operator's own daemon at {operator_endpoint_label} answers "
+            f"ismine=false, and so does the desk's own endpoint. The operator half is the separation "
+            f"this check looks for, but a deposit address the DESK cannot see is a deposit the desk "
+            f"cannot spend, which is a defect in its own right and the louder of the two. Check "
+            f"whether the desk's GRC endpoint changed datadir after this swap row was written"
+        ))
+    confirmed = (
+        " The desk's own endpoint answers ismine=true for it, which is CORRECT for a custodial desk "
+        "and is the other half of this proof: the key is in the desk's wallet and not in the "
+        "operator's."
+        if desk_owns
+        else " The desk's own half of this comparison was not read, so that the DESK can spend this "
+             "deposit is not established here -- see the deposit-address line above for that question."
+    )
+    return CustodyVerdict(SEPARATED, (
+        f"{label}: the OPERATOR's own daemon at {operator_endpoint_label} reports ismine=false for "
+        f"the desk's deposit address {deposit_address}, so the wallet holding the operator's coins "
+        f"does NOT hold the key the desk derived.{confirmed} That is behavioral evidence about a KEY "
+        f"rather than a reading of a config value, and on Gridcoin it is the only separation evidence "
+        f"available: this daemon family has no multiwallet RPCs, so there is no `walletname` to ask "
+        f"for. WHAT THIS DOES NOT ESTABLISH: that no OTHER wallet of the operator's holds this key -- "
+        f"ONE daemon and ONE datadir were asked, and a second datadir, a restored backup or a "
+        f"watch-only import was not and could not be. Nor that the desk's coins were never the "
+        f"operator's: funding is unaudited, here as everywhere in this report"
+    ))
+
+
 def xrp_desk_account_verdict(
     configured_account: str, derived_account: str, derive_error: str = ""
 ) -> CustodyVerdict:
