@@ -1,4 +1,19 @@
-"""Broadcast the payout leg, and track hot-wallet inventory.
+"""Broadcast the payout leg, and track the hot wallet's BALANCE.
+
+THE FIRST LINE SAID "track hot-wallet inventory" UNTIL 2026-10-03, AND
+"inventory" WAS THE WRONG WORD FOR WHAT THIS FILE WRITES. refresh_wallet_inventory()
+stores `adapter.get_balance()` -- the WHOLE wallet the endpoint serves -- into
+`wallet_inventory.hot_confirmed`. On a host where `*_RPC_WALLET` is unset, that is
+the operator's own wallet, personal coins included, and none of it was committed to
+the desk. Measured on the operator's host 2026-10-03: 3780.08654497 GRC recorded as
+desk stock, of which the amount actually committed to the desk was never established
+because nothing in the tree could express the distinction (wallet_custody.py now
+reports it; docs/hot_wallet_separation_runbook.md says how to separate them).
+
+The column name is left alone deliberately: renaming a table column is a migration
+on a live database for a wording change, which is the large-diff-no-benefit trade
+rule 10 refuses for layout. The DDL comment in db.py and every surface that PRINTS
+the figure now say what it measures, which is where a reader meets it.
 
 Role: submodule -> function (process_pending_payouts is the decision)
 Reads: swap_terminal.db (swaps, payouts, wallet_inventory), the destination
