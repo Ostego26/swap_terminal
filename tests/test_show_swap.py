@@ -650,3 +650,69 @@ def test_the_header_says_which_source_the_path_came_from(tmp_path, monkeypatch):
         "variable is the defect that reached the operator"
     )
     assert not any("<- SWAP_DB_PATH." in line for line in from_default)
+
+
+# --- the two labels the first settled BTC swap found --------------------------
+
+
+def test_the_seen_line_says_WHICH_sum_it_is_holding():
+    """swaps.actual_input_amount is two different sums, and the label claimed one.
+
+    MEASURED ON THE OPERATOR'S SCREEN 2026-10-03, the first BTC -> GRC swap to
+    settle:
+
+        seen           0.0003 BTC  <- ... the SEEN total over every deposit row
+        deposit rows   2
+                       0.0003 BTC  0 confirmation(s)  NOT counted
+                       0.0003 BTC  2 confirmation(s)  COUNTED by the gate
+
+    Two rows of 0.0003 under a label saying it sums every row, showing 0.0003. The
+    arithmetic does not add up and the screen gave no way to learn why.
+
+    services/deposit_service.refresh_swap_from_chain() writes the seen total, then
+    _credit_confirmed_deposit() OVERWRITES it with the confirmed total -- so the
+    old label was right until the credit and wrong from then on. The figure is a
+    multiplier on the payout (payout_service.payout_amount() scales the quote by
+    actual/expected), so a reader who believes it counts unconfirmed rows believes
+    the payout tracks money that has not confirmed.
+    """
+    before = show_swap.what_the_seen_total_counts({"credited_at": None})
+    after = show_swap.what_the_seen_total_counts({"credited_at": "2026-10-03T15:15:48.191664+00:00"})
+
+    assert "SEEN total over every deposit row" in before
+    assert "CONFIRMED total" in after
+    assert "scaled" in after, "the line says what the figure DECIDES, not just which sum it is"
+    assert before != after, (
+        "one label for two sums is how this was wrong in the first place -- a version returning a "
+        "constant would satisfy every assertion above except this one"
+    )
+
+
+def test_an_uncounted_row_does_not_read_as_a_credited_one():
+    """"NOT counted" and a credit timestamp, nine words apart in one line.
+
+    _credit_confirmed_deposit() stamps credited_at on EVERY row of the swap --
+    `WHERE swap_id = ? AND credited_at IS NULL` -- so a row the gate refused
+    carries the swap's credit time. Rule 13's "'skipped' plus 'success' in the same
+    output is a defect in the OUTPUT", inside a single line rather than across two.
+
+    The write is NOT changed by this: that is the credit path and it belongs to the
+    operator (rule 16). What is fixed is a column name that invites one reading
+    while the row says the other.
+    """
+    uncounted = {"amount": 0.0003, "asset": "BTC", "confirmations": 0, "txid": "ded1b906", "vout": 1,
+                 "credited_at": "2026-10-03T15:15:48.191703+00:00"}
+    counted = {**uncounted, "confirmations": 2, "vout": 0}
+
+    uncounted_line = show_swap.deposit_event_lines([uncounted], 2)[0]
+    counted_line = show_swap.deposit_event_lines([counted], 2)[0]
+
+    assert "NOT counted" in uncounted_line
+    assert "the SWAP's credit timestamp" in uncounted_line, (
+        "the row has to say whose credit that timestamp is, or 'not counted' and a credit time sit "
+        "side by side with nothing reconciling them"
+    )
+    assert "the SWAP's credit timestamp" not in counted_line, (
+        "a COUNTED row's credited_at means what it says, and annotating it would be noise on every "
+        "normal line"
+    )

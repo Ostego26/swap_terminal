@@ -293,7 +293,27 @@ def deposit_event_lines(events: list[dict], min_confirmations: int) -> list[str]
         counted = "COUNTED by the gate" if confirmations >= min_confirmations else (
             f"NOT counted -- below min_confirmations={min_confirmations}"
         )
+        # credited_at IS THE SWAP'S CREDIT, NOT THIS ROW'S, AND THE LINE HAS TO SAY SO
+        # WHEN THE TWO DISAGREE.
+        #
+        # services/deposit_service._credit_confirmed_deposit() stamps it with
+        # `UPDATE deposit_events SET credited_at = ? WHERE swap_id = ? AND credited_at
+        # IS NULL` -- every row of the swap, including rows the gate did NOT count. So
+        # on the operator's screen 2026-10-03 one line read
+        #
+        #     0.0003 BTC  0 confirmation(s)  NOT counted -- below min_confirmations=2
+        #                 ... credited_at 2026-10-03T15:15:48.191703+00:00
+        #
+        # which is "not counted" and "credited" in one row, nine words apart. Rule 13's
+        # "'skipped' plus 'success' in the same output is a defect in the OUTPUT",
+        # arriving inside a single line instead of across two.
+        #
+        # The timestamp is not wrong and the write is not changed here -- that is the
+        # credit path, and it is the operator's (rule 16). What was wrong is a column
+        # name that invites one reading when the row says the other.
         credited = event.get("credited_at") or "(not credited)"
+        if event.get("credited_at") and confirmations < min_confirmations:
+            credited += "  <- the SWAP's credit timestamp, stamped on every row; this row was NOT counted"
         lines.append(
             CONTINUATION + f"{event.get('amount')} {event.get('asset')}  {confirmations} confirmation(s)  "
             f"{counted}  txid {event.get('txid')} vout {event.get('vout')}  credited_at {credited}"
@@ -311,6 +331,46 @@ def payout_lines(payouts: list[dict]) -> list[str]:
         f"sent {row.get('sent_at') or '(not recorded as sent)'}"
         for row in payouts
     ]
+
+
+def what_the_seen_total_counts(swap: dict) -> str:
+    """Which sum swaps.actual_input_amount is holding right now. It is TWO different sums.
+
+    THE LABEL WAS WRONG, AND IT WAS WRONG ABOUT THE FIGURE THE PAYOUT IS SCALED
+    FROM. It read, unconditionally:
+
+        swaps.actual_input_amount, the SEEN total over every deposit row
+
+    Measured on the operator's screen 2026-10-03, on the first BTC -> GRC swap to
+    settle:
+
+        seen           0.0003 BTC
+        deposit rows   2
+                       0.0003 BTC  0 confirmation(s)  NOT counted
+                       0.0003 BTC  2 confirmation(s)  COUNTED by the gate
+
+    Two rows of 0.0003 under a label that says it sums every row, showing 0.0003.
+    A reader checking the arithmetic finds it does not add up and has no way to
+    learn why from the screen.
+
+    BOTH SUMS ARE REAL AND THE COLUMN HOLDS WHICHEVER RAN LAST.
+    services/deposit_service.refresh_swap_from_chain() writes `seen_total` -- every
+    row, confirmed or not -- and then _credit_confirmed_deposit() OVERWRITES it
+    with `confirmed_total`, the rows at or above min_confirmations. So before the
+    credit the old label was right, and from the credit onward it was wrong.
+
+    WHY THIS MATTERS BEYOND TIDINESS: services/payout_service.payout_amount()
+    scales the quote by actual_input_amount / expected_input_amount. The figure on
+    this line is a multiplier on what gets broadcast, so a reader who believes it
+    counts unconfirmed rows believes the payout tracks money that has not
+    confirmed. On this swap the two sums happened to agree on the counted row, and
+    the payout was exactly the quote.
+    """
+    return ("the CONFIRMED total -- rows at or above min_confirmations, which is what "
+            "_credit_confirmed_deposit() wrote at the credit and what the payout is scaled by"
+            if swap.get("credited_at")
+            else "the SEEN total over every deposit row, counted or not -- it becomes the CONFIRMED "
+                 "total when the swap is credited")
 
 
 def swap_lines(view: dict, now_iso: str) -> list[str]:
@@ -349,7 +409,7 @@ def swap_lines(view: dict, now_iso: str) -> list[str]:
         labeled("expected", f"{amount_text(swap.get('expected_input_amount'), from_asset, '(none)')}  <- what "
                             f"this swap was created to receive"),
         labeled("seen", f"{amount_text(swap.get('actual_input_amount'), from_asset, '(none) -- nothing seen yet')}"
-                        f"  <- swaps.actual_input_amount, the SEEN total over every deposit row"),
+                        f"  <- swaps.actual_input_amount, {what_the_seen_total_counts(swap)}"),
         labeled("confirmations", f"{confirmations['seen']} of {confirmations['threshold']} required, "
                                  f"{confirmations['rows']} deposit row(s)  <- {confirmations['source']}"),
         labeled("deposit target", f"{deposit.get('address') or '(none)'}  <- attributed by "
