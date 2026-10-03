@@ -106,11 +106,18 @@ def seeded(tmp_path, *, status="under_review", reserved=0.0):
                  (EXPECTED, LOCKED_PAYOUT, HALTED_AT, HALTED_AT))
     conn.execute("INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address, "
                  "expected_input_amount, actual_input_amount, quoted_rate, fee_bps, network_fee_reserve, "
+                 # credited_at IS NULL, AND THE FIRST VERSION OF THIS FIXTURE SET IT --
+                 # which made two mutations survive and is recorded here because that is
+                 # the defect, not the typo. A swap halted on a tolerance mismatch never
+                 # reaches deposit_service._credit_confirmed_deposit(), so credited_at is
+                 # NULL on the real row; seeding it meant the stamp test asserted the
+                 # FIXTURE rather than the tool, and the "UPDATE ... WHERE credited_at IS
+                 # NULL" mutation was a no-op for the same reason. Both mutations are
+                 # caught with it NULL.
                  "output_amount_estimate, status, failed_reason, min_confirmations, created_at, "
-                 "updated_at, credited_at, expires_at) VALUES ('s1','q1','XRP','GRC','rDEP','mGRC',?,?,"
-                 "56.29,150,0.001,?,?,?,1,?,?,?,?)",
-                 (EXPECTED, SEEN, LOCKED_PAYOUT, status, REASON, HALTED_AT, HALTED_AT, HALTED_AT,
-                  HALTED_AT))
+                 "updated_at, expires_at) VALUES ('s1','q1','XRP','GRC','rDEP','mGRC',?,?,"
+                 "56.29,150,0.001,?,?,?,1,?,?,?)",
+                 (EXPECTED, SEEN, LOCKED_PAYOUT, status, REASON, HALTED_AT, HALTED_AT, HALTED_AT))
     conn.execute("INSERT INTO wallet_inventory (asset, hot_confirmed, hot_reserved, hot_available, "
                  "updated_at) VALUES ('GRC', 3780.08854497, ?, ?, ?)",
                  (reserved, 3780.08854497 - reserved, HALTED_AT))
@@ -214,3 +221,64 @@ def test_the_resolution_flag_has_no_default(tmp_path):
     assert exit_info.value.code == 2
     with pytest.raises(SystemExit):
         main(["--swap", "s1", "--resolution", "refund-the-deposit", "--db", str(db_path)])
+
+
+def test_APPLY_stamps_credited_at_because_resolving_IS_accepting_the_deposit(tmp_path):
+    """A PAID swap said its deposit was never accepted. Measured 2026-10-03.
+
+    Minutes after this tool first ran, s_612fac62489f2122 went under_review ->
+    payout_pending -> completed, broadcast 55.44825689 GRC, and show_swap.py
+    reported
+
+        credited  (none) -- the deposit was never accepted
+        1.0 XRP  1 confirmation(s)  COUNTED by the gate  credited_at (not credited)
+
+    on a swap that had just paid out. deposit_service._credit_confirmed_deposit()
+    is the only thing that stamps those columns, and moving a swap straight to
+    payout_pending skips it.
+
+    RESOLVING A HALTED SWAP THIS WAY *IS* ACCEPTING THE DEPOSIT, which is what
+    makes the stamp correct rather than cosmetic: a person looked at a deposit
+    outside tolerance and decided to pay for it. The row should say it was
+    accepted, because it was -- by a person rather than by the gate.
+
+    THE STRANDING QUESTION WAS CHECKED RATHER THAN ASSUMED, and the answer is why
+    this is display-only: unattributable_deposit_service.unclaimed_events() takes
+    `credited` as the set of txids that HAVE a deposit_events row, not those with
+    credited_at set, so the missing stamp could not have made this deposit read as
+    stranded money.
+    """
+    db_path = seeded(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO deposit_events (swap_id, asset, txid, vout, address, amount, "
+                 "confirmations, first_seen_at, last_seen_at) "
+                 "VALUES ('s1','XRP','5FD710C2',1,'rDEP',?,1,?,?)", (SEEN, HALTED_AT, HALTED_AT))
+    conn.commit()
+    conn.close()
+
+    main(["--swap", "s1", "--resolution", SCALE_THE_LOCKED_QUOTE, "--db", str(db_path), "--apply"])
+
+    assert read(db_path, "SELECT credited_at FROM swaps WHERE id='s1'")["credited_at"], (
+        "a swap this tool handed to the payout worker must not report that its deposit was never "
+        "accepted"
+    )
+    assert read(db_path, "SELECT credited_at FROM deposit_events WHERE swap_id='s1'")["credited_at"]
+
+
+def test_APPLY_does_NOT_rewrite_the_payouts_own_basis(tmp_path):
+    """actual_input_amount is what payout_amount() scaled by, and it stays untouched.
+
+    _credit_confirmed_deposit() sets it from confirmed_total. Here it already holds
+    the counted figure the preview was computed from, and rewriting the payout's
+    own basis during a resolution is the one thing this tool must not do -- the
+    figure on the screen the operator authorized would stop matching what the
+    worker sends.
+    """
+    db_path = seeded(tmp_path)
+
+    main(["--swap", "s1", "--resolution", SCALE_THE_LOCKED_QUOTE, "--db", str(db_path), "--apply"])
+
+    swap = read(db_path, "SELECT * FROM swaps WHERE id='s1'")
+    assert swap["actual_input_amount"] == SEEN
+    assert swap["expected_input_amount"] == EXPECTED
+    assert swap["output_amount_estimate"] == LOCKED_PAYOUT, "the quote figure is history, not a draft"

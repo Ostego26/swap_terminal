@@ -165,7 +165,12 @@ from services.pair_view import allowed_pair_rows
 from services.payout_capacity import as_amount, largest_fundable_payout
 from services.pricing import fetch_usd_prices
 from services.quote_service import create_quote, get_network_fee_reserve, validate_pair
-from services.swap_service import TAG_ATTRIBUTED_ASSETS, create_swap, deposit_account
+from services.swap_service import (
+    TAG_ATTRIBUTED_ASSETS,
+    create_swap,
+    deposit_account,
+    payout_source_account,
+)
 from services.xrp_tag_service import XRPTagAllocationError
 from workers.common import build_adapters_from_config, db_path_source, get_config_dict
 
@@ -1019,6 +1024,29 @@ def payout_wallet_line(config, adapters, to_asset: str, amount: float) -> str:
     if ceiling < 0:
         # NOT ESTABLISHED is not zero, and must not render as one (rule 13). A
         # printed 0.0 would send an operator to fund a wallet that may be full.
+        #
+        # AND IT MUST NOT CLAIM A REFUSAL THAT WILL NOT HAPPEN. This line read
+        # "--apply will refuse rather than take a deposit against a wallet it could
+        # not verify" unconditionally, which was TRUE when it was written on
+        # 2026-10-03 and was made FALSE the same afternoon by the source_account
+        # change a few commits later: services/payout_capacity.
+        # why_the_payout_cannot_be_funded() now returns `unchecked` rather than
+        # refusing for a chain whose payouts are debited from a NAMED account, so
+        # --apply proceeds.
+        #
+        # Measured on the operator's screen minutes before they would have run it: a
+        # GRC -> XRP preview told them --apply would refuse, and --apply would have
+        # created the swap. A line that promises a gate the code does not have is
+        # worse than no line, because it is read as protection.
+        #
+        # SO THE TWO CASES ARE SPLIT, and the discriminator is the same
+        # payout_source_account() the gate itself uses -- not a second opinion about
+        # which chains are which (rule 8).
+        if payout_source_account(config, to_asset):
+            return labeled("payout wallet", f"NOT CHECKED  <- {how}. {to_asset} payouts are debited "
+                                            f"from a NAMED account this ceiling cannot read, so --apply "
+                                            f"does NOT refuse on it: the swap is created and the "
+                                            f"account's balance is first tested by the payout itself")
         return labeled("payout wallet", f"NOT ESTABLISHED  <- {how}. --apply will refuse rather than "
                                         f"take a deposit against a wallet it could not verify")
     return labeled("payout wallet", f"can fund a payout up to {as_amount(ceiling)} {to_asset}  <- {how}. --apply "

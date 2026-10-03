@@ -5,8 +5,9 @@ Role: file (operator entry point at the project root per CLAUDE.md rule 10; the
       decisions are the functions below and are callable with seeded inputs)
 Reads: swap_terminal.db (swaps, payouts, deposit_events, wallet_inventory) and,
       when a destination adapter is available, that chain's balance
-Writes: with --apply ONLY -- swaps.status, swaps.expected_input_amount, one
-      swap_audit_log row. Nothing else, in one transaction.
+Writes: with --apply ONLY -- swaps.status, swaps.failed_reason, swaps.credited_at,
+      deposit_events.credited_at for this swap, and one swap_audit_log row.
+      Nothing else, and all of it in one transaction.
 Can send orders: NO. It signs nothing and broadcasts nothing. It hands the swap
       to payout_worker, which does.
 Live-safe: the dry run is read-only. --apply moves a swap into payout_pending,
@@ -274,6 +275,44 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  REFUSED: the swap left {swap['status']!r} between the read and the write, so "
                   f"nothing was changed. Run the dry run again and look at its status.", flush=True)
             return 4
+        # credited_at IS STAMPED HERE, AND LEAVING IT OUT PRODUCED A PAID SWAP THAT
+        # SAID ITS DEPOSIT WAS NEVER ACCEPTED. Measured on the operator's host
+        # 2026-10-03, minutes after this tool first ran: s_612fac62489f2122 went
+        # under_review -> payout_pending -> completed, broadcast 55.44825689 GRC, and
+        # show_swap.py reported
+        #
+        #     credited  (none) -- the deposit was never accepted
+        #     1.0 XRP  1 confirmation(s)  COUNTED by the gate  credited_at (not credited)
+        #
+        # on a swap that had just paid out. services/deposit_service.
+        # _credit_confirmed_deposit() is the only thing that stamps those columns, and
+        # moving a swap straight to payout_pending skips it.
+        #
+        # RESOLVING A HALTED SWAP THIS WAY *IS* ACCEPTING THE DEPOSIT, which is what
+        # makes stamping it correct rather than cosmetic: the operator looked at a
+        # deposit outside tolerance and decided to pay for it. The row should say the
+        # deposit was accepted, because it was -- by a person rather than by the gate.
+        #
+        # actual_input_amount IS DELIBERATELY NOT TOUCHED. _credit_confirmed_deposit()
+        # sets it from confirmed_total; here it already holds the counted figure that
+        # payout_amount() scaled by, and rewriting the payout's own basis during a
+        # resolution is the one thing this tool must not do.
+        #
+        # THE STRANDING QUESTION WAS CHECKED, not assumed: unattributable_deposit_service.
+        # unclaimed_events() takes `credited` as the set of txids that HAVE a
+        # deposit_events row, not those with credited_at set, so the missing stamp
+        # could not have made this deposit read as stranded money. The defect was
+        # display only -- and a paid swap reporting "the deposit was never accepted" is
+        # rule 13's "'skipped' plus 'success' in one output" on the two lines an
+        # operator reads to decide whether a customer was served.
+        db.execute(
+            "UPDATE swaps SET credited_at = ? WHERE id = ? AND credited_at IS NULL",
+            (now, args.swap),
+        )
+        db.execute(
+            "UPDATE deposit_events SET credited_at = ? WHERE swap_id = ? AND credited_at IS NULL",
+            (now, args.swap),
+        )
         db.execute(
             # Column names read off db.py's schema, not recalled: the table is
             # (old_status, new_status, message), and a guess at (from_status,
@@ -284,8 +323,9 @@ def main(argv: list[str] | None = None) -> int:
              f"{SELF}: {args.resolution}. {reason}. Will pay {amount} {swap['to_asset']}.", now),
         )
         db.commit()
-        print(labeled("WROTE", f"status {swap['status']} -> payout_pending, audit row written. No "
-                               f"reservation existed to release"), flush=True)
+        print(labeled("WROTE", f"status {swap['status']} -> payout_pending, credited_at stamped on the "
+                               f"swap and its deposit row(s), audit row written. No reservation existed "
+                               f"to release"), flush=True)
         print(f"  next       payout_worker picks it up on its next cycle. Watch it:\n"
               f"               python3 show_swap.py --swap {args.swap}", flush=True)
     print(labeled("done in", format_duration(time.monotonic() - started)), flush=True)

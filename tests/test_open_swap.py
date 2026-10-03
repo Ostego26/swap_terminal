@@ -1408,3 +1408,53 @@ def test_the_network_fee_line_does_not_print_a_measured_reserve_in_exponent_form
 
     assert "0.0000282 GRC reserved" in text
     assert "2.82e-05" not in text
+
+
+def test_the_ceiling_line_does_not_promise_a_refusal_that_will_not_happen():
+    """It said "--apply will refuse" for XRP, and --apply proceeds. Measured 2026-10-03.
+
+    The sentence was TRUE when written and was made FALSE the same afternoon by the
+    source_account change a few commits later: services/payout_capacity.
+    why_the_payout_cannot_be_funded() returns `unchecked` rather than refusing for a
+    chain whose payouts are debited from a NAMED account, so create_swap() goes
+    ahead.
+
+    Caught on the operator's screen minutes before they would have run --apply on a
+    GRC -> XRP swap. A line that promises a gate the code does not have is worse
+    than no line, because it is read as protection.
+
+    THE DISCRIMINATOR IS payout_source_account(), the same function the gate uses,
+    rather than a second list of which chains are which (rule 8).
+    """
+    config = {**real_config(), "XRP_NETWORK_FEE_RESERVE": 0.00001}
+
+    line = open_swap.payout_wallet_line(config, {"XRP": XRPBalanceRefuser()}, "XRP", 1.0)
+
+    assert "NOT CHECKED" in line
+    assert "does NOT refuse" in line, "the line must say what --apply will actually do"
+    assert "will refuse rather than take a deposit" not in line
+
+
+class XRPBalanceRefuser:
+    """An adapter whose get_balance() refuses by design, as XRPAdapter's does.
+
+    Not a stub standing in for a broken daemon: chains/xrp.py raises here on
+    purpose, because that adapter holds no account of its own and XRP payouts are
+    debited from XRP_DEPOSIT_ACCOUNT.
+    """
+
+    def get_balance(self):
+        raise RuntimeError("get_balance() answers 'what is MY balance' and this adapter has no account")
+
+
+def test_a_daemon_wallet_chain_still_warns_that_apply_WILL_refuse():
+    """The other half, because for BTC, LTC and GRC the refusal is real.
+
+    Without this, the fix could have removed the refusal warning everywhere and the
+    test above would still pass -- losing a true warning to fix a false one.
+    """
+    line = open_swap.payout_wallet_line({**real_config(), "GRC_NETWORK_FEE_RESERVE": 0.001},
+                                        {"GRC": XRPBalanceRefuser()}, "GRC", 1.0)
+
+    assert "NOT ESTABLISHED" in line
+    assert "will refuse rather than take a deposit" in line
