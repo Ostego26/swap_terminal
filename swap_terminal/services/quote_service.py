@@ -445,7 +445,7 @@ def measured_or_configured_reserve(db, config, adapters, to_asset: str, payout_a
     if payout_amount <= 0:
         return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because a payout of "
                             f"{payout_amount!r} has no fee to measure")
-    address = own_address_on_chain(db, to_asset)
+    address = own_address_on_chain(db, to_asset, adapter)
     if not address:
         return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because this desk holds no "
                             f"{to_asset} address of its own to measure a send against -- no swap has "
@@ -458,19 +458,33 @@ def measured_or_configured_reserve(db, config, adapters, to_asset: str, payout_a
                  f"configured {to_asset}_NETWORK_FEE_RESERVE of {configured}")
 
 
-def own_address_on_chain(db, asset: str) -> str:
-    """One address on `asset` that this desk derived for itself, or "".
+def own_address_on_chain(db, asset: str, adapter=None) -> str:
+    """One address on `asset` that this desk owns, or "". THE WALLET IS ASKED FIRST.
 
-    READS swaps.deposit_address, which services/swap_service.deposit_account()
-    wrote by asking this wallet for a fresh address -- so every row is ours and on
-    the right chain. Newest first, because an older one may belong to a wallet the
-    operator has since repointed, and a stand-in for a fee measurement only has to
-    be a valid address of the right TYPE.
+    THE DATABASE ALONE WAS THE WRONG SOURCE, measured on the operator's host within
+    an hour of it shipping. It read swaps.deposit_address, which holds addresses for
+    chains used as a SOURCE -- and the reserve is needed for the DESTINATION chain.
+    A BTC -> LTC quote therefore fell back to the flat 0.001 constant, because no
+    swap had ever taken an LTC DEPOSIT: LTC has only ever been paid out to. A payout
+    chain that is only ever a destination is the NORMAL case, so the one source
+    picked had no row exactly when it was needed.
 
-    IT EXISTS SO THE QUOTE PATH DOES NOT CALL getnewaddress. That is a wallet
-    write -- it derives and stores a key -- and a priced quote that leaves a key
-    behind would put one in the wallet for every page refresh.
+    SO THE WALLET IS ASKED FIRST, through RPCAdapter.own_address(), which READS --
+    listreceivedbyaddress with include_empty, then getaddressesbylabel. Neither
+    derives anything, because getnewaddress is a wallet write and a priced quote
+    must not leave a key behind for every page refresh.
+
+    THE DATABASE IS KEPT AS THE FALLBACK rather than deleted. It needs no RPC and it
+    answers for a chain whose daemon exposes neither read; its rows are ours by
+    construction, since services/swap_service.deposit_account() asked this wallet
+    for each one. Newest first, because an older row may belong to a wallet the
+    operator has since repointed, and a stand-in only has to be a valid address of
+    the right TYPE.
     """
+    if adapter is not None and hasattr(adapter, "own_address"):
+        from_wallet = adapter.own_address()
+        if from_wallet:
+            return from_wallet
     row = db.execute(
         "SELECT deposit_address FROM swaps WHERE from_asset = ? AND deposit_address IS NOT NULL "
         "AND deposit_address != '' ORDER BY created_at DESC LIMIT 1",

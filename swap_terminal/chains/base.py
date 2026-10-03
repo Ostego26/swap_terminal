@@ -416,6 +416,47 @@ class RPCAdapter:
             logger.info("%s payout amount %s  <- %s", self.asset or "?", fitted, changed)
         return self.call("sendtoaddress", address, fitted)
 
+    def own_address(self) -> str:
+        """An address this WALLET already owns, read not derived. "" when none can be read.
+
+        FOR MEASURING A FEE AGAINST, and it exists because the first source tried
+        was wrong for the case that matters. services/quote_service.
+        own_address_on_chain() read swaps.deposit_address, which holds addresses for
+        chains used as a SOURCE -- and the reserve is needed for the DESTINATION
+        chain. Measured on the operator's host within the hour: a BTC -> LTC quote
+        fell back to the flat constant because no swap had ever taken an LTC
+        DEPOSIT, LTC having only ever been paid out to. A payout chain that is only
+        ever a destination is the normal case, so the one source I picked had no
+        row precisely when it was needed.
+
+        READS ONLY, AND THAT IS THE WHOLE CONSTRAINT. getnewaddress would answer in
+        one call and DERIVES a key, so a priced quote would leave one in the hot
+        wallet for every page refresh. listreceivedbyaddress with include_empty
+        lists addresses the wallet already has; getaddressesbylabel is the fallback
+        for a daemon that answers one and not the other. Neither creates anything.
+
+        ANY ADDRESS OF THE RIGHT TYPE WILL DO, which is why this does not care
+        which one comes back: a fee is the inputs selected plus the output's SIZE,
+        and a p2wpkh output is 31 bytes whoever owns it. The assumption and its
+        residual error are recorded at measured_or_configured_reserve().
+        """
+        try:
+            received = self.call("listreceivedbyaddress", 0, True) or []
+        except Exception:  # noqa: BLE001 -- checked: returns "" through the fallback below, and the caller renders a missing address as "the constant was used, because no address could be read". No failure here can produce a wrong fee, only an unmeasured one.
+            received = []
+        for entry in received:
+            address = (entry or {}).get("address") or ""
+            if address:
+                return str(address)
+        try:
+            labeled_addresses = self.call("getaddressesbylabel", "") or {}
+        except Exception:  # noqa: BLE001 -- checked: as above. Two reads are tried because daemons differ on which they expose, and neither existing is a legitimate answer.
+            return ""
+        for address in labeled_addresses:
+            if address:
+                return str(address)
+        return ""
+
     def measure_send_fee(self, address: str, amount: float) -> tuple[float | None, str]:
         """What THIS wallet would actually pay in fees to send `amount` now. (fee, how).
 

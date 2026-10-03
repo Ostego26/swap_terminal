@@ -28,6 +28,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
+from chains.base import RPCAdapter
 from db import SCHEMA, db_session, dict_factory
 from services import pricing
 from services.pricing import IDS
@@ -222,3 +223,85 @@ def test_a_quote_with_no_adapters_still_prices(config):
         quote = create_quote(db, config, "GRC", "BTC", 10000.0)
 
     assert quote["network_fee_reserve"] == CONFIGURED
+
+
+# --- where the stand-in address comes from, after the first source was wrong ---
+
+
+class WalletWithAddresses:
+    """An adapter whose wallet can be ASKED for an address it already owns."""
+
+    def __init__(self, received=None, labeled=None, fail=()):
+        self._received = received if received is not None else [{"address": BTC_REGTEST_DEPOSIT}]
+        self._labeled = labeled if labeled is not None else {}
+        self._fail = set(fail)
+        self.calls = []
+
+    def call(self, method, *params):
+        self.calls.append(method)
+        if method in self._fail:
+            raise RuntimeError(f"{method} not available")
+        if method == "listreceivedbyaddress":
+            return self._received
+        if method == "getaddressesbylabel":
+            return self._labeled
+        raise AssertionError(f"own_address asked for {method!r}, which this fixture does not stub")
+
+
+def test_the_wallet_is_asked_BEFORE_the_database(config):
+    """THE FIRST SOURCE WAS WRONG FOR THE CASE THAT MATTERS, measured within the hour.
+
+    own_address_on_chain() read swaps.deposit_address, which holds addresses for
+    chains used as a SOURCE -- and the reserve is needed for the DESTINATION chain.
+    A BTC -> LTC quote fell back to the flat 0.001 constant on the operator's host
+    because no swap had ever taken an LTC DEPOSIT: LTC has only ever been paid out
+    to. A payout chain that is only ever a destination is the NORMAL case.
+    """
+    adapter = WalletWithAddresses()
+    adapter.own_address = RPCAdapter.own_address.__get__(adapter)
+
+    with db_session(config["DB_PATH"]) as db:
+        # NO SWAP ROW AT ALL, which is the state that produced the defect: the
+        # database half cannot answer for a chain never used as a source.
+        address = own_address_on_chain(db, "LTC", adapter)
+
+    assert address == BTC_REGTEST_DEPOSIT
+    assert "listreceivedbyaddress" in adapter.calls, "the wallet has to be asked, not just available"
+
+
+def test_getaddressesbylabel_is_the_fallback_when_the_first_read_is_absent(config):
+    """Daemons differ on which read they expose, so both are tried.
+
+    Neither creates anything -- that is the constraint. getnewaddress would answer
+    in one call and DERIVES a key, which a priced quote must never do.
+    """
+    adapter = WalletWithAddresses(fail={"listreceivedbyaddress"},
+                                  labeled={BTC_REGTEST_DEPOSIT: {"purpose": "receive"}})
+    adapter.own_address = RPCAdapter.own_address.__get__(adapter)
+
+    assert adapter.own_address() == BTC_REGTEST_DEPOSIT
+    assert adapter.calls == ["listreceivedbyaddress", "getaddressesbylabel"]
+
+
+def test_a_wallet_that_can_answer_neither_read_yields_no_address(config):
+    """And the caller then uses the constant and says why. Never a derived key."""
+    adapter = WalletWithAddresses(fail={"listreceivedbyaddress", "getaddressesbylabel"})
+    adapter.own_address = RPCAdapter.own_address.__get__(adapter)
+
+    assert adapter.own_address() == ""
+    assert "getnewaddress" not in adapter.calls, "the quote path must never derive an address"
+
+
+def test_the_database_still_answers_for_a_wallet_that_cannot(config):
+    """The fallback is KEPT rather than deleted: it needs no RPC.
+
+    Its rows are ours by construction -- deposit_account() asked this wallet for
+    each one -- so a chain whose daemon exposes neither read is still measured when
+    a past deposit gives it an address.
+    """
+    _seed_own_address(config, "BTC", BTC_REGTEST_DEPOSIT)
+    adapter = WalletWithAddresses(fail={"listreceivedbyaddress", "getaddressesbylabel"})
+    adapter.own_address = RPCAdapter.own_address.__get__(adapter)
+
+    with db_session(config["DB_PATH"]) as db:
+        assert own_address_on_chain(db, "BTC", adapter) == BTC_REGTEST_DEPOSIT
