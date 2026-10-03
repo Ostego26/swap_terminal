@@ -68,6 +68,19 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from chains.coin_amounts import fit_to_chain_precision
+
+# SUSPECT_VOUT is the vout a fabricated deposit event is stamped with, and it
+# is imported rather than written as a `0` literal here because the two have to
+# agree for the migration to be able to FIND the rows this file writes:
+# deposit_vout_artifact.multi_vout_groups() and migrate_deposit_vouts.py both
+# select on it as the artifact's signature. Two copies of one constant is rule
+# 8's bug with a delay on it, and the delay here would be measured in rows
+# nobody could clean up. The module is safe to import from this money path and
+# that was checked rather than assumed: deposit_vout_artifact.py has NO imports
+# at all, opens no database, reads no environment and defines only constants
+# and pure functions, so there is no import-time side effect of the kind rule 12
+# names.
+from deposit_vout_artifact import SUSPECT_VOUT
 from script_pub_key import pays_address
 
 logger = logging.getLogger(__name__)
@@ -87,6 +100,143 @@ class RPCError(Exception):
 # so anything smaller than this is float noise rather than a difference in
 # money.
 SATOSHI = 1e-8
+
+# A fabricated event is emitted only at or above this many confirmations. One,
+# not the swap's min_confirmations: this module does not know which swap the
+# transaction belongs to and must not learn, because min_confirmations is
+# copied onto each swap row at creation and services/deposit_service.py reads
+# it from there (the comparison is `int(row["confirmations"]) >=
+# int(swap["min_confirmations"])`). A second copy of that threshold down here
+# would be rule 8's duplicate on the one line that releases a payout. What this
+# constant encodes is weaker and chain-wide: a transaction with ZERO
+# confirmations cannot satisfy any positive min_confirmations, whatever it is,
+# so a zero-confirmation event can never contribute to confirmed_total.
+MIN_FABRICATED_CONFIRMATIONS = 1
+
+
+def fabricated_deposit_events(
+    *, asset: str, txid: str, address: str, amount: float, confirmations: int
+) -> list[dict]:
+    """The fabricated deposit event, or NOTHING when the transaction has no confirmations.
+
+    Keyword-only on purpose: `txid`, `address` and `amount` are three values a
+    positional call can transpose without the type system noticing, and a
+    transposed address on this path writes a deposit row against the wrong
+    string.
+
+    =========================================================================
+    WHAT FABRICATION MEANS HERE
+    =========================================================================
+
+    _extract_matching_vouts() calls this at its two fallback sites -- the
+    getrawtransaction decode raising, and the decode succeeding but matching no
+    output. Neither has read a real output, so the event it would return is
+    built from what the caller already believed: SUSPECT_VOUT (0) for the
+    output index, the amount `listtransactions` summarized, and a confirmation
+    count from a separate RPC. services/deposit_service.py cannot tell that
+    apart from a real event, which is rule 12's BLE001 in its expensive form
+    and is written up at length in deposit_vout_artifact.py.
+
+    =========================================================================
+    THE DEFECT THAT PUT THE GUARD HERE -- MEASURED TWICE, 2026-10-03
+    =========================================================================
+
+    One BTC deposit of ONE transaction produced TWO rows in deposit_events.
+    Reproduced on two separate swaps, `s_6cd1a920cbe5739e` and
+    `s_02623852c1ea42cc`. For txid
+
+        fd898cfb8b5b8fa026f21ce30afc7f234126fe965a27c1330c8d6969a228eaf2
+
+    the operator's screen showed both of these rows, for the one payment:
+
+        0.001 BTC  0 confirmation(s)  NOT counted -- below min_confirmations=2  vout 1
+        0.001 BTC  2 confirmation(s)  COUNTED by the gate                       vout 0
+
+    `bitcoin-cli gettransaction <txid> true` settled what the transaction
+    actually contains: ONE payment, of 0.001, whose real output is at **vout
+    1**. So the row the credit arithmetic actually used records a vout the
+    transaction does not have.
+
+    upsert_deposit_event() keys on (asset, txid, vout), so a vout=0 row and a
+    vout=1 row are two different keys and both persist. refresh_swap_from_chain()
+    then sums every row for the swap, which is the double count
+    deposit_vout_artifact.py describes.
+
+    WHICH BRANCH WROTE WHICH ROW IS NOT ESTABLISHABLE, and that was checked
+    rather than assumed (rule 17). The real matching branch reads
+    `int(vout.get("n", 0))`, so it can legitimately emit 0 as well -- a stored
+    row carries no record of the branch that wrote it, and nothing in this
+    comment should be read as a claim about that.
+
+    =========================================================================
+    WHY REFUSING AT ZERO CONFIRMATIONS COSTS NOTHING
+    =========================================================================
+
+    The credit sums only rows at or above the swap's own min_confirmations, and
+    min_confirmations is positive on every chain this terminal serves. A
+    zero-confirmation row therefore cannot contribute to confirmed_total and
+    cannot release a payout -- it can only sit in the table, under a key the
+    real output's row will never reuse. Emitting nothing while the decode is
+    failing forfeits no credit at all.
+
+    WHAT THIS DOES AND DOES NOT CLOSE, stated precisely because the narrower
+    claim is the true one. A fabricated event can reach the table at any
+    confirmation count, and this removes exactly one route: the insert made
+    while the transaction is unconfirmed. It does NOT make a second row
+    impossible -- a poll that fabricates at two confirmations still writes
+    vout=SUSPECT_VOUT beside a real vout=N row, and closing that would mean
+    refusing a transaction that credits today, which is the operator's call and
+    is why the fabricated branch survives at all. Nothing here should be read as
+    a claim that the 2026-10-03 rows above were written by the route this
+    refuses: which branch wrote which row is not establishable (see above), and
+    the authorized change is this one rather than the one that would have had to
+    know.
+
+    A negative count is suppressed by the same comparison and that is
+    deliberate: Bitcoin Core reports `confirmations: -1` for a transaction
+    conflicted by a block, which is further from creditable than zero is.
+
+    WHAT IS DELIBERATELY NOT CHANGED. Where this fires for a transaction that
+    DOES have confirmations, the fabricated event is still returned, exactly as
+    before. Refusing there would stall deposits that credit today, which
+    _extract_matching_vouts()'s own comment has said since 2026-09-25 is a fund
+    decision and the operator's (rule 16). This function narrows the fabricated
+    branch to the cases where it can still do damage; it does not remove it.
+
+    WHAT CHANGES ON SCREEN, since it is not nothing. A deposit whose decode
+    fails while it is still unconfirmed no longer produces a deposit_events
+    row, so the swap stays in `awaiting_deposit` instead of moving to
+    `deposit_seen` -- advance_deposit_status() turns on `sums.has_rows`. That is
+    a visibility difference on an uncreditable deposit, and it resolves on the
+    next poll that either decodes the transaction or sees a confirmation. The
+    suppression logs rather than passing silently (rule 14), because the
+    original defect went unnoticed for precisely as long as nothing said
+    anything.
+    """
+    if int(confirmations) < MIN_FABRICATED_CONFIRMATIONS:
+        logger.warning(
+            "%s deposit %s to %s: raw outputs could not be matched and the transaction has "
+            "%s confirmation(s), so NO deposit event was emitted for %s %s  <- a "
+            "zero-confirmation event cannot reach any min_confirmations, and emitting one at "
+            "vout=%s would collide with the real output once the decode works (measured "
+            "2026-10-03, swaps s_6cd1a920cbe5739e and s_02623852c1ea42cc)",
+            asset or "?", txid, address, int(confirmations), amount, asset or "?", SUSPECT_VOUT,
+        )
+        return []
+    logger.warning(
+        "%s deposit %s to %s: raw outputs could not be matched, so this event is FABRICATED "
+        "from the wallet summary -- amount=%s vout=%s confirmations=%s  <- vout=%s is invented, "
+        "not read from the transaction; the amount is listtransactions' figure rather than an "
+        "output's value",
+        asset or "?", txid, address, amount, SUSPECT_VOUT, int(confirmations), SUSPECT_VOUT,
+    )
+    return [{
+        "txid": txid,
+        "vout": SUSPECT_VOUT,
+        "address": address,
+        "amount": float(amount),
+        "confirmations": int(confirmations),
+    }]
 
 
 def rpc_error_from_body(response) -> str | None:
@@ -535,22 +685,53 @@ class RPCAdapter:
         return self.call("getrawtransaction", txid, True)
 
     def _extract_matching_vouts(self, txid: str, address: str, amount: float):
-        # PROPOSAL MARKER, NOT AN ENDORSEMENT. The handler below FABRICATES a
-        # deposit event -- vout 0, the amount the caller already believed, and
-        # a confirmation count from a second RPC -- and returns it in the same
+        # STILL A PROPOSAL MARKER, AND HALF OF IT HAS NOW BEEN ACTED ON. Both
+        # fallbacks in this method -- the decode raising, here, and the decode
+        # succeeding while matching no output, at the bottom -- FABRICATE a
+        # deposit event: vout SUSPECT_VOUT, the amount the caller already
+        # believed, and a confirmation count from a second RPC, in the same
         # shape as a real one. services/deposit_service.py cannot tell the two
         # apart, so a transaction this adapter failed to decode is credited
-        # from the wallet's summary rather than from its outputs.
+        # from the wallet's summary rather than from its outputs. That is rule
+        # 12's BLE001 in its expensive form.
         #
-        # That is rule 12's BLE001 in its expensive form and it is NOT fixed
-        # here, because this value feeds the confirmation comparison that
-        # releases a payout: making it raise would stall swaps that credit
-        # today. Which of the two failure modes the operator wants is a fund
-        # decision (rule 16).
+        # WHAT IS NOW REFUSED: a fabricated event for a transaction with no
+        # confirmations. It could never be credited -- the gate sums only rows
+        # at or above the swap's min_confirmations -- so it could only ever sit
+        # in deposit_events under a key the real output's row will never reuse.
+        # That is one of the routes to the TWO ROWS FOR ONE PAYMENT measured on
+        # the operator's host on 2026-10-03, on swaps s_6cd1a920cbe5739e and
+        # s_02623852c1ea42cc; it is NOT established to be the route those rows
+        # took, and it is not the only one. The measurement, the txid, and why
+        # the branch that wrote each row is not establishable are recorded in
+        # full at fabricated_deposit_events().
+        #
+        # WHAT IS STILL NOT FIXED, and it is unchanged on purpose: a fabricated
+        # event for a transaction that DOES have confirmations is still
+        # returned and still credited from the wallet's summary. Making that
+        # raise would stall swaps that credit today, and which of the two
+        # failure modes the operator wants is a fund decision (rule 16).
+        #
+        # Both sites go through the one function so the refusal cannot drift
+        # between them (rule 8); the earlier shape wrote the event dict out
+        # twice, twenty lines apart.
         try:
             raw = self._raw_tx_for_vouts(txid)
-        except Exception:  # noqa: BLE001 -- checked: see the proposal marker above. The caller CANNOT distinguish this synthetic event from a real one, which is exactly why it is being handed over rather than patched.
-            return [{"txid": txid, "vout": 0, "address": address, "amount": float(amount), "confirmations": self.get_confirmations(txid)}]
+        except Exception:  # noqa: BLE001 -- checked: see the proposal marker above. Above min_confirmations the caller still CANNOT distinguish this synthetic event from a real one, which is why that half is handed over rather than patched; below it, nothing is returned at all.
+            return fabricated_deposit_events(
+                asset=self.asset,
+                txid=txid,
+                address=address,
+                amount=amount,
+                # A SECOND ROUND TRIP, and it is the reason this branch can
+                # report a different count from the one the matching branch
+                # below reads: `gettransaction` answers from the wallet, and
+                # this is the only confirmation figure available when the raw
+                # decode is what just failed. Not wrapped -- if it raises, the
+                # exception reaches the worker rather than becoming a zero that
+                # reads as a real unconfirmed deposit.
+                confirmations=self.get_confirmations(txid),
+            )
         matches = []
         confirmations = int(raw.get("confirmations", 0))
         for vout in raw.get("vout", []):
@@ -600,7 +781,24 @@ class RPCAdapter:
                 })
         if matches:
             return matches
-        return [{"txid": txid, "vout": 0, "address": address, "amount": float(amount), "confirmations": confirmations}]
+        # The decode SUCCEEDED and matched nothing: every output either pays
+        # somebody else, names no address at all (a bare multisig, an
+        # OP_RETURN), or carries a value further than one satoshi from the
+        # amount `listtransactions` reported. That is the same "no real output
+        # was read" state as the except branch above, reached without an
+        # exception and without a `noqa` to mark it -- which is how the
+        # `scriptPubKey.addresses` defect stayed invisible until 2026-09-25 --
+        # so it fabricates through the same function and is refused on the same
+        # zero-confirmation condition.
+        return fabricated_deposit_events(
+            asset=self.asset,
+            txid=txid,
+            address=address,
+            amount=amount,
+            # The decoded transaction's own count, not a second RPC: it is
+            # already in hand here, and asking again could answer differently.
+            confirmations=confirmations,
+        )
 
     def find_deposits_to_address(self, address: str, tx_limit: int = 500, skip_txids=frozenset()):
         """Credits to one address, as deposit events. ONE `listtransactions` call.

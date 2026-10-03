@@ -46,6 +46,14 @@ THE FOUR THINGS RULE 13 ASKS FOR, AND WHERE EACH ONE IS.
     returns the absence as the result; if the process is still there after
     SIGTERM, the grace period and SIGKILL, it returns "failed" and the CLI
     exits non-zero. The absence is the assertion.
+  Verify the artifact, not the deploy.   `status` reads each running worker's
+    START TIME out of /proc and compares it against the newest .py file in the
+    tree, so a worker running code that has since been edited is named as
+    *** STALE CODE *** rather than as `running`. Four failures on 2026-10-03 were
+    a fix that was on disk and not in the process; the measurements and the
+    definition of "the code on disk" are above code_freshness(). It REPORTS and
+    never restarts: CURRENT is returned only when established, and
+    NOT ESTABLISHED is a verdict rather than a gap.
   "Skipped" must not look like "did work".   start on an already-running worker
     returns "already-running", prints it in its own marked line, and the
     summary counts it separately from "started". A run that spawned nothing and
@@ -332,19 +340,58 @@ def _is_zombie(pid: int) -> bool:
     transaction, so for every question this file asks -- may I start another
     one, is it gone yet -- a zombie is NOT alive.
 
-    /proc/<pid>/stat's third field is the state, but the second field is the
-    executable name in parentheses and may itself contain spaces and
-    parentheses, so the state is read after the LAST ')' rather than by
-    splitting on whitespace.
+    /proc/<pid>/stat's third field is the state, and _proc_stat_fields() is the
+    one reader of that file -- see it for why the parse starts after the LAST
+    ')' and not at a whitespace split.
+    """
+    fields = _proc_stat_fields(pid)
+    return bool(fields) and fields[0] == "Z"
+
+
+#: Index, within _proc_stat_fields()' output, of /proc/<pid>/stat field 22
+#: `starttime` -- the process's start time in clock ticks since boot. The output
+#: begins at field 3 (`state`), so field 22 is index 19. Named rather than
+#: written as a bare 19 for the same reason WORKER_ARGV_LENGTH is (ruff PLR2004),
+#: and because "22 minus the two fields the parse drops" is the only thing that
+#: explains the number.
+PROC_STAT_STARTTIME_INDEX = 19
+
+
+def _proc_stat_fields(pid: int) -> list[str]:
+    """/proc/<pid>/stat from field 3 onward, or [] if it cannot be read.
+
+    ONE READER OF ONE FILE (rule 8). _is_zombie() has read this file since
+    2026-09-24 for the state, and process_start_time() now reads it for the start
+    time. Two copies of "open /proc/<pid>/stat, find the last ')', split" would be
+    two copies of the parse below, and the parse is the part that is easy to get
+    wrong -- which is the whole argument rule 8 makes.
+
+    WHY THE PARSE IS NOT A WHITESPACE SPLIT. Field 2 is the executable name in
+    parentheses and may itself contain spaces and parentheses: a process named
+    `(my cat)` produces `1946 ((my cat)) R 1943 ...`, and splitting on whitespace
+    puts the state at a different index for every such process. Splitting after the
+    LAST ')' is the documented way to read this file, and it is correct for every
+    name because the kernel writes the name's own parentheses inside the pair it
+    adds.
+
+    [] means "could not look", never "nothing there". Every caller distinguishes
+    the two, because this file's recurring defect is an absence of evidence
+    reported as evidence of absence.
+
+    PROC_DIR rather than a hardcoded "/proc" so a test can take /proc away and see
+    what the callers then say. The old spelling here was literal, and PROC_DIR's
+    own comment records that the no-/proc branch SURVIVED mutation for exactly
+    that reason -- an untestable branch is one nobody has checked (rule 17).
     """
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-    except (FileNotFoundError, PermissionError, OSError):
-        # No /proc, or not readable: we cannot tell, so do not claim it is dead.
-        return False
+        stat = (PROC_DIR / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # No /proc, process gone between the listdir and the read, or not readable.
+        # OSError covers FileNotFoundError and PermissionError, both of which are
+        # subclasses; naming them separately read as three cases and was one.
+        return []
     _, _, remainder = stat.rpartition(")")
-    fields = remainder.split()
-    return bool(fields) and fields[0] == "Z"
+    return remainder.split()
 
 
 def process_alive(pid: int) -> bool:
@@ -815,6 +862,346 @@ def _wait_for_absence(pid: int, timeout_seconds: float) -> bool:
     return not process_alive(pid)
 
 
+# ---------------------------------------------------------------------------
+# DOES A RUNNING WORKER PREDATE THE CODE ON DISK? (rule 13's last clause)
+#
+# "When a deploy depends on new code actually running, verify the artifact, not
+# the deploy."
+#
+# MEASURED ON THE OPERATOR'S HOST 2026-10-03. Four failures in one day, and every
+# one of them was a fix that was in the working tree and NOT in the running
+# process, because the operator had pulled code without restarting a worker.
+# Every one impersonated a code defect, which is what made them expensive:
+#
+#   1. A SOL payout refused with "this adapter cannot sign or broadcast a Solana
+#      transfer, and holds no key that could". That string no longer exists
+#      anywhere in the tree -- the signing path had landed. The worker had been
+#      started before it did, so it was quoting a file that had been edited under
+#      it. The first hour went into looking for the string.
+#   2. Two workers crashed every cycle with `KeyError: 'BTC'`, from a process
+#      whose environment predated the BTC credentials being exported. The code on
+#      disk was correct and would have worked; the running process could not see
+#      the variables because a process's environment is fixed at exec.
+#   3. An LTC payout failed with "Invalid amount (rpc code -3)" from a worker
+#      started before the amount-precision fix. The operator's deposit was
+#      already confirmed and IRREVERSIBLE when it failed. This is the one that
+#      cost money rather than time.
+#   4. A quote booked a flat fee reserve instead of a measured one, from a worker
+#      started before that change.
+#
+# In all four the operator's next question was "did my fix deploy?", and nothing
+# on screen answered it. `start` says NOT RELOADED when it skips a worker, which
+# helps only in the moment; an hour later `status` printed `running pid=2065613`
+# and that line reads identically for a worker started two minutes ago and one
+# started before three merges.
+#
+# WHAT "THE CODE ON DISK" MEANS HERE, and why this definition and not another.
+#
+# It is the NEWEST mtime among the .py files under this package directory --
+# swap_terminal/ -- which is the tree every worker imports from (`from config
+# import Config`, `from workers.common import ...`, `from chains.registry import
+# ...`; all of it is here, because sys.path.insert at the top of this file and of
+# each worker puts exactly this directory on the path).
+#
+# `git rev-parse HEAD` was the obvious alternative and is wrong for the case that
+# actually happened: three of the four failures above were fixes being edited and
+# tested in the working tree, not commits. HEAD is unchanged by an edit, so a HEAD
+# comparison would have said "up to date" in exactly the situation this exists to
+# catch -- and the brief says to make a false CURRENT impossible, so a definition
+# that cannot see a dirty tree is disqualified before any other argument.
+#
+# THE FAILURE MODES OF mtime, stated rather than discovered later:
+#
+#   `touch` with no edit reports STALE.  So does a checkout that rewrites a file
+#       to the same bytes, and so does any tool that rewrites the tree (git
+#       checkout sets mtime to checkout time regardless of content). This
+#       direction is the safe one: it says "restart to be sure" about a worker
+#       that may be fine, and it never says "fine" about a worker that is not.
+#   A copied or extracted tree can carry OLDER mtimes than reality.  `cp -p`,
+#       `tar -x` and `rsync --times` preserve the source's times, so a worker
+#       started after such a deploy is reported CURRENT while running code that
+#       is in fact older than what was deployed. This is the one hole in the
+#       direction that matters, it cannot be closed from mtime alone, and it is
+#       the reason the printed line names the file and its time rather than only
+#       printing a verdict: the operator can see at a glance if the newest file
+#       in the tree is implausibly old.
+#   It cannot see case 2 at all.  A worker's ENVIRONMENT is fixed at exec, and no
+#       file changes when the operator exports a credential. CURRENT here means
+#       "no .py file is newer than this process", not "this process has
+#       everything it needs". /proc/<pid>/environ WOULD answer it and is
+#       deliberately never read: it holds the wallet passphrase, and a status
+#       command that prints -- or even opens -- a secret is a worse defect than
+#       the one it would be diagnosing.
+#   Imports from OUTSIDE this directory are not scanned.  Site-packages, the
+#       interpreter itself, and anything a worker shells out to. A dependency
+#       upgrade is invisible here.
+#
+# NOTHING HERE SIGNALS, RESTARTS OR REFUSES ANYTHING. It is a sentence on a status
+# screen. What to do about a stale worker is the operator's: restarting a payout
+# worker is a live-posture action (rule 16), and a supervisor that restarted
+# workers on its own reading of a file mtime would be deciding when money moves
+# on the strength of a timestamp.
+# ---------------------------------------------------------------------------
+
+#: How close two timestamps may be before this refuses to rank them.
+#:
+#: The process start time is derived from /proc/stat's `btime`, which is a WHOLE
+#: NUMBER OF SECONDS, plus a tick count; the file mtime is a float from a
+#: different clock. So a difference of a few hundred milliseconds is inside the
+#: measurement error of the comparison, not a fact about the code.
+#:
+#: Within this window the verdict is NOT ESTABLISHED rather than either answer.
+#: That is not symmetric caution for its own sake -- reporting CURRENT there is
+#: the forbidden direction, and reporting STALE there would cry wolf on the most
+#: ordinary sequence there is (pull, then immediately start), which is how a
+#: warning line stops being read.
+CODE_FRESHNESS_RESOLUTION_SECONDS = 2.0
+
+
+def boot_time() -> float | None:
+    """Epoch seconds at which this kernel booted, from /proc/stat's `btime`.
+
+    Needed because /proc/<pid>/stat's `starttime` is measured in clock ticks
+    SINCE BOOT, and a wall-clock comparison against a file mtime needs an origin.
+
+    None means "could not look": no /proc, no btime line, or a btime that is not
+    a number. Every caller turns that into NOT ESTABLISHED rather than into a
+    verdict, because an unknown origin makes the subtraction meaningless rather
+    than merely imprecise.
+
+    btime has one-second granularity, which is where
+    CODE_FRESHNESS_RESOLUTION_SECONDS comes from.
+    """
+    try:
+        raw = (PROC_DIR / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        if line.startswith("btime "):
+            try:
+                return float(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def process_start_time(pid: int) -> float | None:
+    """Epoch seconds at which this pid started, or None if it cannot be read.
+
+    THE EVIDENCE THE STALENESS VERDICT IS BUILT ON, and it has to come from the
+    kernel rather than from anything this supervisor recorded. A timestamp written
+    into the pid file would be a claim by whoever wrote the file: it would be
+    absent for a worker started before this feature existed, wrong for a pid file
+    edited or copied, and -- worst -- it would still be there, confidently, for a
+    worker that died and whose pid was recycled. Rule 13's shape: make the
+    evidence the thing itself.
+
+    starttime is field 22 of /proc/<pid>/stat, in clock ticks since boot;
+    SC_CLK_TCK converts, and boot_time() supplies the origin.
+
+    None means could not look -- no /proc, the process gone, a short stat line, a
+    non-numeric field, or no btime. It never means "started at the epoch", which
+    is what returning 0.0 would have meant and would have made every worker look
+    infinitely stale.
+    """
+    boot = boot_time()
+    if boot is None:
+        return None
+    fields = _proc_stat_fields(pid)
+    if len(fields) <= PROC_STAT_STARTTIME_INDEX:
+        return None
+    try:
+        ticks = float(fields[PROC_STAT_STARTTIME_INDEX])
+    except ValueError:
+        return None
+    try:
+        hertz = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError):
+        return None
+    if not hertz or hertz <= 0:
+        return None
+    return boot + ticks / hertz
+
+
+def newest_code_file(root: Path = BASE_DIR) -> tuple[str, float] | None:
+    """The most recently modified .py file under `root`, as (path, mtime).
+
+    None means no .py file was found or none could be stat'd -- which is itself a
+    reason to say NOT ESTABLISHED rather than to assume a fresh tree. An empty
+    directory and an unreadable one must not render as "nothing has changed".
+
+    __pycache__ is skipped: a .pyc is not source, and its mtime moves when a
+    worker merely IMPORTS the tree, so including it would report every worker as
+    stale moments after it started -- a verdict generated by the act of observing.
+    runtime/ is skipped because it holds this supervisor's own pid files and logs,
+    which are not code, and swap_terminal.db lives beside them.
+    """
+    newest: tuple[str, float] | None = None
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts or "runtime" in path.parts:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            # A file that vanished mid-walk, or one we may not stat. Skipping it
+            # can only make the newest time OLDER, which biases toward CURRENT --
+            # the forbidden direction. It is accepted rather than counted because
+            # the alternative readings are worse: returning None over one
+            # unreadable file would make the whole verdict NOT ESTABLISHED from a
+            # single stray permission, and this walk is of a directory the operator
+            # owns. If it ever starts happening, the printed `newest` path and its
+            # time are what shows it -- which is why they are on the line.
+            continue
+        if newest is None or mtime > newest[1]:
+            newest = (str(path), mtime)
+    return newest
+
+
+#: The three verdicts code_freshness() can return. Strings rather than an enum
+#: because they are printed verbatim and asserted on verbatim; a second spelling
+#: of one of them in a test would be rule 8 at its smallest.
+CODE_CURRENT = "CURRENT"
+CODE_STALE = "STALE"
+CODE_NOT_ESTABLISHED = "NOT ESTABLISHED"
+
+
+def code_freshness(
+    process_started_at: float | None,
+    code_modified_at: float | None,
+    newest_path: str = "",
+    resolution_seconds: float = CODE_FRESHNESS_RESOLUTION_SECONDS,
+) -> dict:
+    """Does a process that started at `process_started_at` predate the code on disk?
+
+    THE DECISION, and it is a function of two numbers so that it can be called
+    with seeded inputs (rule 10). Nothing here reads /proc, stats a file, or
+    prints: every test of every verdict below -- including the ones that are hard
+    to arrange in reality, like a clock that disagrees with itself -- is two floats
+    and an assert, with no process spawned and no file touched.
+
+    Returns {"verdict", "reason", "newest_path", "code_modified_at",
+    "process_started_at", "delta_seconds"}. `delta_seconds` is start minus
+    modification: POSITIVE means the process started after the code last changed.
+
+    THE ONE ASYMMETRY THAT MATTERS: CURRENT is returned only when it is
+    established. Either timestamp missing is NOT ESTABLISHED, and so is a
+    difference inside `resolution_seconds`. There is no path through this function
+    that answers CURRENT from an absence of evidence, which is the property the
+    four 2026-10-03 failures ask for -- a status that says "up to date" because it
+    could not tell is worse than one that says nothing, since it ends the
+    investigation.
+    """
+    result = {
+        "verdict": CODE_NOT_ESTABLISHED,
+        "reason": "",
+        "newest_path": newest_path,
+        "code_modified_at": code_modified_at,
+        "process_started_at": process_started_at,
+        "delta_seconds": None,
+    }
+    if process_started_at is None:
+        result["reason"] = (
+            "the process start time could not be read from /proc, so how old this process is "
+            "relative to the code is NOT KNOWN here"
+        )
+        return result
+    if code_modified_at is None:
+        result["reason"] = (
+            "no .py file under the package directory could be stat'd, so there is nothing to "
+            "compare the process against"
+        )
+        return result
+
+    delta = process_started_at - code_modified_at
+    result["delta_seconds"] = delta
+    if delta <= -resolution_seconds:
+        result["verdict"] = CODE_STALE
+        result["reason"] = (
+            f"this process started {format_duration(-delta)} BEFORE the newest .py file was "
+            f"modified, so it is running code that has since been edited"
+        )
+        return result
+    if delta >= resolution_seconds:
+        result["verdict"] = CODE_CURRENT
+        result["reason"] = (
+            f"this process started {format_duration(delta)} after the newest .py file was "
+            f"modified"
+        )
+        return result
+    result["reason"] = (
+        f"the process start time and the newest .py file are within "
+        f"{format_duration(resolution_seconds)} of each other, which is inside the measurement "
+        f"error of this comparison (/proc/stat btime has one-second granularity), so NEITHER "
+        f"answer is established"
+    )
+    return result
+
+
+def worker_code_freshness(pid: int, root: Path = BASE_DIR) -> dict:
+    """code_freshness() wired to the live kernel and the live tree.
+
+    The gathering half, kept out of the deciding half on purpose: this is the part
+    that cannot be seeded, and it contains no logic -- two reads and a call.
+    """
+    newest = newest_code_file(root)
+    return code_freshness(
+        process_start_time(pid),
+        newest[1] if newest else None,
+        newest[0] if newest else "",
+    )
+
+
+def code_freshness_lines(state: str, pid: int | None, freshness: dict | None = None) -> list[str]:
+    """The status block's lines about whether a RUNNING worker predates the code.
+
+    Takes the verdict dict rather than computing it, so the rendering is testable
+    against a seeded verdict and the gathering is not dragged into those tests.
+    When `freshness` is None it is gathered for `pid`, which is what the CLI does.
+
+    ONLY FOR A PROCESS THAT EXISTS. For a `stopped` worker there is no process to
+    be out of date, and printing a verdict about one would be a sentence with no
+    subject. `unknown` (the pid belongs to something else now) is also skipped:
+    the start time read there would be the start time of a stranger, and ranking a
+    stranger against our source tree would produce a confident number about
+    nothing. Both cases say which, because a silent omission reads as "no problem
+    found" (rule 14).
+    """
+    if state == "stopped" or pid is None:
+        return ["                    code (no running process to compare against the code on disk)"]
+    if state != "running":
+        return [
+            "                    code NOT ESTABLISHED -- this pid is no longer the worker we started "
+            "(see above), so its start time says nothing about our code"
+        ]
+    if freshness is None:
+        freshness = worker_code_freshness(pid)
+
+    verdict = freshness["verdict"]
+    newest = freshness.get("newest_path") or "(no .py file)"
+    # EACH LINE SAYS WHAT WAS READ AND WHAT THE NUMBER MEANS (rule 14), because the
+    # operator reads the screen and not this file. The STALE line is the one that
+    # had to carry a remedy: on 2026-10-03 the question was always "did my fix
+    # deploy?", and a verdict without the next action sends them back here to ask.
+    if verdict == CODE_STALE:
+        return [
+            f"  *** STALE CODE ***  this worker is RUNNING CODE OLDER THAN THE TREE. {freshness['reason']}",
+            f"                    newest {newest}",
+            "                    fix  `stop` then `start` -- `start` alone will NOT reload it. A "
+            "worker keeps whatever it imported at exec",
+        ]
+    if verdict == CODE_CURRENT:
+        return [
+            f"                    code CURRENT -- {freshness['reason']}",
+            f"                    newest {newest}  <- compared by mtime; a `touch` or a re-checkout "
+            "moves it, and an exported credential does NOT (the environment is fixed at exec)",
+        ]
+    return [
+        f"                    code NOT ESTABLISHED -- {freshness['reason']}",
+        f"                    newest {newest}  <- NOT ESTABLISHED is not 'up to date'. If you have "
+        "just changed code, `stop` then `start` is the only way to be sure",
+    ]
+
+
 def worker_status(name: str, run_dir: Path) -> dict:
     """Report one worker's state without changing anything."""
     path = pid_file(run_dir, name)
@@ -1172,26 +1559,67 @@ def command_status(names: list[str], run_dir: Path) -> int:
     for line in endpoint_summary():
         print(line)
     lines = []
+    verdicts: list[str] = []
+    states: list[dict] = []
     for name in names:
         state = worker_status(name, run_dir)
         detail = f"  {state['detail']}" if state["detail"] else ""
         lines.append(f"  {state['state']:<9} {state['worker']} pid={state['pid']}{detail}")
+        # DOES THIS RUNNING PROCESS PREDATE THE CODE ON DISK (rule 13's last
+        # clause). The four 2026-10-03 failures are recorded above
+        # code_freshness(); the short version is that `running pid=2065613` reads
+        # identically for a worker started two minutes ago and one started before
+        # three merges, and the operator's question in all four cases was "did my
+        # fix deploy?".
+        freshness = worker_code_freshness(state["pid"]) if state["state"] == "running" else None
+        verdicts.append(freshness["verdict"] if freshness else "")
         # THE LOG PATH AND THE LAST LINE, which this block computed and discarded
         # until 2026-10-02. worker_status() returns state/worker/pid/detail and the
         # path was reachable only from start_worker(), so `status` could not name
         # the file the operator needs -- and three guessed paths were handed over
         # instead. status_log_lines() is the only place that decides it.
         lines.extend(status_log_lines(run_dir, name, state["state"]))
+        lines.extend(code_freshness_lines(state["state"], state["pid"], freshness))
+        states.append(state)
     _print_block("  workers", lines)
     # Same reason as in command_stop(): a worker reported `stopped` while an orphan
     # of it polls a database nobody named is the failure rule 13 is written from,
     # and status is where an operator looks to decide the system is quiet.
     _print_block("  still alive?", unaccounted_lines(names, run_dir))
-    running = sum(1 for name in names if worker_status(name, run_dir)["state"] == "running")
+    # COUNTED FROM THE STATES ALREADY READ. This line used to call worker_status()
+    # a second time for every worker, so the summary could in principle disagree
+    # with the block above it -- a worker that exited between the two loops is
+    # listed `running` and counted as not. One read, one answer.
+    running = sum(1 for state in states if state["state"] == "running")
+    stale = sum(1 for verdict in verdicts if verdict == CODE_STALE)
+    unknown_age = sum(1 for verdict in verdicts if verdict == CODE_NOT_ESTABLISHED)
     print(
         f"  summary           running={running}/{len(names)}  <- expected {len(names)} while swaps are open; "
         "0 means no worker is polling and deposits will not be credited"
     )
+    # A SECOND SUMMARY LINE RATHER THAN A LONGER FIRST ONE, and it is always
+    # printed -- including `stale=0 unknown-age=0`, because "no stale worker" and
+    # "this check did not run" must not render identically (rule 14). The counts
+    # are of RUNNING workers only; a stopped worker has no age to be wrong.
+    #
+    # THE running=0 CASE GETS ITS OWN SENTENCE, and the first draft got this wrong
+    # on its very first live run: `stale=0  unknown-age=0` followed by "every
+    # running worker started after the newest .py file was modified" is VACUOUSLY
+    # true of zero workers and reads as an all-clear. That is rule 14's
+    # did-nothing-looks-like-did-work, and rule 13's "'skipped' plus 'success' in
+    # the same output", inside the line added to fix exactly that.
+    if not running:
+        tail = "  <- NOTHING WAS CHECKED: no worker is running, so there is no process to be out of date"
+    elif stale:
+        tail = (
+            "  <- stale>0 means a RUNNING worker predates the code on disk; it is named above. "
+            "`start` will not reload it"
+        )
+    elif unknown_age:
+        tail = "  <- unknown-age>0 is NOT 'up to date'; see the per-worker line"
+    else:
+        tail = "  <- every running worker started after the newest .py file was modified"
+    print(f"  code              stale={stale}  unknown-age={unknown_age}  of running={running}{tail}")
     return 0
 
 

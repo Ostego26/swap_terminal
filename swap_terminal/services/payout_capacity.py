@@ -243,7 +243,13 @@ def largest_fundable_payout(adapters, asset: str, reserve: float) -> tuple[float
         return -1.0, (f"the {asset} balance could not be read ({type(error).__name__}: "
                       f"{str(error)[:120]}), so the ceiling is NOT established")
     return max(spendable - reserve, 0.0), (
-        f"{spendable} {asset} spendable less {reserve} {asset} reserved for the payout transaction's "
+        # THE INPUTS GO THROUGH as_amount() TOO, not just the ceiling. This half of
+        # the line printed "less 2e-05 BTC reserved" on the operator's screen while
+        # the ceiling beside it was formatted: a line that formats its result and
+        # not its inputs is harder to read than one that formats neither, because
+        # the reader cannot tell which figures are comparable.
+        f"{as_amount(spendable)} {asset} spendable less {as_amount(reserve)} {asset} reserved for the "
+        f"payout transaction's "
         f"own chain fee"
     )
 

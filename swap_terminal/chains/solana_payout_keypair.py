@@ -46,8 +46,11 @@ Until that instruction chains/solana.py carried
 
 HARDCODED, with a comment saying flipping it was the operator's call, and
 chains/solana_signing.py's header named that hardcoding as a DELIBERATE
-divergence from XRP, whose can_spend has been derived from seed presence since
-2026-10-02. The divergence is over: SOL is now derived too, from this module,
+divergence from XRP, whose can_spend has been derived from the seed since
+2026-10-02 -- from its PRESENCE then, and from the seed actually DECODING since
+2026-10-03, after a nine-character placeholder on the operator's host offered an
+XRP payout that could never have been signed (chains/xrp_payout_seed.py carries
+the measurement). The divergence is over: SOL is now derived too, from this module,
 and both sites' prose has been corrected rather than left describing a
 difference that no longer exists (rule 8 asks that a real difference be stated
 at both sites; a difference that ENDS makes both of those statements wrong
@@ -137,6 +140,26 @@ def payout_keypair_is_present() -> bool:
     payer the preview announced. Claiming more than presence here would be the
     reassuring answer rather than the measured one (rule 17), and it would cost
     a key file read on every page render to claim it.
+
+    AND XRP NO LONGER DRAWS THAT LINE HERE, WHICH IS A REAL DIVERGENCE AND IS
+    STATED AT BOTH SITES (rule 8). Since 2026-10-03
+    chains/xrp_payout_seed.payout_capability() is what sets XRPAdapter.can_spend
+    and it DECODES the seed, after a nine-character placeholder on the
+    operator's host made can_spend True and offered an XRP payout that could
+    never have been signed -- with the deposit irreversible by the time it would
+    have been found. SOL CAN REACH THE SAME STATE: SOL_PAYOUT_KEYPAIR_PATH
+    naming a file that is missing, not JSON, or the wrong length arms can_spend
+    here and is refused only at
+    chains/solana_signing.load_payout_keypair(), which is after a deposit is
+    taken. What makes the two cases different in COST rather than in kind is
+    where the check lives: XRP's is base58check on a string already in this
+    process's environment, with no filesystem and no network, so it is free in a
+    constructor; SOL's would be an open() and a parse of a KEY FILE on every
+    adapter construction, which is a page render. That is a judgment about
+    exposure and about live posture -- narrowing it changes which pairs this
+    terminal offers -- so it is the operator's call (rule 16) and is NOT made
+    here. It is a named proposal, not an oversight, and this paragraph is where
+    the next reader finds it.
 
     A SET-BUT-EMPTY VALUE IS ABSENT, and keypair_path_from_environment() is
     what strips it. `export SOL_PAYOUT_KEYPAIR_PATH=''` is what a generator run

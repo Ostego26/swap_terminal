@@ -264,3 +264,26 @@ def test_a_sub_satoshi_ceiling_displays_as_zero_rather_than_as_a_number():
     a swap may pay out, and no payout of five billionths of a coin exists.
     """
     assert as_amount(0.000000005) == "0"
+
+
+def test_the_ceiling_reason_formats_its_INPUTS_and_not_just_its_result():
+    """"less 2e-05 BTC reserved" reached the operator's screen, measured 2026-10-03.
+
+    The ceiling itself was already formatted; the two figures it was derived from
+    were not, so the line read
+
+        can fund a payout up to 13941.9997814 BTC  <- 13941.9998014 BTC spendable
+        less 2e-05 BTC reserved ...
+
+    A line that formats its result and not its inputs is HARDER to read than one
+    that formats neither, because a reader cannot tell which of the three figures
+    are comparable. This is the fourth place in one session where a small number
+    reached a human in exponent notation, and the first three were only exposed
+    because the reserve stopped being a 0.001-sized constant and became a measured
+    0.0000282.
+    """
+    _ceiling, how = largest_fundable_payout({"GRC": Wallet(13941.9998014)}, "GRC", 0.00002)
+
+    assert "0.00002 GRC reserved" in how
+    assert "2e-05" not in how, "exponent notation on a line a person reads"
+    assert "13941.9998014" in how

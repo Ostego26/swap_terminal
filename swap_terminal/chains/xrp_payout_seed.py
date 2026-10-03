@@ -1,9 +1,10 @@
 """The one place that knows the NAME of the XRP signing seed's environment variable.
 
-Role: function layer (rule 10 -- the smallest testable pieces. Two decisions:
-      "is a signing seed present in this process" and "what does an absent one
-      mean", plus one reader that hands the VALUE to the single caller allowed
-      to have it)
+Role: function layer (rule 10 -- the smallest testable pieces. Three decisions:
+      "is a signing seed present in this process", "does the seed in this process
+      DECODE", and "what does each kind of unarmed mean", plus one derivation
+      (payout_capability()) that composes them into the pair XRPAdapter publishes,
+      plus one reader that hands the VALUE to the single caller allowed to have it)
 Reads: this process's environment, and nothing else. No file, no socket, no
       Config, no database. os.environ is read AT CALL TIME rather than at
       import, so a test can set it and a long-lived process cannot bake a
@@ -58,9 +59,11 @@ applied, and they are the same ones that file lists:
     passed straight into send_to_address() as an argument expression and is
     never bound to a local name, never put in a dict, and never returned
     onward.
-  - the ADAPTER cannot reach it. chains/xrp.py imports
-    signing_seed_is_present() and missing_seed_refusal() from this module and
-    NOT signing_seed(), so setting the variable does not let the adapter sign:
+  - the ADAPTER cannot reach it. chains/xrp.py imports payout_capability(),
+    signing_seed_is_present(), signing_seed_decodes() and the two refusals from
+    this module and NOT signing_seed(). payout_capability() DECODES the seed and
+    returns a bool and a sentence; the value never leaves this module, so
+    setting the variable does not let the adapter sign:
     an armed send still requires the seed to be passed at the call site.
     tests/test_xrp_payout_wiring.py asserts that behaviorally -- the variable
     set, send_to_address() called with no seed, and the refusal is the
@@ -68,12 +71,31 @@ applied, and they are the same ones that file lists:
 
 AND THE REFUSAL IS STILL THE DEFAULT. With the variable unset -- which is every
 checkout, every test run and every host where the operator has not made the
-custody decision -- signing_seed_is_present() is False, chains/xrp.py sets
-can_spend False, chains/registry.why_cannot_pay_out() reports the sentence
-below, and services/swap_service.create_swap() refuses to create a swap whose
-payout leg is XRP. Nothing is created, so nothing is taken. Turning it on is an
-operator act that requires supplying a secret, which is exactly where rule 16
-puts a decision that moves money.
+custody decision -- payout_capability() returns (False, missing_seed_refusal()),
+chains/xrp.py sets can_spend False, chains/registry.why_cannot_pay_out() reports
+that sentence, and services/swap_service.create_swap() refuses to create a swap
+whose payout leg is XRP. Nothing is created, so nothing is taken. Turning it on
+is an operator act that requires supplying a secret, which is exactly where rule
+16 puts a decision that moves money.
+
+AND SINCE 2026-10-03 A SET VARIABLE IS NOT ENOUGH: THE VALUE HAS TO DECODE.
+payout_capability() is the arming question and it asks signing_seed_decodes(),
+not signing_seed_is_present(). What that closed, measured on the operator's host
+that day: XRP_PAYOUT_SECRET_SEED held NINE CHARACTERS that do not start with
+'s' -- a placeholder, not a seed -- and chains/xrp.py:369 read PRESENCE, so
+can_spend was True, why_cannot_pay_out() returned "", create_swap()'s cannot_pay
+gate passed, and this terminal considered XRP a payout destination it could
+serve. chains/xrp_signing.py:397 derives the signing wallet with
+Wallet.from_seed(), which raises ValueError on that value, so EVERY XRP payout
+would have failed at signing AFTER the customer's deposit was confirmed and
+irreversible. The only thing that prevented it was XRP_DEPOSIT_ACCOUNT being
+unset -- a different gate, which the operator was in the middle of setting.
+
+The narrowing was the operator's to authorize, because it changes which pairs
+this terminal OFFERS (rule 16: live posture). They authorized it 2026-10-03.
+What is NOT claimed by an armed state: that the seed controls the account this
+host pays from. chains/xrp_signing.derive_and_check() still refuses a seed
+paired with an account it does not control, before signing.
 """
 
 from __future__ import annotations
@@ -101,10 +123,20 @@ def signing_seed_is_present() -> bool:
     """Whether this process HAS an XRP signing seed. Never says what it is.
 
     A bool, deliberately, and the only thing any caller outside the send is
-    allowed to learn. chains/xrp.py uses it to set can_spend, which decides
-    whether this terminal offers XRP as a payout destination at all -- so the
-    question that reaches the customer page is "is one present", and the value
-    stays in this function's caller's environment.
+    allowed to learn: the value stays in this function's caller's environment.
+
+    IT NO LONGER SETS can_spend, AND THAT IS THE 2026-10-03 CHANGE. Until that
+    day chains/xrp.py:369 was `self.can_spend = signing_seed_is_present()`, and
+    a nine-character placeholder on the operator's host therefore offered XRP as
+    a payout destination this terminal could not pay (the measurement is in this
+    module's docstring and in signing_seed_decodes() below). The arming question
+    is payout_capability() now, which decodes. This function answers the narrower
+    question it always answered -- IS THERE A VALUE AT ALL -- and its remaining
+    callers want exactly that: payout_capability() asks it first so the two kinds
+    of unarmed get different sentences, chains/xrp.py's banner asks it to choose
+    which of the three posture lines to print, and
+    services/payout_service.broadcast_payout()'s pre-flight asks it to detect the
+    variable having been REMOVED between a swap's creation and its payout.
 
     "PRESENT" IS NOT "CORRECT", and the distinction is the same one
     services/payout_service.unlock_readiness_lines() makes about the Gridcoin
@@ -112,15 +144,20 @@ def signing_seed_is_present() -> bool:
     chains/xrp_signing.derive_and_check() BEFORE anything is signed, because the
     address it derives will not be the account the preview announced. Claiming
     more than presence here would be the reassuring answer rather than the
-    measured one (rule 17).
+    measured one (rule 17) -- which is why the stronger claim lives in
+    signing_seed_decodes() and not in a widened version of this function.
 
     A SET-BUT-EMPTY VALUE IS ABSENT. `export XRP_PAYOUT_SECRET_SEED=''` is what
     a generator run from a shell without the value writes, and config.py's own
     _env() carries the measurement that cost: five empty exports on
     2026-09-26 turned a missing setting into a crash at import. Here the
-    consequence of reading "" as present would be worse than a crash -- it would
-    make can_spend True, let an XRP swap be created, take a customer's deposit,
-    and then refuse the payout at the send with the deposit already credited.
+    consequence of reading "" as present is a WRONG SENTENCE rather than a wrong
+    posture, since 2026-10-03: payout_capability() would go on to ask whether ""
+    decodes, it does not, and the pair would still be refused -- but the refusal
+    would read "the value in it is not a seed" and send the operator to inspect a
+    variable they never exported. Before that date it was worse than a crash: it
+    made can_spend True, let an XRP swap be created, took a customer's deposit,
+    and refused the payout at the send with the deposit already credited.
     """
     return bool(os.environ.get(SIGNING_SEED_ENV_VAR, "").strip())
 
@@ -204,13 +241,18 @@ def signing_seed_decodes() -> tuple[bool, str]:
     to have that variable set when this was found.
 
     WHY THIS IS A SEPARATE FUNCTION AND NOT A CHANGE TO signing_seed_is_present().
-    That function's contract -- a bool, "never says what it is" -- is what
-    can_spend reads, and can_spend decides whether a pair is OFFERED. Narrowing it
+    That function's contract -- a bool, "never says what it is" -- was what
+    can_spend read, and can_spend decides whether a pair is OFFERED. Narrowing it
     from "present" to "decodes" changes what this terminal will trade, which is
-    live posture and the operator's call (rule 16). This function exists so the
-    DIAGNOSTICS can tell the truth today, while that decision is theirs to make;
-    swap_readiness.py and the worker banner read it, chains/xrp.py deliberately
-    still does not.
+    live posture and the operator's call (rule 16). So this function was added
+    first, for the DIAGNOSTICS, while that decision stayed theirs.
+
+    THE OPERATOR AUTHORIZED THE NARROWING LATER THE SAME DAY, 2026-10-03, and
+    payout_capability() below is where it landed -- still not inside
+    signing_seed_is_present(), because the two questions have to stay separately
+    askable: the refusal an unarmed destination produces has to say WHICH of them
+    failed, and one bool cannot. "Is a value exported" and "does that value
+    decode" send an operator to two different places.
 
     IT RETURNS THE REASON AND NEVER THE VALUE. A seed is a key: the sentence names
     the variable and the exception type, and xrp_payout_account.seed_shape() is
@@ -239,3 +281,94 @@ def signing_seed_decodes() -> tuple[bool, str]:
                        f"without printing it. chains/xrp_signing.py uses the same Wallet.from_seed(), so "
                        f"every XRP payout would fail at signing -- after the deposit is irreversible")
     return True, f"{SIGNING_SEED_ENV_VAR} decodes as a seed, so a payout can derive its signing wallet"
+
+
+def undecodable_seed_refusal(reason: str) -> str:
+    """The OTHER refusal: the variable IS set, and what is in it is not a seed.
+
+    ADDED 2026-10-03, WITH THE NARROWING OF can_spend, BECAUSE ONE SENTENCE COULD
+    NOT COVER BOTH CASES. missing_seed_refusal() says "export
+    XRP_PAYOUT_SECRET_SEED in the shell that starts this process", which is the
+    right instruction when nothing is exported and the WRONG one when something
+    is. An operator whose shell holds a nine-character placeholder -- the state
+    measured on their host that day -- would read "is not set in this process's
+    environment", check their shell, find it set, and have been sent to inspect
+    the one thing that was fine. Rule 14: the line has to say what the number
+    means next to the number, and here the fact that decides the answer is not
+    presence but CONTENT.
+
+    So the vocabulary is EXTENDED rather than replaced. Two refusals, one per
+    case, both reached through payout_capability() so no caller has to choose:
+
+      no variable at all   missing_seed_refusal()      "export it"
+      a value, not a seed  this function               "the value is not a seed"
+
+    IT NEVER CARRIES THE VALUE. `reason` is signing_seed_decodes()'s sentence,
+    which names the VARIABLE and the EXCEPTION TYPE and nothing else -- that
+    function excludes str(error) deliberately, because xrpl-py has echoed the
+    offending seed in its own messages, and this refusal goes to the admin page
+    and the worker banner. Pass it anything else and a key reaches a screen.
+
+    IT POINTS AT A SHAPE REPORT RATHER THAN ASKING FOR THE VALUE. The operator's
+    next question is "what IS in my variable, then", and the answer is
+    xrp_payout_account.py, which reports length, prefix and character class
+    WITHOUT printing it. Naming that script here is what keeps the operator from
+    echoing a seed into a terminal to compare it by eye.
+    """
+    return (
+        f"cannot pay out: {SIGNING_SEED_ENV_VAR} IS set in this process's environment, but the value "
+        f"in it is not a usable signing seed -- {reason}. This is NOT the default refusal: something "
+        f"was exported, so the thing to fix is the VALUE and not the export. A real XRPL family seed "
+        f"is 29 base58 characters beginning with 's' (secp256k1) or 'sEd' (ed25519); run "
+        f"xrp_payout_account.py, which reports the shape of what you have WITHOUT printing it. XRP is "
+        f"offered as a payout destination only while this value decodes, because "
+        f"chains/xrp_signing.py derives the signing wallet with the same Wallet.from_seed() -- so a "
+        f"swap created in this state would take a deposit and then fail at signing, after the deposit "
+        f"is irreversible. Measured on the live host 2026-10-03: this variable held a nine-character "
+        f"placeholder while this terminal was offering XRP."
+    )
+
+
+def payout_capability() -> tuple[bool, str]:
+    """(can_spend, refusal) for XRPAdapter. THE arming question, asked in one place.
+
+    Returns (True, "") only when a seed is exported AND it decodes. Otherwise
+    (False, <the refusal for whichever case it is>), which is the pair
+    chains/xrp.py publishes as `can_spend` / `payout_refusal` and
+    chains/registry.why_cannot_pay_out() reads back out.
+
+    WHY A COMPOSED FUNCTION AND NOT TWO IFS IN THE ADAPTER (rule 10). The
+    decision is "may this terminal offer XRP as a payout destination", it moves
+    money, and it has to be callable with a seeded environment and asserted on
+    directly -- not reachable only by constructing an adapter, which needs a url.
+    Keeping it here also keeps chains/xrp.py unable to see a seed: this returns a
+    bool and a sentence, and signing_seed() is still imported by exactly one
+    caller in this tree (the send in services/payout_service.broadcast_payout()).
+
+    ORDER MATTERS AND IT IS PRESENCE FIRST. signing_seed_decodes() answers False
+    for an unset variable too, so a single decode check would have collapsed both
+    cases into "does not decode" and told an operator with nothing exported that
+    their value was wrong. Presence chooses the sentence; decoding chooses the
+    posture.
+
+    WHAT CHANGED, measured on the operator's host 2026-10-03 and why this function
+    exists at all: chains/xrp.py:369 was `self.can_spend =
+    signing_seed_is_present()`. XRP_PAYOUT_SECRET_SEED held nine characters that
+    do not start with 's', so can_spend was True, why_cannot_pay_out() returned ""
+    and create_swap()'s cannot_pay gate passed -- this terminal was offering a
+    payout it would have failed to sign, after the deposit was irreversible.
+    XRP_DEPOSIT_ACCOUNT being unset was the only thing stopping it, and it was
+    being set. The operator authorized narrowing can_spend that day.
+
+    NO NETWORK, NO VALUE PRINTED, NO FUNDS MOVED. Everything here is one
+    environment read plus base58check and a key derivation, so it is safe in an
+    adapter constructor that runs before any rippled is reachable -- which is
+    where XRPAdapter calls it, once, at construction (see that call site for why
+    once and not per access).
+    """
+    if not signing_seed_is_present():
+        return False, missing_seed_refusal()
+    decodes, why = signing_seed_decodes()
+    if not decodes:
+        return False, undecodable_seed_refusal(why)
+    return True, ""

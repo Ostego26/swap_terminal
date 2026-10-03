@@ -87,6 +87,42 @@ def xrp_address(phrase: str) -> str:
     return base58.b58encode_check(b"\x00" + _hash160(phrase), alphabet=XRP_BASE58_ALPHABET).decode()
 
 
+def xrp_family_seed(phrase: str) -> str:
+    """An XRPL family seed that really DECODES, derived -- so no test invents a seed either.
+
+    ADDED 2026-10-03, THE DAY XRPAdapter.can_spend STOPPED READING PRESENCE. Until then
+    chains/xrp_payout_seed.signing_seed_is_present() read bool() of the variable and nothing
+    more, so three test files armed XRP with an obvious non-value --
+    "not-a-real-seed-and-never-decoded", "never-decoded-by-this-test", "sNotASeed3fbe..." --
+    and each file's comment said, correctly, that it was never decoded.
+    chains/xrp_payout_seed.payout_capability() decodes now, so those literals make can_spend
+    FALSE, which is the opposite of the posture those tests exist to set up.
+
+    DERIVED RATHER THAN TYPED, for this module's own reason: a literal seed can be mistyped in
+    its checksum and nothing notices until something tries to sign with it, and a test that
+    meant "armed" would then quietly measure "unarmed" -- the 2026-10-03 defect reappearing
+    inside the tests written to pin it. 0x21 is XRPL's family-seed version byte and the payload
+    is 16 bytes, which is what makes the result decode under xrpl.wallet.Wallet.from_seed();
+    the bytes come from the phrase, so the same phrase gives the same seed on every machine and
+    any reader can reproduce it from this line.
+
+    IT CONTROLS NOTHING AND IS NOT A SECRET. The account it derives has never been funded on
+    any network and nothing in this tree or on any host pays it -- the same claim the address
+    fixtures above make, one key deeper. That is what makes a derived seed safe to keep in a
+    file whose whole subject is that fixtures must be valid, where a real one would not be.
+
+    NOT SWEPT INTO ALL_VALID, and the lower-case name is what keeps it out: that comprehension
+    takes upper-case module-level strings, and a seed is not an address --
+    modules/address_authority.check_address("XRP", <a seed>) refuses it, and special-casing it
+    out of the sweep would open exactly the hole unplaceable_base58() refuses to open. Callers
+    name their own constant from a phrase that says what it is for.
+    """
+    return base58.b58encode_check(
+        bytes([0x21]) + hashlib.sha256(phrase.encode()).digest()[:16],
+        alphabet=XRP_BASE58_ALPHABET,
+    ).decode()
+
+
 # The named fixtures. One per role, because a test that reuses one address for two roles is
 # testing a case build_htlc_redeem_script() refuses (both branches hashing to one key).
 GRC_PAYOUT = base58_testnet("swap_terminal test fixture GRC payout")

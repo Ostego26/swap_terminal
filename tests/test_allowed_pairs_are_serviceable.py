@@ -58,7 +58,7 @@ from services import pricing
 from services.pair_view import pair_serviceability
 from services.pricing import IDS
 from services.quote_service import create_quote
-from valid_addresses import GRC_PAYOUT
+from valid_addresses import GRC_PAYOUT, xrp_family_seed
 from workers.common import get_config_dict
 
 PAIRS = sorted(Config.ALLOWED_PAIRS)
@@ -274,10 +274,22 @@ def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE(monkeypatch):
     ASSERTED FROM THE ADAPTER ITSELF rather than from a list of chains: any asset whose
     adapter cannot pay out is unavailable as a payout leg no matter what else is configured.
 
-    THE SEED HERE IS NOT A SEED. The adapter reads only `bool()` of the variable -- see
-    chains/xrp_payout_seed.signing_seed_is_present() -- so this value is never decoded,
-    never signed with and reaches no network. The url is unreachable.invalid for the same
-    reason: construction makes no call, and if that ever changes this test fails loudly.
+    THE SEED HERE DECODES AND CONTROLS NOTHING, AND IT USED TO BE A NON-VALUE. This test
+    set "not-a-real-seed-and-never-decoded" while the adapter read only `bool()` of the
+    variable; chains/xrp_payout_seed.payout_capability() DECODES it as of 2026-10-03
+    (measured that day: a nine-character placeholder on the live host made can_spend True
+    and offered a payout that could never have signed), so a non-value now produces the
+    UNARMED state and the "set -> PERMITS" half below would have measured its own
+    opposite. tests/valid_addresses.xrp_family_seed() derives a seed that really decodes,
+    for an account that has never existed on any network and that nothing pays -- so it is
+    still never signed with and still reaches no network. The url is unreachable.invalid
+    for the same reason: construction makes no call, and if that ever changes this test
+    fails loudly.
+
+    A THIRD STATE EXISTS NOW -- the variable set to something that is not a seed -- and it
+    is NOT covered here deliberately: tests/test_xrp_payout_wiring.py owns that gate and
+    its two refusal sentences. What this test owns is the two-state serviceability
+    property it was written for.
 
     AND THE RESERVE IS STILL NOT THE BLOCKER, which is what this test is named for.
     XRP_NETWORK_FEE_RESERVE is unrelated to either state below and is asserted still absent
@@ -302,7 +314,7 @@ def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE(monkeypatch):
         "the reader to do half the work -- which is the exact mistake this test is named after"
     )
 
-    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, "not-a-real-seed-and-never-decoded")
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, xrp_family_seed("allowed pairs: an armed XRP payout leg"))
     armed = XRPAdapter(url=url, min_confirmations=1)
     assert armed.can_spend is True, (
         f"with {SIGNING_SEED_ENV_VAR} set, XRPAdapter.can_spend must be True. If this fails the "

@@ -793,7 +793,13 @@ def report_lines(swap: dict, quote: dict, db_path: str, config: dict, explicit_d
         labeled("quoted rate", f"{swap['quoted_rate']} {to_asset} per {from_asset}  <- fixed now, not "
                                f"re-priced at payout time"),
         labeled("fee", f"{swap['fee_bps']} bps  <- taken off the gross output by create_quote()"),
-        labeled("network fee", f"{swap['network_fee_reserve']} {to_asset} reserved  <- held back for the "
+        # as_amount(), NOT the raw float. The reserve became MEASURED on 2026-10-03
+        # and measured figures are small: this line printed "2.82e-05 BTC reserved"
+        # on the operator's screen, which is the fourth place this session that a
+        # small number reached a human in exponent notation (the others:
+        # swap_readiness's rate line, show_payout_fees's live fee, and
+        # payout_capacity's ceiling). A constant of 0.001 never exposed it.
+        labeled("network fee", f"{as_amount(swap['network_fee_reserve'])} {to_asset} reserved  <- held back for the "
                                f"payout transaction's own chain fee"),
         # "payout (est.)" rather than "estimated payout": the label column is 16
         # wide and the longer spelling filled it exactly, printing

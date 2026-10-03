@@ -77,6 +77,7 @@ from services.swap_service import deposit_account
 # drift silently -- a second copy that seeded `Balance` as an int instead of a string
 # would pass against a parser that mishandles the real shape and keep passing. Every
 # value moved unchanged; see that module's docstring for the measurements.
+from valid_addresses import xrp_family_seed
 from xrp_seeded_transport import MAINNET_URL, TESTNET_URL, Recorder, account_info, server_info
 
 # The XRP Ledger's own reserved accounts, used here for the same reason
@@ -426,7 +427,17 @@ def test_the_banner_says_which_payout_posture_this_process_is_actually_in(monkey
 
       until 2026-09-26   `payouts=REFUSED (holds no signing key)`
       until 2026-10-02   `payouts=PREVIEW-ONLY ... (holds no signing key; ...)`
-      now                one of two lines, chosen by whether the seed is present
+      until 2026-10-03   one of two lines, chosen by whether the seed is PRESENT. The
+                         host measured that day had the variable set to a
+                         nine-character placeholder, so it printed ARMED while no
+                         payout could have signed -- accurate, and useless.
+      now                one of THREE lines: nothing exported, a value that is not a
+                         seed, or a seed that decodes. can_spend is derived from the
+                         last of those (chains/xrp_payout_seed.payout_capability()),
+                         and the two unarmed lines differ because the operator's next
+                         action differs: export the variable, versus fix its value.
+                         tests/test_xrp_payout_wiring.py holds the gate itself; this
+                         test holds the two states this file already covered.
 
     This test used to assert `"holds no signing key" in line`, and that clause is
     what had to go: services/payout_service.broadcast_payout() reads a seed from the
@@ -453,7 +464,11 @@ def test_the_banner_says_which_payout_posture_this_process_is_actually_in(monkey
     assert "ARMED" not in unarmed
     assert "mainnet refused by server network_id, not by url" in unarmed
 
-    monkeypatch.setenv("XRP_PAYOUT_SECRET_SEED", "never-decoded-by-this-test")
+    # A SEED THAT REALLY DECODES, since 2026-10-03. This line used to set
+    # "never-decoded-by-this-test", which was accurate while can_spend read presence
+    # and is now the UNARMED-because-the-value-is-wrong state -- so this half of the
+    # test would have measured the opposite of its own premise.
+    monkeypatch.setenv("XRP_PAYOUT_SECRET_SEED", xrp_family_seed("xrp adapter banner: armed posture"))
     armed = adapter().endpoint_line()
     assert "*** ARMED, THIS PROCESS CAN SPEND XRP ***" in armed, (
         "the armed state must be findable by an operator scanning a banner for it"

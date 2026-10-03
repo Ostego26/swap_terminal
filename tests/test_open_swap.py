@@ -1372,3 +1372,39 @@ def test_an_unreadable_payout_wallet_previews_as_NOT_ESTABLISHED_not_as_zero():
     assert "NOT ESTABLISHED" in line
     assert "connection refused" in line
     assert "0.0 GRC" not in line, "a sentinel must never render as a balance"
+
+
+def test_the_network_fee_line_does_not_print_a_measured_reserve_in_exponent_form(monkeypatch, tmp_path):
+    """"network fee 2.82e-05 BTC reserved", on the operator's screen 2026-10-03.
+
+    The reserve became MEASURED that day and measured figures are small, where the
+    0.001-sized constant it replaced never was. So this line -- unchanged for
+    weeks -- started rendering in exponent notation the moment the number behind it
+    got smaller, which is the shape of every small-number display defect found this
+    session: the formatter was fine until the data moved.
+
+    The reserve is substituted into the row rather than produced by a measuring
+    adapter, because what is asserted is the LINE; the arithmetic that produces the
+    figure has its own tests in tests/test_measured_fee_reserve.py.
+    """
+    stub_prices(monkeypatch)
+    db_path = tmp_path / "reserve.db"
+    run_tool(
+        monkeypatch,
+        ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS, "--db", str(db_path),
+         "--apply"],
+    )
+    swap = swap_row(db_path)[0]
+    connection = connect_db(str(db_path))
+    try:
+        quote = connection.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
+    finally:
+        connection.close()
+    # THE MEASURED-SIZED FIGURE, substituted into the row the line renders. The
+    # arithmetic that produces it is tested in tests/test_measured_fee_reserve.py;
+    # what is asserted here is the LINE.
+    text = "\n".join(report_lines({**swap, "network_fee_reserve": 2.82e-05}, quote, str(db_path),
+                                   real_config()))
+
+    assert "0.0000282 GRC reserved" in text
+    assert "2.82e-05" not in text

@@ -71,8 +71,11 @@ from chains.xrp import XRPAdapter, XRPRPCError
 from chains.xrp_payout_seed import (
     SIGNING_SEED_ENV_VAR,
     missing_seed_refusal,
+    payout_capability,
     signing_seed,
+    signing_seed_decodes,
     signing_seed_is_present,
+    undecodable_seed_refusal,
 )
 from chains.xrp_signing import (
     CONFIRM_XRP_SEND,
@@ -89,7 +92,7 @@ from services.payout_service import (
     process_pending_payouts,
 )
 from services.swap_service import create_swap
-from valid_addresses import GRC_PAYOUT, XRP_CUSTOMER_PAYOUT, XRP_HOT_ACCOUNT
+from valid_addresses import GRC_PAYOUT, XRP_CUSTOMER_PAYOUT, XRP_HOT_ACCOUNT, xrp_family_seed
 from xrp_seeded_transport import TESTNET_URL, Recorder, account_info, server_info
 
 # xrpl-py is an OPTIONAL dependency and importorskip is the mechanism for both of
@@ -109,11 +112,29 @@ transaction_module = pytest.importorskip(
 # definition of not secret -- and the same construction tests/valid_addresses.py and
 # tests/test_grc_address_proof.py already use rather than a literal somebody typed.
 #
-# It is never decoded. chains/xrp_payout_seed.signing_seed_is_present() reads
-# bool() of the variable, so every test that uses this one stops before xrpl-py sees
-# it. The tests that need a seed that actually derives an account use
-# Wallet.create().
+# IT IS NEVER DECODED, AND SINCE 2026-10-03 THAT MEANS IT NO LONGER ARMS THE
+# ADAPTER. chains/xrp_payout_seed.payout_capability() -- what XRPAdapter.can_spend is
+# derived from -- decodes the seed, and Wallet.from_seed() raises ValueError on this
+# string. So every use of NOT_A_SEED below is a test whose subject is the SERVICE
+# path: services/payout_service.broadcast_payout()'s pre-flight asks
+# signing_seed_is_present(), which is still presence, so these tests reach the guard
+# they are about (the source account, the mainnet refusal, the dispatch shape)
+# without xrpl-py ever seeing the value.
+#
+# A test that needs the ADAPTER armed uses SEED_THAT_DECODES below; one that needs a
+# seed deriving a particular account still uses Wallet.create().
 NOT_A_SEED = "sNotASeed" + hashlib.sha256(b"swap_terminal xrp wiring fixture").hexdigest()[:22]
+
+# A SEED THAT REALLY DECODES, for the tests whose premise is "this process is armed".
+#
+# Derived by tests/valid_addresses.xrp_family_seed() rather than written here, for the
+# reason that function records at length: can_spend is DERIVED FROM DECODING as of
+# 2026-10-03, so a hand-typed seed with a bad checksum would silently turn every
+# "armed" test below into an unarmed one -- the 2026-10-03 defect reappearing inside
+# the tests that pin it. The account it derives has never existed on any network and
+# nothing pays it, so this is not a secret; it is reproducible from the phrase by
+# anyone reading this line.
+SEED_THAT_DECODES = xrp_family_seed("swap_terminal xrp wiring: a seed that decodes and owns nothing")
 
 CONFIG_BASE = {
     "GRC_MIN_CONFIRMATIONS": 6,
@@ -304,9 +325,13 @@ def test_the_adapter_cannot_reach_a_seed_even_when_the_variable_is_set(ledger, m
     require_send_confirmation(), which compares an empty string, long before xrpl-py
     would see it.
     """
-    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, NOT_A_SEED)
+    # SEED_THAT_DECODES and not NOT_A_SEED since 2026-10-03: this test's premise is an
+    # ARMED adapter that still cannot find a seed for itself, and an undecodable value
+    # now leaves can_spend False -- which would make the refusal below arrive for the
+    # wrong reason and the test prove nothing.
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, SEED_THAT_DECODES)
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
-    assert adapter.can_spend is True, "the variable IS set, so the capability must read as present"
+    assert adapter.can_spend is True, "a seed that DECODES is exported, so the capability must read armed"
     ledger.answer(server_info=server_info(), account_info=account_info())
 
     with pytest.raises(XRPSendNotArmed, match="no signing seed"):
@@ -868,7 +893,12 @@ def test_a_swap_is_refused_when_the_seed_is_set_but_the_payout_account_is_not(tm
     ASSERTED ON THE ROWS, not only on the exception: "nothing was written" is the
     property that makes a refusal here cost a retry instead of a customer's deposit.
     """
-    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, NOT_A_SEED)
+    # SEED_THAT_DECODES since 2026-10-03: create_swap()'s cannot_pay gate reads
+    # XRPAdapter.can_spend, which is derived from the seed DECODING now, so an
+    # undecodable value would refuse this swap for the wrong reason -- and the
+    # XRP_DEPOSIT_ACCOUNT half of the gate, which is what this test is about, would
+    # never be reached.
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, SEED_THAT_DECODES)
     db_path = str(tmp_path / "xrp_create_gate.db")
     _quote_row(db_path)
     adapters = {"GRC": PayableGRC(), "XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
@@ -897,7 +927,12 @@ def test_a_swap_is_created_once_both_variables_are_set(tmp_path, monkeypatch):
     MUTATION: make payout_source_account() raise unconditionally. This fails; the
     test above does not.
     """
-    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, NOT_A_SEED)
+    # SEED_THAT_DECODES since 2026-10-03: create_swap()'s cannot_pay gate reads
+    # XRPAdapter.can_spend, which is derived from the seed DECODING now, so an
+    # undecodable value would refuse this swap for the wrong reason -- and the
+    # XRP_DEPOSIT_ACCOUNT half of the gate, which is what this test is about, would
+    # never be reached.
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, SEED_THAT_DECODES)
     db_path = str(tmp_path / "xrp_create_ok.db")
     _quote_row(db_path)
     adapters = {"GRC": PayableGRC(), "XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
@@ -914,35 +949,208 @@ def test_a_swap_is_created_once_both_variables_are_set(tmp_path, monkeypatch):
     assert stored["status"] == "awaiting_deposit"
 
 
-# --- presence is not validity, and the banner had no way to say so ------------
+# --- presence is not validity, and can_spend used to read presence ------------
+#
+# THE WHOLE SECTION IS ONE MEASUREMENT, taken on the operator's host 2026-10-03.
+# XRP_PAYOUT_SECRET_SEED held NINE CHARACTERS that do not start with 's' -- a
+# placeholder, not a seed. chains/xrp.py:369 was `self.can_spend =
+# signing_seed_is_present()`, which reads PRESENCE, so can_spend was True,
+# chains/registry.why_cannot_pay_out() returned "", create_swap()'s cannot_pay gate
+# passed, and this terminal considered XRP a payout destination it could serve.
+# chains/xrp_signing.py:397 derives the signing wallet with Wallet.from_seed(),
+# which raises ValueError on that value, so EVERY XRP payout would have failed at
+# signing after the customer's deposit was confirmed and irreversible. The only
+# thing that prevented it was XRP_DEPOSIT_ACCOUNT being unset -- a different gate,
+# which the operator was in the middle of setting.
+#
+# The banner learned to report the decode that day and can_spend did not, because
+# narrowing can_spend changes which pairs this terminal OFFERS, which is live
+# posture and the operator's call (rule 16). THEY AUTHORIZED IT THE SAME DAY. The
+# tests below are the three states of that gate, and the one that used to assert
+# "ARMED is printed on an undecodable seed" is CHANGED rather than deleted (rule 2:
+# a test whose behavior is deliberately replaced pins the stronger invariant).
 
 
-def test_the_banner_says_the_seed_DOES_NOT_DECODE_when_it_does_not(monkeypatch):
-    """ARMED printed on a nine-character placeholder, measured 2026-10-03.
+#: The nine-character placeholder's shape, which is what makes this a regression
+#: test and not an example: ten characters, no leading 's', base58-ish. It is not
+#: the operator's value -- nothing in this tree ever held that -- it is a string
+#: with the same property, that Wallet.from_seed() refuses.
+PLACEHOLDER_NOT_A_SEED = "placeholdr"
 
-    XRP_PAYOUT_SECRET_SEED was SET, so signing_seed_is_present() returned True, so
-    can_spend was True, so chains/registry.why_cannot_pay_out() returned "" and
-    this terminal considered XRP a payout destination it could serve. The value was
-    nine characters and did not start with 's'. chains/xrp_signing.py:397 derives
-    the payout wallet with the same Wallet.from_seed(), so every XRP payout would
-    have failed at signing -- after the deposit was confirmed and irreversible.
 
-    The old line said "NOT a claim the seed is correct", which was true and left
-    the operator unable to tell this state from a working one. Decoding is offline
-    and costs nothing, so the banner states it.
+def test_an_undecodable_seed_leaves_can_spend_FALSE_and_says_WHICH_case_it_is(monkeypatch):
+    """THE GATE, AND IT IS THE 2026-10-03 INCIDENT ASSERTED ON DIRECTLY.
+
+    Three things have to hold together, and asserting fewer of them would leave the
+    defect reachable:
+
+      can_spend is False       so chains/registry.why_cannot_pay_out() refuses and
+                               services/swap_service.create_swap() will not create a
+                               swap whose payout leg is XRP. This is the posture
+                               change the operator authorized.
+      the refusal is the
+      UNDECODABLE one          not missing_seed_refusal(). An operator who exported a
+                               placeholder must not be told to export the variable --
+                               they would check their shell, find it set, and have
+                               been sent to inspect the one thing that is fine.
+      the value is absent
+      from both                a seed is a key. It goes to the admin page and the
+                               worker banner, and xrpl-py has echoed the offending
+                               seed in its own exception messages, which is why
+                               signing_seed_decodes() reports the exception TYPE.
+
+    MUTATION (ran, caught): put `self.can_spend = signing_seed_is_present()` back in
+    chains/xrp.py's __init__. This fails on the first assertion -- which is the one
+    the live host would have failed, had anything been asserting it.
+
+    MUTATION (ran, caught): return missing_seed_refusal() from payout_capability()
+    for both cases. can_spend is still False, the pair is still refused, and this
+    fails on the vocabulary -- which is the half a "does it refuse" test would miss.
     """
-    monkeypatch.setenv("XRP_PAYOUT_SECRET_SEED", "placeholdr")
-    adapter = XRPAdapter(url="https://s.altnet.rippletest.net:51234")
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, PLACEHOLDER_NOT_A_SEED)
+    adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
+
+    assert adapter.can_spend is False, (
+        "a seed that does not decode must not arm a payout: chains/xrp_signing.py derives the signing "
+        "wallet with the same Wallet.from_seed(), so this terminal would be offering a payout it "
+        "cannot sign -- and it would fail AFTER the deposit is irreversible"
+    )
+    assert adapter.payout_refusal != missing_seed_refusal(), (
+        "the variable IS set, so the refusal that says 'export it' is the wrong instruction"
+    )
+    assert "IS set" in adapter.payout_refusal, (
+        "rule 14: the refusal has to say which case it is, and this case is 'something was exported "
+        "and the value is wrong'"
+    )
+    assert "not a usable signing seed" in adapter.payout_refusal
+    assert PLACEHOLDER_NOT_A_SEED not in adapter.payout_refusal, (
+        "a seed is a key and must never reach a refusal that renders on a page"
+    )
+
+
+def test_the_banner_says_the_seed_DOES_NOT_DECODE_and_that_the_pair_is_refused(monkeypatch):
+    """THE BANNER FOLLOWED THE GATE, and the old assertion here is what had to change.
+
+    This test used to assert `"ARMED" in line` and `"still OFFERED" in line`, with
+    the comment "can_spend is unchanged: presence still arms it". Both were true on
+    2026-10-02 and both became FALSE when the operator authorized the narrowing on
+    2026-10-03 -- a banner that printed ARMED now would contradict the gate in the
+    same process, which is the two-surfaces-one-process defect
+    chains/xrp_payout_seed.missing_seed_refusal() was written for.
+
+    THE STRONGER INVARIANT IS THAT ALL THREE STATES ARE DISTINGUISHABLE, which is
+    rule 14's "make did-nothing look different from did-work" applied to a
+    capability. Asserted as an absence AND a presence: the word that used to be here
+    must be gone, and the consequence has to be stated.
+    """
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, PLACEHOLDER_NOT_A_SEED)
+    adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
     line = adapter.endpoint_line()
 
-    assert "ARMED" in line, "can_spend is unchanged: presence still arms it, and the line still says so"
     assert "DOES NOT DECODE" in line
-    assert "still OFFERED" in line, (
-        "the consequence is the content: a pair this terminal will sell and cannot pay. A line that "
-        "reported the bad seed without saying it is still on the menu understates it"
+    assert "ARMED" not in line, (
+        "can_spend is False in this state, so a banner saying ARMED would contradict the gate in its "
+        "own process -- which is exactly the disagreement this module's refusal exists to prevent"
     )
-    assert "placeholdr" not in line, "a seed is a key and must never reach a banner"
+    assert "NOT offered" in line, (
+        "the consequence is the content (rule 14): the operator has to learn that the pair is off the "
+        "menu, not merely that a value looks odd"
+    )
+    assert "IS set" in line, "and that the remedy is the VALUE, not the export"
+    assert PLACEHOLDER_NOT_A_SEED not in line, "a seed is a key and must never reach a banner"
+
+
+def test_no_seed_at_all_is_a_DIFFERENT_sentence_from_a_seed_that_does_not_decode(monkeypatch):
+    """THE VOCABULARY, which is the half a can_spend assertion cannot reach.
+
+    Both states refuse, so any test that only asked "is the pair refused" would pass
+    with one sentence covering both -- and the one sentence would be wrong for
+    whichever case it was not written for. Rule 14: the operator reads the screen,
+    and their next action is "export the variable" in one state and "fix the value"
+    in the other.
+
+    ASSERTED AS A PAIR, in one test, deliberately: the property is that the two
+    differ, and two separate tests each asserting its own wording would both pass if
+    a refactor made them identical.
+
+    MUTATION (ran, caught): make payout_capability() return missing_seed_refusal()
+    in both branches. This fails; the can_spend test above passes.
+    """
+    monkeypatch.delenv(SIGNING_SEED_ENV_VAR, raising=False)
+    absent_can_spend, absent = payout_capability()
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, PLACEHOLDER_NOT_A_SEED)
+    undecodable_can_spend, undecodable = payout_capability()
+
+    assert absent_can_spend is False and undecodable_can_spend is False
+    assert absent == missing_seed_refusal()
+    assert absent != undecodable, (
+        "two different custody states produced one sentence; an operator cannot tell 'export the "
+        "variable' from 'the value in it is not a seed'"
+    )
+    assert "is not set in this process" in absent, "the absent case names the missing export"
+    assert "IS set" in undecodable, "the undecodable case says something WAS exported"
+    assert "xrp_payout_account.py" in undecodable, (
+        "the operator's next question is 'what IS in my variable' and the answer is the script that "
+        "reports its shape without printing it -- naming it is what stops them echoing a seed"
+    )
+    # BOTH name the variable that decides the answer (rule 14), because a refusal that
+    # described the state without naming what to look at sends the reader to grep.
+    assert SIGNING_SEED_ENV_VAR in absent
+    assert SIGNING_SEED_ENV_VAR in undecodable
+
+
+def test_a_decodable_seed_arms_the_adapter_and_clears_the_refusal(monkeypatch):
+    """THE OTHER DIRECTION, because a gate that refuses in every state is not a gate.
+
+    This is the half that would regress silently and expensively: if the decode check
+    ever refused a GOOD seed -- a stricter prefix test, an xrpl-py upgrade, a
+    whitespace bug -- every XRP swap would stop being offered and the only symptom
+    would be customers told a working pair is unavailable. Every refusal test above
+    would still pass.
+
+    MUTATION (ran, caught): make payout_capability() return (False, ...)
+    unconditionally. This fails; nothing else in this section does.
+
+    The seed decodes and controls nothing -- see tests/valid_addresses.xrp_family_seed().
+    """
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, SEED_THAT_DECODES)
+    adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
+
+    decodes, _why = signing_seed_decodes()
+    assert decodes is True, "this test is worthless unless the fixture really does decode"
+    assert adapter.can_spend is True
+    assert adapter.payout_refusal == "", (
+        "chains/registry.why_cannot_pay_out() returns the refusal for an adapter that cannot pay; a "
+        "non-empty sentence beside can_spend=True is two surfaces disagreeing in one process"
+    )
+    assert SEED_THAT_DECODES not in adapter.endpoint_line()
+    assert SEED_THAT_DECODES not in repr(vars(adapter)), (
+        "no attribute on a constructed adapter may hold the seed: payout_capability() returns a bool "
+        "and a sentence precisely so this cannot happen"
+    )
+
+
+def test_the_undecodable_refusal_carries_the_reason_and_never_the_value():
+    """undecodable_seed_refusal() itself, called directly with a seeded reason.
+
+    The refusal is built from signing_seed_decodes()'s sentence, which names the
+    exception TYPE and excludes str(error) -- because xrpl-py has echoed the
+    offending seed in its own messages, and this refusal renders on the admin page.
+    This test pins the composition: the reason arrives inside the refusal, so a
+    caller that passed something richer would be visibly passing it onto a screen.
+
+    MUTATION (ran, caught): drop `{reason}` from the f-string. This fails, and the
+    operator loses the one clause that says WHY it did not decode.
+    """
+    refusal = undecodable_seed_refusal("ValueError was raised by the decoder")
+
+    assert "ValueError was raised by the decoder" in refusal
+    assert SIGNING_SEED_ENV_VAR in refusal
+    assert "2026-10-03" in refusal, (
+        "the measurement is the argument for the gate; a refusal that dropped it is a sentence nobody "
+        "can date"
+    )
 
 
 def test_the_banner_says_the_seed_DECODES_when_it_does(monkeypatch):
@@ -962,3 +1170,41 @@ def test_the_banner_says_the_seed_DECODES_when_it_does(monkeypatch):
         "does not control, and the line must not overclaim"
     )
     assert "sEdTM1uX8pu2do5XvTnutH6HsouMaM2" not in line
+
+
+def test_the_banner_warns_when_the_environment_CHANGED_after_the_adapter_was_built(monkeypatch):
+    """can_spend is settled ONCE, at construction, so a mutated environment can drift.
+
+    WHY can_spend IS NOT RE-READ: chains/xrp.py's __init__ records the measurement.
+    On 2026-10-02 the spawn banner and the customer page disagreed about XRP IN ONE
+    PROCESS, and a property that re-read os.environ on every access is how two
+    surfaces rendered from one adapter can still answer differently. One read at
+    construction makes that impossible.
+
+    WHAT THAT COSTS, and this test is the cost made visible: a process whose
+    environment is edited after construction stays armed on a value that no longer
+    decodes, and will keep offering XRP until it is restarted. The banner re-asks
+    signing_seed_decodes() so it can SAY that, rather than reporting the
+    construction-time answer as if it were current -- which would be the wrong
+    comment rule 16 counts as a bug, on a line an operator reads every cycle.
+
+    MUTATION (ran, caught): make the armed branch print the decode sentence
+    unconditionally without re-asking signing_seed_decodes(). This fails; every other
+    banner test passes.
+    """
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, SEED_THAT_DECODES)
+    adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
+    assert adapter.can_spend is True, "the premise is an adapter that was armed when it was built"
+
+    # The edit a deploy, a systemd reload or an operator's shell can make between
+    # construction and the next banner.
+    monkeypatch.setenv(SIGNING_SEED_ENV_VAR, PLACEHOLDER_NOT_A_SEED)
+    line = adapter.endpoint_line()
+
+    assert adapter.can_spend is True, (
+        "can_spend must NOT quietly change under a live adapter -- that is the one-read-at-construction "
+        "property, and the banner's job is to report the disagreement rather than hide it"
+    )
+    assert "ENVIRONMENT HAS CHANGED" in line
+    assert "Restart it" in line, "rule 14: say what the operator has to DO, next to the fact"
+    assert PLACEHOLDER_NOT_A_SEED not in line

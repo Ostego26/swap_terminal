@@ -74,12 +74,27 @@ usefulness (rule 14 -- echo the parameter that decides the answer), and the thre
 sentences come from three different modules, so nothing but an assertion holds
 them together.
 
-THE SEED IS NOT A SEED. chains/xrp_payout_seed.signing_seed_is_present() reads
-only bool() of the variable, so the literal below is never decoded, never signed
-with and reaches no network -- the same arrangement, and the same literal, as
-tests/test_allowed_pairs_are_serviceable.py's comment of that name. The url is
-unreachable.invalid for the matching reason: construction opens no socket, and if
-that ever changes this test fails loudly rather than quietly reaching a server.
+THE SEED DECODES AND CONTROLS NOTHING, AND IT USED TO BE A NON-VALUE. This file
+set the literal "not-a-real-seed-and-never-decoded" while
+chains/xrp_payout_seed.signing_seed_is_present() -- bool() of the variable -- was
+what XRPAdapter.can_spend read. payout_capability() DECODES as of 2026-10-03
+(measured that day: a nine-character placeholder on the operator's host made
+can_spend True, so this terminal offered an XRP payout that would have failed at
+signing after the deposit was irreversible), so a non-value now produces the
+UNARMED posture and every `seed=True` row below would have measured the
+`seed=False` one instead. The seed is derived by
+tests/valid_addresses.xrp_family_seed(), for an account that has never existed on
+any network and that nothing pays, so it is still never signed with and still
+reaches no network. The url is unreachable.invalid for the matching reason:
+construction opens no socket, and if that ever changes this test fails loudly
+rather than quietly reaching a server.
+
+THE THIRD POSTURE -- variable set, value not a seed -- IS NOT TABULATED HERE
+deliberately. It produces chains/xrp_payout_seed.undecodable_seed_refusal(),
+which names the same variable this file asserts on, and
+tests/test_xrp_payout_wiring.py owns both sentences and the gate between them.
+What this file owns is the pair-row vocabulary across the two postures an
+operator moves between.
 """
 
 from __future__ import annotations
@@ -92,16 +107,17 @@ from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR
 from config import Config
 from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 from services.pair_view import allowed_pair_rows, customer_availability
-from valid_addresses import XRP_HOT_ACCOUNT
+from valid_addresses import XRP_HOT_ACCOUNT, xrp_family_seed
 from workers.common import get_config_dict
 
 #: Never resolved, never connected to. See THE SEED IS NOT A SEED in the header.
 UNREACHABLE_URL = "http://unreachable.invalid"
 
-#: NOT A SEED AND NEVER DECODED. The literal is the one
-#: tests/test_allowed_pairs_are_serviceable.py already uses, so a reader who greps
-#: either file finds the same obvious non-value rather than two inventions.
-NOT_A_SEED = "not-a-real-seed-and-never-decoded"
+#: A SEED THAT DECODES AND OWNS NOTHING -- see THE SEED DECODES in the header for why
+#: this stopped being a non-value on 2026-10-03. Derived rather than typed, by the same
+#: helper tests/test_allowed_pairs_are_serviceable.py uses, so a reader who greps either
+#: file finds one construction rather than two inventions.
+ARMED_SEED = xrp_family_seed("xrp pair reasons: an armed XRP payout leg")
 
 #: The two pairs under measurement, and only those: Config.ALLOWED_PAIRS carries
 #: thirteen directions and the other eleven would make the table below a report on
@@ -138,7 +154,7 @@ def _build(*, seed: bool, deposit_account: bool, monkeypatch):
     what this overrides.
     """
     if seed:
-        monkeypatch.setenv(SIGNING_SEED_ENV_VAR, NOT_A_SEED)
+        monkeypatch.setenv(SIGNING_SEED_ENV_VAR, ARMED_SEED)
     else:
         monkeypatch.delenv(SIGNING_SEED_ENV_VAR, raising=False)
 

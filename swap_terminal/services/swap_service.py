@@ -670,9 +670,18 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     #
     # BOTH CLAUSES WERE FIXED ON 2026-10-02 and this gate is unchanged by that, which
     # is the point of leaving the paragraph. The adapter can sign and this call site
-    # is wired, so `can_spend` is now the answer to "is XRP_PAYOUT_SECRET_SEED set in
-    # this process" -- and with it unset, which is the default, this check refuses
-    # exactly as it did. What changed is that the operator has a way to make it pass.
+    # is wired, so `can_spend` is now the answer to "can this process actually sign an
+    # XRP payout" -- and with nothing exported, which is the default, this check
+    # refuses exactly as it did. What changed is that the operator has a way to make
+    # it pass.
+    #
+    # AND SINCE 2026-10-03 THAT QUESTION IS NOT "IS THE VARIABLE SET". It was, and
+    # the measurement that ended it is in chains/xrp_payout_seed.payout_capability():
+    # XRP_PAYOUT_SECRET_SEED held a nine-character placeholder on the operator's host,
+    # so can_spend was True, this gate PASSED, and the swap it would have created was
+    # one whose payout could never have been signed -- discovered with the deposit
+    # already irreversible. can_spend requires the seed to DECODE now, so this gate
+    # refuses that state too, before any row exists.
     #
     # Checked BEFORE validate_address(), deliberately: for XRP that validator accepts
     # any X-address without verifying its checksum (found by review the same day), so
@@ -689,7 +698,9 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     # that wiring would otherwise have opened.
     #
     # why_cannot_pay_out() reads `can_spend` off the ADAPTER, and XRPAdapter sets that
-    # from one question: is XRP_PAYOUT_SECRET_SEED present in this process. The
+    # from one question: does XRP_PAYOUT_SECRET_SEED hold a seed that DECODES in this
+    # process (presence alone until 2026-10-03 -- see
+    # chains/xrp_payout_seed.payout_capability() for the placeholder that cost). The
     # adapter has no Config and cannot be asked the second question -- is
     # XRP_DEPOSIT_ACCOUNT set -- so a host with the seed exported and the account
     # unset would pass the gate above, create the swap, TAKE AND CREDIT THE

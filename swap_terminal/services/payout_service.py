@@ -483,6 +483,21 @@ def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -
     # variable was removed between creation and payout -- which is exactly when a
     # loud refusal before any network call is what is wanted.
     source = payout_source_account(config, asset)
+    # PRESENCE, NOT DECODING, AND THAT IS DELIBERATE SINCE 2026-10-03 (rule 8 asks
+    # that a real difference be named at both sites; the other is
+    # chains/xrp_payout_seed.payout_capability(), which decodes and is what
+    # XRPAdapter.can_spend reads).
+    #
+    # WHAT THIS CHECK IS FOR is the narrow case its message describes: the swap was
+    # CREATED while the terminal was armed -- create_swap() refuses otherwise -- so
+    # reaching here with nothing exported means the variable was removed between
+    # creation and payout, and the right answer is a loud refusal before any network
+    # call. An undecodable value is not that case: it cannot have passed create_swap()
+    # since the narrowing, and if it somehow arrives it is refused by
+    # chains/xrp_signing.derive_and_check()'s own Wallet.from_seed() with nothing
+    # signed, nothing submitted and no fee claimed -- the same outcome, one guard
+    # later. Decoding it here as well would be a second copy of that question on the
+    # money path, and the copy would have to invent a third sentence about it.
     if not signing_seed_is_present():
         raise PayoutSigningUnavailable(
             f"{asset} payouts are signed in this process and {SIGNING_SEED_ENV_VAR} is not set in its "
