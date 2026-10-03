@@ -639,6 +639,17 @@ def test_the_pair_line_lists_every_allowed_pair_not_one_leg(monkeypatch):
     On the operator's host that rendered as a PASS listing four XRP pairs, with
     SOL->GRC -- the pair being rehearsed that afternoon -- absent from a line whose
     name promises to list what is allowed.
+
+    THE FIXTURE'S PREMISE CHANGED 2026-10-03. It used to assert that BTC->LTC was
+    in `pair allowed` and ABSENT from `pairs checked here`, with "2 of 3" as the
+    gap -- correct while CHECKED_LEGS was ("XRP", "SOL", "GRC") and a BTC leg was
+    unverified here. The operator then said "add the btc/ltc legs now",
+    check_bitcoin_like() landed, and BTC and LTC joined CHECKED_LEGS. Loosening
+    the assertion would have been the wrong move (rule 2: a test changes to pin
+    the stronger invariant, or it dies): the stronger statement is that a pair
+    whose BOTH legs are checked is now REPORTED as checked, so the gap closes and
+    the line says so. The gap half is pinned by the test below, on a leg this file
+    genuinely has no check for.
     """
     monkeypatch.setattr(swap_readiness.Config, "ALLOWED_PAIRS",
                         {("SOL", "GRC"), ("XRP", "GRC"), ("BTC", "LTC")}, raising=False)
@@ -648,11 +659,48 @@ def test_the_pair_line_lists_every_allowed_pair_not_one_leg(monkeypatch):
     checked = next(row for row in swap_readiness._results if row[1] == "pairs checked here")
 
     assert "SOL->GRC" in allowed[2]
-    assert "BTC->LTC" in allowed[2], "a pair this file cannot check is still ALLOWED and must be listed"
+    assert "BTC->LTC" in allowed[2]
     assert "all 3" in allowed[2]
     assert "SOL->GRC" in checked[2]
-    assert "BTC->LTC" not in checked[2]
-    assert "2 of 3" in checked[2], "the gap between allowed and checked is stated, not implied"
+    assert "BTC->LTC" in checked[2], (
+        "both legs of BTC->LTC are in CHECKED_LEGS since the btc/ltc legs landed, so a line that "
+        "omits it tells the operator a verified pair is unverified"
+    )
+    assert "3 of 3" in checked[2], "the gap between allowed and checked is stated, not implied"
+    assert "(none)" in checked[2], (
+        "rule 14: with no unchecked leg left, the absence is a RESULT and has to be printed as one -- "
+        "a sentence that simply stops saying anything reads as a line that forgot to"
+    )
+
+
+def test_an_allowed_leg_with_no_check_here_is_named_rather_than_implied(monkeypatch):
+    """The gap half, on a leg this file genuinely cannot check.
+
+    This used to be carried by BTC, and BTC stopped being an example when
+    check_bitcoin_like() landed. The property has nothing to do with BTC: it is
+    that `pairs checked here` derives what it CANNOT answer from CHECKED_LEGS
+    rather than naming chains in a string literal. So the fixture supplies a pair
+    on a chain CHECKED_LEGS does not contain -- which is what BTC was on
+    2026-10-01 -- and asserts the leg is named and the arithmetic reports the
+    shortfall.
+
+    Without this, the derived sentence could be reduced to a constant "(none)" and
+    the test above would still pass.
+    """
+    monkeypatch.setattr(swap_readiness.Config, "ALLOWED_PAIRS",
+                        {("SOL", "GRC"), ("DOGE", "GRC")}, raising=False)
+    swap_readiness._results.clear()
+    swap_readiness.check_pair_is_allowed()
+    allowed = next(row for row in swap_readiness._results if row[1] == "pair allowed")
+    checked = next(row for row in swap_readiness._results if row[1] == "pairs checked here")
+
+    assert "DOGE->GRC" in allowed[2], "a pair this file cannot check is still ALLOWED and must be listed"
+    assert "DOGE->GRC" not in checked[2]
+    assert "1 of 2" in checked[2]
+    assert "DOGE" in checked[2] and "NOT verified" in checked[2], (
+        "the operator reads the screen, not CHECKED_LEGS: the leg that has no check has to be named "
+        "on the line that stops short of it"
+    )
 
 
 def test_pricing_follows_the_allowed_pairs_rather_than_two_hardwired_assets(monkeypatch):
@@ -1387,3 +1435,169 @@ def test_main_PASSES_THE_DIRECTION_to_the_XRP_deposit_check(monkeypatch, capsys)
         "create_swap() would refuse and nothing here would have said so"
     )
     assert "XRP is the DESTINATION in this run" not in taking_deposits, taking_deposits[-300:]
+
+
+# --- the BTC and LTC legs ----------------------------------------------------
+#
+# ADDED 2026-10-03 with check_bitcoin_like(), on the operator's "add the btc/ltc
+# legs now". Every assertion below is shaped by something that already happened on
+# their host rather than by the function's surface: the -18 case is the one
+# chain_balances.py found while swap_readiness said READY, and the no-socket case
+# is the 2026-09-25 balance leak.
+
+
+class FakeBitcoinLike:
+    """A Bitcoin-derived adapter that RECORDS what was asked of it.
+
+    The recording is the point in two of the tests below, and it is why these do
+    not use a bare lambda. "Did it refuse mainnet" cannot be asserted from a FAIL
+    verdict -- a version that connected, read the balance, printed it and THEN
+    failed would satisfy a verdict-only assertion while doing the exact thing the
+    refusal exists to prevent. So `calls` is the assertion, and the verdict is the
+    corroboration.
+    """
+
+    def __init__(self, *, walletinfo=None, error=None, balance=0.0, wallets=("regtest_htlc_harness",)):
+        self._walletinfo = walletinfo if walletinfo is not None else {"walletname": "regtest_htlc_harness"}
+        self._error = error
+        self._balance = balance
+        self._wallets = wallets
+        self.calls: list[str] = []
+
+    def call(self, method, *_args, **_kwargs):
+        self.calls.append(method)
+        if method == "listwalletdir":
+            return {"wallets": [{"name": name} for name in self._wallets]}
+        if method == "getwalletinfo":
+            if self._error is not None:
+                raise self._error
+            return self._walletinfo
+        raise AssertionError(f"check_bitcoin_like asked for {method!r}, which this fixture does not stub")
+
+    def get_balance(self):
+        self.calls.append("get_balance")
+        return self._balance
+
+
+def _rows_by_name():
+    return {row[1]: row for row in swap_readiness._results}
+
+
+@pytest.mark.parametrize(("asset", "mainnet_port"), [("BTC", 8332), ("LTC", 9332)])
+def test_a_mainnet_btc_or_ltc_port_opens_no_socket_at_all(monkeypatch, asset, mainnet_port):
+    """The 2026-09-25 leak, one chain over.
+
+    chain_precheck() is generalized from gridcoin_precheck() precisely so this
+    property is one implementation rather than three, and this is the test that
+    the GENERALIZATION carried the property rather than only the signature.
+    """
+    adapter = FakeBitcoinLike()
+    monkeypatch.setitem(swap_readiness.Config.RPC, asset, {"port": mainnet_port})
+    swap_readiness._results.clear()
+    swap_readiness.check_bitcoin_like(asset, {asset: adapter}, pays_out=True)
+    rows = _rows_by_name()
+
+    assert adapter.calls == [], (
+        "a mainnet port must not be read. Reading means printing a real balance into whatever "
+        "transcript this output lands in, which is what happened on 2026-09-25"
+    )
+    assert rows[f"{asset} network"][0] == FAIL
+    assert "did NOT connect" in rows[f"{asset} network"][2]
+    assert rows[f"{asset} wallet"][0] == SKIP, "the wallet line must say it was skipped, not go missing"
+
+
+@pytest.mark.parametrize(("asset", "port"), [("BTC", 18443), ("LTC", 19443)])
+def test_an_unloaded_wallet_fails_the_leg_and_names_the_wallet_on_disk(monkeypatch, asset, port):
+    """The exact failure the operator hit, and the reason this function exists.
+
+    Measured on their host 2026-10-03: swap_readiness reported `adapters built
+    BTC, GRC, LTC, SOL, XRP` and a READY banner, while chain_balances.py -- a
+    different tool -- reported
+
+        FAIL  BTC balance: RPCError: No wallet is loaded. (rpc code -18)
+              this daemon has 1 wallet(s) on disk: regtest_htlc_harness
+
+    An adapter that CONNECTS is not a wallet that can act: getnewaddress returns
+    -18 the same way getbalance does, so the swap would have died deriving the
+    deposit address, after the quote and in front of the customer.
+
+    The hint is asserted to come from which_wallets_are_on_disk() -- the wallet
+    name reaches the line -- rather than being a second spelling of it here
+    (rule 8).
+    """
+    adapter = FakeBitcoinLike(error=RuntimeError("No wallet is loaded. (rpc code -18)"))
+    monkeypatch.setitem(swap_readiness.Config.RPC, asset, {"port": port})
+    swap_readiness._results.clear()
+    swap_readiness.check_bitcoin_like(asset, {asset: adapter}, pays_out=True)
+    rows = _rows_by_name()
+
+    assert rows[f"{asset} network"][0] == PASS, "a regtest port is the case that connects"
+    assert rows[f"{asset} wallet"][0] == FAIL
+    assert "-18" in rows[f"{asset} wallet"][2]
+    assert "regtest_htlc_harness" in rows[f"{asset} wallet"][2], (
+        "the operator reads the screen: the line has to name the wallet that could be loaded"
+    )
+    assert "get_balance" not in adapter.calls, (
+        "a balance read after a -18 adds a second failure line for one cause, and the leg is already "
+        "established as unable to act"
+    )
+    assert f"{asset} balance" not in rows, "no balance line at all, rather than a second FAIL for one cause"
+
+
+@pytest.mark.parametrize("asset", ["BTC", "LTC"])
+def test_a_source_leg_does_not_assert_a_balance_it_does_not_need(monkeypatch, asset):
+    """BTC->GRC sends no BTC, so a zero BTC balance is not a defect.
+
+    This is the third instance of one defect in this file -- check_gridcoin() and
+    check_deposit_account() both carried `pays_out` after the same correction --
+    and it is the direction that FAILS WRONG: a fresh regtest chain holds nothing,
+    so asserting a balance on the source would report NOT READY for a run that is
+    entirely fine.
+
+    get_balance is asserted unmade, not merely unreported: a version that read it
+    and then declined to record the row would still have printed the operator's
+    balance through whatever the adapter logs.
+    """
+    adapter = FakeBitcoinLike(balance=0.0)
+    monkeypatch.setitem(swap_readiness.Config.RPC, asset, {"port": 18443 if asset == "BTC" else 19443})
+    swap_readiness._results.clear()
+    swap_readiness.check_bitcoin_like(asset, {asset: adapter}, pays_out=False)
+    rows = _rows_by_name()
+
+    assert rows[f"{asset} wallet"][0] == PASS
+    assert rows[f"{asset} balance"][0] == SKIP
+    assert "SOURCE" in rows[f"{asset} balance"][2]
+    assert "get_balance" not in adapter.calls
+
+
+@pytest.mark.parametrize(("balance", "verdict"), [(0.0, FAIL), (1.25, PASS)])
+def test_a_destination_leg_needs_coins_and_zero_is_the_failing_case(monkeypatch, balance, verdict):
+    """Both halves, because a check that always passed would satisfy either alone.
+
+    GRC->BTC pays out BTC. A wallet that is loaded and empty can derive a payout
+    address and cannot fund the payout, which is a deposit taken against a payout
+    that will fail -- the same shape the SOL keypair gate was added for.
+    """
+    adapter = FakeBitcoinLike(balance=balance)
+    monkeypatch.setitem(swap_readiness.Config.RPC, "BTC", {"port": 18443})
+    swap_readiness._results.clear()
+    swap_readiness.check_bitcoin_like("BTC", {"BTC": adapter}, pays_out=True)
+    rows = _rows_by_name()
+
+    assert rows["BTC balance"][0] == verdict
+    assert "must be > 0" in rows["BTC balance"][2], "state what the number means, next to the number"
+
+
+def test_a_missing_adapter_names_the_variable_rather_than_the_absence(monkeypatch):
+    """"no BTC adapter" tells the operator nothing they can act on.
+
+    why_unconfigured() is the authority for which variable is unset, and it is
+    reached rather than re-derived here for the reason rule 8 gives: a second
+    sentence about BTC credentials would agree on the day it was written.
+    """
+    swap_readiness._results.clear()
+    swap_readiness.check_bitcoin_like("BTC", {}, pays_out=True)
+    rows = _rows_by_name()
+
+    assert rows["BTC"][0] == FAIL
+    assert "BTC_RPC" in rows["BTC"][2], "the line has to name a variable the operator can export"

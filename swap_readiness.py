@@ -53,8 +53,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from chains.registry import build_adapters, missing_settings, why_cannot_pay_out
+from chains.registry import build_adapters, missing_settings, why_cannot_pay_out, why_unconfigured
 from chains.solana_units import SOL_DECIMALS, base_units_to_amount
+from chains.wallet_hint import which_wallets_are_on_disk
 from chains.xrp import XRPAdapter
 from chains.xrp_signing import reserve_drops
 from config import Config
@@ -83,7 +84,11 @@ def record(state: str, name: str, detail: str) -> None:
 #: the report can say which allowed pairs it is actually answering about, rather
 #: than implying it covers all of them -- it does not, and BTC and LTC legs are
 #: unchecked here. Naming the gap beats a silent one (rule 14).
-CHECKED_LEGS = ("XRP", "SOL", "GRC")
+#: GREW FROM ("XRP", "SOL", "GRC") ON 2026-10-03. Two of the operator's five chains
+#: had no leg check at all, so `--pair BTC:GRC` could report READY while the swap
+#: died deriving its deposit address -- see check_bitcoin_like() for the failure
+#: they actually hit.
+CHECKED_LEGS = ("XRP", "SOL", "GRC", "BTC", "LTC")
 
 
 class PairRefused(RuntimeError):
@@ -177,13 +182,27 @@ def check_pair_is_allowed(pair: tuple[str, str] | None = None) -> None:
         f"{a}->{b}" for a, b in Config.ALLOWED_PAIRS
         if a in legs and b in legs and (pair is None or (a, b) == pair)
     )
+    # THE GAP IS DERIVED, NOT SPELLED. This sentence used to end with the literal
+    # "a pair with a BTC or LTC leg is ALLOWED and is NOT verified by anything
+    # below", which was true from 2026-10-01 until the operator said "add the
+    # btc/ltc legs now" on 2026-10-03 and check_bitcoin_like() landed. A hardwired
+    # list of what a file cannot do is rule 8's duplicate with a delay on it: the
+    # capability moved and the sentence did not, so the line would have told the
+    # operator that the two legs it had just checked were unverified. Reading the
+    # gap off CHECKED_LEGS means the sentence cannot be wrong, and means it says
+    # "(none)" -- which is itself the answer (rule 14) -- on the day the gap closes.
+    unchecked = sorted({leg for a, b in Config.ALLOWED_PAIRS for leg in (a, b)} - set(CHECKED_LEGS))
+    gap = (
+        f"a pair with a {' or '.join(unchecked)} leg is ALLOWED and is NOT verified by anything below"
+        if unchecked
+        else "legs with no check here: (none) -- every leg in Config.ALLOWED_PAIRS is checked below"
+    )
     record(PASS, "pair allowed", f"{', '.join(pairs)}  <- all {len(pairs)} in Config.ALLOWED_PAIRS")
     record(
         PASS if covered else FAIL,
         "pairs checked here",
         f"{', '.join(covered) or '(none)'}  <- {len(covered)} of {len(pairs)}. {scoping}. Legs "
-        f"checked: {', '.join(legs)}; a pair with a BTC or LTC leg is ALLOWED and is NOT verified by "
-        f"anything below",
+        f"checked: {', '.join(legs)}; {gap}",
     )
 
 
@@ -617,8 +636,18 @@ def explain_grc_failure(error: Exception, port: int) -> str:
     return f"{type(error).__name__}: {text[:150]}  <- reported as-is; this failure has no known interpretation"
 
 
-def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
-    """Decide whether to OPEN A SOCKET to the Gridcoin wallet. Returns (connect?, state, detail).
+def chain_precheck(asset: str, port: int) -> tuple[bool, str, str]:
+    """Decide whether to OPEN A SOCKET to a Bitcoin-derived wallet. (connect?, state, detail).
+
+    GENERALIZED FROM gridcoin_precheck() ON 2026-10-03, when BTC and LTC legs were
+    added. network_target.CHAIN_PORTS already carries the mainnet port, the test
+    ports, the variable name and the hint for all three chains, so the decision was
+    never GRC-specific -- only its spelling was. A second copy for BTC and a third
+    for LTC would be rule 8's defect with two delays on it, and the thing being
+    copied is a refusal to read a real wallet.
+
+    gridcoin_precheck() below is kept as a one-line wrapper because tests and
+    chain_balances.py import it by name.
 
     Extracted because it is the one decision in this file with a cost attached,
     and rule 10 puts the deciding thing at the bottom where it can be called with
@@ -635,21 +664,29 @@ def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
 
     So a mainnet port returns connect=False. Not "connect and warn".
     """
-    verdict = classify("GRC", port)
+    ports = CHAIN_PORTS[asset]
+    verdict = classify(asset, port)
     if verdict == "UNCONFIGURED":
-        return False, FAIL, f"(unconfigured) -- set GRC_RPC_PORT to the test chain ({CHAIN_PORTS['GRC'].test_hint})"
+        return False, FAIL, (f"(unconfigured) -- set {ports.port_variable} to the test chain "
+                             f"({ports.test_hint})")
     if verdict == "MAINNET":
         return False, FAIL, (
             f"port {port} is MAINNET and this did NOT connect. A preflight will not read a real "
-            f"wallet, because reading it means printing the balance. Set GRC_RPC_PORT=25779"
+            f"wallet, because reading it means printing the balance. Set {ports.port_variable} to a "
+            f"test chain ({ports.test_hint})"
         )
     if verdict == "UNRECOGNIZED":
         return False, FAIL, (
-            f"port {port} is not a Gridcoin port this tree knows, so which chain it is was NOT "
+            f"port {port} is not a {asset} port this tree knows, so which chain it is was NOT "
             f"established -- and an unknown port may be a mainnet daemon on a custom -rpcport. "
             f"Refusing to connect rather than guessing"
         )
-    return True, PASS, f"port {port} is a test chain (mainnet is {CHAIN_PORTS['GRC'].mainnet_port})"
+    return True, PASS, f"port {port} is a test chain (mainnet is {ports.mainnet_port})"
+
+
+def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
+    """chain_precheck("GRC", port). Kept by name because callers and tests import it."""
+    return chain_precheck("GRC", port)
 
 
 def check_gridcoin(pays_out_grc: bool = True) -> None:
@@ -755,6 +792,95 @@ def check_gridcoin(pays_out_grc: bool = True) -> None:
         info if isinstance(info, dict) else {}, can_unlock=can_unlock
     )
     record(lock_state, "GRC wallet lock", lock_detail)
+
+
+def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
+    """The BTC and LTC legs. NOTHING CHECKED THESE AT ALL UNTIL 2026-10-03.
+
+    CHECKED_LEGS was ("XRP", "SOL", "GRC"), so a run scoped to BTC:GRC checked the
+    GRC leg and said of the other one, in the only line that mentioned it:
+
+        pairs checked here  GRC->SOL, GRC->XRP, SOL->GRC, XRP->GRC  <- 4 of 16.
+                            a pair with a BTC or LTC leg is ALLOWED and is NOT
+                            verified by anything below
+
+    True, and under a READY banner. Two of the operator's five chains had no leg
+    check, so `--pair BTC:GRC` could report READY while the swap died at creation.
+
+    AND THAT WAS NOT HYPOTHETICAL -- the operator hit the exact failure within the
+    hour. They started bitcoind and litecoind, exported the credentials, and
+    swap_readiness reported "adapters built BTC, GRC, LTC, SOL, XRP" and READY for
+    everything but XRP_DEPOSIT_ACCOUNT. chain_balances.py, a different tool, is what
+    found the real state:
+
+        FAIL  BTC balance: RPCError: No wallet is loaded. (rpc code -18)
+              this daemon has 1 wallet(s) on disk: regtest_htlc_harness
+
+    An adapter that CONNECTS is not a wallet that can act. getbalance fails with
+    -18 and so does getnewaddress -- so a BTC swap would have been created, shown a
+    deposit address... no: it would have died DERIVING that address, after the quote
+    and in front of the customer. The adapter-built line is necessary and not
+    sufficient, and the readiness page was silent on the difference.
+
+    THREE THINGS ARE ASKED, in the order that costs least:
+
+      the PORT        chain_precheck() classifies it BEFORE a socket opens, so a
+                      mainnet daemon is refused rather than read. Reading means
+                      printing a real balance into a pasted log, which happened on
+                      2026-09-25.
+      a LOADED WALLET getwalletinfo. The -18 case above, reported with
+                      chains/wallet_hint.which_wallets_are_on_disk()'s own sentence
+                      -- which names the wallets on disk and the loadwallet command
+                      -- rather than a second spelling of it (rule 8).
+      the BALANCE     only when this chain is a DESTINATION in this run, exactly as
+                      check_gridcoin() does it. As a source the wallet RECEIVES, so
+                      a zero balance is not a defect and failing on it would refuse
+                      a run that is fine. A fresh regtest chain has no coins at all.
+
+    `pays_out` is the same argument check_gridcoin() and check_deposit_account()
+    carry, for the same reason and after the same two defects: a precondition
+    asserted for a direction that does not have it reads as checked and met.
+    """
+    adapter = adapters.get(asset)
+    if adapter is None:
+        record(FAIL, asset, f"no {asset} adapter in this process -- {why_unconfigured(asset, Config.RPC)}")
+        return
+
+    port = Config.RPC[asset]["port"]
+    connect, state, detail = chain_precheck(asset, port)
+    record(state, f"{asset} network", detail)
+    if not connect:
+        record(SKIP, f"{asset} wallet", "not checked: the port was not established as a test chain, and "
+                                        "reading a wallet means printing its balance")
+        return
+
+    started = time.monotonic()
+    try:
+        info = adapter.call("getwalletinfo")
+    except Exception as error:  # noqa: BLE001 -- checked: a down daemon, a refused login and an unloaded wallet all mean "this leg cannot run", the type and message are printed, and the hint below names the remedy for the one that has one. Telling them further apart would not change what the operator does next.
+        hint = which_wallets_are_on_disk(adapter, asset)
+        record(FAIL, f"{asset} wallet", f"{type(error).__name__}: {str(error)[:120]}"
+                                        + (f"  <- {hint}" if hint else ""))
+        return
+    name = (info or {}).get("walletname", "")
+    record(PASS, f"{asset} wallet",
+           f"loaded{f' ({name})' if name else ''}  <- getwalletinfo answered, so getnewaddress can derive "
+           f"a deposit address. An adapter that merely CONNECTS cannot: rpc -18 is what a daemon with no "
+           f"wallet loaded returns  in {format_duration(time.monotonic() - started)}")
+
+    if not pays_out:
+        record(SKIP, f"{asset} balance",
+               f"not checked: {asset} is the SOURCE in this run, so nothing sends {asset} and a balance is "
+               f"NOT a precondition. The wallet RECEIVES here -- a fresh regtest chain holds nothing and "
+               f"that is fine")
+        return
+    try:
+        balance = float(adapter.get_balance())
+    except Exception as error:  # noqa: BLE001 -- checked: reported with its type and message, and the leg is FAILED rather than passed on an unknown balance.
+        record(FAIL, f"{asset} balance", f"{type(error).__name__}: {str(error)[:120]}")
+        return
+    record(PASS if balance > 0 else FAIL, f"{asset} balance",
+           f"{balance} {asset} on port {port}  <- must be > 0 to pay a {asset} leg")
 
 
 def check_solana(adapters) -> None:
@@ -982,6 +1108,11 @@ def main(argv: list[str] | None = None) -> int:
         # deposit. `pair` is None for an unscoped run, which checks every allowed
         # pair and therefore does pay out GRC.
         ("GRC", lambda: check_gridcoin(pays_out_grc=(pair is None or pair[1] == "GRC"))),
+        # BTC and LTC, scoped the same way: a chain that is only a SOURCE in this run
+        # has no balance precondition. Added 2026-10-03 -- CHECKED_LEGS named three
+        # chains and the operator had five.
+        ("BTC", lambda: check_bitcoin_like("BTC", adapters, pays_out=(pair is None or pair[1] == "BTC"))),
+        ("LTC", lambda: check_bitcoin_like("LTC", adapters, pays_out=(pair is None or pair[1] == "LTC"))),
         ("pricing", lambda: check_pricing(pair)),
     ):
         if name in CHECKED_LEGS and name not in legs:
