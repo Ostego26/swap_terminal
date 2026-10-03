@@ -1335,3 +1335,55 @@ def test_main_PASSES_THE_SCOPE_to_check_gridcoin_for_both_directions(monkeypatch
         "a SOL -> GRC run lost the balance precondition, so the guard is gone where the desk does send GRC"
     )
     assert "GRC is the SOURCE in this run" not in destination_run, destination_run[-400:]
+
+
+def test_main_PASSES_THE_DIRECTION_to_the_XRP_deposit_check(monkeypatch, capsys):
+    """GRC -> XRP pays OUT in XRP, so XRP_DEPOSIT_ACCOUNT is not its precondition.
+
+    THE SYMMETRIC DEFECT TO check_gridcoin()'s, found an hour after fixing that one
+    by reading the operator's unscoped run -- and I had not thought to look for it.
+
+    XRP_DEPOSIT_ACCOUNT is XRP's DEPOSIT TARGET: services/swap_service.TAG_ATTRIBUTION
+    names it as the shared account every XRP deposit is attributed against by
+    DestinationTag. A swap that PAYS OUT in XRP receives nothing there.
+
+    MEASURED, and the proof was already on the operator's host: GRC -> XRP reads
+    AVAILABLE on the customer page with XRP_DEPOSIT_ACCOUNT unset, because
+    services/pair_view.pair_serviceability() asks why_cannot_take_deposits() about the
+    SOURCE only. This page said NOT READY for that same pair. Two surfaces, one pair,
+    opposite verdicts -- which is exactly the 2026-10-02 defect that started this
+    whole thread, in a third place.
+
+    The leg filter cannot catch it: it only asks whether XRP appears in the pair AT
+    ALL, not whether it appears as the deposit leg or the payout leg.
+
+    AND THIS DRIVES main(), NOT THE BRANCH. The branch-only version of this test
+    passes with the call site hardcoded, which is how the GRC fix shipped broken an
+    hour ago. Verified by mutation 2026-10-03.
+    """
+    monkeypatch.delenv("XRP_DEPOSIT_ACCOUNT", raising=False)
+    monkeypatch.setattr(swap_readiness.Config, "XRP_DEPOSIT_ACCOUNT", "", raising=False)
+
+    swap_readiness._results.clear()
+    swap_readiness.main(["--pair", "GRC:XRP"])
+    paying_out = capsys.readouterr().out
+
+    swap_readiness._results.clear()
+    swap_readiness.main(["--pair", "XRP:GRC"])
+    taking_deposits = capsys.readouterr().out
+
+    # XRP as DESTINATION: the account is not demanded, and the line says why.
+    assert "XRP is the DESTINATION in this run" in paying_out, (
+        "main() did not pass the direction to check_deposit_account(), so GRC -> XRP still demands a "
+        "deposit account it never uses -- and reports NOT READY for a pair the customer page offers"
+    )
+    assert "refuses every XRP-SOURCE swap" not in paying_out, (
+        "the FAIL message for a missing deposit account appeared on a pair that takes no XRP deposit"
+    )
+
+    # XRP as SOURCE: it IS demanded, so the scoping cannot pass by never asking.
+    assert "refuses every XRP-SOURCE swap" in taking_deposits, (
+        "XRP:GRC stopped requiring the deposit account, so the custody gate is gone where it matters -- "
+        "create_swap() would refuse and nothing here would have said so"
+    )
+    assert "XRP is the DESTINATION in this run" not in taking_deposits, taking_deposits[-300:]

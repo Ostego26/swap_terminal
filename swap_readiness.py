@@ -345,14 +345,47 @@ def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
         record(FAIL if blocked else PASS, "payout unlock", detail)
 
 
-def check_deposit_account() -> str:
-    """The custody value. Everything about the XRP deposit leg depends on it."""
+def check_deposit_account(takes_deposits: bool = True) -> str:
+    """The custody value for XRP as a SOURCE. Not a precondition when XRP is paid OUT.
+
+    `takes_deposits` SAYS WHETHER XRP IS A SOURCE IN THIS RUN, and it is the
+    symmetric half of check_gridcoin()'s `pays_out_grc` -- the same defect, the other
+    way round, found by reading the operator's unscoped run an hour after fixing the
+    first one and failing to look for this one.
+
+    XRP_DEPOSIT_ACCOUNT is XRP's DEPOSIT TARGET. services/swap_service.TAG_ATTRIBUTION
+    names it as the shared account every XRP DEPOSIT is attributed against by
+    DestinationTag. A swap that PAYS OUT in XRP never receives anything there, so the
+    account is irrelevant to that direction -- and the proof is already on the
+    operator's host: GRC -> XRP reads AVAILABLE on the customer page with
+    XRP_DEPOSIT_ACCOUNT unset, because services/pair_view.pair_serviceability() asks
+    why_cannot_take_deposits() about the SOURCE only.
+
+    SO `--pair GRC:XRP` WOULD HAVE REPORTED NOT READY FOR A PAIR THAT IS READY, which
+    is the verdict this page exists to get right. The leg filter above only asks
+    whether XRP appears in the pair AT ALL; it cannot tell a deposit leg from a payout
+    leg, and that is what this argument adds.
+
+    THE OLD MESSAGE WAS ALSO FALSE AS WRITTEN: "create_swap() refuses every XRP swap".
+    It refuses every XRP-SOURCE swap. A sentence that overstates which swaps are
+    blocked sends an operator to set a custody value they do not need for the
+    direction they are trying to run.
+    """
     account = Config.XRP_DEPOSIT_ACCOUNT
+    if not takes_deposits:
+        record(SKIP, "XRP_DEPOSIT_ACCOUNT",
+               "not checked: XRP is the DESTINATION in this run, so no XRP deposit is taken and this "
+               "account is not a precondition. It is the shared account XRP DEPOSITS are attributed "
+               "against by DestinationTag (services/swap_service.TAG_ATTRIBUTION), which only a pair "
+               "with XRP as its SOURCE uses"
+               + (f". It IS set, to {account}" if account else ". It is unset here"))
+        return account
     if not account:
         record(FAIL, "XRP_DEPOSIT_ACCOUNT",
-               "(unset) -- create_swap() refuses every XRP swap until this names an account you hold the key for")
+               "(unset) -- create_swap() refuses every XRP-SOURCE swap until this names an account you "
+               "hold the key for. A swap paying OUT in XRP does not need it")
         return ""
-    record(PASS, "XRP_DEPOSIT_ACCOUNT", f"{account}  <- every XRP swap shares this one account")
+    record(PASS, "XRP_DEPOSIT_ACCOUNT", f"{account}  <- every XRP DEPOSIT shares this one account")
     return account
 
 
@@ -938,7 +971,12 @@ def main(argv: list[str] | None = None) -> int:
         ("pair allowed", lambda: check_pair_is_allowed(pair)),
         ("schema", check_schema),
         ("payout unlock", lambda: check_payout_unlock(adapters, pair)),
-        ("XRP", lambda: check_xrp(check_deposit_account())),
+        # The scope reaches check_deposit_account() so it can tell an XRP DEPOSIT from
+        # an XRP PAYOUT, the same way it reaches check_gridcoin() below. `pair` is
+        # None for an unscoped run, which checks every allowed pair and therefore
+        # does take XRP deposits.
+        ("XRP", lambda: check_xrp(check_deposit_account(
+            takes_deposits=(pair is None or pair[0] == "XRP")))),
         ("SOL", lambda: check_solana(adapters)),
         # The scope reaches check_gridcoin() so it can tell a GRC payout from a GRC
         # deposit. `pair` is None for an unscoped run, which checks every allowed
