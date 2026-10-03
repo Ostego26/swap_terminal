@@ -62,6 +62,55 @@ from report_block import labeled
 DEPOSIT_ACCOUNT_VARIABLE = "XRP_DEPOSIT_ACCOUNT"
 
 
+def seed_shape(seed: str) -> str:
+    """What SHAPE the exported value has, said without printing any of it.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-03: XRP_PAYOUT_SECRET_SEED was SET and
+    xrpl-py raised ValueError reading it. The first version of this refusal said
+    only "could not read it as a seed (ValueError)" and named the length
+    requirement -- true, actionable in principle, and it left the operator to
+    inspect a live key by eye to find out which way it was wrong.
+
+    SO THIS REPORTS SHAPE FACTS AND NEVER CONTENT: a length, a prefix FAMILY, and
+    whether the value contains characters a shell would have stripped if the export
+    had been written differently. None of those narrows a 29-character base58 secret
+    to anything an attacker could use, and each one points at a different fix.
+
+    Probed against the installed xrpl-py the same day, so the branches below are
+    measured rather than guessed:
+
+        "sEdTM1uX8pu2do5XvTnutH6HsouMaM2 "   trailing space  -> ACCEPTED
+        '"sEdTM1uX8pu2do5XvTnutH6HsouMaM2"'  literal quotes  -> ValueError
+        "a" * 64                             hex-looking     -> ValueError
+        "notaseed"                           garbage         -> ValueError
+
+    The trailing-space result is why whitespace is reported but not blamed: it
+    decodes fine, so a value that fails AND has whitespace failed for another
+    reason.
+    """
+    length = len(seed)
+    facts = [f"{length} characters"]
+    if seed != seed.strip():
+        facts.append("leading or trailing whitespace (which xrpl-py tolerates, so this is not the cause)")
+    if any(ch in seed for ch in "\"'"):
+        facts.append("QUOTE CHARACTERS inside the value -- an `export VAR=\"...\"` whose quotes were "
+                     "themselves quoted keeps them, and xrpl-py rejects that")
+    stripped = seed.strip().strip("\"'")
+    if stripped and all(ch in "0123456789abcdefABCDEF" for ch in stripped):
+        facts.append("all hexadecimal -- that is a master seed or entropy in hex, not the base58 secret "
+                     "Wallet.from_seed() reads")
+    elif stripped.startswith("sEd"):
+        facts.append("starts with 'sEd' (an ed25519 seed), so the prefix is right and the rest is not")
+    elif stripped.startswith("s"):
+        facts.append("starts with 's' (a secp256k1 seed), so the prefix is right and the rest is not")
+    elif stripped and stripped[0].isdigit():
+        facts.append("starts with a digit -- xrpl's 'secret numbers' are six groups of six digits and "
+                     "need Wallet.from_secret_numbers(), which the payout path does not use")
+    else:
+        facts.append("does not start with 's', so it is not an XRP seed at all")
+    return "; ".join(facts)
+
+
 def derived_account(seed: str) -> tuple[str, str]:
     """(classic address, "") for a usable seed, or ("", why not). NEVER RAISES.
 
@@ -89,9 +138,26 @@ def derived_account(seed: str) -> tuple[str, str]:
     try:
         wallet = Wallet.from_seed(seed)
     except Exception as error:  # noqa: BLE001 -- checked: returns a refusal naming the TYPE only. str(error) is deliberately NOT included: xrpl-py has echoed the offending seed in its own message, and this output gets pasted.
+        # THE SAME CALL THE PAYOUT MAKES, WHICH IS WHY THIS IS A LIVE FINDING AND NOT A
+        # TOOL PROBLEM. chains/xrp_signing.py:397 derives the signing wallet with
+        # Wallet.from_seed(secret) -- this exact function. A value it cannot read here
+        # cannot be read there either, so an XRP payout would fail at SIGNING TIME,
+        # after the customer's deposit was confirmed and irreversible. Finding it with
+        # no XRP swap in existence costs a re-export.
+        #
+        # AND THIS IS WHY NO ALTERNATE CONSTRUCTOR IS TRIED. xrpl-py also offers
+        # from_entropy(), from_secret() and from_secret_numbers(), and reaching for one
+        # of them would let this tool print an account the payout path still cannot
+        # sign for -- a second spelling of "derive the wallet" that disagrees with the
+        # first (rule 8), and disagrees exactly where it costs a stranded deposit. The
+        # shape line below names the constructor that WOULD read the value, as
+        # information, and the fix is to export a seed from_seed accepts.
         return "", (f"{SIGNING_SEED_ENV_VAR} is set but xrpl-py could not read it as a seed "
-                    f"({type(error).__name__}). The value is NOT printed here. A testnet seed starts with "
-                    f"'s' and is 29 characters; check it was exported whole and unquoted")
+                    f"({type(error).__name__}). The value is NOT printed. Its shape: "
+                    f"{seed_shape(seed)}. A base58 seed is 29 characters. THIS IS NOT ONLY A PROBLEM FOR "
+                    f"THIS TOOL -- chains/xrp_signing.py derives the payout wallet with the same "
+                    f"Wallet.from_seed(), so an XRP payout would fail at signing, after a deposit was "
+                    f"confirmed")
     address = str(wallet.classic_address)
     if not is_valid_classic_address(address):
         return "", (f"the derived address {address!r} does not decode as a classic address, which should be "

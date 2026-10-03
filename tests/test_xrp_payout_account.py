@@ -184,3 +184,68 @@ def test_the_variable_name_is_not_spelled_twice():
     """Rule 8 at its smallest: the module names it once and reads it back."""
     assert xrp_payout_account.DEPOSIT_ACCOUNT_VARIABLE == "XRP_DEPOSIT_ACCOUNT"
     assert xrp_payout_account.DEPOSIT_ACCOUNT_VARIABLE in agreement_line("rAnything", "")
+
+
+# --- the shape of a value that will not decode -------------------------------
+#
+# MEASURED ON THE OPERATOR'S HOST 2026-10-03: XRP_PAYOUT_SECRET_SEED was SET and
+# xrpl-py raised ValueError. The refusal said only "could not read it as a seed
+# (ValueError)", which left them to inspect a live key by eye to learn which way
+# it was wrong.
+
+
+@pytest.mark.parametrize(
+    ("value", "fragment"),
+    [
+        ('"sEdTM1uX8pu2do5XvTnutH6HsouMaM2"', "QUOTE CHARACTERS"),
+        ("a" * 64, "all hexadecimal"),
+        ("notaseed", "does not start with 's'"),
+        ("123456 234567 345678", "secret numbers"),
+        ("sEdTM1uX8pu", "starts with 'sEd'"),
+        ("snotarealsecp", "starts with 's'"),
+    ],
+)
+def test_an_undecodable_seed_is_diagnosed_by_SHAPE_and_never_by_content(value, fragment):
+    """Each shape points at a different fix, and none of them prints the value.
+
+    A length and a prefix FAMILY do not narrow a 29-character base58 secret to
+    anything usable, and they are the difference between "re-export it without the
+    quotes" and "that is a hex master seed, not a base58 secret".
+    """
+    address, refusal = derived_account(value)
+
+    assert address == ""
+    assert fragment in refusal
+    assert value not in refusal, "the rejected value must never appear in output that gets pasted"
+
+
+def test_the_refusal_says_the_PAYOUT_would_fail_too():
+    """The finding is live, not cosmetic, and the line has to say so.
+
+    chains/xrp_signing.py:397 derives the signing wallet with the same
+    Wallet.from_seed(secret). A value this tool cannot read cannot be read there
+    either, so an XRP payout would fail at SIGNING -- after the customer's deposit
+    was confirmed and irreversible. An operator who reads this as "the diagnostic
+    tool is fussy" leaves that in place.
+    """
+    _address, refusal = derived_account("notaseed")
+
+    assert "xrp_signing" in refusal
+    assert "after a deposit was confirmed" in refusal
+
+
+def test_whitespace_is_reported_but_not_blamed():
+    """Because it decodes. Measured against the installed xrpl-py.
+
+        "sEdTM1uX8pu2do5XvTnutH6HsouMaM2 "   trailing space  -> ACCEPTED
+
+    So a value that BOTH fails and has whitespace failed for another reason, and a
+    refusal blaming the whitespace would send the operator to re-export a seed that
+    was never the problem. This is the same "a reason to believe is not a
+    measurement" line rule 17 draws, inside one diagnostic sentence.
+    """
+    address, refusal = derived_account(SEED + " ")
+
+    assert address != "", "a trailing space decodes, so this must still derive an account"
+    assert refusal == ""
+    assert "not the cause" in xrp_payout_account.seed_shape("  " + SEED)
