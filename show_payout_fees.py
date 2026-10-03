@@ -225,16 +225,47 @@ def report_asset(asset: str, bucket: dict, say) -> None:
     """One asset's block: what was booked, what was measured, and the ratio.
 
     A FUNCTION FOR THE SAME REASON read_fees() IS ONE. "What does an operator read
-    for this asset" is a decision about which of four cases they are in -- not
-    measurable here, measurable and nothing read, measurable and read, or no
-    reserve configured at all -- and a decision inside a print loop cannot be
-    called with seeded inputs.
+    for this asset" is a decision about which cases they are in -- no payouts at
+    all, not measurable here, measurable and nothing read, measurable and read, or
+    no reserve configured -- and a decision inside a print loop cannot be called
+    with seeded inputs.
+
+    CALLED FOR EVERY ASSET, INCLUDING THE ONES WITH NO PAYOUTS, AND IT WAS NOT
+    UNTIL 2026-10-03. main() had a SECOND loop printing a one-line "payouts=0" for
+    any asset missing from the fee table, so the whole block below -- the reserve,
+    whether it is absent, and the figure for a chain this tool cannot ask -- was
+    unreachable for exactly those assets. Measured on the operator's host the hour
+    this was written, they asked what to set XRP_NETWORK_FEE_RESERVE to and the
+    tool answered:
+
+        XRP  payouts=0  <- nothing paid out on this chain, so no fee to measure
+
+    No reserve line, no "absent", no 10-drop figure. That is the SILENT-OMISSION
+    FAILURE THIS FILE'S OWN DOCSTRING IS ABOUT, shipped in the same commit that
+    described it, to the one reader it was written for.
+
+    AND THE TEST THAT WAS SUPPOSED TO CATCH IT PASSED, because it called this
+    function directly with a seeded bucket and never ran main(). A unit test on a
+    branch is not a test of whether the branch is REACHED -- which is this
+    repository's recurring defect shape: a correct function whose call site
+    discards it. tests/test_show_payout_fees.py now drives main() over a seeded
+    database as well, and that is the only shape that would have failed.
     """
     verdict = measured_vs_booked(bucket["fees"], bucket["booked"])
     setting = f"{asset}_NETWORK_FEE_RESERVE"
     configured = getattr(Config, setting, None)
     shown = "(absent -- every quote paying out in this asset REFUSES)" if configured is None else configured
     say(f"{asset}  payouts={len(bucket['booked'])}  {setting}={shown}")
+    if not bucket["booked"]:
+        # NOTHING PAID OUT YET IS ITS OWN CASE and is reported BEFORE the
+        # measurability question, because "no fee to measure" is true of this chain
+        # for a reason that has nothing to do with whether the tool could ask it.
+        # The reserve line above still printed, which is the half that was missing.
+        say("  measured fee: (no payouts on this chain yet, so there is no fee to measure)")
+        if asset in UNMEASURABLE_HERE:
+            figure, provenance = UNMEASURABLE_HERE[asset]
+            say(f"  and this tool could not ask anyway: the tree's figure is {figure} -- {provenance}")
+        return
     if asset in UNMEASURABLE_HERE:
         figure, provenance = UNMEASURABLE_HERE[asset]
         say(f"  measured fee: NOT MEASURABLE FROM HERE. The tree's figure is {figure} -- {provenance}")
@@ -297,11 +328,12 @@ def main(argv: list[str] | None = None) -> int:
     per_asset = read_fees(rows, adapters, ask_chain=not args.no_chain, say=say)
 
     say("")
-    for asset in sorted(per_asset):
-        report_asset(asset, per_asset[asset], say)
-
-    for asset in sorted(set(Config.RPC) - set(per_asset)):
-        say(f"{asset}  payouts=0  <- nothing paid out on this chain, so no fee to measure")
+    # EVERY ASSET THROUGH THE SAME FUNCTION. The second loop that used to print a
+    # bare "payouts=0" for the assets missing from `per_asset` is DELETED, not
+    # fixed: two printers for one block is how XRP came to be reported without its
+    # reserve line (see report_asset's docstring). An empty bucket is a bucket.
+    for asset in sorted(set(per_asset) | set(Config.RPC)):
+        report_asset(asset, per_asset.get(asset, {"fees": [], "booked": [], "unread": []}), say)
         if not args.no_chain and asset in MEASURABLE and asset not in adapters:
             say(f"  {why_unconfigured(asset, Config.RPC)}")
 

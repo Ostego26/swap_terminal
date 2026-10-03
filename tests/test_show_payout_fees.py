@@ -35,6 +35,7 @@ from show_payout_fees import (
     MEASURABLE,
     UNMEASURABLE_HERE,
     load_payouts,
+    main,
     measured_vs_booked,
     read_fees,
     report_asset,
@@ -212,3 +213,110 @@ def test_a_pending_payout_is_not_a_cost_yet(tmp_path):
 
     rows = load_payouts(str(db_path))
     assert [row["txid"] for row in rows] == ["sent"], "a pending payout has not charged a fee yet"
+
+
+# --- THE CALL SITE, NOT THE BRANCH ---------------------------------------------
+#
+# Every test above calls report_asset() or read_fees() directly, and ALL OF THEM
+# PASSED while the tool printed this to the operator on 2026-10-03:
+#
+#     XRP  payouts=0  <- nothing paid out on this chain, so no fee to measure
+#
+# No reserve line, no "absent", no 10-drop figure -- for the reader who had just
+# asked what to set XRP_NETWORK_FEE_RESERVE to. main() had a SECOND loop for the
+# assets with no payouts, so report_asset()'s whole block was unreachable for
+# exactly those assets and a unit test on the branch could not see it.
+#
+# That is this repository's recurring shape: a correct function whose CALL SITE
+# discards the result. The tests below drive main() end to end over a seeded
+# database with --no-chain, which is the only shape that would have failed.
+
+
+def _seeded_db(tmp_path, rows=()):
+    """A database with just enough schema for load_payouts(), plus the given rows."""
+    db_path = tmp_path / "main.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("CREATE TABLE payouts (id INTEGER PRIMARY KEY, swap_id TEXT, amount REAL, "
+                       "txid TEXT, status TEXT, sent_at TEXT);"
+                       "CREATE TABLE swaps (id TEXT PRIMARY KEY, to_asset TEXT, network_fee_reserve REAL);")
+    for index, (asset, txid, reserve) in enumerate(rows, start=1):
+        conn.execute("INSERT INTO swaps VALUES (?, ?, ?)", (f"s{index}", asset, reserve))
+        conn.execute("INSERT INTO payouts VALUES (?, ?, ?, ?, 'broadcast', ?)",
+                     (index, f"s{index}", 1.0, txid, f"t{index}"))
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_main_gives_EVERY_asset_its_reserve_line_including_the_ones_with_no_payouts(tmp_path, capsys):
+    """The defect the operator saw, pinned at the call site.
+
+    MUTATION: restore main()'s second loop -- a bare "payouts=0" print for the
+    assets missing from the fee table. XRP then has no reserve line and this fails
+    on the first assertion.
+    """
+    db_path = _seeded_db(tmp_path, [("GRC", "a" * 64, 0.01)])
+    assert main(["--db", str(db_path), "--no-chain"]) == 0
+    body = capsys.readouterr().out
+
+    for asset in ("GRC", "BTC", "LTC", "SOL", "XRP"):
+        assert f"{asset}_NETWORK_FEE_RESERVE=" in body, (
+            f"{asset} got no reserve line. An asset with no payouts still has a reserve, or lacks one, "
+            f"and that is the fact an operator setting them needs"
+        )
+    # XRP's is the one that is ABSENT, and the consequence has to be on the screen.
+    assert "XRP_NETWORK_FEE_RESERVE=(absent -- every quote paying out in this asset REFUSES)" in body, body
+    # And the figure the tree knows, for the chain this tool cannot ask.
+    assert "0.00001 XRP" in body, "XRP printed no figure, so the question that prompted this tool is unanswered"
+    assert "0.000005 SOL" in body, "SOL printed no figure"
+
+
+def test_main_does_not_report_an_unasked_chain_the_same_way_as_an_asked_one(tmp_path, capsys):
+    """"No payouts" and "could not ask" are different facts and must read differently.
+
+    BTC is measurable and has no payouts; XRP has no payouts and could not have
+    been asked either way. Both say there is no fee to measure; only XRP says the
+    second thing.
+    """
+    db_path = _seeded_db(tmp_path, [("GRC", "b" * 64, 0.01)])
+    assert main(["--db", str(db_path), "--no-chain"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    def block(asset):
+        start = next(i for i, line in enumerate(lines) if line.startswith(f"{asset}  payouts="))
+        rest = [line for line in lines[start + 1:] if line.startswith("  ")]
+        return "\n".join(rest[:3])
+
+    assert "no payouts on this chain yet" in block("BTC"), block("BTC")
+    assert "could not ask anyway" not in block("BTC"), "BTC is measurable; saying otherwise is false"
+    assert "could not ask anyway" in block("XRP"), block("XRP")
+
+
+def test_main_on_an_empty_database_says_none_rather_than_printing_nothing(tmp_path, capsys):
+    """Rule 14: a blank gap is ambiguous between zero rows and a query that broke."""
+    db_path = _seeded_db(tmp_path)
+    assert main(["--db", str(db_path), "--no-chain"]) == 0
+    body = capsys.readouterr().out
+    assert "(none)" in body
+    assert "broadcast payouts with a txid: 0" in body
+
+
+def test_main_reports_a_duration_that_is_not_a_bare_zero(tmp_path, capsys):
+    """The second thing wrong on the operator's screen, also at the call site.
+
+    Seven RPC round trips printed `done in 0.0µfn (0.0s)`. At one decimal anything
+    under 0.05s renders as zero in both halves, so a real zero and a fast-but-real
+    duration were the same string. microfortnights.format_duration() now reaches
+    for more precision when the value is greater than zero.
+
+    MUTATION: revert that guard. This run takes well under 0.05s, so the line goes
+    back to "0.0µfn (0.0s)" and this fails.
+    """
+    db_path = _seeded_db(tmp_path, [("GRC", "c" * 64, 0.01)])
+    assert main(["--db", str(db_path), "--no-chain"]) == 0
+    done = next(line for line in capsys.readouterr().out.splitlines() if "done in" in line)
+    assert "0.0µfn (0.0s)" not in done, (
+        f"a run that did measurable work reported a bare zero, which is the string an exact zero owns: "
+        f"{done!r}"
+    )
+    assert "µfn" in done and "ufn" not in done, "the unit is µfn (rule 6)"

@@ -92,6 +92,16 @@ def microfortnights_to_seconds(ufn: float) -> float:
     return ufn * UFN_SECONDS
 
 
+#: THE CEILING ON THE PRECISION format_duration() WILL REACH FOR.
+#:
+#: Six is not arbitrary: 1µfn is 1.2096s, so six decimals resolve about a
+#: microsecond, which is below the cost of the print statement that reports it.
+#: A loop with no ceiling would spin on a denormal; one that stopped at three
+#: would still print 0.000µfn for a duration under 4 microseconds, and printing
+#: zero for something that happened is the defect this exists to prevent.
+MAX_DECIMALS = 6
+
+
 def format_microfortnights(seconds: float, decimals: int = 1) -> str:
     """Format a duration as microfortnights alone: `2.3µfn`.
 
@@ -114,5 +124,38 @@ def format_duration(seconds: float, decimals: int = 1) -> str:
     Returns:
         The microfortnight figure with the seconds in parentheses. No space
         before either unit.
+
+    A NON-ZERO DURATION NEVER PRINTS AS ZERO, added 2026-10-03 because it did, on
+    the operator's screen, under the one line that proved the work had happened:
+
+        reading 7/7 GRC e9d2f63568905d74
+        ...
+        done in         0.0µfn (0.0s)
+
+    Seven JSON-RPC round trips to a Gridcoin daemon, each of which printed as it
+    went, and the total read as zero. At one decimal anything under 0.05s renders
+    `0.0` in both halves, so a real zero and a fast-but-real duration are the same
+    string -- and the reader cannot tell "it ran in microseconds" from "the timer
+    was never started", which is exactly rule 14's complaint about a bare number
+    that could mean two things.
+
+    So a value that is greater than zero and would render as all zeros gets more
+    decimals, up to MAX_DECIMALS, until a significant digit appears. An EXACT zero
+    is left alone: that one IS zero, it is a result, and
+    test_zero_duration_still_prints_a_value_rather_than_nothing pins it.
+
+    The microfortnight half is the one that decides, because it is the smaller
+    number of the two (1s is 0.8µfn), so a precision that shows it also shows the
+    seconds.
     """
+    if seconds > 0:
+        while decimals < MAX_DECIMALS and float(f"{seconds_to_microfortnights(seconds):.{decimals}f}") == 0.0:
+            decimals += 1
+        if float(f"{seconds_to_microfortnights(seconds):.{decimals}f}") == 0.0:
+            # BELOW THE CEILING'S RESOLUTION, so even six decimals print zeros. A
+            # "less than" is the honest rendering and keeps the promise above: a
+            # duration that happened never prints as a plain zero, which is the
+            # string an exact zero owns.
+            floor = 10 ** -MAX_DECIMALS
+            return f"<{floor:.{MAX_DECIMALS}f}{UFN_SYMBOL} (<{floor:.{MAX_DECIMALS}f}s)"
     return f"{format_microfortnights(seconds, decimals)} ({seconds:.{decimals}f}s)"
