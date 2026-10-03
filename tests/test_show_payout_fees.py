@@ -412,23 +412,62 @@ def test_a_server_that_omits_the_fee_field_is_a_failed_ask_and_not_a_zero():
     assert "FAILED" in body and "without a fee figure" in body, body
 
 
-def test_SOL_is_NOT_asked_and_the_reason_is_in_the_code_rather_than_a_gap():
-    """SOL's fee needs getFeeForMessage over a serialized message, so it is not asked.
+def test_SOL_IS_ASKED_NOW_AND_NEVER_ANSWERS_FROM_THE_REFERENCE_CONSTANT():
+    """SOL's fee comes from getFeeForMessage, and a failed ask yields no number.
 
-    THE ABSENCE IS DELIBERATE AND NAMED. ask_base_fee() returns None for SOL, so
-    its block falls through to the tree's figure with the old wording -- no "READ
-    FROM THE SERVER" claim over a number nobody read.
+    THIS TEST WAS test_SOL_is_NOT_asked_and_the_reason_is_in_the_code_rather_than_a_gap
+    AND IT PASSED FOR A CHANGED REASON, which is why it is rewritten rather than
+    left. It asserted `ask_base_fee("SOL", ...) is None` and went on passing after
+    chains/solana_fee_quote.py was wired in -- because the stub it was handed has no
+    latest_blockhash(), so the ask bailed before reaching the cluster. Green for a
+    reason that had nothing to do with what it claimed, and its docstring said SOL
+    "is NOT asked", which was then a wrong comment (rule 16).
 
-    MUTATION: make ask_base_fee() answer for SOL from SIGNATURE_FEE_LAMPORTS. That
-    constant calls ITSELF a reference value in chains/solana_units.py:513, so the
-    label would be false, and this fails.
+    WHAT IS ACTUALLY TRUE NOW, and each half is asserted:
+
+      an adapter that cannot be asked   bare None -- no blockhash getter means no
+                                        message to price, and that is not a failure
+                                        to report, it is a chain this tool cannot
+                                        reach
+      a cluster that refuses            (None, reason) -- and the reason must carry
+                                        no figure
+      never the constant                chains/solana_units.py:513's
+                                        SIGNATURE_FEE_LAMPORTS = 5_000 calls ITSELF
+                                        a "reference value; getFeeForMessage is the
+                                        authority", so answering from it under the
+                                        "READ FROM THE SERVER" label would make the
+                                        label false
+
+    MUTATION: have _ask_sol() return SIGNATURE_FEE_LAMPORTS when the cluster
+    refuses. The last assertion fails, and the label over it would be a lie.
     """
-    assert ask_base_fee("SOL", _Server()) is None, "SOL was asked; its fee is not a one-call read"
+    # No blockhash getter: this adapter cannot be asked at all.
+    assert ask_base_fee("SOL", _Server()) is None, (
+        "an adapter with no latest_blockhash() was asked anyway, so the ask reached a cluster call it "
+        "had no message to make"
+    )
+
+    class _Refusing:
+        """Has the shape, and the cluster is unreachable."""
+
+        def latest_blockhash(self):
+            raise RuntimeError("the cluster is unreachable")
+
+    answer = ask_base_fee("SOL", _Refusing())
+    assert answer is not None, "a refusing cluster must be REPORTED, not treated as unaskable"
+    figure, reason = answer
+    assert figure is None, f"a refused ask produced a figure: {figure!r}"
+    assert reason, "a refused ask gave no reason, so the operator reads a blank"
+    assert "5000" not in reason.replace(",", "") and "0.000005" not in reason, (
+        f"the refusal carries the reference constant, which is the one outcome worse than no figure -- "
+        f"a number that looks measured: {reason!r}"
+    )
+
     lines, say = _collect()
-    report_asset("SOL", {"fees": [], "booked": [], "unread": []}, say, adapter=_Server())
+    report_asset("SOL", {"fees": [], "booked": [], "unread": []}, say, adapter=_Refusing())
     body = "\n".join(lines)
-    assert "READ FROM THE SERVER" not in body, "SOL claimed a server read it did not make"
-    assert "0.000005 SOL" in body, "SOL printed no figure at all"
+    assert "READ FROM THE SERVER" not in body, "a failed SOL ask claimed to have read the cluster"
+    assert "FAILED" in body, body
 
 
 def test_a_chain_with_payouts_is_never_asked_because_it_was_MEASURED():

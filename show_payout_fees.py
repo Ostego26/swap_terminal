@@ -86,6 +86,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.registry import build_adapters, why_unconfigured
+from chains.solana_fee_quote import transfer_fee_lamports_from_cluster
+from chains.solana_units import LAMPORTS_PER_SOL
 from config import Config
 from microfortnights import format_duration
 from report_block import labeled
@@ -246,20 +248,40 @@ def ask_base_fee(asset: str, adapter) -> tuple[str, str] | None:
     and this tool never called it, which is the call-site shape this file has
     already been caught by once today.
 
-    SOL IS DELIBERATELY NOT HERE, and saying why is the point rather than leaving a
-    gap. chains/solana_units.py:513 carries SIGNATURE_FEE_LAMPORTS = 5_000 and calls
-    itself a "reference value; getFeeForMessage is the authority" -- and
-    getFeeForMessage prices a SERIALIZED MESSAGE, so asking it needs a real
-    blockhash and a built transfer. That is reachable (chains/solana_transaction.py
-    serializes one) and it is not a one-line read, so it is named work rather than
-    a number invented here.
+    SOL IS HERE NOW, 2026-10-03, AND THIS PARAGRAPH USED TO SAY IT WAS NOT. It read:
+    "getFeeForMessage prices a SERIALIZED MESSAGE, so asking it needs a real
+    blockhash and a built transfer ... named work rather than a number invented
+    here." That work is done -- chains/solana_fee_quote.py does it, through the
+    serializer tests/test_solana_transaction.py already pinned byte-for-byte
+    against @solana/web3.js -- and the sentence is replaced rather than softened,
+    because a comment that says a thing is not built is a wrong comment the day it
+    is (rule 16).
+
+    IT PRICES A MESSAGE AND NOT A SIGNED TRANSACTION, which is the whole reason a
+    diagnostic may do this at all: getFeeForMessage needs no signature, so a fee
+    quote never requires the ability to spend. A tool that held a key to read a fee
+    would be a tool that can be made to send.
+
+    NEITHER CHAIN FALLS BACK TO A CONSTANT. chains/solana_units.py:513's
+    SIGNATURE_FEE_LAMPORTS = 5_000 calls ITSELF a "reference value;
+    getFeeForMessage is the authority", so answering from it under this function's
+    READ FROM THE SERVER label would make the label false -- which is the one
+    outcome worse than no figure.
 
     Returns (figure, provenance) or None when the chain cannot be asked. A FAILED
     ASK RETURNS THE REASON, never a number: this function's whole job is to replace
     a typed-in figure with a measured one, and a fallback that looked measured
     would defeat it.
     """
-    if asset != "XRP" or adapter is None or not hasattr(adapter, "server_parameters"):
+    asker = _ASKERS.get(asset)
+    if adapter is None or asker is None:
+        return None
+    return asker(adapter)
+
+
+def _ask_xrp(adapter) -> tuple[str | None, str] | None:
+    """XRP's base fee from server_info. The read was already written; see ask_base_fee."""
+    if not hasattr(adapter, "server_parameters"):
         return None
     try:
         parameters = adapter.server_parameters()
@@ -270,6 +292,39 @@ def ask_base_fee(asset: str, adapter) -> tuple[str, str] | None:
         return None, "the server answered without a fee figure"
     return (f"{int(drops) / DROPS_PER_XRP:.6f} XRP ({int(drops)} drops)",
             parameters.get("fee_source") or "server_info.validated_ledger.base_fee_xrp")
+
+
+def _ask_sol(adapter) -> tuple[str | None, str] | None:
+    """SOL's fee from getFeeForMessage, priced against a real blockhash.
+
+    chains/solana_fee_quote.transfer_fee_lamports_from_cluster() already returns
+    exactly this function's contract -- (figure, provenance) on a read, (None,
+    reason) on every failure -- so there is nothing to translate but the units, and
+    report_asset() above needed no change at all to print it.
+    """
+    if not hasattr(adapter, "latest_blockhash"):
+        return None
+    quoted, provenance = transfer_fee_lamports_from_cluster(adapter)
+    if quoted is None:
+        return None, provenance
+    return f"{quoted / LAMPORTS_PER_SOL:.9f} SOL ({quoted} lamports)", provenance
+
+
+#: WHICH CHAINS CAN BE ASKED, and the dispatch rather than a chain of `if asset ==`.
+#:
+#: EXTRACTED 2026-10-03 WHEN SOL ARRIVED AND PLR0911 FIRED -- eight returns in one
+#: function. Rule 12 says a function past a lint ceiling is a function that has
+#: swallowed decisions, and the fix is to extract them rather than raise the ceiling
+#: or write a noqa. Two chains made it a chain of branches; a third would have made
+#: it unreadable, and the table is the thing a reader checks against MEASURABLE
+#: above.
+#:
+#: Each asker returns this module's one contract: (figure, provenance) on a read,
+#: (None, reason) on a failure, bare None for "I cannot ask this adapter at all".
+_ASKERS = {
+    "XRP": _ask_xrp,
+    "SOL": _ask_sol,
+}
 
 
 def report_asset(asset: str, bucket: dict, say, adapter=None) -> None:
