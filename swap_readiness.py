@@ -312,7 +312,25 @@ def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
     record(PASS, "payout chain", f"{', '.join(sorted(payable))}  <- has an adapter AND is the destination "
                                  f"of an allowed pair. A chain missing from here cannot be paid")
 
-    lines = unlock_readiness_lines(adapters.keys())
+    # SCOPED TO WHAT IS ACTUALLY BEING PAID, 2026-10-03. This passed
+    # `adapters.keys()` -- every chain this process can reach -- so a run scoped
+    # with `--pair GRC:SOL` reported
+    #
+    #     PASS  payout unlock  GRC payout unlock  GRIDCOIN_WALLET_PASSPHRASE IS set
+    #
+    # about a direction in which NOTHING SENDS GRC. GRC is the SOURCE of that pair;
+    # the customer deposits it and the desk pays SOL. services/payout_service.py's
+    # payout_unlock_context() is keyed on the DESTINATION asset, so for GRC -> SOL
+    # the Gridcoin unlock path is a no-op that never runs.
+    #
+    # `payable` is the destinations of the pairs in scope that can actually pay out,
+    # which is exactly the set whose wallets a payout will touch. With the old
+    # argument the line was true of the process and irrelevant to the run, and a
+    # PASS beside an irrelevant precondition is worse than no line: it invites the
+    # reader to treat it as a precondition that was met. It did -- it is why the
+    # operator was told a GRC-side failure would point at the wallet lock on a swap
+    # that sends no GRC.
+    lines = unlock_readiness_lines(payable)
     if not lines:
         record(SKIP, "payout unlock",
                f"no payable chain needs a wallet unlock  <- GRC is the only one that does, and it is not "
@@ -601,8 +619,31 @@ def gridcoin_precheck(port: int) -> tuple[bool, str, str]:
     return True, PASS, f"port {port} is a test chain (mainnet is {CHAIN_PORTS['GRC'].mainnet_port})"
 
 
-def check_gridcoin() -> None:
+def check_gridcoin(pays_out_grc: bool = True) -> None:
     """The GRC leg. REFUSES to poll a mainnet wallet rather than reporting on it.
+
+    `pays_out_grc` SAYS WHETHER GRC IS A DESTINATION IN THIS RUN, and it exists
+    because without it this function described a send that does not happen. Scoped
+    to GRC -> SOL on 2026-10-03 it reported:
+
+        PASS  GRC wallet       3780.09054497 GRC  <- must be > 0 to pay a GRC leg
+        SKIP  GRC wallet lock  ... a staking-only unlock CANNOT send ...
+
+    Neither applies. GRC is the SOURCE of that pair: the customer DEPOSITS GRC and
+    the desk pays SOL, so the balance is not a precondition and nothing is sent from
+    the wallet at all. Both lines are correct about the process and wrong about the
+    run, and that is the worse kind of wrong -- a PASS invites the reader to treat
+    it as a precondition that was checked and met.
+
+    IT MISLED A READER THE SAME DAY. The operator was told a GRC-side failure on
+    this swap would point at the wallet lock; there is no GRC-side send to fail. The
+    lines were read at face value and carried into a direction where neither holds.
+
+    WHAT GRC ACTUALLY DOES AS A SOURCE is derive a deposit address --
+    `getnewaddress`, a wallet WRITE and not a spend -- which is a different
+    precondition from a balance and from a send-capable unlock, and is named as such
+    rather than asserted: whether an encrypted wallet needs an unlock for it depends
+    on the keypool, and nothing here has tested that.
 
     Looking is the hazard here, not acting. A get_balance() against port 15715
     prints the operator's real staking balance into whatever terminal or
@@ -640,14 +681,34 @@ def check_gridcoin() -> None:
     except Exception as error:  # noqa: BLE001 -- checked: a down daemon, a refused login and a bad response all mean "the GRC leg cannot run", the type and message are printed, and the exit code is non-zero. Telling them apart would not change what the operator does next, which is to look at the daemon.
         record(FAIL, "GRC wallet", explain_grc_failure(error, port))
         return
-    state = PASS if balance > 0 else FAIL
-    record(state, "GRC wallet",
-           f"{balance} GRC on port {port} (test chain)  <- must be > 0 to pay a GRC leg  "
-           f"in {format_duration(time.monotonic() - started)}")
+    # A BALANCE IS A PRECONDITION ONLY FOR PAYING GRC OUT. As a source chain the
+    # wallet receives, so a zero balance is not a defect in this direction -- and
+    # FAILing on it would refuse a run that is fine.
+    if pays_out_grc:
+        state = PASS if balance > 0 else FAIL
+        record(state, "GRC wallet",
+               f"{balance} GRC on port {port} (test chain)  <- must be > 0 to pay a GRC leg  "
+               f"in {format_duration(time.monotonic() - started)}")
+    else:
+        record(PASS, "GRC wallet",
+               f"{balance} GRC on port {port} (test chain)  <- GRC is the SOURCE in this run, so nothing "
+               f"sends GRC and this balance is NOT a precondition. It is the wallet that will DERIVE the "
+               f"deposit address and RECEIVE the deposit  in {format_duration(time.monotonic() - started)}")
 
     # A SEPARATE CHECK, because a funded wallet that cannot send is a different
     # failure from an empty one and rule 14 forbids rendering them the same way.
     # This is the precondition no other chain here has.
+    #
+    # AND IT IS ABOUT SENDING, so it is skipped entirely when GRC is not a
+    # destination. describe_wallet_lock()'s prose says a staking-only unlock "CANNOT
+    # send", which is true and has nothing to do with a direction that sends no GRC.
+    if not pays_out_grc:
+        record(SKIP, "GRC wallet lock",
+               "not checked: GRC is the SOURCE in this run, so nothing sends GRC and the lock's "
+               "send capability is not exercised. services/payout_service.payout_unlock_context() is "
+               "keyed on the DESTINATION asset, so the Gridcoin unlock path is a no-op here. What the "
+               "wallet DOES do is derive a deposit address with getnewaddress -- a write, not a spend")
+        return
     try:
         info = adapters["GRC"].call("getwalletinfo")
     except Exception as error:  # noqa: BLE001 -- checked: the balance call above already succeeded, so any failure here is specifically about getwalletinfo -- an older daemon without it, or a changed response. Reported with its type and message, and as SKIP rather than PASS, so an unknown lock state never reads as a usable one.
@@ -879,7 +940,10 @@ def main(argv: list[str] | None = None) -> int:
         ("payout unlock", lambda: check_payout_unlock(adapters, pair)),
         ("XRP", lambda: check_xrp(check_deposit_account())),
         ("SOL", lambda: check_solana(adapters)),
-        ("GRC", check_gridcoin),
+        # The scope reaches check_gridcoin() so it can tell a GRC payout from a GRC
+        # deposit. `pair` is None for an unscoped run, which checks every allowed
+        # pair and therefore does pay out GRC.
+        ("GRC", lambda: check_gridcoin(pays_out_grc=(pair is None or pair[1] == "GRC"))),
         ("pricing", lambda: check_pricing(pair)),
     ):
         if name in CHECKED_LEGS and name not in legs:

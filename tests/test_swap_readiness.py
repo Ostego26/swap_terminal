@@ -193,7 +193,13 @@ def test_a_crashing_check_is_reported_and_does_not_kill_the_run(monkeypatch, cap
         raise KeyError("reserve_base_drops")
 
     monkeypatch.setattr(swap_readiness, "check_schema", explode)
-    monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda: swap_readiness.record(PASS, "GRC", "reached"))
+    # **_ BECAUSE A STUB MUST ACCEPT THE SIGNATURE IT STANDS IN FOR. check_gridcoin()
+    # gained `pays_out_grc` on 2026-10-03 so it could tell a GRC payout from a GRC
+    # deposit, and a zero-arity lambda then raised TypeError INSIDE the runner --
+    # which this test read as "the check crashed", failing for the stub's arity
+    # rather than for anything about the behavior it covers.
+    monkeypatch.setattr(swap_readiness, "check_gridcoin",
+                        lambda **_: swap_readiness.record(PASS, "GRC", "reached"))
     # `pair=None`, because check_pricing() gained that parameter when --pair landed.
     # A zero-argument stub raises TypeError, the outer wrapper catches it and records
     # "pricing (check crashed)", and this test then failed on its OWN stub rather
@@ -741,7 +747,7 @@ def test_an_unconfigured_chain_outside_the_pair_cannot_fail_the_verdict(monkeypa
     monkeypatch.setattr(swap_readiness, "build_adapters", lambda rpc: {"GRC": CanSign(), "SOL": CanSign()})
     monkeypatch.setattr(swap_readiness, "check_solana", lambda adapters: swap_readiness.record(
         PASS, "SOL", "stubbed"))
-    monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda: swap_readiness.record(
+    monkeypatch.setattr(swap_readiness, "check_gridcoin", lambda **_: swap_readiness.record(
         PASS, "GRC wallet", "stubbed"))
     monkeypatch.setattr(swap_readiness, "check_pricing", lambda pair=None: swap_readiness.record(
         PASS, "pricing", "stubbed"))
@@ -1203,3 +1209,129 @@ def test_a_destination_with_NO_adapter_is_not_reported_as_a_refusing_one():
         "an absent chain's line does not point at the line that already lists it, so the reader gets "
         "the same fact twice with no indication they are the same fact"
     )
+
+
+def test_a_GRC_SOURCE_run_does_not_report_GRC_SEND_preconditions(monkeypatch):
+    """GRC -> SOL sends no GRC, so a balance and a send-capable unlock are not its preconditions.
+
+    THE DEFECT, MEASURED ON THE OPERATOR'S SCREEN 2026-10-03. `--pair GRC:SOL`
+    reported:
+
+        PASS  payout unlock  GRC payout unlock  GRIDCOIN_WALLET_PASSPHRASE IS set
+        PASS  GRC wallet     3780.09054497 GRC  <- must be > 0 to pay a GRC leg
+        SKIP  GRC wallet lock  ... a staking-only unlock CANNOT send ...
+
+    Every one of those is true of the PROCESS and irrelevant to the RUN. GRC is the
+    SOURCE of that pair: the customer deposits GRC and the desk pays SOL, and
+    services/payout_service.payout_unlock_context() is keyed on the DESTINATION
+    asset, so the Gridcoin unlock path is a no-op that never executes.
+
+    AND IT MISLED A READER THE SAME HOUR. The operator was told a GRC-side failure
+    on this swap would point at the wallet lock. There is no GRC-side send to fail.
+    A PASS beside an irrelevant precondition is worse than no line at all: it reads
+    as a precondition that was checked and met, which is exactly the inference that
+    was drawn.
+
+    WHAT THE SOURCE WALLET ACTUALLY DOES is derive a deposit address --
+    `getnewaddress`, a write and not a spend -- and the lines say so instead,
+    because naming the real operation is the point of the page.
+
+    MUTATION: pass pays_out_grc=True. The balance line goes back to "must be > 0 to
+    pay a GRC leg" and the lock line to the send prose, and both assertions fail.
+    """
+    monkeypatch.setattr(swap_readiness, "gridcoin_precheck",
+                        lambda _port: (True, PASS, "port 25715 is a test chain"))
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda _rpc: {"GRC": FakeGridcoin()})
+
+    swap_readiness._results.clear()
+    swap_readiness.check_gridcoin(pays_out_grc=False)
+    rows = {row[1]: row for row in swap_readiness._results}
+
+    wallet = rows.get("GRC wallet")
+    assert wallet, f"no GRC wallet line at all: {sorted(rows)}"
+    assert "must be > 0 to pay a GRC leg" not in wallet[2], (
+        f"a send precondition is asserted for a direction that sends no GRC: {wallet[2]}"
+    )
+    assert "SOURCE in this run" in wallet[2], wallet[2]
+    assert "NOT a precondition" in wallet[2], wallet[2]
+
+    lock = rows.get("GRC wallet lock")
+    assert lock, f"the lock line vanished rather than being skipped with a reason: {sorted(rows)}"
+    assert lock[0] == SKIP, f"the lock was CHECKED for a direction that sends no GRC: {lock}"
+    assert "nothing sends GRC" in lock[2], lock[2]
+    assert "CANNOT send" not in lock[2], (
+        f"the send-capability prose survived into a run with no GRC send: {lock[2]}"
+    )
+    # And it must still name the real operation, or the reader learns nothing from
+    # the skip (rule 14: `(none)` is a result, a blank is not).
+    assert "getnewaddress" in lock[2], lock[2]
+
+
+def test_a_GRC_DESTINATION_run_still_reports_every_send_precondition(monkeypatch):
+    """So the scoping cannot pass by silencing the checks everywhere.
+
+    A version of check_gridcoin() that skipped the balance and the lock
+    unconditionally would satisfy the test above and remove a real guard from
+    SOL -> GRC, where the desk DOES send GRC and a staking-only unlock blocks it.
+    """
+    monkeypatch.setattr(swap_readiness, "gridcoin_precheck",
+                        lambda _port: (True, PASS, "port 25715 is a test chain"))
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda _rpc: {"GRC": FakeGridcoin()})
+
+    swap_readiness._results.clear()
+    swap_readiness.check_gridcoin(pays_out_grc=True)
+    rows = {row[1]: row for row in swap_readiness._results}
+
+    assert "must be > 0 to pay a GRC leg" in rows["GRC wallet"][2], rows["GRC wallet"][2]
+    lock = rows.get("GRC wallet lock")
+    assert lock, "the lock check did not run for a direction that pays out GRC"
+    assert "nothing sends GRC" not in lock[2], (
+        "the source-chain skip leaked into a destination run, so the send guard is gone where it matters"
+    )
+
+
+def test_main_PASSES_THE_SCOPE_to_check_gridcoin_for_both_directions(monkeypatch, capsys):
+    """The CALL SITE, not the branch. The branch was right and nothing wired it.
+
+    THE TWO TESTS ABOVE PASSED WITH THE WIRING BROKEN, which is the finding. They
+    call check_gridcoin(pays_out_grc=...) directly, so replacing main()'s
+    `pays_out_grc=(pair is None or pair[1] == "GRC")` with a hardcoded True left
+    them green while every scoped run went back to reporting GRC send preconditions
+    it does not have. Verified by mutation 2026-10-03: the suite stayed at exit 0.
+
+    That is this repository's recurring defect shape -- a correct function whose
+    call site discards the distinction -- and it has been caught three times in one
+    day: services/payout_service.payable_assets(), show_payout_fees.report_asset(),
+    and now this. A unit test on a branch is not a test of whether the branch is
+    reached.
+
+    So this drives main() for BOTH directions over the same stubbed wallet and
+    asserts the rendered page differs. Nothing is patched except the daemon.
+    """
+    monkeypatch.setattr(swap_readiness, "gridcoin_precheck",
+                        lambda _port: (True, PASS, "port 25715 is a test chain"))
+    monkeypatch.setattr(swap_readiness, "build_adapters", lambda _rpc: {"GRC": FakeGridcoin()})
+
+    swap_readiness._results.clear()
+    swap_readiness.main(["--pair", "GRC:SOL"])
+    source_run = capsys.readouterr().out
+
+    swap_readiness._results.clear()
+    swap_readiness.main(["--pair", "SOL:GRC"])
+    destination_run = capsys.readouterr().out
+
+    # GRC as the SOURCE: no send precondition anywhere on the page.
+    assert "GRC is the SOURCE in this run" in source_run, (
+        "main() did not pass the scope to check_gridcoin(), so a GRC -> SOL run still reports GRC send "
+        "preconditions. The branch exists and nothing reaches it"
+    )
+    assert "must be > 0 to pay a GRC leg" not in source_run, (
+        "a scoped GRC -> SOL run asserts a balance precondition for a direction that sends no GRC"
+    )
+
+    # GRC as the DESTINATION: the send preconditions are back, so the scoping
+    # cannot pass by silencing them everywhere.
+    assert "must be > 0 to pay a GRC leg" in destination_run, (
+        "a SOL -> GRC run lost the balance precondition, so the guard is gone where the desk does send GRC"
+    )
+    assert "GRC is the SOURCE in this run" not in destination_run, destination_run[-400:]
