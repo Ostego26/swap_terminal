@@ -15,6 +15,7 @@ reaching a swap. It reads ALLOWED_PAIRS from config rather than carrying its
 own list, so there is one vocabulary (rule 11).
 """
 
+import logging
 import time
 from datetime import timedelta
 
@@ -23,6 +24,8 @@ from chains.solana_units import SOL_DECIMALS, SYSTEM_ACCOUNT_SPACE, amount_to_ba
 
 from .helpers import new_id, utc_now
 from .pricing import derive_pair_rate, fetch_usd_prices, last_price_source
+
+logger = logging.getLogger(__name__)
 
 #: SECONDS a cluster's rent-exempt minimum is reused for. Seconds because it is
 #: a `time.monotonic()` difference (rule 6: seconds stay where the interface
@@ -381,6 +384,101 @@ def _confidence_for_display(config, from_asset: str, to_asset: str, notional_usd
     return {"available": True, "legs": legs}
 
 
+def measured_or_configured_reserve(db, config, adapters, to_asset: str, payout_amount: float):
+    """The reserve for THIS payout: measured off the chain where it can be, else the constant.
+
+    (reserve, how). NEVER RAISES -- a failed measurement falls back to the
+    configured figure and says so, because a quote that dies on a fee probe is
+    worse than a quote priced on a constant.
+
+    THE OPERATOR AUTHORIZED THIS 2026-10-03 after being shown the numbers, and the
+    numbers are why a constant cannot be right. Measured on their node with
+    fundrawtransaction, which selects real inputs from the real UTXO set:
+
+        BTC   send 0.0004 -> fee 0.00002820      send 2701 -> fee 0.00084240   30x
+        LTC   send 1.2    -> fee 0.00010372      send 2701 -> fee 0.00097643   9.4x
+
+    A Bitcoin-style fee is bytes times a rate and the bytes are mostly INPUTS, so
+    the figure moves by an order of magnitude across the payout sizes one desk
+    makes. The configured constants were wrong in opposite directions on the same
+    day -- BTC 41% low, LTC 4.7x high -- and no single value fixes both.
+
+    GRC IS NOT SPECIAL-CASED, AND THAT IS DELIBERATE. Gridcoin is flat: 8 payouts
+    at exactly 0.00100000, low equal to high, across amounts from 82 to 2701 GRC,
+    which select different input counts. Its daemon also has no
+    fundrawtransaction, so the probe returns "Method not found (rpc code -32601)"
+    and this falls back to the constant -- which is the right answer for a flat
+    chain, reached by ASKING rather than by keeping a second table of which chains
+    scale (rule 8). A chain that gains the RPC starts being measured with no
+    change here; one that loses it starts falling back.
+
+    WHY THE ADDRESS IS A PAST DEPOSIT ADDRESS OF OUR OWN, and this is the
+    assumption the operator asked be stated rather than hidden:
+
+      * The fee depends on the INPUTS the wallet selects and on the output's TYPE,
+        not on which address of that type it pays. A p2wpkh output is 31 bytes
+        whoever owns it.
+      * The payout's real destination is the CUSTOMER's address and is not known
+        at quote time -- create_quote() runs before create_swap() receives it. So
+        some address has to stand in.
+      * It must not be derived here: getnewaddress would answer in one call and is
+        a WALLET WRITE, and a quote must not leave a key behind in the hot wallet.
+      * swaps.deposit_address rows for this asset are addresses THIS wallet
+        derived for its own deposits, so they are ours, on the right chain, and
+        already on disk.
+
+      THE RESIDUAL ERROR IS THE OUTPUT TYPE. If the customer pays to p2pkh (34
+      bytes) where the stand-in is p2wpkh (31), the estimate is ~3 bytes light --
+      about 3 satoshis at a 1 sat/byte rate, against an input-count effect of
+      30x. Named here because it is a real approximation, not because it matters
+      at that size.
+
+    NO ADDRESS ON FILE MEANS THE CONSTANT, which is the state of every chain this
+    desk has never taken a deposit on. It is not an error: the constant is what
+    was used before this function existed.
+    """
+    configured = get_network_fee_reserve(config, to_asset)
+    adapter = (adapters or {}).get(to_asset)
+    if adapter is None or not hasattr(adapter, "measure_send_fee"):
+        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because no {to_asset} "
+                            f"adapter in this process can measure a send")
+    if payout_amount <= 0:
+        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because a payout of "
+                            f"{payout_amount!r} has no fee to measure")
+    address = own_address_on_chain(db, to_asset)
+    if not address:
+        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because this desk holds no "
+                            f"{to_asset} address of its own to measure a send against -- no swap has "
+                            f"ever taken a {to_asset} deposit")
+    fee, how = adapter.measure_send_fee(address, payout_amount)
+    if fee is None:
+        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because the chain could not "
+                            f"be asked: {how}")
+    return fee, (f"MEASURED off the {to_asset} chain for this payout's size ({how}), against a "
+                 f"configured {to_asset}_NETWORK_FEE_RESERVE of {configured}")
+
+
+def own_address_on_chain(db, asset: str) -> str:
+    """One address on `asset` that this desk derived for itself, or "".
+
+    READS swaps.deposit_address, which services/swap_service.deposit_account()
+    wrote by asking this wallet for a fresh address -- so every row is ours and on
+    the right chain. Newest first, because an older one may belong to a wallet the
+    operator has since repointed, and a stand-in for a fee measurement only has to
+    be a valid address of the right TYPE.
+
+    IT EXISTS SO THE QUOTE PATH DOES NOT CALL getnewaddress. That is a wallet
+    write -- it derives and stores a key -- and a priced quote that leaves a key
+    behind would put one in the wallet for every page refresh.
+    """
+    row = db.execute(
+        "SELECT deposit_address FROM swaps WHERE from_asset = ? AND deposit_address IS NOT NULL "
+        "AND deposit_address != '' ORDER BY created_at DESC LIMIT 1",
+        (asset,),
+    ).fetchone()
+    return str(row["deposit_address"]) if row else ""
+
+
 def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float, *, adapters=None) -> dict:  # noqa: PLR0913 -- checked: the first five ARE the quote (where to write it, the settings, the pair, the size) and the sixth is the only object that can ask a chain a question. Bundling them would add a type without removing a parameter. It is KEYWORD-ONLY, which is the same property the arming token on the payout path relies on: a positional argument that drifted one place cannot land in it. Same judgment recorded at chains/xrp.py:773 and chains/solana.py's __init__.
     from_asset = from_asset.upper().strip()
     to_asset = to_asset.upper().strip()
@@ -391,7 +489,11 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     prices = fetch_usd_prices(config["RATE_CACHE_SECONDS"])
     rate = derive_pair_rate(from_asset, to_asset, prices)
     fee_bps = int(config["DEFAULT_FEE_BPS"])
-    network_fee_reserve = get_network_fee_reserve(config, to_asset)
+    # THE RESERVE IS RESOLVED AFTER THE PAYOUT IS KNOWN, because since 2026-10-03
+    # it may be MEASURED for this payout's size and the fee depends on that size.
+    # There is no circularity: the reserve is no longer subtracted from the payout
+    # (see the long note below), so the payout is a function of the rate and the
+    # fee alone and can be computed first.
     gross_output = input_amount * rate
     # THE RESERVE IS NOT SUBTRACTED, and it was until 2026-10-02. The operator's
     # instruction was "fix the regressive reserve", and what made it regressive is
@@ -426,6 +528,17 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     # negative payout, and the clamp is what services/swap_service.py's
     # below-minimum refusal reads.
     output_amount_estimate = max(gross_output * (1 - fee_bps / 10000.0), 0.0)
+    # NOW the reserve, with the payout size in hand. measured_or_configured_reserve()
+    # says which source it used and why, and that sentence reaches the log rather
+    # than only the comment: the figure it returns is stamped on the quote row and
+    # decides both the fee floor at create_swap() and the funding gate, so a reader
+    # reconciling a refusal has to be able to find out whether it came off the
+    # chain or out of config.
+    network_fee_reserve, reserve_source = measured_or_configured_reserve(
+        db, config, adapters, to_asset, output_amount_estimate
+    )
+    logger.info("quote reserve for %s->%s: %s %s  <- %s",
+                from_asset, to_asset, network_fee_reserve, to_asset, reserve_source)
     # AND A SOL PAYOUT HAS A FLOOR THE NETWORK IMPOSES, checked HERE -- after
     # the payout figure exists and BEFORE the quote row is written, so a refusal
     # leaves nothing behind. See require_deliverable_sol_payout() for what it
