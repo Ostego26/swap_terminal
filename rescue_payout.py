@@ -109,11 +109,26 @@ SELF = "rescue_payout.py"
 #:   a timeout, a transport error, a bare exception
 #:                                 the case this whole file is cautious about. Money
 #:                                 may be on chain.
+#:   "pynacl is not importable"    ADDED 2026-10-03, after the operator's rescue
+#:                                 re-drove the swap and it failed on this instead.
+#:                                 PyNaCl is an OPTIONAL dependency on purpose, so a
+#:                                 host without it refuses rather than crashing a
+#:                                 read-only deposit watcher at import.
+#:
+#:                                 PROVABLY PRE-BROADCAST AT BOTH RAISE SITES,
+#:                                 checked rather than inferred from the wording:
+#:                                 chains/solana_signing._public_key_bytes():527 is
+#:                                 reached from derive_and_check(), which runs BEFORE
+#:                                 sign_message() in signed_transfer_wire(); and
+#:                                 sign_message():716 is the signing call itself, so
+#:                                 if it raises there are no signed bytes to submit.
+#:                                 Either way nothing reached a cluster.
 PRE_SIGNING_MARKERS = (
     "holds no key that could",
     "solanasendnotarmed",
     "cannot pay out",
     "solanaclusterrefused",
+    "pynacl is not importable",
 )
 
 

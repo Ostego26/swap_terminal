@@ -80,6 +80,29 @@ def test_everything_that_is_not_PROVABLY_unbroadcast_is_REFUSED(label, swap, row
     assert why.strip(), f"{label} refused with no reason, which an operator will route around"
 
 
+def test_the_PYNACL_refusal_is_allowed_because_both_raise_sites_precede_the_broadcast():
+    """The operator's rescue re-drove the swap and it failed on this instead.
+
+    PyNaCl is an OPTIONAL dependency on purpose: chains/registry imports
+    chains/solana.py unconditionally, so a module-level import would make a signing
+    library mandatory to start a READ-ONLY deposit watcher on a host that has no
+    business holding one. A host without it therefore REFUSES rather than crashing.
+
+    ALLOWED BECAUSE BOTH RAISE SITES WERE CHECKED, not because the message says
+    "nothing was broadcast". chains/solana_signing._public_key_bytes():527 is
+    reached from derive_and_check(), which runs BEFORE sign_message() in
+    signed_transfer_wire(); sign_message():716 is the signing call itself, so if it
+    raises there are no signed bytes to submit. Reading the raise site is the
+    difference between this and the timeout case, whose message would also sound
+    reassuring.
+    """
+    reason = ("PyNaCl is not importable, so nothing was signed and nothing was broadcast. It is an "
+              "optional dependency on purpose")
+    allowed, why = rescue_verdict(swap_row(reason=reason), [payout_row()])
+    assert allowed, why
+    assert "pynacl is not importable" in why, why
+
+
 def test_an_UNRECOGNIZED_reason_refuses_rather_than_assuming_safety():
     """Absence of evidence is not evidence. Rule 2, applied to money.
 
