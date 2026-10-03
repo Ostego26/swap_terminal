@@ -64,7 +64,7 @@ from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, solana_cluster
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
 from report_block import clipped
-from services.payout_capacity import largest_fundable_payout
+from services.payout_capacity import as_amount, largest_fundable_payout
 from services.payout_service import (
     WALLET_UNLOCK_ENV_VAR,
     payable_assets,
@@ -672,7 +672,7 @@ def payout_ceiling_note(adapters, asset: str) -> str:
     ceiling, how = largest_fundable_payout(adapters, asset, reserve)
     if ceiling < 0:
         return f"  <- must be > 0 to pay a {asset} leg; the ceiling was NOT established ({how})"
-    return (f"  <- the largest single {asset} payout this wallet can fund is {ceiling} {asset} ({how}). "
+    return (f"  <- the largest single {asset} payout this wallet can fund is {as_amount(ceiling)} {asset} ({how}). "
             f"A swap quoting more than that is REFUSED at creation, before any deposit is taken")
 
 

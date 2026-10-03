@@ -1343,15 +1343,18 @@ def test_the_preview_says_what_the_payout_wallet_can_actually_fund():
     line = open_swap.payout_wallet_line(config, adapters, "GRC", 0.001)
 
     assert "3780.08854497" in line, "what the wallet holds has to reach the screen"
-    # THE EXPECTATION IS DERIVED, NOT TYPED. A hand-written "3780.08754497" failed
-    # here: the real line says 3780.0875449699997, because 3780.08854497 - 0.001 in
-    # binary floating point is not the clean decimal. The float tail is left on the
-    # screen deliberately -- rounding it would mean inventing a per-chain precision
-    # (8 places for the Bitcoin-derived chains, 6 for SOL and XRP) and printing a
-    # figure the gate does not compare against, and the gate compares exact floats.
-    # The `how` half of the line carries the spendable and the reserve separately,
-    # so a reader can see where the number came from without trusting the tail.
-    assert str(3780.08854497 - 0.001) in line, "and the ceiling after the chain fee is held back"
+    # THE CLEAN DECIMAL, AND IT TOOK TWO ATTEMPTS TO EARN IT. This assertion was
+    # first written as this literal, failed because the line printed
+    # 3780.0875449699997, and was changed to derive the float tail -- i.e. the test
+    # was loosened to match the defect. The operator then saw the seventeen-digit
+    # figure on their screen. services/payout_capacity.as_amount() now truncates
+    # the DISPLAY to eight decimals, downward, and the literal is correct again:
+    # the right fix was the output, not the expectation.
+    assert "3780.08754497" in line, "and the ceiling after the chain fee is held back"
+    assert "3780.0875449699997" not in line, (
+        "seventeen significant digits where the data has twelve -- the tail carries no information and "
+        "invites the reader to wonder what it means"
+    )
     assert "REFUSES" in line, "and that --apply will act on it, or the line is trivia"
 
 

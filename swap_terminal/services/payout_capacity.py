@@ -246,3 +246,48 @@ def largest_fundable_payout(adapters, asset: str, reserve: float) -> tuple[float
         f"{spendable} {asset} spendable less {reserve} {asset} reserved for the payout transaction's "
         f"own chain fee"
     )
+
+
+def as_amount(value: float) -> str:
+    """A coin amount for DISPLAY: at most 8 decimals, truncated down, no float tail.
+
+    MEASURED ON THE OPERATOR'S SCREEN 2026-10-03, minutes after the ceiling line
+    shipped:
+
+        payout wallet   can fund a payout up to 3780.0875449699997 GRC
+
+    3780.08854497 - 0.001 is not the clean decimal in binary floating point, so the
+    line carried seventeen significant digits where the data had twelve. The tail
+    adds no information and rule 14 is about what the operator READS: a figure
+    computed to the femto-coin invites the reader to wonder what the extra digits
+    mean, and the answer is nothing.
+
+    THE FIRST ATTEMPT AT THIS WAS WRONG AND IS RECORDED RATHER THAN QUIETLY
+    REPLACED, because the reasoning was plausible and the refutation was one test.
+    It derived the precision from how the daemon had reported the BALANCE -- "the
+    daemon already told us its precision", which sounded like deriving from data
+    instead of inventing a table (rule 11's shape). Measured immediately:
+
+        3780.08854497 - 0.001   ->  3780.08754497   correct
+        1.25        - 0.00002   ->  1.24            UNDER by 0.0099 BTC
+        100.0       - 0.001     ->  99.9            UNDER by 0.099
+
+    A round balance reports few decimals; it has not declared a precision. Reading
+    one off the value truncates the ceiling coarsely for exactly the wallets whose
+    balance happens to be tidy. Rule 17: a reason to believe is not a measurement.
+
+    SO: EIGHT DECIMALS, FOR DISPLAY ONLY. Eight is the satoshi precision the three
+    Bitcoin-derived chains actually use, it is more than XRP's six needs, and it
+    truncates SOL's ninth decimal -- one billionth of a SOL off a CEILING, in the
+    safe direction. No per-chain table is introduced, because this is not arithmetic
+    the gate uses: services/payout_capacity.why_the_payout_cannot_be_funded()
+    compares exact floats, and this string never reaches it.
+
+    DOWN, NEVER NEAREST, for the same reason the number is a ceiling at all.
+    Rounding up by one satoshi would show a payout as fundable when the wallet is
+    short, which is the failure this module exists to prevent reintroduced by a
+    display convention.
+    """
+    truncated = int(abs(value) * 100_000_000) / 100_000_000
+    text = f"{-truncated if value < 0 else truncated:.8f}".rstrip("0").rstrip(".")
+    return text or "0"

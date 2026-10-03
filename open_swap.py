@@ -162,7 +162,7 @@ from modules.address_authority import check_address
 from report_block import CONTINUATION, labeled
 from requests.exceptions import RequestException
 from services.pair_view import allowed_pair_rows
-from services.payout_capacity import largest_fundable_payout
+from services.payout_capacity import as_amount, largest_fundable_payout
 from services.pricing import fetch_usd_prices
 from services.quote_service import create_quote, get_network_fee_reserve, validate_pair
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, create_swap, deposit_account
@@ -1015,7 +1015,7 @@ def payout_wallet_line(config, adapters, to_asset: str, amount: float) -> str:
         # printed 0.0 would send an operator to fund a wallet that may be full.
         return labeled("payout wallet", f"NOT ESTABLISHED  <- {how}. --apply will refuse rather than "
                                         f"take a deposit against a wallet it could not verify")
-    return labeled("payout wallet", f"can fund a payout up to {ceiling} {to_asset}  <- {how}. --apply "
+    return labeled("payout wallet", f"can fund a payout up to {as_amount(ceiling)} {to_asset}  <- {how}. --apply "
                                     f"REFUSES if this swap's payout exceeds it, before any row is "
                                     f"written: a payout that fails arrives after the deposit is "
                                     f"confirmed and irreversible (measured 2026-10-03)")

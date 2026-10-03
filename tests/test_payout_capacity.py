@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 
 from services.payout_capacity import (
     FUNDABLE,
+    as_amount,
     largest_fundable_payout,
     why_the_payout_cannot_be_funded,
 )
@@ -223,3 +224,43 @@ def test_an_empty_wallet_reports_zero_and_not_the_sentinel():
     ceiling, _how = largest_fundable_payout({"GRC": Wallet(0.0)}, "GRC", RESERVE)
 
     assert ceiling == 0.0, "a wallet that really is empty has a ceiling of zero, which is a measurement"
+
+
+# --- the displayed figure ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (3780.08854497 - 0.001, "3780.08754497"),   # the operator's own wallet, the case that shipped wrong
+        (1.25 - 0.00002, "1.24998"),                # the case the FIRST attempt got wrong, under by 0.0099
+        (100 - 0.001, "99.999"),                    # and the second, under by 0.099
+        (0.0, "0"),                                 # not "0.00000000"
+        (9049.685834122582, "9049.68583412"),       # the incident's payout
+    ],
+)
+def test_a_displayed_amount_has_no_float_tail_and_is_never_rounded_up(value, shown):
+    """Eight decimals, truncated DOWN, trailing zeros gone.
+
+    THE PARAMETRIZATION IS THE ARGUMENT. The first implementation derived the
+    precision from how the daemon reported the balance -- "the daemon already told
+    us its precision", which reads like deriving from data rather than inventing a
+    per-chain table. The first two rows above refuted it: a round balance reports
+    few decimals without having declared a precision, so the ceiling was truncated
+    coarsely for exactly the wallets whose balance happens to be tidy.
+
+    DOWN matters because this renders a CEILING. Showing one satoshi more than the
+    wallet holds presents an unfundable payout as fundable, which is the failure
+    this module exists to prevent, reintroduced through a display convention.
+    """
+    assert as_amount(value) == shown
+    assert float(as_amount(value)) <= value + 1e-12, "a ceiling must never be displayed larger than it is"
+
+
+def test_a_sub_satoshi_ceiling_displays_as_zero_rather_than_as_a_number():
+    """5e-09 GRC cannot fund anything, and printing it as 0 says so.
+
+    This is the safe direction and the honest one: the figure is a ceiling on what
+    a swap may pay out, and no payout of five billionths of a coin exists.
+    """
+    assert as_amount(0.000000005) == "0"
