@@ -1047,6 +1047,14 @@ def rate_text(rate: float) -> str:
     trading a readable majority for an unreadable minority. So the threshold is
     "can four decimals carry a non-zero digit at all".
 
+    NOT THE SAME FUNCTION AS services/payout_capacity.as_amount(), AND THE
+    DIFFERENCE IS THE POINT -- recorded here and at that site, because a reader who
+    finds one must be told the other exists (rule 8). as_amount() formats a COIN
+    AMOUNT: eight decimal places, truncated down, lossless for a satoshi-exact
+    figure and useless for a rate, since it would print 1.09e-07 as 0. This formats
+    a RATE, which spans 9142021.6211 and 1.09e-07 on one line and therefore keeps
+    significant digits rather than decimal places.
+
     THIS IS DISPLAY ONLY AND NOTHING QUOTES FROM IT. services/quote_service.
     create_quote() derives the rate from the same USD prices and does its own
     arithmetic at full float precision; this line exists so an operator can sanity

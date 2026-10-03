@@ -416,6 +416,65 @@ class RPCAdapter:
             logger.info("%s payout amount %s  <- %s", self.asset or "?", fitted, changed)
         return self.call("sendtoaddress", address, fitted)
 
+    def measure_send_fee(self, address: str, amount: float) -> tuple[float | None, str]:
+        """What THIS wallet would actually pay in fees to send `amount` now. (fee, how).
+
+        MEASURED, NOT ESTIMATED, and that distinction is the whole reason this
+        exists. The operator, 2026-10-03: "we need to match the scaling here."
+
+        WHAT PROMPTED IT. Two payout fees were read off their own node the same
+        day and the configured reserves were wrong in OPPOSITE directions:
+
+            BTC   configured 0.00002   measured 0.00002820   41% too low
+            LTC   configured 0.001     measured 0.00021483   4.7x too high
+
+        and the reason they cannot both be a constant is in the transactions: the
+        BTC send spent ONE input, the LTC send spent FIFTEEN, because that wallet
+        is full of small mining outputs. A Bitcoin-style fee is bytes x rate and
+        bytes scale with input count, so a flat reserve is wrong for every wallet
+        except the one it was measured on, on the day it was measured.
+
+        SO IT ASKS THE DAEMON INSTEAD OF MODELLING IT. createrawtransaction builds
+        the one output, fundrawtransaction selects real inputs from the real UTXO
+        set and REPORTS THE FEE it would pay. Nothing is signed, nothing is
+        broadcast, and no UTXO is locked -- lockUnspents defaults to false, which
+        is why this is safe to call from a read-only report while a payout worker
+        is running. It is the same shape rule 5 asks for everywhere else: ask the
+        authority rather than keep a second copy of its answer.
+
+        THE AMOUNT IS FITTED FIRST, because createrawtransaction runs the SAME
+        ParseFixedPoint(value, 8) that rejected a seventeen-decimal payout with
+        "Invalid amount" -- so measuring an unfitted amount would fail on the
+        measurement rather than on the send, which is the confusing direction.
+
+        (None, why) WHEN IT CANNOT BE ASKED, never a fabricated number. An older
+        daemon without fundrawtransaction, a wallet with nothing spendable, or a
+        transport failure all return None with the reason, because a reserve
+        chosen from a made-up figure is the defect this replaces.
+        """
+        fitted, _changed = fit_to_chain_precision(float(amount), self.asset)
+        if fitted <= 0:
+            return None, (f"{fitted!r} {self.asset} is not a sendable amount, so no fee could be "
+                          f"measured for it")
+        try:
+            raw = self.call("createrawtransaction", [], {address: fitted})
+        except Exception as error:  # noqa: BLE001 -- checked: returns None with the type and message, so no caller can mistake a failed measurement for a cheap fee. Every failure mode here (no such method, bad address, parser refusal) means the same thing to the caller: not established.
+            return None, (f"createrawtransaction refused, so no fee was measured "
+                          f"({type(error).__name__}: {str(error)[:120]})")
+        try:
+            funded = self.call("fundrawtransaction", raw)
+        except Exception as error:  # noqa: BLE001 -- checked: as above. The commonest real case is a wallet with insufficient spendable balance, whose message says so and is passed through.
+            return None, (f"fundrawtransaction refused, so no fee was measured "
+                          f"({type(error).__name__}: {str(error)[:120]})")
+        fee = (funded or {}).get("fee")
+        if fee is None:
+            return None, ("fundrawtransaction answered without a `fee` field, so the figure was NOT "
+                          "established")
+        # Reported as a POSITIVE cost. Core returns it positive here, unlike
+        # gettransaction's `fee`, which is negative because it is a balance delta.
+        return abs(float(fee)), (f"fundrawtransaction selected real inputs for a {fitted} {self.asset} "
+                                 f"send and reported this fee; nothing was signed, broadcast or locked")
+
     def get_transaction(self, txid: str) -> dict:
         # Checked: `gettransaction` only knows wallet transactions, so its
         # failure means "ask about it as a raw transaction instead". The second

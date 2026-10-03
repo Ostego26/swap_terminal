@@ -283,6 +283,12 @@ def as_amount(value: float) -> str:
     the gate uses: services/payout_capacity.why_the_payout_cannot_be_funded()
     compares exact floats, and this string never reaches it.
 
+    NOT THE SAME FUNCTION AS swap_readiness.rate_text(), and the difference is
+    recorded at both sites (rule 8). That one formats a RATE, which spans
+    9142021.6211 and 1.09e-07 in a single line and so keeps significant digits;
+    this formats a COIN AMOUNT and keeps decimal places, which is lossless for a
+    satoshi-exact figure and would render a rate of 1.09e-07 as 0.
+
     DOWN, NEVER NEAREST, for the same reason the number is a ceiling at all.
     Rounding up by one satoshi would show a payout as fundable when the wallet is
     short, which is the failure this module exists to prevent reintroduced by a

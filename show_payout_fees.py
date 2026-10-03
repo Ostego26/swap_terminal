@@ -91,6 +91,7 @@ from chains.solana_units import LAMPORTS_PER_SOL
 from config import Config
 from microfortnights import format_duration
 from report_block import labeled
+from services.payout_capacity import as_amount
 
 SELF = "show_payout_fees.py"
 
@@ -173,6 +174,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the swap database to read (default: the one config.Config resolves)")
     parser.add_argument("--no-chain", action="store_true",
                         help="read the database only and ask no chain, so it is safe with every daemon down")
+    # THE LIVE-FEE PAIR. Both are needed and neither has a default this tool could
+    # invent: the fee depends on how many INPUTS the wallet selects, which depends
+    # on the amount, and a destination has to be an address on the right network.
+    #
+    # THE ADDRESS IS NOT DERIVED HERE ON PURPOSE. getnewaddress would answer it in
+    # one call and it is a WALLET WRITE -- it derives and stores a key -- and this
+    # file's header promises it reads. The alternative, reusing a past payout's
+    # address, would put a CUSTOMER's address into a transaction-building call, and
+    # the one thing worse than asking the operator for an address is building
+    # outputs to someone else's.
+    parser.add_argument("--fee-address", default="", metavar="ADDRESS",
+                        help="an address you control, on the chain whose fee you want measured. The live "
+                             "fee line is printed for the chain whose daemon accepts it and says NOT "
+                             "ASKED for the others. Nothing is signed, broadcast or locked.")
+    parser.add_argument("--fee-amount", default=0.0, type=float, metavar="AMOUNT",
+                        help="the payout size to measure the fee for. It matters: a bigger amount selects "
+                             "more inputs, and the fee is bytes times a rate.")
     return parser
 
 
@@ -327,6 +345,83 @@ _ASKERS = {
 }
 
 
+def live_fee_line(asset: str, adapter, address: str, amount: float) -> str:
+    """What one payout would cost THIS WALLET right now, asked of the daemon.
+
+    THE OPERATOR, 2026-10-03: "we need to match the scaling here." Two fees read
+    off their own node that day were wrong against the configured reserves in
+    OPPOSITE directions --
+
+        BTC   configured 0.00002   measured 0.00002820   41% too low
+        LTC   configured 0.001     measured 0.00021483   4.7x too high
+
+    -- and the transactions say why a constant cannot be right for both: the BTC
+    send spent ONE input, the LTC send spent FIFTEEN, because that wallet is full
+    of small mining outputs. A Bitcoin-style fee is bytes times a rate, and bytes
+    scale with input count, so a flat reserve fits one wallet on one day.
+
+    EVERY OTHER FIGURE IN THIS TOOL IS HISTORICAL -- what past payouts actually
+    cost, read back from their transactions. This one is forward-looking, and it is
+    the one that answers "what should I set the reserve to": it selects real inputs
+    from the wallet's current UTXO set through fundrawtransaction and reports the
+    fee that selection would pay. Nothing is signed, broadcast or locked.
+
+    AND IT ANSWERS THE GRC QUESTION THE SAME WAY, which is the point of putting it
+    behind one call. The evidence so far says Gridcoin is FLAT rather than scaled --
+    7 of 7 payouts at exactly 0.001 with zero variance, and the one transaction
+    read in full shows vin.size=1 with a 0.001 fee -- but nobody has ever sent a
+    GRC payout spending fifteen inputs, so "flat" is a reading and not a
+    measurement (rule 17). If Gridcoin's daemon answers fundrawtransaction, this
+    line settles it; if that RPC is absent, it says NOT ESTABLISHED rather than
+    assuming either way.
+
+    THE ADDRESS IS THE WALLET'S OWN. A fee measurement needs a destination to build
+    an output to, and using an address this wallet controls means the figure cannot
+    accidentally become a real payment if someone later copies this call into a
+    sending path. It is also the only address this tool can obtain without asking
+    the operator for one.
+    """
+    if adapter is None or not hasattr(adapter, "measure_send_fee"):
+        return (f"  live fee      NOT ASKED -- no {asset} adapter in this process, or its adapter cannot "
+                f"measure a send (XRP and SOL price their own fees and are not Bitcoin-style)")
+    if not address or amount <= 0:
+        return ("  live fee      NOT ASKED -- pass --fee-address (an address you control on this chain) "
+                "and --fee-amount to measure what one payout would cost this wallet right now. Both "
+                "are needed: the fee is bytes x rate, and the bytes depend on how many inputs the "
+                "amount makes the wallet select")
+    if not adapter.validate_address(address):
+        return (f"  live fee      NOT ASKED -- the {asset} daemon does not accept {address!r}, so it is "
+                f"an address for a different chain. That is expected when one --fee-address is measured "
+                f"against every configured chain")
+    fee, how = adapter.measure_send_fee(address, amount)
+    if fee is None:
+        return f"  live fee      NOT ESTABLISHED -- {how}"
+    configured = float(getattr(Config, f"{asset}_NETWORK_FEE_RESERVE", 0.0) or 0.0)
+    # as_amount() AND NOT f"{fee}", because a fee is small enough to render in
+    # exponent notation and did: the first version of this line printed "2.82e-05
+    # BTC ... against a configured reserve of 2e-05", which is the defect
+    # swap_readiness.rate_text() was written for the same day, one line over.
+    #
+    # THE TWO FORMATTERS ARE NOT DUPLICATES AND THE DIFFERENCE IS RECORDED AT BOTH
+    # SITES (rule 8). as_amount() is for a COIN AMOUNT: eight decimals, truncated
+    # down, which is lossless for a satoshi-exact fee. rate_text() is for a RATE,
+    # which spans 9142021.6211 and 1.09e-07 in one line and therefore keeps
+    # significant digits instead of decimal places. Using either for the other's
+    # job prints something useless.
+    if configured <= 0:
+        return (f"  live fee      {as_amount(fee)} {asset} to send {as_amount(amount)} {asset} now  "
+                f"<- {how}. No {asset}_NETWORK_FEE_RESERVE is set to compare it against")
+    ratio = fee / configured
+    # THE RATIO AND ITS DIRECTION, because the two errors are not equally bad. A
+    # reserve BELOW the real fee under-protects the fee floor and the funding gate;
+    # above it only makes the floor stricter than it needs to be.
+    direction = ("the reserve is BELOW the measured fee, so the fee floor and the funding gate both "
+                 "reserve too little" if fee > configured else
+                 "the reserve is above the measured fee, which only makes the fee floor stricter")
+    return (f"  live fee      {as_amount(fee)} {asset} to send {as_amount(amount)} {asset} now, against "
+            f"a configured reserve of {as_amount(configured)} ({ratio:.2f}x)  <- {direction}. {how}")
+
+
 def report_asset(asset: str, bucket: dict, say, adapter=None) -> None:
     """One asset's block: what was booked, what was measured, and the ratio.
 
@@ -479,6 +574,12 @@ def main(argv: list[str] | None = None) -> int:
     for asset in sorted(set(per_asset) | set(Config.RPC)):
         report_asset(asset, per_asset.get(asset, {"fees": [], "booked": [], "unread": []}), say,
                      adapter=adapters.get(asset))
+        # THE FORWARD-LOOKING FIGURE, beside the historical ones, for every asset.
+        # One printer for the whole block (report_asset's docstring records what the
+        # second one cost), so this is appended here rather than becoming a third.
+        if not args.no_chain:
+            say(live_fee_line(asset, adapters.get(asset), args.fee_address or "",
+                              args.fee_amount))
         if not args.no_chain and asset in MEASURABLE and asset not in adapters:
             say(f"  {why_unconfigured(asset, Config.RPC)}")
 

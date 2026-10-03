@@ -32,6 +32,7 @@ import sqlite3
 import pytest
 from config import Config
 
+import show_payout_fees
 from show_payout_fees import (
     MEASURABLE,
     UNMEASURABLE_HERE,
@@ -554,3 +555,104 @@ def test_an_asset_with_no_configured_reserve_reports_no_configured_ratio():
     body = "\n".join(lines)
     assert "configured/measured" not in body, "a configured ratio was reported for an absent reserve"
     assert "REFUSES" in body, "the absence's consequence left the screen"
+
+
+# --- the forward-looking fee, which is the one that answers "what do I set it to"
+
+
+class FeeMeasuringAdapter:
+    """An adapter that answers measure_send_fee and records what it was asked."""
+
+    def __init__(self, fee=0.0000282, how="measured", valid=True):
+        self._fee, self._how, self._valid = fee, how, valid
+        self.asked = []
+
+    def validate_address(self, address):
+        return self._valid
+
+    def measure_send_fee(self, address, amount):
+        self.asked.append((address, amount))
+        if self._fee is None:
+            return None, self._how
+        return self._fee, self._how
+
+
+def test_the_live_fee_line_compares_the_measurement_against_the_reserve(monkeypatch):
+    """"we need to match the scaling here" -- the operator, 2026-10-03.
+
+    Two fees read off their node that day were wrong against the configured
+    reserves in OPPOSITE directions:
+
+        BTC   configured 0.00002   measured 0.00002820   41% too low
+        LTC   configured 0.001     measured 0.00021483   4.7x too high
+
+    and the transactions say why no constant fits both: the BTC send spent ONE
+    input, the LTC send FIFTEEN, because that wallet holds many small mining
+    outputs. Bytes times a rate, and bytes scale with input count.
+    """
+    monkeypatch.setattr(show_payout_fees.Config, "BTC_NETWORK_FEE_RESERVE", 0.00002, raising=False)
+    adapter = FeeMeasuringAdapter(fee=0.0000282)
+
+    line = show_payout_fees.live_fee_line("BTC", adapter, "an-address", 0.001)
+
+    assert "0.0000282" in line
+    assert "0.00002" in line, "the configured figure has to be beside the measured one"
+    assert "1.41x" in line, "and the ratio, so nobody has to divide"
+    assert "BELOW the measured fee" in line, (
+        "the DIRECTION is the part that costs money: a reserve under the real fee under-protects both "
+        "the fee floor and the funding gate"
+    )
+
+
+def test_a_reserve_above_the_measured_fee_says_that_is_the_cheaper_error(monkeypatch):
+    """Both directions, and they are not equally bad.
+
+    LTC's reserve is 4.7x its measured fee, which only makes the fee floor
+    stricter than it needs to be -- that is why GRC->BTC demands 12,232 GRC. A
+    line that called both "wrong" without saying which way would leave the
+    operator to work out which one to fix first.
+    """
+    monkeypatch.setattr(show_payout_fees.Config, "LTC_NETWORK_FEE_RESERVE", 0.001, raising=False)
+
+    line = show_payout_fees.live_fee_line("LTC", FeeMeasuringAdapter(fee=0.00021483), "an-address", 1.2)
+
+    assert "0.21x" in line
+    assert "above the measured fee" in line
+    assert "stricter" in line
+
+
+def test_a_fee_that_cannot_be_measured_says_NOT_ESTABLISHED_and_why():
+    """Never a fabricated number: a reserve chosen from a made-up figure is the defect.
+
+    This is the GRC case until somebody checks it. The evidence says Gridcoin is
+    FLAT rather than scaled -- 7 of 7 payouts at exactly 0.001 with zero variance,
+    and the one transaction read in full shows vin.size=1 with a 0.001 fee -- but
+    nobody has sent a GRC payout spending fifteen inputs, so "flat" is a reading
+    and not a measurement (rule 17). If Gridcoin's daemon has no
+    fundrawtransaction, this is the line the operator sees.
+    """
+    adapter = FeeMeasuringAdapter(fee=None, how="fundrawtransaction refused (RPCError: Method not found)")
+
+    line = show_payout_fees.live_fee_line("GRC", adapter, "an-address", 100.0)
+
+    assert "NOT ESTABLISHED" in line
+    assert "Method not found" in line
+
+
+def test_an_address_for_another_chain_is_NOT_ASKED_rather_than_measured():
+    """One --fee-address is offered to every configured chain, and only one accepts it."""
+    adapter = FeeMeasuringAdapter(valid=False)
+
+    line = show_payout_fees.live_fee_line("LTC", adapter, "a-btc-address", 0.001)
+
+    assert "NOT ASKED" in line
+    assert adapter.asked == [], "a wrong-chain address must not reach the measurement"
+
+
+def test_without_the_flags_the_line_says_what_to_pass_and_why_both_are_needed():
+    """Rule 14: a line that just goes missing is indistinguishable from one that broke."""
+    line = show_payout_fees.live_fee_line("BTC", FeeMeasuringAdapter(), "", 0.0)
+
+    assert "NOT ASKED" in line
+    assert "--fee-address" in line and "--fee-amount" in line
+    assert "inputs" in line, "and why the amount matters, or it reads as busywork"
