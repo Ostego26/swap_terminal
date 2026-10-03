@@ -123,13 +123,76 @@ SELF = "rescue_payout.py"
 #:                                 sign_message():716 is the signing call itself, so
 #:                                 if it raises there are no signed bytes to submit.
 #:                                 Either way nothing reached a cluster.
+#:   "invalid amount (rpc code -3)"
+#:                                 ADDED 2026-10-03, after the first BTC -> LTC swap
+#:                                 recorded exactly this and the tool refused to
+#:                                 re-drive it. The refusal was correct for its own
+#:                                 reason -- an unrecognized message is absence of
+#:                                 evidence -- and the evidence exists:
+#:
+#:                                 RPC CODE -3 IS RPC_TYPE_ERROR, raised by Bitcoin
+#:                                 Core's AmountFromValue() while CONVERTING the
+#:                                 `amount` parameter. It happens before the wallet
+#:                                 is touched, before an input is selected, before a
+#:                                 transaction exists -- so there are no signed
+#:                                 bytes and nothing can have been relayed.
+#:
+#:                                 MEASURED, NOT REASONED. The operator ran
+#:                                 createrawtransaction with the same amount class
+#:                                 and got the identical -3 "Invalid amount" while
+#:                                 producing NO transaction, and a valid amount on
+#:                                 the same command returned a hex string. That is
+#:                                 the parser failing in isolation, with the wallet
+#:                                 not involved at all.
+#:
+#:                                 THE CODE IS PART OF THE MARKER on purpose.
+#:                                 "invalid amount" alone could plausibly be some
+#:                                 other daemon's wording for a post-broadcast
+#:                                 condition; "(rpc code -3)" pins it to the
+#:                                 parameter-conversion error, which is the thing
+#:                                 that proves nothing was signed. chains/base.py
+#:                                 includes the code in the message it records,
+#:                                 which is why this can be matched at all.
+#:
+#:                                 AND THE CAUSE IS FIXED, so this marker is for
+#:                                 swaps that failed BEFORE c36250f:
+#:                                 chains/coin_amounts.fit_to_chain_precision() now
+#:                                 fits the amount to the chain's eight decimals
+#:                                 before the send, so a payout no longer reaches
+#:                                 the parser with seventeen.
 PRE_SIGNING_MARKERS = (
     "holds no key that could",
     "solanasendnotarmed",
     "cannot pay out",
     "solanaclusterrefused",
     "pynacl is not importable",
+    "invalid amount (rpc code -3)",
 )
+
+
+def refused_before_signing(reason: str) -> str:
+    """The PRE_SIGNING_MARKERS fragment this reason matches, or "" for none.
+
+    EXTRACTED FROM rescue_verdict() ON 2026-10-03, when a marker was added and
+    there was nowhere to test the matching with seeded inputs -- the comparison was
+    a list comprehension inside a function that also needs a swap row and payout
+    rows. CLAUDE.md rule 10 puts the thing that DECIDES at the bottom, callable on
+    its own, and this is the decision the whole file turns on: whether a recorded
+    failure is provably pre-broadcast.
+
+    CASE-INSENSITIVE, matching the contract PRE_SIGNING_MARKERS documents. The
+    reason text comes from a daemon or an adapter and its capitalization is not
+    ours to rely on; the markers are written lowercase for that reason.
+
+    "" RATHER THAN False, so the caller can name WHICH marker matched in its own
+    sentence. An operator reading "matches 'invalid amount (rpc code -3)'" can go
+    and check that claim; "matched: True" gives them nothing to check.
+    """
+    lowered = (reason or "").lower()
+    for marker in PRE_SIGNING_MARKERS:
+        if marker in lowered:
+            return marker
+    return ""
 
 
 def rescue_verdict(swap, payout_rows) -> tuple[bool, str]:
@@ -169,7 +232,7 @@ def rescue_verdict(swap, payout_rows) -> tuple[bool, str]:
             "swaps.failed_reason is empty, so there is no evidence about WHEN the refusal happened. "
             "Absence of a recorded reason is not evidence that nothing was broadcast"
         )
-    matched = [marker for marker in PRE_SIGNING_MARKERS if marker in reason]
+    matched = refused_before_signing(reason)
     if not matched:
         return False, (
             f"the recorded reason is not one this tool can prove happened BEFORE signing, so it refuses: "
@@ -178,7 +241,7 @@ def rescue_verdict(swap, payout_rows) -> tuple[bool, str]:
             f"{(swap['failed_reason'] or '')[:200]}"
         )
     return True, (
-        f"the recorded reason matches {matched[0]!r}, which is raised BEFORE anything is signed, and no "
+        f"the recorded reason matches {matched!r}, which is raised BEFORE anything is signed, and no "
         f"payout row is live or carries a txid. This swap was provably never broadcast"
     )
 

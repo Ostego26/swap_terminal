@@ -31,7 +31,7 @@ import sqlite3
 import pytest
 from db import SCHEMA, dict_factory
 
-from rescue_payout import main, rescue_verdict
+from rescue_payout import main, refused_before_signing, rescue_verdict
 
 NOW = "2026-10-03T11:29:19"
 
@@ -235,3 +235,37 @@ def test_a_REFUSED_swap_exits_3_and_writes_nothing_even_with_APPLY(tmp_path, cap
         "a swap with a LIVE payout row was re-driven anyway, which is the double-send this refuses"
     )
     assert read(db_path, "SELECT COUNT(*) n FROM swap_audit_log")["n"] == 0
+
+
+def test_an_invalid_amount_type_error_is_recognized_as_pre_signing():
+    """RPC -3 is raised while CONVERTING the amount, before a transaction exists.
+
+    The first BTC -> LTC swap recorded `Invalid amount (rpc code -3)` and this tool
+    refused to re-drive it -- correct for its own reason, since an unrecognized
+    message is absence of evidence rather than evidence of safety. The evidence
+    exists: -3 is RPC_TYPE_ERROR from Bitcoin Core's AmountFromValue(), which runs
+    before the wallet is touched, before an input is selected, before a transaction
+    is built.
+
+    MEASURED RATHER THAN REASONED: the operator ran createrawtransaction with the
+    same amount class and got the identical -3 while producing NO transaction,
+    while a valid amount on the same command returned a hex string. The parser
+    fails in isolation with the wallet uninvolved.
+
+    THE CODE IS PART OF THE MARKER. "invalid amount" alone could be another
+    daemon's wording for a post-broadcast condition; "(rpc code -3)" pins it to
+    parameter conversion, which is what proves nothing was signed.
+    """
+    assert refused_before_signing("Invalid amount (rpc code -3)")
+    assert refused_before_signing("RPCError: Invalid amount (rpc code -3)")
+
+
+def test_a_bare_invalid_amount_without_the_code_is_NOT_recognized():
+    """Because the code is the half that carries the proof.
+
+    Without this, the marker could be shortened to "invalid amount" and the test
+    above would still pass -- while matching any daemon that happens to use those
+    two words for something that did reach a network.
+    """
+    assert not refused_before_signing("Invalid amount")
+    assert not refused_before_signing("the node reported an invalid amount after relay")
