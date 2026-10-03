@@ -3,6 +3,18 @@ __pycache__/
 *.pyc
 .env
 *.db
+# THE SQLITE SIDECARS, added 2026-10-03. `*.db` above does not match them, so
+# swap_terminal.db-shm and swap_terminal.db-wal showed as UNTRACKED in every
+# `git status` of a tree where anything had opened the database -- which is noise
+# that hides a real new file, and worse, invites a `git add -A` to commit one.
+#
+# A COMMITTED WAL IS NOT MERELY UNTIDY. It holds pages not yet checkpointed into
+# the .db, so it can carry swap rows, addresses and amounts; and a WAL without the
+# database it belongs to is unreadable, so it would be an unreviewable binary
+# carrying customer data. The one .db already tracked here predates the `*.db`
+# line above and is a separate question.
+*.db-shm
+*.db-wal
 *.sqlite3
 wallet.dat
 *.log

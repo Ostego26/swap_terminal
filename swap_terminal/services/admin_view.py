@@ -558,7 +558,7 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                 pair_serviceability(config, adapters, from_asset, to_asset)
                 if enabled
                 else {"missing": [], "cannot_pay": "", "cannot_take": "", "cannot_quote": "",
-                      "serviceable": False, "reason": ""}
+                      "cannot_establish": "", "serviceable": False, "reason": ""}
             )
             missing = verdict["missing"]
             if not enabled:
@@ -593,7 +593,7 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                 # looking for the bug in the swap path, where it is not.
                 stage = (
                     "A quote REFUSES; nothing reaches create_swap()."
-                    if verdict["cannot_quote"]
+                    if verdict["cannot_quote"] or verdict["cannot_establish"]
                     else "A quote WILL price; create_swap() refuses."
                 )
                 state, detail = "cannot_complete", (
@@ -614,8 +614,15 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                     short_detail = f"{to_asset} cannot pay out"
                 elif verdict["cannot_take"]:
                     short_detail = f"{from_asset} cannot take deposits"
-                else:
+                elif verdict["cannot_quote"]:
                     short_detail = f"no {to_asset} fee reserve, so no quote"
+                else:
+                    # THE FOURTH CAUSE, 2026-10-03. The chain imposes a payout minimum
+                    # and could not be asked for it, which is a NOW problem rather than
+                    # a configuration one -- so the pill says the chain could not be
+                    # reached rather than naming a setting the operator would go and
+                    # check for nothing.
+                    short_detail = f"{to_asset}'s payout minimum could not be read from the chain"
             else:
                 state, detail = "enabled", verdict["reason"]
                 short_detail = "reachable, can take a deposit, can pay out"
@@ -641,6 +648,7 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                     "cannot_pay": verdict["cannot_pay"],
                     "cannot_take": verdict["cannot_take"],
                     "cannot_quote": verdict["cannot_quote"],
+                    "cannot_establish": verdict["cannot_establish"],
                     "serviceable": enabled and verdict["serviceable"],
                     "detail": detail,
                     "short_detail": short_detail,

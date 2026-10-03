@@ -35,8 +35,12 @@ and closing it is the operator's run.
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
+import tempfile
 import tokenize
 from pathlib import Path
+from time import time
 
 import chains.solana as chains_solana
 import pytest
@@ -54,7 +58,12 @@ from chains.solana_units import (
     LOWEST_COMMITMENT_THE_HISTORY_METHODS_ACCEPT,
 )
 from config import Config
-from services.swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION
+from db import SCHEMA, db_session, dict_factory
+from services import pricing
+from services.pricing import IDS
+from services.quote_service import create_quote
+from services.swap_service import TAG_ATTRIBUTED_ASSETS, TAG_ATTRIBUTION, create_swap
+from workers.common import get_config_dict
 
 #: Devnet's genesis hash, DERIVED from network_target.GENESIS_HASHES rather than
 #: pasted, so a test fixture cannot disagree with the table the payout path
@@ -602,11 +611,17 @@ def test_the_exact_call_the_payout_worker_makes_is_REFUSED_AND_BROADCASTS_NOTHIN
     can be stranded, is this: THE CALL SITE THAT EXISTS IN THE LIVE WORKER IS
     STILL REFUSED, and nothing reaches the chain.
 
-    services/payout_service.py:354 calls
-    `adapter.send_to_address(swap["payout_address"], amount)` -- two positional
-    arguments, no keywords. That is the exact call made here. It must land on
-    the arming guard, and `sendTransaction` must appear nowhere in the call log,
-    which is an assertion about what was DONE rather than about which exception
+    THE CALL MADE HERE IS TWO POSITIONAL ARGUMENTS, AND IT IS NO LONGER THE
+    WORKER'S. Until 2026-10-03 services/payout_service.py made exactly this
+    call for SOL; on the operator's instruction ("whoa we have to be able to
+    swap TO SOL too") broadcast_payout() now passes
+    confirm_send=CONFIRM_SOL_SEND, and the default refusal rests on
+    SOL_PAYOUT_KEYPAIR_PATH being unset instead -- which
+    tests/test_solana_payout.py measures from the service path. What
+    this test still pins is the ADAPTER's own default, which is the property
+    every other caller in the tree depends on: a send with no token must land
+    on the arming guard, and `sendTransaction` must appear nowhere in the call
+    log. An assertion about what was DONE rather than about which exception
     came back.
 
     MUTATION: delete the `require_send_confirmation(...)` call from
@@ -782,48 +797,143 @@ def test_the_registry_builds_sol_once_a_url_is_set():
     assert isinstance(adapters["SOL"], SolanaAdapter)
 
 
-def test_SOL_CANNOT_BE_A_PAYOUT_ASSET_WHATEVER_THE_PAIRS_SAY():
-    """This asserted SOL was in NO pair, and on 2026-10-01 the operator enabled SOL -> GRC.
+def test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken():
+    """The pair list stopped being what protects a customer. This is what does.
 
-    THE PREMISE MOVED, SO THE TEST DOES (rule 2: its test dies with it or changes to pin the
-    stronger invariant). "The adapter being readable does not enable a pair" was true and is
-    no longer the thing worth holding -- a pair IS enabled now, deliberately. What must stay
-    true is the half that cannot be fixed by a config change:
+    THIS TEST WAS test_SOL_CANNOT_BE_A_PAYOUT_ASSET_WHATEVER_THE_PAIRS_SAY and it
+    asserted `[pair for pair in ALLOWED_PAIRS if pair[1] == "SOL"] == []`. The
+    operator enabled ("GRC","SOL"), ("BTC","SOL") and ("LTC","SOL") on 2026-10-03
+    -- "whoa we have to be able to swap TO SOL too" -- so that assertion is false
+    by instruction, and it is rewritten to the stronger invariant rather than
+    deleted (rule 2).
 
-        SOL may be the INPUT of a pair. It may never be the OUTPUT.
+    ITS OWN ARGUMENT IS WHAT MADE THE REWRITE NECESSARY, AND ONE CLAUSE OF IT WAS
+    ALREADY FALSE. It said: "a pair paying out in SOL would still take a customer's
+    deposit and still fail to complete, which is strictly worse than a refused
+    quote." MEASURED 2026-10-03, on an unarmed host, that does not happen -- and
+    the reason is the three gates the same docstring listed:
 
-    AND THE REASON CHANGED ON 2026-10-02 WITHOUT THE ASSERTION CHANGING. This paragraph said
-    a SOL payout "could never be completed, because send_to_address() raises and this module
-    holds no keypair". A payout path exists now -- devnet only, refusing unless armed with
-    chains/solana_signing.CONFIRM_SOL_SEND at the call site, reading its keypair from
-    SOL_PAYOUT_KEYPAIR_PATH in chains/solana_signing.py and never here -- so that sentence
-    would now be wrong, and a reader who trusted it would conclude the wrong thing in either
-    direction.
+      SOL_PAYOUT_KEYPAIR_PATH unset -> SolanaAdapter.can_spend is False
+      -> chains/registry.why_cannot_pay_out() refuses
+      -> services/pair_view.pair_serviceability() marks the pair UNAVAILABLE, so
+         the customer form never offers it
+      -> AND services/swap_service.create_swap() refuses, which is the one that
+         matters, because the form is not the only way in.
 
-    WHAT STILL MAKES THE ASSERTION RIGHT, and it is now three things rather than an absence:
+    So no deposit is taken. The deposit was never protected by the PAIR LIST; it is
+    protected by can_spend, and asserting the pair list was asserting a proxy.
+    Enabling a pair is not arming it, and this test is the proof of the gap between
+    the two.
 
-      can_spend is False     so chains/registry.why_cannot_pay_out() refuses the pair, and
-                             services/swap_service.create_swap() refuses the swap.
-      the worker is unarmed  services/payout_service.py:354 passes two positional arguments,
-                             so it gets a preview and SolanaSendNotArmed.
-      nothing has broadcast  no transaction this path builds has reached any cluster, from any
-                             environment, ever. The serialization is cross-checked against
-                             @solana/web3.js byte for byte and that is not the same claim.
+    WHAT IS STRONGER. The old version pinned a config fact, which one line changes.
+    This runs the real create_swap() over seeded rows (swap_terminal/CLAUDE.md's
+    verification principle: a seeded condition producing or suppressing a row, never
+    SQL text) and asserts the refusal, so it fails if the gate is removed no matter
+    what the pair list says.
 
-    So a pair paying out in SOL would still take a customer's deposit and still fail to
-    complete, which is strictly worse than a refused quote. Enabling one is live posture and
-    is the operator's (rule 16). tests/test_allowed_pairs_are_serviceable.py's
-    DELIBERATELY_ONE_WAY records the same thing from the pair side.
-
-    MUTATION: add ("GRC", "SOL") to ALLOWED_PAIRS and this fails by name.
+    WHAT IT DOES NOT COVER, said rather than left to be found: an ARMED host. There
+    a GRC -> SOL swap would be created and the payout would broadcast -- and no
+    transaction this path builds has ever reached a cluster from any environment.
+    That residual risk is the operator's and they armed it knowingly (rule 16);
+    tests/test_solana_payout.py holds the armed path.
     """
-    paying_out_in_sol = [pair for pair in Config.ALLOWED_PAIRS if pair[1] == "SOL"]
-    assert not paying_out_in_sol, (
-        f"{paying_out_in_sol} would pay out in SOL, and SOL is not enabled to pay out: the "
-        f"adapter's can_spend is False, the payout worker calls send_to_address() unarmed, and no "
-        f"transaction this path builds has ever reached a cluster. A deposit taken against one of "
-        f"these is stranded in a swap that cannot complete."
+    sol_output = sorted(pair for pair in Config.ALLOWED_PAIRS if pair[1] == "SOL")
+    if not sol_output:
+        pytest.skip("no pair pays out in SOL, so there is nothing for this gate to refuse")
+
+    assert "SOL_PAYOUT_KEYPAIR_PATH" not in os.environ, (
+        "the suite is running with the SOL payout ARMED, so this test cannot measure the unarmed "
+        "refusal. tests/conftest.py pops that variable for exactly this reason"
     )
+
+    with tempfile.TemporaryDirectory() as root:
+        db_path = Path(root) / "unarmed.db"
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = dict_factory
+        conn.executescript(SCHEMA)
+        conn.commit()
+        conn.close()
+
+        now = time()
+        pricing._cache.update({
+            "raw": {cg: {"usd": 100.0, "usd_market_cap": 5e9, "usd_24h_vol": 2e8,
+                         "usd_24h_change": 1.0, "last_updated_at": 1790717713}
+                    for cg in IDS.values()},
+            "prices": None, "context": None, "source": "seeded",
+            "fetched_at": now, "expires_at": now + 999,
+        })
+        config = dict(get_config_dict())
+        config["DB_PATH"] = str(db_path)
+
+        class _Source:
+            """A source chain that can take a deposit, so only SOL's posture is measured."""
+
+            asset, can_spend = "GRC", True
+
+            def get_new_address(self, _label):
+                return valid_addresses.GRC_PAYOUT
+
+            def validate_address(self, _address):
+                return True
+
+            def describe_address(self, _address):
+                return "a stub address"
+
+            def why_cannot_pay_out(self):
+                return ""
+
+        class _Cluster(SolanaAdapter):
+            """THE REAL ADAPTER, with only the one RPC read stubbed.
+
+            A hand-written stub was the first attempt and it passed for the wrong
+            reason: declaring `can_spend = False` with no `payout_refusal` produced
+            "SOL cannot pay out, and its adapter does not say why", so the test would
+            have asserted a refusal the real adapter never gives. Measured 2026-10-03.
+
+            Subclassing instead means can_spend is DERIVED here exactly as it is in
+            production -- from SOL_PAYOUT_KEYPAIR_PATH, via
+            chains/solana_payout_keypair -- and the refusal is the real sentence, the
+            one chains/registry.why_cannot_pay_out() puts on the operator page. Only
+            rent_exempt_minimum() is replaced, because that is the single call that
+            would open a socket, and the figure is the operator's own devnet reading.
+            """
+
+            asset = "SOL"
+
+            def rent_exempt_minimum(self, _space=0):
+                return 890_880
+
+            def validate_address(self, _address):
+                return True
+
+        from_asset = sol_output[0][0]
+        adapters = {"SOL": _Cluster(), from_asset: _Source()}
+        if from_asset != "GRC":
+            adapters["GRC"] = _Source()
+
+        # `adapters` IS PASSED to create_quote, because a *->SOL quote asks the
+        # cluster for the rent floor and a call without them refuses with "this
+        # terminal cannot reach the Solana network" -- which would make this test
+        # pass for the wrong reason, on a refusal that is not the payout gate.
+        # Measured: that is exactly what the first run of this test did.
+        with db_session(str(db_path)) as db:
+            quote = create_quote(db, config, from_asset, "SOL", 10, adapters=adapters)
+            assert quote["output_amount_estimate"] > 0, (
+                "the quote priced to zero, so the refusal below would not be measuring the payout gate"
+            )
+            with pytest.raises(ValueError, match="cannot pay out") as refusal:
+                create_swap(db, config, adapters, quote["id"], valid_addresses.SOL_PAYOUT)
+
+        assert "SOL_PAYOUT_KEYPAIR_PATH" in str(refusal.value), (
+            "the refusal does not name the variable that would arm it, which leaves an operator with a "
+            "refused swap and nothing to export"
+        )
+        with db_session(str(db_path)) as db:
+            swaps = db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"]
+        assert swaps == 0, (
+            f"{swaps} swap rows were written for a payout this host cannot make. Nothing may be recorded, "
+            f"because a recorded swap is a deposit target a customer could pay into"
+        )
 
 
 # --- the event shape ---------------------------------------------------------

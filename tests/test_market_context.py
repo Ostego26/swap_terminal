@@ -275,11 +275,15 @@ def test_every_swappable_asset_has_a_price_id_and_the_ids_are_project_names():
     debugging it starts from the wrong end. Lower-cased asset codes are the mistake this
     catches: "sol", "xrp", "btc", "ltc", "grc".
 
-    SOL IS IN THIS TABLE AHEAD OF ANY SOL PAIR, deliberately. chains/solana.py:700
-    send_to_address() raises NotImplementedError and :278 sets can_spend = False, so SOL can
-    only ever be the INPUT of a swap -- and enabling that pair is live posture and the
-    operator's call (rule 16). Preparing the priceable side first is what stops the pair
-    from being the thing that discovers this table is short a row.
+    SOL IS IN THIS TABLE AHEAD OF ANY SOL-PAYOUT PAIR, deliberately. This paragraph said
+    "chains/solana.py:700 send_to_address() raises NotImplementedError and :278 sets
+    can_spend = False"; neither clause is true now -- a devnet payout path was built
+    2026-10-02, and can_spend has been DERIVED from SOL_PAYOUT_KEYPAIR_PATH since
+    2026-10-03. What still holds is that no pair pays out in SOL (measured 2026-10-03
+    against the real Config: three take it as the INPUT, zero as the output), and enabling
+    one is live posture and the operator's call (rule 16). Preparing the priceable side
+    first is what stops the pair from being the thing that discovers this table is short a
+    row.
     """
     swappable = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
     for asset in swappable:

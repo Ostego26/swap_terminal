@@ -54,13 +54,22 @@ watched is a payment nobody sees. Mainnet SOL cannot leave through this file.
 
 WHY IT SHELLS OUT TO THE SOLANA CLI RATHER THAN SIGNING HERE.
 
-chains/solana.py cannot send -- `can_spend = False` and send_to_address() raises
-NotImplementedError, deliberately, because this terminal takes SOL in and never
-pays it out. Building and signing a transfer here would mean this repository
-reading a keypair file, and the operator's standing rule is that nothing here
-moves, copies or reads back a key. The CLI already holds that responsibility and
-is the thing that signed every manual send today. So the keypair PATH is passed
-and the key itself is never opened by this process.
+THIS PARAGRAPH'S PREMISE EXPIRED AND IS CORRECTED RATHER THAN LEFT (rule 16: a
+wrong comment is a bug). It said "chains/solana.py cannot send -- `can_spend =
+False` and send_to_address() raises NotImplementedError, deliberately, because
+this terminal takes SOL in and never pays it out." That was true when this file
+was written. Since 2026-10-02 chains/solana.py has a devnet-only payout path
+(send_to_address() previews by default and raises SolanaSendNotArmed, never
+NotImplementedError), and since 2026-10-03 `can_spend` is derived from
+SOL_PAYOUT_KEYPAIR_PATH rather than hardcoded.
+
+WHAT IS UNCHANGED, and it is the reason this file still shells out: THIS SCRIPT
+NEVER OPENS A KEY. It pays a test deposit INTO the terminal, which is the
+customer's side of a swap and has nothing to do with the payout path; the
+keypair PATH is handed to the Solana CLI and the key itself is never read by
+this process. The application's own signing is confined to
+chains/solana_signing.signed_transfer_wire(), which is a different file, a
+different direction and reachable only with an arming token.
 """
 
 from __future__ import annotations

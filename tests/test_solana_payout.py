@@ -69,7 +69,9 @@ import base58
 import pytest
 import valid_addresses
 from chains import solana_signing as signing
+from chains.registry import why_cannot_pay_out
 from chains.solana import SolanaAdapter, SolanaRPCError
+from chains.solana_payout_keypair import missing_keypair_refusal, payout_keypair_is_present
 from chains.solana_signing import (
     CONFIRM_SOL_SEND,
     KEYPAIR_PATH_VARIABLE,
@@ -97,9 +99,10 @@ from chains.solana_signing import (
 )
 from chains.solana_transaction import parse_transfer_transaction
 from config import Config
-from db import SCHEMA, db_session, dict_factory
+from db import SCHEMA, apply_migrations, connect_db, db_session, dict_factory
 from network_target import GENESIS_HASHES
 from services import quote_service
+from services.payout_service import broadcast_payout, process_pending_payouts
 from services.pricing import IDS, _cache
 from services.quote_service import create_quote
 from workers.common import get_config_dict
@@ -980,14 +983,40 @@ def quote_config(tmp_path):
     return config, database
 
 
-def test_no_live_pair_pays_out_in_SOL_so_the_quote_gate_cannot_fire_today():
-    """Said out loud rather than discovered: this is the gate for a pair that does not exist yet.
+def test_the_SOL_quote_gate_IS_REACHABLE_NOW_THAT_A_PAIR_PAYS_OUT_IN_SOL():
+    """The pair this gate was built ahead of exists, so the gate is live. That is the news.
 
-    It is built now because the moment somebody enables ("GRC", "SOL") is
-    exactly the moment nobody would remember to add it -- and the failure it
-    prevents is a customer being quoted a payout the network will not deliver.
+    THIS TEST WAS test_no_live_pair_pays_out_in_SOL_so_the_quote_gate_cannot_fire_today
+    and it asserted the list was EMPTY. Its own docstring said why it was written
+    early: "the moment somebody enables ('GRC', 'SOL') is exactly the moment nobody
+    would remember to add it". That moment was 2026-10-03, the operator enabled
+    three such pairs, and the gate was there waiting -- which is the mechanism
+    working, so the assertion flips rather than the gate changing (rule 2).
+
+    WHAT IS STRONGER. "No pair pays out in SOL" is a config fact one line changes,
+    and once it is false the test says nothing at all. What is worth holding is that
+    every pair which DOES pay out in SOL goes through the floor gate -- because the
+    failure the gate prevents is a customer quoted a payout the network will not
+    deliver, and that failure is reachable now in a way it was not before.
+
+    The gate's behavior is asserted by
+    test_a_SOL_payout_below_the_network_floor_IS_REFUSED_AT_QUOTE_TIME below, which
+    seeds rows and runs the real create_quote(). This one asserts the gate is
+    REACHED: that there is at least one pair whose quotes pass through it, and that
+    SOL's own reserve exists so the quote gets that far at all. A gate nothing
+    reaches is the dead-code half of rule 9, and a gate that fires on a pair nobody
+    enabled is what this test used to describe.
     """
-    assert [pair for pair in Config.ALLOWED_PAIRS if pair[1] == "SOL"] == []
+    sol_output = sorted(pair for pair in Config.ALLOWED_PAIRS if pair[1] == "SOL")
+    assert sol_output, (
+        "no pair pays out in SOL any more, so require_deliverable_sol_payout() is unreachable from "
+        "any enabled pair. If SOL was deliberately disabled as a payout asset, this test and the "
+        "gate's reachability go together -- the gate itself still earns its place for the next time"
+    )
+    assert hasattr(Config, "SOL_NETWORK_FEE_RESERVE"), (
+        f"{sol_output} pay out in SOL and SOL_NETWORK_FEE_RESERVE does not exist, so every one of "
+        f"those quotes refuses at get_network_fee_reserve() and never reaches the floor gate at all"
+    )
 
 
 def test_a_SOL_payout_below_the_network_floor_IS_REFUSED_AT_QUOTE_TIME(tmp_path, monkeypatch):
@@ -1248,3 +1277,634 @@ def test_the_teller_pane_still_refuses_a_SOL_quote_below_the_network_floor(tmp_p
     # route as well as on the web one.
     for internal in ("SOL_PAYOUT_KEYPAIR_PATH", "SOL_NETWORK_FEE_RESERVE", "rent_exempt_minimum", "lamport"):
         assert internal not in answer["error"], f"the refusal names an internal setting: {internal}"
+
+
+# =============================================================================
+# THE ARMING, AND THE WIRING THAT MAKES IT REACHABLE (2026-10-03)
+# =============================================================================
+#
+# Operator, 2026-10-03, verbatim: "whoa we have to be able to swap TO SOL too".
+#
+# WHAT WAS MEASURED BEFORE THIS SECTION EXISTED, in this checkout, with the real
+# modules:
+#
+#   chains/solana.py                  can_spend = False, HARDCODED, with a comment
+#                                     saying flipping it was the operator's call.
+#   services/payout_service.py        broadcast_payout() fell SOL through to
+#                                     `send_to_address(address, amount)` -- two
+#                                     positional arguments -- so every SOL payout
+#                                     raised SolanaSendNotArmed no matter what the
+#                                     host had exported. The payout path was
+#                                     unreachable code from the worker's side.
+#
+# Both are changed. can_spend is DERIVED from
+# chains/solana_payout_keypair.payout_keypair_is_present(), and broadcast_payout()
+# passes confirm_send=CONFIRM_SOL_SEND for SOL. What these tests hold is the pair of
+# directions, because only the pair is informative:
+#
+#   path UNSET -> REFUSES   the default in every checkout and every test run
+#                           (tests/conftest.py pops the variable at import so the
+#                           suite cannot inherit a different posture from the shell
+#                           that started it), and the refusal must NAME the variable
+#                           so an operator can act on it from a page (rule 14).
+#   path SET   -> PERMITS   so the mechanism is not merely a differently-worded
+#                           refusal. A guard that refused in both states would pass
+#                           the first assertion forever and nobody would notice the
+#                           payout path was dead -- which is the exact property
+#                           tests/test_allowed_pairs_are_serviceable.py::
+#                           test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE was
+#                           rewritten to hold, one chain over.
+#
+# AND NOTHING HERE REACHES A CLUSTER. Every adapter below is a real SolanaAdapter
+# whose `call` is a seeded table, so "nothing was broadcast" is asserted on the
+# recorded call list. No transaction built by this path has reached any cluster from
+# any environment, ever; re-measured 2026-10-03, api.devnet.solana.com answers 403 at
+# this container's proxy.
+
+#: A KEYPAIR PATH THAT IS NOT A PATH, for every test that needs the variable only to
+#: be PRESENT. Deliberately not a filename: it has no separator, no extension and a
+#: shouting name, so a stack trace containing it is unambiguous and any code that
+#: tried to open it would fail on a missing file rather than reading something real.
+#:
+#: chains/solana_payout_keypair.payout_keypair_is_present() reads bool() of the
+#: variable and never opens the file, which is the whole design of that module, so
+#: every capability test below stops before any filesystem call. The tests that need
+#: a keypair that actually derives an account use throwaway_keypair() above.
+SENTINEL_KEYPAIR_PATH = "SENTINEL-NOT-A-REAL-KEYPAIR-PATH-DO-NOT-OPEN"
+
+#: The config process_pending_payouts() needs for a GRC -> SOL swap. SOL is not in
+#: services/payout_service.WALLET_UNLOCK_ASSETS (that set is {"GRC"}), so no wallet
+#: passphrase is involved and payout_unlock_context() is a no-op for this asset.
+SOL_PAYOUT_CONFIG = {
+    "GRC_MIN_CONFIRMATIONS": 6,
+    "SOL_MIN_CONFIRMATIONS": 1,
+    "AMOUNT_TOLERANCE_PCT": 0.01,
+}
+
+
+class RecordingAdapter:
+    """Records exactly how send_to_address() was called, and sends nothing.
+
+    HERE RATHER THAN A REAL ADAPTER because the claim under test is about the CALL
+    SITE -- which keywords services/payout_service.broadcast_payout() chooses for an
+    asset -- and a real adapter would answer that question through seven guards and a
+    seeded cluster. The guards have their own tests above; this one is about the
+    dispatch, which is rule 10's "the decision is a function, callable with seeded
+    inputs".
+    """
+
+    asset = "STUB"
+    can_spend = True
+    payout_refusal = ""
+
+    def __init__(self):
+        self.calls = []
+
+    def send_to_address(self, address, amount, **kwargs):
+        self.calls.append((address, amount, kwargs))
+        return "stub-signature"
+
+
+def _unarmed(monkeypatch):
+    """Guarantee the keypair path is absent from THIS process for this test.
+
+    tests/conftest.py already pops it at import, so this is belt and braces -- and
+    it is here anyway because a test that depends on another file's import-time side
+    effect reads as a test that happens to pass.
+    """
+    monkeypatch.delenv(KEYPAIR_PATH_VARIABLE, raising=False)
+
+
+def _seed_one_pending_sol_swap(db_path: str, payout_address: str, amount: float, swap_id: str = "s_sol") -> None:
+    """One GRC -> SOL swap in `payout_pending`, the state the payout worker acts on.
+
+    A SIBLING OF tests/test_xrp_payout_wiring.py::_seed_one_pending_xrp_swap AND NOT
+    A COPY OF ITS VALUES (rule 8 -- the shape is shared because the schema is, the
+    assets and the amounts are what differ). `apply_migrations` is run because
+    workers/payout_worker.py runs it once at startup and
+    idx_payouts_one_live_per_swap is what makes a second live payout row impossible;
+    a test that skipped it would be measuring a database the worker never sees.
+
+    THE AMOUNT IS A PARAMETER because the rent floor is real: a payout to an account
+    that does not exist must clear getMinimumBalanceForRentExemption, and seeding a
+    dust amount would make every test here die on the rent guard instead of on the
+    thing it is named for.
+    """
+    conn = connect_db(db_path)
+    conn.executescript(SCHEMA)
+    now = "2026-10-03T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps, "
+        "network_fee_reserve, output_amount_estimate, expires_at, created_at) "
+        "VALUES ('q_sol', 'GRC', 'SOL', 1000.0, 0.0002, 150, 0.0, ?, ?, ?)",
+        (amount, now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO swaps (
+            id, quote_id, from_asset, to_asset, deposit_address, payout_address,
+            expected_input_amount, actual_input_amount, quoted_rate, fee_bps,
+            network_fee_reserve, output_amount_estimate, status, min_confirmations,
+            deposit_txid, payout_txid, created_at, updated_at, credited_at,
+            completed_at, expires_at, failed_reason
+        ) VALUES (?, 'q_sol', 'GRC', 'SOL', ?, ?,
+                  1000.0, 1000.0, 0.0002, 150, 0.0, ?, 'payout_pending', 6,
+                  'grc_txid', NULL, ?, ?, ?, NULL, ?, NULL)
+        """,
+        (swap_id, valid_addresses.GRC_PAYOUT, payout_address, amount, now, now, now, now),
+    )
+    conn.commit()
+    apply_migrations(conn)
+    conn.close()
+
+
+# --- the capability, in both directions --------------------------------------
+
+
+def test_the_default_is_no_keypair_path_and_therefore_no_payout_capability(monkeypatch):
+    """UNSET is the default, and the refusal has to name what to export.
+
+    THE DEFAULT IS THE WHOLE SAFETY PROPERTY. With SOL_PAYOUT_KEYPAIR_PATH unset --
+    every checkout, every test run, and every host where the operator has not made
+    the custody decision -- can_spend is False, so
+    chains/registry.why_cannot_pay_out() refuses SOL as a payout destination and
+    services/swap_service.create_swap() refuses a swap whose payout leg is SOL. That
+    is the only stage at which nothing has been taken from a customer.
+
+    BOTH VARIABLES ARE ASSERTED, and naming one would be the mistake
+    tests/test_allowed_pairs_are_serviceable.py::
+    test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE is named after: a host with the
+    keypair and no SOL_HOT_WALLET is armed and still cannot pay, because
+    chains/solana_signing.derive_and_check() refuses to sign for an account the plan
+    never announced.
+
+    MUTATION: make payout_keypair_is_present() return True unconditionally and this
+    fails on can_spend; drop either variable name from missing_keypair_refusal() and
+    it fails on the sentence.
+    """
+    _unarmed(monkeypatch)
+    assert payout_keypair_is_present() is False, "the suite must not inherit an armed posture"
+
+    adapter = SolanaAdapter(url="http://unreachable.invalid", hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
+    assert adapter.can_spend is False
+    assert adapter.payout_refusal == missing_keypair_refusal(), (
+        "the adapter must carry the one shared sentence rather than a second copy of it (rule 8)"
+    )
+
+    refusal = why_cannot_pay_out({"SOL": adapter}, "SOL")
+    assert refusal, "an adapter that cannot spend gave no reason"
+    assert KEYPAIR_PATH_VARIABLE in refusal, (
+        "the refusal no longer names the variable that would fix it, which is the whole of its "
+        "usefulness to an operator reading it off a customer page or a spawn banner (rule 14)"
+    )
+    assert "SOL_HOT_WALLET" in refusal, (
+        "the refusal no longer names the SECOND variable; naming one sends the reader to do half "
+        "the work"
+    )
+
+
+def test_a_keypair_path_ALONE_makes_can_spend_True_AND_CLEARS_THE_REFUSAL(monkeypatch):
+    """SET -> PERMITS, which is the direction that can regress silently.
+
+    THIS IS THE ASSERTION THAT PROVES THE MECHANISM IS NOT A SECOND REFUSAL. A guard
+    that refused in both states would pass the test above forever, and the payout
+    path would be dead code nobody noticed -- the operator would export the variable
+    and the page would still say SOL cannot pay out. So the pair of directions is
+    the test, not either half.
+
+    NOTHING IS OPENED AND NOTHING IS DECODED. The value is a sentinel with no
+    separator in it; chains/solana_payout_keypair.payout_keypair_is_present() reads
+    bool() of the variable, and the url is unreachable.invalid because construction
+    makes no call -- if either of those ever changes, this test fails loudly rather
+    than quietly doing something real.
+
+    MUTATION: put `can_spend = False` back as a hardcoded class attribute, or delete
+    the two derivation lines from __init__, and this fails.
+    """
+    monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
+    assert payout_keypair_is_present() is True
+
+    armed_adapter = SolanaAdapter(url="http://unreachable.invalid", hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
+    assert armed_adapter.can_spend is True, (
+        f"with {KEYPAIR_PATH_VARIABLE} set, SolanaAdapter.can_spend must be True. If this fails the "
+        f"payout path is unreachable from the worker no matter what the operator exports, and the "
+        f"wiring is dead code"
+    )
+    assert armed_adapter.payout_refusal == ""
+    assert why_cannot_pay_out({"SOL": armed_adapter}, "SOL") == "", (
+        "an armed adapter still reports a payout refusal, so the customer page would refuse a swap "
+        "the worker could actually pay"
+    )
+
+
+def test_a_SET_BUT_EMPTY_export_is_NOT_armed(monkeypatch):
+    """`export SOL_PAYOUT_KEYPAIR_PATH=''` is absent, not present.
+
+    What a generator run from a shell without the value writes, and config.py's own
+    _env() carries the measurement that cost: five empty exports on 2026-09-26
+    turned a missing setting into a crash at import. Here, reading "" as present
+    would be worse than a crash -- can_spend True, a SOL swap created, a customer's
+    deposit taken, and the payout refused at the send with the deposit already
+    credited.
+
+    WHITESPACE TOO, because `read` and heredocs leave a newline and a path with a
+    trailing newline does not open.
+
+    MUTATION: drop the .strip() in keypair_path_from_environment(), or compare with
+    `is not None`, and this fails.
+    """
+    for blank in ("", "   ", "\n"):
+        monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, blank)
+        assert payout_keypair_is_present() is False, f"{blank!r} must read as unarmed"
+        adapter = SolanaAdapter(url="http://unreachable.invalid")
+        assert adapter.can_spend is False
+        assert KEYPAIR_PATH_VARIABLE in adapter.payout_refusal
+
+
+def test_the_CLASS_level_values_are_the_REFUSING_pair_whatever_the_environment(monkeypatch):
+    """Fail-closed: anything that reads the attributes off the CLASS gets "cannot pay".
+
+    A stub, a reflective check, a reader who never constructed an adapter --
+    chains/registry.why_cannot_pay_out() already fails in this direction when the
+    attribute is missing entirely, and the class-level pair is the same choice made
+    one step earlier. chains/xrp.py's class attributes are the refusing pair for
+    exactly this reason and say so.
+
+    ASSERTED WITH THE VARIABLE SET, which is the state where a mistake here would
+    matter: the class must not become armed because some process in some shell is.
+    """
+    monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
+    assert SolanaAdapter.can_spend is False
+    assert KEYPAIR_PATH_VARIABLE in SolanaAdapter.payout_refusal
+    assert why_cannot_pay_out({"SOL": SolanaAdapter}, "SOL").startswith("SOL cannot pay out")
+
+
+# --- the module that answers the question never opens the key file ------------
+
+
+def test_NOTHING_on_the_capability_path_OPENS_the_file_the_variable_names(monkeypatch):
+    """The capability is a bool about an environment variable, not a key read.
+
+    WHY THIS IS A TEST AND NOT A COMMENT. can_spend is read by every surface this
+    application renders -- the customer page, the admin page, the operator panel, the
+    worker spawn banner -- and a capability check that opened a key file would mean a
+    key read on page load, in a Flask request handler, in a process paying nobody.
+    chains/solana_payout_keypair.py's header states that it never opens the file; a
+    sentence is not evidence (rule 17), so this proves it by making every open of
+    that path raise.
+
+    FAILS LOUDLY RATHER THAN SKIPPING, which the brief for this work asked for
+    explicitly: the sentinel is not a real file, so a code path that opened it would
+    already fail -- but it could fail as a swallowed OSError somewhere and look like
+    "no key". So builtins.open and Path.open/Path.read_text/Path.read_bytes are
+    patched to raise AssertionError, which no handler on this path catches, and the
+    test dies naming the caller.
+
+    THE ONE PLACE THE FILE IS OPENED AT ALL is
+    chains/solana_signing.load_payout_keypair(), whose only non-test caller is
+    signed_transfer_wire() -- after the arming token has matched and after the
+    cluster has been proven to be devnet. That is checked by the armed tests above,
+    which read a REAL throwaway keypair.
+    """
+    monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
+    opened = []
+
+    def refuse_open(target, *args, **kwargs):
+        name = str(getattr(target, "name", target))
+        if SENTINEL_KEYPAIR_PATH in name:
+            opened.append(name)
+            raise AssertionError(f"the capability path OPENED the key file: {name}")
+        return _real_open(target, *args, **kwargs)
+
+    def refuse_path_method(name):
+        """A replacement for Path.<name> that raises when the sentinel is the target.
+
+        A FACTORY RATHER THAN A LAMBDA IN THE LOOP, because a closure over the loop
+        variable would capture its LAST value and every message would name
+        read_bytes -- ruff's B023, and here it would make the failure name the wrong
+        caller, which is worse than the lint.
+        """
+
+        def refused(self, *args, **kwargs):
+            if SENTINEL_KEYPAIR_PATH in str(self):
+                opened.append(str(self))
+                raise AssertionError(f"the capability path called Path.{name} on {self}")
+            return _real_path_methods[name](self, *args, **kwargs)
+
+        return refused
+
+    # Imported here and not at the top because it exists only to capture the
+    # UNPATCHED methods for the duration of this test; monkeypatch reverts them, and
+    # a module-level name would be reachable from every other test in this file.
+    from pathlib import Path  # noqa: PLC0415 -- checked: local on purpose, see above
+
+    _real_open = open
+    _real_path_methods = {name: getattr(Path, name) for name in ("open", "read_text", "read_bytes")}
+    monkeypatch.setattr("builtins.open", refuse_open)
+    for name in _real_path_methods:
+        monkeypatch.setattr(f"pathlib.Path.{name}", refuse_path_method(name))
+
+    assert payout_keypair_is_present() is True
+    adapter = SolanaAdapter(url="http://unreachable.invalid", hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
+    assert adapter.can_spend is True
+    assert adapter.payout_refusal == ""
+    assert why_cannot_pay_out({"SOL": adapter}, "SOL") == ""
+    assert missing_keypair_refusal()
+    assert opened == []
+
+
+def test_the_keypair_PATH_VALUE_reaches_no_attribute_no_log_and_no_refusal_message(
+    tmp_path, monkeypatch, caplog, capsys
+):
+    """A sentinel path value, and four places it must not appear.
+
+    FOUR PLACES, each of which has leaked a value in some codebase, and the same four
+    tests/test_xrp_payout_wiring.py checks for the XRP seed:
+
+      the adapter     vars() on a constructed instance, because an attribute is what
+                      a template, a debugger and a generic dumper reach for first
+      log records     captured at DEBUG, the most verbose level, and searched in BOTH
+                      getMessage() and repr(record.args) -- a value passed as a lazy
+                      format argument survives in `args` whether or not any handler
+                      formats the message, which is the half a naive test misses
+      the refusal     the exception message from a guard that fires with the variable
+                      SET, which is where a well-meaning "so you know which key"
+                      would have been appended
+      stdout/stderr   the preview block is exactly what an operator pastes back
+
+    THE REFUSAL USED HERE IS THE DEVNET GUARD, deliberately, because it is the one
+    that fires with the variable set and before anything is signed. An unarmed
+    process has no value to leak.
+
+    AND THE ONE DELIBERATE EXCEPTION IS NAMED RATHER THAN HIDDEN, because pretending
+    it does not exist would make this test a lie: chains/solana_signing.
+    describe_keypair_file() PRINTS the path and its file mode, and
+    chains/solana.py's _sign_and_broadcast() prints that line immediately before the
+    broadcast. That is rule 14 working as intended -- an operator about to move money
+    must see WHICH key is signing and whether it is group-readable -- and it happens
+    only on the armed devnet path, after every guard, which is why no assertion here
+    covers it. The path is not a secret; it is also not something a customer page, a
+    log line or a refusal has any reason to carry.
+    """
+    monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
+    caplog.set_level(logging.DEBUG)
+
+    adapter = ready_adapter(genesis=MAINNET_BETA, hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
+    assert adapter.can_spend is True, "the point of this test is a value PRESENT in the environment"
+    with pytest.raises(SolanaClusterRefused) as refused:
+        broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
+
+    captured = capsys.readouterr()
+    for where, text in (
+        ("the exception message", str(refused.value)),
+        ("a log record", all_log_text(caplog)),
+        ("stdout", captured.out),
+        ("stderr", captured.err),
+        ("an adapter attribute", repr(vars(adapter))),
+    ):
+        assert SENTINEL_KEYPAIR_PATH not in text, f"the keypair path reached {where}"
+    assert "sendTransaction" not in methods(adapter)
+
+
+# --- the call site: which keywords each chain's send actually gets ------------
+
+
+def test_a_SOL_payout_gets_the_ARMING_TOKEN_and_nothing_else(monkeypatch):
+    """The wiring, asserted on the call rather than on an outcome.
+
+    WHAT THIS REPLACED, MEASURED IN THIS CHECKOUT BEFORE THE CHANGE:
+    services/payout_service.broadcast_payout() had no SOL branch, so SOL fell
+    through to `send_to_address(address, amount)` and every SOL payout raised
+    SolanaSendNotArmed whatever the host had exported. The operator's instruction
+    ("whoa we have to be able to swap TO SOL too") is what changed it.
+
+    NO source AND NO seed KEYWORD, which is the half that would be easy to get wrong
+    by copying XRP's branch: SOL's payer is SOL_HOT_WALLET, which the adapter already
+    holds and the preview announces, and the keypair never passes through this
+    process's own code -- chains/solana_signing.signed_transfer_wire() reads it from
+    the file for the duration of one call. A `source=` or `seed=` keyword here would
+    be a TypeError on a live payout.
+
+    THE TOKEN IS COMPARED TO THE IMPORTED CONSTANT, so a drifted literal at the call
+    site fails here rather than refusing every payout in production with a message
+    about the token.
+
+    MUTATION: delete the SOL branch from broadcast_payout() and this fails on the
+    empty kwargs.
+    """
+    monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
+    adapter = RecordingAdapter()
+    assert broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 0.25) == "stub-signature"
+
+    (address, amount, kwargs) = adapter.calls[0]
+    assert len(adapter.calls) == 1
+    assert (address, amount) == (DESTINATION, 0.25)
+    assert kwargs == {"confirm_send": CONFIRM_SOL_SEND}, (
+        f"a SOL send takes the arming token and nothing else; it got {sorted(kwargs)}"
+    )
+
+
+def test_the_TOKEN_IS_PASSED_WHETHER_OR_NOT_THE_HOST_IS_ARMED(monkeypatch):
+    """The arming is the KEYPAIR PATH, not a flag at the call site.
+
+    A DELIBERATE DIVERGENCE FROM XRP, stated at both sites (rule 8). XRP refuses
+    inside broadcast_payout(), before any network call, when its seed variable is
+    unset. SOL passes the token unconditionally and lets
+    chains/solana_signing.require_send_confirmation() refuse on the empty keypair
+    path, because THAT refusal arrives with the whole preview inside it -- see the
+    test below -- and an operator who then exports the variable is arming something
+    they have read.
+
+    So the call made with the variable unset is byte-for-byte the call made with it
+    set, and this test pins that: the capability lives in one place, and it is the
+    environment rather than a boolean somebody can flip in a config file.
+    """
+    _unarmed(monkeypatch)
+    adapter = RecordingAdapter()
+    broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 0.25)
+    assert adapter.calls[0][2] == {"confirm_send": CONFIRM_SOL_SEND}
+
+
+def test_every_other_chain_still_gets_exactly_two_positional_arguments(monkeypatch):
+    """BTC, LTC and GRC are unchanged, byte for byte, and that is the point.
+
+    Adding a keyword to a BTC send would be a change to the one function in this
+    suite that moves money for no behavioral gain. The daemon holds the wallet, picks
+    the inputs and signs; there is nothing for this process to arm.
+
+    ASSERTED WITH THE SOL VARIABLE SET, because the hazard worth excluding is a
+    branch that leaks the SOL keyword onto another chain the day somebody exports it.
+    """
+    monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
+    for asset in ("BTC", "LTC", "GRC"):
+        adapter = RecordingAdapter()
+        broadcast_payout(adapter, asset, SOL_PAYOUT_CONFIG, valid_addresses.GRC_PAYOUT, 1.0)
+        assert adapter.calls == [(valid_addresses.GRC_PAYOUT, 1.0, {})], f"{asset} gained a keyword"
+
+
+# --- unarmed: the preview travels with the refusal, and nothing is sent -------
+
+
+def test_an_UNARMED_SOL_payout_gets_the_PREVIEW_in_the_refusal_and_broadcasts_NOTHING(monkeypatch):
+    """The default, through the real service path and a real adapter.
+
+    THREE THINGS IN ONE ASSERTION SET, and the third is the one that matters:
+
+      it refuses        SolanaSendNotArmed, from
+                        chains/solana_signing.require_send_confirmation()'s SECOND
+                        branch (the token matched; the keypair path is empty), which
+                        is where the live worker now lands on an unarmed host.
+      it says WHAT to   the message names SOL_PAYOUT_KEYPAIR_PATH, so an operator
+      export            reading a failed payout does not have to come back here.
+      nothing was sent  asserted on the recorded call list -- `sendTransaction`
+                        appears nowhere -- rather than on the absence of a return
+                        value, which is what the behavioral-verification principle
+                        asks for.
+
+    AND THE PREVIEW IS IN THE MESSAGE, which is why the pre-flight refusal XRP uses
+    is deliberately NOT copied here: an operator who then exports the variable has
+    read the cluster, the payer, the destination, the lamports, the fee, the rent
+    verdict and the headroom.
+
+    MUTATION: delete the require_send_confirmation() call from send_to_address() and
+    this fails on the refusal; delete the keypair-path branch inside that function
+    and it fails on `sendTransaction` being in the call list.
+    """
+    _unarmed(monkeypatch)
+    adapter = ready_adapter(hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
+    with pytest.raises(SolanaSendNotArmed) as refused:
+        broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
+
+    message = str(refused.value)
+    assert KEYPAIR_PATH_VARIABLE in message
+    assert "SOL PAYOUT PREVIEW" in message
+    assert "sendTransaction" not in methods(adapter), "an unarmed call must not reach the chain"
+
+
+def test_THE_DEVNET_GUARD_STILL_REFUSES_A_MAINNET_GENESIS_EVEN_WHEN_ARMED(tmp_path, monkeypatch):
+    """Arming is not a bypass. The cluster refusal is decided by the CLUSTER.
+
+    THE WORST OUTCOME THIS WHOLE FILE EXISTS TO PREVENT is a real mainnet transfer,
+    and the thing that would produce it is a guard that only ran while nothing could
+    sign. So this test arms the process with a REAL throwaway keypair that derives
+    the announced payer -- every other refusal is satisfied -- and the only fault is
+    the genesis hash the seeded cluster reports.
+
+    MEASURED, not reasoned: the refusal class is SolanaClusterRefused, it names the
+    cluster, and `getBalance`, `getLatestBlockhash` and `sendTransaction` appear
+    nowhere in the call list, so the refusal is before the balance read and not
+    merely before the broadcast.
+
+    MUTATION: delete the require_devnet() call from preview_payout() and this fails.
+    There is no flag, environment variable or argument that disables it, which is
+    what makes this assertion possible to write at all.
+    """
+    adapter, _seed, _public = armed(tmp_path, monkeypatch, genesis=MAINNET_BETA)
+    assert adapter.can_spend is True, "this test is worthless unless the process really is armed"
+    with pytest.raises(SolanaClusterRefused) as refused:
+        broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
+
+    # MEASURED off the real refusal rather than written from memory: the message
+    # spells the cluster "MAINNET-BETA" in capitals. The first version of this line
+    # asserted lower case and failed, which is the small version of the thing rule 17
+    # is about -- a plausible string is not a measured one.
+    assert "MAINNET-BETA" in str(refused.value)
+    assert methods(adapter) == ["getGenesisHash"], (
+        f"the cluster must be refused before anything else is read; the calls were {methods(adapter)}"
+    )
+
+
+# --- the whole worker loop, on rows rather than return values -----------------
+
+
+def test_an_UNARMED_SOL_swap_lands_FAILED_with_the_reason_and_NOTHING_recorded_as_broadcast(
+    tmp_path, monkeypatch
+):
+    """The stranded-swap shape, asserted on the database the worker left behind.
+
+    THIS IS THE OUTCOME THE OPERATOR'S INSTRUCTION WAS ABOUT, seen from the other
+    side: before 2026-10-03 this was the ONLY outcome a SOL payout could have, on a
+    swap whose deposit had already been credited. It is still the outcome on an
+    unarmed host, and that is correct -- what must never happen is a payouts row
+    reading `broadcast` with no transaction, or a swap reading `completed`.
+
+    ROWS, NOT A RETURN VALUE (rule 13's "a stop that cannot prove it worked"): the
+    swap is `failed` with SOL_PAYOUT_KEYPAIR_PATH in failed_reason, the payouts row
+    is `failed` with a NULL txid, and the recorded call list has no sendTransaction
+    in it.
+
+    THE AMOUNT CLEARS THE RENT FLOOR on purpose -- 0.05 SOL against a 650240-lamport
+    floor measured on the operator's own devnet run -- so that this test dies on the
+    arming and not on a guard it is not named for.
+    """
+    _unarmed(monkeypatch)
+    db_path = str(tmp_path / "sol_payout_unarmed.db")
+    _seed_one_pending_sol_swap(db_path, DESTINATION, 0.05)
+    adapter = ready_adapter(destination_exists=False, hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
+
+    conn = connect_db(db_path)
+    try:
+        completed = process_pending_payouts(conn, SOL_PAYOUT_CONFIG, {"SOL": adapter})
+        swap = conn.execute("SELECT * FROM swaps WHERE id = 's_sol'").fetchone()
+        payout = conn.execute("SELECT * FROM payouts WHERE swap_id = 's_sol'").fetchone()
+    finally:
+        conn.close()
+
+    assert completed == []
+    assert swap["status"] == "failed"
+    assert swap["payout_txid"] is None
+    assert KEYPAIR_PATH_VARIABLE in (swap["failed_reason"] or ""), (
+        f"the recorded reason must name the variable an operator exports; it was {swap['failed_reason']!r}"
+    )
+    assert payout["status"] == "failed"
+    assert payout["txid"] is None
+    assert "sendTransaction" not in methods(adapter)
+
+
+def test_an_ARMED_SOL_payout_completes_the_swap_and_records_the_SIGNATURE(tmp_path, monkeypatch):
+    """The armed outcome, which is the whole of what the operator asked for.
+
+    AND IT IS THE MUTATION CHECK FOR THE WIRING ITSELF. A correct adapter whose
+    caller never armed it looks exactly like a working change: the suite is green,
+    the preview is beautiful, and every payout fails in production. So the assertion
+    is the state the worker left behind -- payouts `broadcast` with the signature,
+    the swap `completed` carrying the same value in payout_txid, exactly one
+    sendTransaction -- and reverting broadcast_payout()'s SOL branch to two
+    positional arguments turns this test red while every other test in this file
+    stays green.
+
+    WHAT IS STILL NOT PROVEN, AND IT IS WHY THIS IS NOT EVIDENCE OF A WORKING PAYOUT:
+    the transport is a seeded table. `sendTransaction` returns the signature computed
+    by DECODING the base64 the adapter actually sent (echo_signature above), so the
+    bytes are checked against the plan -- but no transaction from this path has ever
+    reached a cluster, from any environment, ever. api.devnet.solana.com answers 403
+    at this container's proxy, re-measured 2026-10-03. The first real send is the
+    operator's run.
+    """
+    adapter, _seed, public = armed(tmp_path, monkeypatch, destination_exists=False)
+    assert adapter.can_spend is True
+
+    db_path = str(tmp_path / "sol_payout_armed.db")
+    _seed_one_pending_sol_swap(db_path, DESTINATION, 0.05)
+
+    conn = connect_db(db_path)
+    try:
+        completed = process_pending_payouts(conn, SOL_PAYOUT_CONFIG, {"SOL": adapter})
+        swap = conn.execute("SELECT * FROM swaps WHERE id = 's_sol'").fetchone()
+        payout = conn.execute("SELECT * FROM payouts WHERE swap_id = 's_sol'").fetchone()
+    finally:
+        conn.close()
+
+    sent = [params for method, params in adapter.calls if method == "sendTransaction"]
+    assert len(sent) == 1, "exactly one broadcast"
+    parsed = parse_transfer_transaction(base64.b64decode(sent[0][0]))
+    assert parsed["payer"] == public
+    assert parsed["destination"] == DESTINATION
+    assert parsed["lamports"] == 50_000_000
+
+    assert len(completed) == 1
+    assert swap["status"] == "completed"
+    assert swap["payout_txid"] == parsed["signature"]
+    assert payout["status"] == "broadcast"
+    assert payout["txid"] == parsed["signature"]
+    assert payout["destination_address"] == DESTINATION

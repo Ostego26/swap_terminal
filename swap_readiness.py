@@ -209,10 +209,18 @@ def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
     # NOTHING PAYABLE IS A FAIL, NOT A SKIP, and it rendered as a SKIP on the
     # operator's 2026-10-01 run: "no configured chain needs a wallet unlock to pay
     # out", which is true and reads as nothing-to-worry-about. With GRC_RPC_PASS
-    # unset the only adapter was SOL, SOL is never a TO asset, and therefore NO
-    # swap this terminal allows could ever have been paid. A SKIP beside that is
+    # unset the only adapter was SOL, SOL was never a TO asset, and therefore NO
+    # swap this terminal allowed could ever have been paid. A SKIP beside that is
     # the same did-nothing-looks-like-did-work the supervisor's spawn warning had
     # in the identical case (see services/payout_service.payable_assets()).
+    #
+    # "SOL IS NEVER A TO ASSET" STOPPED BEING TRUE ON 2026-10-03, when ("GRC","SOL"),
+    # ("BTC","SOL") and ("LTC","SOL") were enabled, and the past tense above is the
+    # correction rather than a deletion: the 2026-10-01 measurement still happened and
+    # still explains why this line is a FAIL. What changed is only HOW a SOL-only
+    # adapter table reaches "nothing payable" -- payable_assets() now drops SOL for
+    # want of a signing key on an unarmed host rather than for want of a pair. The
+    # verdict, and the reason it is not a SKIP, are unchanged.
     # The pair's OWN destination when one was named, so "nothing can be paid" means
     # "this pair cannot be paid" rather than "no pair anywhere can be".
     wanted = {pair} if pair else Config.ALLOWED_PAIRS

@@ -350,6 +350,50 @@ class Config:
         # COMPLETE on both surfaces, and it has been broken since 2026-09-26.
         ("SOL", "BTC"),
         ("SOL", "LTC"),
+        # THE THREE DIRECTIONS THAT PAY OUT IN SOL, enabled 2026-10-03 on the
+        # operator's instruction: "whoa we have to be able to swap TO SOL too".
+        #
+        # UNTIL TODAY SOL COULD ONLY EVER BE AN INPUT, and the reason was an ABSENCE
+        # rather than a setting: chains/solana.py held no keypair, imported nothing
+        # that could sign, and send_to_address() raised. That is no longer true --
+        # the signing path exists, SolanaAdapter.can_spend is derived from
+        # SOL_PAYOUT_KEYPAIR_PATH the way XRP's is derived from its seed, and
+        # services/payout_service.broadcast_payout() passes the arming token. So the
+        # asymmetry this set carried for four days has ended and these three close it.
+        #
+        # ALL FOUR PREREQUISITES ARE MET FOR EACH, checked rather than assumed:
+        #
+        #   adapters    chains/registry builds SOL whenever SOL_RPC_URL is set, GRC
+        #               always, and BTC/LTC when their credentials are exported. A
+        #               chain that is absent reads OFFLINE rather than trading.
+        #   a USD price services/pricing.IDS carries SOL, GRC, BTC and LTC.
+        #   a reserve   SOL_NETWORK_FEE_RESERVE exists as of today and is MEASURED --
+        #               0.000005, read from the operator's own cluster through
+        #               getFeeForMessage. It is the TO asset's that matters, and SOL
+        #               is the TO asset in all three.
+        #   a payout    SOL can sign when armed, and REFUSES when it is not. That is
+        #               the condition these three rest on and the one worth naming
+        #               twice.
+        #
+        # WHAT HAPPENS ON AN UNARMED HOST, WHICH IS EVERY CHECKOUT AND EVERY TEST RUN:
+        # can_spend is False, chains/registry.why_cannot_pay_out() names
+        # SOL_PAYOUT_KEYPAIR_PATH and SOL_HOT_WALLET, and
+        # services/pair_view.pair_serviceability() marks all three UNAVAILABLE -- so
+        # the customer form never offers them and no deposit is taken against a
+        # payout that cannot fire. Enabling a pair is not arming it; these two
+        # switches are deliberately separate.
+        #
+        # AND THE BROADCAST IS STILL A PROPOSAL (rule 16). No transaction from this
+        # path has ever reached a cluster -- api.devnet.solana.com answers 403 from
+        # the environment this was written in, re-measured 2026-10-03 -- so the
+        # serialization is verified byte-for-byte against @solana/web3.js and the
+        # BROADCAST is verified against nothing. The path also refuses off devnet by
+        # genesis hash, with no flag that turns that off, so mainnet cannot even be
+        # previewed against. The first real send is the operator's and should be the
+        # smallest amount that clears the rent floor the preview prints.
+        ("GRC", "SOL"),
+        ("BTC", "SOL"),
+        ("LTC", "SOL"),
     }
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's

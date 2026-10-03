@@ -328,10 +328,20 @@ def require_send_confirmation(token: str, keypair_path: str) -> None:
     shipped a substring-matching bug on a status check, and a substring test on
     an arming token is that defect where it costs money instead of an exit code.
 
-    THE DEFAULT IS THE REFUSAL. services/payout_service.py:354 calls
+    THE DEFAULT IS STILL THE REFUSAL, BUT NOT FOR THE REASON THIS PARAGRAPH
+    GAVE UNTIL 2026-10-03. It said: "services/payout_service.py:354 calls
     `send_to_address(swap["payout_address"], amount)` -- two positional
     arguments and nothing else -- so the live payout worker lands here and is
-    refused. A forgotten opt-in cannot degrade into a send.
+    refused." That was true and is now false in its first clause:
+    services/payout_service.broadcast_payout() passes
+    confirm_send=CONFIRM_SOL_SEND for SOL, on the operator's 2026-10-03
+    instruction, so the live worker now reaches the SECOND branch below rather
+    than the first. The default refusal therefore rests on the keypair path
+    being unset -- which is every checkout, every test run and every host where
+    the operator has not made the custody decision -- rather than on a call site
+    that forgot to opt in. Both branches are unchanged; which one the worker
+    lands on is what moved, and a forgotten export still cannot degrade into a
+    send.
     """
     if token != CONFIRM_SOL_SEND:
         raise SolanaSendNotArmed(

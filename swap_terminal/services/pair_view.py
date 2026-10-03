@@ -3,7 +3,13 @@
 Role: submodule (assembles rows from two authorities; holds no decision about
       amounts, addresses or fund movement)
 Reads: config["ALLOWED_PAIRS"], config["RPC"], and the adapters dict
-      chains/registry.build_adapters() produced. No database, no socket.
+      chains/registry.build_adapters() produced. No database. ONE CACHED SOCKET
+      READ, for a pair paying out in SOL only: the cluster's rent-exempt minimum,
+      through services/quote_service.new_account_floor_lamports(), which caches 600
+      seconds per endpoint and is the same call the quote itself makes. This module
+      said "no socket" until 2026-10-03 and the three *->SOL pairs ended that --
+      see pair_serviceability()'s fifth condition for why a page that cannot ask
+      the cluster cannot honestly badge such a pair AVAILABLE.
 Writes: nothing
 Can move funds: no
 Mainnet-safe: yes
@@ -61,7 +67,7 @@ instead of reasoning about adapters at all.
 
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 
-from .quote_service import why_cannot_quote
+from .quote_service import why_cannot_establish_payout_floor, why_cannot_quote
 from .swap_service import why_cannot_take_deposits
 
 
@@ -83,6 +89,23 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dic
                     move and nobody has recorded what a payout on the destination
                     costs this desk, so no price can be put on it. Only the
                     DESTINATION is asked, for the same reason cannot_pay is.
+      cannot_establish
+                    services/quote_service.why_cannot_establish_payout_floor() --
+                    the destination chain imposes a MINIMUM on a payout that only
+                    the chain can state, and it could not be asked. SOL only today.
+                    THE ONLY CONDITION HERE THAT TOUCHES A NETWORK, which is why it
+                    is evaluated last and only for a pair that passed the other four.
+
+    THERE WERE FOUR UNTIL THE THREE *->SOL PAIRS WERE ENABLED ON 2026-10-03, and the
+    fifth was forced by the same failure shape as the fourth, one layer deeper:
+
+        the customer page badges BTC -> SOL AVAILABLE -- Ready to quote now. -- and a
+        real quote for it did not price.
+
+    A SOL payout has a rent-exemption minimum that comes from the cluster, so a
+    terminal that cannot reach it cannot quote -- and a page answering from config
+    alone could not know that. This is the point at which "no socket" stopped being
+    true of this module; the header says so rather than leaving a reader to find out.
 
     THERE WERE THREE UNTIL 2026-10-02 AND THE FOURTH WAS FOUND ON THE OPERATOR'S
     SCREEN. With XRP_PAYOUT_SECRET_SEED exported, GRC -> XRP passes all three
@@ -123,21 +146,32 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dic
     cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
     cannot_take = "" if missing or cannot_pay else why_cannot_take_deposits(config, adapters, from_asset)
     cannot_quote = "" if missing or cannot_pay or cannot_take else why_cannot_quote(config, to_asset)
+    # THE FIFTH CONDITION IS LAST BECAUSE IT IS THE ONLY ONE THAT COSTS A NETWORK
+    # READ, and the short-circuit above means it is reached only for a pair that has
+    # already passed every answerable test. See why_cannot_establish_payout_floor().
+    cannot_establish = (
+        ""
+        if missing or cannot_pay or cannot_take or cannot_quote
+        else why_cannot_establish_payout_floor(adapters, to_asset)
+    )
     return {
         "missing": missing,
         "cannot_pay": cannot_pay,
         "cannot_take": cannot_take,
         "cannot_quote": cannot_quote,
-        "serviceable": not missing and not cannot_pay and not cannot_take and not cannot_quote,
+        "cannot_establish": cannot_establish,
+        "serviceable": not missing and not cannot_pay and not cannot_take and not cannot_quote
+        and not cannot_establish,
         "reason": (
             " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
             if missing
             else cannot_pay
             or cannot_take
             or cannot_quote
+            or cannot_establish
             or "in ALLOWED_PAIRS, both chains have an adapter here, the source can take "
-            "a deposit, the destination can pay out and this desk has recorded what "
-            "a payout on it costs"
+            "a deposit, the destination can pay out, this desk has recorded what a "
+            "payout on it costs and the smallest deliverable payout is known"
         ),
     }
 
@@ -206,6 +240,7 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
                 "cannot_pay": verdict["cannot_pay"],
                 "cannot_take": verdict["cannot_take"],
                 "cannot_quote": verdict["cannot_quote"],
+                "cannot_establish": verdict["cannot_establish"],
                 # `(none)` is never right here: a row is either enabled, in which
                 # case the reason says all three tests passed, or it names what
                 # refused. A blank reason beside DISABLED would be rule 14's empty

@@ -282,17 +282,29 @@ log that nobody reading this file will ever see.
                      own bytes before broadcast, and the settlement is asserted
                      rather than assumed. What does NOT exist is a run: no
                      transaction built here has reached any cluster. Rule 16's
-                     line has moved rather than gone -- the first broadcast,
-                     mainnet, and flipping can_spend are all still the
-                     operator's.
-  the WIRING         ALLOWED_PAIRS contains ZERO entries with SOL on either
-                     side (counted 2026-10-01), so no SOL swap can be created
-                     today whatever the adapter can do. The deposit side IS
-                     wired -- services/swap_service.TAG_ATTRIBUTED_ASSETS
-                     holds SOL and TAG_ATTRIBUTION maps it to
-                     SOL_DEPOSIT_ACCOUNT with "Memo instruction" as the
-                     discriminator -- and enabling a pair is a live-posture
-                     decision, so it stays the operator's.
+                     line has moved rather than gone -- the first broadcast and
+                     mainnet are still the operator's. "AND FLIPPING can_spend"
+                     WAS THE THIRD ITEM IN THAT LIST UNTIL 2026-10-03 and it is
+                     no longer one: on the operator's instruction ("whoa we
+                     have to be able to swap TO SOL too") can_spend is DERIVED
+                     from whether SOL_PAYOUT_KEYPAIR_PATH is exported, through
+                     chains/solana_payout_keypair.py. Exporting it IS the
+                     operator act -- the decision did not move, the switch did.
+  the WIRING         services/payout_service.broadcast_payout() PASSES
+                     CONFIRM_SOL_SEND for SOL as of 2026-10-03; it passed two
+                     positional arguments until then, so every SOL payout was
+                     refused whatever was exported. ALLOWED_PAIRS still names
+                     NO pair that pays out in SOL -- measured 2026-10-03 by
+                     calling the real Config: three pairs carry SOL as the
+                     INPUT (SOL->BTC, SOL->GRC, SOL->LTC, enabled 2026-10-01)
+                     and zero carry it as the output, which is the figure that
+                     matters here and the figure this paragraph used to get
+                     wrong by saying "ZERO entries on either side". The deposit
+                     side IS wired -- services/swap_service.
+                     TAG_ATTRIBUTED_ASSETS holds SOL and TAG_ATTRIBUTION maps
+                     it to SOL_DEPOSIT_ACCOUNT with "Memo instruction" as the
+                     discriminator -- and enabling an output pair is a
+                     live-posture decision, so it stays the operator's.
 
 One more gap that is neither, and it is the one that touches money: a credit
 this adapter reads and REFUSES (no memo) is reported to the operator by
@@ -361,6 +373,16 @@ from .solana_address import (
     is_valid_address,
 )
 from .solana_memo import deposit_tag_from
+
+# WHETHER THIS PROCESS IS ARMED, AND DELIBERATELY NOT THE PATH OR THE KEY.
+#
+# chains/solana_payout_keypair.py exposes a bool and a sentence and nothing
+# else. keypair_path_from_environment() is imported below for ONE use -- giving
+# the arming guard the answer to "is a path set" at send time -- and this
+# module still holds no keypair, opens no key file and stores neither, which
+# tests/test_solana_adapter.py::test_the_module_references_no_keypair_anywhere
+# and tests/test_solana_payout.py check rather than assume.
+from .solana_payout_keypair import missing_keypair_refusal, payout_keypair_is_present
 from .solana_signing import (
     SolanaSendNotArmed,
     SolanaSplSendRefused,
@@ -684,23 +706,65 @@ class SolanaAdapter:
     # and mint_decimals() reads it from the chain rather than assuming.
     decimals = SOL_DECIMALS
 
-    # SEE chains/base.RPCAdapter.can_spend. STILL False on 2026-10-02, and the
-    # reason changed underneath it: send_to_address() can now sign and broadcast
-    # when it is armed, so this is no longer the absence it used to report. It
-    # stays False because what it gates is LIVE POSTURE -- chains/registry.
-    # payout_refusal() reads it to tell an operator which pairs cannot be
-    # serviced, and Config.ALLOWED_PAIRS names no pair that pays out in SOL.
-    # Flipping it would make the payout worker try to pay SOL swaps with a path
-    # that has never reached a cluster, and that is the operator's call (rule
-    # 16: fund movement comes back), not a consequence of this file compiling.
+    # SEE chains/base.RPCAdapter.can_spend for why this name and not another.
+    #
+    # THESE TWO CLASS-LEVEL VALUES ARE THE FAIL-CLOSED FALLBACK AND ARE DELIBERATELY
+    # THE REFUSING PAIR, exactly as chains/xrp.py's are. __init__ overrides both per
+    # instance from chains/solana_payout_keypair.payout_keypair_is_present(), so
+    # anything that reads them off the CLASS -- a stub, a reflective check, a reader
+    # who never constructed an adapter -- gets "cannot pay out". That is the safe
+    # direction, and the same direction chains/registry.why_cannot_pay_out() already
+    # fails in when the attribute is missing entirely.
+    #
+    # WHAT THIS SAID UNTIL 2026-10-03, KEPT BECAUSE THE REASONING IS THE RECORD AND
+    # ONLY ONE CLAUSE OF IT DIED (rule 1: the measurement is the point; mark what
+    # changed rather than deleting it). It read:
+    #
+    #     SEE chains/base.RPCAdapter.can_spend. STILL False on 2026-10-02, and the
+    #     reason changed underneath it: send_to_address() can now sign and broadcast
+    #     when it is armed, so this is no longer the absence it used to report. It
+    #     stays False because what it gates is LIVE POSTURE -- chains/registry.
+    #     payout_refusal() reads it to tell an operator which pairs cannot be
+    #     serviced, and Config.ALLOWED_PAIRS names no pair that pays out in SOL.
+    #     Flipping it would make the payout worker try to pay SOL swaps with a path
+    #     that has never reached a cluster, and that is the operator's call (rule
+    #     16: fund movement comes back), not a consequence of this file compiling.
+    #
+    # Operator, 2026-10-03: "whoa we have to be able to swap TO SOL too". So the
+    # hardcoded False is gone and the capability is DERIVED from the one question
+    # that remains -- is a signing keypair path exported into this process -- which
+    # is the arrangement chains/xrp.py has had since 2026-10-02 and which
+    # chains/solana_signing.py's header used to name as a deliberate difference
+    # between the two chains. That difference has ENDED, so both prose sites are
+    # corrected rather than left describing it (rule 8 asks a real difference be
+    # stated at both sites; a difference that stops existing turns both statements
+    # into wrong comments, which rule 16 counts as bugs).
+    #
+    # WHAT IS UNCHANGED, AND IT IS THE HALF THE OLD COMMENT WAS RIGHT ABOUT:
+    #
+    #   the default REFUSES  with SOL_PAYOUT_KEYPAIR_PATH unset -- every checkout,
+    #                        every test run, and every host where the operator has
+    #                        not made the custody decision -- can_spend is False and
+    #                        services/swap_service.create_swap() refuses a swap whose
+    #                        payout leg is SOL, which is the only stage at which
+    #                        nothing has been taken.
+    #   the pair is POSTURE  Config.ALLOWED_PAIRS still names no pair that pays out
+    #                        in SOL (counted 2026-10-03: zero entries with SOL in the
+    #                        second position), so arming this changes what the payout
+    #                        path WOULD do and not what it is asked to do. Enabling
+    #                        such a pair is live posture and is the operator's.
+    #   nothing has SENT     no transaction this path builds has reached any cluster,
+    #                        from any environment, ever. Re-measured 2026-10-03:
+    #                        api.devnet.solana.com answers 403 at this container's
+    #                        proxy. The serialization is cross-checked byte for byte
+    #                        against @solana/web3.js and that is not the same claim.
+    #   every guard STANDS   devnet by genesis hash in the preview as well as the
+    #                        send, the exact arming token, derive-and-compare against
+    #                        the announced payer, the rent floor, the lamport
+    #                        headroom, and the signed bytes parsed back out. None was
+    #                        weakened, skipped or given a bypass to do this.
     can_spend = False
-    payout_refusal = (
-        "has a payout path as of 2026-10-02, and it is NOT enabled: devnet only, refusing "
-        "unless armed with chains/solana_signing.CONFIRM_SOL_SEND at the call site, and never "
-        "broadcast against any cluster from the environment it was written in. The payout "
-        "worker calls send_to_address() with two positional arguments, so it gets a preview and "
-        "a refusal. Enabling it is live posture and is the operator's (rule 16)."
-    )
+    payout_refusal = missing_keypair_refusal()
 
     def __init__(  # noqa: PLR0913, PLR0917 -- checked: these six ARE the connection, exactly as RPCAdapter's six are. They arrive as **Config.RPC["SOL"], a dict built for this signature, so bundling them into an object would add a type without removing a parameter.
         self,
@@ -735,6 +799,24 @@ class SolanaAdapter:
         self.mint = (mint or "").strip()
         self.hot_wallet = (hot_wallet or "").strip()
         self.min_commitment_rank = validate_min_commitment_rank(int(min_commitment_rank))
+        # WHETHER THIS PROCESS CAN SIGN A SOL PAYOUT, SETTLED ONCE PER ADAPTER AND
+        # NOT PER CALL. The reasoning is chains/xrp.py's and it transfers exactly, so
+        # it is summarized rather than re-argued: on 2026-10-02 the measured defect
+        # was the spawn banner and the customer page disagreeing about ONE asset in
+        # ONE process. A property re-reads os.environ on every access, so two
+        # surfaces rendered from the same adapter could still answer differently if
+        # anything mutated the environment between them. One read at construction
+        # makes that impossible -- every surface in a process sees the answer the
+        # shell that started it supplied.
+        #
+        # NO PATH AND NO KEY IS STORED, ONLY A BOOLEAN AND A SENTENCE.
+        # payout_keypair_is_present() returns bool(...) and never opens the file;
+        # missing_keypair_refusal() names the VARIABLES an operator exports and never
+        # a value. tests/test_solana_payout.py walks vars() on a constructed
+        # instance against a sentinel path value and asserts the path appears in no
+        # attribute, no rendered page, no log record and no exception message.
+        self.can_spend = payout_keypair_is_present()
+        self.payout_refusal = "" if self.can_spend else missing_keypair_refusal()
         #: Credits the LAST find_deposits_to_address() call read and refused. See
         #: UnattributableCredit -- returning [] for "nothing arrived" and for "money arrived
         #: that nobody can claim" is the distinction this exists to restore.
@@ -1627,19 +1709,29 @@ class SolanaAdapter:
                             call to chains/solana_signing.signed_transfer_wire(),
                             which returns bytes. This adapter broadcasts a
                             transaction it could not have produced.
-          the caller        services/payout_service.py:354 calls
+          the caller        services/payout_service.broadcast_payout() PASSES
+                            confirm_send=CONFIRM_SOL_SEND for SOL as of
+                            2026-10-03. Until then it called
                             `send_to_address(swap["payout_address"], amount)` --
-                            two positional arguments and no keywords. It
-                            therefore gets SolanaSendNotArmed with the preview
-                            in the message, and the swap lands in `failed` with
-                            the reason recorded. THAT CALL SITE WAS NOT WIRED
-                            UP and wiring it is the operator's (rule 16: fund
-                            movement comes back).
-          can_spend         still False, so chains/registry.payout_refusal()
-                            still reports SOL as unable to pay out and
-                            Config.ALLOWED_PAIRS still names no pair that pays
-                            out in SOL. Flipping either is live posture and is
-                            the operator's.
+                            two positional arguments and no keywords -- so
+                            every SOL payout was refused whatever the host had
+                            exported, which is what the operator's instruction
+                            ("whoa we have to be able to swap TO SOL too")
+                            was about. The token is passed UNCONDITIONALLY and
+                            the arming now rests on the keypair path: an
+                            unarmed host lands on require_send_confirmation()'s
+                            second branch, gets the preview inside the refusal
+                            with SOL_PAYOUT_KEYPAIR_PATH named, and the swap
+                            lands in `failed` with that reason recorded.
+          can_spend         DERIVED, not hardcoded, since 2026-10-03: this
+                            instance's can_spend is
+                            chains/solana_payout_keypair.
+                            payout_keypair_is_present(), so an unarmed process
+                            reports SOL as unable to pay out exactly as before
+                            and an armed one does not. What is UNCHANGED is
+                            that Config.ALLOWED_PAIRS names no pair that pays
+                            out in SOL (measured 2026-10-03), and enabling one
+                            is live posture and is the operator's.
 
         AND THE BROADCAST ITSELF IS A PROPOSAL (rule 16), which is the one
         sentence in this docstring that matters most. No transaction built by

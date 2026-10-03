@@ -180,6 +180,60 @@ def new_account_floor_lamports(adapter, *, now=None) -> int:
     return lamports
 
 
+def why_cannot_establish_payout_floor(adapters, to_asset: str) -> str:
+    """Why a quote paying out in `to_asset` cannot even be PRICED, or "" if it can.
+
+    THE FIFTH CONDITION, AND IT IS THE FIRST ONE THAT NEEDS A NETWORK. The four
+    services/pair_view.pair_serviceability() already asks are answerable from config
+    and the adapter table alone. This one is not, and pretending otherwise is what
+    produced the failure that forced it:
+
+        the customer page badges BTC -> SOL AVAILABLE -- Ready to quote now. -- and
+        a real quote for it did not price. What the quote said: "this terminal
+        cannot reach the Solana network right now, so it cannot establish the
+        smallest payout the network will accept."
+
+    Measured 2026-10-03, the moment the three *->SOL pairs were enabled. A SOL
+    payout has a MINIMUM imposed by the runtime -- rent exemption for the account it
+    would create -- and that figure comes from the cluster
+    (getMinimumBalanceForRentExemption). A terminal that cannot ask cannot quote,
+    and a page that cannot ask cannot honestly say AVAILABLE.
+
+    SO THIS IS THE SAME SHAPE AS why_cannot_quote() ONE LEVEL OUT: the condition the
+    quote enforces, asked without raising, so a surface can show it before a customer
+    picks. And it goes through new_account_floor_lamports() -- the SAME function
+    require_deliverable_sol_payout() calls, with the same 600-second per-endpoint
+    cache -- so the page and the quote cannot disagree and the page does not add a
+    cluster round trip per render (rule 8).
+
+    ONLY SOL NEEDS IT TODAY and the function says so by returning "" for everything
+    else rather than growing a table. BTC, LTC, GRC and XRP have no runtime-imposed
+    payout minimum this desk must read from a chain; if one ever does, this is where
+    it goes.
+
+    A FAILURE TO ASK IS NOT A REFUSAL TO PAY, and the distinction decides what a
+    customer is told: the chain being unreachable is a NOW problem (services/pair_view
+    maps it to OFFLINE, "come back later"), while holding no signing key is not. The
+    caller makes that distinction; this function only says the floor could not be
+    established and why.
+    """
+    if to_asset != "SOL":
+        return ""
+    adapter = (adapters or {}).get("SOL")
+    if adapter is None:
+        return "SOL has no adapter in this process, so the smallest deliverable payout cannot be established"
+    if getattr(adapter, "is_spl", False):
+        return ""
+    try:
+        new_account_floor_lamports(adapter)
+    except Exception as exc:  # noqa: BLE001 -- checked: the caller CAN tell this from a real answer, because the reason is returned and "" is the only value that means yes. Any cluster or transport failure is one answer here -- "we could not ask" -- and narrowing it would mean importing the adapter module's error type upward from a submodule.
+        return (
+            f"the Solana cluster could not be asked for the rent-exempt minimum, so the smallest "
+            f"deliverable SOL payout is unknown: {type(exc).__name__}: {exc}"
+        )
+    return ""
+
+
 def require_deliverable_sol_payout(config, adapters, to_asset: str, output_amount: float) -> None:
     """Refuse a SOL payout too small to create the account it would be sent to.
 

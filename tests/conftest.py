@@ -89,3 +89,22 @@ os.environ.setdefault("SWAP_DB_PATH", str(Path(_TEST_DB_DIR) / "swap_terminal_te
 #    environment at class-definition time, so a fixture would be too late), and the
 #    thing it removes is a secret rather than a setting.
 os.environ.pop("XRP_PAYOUT_SECRET_SEED", None)
+
+# 4. THE SOL PAYOUT KEYPAIR PATH IS REMOVED FROM THIS PROCESS'S ENVIRONMENT. Added
+#    2026-10-03 with chains/solana_payout_keypair.py, for the identical reason as
+#    item 3 above and not restated at length: SolanaAdapter reads that variable at
+#    CONSTRUCTION to decide `can_spend`, and `can_spend` decides whether
+#    services/swap_service.create_swap() will create a swap that pays out in SOL. An
+#    operator or developer with it exported -- which is exactly the state a host that
+#    pays SOL out is in -- would otherwise run this suite against a DIFFERENT posture
+#    from CI, and a suite whose result depends on the shell that started it cannot be
+#    used to establish anything.
+#
+#    ONE DIFFERENCE FROM THE SEED ABOVE, worth naming because it is the whole design
+#    of that module: this variable holds a PATH and not a secret. Nothing in this
+#    harness or in chains/solana_payout_keypair.py ever opens the file it names --
+#    the only reader is chains/solana_signing.load_payout_keypair(), reached from
+#    signed_transfer_wire() after the arming token has matched. Removing the path is
+#    therefore about POSTURE determinism rather than about secret hygiene, and both
+#    reasons would call for the same line.
+os.environ.pop("SOL_PAYOUT_KEYPAIR_PATH", None)

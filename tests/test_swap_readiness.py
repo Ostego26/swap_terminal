@@ -483,12 +483,19 @@ def test_a_present_passphrase_claims_presence_and_never_correctness(monkeypatch)
 def test_a_chain_that_needs_no_unlock_gets_no_warning(monkeypatch):
     """Cried-wolf noise for a chain nobody set up is what this file fixed once already.
 
-    BTC, not SOL, and the change is the point: SOL is never a TO asset, so a
-    process with only a SOL adapter can pay NOTHING, which is now its own FAIL
-    (see test_nothing_payable_is_a_FAIL_not_a_SKIP). BTC is the destination of two
+    BTC, not SOL, and the change is the point: a process with only a SOL adapter
+    could pay NOTHING, which is its own FAIL (see
+    test_nothing_payable_is_a_FAIL_not_a_SKIP). BTC is the destination of two
     allowed pairs and needs no wallet unlock, which is the case this test is
     actually about -- the old fixture was exercising the no-payable path and
     scoring it as "no warning needed".
+
+    THE REASON SOL COULD PAY NOTHING CHANGED ON 2026-10-03 and the choice of BTC
+    here did not. It used to be "SOL is never a TO asset", which stopped being true
+    when ("GRC","SOL"), ("BTC","SOL") and ("LTC","SOL") were enabled; it is now "SOL
+    holds no signing key on an unarmed host". Either way a SOL-only adapter table is
+    the no-payable case and the wrong fixture for a test about unlock noise, so this
+    sentence is corrected rather than the fixture.
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
@@ -502,20 +509,37 @@ def test_a_chain_that_needs_no_unlock_gets_no_warning(monkeypatch):
 def test_nothing_payable_is_a_FAIL_not_a_SKIP(monkeypatch):
     """MEASURED ON THE OPERATOR'S HOST 2026-10-01, and it rendered as a SKIP.
 
-    With GRC_RPC_PASS unset the only adapter was SOL. SOL is deliberately never a
-    TO asset -- config.ALLOWED_PAIRS carries ("SOL","GRC") and not the reverse,
-    because chains/solana.py cannot sign -- so NO swap this terminal allows could
-    ever have been paid. The line printed was
+    With GRC_RPC_PASS unset the only adapter was SOL. SOL was deliberately never a
+    TO asset -- config.ALLOWED_PAIRS carried ("SOL","GRC") and not the reverse,
+    because chains/solana.py could not sign -- so NO swap this terminal allowed
+    could ever have been paid. The line printed was
 
         SKIP  payout unlock   no configured chain needs a wallet unlock to pay out
 
     which is true, and reads as nothing-to-worry-about. The supervisor's spawn
     banner had the identical defect in the identical case and said "a payout worker
     CAN broadcast" one screen later.
+
+    THE FIXTURE CHANGED 2026-10-03 AND THE INVARIANT DID NOT. The paragraph above
+    is kept as written because it is the measurement this test exists for, and
+    every clause of it about SOL has stopped being true: ("GRC","SOL"),
+    ("BTC","SOL") and ("LTC","SOL") are now in ALLOWED_PAIRS, so SOL IS a
+    destination, and `{"SOL": CanSign()}` no longer expresses "nothing can be paid"
+    -- it expresses the opposite. The test was handing payable_assets() a payable
+    adapter and asserting the unpayable verdict.
+
+    IT NOW REACHES THE SAME STATE THROUGH THE CONDITION THAT ACTUALLY HOLDS ON
+    EVERY CHECKOUT, which is a stronger premise rather than a looser one.
+    SOL_PAYOUT_KEYPAIR_PATH is unset in every test run, so SolanaAdapter.can_spend
+    is False, so payable_assets() drops SOL for want of a SIGNING KEY rather than
+    for want of a pair -- and CannotSign() is exactly that adapter. The old fixture
+    asserted the FAIL through a config fact an operator changes with one line; this
+    one asserts it through the arming switch, which is still false on the next
+    unarmed host whatever ALLOWED_PAIRS grows to.
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"SOL": CanSign()})
+    swap_readiness.check_payout_unlock({"SOL": CannotSign()})
     rows = list(swap_readiness._results)
 
     assert len(rows) == 1, "it must stop at the payout-chain line rather than also asking about unlocks"
@@ -546,16 +570,58 @@ class CanSign:
     payout_refusal = ""
 
 
+class CannotSign:
+    """An adapter that is REACHABLE and still cannot pay out, which is a different
+    thing from being absent and has to be expressible as a fixture.
+
+    ADDED 2026-10-03, because the fixture that used to express "nothing can be paid
+    out" was `{"SOL": CanSign()}` and stopped expressing it the moment SOL became a
+    destination of three allowed pairs. The unpayable state did not go away with it
+    -- it moved from ALLOWED_PAIRS to the arming switch -- and this is that state:
+    chains/registry.why_cannot_pay_out() returns `payout_refusal` for an adapter
+    whose can_spend is False, which is precisely what SolanaAdapter answers on a
+    host with no SOL_PAYOUT_KEYPAIR_PATH exported, i.e. every test run and every
+    fresh checkout.
+
+    The refusal sentence is non-empty on purpose. why_cannot_pay_out() falls back to
+    "cannot pay out, and its adapter does not say why" for an adapter that declines
+    without a reason, and a fixture that took that path would be testing the
+    fallback rather than the case.
+    """
+
+    can_spend = False
+    payout_refusal = "cannot pay out in this test: no payout key is armed"
+
+
 def test_a_payable_chain_is_named_so_a_missing_one_is_visible(monkeypatch):
-    """The PASS half, because a version that always failed would pass the test above."""
+    """The PASS half, because a version that always failed would pass the test above.
+
+    THE FIXTURE CHANGED 2026-10-03, FOR THE REASON RECORDED ON THE TEST ABOVE, and
+    the assertion it carries is now the stronger of the two available. It used to
+    read
+
+        assert "SOL" not in row[2], "SOL has an adapter but is no pair's destination"
+
+    which pinned the DESTINATION half of payable_assets() -- true until ("GRC","SOL")
+    landed, and a config edit away from being untrue again. The half that is worth
+    pinning is the one that was missing from payable_assets() until 2026-10-02 and
+    had it reporting XRP as payable on the operator's host while XRP held no signing
+    key: an adapter that EXISTS, is REACHABLE, and cannot sign must not be named on
+    a line that promises a payout can be broadcast. So SOL is still the asset
+    asserted absent, and it is absent for the reason that costs money rather than
+    the reason that is a config setting.
+    """
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "present-for-this-test-only")
     swap_readiness._results.clear()
-    swap_readiness.check_payout_unlock({"GRC": CanSign(), "SOL": CanSign()})
+    swap_readiness.check_payout_unlock({"GRC": CanSign(), "SOL": CannotSign()})
     row = next(r for r in swap_readiness._results if r[1] == "payout chain")
 
     assert row[0] == PASS
     assert "GRC" in row[2]
-    assert "SOL" not in row[2], "SOL has an adapter but is no pair's destination, so it is not payable"
+    assert "SOL" not in row[2], (
+        "SOL has an adapter and is the destination of three allowed pairs, and it holds no signing "
+        "key here -- a line that names it claims a payout that would raise and strand a deposit"
+    )
 
 
 # --- the pair line and the pricing line must follow ALLOWED_PAIRS ------------
@@ -709,14 +775,63 @@ def test_the_unscoped_verdict_still_covers_the_whole_terminal(monkeypatch, capsy
     assert "XRP_RPC_URL" in out, "the unscoped run must still check every leg it knows"
 
 
-def test_a_pair_outside_ALLOWED_PAIRS_is_refused_rather_than_widening_the_gate(capsys):
+def _ordered_pairs_outside_ALLOWED_PAIRS() -> list[str]:
+    """Every FROM:TO over the tradeable assets that Config does NOT allow.
+
+    DERIVED, NOT SPELLED, AND THE SPELLING IS WHY. This test said `GRC:SOL` -- the
+    reverse of ("SOL","GRC") and therefore outside ALLOWED_PAIRS when it was
+    written, and INSIDE it from 2026-10-03, when the three *->SOL directions were
+    enabled. The test then exercised the allowed path and asserted the refused one,
+    which is a fixture rotting rather than a gate failing, and it is the same
+    hand-written-copy-of-the-config failure the pair line above already records.
+
+    So the argument comes off Config.ALLOWED_PAIRS itself: every ordered pair of
+    the assets that appear in it, minus the ones it carries. That cannot rot while
+    any direction remains unenabled -- and if one day none does, the parametrize
+    list is empty, which pytest reports rather than passing silently, and the
+    assertion below says what to do about it.
+
+    Measured 2026-10-03 against this tree: 5 tradeable assets, 20 ordered pairs, 16
+    allowed, so 4 are refused -- BTC:XRP, LTC:XRP, SOL:XRP, XRP:SOL. Each is a real
+    asset pair and a plausible typo, which is the case this gate is for; a nonsense
+    string is the test below.
+    """
+    allowed = set(swap_readiness.Config.ALLOWED_PAIRS)
+    assets = sorted({asset for pair in allowed for asset in pair})
+    return [
+        f"{from_asset}:{to_asset}"
+        for from_asset in assets
+        for to_asset in assets
+        if from_asset != to_asset and (from_asset, to_asset) not in allowed
+    ]
+
+
+def test_there_is_an_unallowed_direction_left_to_refuse():
+    """An empty parametrize set below would report as a SKIP, which reads as
+    nothing-to-worry-about -- the exact shape test_nothing_payable_is_a_FAIL_not_a_SKIP
+    is about, one layer up in the test suite itself. So the denominator is asserted
+    here rather than left to pytest's collection message (rule 3, rule 14)."""
+    assert _ordered_pairs_outside_ALLOWED_PAIRS(), (
+        "every ordered pair of every tradeable asset is now in Config.ALLOWED_PAIRS, so the refusal "
+        "path below has nothing to exercise. That is a real finding about config.py and not a setup "
+        "problem: parse_pair()'s gate is then unreachable and needs a fixture that is not derived."
+    )
+
+
+@pytest.mark.parametrize("text", _ordered_pairs_outside_ALLOWED_PAIRS())
+def test_a_pair_outside_ALLOWED_PAIRS_is_refused_rather_than_widening_the_gate(capsys, text):
     """A typo in a gate's argument must not check everything instead.
 
     The dangerous reading of an unrecognized --pair is "scope to nothing, so
     nothing fails". Exit 2, distinct from both 0 and the 1 that means NOT READY.
+
+    EVERY unallowed direction, not one of them (2026-10-03). The single argument
+    this used to pass became an ALLOWED pair, so parametrizing over the derived set
+    both fixes that and widens the coverage: a refusal that worked for one spelling
+    and not another would now be visible.
     """
     swap_readiness._results.clear()
-    code = swap_readiness.main(["--pair", "GRC:SOL"])
+    code = swap_readiness.main(["--pair", text])
     captured = capsys.readouterr()
 
     assert code == 2

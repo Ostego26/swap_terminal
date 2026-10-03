@@ -19,6 +19,14 @@ Can move funds: YES. `broadcast_payout(...)` on the line inside
        left: a header naming a line that is no longer there sends a reader
        looking for the broadcast in the wrong place, and this is the one file
        where that matters most.
+
+       SOL JOINED THE CHAINS THIS FUNCTION CAN MOVE ON 2026-10-03 (operator:
+       "whoa we have to be able to swap TO SOL too"). It is armed by
+       SOL_PAYOUT_KEYPAIR_PATH, which this module never reads and never names
+       as a value -- chains/solana_signing.py reads it, inside the one call
+       that signs -- and it is refused on devnet's genesis hash alone. No pair
+       in Config.ALLOWED_PAIRS pays out in SOL as of that date (measured), so
+       this branch is reachable only once the operator enables one.
 Mainnet-safe: NO -- running this against a funded mainnet wallet is operating
        the payout path, not inspecting it.
 
@@ -62,6 +70,16 @@ from contextlib import nullcontext
 
 from chains.gridcoin_wallet_lock import GridcoinLockError, unlocked_for_payout
 from chains.registry import why_cannot_pay_out
+
+# THE ARMING TOKEN ONLY, AND DELIBERATELY NOT chains/solana_payout_keypair.
+#
+# This module needs no capability check for SOL: broadcast_payout() passes the
+# token unconditionally and the keypair path is what arms the send, refused
+# inside chains/solana_signing.require_send_confirmation() with the preview
+# attached. Importing the presence check here as well would put the same
+# question in two places on one path (rule 8), and the copy here would be the
+# one that answered without the preview.
+from chains.solana_signing import CONFIRM_SOL_SEND
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_seed_is_present
 from chains.xrp_signing import CONFIRM_XRP_SEND
 from modules.address_authority import check_address
@@ -288,12 +306,51 @@ def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -
     survives whether or not a handler formats the message -- and asserts the seed is
     in none of them, in no exception string, and in no return value.
 
-    EVERY OTHER CHAIN IS UNCHANGED, BYTE FOR BYTE. An asset outside
-    SHARED_ACCOUNT_PAYOUT_ASSETS gets `send_to_address(address, amount)`, the same
-    two positional arguments it always got. That is deliberate rather than
-    incidental: adding keywords to a BTC send would be a change to the one function
-    in this suite that moves money, for no behavioral gain.
+    SOL WAS ADDED 2026-10-03 AND IT IS A THIRD SHAPE, NOT A SECOND COPY OF XRP'S.
+    Operator: "whoa we have to be able to swap TO SOL too". Until that instruction
+    SOL fell through to the two-positional branch below, so every SOL payout raised
+    SolanaSendNotArmed no matter what the host had exported -- the same stranded-swap
+    shape XRP had, one chain over. What SOL's send needs is the arming token and
+    NOTHING ELSE: no source account (the payer is SOL_HOT_WALLET, which the adapter
+    already holds and the preview announces) and no key (chains/solana.py holds
+    none; chains/solana_signing.signed_transfer_wire() reads the keypair file from
+    SOL_PAYOUT_KEYPAIR_PATH for the duration of one call).
+
+    AND IT DIVERGES FROM XRP ON ONE POINT, WHICH IS THE PRE-FLIGHT CHECK. XRP refuses
+    HERE, before any network call, when its seed variable is unset. SOL deliberately
+    does not: it passes the token unconditionally and lets
+    chains/solana_signing.require_send_confirmation() refuse on the empty keypair
+    path, because that refusal arrives with the whole PREVIEW inside it -- cluster,
+    payer, destination, lamports, fee, rent verdict, headroom -- and an operator who
+    then exports the variable is arming something they have read. A pre-flight
+    refusal here would be a second copy of the same rule (rule 8) that said less.
+    What it costs is read-only: the preview's genesis, balance, account and rent
+    reads happen before the refusal on an unarmed host. Nothing is signed and
+    nothing is broadcast, which tests/test_solana_payout.py asserts on the
+    recorded call list rather than on which exception came back.
+
+    SO THE ARMING IS THE KEYPAIR PATH, AND NOT A BOOLEAN ANYWHERE. There is no
+    config flag, no Config field and no `if enabled:` on this path. The only way a
+    SOL payout signs is for SOL_PAYOUT_KEYPAIR_PATH to name a keypair file that
+    derives to the announced payer, on a cluster whose own genesis hash is devnet's.
+    chains/solana_payout_keypair.payout_keypair_is_present() is the same question
+    read one layer up, where it sets the adapter's can_spend and therefore whether
+    services/swap_service.create_swap() will create such a swap at all.
+
+    EVERY OTHER CHAIN IS UNCHANGED, BYTE FOR BYTE. An asset that is neither XRP nor
+    SOL gets `send_to_address(address, amount)`, the same two positional arguments it
+    always got. That is deliberate rather than incidental: adding keywords to a BTC
+    send would be a change to the one function in this suite that moves money, for no
+    behavioral gain.
     """
+    if asset == "SOL":
+        # THE TOKEN IS SPELLED BY IMPORTING THE CONSTANT, never by copying its text,
+        # for the reason the XRP branch below records: `grep -rn CONFIRM_SOL_SEND`
+        # is meant to enumerate every site in this tree that can send SOL, and a
+        # local literal would hide from it -- while a literal that drifted by one
+        # character would refuse every payout with a message about the token.
+        return adapter.send_to_address(address, amount, confirm_send=CONFIRM_SOL_SEND)
+
     if asset not in SHARED_ACCOUNT_PAYOUT_ASSETS:
         return adapter.send_to_address(address, amount)
 
@@ -922,7 +979,11 @@ def payable_assets(adapters, allowed_pairs) -> set[str]:
 
     GRC_RPC_PASS was unset, so chains/registry had built exactly one adapter --
     SOL -- and SOL is deliberately never a TO asset (config.ALLOWED_PAIRS carries
-    ("SOL","GRC") and not the reverse, because chains/solana.py cannot sign). So
+    ("SOL","GRC") and not the reverse; the parenthetical here said "because
+    chains/solana.py cannot sign", which stopped being true on 2026-10-02 when the
+    payout path was built and is doubly wrong since 2026-10-03, when the call site
+    was armed -- the reason is now simply that the operator has not enabled an
+    output pair, and ALLOWED_PAIRS is where that decision lives). So
     NOTHING could be paid out at all, and the banner said the opposite, in the
     direction that costs rounds: the operator had just been told NOT READY by
     swap_readiness.py one screen earlier.

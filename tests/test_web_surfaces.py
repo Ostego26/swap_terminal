@@ -243,7 +243,7 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
     """
     allowed = client.application.config["ALLOWED_PAIRS"]
     every_asset = {asset for pair in allowed for asset in pair}
-    fully_reachable(client, monkeypatch, *every_asset)
+    adapters = fully_reachable(client, monkeypatch, *every_asset)
     body = client.get("/").get_data(as_text=True)
 
     # THE PREMISE NARROWED ON 2026-10-03 AND THE GUARD IT PROVIDES DID NOT.
@@ -251,7 +251,17 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
     # destination has no fee reserve refuses at the quote and must not be offered.
     # The split is asserted both ways below, so a function that marked everything
     # disabled still fails here -- which is the one thing this test exists for.
-    expected = [pair for pair in sorted(allowed) if quotable(pair)]
+    #
+    # IT NARROWED AGAIN THE SAME DAY, ONE CONDITION DEEPER, and that is why the
+    # expectation is now offerable() rather than quotable(): a *->SOL pair also needs
+    # the cluster to answer the rent-exempt minimum, which no amount of config can
+    # settle. The PREMISE here is "everything works", so StubAdapter was taught to
+    # answer that ask (see its docstring) rather than the expectation being narrowed
+    # to route around it -- a premise of a reachable terminal that cannot represent a
+    # reachable cluster is a premise that no longer means what the test name says.
+    # Where it still cannot be represented the pair drops out of `expected` and the
+    # loop below asserts it is NOT offered, naming which of the two conditions did it.
+    expected = [pair for pair in sorted(allowed) if offerable(pair, adapters)]
     assert expected, (
         "no allowed pair has a destination fee reserve, so this test would assert nothing. "
         "That is a real finding, not a setup problem -- read config.py"
@@ -259,9 +269,14 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
     for from_asset, to_asset in expected:
         assert f'value="{from_asset}:{to_asset}"' in body, (from_asset, to_asset)
     for from_asset, to_asset in sorted(set(allowed) - set(expected)):
+        why = (
+            f"no {to_asset}_NETWORK_FEE_RESERVE exists"
+            if not quotable((from_asset, to_asset))
+            else f"the {to_asset} cluster could not be asked for the rent-exempt minimum in this premise"
+        )
         assert f'value="{from_asset}:{to_asset}"' not in body, (
-            f"{from_asset}->{to_asset} was offered and no {to_asset}_NETWORK_FEE_RESERVE exists, so the "
-            f"quote for it refuses -- the form offered a pair the next click cannot price"
+            f"{from_asset}->{to_asset} was offered and {why}, so the quote for it refuses -- "
+            f"the form offered a pair the next click cannot price"
         )
     assert 'badge-word">DISABLED<' not in body, "nothing is unreachable here, so nothing may be badged DISABLED"
     if len(expected) == len(allowed):
@@ -645,14 +660,53 @@ class StubAdapter:
     through the adapter. A stub declaring only `can_spend` made every XRP and SOL pair
     unofferable in these tests, which is the right answer for a chain whose account is unset
     and the wrong SETUP for a test whose premise is "every chain is reachable".
+
+    `rent_exempt_minimum` AND `url` ARRIVED 2026-10-03 with pair_view's FIFTH condition,
+    services/quote_service.why_cannot_establish_payout_floor(), and for the identical
+    reason one gate later. A *->SOL pair is now offered only when the CLUSTER can be asked
+    for the rent-exempt minimum a new account needs, because a SOL payout has a minimum
+    only the chain can state -- the page badged BTC -> SOL AVAILABLE while the real quote
+    refused with "this terminal cannot reach the Solana network right now". A stub with no
+    rent_exempt_minimum raises AttributeError inside that function's broad catch and so
+    reads as an UNREACHABLE cluster, which is again the right answer for a terminal that
+    cannot reach one and the wrong setup for a premise of "every chain is reachable".
+
+    650_240 LAMPORTS IS NOT INVENTED. It is the operator's 2026-09-30 devnet reading for
+    SYSTEM_ACCOUNT_SPACE = 0, recorded in chains/solana_units.py and quoted by
+    quote_service.new_account_floor_lamports(). A stub that answered 0 would be a cluster
+    saying no account needs rent, which no cluster says, and would make the floor check
+    vacuous rather than satisfied.
+
+    `url` IS SET AND IS DISTINCT PER CAPABILITY, which is a cache fact rather than a
+    cosmetic one. new_account_floor_lamports() memoizes per `url|mint` for 600s in a
+    MODULE-level dict that outlives any one test, so two stubs sharing a key would let an
+    answerable one prime the cache for an unanswerable one and the second test would pass
+    on the first test's answer. Distinct urls keep each shape honest; `mint` is absent, so
+    both key as native.
+
+    `rent_floor_lamports=None` IS THE UNREACHABLE CLUSTER, and it raises rather than
+    returning a falsy number: a 0 would travel through int() as a real answer, and the
+    distinction between "the chain said a number" and "the chain could not be asked" is
+    the whole subject of the fifth condition.
     """
 
-    def __init__(self, can_spend=True):
+    def __init__(self, can_spend=True, rent_floor_lamports=650_240):
         self.can_spend = can_spend
         self.payout_refusal = "" if can_spend else "cannot pay out in this test"
+        self.rent_floor_lamports = rent_floor_lamports
+        self.url = (
+            "stub://cluster-answers-the-rent-floor"
+            if rent_floor_lamports is not None
+            else "stub://cluster-cannot-be-asked"
+        )
 
     def validate_address(self, _address):
         return True
+
+    def rent_exempt_minimum(self, _space):
+        if self.rent_floor_lamports is None:
+            raise ConnectionError("stub cluster is unreachable in this test")
+        return self.rent_floor_lamports
 
 
 #: Real-format shared accounts for the tag-attributed chains, because the validation these go
@@ -719,6 +773,69 @@ def quotable(pair) -> bool:
     property. This one keeps the four tests here honest about their premise.
     """
     return hasattr(Config, f"{pair[1]}_NETWORK_FEE_RESERVE")
+
+
+#: Destinations whose smallest deliverable payout comes from the CHAIN rather than from
+#: config. SOL only today, which is what services/quote_service.why_cannot_establish_payout_floor()
+#: says by returning "" for everything else instead of growing a table.
+RUNTIME_FLOOR_DESTINATIONS = frozenset({"SOL"})
+
+
+def floor_establishable(pair, adapters) -> bool:
+    """Could this premise establish the destination's runtime payout floor?
+
+    THE FIFTH CONDITION, ADDED TO pair_serviceability() ON 2026-10-03, and the two
+    "every chain is reachable" tests in this file failed the moment it landed --
+    correctly, and for a reason neither reachability nor quotable() can express. A
+    *->SOL payout has a minimum imposed by the RUNTIME (rent exemption for the account
+    it would create) and that figure comes from the cluster; a terminal that cannot ask
+    cannot quote, so a pair whose chains are both up and whose reserve exists can still
+    not be offered.
+
+    WHY THIS SPELLS THE CONDITION AGAIN INSTEAD OF CALLING
+    why_cannot_establish_payout_floor(), WHICH IS quotable()'S ARGUMENT VERBATIM AND
+    STILL THE RIGHT ONE. A test that derives its expectation from the function under
+    test passes for any implementation of it, including one that returns "" for
+    everything -- it would assert only that the page agrees with itself, which is
+    exactly the property that was TRUE on 2026-10-02 while the page was wrong, and
+    TRUE again on 2026-10-03 while it badged BTC -> SOL AVAILABLE against a quote that
+    refused. So this is a second deliberate second opinion, kept to one expression and
+    named, exactly as quotable() is.
+
+    WHAT IT SPELLS AGAIN, and all three clauses are necessary: the destination must be
+    one whose floor comes from a chain at all, that chain must have an adapter in this
+    premise, and the adapter must be able to answer the ask. can_spend is deliberately
+    NOT re-spelled here -- why_cannot_pay_out() is the authority for that, the tests
+    below already cover it through `can_spend=False`, and a copy of it in this helper
+    would be rule 8's duplication rather than a second opinion about a different
+    question.
+
+    THE ANSWER IS TAKEN BY CALLING THE STUB, not by checking that the method exists.
+    An adapter that has rent_exempt_minimum and raises is the unreachable cluster, and
+    those two must not score the same -- which is the distinction the condition exists
+    for.
+    """
+    to_asset = pair[1]
+    if to_asset not in RUNTIME_FLOOR_DESTINATIONS:
+        return True
+    adapter = (adapters or {}).get(to_asset)
+    if adapter is None:
+        return False
+    try:
+        return int(adapter.rent_exempt_minimum(0)) > 0
+    except Exception:  # noqa: BLE001 -- checked: this helper has exactly one caller shape and False is its only other value, so no caller can mistake a failure for a floor. The stub raises ConnectionError for an unreachable cluster and AttributeError for an adapter that cannot be asked at all, and this helper's whole job is to score both as "the floor could not be established" -- the same one answer why_cannot_establish_payout_floor() gives them.
+        return False
+
+
+def offerable(pair, adapters) -> bool:
+    """Both second opinions, so a test states its premise once.
+
+    quotable() answers from config and floor_establishable() from the premise's
+    adapters, and a pair needs both. Written out here rather than left to each caller
+    because the two tests below asserted "reachable implies offered" and the whole
+    correction is that the implication now has two more terms in it.
+    """
+    return quotable(pair) and floor_establishable(pair, adapters)
 
 
 # NOT a credential. A SENTINEL: its only purpose is to be findable, so the leak
@@ -803,15 +920,26 @@ def test_health_offerable_pairs_is_the_subset_that_could_complete(client, monkey
 def test_health_offerable_equals_allowed_when_every_chain_is_reachable(client, monkeypatch):
     """So the field cannot pass by always being empty."""
     every = {asset for pair in client.application.config["ALLOWED_PAIRS"] for asset in pair}
-    fully_reachable(client, monkeypatch, *every)
+    adapters = fully_reachable(client, monkeypatch, *every)
 
     body = client.get("/api/health").get_json()
 
     # "EQUALS" BECAME "EQUALS, LESS THE UNQUOTABLE ONES" ON 2026-10-03, and the guard
     # survives the change: the endpoint still cannot pass by reporting an empty list,
     # because `expected` is non-empty and asserted to be.
-    expected = [f"{a}->{b}" for a, b in sorted(client.application.config["ALLOWED_PAIRS"]) if quotable((a, b))]
-    assert expected, "no allowed pair is quotable, so this assertion would be vacuous"
+    #
+    # AND "LESS THE ONES WHOSE RUNTIME FLOOR CANNOT BE ESTABLISHED", the same day, which
+    # is why this reads offerable() rather than quotable(). With StubAdapter answering the
+    # rent-exempt ask the two sets coincide again under this premise, and the ASSERTION
+    # BELOW IS WHAT PROVES THAT rather than a comment claiming it: were the stub unable to
+    # answer, the three *->SOL pairs would leave `expected` and the endpoint would have to
+    # drop them too.
+    expected = [
+        f"{a}->{b}"
+        for a, b in sorted(client.application.config["ALLOWED_PAIRS"])
+        if offerable((a, b), adapters)
+    ]
+    assert expected, "no allowed pair is offerable, so this assertion would be vacuous"
     assert body["offerable_pairs"] == expected
 
 

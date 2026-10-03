@@ -138,40 +138,34 @@ DELIBERATELY_ONE_WAY = {
     # variable).
     ("XRP", "BTC"): "the reverse pays out XRP, which needs the two XRP custody variables (the fee reserve is set as of 2026-10-03)",
     ("XRP", "LTC"): "the reverse pays out XRP, which needs the two XRP custody variables (the fee reserve is set as of 2026-10-03)",
-    # SOL -> GRC, 2026-10-01. The reverse is blocked TWICE, and this test is where that gets
-    # recorded so nobody fixes one half and expects a working pair -- which is the mistake the
-    # paragraph above this table documents me making about XRP.
+    # THE THREE SOL ROWS ARE GONE, 2026-10-03, AND THE TABLE IS SMALLER FOR THE RIGHT
+    # REASON. They said the reverse "has no fee reserve AND cannot pay out at all
+    # (send_to_address raises; no keypair in the module)". Every clause is now false
+    # or no longer a blocker:
     #
-    #   no SOL_NETWORK_FEE_RESERVE   config.py has BTC, LTC and GRC only. Setting it is a
-    #                                pricing decision and the operator's (rule 16).
-    #   no SOL send path             chains/solana.py's send_to_address() raises. It holds no
-    #                                keypair and imports nothing that could, so this is an
-    #                                ABSENCE and not a flag -- "nothing in a .env can arm it",
-    #                                in chains/registry's own words about XRP.
+    #   send_to_address raises     it SIGNS and broadcasts when armed, devnet only.
+    #   no keypair in the module   still TRUE of chains/solana.py and deliberately so
+    #                              -- the keypair lives in chains/solana_signing.py
+    #                              and the adapter broadcasts bytes it could not have
+    #                              produced. What changed is that this stopped being a
+    #                              reason the pair cannot exist.
+    #   no fee reserve             SOL_NETWORK_FEE_RESERVE = 0.000005, measured on the
+    #                              operator's own cluster through getFeeForMessage.
     #
-    # Either one alone leaves ("GRC", "SOL") broken, so both are named. The forward direction
-    # needs neither: the reserve is the TO asset's (GRC's, which exists) and the payout is in
-    # GRC, which pays out today.
-    ("SOL", "GRC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
-                     "at all (send_to_address raises; no keypair in the module)"),
-    # SOL -> BTC and SOL -> LTC, 2026-10-02, at the operator's request to "enable all trading
-    # pairs". Blocked in reverse for EXACTLY the same two reasons as ("SOL", "GRC") above, and
-    # named per pair rather than by pointing at that entry, because this table's whole job is
-    # that a reader finds the reason at the row they are looking at.
+    # So the operator enabled ("GRC","SOL"), ("BTC","SOL") and ("LTC","SOL") --
+    # "whoa we have to be able to swap TO SOL too" -- and every SOL pair is SYMMETRIC
+    # now. A row naming a cleared blocker is worse than no row: it sends the next
+    # reader to do work that is already done, which is exactly the mistake the XRP
+    # paragraph above this table records me making about this very table.
     #
-    # The forward direction needs nothing: the reserve is the TO asset's, and BTC (2e-05) and
-    # LTC (0.001) both have one; both destinations hold their own signing key in wallet.dat;
-    # both assets are priced in services/pricing.IDS; and SOL takes deposits through the memo
-    # path already live for SOL -> GRC.
-    #
-    # They read UNREACHABLE until BTC_RPC_* / LTC_RPC_* are exported in the serving shell.
-    # That is the pair being willing and the chain being absent, which is a different fact
-    # from the reverse direction being impossible -- and the two must not be confused, which
-    # is why this entry exists rather than the pairs simply being left out.
-    ("SOL", "BTC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
-                     "at all (send_to_address raises; no keypair in the module)"),
-    ("SOL", "LTC"): ("the reverse pays out SOL, which has no fee reserve AND cannot pay out "
-                     "at all (send_to_address raises; no keypair in the module)"),
+    # WHAT REPLACED THE EXEMPTION IS NOT NOTHING, and it is a stronger guard than a
+    # row here ever was. The pair can exist and still cannot COMPLETE unarmed:
+    # SOL_PAYOUT_KEYPAIR_PATH is unset in every checkout and every test run, so
+    # can_spend is False, the page marks the pair UNAVAILABLE and create_swap()
+    # refuses with nothing written. That is asserted over SEEDED ROWS through the real
+    # services by tests/test_solana_adapter.py::
+    # test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken,
+    # which fails if the gate is removed whatever this pair list says.
 }
 
 
@@ -210,16 +204,24 @@ def test_EVERY_pair_has_a_network_fee_reserve(pair):
 def test_the_pair_set_is_SYMMETRIC_or_says_which_direction_is_missing():
     """A one-way pair is legitimate and should be deliberate, not accidental.
 
-    SOL can only ever be an INPUT -- chains/solana.py's send_to_address raises
-    NotImplementedError -- so a SOL pair would correctly be one-way. Nothing
-    enabled today is, and this reports any asymmetry rather than asserting
-    against it, because the honest answer depends on which chain can pay out.
+    THIS SAID "SOL can only ever be an INPUT -- chains/solana.py's send_to_address
+    raises NotImplementedError", AND THAT ENDED ON 2026-10-03. It signs when armed,
+    and the operator enabled all three *->SOL directions, so every SOL pair is
+    symmetric and DELIBERATELY_ONE_WAY no longer carries one.
+
+    A one-way pair is still legitimate and should still be deliberate rather than
+    accidental, which is what this reports. The honest reason for one has changed
+    shape: it is no longer "that chain cannot sign at all" but "that chain cannot
+    sign HERE" -- a posture, not an absence -- and a posture does not belong in this
+    table, because a table of permanent exemptions that records a switch goes stale
+    the moment the switch moves. Which is what the three SOL rows did.
     """
     asymmetric = [(a, b) for (a, b) in PAIRS
                   if (b, a) not in Config.ALLOWED_PAIRS and (a, b) not in DELIBERATELY_ONE_WAY]
     assert not asymmetric, (
         f"these pairs are enabled in one direction only: {asymmetric}. That is legitimate when the "
-        f"reverse chain cannot pay out (SOL, whose send_to_address raises) or the reverse "
+        f"reverse chain genuinely cannot pay out at all -- which is no longer true of any chain "
+        f"here as of 2026-10-03 -- or the reverse "
         f"payout asset has no fee reserve, and a mistake otherwise. If it is deliberate, add it "
         f"to DELIBERATELY_ONE_WAY with the reason"
     )

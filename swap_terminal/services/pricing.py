@@ -137,11 +137,21 @@ IDS = {
     # ("No quote: 'XRP_NETWORK_FEE_RESERVE'", one table over), so this side is prepared first
     # and the pair stays the operator's decision (rule 16).
     #
-    # NOTE WHICH DIRECTION IS EVEN POSSIBLE: chains/solana.py:700 send_to_address() raises
-    # NotImplementedError and :278 sets can_spend = False, so SOL can be the INPUT of a swap
-    # and never the output. There is deliberately no SOL_NETWORK_FEE_RESERVE to match this
-    # line: quote_service.get_network_fee_reserve() is keyed on `to_asset`, and SOL cannot be
-    # one.
+    # NOTE WHICH DIRECTION IS EVEN POSSIBLE, AND THIS COMMENT WAS TWO VERSIONS BEHIND THE
+    # CODE. It said "chains/solana.py:700 send_to_address() raises NotImplementedError and
+    # :278 sets can_spend = False". Neither clause is true any more: a devnet payout path was
+    # built 2026-10-02 (send_to_address() previews, and raises SolanaSendNotArmed rather than
+    # NotImplementedError), and can_spend has been DERIVED from SOL_PAYOUT_KEYPAIR_PATH since
+    # 2026-10-03 rather than hardcoded. A line number in a comment rots on every edit above
+    # it, which is why this names the mechanism instead of a location.
+    #
+    # WHAT IS STILL TRUE is the only thing this note needed: no pair in
+    # config.ALLOWED_PAIRS pays out in SOL -- measured 2026-10-03 against the real Config,
+    # three pairs take SOL as the INPUT and zero take it as the output -- so there is
+    # deliberately no SOL_NETWORK_FEE_RESERVE to match this line:
+    # quote_service.get_network_fee_reserve() is keyed on `to_asset`, and SOL is not one
+    # today. Enabling such a pair is live posture and the operator's (rule 16), and it would
+    # need a reserve here first.
     "SOL": "solana",
     # THIS TABLE IS WHY ALLOWED_PAIRS ALONE IS NOT ENOUGH TO ADD A PAIR. Adding one to
     # config.ALLOWED_PAIRS without a line here makes validate_pair() accept it and then
