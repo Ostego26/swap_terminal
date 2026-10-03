@@ -110,12 +110,25 @@ def clears_the_floor(amount_sol: float, floor_lamports: int, destination_exists:
         # a figure's provenance visible.
         #
         # So the number is only named when there IS one.
-        floor = (f"the {floor_lamports:,}-lamport floor" if floor_lamports
-                 else "the rent-exempt floor, which was NOT asked of the cluster for this send")
+        # ONE CLAUSE, NOT A RELATIVE CLAUSE SPLICED INTO A SENTENCE. The first
+        # version of this read, on the operator's screen: "and the rent-exempt
+        # floor, which was NOT asked of the cluster for this send does not apply to
+        # it" -- the `which` clause runs straight into `does not apply` and the
+        # reader has to re-parse it. Rule 14 is about what a person takes off the
+        # screen, and a sentence they have to read twice is a cost even when every
+        # fact in it is right. So the unasked case gets its own sentence instead of
+        # being inlined into this one.
+        if floor_lamports:
+            return True, (
+                f"YES -- the destination account already exists, so any amount is deliverable and the "
+                f"{floor_lamports:,}-lamport rent-exempt floor does not apply to it. IT WOULD APPLY if "
+                f"that account were ever closed, so an amount above the floor is the durable answer"
+            )
         return True, (
-            f"YES -- the destination account already exists, so any amount is deliverable and "
-            f"{floor} does not apply to it. IT WOULD APPLY if that account were ever closed, so an "
-            f"amount above the floor is the durable answer"
+            "YES -- the destination account already exists, so any amount is deliverable and no "
+            "rent-exempt minimum applies. The floor was NOT asked of the cluster for this send, so "
+            "no figure for it is reported here. IT WOULD APPLY if that account were ever closed, so "
+            "an amount above the floor is the durable answer"
         )
     if lamports >= floor_lamports:
         return True, (

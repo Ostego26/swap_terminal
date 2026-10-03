@@ -84,8 +84,15 @@ def test_an_UNASKED_floor_is_never_printed_as_a_figure():
     assert "NOT asked of the cluster" in why, why
     # And when there IS a figure, it is still named -- the fix must not silence a
     # real reading to avoid a fake one.
+    # THE FIGURE, NOT THE WORDING AROUND IT. This asserted "890,880-lamport floor"
+    # and broke on a grammar fix that changed it to "890,880-lamport rent-exempt
+    # floor" -- every fact identical. A test that pins a phrase fails on a rewrite
+    # that kept every fact, which is noise that teaches the next person to loosen
+    # the assertion rather than read it. What must hold is that a real reading is
+    # NAMED with its digits.
     _clears, why = clears_the_floor(0.001, 890_880, destination_exists=True)
-    assert "890,880-lamport floor" in why, why
+    assert "890,880" in why, f"a floor the cluster DID answer is not reported: {why}"
+    assert "NOT asked" not in why, f"a real reading is described as unasked: {why}"
 
 
 def test_an_EXISTING_destination_takes_any_amount_and_the_sentence_says_so_is_conditional():
