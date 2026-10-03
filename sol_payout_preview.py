@@ -95,10 +95,27 @@ def clears_the_floor(amount_sol: float, floor_lamports: int, destination_exists:
     """
     lamports = amount_to_base_units(amount_sol, SOL_DECIMALS)
     if destination_exists:
+        # THE FLOOR IS NOT ASKED FOR AN EXISTING DESTINATION, so there is no figure
+        # to quote -- and the first version of this sentence quoted it anyway. From
+        # the operator's own run, the hour this tool shipped:
+        #
+        #     YES -- the destination account already exists, so any amount is
+        #     deliverable and the 0-lamport floor does not apply to this send.
+        #
+        # preview_payout() prints "rent floor  not asked: the destination account
+        # already exists" four lines above, and `rent_minimum_lamports` is 0 because
+        # nothing asked -- so "the 0-lamport floor" is an UNASKED value rendered as a
+        # measurement. Rule 17's failure in one clause: a reader cannot tell that
+        # zero from a cluster that answered zero, and this whole file exists to make
+        # a figure's provenance visible.
+        #
+        # So the number is only named when there IS one.
+        floor = (f"the {floor_lamports:,}-lamport floor" if floor_lamports
+                 else "the rent-exempt floor, which was NOT asked of the cluster for this send")
         return True, (
-            f"YES -- the destination account already exists, so any amount is deliverable and the "
-            f"{floor_lamports:,}-lamport floor does not apply to this send. IT WOULD APPLY if that "
-            f"account were ever closed, so an amount above the floor is the durable answer"
+            f"YES -- the destination account already exists, so any amount is deliverable and "
+            f"{floor} does not apply to it. IT WOULD APPLY if that account were ever closed, so an "
+            f"amount above the floor is the durable answer"
         )
     if lamports >= floor_lamports:
         return True, (

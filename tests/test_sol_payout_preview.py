@@ -63,6 +63,31 @@ def test_exactly_the_floor_IS_deliverable():
     assert "at or above" in why, why
 
 
+def test_an_UNASKED_floor_is_never_printed_as_a_figure():
+    """"the 0-lamport floor" was on the operator's screen within the hour.
+
+    MEASURED 2026-10-03, from their own run of this tool:
+
+        YES -- the destination account already exists, so any amount is deliverable
+        and the 0-lamport floor does not apply to this send.
+
+    preview_payout() prints "rent floor  not asked: the destination account already
+    exists" four lines above that, and `rent_minimum_lamports` is 0 BECAUSE NOTHING
+    ASKED. So the sentence rendered an unasked value as a measurement -- a reader
+    cannot tell that zero from a cluster that answered zero, and the entire point of
+    this tool is making a figure's provenance visible.
+
+    MUTATION: put the f-string back. This fails on the digit.
+    """
+    _clears, why = clears_the_floor(0.001, 0, destination_exists=True)
+    assert "0-lamport" not in why, f"an unasked floor is printed as a figure: {why}"
+    assert "NOT asked of the cluster" in why, why
+    # And when there IS a figure, it is still named -- the fix must not silence a
+    # real reading to avoid a fake one.
+    _clears, why = clears_the_floor(0.001, 890_880, destination_exists=True)
+    assert "890,880-lamport floor" in why, why
+
+
 def test_an_EXISTING_destination_takes_any_amount_and_the_sentence_says_so_is_conditional():
     """A yes that depends on the account staying open must not read like an absolute.
 

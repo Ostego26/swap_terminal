@@ -53,7 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from chains.registry import build_adapters, missing_settings
+from chains.registry import build_adapters, missing_settings, why_cannot_pay_out
 from chains.solana_units import SOL_DECIMALS, base_units_to_amount
 from chains.xrp import XRPAdapter
 from chains.xrp_signing import reserve_drops
@@ -187,6 +187,49 @@ def check_pair_is_allowed(pair: tuple[str, str] | None = None) -> None:
     )
 
 
+def _why_each_destination_refuses(adapters, wanted) -> str:
+    """Per destination, the authority's own sentence saying what to export.
+
+    THIS PAGE'S FOOTER PROMISES "Each line above names the value to change", AND THE
+    PAYOUT LINE DID NOT. Measured 2026-10-03 on the operator's own screen, an
+    unarmed host reported:
+
+        FAIL  payout chain  NOTHING CAN BE PAID OUT. Adapters built: GRC, SOL, XRP;
+                            destination(s) needed: SOL. ...
+
+    Not one variable named, under a footer saying every line names one. The
+    operator had to be told SOL_PAYOUT_KEYPAIR_PATH and SOL_HOT_WALLET in chat,
+    which is the round trip rule 14 exists to remove -- they read the screen, not
+    the source, and not a transcript.
+
+    THE SENTENCE IS NOT WRITTEN HERE. chains/registry.why_cannot_pay_out() already
+    has it, per asset, and it is the same sentence the customer page, /admin and the
+    worker's spawn banner render (rule 8). A second spelling here is how four
+    implementations of the pay-out verdict came to disagree, three of them wrong --
+    services/pair_view.py's header has that measurement.
+
+    ONE LINE PER DESTINATION, because a run scoped with --pair has one and an
+    unscoped run can have five, and a reader needs to know which chain each remedy
+    belongs to. A destination whose adapter gives no reason is reported as such
+    rather than skipped: silence beside a FAIL is rule 14's empty gap.
+    """
+    destinations = sorted({to for _, to in wanted})
+    lines = []
+    for asset in destinations:
+        refusal = why_cannot_pay_out(adapters, asset) if asset in adapters else ""
+        if refusal:
+            lines.append(f"{asset}: {refusal}")
+        elif asset not in adapters:
+            # Its own case: no adapter is a DIFFERENT problem from an adapter that
+            # refuses, and the `adapters built` list above already says which chains
+            # are absent. Naming it again here would read as a second finding.
+            lines.append(f"{asset}: no adapter in this process (see `adapters built` above)")
+        else:
+            lines.append(f"{asset}: its adapter reports it cannot pay out and gives no reason, which is "
+                         f"itself a defect -- see chains/base.RPCAdapter.payout_refusal")
+    return "\n      WHAT TO CHANGE, per destination: " + "\n      ".join(lines) if lines else ""
+
+
 def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
     """Whether a payout chain's wallet can be unlocked from THIS process.
 
@@ -263,7 +306,8 @@ def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
                f"written, so no deposit is watched or credited -- this is a closed door, not a trap. BUT "
                f"ANY SWAP ALREADY OPEN for one of those destinations is the trap: its deposit is still "
                f"watched and CREDITED, and the payout then refuses and lands it in 'failed', which nothing "
-               f"retries. If this host was ever armed, check for in-flight swaps before leaving it this way")
+               f"retries. If this host was ever armed, check for in-flight swaps before leaving it this way."
+               + _why_each_destination_refuses(adapters, wanted))
         return
     record(PASS, "payout chain", f"{', '.join(sorted(payable))}  <- has an adapter AND is the destination "
                                  f"of an allowed pair. A chain missing from here cannot be paid")

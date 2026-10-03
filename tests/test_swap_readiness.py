@@ -1132,3 +1132,74 @@ def test_the_unpayable_FAIL_distinguishes_a_refused_NEW_swap_from_a_stranded_OPE
         "the trap is described before the closed door, so a reader meets the hazard first and attaches "
         "it to the action they were about to take"
     )
+
+
+def test_the_payout_FAIL_names_the_VARIABLE_to_export_per_destination():
+    """The footer promises every line names the value to change. This one did not.
+
+    MEASURED 2026-10-03 on the operator's own screen. They had just armed nothing,
+    ran the check, and read:
+
+        FAIL  payout chain  NOTHING CAN BE PAID OUT. Adapters built: GRC, SOL, XRP;
+                            destination(s) needed: SOL. ...
+
+    Not one variable named -- under a footer that says "Each line above names the
+    value to change". They then had to be told SOL_PAYOUT_KEYPAIR_PATH and
+    SOL_HOT_WALLET in conversation, which is the exact round trip rule 14 exists to
+    remove: an operator reads the screen, not the source, and not a transcript.
+
+    THE SENTENCE IS NOT WRITTEN IN swap_readiness.py AND MUST NOT BE.
+    chains/registry.why_cannot_pay_out() already has it per asset, and it is the
+    same sentence the customer page, /admin and the worker's spawn banner render. A
+    second spelling here is how four implementations of the pay-out verdict came to
+    disagree with three of them wrong (services/pair_view.py's header has that
+    measurement), so this asserts the AUTHORITY's text appears rather than asserting
+    a copy of it.
+
+    MUTATION: have _why_each_destination_refuses() return "". Both assertions below
+    fail, and the screen goes back to naming nothing.
+    """
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"SOL": CannotSign()})
+    detail = next(row[2] for row in swap_readiness._results if row[1] == "payout chain")
+
+    assert "WHAT TO CHANGE, per destination:" in detail, detail
+    assert "SOL:" in detail, "the destination that refused is not named, so a multi-chain run is unreadable"
+    assert "cannot pay out in this test" in detail, (
+        "the per-destination line does not carry the ADAPTER's own refusal. If swap_readiness started "
+        "writing its own sentence instead, this page and every other surface would be free to word one "
+        "refusal two ways -- which is the defect this assertion exists to prevent"
+    )
+
+
+def test_a_destination_with_NO_adapter_is_not_reported_as_a_refusing_one():
+    """Two different problems, and conflating them sends the operator to the wrong fix.
+
+    No adapter means a chain this process cannot reach at all -- the `adapters
+    built` line above already says which. An adapter that REFUSES is reachable and
+    unarmed. Printing the registry's reachability sentence again here would read as
+    a second finding about the same chain.
+    """
+    # THE FIXTURE WAS THE DEFECT ON THE FIRST ATTEMPT AND IT IS WORTH RECORDING.
+    # `{"GRC": CanSign()}` was handed in to mean "SOL is absent", and GRC is itself
+    # the destination of an allowed pair and CAN sign -- so the check PASSED, there
+    # was a `payout chain` row, and the test read the PASS row's text looking for a
+    # refusal. It failed on "has an adapter AND is the destination of an allowed
+    # pair", which is the correct sentence for the state the fixture actually built.
+    #
+    # The premise needs a payable set that is EMPTY while a destination is absent:
+    # GRC present but unable to sign, SOL absent entirely. Then nothing is payable,
+    # the check FAILS, and SOL's line is the absent-chain case this test is about.
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"GRC": CannotSign()})
+    payout = [row for row in swap_readiness._results if row[1] == "payout chain"]
+    assert payout and payout[0][0] == FAIL, (
+        f"the fixture did not produce a payout-chain FAIL, so there is no per-destination list to "
+        f"inspect: {[(r[0], r[1]) for r in swap_readiness._results]}"
+    )
+    detail = payout[0][2]
+    assert "no adapter in this process" in detail, detail
+    assert "see `adapters built` above" in detail, (
+        "an absent chain's line does not point at the line that already lists it, so the reader gets "
+        "the same fact twice with no indication they are the same fact"
+    )
