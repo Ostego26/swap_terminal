@@ -716,3 +716,52 @@ def test_an_uncounted_row_does_not_read_as_a_credited_one():
         "a COUNTED row's credited_at means what it says, and annotating it would be noise on every "
         "normal line"
     )
+
+
+def test_two_rows_for_one_payment_are_not_called_two_payments():
+    """The operator's own rows, and the line that asserted the opposite.
+
+    MEASURED 2026-10-03. `gettransaction` showed ONE payment of 0.0003 at vout 1;
+    the screen showed two rows under "every payment attributed to this swap". The
+    second is chains/base.py's FABRICATED vout-0 event, written while the
+    transaction was in the mempool and the raw decode failed.
+
+    THE CONDITION WAS ALREADY DETECTED AND WENT NOWHERE THE OPERATOR LOOKS:
+    deposit_service.refresh_swap_from_chain() calls warn_on_multi_vout_rows() on
+    these same rows every cycle, into a log. A check whose finding reaches only a
+    log while the screen says the opposite is the defect this session has found
+    four times in other shapes.
+    """
+    one_payment_two_rows = [
+        {"asset": "BTC", "txid": "ded1b906", "vout": 1, "amount": 0.0003, "confirmations": 2},
+        {"asset": "BTC", "txid": "ded1b906", "vout": 0, "amount": 0.0003, "confirmations": 0},
+    ]
+
+    line = show_swap.what_the_deposit_rows_are(one_payment_two_rows)
+
+    assert "2 ROWS, NOT 2 PAYMENTS" in line
+    assert "same txid, different vout" in line, "name the shape, so the reader can check it themselves"
+    assert "seen" in line, (
+        "and say which figure sums them, because that is the one whose arithmetic does not look right "
+        "on screen"
+    )
+
+
+def test_ordinary_rows_keep_the_plain_sentence():
+    """Two genuinely separate payments are two payments, and must not be flagged.
+
+    Without this, a version that printed the multi-vout warning unconditionally
+    would pass the test above -- and would put a paragraph about a fabricated
+    branch on every normal swap's screen.
+    """
+    two_payments = [
+        {"asset": "BTC", "txid": "aaa", "vout": 0, "amount": 0.0003, "confirmations": 2},
+        {"asset": "BTC", "txid": "bbb", "vout": 0, "amount": 0.0003, "confirmations": 2},
+    ]
+
+    assert show_swap.what_the_deposit_rows_are(two_payments) == (
+        "every payment attributed to this swap, confirmed or not"
+    )
+    assert show_swap.what_the_deposit_rows_are([]) == (
+        "every payment attributed to this swap, confirmed or not"
+    )

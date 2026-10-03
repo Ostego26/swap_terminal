@@ -105,6 +105,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from config import Config
 from db import connect_db
+from deposit_vout_artifact import multi_vout_groups
 from microfortnights import format_duration
 from report_block import CONTINUATION, labeled
 from services.admin_view import halted_swaps, status_counts
@@ -276,6 +277,59 @@ def halted_lines(rows: list[dict], now_iso: str, counts: list[dict], db_path: st
     ]
 
 
+def what_the_deposit_rows_are(events) -> str:
+    """"every payment" -- EXCEPT WHEN TWO ROWS ARE ONE PAYMENT, WHICH IS NOT RARE.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-03, the first BTC -> GRC swap to
+    settle. The screen said
+
+        deposit rows   2  <- every payment attributed to this swap, confirmed or not
+                       0.0003 BTC  0 confirmation(s)  NOT counted  ... vout 1
+                       0.0003 BTC  2 confirmation(s)  COUNTED      ... vout 0
+
+    and `bitcoin-cli gettransaction` settled what the screen could not: there was
+    ONE payment, of 0.0003, at vout 1. The second row is chains/base.py's
+    FABRICATED event -- the branch its own comment heads "PROPOSAL MARKER, NOT AN
+    ENDORSEMENT" -- written while the transaction was still in the mempool and the
+    raw decode failed, carrying vout 0, the amount the wallet summary reported, and
+    a confirmation count from a second RPC. upsert_deposit_event() keys on
+    (asset, txid, vout), so the two never collide and both persist; the fabricated
+    one stays frozen at 0 confirmations because the real branch never emits vout 0
+    again to update it.
+
+    THAT FREEZE IS THE ONLY REASON THE PAYOUT WAS RIGHT. confirmed_total counts
+    rows at or above min_confirmations, so it took 0.0003 and the payout equaled
+    the quote. seen_total sums EVERY row and was 0.0006 until the credit overwrote
+    the column. Had the fabricated row ever confirmed, confirmed_total would be
+    0.0006 and payout_service.payout_amount() scales the quote by actual/expected
+    -- a 2x payout. chains/base.py:411 anticipated the double-count and expected it
+    to halt the swap at `under_review`; it did not halt, because the row never
+    confirmed.
+
+    SO THE COUNT GETS A SENTENCE INSTEAD OF A CLAIM. The condition is already
+    detected -- deposit_service.refresh_swap_from_chain() calls
+    warn_on_multi_vout_rows() on these same rows every cycle -- and it went only to
+    a log the operator does not read while the screen asserted the opposite. This
+    is the same authority (deposit_vout_artifact.multi_vout_groups), read rather
+    than restated, so the two cannot disagree about what counts as multi-vout.
+
+    NOTHING ABOUT THE CREDIT CHANGES HERE. Which rows are written, which are
+    counted, and whether the fabricated branch should raise instead are all the
+    credit path, and they are the operator's (rule 16). What this fixes is a line
+    that told them two rows were two payments.
+    """
+    count = len(events)
+    groups = multi_vout_groups(events)
+    if not groups:
+        return "every payment attributed to this swap, confirmed or not"
+    rows_in_groups = sum(len(rows) for rows in groups.values())
+    return (f"{count} ROWS, NOT {count} PAYMENTS -- {len(groups)} transaction(s) carry {rows_in_groups} rows "
+            f"between them (same txid, different vout). One of each such pair is usually chains/base.py's "
+            f"FABRICATED vout-0 event, written when the raw decode failed; see its PROPOSAL MARKER. The "
+            f"credit counts only rows at or above min_confirmations, so a frozen 0-confirmation row does not "
+            f"reach the payout -- but `seen` sums them all")
+
+
 def deposit_event_lines(events: list[dict], min_confirmations: int) -> list[str]:
     """Every deposit row for one swap, with confirmed/not marked per row.
 
@@ -434,8 +488,7 @@ def swap_lines(view: dict, now_iso: str) -> list[str]:
     # answers it before the rows do.
     events = swap.get("deposit_events") or []
     payouts = swap.get("payouts") or []
-    lines.append(labeled("deposit rows", f"{len(events)}  <- every payment attributed to this swap, confirmed "
-                                         f"or not"))
+    lines.append(labeled("deposit rows", f"{len(events)}  <- {what_the_deposit_rows_are(events)}"))
     lines.extend(deposit_event_lines(events, int(swap.get("min_confirmations") or 0)))
     lines.append(labeled("payout rows", f"{len(payouts)}  <- a row exists only once a payout has been claimed"))
     lines.extend(payout_lines(payouts))
