@@ -218,7 +218,12 @@ from .xrp_payments import XRPPaymentError, deposit_events_from_transactions
 # of signing_seed() here would make configuration alone sufficient to arm a payout,
 # and tests/test_xrp_payout_wiring.py fails behaviorally if one is ever added --
 # the variable set, no seed argument, and the refusal is the assertion.
-from .xrp_payout_seed import SIGNING_SEED_ENV_VAR, missing_seed_refusal, signing_seed_is_present
+from .xrp_payout_seed import (
+    SIGNING_SEED_ENV_VAR,
+    missing_seed_refusal,
+    signing_seed_decodes,
+    signing_seed_is_present,
+)
 from .xrp_signing import (
     FEE_ALLOWANCE_DROPS,
     XRPSendNotArmed,
@@ -424,11 +429,30 @@ class XRPAdapter:
         variable that turns that off.
         """
         if self.can_spend:
+            # "NOT a claim the seed is correct" WAS TRUE AND WAS NOT ENOUGH, MEASURED
+            # 2026-10-03. This banner printed ARMED on the operator's host while
+            # XRP_PAYOUT_SECRET_SEED held NINE CHARACTERS that do not start with 's'.
+            # can_spend reads signing_seed_is_present(), which is presence, so the line
+            # was accurate and the operator had no way to tell this state from a working
+            # one. Whether the seed DECODES is checkable offline, in base58check, with no
+            # rippled and no value printed -- so the banner says it rather than disclaiming
+            # it. chains/xrp_signing.py:397 uses the same Wallet.from_seed(), so a seed
+            # that does not decode here cannot sign there, after a deposit is irreversible.
+            #
+            # can_spend ITSELF IS UNCHANGED, deliberately: narrowing it from "present" to
+            # "decodes" changes which pairs this terminal OFFERS, which is live posture and
+            # the operator's call (rule 16). This line reports; it does not gate.
+            decodes, why = signing_seed_decodes()
             posture = (
                 f"payouts=*** ARMED, THIS PROCESS CAN SPEND XRP *** ({SIGNING_SEED_ENV_VAR} is set, so "
-                f"payouts sign locally and submit. NOT a claim the seed is correct -- a wrong one is "
-                f"refused by derive_and_check() before signing. Mainnet is still refused by server "
-                f"network_id, not by url)"
+                f"payouts sign locally and submit. "
+                + (f"The seed DECODES: {why}. Still not a claim it is the RIGHT account -- "
+                   f"derive_and_check() refuses a seed paired with an account it does not control, "
+                   f"before signing. "
+                   if decodes else
+                   f"*** BUT THE SEED DOES NOT DECODE: {why} *** This pair is still OFFERED, because "
+                   f"can_spend reads presence rather than validity. ")
+                + "Mainnet is still refused by server network_id, not by url)"
             )
         else:
             posture = (

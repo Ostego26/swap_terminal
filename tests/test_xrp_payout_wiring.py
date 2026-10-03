@@ -912,3 +912,53 @@ def test_a_swap_is_created_once_both_variables_are_set(tmp_path, monkeypatch):
     assert stored["to_asset"] == "XRP"
     assert stored["payout_address"] == XRP_CUSTOMER_PAYOUT
     assert stored["status"] == "awaiting_deposit"
+
+
+# --- presence is not validity, and the banner had no way to say so ------------
+
+
+def test_the_banner_says_the_seed_DOES_NOT_DECODE_when_it_does_not(monkeypatch):
+    """ARMED printed on a nine-character placeholder, measured 2026-10-03.
+
+    XRP_PAYOUT_SECRET_SEED was SET, so signing_seed_is_present() returned True, so
+    can_spend was True, so chains/registry.why_cannot_pay_out() returned "" and
+    this terminal considered XRP a payout destination it could serve. The value was
+    nine characters and did not start with 's'. chains/xrp_signing.py:397 derives
+    the payout wallet with the same Wallet.from_seed(), so every XRP payout would
+    have failed at signing -- after the deposit was confirmed and irreversible.
+
+    The old line said "NOT a claim the seed is correct", which was true and left
+    the operator unable to tell this state from a working one. Decoding is offline
+    and costs nothing, so the banner states it.
+    """
+    monkeypatch.setenv("XRP_PAYOUT_SECRET_SEED", "placeholdr")
+    adapter = XRPAdapter(url="https://s.altnet.rippletest.net:51234")
+
+    line = adapter.endpoint_line()
+
+    assert "ARMED" in line, "can_spend is unchanged: presence still arms it, and the line still says so"
+    assert "DOES NOT DECODE" in line
+    assert "still OFFERED" in line, (
+        "the consequence is the content: a pair this terminal will sell and cannot pay. A line that "
+        "reported the bad seed without saying it is still on the menu understates it"
+    )
+    assert "placeholdr" not in line, "a seed is a key and must never reach a banner"
+
+
+def test_the_banner_says_the_seed_DECODES_when_it_does(monkeypatch):
+    """The other half, or a version that always warned would pass the test above.
+
+    The seed funds nothing and controls an account that has never existed.
+    """
+    monkeypatch.setenv("XRP_PAYOUT_SECRET_SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+    adapter = XRPAdapter(url="https://s.altnet.rippletest.net:51234")
+
+    line = adapter.endpoint_line()
+
+    assert "The seed DECODES" in line
+    assert "DOES NOT DECODE" not in line
+    assert "RIGHT account" in line, (
+        "decoding is not ownership: derive_and_check() still refuses a seed paired with an account it "
+        "does not control, and the line must not overclaim"
+    )
+    assert "sEdTM1uX8pu2do5XvTnutH6HsouMaM2" not in line

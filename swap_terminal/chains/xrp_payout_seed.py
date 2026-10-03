@@ -182,3 +182,60 @@ def missing_seed_refusal() -> str:
         f"set in a file, or in another shell, does not reach here -- and set XRP_DEPOSIT_ACCOUNT to the "
         f"account that seed controls. Both are custody decisions and neither has a default."
     )
+
+
+def signing_seed_decodes() -> tuple[bool, str]:
+    """Does the seed in this process DECODE. (yes/no, the sentence). No network, no value.
+
+    PRESENCE IS NOT VALIDITY, AND THE GAP BETWEEN THEM WAS A 9-CHARACTER
+    PLACEHOLDER ON THE LIVE HOST.
+
+    Measured 2026-10-03. XRP_PAYOUT_SECRET_SEED was SET, so
+    signing_seed_is_present() returned True, so chains/xrp.py:369 set
+    can_spend = True, so chains/registry.why_cannot_pay_out() returned "" and this
+    terminal considered XRP a payout destination it could serve. The value was nine
+    characters and did not start with 's'. Wallet.from_seed() raises ValueError on
+    it, and chains/xrp_signing.py:397 -- the PAYOUT's own derivation -- is the same
+    call, so every XRP payout would have failed at signing, after the customer's
+    deposit was confirmed and irreversible.
+
+    The only reason it had not already happened is that XRP_DEPOSIT_ACCOUNT was
+    unset, which blocks XRP swaps through a DIFFERENT gate. The operator was asking
+    to have that variable set when this was found.
+
+    WHY THIS IS A SEPARATE FUNCTION AND NOT A CHANGE TO signing_seed_is_present().
+    That function's contract -- a bool, "never says what it is" -- is what
+    can_spend reads, and can_spend decides whether a pair is OFFERED. Narrowing it
+    from "present" to "decodes" changes what this terminal will trade, which is
+    live posture and the operator's call (rule 16). This function exists so the
+    DIAGNOSTICS can tell the truth today, while that decision is theirs to make;
+    swap_readiness.py and the worker banner read it, chains/xrp.py deliberately
+    still does not.
+
+    IT RETURNS THE REASON AND NEVER THE VALUE. A seed is a key: the sentence names
+    the variable and the exception type, and xrp_payout_account.seed_shape() is
+    where a caller gets shape facts without content.
+
+    OFFLINE BY CONSTRUCTION. Decoding is base58check plus a key derivation; no
+    rippled is contacted, so this is safe in a banner that prints before any
+    network is reachable.
+    """
+    seed = signing_seed()
+    if not seed:
+        return False, f"{SIGNING_SEED_ENV_VAR} is not set in this process"
+    try:
+        # Imported here, not at module scope: this module is imported by the
+        # customer page's path and xrpl-py is an optional dependency, so a missing
+        # one must degrade to a sentence rather than an ImportError at import time.
+        from xrpl.wallet import Wallet  # noqa: PLC0415
+    except ImportError:
+        return False, ("xrpl-py is not importable in this interpreter, so whether the seed decodes was "
+                       "NOT established -- and a payout could not sign either way")
+    try:
+        Wallet.from_seed(seed)
+    except Exception as error:  # noqa: BLE001 -- checked: returns False with the exception TYPE in the sentence. str(error) is excluded because xrpl-py has echoed the offending seed in its own messages.
+        return False, (f"{SIGNING_SEED_ENV_VAR} is set but does NOT decode as a seed "
+                       f"({type(error).__name__}); run xrp_payout_account.py, which reports its shape "
+                       f"without printing it. chains/xrp_signing.py uses the same Wallet.from_seed(), so "
+                       f"every XRP payout would fail at signing -- after the deposit is irreversible")
+    return True, f"{SIGNING_SEED_ENV_VAR} decodes as a seed, so a payout can derive its signing wallet"
