@@ -204,6 +204,26 @@ def seeded_config() -> dict:
         "SOL_MIN_CONFIRMATIONS": 3,
         "XRP_MIN_CONFIRMATIONS": 1,
         "QUOTE_TTL_SECONDS": 600,
+        # THE FOURTH CONDITION'S SETTINGS, ADDED 2026-10-03, AND THE FIXTURE WAS THE
+        # DEFECT RATHER THAN THE CODE -- which is the SECOND time this exact fixture
+        # has had to learn that, and the first time is written down thirty lines
+        # below: these adapters were `object()` until 2026-10-02 and correctly
+        # stopped passing when can_spend landed.
+        #
+        # pair_serviceability() now also asks services/quote_service.why_cannot_quote(),
+        # which refuses a destination with no <ASSET>_NETWORK_FEE_RESERVE. This config
+        # carried none, so every pair in it became `cannot_complete` -- the right answer
+        # for a desk that has recorded no chain costs, and the wrong PREMISE for a test
+        # whose subject is which pairs are in ALLOWED_PAIRS.
+        #
+        # The VALUES are config.py's own, not invented: a fixture that quietly priced a
+        # chain differently from the real one would be a second source for a number the
+        # fee ledger reports. Only the three chains config.py actually has a reserve for
+        # are here -- XRP deliberately has none, which is the live fact this suite is
+        # about, and inventing one here would hide it.
+        "BTC_NETWORK_FEE_RESERVE": 0.00002,
+        "LTC_NETWORK_FEE_RESERVE": 0.001,
+        "GRC_NETWORK_FEE_RESERVE": 0.01,
         # Deliberately present, and deliberately NOT echoed. See the test below.
         "RPC": {"BTC": {"user": "rpcuser", "password": LEAK_SENTINEL, "host": "127.0.0.1"}},
         "SECRET_KEY": "swap-terminal-dev",

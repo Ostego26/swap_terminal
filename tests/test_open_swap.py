@@ -289,8 +289,19 @@ def test_every_pair_reachable_prints_no_unavailable_note():
     # XRP_DEPOSIT_ACCOUNT IS PART OF "REACHABLE" since 2026-10-01: a tag-attributed source
     # chain with no shared account cannot produce a deposit address, so the pair is
     # UNAVAILABLE and this test's premise -- every pair reachable -- requires it.
+    # AND GRC_NETWORK_FEE_RESERVE IS PART OF "REACHABLE" since 2026-10-03, for the same
+    # reason the line above says XRP_DEPOSIT_ACCOUNT is: pair_serviceability() asks a
+    # fourth question -- has this desk recorded what a payout on the DESTINATION costs --
+    # and with no reserve the pair is UNAVAILABLE however reachable both chains are. That
+    # is the right answer and this test's premise is the other case, so the premise says
+    # so. The value is config.py's own GRC figure rather than a round number invented here.
+    #
+    # THE PAIR PAYS OUT IN GRC, so GRC's reserve is the one that matters and XRP's absence
+    # is irrelevant here -- the reserve is keyed on the asset being PAID, and a source
+    # chain never sends. If that key were XRP's this test would pass for the wrong reason.
     config = {"ALLOWED_PAIRS": {("XRP", "GRC")}, "RPC": {},
-              "XRP_DEPOSIT_ACCOUNT": XRP_SHARED_ACCOUNT}
+              "XRP_DEPOSIT_ACCOUNT": XRP_SHARED_ACCOUNT,
+              "GRC_NETWORK_FEE_RESERVE": 0.01}
 
     catalog = pair_catalog(config, {"XRP": Payer(), "GRC": Payer()})
 
