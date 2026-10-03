@@ -28,6 +28,7 @@ from swap_readiness import (
     describe_wallet_lock,
     explain_grc_failure,
     gridcoin_precheck,
+    rate_text,
 )
 
 MAINNET_PORT = 15715
@@ -1706,3 +1707,57 @@ def test_the_ceiling_note_names_the_consequence_and_not_just_the_number():
     assert "3780.08854497" in note
     assert "REFUSED at creation" in note
     assert "before any deposit is taken" in note
+
+
+# --- a rate that cannot show its own value ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rate", "shown"),
+    [
+        (9142021.62107, "9142021.6211"),  # BTC->GRC, the readable majority: fixed format stays
+        (0.0062, "0.0062"),               # GRC->XRP
+        (0.0001, "0.0001"),               # the exact threshold four decimals can still carry
+        (1.09e-07, "1.09e-07"),           # GRC->BTC, which printed 0.0000
+        (1.76e-05, "1.76e-05"),           # XRP->BTC, which printed 0.0000
+        (0.0, "0"),                       # a result, not a formatting failure
+        (-1.0, "-1"),                     # a broken feed must stay visible
+    ],
+)
+def test_a_small_rate_keeps_its_digits_instead_of_printing_as_zero(rate, shown):
+    """1 GRC = 0.0000 BTC, on the first all-green run of the whole terminal.
+
+    MEASURED ON THE OPERATOR'S SCREEN 2026-10-03. The pricing line formatted every
+    rate with `:.4f`, so GRC->BTC (about 1.09e-07) and XRP->BTC (about 1.76e-05)
+    both rendered as exactly 0.0000 -- for pairs this terminal WILL quote. A rate
+    of zero reads as a broken price feed and is indistinguishable from one.
+
+    FOUR DECIMALS STAYS WHERE IT WORKS, which is why the first two rows are here:
+    switching everything to %g would print 9142021.6211 as 9.14202e+06, trading a
+    readable majority for an unreadable minority.
+
+    THE LAST ROW IS A CORRECTION TO MY OWN FIRST FIX. It read `if rate <= 0:
+    return "0"`, which rendered -1.0 as "0" -- the same defect pointed the other
+    way. A negative rate cannot come from two positive USD prices, so if one
+    appears it is a broken feed and must be visible rather than flattened into a
+    plausible zero.
+    """
+    assert rate_text(rate) == shown
+
+
+def test_the_pricing_line_uses_the_formatter_rather_than_its_own_format(monkeypatch):
+    """The call site, because the formatter being right is not what failed.
+
+    `:.4f` was inline in the f-string that builds the line, so the only way to be
+    sure the fix reaches the screen is to read the screen's line.
+    """
+    monkeypatch.setattr(swap_readiness.Config, "ALLOWED_PAIRS", {("GRC", "BTC")}, raising=False)
+    monkeypatch.setattr(swap_readiness, "fetch_usd_prices",
+                        lambda *a, **k: {"GRC_USD": 0.00928077, "BTC_USD": 84845.0})
+    swap_readiness._results.clear()
+    swap_readiness.check_pricing()
+    row = swap_readiness._results[0]
+
+    assert row[0] == PASS
+    assert "0.0000 BTC" not in row[2], "the defect: a quotable pair's rate rendered as zero"
+    assert "1 GRC = 1.09e-07 BTC" in row[2]

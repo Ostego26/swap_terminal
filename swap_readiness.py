@@ -1026,6 +1026,53 @@ def check_solana(adapters) -> None:
            f"by memo, not by address. A zero balance is fine: nothing is ever sent FROM here")
 
 
+def rate_text(rate: float) -> str:
+    """A rate for a human, keeping digits when the number is small. Four decimals is not enough.
+
+    MEASURED ON THE OPERATOR'S SCREEN 2026-10-03, on the first READY run of the
+    whole terminal, in the line that lists every pair's rate:
+
+        1 GRC = 0.0000 BTC, ... 1 XRP = 0.0000 BTC
+
+    Both of those are ALLOWED pairs. The format was `:.4f`, so any rate under
+    0.0001 renders as exactly zero -- which reads as a broken price feed, and is
+    indistinguishable from one. Rule 14: state what the number means, and a number
+    that cannot represent its own value means nothing. The real figures are around
+    1.09e-7 BTC per GRC and 1.76e-5 BTC per XRP, and both matter: GRC->BTC and
+    XRP->BTC are pairs this terminal will quote.
+
+    FOUR DECIMALS STAYS FOR ANYTHING IT CAN HOLD, deliberately. The large rates on
+    that same line -- 9142021.6211 GRC per BTC -- are easier to scan in a fixed
+    format, and switching everything to %g would render that one as 9.14202e+06,
+    trading a readable majority for an unreadable minority. So the threshold is
+    "can four decimals carry a non-zero digit at all".
+
+    THIS IS DISPLAY ONLY AND NOTHING QUOTES FROM IT. services/quote_service.
+    create_quote() derives the rate from the same USD prices and does its own
+    arithmetic at full float precision; this line exists so an operator can sanity
+    check a feed before opening a swap. A formatter that changed the number would
+    be a second copy of the rate (rule 8), which is why it only changes the
+    rendering.
+    """
+    if rate >= 0.0001:  # noqa: PLR2004 -- the smallest value `:.4f` can show as non-zero, which is the whole threshold; naming it as a constant would say less than this comparison does.
+        return f"{rate:.4f}"
+    if rate == 0:
+        # Zero is a RESULT here and not a formatting failure: a price of 0 for
+        # either leg produces it, and that is worth seeing as 0 rather than as
+        # 0.00e+00.
+        #
+        # EXACTLY ZERO, NOT `<= 0`, and the first version of this line had it
+        # wrong. `rate <= 0` rendered -1.0 as "0", which is the defect this whole
+        # function exists to remove, pointed the other way: a negative rate cannot
+        # arise from two positive USD prices, so if one ever appears it is a broken
+        # feed and must be VISIBLE rather than flattened to a plausible-looking
+        # zero. Negatives fall through to %g below and print as negatives.
+        return "0"
+    # Three significant digits, which carries 1.09e-07 and 1.76e-05 without
+    # pretending to a precision the USD prices behind them do not have.
+    return f"{rate:.3g}"
+
+
 def check_pricing(pair: tuple[str, str] | None = None) -> None:
     """Every asset a CHECKED pair needs must have a USD price, or no rate exists.
 
@@ -1060,7 +1107,7 @@ def check_pricing(pair: tuple[str, str] | None = None) -> None:
                f"no USD price for {', '.join(missing)}  <- every checked pair needs BOTH legs priced, or "
                f"create_quote() raises and the browser renders the exception. Read: {shown or '(none)'}")
         return
-    rates = ", ".join(f"1 {a} = {usd[a] / usd[b]:.4f} {b}" for a, b in pairs)
+    rates = ", ".join(f"1 {a} = {rate_text(usd[a] / usd[b])} {b}" for a, b in pairs)
     record(PASS, "pricing", f"{shown}  ->  {rates or '(no checked pair to rate)'}  <- before fees")
 
 
