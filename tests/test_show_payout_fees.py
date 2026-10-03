@@ -483,3 +483,74 @@ def test_a_chain_with_payouts_is_never_asked_because_it_was_MEASURED():
     body = "\n".join(lines)
     assert "booked/measured: 10.00x" in body, body
     assert "READ FROM THE SERVER" not in body, "a measured chain was also asked for a current quote"
+
+
+# --- HISTORY VS CONFIGURATION ---------------------------------------------------
+#
+# The operator set GRC_NETWORK_FEE_RESERVE to the measured 0.001 and this tool
+# printed, on one screen:
+#
+#     GRC  payouts=7  GRC_NETWORK_FEE_RESERVE=0.001
+#       measured fee: mean 0.00100000 ...
+#       booked/measured: 10.00x
+#
+# Both figures were correct and together they read as "you changed it and nothing
+# happened". `booked` is swaps.network_fee_reserve, stamped on each swap AT QUOTE
+# TIME, and all seven were quoted while the config said 0.01. A config change
+# cannot reach into a completed swap, and the output must not look like it should
+# have.
+
+
+def test_the_HISTORICAL_ratio_and_the_CONFIGURED_one_are_both_reported_and_labeled():
+    """Seven swaps booked 0.01; the config now says 0.001. Both facts, each labeled.
+
+    MUTATION: delete the configured/measured line. The output goes back to a single
+    10.00x beside a setting reading 0.001, which is the screen that reads as a
+    change that did not take.
+    """
+    lines, say = _collect()
+    # Exactly the operator's host on 2026-10-03: seven payouts that each booked 0.01
+    # and each cost 0.001, against a config that now says 0.001.
+    report_asset("GRC", {"fees": [0.001] * 7, "booked": [0.01] * 7, "unread": []}, say)
+    body = "\n".join(lines)
+
+    assert "booked at quote time: mean 0.01000000 over 7 payouts" in body, body
+    assert "booked/measured: 10.00x" in body, "the historical ratio must still be reported"
+    assert "HISTORICAL" in body, (
+        "the 10.00x is a statement about seven completed payouts and must say so, or it reads as a "
+        "live disagreement with the setting printed three lines above it"
+    )
+    assert "Changing the setting cannot alter this" in body, (
+        "nothing told the reader why the ratio did not move when they changed the setting"
+    )
+    # And the figure a change DOES move, against the real Config value.
+    expected = float(Config.GRC_NETWORK_FEE_RESERVE) / 0.001
+    assert f"configured/measured: {expected:.2f}x" in body, body
+    assert "WHAT THE NEXT SWAP WILL BOOK" in body, (
+        "the configured ratio is the only one an operator can act on and must be named as such"
+    )
+
+
+def test_the_configured_figure_is_marked_as_NOW_on_the_header_line():
+    """`SETTING=0.001` alone invites the reader to compare it with a historical ratio."""
+    lines, say = _collect()
+    report_asset("GRC", {"fees": [0.001], "booked": [0.01], "unread": []}, say)
+    assert "CONFIGURED NOW" in lines[0], lines[0]
+
+
+def test_an_asset_with_no_configured_reserve_reports_no_configured_ratio():
+    """SOL has no reserve, so there is no configured figure to divide by.
+
+    A 0.00x or a crash here would both be worse than the line's absence -- and the
+    header still says the reserve is absent and what that costs, which is the fact
+    that reader needs.
+    """
+    absent = [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC")
+              if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE")]
+    if not absent:
+        pytest.skip("every asset has a reserve now, so there is no absent one to report")
+    lines, say = _collect()
+    report_asset(absent[0], {"fees": [0.000005], "booked": [0.0], "unread": []}, say)
+    body = "\n".join(lines)
+    assert "configured/measured" not in body, "a configured ratio was reported for an absent reserve"
+    assert "REFUSES" in body, "the absence's consequence left the screen"

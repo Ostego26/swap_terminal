@@ -361,7 +361,7 @@ def report_asset(asset: str, bucket: dict, say, adapter=None) -> None:
     setting = f"{asset}_NETWORK_FEE_RESERVE"
     configured = getattr(Config, setting, None)
     shown = "(absent -- every quote paying out in this asset REFUSES)" if configured is None else configured
-    say(f"{asset}  payouts={len(bucket['booked'])}  {setting}={shown}")
+    say(f"{asset}  payouts={len(bucket['booked'])}  {setting}={shown} <- CONFIGURED NOW")
     if not bucket["booked"]:
         # NOTHING PAID OUT YET IS ITS OWN CASE and is reported BEFORE the
         # measurability question, because "no fee to measure" is true of this chain
@@ -394,10 +394,34 @@ def report_asset(asset: str, bucket: dict, say, adapter=None) -> None:
     else:
         say(f"  measured fee: mean {verdict['measured']:.8f} over {verdict['n']} payouts "
             f"(low {verdict['low']:.8f}, high {verdict['high']:.8f})")
+        # THE BOOKED FIGURE IS HISTORY AND THE CONFIGURED ONE IS THE FUTURE, AND
+        # SAYING SO IS NOT A NICETY. The operator set GRC_NETWORK_FEE_RESERVE to
+        # the measured 0.001 on 2026-10-03 and this tool still printed
+        #
+        #     GRC  payouts=7  GRC_NETWORK_FEE_RESERVE=0.001
+        #       measured fee: mean 0.00100000 ...
+        #       booked/measured: 10.00x
+        #
+        # which reads, on one screen, as "you changed it and nothing happened".
+        # Both numbers were right. `booked` is swaps.network_fee_reserve -- the
+        # figure stamped on each swap AT QUOTE TIME -- and all seven of those swaps
+        # were quoted while the config said 0.01, so 10.00x is a true statement
+        # about seven payouts that have already happened. A config change cannot
+        # reach back into them, and nothing should pretend it did.
+        #
+        # So the ratio now says WHEN its numerator is from, and the configured
+        # figure gets its own comparison line. Rule 14: state what the number means
+        # next to the number, because the operator reads the screen.
+        say(f"  booked at quote time: mean {verdict['booked']:.8f} over {verdict['n']} payouts")
         if verdict["ratio"] is not None:
-            say(f"  booked/measured: {verdict['ratio']:.2f}x  <- 1.0 means the reserve matches what the "
-                f"chain charged; above 1.0 the desk books more cost than it pays, so every margin figure "
-                f"it reports is understated")
+            say(f"  booked/measured: {verdict['ratio']:.2f}x  <- HISTORICAL. 1.0 means those swaps "
+                f"booked what the chain charged; above 1.0 the desk booked more cost than it paid, so "
+                f"the margin it REPORTED on them is understated. Changing the setting cannot alter "
+                f"this -- the figure is stamped on each swap when it is quoted.")
+        if configured is not None and verdict["measured"]:
+            ahead = float(configured) / verdict["measured"]
+            say(f"  configured/measured: {ahead:.2f}x  <- WHAT THE NEXT SWAP WILL BOOK. This is the one "
+                f"a change to {setting} moves, and 1.0 is the target.")
     for txid, why in bucket["unread"]:
         say(f"  unread {txid[:16]}: {why}")
 
