@@ -173,6 +173,32 @@ class Config:
     # longer the blocker; enabling them is a separate decision and still the
     # operator's.
     XRP_NETWORK_FEE_RESERVE = _env_float("XRP_NETWORK_FEE_RESERVE", "0.00001")
+    # SOL, MEASURED ON THE OPERATOR'S HOST 2026-10-03, and it is the first time
+    # anything in this tree checked the figure against a cluster.
+    #
+    #   0.000005000 SOL (5000 lamports), getFeeForMessage at commitment finalized,
+    #   over the 150-byte MESSAGE of a one-signature native transfer, priced
+    #   against a real blockhash from getLatestBlockhash.
+    #
+    # chains/solana_units.py:513's SIGNATURE_FEE_LAMPORTS = 5_000 calls itself "a
+    # reference value; getFeeForMessage is the authority" -- and the authority
+    # agrees with it. That is worth distinguishing from a constant nobody checked:
+    # the number did not change, the EVIDENCE for it did, and only one of those two
+    # states can be relied on.
+    #
+    # PER SIGNATURE, NOT PER BYTE, so a one-signature transfer costs this regardless
+    # of size. A priority fee would be ON TOP and this desk sends none.
+    #
+    # WHY THIS LINE IS NOT WHAT MAKES A *->SOL PAIR WORK, said here because the
+    # reserve is the cheapest of the prerequisites and the easiest to mistake for
+    # the whole job. With a reserve and nothing else, a quote PRICES and the swap
+    # then refuses, which is the quote-then-cannot-pay sequence
+    # tests/test_allowed_pairs_are_serviceable.py spent three days declining to
+    # open for XRP. What a SOL payout additionally needs is the signing path armed
+    # (chains/solana.py's can_spend, and the keypair path behind it) and a funded
+    # SOL_HOT_WALLET. The page refuses the pair until those hold, which is what
+    # makes adding this safe rather than a promise.
+    SOL_NETWORK_FEE_RESERVE = _env_float("SOL_NETWORK_FEE_RESERVE", "0.000005")
     # ClassVar annotations: these are shared configuration read by every
     # request, not per-instance defaults. Config is never instantiated --
     # app.py copies its uppercase attributes into app.config -- so the
