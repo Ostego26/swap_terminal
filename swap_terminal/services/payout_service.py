@@ -68,7 +68,12 @@ import os
 import sqlite3
 from contextlib import nullcontext
 
-from chains.gridcoin_wallet_lock import GridcoinLockError, unlocked_for_payout
+from chains.gridcoin_wallet_lock import (
+    WALLET_UNLOCK_ASSETS,
+    WALLET_UNLOCK_ENV_VAR,
+    GridcoinLockError,
+    unlocked_for_payout,
+)
 from chains.registry import why_cannot_pay_out
 
 # THE ARMING TOKEN ONLY, AND DELIBERATELY NOT chains/solana_payout_keypair.
@@ -833,19 +838,13 @@ _REPORTED_INVENTORY_FAILURES: set[tuple[str, str]] = set()
 #     on success, on a failed send, and on Ctrl-C
 #   - a missing passphrase REFUSES the payout rather than attempting a send that
 #     would fail anyway, and says which variable to set
-WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
-
-# THE NAME OF the environment variable, which is not itself a secret -- and naming
-# it WALLET_UNLOCK_ENV_VAR rather than ..._PASSPHRASE_VARIABLE is the honest fix for
-# ruff's S105 rather than a suppression (rule 19). The first spelling made a
-# constant holding a variable NAME look like a constant holding a passphrase, which
-# is precisely the confusion that lint rule exists to catch.
-#
-# Read from the environment and never from Config. Config is echoed on the admin
-# page through an allowlist, and a passphrase must not be one key away from
-# something that gets rendered -- services/admin_view.py's own comment notes that
-# Config.RPC holds wallet credentials "one key away from these".
-WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
+# BOTH CONSTANTS NOW LIVE IN chains/gridcoin_wallet_lock.py AND ARE RE-EXPORTED HERE.
+# services/swap_service.py needs them for the same lock cycle around getnewaddress,
+# and this module already imports swap_service -- so defining them here and importing
+# back would be a cycle. They are imported at the top of this file; these names stay
+# bound so every existing caller and test keeps working, with ONE definition rather
+# than two spellings (rule 8).
+_WALLET_UNLOCK_CONSTANTS_LIVE_IN = "chains/gridcoin_wallet_lock.py"
 
 
 # What the payouts row reads while the swap reads the key. The two move together in

@@ -24,7 +24,14 @@ is written out at the function.
 """
 
 import logging
+import os
 
+from chains.gridcoin_wallet_lock import (
+    WALLET_UNLOCK_ASSETS,
+    WALLET_UNLOCK_ENV_VAR,
+    needs_wallet_unlock,
+    unlocked_for_payout,
+)
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 from modules.address_authority import check_address, check_receive_address, expected_network
 
@@ -296,7 +303,7 @@ def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tu
     deposit it cannot see costs the deposit.
     """
     if from_asset not in TAG_ATTRIBUTED_ASSETS:
-        derived = adapters[from_asset].get_new_address(f"swap_{swap_id}")
+        derived = derive_deposit_address(adapters[from_asset], from_asset, swap_id)
         _refuse_unusable_deposit_address(config, from_asset, derived, "the wallet's own get_new_address()")
         return derived, False
 
@@ -421,6 +428,67 @@ def payout_source_account(config, asset: str) -> str:
             f"destination side, not here."
         )
     return account
+
+
+def derive_deposit_address(adapter, asset: str, swap_id: str) -> str:
+    """getnewaddress, and if the wallet is LOCKED, do the lock cycle and try once more.
+
+    OPERATOR INSTRUCTION 2026-10-03: "on our end the terminal it will have to be
+    able to lock-unlock-lock-return to staking unlock our OWN hot wallet."
+
+    THAT CYCLE ALREADY EXISTED AND ONLY WRAPPED THE SEND.
+    chains/gridcoin_wallet_lock.unlocked_for_payout() does exactly
+    lock -> unlock past staking -> body -> lock -> unlock for staking, with the
+    restore in a `finally` so it runs even when the body raises. But
+    services/payout_service.py is its only caller, so it covered the one wallet
+    write that pays a customer and not the other one.
+
+    DERIVING AN ADDRESS IS ALSO A WALLET WRITE. On a Bitcoin-derived daemon
+    `getnewaddress` succeeds while the keypool holds spare keys and fails with
+    WALLET_UNLOCK_NEEDED (rpc -13) once it must top the pool up. So an encrypted
+    wallet unlocked only for staking creates swaps fine until the keypool empties,
+    and then stops -- with a customer on the page.
+
+    NOT MEASURED AGAINST A GRIDCOIN DAEMON FROM HERE, and said rather than implied:
+    this container has no Gridcoin node. It is the documented behavior of the family
+    Gridcoin forked, and the operator's own wallet has not hit it yet because their
+    keypool is not exhausted.
+
+    TRY FIRST, UNLOCK ONLY IF THE WALLET SAYS SO. The alternative -- unlock on every
+    swap creation -- would hold the hot wallet open for sending on a path that only
+    needs to read a key out of a pool, and would do it for every customer who loads
+    the form. The cost of this order is one failed RPC before the retry; the cost of
+    the other is a wallet unlocked for no reason, repeatedly.
+
+    A FAILURE THAT IS NOT A LOCK IS RE-RAISED UNCHANGED. needs_wallet_unlock() is
+    deliberately narrow: a refused connection, a bad label and a malformed response
+    must stay failures, because only the lock is something this process can fix and
+    then re-attempt. Rule 12's BLE001 note is the reason this is not `except
+    Exception: retry`.
+
+    AND IF NO PASSPHRASE IS SET, THE ORIGINAL ERROR IS RAISED, not a complaint about
+    the variable. The operator needs to see what the daemon said; the missing
+    variable is named in the message this adds to it.
+    """
+    label = f"swap_{swap_id}"
+    try:
+        return adapter.get_new_address(label)
+    except Exception as error:
+        if asset not in WALLET_UNLOCK_ASSETS or not needs_wallet_unlock(error):
+            raise
+        passphrase = os.environ.get(WALLET_UNLOCK_ENV_VAR, "")
+        if not passphrase:
+            raise type(error)(
+                f"{error}  <- the wallet is locked and {WALLET_UNLOCK_ENV_VAR} is not set in this "
+                f"process, so this swap cannot derive a deposit address. getnewaddress needs the "
+                f"wallet unlocked once the keypool is exhausted; a staking-only unlock is not enough"
+            ) from error
+        logger.info(
+            "swap %s: %s getnewaddress needs an unlocked wallet, doing lock -> unlock -> derive -> "
+            "lock -> unlock for staking", swap_id, asset,
+        )
+        with unlocked_for_payout(adapter, passphrase):
+            return adapter.get_new_address(label)
 
 
 def _refuse_unusable_deposit_address(config, asset: str, address: str, source: str) -> None:

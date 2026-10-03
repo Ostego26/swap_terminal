@@ -79,7 +79,7 @@ from config import Config
 from db import PAYOUT_LIVE_STATUSES, db_session
 from microfortnights import format_duration
 from report_block import labeled
-from services.helpers import utc_now
+from services.helpers import utc_now_iso
 
 SELF = "rescue_payout.py"
 
@@ -218,7 +218,15 @@ def main(argv: list[str] | None = None) -> int:
             print(labeled("done in", format_duration(time.monotonic() - started)), flush=True)
             return 0
 
-        now = utc_now()
+        # utc_now_iso(), NOT utc_now(). The first version used utc_now(), which returns
+        # a datetime -- so every timestamp went into SQLite through the default
+        # datetime adapter, which Python 3.12 deprecates and which renders
+        # "2026-10-03 11:52:00+00:00" with a SPACE where every other row in this
+        # database has a "T". The operator saw three DeprecationWarnings on their
+        # 3.12 host; this container is 3.11 and printed none, which is why it
+        # shipped. services/helpers.py has both functions and the rest of the tree
+        # uses the _iso one.
+        now = utc_now_iso()
         # ONE TRANSACTION for the release and the status change. Either both land or
         # neither does: a released reservation on a swap still 'failed' loses the
         # record of money owed, and a 'payout_pending' swap with the reservation

@@ -138,6 +138,67 @@ def unlock_for_staking(adapter, passphrase: str) -> None:
     adapter.call(_METHOD_UNLOCK, passphrase, STAKING_UNLOCK_SECONDS, True)
 
 
+#: Chains whose wallet must be FULLY UNLOCKED to write, and which are returned to a
+#: staking unlock afterwards. Gridcoin is the only one.
+#:
+#: MOVED HERE FROM services/payout_service.py ON 2026-10-03, and the move is what
+#: made the fix possible rather than a tidy-up. services/swap_service.py needs both
+#: of these to do the same lock cycle around getnewaddress -- and payout_service
+#: already imports swap_service, so importing back would be a cycle. They belong
+#: below both services anyway: this module owns the lock concept, and dependencies
+#: point downward (rule 10). payout_service re-exports them so its own callers and
+#: tests are unchanged, which is one definition and no second spelling (rule 8).
+WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
+
+#: THE NAME OF the environment variable, which is not itself a secret -- and naming
+#: it WALLET_UNLOCK_ENV_VAR rather than ..._PASSPHRASE_VARIABLE is the honest fix for
+#: ruff's S105 rather than a suppression (rule 19). The first spelling made a
+#: constant holding a variable NAME look like a constant holding a passphrase, which
+#: is precisely the confusion that lint rule exists to catch.
+#:
+#: Read from the environment and never from Config. Config is echoed on the admin
+#: page through an allowlist, and a passphrase must not be one key away from
+#: something that gets rendered.
+WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
+
+
+#: What a Bitcoin-derived daemon says when an operation needs the wallet unlocked.
+#:
+#: RPC code -13 is WALLET_UNLOCK_NEEDED, and the message is the one every fork
+#: prints. Both are matched because a caller may see either the code (through a
+#: structured RPC error) or only the text (through a wrapper that kept the message
+#: and dropped the code) -- chains/base.rpc_error_from_body() returns a string, so
+#: in this tree it is usually the text.
+#:
+#: NOT MEASURED AGAINST A GRIDCOIN DAEMON FROM HERE, and said rather than implied:
+#: this container has no Gridcoin node. The code and the message are what the
+#: Bitcoin family documents and what Gridcoin inherits; needs_wallet_unlock() is
+#: deliberately generous, because a false NEGATIVE means a swap fails for a reason
+#: the operator has already solved, while a false positive costs one unlock cycle.
+WALLET_UNLOCK_NEEDED_CODE = -13
+WALLET_UNLOCK_NEEDED_MARKERS = (
+    "please enter the wallet passphrase",
+    "wallet_unlock_needed",
+    "walletpassphrase first",
+    "-13",
+)
+
+
+def needs_wallet_unlock(error: Exception) -> bool:
+    """Is this failure "the wallet is locked" rather than anything else?
+
+    A FUNCTION SO IT CAN BE CALLED WITH A SEEDED ERROR (rule 10). The alternative
+    is a substring test inlined at the call site, which cannot be asserted on
+    without provoking a real locked daemon.
+
+    Deliberately NOT a catch-all: a connection refused, a bad address and a
+    malformed request must all stay failures. Only the lock gets a retry, because
+    only the lock is something this process can fix and then re-attempt.
+    """
+    text = str(error).lower()
+    return any(marker in text for marker in WALLET_UNLOCK_NEEDED_MARKERS)
+
+
 def restore_failed_because(locked: bool, error: Exception) -> str:
     """The operator-facing sentence for a failed restore. Two OUTCOMES, not one.
 
