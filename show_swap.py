@@ -411,6 +411,63 @@ def payout_lines(payouts: list[dict]) -> list[str]:
     ]
 
 
+def what_credited_means(swap: dict) -> str:
+    """swaps.credited_at, and what its ABSENCE means -- which is three things, not one.
+
+    THE LINE READ, UNCONDITIONALLY:
+
+        credited        (none) -- the deposit was never accepted
+
+    and that sentence describes exactly one of the three states the column has.
+    Measured on the operator's screen 2026-10-03, on a swap created ten minutes
+    earlier that was working perfectly:
+
+        status          awaiting_deposit  <- Waiting for your deposit [waiting]
+        deposit rows    0
+        credited        (none) -- the deposit was never accepted
+
+    Nothing had been sent yet. "Was never accepted" is a past-tense verdict on a
+    deposit that does not exist, and it reads as a refusal on the one status where
+    there is nothing at all to refuse. An operator reads the screen, not the source
+    (rule 14), and this screen told them their untouched swap had been rejected.
+
+    THE SAME SENTENCE, ON THE SAME DAY, WAS ALSO WRONG IN THE OPPOSITE DIRECTION.
+    resolve_halted_swap.py's --apply did not stamp credited_at, so a PAID swap --
+    GRC on the chain, txid recorded, status completed -- printed "the deposit was
+    never accepted" too. e40a0b8 fixed the stamping, which was the defect that
+    could strand money, and left this sentence alone because the stamping was the
+    half that mattered. It was not the only half: one string was serving as the
+    explanation for "nothing sent", "sent but not yet counted" and "a bug in the
+    resolver", and it was accurate for none of them.
+
+    So the absence is split by what the deposit rows say, because that is the
+    evidence that distinguishes the cases and it is already loaded:
+
+      no rows at all    nothing has arrived. There is nothing to credit and no
+                        judgment has been made.
+      rows, uncredited  something arrived and has NOT been accepted yet. On this
+                        path that is almost always the confirmation threshold not
+                        being met -- the `confirmations` line two rows up carries
+                        the count -- and it is also what a tolerance halt looks
+                        like, which is why this says "not accepted YET" and points
+                        at the status rather than guessing between them.
+      credited_at set   the stamp, which is the only case the old sentence was
+                        the complement of.
+
+    Returns the whole value for the line rather than a note appended to it,
+    unlike what_the_seen_total_counts(), because in two of the three cases there
+    is no timestamp for a note to be attached to.
+    """
+    credited = swap.get("credited_at")
+    if credited:
+        return f"{credited}  <- swaps.credited_at, stamped when the confirmed deposit was accepted"
+    rows = len(swap.get("deposit_events") or [])
+    if not rows:
+        return "(none) -- nothing has arrived, so there is nothing to credit yet"
+    return (f"(none) -- {rows} deposit row(s) seen and none accepted yet; the confirmations line above and "
+            f"the status say which of waiting, short, or held for review this is")
+
+
 def what_the_seen_total_counts(swap: dict) -> str:
     """Which sum swaps.actual_input_amount is holding right now. It is TWO different sums.
 
@@ -502,7 +559,7 @@ def swap_lines(view: dict, now_iso: str) -> list[str]:
         labeled("created", f"{swap.get('created_at')}"),
         labeled("updated", f"{swap.get('updated_at')}"
                            f"{'' if waited is None else f'  ({format_duration(waited)} ago)'}"),
-        labeled("credited", f"{swap.get('credited_at') or '(none) -- the deposit was never accepted'}"),
+        labeled("credited", what_credited_means(swap)),
         labeled("quote window", f"{window['display']}  <- {window['note']}"),
     ])
     # The two section headers carry their own COUNT rather than an empty value.

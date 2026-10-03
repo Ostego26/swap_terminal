@@ -765,3 +765,74 @@ def test_ordinary_rows_keep_the_plain_sentence():
     assert show_swap.what_the_deposit_rows_are([]) == (
         "every payment attributed to this swap, confirmed or not"
     )
+
+
+def test_an_untouched_swap_does_not_say_its_deposit_was_refused():
+    """"the deposit was never accepted" on a swap nothing had been sent to.
+
+    Measured on the operator's screen 2026-10-03, on a GRC -> XRP swap created ten
+    minutes earlier and working perfectly:
+
+        status          awaiting_deposit  <- Waiting for your deposit [waiting]
+        deposit rows    0
+        credited        (none) -- the deposit was never accepted
+
+    Past-tense verdict on a deposit that does not exist. The line was
+    unconditional, so one sentence was serving as the explanation for three
+    different states, and it was accurate for none of the other two.
+
+    The same sentence printed on a PAID swap earlier the same day, because
+    resolve_halted_swap.py's --apply did not stamp credited_at. e40a0b8 fixed the
+    stamping; this is the other half, which that commit left alone.
+    """
+    waiting = show_swap.what_credited_means({"credited_at": None, "deposit_events": []})
+    seen = show_swap.what_credited_means({"credited_at": None, "deposit_events": [{"amount": 500.0}]})
+    credited = show_swap.what_credited_means(
+        {"credited_at": "2026-10-03T19:40:00+00:00", "deposit_events": [{"amount": 500.0}]}
+    )
+
+    assert "nothing has arrived" in waiting
+    assert "never accepted" not in waiting, (
+        "the defect itself: a refusal reported on a swap with no deposit to refuse"
+    )
+    assert "1 deposit row(s) seen" in seen, "a row exists, so the absence of a credit is about THAT row"
+    assert "none accepted yet" in seen, "'yet' is the difference between awaiting confirmations and refused"
+    assert "2026-10-03T19:40:00+00:00" in credited
+    assert "swaps.credited_at" in credited, "rule 14: say which column the figure came from"
+
+    assert waiting != seen != credited and waiting != credited, (
+        "three states, three sentences -- a version returning one constant satisfies every "
+        "assertion above that does not compare them"
+    )
+
+
+def test_the_credited_line_on_the_real_report_distinguishes_waiting_from_refused(tmp_path, capsys):
+    """Through the real tool, because the old string was INLINE in the line list.
+
+    That is why fixing resolve_halted_swap.py's stamping in e40a0b8 did not touch
+    it: there was no function name to grep for. Asserted end to end so a future
+    rewrite of this line back into swap_lines() fails here and not only in the
+    unit test above.
+
+    Two swaps, one database, one difference: whether a deposit row exists.
+    """
+    path = tmp_path / "swap_terminal.db"
+    conn = seed_db(path)
+    seed_swap(conn, "s_nothing_sent", "awaiting_deposit", min_confirmations=6)
+    seed_swap(conn, "s_one_row_short", "awaiting_deposit", min_confirmations=6, actual=5.0)
+    seed_deposit(conn, "s_one_row_short", 5.0, confirmations=2)
+    conn.close()
+
+    assert run_tool(["--db", str(path), "--swap", "s_nothing_sent"]) == 0
+    nothing_sent = capsys.readouterr().out
+    assert run_tool(["--db", str(path), "--swap", "s_one_row_short"]) == 0
+    one_row = capsys.readouterr().out
+
+    assert "nothing has arrived, so there is nothing to credit yet" in nothing_sent
+    assert "never accepted" not in nothing_sent, (
+        "the measured defect: a swap nobody had sent to reported its deposit refused"
+    )
+    assert "1 deposit row(s) seen and none accepted yet" in one_row
+    assert "nothing has arrived" not in one_row, (
+        "a row exists, so the swap-wide 'nothing arrived' sentence is false here"
+    )
