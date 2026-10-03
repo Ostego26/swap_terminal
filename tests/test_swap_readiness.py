@@ -1083,3 +1083,52 @@ def test_the_whole_run_is_READY_on_the_operators_actual_state(monkeypatch, capsy
     assert code == 0, f"the gate must open on this configuration:\n{out}"
     assert "READY" in out
     assert "SOL -> GRC can be created and paid" in out
+
+
+def test_the_unpayable_FAIL_distinguishes_a_refused_NEW_swap_from_a_stranded_OPEN_one():
+    """One line used to attach the stranded-deposit hazard to the wrong case.
+
+    It said, for every unpayable destination: "A deposit would still be watched and
+    CREDITED, and the payout would then refuse and land the swap in 'failed', which
+    nothing retries."
+
+    MEASURED 2026-10-03, after chains/solana.py's can_spend became derived: for a
+    NEW swap that does not happen. services/swap_service.create_swap() reads
+    chains/registry.why_cannot_pay_out() and refuses with nothing written --
+    tests/test_solana_adapter.py::
+    test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken
+    proves zero swap rows over seeded rows through the real services. No swap row,
+    no deposit target, nothing credited.
+
+    AND THE SENTENCE IS STILL TRUE OF A SWAP ALREADY OPEN, which is why it stays: a
+    swap created while the payout was ARMED, on a process since restarted without
+    the variable, is exactly that stranded case. An operator produces it by
+    unexporting one variable.
+
+    So the line must say BOTH and say which is which. A hazard attached to the wrong
+    case either scares an operator off a safe action or hides the unsafe one, and
+    this check exists to send them looking in the right place.
+
+    MUTATION: drop either clause. Whichever goes, one assertion below fails.
+    """
+    swap_readiness._results.clear()
+    swap_readiness.check_payout_unlock({"SOL": CannotSign()})
+    payout = [row for row in swap_readiness._results if row[1] == "payout chain"]
+    assert len(payout) == 1, f"expected one payout-chain row, got {[r[1] for r in swap_readiness._results]}"
+    verdict, _label, detail = payout[0]
+    assert verdict == FAIL, f"an unpayable destination must FAIL, got {verdict}"
+
+    # The NEW-swap half: a closed door, and it must say nothing is written.
+    assert "REFUSED by create_swap()" in detail, detail
+    assert "no deposit is watched or credited" in detail, detail
+    # The ALREADY-OPEN half: the real trap, and it must still be named.
+    assert "ALREADY OPEN" in detail, detail
+    assert "nothing retries" in detail, (
+        "the stranded-deposit hazard left the line entirely. It is real for an in-flight swap and an "
+        "operator who ever armed this host needs to go and look"
+    )
+    # And the two must be distinguishable, not run together as one claim.
+    assert detail.index("REFUSED by create_swap()") < detail.index("ALREADY OPEN"), (
+        "the trap is described before the closed door, so a reader meets the hazard first and attaches "
+        "it to the action they were about to take"
+    )

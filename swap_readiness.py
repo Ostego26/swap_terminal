@@ -232,10 +232,38 @@ def check_payout_unlock(adapters, pair: tuple[str, str] | None = None) -> None:
         # the one it was -- rule 14's "state what the number means" turned into
         # noise by a set that did not follow the scope.
         needed = ", ".join(sorted({to for _, to in wanted}))
+        # TWO DIFFERENT HAZARDS AND THIS LINE USED TO NAME ONLY THE WORSE ONE, as
+        # though it applied to the swap the reader is about to make. It said: "A
+        # deposit would still be watched and CREDITED, and the payout would then
+        # refuse and land the swap in 'failed', which nothing retries."
+        #
+        # MEASURED 2026-10-03, after can_spend became derived rather than
+        # hardcoded: for a NEW swap that does not happen.
+        # services/swap_service.create_swap() reads
+        # chains/registry.why_cannot_pay_out() and REFUSES, writing nothing --
+        # tests/test_solana_adapter.py::
+        # test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken
+        # asserts zero swap rows over seeded rows through the real services. No
+        # swap row means no deposit target, so nothing is watched and nothing is
+        # credited.
+        #
+        # THE OLD SENTENCE IS STILL TRUE OF A SWAP THAT ALREADY EXISTS, which is
+        # why it is kept rather than deleted: a swap created while the payout was
+        # ARMED, on a process since restarted without the variable, is exactly the
+        # stranded case it describes. That is a real sequence an operator can
+        # produce by unexporting one variable, and it is the one this check should
+        # make them look for.
+        #
+        # Saying both, and which is which, is rule 14: the operator reads the
+        # screen, and a hazard attached to the wrong case either scares them off a
+        # safe action or hides the unsafe one.
         record(FAIL, "payout chain",
                f"NOTHING CAN BE PAID OUT. Adapters built: {', '.join(sorted(adapters)) or '(none)'}; "
-               f"destination(s) needed: {needed}. A deposit would still be watched and CREDITED, and the "
-               f"payout would then refuse and land the swap in 'failed', which nothing retries")
+               f"destination(s) needed: {needed}. A NEW swap is REFUSED by create_swap() and nothing is "
+               f"written, so no deposit is watched or credited -- this is a closed door, not a trap. BUT "
+               f"ANY SWAP ALREADY OPEN for one of those destinations is the trap: its deposit is still "
+               f"watched and CREDITED, and the payout then refuses and lands it in 'failed', which nothing "
+               f"retries. If this host was ever armed, check for in-flight swaps before leaving it this way")
         return
     record(PASS, "payout chain", f"{', '.join(sorted(payable))}  <- has an adapter AND is the destination "
                                  f"of an allowed pair. A chain missing from here cannot be paid")
