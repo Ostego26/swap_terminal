@@ -977,6 +977,57 @@ stops anywhere earlier than the arming check now says so and exits non-zero —
 it used to print "that refusal is the DEFAULT and is correct" for an unreachable
 endpoint, which made a connection reset read as a working guard.
 
+### Arming the SOL payout — one variable, and it arms NOTHING on its own
+
+Written 2026-10-03 because the section above documents XRP and this one did not
+exist, which is the asymmetry that makes a reader conclude SOL has no payout
+path at all. It has one, as of `cb37457`, and it is deliberately harder to arm
+than XRP's.
+
+| variable | what it is | unset means |
+| --- | --- | --- |
+| `SOL_PAYOUT_KEYPAIR_PATH` | a PATH to a keypair file, never the key itself. Read at use time, never from `Config` (which `/admin` echoes through an allowlist), never logged, never in `argv` | the send refuses with the full preview in the refusal |
+
+**SETTING IT STILL ARMS NOTHING, AND THAT IS THE DIFFERENCE FROM XRP.** This is
+the one place the two chains deliberately diverge, so it is stated here and at
+`chains/solana_signing.py` rather than left for a reader to infer from one of
+them:
+
+    XRP   can_spend is DERIVED from whether the seed is present, so exporting
+          XRP_PAYOUT_SECRET_SEED moves it from False to True.
+    SOL   can_spend is a hardcoded False that configuration cannot flip. Export
+          SOL_PAYOUT_KEYPAIR_PATH on every host you own and `create_swap()` still
+          refuses a SOL-destination swap. Flipping it is a one-line code change
+          that shows up in a diff, which is where a decision to start paying out
+          in SOL belongs (rule 16).
+
+Measured with the path set: `can_spend` is `False` and
+`chains/registry.why_cannot_pay_out("SOL")` returns the identical sentence it
+returns with the path unset.
+
+Two other things stand between the tree and a quotable `*→SOL` pair, and both
+are the operator's: `SOL_NETWORK_FEE_RESERVE` does not exist in `config.py`
+(`config.py:151` makes that key's existence one of two conditions for an asset
+to be quotable, and inventing the number is a pricing decision), and no
+`*→SOL` pair is in `ALLOWED_PAIRS`.
+
+**NO TRANSACTION THIS PATH BUILDS HAS EVER REACHED A CLUSTER.** The serializer
+is verified byte-for-byte against `@solana/web3.js` — the same library
+`grc-sol-swap/abstergo_exchange/server.js:244` uses to move real SOL — over the
+5 pinned vectors and 60 random ones, in both directions, with `verifySignatures()`
+true on every Python-produced wire. **That is agreement about a FORMAT.** Whether
+the runtime accepts the transaction — fees, rent, a live blockhash, preflight —
+is a different question that only a broadcast answers, and
+`api.devnet.solana.com` answers `403 Forbidden` through the development proxy.
+So everything downstream of `sendTransaction` is a PROPOSAL under rule 16.
+
+A payout too small to create a brand-new account is refused at QUOTE time, not
+after a deposit is credited: the floor comes from
+`getMinimumBalanceForRentExemption(0)` asked of the chain and cached per
+endpoint, never from a constant — `chains/solana_units.py:411` onward records
+hardcoded reference values going stale, live returning 650,240 and 1,488,440
+where the module said 890,880.
+
 ### Opening a swap from the shell — `open_swap.py`
 
 Dry run by default; `--apply` writes the rows. It exists because the rest of the
