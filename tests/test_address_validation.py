@@ -170,7 +170,19 @@ def test_a_genuinely_invalid_address_also_refuses_the_swap(db):
 def test_a_good_address_still_creates_the_swap(db):
     """And the permissive path is genuinely unchanged, not merely narrowed."""
     adapters = {
-        "LTC": StubAdapter(responses={"validateaddress": {"isvalid": True}}),
+        # getbalance IS SCRIPTED BECAUSE CREATING A SWAP NOW READS IT. Added
+        # 2026-10-03 with services/payout_capacity.py: LTC is this swap's
+        # DESTINATION, and the gate refuses a swap whose payout the destination
+        # wallet cannot fund -- the defect a real 0.001 BTC deposit paid for that
+        # morning, when a 9049.69 GRC payout was quoted against a 3780.09 GRC
+        # wallet and the daemon said "Insufficient funds" eleven seconds after the
+        # deposit became irreversible.
+        #
+        # The figure is deliberately far above the 0.0975 LTC this quote pays, so
+        # the test stays about ADDRESSES: a stub balance trimmed to just clear the
+        # payout would turn every future change to the fee or the reserve into a
+        # failure here, in a file whose subject is validate_address().
+        "LTC": StubAdapter(responses={"validateaddress": {"isvalid": True}, "getbalance": 1000.0}),
         "GRC": StubAdapter(responses={"getnewaddress": GRC_PAYOUT}),
     }
 
@@ -542,3 +554,63 @@ def test_a_not_established_answer_is_logged_loudly_enough_to_be_seen(caplog):
     # phrase in tests/test_web_surfaces.py earlier the same day.
     assert "'not yours'" in text, "the log has to say what the answer is NOT"
     assert "nobody answered" in text
+
+
+# --- the destination wallet must hold the payout ------------------------------
+#
+# These sit here rather than in tests/test_payout_capacity.py because the function
+# being right is not what failed. Four times on 2026-10-03 a correct function's CALL
+# SITE discarded its result -- payable_assets(), show_payout_fees.report_asset(),
+# check_gridcoin(), check_deposit_account() -- so the gate's unit tests are necessary
+# and not sufficient. What these pin is that create_swap() asks, refuses, and leaves
+# nothing behind.
+
+
+def test_a_destination_wallet_too_poor_to_pay_refuses_the_swap_and_writes_nothing(db):
+    """The incident, at its call site. q_v pays 0.0975 LTC and the wallet holds 0.01.
+
+    MEASURED THE SAME MORNING, at the real scale: a 9049.68583412 GRC payout quoted
+    against a 3780.08854497 GRC wallet, refused by the Gridcoin daemon with
+    "Insufficient funds (rpc code -4)" eleven seconds after a 0.001 BTC deposit
+    reached 2 of 2 confirmations and became irreversible.
+
+    THE ZERO-ROWS ASSERTION IS THE SAME INVARIANT the other refusals in this file
+    carry, and it is the one that matters here: a refusal that still wrote the swap
+    row would leave a deposit address a customer could pay into.
+    """
+    adapters = {
+        "LTC": StubAdapter(responses={"validateaddress": {"isvalid": True}, "getbalance": 0.01}),
+        "GRC": StubAdapter(responses={"getnewaddress": GRC_PAYOUT}),
+    }
+
+    with pytest.raises(ValueError, match="Insufficient funds") as refusal:
+        create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
+
+    assert "0.01" in str(refusal.value), "what the wallet holds"
+    assert "0.0985" in str(refusal.value), "and what the payout needs: 0.0975 plus the 0.001 chain fee"
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0, (
+        "nothing taken means no swap row, so no deposit address exists for a customer to pay into"
+    )
+
+
+def test_the_refusal_happens_before_a_deposit_key_is_derived(db):
+    """getnewaddress is a WALLET WRITE and must not run for a swap being refused.
+
+    This is why the gate sits after the address checks and before deposit_account()
+    rather than beside the four local refusals where it was first written: a swap
+    that is going to be refused should not leave a derived key behind in the hot
+    wallet. The source adapter's call log is the assertion, because the swap-row
+    count above would be zero either way.
+    """
+    source = StubAdapter(responses={"getnewaddress": GRC_PAYOUT})
+    adapters = {
+        "LTC": StubAdapter(responses={"validateaddress": {"isvalid": True}, "getbalance": 0.01}),
+        "GRC": source,
+    }
+
+    with pytest.raises(ValueError, match="Insufficient funds"):
+        create_swap(db, CONFIG, adapters, "q_v", LTC_PARTICIPANT)
+
+    assert [method for method, _params in source.calls if method == "getnewaddress"] == [], (
+        "the refusal must come first, or every refused swap burns an address in the hot wallet"
+    )

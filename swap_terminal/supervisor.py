@@ -73,6 +73,40 @@ import sys
 import time
 from pathlib import Path
 
+# sys.path.insert is the idiom every entry point in this tree needs, because the
+# application imports its own modules rootlessly (`from config import Config`).
+# CLAUDE.md rule 10 names that as the largest gap between the rule and the tree,
+# and rewriting every import to close it would be a large diff with no
+# behavioral benefit. The spelling is migrate_swap_intents.py's, deliberately,
+# because a second spelling of one bootstrap is rule 8's shape at its smallest.
+#
+# THIS FILE WAS THE ONE ENTRY POINT WITHOUT IT, which is the opposite of the
+# order you would guess: all three workers carry it (deposit_watcher.py:51,
+# payout_worker.py:60, reconcile_worker.py:78) and so does
+# migrate_swap_intents.py, while supervisor.py -- the file an operator types
+# most, and the one the README names three times -- relied entirely on being
+# invoked as `python3 swap_terminal/supervisor.py`, where Python puts the
+# script's own directory on sys.path for free.
+#
+# MEASURED ON THE OPERATOR'S HOST 2026-10-03. Asked for a worker status while a
+# BTC deposit sat uncredited, `python3 -m swap_terminal.supervisor status` gave
+# them:
+#
+#     ModuleNotFoundError: No module named 'config'
+#
+# `config` is not a name an operator has any reason to recognize, the message
+# says nothing about the invocation being the problem, and the traceback's four
+# frames are all runpy. Worse, it is indistinguishable from a genuinely broken
+# install -- so the reading it invites is "the supervisor is broken", at the
+# moment the actual question was whether the workers were running. Rule 14: the
+# output has to say what the operator can act on, and this one sent them looking
+# at the wrong thing.
+#
+# `python3 -m` is the only invocation this changes. It is already correct under
+# the documented form, and the insert is a no-op there because the path is
+# already present.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from config import Config
 from microfortnights import format_duration
 

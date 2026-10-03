@@ -33,6 +33,41 @@ from swap_readiness import (
 MAINNET_PORT = 15715
 TESTNET_PORT = 25779
 
+# THE MARKER FOR "THIS RUN REPORTED A SEND PRECONDITION ON THIS CHAIN", in one
+# place because four tests use it and they must not disagree about what they are
+# looking for (rule 8 at its smallest).
+#
+# IT USED TO BE THE LITERAL "must be > 0 to pay a GRC leg", four times. That
+# sentence was the whole of this file's balance test until 2026-10-03, when it
+# PASSED on the morning a real 0.001 BTC deposit was taken against a 9049.69 GRC
+# payout that a 3780.09 GRC wallet could not fund:
+#
+#     PASS  GRC wallet   3780.08854497 GRC  <- must be > 0 to pay a GRC leg
+#
+# True, and useless -- the number an operator needs is the largest payout the
+# wallet can fund, which is now the ceiling on every swap this terminal accepts.
+# So the line says that instead, and these tests track the stronger statement
+# rather than being loosened to keep matching the weaker one (rule 2: a test
+# changes to pin the stronger invariant, or it dies with the behavior).
+class CanReadBalance:
+    """A destination adapter that answers get_balance(). Nothing else is asked of it."""
+
+    def __init__(self, balance):
+        self._balance = balance
+
+    def get_balance(self):
+        return self._balance
+
+
+class CannotReadBalance:
+    """A destination adapter whose get_balance() raises, as a down daemon's does."""
+
+    def get_balance(self):
+        raise RuntimeError("connection refused")
+
+
+PAYOUT_CAPACITY_MARKER = "payout this wallet can fund"
+
 
 def test_a_mainnet_port_refuses_to_connect_at_all():
     """THE one that matters. Looking is the hazard, not acting.
@@ -1284,7 +1319,7 @@ def test_a_GRC_SOURCE_run_does_not_report_GRC_SEND_preconditions(monkeypatch):
     `getnewaddress`, a write and not a spend -- and the lines say so instead,
     because naming the real operation is the point of the page.
 
-    MUTATION: pass pays_out_grc=True. The balance line goes back to "must be > 0 to
+    MUTATION: pass pays_out_grc=True. The balance line comes back, naming the "
     pay a GRC leg" and the lock line to the send prose, and both assertions fail.
     """
     monkeypatch.setattr(swap_readiness, "gridcoin_precheck",
@@ -1297,7 +1332,7 @@ def test_a_GRC_SOURCE_run_does_not_report_GRC_SEND_preconditions(monkeypatch):
 
     wallet = rows.get("GRC wallet")
     assert wallet, f"no GRC wallet line at all: {sorted(rows)}"
-    assert "must be > 0 to pay a GRC leg" not in wallet[2], (
+    assert PAYOUT_CAPACITY_MARKER not in wallet[2], (
         f"a send precondition is asserted for a direction that sends no GRC: {wallet[2]}"
     )
     assert "SOURCE in this run" in wallet[2], wallet[2]
@@ -1330,7 +1365,7 @@ def test_a_GRC_DESTINATION_run_still_reports_every_send_precondition(monkeypatch
     swap_readiness.check_gridcoin(pays_out_grc=True)
     rows = {row[1]: row for row in swap_readiness._results}
 
-    assert "must be > 0 to pay a GRC leg" in rows["GRC wallet"][2], rows["GRC wallet"][2]
+    assert PAYOUT_CAPACITY_MARKER in rows["GRC wallet"][2], rows["GRC wallet"][2]
     lock = rows.get("GRC wallet lock")
     assert lock, "the lock check did not run for a direction that pays out GRC"
     assert "nothing sends GRC" not in lock[2], (
@@ -1373,13 +1408,13 @@ def test_main_PASSES_THE_SCOPE_to_check_gridcoin_for_both_directions(monkeypatch
         "main() did not pass the scope to check_gridcoin(), so a GRC -> SOL run still reports GRC send "
         "preconditions. The branch exists and nothing reaches it"
     )
-    assert "must be > 0 to pay a GRC leg" not in source_run, (
+    assert PAYOUT_CAPACITY_MARKER not in source_run, (
         "a scoped GRC -> SOL run asserts a balance precondition for a direction that sends no GRC"
     )
 
     # GRC as the DESTINATION: the send preconditions are back, so the scoping
     # cannot pass by silencing them everywhere.
-    assert "must be > 0 to pay a GRC leg" in destination_run, (
+    assert PAYOUT_CAPACITY_MARKER in destination_run, (
         "a SOL -> GRC run lost the balance precondition, so the guard is gone where the desk does send GRC"
     )
     assert "GRC is the SOURCE in this run" not in destination_run, destination_run[-400:]
@@ -1585,7 +1620,10 @@ def test_a_destination_leg_needs_coins_and_zero_is_the_failing_case(monkeypatch,
     rows = _rows_by_name()
 
     assert rows["BTC balance"][0] == verdict
-    assert "must be > 0" in rows["BTC balance"][2], "state what the number means, next to the number"
+    assert PAYOUT_CAPACITY_MARKER in rows["BTC balance"][2], (
+        "state what the number means, next to the number: the ceiling is what decides whether a "
+        "swap can be created, where a bare '> 0' passed on a wallet holding 41.8% of its payout"
+    )
 
 
 def test_a_missing_adapter_names_the_variable_rather_than_the_absence(monkeypatch):
@@ -1630,3 +1668,41 @@ def test_the_wallet_line_says_when_it_cut_the_daemons_message(monkeypatch):
         "message, a dropped terminal line, and a tool clipping it -- and only the last needs no action"
     )
     assert "regtest_htlc_harness" in line, "the clip must not swallow the hint that follows it"
+
+
+@pytest.mark.parametrize(
+    ("adapters", "fragment"),
+    [
+        ({}, "NOT established"),
+        ({"GRC": CannotReadBalance()}, "NOT established"),
+    ],
+)
+def test_a_ceiling_that_cannot_be_computed_says_so_instead_of_printing_a_number(adapters, fragment):
+    """A readiness page that dies on a missing variable cannot report it.
+
+    get_network_fee_reserve() RAISES for an asset with no reserve configured, which
+    is right for a quote and wrong here -- so payout_ceiling_note() asks through a
+    wrapper that returns None. Either way the line must print the absence rather
+    than a figure: a 0.0 ceiling would send an operator to fund a wallet that may
+    be full, which is rule 13's "did nothing must not look like did work" applied
+    to a number instead of a verdict.
+    """
+    note = swap_readiness.payout_ceiling_note(adapters, "GRC")
+
+    assert fragment in note
+    assert "can fund is" not in note, "a sentinel must never render as a ceiling"
+
+
+def test_the_ceiling_note_names_the_consequence_and_not_just_the_number():
+    """The number alone is trivia; what it DECIDES is the content.
+
+    Since 2026-10-03 this figure is the ceiling on every swap the terminal will
+    create -- services/swap_service.refuse_unless_the_payout_can_be_funded()
+    refuses above it, before any row exists. An operator reading a bare balance
+    cannot know that, and the operator reads the screen, not the source (rule 14).
+    """
+    note = swap_readiness.payout_ceiling_note({"GRC": CanReadBalance(3780.08854497)}, "GRC")
+
+    assert "3780.08854497" in note
+    assert "REFUSED at creation" in note
+    assert "before any deposit is taken" in note

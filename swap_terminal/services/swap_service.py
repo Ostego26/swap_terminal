@@ -36,6 +36,7 @@ from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfi
 from modules.address_authority import check_address, check_receive_address, expected_network
 
 from .helpers import new_id, parse_iso, utc_now_iso
+from .payout_capacity import why_the_payout_cannot_be_funded
 from .xrp_tag_service import allocate_destination_tag
 
 # No handler and no setLevel: a library module that configures logging decides policy for
@@ -551,6 +552,79 @@ def _refuse_unusable_deposit_address(config, asset: str, address: str, source: s
         )
 
 
+def refuse_unless_the_payout_can_be_funded(adapters, config, quote, from_asset: str, to_asset: str) -> None:
+    """Raise if the destination wallet cannot fund this quote's payout. Writes nothing.
+
+    EXTRACTED FROM create_swap() THE MOMENT IT LANDED, because adding the gate took
+    that function to C901 11 > 10, and CLAUDE.md rule 12 says exactly what to do
+    about that: "a main() past the ceiling is orchestration that has swallowed
+    decisions ... the fix is to extract the decision so it can be called with
+    seeded inputs, not to raise the ceiling." The decision itself is one level
+    further down in services/payout_capacity.why_the_payout_cannot_be_funded();
+    what lives here is the raise and the warning, which is the only part
+    create_swap() was holding.
+
+    TAKES THE QUOTE ROW RATHER THAN TWO FLOATS, so no caller can pair an amount
+    with a reserve from somewhere else. Both come off the one row the payout will
+    itself be computed from, which is what makes this gate and the payout agree.
+    """
+    # AND THE WALLET MUST ACTUALLY HOLD IT. THE FIFTH REFUSAL, AND THE ONE A REAL
+    # DEPOSIT PAID FOR.
+    #
+    # MEASURED 2026-10-03, the first BTC -> GRC swap this terminal ever ran. The
+    # deposit was flawless -- 0.001 BTC, 2 of 2 confirmations, COUNTED by the gate,
+    # credited at 12:46:16 and irreversible -- and the payout claimed 11 seconds
+    # later died on "Insufficient funds (rpc code -4)" from the Gridcoin daemon,
+    # which was right:
+    #
+    #     need   9049.68583412 GRC
+    #     have   3780.08854497 GRC spendable
+    #     short  5269.59728915 GRC   -- the wallet held 41.8% of the payout
+    #
+    # Every gate above passed. GRC had an adapter, could sign, had a payout source,
+    # and the fee covered the chain cost. The one question nobody asked was whether
+    # the money was there, and grepping that day found why: quote_service.py and
+    # this file contained ZERO get_balance() calls between them, so the payout's
+    # funding was first tested BY THE DAEMON -- at the only moment when refusing
+    # costs a customer their deposit instead of a retry.
+    #
+    # THAT IS THE SAME SENTENCE THE FOUR GATES ABOVE ARE EACH AN INSTANCE OF, so
+    # this one belongs beside them rather than in the payout worker: refusing
+    # before the swap row exists is the only stage at which nothing has been taken.
+    #
+    # LIVE POSTURE, AND IT WAS HANDED OVER BEFORE IT WAS BUILT (rule 16). A gate
+    # that refuses swap creation changes what this terminal will trade, so the
+    # numbers above went to the operator with three shapes to choose from -- refuse
+    # here, cap the quotable input, or warn only -- and they authorized refusing.
+    #
+    # THE RESERVE IS ADDED, NOT SUBTRACTED: create_quote() no longer takes it out of
+    # the payout (the fee-floor paragraph directly above carries that measurement),
+    # so the wallet needs the payout AND the fee that sends it. That sum is exactly
+    # what the daemon was short of.
+    funding = why_the_payout_cannot_be_funded(
+        adapters, to_asset, float(quote["output_amount_estimate"]), float(quote["network_fee_reserve"]),
+        # THE SAME AUTHORITY create_swap() ALREADY ASKED, not a second reading of it:
+        # "" means the daemon picks the payout's inputs, so its own wallet balance IS
+        # the payable figure. A named account means it is not, and payout_capacity
+        # says so instead of refusing on a method that would answer the wrong
+        # question. config is a plain dict here, which is why this reads RPC-free.
+        source_account=payout_source_account(config, to_asset),
+    )
+    if funding.refuses:
+        raise ValueError(
+            f"No swap was created, because {funding.why}. Nothing was written and nothing was taken."
+        )
+    if funding.unchecked:
+        # THE SAME HANDLING payout_verdict.unchecked GETS TWENTY LINES UP, and for the
+        # same reason: a question this process could not ask must reach the log rather
+        # than be rendered as a pass. See payout_capacity.FundingVerdict.
+        logger.warning(
+            "payout funding for a new %s->%s swap was NOT CHECKED (%s)  <- proceeding; the daemon "
+            "answers this at payout time, which is after the deposit is irreversible.",
+            from_asset, to_asset, funding.why,
+        )
+
+
 def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) -> dict:
     quote = get_quote_or_raise(db, quote_id)
     to_asset = quote["to_asset"]
@@ -717,6 +791,18 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
         )
     if not adapters[to_asset].validate_address(payout_address):
         raise ValueError(f"Invalid {to_asset} payout address")
+    # PLACED AFTER THE ADDRESS CHECKS AND BEFORE deposit_account(), WHICH IS A
+    # DELIBERATE ORDERING AND NOT WHERE IT WAS FIRST WRITTEN. It went in beside the
+    # four local refusals above, and tests/test_address_authority.py::
+    # test_a_deposit_address_that_cannot_receive_refuses_the_swap_and_writes_nothing
+    # failed -- correctly. Its stub destination has no get_balance(), so this gate
+    # refused first and the address refusal it exists to pin never ran. The fixture
+    # was not the defect: the ordering was. Everything above this line is LOCAL and
+    # free, this is a network read, and deposit_account() below DERIVES A KEY in the
+    # hot wallet -- so the sequence is local checks, then the daemon's own address
+    # verdict, then the balance, then the first thing that changes any state. A swap
+    # that is going to be refused should not leave a derived key behind.
+    refuse_unless_the_payout_can_be_funded(adapters, config, quote, from_asset, to_asset)
     swap_id = new_id("s")
     # The swap row must exist before a tag can reference it: xrp_destination_tags
     # has a FOREIGN KEY to swaps(id). Handled inside create_swap() below by

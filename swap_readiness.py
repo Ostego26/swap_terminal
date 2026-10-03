@@ -64,12 +64,15 @@ from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, solana_cluster
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
 from report_block import clipped
+from services.payout_capacity import largest_fundable_payout
 from services.payout_service import (
     WALLET_UNLOCK_ENV_VAR,
     payable_assets,
     unlock_readiness_lines,
 )
 from services.pricing import fetch_usd_prices
+from services.quote_service import get_network_fee_reserve
+from workers.common import get_config_dict
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 _results: list[tuple[str, str, str]] = []
@@ -637,6 +640,57 @@ def explain_grc_failure(error: Exception, port: int) -> str:
     return f"{type(error).__name__}: {text[:150]}  <- reported as-is; this failure has no known interpretation"
 
 
+# WHY A BALANCE LINE SAYS MORE THAN "> 0" SINCE 2026-10-03.
+#
+# "must be > 0 to pay a GRC leg" was this file's whole balance test, and it is the
+# same necessary-and-not-sufficient shape as "an adapter that CONNECTS is not a
+# wallet that can act" one function up. It passed, loudly, on the morning a real
+# deposit was taken against a payout the wallet could not fund:
+#
+#     PASS  GRC wallet   3780.08854497 GRC  <- must be > 0 to pay a GRC leg
+#
+# and the swap that followed quoted 9049.68583412 GRC. The wallet held 41.8% of it.
+# "> 0" was true and useless, because the number an operator needs is not whether
+# the wallet has anything -- it is the largest payout it can fund, which is the
+# ceiling on every swap this terminal will now accept (services/swap_service.
+# refuse_unless_the_payout_can_be_funded refuses above it, before any row exists).
+#
+# THE CEILING AND NOT A COMPARISON, because this tool has no swap and no payout
+# figure. That is the amount-free form of the question, which is why
+# services/payout_capacity.largest_fundable_payout() exists beside the gate.
+def payout_ceiling_note(adapters, asset: str) -> str:
+    """"  <- ..." for a balance line: the largest payout this wallet can fund.
+
+    Returns the whole fragment including its leading separator, so a caller
+    appends it without composing the punctuation and the three call sites cannot
+    drift on spacing (rule 8, at its smallest).
+    """
+    reserve = get_network_fee_reserve_or_blank(asset)
+    if reserve is None:
+        return f"  <- must be > 0 to pay a {asset} leg; no {asset}_NETWORK_FEE_RESERVE is set, so the "\
+               f"largest fundable payout was NOT computed"
+    ceiling, how = largest_fundable_payout(adapters, asset, reserve)
+    if ceiling < 0:
+        return f"  <- must be > 0 to pay a {asset} leg; the ceiling was NOT established ({how})"
+    return (f"  <- the largest single {asset} payout this wallet can fund is {ceiling} {asset} ({how}). "
+            f"A swap quoting more than that is REFUSED at creation, before any deposit is taken")
+
+
+def get_network_fee_reserve_or_blank(asset: str):
+    """This asset's reserve, or None when it has none. NEVER RAISES.
+
+    services/quote_service.get_network_fee_reserve() raises for an asset with no
+    reserve configured, which is correct for a quote and wrong for a preflight: a
+    readiness page that dies on a missing variable cannot report the missing
+    variable. The reserve line elsewhere in this file is the authority for whether
+    one is set; this only needs the number or the absence.
+    """
+    try:
+        return get_network_fee_reserve(get_config_dict(), asset)
+    except Exception:  # noqa: BLE001 -- checked: returns None, which the caller renders as "NOT computed" rather than as a ceiling, so no failure can read as a figure.
+        return None
+
+
 def chain_precheck(asset: str, port: int) -> tuple[bool, str, str]:
     """Decide whether to OPEN A SOCKET to a Bitcoin-derived wallet. (connect?, state, detail).
 
@@ -758,7 +812,8 @@ def check_gridcoin(pays_out_grc: bool = True) -> None:
     if pays_out_grc:
         state = PASS if balance > 0 else FAIL
         record(state, "GRC wallet",
-               f"{balance} GRC on port {port} (test chain)  <- must be > 0 to pay a GRC leg  "
+               f"{balance} GRC on port {port} (test chain)"
+               + payout_ceiling_note(adapters, "GRC") + "  "
                f"in {format_duration(time.monotonic() - started)}")
     else:
         record(PASS, "GRC wallet",
@@ -881,7 +936,7 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
         record(FAIL, f"{asset} balance", f"{type(error).__name__}: {clipped(str(error), 120)}")
         return
     record(PASS if balance > 0 else FAIL, f"{asset} balance",
-           f"{balance} {asset} on port {port}  <- must be > 0 to pay a {asset} leg")
+           f"{balance} {asset} on port {port}" + payout_ceiling_note(adapters, asset))
 
 
 def check_solana(adapters) -> None:

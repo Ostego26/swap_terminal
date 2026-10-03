@@ -1230,3 +1230,53 @@ def test_the_NOT_RELOADED_line_is_ABSENT_when_everything_was_actually_spawned(tm
         supervisor.stop_worker("sleeper", tmp_path, grace_seconds=5.0)
         if status.get("pid"):
             _reap_zombie(status["pid"])
+
+
+# --- both documented-ish invocations have to reach the CLI --------------------
+
+
+@pytest.mark.parametrize(
+    ("form", "argv"),
+    [
+        ("script", ["swap_terminal/supervisor.py", "--help"]),
+        ("module", ["-m", "swap_terminal.supervisor", "--help"]),
+    ],
+)
+def test_the_supervisor_cli_starts_under_both_invocations(form, argv):
+    """`-m swap_terminal.supervisor` died on an import, naming a module nobody knows.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-03, while a BTC deposit sat
+    uncredited and the question was whether the workers were running:
+
+        ModuleNotFoundError: No module named 'config'
+
+    `config` is not a name an operator has any reason to recognize, nothing in
+    the message says the invocation is what is wrong, and all four traceback
+    frames are runpy. It is indistinguishable from a broken install, so the
+    reading it invites is "the supervisor is broken" -- which is the wrong thing
+    to go and look at.
+
+    supervisor.py was the ONE entry point in this tree without the
+    `sys.path.insert` bootstrap, which is the opposite of what you would guess:
+    all three workers carry it and so does migrate_swap_intents.py, while the
+    file the README names three times relied on Python putting the script's own
+    directory on sys.path, which only happens under the script form.
+
+    --help IS THE ASSERTION ON PURPOSE. It exercises every import in the module
+    and builds the parser, and it spawns nothing, signals nothing and writes no
+    pid file -- so this test cannot leave a worker behind, which rule 13 would
+    make this suite's problem rather than this test's.
+    """
+    result = subprocess.run(  # noqa: S603 -- sys.executable and literal argv, no shell and no user input
+        [sys.executable, *argv],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode == 0, (
+        f"the {form} form failed:\n{result.stderr}"
+    )
+    assert "No module named" not in result.stderr
+    assert "--grace" in result.stdout or "usage:" in result.stdout, (
+        "a zero exit with no usage text would mean something other than the parser answered"
+    )

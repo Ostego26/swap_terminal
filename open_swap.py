@@ -162,8 +162,9 @@ from modules.address_authority import check_address
 from report_block import CONTINUATION, labeled
 from requests.exceptions import RequestException
 from services.pair_view import allowed_pair_rows
+from services.payout_capacity import largest_fundable_payout
 from services.pricing import fetch_usd_prices
-from services.quote_service import create_quote, validate_pair
+from services.quote_service import create_quote, get_network_fee_reserve, validate_pair
 from services.swap_service import TAG_ATTRIBUTED_ASSETS, create_swap, deposit_account
 from services.xrp_tag_service import XRPTagAllocationError
 from workers.common import build_adapters_from_config, db_path_source, get_config_dict
@@ -986,6 +987,40 @@ def apply_command(args, from_asset: str, to_asset: str) -> str:
     return " ".join(parts)
 
 
+def payout_wallet_line(config, adapters, to_asset: str, amount: float) -> str:
+    """One preview line: the biggest payout the destination wallet could fund.
+
+    WHY THE CEILING AND NOT A COMPARISON. The dry run deliberately computes no
+    payout figure -- the rate is fixed by create_quote() at --apply time, and a
+    second figure here would be a second copy of the fee arithmetic that decides
+    it (the DRY RUN footer says so). So the amount-free form of the question is
+    the one a preview can honestly ask, which is why
+    services/payout_capacity.largest_fundable_payout() exists beside the gate.
+
+    MEASURED 2026-10-03, AND THIS LINE IS THE PART I OWED WITHOUT BEING ASKED.
+    The preview printed `payout (est.) 9049.685834122582 GRC` and said nothing
+    about the wallet holding 3780.08854497 -- both numbers on one screen, one RPC
+    call apart, never compared. The deposit was taken, confirmed, and the payout
+    died on "Insufficient funds". Rule 14: state what the number means, next to
+    the number.
+
+    `amount` IS THE INPUT, NOT A PAYOUT, and is used only to say whether the
+    ceiling is comfortable at the rate the header already printed. It is not
+    multiplied by anything here.
+    """
+    reserve = get_network_fee_reserve(config, to_asset)
+    ceiling, how = largest_fundable_payout(adapters, to_asset, reserve)
+    if ceiling < 0:
+        # NOT ESTABLISHED is not zero, and must not render as one (rule 13). A
+        # printed 0.0 would send an operator to fund a wallet that may be full.
+        return labeled("payout wallet", f"NOT ESTABLISHED  <- {how}. --apply will refuse rather than "
+                                        f"take a deposit against a wallet it could not verify")
+    return labeled("payout wallet", f"can fund a payout up to {ceiling} {to_asset}  <- {how}. --apply "
+                                    f"REFUSES if this swap's payout exceeds it, before any row is "
+                                    f"written: a payout that fails arrives after the deposit is "
+                                    f"confirmed and irreversible (measured 2026-10-03)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Open one swap from the shell. Dry run by default; --apply writes the rows.",
@@ -1067,6 +1102,7 @@ def run(args) -> int:
             f"from the address being bad. Nothing was written."
         )
 
+    print(payout_wallet_line(config, adapters, to_asset, args.amount), flush=True)
     for line in deposit_preview(config, adapters, from_asset):
         print(line, flush=True)
     for line in read_open_swaps(db_path, from_asset):

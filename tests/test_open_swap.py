@@ -121,9 +121,27 @@ class StubGRC:
     stub makes that a failure rather than a silent extra key.
     """
 
-    def __init__(self, answer=True):
+    def __init__(self, answer=True, balance=1_000_000.0, balance_raises=None):
         self.answer = answer
         self.asked = []
+        # BALANCE ADDED 2026-10-03, because the preview and create_swap() both read
+        # it now: a payout the destination wallet cannot fund is refused before any
+        # row is written, after a real 0.001 BTC deposit was taken against a
+        # 9049.69 GRC payout and a 3780.09 GRC wallet.
+        #
+        # THE DEFAULT IS AMPLE FOR THE SAME REASON can_spend IS True ABOVE. These
+        # stubs stand in for a chain that CAN be paid out to, and since 2026-10-03
+        # being payable includes holding the money -- so a default of 0.0 would
+        # make every end-to-end test in this file assert the funding refusal
+        # instead of what it is about. A test that cares about the refusal passes
+        # a balance, as the two at the end of this file do.
+        self._balance = balance
+        self._balance_raises = balance_raises
+
+    def get_balance(self):
+        if self._balance_raises is not None:
+            raise self._balance_raises
+        return self._balance
 
     # DECLARED, because chains/registry.why_cannot_pay_out() fails closed: a stub
     # that says nothing about itself counts as unable to pay, and create_swap()
@@ -1301,3 +1319,53 @@ def test_an_unrecognised_cause_says_so_rather_than_inventing_one():
     """A pair marked UNAVAILABLE with no cause is a bug report. A WRONG cause is worse
     than an absent one, which is the whole lesson of this line's history."""
     assert "NOT ESTABLISHED" in blocked_by([{"to_asset": "GRC", "missing": [], "cannot_pay": ""}])
+
+
+def test_the_preview_says_what_the_payout_wallet_can_actually_fund():
+    """The preview held both numbers and never compared them.
+
+    MEASURED ON THE OPERATOR'S SCREEN 2026-10-03. The dry run printed
+
+        payout (est.)   9049.685834122582 GRC  <- after the fee and the reserve
+
+    and said nothing about the GRC wallet holding 3780.08854497 -- one RPC call
+    away, on the same screen, never put side by side. The deposit was taken,
+    confirmed, irreversible, and the payout died on "Insufficient funds".
+
+    THE CEILING RATHER THAN A COMPARISON, because the dry run computes no payout
+    on purpose: the rate is fixed at --apply time and a second figure here would
+    be a second copy of the fee arithmetic. So the line answers the amount-free
+    form of the question, which is the one a preview can honestly ask.
+    """
+    config = {"GRC_NETWORK_FEE_RESERVE": 0.001}
+    adapters = {"GRC": StubGRC(balance=3780.08854497)}
+
+    line = open_swap.payout_wallet_line(config, adapters, "GRC", 0.001)
+
+    assert "3780.08854497" in line, "what the wallet holds has to reach the screen"
+    # THE EXPECTATION IS DERIVED, NOT TYPED. A hand-written "3780.08754497" failed
+    # here: the real line says 3780.0875449699997, because 3780.08854497 - 0.001 in
+    # binary floating point is not the clean decimal. The float tail is left on the
+    # screen deliberately -- rounding it would mean inventing a per-chain precision
+    # (8 places for the Bitcoin-derived chains, 6 for SOL and XRP) and printing a
+    # figure the gate does not compare against, and the gate compares exact floats.
+    # The `how` half of the line carries the spendable and the reserve separately,
+    # so a reader can see where the number came from without trusting the tail.
+    assert str(3780.08854497 - 0.001) in line, "and the ceiling after the chain fee is held back"
+    assert "REFUSES" in line, "and that --apply will act on it, or the line is trivia"
+
+
+def test_an_unreadable_payout_wallet_previews_as_NOT_ESTABLISHED_not_as_zero():
+    """0.0 would send an operator to fund a wallet that may be full.
+
+    Rule 13: "did nothing" must not look like "did work". An empty wallet and a
+    daemon that did not answer are different facts with different remedies, and a
+    bare float cannot carry the difference.
+    """
+    line = open_swap.payout_wallet_line({"GRC_NETWORK_FEE_RESERVE": 0.001},
+                                        {"GRC": StubGRC(balance_raises=RPCError("connection refused"))},
+                                        "GRC", 0.001)
+
+    assert "NOT ESTABLISHED" in line
+    assert "connection refused" in line
+    assert "0.0 GRC" not in line, "a sentinel must never render as a balance"
