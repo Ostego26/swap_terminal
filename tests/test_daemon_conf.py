@@ -227,6 +227,18 @@ SERVICE_SIDE = frozenset({
     # outcome this side of the register produces; the other side could have produced
     # it only by luck of the conf naming the same wallet.
     "show_payout_fees.py",
+    # sol_payout_preview.py, added 2026-10-03. SERVICE SIDE, for the same reason
+    # show_payout_fees.py is, read forward instead of back: it previews the payout
+    # THIS TERMINAL would make, so it has to ask the cluster the payout worker will
+    # ask. A conf fallback pointing it at another endpoint would print a rent floor,
+    # a balance and a genesis hash from a cluster nobody is paying out on -- and the
+    # operator would read it as the plan for their send. Wrong numbers under the
+    # right labels, which is worse than a refusal.
+    #
+    # It also means the devnet guard is measuring the real thing: the cluster is
+    # identified by genesis hash through the same adapter the worker builds, so a
+    # preview that says DEVNET is a statement about the endpoint the send will use.
+    "sol_payout_preview.py",
     "swap_readiness.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
