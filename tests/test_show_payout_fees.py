@@ -34,6 +34,7 @@ import pytest
 from show_payout_fees import (
     MEASURABLE,
     UNMEASURABLE_HERE,
+    ask_base_fee,
     load_payouts,
     main,
     measured_vs_booked,
@@ -287,9 +288,17 @@ def test_main_does_not_report_an_unasked_chain_the_same_way_as_an_asked_one(tmp_
         rest = [line for line in lines[start + 1:] if line.startswith("  ")]
         return "\n".join(rest[:3])
 
+    # THE WORDING MOVED 2026-10-03 AND THE INVARIANT DID NOT, which is why this
+    # matches on "could not read a paid fee" rather than on the sentence it used to
+    # assert ("could not ask anyway"). That phrase was written when nothing asked a
+    # chain anything; ask_base_fee() now asks XRP for its current base fee, so the
+    # line it prints depends on whether that read succeeded. What must stay true is
+    # the DISTINCTION: BTC is a chain this tool can read a paid fee from and has no
+    # payout, XRP is a chain it cannot read one from at all, and the two must not
+    # print the same way.
     assert "no payouts on this chain yet" in block("BTC"), block("BTC")
-    assert "could not ask anyway" not in block("BTC"), "BTC is measurable; saying otherwise is false"
-    assert "could not ask anyway" in block("XRP"), block("XRP")
+    assert "could not read a paid fee" not in block("BTC"), "BTC is measurable; saying otherwise is false"
+    assert "could not read a paid fee" in block("XRP"), block("XRP")
 
 
 def test_main_on_an_empty_database_says_none_rather_than_printing_nothing(tmp_path, capsys):
@@ -320,3 +329,98 @@ def test_main_reports_a_duration_that_is_not_a_bare_zero(tmp_path, capsys):
         f"{done!r}"
     )
     assert "µfn" in done and "ufn" not in done, "the unit is µfn (rule 6)"
+
+
+# --- ASKING THE CHAIN, FOR A CHAIN WITH NO PAYOUT YET ---------------------------
+
+
+class _Server:
+    """An XRP adapter that answers server_parameters() the way chains/xrp.py does."""
+
+    def __init__(self, drops=10, source="server_info.validated_ledger.base_fee_xrp", raises=False):
+        self._drops, self._source, self._raises = drops, source, raises
+
+    def server_parameters(self):
+        if self._raises:
+            raise RuntimeError("rippled is unreachable")
+        return {"fee_drops": self._drops, "fee_source": self._source}
+
+
+def test_a_fee_READ_from_the_server_is_labeled_as_read_and_outranks_the_tree():
+    """The point of asking: the operator can tell a measurement from a typed figure.
+
+    MUTATION: have ask_base_fee() fall back to UNMEASURABLE_HERE's figure when the
+    server answers nothing. The "READ FROM THE SERVER" label then appears over a
+    number nobody read, which is rule 17's failure with a label attached -- and
+    test_a_failed_ask_prints_its_reason_and_NO_figure below fails.
+    """
+    lines, say = _collect()
+    report_asset("XRP", {"fees": [], "booked": [], "unread": []}, say, adapter=_Server(drops=10))
+    body = "\n".join(lines)
+
+    assert "0.000010 XRP (10 drops)" in body, body
+    assert "READ FROM THE SERVER, not the tree" in body, (
+        "a figure read from the chain must say so, or it is indistinguishable from the reference value "
+        "this function exists to replace"
+    )
+    assert "validated_ledger.base_fee_xrp" in body, "a read figure with no provenance is a typed figure"
+    # The tree's figure still prints, now as a comparison rather than as the answer.
+    assert "for comparison" in body, body
+
+
+def test_a_failed_ask_prints_its_reason_and_NO_figure():
+    """A broad catch here returns the REASON, never a number (rule 12's BLE001).
+
+    If rippled cannot be reached the operator must read that, not a fee. A figure
+    produced by a failed read is the worst of both: it looks measured and is not.
+    """
+    lines, say = _collect()
+    report_asset("XRP", {"fees": [], "booked": [], "unread": []}, say, adapter=_Server(raises=True))
+    body = "\n".join(lines)
+
+    assert "FAILED" in body and "rippled is unreachable" in body, body
+    assert "READ FROM THE SERVER" not in body, "a failed ask claimed to have read the server"
+    assert "drops)" not in body.split("FAILED")[1].split("\n")[0], "a failed ask printed a figure"
+
+
+def test_a_server_that_omits_the_fee_field_is_a_failed_ask_and_not_a_zero():
+    """chains/xrp.py documents base_fee_xrp as OPTIONAL, so this case is real."""
+    lines, say = _collect()
+    report_asset("XRP", {"fees": [], "booked": [], "unread": []}, say,
+                 adapter=_Server(drops=None))
+    body = "\n".join(lines)
+    assert "FAILED" in body and "without a fee figure" in body, body
+
+
+def test_SOL_is_NOT_asked_and_the_reason_is_in_the_code_rather_than_a_gap():
+    """SOL's fee needs getFeeForMessage over a serialized message, so it is not asked.
+
+    THE ABSENCE IS DELIBERATE AND NAMED. ask_base_fee() returns None for SOL, so
+    its block falls through to the tree's figure with the old wording -- no "READ
+    FROM THE SERVER" claim over a number nobody read.
+
+    MUTATION: make ask_base_fee() answer for SOL from SIGNATURE_FEE_LAMPORTS. That
+    constant calls ITSELF a reference value in chains/solana_units.py:513, so the
+    label would be false, and this fails.
+    """
+    assert ask_base_fee("SOL", _Server()) is None, "SOL was asked; its fee is not a one-call read"
+    lines, say = _collect()
+    report_asset("SOL", {"fees": [], "booked": [], "unread": []}, say, adapter=_Server())
+    body = "\n".join(lines)
+    assert "READ FROM THE SERVER" not in body, "SOL claimed a server read it did not make"
+    assert "0.000005 SOL" in body, "SOL printed no figure at all"
+
+
+def test_a_chain_with_payouts_is_never_asked_because_it_was_MEASURED():
+    """GRC has real fees, so the server's current quote is not the figure that matters.
+
+    What a payout COST is a fact; what a chain WOULD charge now is a different one,
+    and printing the second beside seven readings of the first would invite the
+    reader to average them.
+    """
+    lines, say = _collect()
+    report_asset("GRC", {"fees": [0.001] * 7, "booked": [0.01] * 7, "unread": []}, say,
+                 adapter=_Server())
+    body = "\n".join(lines)
+    assert "booked/measured: 10.00x" in body, body
+    assert "READ FROM THE SERVER" not in body, "a measured chain was also asked for a current quote"

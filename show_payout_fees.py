@@ -221,7 +221,58 @@ def read_fees(rows: list[dict], adapters: dict, *, ask_chain: bool, say) -> dict
     return per_asset
 
 
-def report_asset(asset: str, bucket: dict, say) -> None:
+#: DROPS PER XRP. 10**6, and it is here rather than imported from
+#: chains/xrp_units because this module must not import the signing side to divide
+#: by a million -- the tree's own reason for keeping xrp_units out of modules that
+#: only report.
+DROPS_PER_XRP = 1_000_000
+
+
+def ask_base_fee(asset: str, adapter) -> tuple[str, str] | None:
+    """What the CHAIN says one payout costs right now, for a chain with no payout yet.
+
+    WHY THIS EXISTS AT ALL. The operator asked 2026-10-03 what all four reserves
+    should be, and for XRP and SOL this tool answered with a figure out of the tree
+    and a note that it could not ask. That is better than silence and it is not an
+    answer: the figure in the tree is a reference value somebody typed, and rule 17
+    says run the thing that would show it false.
+
+    AND WAITING FOR A PAYOUT TO MEASURE THEM IS BACKWARDS. Neither chain has ever
+    paid out, so there is no transaction to read -- but XRP will state its current
+    base fee without one, and chains/xrp.py ALREADY READS IT:
+    XRPAdapter.server_parameters() returns `fee_drops` from
+    server_info.validated_ledger.base_fee_xrp, and names its own fallback when the
+    server does not report the field. That function existed before this tool did
+    and this tool never called it, which is the call-site shape this file has
+    already been caught by once today.
+
+    SOL IS DELIBERATELY NOT HERE, and saying why is the point rather than leaving a
+    gap. chains/solana_units.py:513 carries SIGNATURE_FEE_LAMPORTS = 5_000 and calls
+    itself a "reference value; getFeeForMessage is the authority" -- and
+    getFeeForMessage prices a SERIALIZED MESSAGE, so asking it needs a real
+    blockhash and a built transfer. That is reachable (chains/solana_transaction.py
+    serializes one) and it is not a one-line read, so it is named work rather than
+    a number invented here.
+
+    Returns (figure, provenance) or None when the chain cannot be asked. A FAILED
+    ASK RETURNS THE REASON, never a number: this function's whole job is to replace
+    a typed-in figure with a measured one, and a fallback that looked measured
+    would defeat it.
+    """
+    if asset != "XRP" or adapter is None or not hasattr(adapter, "server_parameters"):
+        return None
+    try:
+        parameters = adapter.server_parameters()
+    except Exception as exc:  # noqa: BLE001 -- checked: the failure is RETURNED as the provenance string and printed, so the reader sees "the server could not be asked" rather than a figure that looks read. It never becomes a number.
+        return None, f"the server could not be asked: {type(exc).__name__}: {exc}"
+    drops = parameters.get("fee_drops")
+    if drops is None:
+        return None, "the server answered without a fee figure"
+    return (f"{int(drops) / DROPS_PER_XRP:.6f} XRP ({int(drops)} drops)",
+            parameters.get("fee_source") or "server_info.validated_ledger.base_fee_xrp")
+
+
+def report_asset(asset: str, bucket: dict, say, adapter=None) -> None:
     """One asset's block: what was booked, what was measured, and the ratio.
 
     A FUNCTION FOR THE SAME REASON read_fees() IS ONE. "What does an operator read
@@ -262,9 +313,23 @@ def report_asset(asset: str, bucket: dict, say) -> None:
         # for a reason that has nothing to do with whether the tool could ask it.
         # The reserve line above still printed, which is the half that was missing.
         say("  measured fee: (no payouts on this chain yet, so there is no fee to measure)")
+        asked = ask_base_fee(asset, adapter)
+        if asked is not None:
+            figure, provenance = asked
+            # A figure READ FROM THE CHAIN outranks the one in the tree and is
+            # labeled as read, so the operator can tell which they are holding
+            # (rule 17). A failed ask prints its reason in the same slot and no
+            # figure at all.
+            if figure is None:
+                say(f"  asked the chain for its current fee: FAILED -- {provenance}")
+            else:
+                say(f"  asked the chain for its current fee: {figure} <- READ FROM THE SERVER, not the tree")
+                say(f"    {provenance}")
         if asset in UNMEASURABLE_HERE:
             figure, provenance = UNMEASURABLE_HERE[asset]
-            say(f"  and this tool could not ask anyway: the tree's figure is {figure} -- {provenance}")
+            label = ("the tree's reference figure, for comparison" if asked and asked[0]
+                     else "this tool could not read a paid fee; the tree's figure is")
+            say(f"  {label} {figure} -- {provenance}")
         return
     if asset in UNMEASURABLE_HERE:
         figure, provenance = UNMEASURABLE_HERE[asset]
@@ -333,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     # fixed: two printers for one block is how XRP came to be reported without its
     # reserve line (see report_asset's docstring). An empty bucket is a bucket.
     for asset in sorted(set(per_asset) | set(Config.RPC)):
-        report_asset(asset, per_asset.get(asset, {"fees": [], "booked": [], "unread": []}), say)
+        report_asset(asset, per_asset.get(asset, {"fees": [], "booked": [], "unread": []}), say,
+                     adapter=adapters.get(asset))
         if not args.no_chain and asset in MEASURABLE and asset not in adapters:
             say(f"  {why_unconfigured(asset, Config.RPC)}")
 
