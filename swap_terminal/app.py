@@ -60,6 +60,7 @@ from network_target import CHAIN_PORTS, mainnet_chains, startup_lines
 from routes.admin import bp as admin_bp
 from routes.grc_login import bp as grc_login_bp
 from routes.health import bp as health_bp
+from routes.kill_switch import bp as kill_switch_bp
 from routes.quotes import bp as quotes_bp
 from routes.rates import bp as rates_bp
 from routes.swaps import bp as swaps_bp
@@ -205,6 +206,17 @@ def create_app() -> Flask:
     # that reaches a chain daemon on a POST -- both named in that file's header.
     # It can move no funds, and nothing on the payout path reads what it records.
     app.register_blueprint(grc_login_bp)
+    # routes/kill_switch.py owns /admin/controls, and it is the only blueprint in
+    # this application whose POST can SIGNAL OR SPAWN A PROCESS (/api/quotes,
+    # /api/swaps and /swap/<id>/address-proof are the other POSTs, and none of them
+    # spawns anything). It starts and stops the three
+    # supervised workers, one of which broadcasts payouts, so a start is gated on
+    # reading the spawn warning and both verbs refuse unless this server is
+    # provably bound to loopback. Its own blueprint rather than part of admin_bp
+    # because routes/admin.py's header claims every route there is a GET and
+    # tests/test_web_surfaces.py asserts that over the real url map -- a claim
+    # worth keeping true rather than loosening.
+    app.register_blueprint(kill_switch_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(quotes_bp)
     app.register_blueprint(rates_bp)

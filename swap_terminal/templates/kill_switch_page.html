@@ -1,0 +1,41 @@
+{#
+  A standalone page holding nothing but the start/stop controls.
+
+  Role: template (page shell; no logic and no decision)
+  Reads: the `panel` dict services/kill_switch.switch_panel() returns
+  Writes: nothing. The form inside POSTs to routes/kill_switch.py.
+  Can move funds: no by itself; see _kill_switch.html, which it includes.
+  Mainnet-safe: yes to render.
+
+  WHY IT EXTENDS NOTHING. base.html, static/styles.css and templates/admin.html
+  were off-limits to the change that wrote this -- another agent had just
+  restructured the operator page into tabs -- and the point of keeping this
+  change self-contained is that neither side has to wait for the other. It is a
+  complete document instead: doctype, charset, viewport, one stylesheet of its
+  own, every selector prefixed.
+
+  IT IS NOT THE DESTINATION. The panel belongs on /admin beside the Workers
+  card; this page is how it is reachable and testable before that include lands,
+  and it stays afterwards as the no-JavaScript direct link an operator can
+  bookmark -- which matters more here than on any other page in this tree,
+  because the moment you need a stop button is the moment something on this host
+  is already misbehaving and the big page may be the thing that is slow.
+
+  NO <script> ANYWHERE, AND THAT IS STRUCTURAL. A stop button that needs
+  JavaScript to work does nothing when a script fails to load. The form is a
+  plain form, the response is a plain render.
+#}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Start and stop the workers &#183; operator</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='kill_switch.css') }}">
+</head>
+<body class="killsw-page">
+  <main class="killsw-main">
+    <p class="killsw-breadcrumb"><a href="{{ url_for('admin.admin_page') }}">&#8592; back to the operator page</a></p>
+    {% include "_kill_switch.html" %}
+  </main>
+</body>
+</html>

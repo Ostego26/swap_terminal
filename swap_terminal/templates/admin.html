@@ -31,9 +31,26 @@
 <section class="hero hero-tight">
   <p class="eyebrow">Operator surface &#183; read-only</p>
   <h1>System state</h1>
+  {#- THIS SENTENCE IS STILL TRUE OF THIS PAGE, and keeping it true is why the start/stop
+      controls live at /admin/controls instead of here.
+
+      The operator asked for a start and stop button on 2026-10-02. The obvious place was this
+      page, and putting it here would have made this paragraph false -- on the first sentence an
+      operator reads, about the one property that lets them trust everything below it. So the
+      controls are their own page and their own blueprint: routes/admin.py's header claims every
+      route it registers is a GET, and routes/kill_switch.py's header records that it is a
+      separate blueprint so that claim stays true too.
+
+      The link is NOT a hedge. A control one click away is as reachable as a control here; what it
+      is not is a control an operator can hit while reading. -#}
   <p class="lede">Nothing on this page changes anything. There is no button that retries a payout, enables a pair,
      cancels a swap or restarts a worker &#8212; every one of those moves funds or touches armed state, and those
      belong to you at a shell, not to a web page.</p>
+  <p class="panel-note">The one exception is a page of its own, not a button here:
+     <a href="/admin/controls">start and stop the workers</a> &#8212; it stops the three supervised
+     workers and proves each is gone, and starting them arms a payout worker that can broadcast,
+     so it shows that warning and requires it to be acknowledged first. It refuses outright
+     unless this server is provably bound to loopback, because this page is not authenticated.</p>
   {#- The echoed parameters, tabulated 2026-10-02 with the customer pages. These
       three are the ones rule 14 means by "echo the parameters that decide the
       answer", and they are read by someone checking which database a pasted page

@@ -1,0 +1,290 @@
+/*
+ * Styles for the start/stop control panel, and for nothing else.
+ *
+ * Role: stylesheet (presentation only)
+ * Reads: nothing
+ * Writes: nothing
+ * Can move funds: no
+ * Mainnet-safe: yes
+ *
+ * A SEPARATE FILE FROM styles.css, ON PURPOSE. styles.css, admin.html and
+ * admin.js were off-limits to the change that wrote this panel (another agent had
+ * just converted the operator page to tabs), so adding rules there would have
+ * collided. Every selector here is prefixed `killsw-`, so when the partial is
+ * included into admin.html the two stylesheets cannot reach into each other's
+ * rules -- and if a restructured styles.css later wants to own this panel, the
+ * whole of this file can be deleted in one move rather than untangled.
+ *
+ * COLOR IS THE THIRD CHANNEL, NEVER THE FIRST, and on this panel that is not a
+ * nicety. The two readings an operator must never confuse are "STOPPED, and
+ * proven" and "NOT PROVEN -- something is still alive", and this operator reads
+ * these pages by PASTING THEM BACK, where no CSS travels at all. So every verdict
+ * carries a glyph and a word from the template (services/kill_switch.VERDICT_GLYPHS
+ * and VERDICT_HEADLINES); what is here only makes the distinction louder on a
+ * screen, and nothing here is the only thing saying it.
+ *
+ * FOUR STATES AND NOT TWO. Refused, nothing-to-do, done-and-proven, and
+ * not-proven are four different facts:
+ *
+ *   refused        nothing was attempted. This is not a failure and must not look
+ *                  like one -- it is the system declining, which on a control
+ *                  surface is usually the correct outcome.
+ *   nothing to do  attempted, found nothing, changed nothing. Rule 13's whole
+ *                  subject: twelve cycles printed exit_code=0 beside "skipping"
+ *                  and a reader skimming for errors found none.
+ *   proven         it happened AND absence was confirmed against the OS.
+ *   not proven     the loud one. Something is alive, or absence could not be
+ *                  established. It gets the heaviest treatment on the page.
+ *
+ * THE START FORM IS STYLED TO SLOW A CLICK DOWN AND THE STOP FORM IS NOT. Stop is
+ * defensive and reversible; start spawns a process that signs and broadcasts
+ * payouts. The asymmetry in the markup (a warning to read, a box to tick) is the
+ * design, and the styling follows it rather than making the two look like a
+ * matched pair of buttons.
+ */
+
+:root {
+  --killsw-ink: #1b1f23;
+  --killsw-muted: #57606a;
+  --killsw-rule: #d0d7de;
+  --killsw-surface: #ffffff;
+  --killsw-code-surface: #f3f5f7;
+  --killsw-proven: #1a7f37;
+  --killsw-notproven: #a40e26;
+  --killsw-refused: #8a6d00;
+  --killsw-inert: #57606a;
+  --killsw-warn-surface: #fff8e5;
+  --killsw-alarm-surface: #fff0f1;
+  --killsw-ok-surface: #f2fbf4;
+  --killsw-gap: 16px;
+}
+
+.killsw-page {
+  margin: 0;
+  background: var(--killsw-code-surface);
+  color: var(--killsw-ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* 16px side gutter and no horizontal page scroll at phone width. */
+.killsw-main {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: var(--killsw-gap);
+  box-sizing: border-box;
+}
+
+.killsw-breadcrumb { margin: 0 0 var(--killsw-gap); font-size: 14px; }
+
+.killsw {
+  background: var(--killsw-surface);
+  border: 1px solid var(--killsw-rule);
+  border-radius: 8px;
+  padding: var(--killsw-gap);
+}
+
+.killsw-heading { margin: 0 0 8px; font-size: 22px; }
+.killsw-subheading { margin: 20px 0 8px; font-size: 16px; }
+.killsw-lede { margin: 0 0 var(--killsw-gap); }
+.killsw-note { margin: 8px 0; color: var(--killsw-muted); font-size: 14px; }
+.killsw-meta { margin: 6px 0; color: var(--killsw-muted); font-size: 13px; }
+
+.killsw-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  /* Long paths and command lines break rather than widening the panel: a table
+   * that scrolls sideways hides columns, where wrapping only costs height. */
+  overflow-wrap: anywhere;
+}
+.killsw-log { color: var(--killsw-muted); }
+
+/* --- the result block -------------------------------------------------------
+ *
+ * One block for every outcome, refusals included, so there is no second
+ * rendering path that nobody looks at. The verdict class is what differs.
+ */
+.killsw-result,
+.killsw-refused {
+  border: 1px solid var(--killsw-rule);
+  border-left-width: 6px;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 0 0 var(--killsw-gap);
+  background: var(--killsw-surface);
+}
+
+.killsw-verdict {
+  margin: 0 0 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  font-weight: 600;
+}
+.killsw-glyph { font-size: 20px; line-height: 1; }
+.killsw-action {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.killsw-headline { flex: 1 1 320px; font-weight: 600; }
+
+/* PROVEN. The only two verdicts that get the quiet green are the ones where the
+ * operating system was asked again and answered. */
+.killsw-v-stopped-and-proven,
+.killsw-v-started {
+  border-left-color: var(--killsw-proven);
+  background: var(--killsw-ok-surface);
+}
+.killsw-v-stopped-and-proven .killsw-glyph,
+.killsw-v-started .killsw-glyph { color: var(--killsw-proven); }
+
+/* NOTHING HAPPENED. Deliberately NOT green. A stop that found nothing running
+ * and a stop that stopped three must not render alike (rule 13), and the failure
+ * being designed against is the reader who skims for color and sees "fine". */
+.killsw-v-nothing-was-running,
+.killsw-v-already-running,
+.killsw-v-some-started-some-already-running {
+  border-left-color: var(--killsw-inert);
+  background: var(--killsw-code-surface);
+}
+.killsw-v-nothing-was-running .killsw-glyph,
+.killsw-v-already-running .killsw-glyph,
+.killsw-v-some-started-some-already-running .killsw-glyph { color: var(--killsw-inert); }
+
+/* REFUSED. Amber, not red: nothing was attempted, so this is not a failure. */
+.killsw-v-refused,
+.killsw-v-another-action-in-flight,
+.killsw-v-warning-not-acknowledged,
+.killsw-v-refused-an-orphan-is-already-polling,
+.killsw-refused {
+  border-left-color: var(--killsw-refused);
+  background: var(--killsw-warn-surface);
+}
+.killsw-v-refused .killsw-glyph,
+.killsw-v-another-action-in-flight .killsw-glyph,
+.killsw-v-warning-not-acknowledged .killsw-glyph,
+.killsw-v-refused-an-orphan-is-already-polling .killsw-glyph,
+.killsw-refused .killsw-glyph { color: var(--killsw-refused); }
+
+/* NOT PROVEN, and a worker that died on spawn. The loudest thing on the page,
+ * because the whole feature is worthless if this reads like the others. */
+.killsw-v-stop-not-proven,
+.killsw-v-spawned-and-died {
+  border-left-color: var(--killsw-notproven);
+  background: var(--killsw-alarm-surface);
+}
+.killsw-v-stop-not-proven .killsw-headline,
+.killsw-v-spawned-and-died .killsw-headline { color: var(--killsw-notproven); }
+.killsw-v-stop-not-proven .killsw-glyph,
+.killsw-v-spawned-and-died .killsw-glyph { color: var(--killsw-notproven); font-weight: 700; }
+
+.killsw-refusals, .killsw-orphans, .killsw-arms, .killsw-cards { margin: 8px 0; padding-left: 20px; }
+.killsw-refusals li, .killsw-orphans li, .killsw-arms li { margin: 4px 0; }
+.killsw-orphans li { color: var(--killsw-notproven); font-weight: 600; }
+
+.killsw-clear { margin: 8px 0; color: var(--killsw-proven); }
+.killsw-notproven { margin: 8px 0; color: var(--killsw-notproven); font-weight: 600; }
+/* `(none)` IS A RESULT AND IS STYLED AS ONE. A blank gap is ambiguous between
+ * zero rows and a query that broke (rule 14), so the empty case is a visible
+ * sentence rather than an absence. */
+.killsw-empty { margin: 8px 0; color: var(--killsw-muted); font-style: italic; }
+
+.killsw-counts { margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.killsw-count code {
+  background: var(--killsw-code-surface);
+  border: 1px solid var(--killsw-rule);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+/* --- tables ----------------------------------------------------------------- */
+.killsw-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.killsw-table th, .killsw-table td {
+  border-bottom: 1px solid var(--killsw-rule);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 14px;
+}
+.killsw-table thead th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--killsw-muted); }
+.killsw-kv th { width: 170px; color: var(--killsw-muted); font-weight: 600; }
+
+.killsw-row-failed td, .killsw-row-DIED td { background: var(--killsw-alarm-surface); }
+.killsw-row-stale-pidfile td { background: var(--killsw-warn-surface); }
+
+/* --- the two forms ---------------------------------------------------------- */
+.killsw-form {
+  border: 1px solid var(--killsw-rule);
+  border-radius: 6px;
+  padding: 12px;
+  margin: var(--killsw-gap) 0;
+}
+.killsw-form-start { border-color: var(--killsw-notproven); background: var(--killsw-warn-surface); }
+
+.killsw-warning { margin: 8px 0; }
+.killsw-warning-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: var(--killsw-surface);
+  border: 1px solid var(--killsw-rule);
+  border-radius: 4px;
+  padding: 10px;
+  overflow-wrap: anywhere;
+}
+
+.killsw-ack { display: block; margin: 12px 0; font-weight: 600; }
+.killsw-ack input { margin-right: 8px; }
+
+.killsw-button {
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--killsw-ink);
+  background: var(--killsw-surface);
+  color: var(--killsw-ink);
+  cursor: pointer;
+}
+.killsw-button-stop { border-color: var(--killsw-ink); }
+/* The arming button is the only filled one on the page. It is the only control
+ * here that can start a process which broadcasts. */
+.killsw-button-start { background: var(--killsw-notproven); border-color: var(--killsw-notproven); color: #ffffff; }
+.killsw-button:focus-visible { outline: 3px solid var(--killsw-ink); outline-offset: 2px; }
+
+/* --- current state ---------------------------------------------------------- */
+.killsw-cards { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
+.killsw-card { border: 1px solid var(--killsw-rule); border-left-width: 5px; border-radius: 6px; padding: 10px; }
+.killsw-card-running { border-left-color: var(--killsw-proven); }
+.killsw-card-stopped { border-left-color: var(--killsw-inert); }
+.killsw-card-unknown { border-left-color: var(--killsw-refused); }
+.killsw-card-head { margin: 0 0 4px; display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; }
+.killsw-state { font-size: 12px; letter-spacing: 0.06em; font-weight: 700; }
+.killsw-card-body, .killsw-card-note { margin: 4px 0; font-size: 14px; }
+.killsw-card-note { color: var(--killsw-muted); }
+
+.killsw-scope dt { margin-top: 10px; font-weight: 600; }
+.killsw-scope dd { margin: 2px 0 0 0; font-size: 14px; color: var(--killsw-muted); }
+.killsw-scope-cannot dt { color: var(--killsw-refused); }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --killsw-ink: #e6edf3;
+    --killsw-muted: #9aa7b2;
+    --killsw-rule: #30363d;
+    --killsw-surface: #0d1117;
+    --killsw-code-surface: #161b22;
+    --killsw-proven: #3fb950;
+    --killsw-notproven: #ff7b72;
+    --killsw-refused: #d29922;
+    --killsw-inert: #9aa7b2;
+    --killsw-warn-surface: #241c06;
+    --killsw-alarm-surface: #2b1416;
+    --killsw-ok-surface: #0f2417;
+  }
+  :root:not([data-theme="light"]) .killsw-button-start { color: #140407; }
+}

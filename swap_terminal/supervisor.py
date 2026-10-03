@@ -129,7 +129,7 @@ def unaccounted_workers(names, run_dir: Path, python_executable: str = sys.execu
 
     This file's own header argues for pid files over pgrep patterns, and that
     argument is right -- for SIGNALLING. A pattern matches what a command line
-    happens to look like today, and signalling a pid because a string matched is
+    happens to look like today, and signaling a pid because a string matched is
     how a recycled pid gets killed. Nothing here changes that: every signal still
     goes to a pid read from a pid file and checked against /proc.
 
@@ -373,11 +373,11 @@ def _proc_cmdline(pid: int) -> str:
 
 
 def pid_is_still_ours(pid: int, recorded_command: str) -> bool:
-    """Guard against pid reuse before signalling.
+    """Guard against pid reuse before signaling.
 
     A pid file names a number, and numbers get recycled. Between the worker
     exiting and the operator running `stop`, that pid can belong to anything --
-    including the shell the operator is typing in. Signalling it would be
+    including the shell the operator is typing in. Signaling it would be
     strictly worse than failing to stop a process that is already gone.
 
     Returns True when the recorded command still appears in the live process's
@@ -413,7 +413,7 @@ def pid_is_still_ours(pid: int, recorded_command: str) -> bool:
     # only fires inside that window.
     #
     # ON LINUX AN EMPTY CMDLINE FOR A LIVE PID IS NEVER ONE OF OUR WORKERS: a zombie
-    # (nothing to signal), a kernel thread (not ours, not signallable), or a process
+    # (nothing to signal), a kernel thread (not ours, not signalable), or a process
     # mid-fork (not yet the thing the pid file names). /proc answering "empty" is an
     # ANSWER, and the answer is no.
     #
@@ -474,6 +474,21 @@ def start_worker(name: str, argv: list[str], run_dir: Path) -> dict:
         "argv": argv,
         "log": str(log_path),
         "process": process,
+        # CARRIED OUT SO confirm_spawned() DOES NOT NEED IT AS A PARAMETER, added
+        # 2026-10-02. Its docstring has always said it removes the pid file of a
+        # worker that died, and it did not: command_start() removed it, and then
+        # services/kill_switch.start_everything() had to remove it a second time
+        # in its own loop. Two callers spelling one cleanup is rule 8's bug with a
+        # delay on it, and the delay here is "the third caller forgets", which
+        # leaves a pid file naming a dead process -- rule 13's stale record, on
+        # the path whose whole job is to not have one.
+        #
+        # A PARAMETER WOULD NOT HAVE FIXED IT. `confirm_spawned(results, run_dir)`
+        # is still something a caller can pass wrongly or not at all, which is the
+        # call-site failure this repository keeps finding: a correct function whose
+        # caller ignores it. Carrying the directory in the result means the only
+        # way to get a DIED result is to get its cleanup with it.
+        "run_dir": str(run_dir),
     }
 
 
@@ -560,6 +575,15 @@ def confirm_spawned(results: list[dict], settle_seconds: float = IMMEDIATE_DEATH
         result["outcome"] = "DIED"
         result["exit_code"] = code
         result["last_log_line"] = _last_log_line(result.get("log", ""))
+        # THE SENTENCE AT THE BOTTOM OF THIS DOCSTRING, NOW ACTUALLY HERE. It
+        # claimed "the pid file is REMOVED for it" from the day it was written and
+        # the removal lived in command_start() instead -- so the claim was true of
+        # the CLI and false of the function, and the second caller duplicated it.
+        # See start_worker()'s "run_dir" key for why the directory travels in the
+        # result rather than arriving as an argument.
+        run_dir = result.get("run_dir")
+        if run_dir:
+            pid_file(Path(run_dir), result["worker"]).unlink(missing_ok=True)
     return results
 
 
@@ -668,10 +692,10 @@ def stop_worker(name: str, run_dir: Path, grace_seconds: float = DEFAULT_GRACE_S
 
       not-running     no pid file, or a pid file naming nothing that exists.
       stale-pidfile   the pid exists but is no longer the process we started
-                      (pid reuse). Nothing is signalled and the file is
+                      (pid reuse). Nothing is signaled and the file is
                       removed. This is the case where killing would be the
                       damage.
-      stopped         the process was signalled and is now ABSENT. The absence
+      stopped         the process was signaled and is now ABSENT. The absence
                       was polled for and confirmed; this is not the exit status
                       of the kill.
       failed          still alive after SIGTERM, the grace period and SIGKILL.
@@ -990,7 +1014,9 @@ def command_start(names: list[str], run_dir: Path, commands: dict[str, list[str]
                 f"  <- still running {format_duration(IMMEDIATE_DEATH_SETTLE_SECONDS)} after the spawn, asked of the OS"
             )
         elif result["outcome"] == "DIED":
-            pid_file(run_dir, result["worker"]).unlink(missing_ok=True)
+            # The pid file was removed by confirm_spawned(), which is where the
+            # removal belongs and where its docstring always said it was. This
+            # branch used to do it, and services/kill_switch.py had to do it too.
             lines.append(
                 f"  *** DIED ***      {result['worker']} pid={result['pid']} exited {result['exit_code']} within "
                 f"{format_duration(IMMEDIATE_DEATH_SETTLE_SECONDS)} of being spawned, so it is NOT polling and its pid "
@@ -1042,7 +1068,7 @@ def command_stop(names: list[str], run_dir: Path, grace_seconds: float) -> int:
             lines.append(f"  not running       {result['worker']}  <- nothing to stop; {result.get('note', 'no pid file')}")
         elif result["outcome"] == "stale-pidfile":
             lines.append(
-                f"  STALE PID FILE    {result['worker']} pid={result['pid']} was NOT signalled: "
+                f"  STALE PID FILE    {result['worker']} pid={result['pid']} was NOT signaled: "
                 f"{result.get('note', '')}. pid file removed."
             )
         else:
