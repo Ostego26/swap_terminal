@@ -14,6 +14,7 @@ returns a bool by design, and xrp_payout_verify.py and xrp_balances.py both take
 the account as an input.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
+from chains import xrp_testnet
 from chains.xrp_address import is_valid_classic_address
 from chains.xrp_signing import derive_and_check
 from valid_addresses import XRP_CUSTOMER_PAYOUT
@@ -249,3 +251,139 @@ def test_whitespace_is_reported_but_not_blamed():
     assert address != "", "a trailing space decodes, so this must still derive an account"
     assert refusal == ""
     assert "not the cause" in xrp_payout_account.seed_shape("  " + SEED)
+
+
+# --- resolving it, not just diagnosing it ------------------------------------
+#
+# The operator's reply to the refusal was "don't know, help me resolve this",
+# which is the correct response to a message that says a value is bad and nothing
+# about where a good one lives.
+
+
+def _keyfile(directory, name, address, secret):
+    """Write a faucet-shaped keyfile. The shape is chains/xrp_testnet's, measured."""
+    (directory / name).write_text(json.dumps({"account": {"address": address, "secret": secret}}))
+
+
+@pytest.fixture
+def key_directory(tmp_path, monkeypatch):
+    """Point chains/xrp_testnet at a temp directory. No real key is ever read."""
+    monkeypatch.setattr(xrp_testnet, "KEY_DIRECTORY", tmp_path)
+    return tmp_path
+
+
+def test_a_keyfile_whose_secret_controls_its_address_is_USABLE(key_directory):
+    """Both halves checked, and the second is the one no file format guarantees.
+
+    chains/xrp_testnet.saved_faucet_accounts()'s own comment says the address and
+    the secret are read from separate key names over two nesting levels, so nothing
+    structurally ties them to the same faucet response. A seed paired with an
+    address it does not control is what derive_and_check() refuses -- at signing,
+    after a deposit.
+    """
+    derived, _ = derived_account(SEED)
+    _keyfile(key_directory, "xrp-testnet-1.json", derived, SEED)
+
+    verdicts = xrp_payout_account.saved_key_verdicts()
+
+    assert len(verdicts) == 1
+    assert "USABLE" in verdicts[0][2]
+    assert "NOT USABLE" not in verdicts[0][2]
+
+
+def test_a_keyfile_pairing_a_good_secret_with_the_WRONG_address_is_refused(key_directory):
+    """The dangerous case, and it looks fine to any reader of the file.
+
+    The secret decodes, the address decodes, both are well-formed -- and they are
+    not each other's. Exporting that seed would arm the terminal against an account
+    it cannot debit.
+    """
+    _keyfile(key_directory, "xrp-testnet-1.json", OTHER_ACCOUNT, SEED)
+
+    verdict = xrp_payout_account.saved_key_verdicts()[0][2]
+
+    assert "NOT USABLE" in verdict
+    assert "controls" in verdict and "NOT the address" in verdict
+    assert SEED not in verdict, "a verdict about a secret must not contain it"
+
+
+def test_a_keyfile_whose_secret_does_not_decode_is_refused(key_directory):
+    """And the verdict says which of the two failures it is."""
+    _keyfile(key_directory, "xrp-testnet-1.json", OTHER_ACCOUNT, "placeholdr")
+
+    verdict = xrp_payout_account.saved_key_verdicts()[0][2]
+
+    assert "NOT USABLE" in verdict
+    assert "does not decode" in verdict
+
+
+def test_the_export_mode_hands_back_only_a_USABLE_secret(key_directory):
+    """And refuses rather than handing back a plausible one.
+
+    Two files, the usable one written second so it is not merely "the first found":
+    saved_faucet_accounts() sorts newest-name-first, so xrp-testnet-2 is seen
+    before xrp-testnet-1.
+    """
+    derived, _ = derived_account(SEED)
+    _keyfile(key_directory, "xrp-testnet-1.json", OTHER_ACCOUNT, "placeholdr")
+    _keyfile(key_directory, "xrp-testnet-2.json", derived, SEED)
+
+    secret, refusal = xrp_payout_account.seed_for_export()
+
+    assert secret == SEED
+    assert refusal == ""
+
+
+def test_the_export_mode_refuses_when_nothing_on_disk_is_usable(key_directory):
+    """Returning "" with a reason, never a secret it could not vouch for."""
+    _keyfile(key_directory, "xrp-testnet-1.json", OTHER_ACCOUNT, SEED)
+
+    secret, refusal = xrp_payout_account.seed_for_export()
+
+    assert secret == ""
+    assert "decodes AND controls" in refusal
+    assert "Nothing was printed" in refusal
+
+
+def test_the_export_mode_REFUSES_to_write_a_seed_to_a_terminal(key_directory, monkeypatch, capsys):
+    """The guard that makes the whole mode safe, and it is the assertion.
+
+    Printing a seed is what the rest of this tool exists to avoid, so the one path
+    that does it refuses when stdout is a tty: inside `$(...)` stdout is a pipe and
+    the value goes file -> environment, while run by hand it refuses and explains.
+    The seed never reaches a scrollback buffer, a `script` log or a pasted block.
+
+    THIS COULD NOT BE DEMONSTRATED BY RUNNING THE TOOL during development, because
+    this environment's stdout is already a pipe -- the refusal did not fire and the
+    output looked like the success path. That is precisely why it is a test with
+    isatty forced rather than something checked by eye.
+    """
+    derived, _ = derived_account(SEED)
+    _keyfile(key_directory, "xrp-testnet-1.json", derived, SEED)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+
+    code = xrp_payout_account.print_seed_for_export()
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert SEED not in captured.out, "nothing may reach stdout on the refusal path"
+    assert "REFUSED" in captured.err
+    assert "command substitution" in captured.err, "and it has to say how to use it correctly"
+
+
+def test_the_export_mode_writes_the_secret_ALONE_to_a_pipe(key_directory, monkeypatch, capsys):
+    """Whatever stdout holds becomes the variable, so a banner would corrupt it.
+
+    No label, no newline, no trailing context -- and the refusal path above writes
+    to STDERR for the same reason: a refusal printed to stdout would silently
+    export its own error message as the seed.
+    """
+    derived, _ = derived_account(SEED)
+    _keyfile(key_directory, "xrp-testnet-1.json", derived, SEED)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+
+    code = xrp_payout_account.print_seed_for_export()
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert captured.out == SEED, "exactly the seed, with nothing around it"

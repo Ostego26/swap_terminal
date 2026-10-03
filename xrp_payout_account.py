@@ -46,6 +46,7 @@ on its own. So there is one value to set here, not two.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -54,8 +55,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.xrp_address import is_valid_classic_address
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed
+from chains.xrp_testnet import saved_faucet_accounts
 from config import Config
-from report_block import labeled
+from report_block import CONTINUATION, labeled
 
 #: What Config holds for the deposit account, named once so the three places
 #: below that mention it cannot drift (rule 8).
@@ -195,7 +197,127 @@ def agreement_line(derived: str, configured: str) -> str:
                 f"check")
 
 
+def saved_key_verdicts() -> list[tuple[str, str, str]]:
+    """Every saved faucet keyfile, as (filename, address, verdict). NO SECRET IS RETURNED.
+
+    WHY THIS IS HERE, 2026-10-03. xrp_payout_account.py found that
+    XRP_PAYOUT_SECRET_SEED held nine characters that are not a seed, and the
+    operator's answer was "don't know, help me resolve this". The tree already
+    reads faucet keyfiles -- chains/xrp_testnet.saved_faucet_accounts(), which
+    globs ~/.config/swap_terminal/keys/xrp-testnet-*.json and resolves the secret
+    through SECRET_KEYS because WHERE THE FAUCET PUTS THINGS was measured rather
+    than guessed. What nothing did was say whether a saved file is USABLE.
+
+    USABLE MEANS TWO THINGS AND BOTH ARE CHECKED LOCALLY. The secret must decode,
+    and it must control the address stored beside it. The second is the one that
+    matters and the one no file format guarantees:
+    chains/xrp_testnet.saved_faucet_accounts()'s own comment says the address and
+    the secret are read from separate key names over two nesting levels, so nothing
+    structurally ties them to the same faucet response. A seed paired with an
+    address it does not control is exactly what
+    chains/xrp_signing.derive_and_check() refuses -- at signing time, after a
+    deposit.
+
+    Offline: base58check and a key derivation, no rippled.
+    """
+    verdicts = []
+    for path, address, secret in saved_faucet_accounts():
+        derived, refusal = derived_account(secret)
+        if refusal:
+            verdict = f"NOT USABLE -- the stored secret does not decode ({refusal.split('. ')[0]})"
+        elif derived != address:
+            verdict = (f"NOT USABLE -- the stored secret decodes but controls {derived}, NOT the address "
+                       f"stored in this file. derive_and_check() would refuse this pairing at signing")
+        else:
+            verdict = "USABLE -- the stored secret decodes AND controls this address"
+        verdicts.append((path.name, address, verdict))
+    return verdicts
+
+
+def seed_for_export() -> tuple[str, str]:
+    """The newest USABLE saved secret, for command substitution only. (secret, why not).
+
+    THE ONE PLACE IN THIS TOOL THAT RETURNS A SECRET, and main() will only write it
+    to a NON-TTY stdout. The point is a seed that travels from the 0600 keyfile
+    into the environment WITHOUT passing across a terminal, a scrollback buffer, or
+    a pasted block:
+
+        export XRP_PAYOUT_SECRET_SEED="$(python3 xrp_payout_account.py --print-seed-for-export)"
+
+    Run interactively it refuses, because then stdout IS the terminal and printing
+    there is the thing being avoided. That check is in main(), not here, so this
+    function stays callable from a test.
+
+    IT REUSES chains/xrp_testnet's RESOLUTION RATHER THAN RE-READING THE JSON. The
+    obvious alternative -- printing a one-liner that digs the secret out with
+    json.loads and a key name -- would be a second spelling of SECRET_KEYS and
+    ACCOUNT_KEYS in a shell command nobody can test (rule 8), and those tables
+    exist because the faucet's shape was measured.
+    """
+    # saved_faucet_accounts() PRINTS TO STDOUT, AND IN THIS MODE STDOUT IS THE
+    # VARIABLE. Caught by tests/test_xrp_payout_account.py before it shipped: the
+    # captured value came back as
+    #
+    #     "    xrp-testnet-1.json: address under 'address', secret under 'secret'
+    #      (value not shown)\nsEdTM1uX8pu2do5XvTnutH6HsouMaM2"
+    #
+    # so `export VAR="$(...)"` would have set a seed with a diagnostic line glued
+    # to the front of it, and the failure would have surfaced as "xrpl-py could not
+    # read it as a seed" -- the exact message the operator is already stuck on, now
+    # with a second cause. That line is useful to its other callers and is not
+    # removed; it is sent to STDERR, where the operator still sees which file was
+    # used and the shell does not capture it.
+    with contextlib.redirect_stdout(sys.stderr):
+        accounts = saved_faucet_accounts()
+    for _path, address, secret in accounts:
+        derived, refusal = derived_account(secret)
+        if not refusal and derived == address:
+            return secret, ""
+    return "", ("no saved keyfile in ~/.config/swap_terminal/keys/ holds a secret that decodes AND "
+                "controls the address stored beside it. Nothing was printed")
+
+
+def print_seed_for_export() -> int:
+    """stdout becomes the variable, so NOTHING else may be written to it.
+
+    EXTRACTED FROM main() RATHER THAN SUPPRESSING PLR0911. Adding this mode took
+    main() to seven returns against a ceiling of six, and CLAUDE.md rule 12 says
+    what to do: extract, never raise the ceiling. It also happens to be the right
+    shape -- this mode shares no output with the readable report and must not.
+
+    THE TTY REFUSAL IS THE GUARD THAT MAKES THE WHOLE MODE SAFE. Printing a seed is
+    exactly what the rest of this tool exists to avoid, so the one path that does
+    it refuses when stdout is a terminal: inside `$(...)` stdout is a pipe and the
+    value flows file -> environment, while run by hand it refuses and explains. The
+    seed therefore never reaches a scrollback buffer, a `script` log, or a pasted
+    block.
+
+    Diagnostics go to STDERR, so a refusal is visible to the operator without ever
+    becoming part of the captured value. A refusal that printed to stdout would
+    silently export its own error message as the seed.
+    """
+    if sys.stdout.isatty():
+        print("REFUSED: stdout is a terminal, and this mode exists to keep a seed OFF a terminal.",
+              file=sys.stderr, flush=True)
+        print(f'Use it inside command substitution:\n'
+              f'    export {SIGNING_SEED_ENV_VAR}="$(python3 xrp_payout_account.py '
+              f'--print-seed-for-export)"', file=sys.stderr, flush=True)
+        return 2
+    secret, refusal = seed_for_export()
+    if refusal:
+        print(f"REFUSED: {refusal}", file=sys.stderr, flush=True)
+        return 1
+    # No newline, no label: the whole of stdout becomes the variable, and a trailing
+    # newline inside $() is stripped by the shell anyway -- but `end=""` means the
+    # same bytes reach a Python caller that captures this without a shell.
+    print(secret, end="", flush=True)
+    return 0
+
+
 def main() -> int:
+    if "--print-seed-for-export" in sys.argv[1:]:
+        return print_seed_for_export()
+
     print("xrp payout account -- READ-ONLY. Derives a PUBLIC address from the seed already in this "
           "process.", flush=True)
     print("  the seed itself is never printed, never logged, and is not a command-line argument "
@@ -211,9 +333,32 @@ def main() -> int:
     address, refusal = derived_account(signing_seed())
     if refusal:
         print(labeled("account", f"NOT DERIVED  <- {refusal}"), flush=True)
+        # THE REMEDY, NOT JUST THE DIAGNOSIS. A refusal that names what is wrong and
+        # stops is where this tool was yesterday, and the operator's reply to it was
+        # "don't know, help me resolve this" -- which is the correct response to a
+        # message that says a value is bad and nothing about where a good one lives.
         print(flush=True)
-        print(f"Nothing was written and no variable was changed. This tool cannot set "
-              f"{DEPOSIT_ACCOUNT_VARIABLE} in your shell.", flush=True)
+        verdicts = saved_key_verdicts()
+        print(labeled("saved keys", f"{len(verdicts)} faucet keyfile(s) in "
+                                    f"~/.config/swap_terminal/keys/" if verdicts else
+                                    "(none) in ~/.config/swap_terminal/keys/ -- no saved faucet account "
+                                    "to fall back on"), flush=True)
+        for name, address, verdict in verdicts:
+            print(CONTINUATION + f"{name}  {address}  {verdict}", flush=True)
+        _secret, why_not = seed_for_export()
+        print(flush=True)
+        if why_not:
+            print(f"Nothing was written and no variable was changed. {why_not[0].upper()}{why_not[1:]}.",
+                  flush=True)
+            print(f"A usable keyfile is what this needs; {DEPOSIT_ACCOUNT_VARIABLE} is derived from the "
+                  f"seed, so there is nothing to set until the seed is real.", flush=True)
+            return 1
+        print("One of those is usable. This moves its seed from the 0600 keyfile into the environment "
+              "WITHOUT it crossing your terminal -- the tool refuses to print it to a tty:", flush=True)
+        print(f'    export {SIGNING_SEED_ENV_VAR}="$(python3 xrp_payout_account.py '
+              f'--print-seed-for-export)"', flush=True)
+        print("Then re-run this tool: it will derive the account and print the export line for "
+              f"{DEPOSIT_ACCOUNT_VARIABLE}.", flush=True)
         return 1
 
     configured = str(getattr(Config, DEPOSIT_ACCOUNT_VARIABLE, "") or "")
