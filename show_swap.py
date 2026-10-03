@@ -288,23 +288,45 @@ def what_the_deposit_rows_are(events) -> str:
                        0.0003 BTC  2 confirmation(s)  COUNTED      ... vout 0
 
     and `bitcoin-cli gettransaction` settled what the screen could not: there was
-    ONE payment, of 0.0003, at vout 1. The second row is chains/base.py's
-    FABRICATED event -- the branch its own comment heads "PROPOSAL MARKER, NOT AN
-    ENDORSEMENT" -- written while the transaction was still in the mempool and the
-    raw decode failed, carrying vout 0, the amount the wallet summary reported, and
-    a confirmation count from a second RPC. upsert_deposit_event() keys on
-    (asset, txid, vout), so the two never collide and both persist; the fabricated
-    one stays frozen at 0 confirmations because the real branch never emits vout 0
-    again to update it.
+    ONE payment, of 0.0003, at vout 1. Both `details` entries carry vout 1 -- the
+    send and the receive halves of a payment into our own wallet -- and
+    find_deposits_to_address() drops the send, so the duplicate is not those two
+    halves.
 
-    THAT FREEZE IS THE ONLY REASON THE PAYOUT WAS RIGHT. confirmed_total counts
-    rows at or above min_confirmations, so it took 0.0003 and the payout equaled
-    the quote. seen_total sums EVERY row and was 0.0006 until the credit overwrote
-    the column. Had the fabricated row ever confirmed, confirmed_total would be
-    0.0006 and payout_service.payout_amount() scales the quote by actual/expected
-    -- a 2x payout. chains/base.py:411 anticipated the double-count and expected it
-    to halt the swap at `under_review`; it did not halt, because the row never
+    THE ROW THAT RELEASED THE PAYOUT RECORDS A VOUT THE TRANSACTION DOES NOT HAVE,
+    and that is the measurement. The counted row is the one at vout 0, which pays
+    no output on this transaction; the row carrying the chain's true vout 1 sat at
+    0 confirmations and was never counted. upsert_deposit_event() keys on
+    (asset, txid, vout), so the two never collide and both persist.
+
+    WHICH BRANCH WROTE THE COUNTED ROW IS NOT ESTABLISHED FROM HERE, and saying so
+    is the point (rule 17). chains/base.py's FABRICATED branch -- the one its own
+    comment heads "PROPOSAL MARKER, NOT AN ENDORSEMENT" -- emits vout 0 with the
+    amount the WALLET SUMMARY reported and a confirmation count from a second RPC.
+    But the real branch also emits 0, because it reads `int(vout.get("n", 0))`, so
+    a decode missing `n` produces vout 0 with the OUTPUT's value. The two are
+    indistinguishable in the row, which is exactly the property the proposal marker
+    is about: services/deposit_service.py cannot tell a fabricated event from a
+    real one.
+
+    THE PAYOUT WAS CORRECT FOR A REASON THAT DOES NOT GENERALIZE. Both candidate
+    branches put 0.0003 in that row -- the wallet summary and the output agree for
+    a simple one-recipient payment -- so confirmed_total was 0.0003 and the payout
+    equaled the quote. They stop agreeing as soon as a transaction pays the address
+    more than once, or pays it alongside anything the summary nets against.
+    seen_total sums EVERY row and was 0.0006 until the credit overwrote the column;
+    had both rows confirmed, confirmed_total would be 0.0006 and
+    payout_service.payout_amount() scales the quote by actual/expected -- a 2x
+    payout. chains/base.py:411 anticipated that double-count and expected it to
+    halt the swap at `under_review`. It did not halt, because only one row ever
     confirmed.
+
+    AN EARLIER VERSION OF THIS DOCSTRING HAD THE TWO ROWS THE OTHER WAY ROUND,
+    claiming the decoded vout-1 row was the counted one and that a frozen
+    fabricated row was harmless. It is kept in git rather than quietly replaced
+    (rule 1: the drift is the point): the inverted reading made the finding sound
+    like a cosmetic duplicate, when what the rows actually say is that a real
+    payout was released by a row whose vout does not exist on the transaction.
 
     SO THE COUNT GETS A SENTENCE INSTEAD OF A CLAIM. The condition is already
     detected -- deposit_service.refresh_swap_from_chain() calls
@@ -324,10 +346,12 @@ def what_the_deposit_rows_are(events) -> str:
         return "every payment attributed to this swap, confirmed or not"
     rows_in_groups = sum(len(rows) for rows in groups.values())
     return (f"{count} ROWS, NOT {count} PAYMENTS -- {len(groups)} transaction(s) carry {rows_in_groups} rows "
-            f"between them (same txid, different vout). One of each such pair is usually chains/base.py's "
-            f"FABRICATED vout-0 event, written when the raw decode failed; see its PROPOSAL MARKER. The "
-            f"credit counts only rows at or above min_confirmations, so a frozen 0-confirmation row does not "
-            f"reach the payout -- but `seen` sums them all")
+            f"between them (same txid, different vout). At most one vout per transaction can be the real "
+            f"output: check it with `gettransaction <txid> true` before trusting a row's vout. chains/"
+            f"base.py's FABRICATED branch writes vout 0 with the amount the WALLET SUMMARY reported, and "
+            f"its real branch also writes 0 when the decode omits `n`, so the row cannot say which it is "
+            f"(see its PROPOSAL MARKER). `seen` sums every row; the credit counts only those at or above "
+            f"min_confirmations")
 
 
 def deposit_event_lines(events: list[dict], min_confirmations: int) -> list[str]:

@@ -1,0 +1,186 @@
+"""The account the signing seed controls, which nothing in the tree could name.
+
+Role: test (pure functions; derives from a seeded value, opens no socket)
+Reads: xrp_payout_account.py
+Writes: nothing
+Can move funds: no
+Mainnet-safe: yes
+
+XRP_DEPOSIT_ACCOUNT was the single remaining readiness FAIL on the operator's
+host through 2026-10-03, and it is what rendered four XRP pairs UNAVAILABLE on
+the customer page. They asked to have it set, and nothing here could say WHAT to
+set it to: derive_and_check() VERIFIES a pairing, signing_seed_is_present()
+returns a bool by design, and xrp_payout_verify.py and xrp_balances.py both take
+the account as an input.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
+
+from chains.xrp_address import is_valid_classic_address
+from chains.xrp_signing import derive_and_check
+from valid_addresses import XRP_CUSTOMER_PAYOUT
+
+import xrp_payout_account
+from xrp_payout_account import agreement_line, derived_account
+
+# A seed that funds nothing and controls an account that has never existed on any
+# ledger. There is NO EXPECTED-ADDRESS LITERAL here, and that is the second
+# iteration of this fixture.
+#
+# The first version typed one, got it wrong (the assertion failed with rG31cLy...
+# against an invented rLUEXYu...), and was then "fixed" by pasting the measured
+# value back in -- which pushed the tree to 61 address literals against
+# tests/test_address_literals_are_valid.py's ceiling of 60. That gate's own
+# failure message says what to do: "Use tests/valid_addresses.py rather than
+# writing one -- a derived address cannot be mistyped and says what it is for."
+#
+# valid_addresses.py DERIVES its addresses from phrases, which is why it is exempt
+# and why it cannot help here: the derivation under test is seed -> address and no
+# phrase produces it. So the assertion changed shape instead of the ceiling
+# changing (rule 19: never raise a baseline to let your own change land). What is
+# pinned now is AGREEMENT WITH chains/xrp_signing.derive_and_check(), the function
+# the live payout path actually uses -- which is a stronger statement than any
+# literal: a typo'd literal fails loudly, but a literal that is merely the WRONG
+# derivation agrees with nothing.
+SEED = "sEdTM1uX8pu2do5XvTnutH6HsouMaM2"
+
+#: A different, derived account, for the disagreement case. Taken from the shared
+#: fixture registry rather than written, for the reason above.
+OTHER_ACCOUNT = XRP_CUSTOMER_PAYOUT
+
+
+def test_the_derived_account_is_the_one_the_SIGNING_PATH_would_accept():
+    """Agreement with derive_and_check(), which is what guards the live payout.
+
+    That function REFUSES to sign when the seed does not control the announced
+    account -- chains/xrp_signing.py's threat model: local signing lets us choose
+    the account a transaction claims, so a seed paired with the wrong address
+    signs a Payment debiting an account nobody announced. So the address this tool
+    prints is only useful if it is the address that check will accept, and that is
+    what is asserted rather than a literal.
+
+    The seed is read from the environment by the process and used for one thing.
+    It is never printed, never logged and never a command-line argument -- argv is
+    world-readable through /proc and `ps`, which is why there is no --seed flag.
+    """
+    address, refusal = derived_account(SEED)
+
+    assert refusal == ""
+    assert is_valid_classic_address(address), "the printed value has to decode as a classic address"
+    assert SEED not in address
+    # The authority, called directly: it raises when the pairing is wrong.
+    derive_and_check(SEED, address)
+
+
+def test_the_derivation_is_the_same_answer_every_time():
+    """A seed maps to ONE account, and an operator pastes this into a variable.
+
+    Without this, a version returning a fresh random address per call would pass
+    every other test in this file: each one would decode, and derive_and_check()
+    is handed whatever came back.
+    """
+    first, _ = derived_account(SEED)
+    second, _ = derived_account(SEED)
+
+    assert first == second
+
+
+def test_a_DIFFERENT_seed_derives_a_different_account():
+    """Or the function could ignore its argument entirely.
+
+    The second seed is as disposable as the first and controls nothing.
+    """
+    other_seed = "sEdSKaCy2JT7JaM7v95H9SxkhP9wS2r"
+    mine, _ = derived_account(SEED)
+    theirs, refusal = derived_account(other_seed)
+
+    assert refusal == ""
+    assert theirs != mine
+
+
+def test_an_unreadable_seed_refuses_WITHOUT_quoting_the_value():
+    """str(error) is deliberately excluded, and that is not fussiness.
+
+    xrpl-py's own messages for a malformed seed have echoed the offending value,
+    and this tool's output is printed, pasted into a chat, and kept. So the
+    refusal names the exception TYPE and the variable, which is everything the
+    operator can act on, and nothing they must then redact.
+    """
+    address, refusal = derived_account("not-a-seed-at-all")
+
+    assert address == ""
+    assert "XRP_PAYOUT_SECRET_SEED" in refusal, "name the variable, or there is nothing to fix"
+    assert "not-a-seed-at-all" not in refusal, (
+        "the rejected value must not appear in output that gets pasted -- a real one would be a live key"
+    )
+
+
+def test_an_unset_seed_says_so_rather_than_deriving_nothing_quietly():
+    """(none) is a result (rule 14), and the remedy is a shell command."""
+    address, refusal = derived_account("")
+
+    assert address == ""
+    assert "not set in this process" in refusal
+    assert "Export it in this shell" in refusal
+
+
+@pytest.mark.parametrize(
+    ("configured", "fragment"),
+    [
+        ("", "(unset)"),
+        ("SAME", "AGREES with the seed"),
+        ("OTHER", "DISAGREES with the seed"),
+    ],
+)
+def test_the_configured_variable_is_compared_against_the_derived_account(configured, fragment):
+    """THE CASE THAT COSTS MONEY IS NOT "UNSET", IT IS "SET TO SOMETHING ELSE".
+
+    chains/xrp_signing.derive_and_check()'s threat model: local signing lets US
+    choose the account a transaction CLAIMS, so a seed paired with an address it
+    does not control signs a Payment debiting an account nobody announced. The
+    payout path refuses that -- at payout time, after the deposit is confirmed and
+    irreversible, which is the ordering the funding gate was added for the same
+    morning. Reporting it here costs a retry.
+    """
+    derived, _ = derived_account(SEED)
+    resolved = {"SAME": derived, "OTHER": OTHER_ACCOUNT}.get(configured, configured)
+
+    assert fragment in agreement_line(derived, resolved)
+
+
+def test_the_disagreement_line_names_BOTH_accounts():
+    """One of the two alone leaves the operator unable to tell which to keep."""
+    derived, _ = derived_account(SEED)
+    line = agreement_line(derived, OTHER_ACCOUNT)
+
+    assert derived in line and OTHER_ACCOUNT in line
+
+
+def test_one_account_serves_both_directions_and_the_lines_say_which():
+    """The operator asked whether every chain needs a deposit AND a withdraw account.
+
+    services/swap_service.payout_source_account() reads the SAME variable through
+    the SAME table as deposit_account() -- TAG_ATTRIBUTION[asset][0] -- and its
+    docstring gives the reason at length: a second variable is how the deposit side
+    and the payout side come to point at different accounts, each file looking
+    correct on its own. So this tool prints ONE value to set, and says that it
+    serves both directions, rather than leaving the reader to wonder where the
+    withdraw account went.
+    """
+    derived, _ = derived_account(SEED)
+    line = agreement_line(derived, derived)
+
+    assert "deposits IN" in line and "debited OUT" in line
+    assert "one account, both directions" in line
+
+
+def test_the_variable_name_is_not_spelled_twice():
+    """Rule 8 at its smallest: the module names it once and reads it back."""
+    assert xrp_payout_account.DEPOSIT_ACCOUNT_VARIABLE == "XRP_DEPOSIT_ACCOUNT"
+    assert xrp_payout_account.DEPOSIT_ACCOUNT_VARIABLE in agreement_line("rAnything", "")
