@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""The booked reserve against the fee the chain actually charged, over seeded rows.
+
+Role: tests (read-only)
+Reads: show_payout_fees.py's own functions, a temporary SQLite database it seeds,
+      and a stub adapter. No network, no daemon, no live database.
+Writes: nothing outside tmp_path
+Can move funds: no
+Mainnet-safe: yes
+
+WHAT THIS IS FOR. The operator asked 2026-10-03 what the four
+*_NETWORK_FEE_RESERVE figures should be. Nothing in the tree could answer it: the
+three that exist are bare defaults with no provenance, and the only one anybody
+had ever checked against a chain -- GRC -- was wrong by a factor of ten
+(services/quote_service.get_network_fee_reserve() carries the 2026-10-01
+measurement: "the real fee was 0.001 GRC, not 0.01").
+
+show_payout_fees.py does that check for every payout in the database at once. It
+reaches a live daemon, so the live run is the operator's; THIS pins the arithmetic
+and the four reporting cases with seeded rows, which is the half that can be
+verified from here (rule 16's line between a fix and a proposal).
+
+THE RATIO IS THE FIGURE THAT MATTERS and it is why measured_vs_booked() returns
+one. "0.01 booked against 0.001 charged" is a sentence an operator has to do
+arithmetic on; "10.00x" is not.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from show_payout_fees import (
+    MEASURABLE,
+    UNMEASURABLE_HERE,
+    load_payouts,
+    measured_vs_booked,
+    read_fees,
+    report_asset,
+)
+
+
+class _Wallet:
+    """A chain whose gettransaction answers a NEGATIVE fee, as a real one does.
+
+    THE SIGN IS THE POINT, not an incidental. A Bitcoin wallet reports `fee` as a
+    debit, so an implementation that forgot abs() would report every fee as
+    negative and every ratio as negative -- which reads as a credit. Seeded
+    negative here so that mistake cannot pass.
+    """
+
+    def __init__(self, fee=None, raises=False, omit=False):
+        self._fee, self._raises, self._omit = fee, raises, omit
+
+    def get_transaction(self, _txid):
+        if self._raises:
+            raise RuntimeError("the daemon refused")
+        return {} if self._omit else {"fee": self._fee}
+
+
+def _collect():
+    lines = []
+    return lines, lines.append
+
+
+def test_the_GRC_overstatement_reads_as_a_ratio_and_not_as_two_numbers():
+    """The exact 2026-10-01 finding, as this tool would have printed it.
+
+    MUTATION: drop abs() in read_fees(). The mean goes negative, the ratio goes
+    negative, and this fails -- a negative ratio reads as the chain paying the desk.
+    """
+    rows = [{"asset": "GRC", "txid": "a" * 64, "amount": 143.4, "booked": 0.01, "sent_at": "t"}]
+    per_asset = read_fees(rows, {"GRC": _Wallet(fee=-0.001)}, ask_chain=True, say=lambda _t: None)
+
+    verdict = measured_vs_booked(per_asset["GRC"]["fees"], per_asset["GRC"]["booked"])
+    assert verdict["n"] == 1
+    assert verdict["measured"] == pytest.approx(0.001), "the fee must be reported as a positive cost"
+    assert verdict["booked"] == pytest.approx(0.01)
+    assert verdict["ratio"] == pytest.approx(10.0), (
+        "the ratio is the whole output: 0.01 booked against 0.001 charged is 10x, and that is the "
+        "number the operator acts on"
+    )
+
+
+def test_a_fee_the_chain_would_not_give_is_UNREAD_and_never_counted_as_zero():
+    """Three ways a read fails, and none of them may become a measurement.
+
+    A zero fee is a CLAIM -- that the payout was free. "The daemon refused", "the
+    wallet has no fee for this" and "there is no adapter" are not that claim, and
+    folding any of them into the mean would understate the real cost and make the
+    reserve look too high, which is the direction that loses money.
+
+    MUTATION: append 0.0 to `fees` in any of the three branches. The mean drops,
+    `unread` empties, and both assertions below fail.
+    """
+    rows = [{"asset": "GRC", "txid": "b" * 64, "amount": 1.0, "booked": 0.01, "sent_at": "t"},
+            {"asset": "GRC", "txid": "c" * 64, "amount": 1.0, "booked": 0.01, "sent_at": "t"},
+            {"asset": "LTC", "txid": "d" * 64, "amount": 1.0, "booked": 0.001, "sent_at": "t"}]
+    # GRC raises on the first and omits `fee` on the second only if one adapter did
+    # both; two assets instead, so each failure mode is attributable to its own row.
+    per_asset = read_fees(rows, {"GRC": _Wallet(raises=True)}, ask_chain=True, say=lambda _t: None)
+
+    assert per_asset["GRC"]["fees"] == [], "a refused read became a measured fee"
+    assert len(per_asset["GRC"]["unread"]) == 2, "both refusals must be recorded with a reason"
+    assert all(why for _txid, why in per_asset["GRC"]["unread"]), "an unread row with no reason is a blank gap"
+    # LTC had no adapter at all, which is its own reason and not a silent omission.
+    assert per_asset["LTC"]["unread"] == [("d" * 64, "no LTC adapter in this process")]
+
+    verdict = measured_vs_booked(per_asset["GRC"]["fees"], per_asset["GRC"]["booked"])
+    assert verdict["n"] == 0 and verdict["measured"] is None, (
+        "0 of 2 payouts answered, so there is no mean -- and None prints as '(none read)' where a 0.0 "
+        "would print as a free payout"
+    )
+
+
+def test_a_wallet_that_omits_the_fee_field_is_unread_rather_than_free():
+    """Separated from the raise, because the two are different wallet answers."""
+    rows = [{"asset": "GRC", "txid": "e" * 64, "amount": 1.0, "booked": 0.01, "sent_at": "t"}]
+    per_asset = read_fees(rows, {"GRC": _Wallet(omit=True)}, ask_chain=True, say=lambda _t: None)
+    assert per_asset["GRC"]["fees"] == []
+    assert "no `fee` field" in per_asset["GRC"]["unread"][0][1]
+
+
+def test_the_two_chains_this_tool_cannot_ask_print_a_figure_and_its_provenance():
+    """XRP and SOL are NOT MEASURABLE here, and must not read as having no payouts.
+
+    THE SILENT-OMISSION FAILURE THIS GUARDS. A table that simply left XRP out
+    would read as "no XRP payouts", which is a different fact from "this tool
+    cannot ask XRP's chain" -- and the operator asking what to set
+    XRP_NETWORK_FEE_RESERVE to is the exact reader who would be misled.
+
+    MUTATION: remove XRP from UNMEASURABLE_HERE. The block falls through to the
+    n==0 branch and prints "(none read)", and this fails.
+    """
+    assert set(UNMEASURABLE_HERE) == {"XRP", "SOL"}, (
+        "the unmeasurable set changed. If a chain became measurable it belongs in MEASURABLE and its "
+        "real fee belongs in the report; if one became unmeasurable it needs a figure and a provenance"
+    )
+    assert not set(UNMEASURABLE_HERE) & set(MEASURABLE), "a chain cannot be both"
+
+    lines, say = _collect()
+    report_asset("XRP", {"fees": [], "booked": [0.0], "unread": []}, say)
+    body = "\n".join(lines)
+    assert "NOT MEASURABLE FROM HERE" in body, body
+    assert "0.00001 XRP" in body, "the figure the tree knows must be printed, not omitted"
+    assert "autofilled" in body, "a figure with no provenance becomes the provenance for a reserve"
+    assert "(none read)" not in body, (
+        "an unmeasurable chain printed the same line as a measurable one that answered nothing -- those "
+        "are different facts"
+    )
+
+
+def test_an_absent_reserve_says_the_quote_REFUSES_rather_than_printing_None():
+    """XRP_NETWORK_FEE_RESERVE does not exist, and that is the live consequence.
+
+    `None` beside a setting name tells the operator nothing. What they need is that
+    every quote paying out in that asset refuses -- which is what they hit on
+    2026-10-02 and the reason they asked the question this tool answers.
+    """
+    lines, say = _collect()
+    report_asset("XRP", {"fees": [], "booked": [0.0], "unread": []}, say)
+    assert "REFUSES" in lines[0], lines[0]
+    assert "None" not in lines[0]
+
+
+def test_load_payouts_opens_the_database_READ_ONLY(tmp_path):
+    """The header claims it writes nothing; mode=ro is what makes that checkable.
+
+    MUTATION: drop `?mode=ro` from the URI. This test fails, because the write
+    below then succeeds on the same connection shape the tool uses.
+    """
+    db_path = tmp_path / "ro.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("CREATE TABLE payouts (id INTEGER PRIMARY KEY, swap_id TEXT, amount REAL, "
+                       "txid TEXT, status TEXT, sent_at TEXT);"
+                       "CREATE TABLE swaps (id TEXT PRIMARY KEY, to_asset TEXT, network_fee_reserve REAL);")
+    conn.execute("INSERT INTO swaps VALUES ('s1', 'GRC', 0.01)")
+    conn.execute("INSERT INTO payouts VALUES (1, 's1', 143.4, 'f', 'broadcast', 't')")
+    conn.commit()
+    conn.close()
+
+    rows = load_payouts(str(db_path))
+    assert [row["asset"] for row in rows] == ["GRC"]
+    assert rows[0]["booked"] == pytest.approx(0.01)
+
+    read_only = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            read_only.execute("INSERT INTO swaps VALUES ('s2', 'BTC', 0.1)")
+    finally:
+        read_only.close()
+
+
+def test_a_pending_payout_is_not_a_cost_yet(tmp_path):
+    """Only `broadcast` rows with a txid count. A queued payout has charged no fee.
+
+    MUTATION: drop the status filter from PAYOUT_SQL. The pending row appears, its
+    txid is NULL, and the tool asks the chain about None.
+    """
+    db_path = tmp_path / "pending.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("CREATE TABLE payouts (id INTEGER PRIMARY KEY, swap_id TEXT, amount REAL, "
+                       "txid TEXT, status TEXT, sent_at TEXT);"
+                       "CREATE TABLE swaps (id TEXT PRIMARY KEY, to_asset TEXT, network_fee_reserve REAL);")
+    conn.executescript("INSERT INTO swaps VALUES ('s1', 'GRC', 0.01);"
+                       "INSERT INTO swaps VALUES ('s2', 'GRC', 0.01);"
+                       "INSERT INTO payouts VALUES (1, 's1', 1.0, 'sent', 'broadcast', 't1');"
+                       "INSERT INTO payouts VALUES (2, 's2', 1.0, NULL, 'pending', 't2');")
+    conn.commit()
+    conn.close()
+
+    rows = load_payouts(str(db_path))
+    assert [row["txid"] for row in rows] == ["sent"], "a pending payout has not charged a fee yet"
