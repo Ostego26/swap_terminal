@@ -160,6 +160,7 @@ from fee_sweep import (
     SWEEP,
     Accrual,
     WalletCeiling,
+    destination_refusal,
     obligation,
     record_sweep_broadcast,
     record_sweep_failed,
@@ -258,9 +259,32 @@ def plan_for_asset(db, config, adapters, total, already_swept: dict) -> tuple[ob
     # RECORDED SO THE PRINTER CAN SHOW THE FIGURES THE VERDICT USED. See _accruals.
     accrual = Accrual(asset=asset, accrued=total.retained, swept=swept, sweeps=sweeps)
     _accruals[asset] = accrual
+    destination = fee_sweep_destination(asset)
+    # THE DESTINATION IS ASKED ABOUT FIRST, AND ONLY WHEN THERE IS SOMETHING TO
+    # SWEEP. Ordered this way for the reason swap_readiness.check_bitcoin_like()
+    # orders its three: a question answerable from config with no socket is
+    # answered that way, and a network read happens only once it can change the
+    # answer. An asset with nothing accrued must not open a socket to validate an
+    # address it will never send to -- and must not nag about a variable it does
+    # not need, which fee_sweep.sweep_plan()'s own docstring calls out as
+    # deliberate.
+    #
+    # READ-ONLY. address_ownership() calls validateaddress/getaddressinfo and
+    # nothing else: no getnewaddress (a wallet WRITE), no balance, no key.
+    is_ours: bool | None = None
+    why = ""
+    if destination and accrual.accrued - accrual.swept > 0 and asset in adapters:
+        ownership = adapters[asset].address_ownership(destination)
+        is_ours, why = ownership.verdict, ownership.why
+    elif destination:
+        why = (
+            f"no {asset} adapter in this process, so the destination could not be asked about"
+            if asset not in adapters
+            else "nothing is accrued, so the destination was not asked about"
+        )
     plan = sweep_plan(
         accrual=accrual,
-        destination=fee_sweep_destination(asset),
+        destination=destination,
         ceiling=ceiling,
         owed=owed,
         # 0.0 ONLY WHEN THE RESERVE COULD NOT BE READ, in which case the ceiling
@@ -268,6 +292,26 @@ def plan_for_asset(db, config, adapters, total, already_swept: dict) -> tuple[ob
         # not a default standing in for a real fee of zero.
         chain_fee=0.0 if chain_fee is None else chain_fee,
     )
+    # THE DESTINATION IS CHECKED LAST, AND THE ORDER IS A CORRECTION I MADE TO
+    # MYSELF MID-CHANGE. Running destination_refusal() BEFORE sweep_plan() made an
+    # asset with nothing accrued refuse for a missing destination -- nagging about
+    # a variable it will never need, which sweep_plan()'s own docstring calls out
+    # as deliberately avoided ("an asset with nothing to sweep must not nag about"
+    # it). So the accrual verdicts come first and this applies only to an asset
+    # that got as far as SWEEP.
+    #
+    # ONE VISIBLE CONSEQUENCE, so it is not discovered as a surprise: an asset
+    # whose BALANCE could not be read now reports that instead of a missing
+    # destination, because the ceiling refusal is inside sweep_plan() and fires
+    # first. On this desk that is XRP and SOL, whose get_balance() refuses -- and
+    # it is the better sentence of the two, because the balance is the blocker
+    # there and the destination is not (rule 14: the reason chooses the fix).
+    if plan.verdict == SWEEP:
+        refusal = destination_refusal(
+            asset, destination, is_ours, why, 0.0 if chain_fee is None else chain_fee
+        )
+        if refusal is not None:
+            return refusal, owed
     return plan, owed
 
 

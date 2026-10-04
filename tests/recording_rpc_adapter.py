@@ -54,9 +54,34 @@ class RecordingRPCAdapter(RPCAdapter):
         )
         self.asset = asset
         self.calls: list[tuple] = []
+        #: Addresses this fake wallet claims the key for. Everything else answers
+        #: ismine=false. Empty by default because the realistic default for the
+        #: addresses tests point this adapter at -- customer payout destinations,
+        #: fee sweep destinations -- is that they are NOT the desk's.
+        self.owned_addresses: set[str] = set()
 
     def call(self, method, *params):
         self.calls.append((method, params))
+        # validateaddress AND getaddressinfo ANSWER PROPERLY, because returning a
+        # STUB TXID STRING for them was answering "not established" to every
+        # ownership question, and that is not what a wallet does.
+        #
+        # FOUND BY A GUARD LANDING ON IT, 2026-10-04. fee_sweep.destination_refusal()
+        # began refusing a sweep whose destination could not be shown to be
+        # somebody else's -- the fix for the operator's "nothing has moved in a grc
+        # wallet" -- and six collect_fees tests went red at once with "whether
+        # <addr> is the desk's own wallet was NOT established (validateaddress:
+        # answered, with no `ismine` field)". The guard was right and the FAKE was
+        # the thing that could not answer. A fake that cannot answer a question the
+        # real adapter answers will keep turning correct new guards into red tests
+        # and invite somebody to weaken the guard instead (rule 19).
+        if method in ("validateaddress", "getaddressinfo"):
+            address = params[0] if params else ""
+            return {
+                "isvalid": True,
+                "address": address,
+                "ismine": address in self.owned_addresses,
+            }
         return STUB_TXID
 
     @property

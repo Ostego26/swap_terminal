@@ -576,7 +576,33 @@ def test_the_grc_send_goes_through_the_lock_cycle_the_payout_path_uses(monkeypat
     assert run(monkeypatch, db_path, adapter, "--apply") == 0
 
     methods = [method for method, _params in adapter.calls]
-    assert methods == [
+    # THE OWNERSHIP READ COMES FIRST AND THE ASSERTION NOW SAYS SO -- a stronger
+    # invariant than the equality it replaces, not a weaker one.
+    #
+    # This asserted the five lock-cycle methods as the WHOLE list until 2026-10-04,
+    # when fee_sweep.destination_refusal() added a validateaddress/getaddressinfo
+    # read of the destination and the list gained a leading sixth. The equality
+    # failed on a change that violated nothing it was written to protect: the real
+    # invariant is "the send happened BETWEEN the unlock and the re-lock", which a
+    # read-only call in front cannot break.
+    #
+    # So it is split in two, and the first half is new ground. A destination read
+    # BEFORE any walletpassphrase means the address is checked while the wallet
+    # still cannot spend -- so a refusal cannot leave a wallet unlocked, and the
+    # window in which this process can send is as short as the send itself. Had
+    # that call landed inside the unlock context it would have passed the old
+    # equality's successor just as happily while widening that window.
+    ownership_reads = [m for m in methods if m in ("validateaddress", "getaddressinfo")]
+    assert ownership_reads, (
+        "the destination was never asked about, so a sweep into the desk's own wallet would "
+        "broadcast, cost a chain fee and move nothing -- the defect destination_refusal() exists "
+        "for, and it cannot refuse on an answer nobody requested"
+    )
+    assert methods.index(ownership_reads[0]) < methods.index("walletpassphrase"), (
+        f"the destination was read AFTER the wallet was unlocked for spending, which widens the "
+        f"send window for a question answerable with the wallet locked: {methods}"
+    )
+    assert [m for m in methods if m.startswith("wallet") or m == "sendtoaddress"] == [
         "walletlock", "walletpassphrase", "sendtoaddress", "walletlock", "walletpassphrase",
     ], methods
 

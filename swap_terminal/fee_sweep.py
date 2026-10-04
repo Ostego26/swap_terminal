@@ -484,6 +484,86 @@ class WalletCeiling(NamedTuple):
         return cls(None if amount < 0 else amount, how)
 
 
+def destination_refusal(
+    asset: str,
+    destination: str,
+    destination_is_ours: bool | None,
+    destination_why: str,
+    chain_fee: float,
+) -> SweepPlan | None:
+    """Is `destination` somewhere a sweep would actually MOVE coin? A plan, or None to proceed.
+
+    A SWEEP INTO THE DESK'S OWN WALLET MOVES NOTHING, AND NOTHING STOPPED IT.
+
+    Operator, 2026-10-04, after a day of this tool reporting an accrual it never
+    collected: "nothing has moved in a grc wallet." Correct, and this function is
+    why it had not. sweep_plan() checked the destination for being SET and never
+    for being SOMEBODY ELSE'S, so the one arrangement where a sweep is pointless
+    was also the one arrangement nothing refused: it would have signed, broadcast,
+    confirmed, returned a txid, and moved one chain fee out of the wallet and
+    nothing else. "Sent" on screen, zero collected. That is rule 13's "'skipped'
+    plus 'success' in the same output is a defect in the OUTPUT", on the money path
+    rather than in a log line.
+
+    IT WAS NOT A HYPOTHETICAL ON THIS DESK, which is what makes this a refusal
+    rather than a warning. Gridcoin has no multiwallet -- measured on the
+    operator's v5.5.1.0 testnet daemon: getwalletinfo carries no `walletname` and
+    getaddressinfo answers Method not found (rpc code -32601) -- so there is
+    exactly ONE GRC wallet and EVERY GRC address the operator holds answers
+    ismine=true. Before this check there was no value of GRC_FEE_SWEEP_DESTINATION
+    that both passed the tool and moved any coin. The same wallet already swallowed
+    a 500 GRC swap on 2026-09-26 and looked like nothing happening, which
+    chains/base.owns_address() exists because of.
+
+    NONE REFUSES TOO, deliberately, and it is the direction this module takes
+    everywhere else: "refusing costs nothing -- the fee stays in the wallet and
+    stays sweepable -- where sweeping on an unverified balance could strand a
+    payout." An unverified DESTINATION is the same trade. A sweep is the desk's own
+    money, so a false refusal costs a delay and a false send costs the chain fee
+    plus the operator's belief that the fee was collected.
+
+    ITS OWN FUNCTION RATHER THAN TWO MORE BRANCHES IN sweep_plan(), and ruff is
+    what said so: adding the ownership inputs there took it to 7 arguments and 7
+    return statements, over both ceilings. Rule 12's note on C901 is that a
+    function past the limit is orchestration that has swallowed a decision, and
+    the fix is to extract the decision rather than raise the ceiling -- so this is
+    a decision callable with seeded inputs (rule 10), and sweep_plan() is back to
+    the five arguments it had.
+
+    RETURNS None TO MEAN "NOTHING TO REFUSE", not "fine": the caller then runs
+    sweep_plan(), which has its own four refusals. A caller that treated None as
+    approval would be reading this function as the whole gate.
+    """
+    if not destination:
+        return SweepPlan(asset, REFUSE, None, destination, (
+            f"REFUSED: {FEE_SWEEP_DESTINATION_TEMPLATE.format(asset=asset)} is not set, so there is no "
+            f"address to sweep {asset} to. Nothing is defaulted and nothing is guessed: a fee address "
+            f"this tool chose would be a final, unrecoverable transaction to somewhere nobody picked. "
+            f"Export that variable with an address you control OUTSIDE this wallet, then run this again"
+        ), chain_fee)
+    if destination_is_ours:
+        return SweepPlan(asset, REFUSE, None, destination, (
+            f"REFUSED: {destination} is THE DESK'S OWN WALLET ({destination_why or 'ismine=true'}), so "
+            f"a sweep to it would NOT MOVE any {asset}. It would broadcast, confirm, return a txid and "
+            f"cost {chain_fee!r} {asset} in chain fee while the coin stayed exactly where it is -- "
+            f"'sent' on screen and nothing collected. Set "
+            f"{FEE_SWEEP_DESTINATION_TEMPLATE.format(asset=asset)} to an address OUTSIDE this wallet. "
+            f"On a chain with one wallet and no multiwallet -- Gridcoin -- every address the desk "
+            f"holds is its own, so that means a second wallet elsewhere, an exchange deposit address, "
+            f"or another machine; no value of that variable inside this wallet collects anything"
+        ), chain_fee)
+    if destination_is_ours is None:
+        return SweepPlan(asset, REFUSE, None, destination, (
+            f"REFUSED: whether {destination} is the desk's own wallet was NOT established "
+            f"({destination_why or 'no reason was returned'}), so whether a sweep would move any "
+            f"{asset} is unknown. This is 'nobody answered', NOT 'not ours' -- refusing costs a "
+            f"delay and the fee stays sweepable, where sending could cost {chain_fee!r} {asset} to "
+            f"move the coin from this wallet to this wallet and report success. If the reason above "
+            f"is a connection error the question is still answerable"
+        ), chain_fee)
+    return None
+
+
 def sweep_plan(
     *,
     accrual: Accrual,
@@ -584,13 +664,10 @@ def sweep_plan(
             f"({quantization or 'nothing is left at all'}) -- it stays in the wallet and becomes "
             f"sweepable once more accrues on top of it"
         ), chain_fee)
-    if not destination:
-        return SweepPlan(asset, REFUSE, None, destination, (
-            f"REFUSED: {FEE_SWEEP_DESTINATION_TEMPLATE.format(asset=asset)} is not set, so there is no "
-            f"address to sweep {asset} to. Nothing is defaulted and nothing is guessed: a fee address "
-            f"this tool chose would be a final, unrecoverable transaction to somewhere nobody picked. "
-            f"Export that variable with an address you control, then run this again"
-        ), chain_fee)
+    # THE DESTINATION REFUSALS MOVED OUT, to destination_refusal() above, and the
+    # caller runs that FIRST. Not duplicated here: two copies of one refusal is
+    # rule 8's bug with a delay on it, and this one would decide whether money
+    # moves. collect_fees.py is the single caller and calls both in order.
     if ceiling.amount is None:
         return SweepPlan(asset, REFUSE, None, destination, (
             f"REFUSED: the {asset} payout wallet's balance was NOT established ({ceiling.how}), so "
