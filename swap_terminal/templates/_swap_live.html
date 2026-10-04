@@ -251,3 +251,114 @@
     </table>
   </section>
 </div>
+
+{#- MOVED IN FROM swap.html ON 2026-10-04, AND THE DEFECT WAS VISIBLE ON A REAL SWAP.
+
+    These two sections sat OUTSIDE `#swap-live`, which static/script.js replaces on
+    a timer -- so they rendered once at page load and never again. The operator's
+    BTC->GRC swap s_708ea48e227183bd completed while its page was open, and the
+    page then said all of this at once:
+
+        Raw status              completed
+        Deposit rows recorded   1 row(s) recorded for this swap
+        Payout txid             b3dce6dca2dddca5d79fdcae41300ce77b76ff95c5d9a2f5d07e69b0b7168c0f
+      ...
+        Deposits recorded for this swap
+          (none) no deposit row exists for this swap
+          That is the expected state before you send anything.
+        Payout attempts
+          (none) no payout has been attempted
+
+    Two moments in time rendered as one page, and the frozen half told the
+    operator "that is the expected state before you send anything" about a swap
+    that had already paid out 989.15511156 GRC. That is rule 13's "'skipped' plus
+    'success' in the same output is a defect in the OUTPUT", and rule 14's "make
+    did-nothing look different from did-work" -- here the page made did-work look
+    like both at once.
+
+    WHY IT SHIPPED, because it is the same shape as a dozen findings this week:
+    tests/test_web_surfaces.py::test_an_empty_deposit_list_renders_none_and_not_a
+    _blank_gap seeds a swap with NO rows and asserts the `(none)` branch. Green,
+    for the right reason, about the wrong case. Nothing asserted that a swap WITH
+    rows renders them, and nothing asserted these sections were inside the polled
+    region.
+
+    SAFE TO BE HERE, verified before the move rather than after: routes/ui.
+    swap_fragment() renders this template with `swap_display(get_swap(...))`, and
+    services/swap_service.get_swap() attaches `deposit_events` and `payouts` to
+    the swap dict. The fragment gets the same view from the same function as the
+    full page, so these loops see the same rows here as they did there.
+-#}
+
+<section class="panel" aria-labelledby="events-heading">
+  <h2 id="events-heading">Deposits recorded for this swap</h2>
+  {% if view.swap.deposit_events %}
+  <p class="panel-note" id="deposit-table-note">Each row is one output credited to this swap's deposit target.
+     Confirmations are counts.</p>
+  <div class="scroll-x">
+  <table aria-describedby="deposit-table-note">
+    {#- THE ASSET IS ITS OWN COLUMN, 2026-10-02, AND THAT IS THE WHOLE POINT OF THE
+        CHANGE. The amount cell used to read `0.01000000 GRC`, right-aligned -- which
+        aligns on the "C" and puts every decimal point in the column at a different x
+        depending on how many characters the ticker spends, so the one thing right
+        alignment buys is lost by keeping the unit in the cell. Splitting them, plus
+        `.num`'s tabular-nums, is what makes a column of eight-decimal amounts
+        readable as magnitudes rather than as strings.
+
+        It costs a seventh column in a table that already scrolls sideways inside
+        .scroll-x, and that is the trade taken knowingly: the brief asks for
+        alignment on amounts specifically, and this table was already wide enough to
+        need the scroller before the column was added. -#}
+    <thead><tr><th scope="col">txid</th><th scope="col" class="num">vout</th><th scope="col" class="num">amount</th><th scope="col">asset</th><th scope="col" class="num">confirmations</th><th scope="col">first seen</th><th scope="col">credited</th></tr></thead>
+    <tbody>
+      {% for event in view.swap.deposit_events %}
+      <tr>
+        <td class="mono breakable">{{ event.txid }}</td>
+        <td class="num">{{ event.vout }}</td>
+        <td class="num">{{ '%.8f'|format(event.amount) }}</td>
+        <td class="unit">{{ event.asset }}</td>
+        <td class="num">{{ event.confirmations }}</td>
+        <td class="mono">{{ event.first_seen_at }}</td>
+        <td class="mono">{{ event.credited_at or '(not credited)' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('deposit row exists for this swap', 'deposit_events WHERE swap_id = ' ~ view.swap.id) }}
+    <p class="panel-note">That is the expected state before you send anything. A row appears the first time a
+       watcher sees your transaction, even with zero confirmations.</p>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="payout-heading">
+  <h2 id="payout-heading">Payout attempts</h2>
+  {% if view.swap.payouts %}
+  <p class="panel-note" id="payout-table-note">One row per payout attempt. A row with no txid has not been
+     broadcast.</p>
+  <div class="scroll-x">
+  <table aria-describedby="payout-table-note">
+    {#- Amount and asset split for the reason the deposit table above gives. `(none)`
+        for an unbroadcast txid and `(not sent)` for an unsent row are both kept
+        verbatim: a payout row with no txid is the one row on this page where a blank
+        cell would be read as "it went out and we lost the id" (rule 14). -#}
+    <thead><tr><th scope="col">status</th><th scope="col" class="num">amount</th><th scope="col">asset</th><th scope="col">txid</th><th scope="col">created</th><th scope="col">sent</th></tr></thead>
+    <tbody>
+      {% for payout in view.swap.payouts %}
+      <tr>
+        <td>{{ payout.status }}</td>
+        <td class="num">{{ '%.8f'|format(payout.amount) }}</td>
+        <td class="unit">{{ payout.asset }}</td>
+        <td class="mono breakable">{{ payout.txid or '(none)' }}</td>
+        <td class="mono">{{ payout.created_at }}</td>
+        <td class="mono">{{ payout.sent_at or '(not sent)' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    {{ badges.empty('payout has been attempted', 'payouts WHERE swap_id = ' ~ view.swap.id) }}
+  {% endif %}
+</section>

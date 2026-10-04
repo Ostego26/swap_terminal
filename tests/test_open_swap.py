@@ -113,6 +113,16 @@ class StubXRP:
         raise AssertionError(f"get_new_address must NOT be called for XRP (label={label})")
 
 
+    def owns_address(self, address):
+        """Not the desk's. Added 2026-10-04 with services/swap_service.
+        refuse_unusable_payout_address()'s ownership gate, which calls this on a
+        script chain -- a stub that lacks it raises AttributeError and the gate
+        cannot be exercised at all. False is the right default for a CUSTOMER
+        payout address, which is what every one of these fixtures supplies; a
+        test that wants the refusal says so by returning True (see
+        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        return False
+
 class StubGRC:
     """A destination adapter that records what it was asked about.
 
@@ -166,6 +176,16 @@ class StubGRC:
         raise AssertionError(f"a dry run must not derive a GRC address (label={label})")
 
 
+    def owns_address(self, address):
+        """Not the desk's. Added 2026-10-04 with services/swap_service.
+        refuse_unusable_payout_address()'s ownership gate, which calls this on a
+        script chain -- a stub that lacks it raises AttributeError and the gate
+        cannot be exercised at all. False is the right default for a CUSTOMER
+        payout address, which is what every one of these fixtures supplies; a
+        test that wants the refusal says so by returning True (see
+        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        return False
+
 class UnaskableGRC:
     """A daemon that cannot be asked. RPCError is what chains/base.py raises."""
 
@@ -179,6 +199,17 @@ class UnaskableGRC:
 
     def validate_address(self, address):
         raise RPCError("connection refused to 127.0.0.1:25715")
+
+    def owns_address(self, address):
+        """Not the desk's -- these fixtures all supply a CUSTOMER payout address.
+
+        Added 2026-10-04 with the ownership gate in services/swap_service.
+        refuse_unusable_payout_address(). A destination stub without it raises
+        AttributeError, so the gate could not be exercised and every create_swap
+        test failed on the harness instead of on its own subject. False is the
+        honest default here; a test that wants the refusal returns True.
+        """
+        return False
 
 
 def real_config(**overrides):
@@ -1267,6 +1298,17 @@ class _Payer:
     def validate_address(self, _address):
         return True
 
+    def owns_address(self, address):
+        """Not the desk's -- these fixtures all supply a CUSTOMER payout address.
+
+        Added 2026-10-04 with the ownership gate in services/swap_service.
+        refuse_unusable_payout_address(). A destination stub without it raises
+        AttributeError, so the gate could not be exercised and every create_swap
+        test failed on the harness instead of on its own subject. False is the
+        honest default here; a test that wants the refusal returns True.
+        """
+        return False
+
 
 class _ViewOnly:
     can_spend = False
@@ -1274,6 +1316,17 @@ class _ViewOnly:
 
     def validate_address(self, _address):
         return True
+
+    def owns_address(self, address):
+        """Not the desk's -- these fixtures all supply a CUSTOMER payout address.
+
+        Added 2026-10-04 with the ownership gate in services/swap_service.
+        refuse_unusable_payout_address(). A destination stub without it raises
+        AttributeError, so the gate could not be exercised and every create_swap
+        test failed on the harness instead of on its own subject. False is the
+        honest default here; a test that wants the refusal returns True.
+        """
+        return False
 
 
 def test_three_different_causes_are_all_named():

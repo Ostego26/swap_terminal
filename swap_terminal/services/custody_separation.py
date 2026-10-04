@@ -952,3 +952,90 @@ def gridcoin_account_verdict(
         f"`setaccount`, or an address reused from elsewhere in the wallet. Until it is reconciled, "
         f"an account-based reading of which coins are the desk's is wrong for this address"
     ))
+
+
+#: Returned by payout_to_the_desk_refusal() when there is nothing to refuse. A
+#: caller that treats any other value as "fine" has inverted the gate.
+PAYOUT_ALLOWED = ""
+
+
+def payout_to_the_desk_refusal(
+    asset: str,
+    payout_address: str,
+    desk_account: str,
+    owns: bool | None,
+) -> str:
+    """Is this customer payout address the DESK'S OWN? The refusal sentence, or "".
+
+    WHY THIS EXISTS, MEASURED ON THE OPERATOR'S HOST 2026-10-04.
+
+    Swap s_ae76ec53236ffcf6 (BTC -> XRP) was created with its payout address set to
+    rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv -- which is XRP_DEPOSIT_ACCOUNT, the desk's
+    own account. create_swap() accepted it: check_address() decoded it, the daemon's
+    validate_address() called it well-formed, and both were right. Neither asks
+    whether the address is OURS. So the terminal took a 0.001 BTC deposit, confirmed
+    it, and attempted to pay the desk out of the desk.
+
+    THE RESERVE GUARD CAUGHT IT FOR THE WRONG REASON, which is why this is a
+    separate defect and not one the existing guards cover. The payout failed on
+    "balance 18763278 - send 55743172 ... short by 38379904 drops" -- an
+    INSUFFICIENT FUNDS refusal. Had the account held 56 XRP the payment would have
+    been signed, submitted and validated, and the only trace would have been a
+    swap marked completed with the ledger fee gone and no coin anywhere new.
+
+    WHAT IT WOULD COST A PUBLIC TERMINAL, which is the reason the operator asked
+    for it: the deposit account is printed ON THE SWAP PAGE for every tag-attributed
+    chain, because a customer has to send to it. A customer who pastes the address
+    they were just told to send to -- a completely natural mistake -- gets a swap
+    that can only ever pay the desk, and they have no way to tell. Their coin is
+    gone and the row says completed.
+
+    TWO MECHANISMS, BECAUSE THE CHAINS ANSWER DIFFERENT QUESTIONS, and conflating
+    them is how this check would be wrong on one chain while looking right:
+
+      tag chains (XRP, SOL)     ONE desk account, known from config.
+                                services/swap_service.payout_source_account() reads
+                                it from TAG_ATTRIBUTION, and a string comparison is
+                                exact and free. chains/xrp.owns_address() returns
+                                None BY DESIGN here -- the XRP Ledger has no
+                                `ismine` -- so an ownership-based check would never
+                                fire on the very chain the incident happened on.
+      script chains (BTC/LTC/GRC)
+                                many addresses, so the question is the wallet's:
+                                `ismine` through owns_address(). There is no single
+                                account to compare against.
+
+    NONE DOES NOT REFUSE, and that is deliberate in the opposite direction from
+    fee_sweep.destination_refusal(). There, refusing an unestablished destination
+    costs the DESK a delay on its own money. Here it would refuse a CUSTOMER's swap
+    because our daemon hiccuped -- declining business over our own outage, on an
+    address that is almost certainly theirs. The asymmetry is who pays for being
+    wrong. A definite True refuses; an unanswered question proceeds and says so in
+    the log at the call site.
+
+    RETURNS A SENTENCE, NOT A BOOL, so the caller raises with the reason the
+    customer reads. PAYOUT_ALLOWED ("") is the only value that means proceed.
+    """
+    address = (payout_address or "").strip()
+    desk = (desk_account or "").strip()
+    if not address:
+        # Not this gate's job: check_address() already refused an empty address
+        # before anything reached here, and inventing a second refusal for it
+        # would be two sentences for one fault (rule 8).
+        return PAYOUT_ALLOWED
+    if desk and address == desk:
+        return (
+            f"{address} is this terminal's OWN {asset} account, so a payout to it would move "
+            f"nothing: the desk would pay itself, spend the chain fee, and mark the swap completed "
+            f"while you received no {asset}. On {asset} one account both receives deposits and pays "
+            f"out -- that is the custodial design -- which means the address you SEND to is never "
+            f"the address you should be PAID at. Use an account you control"
+        )
+    if owns:
+        return (
+            f"{address} is an address this terminal's own {asset} wallet holds the key for "
+            f"(ismine=true), so a payout to it would move nothing: the desk would pay itself, spend "
+            f"the chain fee, and mark the swap completed while you received no {asset}. Use an "
+            f"address in a wallet you control"
+        )
+    return PAYOUT_ALLOWED

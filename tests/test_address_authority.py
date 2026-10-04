@@ -75,6 +75,7 @@ from valid_addresses import (
     BTC_REGTEST_TAPROOT,
     BTC_TAPROOT_MAINNET,
     BTC_TAPROOT_PAYOUT,
+    GRC_DESK_DEPOSIT,
     GRC_PAYOUT,
     INVALID_PLACEHOLDERS,
     LTC_P2SH_SCRIPT_ADDRESS2,
@@ -746,6 +747,16 @@ class StubSourceChain:
         return bool(address)
 
 
+    def owns_address(self, address):
+        """Not the desk's. Added 2026-10-04 with services/swap_service.
+        refuse_unusable_payout_address()'s ownership gate, which calls this on a
+        script chain -- a stub that lacks it raises AttributeError and the gate
+        cannot be exercised at all. False is the right default for a CUSTOMER
+        payout address, which is what every one of these fixtures supplies; a
+        test that wants the refusal says so by returning True (see
+        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        return False
+
 class StubDestination:
     can_spend = True
     payout_refusal = ""
@@ -753,6 +764,16 @@ class StubDestination:
     def validate_address(self, address):
         return True
 
+
+    def owns_address(self, address):
+        """Not the desk's. Added 2026-10-04 with services/swap_service.
+        refuse_unusable_payout_address()'s ownership gate, which calls this on a
+        script chain -- a stub that lacks it raises AttributeError and the gate
+        cannot be exercised at all. False is the right default for a CUSTOMER
+        payout address, which is what every one of these fixtures supplies; a
+        test that wants the refusal says so by returning True (see
+        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        return False
 
 def _quote_db(tmp_path, name):
     conn = connect_db(str(tmp_path / name))
@@ -1275,3 +1296,84 @@ def test_a_prefix_and_length_that_DISAGREE_are_still_refused(fixture):
     assert "disagree" in verdict.why, "and the reason says which two facts conflict"
 
 
+
+
+# --- a payout to the desk's OWN account, 2026-10-04 ----------------------------
+
+class DeskOwnedDestination(StubDestination):
+    """A destination wallet that says the payout address is ITS OWN.
+
+    The one case every other stub in this file denies, and the one that reached
+    production: swap s_ae76ec53236ffcf6 was created paying out to the desk's own
+    XRP account because nothing asked whose it was.
+    """
+
+    def owns_address(self, address):
+        return True
+
+
+class UnanswerableDestination(StubDestination):
+    """A destination wallet that cannot answer whether the address is its own."""
+
+    def owns_address(self, address):
+        return None
+
+
+def test_a_payout_to_an_address_the_desk_OWNS_is_refused_and_writes_nothing(tmp_path):
+    """The defect, pinned. A script-chain payout into our own wallet moves nothing.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-04 and this is the general form of it.
+    Swap s_ae76ec53236ffcf6 (BTC -> XRP) was created with payout_address set to
+    XRP_DEPOSIT_ACCOUNT -- the desk's own account, which the swap page PRINTS
+    because a customer has to send to it. check_address() decoded it,
+    validate_address() called it well-formed, and both were correct: neither asks
+    whose it is.
+
+    THE RESERVE GUARD CAUGHT THAT ONE FOR THE WRONG REASON. It failed on
+    insufficient funds ("short by 38379904 drops"), not on self-payment. With a
+    funded account it would have signed, submitted, validated, and recorded a
+    completed swap whose only effect was the ledger fee.
+
+    AND IT WRITES NOTHING, which is the half worth asserting separately: the gate
+    sits before deposit_account(), so a refused swap leaves no derived key behind
+    -- the ordering create_swap()'s own comment insists on.
+
+    MUTATION (ran, caught): make payout_to_the_desk_refusal() return
+    PAYOUT_ALLOWED unconditionally. This fails on the raise, and the row count
+    assertion fails too.
+    """
+    db = _quote_db(tmp_path, "desk_owned.db")
+    adapters = {"GRC": StubSourceChain(GRC_DESK_DEPOSIT), "LTC": DeskOwnedDestination()}
+
+    with pytest.raises(ValueError) as refused:
+        create_swap(db, CONFIG_TESTNET_GRC, adapters, "q1", LTC_PARTICIPANT)
+
+    message = str(refused.value)
+    assert "ismine=true" in message, f"the reason has to name WHY it is ours: {message}"
+    assert "pay itself" in message, "the consequence belongs in the sentence the customer reads"
+    assert "No swap was created" in message
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0, (
+        "a refused swap left a row behind, so the gate is running too late"
+    )
+
+
+def test_an_unanswerable_ownership_question_does_NOT_refuse_the_customer(tmp_path):
+    """None proceeds, and the asymmetry is deliberate -- not an oversight.
+
+    fee_sweep.destination_refusal() refuses an unestablished destination because
+    there the delay costs the DESK its own money. Here refusing would decline a
+    CUSTOMER's swap because our daemon hiccuped, on an address almost certainly
+    theirs. Who pays for being wrong is what sets the direction, and it points
+    opposite ways in the two places.
+
+    MUTATION (ran, caught): make the gate refuse on `owns is None` as well. This
+    test fails, and it is the only one that would -- which is exactly why it
+    exists: without it, tightening None looks free.
+    """
+    db = _quote_db(tmp_path, "unanswerable.db")
+    adapters = {"GRC": StubSourceChain(GRC_DESK_DEPOSIT), "LTC": UnanswerableDestination()}
+
+    swap = create_swap(db, CONFIG_TESTNET_GRC, adapters, "q1", LTC_PARTICIPANT)
+
+    assert swap["id"].startswith("s_"), "an unanswered ownership question blocked a customer's swap"
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 1

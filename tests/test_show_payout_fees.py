@@ -576,6 +576,17 @@ class FeeMeasuringAdapter:
             return None, self._how
         return self._fee, self._how
 
+    def owns_address(self, address):
+        """Not the desk's -- these fixtures all supply a CUSTOMER payout address.
+
+        Added 2026-10-04 with the ownership gate in services/swap_service.
+        refuse_unusable_payout_address(). A destination stub without it raises
+        AttributeError, so the gate could not be exercised and every create_swap
+        test failed on the harness instead of on its own subject. False is the
+        honest default here; a test that wants the refusal returns True.
+        """
+        return False
+
 
 def test_the_live_fee_line_compares_the_measurement_against_the_reserve(monkeypatch):
     """"we need to match the scaling here" -- the operator, 2026-10-03.

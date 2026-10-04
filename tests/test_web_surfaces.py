@@ -32,7 +32,7 @@ from db import SCHEMA, dict_factory
 from network_target import configuring_variable
 from services import coinpaprika, market_context, pricing
 from services.wallet_leveling import PEG_ASSETS
-from valid_addresses import GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
+from valid_addresses import GRC_DESK_DEPOSIT, GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
 # already pointed SWAP_DB_PATH at a temp file by the time this import runs.
@@ -760,6 +760,17 @@ class StubAdapter:
         if self.rent_floor_lamports is None:
             raise ConnectionError("stub cluster is unreachable in this test")
         return self.rent_floor_lamports
+
+    def owns_address(self, address):
+        """Not the desk's -- these fixtures all supply a CUSTOMER payout address.
+
+        Added 2026-10-04 with the ownership gate in services/swap_service.
+        refuse_unusable_payout_address(). A destination stub without it raises
+        AttributeError, so the gate could not be exercised and every create_swap
+        test failed on the harness instead of on its own subject. False is the
+        honest default here; a test that wants the refusal returns True.
+        """
+        return False
 
 
 #: Real-format shared accounts for the tag-attributed chains, because the validation these go
@@ -1738,3 +1749,106 @@ def test_a_closed_swap_is_offered_no_wallet_menu_and_no_qr(client):
     assert "solana:" not in body
     # And it still says the swap is closed, which is the thing that matters.
     assert "no longer accepting" in body
+
+
+def _seed_with_a_deposit_and_a_payout(client, swap_id: str) -> tuple[str, str]:
+    """One swap that has actually HAPPENED: a credited deposit row and a broadcast payout.
+
+    seed_swap() alone makes an EMPTY swap, which is why the two tests below did
+    not exist before 2026-10-04 and why the defect they pin shipped: every
+    assertion about these sections was written against a swap with no rows.
+    """
+    # write(), the helper every other seeder in this file uses, rather than a
+    # second way of reaching the same database (rule 8).
+    deposit_txid = f"deadbeef{swap_id[-8:]}" * 4
+    payout_txid = f"feedface{swap_id[-8:]}" * 4
+    seed_swap(client, swap_id, "completed")
+    write(
+        client,
+        "INSERT INTO deposit_events (swap_id, asset, address, txid, vout, amount, confirmations,"
+        " first_seen_at, last_seen_at, credited_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        # `address` is NOT NULL and the schema is right to insist: a deposit row
+        # with no address cannot be attributed to the swap it arrived for. Derived
+        # (tests/valid_addresses.py), never spelled -- an address literal in a test
+        # is what tests/test_address_literals_are_valid.py counts.
+        (swap_id, "GRC", GRC_DESK_DEPOSIT, deposit_txid, 1, 500.0, 6, iso(-300), iso(-60), iso(-60)),
+    )
+    write(
+        client,
+        "INSERT INTO payouts (swap_id, asset, destination_address, amount, status, txid,"
+        " created_at, sent_at) VALUES (?,?,?,?,?,?,?,?)",
+        # destination_address and created_at are NOT NULL, and both deserve to be:
+        # a payout row with no destination records money sent nowhere, and one with
+        # no created_at cannot be aged. GRC_PAYOUT is the derived fixture for a
+        # customer payout address (tests/valid_addresses.py).
+        (swap_id, "GRC", GRC_PAYOUT, 989.15511156, "broadcast", payout_txid, iso(-45), iso(-30)),
+    )
+    return deposit_txid, payout_txid
+
+
+def test_a_swap_with_rows_renders_them_instead_of_saying_none(client):
+    """THE CASE NOBODY ASSERTED. A swap that happened must not report `(none)`.
+
+    MEASURED ON THE OPERATOR'S HOST, 2026-10-04. swap s_708ea48e227183bd
+    completed while its page was open and the page said, in one render:
+
+        Raw status              completed
+        Payout txid             b3dce6dc...
+        Deposits recorded for this swap
+          (none) no deposit row exists for this swap
+          That is the expected state before you send anything.
+
+    The cause was placement, not a query: both sections sat outside `#swap-live`,
+    the region static/script.js replaces on a timer, so they froze at page load.
+    The existing coverage -- test_an_empty_deposit_list_renders_none_and_not_a
+    _blank_gap -- seeds a swap with NO rows, so it was green for the right reason
+    about the wrong case and could never have caught this.
+
+    THIS ASSERTS THE ROWS AND THE ABSENCE OF THE EMPTY SENTENCES, both halves. A
+    test that only checked the txid appeared would pass on a page that ALSO still
+    printed "(none)" underneath it, which is precisely what the operator saw.
+
+    MUTATION (ran, caught): move the two sections back out of _swap_live.html into
+    swap.html. The fragment then renders without them and both row assertions
+    fail.
+    """
+    deposit_txid, payout_txid = _seed_with_a_deposit_and_a_payout(client, "s_hasrows0000001")
+
+    body = client.get("/swap/s_hasrows0000001").get_data(as_text=True)
+
+    assert deposit_txid in body, "the deposit row is not rendered on a swap that has one"
+    assert payout_txid in body, "the payout row is not rendered on a swap that has one"
+    assert "no deposit row exists for this swap" not in body, (
+        "the page claims no deposit row while rendering a swap that has one -- the contradiction "
+        "the operator read off a completed swap"
+    )
+    assert "no payout has been attempted" not in body, (
+        "the page claims no payout was attempted while carrying its broadcast txid"
+    )
+    assert "expected state before you send anything" not in body, (
+        "a completed swap is being told it has not been paid for yet"
+    )
+
+
+def test_the_polled_fragment_carries_the_deposit_and_payout_tables(client):
+    """The ROOT CAUSE, pinned where it lives: these sections must be in the fragment.
+
+    The test above asserts the symptom is gone from the full page; this asserts
+    WHY, against the thing the browser actually re-fetches every 15s. Without
+    this, someone moves the sections back into swap.html for layout reasons, the
+    full-page test still passes on first render, and the page silently freezes
+    again on the only swaps that matter -- the ones that change while you watch.
+
+    MUTATION (ran, caught): move either section back to swap.html. This fails on
+    that section's txid while the other still passes, naming which one moved.
+    """
+    deposit_txid, payout_txid = _seed_with_a_deposit_and_a_payout(client, "s_hasrows0000002")
+
+    fragment = client.get("/swap/s_hasrows0000002/fragment").get_data(as_text=True)
+
+    assert deposit_txid in fragment, (
+        "the deposits table is not in the polled fragment, so it will freeze at page load"
+    )
+    assert payout_txid in fragment, (
+        "the payouts table is not in the polled fragment, so it will freeze at page load"
+    )

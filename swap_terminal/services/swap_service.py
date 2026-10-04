@@ -35,6 +35,7 @@ from chains.gridcoin_wallet_lock import (
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 from modules.address_authority import check_address, check_receive_address, expected_network
 
+from .custody_separation import payout_to_the_desk_refusal
 from .helpers import new_id, parse_iso, utc_now_iso
 from .payout_capacity import why_the_payout_cannot_be_funded
 from .xrp_tag_service import allocate_destination_tag
@@ -625,6 +626,112 @@ def refuse_unless_the_payout_can_be_funded(adapters, config, quote, from_asset: 
         )
 
 
+def refuse_unusable_payout_address(config, adapters: dict, to_asset: str, payout_address: str) -> None:
+    """Every refusal a PAYOUT address can earn, in the order that costs least. Raises or returns.
+
+    EXTRACTED FROM create_swap() ON 2026-10-04, AND RUFF IS WHAT ASKED FOR IT.
+    Adding the "is this address ours" gate took create_swap() to C901 11 > 10, and
+    rule 12's note on that code is exact: a function past the ceiling is
+    orchestration that has swallowed a decision, and the fix is to extract the
+    decision rather than raise the ceiling. These four checks are one job --
+    "may this address be paid" -- and they were already sitting together.
+
+    THE ORDER IS THE ORDER THAT COSTS LEAST and it is not arbitrary; the comments
+    inside say why at each step. Local decode first (no daemon, cannot be fooled by
+    a loose adapter), then the daemon's network-scoped verdict, then whether the
+    address is the desk's own. Everything here happens BEFORE the balance read and
+    BEFORE deposit_account() derives a key, so a swap that is going to be refused
+    leaves no derived key behind.
+
+    RAISES ValueError WITH THE CUSTOMER'S SENTENCE, same as it did inline, so
+    routes/swaps.py and open_swap.py both surface the reason unchanged. It returns
+    None on success rather than a verdict: there is nothing for a caller to decide,
+    and a boolean here would be a second place to get the polarity wrong.
+    """
+    # THE PAYOUT ADDRESS, DECODED LOCALLY BEFORE THE DAEMON IS ASKED. Added 2026-09-27.
+    #
+    # This is the EARLIEST point at which a burn can be stopped on the send side, and it is
+    # the only one the web form reaches: open_swap.py's CLI carries the same local decode,
+    # and routes/swaps.py POSTs straight here. services/payout_service.py guards the send
+    # itself as a last resort, but by the time a swap reaches that worker the customer's
+    # deposit has already been taken and credited -- a refusal there strands them. Here,
+    # nothing has been written and nothing has been taken, so a refusal costs a retry.
+    #
+    # BEFORE the daemon, not instead of it, and the two are kept because they differ:
+    # this one needs no daemon and cannot be fooled by an adapter that answers loosely,
+    # and the daemon's answers whether THAT wallet on THAT network will accept it.
+    #
+    # DECODE ONLY -- deliberately NOT check_receive_address(). A payout address belongs to
+    # the CUSTOMER's wallet, and refusing it for being on the wrong network would be this
+    # process's own configuration overruling theirs. The daemon's validate_address() below
+    # is network-scoped and is the right authority for that half.
+    payout_verdict = check_address(to_asset, payout_address)
+    if payout_verdict.refuses:
+        raise ValueError(
+            f"No swap was created: {payout_address!r} cannot receive a {to_asset} payout -- "
+            f"{payout_verdict.why}. Refused here, before any daemon was asked and before any row was "
+            f"written, because money sent to it would be unspendable by anybody. Nothing was written."
+        )
+    if payout_verdict.unchecked:
+        logger.warning(
+            "payout address for a new %s swap was NOT CHECKED locally (%s): %s  <- proceeding to the "
+            "daemon's own validate_address(), which is the authority this could not stand in for.",
+            to_asset, payout_verdict.state, payout_verdict.why,
+        )
+    if not adapters[to_asset].validate_address(payout_address):
+        raise ValueError(f"Invalid {to_asset} payout address")
+    # IS THE PAYOUT ADDRESS OURS? Added 2026-10-04 after swap s_ae76ec53236ffcf6
+    # was created with its payout address set to XRP_DEPOSIT_ACCOUNT -- the desk's
+    # own account, which the swap page PRINTS because a customer has to send to
+    # it. Everything above accepted it and was right to: check_address() decodes,
+    # validate_address() asks the daemon whether it is well-formed. Neither asks
+    # whose it is. See services/custody_separation.payout_to_the_desk_refusal()
+    # for the incident and for why the two chain families need different questions.
+    #
+    # PLACED HERE, which is the same reasoning the comment below gives for the
+    # funding check: the daemon has already been asked once on this line, so a
+    # second read costs nothing new, and this is still BEFORE the balance read and
+    # before deposit_account() derives a key. A swap that is going to be refused
+    # must not leave a derived key behind.
+    #
+    # owns_address() IS NOT CALLED ON A TAG CHAIN. chains/xrp.py overrides it to
+    # return None by design -- the XRP Ledger has no `ismine` -- so asking it on
+    # the one chain this incident happened on would always answer "not
+    # established" and never refuse. The account comparison is what works there,
+    # and payout_source_account() is already the single reader of that config.
+    desk_account = payout_source_account(config, to_asset)
+    owns = None if desk_account else adapters[to_asset].owns_address(payout_address)
+    refusal = payout_to_the_desk_refusal(to_asset, payout_address, desk_account, owns)
+    if refusal:
+        raise ValueError(
+            f"No swap was created: {refusal}. Refused before any key was derived and before any row "
+            f"was written, so nothing here is to undo."
+        )
+    if owns is None and not desk_account:
+        # NOT A REFUSAL, and the asymmetry is in the decision function's docstring:
+        # refusing here would decline a customer's swap over our own daemon outage.
+        # It is logged at WARNING because a payout wallet that cannot answer
+        # `ismine` is a condition an operator should see, exactly as
+        # chains/base.address_ownership() argues for the same reason.
+        logger.warning(
+            "payout address for a new %s swap could NOT be checked for being the desk's own: %s  <- "
+            "proceeding, because refusing a customer over our own outage is the wrong direction. A "
+            "payout to our own address would move nothing and still mark the swap completed.",
+            to_asset, payout_address,
+        )
+    # PLACED AFTER THE ADDRESS CHECKS AND BEFORE deposit_account(), WHICH IS A
+    # DELIBERATE ORDERING AND NOT WHERE IT WAS FIRST WRITTEN. It went in beside the
+    # four local refusals above, and tests/test_address_authority.py::
+    # test_a_deposit_address_that_cannot_receive_refuses_the_swap_and_writes_nothing
+    # failed -- correctly. Its stub destination has no get_balance(), so this gate
+    # refused first and the address refusal it exists to pin never ran. The fixture
+    # was not the defect: the ordering was. Everything above this line is LOCAL and
+    # free, this is a network read, and deposit_account() below DERIVES A KEY in the
+    # hot wallet -- so the sequence is local checks, then the daemon's own address
+    # verdict, then the balance, then the first thing that changes any state. A swap
+    # that is going to be refused should not leave a derived key behind.
+
+
 def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) -> dict:
     quote = get_quote_or_raise(db, quote_id)
     to_asset = quote["to_asset"]
@@ -770,49 +877,7 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             f"costs. The swap would lose money however the customer's deposit arrives. Deposit more "
             f"{from_asset}. Nothing was written."
         )
-    # THE PAYOUT ADDRESS, DECODED LOCALLY BEFORE THE DAEMON IS ASKED. Added 2026-09-27.
-    #
-    # This is the EARLIEST point at which a burn can be stopped on the send side, and it is
-    # the only one the web form reaches: open_swap.py's CLI carries the same local decode,
-    # and routes/swaps.py POSTs straight here. services/payout_service.py guards the send
-    # itself as a last resort, but by the time a swap reaches that worker the customer's
-    # deposit has already been taken and credited -- a refusal there strands them. Here,
-    # nothing has been written and nothing has been taken, so a refusal costs a retry.
-    #
-    # BEFORE the daemon, not instead of it, and the two are kept because they differ:
-    # this one needs no daemon and cannot be fooled by an adapter that answers loosely,
-    # and the daemon's answers whether THAT wallet on THAT network will accept it.
-    #
-    # DECODE ONLY -- deliberately NOT check_receive_address(). A payout address belongs to
-    # the CUSTOMER's wallet, and refusing it for being on the wrong network would be this
-    # process's own configuration overruling theirs. The daemon's validate_address() below
-    # is network-scoped and is the right authority for that half.
-    payout_verdict = check_address(to_asset, payout_address)
-    if payout_verdict.refuses:
-        raise ValueError(
-            f"No swap was created: {payout_address!r} cannot receive a {to_asset} payout -- "
-            f"{payout_verdict.why}. Refused here, before any daemon was asked and before any row was "
-            f"written, because money sent to it would be unspendable by anybody. Nothing was written."
-        )
-    if payout_verdict.unchecked:
-        logger.warning(
-            "payout address for a new %s swap was NOT CHECKED locally (%s): %s  <- proceeding to the "
-            "daemon's own validate_address(), which is the authority this could not stand in for.",
-            to_asset, payout_verdict.state, payout_verdict.why,
-        )
-    if not adapters[to_asset].validate_address(payout_address):
-        raise ValueError(f"Invalid {to_asset} payout address")
-    # PLACED AFTER THE ADDRESS CHECKS AND BEFORE deposit_account(), WHICH IS A
-    # DELIBERATE ORDERING AND NOT WHERE IT WAS FIRST WRITTEN. It went in beside the
-    # four local refusals above, and tests/test_address_authority.py::
-    # test_a_deposit_address_that_cannot_receive_refuses_the_swap_and_writes_nothing
-    # failed -- correctly. Its stub destination has no get_balance(), so this gate
-    # refused first and the address refusal it exists to pin never ran. The fixture
-    # was not the defect: the ordering was. Everything above this line is LOCAL and
-    # free, this is a network read, and deposit_account() below DERIVES A KEY in the
-    # hot wallet -- so the sequence is local checks, then the daemon's own address
-    # verdict, then the balance, then the first thing that changes any state. A swap
-    # that is going to be refused should not leave a derived key behind.
+    refuse_unusable_payout_address(config, adapters, to_asset, payout_address)
     refuse_unless_the_payout_can_be_funded(adapters, config, quote, from_asset, to_asset)
     swap_id = new_id("s")
     # The swap row must exist before a tag can reference it: xrp_destination_tags
