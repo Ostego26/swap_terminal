@@ -370,7 +370,8 @@ def script_chain_verdict(
             f"rather than proposed as of 2026-10-04 -- a desk deposit address on the operator's "
             f"host came back under account 'swap_s_539d922e9ef0a5d8' while 88 operator addresses "
             f"sat in the default account -- so the separation was already present in this one "
-            f"wallet and nothing was reading it. Pass --swap to see that line; THIS line stays "
+            f"wallet and nothing was reading it -- the `desk account` line carries it whenever a "
+            f"swap is in scope. THIS line stays "
             f"CANNOT BE ASKED because the WALLET question specifically has no answer here"
         ))
     serving = str(walletinfo["walletname"])
@@ -461,9 +462,10 @@ def deposit_address_verdict(
         return CustodyVerdict(DESK_OWNS, (
             f"{label}: the payout wallet reports ismine=true for its own deposit address "
             f"{deposit_address}, which is CORRECT for a custodial desk -- the desk derived that "
-            f"address in its own wallet. It does NOT establish that the deposit moved custody: if "
-            f"the line above says this is the daemon's default wallet, a deposit sent from that same "
-            f"wallet is a self-transfer and the only thing that moved was the fee"
+            f"address in its own wallet. It does NOT establish that the deposit moved custody: where "
+            f"the wallet OR account holding this address is the same one the operator's own CLI and "
+            f"GUI reach, a deposit sent from there is a self-transfer and the only thing that moved "
+            f"was the fee. The other {asset} lines in this report say which of those applies"
         ))
     return CustodyVerdict(NOT_THE_DESKS, (
         f"{label}: the payout wallet reports ismine=false for its own deposit address "

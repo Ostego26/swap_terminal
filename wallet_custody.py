@@ -584,7 +584,12 @@ def cross_daemon_lines(row: dict | None, results: list[tuple[str, str, str]]) ->
         return [(name, NOT_ESTABLISHED, (
             f"{CROSS_DAEMON_CHAIN}: {refusal}. Without it the GRC separation question is UNANSWERED "
             f"rather than answered either way -- this daemon family has no `walletname` to compare, "
-            f"so the second daemon is the only route there is"
+            f"so a second daemon is the only route to THIS question. It said \"the only route there "
+            f"is\" until 2026-10-04 and that became false the same day: the `desk account` line "
+            f"answers the SEPARATION question from the pre-0.17 `account` field with no second "
+            f"daemon at all. What a second daemon would add beyond it is a key-level answer -- "
+            f"whether a DIFFERENT wallet holds this address -- which an account label cannot give. "
+            f"With one wallet by choice, that is an optional stronger reading rather than owed work"
         ))]
     connect, why_port = may_read_a_wallet(CROSS_DAEMON_CHAIN, endpoint.port)
     if not connect:
@@ -734,8 +739,14 @@ def verdict_lines(results: list[tuple[str, str, str]]) -> tuple[list[str], int]:
     if unaskable:
         lines.append(f"  {len(unaskable)} of those {len(bad)} CANNOT BE ASKED on this daemon family and name NO variable:")
         lines.append(f"  {', '.join(unaskable)}. Re-running changes nothing and no configuration fixes it;")
-        lines.append("  the sentence above says which mechanism would, and it is a second daemon rather")
-        lines.append("  than a setting. Not counted as passing: the exit code is non-zero for these too.")
+        # NAMES NO SPECIFIC MECHANISM, and it named one until 2026-10-04: "it is a
+        # second daemon rather than a setting". That was true of the GRC wallet
+        # question for one day and then was not -- the account route landed the
+        # same afternoon and needs no second daemon. A closing block that restates
+        # a per-line remedy is a second copy of it (rule 8), and this is the copy
+        # that went stale while the line above it was correct.
+        lines.append("  the sentence above says which mechanism would, and it is not a setting.")
+        lines.append("  Not counted as passing: the exit code is non-zero for these too.")
     lines.append("")
     lines.append("  Nothing was written and no wallet was touched.")
     lines.append("  docs/hot_wallet_separation_runbook.md has the per-chain steps, and they are the")
