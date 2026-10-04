@@ -66,6 +66,7 @@ from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, may_read_a_wallet
 from report_block import LABEL_WIDTH
 from services.custody_separation import (
     BY_DESIGN,
+    CANNOT_BE_ASKED,
     DESK_OWNERSHIP_FROM_STATE,
     DESK_OWNS,
     MISCONFIGURED,
@@ -168,10 +169,15 @@ def test_every_verdict_state_is_a_DIFFERENT_string():
     """
     assert len(set(STATES)) == len(STATES), f"two states share a spelling: {STATES}"
     # The literal IS the assertion (pyproject turns PLR2004 off in tests for exactly
-    # this): seven states are the closed set, and an eighth has to be added here
+    # this): eight states are the closed set, and a ninth has to be added here
     # deliberately, with a decision about whether wallet_custody.GOOD_STATES
     # includes it -- which is the decision that determines an exit code.
-    assert len(STATES) == 7, (
+    #
+    # SEVEN UNTIL 2026-10-04, when CANNOT_BE_ASKED split out of NOT_ESTABLISHED.
+    # The decision this comment demands was made: it is NOT in GOOD_STATES, so the
+    # exit code stays non-zero for it -- a question Gridcoin cannot answer is not
+    # a separation established.
+    assert len(STATES) == 8, (
         "a state was added or removed; decide whether wallet_custody.GOOD_STATES should include it"
     )
 
@@ -342,32 +348,52 @@ def test_the_daemon_serving_a_DIFFERENT_wallet_is_MISCONFIGURED_and_names_both()
 
 
 @pytest.mark.parametrize(
-    ("walletinfo", "read_error", "marker"),
+    ("walletinfo", "read_error", "marker", "expected"),
     [
-        (None, "RPCError: No wallet is loaded. (rpc code -18)", "rpc code -18"),
-        (None, "ConnectionError: [Errno 111] Connection refused", "Connection refused"),
-        (["not", "a", "dict"], "", "list rather than an object"),
-        ({"walletversion": 169900}, "", "no `walletname` field"),
+        (None, "RPCError: No wallet is loaded. (rpc code -18)", "rpc code -18", NOT_ESTABLISHED),
+        (None, "ConnectionError: [Errno 111] Connection refused", "Connection refused", NOT_ESTABLISHED),
+        (["not", "a", "dict"], "", "list rather than an object", NOT_ESTABLISHED),
+        # THE FOURTH IS A DIFFERENT ABSENCE AND NOW SAYS SO. It asserted
+        # NOT_ESTABLISHED alongside the other three until 2026-10-04 -- correct
+        # that it was not green, wrong that it was the same kind of not-green. A
+        # down daemon is fixed by starting it; a daemon whose getwalletinfo has no
+        # `walletname` field is fixed by nothing an operator can type, and the
+        # report told them to change a variable for it.
+        ({"walletversion": 169900}, "", "no `walletname` field", CANNOT_BE_ASKED),
     ],
 )
-def test_nothing_a_daemon_can_fail_to_say_produces_a_green_verdict(walletinfo, read_error, marker):
-    """FOUR ways to not get an answer, and every one of them is NOT ESTABLISHED.
+def test_nothing_a_daemon_can_fail_to_say_produces_a_green_verdict(walletinfo, read_error, marker, expected):
+    """FOUR ways to not get an answer, and NONE of them is ever a green verdict.
 
     This is the assertion the whole tool rests on. A down daemon, a refused login,
     an unloaded wallet, a reply of the wrong shape and an older build without
     `walletname` must never render as either answer -- a custody report whose
     default is green reports a separation it never measured.
 
+    THE STRONGER INVARIANT, pinned since 2026-10-04: not merely "not green" but
+    WHICH absence. Three of these four are retryable and the fourth is not, and
+    asserting one shared state over all four is what let wallet_custody.py print
+    "Each line names the variable to change" for a line that names none. So the
+    test asserts both: never in GOOD_STATES, and the specific state -- the second
+    half is what a single shared spelling would now fail.
+
     MUTATION (ran, caught): make the `read_error` branch return SEPARATED. This
     fails on two of the four parameters. MUTATION (ran, caught): delete the
     `isinstance(walletinfo, dict)` guard -- the list case then raises TypeError
     inside the function, which this test catches as an error rather than a verdict.
+    MUTATION (ran, caught): return NOT_ESTABLISHED from the `walletname` branch
+    again -- the fourth parameter fails on the state while still passing the
+    not-green half, which is precisely the gap this parameter was added to close.
     """
     verdict = script_chain_verdict("GRC", "desk_hot", walletinfo, read_error, ("desk_hot",))
 
-    assert verdict.state == NOT_ESTABLISHED
+    assert verdict.state not in wallet_custody.GOOD_STATES, "no absence may exit zero"
+    assert verdict.state == expected, (
+        f"a {expected!r} absence and a {NOT_ESTABLISHED!r} one have opposite remedies, so one "
+        f"spelling for both is what the report then mis-renders; got {verdict.state!r}"
+    )
     assert marker in verdict.why, f"the reason has to survive into the sentence: {verdict.why}"
-    assert verdict.why, "a NOT ESTABLISHED verdict with no reason is the thing it exists to replace"
+    assert verdict.why, "an absence verdict with no reason is the thing it exists to replace"
 
 
 def test_every_verdict_this_module_can_return_carries_a_reason():

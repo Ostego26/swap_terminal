@@ -121,10 +121,57 @@ DESK_OWNS = "DESK OWNS IT"
 #: deposit it cannot spend.
 NOT_THE_DESKS = "NOT THE DESK'S"
 
-#: Nobody answered, or the question cannot be asked on this chain. NEVER a green
-#: verdict by default: the reason is always carried, and a caller that renders
-#: this as "fine" has reintroduced the defect this module exists to remove.
+#: Nobody answered. NEVER a green verdict by default: the reason is always
+#: carried, and a caller that renders this as "fine" has reintroduced the defect
+#: this module exists to remove.
+#:
+#: IT USED TO READ "Nobody answered, or the question cannot be asked on this
+#: chain", AND THAT SECOND CLAUSE MOVED OUT to CANNOT_BE_ASKED on 2026-10-04.
+#: Kept as a sentence rather than deleted because the drift is the point (rule 1):
+#: the two clauses have opposite remedies, this state carried both for a day, and
+#: wallet_custody.py's closing block told the operator to change a variable for a
+#: line that has none. What is still TRUE here is a daemon that is down, a refused
+#: login, an unloaded wallet, or a question whose INPUT was not supplied (no
+#: --swap, no second endpoint named) -- every one of which a different run can
+#: answer. A question the RPC surface cannot carry is the other state.
 NOT_ESTABLISHED = "NOT ESTABLISHED"
+
+#: The question cannot be asked on this daemon family AT ALL, and asking again
+#: with different configuration changes nothing. Not a pass -- it is kept out of
+#: wallet_custody.GOOD_STATES so the exit code stays non-zero -- but a DIFFERENT
+#: failure from NOT_ESTABLISHED, and the difference is the whole reason it exists.
+#:
+#: SPLIT OUT OF NOT_ESTABLISHED ON 2026-10-04, because that state's own docstring
+#: four lines up conflated two things in one sentence: "Nobody answered, or the
+#: question cannot be asked on this chain." Those have opposite remedies. A daemon
+#: that did not answer is fixed by starting it, fixing a login, or exporting a
+#: variable; a daemon whose RPC surface does not CARRY the field is fixed by
+#: nothing an operator can type.
+#:
+#: MEASURED, AND IT IS WHY THIS IS A DEFECT RATHER THAN A NICETY. On the
+#: operator's host on 2026-10-04, `wallet_custody.py --swap s_539d922e9ef0a5d8`
+#: printed 8 checks, 2 of them NOT ESTABLISHED, and closed with
+#:
+#:     Each line names the variable to change.
+#:
+#: That sentence is FALSE for the GRC wallet line. Gridcoin v5.5.1.0 lists none of
+#: createwallet, loadwallet, listwallets or unloadwallet in its own `help` -- one
+#: wallet per datadir, no -rpcwallet, no /wallet/<name> endpoint, and no
+#: `walletname` field on getwalletinfo. There is no variable. An operator reading
+#: that footer goes looking for one, which is the round trip rule 14 exists to
+#: prevent: the screen told them to do something impossible.
+#:
+#: THE ONLY ROUTE THAT CAN ANSWER IT is a SECOND Gridcoin daemon with its own
+#: datadir on its own port, because one-wallet-per-datadir means a second wallet
+#: REQUIRES a second datadir. That is the same single missing thing the
+#: `GRC operator daemon` line is blocked on, which is why the two GRC lines on
+#: that run were one blocker rendered as two. The `why` carried with this state
+#: says so, and says it names a daemon rather than a variable.
+#:
+#: FITS report_block.LABEL_WIDTH at 15 characters, pinned by
+#: tests/test_custody_separation.py like every other state -- the constraint that
+#: turned "ONE DESK ACCOUNT, BY DESIGN" into "BY DESIGN".
+CANNOT_BE_ASKED = "CANNOT BE ASKED"
 
 #: Every state, so a caller can render a legend and a test can assert the set is
 #: closed. Ordered worst-known-first is deliberately NOT done: these are not
@@ -136,7 +183,8 @@ NOT_ESTABLISHED = "NOT ESTABLISHED"
 #: tests/test_custody_separation.py pins that, because the alternative is a state
 #: cut mid-word with nothing saying a tool did it -- which is what
 #: "ONE DESK ACCOUNT, BY DESIGN" did before it became "BY DESIGN".
-STATES = (SEPARATED, NOT_SEPARATED, BY_DESIGN, DESK_OWNS, NOT_THE_DESKS, MISCONFIGURED, NOT_ESTABLISHED)
+STATES = (SEPARATED, NOT_SEPARATED, BY_DESIGN, DESK_OWNS, NOT_THE_DESKS, MISCONFIGURED,
+          NOT_ESTABLISHED, CANNOT_BE_ASKED)
 
 
 class CustodyVerdict(NamedTuple):
@@ -229,10 +277,25 @@ def script_chain_verdict(
             f"caller or in the daemon's reply, not as a configuration problem"
         ))
     if "walletname" not in walletinfo:
-        return CustodyVerdict(NOT_ESTABLISHED, (
-            f"{asset}: getwalletinfo answered with no `walletname` field, so which wallet this "
-            f"endpoint serves was not established. Older daemons predate that field -- asking again "
-            f"changes nothing, which is a different problem from a daemon that did not answer"
+        # CANNOT_BE_ASKED AND NOT NOT_ESTABLISHED, and this branch is why that
+        # state exists. The old sentence here already SAID the distinction --
+        # "asking again changes nothing, which is a different problem from a
+        # daemon that did not answer" -- while returning the state that means
+        # exactly "a daemon did not answer", so wallet_custody.py tallied it
+        # beside a line that a second run fixes and closed with "Each line names
+        # the variable to change". There is no variable; see CANNOT_BE_ASKED.
+        return CustodyVerdict(CANNOT_BE_ASKED, (
+            f"{asset}: getwalletinfo answered, but its reply carries no `walletname` field at all, "
+            f"so which wallet this endpoint serves CANNOT be established from this daemon -- not "
+            f"now and not with different configuration. This daemon family predates multiwallet: "
+            f"Gridcoin v5.5.1.0 lists none of createwallet, loadwallet, listwallets or unloadwallet "
+            f"in its own `help`, which means one wallet per datadir, no -rpcwallet, no "
+            f"/wallet/<name> endpoint and no `walletname` to compare. THERE IS NO VARIABLE TO "
+            f"CHANGE. The only route that can answer it is a SECOND {asset} daemon with its own "
+            f"datadir on its own port -- one wallet per datadir means a second wallet REQUIRES a "
+            f"second datadir -- which is the same missing thing the operator-daemon line below is "
+            f"blocked on, so these are ONE blocker and not two. Copy block data only when you build "
+            f"it; never wallet.dat"
         ))
     serving = str(walletinfo["walletname"])
     asked_for = (configured_wallet or "").strip()
@@ -657,6 +720,14 @@ def what_this_cannot_establish() -> tuple[str, ...]:
         "CLI reaches. It says nothing about how that wallet was funded.",
         "an address this desk does not control is not thereby the CUSTOMER's. The desk cannot tell a "
         "customer's account from a second account the operator holds, on any of these five chains.",
-        "NOT ESTABLISHED is never a pass. Where a daemon did not answer, the line says so and the "
-        "reason is printed -- a green verdict is never the default here.",
+        # NAMES BOTH NON-PASSING ABSENCES, and it named only the first until
+        # 2026-10-04. A reader who had been told NOT ESTABLISHED is the state for
+        # "we could not tell" would read CANNOT BE ASKED as something else --
+        # possibly as a pass, which is the one reading this whole module exists to
+        # prevent.
+        f"{NOT_ESTABLISHED} and {CANNOT_BE_ASKED} are never a pass, and they are different "
+        f"absences: the first is a daemon that did not answer or an input not supplied, which "
+        f"another run can fix, and the second is a question this daemon family cannot carry at "
+        f"all, which no configuration fixes. Both print their reason and both exit non-zero -- a "
+        f"green verdict is never the default here.",
     )

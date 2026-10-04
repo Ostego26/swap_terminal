@@ -154,6 +154,7 @@ from network_target import may_read_a_wallet
 from report_block import CONTINUATION, labeled, wrapped
 from services.custody_separation import (
     BY_DESIGN,
+    CANNOT_BE_ASKED,
     DESK_OWNERSHIP_FROM_STATE,
     DESK_OWNS,
     NOT_ESTABLISHED,
@@ -231,9 +232,16 @@ def build_parser() -> argparse.ArgumentParser:
         # copy of a vocabulary is rule 8's bug with a delay on it, and the delay on
         # this one expired the same day it was written.
         epilog=(
-            f"Exit 0 only when every line answered one of: {', '.join(GOOD_STATES)}. NOT ESTABLISHED is "
-            "never a pass: a daemon that did not answer exits non-zero with the reason printed, "
-            "because a green verdict by default is the defect this tool exists to remove."
+            # BOTH HALVES DERIVED NOW. The passing half was already generated from
+            # GOOD_STATES, for the reason the comment above gives -- and the FAILING
+            # half was still hand-written, naming NOT ESTABLISHED alone. It went
+            # stale the moment CANNOT BE ASKED was added on 2026-10-04, which is the
+            # same drift one sentence later in the same string literal. Deriving it
+            # from STATES minus GOOD_STATES means a future state cannot be omitted.
+            f"Exit 0 only when every line answered one of: {', '.join(GOOD_STATES)}. Never a pass: "
+            f"{', '.join(state for state in STATES if state not in GOOD_STATES)} -- each exits "
+            "non-zero with its reason printed, because a green verdict by default is the defect "
+            "this tool exists to remove."
         ),
     )
     parser.add_argument(
@@ -648,7 +656,33 @@ def verdict_lines(results: list[tuple[str, str, str]]) -> tuple[list[str], int]:
     for name, state, _why in bad:
         lines.append(labeled(state, name))
     lines.append("")
-    lines.append("  Each line names the variable to change. Nothing was written and no wallet was touched.")
+    # SPLIT, BECAUSE ONE SENTENCE FOR BOTH GROUPS WAS FALSE FOR ONE OF THEM.
+    # This block used to close with a single unconditional line:
+    #
+    #     Each line names the variable to change.
+    #
+    # Measured on the operator's host 2026-10-04, `--swap s_539d922e9ef0a5d8`
+    # printed 8 checks with 2 of them NOT ESTABLISHED, and one of the two was the
+    # GRC wallet -- a question Gridcoin's RPC surface cannot carry at all, so
+    # there IS no variable. The footer sent the operator looking for one. That is
+    # rule 14's "state what the number means, next to the number" failing at the
+    # one place a reader acts on: a remedy printed for a line that has none.
+    #
+    # Two groups, two sentences, and the count of each is printed so neither can
+    # be read as the whole list. A group with no members prints nothing rather
+    # than an empty heading -- an empty section is the ambiguity rule 14 refuses.
+    unaskable = [name for name, state, _ in bad if state == CANNOT_BE_ASKED]
+    actionable = [name for name, state, _ in bad if state != CANNOT_BE_ASKED]
+    if actionable:
+        lines.append(f"  {len(actionable)} of those {len(bad)} name something to change -- a variable to export, a daemon to")
+        lines.append(f"  start, or a --swap to pass: {', '.join(actionable)}.")
+    if unaskable:
+        lines.append(f"  {len(unaskable)} of those {len(bad)} CANNOT BE ASKED on this daemon family and name NO variable:")
+        lines.append(f"  {', '.join(unaskable)}. Re-running changes nothing and no configuration fixes it;")
+        lines.append("  the sentence above says which mechanism would, and it is a second daemon rather")
+        lines.append("  than a setting. Not counted as passing: the exit code is non-zero for these too.")
+    lines.append("")
+    lines.append("  Nothing was written and no wallet was touched.")
     lines.append("  docs/hot_wallet_separation_runbook.md has the per-chain steps, and they are the")
     lines.append("  operator's to run: this tool creates no wallet, funds nothing and edits no .env.")
     return lines, 1
