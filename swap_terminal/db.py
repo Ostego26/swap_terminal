@@ -4,7 +4,8 @@ Role: submodule (persistence; holds no decision of its own)
 Reads: swap_terminal.db
 Writes: swap_terminal.db -- creates quotes, swaps, deposit_events,
        unattributable_deposits, late_deposits, payouts, wallet_inventory,
-       market_context, swap_audit_log, xrp_destination_tags
+       market_context, swap_audit_log, wallet_inventory_corrections,
+       xrp_destination_tags
        and address_proof_challenges if they are absent, plus the two triggers
        that make an allocated XRP destination tag immutable and undeletable and
        the three that make an address-proof challenge single-use, unrepointable
@@ -406,10 +407,36 @@ CREATE INDEX IF NOT EXISTS idx_fee_sweeps_asset_status ON fee_sweeps(asset, stat
 -- NOTHING GATES A PAYOUT ON THIS TABLE, established by grep 2026-10-02 and
 -- re-established behaviorally 2026-10-03: zeroing hot_confirmed and re-running
 -- services/payout_capacity.largest_fundable_payout() returned the SAME ceiling,
--- because that function calls adapter.get_balance() itself. The readers are
--- services/admin_view.py's display query, this file's reserve bookkeeping, and
--- rescue_payout.py's release. wallet_custody.py is the tool that says which wallet
--- an endpoint actually serves.
+-- because that function calls adapter.get_balance() itself. RE-ESTABLISHED
+-- BEHAVIORALLY AGAIN 2026-10-04 against a seeded row carrying the operator's own
+-- figures: hot_available=-6102.288412361736 for GRC, and both
+-- services/payout_capacity.largest_fundable_payout() and
+-- why_the_payout_cannot_be_funded() returned the SAME answers before and after
+-- hot_confirmed was zeroed. A negative hot_available cannot refuse a customer
+-- payout. wallet_custody.py is the tool that says which wallet an endpoint
+-- actually serves.
+--
+-- THE READER LIST THIS COMMENT USED TO GIVE WAS INCOMPLETE, AND THE OMISSION WAS
+-- THE CONSEQUENTIAL ONE. It read "services/admin_view.py's display query, this
+-- file's reserve bookkeeping, and rescue_payout.py's release", which is three of
+-- four. The fourth is swap_terminal/fee_sweep.obligation(), which reads
+-- hot_reserved and sets `floor = max(open_total, reserved)` -- so an inflated
+-- reservation raises the retention floor a fee sweep has to clear. Measured the
+-- same day, with the operator's figures seeded: obligation() returned
+-- floor=9882.372957331736 against a wallet holding 3780.08454497 GRC and
+-- open_total=0.0, which refuses every GRC fee sweep for as long as the figure
+-- stands. "Nothing gates a PAYOUT on this table" is still true and is a narrower
+-- claim than the list was being read as.
+--
+--   readers, 4 of 4 as of 2026-10-04
+--     services/admin_view.py              displays all three columns
+--     services/payout_service.py          reserve_inventory / release_inventory_after_send
+--     rescue_payout.py                    release
+--     swap_terminal/fee_sweep.py          obligation(), reads hot_reserved INTO A FLOOR
+--
+-- repair_inventory_reservations.py is the tool that reports and repairs a
+-- hot_reserved figure the payout rows do not justify, and
+-- wallet_inventory_corrections (below) is where it records what it replaced.
 CREATE TABLE IF NOT EXISTS wallet_inventory (
     asset TEXT PRIMARY KEY,
     hot_confirmed REAL NOT NULL DEFAULT 0,
@@ -809,10 +836,113 @@ SCHEMA = SCHEMA + XRP_DESTINATION_TAG_SCHEMA
 # and reports instead.
 PAYOUT_UNIQUE_INDEX_NAME = "idx_payouts_one_live_per_swap"
 PAYOUT_LIVE_STATUSES = ("created", "broadcast", "completed")
+
+# THE INDEX'S STATUS LIST IS NOW DERIVED FROM THE CONSTANT ABOVE RATHER THAN
+# SPELLED A SECOND TIME. Until 2026-10-04 these two lines read
+#
+#     PAYOUT_LIVE_STATUSES = ("created", "broadcast", "completed")
+#     ... "ON payouts(swap_id) WHERE status IN ('created', 'broadcast', 'completed')"
+#
+# which is rule 8's shape at its smallest: one vocabulary, two spellings, agreeing
+# on the day they were written. The cost of that drift is not hypothetical here --
+# the tuple is what tests/ and swap_terminal/ read when they ask "is this payout
+# live", and the string is what the DATABASE enforces. A fourth status added to the
+# tuple alone would leave the constraint unchanged while every reader believed it
+# had moved, and nothing would fail until two payout rows for one swap were
+# accepted, on chain, for one customer.
+#
+# The values are formatted into the text rather than bound as parameters because a
+# SQL parameter cannot bind a literal inside a partial index's WHERE clause: the
+# index expression is STORED, so it has to be text. Every element is a literal from
+# this module and none of them is ever input. Checked 2026-10-04 that the derived
+# string is byte-identical to the one it replaced.
 PAYOUT_UNIQUE_INDEX_SQL = (
     f"CREATE UNIQUE INDEX IF NOT EXISTS {PAYOUT_UNIQUE_INDEX_NAME} "
-    "ON payouts(swap_id) WHERE status IN ('created', 'broadcast', 'completed')"
+    f"ON payouts(swap_id) WHERE status IN ({', '.join(repr(status) for status in PAYOUT_LIVE_STATUSES)})"
 )
+
+#: THE STATUSES THAT JUSTIFY A STANDING RESERVATION IN `wallet_inventory`, and this
+#: is DELIBERATELY NOT PAYOUT_LIVE_STATUSES. The difference is the point and it is
+#: named at both sites (rule 8), because the two lists answer different questions
+#: about the same rows and collapsing them would be wrong in both directions.
+#:
+#: PAYOUT_LIVE_STATUSES asks "may another payout row exist for this swap" -- so a
+#: DELIVERED payout still counts, because a second send would be a double payment.
+#:
+#: This asks "is this asset's hot wallet still holding money back for a payout that
+#: has not left". The reservation lifecycle, read off
+#: services/payout_service.process_pending_payouts() on 2026-10-04:
+#:
+#:    reserve_inventory(amount)          hot_reserved += amount
+#:    INSERT INTO payouts ... 'created'  the row the reservation is FOR
+#:    broadcast_payout(...)
+#:      on success  -> payouts 'broadcast' AND release_inventory_after_send()
+#:      on failure  -> payouts 'failed'    AND NO RELEASE AT ALL
+#:
+#: So `created` is the ONLY status whose reservation is still owed. A `broadcast` or
+#: `completed` row has already had release_inventory_after_send() subtract it, and
+#: counting it again would double every delivered payout into the retention floor. A
+#: `failed` row never had a release -- that is the leak this vocabulary exists to
+#: measure -- and treating `failed` as justifying would declare the leak correct.
+#:
+#: MEASURED ON THE OPERATOR'S HOST 2026-10-04, which is why this is a shared constant
+#: and not a literal inside one tool: GRC carried hot_reserved=9882.372957331736
+#: against hot_confirmed=3780.08454497, so hot_available read -6102.288412361736,
+#: beside 5 `failed` GRC payout rows totaling 9993.425862093694.
+#: repair_inventory_reservations.py is the tool that reports and repairs it.
+PAYOUT_RESERVED_STATUSES = ("created",)
+
+#: WHERE A CORRECTION TO A MONEY COLUMN IS RECORDED, and why it is its own table
+#: rather than a `swap_audit_log` row.
+#:
+#: swap_audit_log is KEYED TO A SWAP -- `swap_id TEXT NOT NULL` with a FOREIGN KEY to
+#: swaps(id) -- and these corrections are per ASSET. A `wallet_inventory` row has no
+#: swap: GRC's inflated reservation is the residue of several different failed
+#: payouts across several different swaps, and the corrected figure belongs to none
+#: of them in particular. The two ways to force it into swap_audit_log are both worse
+#: than a table:
+#:
+#:   pick one of the swaps   falsifies that swap's trail -- the one record that
+#:                           explains what happened to it -- and leaves the rest
+#:                           unmentioned
+#:   invent a swap_id        a row whose foreign key points at nothing, found later
+#:                           by a reader with no way to tell it from corruption
+#:
+#: correct_payout_amounts.py uses swap_audit_log and is right to: it corrects
+#: `payouts.amount`, and a payout row HAS a swap. The object corrected here is keyed
+#: by asset, so the record is keyed by asset. The requirement is identical and is
+#: that tool's own -- the original figure must be recoverable from the database
+#: alone, with no git history -- answered at the grain of the thing that changed.
+#:
+#: ALL THREE ORIGINALS ARE STORED, not only the column that moved. An operator
+#: undoing this by hand needs the row as it stood, and hot_available is nominally
+#: derived from the other two -- so a record holding one figure would require the
+#: reader to trust that the derivation held at the time, which is precisely what was
+#: broken. The `now_*` columns are NULLable because one action does not write a row
+#: back at all: a row DELETED has no "now".
+#:
+#: NOT IN SCHEMA, for PAYOUT_UNIQUE_INDEX_SQL's reason one line up: it is applied by
+#: apply_migrations() and by the tool itself, so a tool run against a database the
+#: app has not restarted against still has somewhere to write its audit row.
+INVENTORY_CORRECTIONS_TABLE = "wallet_inventory_corrections"
+INVENTORY_CORRECTIONS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {INVENTORY_CORRECTIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL,
+    action TEXT NOT NULL,
+    was_hot_confirmed REAL NOT NULL,
+    was_hot_reserved REAL NOT NULL,
+    was_hot_available REAL NOT NULL,
+    now_hot_confirmed REAL,
+    now_hot_reserved REAL,
+    now_hot_available REAL,
+    justified_by TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_inventory_corrections_asset
+    ON {INVENTORY_CORRECTIONS_TABLE}(asset);
+"""
 
 
 def duplicate_live_payouts(conn: sqlite3.Connection) -> list:
@@ -889,6 +1019,15 @@ def apply_migrations(conn: sqlite3.Connection) -> dict:
     # what create_swap() writes on every XRP swap, and a database that has the
     # constraint but not the column fails at swap creation rather than at start.
     added_deposit_tag = add_column_if_missing(conn, "swaps", "deposit_tag", "INTEGER")
+
+    # THE CORRECTIONS TABLE GOES UP BEFORE THE INDEX WORK, for the same reason the
+    # ADD COLUMN does: the early return below must not skip it. It is where a
+    # repair to a money column records the figure it replaced, and a database with
+    # the repair tool available but nowhere for its audit row to land is a database
+    # where the repair has to either refuse or overwrite silently. IF NOT EXISTS
+    # throughout, so this is idempotent and cannot fail on an existing database.
+    conn.executescript(INVENTORY_CORRECTIONS_SQL)
+    conn.commit()
 
     duplicates = duplicate_live_payouts(conn)
     if duplicates:

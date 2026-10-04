@@ -324,6 +324,32 @@ SERVICE_SIDE = frozenset({
 # row describing it was a row about a file that does not do the thing. That is the
 # check working in the direction nobody writes a test for -- an entry going stale
 # rather than one going missing.
+#
+# repair_inventory_reservations.py, 2026-10-04: CONSIDERED AND DELIBERATELY ON
+# NEITHER SIDE, recorded here because in a register "no row" and "nobody looked"
+# are indistinguishable, and only one of them is a decision.
+#
+# It resolves no chain. Measured against this register's own three markers rather
+# than by reading the file: `build_adapters(` 0, `CLIENTS[` 0, `SCRIPT_CLIENTS[` 0.
+# It imports nothing from chains/, constructs no adapter, opens no socket and makes
+# no RPC call of any kind -- its whole derivation is one SQL statement over
+# `wallet_inventory` left-joined to `payouts`, which is why the thing it decides is
+# a query and not a balance read (rules 5 and 20).
+#
+# So it stays out of BOTH frozensets, and that is ENFORCED rather than remembered:
+# the second assertion in the test below fails with "is in the register but no
+# longer resolves a chain" for any entry the markers do not find -- which is
+# exactly how show_swap.py came off the list above. Adding a row for this tool
+# would not be caution, it would break the suite, and the row would describe a file
+# that does not do the thing.
+#
+# AND IF IT EVER DOES RESOLVE ONE, IT IS SERVICE SIDE. Said now because the
+# classification is forced rather than open: it WRITES hot_reserved for the wallet
+# the payout worker spends from, so any balance it ever read would have to be that
+# daemon's. A conf fallback would let it reconcile the desk's reservations against
+# a wallet the desk does not pay from -- correct_payout_amounts.py's entry above
+# word for word, since that one WRITES too. The register will ask the question on
+# its own the moment a marker appears; this records what the answer is.
 
 
 def test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other():
