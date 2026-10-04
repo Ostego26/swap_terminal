@@ -470,13 +470,16 @@ class AddressOwnership(NamedTuple):
     #: for one reply and a second place asking the same question (rule 8).
     #:
     #: MEASURED ON THE OPERATOR'S GRIDCOIN v5.5.1.0 TESTNET DAEMON, 2026-10-04,
-    #: which is what made this field worth carrying:
+    #: which is what made this field worth carrying. The readings themselves live
+    #: in ONE place -- services/custody_separation.gridcoin_account_verdict()'s
+    #: docstring -- rather than being copied here: a measurement spelled twice is
+    #: rule 8's bug with a delay on it, and transcribing an ADDRESS is how the
+    #: delay gets short. (tests/test_address_literals_are_valid.py counts every
+    #: address-shaped literal in the tree for that reason, and this comment was
+    #: two of them.)
     #:
-    #:     moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz -> "swap_s_539d922e9ef0a5d8"
-    #:     moimRB7znV9FgZGKUmLHukYusVmzKiY5r6 -> "Beacon Address for CPID 09ff..."
-    #:
-    #: The first is a desk deposit address, filed by the daemon into an account
-    #: named for its swap because services/swap_service.py:475 derives it with
+    #: In short: a desk deposit address came back filed under an account named for
+    #: its swap, because services/swap_service.py:475 derives it with
     #: `getnewaddress f"swap_{swap_id}"` and a PRE-0.17 daemon reads that first
     #: argument as the ACCOUNT (0.17 renamed it to "label" when multiwallet
     #: arrived). getaddressesbyaccount "" returned 88 addresses on that host and

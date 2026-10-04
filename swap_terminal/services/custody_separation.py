@@ -841,12 +841,29 @@ def gridcoin_account_verdict(
     instead, and the measurement that followed showed the separation was already
     there:
 
-        validateaddress moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz
-          -> "account": "swap_s_539d922e9ef0a5d8"      <- a desk deposit address
-        validateaddress moimRB7znV9FgZGKUmLHukYusVmzKiY5r6
+        validateaddress <swap s_539d922e9ef0a5d8's deposit address>
+          -> "account": "swap_s_539d922e9ef0a5d8"
+        validateaddress <the wallet's CPID beacon address>
           -> "account": "Beacon Address for CPID 09ff..."
         getaddressesbyaccount ""
           -> 88 addresses, and NEITHER of the above among them
+
+    THE ADDRESSES THEMSELVES ARE NOT TRANSCRIBED HERE, deliberately, and the
+    ACCOUNT values are -- because the accounts are the finding and the addresses
+    are already in `swaps.deposit_address` where a reader can get them without
+    trusting a comment. tests/test_address_literals_are_valid.py counts every
+    address-shaped literal in the tree.
+
+    MEASURED, BECAUSE THE FIRST VERSION OF THIS PARAGRAPH OVERSTATED IT: removing
+    these two addresses changed that count by ZERO. The scanner reads string
+    literals in CODE, so prose in a docstring was never in scope -- of fourteen
+    address mentions this change first added, five were counted (all of them real
+    string literals in the test file, replaced with derived fixtures from
+    tests/valid_addresses.py) and nine were not. The count was 60 of its 60
+    ceiling at 164e1d0 and is 60 now, so this work contributed none of the drift
+    its own note records (48 on 2026-09-27, so twelve arrived from elsewhere).
+    These two came out on rule 8 grounds alone -- the measurement belongs in one
+    place and an address a reader cannot verify is not worth transcribing.
 
     Three accounts in one wallet.dat: the desk's per-swap accounts, the default
     account holding the operator's own 88, and the beacon's. Gridcoin has been

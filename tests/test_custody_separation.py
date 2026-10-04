@@ -17,7 +17,7 @@ customer's wallet and INTO the terminal's, and XRP OUT of the terminal's account
 and INTO the customer's. Three things were measured that day:
 
   1. swap s_539d922e9ef0a5d8 completed. Its 500 GRC deposit went to
-     moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz, derived by getnewaddress on the
+     <the desk's deposit address>, derived by getnewaddress on the
      operator's OWN gridcoinresearchd, and their balance moved
      3780.08654497 -> 3780.08554497: the 0.001 fee and nothing else. The
      transaction carries `category: send` AND `category: receive` for one
@@ -87,7 +87,15 @@ from services.custody_separation import (
     xrp_desk_account_verdict,
     xrp_payout_destination_verdict,
 )
-from valid_addresses import GRC_DESK_DEPOSIT, XRP_CUSTOMER_PAYOUT, XRP_HOT_ACCOUNT
+from valid_addresses import (
+    BTC_REGTEST_DEPOSIT,
+    GRC_DESK_DEPOSIT,
+    XRP_CUSTOMER_PAYOUT,
+    XRP_HOT_ACCOUNT,
+)
+from valid_addresses import (
+    GRC_PARTICIPANT as GRC_BEACON_LOOKALIKE,
+)
 
 import wallet_custody  # isort: skip
 
@@ -105,7 +113,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: Nothing asserted below depends on an address's VALUE -- only on the three being
 #: distinct, correctly shaped for their chains, and comparable. The real addresses
 #: are evidence about one run, so they live in this module's docstring, where a
-#: reader meets them as what they are: moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz took the
+#: reader meets them as what they are: <the desk's deposit address> took the
 #: 500 GRC, and the payout went rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv ->
 #: rBfM7je6e9Ca2cMvuRn7cr9xExFgDa5NGx. All three are testnet; none is a key.
 SWAP_ID = "s_539d922e9ef0a5d8"
@@ -999,7 +1007,7 @@ def test_the_decode_check_still_answers_both_ways_after_the_derivation_was_merge
 # DESK's deposit address is `ismine`. Their daemon on that day: datadir
 # /home/mpjones26/.GridcoinResearch, rpcport 25715, in_sync true, balance
 # 3780.08554497. The desk address is swap s_539d922e9ef0a5d8's own deposit_address,
-# moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz, read from swap_terminal.db -- never from
+# <the desk's deposit address>, read from swap_terminal.db -- never from
 # getnewaddress, which is a wallet WRITE.
 #
 # EVERY TEST BELOW WAS MUTATION-CHECKED and names its mutation and what it caught.
@@ -1776,7 +1784,7 @@ def test_the_desks_own_account_is_ATTRIBUTED_and_exits_zero():
 
     MEASURED ON THE OPERATOR'S HOST 2026-10-04 and this test is that reading:
 
-        validateaddress moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz
+        validateaddress <the desk's deposit address>
           -> {"ismine": true, "account": "swap_s_539d922e9ef0a5d8", ...}
 
     MUTATION (ran, caught): return SEPARATED here instead. Fails on the state --
@@ -1784,7 +1792,7 @@ def test_the_desks_own_account_is_ATTRIBUTED_and_exits_zero():
     enforces nothing, so the two words must not be interchangeable.
     """
     verdict = gridcoin_account_verdict(
-        "GRC", "s_539d922e9ef0a5d8", "moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz",
+        "GRC", "s_539d922e9ef0a5d8", GRC_DESK_DEPOSIT,
         _ownership(True, "swap_s_539d922e9ef0a5d8"),
     )
 
@@ -1810,7 +1818,7 @@ def test_the_DEFAULT_account_is_NOT_SEPARATED_rather_than_merely_unlabeled():
     it would have made the tool green for the one arrangement it is looking for.
     """
     verdict = gridcoin_account_verdict(
-        "GRC", "s_abc", "moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz", _ownership(True, ""),
+        "GRC", "s_abc", GRC_DESK_DEPOSIT, _ownership(True, ""),
     )
 
     assert verdict.state == NOT_SEPARATED
@@ -1832,7 +1840,7 @@ def test_an_empty_account_from_getaddressinfo_is_CANNOT_BE_ASKED_not_NOT_SEPARAT
     -- which is exactly the half a single-case test would have missed.
     """
     verdict = gridcoin_account_verdict(
-        "GRC", "s_abc", "bcrt1qexample", _ownership(True, "", "getaddressinfo answered ismine"),
+        "GRC", "s_abc", BTC_REGTEST_DEPOSIT, _ownership(True, "", "getaddressinfo answered ismine"),
     )
 
     assert verdict.state == CANNOT_BE_ASKED
@@ -1852,7 +1860,7 @@ def test_a_third_account_is_MISCONFIGURED_rather_than_quietly_accepted():
     MUTATION (ran, caught): make the final branch return ATTRIBUTED. Fails here.
     """
     verdict = gridcoin_account_verdict(
-        "GRC", "s_abc", "moimRB7znV9FgZGKUmLHukYusVmzKiY5r6",
+        "GRC", "s_abc", GRC_BEACON_LOOKALIKE,
         _ownership(True, "Beacon Address for CPID 09ff71bf7098642c260fcbc9bd9c08c3 (at 3294366)"),
     )
 
@@ -1877,7 +1885,7 @@ def test_no_account_reading_can_outrank_ismine(verdict_in, expected):
     daemon that never replied -- which is the single worst outcome available here.
     """
     verdict = gridcoin_account_verdict(
-        "GRC", "s_abc", "moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz",
+        "GRC", "s_abc", GRC_DESK_DEPOSIT,
         _ownership(verdict_in, "swap_s_abc"),
     )
 
