@@ -467,6 +467,30 @@ for the Python half is the 123 `.py` files under `swap_terminal/` plus the 34 at
 the root; for the JS half, the 31 non-`node_modules` `.js`/`.mjs`/`.jsx` files
 under `grc-sol-swap/`.
 
+**THAT JS DENOMINATOR IS 11, RE-MEASURED 2026-10-04, and it was already wrong
+before this re-measurement.** It read 23 the day after this document was written
+-- the 2026-10-04 Serum/wGRC cull removed twelve files the day after the count
+was taken -- and it is 11 now because the React frontend was deleted when the
+two UIs were merged onto the Flask app: eighteen of the thirty-four tracked files
+in `abstergo_exchange/`, ten of them `.jsx`, plus `vite.config.js` and
+`craco.config.js`.
+
+The 20 names are NOT re-measured here and may have moved with those files; what
+is re-measured is the denominator. The surviving eleven are `server.js`,
+`auth.js`, `intent_store.js`, `eslint.config.js`, `services/coinGecko.js`,
+`services/gridcoin.js`, `scan_solana_wallets.js`, `testAddress.js`,
+`rotate_solana_key.mjs` and the two files under `tests/`. None of the deleted
+eighteen read an environment variable that armed anything -- the frontend's only
+contact with a backend was `fetch` and `axios` against `localhost:5000` -- so
+the secret-bearing set is unlikely to have shrunk; "unlikely" is not a
+measurement and this sentence is not making one.
+
+This is rule 3's denominator problem in its purest form: the count was true the
+day it was taken, nothing recounted it, and two culls moved it the same way
+without anyone noticing. `S3. abstergo` below is unaffected -- it still runs
+`node server.js`, which never served the frontend and carries no
+`express.static`.
+
 Signing and spending -- **these 6 are the ones that can move money**:
 
 | name | read by | what it arms |

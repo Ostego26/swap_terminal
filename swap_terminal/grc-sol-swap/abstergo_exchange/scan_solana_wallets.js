@@ -26,6 +26,15 @@ function tryFile(filePath) {
     const marker = target && pubkey === target ? ' <== MATCH' : '';
     console.log(`${filePath} -> ${pubkey}${marker}`);
   } catch {
+    // DELIBERATELY EMPTY, and the reason is this function's whole job: walk() points
+    // it at every file under a home directory, so the overwhelming majority of what it
+    // opens is not a Solana keypair. An unreadable file, a non-JSON file and a JSON file
+    // that is not a 64-byte secret array are all 'not a keypair', which is the same
+    // answer as the two early `return`s above and not an error worth a line of output.
+    // Reporting them would bury the MATCH line this scan exists to print (rule 14: the
+    // signal is the point). Nothing here can mask a failure that matters, because the
+    // only thing this function does on success is console.log -- it moves nothing and
+    // returns nothing a caller branches on.
   }
 }
 

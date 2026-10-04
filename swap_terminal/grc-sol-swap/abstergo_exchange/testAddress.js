@@ -5,6 +5,6 @@ const address = "Eypf7jY7pocut9A8hEoJPmkFpXSRDjtNYozo2jKEgs2H";  // Replace with
 try {
   const publicKey = new PublicKey(address);
   console.log(`Valid PublicKey: ${publicKey.toBase58()}`);
-} catch (error) {
+} catch {
   console.error("Invalid PublicKey format:", address);
 }
