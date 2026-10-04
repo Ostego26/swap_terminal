@@ -372,8 +372,20 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
 #
 # What reconcile_worker now reports as work is `transitions_written` -- the audit rows
 # its own pass wrote -- and that figure is zero exactly when deposit_watcher is healthy.
+#
+# `late_unresolved` JOINED 2026-10-04 and it is the `failed_total` shape exactly, which
+# is why it was put here in the same commit that added the field rather than after
+# somebody watched it latch. It counts late_deposits rows a PERSON has not resolved yet
+# (services/late_deposit_service.py), so it stays non-zero from the moment the first late
+# deposit is recorded until the operator writes a resolution -- days, plausibly. Without
+# this line reconcile_worker would print WORKED on every cycle of that period for doing
+# nothing at all, and the `late_deposits` field beside it -- which counts rows NEW this
+# pass and returns to 0 -- is the one that genuinely means this cycle found something.
+# Both are on the line because an operator needs "one arrived just now" and "four are
+# still sitting there" to be different numbers; only the first may claim work.
 STANDING_COUNTS = frozenset({
-    "HALTED_for_review", "failed_total", "inventory_rows", "refreshed_swaps",
+    "HALTED_for_review", "failed_total", "inventory_rows", "late_unresolved",
+    "refreshed_swaps",
 })
 
 

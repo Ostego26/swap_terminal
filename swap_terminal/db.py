@@ -2,8 +2,9 @@
 
 Role: submodule (persistence; holds no decision of its own)
 Reads: swap_terminal.db
-Writes: swap_terminal.db -- creates quotes, swaps, deposit_events, payouts,
-       wallet_inventory, market_context, swap_audit_log, xrp_destination_tags
+Writes: swap_terminal.db -- creates quotes, swaps, deposit_events,
+       unattributable_deposits, late_deposits, payouts, wallet_inventory,
+       market_context, swap_audit_log, xrp_destination_tags
        and address_proof_challenges if they are absent, plus the two triggers
        that make an allocated XRP destination tag immutable and undeletable and
        the three that make an address-proof challenge single-use, unrepointable
@@ -206,6 +207,96 @@ CREATE TABLE IF NOT EXISTS unattributable_deposits (
 -- The query an operator actually runs: what is still outstanding, oldest first.
 CREATE INDEX IF NOT EXISTS idx_unattributable_deposits_unresolved
     ON unattributable_deposits(resolved_at, first_seen_at);
+
+-- MONEY THAT ARRIVED FOR A SWAP THAT HAD ALREADY FINISHED. Added 2026-10-04.
+--
+-- THE DEFECT, MEASURED END TO END ON THE OPERATOR'S REGTEST BTC THAT DAY. Swap
+-- s_10b5946333612e06 (BTC->GRC) completed: expected_input_amount 0.0001, credited_at
+-- 2026-10-04T16:13:09.315366+00:00, deposit_events id=24 at vout=1 for txid
+-- 7ea61ac9c7038f58..., and 986.89613973 GRC broadcast. The operator then sent a SECOND
+-- 0.0001 BTC to the SAME deposit address -- txid 1abce90c0e7fdfe5... -- and the desk's
+-- `desk_hot` balance moved 10.00110000 -> 10.00120000, so the coins are in the wallet.
+-- Queried read-only afterwards: NO deposit_events row for that txid and NO
+-- unattributable_deposits row either. The payment existed on chain, in our wallet, and
+-- in no row of this database.
+--
+-- WHY NOTHING SAW IT, established by running it rather than by reading the code
+-- (2026-10-04, services/late_deposit_service.py's docstring carries the full table):
+-- services/deposit_service.process_active_swaps() selects ACTIVE_STATUSES --
+-- awaiting_deposit, deposit_seen, confirming -- and an address-attributed chain's deposit
+-- address is only ever scanned from inside that loop. Seeding one BTC swap per status and
+-- counting adapter calls: the address is scanned for those three and scanned ZERO times
+-- for payout_pending, paying, completed, under_review and failed. A finished swap's
+-- address stops being looked at, so a late payment to it is never seen by anything.
+--
+-- WHY IT IS NOT A deposit_events ROW. That table is what refresh_swap_from_chain() SUMS to
+-- decide whether a deposit is confirmed and a payout may be released. A row here would be
+-- summed into a settled swap's confirmed_total and would re-arm or halt a swap that has
+-- already paid out. Recording must decide nothing about the money (the same refusal
+-- migrate_deposit_vouts.py makes about rewriting settled swaps), and the only way to
+-- guarantee that is for the record to live where no gate reads it.
+--
+-- WHY IT IS NOT AN unattributable_deposits ROW, AND THIS IS THE DISTINCTION THAT EARNS A
+-- SECOND TABLE. That table's own comment above says it holds money that "belongs to no
+-- swap -- that is the definition of unattributable", that it holds "no swap_id, now or
+-- later", and that filling one in "would make this table a second source of truth about
+-- who owns a deposit". A late deposit is the OPPOSITE case: the deposit address belongs to
+-- exactly one swap, so attribution is known and certain; what is missing is a swap that is
+-- still willing to accept it. Writing it there would need either a swap_id column that
+-- table forbids, or `discriminator` overloaded to mean a vout on one chain and a
+-- DestinationTag on another -- one column meaning two things, which is rule 11's defect.
+-- So: a separate table, where swap_id IS a FOREIGN KEY because the attribution is a fact
+-- rather than an opinion.
+--
+-- KEYED ON (asset, txid, vout) AND NOT (asset, txid), which is the other way round from
+-- unattributable_deposits and for the reason that table states. There, `vout` carries the
+-- integer discriminator and the row exists BECAUSE no usable discriminator was found, so
+-- it cannot be part of the key. Here `vout` is a real output index on a UTXO chain and one
+-- transaction can pay the same address at two outputs -- two separate payments, two rows.
+-- It is the same triple deposit_events is keyed on, deliberately, so the two tables answer
+-- "have I seen this output before" the same way.
+--
+-- NOTHING ON THE ORDER PATH MAY READ THIS, exactly as for unattributable_deposits. No
+-- gate, no crediting, no payout, no pricing may join against it. It records and surfaces;
+-- the operator decides what happens to the coins, and the decision is the
+-- `resolved_at`/`resolution_note` pair, which is a person's note rather than a transition.
+CREATE TABLE IF NOT EXISTS late_deposits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- The swap whose deposit address this payment landed on. A FOREIGN KEY, unlike
+    -- unattributable_deposits, because on an address-attributed chain the address IS the
+    -- attribution: swap_service allocates a fresh address per swap and no other swap
+    -- shares it. See the block above for why that difference justifies a second table.
+    swap_id TEXT NOT NULL,
+    -- The swap's status AT THE MOMENT THIS ROW WAS WRITTEN, carried rather than looked up.
+    -- An operator reading the row a week later needs to know whether the money arrived
+    -- after a COMPLETED payout (the desk is holding a customer's extra send) or after a
+    -- FAILED one (the desk may still owe the original payout too). Joining to swaps would
+    -- give today's status, which is not the one that made this a late deposit.
+    swap_status TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    txid TEXT NOT NULL,
+    vout INTEGER NOT NULL,
+    -- Carried rather than looked up through swap_id, for the same reason
+    -- unattributable_deposits carries it: a row still says where the coins are after the
+    -- swap row or the configuration changes.
+    address TEXT NOT NULL,
+    -- Whole units of the asset, the same scale as deposit_events.amount and
+    -- unattributable_deposits.amount. A record of money that omits the amount is not a
+    -- record of money.
+    amount REAL NOT NULL,
+    confirmations INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution_note TEXT,
+    UNIQUE(asset, txid, vout),
+    FOREIGN KEY (swap_id) REFERENCES swaps(id)
+);
+
+-- The query an operator actually runs: what is still outstanding, oldest first. Mirrors
+-- idx_unattributable_deposits_unresolved above, for the identical question.
+CREATE INDEX IF NOT EXISTS idx_late_deposits_unresolved
+    ON late_deposits(resolved_at, first_seen_at);
 
 CREATE TABLE IF NOT EXISTS payouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

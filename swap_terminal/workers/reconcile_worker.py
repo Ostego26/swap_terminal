@@ -2,11 +2,11 @@
 """Slow sweep: refresh wallet balances and re-check every open swap.
 
 Role: module (polling loop; the decisions live in services/)
-Reads: swap_terminal.db (swaps, deposit_events, wallet_inventory), BTC/LTC/GRC
-       wallet RPC (getbalance, listtransactions, getrawtransaction,
-       gettransaction, decoderawtransaction)
+Reads: swap_terminal.db (swaps, deposit_events, late_deposits,
+       wallet_inventory), BTC/LTC/GRC wallet RPC (getbalance, listtransactions,
+       getrawtransaction, gettransaction, decoderawtransaction)
 Writes: swap_terminal.db (wallet_inventory, deposit_events, swaps,
-       swap_audit_log)
+       swap_audit_log, late_deposits)
 Can move funds: no -- it calls neither sendtoaddress nor any signing method.
        Like deposit_watcher it CAN move a swap into `payout_pending`, which is
        one step upstream of a broadcast.
@@ -66,6 +66,18 @@ another process had already advanced, which is rule 13's "skipped plus success i
 the same output" in the one worker an operator would check to find out whether the
 backstop is carrying the load.
 
+IT IS ALSO THE ONLY THING THAT NOTICES A LATE DEPOSIT, added 2026-10-04 and the one
+job this worker does that deposit_watcher does not do at all. A payment arriving at the
+deposit address of a swap that has already finished was recorded NOWHERE before that
+date -- not credited, not refused, not marked unattributable -- because an
+address-attributed chain's deposit address is only ever scanned from inside
+process_active_swaps()' `WHERE status IN (ACTIVE_STATUSES)`. Measured on the operator's
+host that day: 0.0001 BTC in the hot wallet and `(none)` rows anywhere in the database.
+services/late_deposit_service.py carries the full per-status measurement, the window and
+its derivation; `late_deposits` on the cycle line is how many rows this pass wrote and
+`late_unresolved` is how many a person has yet to deal with. It records and decides
+NOTHING -- no credit, no refund, no status change on a settled swap.
+
 REAPER: swap_terminal/supervisor.py. See deposit_watcher.py's header.
 """
 
@@ -82,6 +94,7 @@ from config import Config
 from db import SCHEMA, db_session
 from services.deposit_service import process_active_swaps
 from services.helpers import utc_now_iso
+from services.late_deposit_service import late_note, reconcile_late_deposits
 from services.payout_service import (
     inventory_assets,
     inventory_note,
@@ -221,6 +234,45 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
     refresh_wallet_inventory(db, adapters)
     processed = process_active_swaps(db, config, adapters)
     written = transitions_written(db, [row["id"] for row in processed], since=cycle_began)
+    # THE LATE-DEPOSIT PASS, AND WHY IT IS IN *THIS* WORKER RATHER THAN IN deposit_watcher.
+    #
+    # deposit_watcher's 15s loop exists to credit a deposit promptly, and a late deposit is
+    # the one case where promptness buys nothing: nothing is credited, nothing is released,
+    # and a person has to read the row before anything happens to the coins. This worker is
+    # already the 60s backstop that re-reads what the fast loop may have missed, which is the
+    # same job one level out -- so the pass runs here, once a minute, and the fast loop keeps
+    # its scan count unchanged.
+    #
+    # IT RUNS AFTER process_active_swaps(), AND THE ORDER TURNS OUT NOT TO BE LOAD-BEARING.
+    # That is recorded rather than left for the next reader to rediscover, and it is the same
+    # correction deposit_service.process_active_swaps() already carries about
+    # reconcile_shared_accounts()' position.
+    #
+    # I FIRST WROTE HERE THAT THE ORDER WAS LOAD-BEARING, and the mutation refuted it
+    # (2026-10-04). The argument was that running the late pass FIRST would see a swap that
+    # is about to be credited this cycle, with no deposit_events row yet, and call its own
+    # arriving deposit late -- the 2026-10-01 defect where a reconciler called a freshly
+    # credited deposit stranded. It cannot happen in either order, and the reason is the
+    # status filter: a swap that is still ACTIVE at the top of the cycle is excluded from the
+    # late pass by `status NOT IN (ACTIVE_STATUSES)` whatever order the two run in, and by
+    # the time it is NOT active its deposit_events row has already been written by the call
+    # above, so accounted_keys() excludes it. Two independent exclusions, one per order.
+    #
+    # MEASURED, not reasoned alone: moving this whole block above process_active_swaps()
+    # leaves all 24 tests in tests/test_late_deposits.py passing. The position stays where it
+    # is because reading the swap's post-credit status is the more obviously correct one to
+    # record in `swap_status`, not because a test pins it.
+    #
+    # IT COMMITS NOTHING OF ITS OWN: the db_session() in main() owns the transaction, exactly
+    # as process_active_swaps()' own writes do.
+    late = reconcile_late_deposits(db, config, adapters, now=utc_now_iso())
+    late_unresolved = db.execute(
+        # READ BACK FROM SQL rather than threaded up from the pass. "How many late deposits is
+        # a person still sitting on" is a question about rows in the table and not about what
+        # THIS pass did, so it is a SELECT -- the same split transitions_written() makes one
+        # field over, and the reason `recorded` and this number are both on the line.
+        "SELECT COUNT(*) AS n FROM late_deposits WHERE resolved_at IS NULL",
+    ).fetchone()["n"]
     # READ BACK FROM THE TABLE, not assumed from which adapters were asked. An adapter
     # whose get_balance() raised wrote no row, and that difference is exactly what the
     # note reports.
@@ -237,6 +289,23 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
             # nothing left to move. Non-zero means this loop is the one crediting, which
             # on a host where both workers are up is worth a second look.
             "transitions_written": written,
+            # NOT IN workers/common.STANDING_COUNTS, AND THAT IS THE DECISION ON THIS LINE.
+            # Every field in that set is one whose non-zero value is the healthy steady state,
+            # so letting it mark WORKED made a worker claim work for existing. This one is the
+            # opposite: it counts rows NEW this pass, it is 0 on every cycle of a healthy
+            # system, and the single cycle where it is not is the cycle an operator must see.
+            # So a non-zero value SHOULD flip the line to WORKED -- which is rule 14's "make
+            # 'did nothing' look different from 'did work'" pointing the other way from
+            # `refreshed_swaps`, and the reason both belong on the same line.
+            "late_deposits": late.recorded,
+            # UNRESOLVED AND NOT TOTAL. A resolved row is one a person has dealt with; leaving
+            # it in would make this a number that only ever grows, which is the measurement
+            # unattributable_deposit_service.resolve_credited() warns about. In
+            # STANDING_COUNTS-spirit it is a standing figure rather than this pass's work --
+            # it is reported beside `late_deposits` so the operator can tell "one arrived just
+            # now" from "four have been sitting there", and it is deliberately NOT what flips
+            # the WORKED marker.
+            "late_unresolved": late_unresolved,
             "inventory_rows": len(present),
         },
         # DERIVED FROM THE CONSTRUCTED ADAPTERS, never hardcoded. The string this
@@ -246,7 +315,15 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
         # BOTH COUNTS THAT NEED EXPLAINING GET IT. inventory_note() covers
         # inventory_rows; backstop_note() covers transitions_written, whose
         # explanation was a code comment the operator never sees.
-        notes=f"{backstop_note(written, len(processed))}. {inventory_note(adapters, present)}",
+        # THREE COUNTS THAT NEED EXPLAINING, THREE NOTES. late_note() is the third, and it
+        # is the one where ZERO and NON-ZERO read completely differently -- see that
+        # function, and services/late_deposit_service.py's header for the measurement that
+        # made the field necessary at all.
+        notes=(
+            f"{backstop_note(written, len(processed))}. "
+            f"{late_note(late.recorded, late.targets)}. "
+            f"{inventory_note(adapters, present)}"
+        ),
     )
 
 
