@@ -474,11 +474,18 @@ app.get('/deposit-addresses', (_req, res) => {
  * a complete disclosure. "Unguessable identifier" is not authentication; it is
  * an identifier.
  *
- * WHO THIS COULD BREAK: no caller in this tree. Measured by grepping every
- * .js/.jsx under grc-sol-swap/ for `swap-intents` -- the only frontend call is
- * SwapIntentForm.jsx's POST to /swap-intents. Nothing polls this route. If a
- * depositor-facing status page is added later, it needs a per-intent token,
- * not a shared operator secret.
+ * WHO THIS COULD BREAK: no caller in this tree, and as of 2026-10-04 no caller
+ * anywhere. This said "the only frontend call is SwapIntentForm.jsx's POST to
+ * /swap-intents" and that frontend was DELETED in 97c820a -- a React/Vite app
+ * that could not build (`npm run build` -> "Could not resolve ./IntentForm",
+ * exit 1) and that nothing outside its own directory referenced. The sentence
+ * was true when written and is now a pointer to a file that is not there, which
+ * is the worse failure of the two: a reader greps for it, finds nothing, and
+ * cannot tell a deleted caller from a comment that was always wrong.
+ *
+ * So there is now NO browser caller of this route at all. Nothing polls it
+ * either. If a depositor-facing status page is added later, it needs a
+ * per-intent token, not a shared operator secret.
  */
 app.get('/swap-intents/:intentId', (req, res) => {
   try {
@@ -512,8 +519,13 @@ app.post('/quote/grc-to-sol', async (req, res) => {
 /**
  * AUTHENTICATION: deliberately NOT required, with a caveat recorded below.
  *
- * This is the depositor's entry point and SwapIntentForm.jsx calls it from the
- * browser, which has nowhere to hold a shared secret. An intent created here
+ * This is the depositor's entry point and was called from the browser, which
+ * has nowhere to hold a shared secret -- so the reasoning for leaving it open
+ * stands on the SHAPE of the caller rather than on any particular one. It named
+ * SwapIntentForm.jsx until 97c820a deleted that frontend (see the /swap-intents
+ * comment above for why), and the route is reachable with no browser caller at
+ * all today, which makes the open-by-design decision MORE exposed rather than
+ * less: anyone can create an intent. An intent created here
  * starts at `awaiting_deposit` and cannot become payable without a
  * `/verify-gridcoin` call, which DOES require the secret -- so creating one
  * releases no funds and commits the operator to nothing.
