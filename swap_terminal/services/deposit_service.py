@@ -5,7 +5,8 @@ Role: submodule -> function. Three decisions live here as functions:
        (which deposit accounts a cycle must read, and how many times) and
        attributable_events (whose money is this). process_active_swaps is
        orchestration and holds none of them.
-Reads: the source chain adapter (listtransactions, getrawtransaction),
+Reads: the source chain adapter (listtransactions, getrawtransaction,
+       gettransaction, decoderawtransaction),
        swap_terminal.db (swaps, deposit_events)
 Writes: swap_terminal.db (deposit_events, swaps, swap_audit_log)
 Can move funds: no broadcast here -- but this is the module that decides a

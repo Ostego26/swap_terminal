@@ -34,7 +34,7 @@ WHAT THE CONTRACT ACTUALLY IS -- MEASURED, NOT ASSUMED
 =============================================================================
 
 chains/base.RPCAdapter has a wide surface built around Bitcoin's UTXO model:
-call(), get_confirmations(), _raw_tx_for_vouts(), _extract_matching_vouts().
+call(), _raw_tx_for_vouts(), _vouts_through_the_wallet(), _extract_matching_vouts().
 **None of that is the contract.** The contract is what the callers use, and it
 was measured (2026-09-25) by walking the AST of every module in services/,
 workers/, routes/ and app.py and collecting every attribute accessed on an
@@ -47,9 +47,12 @@ adapter object:
     find_deposits_to_address(address) -> list     services/deposit_service.py:143
 
 Five methods, one call site each. (`.items()` also appeared, on the adapterS
-dict, not on an adapter.) `get_confirmations` is NOT in the contract: it is
-base.py's own helper, and confirmations reach the caller INSIDE the dicts
-find_deposits_to_address returns. That is the whole reason a Solana adapter can
+dict, not on an adapter.) `get_confirmations` was NOT in the contract either --
+it was base.py's own helper, and it has since been deleted (2026-10-04) for
+exactly the reason this paragraph gives: nothing outside base.py ever called
+it, and its one caller in base.py went away with the fabricated branch's second
+round trip. Confirmations reach the caller INSIDE the dicts
+find_deposits_to_address returns, which is unchanged and is the point. That is the whole reason a Solana adapter can
 satisfy this interface without inheriting a UTXO model -- so this class does
 not subclass RPCAdapter, and says so here rather than leaving a reader to
 wonder whether that was an oversight.

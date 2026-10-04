@@ -3,7 +3,8 @@
 Role: submodule (chain binding; adds no behavior, only the asset label)
 Reads: a Bitcoin wallet daemon, through the methods inherited from
        chains/base.py -- validateaddress, getaddressinfo, getbalance,
-       gettransaction, getrawtransaction, listtransactions
+       gettransaction, getrawtransaction, decoderawtransaction,
+       listtransactions
 Writes: nothing to disk. THE WALLET AND THE CHAIN, through inherited methods:
        get_new_address() derives and stores a key, send_to_address()
        broadcasts.

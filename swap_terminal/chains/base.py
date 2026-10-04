@@ -2,8 +2,8 @@
 
 Role: submodule (one class; the three chains differ only by an `asset` string)
 Reads: a wallet daemon over JSON-RPC -- validateaddress, getaddressinfo,
-       getbalance, gettransaction, getrawtransaction, listtransactions,
-       estimatesmartfee
+       getbalance, gettransaction, getrawtransaction, decoderawtransaction,
+       listtransactions, estimatesmartfee
 Writes: nothing to disk. On the chain it can write: see below.
 Can move funds: YES. send_to_address() calls `sendtoaddress`, which broadcasts.
        get_new_address() also mutates the wallet (it derives and stores a new
@@ -114,8 +114,8 @@ SATOSHI = 1e-8
 MIN_FABRICATED_CONFIRMATIONS = 1
 
 
-def fabricated_deposit_events(
-    *, asset: str, txid: str, address: str, amount: float, confirmations: int
+def fabricated_deposit_events(  # noqa: PLR0913 -- checked: these six are the deposit_events row (asset, txid, address, amount, confirmations) plus the reason the row is synthetic, and the call is KEYWORD-ONLY, which is the transposition hazard PLR0913 exists to flag. Bundling them into an object would add a type without removing a parameter -- the same reading, for the same reason, as RPCAdapter.__init__'s six below.
+    *, asset: str, txid: str, address: str, amount: float, confirmations: int, why: str
 ) -> list[dict]:
     """The fabricated deposit event, or NOTHING when the transaction has no confirmations.
 
@@ -124,18 +124,30 @@ def fabricated_deposit_events(
     transposed address on this path writes a deposit row against the wrong
     string.
 
+    `why` IS REQUIRED AND HAS NO DEFAULT, because the warning this function
+    prints used to say "raw outputs could not be matched" for every caller and
+    that sentence was wrong for most of them. One string covered a decode that
+    RAISED, a decode that succeeded and matched nothing, and -- once the wallet
+    route below existed -- a wallet record that carried neither a serialization
+    nor a block hash. Three different things an operator would do three
+    different things about, rendered identically, which is rule 14's defect
+    (and it misled a reader of the 2026-10-04 log before it was fixed). A
+    caller that cannot say which failure it saw has not established which
+    failure it saw.
+
     =========================================================================
     WHAT FABRICATION MEANS HERE
     =========================================================================
 
-    _extract_matching_vouts() calls this at its two fallback sites -- the
-    getrawtransaction decode raising, and the decode succeeding but matching no
-    output. Neither has read a real output, so the event it would return is
+    _extract_matching_vouts() calls this at ONE site -- it used to be two,
+    the decode raising and the decode succeeding while matching no output, and
+    they are now one `if` at the bottom of that method with `why` carrying
+    which happened. Either way no real output has been read, so the event is
     built from what the caller already believed: SUSPECT_VOUT (0) for the
     output index, the amount `listtransactions` summarized, and a confirmation
-    count from a separate RPC. services/deposit_service.py cannot tell that
-    apart from a real event, which is rule 12's BLE001 in its expensive form
-    and is written up at length in deposit_vout_artifact.py.
+    count from the wallet rather than from an output. services/deposit_service.py
+    cannot tell that apart from a real event, which is rule 12's BLE001 in its
+    expensive form and is written up at length in deposit_vout_artifact.py.
 
     =========================================================================
     THE DEFECT THAT PUT THE GUARD HERE -- MEASURED TWICE, 2026-10-03
@@ -162,11 +174,58 @@ def fabricated_deposit_events(
     then sums every row for the swap, which is the double count
     deposit_vout_artifact.py describes.
 
-    WHICH BRANCH WROTE WHICH ROW IS NOT ESTABLISHABLE, and that was checked
-    rather than assumed (rule 17). The real matching branch reads
-    `int(vout.get("n", 0))`, so it can legitimately emit 0 as well -- a stored
-    row carries no record of the branch that wrote it, and nothing in this
-    comment should be read as a claim about that.
+    WHICH BRANCH WROTE WHICH ROW WAS NOT ESTABLISHABLE WHEN THAT WAS WRITTEN,
+    AND IT IS NOW. The sentence that stood here said the real matching branch
+    reads `int(vout.get("n", 0))` and so can legitimately emit 0 too, which is
+    true of the CODE and is settled by the measurement beside it: the
+    operator's `gettransaction <txid> true` showed ONE payment, of 0.001, at
+    vout 1. For the vout=0 row to have come from the matching branch, output 0
+    would have to pay the deposit address 0.001 -- and it does not; it is
+    change to another address. So the matching branch cannot have written the
+    vout=0 row, and the fabricated branch cannot have written the vout=1 row
+    (it writes SUSPECT_VOUT and nothing else). One row from each branch, and
+    which is which follows from the transaction rather than from a guess.
+
+    =========================================================================
+    AND THE CAUSE IS NOW ESTABLISHED TOO -- MEASURED 2026-10-04, ON THE
+    OPERATOR'S OWN BITCOIND
+    =========================================================================
+
+    `_raw_tx_for_vouts()` was one line: `getrawtransaction(txid, True)`, with
+    no block hash. Against the real deposit
+    b2892636451355197be246e9f5dc56fcac309261fc17bd8d36b2a2b1108dd4f8 that
+    daemon answered
+
+        error code: -5
+        No such mempool transaction. Use -txindex or provide a block hash to
+        enable blockchain transaction queries. Use gettransaction for wallet
+        transactions.
+
+    and `grep -c '^txindex=1' ~/regtest/btc/bitcoin.conf` answered 0. Both
+    readings are the operator's. So on that node the call could read a
+    transaction only while it sat in the MEMPOOL, and every deposit that
+    reached a confirmation before the next poll took the fabricated branch.
+
+    That accounts for both 2026-10-03 rows, counts included, with one
+    mechanism:
+
+        poll while unconfirmed   in the mempool, so the decode SUCCEEDS
+                                 -> the real output, vout 1, confirmations 0
+        poll after confirming    gone from the mempool, so -5
+                                 -> fabricated, vout 0, confirmations 2
+
+    WHAT IS STILL NOT ESTABLISHED, stated because the narrower claim is the
+    true one (rule 17). The -5 and the missing `txindex=1` were measured on
+    2026-10-04 against a DIFFERENT txid on the same host; nobody measured that
+    daemon's configuration on 2026-10-03. And no log from that day can settle
+    it directly, because the warning text was identical for the raising branch
+    and the no-match branch -- the very defect `why` above now removes. What IS
+    established is that every other route to those two rows is excluded by
+    measurements already recorded: the matching branch ran (it produced the
+    vout=1 row, which the pre-2026-09-25 `scriptPubKey.addresses` code could
+    not have), and the no-match branch is excluded because the same outputs
+    decoded and matched at zero confirmations and outputs do not change when a
+    transaction is mined.
 
     =========================================================================
     WHY REFUSING AT ZERO CONFIRMATIONS COSTS NOTHING
@@ -179,18 +238,23 @@ def fabricated_deposit_events(
     real output's row will never reuse. Emitting nothing while the decode is
     failing forfeits no credit at all.
 
-    WHAT THIS DOES AND DOES NOT CLOSE, stated precisely because the narrower
-    claim is the true one. A fabricated event can reach the table at any
-    confirmation count, and this removes exactly one route: the insert made
-    while the transaction is unconfirmed. It does NOT make a second row
-    impossible -- a poll that fabricates at two confirmations still writes
-    vout=SUSPECT_VOUT beside a real vout=N row, and closing that would mean
-    refusing a transaction that credits today, which is the operator's call and
-    is why the fabricated branch survives at all. Nothing here should be read as
-    a claim that the 2026-10-03 rows above were written by the route this
-    refuses: which branch wrote which row is not establishable (see above), and
-    the authorized change is this one rather than the one that would have had to
-    know.
+    WHAT THE ZERO-CONFIRMATION REFUSAL DOES AND DOES NOT CLOSE, stated
+    precisely because the narrower claim is the true one. A fabricated event
+    can reach the table at any confirmation count, and the refusal removes
+    exactly one route: the insert made while the transaction is unconfirmed. It
+    was NOT the route the 2026-10-03 rows took -- those were a real row at zero
+    confirmations and a fabricated row at two, which is the opposite way round
+    -- and this is the correction to the paragraph that used to stand here and
+    could not say so.
+
+    WHAT CLOSED THE ACTUAL ROUTE is the wallet route in
+    RPCAdapter._raw_tx_for_vouts(): `gettransaction` for the serialization and
+    `decoderawtransaction` for the outputs, so a confirmed wallet transaction
+    on a node with no `-txindex` is DECODED instead of fabricated from. The
+    refusal below stays because it is cheap and because it holds for the
+    failures that remain (a wallet record carrying neither `hex` nor
+    `blockhash`, and a recovery call the daemon refuses), neither of which this
+    session can reproduce against a real daemon.
 
     A negative count is suppressed by the same comparison and that is
     deliberate: Bitcoin Core reports `confirmations: -1` for a transaction
@@ -215,20 +279,20 @@ def fabricated_deposit_events(
     """
     if int(confirmations) < MIN_FABRICATED_CONFIRMATIONS:
         logger.warning(
-            "%s deposit %s to %s: raw outputs could not be matched and the transaction has "
-            "%s confirmation(s), so NO deposit event was emitted for %s %s  <- a "
-            "zero-confirmation event cannot reach any min_confirmations, and emitting one at "
-            "vout=%s would collide with the real output once the decode works (measured "
-            "2026-10-03, swaps s_6cd1a920cbe5739e and s_02623852c1ea42cc)",
-            asset or "?", txid, address, int(confirmations), amount, asset or "?", SUSPECT_VOUT,
+            "%s deposit %s to %s: %s, and the transaction has %s confirmation(s), so NO "
+            "deposit event was emitted for %s %s  <- a zero-confirmation event cannot reach "
+            "any min_confirmations, and emitting one at vout=%s would collide with the real "
+            "output once the outputs can be read (measured 2026-10-03, swaps "
+            "s_6cd1a920cbe5739e and s_02623852c1ea42cc)",
+            asset or "?", txid, address, why, int(confirmations), amount, asset or "?",
+            SUSPECT_VOUT,
         )
         return []
     logger.warning(
-        "%s deposit %s to %s: raw outputs could not be matched, so this event is FABRICATED "
-        "from the wallet summary -- amount=%s vout=%s confirmations=%s  <- vout=%s is invented, "
-        "not read from the transaction; the amount is listtransactions' figure rather than an "
-        "output's value",
-        asset or "?", txid, address, amount, SUSPECT_VOUT, int(confirmations), SUSPECT_VOUT,
+        "%s deposit %s to %s: %s, so this event is FABRICATED from the wallet summary -- "
+        "amount=%s vout=%s confirmations=%s  <- vout=%s is invented, not read from the "
+        "transaction; the amount is listtransactions' figure rather than an output's value",
+        asset or "?", txid, address, why, amount, SUSPECT_VOUT, int(confirmations), SUSPECT_VOUT,
     )
     return [{
         "txid": txid,
@@ -237,6 +301,117 @@ def fabricated_deposit_events(
         "amount": float(amount),
         "confirmations": int(confirmations),
     }]
+
+
+class VoutReadRoute(NamedTuple):
+    """Which RPC can take a wallet transaction apart, and why that one.
+
+    `method` is empty when no route is available, and `why` is then the reason
+    -- never an empty string, because a blank gap in a log is ambiguous between
+    "no route" and "the lookup broke" (rule 14).
+    """
+
+    method: str
+    params: tuple
+    why: str
+
+
+def vout_read_route(txid: str, wallet_tx) -> VoutReadRoute:
+    """THE DECISION (rule 10): how to read a wallet transaction's outputs with no -txindex.
+
+    Called with a `gettransaction` result and nothing else, so it is testable
+    with seeded dictionaries rather than only by running a deposit poll.
+
+    =========================================================================
+    WHY THE ORDER IS hex FIRST AND blockhash SECOND
+    =========================================================================
+
+    Both routes answer the daemon's own -5 complaint, and either would work on
+    Bitcoin Core 28.1 and Litecoin Core 0.21.4. They do NOT both work on the
+    third chain, and that is what decides the order. Measured on the
+    operator's Gridcoin testnet daemon 2026-09-27 by asking it, and recorded
+    in docs/atomic_swap_runs_2026_09_27.md:
+
+        getrawtransaction            getrawtransaction <txid> [verbose=bool]
+        gettransaction               gettransaction "txid" ( includeWatchonly )
+
+    TWO parameters. The block-hash argument arrived in Bitcoin Core 0.16 and
+    Gridcoin is on the pre-0.17 surface (it has neither `getaddressinfo` nor
+    `gettxout`, both measured on that daemon), so a route built on a third
+    argument is a route that cannot exist on one of the three chains this
+    adapter serves. `decoderawtransaction` predates all of them.
+
+    The hex route also needs no chain context at all, so it answers for a
+    transaction in the mempool and for one mined forty blocks ago with the same
+    two calls -- where the block-hash route has nothing to pass while the
+    transaction is unconfirmed.
+
+    It is kept as the SECOND route rather than dropped because a wallet record
+    with no `hex` is the one case the first cannot serve, and a daemon vintage
+    that omits it is not something this session can rule out: no GRC
+    `gettransaction` output has been read in this tree, so whether Gridcoin
+    reports `hex` is NOT established here (and GRC does not reach this function
+    today -- see _raw_tx_for_vouts).
+
+    =========================================================================
+    THE SAME LADDER EXISTS ONCE MORE IN THIS TREE (rule 8)
+    =========================================================================
+
+    modules/htlc_rpc.lookup_contract_output() tries four routes -- `gettxout`,
+    `getrawtransaction` with a block hash, `gettransaction` plus
+    `decoderawtransaction`, then bare `getrawtransaction` -- for the same
+    reason, and its docstring carries the establishment for each. A reader who
+    finds one must be told the other exists, so: that is the other one, and
+    these genuinely differ rather than being a copy to merge.
+
+      - It reads ONE output by index for an HTLC the counterparty may have
+        funded; this searches every output for one that pays an address, for a
+        wallet transaction `listtransactions` just reported, which is why
+        `gettxout` (unspent only) is not a route here at all -- a deposit that
+        has been swept is still a deposit.
+      - It cannot be imported from here. modules/htlc_rpc imports
+        modules/htlc_spend, which imports `ecdsa`, `base58` and `bech32`, and
+        swap_terminal/requirements.txt states as a deployment property that the
+        Flask app does not drag the atomic-swap dependencies in. The same
+        measurement is why script_pub_key.py exists at the package root.
+    """
+    if not isinstance(wallet_tx, dict):
+        return VoutReadRoute("", (), f"gettransaction answered {type(wallet_tx).__name__}, not an object")
+    raw_hex = wallet_tx.get("hex")
+    if isinstance(raw_hex, str) and raw_hex:
+        return VoutReadRoute(
+            "decoderawtransaction",
+            (raw_hex,),
+            "gettransaction + decoderawtransaction (the wallet's own serialization, which needs no block hash)",
+        )
+    block_hash = wallet_tx.get("blockhash")
+    if isinstance(block_hash, str) and block_hash:
+        return VoutReadRoute(
+            "getrawtransaction",
+            (txid, True, block_hash),
+            f"getrawtransaction with the wallet's block hash {block_hash}",
+        )
+    return VoutReadRoute(
+        "", (),
+        "gettransaction reported neither `hex` nor `blockhash`, so there is no way to ask for the outputs",
+    )
+
+
+class DecodedOutputs(NamedTuple):
+    """A transaction's outputs as some daemon decoded them, plus how that was done.
+
+    `read` is the field that matters and it is NOT `bool(outputs)`: "the
+    daemon decoded this and these are its outputs" and "nothing could decode
+    it" are different answers, and collapsing them is the shape of defect this
+    whole module keeps paying for. `how` is a sentence either way -- the route
+    that worked, or every route that did not -- and it is what reaches the
+    operator's log through fabricated_deposit_events(`why=`).
+    """
+
+    outputs: list
+    confirmations: int
+    read: bool
+    how: str
 
 
 def rpc_error_from_body(response) -> str | None:
@@ -687,71 +862,207 @@ class RPCAdapter:
         # Checked: `gettransaction` only knows wallet transactions, so its
         # failure means "ask about it as a raw transaction instead". The second
         # call is NOT wrapped -- if that fails too, the exception reaches the
-        # caller rather than becoming an empty dict that get_confirmations()
-        # would read as zero confirmations.
+        # caller rather than becoming an empty dict a caller would read as zero
+        # confirmations.
+        #
+        # THE FALLBACK HERE CANNOT READ A CONFIRMED TRANSACTION ON A NODE WITH
+        # NO -txindex, which is the 2026-10-04 measurement written up at
+        # _raw_tx_for_vouts() below, and it is NOT fixed the same way: it is
+        # reached only when `gettransaction` has already failed, so there is no
+        # wallet record to take a block hash or a serialization from. Both
+        # callers (chains/payout_on_chain.py and show_payout_fees.py) read
+        # transactions THIS wallet sent, where the first call answers. A reader
+        # who comes here from that measurement must be told why one site took
+        # the wallet route and this one cannot (rule 8).
         try:
             return self.call("gettransaction", txid)
-        except Exception:  # noqa: BLE001 -- checked: see the comment above; the fallback's own failure propagates.
+        except Exception:  # noqa: BLE001 -- checked: see the comment above; the fallback's own failure propagates, so a caller never receives a plausible-looking empty answer.
             return self.call("getrawtransaction", txid, True)
 
-    def get_confirmations(self, txid: str) -> int:
-        tx = self.get_transaction(txid)
-        return int(tx.get("confirmations", 0))
+    # get_confirmations() USED TO BE HERE AND IS DELETED, 2026-10-04 (rules 2
+    # and 9). It was `int(self.get_transaction(txid).get("confirmations", 0))`
+    # and its only caller in the tree was the fabricated branch of
+    # _extract_matching_vouts(), which now takes its count from the wallet
+    # record the new route already read -- so keeping it would leave a helper
+    # whose only caller had just been deleted. Established by grepping the NAME
+    # across every file in the repository, not just the import graph (rule 2):
+    # the remaining hits are this comment, the historical quote in
+    # deposit_vout_artifact.py's docstring and chains/solana.py's note that it
+    # was never part of the adapter contract. What that establishes is "no
+    # caller in this tree"; it cannot establish "no caller anywhere", and
+    # nothing outside this repository is visible from here.
 
-    def _raw_tx_for_vouts(self, txid: str) -> dict:
-        return self.call("getrawtransaction", txid, True)
+    def _raw_tx_for_vouts(self, txid: str) -> DecodedOutputs:
+        """This transaction's outputs, read WITHOUT requiring -txindex on the node.
+
+        =====================================================================
+        THE DEFECT THIS REPLACES -- MEASURED ON THE OPERATOR'S BITCOIND 2026-10-04
+        =====================================================================
+
+        This method was one line:
+
+            return self.call("getrawtransaction", txid, True)
+
+        No block hash. Against the real deposit
+        b2892636451355197be246e9f5dc56fcac309261fc17bd8d36b2a2b1108dd4f8 the
+        operator's own daemon answered
+
+            error code: -5
+            No such mempool transaction. Use -txindex or provide a block hash
+            to enable blockchain transaction queries. Use gettransaction for
+            wallet transactions.
+
+        and `grep -c '^txindex=1' ~/regtest/btc/bitcoin.conf` answered 0.
+        Both readings are the operator's, not this session's.
+
+        So the one call could see a transaction only while it was in the
+        MEMPOOL. Every BTC or LTC deposit that reached a confirmation before
+        the next 15s poll therefore raised, and _extract_matching_vouts()
+        fabricated an event at vout=0 with the amount from
+        `listtransactions` -- which is the two-rows-for-one-payment artifact
+        measured 2026-10-03 and is written up in full at
+        fabricated_deposit_events().
+
+        It was never a decode failure. The wallet knew the transaction the
+        whole time; the adapter simply did not ask it.
+
+        =====================================================================
+        WHAT IT COSTS, PER DEPOSIT READ
+        =====================================================================
+
+            node that can answer directly   1 RPC   unchanged
+              (the mempool; a node with -txindex; Gridcoin, whose pre-0.8
+               lineage indexes every transaction -- measured 2026-09-27, route
+               4 of modules/htlc_rpc.lookup_contract_output() answered for a
+               CONFIRMED GRC contract on a daemon with no txindex setting)
+            confirmed, no -txindex          3 RPCs  was 2, and fabricated
+              (getrawtransaction, then gettransaction, then the route below)
+            no route available              2 RPCs  was 2, still fabricates
+
+        The direct call is tried FIRST rather than going straight to the
+        wallet, and that ordering is the reason GRC cannot regress: a daemon
+        that answers today answers identically and never reaches a line of
+        the new code. It also keeps the mempool case at one call, which is
+        most polls -- the watcher sees a deposit unconfirmed before it sees it
+        confirmed.
+
+        =====================================================================
+        WHAT IS CAUGHT, AND WHY IT IS NOT `except Exception`
+        =====================================================================
+
+        `RPCError` is the daemon saying no (code -5 here), and
+        `requests.RequestException` is the socket saying no -- those two are
+        every failure self.call() is built to produce, and
+        requests.exceptions.JSONDecodeError is a RequestException, so a 200
+        carrying junk is included (checked against requests 2.33.1's MRO
+        rather than assumed).
+
+        Anything else -- a TypeError, an AttributeError -- is a defect in this
+        file and now REACHES THE WORKER instead of becoming a fabricated
+        deposit event. That is a deliberate narrowing of the old
+        `except Exception`: the worker logs a FAILED cycle and credits
+        nothing, where before a bug here was laundered into a credit built
+        from a wallet summary. It halts rather than releasing, which is the
+        safe direction on this path.
+        """
+        try:
+            raw = self.call("getrawtransaction", txid, True)
+        except (RPCError, requests.RequestException) as direct_failure:
+            return self._vouts_through_the_wallet(txid, direct_failure)
+        raw = raw if isinstance(raw, dict) else {}
+        return DecodedOutputs(
+            outputs=list(raw.get("vout") or []),
+            confirmations=int(raw.get("confirmations") or 0),
+            read=True,
+            how="getrawtransaction verbose, answered directly (the mempool, -txindex, or a daemon that indexes every transaction)",
+        )
+
+    def _vouts_through_the_wallet(self, txid: str, direct_failure: Exception) -> DecodedOutputs:
+        """The outputs by way of the WALLET, for a transaction the chain query cannot reach.
+
+        Reached only when the direct `getrawtransaction` failed. Every txid
+        that gets here came out of `listtransactions` (see
+        find_deposits_to_address), so it IS a wallet transaction and
+        `gettransaction` is the right question -- which is exactly what the
+        daemon's own -5 message says to ask.
+
+        `gettransaction` is NOT wrapped, and that is unchanged from the code
+        this replaces: if the wallet cannot answer for a transaction it just
+        listed, the exception reaches the worker rather than becoming a zero
+        confirmation count that reads as a real unconfirmed deposit.
+
+        The SECOND call is wrapped, because its failure must not be worse than
+        the behavior it replaces: before this method existed, a daemon that
+        refused here fabricated an event, and a route that turned that into a
+        dead worker cycle would be a regression on a chain nobody here can
+        test. The reason is carried out in `how` rather than swallowed, so the
+        log names both what the chain query said and what the wallet route
+        then said (rule 12: a broad-ish catch has to say which failure it saw).
+
+        The confirmation count comes from the wallet record, once, and is the
+        only count available on this path -- `decoderawtransaction` is handed
+        bytes, not a position in a chain, so it reports none.
+        modules/htlc_rpc.lookup_contract_output() splices the same field in for
+        the same reason.
+        """
+        direct = f"getrawtransaction answered {type(direct_failure).__name__}: {direct_failure}"
+        wallet_tx = self.call("gettransaction", txid)
+        # A non-dict is not an answer, and 0 confirmations is the right floor
+        # for one: it cannot reach any swap's min_confirmations, so it cannot
+        # release anything. vout_read_route() reports the same shape as "no
+        # route" and says so in its reason.
+        confirmations = int(wallet_tx.get("confirmations") or 0) if isinstance(wallet_tx, dict) else 0
+        route = vout_read_route(txid, wallet_tx)
+        if not route.method:
+            return DecodedOutputs([], confirmations, False, f"{direct}, and then {route.why}")
+        try:
+            decoded = self.call(route.method, *route.params)
+        except (RPCError, requests.RequestException) as recovery_failure:
+            return DecodedOutputs(
+                [], confirmations, False,
+                f"{direct}, and then {route.why} answered "
+                f"{type(recovery_failure).__name__}: {recovery_failure}",
+            )
+        decoded = decoded if isinstance(decoded, dict) else {}
+        return DecodedOutputs(list(decoded.get("vout") or []), confirmations, True, route.why)
 
     def _extract_matching_vouts(self, txid: str, address: str, amount: float):
-        # STILL A PROPOSAL MARKER, AND HALF OF IT HAS NOW BEEN ACTED ON. Both
-        # fallbacks in this method -- the decode raising, here, and the decode
-        # succeeding while matching no output, at the bottom -- FABRICATE a
-        # deposit event: vout SUSPECT_VOUT, the amount the caller already
-        # believed, and a confirmation count from a second RPC, in the same
-        # shape as a real one. services/deposit_service.py cannot tell the two
-        # apart, so a transaction this adapter failed to decode is credited
-        # from the wallet's summary rather than from its outputs. That is rule
-        # 12's BLE001 in its expensive form.
+        # THE PROPOSAL MARKER THAT USED TO HEAD THIS METHOD IS NARROWED AGAIN,
+        # AND THE CAUSE IT DESCRIBED IS GONE. It said that both fallbacks here
+        # fabricate a deposit event -- vout SUSPECT_VOUT, the amount the caller
+        # already believed, a confirmation count from a second RPC -- and that
+        # services/deposit_service.py cannot tell that from a real event. All
+        # of that is still true of the fallback. What changed on 2026-10-04 is
+        # WHY it was being reached.
         #
-        # WHAT IS NOW REFUSED: a fabricated event for a transaction with no
-        # confirmations. It could never be credited -- the gate sums only rows
-        # at or above the swap's min_confirmations -- so it could only ever sit
-        # in deposit_events under a key the real output's row will never reuse.
-        # That is one of the routes to the TWO ROWS FOR ONE PAYMENT measured on
-        # the operator's host on 2026-10-03, on swaps s_6cd1a920cbe5739e and
-        # s_02623852c1ea42cc; it is NOT established to be the route those rows
-        # took, and it is not the only one. The measurement, the txid, and why
-        # the branch that wrote each row is not establishable are recorded in
-        # full at fabricated_deposit_events().
+        # It was not a decode failure. `_raw_tx_for_vouts()` asked
+        # `getrawtransaction(txid, True)` with no block hash, which on a node
+        # without -txindex cannot see a transaction once it leaves the mempool
+        # -- measured on the operator's own bitcoind, error code -5, with
+        # txindex unset. So every BTC and LTC deposit that confirmed between
+        # two polls took the fabricated branch. That method now reads the
+        # outputs through the WALLET instead, and both its measurement and the
+        # RPC cost are written down there.
         #
-        # WHAT IS STILL NOT FIXED, and it is unchanged on purpose: a fabricated
-        # event for a transaction that DOES have confirmations is still
-        # returned and still credited from the wallet's summary. Making that
-        # raise would stall swaps that credit today, and which of the two
-        # failure modes the operator wants is a fund decision (rule 16).
+        # WHAT REACHES THE FALLBACK NOW: a wallet record carrying neither `hex`
+        # nor `blockhash`, a recovery call the daemon refuses, and a decode
+        # that succeeded while matching no output (every output pays somebody
+        # else, names no address at all, or carries a value further than one
+        # satoshi from the amount `listtransactions` reported). Below one
+        # confirmation none of them emits anything; at or above it, the event
+        # is still fabricated and still credited from the wallet's summary,
+        # which is unchanged on purpose -- making it raise would stall swaps
+        # that credit today, and which failure mode the operator wants is a
+        # fund decision (rule 16).
         #
-        # Both sites go through the one function so the refusal cannot drift
-        # between them (rule 8); the earlier shape wrote the event dict out
-        # twice, twenty lines apart.
-        try:
-            raw = self._raw_tx_for_vouts(txid)
-        except Exception:  # noqa: BLE001 -- checked: see the proposal marker above. Above min_confirmations the caller still CANNOT distinguish this synthetic event from a real one, which is why that half is handed over rather than patched; below it, nothing is returned at all.
-            return fabricated_deposit_events(
-                asset=self.asset,
-                txid=txid,
-                address=address,
-                amount=amount,
-                # A SECOND ROUND TRIP, and it is the reason this branch can
-                # report a different count from the one the matching branch
-                # below reads: `gettransaction` answers from the wallet, and
-                # this is the only confirmation figure available when the raw
-                # decode is what just failed. Not wrapped -- if it raises, the
-                # exception reaches the worker rather than becoming a zero that
-                # reads as a real unconfirmed deposit.
-                confirmations=self.get_confirmations(txid),
-            )
+        # ONE CALL SITE, not two. The two fabrication sites twenty lines apart
+        # are now one `if` at the bottom, and `why` carries which of the
+        # failures above happened -- they used to print the same sentence,
+        # "raw outputs could not be matched", for all of them (rule 14).
+        decoded = self._raw_tx_for_vouts(txid)
         matches = []
-        confirmations = int(raw.get("confirmations", 0))
-        for vout in raw.get("vout", []):
+        confirmations = decoded.confirmations
+        for vout in decoded.outputs:
             # MATCHED ON EITHER DAEMON'S FIELD SHAPE, and this was the FOURTH
             # copy of one defect. This line read
             #
@@ -798,23 +1109,32 @@ class RPCAdapter:
                 })
         if matches:
             return matches
-        # The decode SUCCEEDED and matched nothing: every output either pays
-        # somebody else, names no address at all (a bare multisig, an
-        # OP_RETURN), or carries a value further than one satoshi from the
-        # amount `listtransactions` reported. That is the same "no real output
-        # was read" state as the except branch above, reached without an
-        # exception and without a `noqa` to mark it -- which is how the
-        # `scriptPubKey.addresses` defect stayed invisible until 2026-09-25 --
-        # so it fabricates through the same function and is refused on the same
-        # zero-confirmation condition.
+        # NO REAL OUTPUT WAS READ, by either road, and the two roads are told
+        # apart in the log rather than in the code path. `decoded.read` is the
+        # distinction: True means a daemon handed over this transaction's
+        # outputs and none of them pays `address` for `amount` -- which is what
+        # the removed `scriptPubKey.addresses` field produced for EVERY output
+        # on a Core 22+ node until 2026-09-25, silently, without an exception
+        # and without a `noqa` to mark it. False means nothing could read the
+        # outputs at all, and `decoded.how` then names every route that was
+        # tried and what each said.
+        #
+        # The confirmation count is whichever one _raw_tx_for_vouts() already
+        # has -- the decoded transaction's, or the wallet record's from the
+        # route it took. No extra round trip, and no second answer that could
+        # differ from the first.
+        if decoded.read:
+            why = (f"the outputs were read ({decoded.how}) and none of them pays this address "
+                   f"for this amount")
+        else:
+            why = f"the outputs could not be read: {decoded.how}"
         return fabricated_deposit_events(
             asset=self.asset,
             txid=txid,
             address=address,
             amount=amount,
-            # The decoded transaction's own count, not a second RPC: it is
-            # already in hand here, and asking again could answer differently.
             confirmations=confirmations,
+            why=why,
         )
 
     def find_deposits_to_address(self, address: str, tx_limit: int = 500, skip_txids=frozenset()):

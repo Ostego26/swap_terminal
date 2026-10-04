@@ -3,7 +3,8 @@
 
 Role: module (polling loop; the decisions live in services/)
 Reads: swap_terminal.db (swaps, deposit_events, wallet_inventory), BTC/LTC/GRC
-       wallet RPC (getbalance, listtransactions, getrawtransaction)
+       wallet RPC (getbalance, listtransactions, getrawtransaction,
+       gettransaction, decoderawtransaction)
 Writes: swap_terminal.db (wallet_inventory, deposit_events, swaps,
        swap_audit_log)
 Can move funds: no -- it calls neither sendtoaddress nor any signing method.
