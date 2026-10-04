@@ -154,12 +154,14 @@ NOT_ESTABLISHED = "NOT ESTABLISHED"
 #:
 #:     Each line names the variable to change.
 #:
-#: That sentence is FALSE for the GRC wallet line. Gridcoin v5.5.1.0 lists none of
-#: createwallet, loadwallet, listwallets or unloadwallet in its own `help` -- one
-#: wallet per datadir, no -rpcwallet, no /wallet/<name> endpoint, and no
-#: `walletname` field on getwalletinfo. There is no variable. An operator reading
-#: that footer goes looking for one, which is the round trip rule 14 exists to
-#: prevent: the screen told them to do something impossible.
+#: That sentence is FALSE for the GRC wallet line: getwalletinfo carries no
+#: `walletname` field to compare against, so there is no variable. An operator
+#: reading that footer goes looking for one, which is the round trip rule 14
+#: exists to prevent: the screen told them to do something impossible.
+#:
+#: THE REASON WHY IS IN GRIDCOIN_NO_WALLETNAME_EVIDENCE just above, spelled once.
+#: This docstring cited a help-text grep until later the same day, when a control
+#: run refuted that grep -- see that constant for the numbers.
 #:
 #: THE ONLY ROUTE THAT CAN ANSWER IT is a SECOND Gridcoin daemon with its own
 #: datadir on its own port, because one-wallet-per-datadir means a second wallet
@@ -172,6 +174,51 @@ NOT_ESTABLISHED = "NOT ESTABLISHED"
 #: tests/test_custody_separation.py like every other state -- the constraint that
 #: turned "ONE DESK ACCOUNT, BY DESIGN" into "BY DESIGN".
 CANNOT_BE_ASKED = "CANNOT BE ASKED"
+
+#: WHY Gridcoin cannot answer which wallet an endpoint serves, in ONE place.
+#:
+#: SPELLED SIX TIMES UNTIL 2026-10-04 -- here, twice in wallet_custody.py, twice
+#: more below, and once in gridcoin_credentials.py -- and all six cited the SAME
+#: REFUTED MEASUREMENT, which is rule 8's "a bug with a delay on it" with the
+#: delay expired. The claim every one of them made:
+#:
+#:     gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
+#:       -> (none of the multiwallet RPCs exist on this build)
+#:
+#: THAT COMMAND ESTABLISHES NOTHING, and a control run on the operator's host on
+#: 2026-10-04 is what showed it. The same grep, anchored the same way, over RPCs
+#: this repo calls in PRODUCTION against that daemon:
+#:
+#:     grep -icE '^(listunspent|validateaddress|getwalletinfo|sendtoaddress)'  -> 0
+#:     grep -icE '^(getaccountaddress|setaccount|listaccounts|sendfrom|move)'  -> 0
+#:     grep -icE '^(createwallet|loadwallet|listwallets|unloadwallet)'         -> 0
+#:
+#: Zero for all three, including the line that must be non-zero: chains/gridcoin
+#: calls `listunspent` (modules/atomic_grc_client.py:375) and `validateaddress`
+#: answered a live query minutes earlier. So `^` matches nothing against this
+#: daemon's help output, every conclusion drawn from that grep was a FALSE
+#: NEGATIVE, and the second line above is no evidence about accounts either.
+#:
+#: WHAT ACTUALLY ESTABLISHES IT is behavioral, which is what this repo's
+#: verification principle asks for and what the grep was standing in for. Three
+#: readings, all from the daemon rather than from its help text:
+#:
+#:   getwalletinfo     reply carries no `walletname` field at all
+#:                     (wallet_custody.py's own run, 2026-10-04)
+#:   getaddressinfo    Method not found (rpc code -32601)
+#:                     (chains/base.py records this, measured 2026-10-03)
+#:   validateaddress   returns a pre-0.17 `account` field
+#:                     (operator's host, 2026-10-04: an address came back with
+#:                      account="Beacon Address for CPID ...")
+#:
+#: Each is a pre-0.17 wallet and together they are why there is no `walletname`
+#: to compare. The CONCLUSION survived the refutation; the cited evidence did not.
+GRIDCOIN_NO_WALLETNAME_EVIDENCE = (
+    "this daemon family predates multiwallet, established from the daemon's BEHAVIOR rather than "
+    "from its help text: getwalletinfo's reply carries no `walletname` field at all, "
+    "getaddressinfo answers Method not found (rpc code -32601), and validateaddress returns a "
+    "pre-0.17 `account` field. One wallet per datadir, no -rpcwallet, no /wallet/<name> endpoint"
+)
 
 #: Every state, so a caller can render a legend and a test can assert the set is
 #: closed. Ordered worst-known-first is deliberately NOT done: these are not
@@ -287,15 +334,16 @@ def script_chain_verdict(
         return CustodyVerdict(CANNOT_BE_ASKED, (
             f"{asset}: getwalletinfo answered, but its reply carries no `walletname` field at all, "
             f"so which wallet this endpoint serves CANNOT be established from this daemon -- not "
-            f"now and not with different configuration. This daemon family predates multiwallet: "
-            f"Gridcoin v5.5.1.0 lists none of createwallet, loadwallet, listwallets or unloadwallet "
-            f"in its own `help`, which means one wallet per datadir, no -rpcwallet, no "
-            f"/wallet/<name> endpoint and no `walletname` to compare. THERE IS NO VARIABLE TO "
-            f"CHANGE. The only route that can answer it is a SECOND {asset} daemon with its own "
-            f"datadir on its own port -- one wallet per datadir means a second wallet REQUIRES a "
-            f"second datadir -- which is the same missing thing the operator-daemon line below is "
-            f"blocked on, so these are ONE blocker and not two. Copy block data only when you build "
-            f"it; never wallet.dat"
+            f"now and not with different configuration. {GRIDCOIN_NO_WALLETNAME_EVIDENCE}, and so "
+            f"no `walletname` to compare. THERE IS NO VARIABLE TO CHANGE. Two routes could answer "
+            f"it and neither is a setting: a SECOND {asset} daemon with its own datadir on its own "
+            f"port (one wallet per datadir means a second wallet REQUIRES a second datadir -- and "
+            f"copy block data only, never wallet.dat), which is the same missing thing the "
+            f"operator-daemon line is blocked on; or the pre-0.17 `account` field validateaddress "
+            f"already returns, which would separate the desk inside the ONE wallet this daemon has. "
+            f"The second is NOT YET ESTABLISHED as available -- the field is confirmed present on "
+            f"the operator's host, but whether `setaccount` is callable to WRITE it is unmeasured, "
+            f"and the help-text grep that would have answered it is the one a control run refuted"
         ))
     serving = str(walletinfo["walletname"])
     asked_for = (configured_wallet or "").strip()
@@ -428,7 +476,8 @@ def cross_daemon_ownership_verdict(  # noqa: PLR0913, PLR0917 -- checked: these 
     rather than assumed. On the operator's Gridcoin v5.5.1.0 testnet daemon,
     2026-10-03:
 
-        gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
+        (see GRIDCOIN_NO_WALLETNAME_EVIDENCE -- this cited a help-text grep that a
+         control run refuted on 2026-10-04; the evidence is behavioral now)
           -> (none of the multiwallet RPCs exist on this build)
 
     So Gridcoin has ONE wallet per datadir: no `-rpcwallet`, no `/wallet/<name>`

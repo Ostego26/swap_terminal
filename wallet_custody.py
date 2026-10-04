@@ -90,9 +90,10 @@ they are holding. What this establishes is narrower and true:
                 the finding; the finding is that line read beside the wallet line.
   GRC           and ONLY GRC: whether the OPERATOR's OWN daemon reports ismine for
                 the desk's deposit address. Measured 2026-10-03 on their Gridcoin
-                v5.5.1.0 testnet daemon, `help` lists none of createwallet,
-                loadwallet, listwallets or unloadwallet -- one wallet per datadir,
-                no -rpcwallet, no /wallet/<name>, no `walletname` field -- so the
+                v5.5.1.0 testnet daemon answers getwalletinfo with NO `walletname`
+                field, getaddressinfo with Method not found, and validateaddress
+                with a pre-0.17 `account` field -- one wallet per datadir, no
+                -rpcwallet, no /wallet/<name>, nothing to compare -- so the
                 BTC/LTC route CANNOT work here and no configuration can make it.
                 Asking the other daemon is the only separation evidence available,
                 and it is stronger than a config read: an `ismine: false` from the
@@ -178,15 +179,35 @@ SCRIPT_CHAINS = ("BTC", "LTC", "GRC")
 #: The one chain whose separation is established by asking a SECOND daemon, and
 #: the only chain where that is the only route available.
 #:
-#: MEASURED ON THE OPERATOR'S GRIDCOIN v5.5.1.0 TESTNET DAEMON, 2026-10-03:
+#: THIS BLOCK SAID "MEASURED" OVER A COMMAND THAT MEASURES NOTHING, 2026-10-03
+#: to 2026-10-04. It cited
 #:
 #:     gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
 #:       -> (none of the multiwallet RPCs exist on this build)
 #:
-#: So Gridcoin has ONE wallet per datadir -- no -rpcwallet, no /wallet/<name>
-#: endpoint, no `walletname` field -- and the `GRC wallet` line above answers
-#: NOT ESTABLISHED for a field that does not exist rather than for a field nobody
-#: configured. BTC and LTC do carry those RPCs (docs/hot_wallet_separation_runbook.md
+#: and a control run on the operator's host refuted it: `gridcoinresearchd
+#: -testnet help` writes NOTHING to stdout on that build, so the same grep
+#: returns empty for `listunspent` and `validateaddress` too -- one of which this
+#: repo calls in production against that daemon and the other of which answered a
+#: live query minutes before. An absent command and an absent OUTPUT STREAM are
+#: indistinguishable through a pipe, and for a day this file could not tell them
+#: apart while printing the word MEASURED. Rule 17 in one line: a reason to
+#: believe is not the same as having checked.
+#:
+#: Kept rather than overwritten because the drift is the point (rule 1), and
+#: because the conclusion SURVIVED while its evidence did not -- which is the
+#: case most likely to be read as "so it was fine".
+#:
+#: WHAT ESTABLISHES IT NOW is behavioral, and it is spelled once in
+#: services/custody_separation.GRIDCOIN_NO_WALLETNAME_EVIDENCE: getwalletinfo
+#: carries no `walletname`, getaddressinfo answers Method not found (rpc code
+#: -32601), and validateaddress returns a pre-0.17 `account` field. Three
+#: readings from the daemon rather than from its help text, which is what this
+#: repo's "verify by behavior, never by text" principle asks for and what the
+#: grep was standing in for all along.
+#:
+#: So the `GRC wallet` line answers CANNOT BE ASKED for a field that does not
+#: exist rather than for a field nobody configured. BTC and LTC do carry those RPCs (docs/hot_wallet_separation_runbook.md
 #: has the createwallet steps that worked for both), so they need no second daemon
 #: and deliberately do not get this line: a check that asked a second endpoint on a
 #: chain where the first endpoint can answer would be two mechanisms for one

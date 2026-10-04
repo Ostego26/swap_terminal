@@ -187,7 +187,9 @@ def require_gridcoin_rpc_password(what_for: str) -> str:
 # seven checks answer. The seventh could not, and the reason is now settled rather
 # than suspected:
 #
-#     gridcoinresearchd -testnet help | grep -iE '^(createwallet|loadwallet|listwallets|unloadwallet)'
+#     (this cited a help-text grep; a control run refuted it on 2026-10-04 --
+#      `help` writes nothing to stdout on that build, so the grep was empty for
+#      listunspent too. See services/custody_separation.GRIDCOIN_NO_WALLETNAME_EVIDENCE)
 #       -> (none)
 #
 # Gridcoin has ONE wallet per datadir. There is no `-rpcwallet`, no
