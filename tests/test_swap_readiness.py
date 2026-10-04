@@ -16,6 +16,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
+from conftest import UNTRADED_ASSET, unallowed_directions
 from network_target import UNCONFIGURED_PORT
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK, why_nothing_answered
 from services.payout_service import WALLET_UNLOCK_ENV_VAR
@@ -865,50 +866,85 @@ def test_the_unscoped_verdict_still_covers_the_whole_terminal(monkeypatch, capsy
     assert "XRP_RPC_URL" in out, "the unscoped run must still check every leg it knows"
 
 
-def _ordered_pairs_outside_ALLOWED_PAIRS() -> list[str]:
-    """Every FROM:TO over the tradeable assets that Config does NOT allow.
+def _pairs_the_gate_must_refuse() -> list[str]:
+    """Every FROM:TO this terminal must refuse. From conftest, not spelled here.
 
     DERIVED, NOT SPELLED, AND THE SPELLING IS WHY. This test said `GRC:SOL` -- the
     reverse of ("SOL","GRC") and therefore outside ALLOWED_PAIRS when it was
     written, and INSIDE it from 2026-10-03, when the three *->SOL directions were
     enabled. The test then exercised the allowed path and asserted the refused one,
-    which is a fixture rotting rather than a gate failing, and it is the same
-    hand-written-copy-of-the-config failure the pair line above already records.
+    which is a fixture rotting rather than a gate failing.
 
-    So the argument comes off Config.ALLOWED_PAIRS itself: every ordered pair of
-    the assets that appear in it, minus the ones it carries. That cannot rot while
-    any direction remains unenabled -- and if one day none does, the parametrize
-    list is empty, which pytest reports rather than passing silently, and the
-    assertion below says what to do about it.
+    SO IT WAS DERIVED FROM Config.ALLOWED_PAIRS -- "every ordered pair of the assets
+    it names, minus the ones it carries" -- AND THAT DERIVATION HIT ZERO ON
+    2026-10-04. Measured against this tree:
 
-    Measured 2026-10-03 against this tree: 5 tradeable assets, 20 ordered pairs, 16
-    allowed, so 4 are refused -- BTC:XRP, LTC:XRP, SOL:XRP, XRP:SOL. Each is a real
-    asset pair and a plausible typo, which is the case this gate is for; a nonsense
-    string is the test below.
+        2026-10-03   5 tradeable assets, 20 ordered pairs, 16 allowed, 4 refused
+                     (BTC:XRP, LTC:XRP, SOL:XRP, XRP:SOL)
+        2026-10-04   5 tradeable assets, 20 ordered pairs, 20 allowed, 0 refused
+
+    The operator enabled exactly those four ("yeah let's figure out why and enable
+    them"), so the derived list emptied and this gate had nothing left to exercise.
+    test_there_is_an_unallowed_direction_left_to_refuse FAILED rather than the
+    parametrize silently reporting a skip, which is what it was written to do.
+
+    The denominator moved, not the gate, so the fixture gains a second source rather
+    than the gate losing coverage: conftest.unallowed_directions() unions the derived
+    half with UNTRADED_ASSET paired both ways. An asset this terminal does not price
+    cannot become allowed by enabling a direction between assets it does, which is
+    the rot that emptied the first half. Both halves live in conftest because
+    tests/test_open_swap.py needed the same fixture in the same hour (rule 8).
     """
-    allowed = set(swap_readiness.Config.ALLOWED_PAIRS)
-    assets = sorted({asset for pair in allowed for asset in pair})
-    return [
-        f"{from_asset}:{to_asset}"
-        for from_asset in assets
-        for to_asset in assets
-        if from_asset != to_asset and (from_asset, to_asset) not in allowed
-    ]
+    return unallowed_directions(swap_readiness.Config.ALLOWED_PAIRS)
 
 
 def test_there_is_an_unallowed_direction_left_to_refuse():
     """An empty parametrize set below would report as a SKIP, which reads as
     nothing-to-worry-about -- the exact shape test_nothing_payable_is_a_FAIL_not_a_SKIP
     is about, one layer up in the test suite itself. So the denominator is asserted
-    here rather than left to pytest's collection message (rule 3, rule 14)."""
-    assert _ordered_pairs_outside_ALLOWED_PAIRS(), (
-        "every ordered pair of every tradeable asset is now in Config.ALLOWED_PAIRS, so the refusal "
-        "path below has nothing to exercise. That is a real finding about config.py and not a setup "
-        "problem: parse_pair()'s gate is then unreachable and needs a fixture that is not derived."
+    here rather than left to pytest's collection message (rule 3, rule 14).
+
+    THIS ASSERTION FIRED FOR REAL ON 2026-10-04 and the failure was the news, exactly
+    as written: enabling the last four directions took Config.ALLOWED_PAIRS to 20 of
+    20 and emptied the derived fixture. The fix was a second source for the fixture,
+    not a relaxation here -- see _pairs_the_gate_must_refuse().
+    """
+    assert _pairs_the_gate_must_refuse(), (
+        "there is no pair left for parse_pair()'s ALLOWED_PAIRS gate to refuse, so the path below "
+        "is unreachable and the parametrize list is empty. conftest.unallowed_directions() unions "
+        "an untraded asset into the fixture precisely so this cannot happen by enabling a pair -- "
+        "if it is empty, UNTRADED_ASSET has become tradeable and the fixture needs a new one"
     )
 
 
-@pytest.mark.parametrize("text", _ordered_pairs_outside_ALLOWED_PAIRS())
+def test_the_refusal_fixture_is_still_outside_the_config():
+    """The fixture's own premise, asserted rather than trusted.
+
+    conftest.UNTRADED_ASSET is only useful while this terminal does not trade it. If
+    XMR is ever added to services/pricing.IDS and to Config.ALLOWED_PAIRS, every
+    string the gate test feeds in becomes an ALLOWED pair and the gate test inverts --
+    it would assert a refusal for a pair the terminal accepts, pass for the wrong
+    reason, and report nothing.
+
+    That is the same silent inversion the derived fixture suffered twice (GRC:SOL in
+    2026-10-03, BTC:XRP in 2026-10-04), and the lesson both times was that the
+    fixture's premise has to be a measurement and not a memory (rule 17).
+    """
+    allowed = set(swap_readiness.Config.ALLOWED_PAIRS)
+    traded = {asset for pair in allowed for asset in pair}
+    assert UNTRADED_ASSET not in traded, (
+        f"{UNTRADED_ASSET} is now traded, so conftest.unallowed_directions() is feeding the pair "
+        f"gate pairs it ACCEPTS and every assertion about a refusal below is passing for the wrong "
+        f"reason. Pick an asset this terminal does not trade"
+    )
+    for text in _pairs_the_gate_must_refuse():
+        from_asset, to_asset = text.split(":")
+        assert (from_asset, to_asset) not in allowed, (
+            f"{text} is in Config.ALLOWED_PAIRS and is being fed to a gate that must refuse it"
+        )
+
+
+@pytest.mark.parametrize("text", _pairs_the_gate_must_refuse())
 def test_a_pair_outside_ALLOWED_PAIRS_is_refused_rather_than_widening_the_gate(capsys, text):
     """A typo in a gate's argument must not check everything instead.
 

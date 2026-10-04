@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal")
 # root, which conftest.py does not put on sys.path, and the tool's own imports
 # are rootless out of swap_terminal/.
 from chains.base import RPCError
+from conftest import unallowed_directions
 from db import connect_db
 from modules.address_network import is_testnet_address
 from report_block import LABEL_WIDTH
@@ -798,16 +799,41 @@ def test_an_invalid_payout_address_writes_no_rows(monkeypatch, tmp_path, capsys)
 
 
 def test_a_pair_outside_allowed_pairs_refuses_with_the_list(monkeypatch, tmp_path, capsys):
-    """validate_pair()'s own refusal, with the catalog attached so it is actionable."""
+    """validate_pair()'s own refusal, with the catalog attached so it is actionable.
+
+    THIS TEST SPELLED `BTC:XRP` AND THAT PAIR WAS ENABLED ON 2026-10-04, which made it
+    fail -- correctly, and for the reason worth recording rather than patching past.
+    It had been asserting a refusal for a direction the operator then allowed ("yeah
+    let's figure out why and enable them", taking Config.ALLOWED_PAIRS to 20 of 20
+    directed pairs over five assets), so the fixture had rotted into the ALLOWED path
+    while the assertions still described the refused one.
+
+    tests/test_swap_readiness.py had already learned this with `GRC:SOL` on 2026-10-03
+    and derived its fixture from Config.ALLOWED_PAIRS as the fix. That derivation then
+    emptied on 2026-10-04 for the same reason this line broke, so the shared fixture in
+    conftest.unallowed_directions() unions the derived half with an UNTRADED asset --
+    one that cannot become allowed by enabling a direction between traded assets.
+
+    FIRST, NOT SAMPLED, so this file exercises one concrete refusal end to end through
+    the real tool while test_swap_readiness.py parametrizes over the whole set. The
+    fixture is sorted, so "first" is stable between runs rather than whichever one a
+    set happened to yield.
+    """
+    refused = unallowed_directions(real_config()["ALLOWED_PAIRS"])
+    assert refused, (
+        "there is no unallowed direction left to refuse, so this test would assert a refusal for a "
+        "pair the terminal accepts. conftest.UNTRADED_ASSET has become tradeable"
+    )
+    pair = refused[0]
     code = run_tool(
         monkeypatch,
-        ["--pair", "BTC:XRP", "--amount", "1", "--payout-address", XRP_ACCOUNT, "--db", str(tmp_path / "x.db")],
+        ["--pair", pair, "--amount", "1", "--payout-address", XRP_ACCOUNT, "--db", str(tmp_path / "x.db")],
         adapters={"XRP": StubXRP(), "BTC": StubGRC()},
     )
 
     assert code == 2
     error = capsys.readouterr().err
-    assert "Unsupported trading pair" in error
+    assert "Unsupported trading pair" in error, f"{pair} was not refused by validate_pair()"
     assert "XRP->GRC" in error, "the allowed directions have to be in the refusal"
 
 
@@ -1546,3 +1572,94 @@ def test_a_SAME_ASSET_PAIR_is_refused_at_the_argument_and_names_the_real_cause(m
     with pytest.raises(SwapRefused, match="wallet transfer"):
         parse_pair("xrp/xrp")
     assert parse_pair("GRC:XRP") == ("GRC", "XRP"), "a real pair is unaffected"
+
+
+class MeasuringGRC(StubGRC):
+    """StubGRC that can answer measure_send_fee, so the MEASURED branch is reachable.
+
+    A SUBCLASS AND NOT A FLAG ON StubGRC, because measured_or_configured_reserve()
+    branches on `hasattr(adapter, "measure_send_fee")` -- so the two cases this test
+    needs are "the attribute is absent" and "the attribute answers", and an attribute
+    that exists and returns None is a THIRD case (the chain refused) that
+    tests/test_measured_fee_reserve.py already owns. Giving StubGRC the method and a
+    flag would make the absent case unreachable from this file, which is the one every
+    other test here depends on.
+    """
+
+    def measure_send_fee(self, _address, _amount):
+        return 0.0009, "fundrawtransaction selected 1 input, fee 0.0009"
+
+    def own_address(self):
+        """An address of this desk's own for the probe to measure a send AGAINST.
+
+        BOTH HALVES ARE NEEDED AND THE FIRST DRAFT HAD ONLY ONE, which the run found:
+        with measure_send_fee() alone the receipt still read FALLBACK, because
+        own_address_on_chain() found no address and measured_or_configured_reserve()
+        refuses to derive one -- getnewaddress is a wallet WRITE and a priced quote must
+        not leave a key behind. So "the chain can be asked" is two conditions, and a
+        stub that satisfies one of them measures the fallback path while looking like
+        the measured one.
+        """
+        return GRC_ADDRESS
+
+
+def test_the_RECEIPT_LINE_says_whether_the_reserve_was_measured_or_fell_back(monkeypatch, tmp_path, capsys):
+    """Asserted on the rendered `--apply` output, not on the helper that builds the text.
+
+    THIS TEST EXISTS BECAUSE A MUTATION SURVIVED, 2026-10-04, and the survivor is worth
+    recording because it is the exact failure this repository's verification principle is
+    about. tests/test_measured_fee_reserve.py had a test whose docstring claimed
+    "ASSERTED ON THE RENDERED LINE, not on the dict" -- and it called
+    open_swap.reserve_provenance() directly. Deleting `({reserve_provenance(quote)})`
+    from report_lines()'s `network fee` line changed what the operator SEES and broke
+    nothing: 17 passed. The claim in the docstring was false, which makes it a wrong
+    comment as well as a weak test (rule 16), and nothing but the mutation would have
+    found it -- review had already read that docstring.
+
+    SO THIS ONE RUNS THE REAL TOOL and reads its stdout. Verify by behavior: the thing
+    under test is a line on a screen, so the assertion is on the line on the screen.
+
+    BOTH BRANCHES, because they are one format string and a fix to one is a fix to
+    neither alone -- and because after 2026-10-04 they can carry the SAME NUMBER
+    (BTC_NETWORK_FEE_RESERVE is the measured one-input BTC fee, 0.0000282 both ways), so
+    a reader with only the amount has nothing to go on. Rule 14: "did nothing" must not
+    look like "did work".
+
+      FALLBACK   the default StubGRC has no measure_send_fee, which is the state of
+                 every XRP and SOL adapter in production -- they price their own fees --
+                 so this is not a contrived case
+      MEASURED   MeasuringGRC answers, which is what bitcoind and litecoind do through
+                 RPCAdapter.measure_send_fee()
+
+    MUTATION: delete `({reserve_provenance(quote)})` from report_lines() and both halves
+    fail. Measured 2026-10-04.
+    """
+    stub_prices(monkeypatch)
+
+    run_tool(monkeypatch, ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+                           "--db", str(tmp_path / "fallback.db"), "--apply"])
+    fell_back = capsys.readouterr().out
+
+    assert "network fee" in fell_back, "the receipt lost the reserve line entirely"
+    assert "FALLBACK" in fell_back, (
+        "the receipt does not say the chain was never asked for this reserve. The figure alone cannot "
+        "say it: a fallback and a measurement can carry the identical number since 2026-10-04"
+    )
+    assert "no GRC adapter in this process can measure a send" in fell_back, (
+        "the receipt names no REASON, so the operator cannot tell a missing export from a chain that "
+        "will never answer -- which is the actionable half of the sentence"
+    )
+
+    run_tool(monkeypatch, ["--pair", "XRP:GRC", "--amount", "1", "--payout-address", GRC_ADDRESS,
+                           "--db", str(tmp_path / "measured.db"), "--apply"],
+             adapters={"XRP": StubXRP(), "GRC": MeasuringGRC()})
+    measured = capsys.readouterr().out
+
+    assert "MEASURED off the GRC chain" in measured, (
+        "the chain WAS asked and the receipt does not say so, so a measured reserve is indistinguishable "
+        "from a constant"
+    )
+    assert "FALLBACK" not in measured, (
+        "a measured reserve rendered as a fallback. The measured sentence names the configured figure it "
+        "beat, which is how a substring check on provenance inverts -- the token is why it cannot here"
+    )

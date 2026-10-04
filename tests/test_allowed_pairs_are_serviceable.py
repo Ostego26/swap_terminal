@@ -37,10 +37,47 @@ the test suite". Both the set and that test are DELETED rather than emptied
 is why the parametrized reserve test below now covers EVERY enabled pair with no
 exclusion. That is the property this file always meant to hold.
 
-THE OTHER TWO RESERVES ARE STILL UNMEASURED and that is named rather than tidied
-away: no BTC or LTC payout has ever been made, so 0.00002 and 0.001 are the
-defaults they always were. Bitcoin's fee is a market rather than a constant, so
-that one wants a fee-rate read and not a typed figure.
+THE OTHER TWO RESERVES ARE STILL UNMEASURED -- AND THAT SENTENCE IS FALSE AS OF
+2026-10-03. It is kept rather than overwritten because its reasoning is what the
+measurement refuted (rule 1). It read, in full:
+
+    "THE OTHER TWO RESERVES ARE STILL UNMEASURED and that is named rather than
+    tidied away: no BTC or LTC payout has ever been made, so 0.00002 and 0.001 are
+    the defaults they always were. Bitcoin's fee is a market rather than a
+    constant, so that one wants a fee-rate read and not a typed figure."
+
+Both payouts have since been made, on the operator's host, and the numbers came
+back off the chain rather than out of anybody's recollection:
+
+    LTC  payouts.id=19  1.19967368 LTC   and id=20  1.20774577 LTC
+    BTC  payouts.id=21  0.0040178 BTC, gettransaction fee 0.00002820
+
+THE LAST CLAUSE WAS RIGHT AND IS WHY THE BTC FIGURE MATTERS. Bitcoin's fee IS a
+market and it scales with input count, measured on their host 2026-10-03:
+
+    inputs   fee
+    1        0.00002820
+    15       0.00021483   (LTC, ~0.0000150/input)
+    2701     0.00084240   -- 30x the one-input figure
+
+so a flat constant cannot cover it, and the tree does not rely on one:
+services/quote_service.measured_or_configured_reserve() probes the chain with
+fundrawtransaction for THIS payout's size, and the constant is only the fallback
+for when that probe fails.
+
+WHICH IS WHERE THE DEFECT WAS. BTC_NETWORK_FEE_RESERVE was 2e-05 against a
+measured 0.0000282 -- the fallback sat 29% BELOW a fee the chain had actually
+charged, on a ONE-input send, which is the cheapest case there is. A reserve below
+the real fee is how a payout fails after the deposit is irreversible, and this tree
+did exactly that on 2026-10-03 with "Insufficient funds (rpc code -4)". The
+operator raised it to 0.0000282 on 2026-10-04 ("yes, please resolve this and make
+it the default for btc") -- the lowest value that covers a fee this desk has
+actually been charged, which is not a safety margin and must not be described as
+one. config.py's line carries the trade-off in both directions.
+
+LTC's 0.001 IS UNTOUCHED and is wrong in the safe direction: ~10x its measured
+0.00010372 at one input, so it over-reserves rather than under-reserving. Changing
+it is a pricing decision and the operator has not asked (rule 16).
 """
 
 from __future__ import annotations
@@ -76,97 +113,36 @@ PAIRS = sorted(Config.ALLOWED_PAIRS)
 #: payout asset. That is strictly stronger than the version with an exemption, and it
 #: is the shape the tolerated break was always a detour around.
 
-#: PAIRS THAT ARE DELIBERATELY ONE-WAY, each with the reason. This test caught my
-#: own asymmetry on the commit that added these two, which is what it is for.
+#: DELIBERATELY_ONE_WAY IS GONE, 2026-10-04, AND THIS IS THE SECOND TABLE IN THIS
+#: FILE TO REACH ZERO AND BE DELETED RATHER THAN EMPTIED (rule 19: a ratchet that
+#: reaches zero gets deleted along with its baseline; an empty container is
+#: something somebody refills).
 #:
-#: XRP->BTC and XRP->LTC take XRP as the INPUT and pay out to an asset that can
-#: pay. The reverse of each -- BTC->XRP, LTC->XRP -- would pay out IN XRP, which
-#: needs TWO things this host does not have by default: the fee reserve below, and
-#: the two custody variables that arm the XRP payout.
+#: IT HELD TWO ROWS AT THE END -- ("XRP","BTC") and ("XRP","LTC") -- each reading
+#: "the reverse pays out XRP, which needs the two XRP custody variables (the fee
+#: reserve is set as of 2026-10-03)". It had held three more for the SOL directions
+#: until 2026-10-03, and one for every XRP direction before that.
 #:
-#: UNTIL 2026-10-02 THIS READ "and XRP cannot pay out at all", which was true and is
-#: no longer. The payout path is built, wired to services/payout_service.py and
-#: refuses by default; an operator who exports XRP_PAYOUT_SECRET_SEED and
-#: XRP_DEPOSIT_ACCOUNT can pay XRP out. Adding BTC->XRP or LTC->XRP to ALLOWED_PAIRS
-#: is still a separate live-posture decision and is still theirs, and it still needs
-#: XRP_NETWORK_FEE_RESERVE first -- see test_A_RESERVE_ALONE_WOULD_MOVE_THE_REFUSAL
-#: for why the reserve without the custody variables is worse than neither.
+#: WHAT EMPTIED IT: the operator enabling BTC->XRP, LTC->XRP, SOL->XRP and XRP->SOL
+#: on 2026-10-04 ("yeah let's figure out why and enable them"). Config.ALLOWED_PAIRS
+#: is now 20 of 20 directed pairs over the five traded assets, so no pair is one-way
+#: and there is nothing left to exempt.
 #:
-#: THE SENTENCE THAT WAS HERE NAMED THE WRONG BLOCKER AND SENT ME TO DO THE WRONG
-#: WORK. It said: "When XRP_NETWORK_FEE_RESERVE is set, all four XRP-payout
-#: directions become enable-able at once and this table should empty." That is
-#: false, and on 2026-09-30 I read it, believed it, and told the operator that
-#: setting one environment variable would unblock three pairs. MEASURED instead:
+#: THE ROWS WERE NOT WRONG, THEY WERE A POSTURE WRITTEN INTO A TABLE OF ABSENCES,
+#: which is what the symmetry test below already said about the three SOL rows when
+#: they went: "a table of permanent exemptions that records a switch goes stale the
+#: moment the switch moves." Both surviving rows named the XRP custody variables --
+#: a switch an operator flips -- and the switch moved. The property that replaces
+#: them is not nothing and is strictly stronger: the symmetry check below now holds
+#: unconditionally, with no table it can be silenced through.
 #:
-#:   without XRP_NETWORK_FEE_RESERVE   create_quote() refuses -- "XRP has no
-#:                                     network fee reserve"
-#:   with it set to 0.00001            create_quote() SUCCEEDS (9.84999 XRP on a
-#:                                     10 GRC input) and create_swap() refuses --
-#:                                     "XRP cannot pay out: it holds no signing
-#:                                     key, and services/payout_service.py calls
-#:                                     send_to_address() without the arming token"
-#:
-#: So the reserve does not unblock the pair. It moves the refusal from BEFORE the
-#: promise to AFTER it: a teller quotes a customer a number and then cannot open
-#: the swap. That is strictly worse than today, which is why the reserve is not
-#: being added here and why it would not help if it were.
-#:
-#: WHAT WOULD ACTUALLY UNBLOCK THESE, AND IT IS STILL TWO OPERATOR DECISIONS AND
-#: NOT ONE VARIABLE. This paragraph used to end "chains/registry's own refusal says
-#: 'Nothing in a .env can arm it'", which was true until 2026-10-02 and is not:
-#:
-#:   the payout      DONE as a mechanism. chains/xrp.py signs, the arming token is
-#:                   required at the call site, and
-#:                   services/payout_service.broadcast_payout() passes a source
-#:                   account, the seed and the token. It refuses by default and the
-#:                   operator arms it by exporting XRP_PAYOUT_SECRET_SEED and
-#:                   XRP_DEPOSIT_ACCOUNT -- which IS a .env-shaped action now, so
-#:                   the old sentence has to go rather than be softened. Still fund
-#:                   movement, still theirs (rule 16); what changed is that there
-#:                   is something for them to decide rather than code to write.
-#:   the reserve     UNCHANGED and still absent.
-#:                   services/quote_service.get_network_fee_reserve() refuses rather
-#:                   than defaulting to zero, deliberately, and setting the number
-#:                   is a pricing decision they own.
-DELIBERATELY_ONE_WAY = {
-    # THE REASON CHANGED ON 2026-10-03 AND THE ROWS STAY. These said the reverse
-    # "needs XRP_NETWORK_FEE_RESERVE (absent) plus the two XRP custody variables".
-    # The reserve is set now, measured off the operator's own rippled, so only the
-    # custody half is left -- and the row has to say which, because a row naming a
-    # blocker that is already cleared sends the next reader to do work that is done
-    # (the mistake the paragraph above this table records me making about this exact
-    # variable).
-    ("XRP", "BTC"): "the reverse pays out XRP, which needs the two XRP custody variables (the fee reserve is set as of 2026-10-03)",
-    ("XRP", "LTC"): "the reverse pays out XRP, which needs the two XRP custody variables (the fee reserve is set as of 2026-10-03)",
-    # THE THREE SOL ROWS ARE GONE, 2026-10-03, AND THE TABLE IS SMALLER FOR THE RIGHT
-    # REASON. They said the reverse "has no fee reserve AND cannot pay out at all
-    # (send_to_address raises; no keypair in the module)". Every clause is now false
-    # or no longer a blocker:
-    #
-    #   send_to_address raises     it SIGNS and broadcasts when armed, devnet only.
-    #   no keypair in the module   still TRUE of chains/solana.py and deliberately so
-    #                              -- the keypair lives in chains/solana_signing.py
-    #                              and the adapter broadcasts bytes it could not have
-    #                              produced. What changed is that this stopped being a
-    #                              reason the pair cannot exist.
-    #   no fee reserve             SOL_NETWORK_FEE_RESERVE = 0.000005, measured on the
-    #                              operator's own cluster through getFeeForMessage.
-    #
-    # So the operator enabled ("GRC","SOL"), ("BTC","SOL") and ("LTC","SOL") --
-    # "whoa we have to be able to swap TO SOL too" -- and every SOL pair is SYMMETRIC
-    # now. A row naming a cleared blocker is worse than no row: it sends the next
-    # reader to do work that is already done, which is exactly the mistake the XRP
-    # paragraph above this table records me making about this very table.
-    #
-    # WHAT REPLACED THE EXEMPTION IS NOT NOTHING, and it is a stronger guard than a
-    # row here ever was. The pair can exist and still cannot COMPLETE unarmed:
-    # SOL_PAYOUT_KEYPAIR_PATH is unset in every checkout and every test run, so
-    # can_spend is False, the page marks the pair UNAVAILABLE and create_swap()
-    # refuses with nothing written. That is asserted over SEEDED ROWS through the real
-    # services by tests/test_solana_adapter.py::
-    # test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken,
-    # which fails if the gate is removed whatever this pair list says.
-}
+#: WHAT STILL STOPS AN UNARMED HOST OFFERING THESE FOUR is unchanged and is asserted
+#: over seeded rows through the real services, not through a pair list:
+#: pair_serviceability() marks a pair UNAVAILABLE when its payout leg cannot sign,
+#: which is every checkout and every test run -- see
+#: test_THE_RESERVE_IS_SET_NOW_AND_THE_PAGE_IS_WHAT_CLOSES_THE_HAZARD_IT_OPENED
+#: below and tests/test_solana_adapter.py::
+#: test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken.
 
 
 def test_every_pair_has_a_usd_price_for_both_assets():
@@ -201,48 +177,49 @@ def test_EVERY_pair_has_a_network_fee_reserve(pair):
     )
 
 
-def test_the_pair_set_is_SYMMETRIC_or_says_which_direction_is_missing():
-    """A one-way pair is legitimate and should be deliberate, not accidental.
+def test_the_pair_set_is_SYMMETRIC_with_no_table_it_can_be_silenced_through():
+    """Every enabled direction has its reverse enabled too, unconditionally.
 
-    THIS SAID "SOL can only ever be an INPUT -- chains/solana.py's send_to_address
-    raises NotImplementedError", AND THAT ENDED ON 2026-10-03. It signs when armed,
-    and the operator enabled all three *->SOL directions, so every SOL pair is
-    symmetric and DELIBERATELY_ONE_WAY no longer carries one.
+    MEASURED 2026-10-04 after the operator enabled the last four directions ("yeah
+    let's figure out why and enable them"): Config.ALLOWED_PAIRS is 20 of 20 directed
+    pairs over the five traded assets {BTC, GRC, LTC, SOL, XRP}, so the set is
+    symmetric and nothing is exempt.
 
-    A one-way pair is still legitimate and should still be deliberate rather than
-    accidental, which is what this reports. The honest reason for one has changed
-    shape: it is no longer "that chain cannot sign at all" but "that chain cannot
-    sign HERE" -- a posture, not an absence -- and a posture does not belong in this
-    table, because a table of permanent exemptions that records a switch goes stale
-    the moment the switch moves. Which is what the three SOL rows did.
+    THIS USED TO READ `and (a, b) not in DELIBERATELY_ONE_WAY`, AND THAT CLAUSE IS
+    GONE WITH THE TABLE. The history is worth keeping because the test kept
+    predicting it:
+
+      before 2026-10-03  the table held every XRP-payout direction -- "XRP cannot
+                         pay out at all", which was an ABSENCE and a fair exemption
+      2026-10-03         the three SOL rows went when *->SOL was enabled, and this
+                         docstring recorded why: "a table of permanent exemptions
+                         that records a switch goes stale the moment the switch
+                         moves"
+      2026-10-04         the last two rows -- ("XRP","BTC") and ("XRP","LTC") -- went
+                         the same way, for the same reason, naming the same kind of
+                         thing: the XRP custody variables, which is a switch
+
+    So the table emptied twice by the mechanism it was warned about, and rule 19 says
+    what to do with a container that reaches zero: delete it. This assertion is
+    strictly stronger than the version that consulted a table, because there is no
+    longer anywhere to write a row that silences it.
+
+    A GENUINELY ONE-WAY PAIR WOULD NOW FAIL THIS, which is the intended outcome. The
+    honest reason for one is no longer available: no chain in this tree "cannot pay
+    out at all" as of 2026-10-03, so an asymmetry is either a mistake or a posture --
+    and a posture belongs in pair_serviceability(), which reports it per host, not in
+    a constant that reports it for every host forever.
+
+    MUTATION: remove any one pair from Config.ALLOWED_PAIRS and this fails naming it.
     """
-    asymmetric = [(a, b) for (a, b) in PAIRS
-                  if (b, a) not in Config.ALLOWED_PAIRS and (a, b) not in DELIBERATELY_ONE_WAY]
+    asymmetric = [(a, b) for (a, b) in PAIRS if (b, a) not in Config.ALLOWED_PAIRS]
     assert not asymmetric, (
-        f"these pairs are enabled in one direction only: {asymmetric}. That is legitimate when the "
-        f"reverse chain genuinely cannot pay out at all -- which is no longer true of any chain "
-        f"here as of 2026-10-03 -- or the reverse "
-        f"payout asset has no fee reserve, and a mistake otherwise. If it is deliberate, add it "
-        f"to DELIBERATELY_ONE_WAY with the reason"
+        f"these pairs are enabled in one direction only: {asymmetric}. As of 2026-10-03 no chain "
+        f"here is unable to pay out at all, and as of 2026-10-04 every payout asset has a fee "
+        f"reserve, so there is no longer an honest permanent reason for an asymmetry -- it is "
+        f"either a mistake in config.py or a per-host posture, and a posture belongs in "
+        f"services/pair_view.pair_serviceability() rather than in this set"
     )
-
-
-def test_every_DELIBERATELY_one_way_pair_is_actually_enabled_and_actually_one_way():
-    """The exemption table cannot outlive what it exempts.
-
-    Two ways it goes stale and both are silent: a row for a pair nobody enabled
-    any more, and a row for a pair whose reverse was since enabled -- the second
-    of which would hide a real asymmetry behind a stale excuse.
-    """
-    for pair, reason in sorted(DELIBERATELY_ONE_WAY.items()):
-        assert pair in Config.ALLOWED_PAIRS, (
-            f"{pair} is exempted from the symmetry check and is not enabled at all. Remove the row"
-        )
-        reverse = (pair[1], pair[0])
-        assert reverse not in Config.ALLOWED_PAIRS, (
-            f"{reverse} is now enabled, so {pair} is no longer one-way and its exemption "
-            f"({reason}) is stale. Remove the row"
-        )
 
 
 def test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE(monkeypatch):
@@ -442,3 +419,101 @@ class _Payable:
 
     def why_cannot_pay_out(self):
         return ""
+
+
+#: THE FOUR DIRECTIONS ENABLED 2026-10-04, as (from, to). Spelled here rather than
+#: derived, deliberately and for once: the subject of the test below is "the operator
+#: asked for exactly these four and exactly these four went in", and a derivation from
+#: Config.ALLOWED_PAIRS would assert that whatever is in the set is in the set.
+#:
+#: THE OPERATOR'S WORDS: they asked why BTC->XRP, LTC->XRP, SOL->XRP and XRP->SOL were
+#: not in Config.ALLOWED_PAIRS, and then "yeah let's figure out why and enable them".
+#: That is live posture, authorized in those words (rule 16), and it takes the set from
+#: 16 of 20 directed pairs over the five traded assets to 20 of 20.
+ENABLED_2026_10_04 = (("BTC", "XRP"), ("LTC", "XRP"), ("SOL", "XRP"), ("XRP", "SOL"))
+
+
+@pytest.mark.parametrize("pair", ENABLED_2026_10_04)
+def test_the_four_directions_the_operator_asked_for_are_enabled(pair):
+    """Each of the four, with the prerequisite that had blocked it asserted alongside.
+
+    MEASURED 2026-10-04 by importing the real Config and the real services/pricing.IDS,
+    which is the denominator this file exists to state -- every one of the five traded
+    assets has all three of the things a pair needs, so no pair among them is blocked:
+
+        asset  fee reserve   pricing.IDS id       MIN_CONFIRMATIONS
+        BTC    2e-05         bitcoin              2
+        GRC    0.001         gridcoin-research    6
+        LTC    0.001         litecoin             2
+        SOL    5e-06         solana               3
+        XRP    1e-05         ripple               1
+
+    (BTC's reserve became 0.0000282 later the same day, for a reason that has nothing
+    to do with these pairs -- see tests/test_measured_fee_reserve.py. The reading above
+    is as taken, at the moment the pairs went in.)
+
+    WHY EACH WAS ABSENT, AND WHEN THAT STOPPED BEING TRUE. None of it is a config gap
+    any more, and every clause was checked rather than recalled:
+
+      BTC->XRP  needed XRP_NETWORK_FEE_RESERVE, which did not exist. Set 2026-10-03,
+      LTC->XRP  to 0.00001, off the operator's own rippled
+                (server_info.validated_ledger.base_fee_xrp, 10 drops).
+      SOL->XRP  the same reserve, plus a claim that chains/xrp.py "holds no signing key
+                and services/payout_service.py calls send_to_address() without the
+                arming token". False since 2026-10-02: broadcast_payout() passes
+                source=, seed= and confirm_send=CONFIRM_XRP_SEND for XRP, and a real
+                XRP payout settled 2026-10-03 (payouts.id=23, tesSUCCESS, validated).
+      XRP->SOL  needed SOL_NETWORK_FEE_RESERVE (set 2026-10-03 to 0.000005, measured
+                through getFeeForMessage on the operator's own cluster) and a SOL
+                signing path, which landed the same day in 79c4808.
+
+    THIS DOES NOT ASSERT THAT ANY OF THEM CAN BE SWAPPED HERE, and that distinction is
+    the one this file has drawn since it was written: three gates, not one. ALLOWED is
+    what this set says; CREATABLE additionally needs the FROM chain's deposit account
+    (XRP_DEPOSIT_ACCOUNT, SOL_DEPOSIT_ACCOUNT); ARMED needs the payout leg's key
+    (XRP_PAYOUT_SECRET_SEED, or SOL_PAYOUT_KEYPAIR_PATH plus a funded SOL_HOT_WALLET).
+    None of those five is set in any checkout, so pair_serviceability() marks all four
+    UNAVAILABLE and the customer form never offers them --
+    test_THE_RESERVE_IS_SET_NOW_AND_THE_PAGE_IS_WHAT_CLOSES_THE_HAZARD_IT_OPENED above
+    asserts that half over seeded rows through the real services.
+
+    MUTATION: remove any one of the four from Config.ALLOWED_PAIRS and this fails
+    naming it, as does the parametrized reserve test and the symmetry test.
+    """
+    from_asset, to_asset = pair
+    assert pair in Config.ALLOWED_PAIRS, (
+        f"{pair} was authorized by the operator on 2026-10-04 and is not in Config.ALLOWED_PAIRS"
+    )
+    assert hasattr(Config, f"{to_asset}_NETWORK_FEE_RESERVE"), (
+        f"{pair} is enabled and {to_asset}_NETWORK_FEE_RESERVE does not exist, which is the exact "
+        f"blocker that kept it out until 2026-10-03"
+    )
+    for asset in pair:
+        assert asset in IDS, f"{pair} is enabled and {asset} has no services/pricing.IDS row"
+    assert (to_asset, from_asset) in Config.ALLOWED_PAIRS, (
+        f"{pair} went in without its reverse, so the set is asymmetric and no table exempts it any more"
+    )
+
+
+def test_the_pair_set_is_exactly_twenty_of_twenty_over_five_assets():
+    """The denominator, asserted rather than written in a comment somewhere (rule 3).
+
+    MEASURED 2026-10-04: 5 traded assets, 20 ordered pairs, 20 in
+    Config.ALLOWED_PAIRS. Stated as a product of the asset count rather than as a
+    literal 20, so adding a sixth asset makes this fail with arithmetic a reader can
+    follow -- a bare `== 20` would have to be found and edited, and a count whose
+    denominator is not stated beside it is the error rule 3 names.
+
+    WHY A COUNT AT ALL, when the symmetry test above covers the shape: because
+    symmetry holds for a smaller set too. Sixteen of twenty was symmetric on
+    2026-10-03 -- the four missing directions were two symmetric pairs -- so symmetry
+    alone cannot tell that pair set from this one. This is what says the set is
+    COMPLETE and would fail if a direction were quietly dropped in a pair.
+    """
+    assets = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    expected = len(assets) * (len(assets) - 1)
+    assert len(Config.ALLOWED_PAIRS) == expected, (
+        f"Config.ALLOWED_PAIRS holds {len(Config.ALLOWED_PAIRS)} of the {expected} ordered pairs over "
+        f"its {len(assets)} assets {sorted(assets)}. Every direction was enabled on 2026-10-04, so a "
+        f"shortfall means one was removed -- which is live posture and belongs to the operator"
+    )

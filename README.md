@@ -674,8 +674,17 @@ leaves `unlocked_until` at 0 or sets a timestamp.
 
 ## XRP
 
-Brokered deposits only, **and XRP is not a tradeable pair** — `Config.ALLOWED_PAIRS`
-names none, so no XRP quote can be produced and no XRP swap can be created.
+Brokered deposits only. **AND "XRP IS NOT A TRADEABLE PAIR" IS FALSE, AND HAS BEEN
+SINCE 2026-09-26.** The sentence that stood here —  "XRP is not a tradeable pair —
+`Config.ALLOWED_PAIRS` names none, so no XRP quote can be produced and no XRP swap
+can be created" — is kept quoted rather than overwritten, because the drift is the
+point. `Config.ALLOWED_PAIRS` has carried `XRP<->GRC` since 2026-09-26, `XRP->BTC`
+and `XRP->LTC` since 2026-09-30, `SOL->XRP` and `XRP->SOL` and `BTC->XRP` and
+`LTC->XRP` since 2026-10-04 — every XRP direction, 8 of 8. XRP quotes price (the
+reserve was set 2026-10-03) and a real XRP payout settled that night
+(`payouts.id=23`, tesSUCCESS, validated). What remains true is that a swap is still
+not CREATABLE without `XRP_DEPOSIT_ACCOUNT` and not payable without
+`XRP_PAYOUT_SECRET_SEED`, which are custody decisions with no defaults.
 
 `rippled` removed signing from its public API on purpose, so paying XRP means
 holding a key in this process — a custody decision, not an implementation gap,
@@ -1011,6 +1020,11 @@ are the operator's: `SOL_NETWORK_FEE_RESERVE` does not exist in `config.py`
 to be quotable, and inventing the number is a pricing decision), and no
 `*→SOL` pair is in `ALLOWED_PAIRS`.
 
+**BOTH OF THOSE WERE DONE ON 2026-10-03 and the paragraph above is kept as written.**
+`SOL_NETWORK_FEE_RESERVE` is `0.000005`, measured off the operator's own cluster
+through `getFeeForMessage`, and `GRC->SOL`, `BTC->SOL`, `LTC->SOL` and (2026-10-04)
+`XRP->SOL` are all in `ALLOWED_PAIRS` — 4 of 4 directions into SOL.
+
 **NO TRANSACTION THIS PATH BUILDS HAS EVER REACHED A CLUSTER.** The serializer
 is verified byte-for-byte against `@solana/web3.js` — the same library
 `grc-sol-swap/abstergo_exchange/server.js:244` uses to move real SOL — over the
@@ -1258,6 +1272,10 @@ is not code:
   above is still open and is still the thing standing between a working mechanism
   and a payout that pays a customer. `Config.ALLOWED_PAIRS` names no XRP pair.
 
+  **THAT LAST SENTENCE WAS TRUE WHEN WRITTEN AND IS FALSE SINCE 2026-09-26**; see the
+  XRP section above for the current 8-of-8 state. The custody question it points at is
+  the half that stayed open, and the operator closed it on 2026-10-03.
+
   The unarmed, preview and refusal paths are a fix, and as of 2026-09-26 they are
   measured rather than merely tested: the operator ran a real preview against
   rippled 3.4.1 from their host. It read `server_info` and `account_info`, named
@@ -1332,6 +1350,11 @@ XRP_MIN_CONFIRMATIONS=1
 
 `ALLOWED_PAIRS` is unchanged, matching how Solana landed. No XRP
 swap can be created; enabling it is the operator's (rule 16).
+
+**THE OPERATOR DID ENABLE IT, and this paragraph describes only the day it was
+written (2026-09-26 or earlier).** Every XRP direction is in `ALLOWED_PAIRS` as of
+2026-10-04 and an XRP payout has settled for real; the XRP section above carries the
+dates and the evidence.
 
 ## Regtest HTLC verification
 

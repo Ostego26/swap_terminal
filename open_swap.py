@@ -165,7 +165,7 @@ from requests.exceptions import RequestException
 from services.pair_view import allowed_pair_rows
 from services.payout_capacity import as_amount, largest_fundable_payout
 from services.pricing import fetch_usd_prices
-from services.quote_service import create_quote, get_network_fee_reserve, validate_pair
+from services.quote_service import RESERVE_MEASURED, create_quote, get_network_fee_reserve, validate_pair
 from services.swap_service import (
     TAG_ATTRIBUTED_ASSETS,
     create_swap,
@@ -766,6 +766,36 @@ def fetch_prices_or_refuse(config: dict) -> dict:
     return prices
 
 
+def reserve_provenance(quote: dict) -> str:
+    """Three states, and the third is the one that must not be guessed.
+
+    MEASURED            the chain was asked for this payout's size and answered
+    FALLBACK: <why>     it could not be, so the configured constant was used, and the
+                        sentence says which guard stopped it
+    provenance not recorded
+                        there is no answer available, because the dict came out of the
+                        database rather than out of create_quote()
+
+    THE THIRD STATE IS REAL AND NOT DEFENSIVE PROGRAMMING. The provenance lives on
+    create_quote()'s RESPONSE only -- persisting it would mean a column on `quotes`,
+    which is a schema change on the fund path and the operator's (rule 16) -- so any
+    reader that re-reads a quote from SQL has nothing to show. Printing "MEASURED"
+    there, or printing nothing, would both be a claim this code cannot support; rule
+    14 says an empty result is still a result and has to say so.
+
+    The FALLBACK sentence is passed through whole rather than summarized, because the
+    `because` clause is the actionable half: "no BTC adapter in this process" is an
+    export the operator can fix, and "Method not found (rpc code -32601)" is a chain
+    that will never answer.
+    """
+    provenance = quote.get("network_fee_reserve_provenance")
+    if not provenance:
+        return "provenance not recorded -- this quote was not read back from create_quote()"
+    if provenance == RESERVE_MEASURED:
+        return quote.get("network_fee_reserve_how") or RESERVE_MEASURED
+    return quote.get("network_fee_reserve_how") or provenance
+
+
 def report_lines(swap: dict, quote: dict, db_path: str, config: dict, explicit_db: str = "") -> list[str]:
     """The block the operator reads and pastes back. Pure, over the rows as written.
 
@@ -827,7 +857,27 @@ def report_lines(swap: dict, quote: dict, db_path: str, config: dict, explicit_d
         # small number reached a human in exponent notation (the others:
         # swap_readiness's rate line, show_payout_fees's live fee, and
         # payout_capacity's ceiling). A constant of 0.001 never exposed it.
-        labeled("network fee", f"{as_amount(swap['network_fee_reserve'])} {to_asset} reserved  <- held back for the "
+        # AND WHERE THE FIGURE CAME FROM, added 2026-10-04. This line printed the
+        # amount and nothing else, so a reserve the chain was ASKED for and a reserve
+        # read out of config.py rendered identically -- and on 2026-10-04 they
+        # started being able to carry the IDENTICAL NUMBER, because
+        # BTC_NETWORK_FEE_RESERVE was raised to the measured one-input BTC fee
+        # (0.0000282 both ways). Before that a reader could at least notice 2e-05 and
+        # guess; now the value distinguishes nothing and guessing is rule 17's error.
+        #
+        # Rule 14: "did nothing" must not look like "did work". A BTC fee scales ~30x
+        # with input count, so a FALLBACK on a wallet with many utxos is a reserve
+        # that can be far under the real fee -- which is how a payout fails after the
+        # deposit is irreversible. That is worth one token on the receipt.
+        #
+        # RESPONSE-ONLY, SO IT COMES OFF THE QUOTE AND NOT THE SWAP ROW.
+        # services/quote_service.create_quote() attaches it to what it returns and
+        # persists nothing; `quotes` and `swaps` are unchanged. A swap re-read from
+        # the database later has no provenance, which is why the default below says
+        # "not recorded" rather than inventing one -- the honest answer, and the same
+        # reason show_swap.py still cannot show it.
+        labeled("network fee", f"{as_amount(swap['network_fee_reserve'])} {to_asset} reserved "
+                               f"({reserve_provenance(quote)})  <- held back for the "
                                f"payout transaction's own chain fee"),
         # "payout (est.)" rather than "estimated payout": the label column is 16
         # wide and the longer spelling filled it exactly, printing

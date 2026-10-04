@@ -53,6 +53,72 @@ from pathlib import Path
 RPC_FIXTURE_USER = "fixture-rpc-user"
 RPC_FIXTURE_AUTH = "fixture-rpc-auth-value"
 
+# AN ASSET THIS TERMINAL DOES NOT TRADE, for the gates whose whole job is to refuse
+# a pair Config.ALLOWED_PAIRS does not carry.
+#
+# WHY A CONSTANT AND NOT A DERIVED ONE, WHICH IS THE WHOLE POINT OF THIS ENTRY.
+# Until 2026-10-04 two test files derived their refusal fixture from
+# Config.ALLOWED_PAIRS: "every ordered pair of the traded assets, minus the ones it
+# carries". That was the right fix for the problem it solved -- both files had
+# previously SPELLED a pair (`GRC:SOL`, `BTC:XRP`) that an operator later enabled, so
+# the test quietly started exercising the ALLOWED path while asserting the refused
+# one, a fixture rotting rather than a gate failing.
+#
+# AND THE DERIVATION HIT ZERO. Measured 2026-10-04, after the operator enabled the
+# last four directions: 5 traded assets, 20 ordered pairs, 20 allowed, so the derived
+# set is EMPTY and the refusal gate has nothing to exercise. Both files predicted
+# exactly this in prose -- tests/test_swap_readiness.py's
+# test_there_is_an_unallowed_direction_left_to_refuse asserted the denominator so it
+# would FAIL rather than skip, and it did, which is the mechanism working.
+#
+# So the fixture needs an asset that CANNOT become allowed by an operator enabling a
+# direction between assets this terminal already trades. XMR is that asset, and it is
+# not hypothetical: tests/test_address_authority.py records Config.ALLOWED_PAIRS
+# having carried ("GRC","XMR"), so it is a real pair somebody really configured and a
+# plausible thing to type.
+#
+# THIS CAN ROT TOO, IN ONE WAY, AND THE ROT IS LOUD. If XMR is ever traded, every pair
+# below becomes allowable -- test_the_refusal_fixture_is_still_outside_the_config in
+# tests/test_swap_readiness.py asserts both that this asset is untraded and that every
+# string this returns is outside Config.ALLOWED_PAIRS, so adding XMR fails the suite by
+# name rather than silently inverting a gate. Measured 2026-10-04: setting this to
+# "BTC" fails that test and tests/test_open_swap.py's refusal test, and nothing else.
+UNTRADED_ASSET = "XMR"
+
+
+def unallowed_directions(allowed_pairs) -> list[str]:
+    """Every `FROM:TO` string a pair gate must refuse, and it can never be empty.
+
+    TWO SOURCES, UNIONED, because each covers what the other cannot:
+
+      derived    ordered pairs of the assets `allowed_pairs` itself names, minus the
+                 ones it carries. Cannot rot while any direction is unenabled, and is
+                 EMPTY as of 2026-10-04 (20 of 20). Kept rather than dropped: it is
+                 what catches a direction being disabled again, and it is the half
+                 that cannot go stale.
+      untraded   UNTRADED_ASSET paired both ways with every traded asset. Cannot
+                 become allowed by enabling a direction among traded assets, which is
+                 the failure mode that emptied the derived half.
+
+    Returned sorted so pytest's parametrize ids are stable between runs; a set would
+    reorder them and make a failure impossible to match against a previous one.
+
+    HERE RATHER THAN IN EITHER CONSUMER because two files needed it within the same
+    hour, which is rule 8's threshold and the same reason RPC_FIXTURE_USER above sits
+    in this file.
+    """
+    allowed = set(allowed_pairs)
+    assets = sorted({asset for pair in allowed for asset in pair})
+    derived = [
+        (from_asset, to_asset)
+        for from_asset in assets
+        for to_asset in assets
+        if from_asset != to_asset and (from_asset, to_asset) not in allowed
+    ]
+    untraded = [(asset, UNTRADED_ASSET) for asset in assets] + [(UNTRADED_ASSET, asset) for asset in assets]
+    return sorted(f"{a}:{b}" for a, b in set(derived) | set(untraded) if (a, b) not in allowed)
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = REPO_ROOT / "swap_terminal"
 

@@ -152,7 +152,60 @@ class Config:
     # and has charged for years. A fee escalation would cost more than this books,
     # which is the opposite direction from GRC's old 0.01 and is the direction that
     # understates a cost rather than overstating it.
-    BTC_NETWORK_FEE_RESERVE = _env_float("BTC_NETWORK_FEE_RESERVE", "0.00002")
+    # BTC: 0.00002 -> 0.0000282, CHANGED 2026-10-04 ON THE OPERATOR'S INSTRUCTION,
+    # "yes, please resolve this and make it the default for btc". The 0.00002 above
+    # is left in the UNMEASURED table as what it was, because the table is the
+    # provenance record and refreshing it would erase the reason this line moved.
+    #
+    # THE FIRST REAL BTC PAYOUT MADE THE OLD VALUE MEASURABLY WRONG. payouts.id=21,
+    # 0.0040178 BTC, `gettransaction` fee 0.00002820, confirmed on chain. So 2e-05
+    # sat 29% BELOW a fee the chain had ACTUALLY charged -- and on a ONE-input send,
+    # which is the cheapest case that exists. Not a near miss on an unusual
+    # transaction: the floor.
+    #
+    # 0.0000282 IS THE LOWEST VALUE THAT COVERS A FEE THIS DESK HAS BEEN CHARGED.
+    # It is not a safety margin and must not be described as one -- there is no
+    # headroom in it, by construction. The trade-off runs in both directions and
+    # that is why the number is argued rather than rounded up:
+    #
+    #   too LOW    the quote is priced below what the chain charges, so the payout
+    #              fails AFTER the deposit is irreversible. This tree did exactly
+    #              that on 2026-10-03 -- "Insufficient funds (rpc code -4)" -- and
+    #              services/payout_service.py carries the incident.
+    #   too HIGH   every quote that uses this figure under-pays the customer, because
+    #              the reserve is held back out of the gross. The worst fee ever
+    #              measured on this desk is 0.00084240 (2701 inputs); using THAT as
+    #              the fallback would short every customer by 30x the real fee.
+    #
+    # THIS IS THE FALLBACK, NOT THE FIGURE MOST QUOTES USE, and that is the sentence
+    # that keeps the number in proportion. BTC is already measured-first:
+    # services/quote_service.measured_or_configured_reserve() probes the chain with
+    # fundrawtransaction for THIS payout's size and only falls back here when the
+    # probe cannot answer. MEASURED ON THE OPERATOR'S LIVE bitcoind 2026-10-04 with
+    # BTC_RPC_WALLET=desk_hot, four payout sizes, denominator 4 of 4:
+    #
+    #     payout 0.0004      reserve 0.0000282   MEASURED
+    #     payout 0.0040178   reserve 0.0000282   MEASURED
+    #     payout 0.01        reserve 0.0000282   MEASURED
+    #     payout 0.1         reserve 0.0000282   MEASURED
+    #
+    # FLAT ACROSS ALL FOUR BECAUSE THE WALLET HOLDS ONE UTXO, not because the fee
+    # does not scale -- desk_hot was created and funded with a single 10 BTC output
+    # that day, so every send selects one input. It WILL start scaling as change
+    # outputs accumulate; the 30x spread above was measured against a wallet with
+    # thousands. Reading these four as "the fee is constant" is the mistake this
+    # paragraph exists to prevent.
+    #
+    # So nothing had to be "made the default": the measured-first behavior the
+    # operator's instruction asks for was already in place, and what was wrong was
+    # only the number used when the chain cannot be asked.
+    BTC_NETWORK_FEE_RESERVE = _env_float("BTC_NETWORK_FEE_RESERVE", "0.0000282")
+    # LTC IS DELIBERATELY UNTOUCHED, and it is wrong in the OTHER direction:
+    # measured 0.00010372 at one input and 0.00021483 at fifteen (~0.0000150/input)
+    # on 2026-10-03, so 0.001 over-reserves by roughly 10x rather than
+    # under-reserving. Over-reserving under-pays a customer and never fails a payout,
+    # which is the safe side of the same trade-off argued above -- and changing it is
+    # a pricing decision the operator has not asked for (rule 16).
     LTC_NETWORK_FEE_RESERVE = _env_float("LTC_NETWORK_FEE_RESERVE", "0.001")
     GRC_NETWORK_FEE_RESERVE = _env_float("GRC_NETWORK_FEE_RESERVE", "0.001")
     # ADDING THIS LINE IS A POSTURE CHANGE AND IT IS THE OPERATOR'S, MADE 2026-10-03.
@@ -168,10 +221,20 @@ class Config:
     # and KNOWN_UNQUOTABLE should be emptied -- a tolerated break that outlives its
     # fix is a lie in the test suite." Done in the same commit (rule 19).
     #
-    # WHAT THIS DOES NOT DO: ("BTC", "XRP") and ("LTC", "XRP") are still NOT in
-    # ALLOWED_PAIRS. The reserve was one of two things they needed and it is no
-    # longer the blocker; enabling them is a separate decision and still the
-    # operator's.
+    # WHAT THIS DOES NOT DO -- AND IT DID IT ON 2026-10-04, ONE DAY LATER. The
+    # paragraph is kept rather than overwritten because the drift is the point
+    # (rule 1), and this one aged in a day:
+    #
+    #     "("BTC", "XRP") and ("LTC", "XRP") are still NOT in ALLOWED_PAIRS. The
+    #     reserve was one of two things they needed and it is no longer the
+    #     blocker; enabling them is a separate decision and still the operator's."
+    #
+    # Every clause was true when written. The separate decision was then MADE: the
+    # operator asked why those two, plus ("SOL","XRP") and ("XRP","SOL"), were
+    # absent and said "yeah let's figure out why and enable them". All four are in
+    # ALLOWED_PAIRS as of 2026-10-04, which is the only clause that moved -- the
+    # reserve is still not what arms an XRP payout, and XRP_PAYOUT_SECRET_SEED plus
+    # XRP_DEPOSIT_ACCOUNT are still what does.
     XRP_NETWORK_FEE_RESERVE = _env_float("XRP_NETWORK_FEE_RESERVE", "0.00001")
     # SOL, MEASURED ON THE OPERATOR'S HOST 2026-10-03, and it is the first time
     # anything in this tree checked the figure against a cluster.
@@ -248,21 +311,49 @@ class Config:
     #                                    atomic_swap_xrp.py, and BTC shares every
     #                                    function of that path
     #
-    # THE TWO NOT ADDED, AND WHY -- ("BTC", "XRP") and ("LTC", "XRP") pay out in
-    # XRP, and XRP_NETWORK_FEE_RESERVE DOES NOT EXIST. Adding them would enable a
-    # pair that refuses every quote.
+    # THE TWO NOT ADDED, AND WHY -- THIS BLOCK DESCRIBES NOTHING AS OF 2026-10-03,
+    # AND IT IS QUOTED RATHER THAN DELETED BECAUSE THE DRIFT IS THE POINT (rule 1).
+    # It read, in full:
     #
-    # WHICH IS ALREADY TRUE OF ("GRC", "XRP"), enabled 2026-09-26 and unquotable
-    # since: quote_service.network_fee_reserve() raises for a missing reserve, and
-    # the operator saw exactly that from their browser --
+    #     "THE TWO NOT ADDED, AND WHY -- ("BTC", "XRP") and ("LTC", "XRP") pay out
+    #     in XRP, and XRP_NETWORK_FEE_RESERVE DOES NOT EXIST. Adding them would
+    #     enable a pair that refuses every quote.
     #
-    #     No quote: 'XRP_NETWORK_FEE_RESERVE'
+    #     WHICH IS ALREADY TRUE OF ("GRC", "XRP"), enabled 2026-09-26 and
+    #     unquotable since: quote_service.network_fee_reserve() raises for a
+    #     missing reserve, and the operator saw exactly that from their browser --
     #
-    # -- which is the bare KeyError repr that docstring was rewritten to prevent.
-    # The message is better now; the pair is still broken. Setting that number is
-    # a pricing decision and the operator's (rule 16), so it is REPORTED here
-    # rather than guessed, and tests/test_allowed_pairs_are_serviceable.py fails
-    # on it so it cannot be forgotten again.
+    #         No quote: 'XRP_NETWORK_FEE_RESERVE'
+    #
+    #     -- which is the bare KeyError repr that docstring was rewritten to
+    #     prevent. The message is better now; the pair is still broken."
+    #
+    # WHAT MADE IT FALSE, AND WHEN. The operator set XRP_NETWORK_FEE_RESERVE on
+    # 2026-10-03, to 0.00001, read off their own rippled
+    # (server_info.validated_ledger.base_fee_xrp, 10 drops) -- the line is ninety
+    # lines above this one with its measurement beside it. So the premise of the
+    # whole block ("DOES NOT EXIST") is gone, GRC -> XRP quotes rather than
+    # raising, and the two pairs it held back were enabled on 2026-10-04.
+    #
+    # MEASURED AGAINST THE REAL Config AND services/pricing.IDS, 2026-10-04, all
+    # five traded assets, rather than recalled:
+    #
+    #     asset  fee reserve   pricing.IDS id       MIN_CONFIRMATIONS
+    #     BTC    2e-05         bitcoin              2
+    #     GRC    0.001         gridcoin-research     6
+    #     LTC    0.001         litecoin             2
+    #     SOL    5e-06         solana               3
+    #     XRP    1e-05         ripple               1
+    #
+    # Not one asset is missing any of the three, which is why the set below is now
+    # 20 of 20 directed pairs over those five assets rather than 16.
+    #
+    # Setting a reserve remains a pricing decision and the operator's (rule 16),
+    # which is why none of them is touched here, and
+    # tests/test_allowed_pairs_are_serviceable.py still fails by name for any
+    # enabled pair whose payout asset has none -- with NO exemption set, since
+    # KNOWN_UNQUOTABLE was deleted rather than emptied when it reached zero
+    # (rule 19).
     ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]] = {
         ("GRC", "BTC"),
         ("BTC", "GRC"),
@@ -285,7 +376,11 @@ class Config:
         #   a USD price  services/pricing.IDS carries "SOL": "solana" (added 2026-09-29,
         #                inert until now) and "GRC": "gridcoin-research".
         #   a fee        the reserve is the TO asset's, and GRC_NETWORK_FEE_RESERVE exists
-        #   reserve      (0.01). This is why the reverse direction is absent: there is no
+        #   reserve      (0.01 WHEN THIS WAS WRITTEN, 0.001 since 2026-10-03 -- the operator
+        #                set it to the measured figure, "7/7, zero variance, your host", and
+        #                the parenthesis above is left as what was true on 2026-10-01 rather
+        #                than silently refreshed; see the reserve's own line for the
+        #                measurement). This is why the reverse direction is absent: there is no
         #                SOL_NETWORK_FEE_RESERVE, and inventing one is a pricing decision
         #                that is not mine (rule 16) -- adding ("GRC", "SOL") without it
         #                reproduces the GRC->XRP failure this section already records, a
@@ -309,10 +404,15 @@ class Config:
         #
         #     asset  USD price  fee reserve
         #     BTC    yes        2e-05
-        #     GRC    yes        0.01
-        #     LTC    yes        0.001
-        #     SOL    yes        MISSING
-        #     XRP    yes        MISSING
+        #     GRC    yes        0.01      <- 0.001 since 2026-10-03; this column is the
+        #     LTC    yes        0.001        2026-10-02 reading and is kept as taken
+        #     SOL    yes        MISSING   <- 5e-06 since 2026-10-03
+        #     XRP    yes        MISSING   <- 1e-05 since 2026-10-03
+        #
+        # THE TWO "MISSING" CELLS ARE THE REASON THIS TABLE CANNOT BE READ AS CURRENT, and
+        # they are annotated rather than rewritten because the arithmetic below depends on
+        # them: "these two need NOTHING in config" was reasoning FROM the two absences, and
+        # a reader who finds the table refreshed cannot see what the reasoning rested on.
         #
         # These two need NOTHING in config. SOL is the source, so the missing
         # SOL_NETWORK_FEE_RESERVE does not apply -- the reserve is the TO asset's, and both
@@ -324,30 +424,57 @@ class Config:
         # starts the server, and that is the honest reading rather than a defect: the pair is
         # willing, the chain is absent. create_swap() refuses meanwhile.
         #
-        # THE OTHER SEVEN ARE NOT A CONFIG CHANGE AND ARE NOT MINE. Every one has SOL or XRP
-        # as its DESTINATION:
+        # THE OTHER SEVEN ARE NOT A CONFIG CHANGE AND ARE NOT MINE -- AND BOTH HALVES OF
+        # THAT ARE NOW FALSE. The block is kept as written, because what it rested on is
+        # what moved and a refreshed version would hide that (rule 1). It read:
         #
-        #     BTC -> SOL   GRC -> SOL   LTC -> SOL   XRP -> SOL
-        #     BTC -> XRP   LTC -> XRP   SOL -> XRP
+        #     "Every one has SOL or XRP as its DESTINATION:
         #
-        # and each needs TWO things that do not exist, not one:
+        #         BTC -> SOL   GRC -> SOL   LTC -> SOL   XRP -> SOL
+        #         BTC -> XRP   LTC -> XRP   SOL -> XRP
         #
-        #   a fee reserve   SOL_NETWORK_FEE_RESERVE / XRP_NETWORK_FEE_RESERVE. Inventing one
-        #                   is a pricing decision and the operator's (rule 16).
-        #                   tests/test_allowed_pairs_are_serviceable.py refuses to guess and
-        #                   fails by name until the number exists -- which is the mechanism
-        #                   that keeps "we enabled a pair nobody can trade" visible.
-        #   a send path     chains/solana.py holds no keypair and imports nothing that could
-        #                   sign. chains/xrp.py holds no signing key and
-        #                   services/payout_service.py calls send_to_address() without the
-        #                   arming token. So even WITH a reserve, a swap into either could be
-        #                   quoted, could take a deposit, and could never be paid out.
+        #     and each needs TWO things that do not exist, not one:
         #
-        # That second one is why these seven are not merely unfinished config. The paragraph
-        # above already records it for ("GRC", "SOL") in the operator's own words -- "it
-        # strands a customer's coins in a swap the terminal cannot complete" -- and ("GRC",
-        # "XRP") is in this set TODAY as the live proof: it is allowed, it reads CANNOT
-        # COMPLETE on both surfaces, and it has been broken since 2026-09-26.
+        #       a fee reserve   SOL_NETWORK_FEE_RESERVE / XRP_NETWORK_FEE_RESERVE.
+        #                       Inventing one is a pricing decision and the operator's
+        #                       (rule 16).
+        #       a send path     chains/solana.py holds no keypair and imports nothing that
+        #                       could sign. chains/xrp.py holds no signing key and
+        #                       services/payout_service.py calls send_to_address() without
+        #                       the arming token. So even WITH a reserve, a swap into
+        #                       either could be quoted, could take a deposit, and could
+        #                       never be paid out."
+        #
+        # WHICH CLAUSE DIED WHEN:
+        #
+        #   the reserves    both set 2026-10-03, both MEASURED rather than invented --
+        #                   XRP 0.00001 off the operator's own rippled, SOL 0.000005 off
+        #                   their own cluster through getFeeForMessage.
+        #   XRP's send path 2026-10-02. chains/xrp.py signs, and
+        #                   services/payout_service.broadcast_payout() passes `source=`,
+        #                   `seed=` and `confirm_send=CONFIRM_XRP_SEND` for XRP -- so "calls
+        #                   send_to_address() without the arming token" names code that is
+        #                   not there. A real XRP payout settled on 2026-10-03:
+        #                   payouts.id=23, tx 799F8DED7CFB657411C5B1B9BE500C79CD62F07C
+        #                   F5634D2817804E89BDED7935, meta.delivered_amount 3315589 drops,
+        #                   tesSUCCESS, validated.
+        #   SOL's send path 2026-10-03, commit 79c4808. SolanaAdapter.can_spend is
+        #                   payout_keypair_is_present() and the keypair lives in
+        #                   chains/solana_signing.py -- "holds no keypair" stays literally
+        #                   true of chains/solana.py and stopped being a reason the pair
+        #                   cannot exist.
+        #   three of seven  GRC -> SOL, BTC -> SOL and LTC -> SOL were enabled the same
+        #                   day, by 79c4808 itself.
+        #   the last four   2026-10-04, below.
+        #
+        # AND ("GRC","XRP") IS NO LONGER THE LIVE PROOF THIS BLOCK CITED. It said that pair
+        # "reads CANNOT COMPLETE on both surfaces, and it has been broken since
+        # 2026-09-26"; it has quoted since the reserve was set on 2026-10-03 and it paid out
+        # for real the same night (the payout named above). What remains true, and is the
+        # only part worth carrying forward, is that a pair can be ALLOWED and still unable
+        # to complete on an UNARMED host -- which is a posture, not an absence, and is what
+        # services/pair_view.pair_serviceability() reports rather than something this set
+        # could express.
         ("SOL", "BTC"),
         ("SOL", "LTC"),
         # THE THREE DIRECTIONS THAT PAY OUT IN SOL, enabled 2026-10-03 on the
@@ -383,17 +510,129 @@ class Config:
         # payout that cannot fire. Enabling a pair is not arming it; these two
         # switches are deliberately separate.
         #
-        # AND THE BROADCAST IS STILL A PROPOSAL (rule 16). No transaction from this
-        # path has ever reached a cluster -- api.devnet.solana.com answers 403 from
-        # the environment this was written in, re-measured 2026-10-03 -- so the
-        # serialization is verified byte-for-byte against @solana/web3.js and the
-        # BROADCAST is verified against nothing. The path also refuses off devnet by
-        # genesis hash, with no flag that turns that off, so mainnet cannot even be
-        # previewed against. The first real send is the operator's and should be the
-        # smallest amount that clears the rent floor the preview prints.
+        # AND THE BROADCAST IS NO LONGER A PROPOSAL. IT WAS, FOR EIGHT HOURS. The
+        # sentence that stood here is kept verbatim, because it is the clearest example
+        # in this file of the thing rule 1 is about -- a measurement in prose ages, and
+        # CLAUDE.md records that happening over five days; this one aged in eight hours:
+        #
+        #     "AND THE BROADCAST IS STILL A PROPOSAL (rule 16). No transaction from
+        #     this path has ever reached a cluster -- api.devnet.solana.com answers 403
+        #     from the environment this was written in, re-measured 2026-10-03 -- so
+        #     the serialization is verified byte-for-byte against @solana/web3.js and
+        #     the BROADCAST is verified against nothing."
+        #
+        # TRUE AT 2026-10-03T04:02:29Z, the commit timestamp of 79c4808 -- the commit
+        # that wrote the sentence and enabled these three pairs. FALSE BY
+        # 2026-10-03T12:00:27Z, the `payouts` row of the first SOL payout the operator
+        # ran through the path 79c4808 had just armed: 7h58m later, on a pair that same
+        # commit enabled.
+        #
+        # MEASURED, from the operator's own swap_terminal.db joined against `swaps`
+        # (their measurement, not reproducible from a container -- see the next
+        # paragraph for why that is the whole point):
+        #
+        #     payouts.id=14  GRC->SOL  swap 2026-10-03T11:15:58Z  payout 12:00:27Z
+        #     payouts.id=15  GRC->SOL  swap 2026-10-03T11:16:09Z  payout 12:15:56Z
+        #
+        # and read BACK OFF THE CLUSTER by correct_payout_amounts.py from their host
+        # the same day, through getTransaction's postBalances[1] - preBalances[1]:
+        # 690761654 - 690000000 = 761654 lamports for id=14, and
+        # 691523308 - 690761654 = 761654 for id=15. Both status=broadcast with real
+        # signatures. So the serialization is verified against @solana/web3.js AND the
+        # broadcast is verified against the cluster, twice.
+        #
+        # WHICH ENVIRONMENT ESTABLISHED WHAT, because that distinction is the reason the
+        # old sentence was defensible rather than careless. The 403 clause is STILL TRUE
+        # and is kept: api.devnet.solana.com answers 403 from a sandboxed container, so
+        # no test in this repository can broadcast and no session here can produce this
+        # proof. It had to come from the operator's host, and it did. A claim scoped to
+        # "the environment this was written in" was honest; the sentence it was attached
+        # to ("has ever reached a cluster") was scoped to the world, and that is the half
+        # that was wrong.
+        #
+        # NO ROW CAME FROM ANYWHERE ELSE, established rather than assumed: outside
+        # tests/, `INSERT INTO payouts` and `UPDATE payouts` appear only in
+        # services/payout_service.py and correct_payout_amounts.py (which writes
+        # `amount` alone), the only writer of payouts.status/txid is
+        # _record_broadcast(), and it runs only after broadcast_payout() has returned a
+        # txid. The Node bridge under grc-sol-swap/abstergo_exchange/ never opens
+        # swap_terminal.db -- it carries no SQLite driver in package.json and no
+        # shellout, and its single mention of that filename is a comment in
+        # intent_store.js arguing for migrating its JSON store INTO it. This is drift,
+        # not a second writer.
+        #
+        # STILL TRUE AND UNCHANGED: the path refuses off devnet by genesis hash, with no
+        # flag that turns that off, so mainnet cannot be previewed against. The first
+        # MAINNET send is still the operator's.
         ("GRC", "SOL"),
         ("BTC", "SOL"),
         ("LTC", "SOL"),
+        # THE LAST FOUR, enabled 2026-10-04. The operator asked why BTC->XRP, LTC->XRP,
+        # SOL->XRP and XRP->SOL were absent and then said: "yeah let's figure out why and
+        # enable them". So this is live posture, authorized in those words (rule 16), and
+        # it takes the set from 16 of 20 directed pairs over five assets to 20 of 20.
+        #
+        # WHY THEY WERE ABSENT: NOTHING THAT IS STILL TRUE. Each of the three blocks above
+        # held some of these back, and every reason any of them gave has since been
+        # measured false -- the quoted originals are in those blocks rather than
+        # summarized here, which is the point of keeping them. In short: XRP->SOL and
+        # SOL->XRP waited on reserves that did not exist and send paths that could not
+        # sign; BTC->XRP and LTC->XRP waited on XRP_NETWORK_FEE_RESERVE alone. The
+        # reserves were set 2026-10-03, both measured off the operator's own
+        # infrastructure, and both send paths sign when armed -- XRP's since 2026-10-02
+        # and proven by a settled payment, SOL's since 2026-10-03 and proven by two
+        # settled transfers read back off the cluster.
+        #
+        # THE FOUR PREREQUISITES, CHECKED PER PAIR RATHER THAN ASSERTED. Measured
+        # 2026-10-04 by importing the real Config and the real services/pricing.IDS, not
+        # by reading these lines:
+        #
+        #   pair        adapter buildable      USD price (both)   reserve (TO asset)
+        #   BTC -> XRP  BTC_RPC_*, XRP_RPC_URL bitcoin, ripple    XRP 1e-05
+        #   LTC -> XRP  LTC_RPC_*, XRP_RPC_URL litecoin, ripple   XRP 1e-05
+        #   SOL -> XRP  SOL_RPC_URL, XRP_RPC_URL solana, ripple   XRP 1e-05
+        #   XRP -> SOL  XRP_RPC_URL, SOL_RPC_URL ripple, solana   SOL 5e-06
+        #
+        #   pair        payout path on an ARMED host
+        #   BTC -> XRP  chains/xrp.py signs; broadcast_payout() passes source, seed and
+        #   LTC -> XRP  confirm_send=CONFIRM_XRP_SEND. Settled for real 2026-10-03:
+        #   SOL -> XRP  payouts.id=23, tesSUCCESS, validated.
+        #   XRP -> SOL  chains/solana.py broadcasts bytes chains/solana_signing.py signed;
+        #               can_spend is payout_keypair_is_present(). Settled for real twice on
+        #               2026-10-03: payouts.id=14 and id=15, 761654 lamports each, read back
+        #               off the cluster.
+        #
+        # NO NEW ASSET ARRIVES WITH THESE FOUR, which is why no per-asset table needed a
+        # row: BTC, GRC, LTC, SOL and XRP were all already traded, so every gate keyed by
+        # ASSET -- the address validators, the payout quantizers, the attribution models,
+        # the swap_readiness leg checks -- was already satisfied before this change and is
+        # unchanged by it. What grows is the set of DIRECTIONS.
+        #
+        # ALLOWED IS NOT CREATABLE AND IS NOT ARMED, which this file has now drawn twice
+        # and draws a third time because all four of these land on the far side of it:
+        #
+        #   allowed    this set. What the terminal is WILLING to swap. A pair not here is
+        #              refused by quote_service.validate_pair() before anything else.
+        #   creatable  swap_service.create_swap() additionally needs the DEPOSIT account
+        #              for the FROM chain -- XRP_DEPOSIT_ACCOUNT for XRP (a custody
+        #              decision with no default) and SOL_DEPOSIT_ACCOUNT for SOL.
+        #   armed      the payout leg must be able to sign: XRP_PAYOUT_SECRET_SEED for an
+        #              XRP payout, SOL_PAYOUT_KEYPAIR_PATH plus a funded SOL_HOT_WALLET
+        #              for a SOL one.
+        #
+        # WHAT HAPPENS ON AN UNARMED HOST, WHICH IS EVERY CHECKOUT AND EVERY TEST RUN:
+        # none of those five variables is set, so can_spend is False on both chains,
+        # chains/registry.why_cannot_pay_out() names the missing ones, and
+        # services/pair_view.pair_serviceability() marks all four UNAVAILABLE rather than
+        # offering them. The customer form never shows a pair it cannot complete, so no
+        # deposit is taken against a payout that cannot fire. That is the gate that makes
+        # adding these four safe rather than a promise, and it is asserted over seeded
+        # rows through the real services rather than read off this comment --
+        # tests/test_allowed_pairs_are_serviceable.py.
+        ("BTC", "XRP"),
+        ("LTC", "XRP"),
+        ("SOL", "XRP"),
+        ("XRP", "SOL"),
     }
     # XRP. No default URL: a rippled endpoint is either your own server or a
     # public cluster, and guessing one would point this at somebody else's

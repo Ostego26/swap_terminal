@@ -18,6 +18,7 @@ own list, so there is one vocabulary (rule 11).
 import logging
 import time
 from datetime import timedelta
+from typing import NamedTuple
 
 from chains.solana_signing import below_new_account_floor
 from chains.solana_units import SOL_DECIMALS, SYSTEM_ACCOUNT_SPACE, amount_to_base_units, decimal_amount
@@ -384,12 +385,66 @@ def _confidence_for_display(config, from_asset: str, to_asset: str, notional_usd
     return {"available": True, "legs": legs}
 
 
+#: THE PROVENANCE OF A RESERVE, AS A TOKEN RATHER THAN AS PROSE. Added 2026-10-04
+#: because a one-line substring test on the prose INVERTS THE ANSWER, and it did:
+#: the MEASURED sentence names the configured figure too ("... against a configured
+#: BTC_NETWORK_FEE_RESERVE of 2e-05"), so `"configured" in how.lower()` is True for
+#: BOTH cases and a reader -- human or test -- who checks for that word scores every
+#: measured reserve as a fallback. That happened to somebody checking this very
+#: function on the day this token was added.
+#:
+#: WHY THE PROSE STAYS ANYWAY. The sentence is for a person reconciling a refusal and
+#: it says WHY the chain could not be asked, which no token can carry. The token is
+#: for the caller that has to BRANCH. One value cannot do both jobs, which is the
+#: whole reason there are now two -- and they are built together at every return site
+#: so they cannot disagree (rule 8).
+#:
+#: THE PROSE IS LED BY THE TOKEN, which is the rule 14 half: before this, a fallback
+#: and a measurement differed only somewhere inside a sentence. They now differ in the
+#: first word on every surface that prints `how`, and after 2026-10-04 they can carry
+#: the IDENTICAL NUMBER -- BTC_NETWORK_FEE_RESERVE is 0.0000282 and the measured
+#: one-input fee is 0.0000282 -- so the figure alone no longer distinguishes them at
+#: all. "Did nothing" must not look like "did work".
+RESERVE_MEASURED = "MEASURED"
+RESERVE_FALLBACK = "FALLBACK"
+
+
+class ReserveReading(NamedTuple):
+    """(amount, how, provenance). Named fields, so a caller cannot read by position.
+
+    A plain tuple grew a third element on 2026-10-04 and every `reserve, how = ...`
+    unpack in the tree would have raised ValueError -- which is the loud failure and
+    is wanted: every caller has to look at the new field rather than inherit a
+    silently-wrong two-value read. Named fields mean the next addition does not have
+    that cost, and `reading.provenance` reads as what it is where `reading[2]` does
+    not.
+    """
+
+    amount: float
+    how: str
+    provenance: str
+
+
 def measured_or_configured_reserve(db, config, adapters, to_asset: str, payout_amount: float):
     """The reserve for THIS payout: measured off the chain where it can be, else the constant.
 
-    (reserve, how). NEVER RAISES -- a failed measurement falls back to the
-    configured figure and says so, because a quote that dies on a fee probe is
-    worse than a quote priced on a constant.
+    Returns a ReserveReading(amount, how, provenance). NEVER RAISES -- a failed
+    measurement falls back to the configured figure and says so, because a quote that
+    dies on a fee probe is worse than a quote priced on a constant.
+
+    IT RETURNED (reserve, how) UNTIL 2026-10-04 and the third field is the fix for a
+    defect in the second: `how` carries prose for a human AND was the only thing a
+    caller could branch on, and the measured sentence contains the word "configured"
+    (it names the constant it beat), so any substring test for provenance answers
+    the OPPOSITE for measured rows. See RESERVE_MEASURED above for the incident.
+    `provenance` is the token; `how` stays prose and is now LED by that token.
+
+    THE DISTINCTION MATTERS MORE AFTER 2026-10-04 THAN IT DID BEFORE, which is the
+    argument for doing it in the same pass as the constant: BTC_NETWORK_FEE_RESERVE
+    is now 0.0000282 and the measured one-input BTC fee IS 0.0000282, so a fallback
+    and a measurement can print the identical number. Before, the figures differed
+    and a reader could infer provenance from the value. Now they cannot, and
+    inferring it is rule 17's error anyway.
 
     THE OPERATOR AUTHORIZED THIS 2026-10-03 after being shown the numbers, and the
     numbers are why a constant cannot be right. Measured on their node with
@@ -440,22 +495,38 @@ def measured_or_configured_reserve(db, config, adapters, to_asset: str, payout_a
     configured = get_network_fee_reserve(config, to_asset)
     adapter = (adapters or {}).get(to_asset)
     if adapter is None or not hasattr(adapter, "measure_send_fee"):
-        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because no {to_asset} "
-                            f"adapter in this process can measure a send")
+        return _fallback(configured, f"no {to_asset} adapter in this process can measure a send", to_asset)
     if payout_amount <= 0:
-        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because a payout of "
-                            f"{payout_amount!r} has no fee to measure")
+        return _fallback(configured, f"a payout of {payout_amount!r} has no fee to measure", to_asset)
     address = own_address_on_chain(db, to_asset, adapter)
     if not address:
-        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because this desk holds no "
-                            f"{to_asset} address of its own to measure a send against -- no swap has "
-                            f"ever taken a {to_asset} deposit")
+        return _fallback(configured, (f"this desk holds no {to_asset} address of its own to measure a send "
+                                      f"against -- no swap has ever taken a {to_asset} deposit"), to_asset)
     fee, how = adapter.measure_send_fee(address, payout_amount)
     if fee is None:
-        return configured, (f"the configured {to_asset}_NETWORK_FEE_RESERVE, because the chain could not "
-                            f"be asked: {how}")
-    return fee, (f"MEASURED off the {to_asset} chain for this payout's size ({how}), against a "
-                 f"configured {to_asset}_NETWORK_FEE_RESERVE of {configured}")
+        return _fallback(configured, f"the chain could not be asked: {how}", to_asset)
+    return ReserveReading(
+        fee,
+        f"{RESERVE_MEASURED} off the {to_asset} chain for this payout's size ({how}), against a "
+        f"configured {to_asset}_NETWORK_FEE_RESERVE of {configured}",
+        RESERVE_MEASURED,
+    )
+
+
+def _fallback(configured: float, because: str, to_asset: str) -> ReserveReading:
+    """One fallback sentence, built in one place, always led by the token.
+
+    FIVE RETURN SITES SPELLED THIS SENTENCE FOUR TIMES, each "the configured
+    <ASSET>_NETWORK_FEE_RESERVE, because ...". Four copies of one sentence is rule
+    8's shape: they agreed the day they were written and the token could have been
+    added to three of them. One builder, one token, and the `because` clause is the
+    only thing a call site supplies.
+    """
+    return ReserveReading(
+        configured,
+        f"{RESERVE_FALLBACK}: the configured {to_asset}_NETWORK_FEE_RESERVE, because {because}",
+        RESERVE_FALLBACK,
+    )
 
 
 def own_address_on_chain(db, asset: str, adapter=None) -> str:
@@ -548,11 +619,17 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     # decides both the fee floor at create_swap() and the funding gate, so a reader
     # reconciling a refusal has to be able to find out whether it came off the
     # chain or out of config.
-    network_fee_reserve, reserve_source = measured_or_configured_reserve(
+    reserve_reading = measured_or_configured_reserve(
         db, config, adapters, to_asset, output_amount_estimate
     )
-    logger.info("quote reserve for %s->%s: %s %s  <- %s",
-                from_asset, to_asset, network_fee_reserve, to_asset, reserve_source)
+    network_fee_reserve = reserve_reading.amount
+    # THE TOKEN LEADS THE LOG LINE, so grepping a worker log for FALLBACK finds every
+    # quote priced off a constant without reading a sentence per line. It was
+    # `<- %s` with the prose alone until 2026-10-04, when the constant was raised to
+    # the measured one-input figure and the two cases stopped differing by value.
+    logger.info("quote reserve for %s->%s: %s %s %s  <- %s",
+                from_asset, to_asset, network_fee_reserve, to_asset,
+                reserve_reading.provenance, reserve_reading.how)
     # AND A SOL PAYOUT HAS A FLOOR THE NETWORK IMPOSES, checked HERE -- after
     # the payout figure exists and BEFORE the quote row is written, so a refusal
     # leaves nothing behind. See require_deliverable_sol_payout() for what it
@@ -613,6 +690,21 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     quote["price_source"] = last_price_source()
     quote["price_fetched_at"] = prices.get("fetched_at")
     quote["confidence"] = _confidence_for_display(config, from_asset, to_asset, gross_output)
+    # WHERE THE RESERVE CAME FROM, ON THE RESPONSE ONLY. Added 2026-10-04, under the
+    # boundary the comment above already draws: no number changes, nothing new is
+    # persisted, and the `quotes` table is untouched -- adding a column to it would be
+    # a schema change on the fund path (rule 16) for a display field.
+    #
+    # WHY IT HAS TO TRAVEL AT ALL. The reserve's provenance reached exactly ONE reader
+    # before this: a logger.info inside this function. open_swap.py's receipt printed
+    # `2.82e-05 BTC reserved` with no indication whether the chain had been asked, and
+    # show_swap.py the same -- so on 2026-10-04, when BTC_NETWORK_FEE_RESERVE became
+    # the measured one-input figure, a fallback and a measurement began printing an
+    # IDENTICAL line on the operator's screen. Rule 14: "did nothing" must not look
+    # like "did work", and a reserve that silently came from a constant on a chain
+    # whose fee scales 30x is that defect on the money path.
+    quote["network_fee_reserve_provenance"] = reserve_reading.provenance
+    quote["network_fee_reserve_how"] = reserve_reading.how
     db.execute(
         """
         INSERT INTO quotes (
