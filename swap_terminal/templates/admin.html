@@ -353,6 +353,51 @@
     <p class="panel-note">Expected to hold one row per configured chain. Empty means the reconcile worker has never
        completed a cycle against this database &#8212; not that the wallets are empty.</p>
   {% endif %}
+
+  {#- THE DESK'S OWN FEE, IN THE PANEL WHOSE NUMBER IT IS SITTING INSIDE. Added
+      2026-10-04. Operator: "i NEED to collect a fee to be profitable." The
+      whole-wallet figure above is one number carrying three things -- customer
+      deposits awaiting payout, the desk's float, and the retained fee -- and
+      correcting its LABEL on 2026-10-03 did not make profit distinguishable from
+      float. This is that column, derived by swap_terminal/fee_sweep.py's one
+      derivation and reimplemented nowhere. -#}
+  <h3 id="retained-fees-subheading">The desk&rsquo;s own fee, inside that balance</h3>
+  <p class="panel-note">What this terminal has <strong>retained</strong> out of completed swaps, per destination
+     asset &#8212; derived from <code>swaps</code> and <code>payouts</code>, never pooled across assets. It is part
+     of the whole-wallet figure above and is <strong>not</strong> separable by looking at a wallet: the retained fee
+     and a customer&rsquo;s deposit are the same coin in the same place. <code>collect_fees.py</code> is the tool
+     that sweeps it out, and it refuses any sweep that would leave the wallet unable to fund an open
+     swap&rsquo;s payout.</p>
+  <p class="panel-note"><strong>Accrued is GROSS.</strong> The chain fee this desk paid to DELIVER each of those
+     payouts is not subtracted &#8212; <code>show_payout_fees.py</code> measures those &#8212; so this is retention,
+     not net profit.</p>
+  {% if data.retained_fees %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th scope="col">asset</th><th scope="col" class="num">accrued</th><th scope="col" class="num">swept</th><th scope="col" class="num">sweepable</th><th scope="col" class="num">payouts</th><th scope="col" class="num">sweeps</th></tr></thead>
+    <tbody>
+      {% for row in data.retained_fees %}
+      <tr>
+        <td>{{ row.asset }}</td>
+        <td class="num">{{ '%.8f'|format(row.accrued) }}</td>
+        <td class="num">{{ '%.8f'|format(row.swept) }}</td>
+        <td class="num">{{ '%.8f'|format(row.sweepable) }}</td>
+        <td class="num">{{ row.swaps }}</td>
+        <td class="num">{{ row.sweeps }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="panel-note"><code>payouts</code> is the denominator for accrued and <code>sweeps</code> for swept: a
+     retention with no count behind it cannot be told from one lucky swap. A sweep recorded but never
+     reported sent counts as <em>swept</em>, because over-counting costs an uncollected fee while
+     under-counting costs a double send.</p>
+  {% else %}
+    {{ badges.empty('fee has been realized in any asset', 'swaps JOIN payouts WHERE payouts.status = broadcast AND txid IS NOT NULL') }}
+    <p class="panel-note">That is <strong>not</strong> a fee of zero. No payout in this database has been
+       broadcast with a txid, so nothing has been delivered to charge a fee on.</p>
+  {% endif %}
 </section>
 
 <section class="panel" aria-labelledby="chains-heading">

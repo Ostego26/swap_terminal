@@ -454,6 +454,49 @@ def inventory_rows(db, now_iso: str) -> list[dict]:
     return rows
 
 
+def retained_fee_rows(db) -> list[dict]:
+    """The desk's own fee, per asset: earned, already collected, still collectable.
+
+    WHY THIS IS ON THIS PAGE AND IN THIS PANEL. Operator, 2026-10-04: "i NEED to
+    collect a fee to be profitable." The hot-wallet panel beside this reads
+    `getbalance` with no arguments -- the WHOLE wallet -- so one number was
+    carrying three different things at once: customer deposits awaiting payout, the
+    desk's own float, and the retained fee. The panel was corrected on 2026-10-03 to
+    stop calling that figure inventory, which was the right fix for the word and
+    left the operator still unable to tell PROFIT from FLOAT by looking.
+
+    This is the missing column. It does not change the balance figure or how it is
+    computed (rule 16: how inventory is computed and what reads it is live posture);
+    it puts the retention beside it so the two can be read against each other.
+
+    REIMPLEMENTS NOTHING (rule 8). fee_sweep.retention_by_asset() is the one
+    derivation -- fee_ledger.py's `retained` joined to what `fee_sweeps` records as
+    gone -- and collect_fees.py and show_fees.py read the same function. This
+    converts its tuples to the dicts this page's template consumes and adds nothing.
+
+    IT OPENS NO SOCKET, which is what keeps it safe to call on a page render: the
+    accrual is a SELECT over `swaps` and `payouts` and the swept figure is one
+    GROUP BY. The wallet-can-afford-it question needs a balance and is deliberately
+    NOT asked here -- that is collect_fees.py's, where the operator is deciding
+    whether to send rather than reading a page.
+    """
+    from fee_sweep import (  # noqa: PLC0415 -- checked: local for the reason pricing_rows() and probe_peg() are local in this module -- it keeps this page's import surface to what the database rows need, and fee_sweep pulls in fee_ledger behind it.
+        retention_by_asset,
+    )
+
+    return [
+        {
+            "asset": row.asset,
+            "accrued": row.accrued,
+            "swept": row.swept,
+            "sweepable": row.sweepable,
+            "swaps": row.swaps,
+            "sweeps": row.sweeps,
+        }
+        for row in retention_by_asset(db)
+    ]
+
+
 def recent_transitions(db, limit: int = 25) -> list[dict]:
     """The audit log tail: what actually changed status, and when.
 
@@ -1261,6 +1304,10 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
         "payouts": payout_rows(db),
         "unresolved_payouts": unresolved_payouts(db),
         "inventory": inventory_rows(db, now),
+        # The desk's own fee, beside the wallet balance it is sitting inside. See
+        # retained_fee_rows() for why this belongs on this page and nowhere else on
+        # it.
+        "retained_fees": retained_fee_rows(db),
         "transitions": recent_transitions(db),
         # ONE CALL, THREE SHAPES. The matrix and the asset list are INDEXES over
         # these rows, not second derivations of them -- see pair_matrix(). `pairs`

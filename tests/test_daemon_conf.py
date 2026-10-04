@@ -228,6 +228,26 @@ SERVICE_SIDE = frozenset({
     # register's own words apply: strictly worse than refusing until the variables
     # are exported.
     "correct_payout_amounts.py",
+    # collect_fees.py, added 2026-10-04. SERVICE SIDE, and this one is not a
+    # judgment call either: it resolves a chain for exactly one purpose, which is to
+    # ask whether the wallet the PAYOUT WORKER SPENDS FROM can still fund what it
+    # owes after a sweep. An answer about any other daemon is not a weaker answer to
+    # that question, it is an answer to a different one.
+    #
+    # It is also the entry on this list where the wrong-number-under-the-right-label
+    # failure would cost the most, because the label is the word `obligated` and the
+    # consequence is a BROADCAST. A conf fallback could read a balance off a wallet
+    # the desk does not pay from, compute headroom against it, decide a sweep fits,
+    # and send this desk's fee out of the wallet that is holding a credited
+    # customer's deposit -- which is the one thing swap_terminal/fee_sweep.py exists
+    # to prevent, arriving through the door this register guards rather than through
+    # the arithmetic. The register's own words apply unchanged: strictly worse than
+    # refusing until the variables are exported.
+    #
+    # And a sweep cannot be undone. correct_payout_amounts.py's entry above says a
+    # conf fallback there would be worse than a wrong read because that tool WRITES;
+    # this one SENDS.
+    "collect_fees.py",
     "open_swap.py",
     "settle_payout.py",
     # show_payout_fees.py, added 2026-10-03. SERVICE SIDE, and the reason is the

@@ -313,6 +313,69 @@ CREATE TABLE IF NOT EXISTS payouts (
 
 CREATE INDEX IF NOT EXISTS idx_payouts_swap_id ON payouts(swap_id);
 
+-- WHAT THE DESK HAS TAKEN OUT OF ITS OWN FEE. One row per sweep attempt, written
+-- by collect_fees.py and by nothing else.
+--
+-- WHY IT EXISTS AT ALL. fee_ledger.py DERIVES what each completed swap retained
+-- (realized_gross - paid) from `swaps` and `payouts`, so the accrued fee is a
+-- query and needs no table. What is NOT derivable from those rows is whether the
+-- desk has already MOVED some of it: the retained fee never had a row of its own,
+-- it is simply coin that stayed in the hot wallet, and a sweep that sends it out
+-- leaves no trace in `swaps` or `payouts`. Without this table a second run of
+-- collect_fees.py would compute the same accrued figure and sweep it again --
+-- money out twice against one accrual, with the second send coming out of
+-- customer deposits. Operator, 2026-10-04: "i NEED to collect a fee to be
+-- profitable", and a collector that cannot be run twice safely is not one.
+--
+-- SO THIS IS THE ONE FACT A DERIVATION CANNOT SUPPLY, and it is stored for that
+-- reason rather than as a convenience cache. The accrued side stays derived
+-- (rules 5 and 20); only the irreversible act is recorded.
+--
+-- THE SHAPE IS `payouts`, DELIBERATELY, down to the column names and the two
+-- timestamps. Both tables record "this desk broadcast a transaction for this
+-- amount to this address", the sweep is written through the same ordering
+-- services/payout_service.py uses -- INSERT 'created' and COMMIT before the send,
+-- UPDATE to 'broadcast' with the txid INSIDE the wallet-unlock context before the
+-- re-lock can raise -- and a reader who knows one table can read the other. A
+-- second vocabulary for the same event would be rule 8's duplicate.
+--
+--   created    the intent is durable and the send has not returned. A row left in
+--              this state is money POSSIBLY on chain with no txid, exactly like a
+--              `payouts` row in 'created'; it is counted as ALREADY SWEPT so a
+--              rerun cannot send it twice, and collect_fees.py prints it as an
+--              alarm rather than a total. That is the direction that cannot lose
+--              money: the cost of over-counting is an unswept fee, the cost of
+--              under-counting is a double send.
+--   broadcast  the txid is recorded. Final; a broadcast cannot be unsent.
+--   failed     the send raised and nothing reached a chain. NOT counted as swept,
+--              so the fee stays sweepable -- the same reason 'failed' is absent
+--              from db.PAYOUT_LIVE_STATUSES.
+--
+-- NO swap_id AND NO FOREIGN KEY, which is the one structural difference from
+-- `payouts` and is a fact about what a sweep IS. A sweep is not attributable to a
+-- swap: it moves the pooled retention of every completed swap in that asset, so a
+-- swap_id column would have to hold either a lie or a NULL on every row. The
+-- accrual it is drawn against is the fee_ledger derivation over ALL of them, and
+-- `asset` is the only key that means anything.
+--
+-- NOTHING GATES A PAYOUT ON THIS TABLE. collect_fees.py is its only reader and
+-- only writer; the payout path does not import it, and a customer payout is
+-- unaffected by whether a sweep ever ran. What protects a customer is the
+-- retention arithmetic in fee_sweep.py, which reads `swaps` -- not this table.
+CREATE TABLE IF NOT EXISTS fee_sweeps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL,
+    destination_address TEXT NOT NULL,
+    amount REAL NOT NULL,
+    txid TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
+
+-- The query collect_fees.py actually runs: how much of this asset has been swept.
+CREATE INDEX IF NOT EXISTS idx_fee_sweeps_asset_status ON fee_sweeps(asset, status);
+
 -- THE TABLE IS CALLED INVENTORY AND hot_confirmed IS A WALLET BALANCE. The name
 -- stays -- it is an identifier, and renaming a column on a live-money system is a
 -- posture change and a large diff with no reader benefit -- but what the column

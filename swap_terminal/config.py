@@ -89,6 +89,57 @@ def _env_float(name: str, default: str) -> float:
     return float(_env(name, default))
 
 
+#: The environment variable naming WHERE a chain's retained fee is swept to.
+#:
+#: ONE TEMPLATE FOR EVERY CHAIN, not five constants, for rule 11's reason: a
+#: per-chain list would be a second place a chain has to be added by hand, and
+#: "did every consumer follow automatically?" is the test that rule asks. The asset
+#: comes from whoever is sweeping -- collect_fees.py iterates the assets the fee
+#: ledger actually shows a retention in -- so a chain this terminal starts paying
+#: out in needs no edit here at all.
+#:
+#: THE NAME IS ALSO THE REFUSAL. fee_sweep_destination() returns "" for an unset
+#: one and collect_fees.py prints this template filled in, so an operator reads the
+#: exact variable to export rather than a sentence about configuration.
+FEE_SWEEP_DESTINATION_TEMPLATE = "{asset}_FEE_SWEEP_DESTINATION"
+
+
+def fee_sweep_destination(asset: str) -> str:
+    """Where `asset`'s retained fee is swept to, or "" when nobody has chosen one.
+
+    NO DEFAULT, AND THAT IS THE WHOLE POINT RATHER THAN caution. A defaulted fee
+    address is a transaction to somewhere nobody chose, and on these chains it
+    cannot be undone -- this repository's own CLAUDE.md opens by saying a broadcast
+    transaction is final, with no exchange to call and no counterparty to unwind it
+    with. XRP_DEPOSIT_ACCOUNT carries the identical reasoning for the same reason
+    ("a value that decides where money lands is not something to infer"), and this
+    is that sentence applied to the OUT direction.
+
+    READ AT CALL TIME, NOT AT IMPORT, WHICH IS A DEPARTURE FROM EVERY OTHER VALUE
+    IN THIS FILE AND IS DELIBERATE. `Config`'s class body is evaluated once at
+    import, which is why tests/conftest.py has to set SWAP_DB_PATH before importing
+    anything. That is right for a setting a long-lived worker serves on, and wrong
+    for this one: nothing in the serving path reads it -- no worker, no route, no
+    quote, no payout -- and its only consumer is a root tool the operator runs in a
+    fresh process, where a function and a class attribute behave identically. What
+    a function additionally gives is that there is no `Config.*_FEE_SWEEP_DESTINATION`
+    attribute to be picked up by services/admin_view.config_echo()'s allowlist, and
+    no five-chain table to keep in step with the template above.
+
+    It is NOT a secret -- a destination address is public by nature, and the chain
+    will publish it the moment anything is sent there -- so this is a layout
+    decision rather than a hygiene one, unlike GRIDCOIN_WALLET_PASSPHRASE which is
+    read from the environment specifically so it cannot be echoed.
+
+    `_env` rather than os.getenv, so `export GRC_FEE_SWEEP_DESTINATION=` (the empty
+    export this file's own header records taking down every entry point) means
+    ABSENT here too, and reads as the unset refusal instead of as an address that
+    is the empty string. .strip() for the same reason the two deposit accounts
+    strip: a trailing newline from a copy-paste is not part of an address.
+    """
+    return _env(FEE_SWEEP_DESTINATION_TEMPLATE.format(asset=asset), "").strip()
+
+
 class Config:
     SECRET_KEY = _env("SECRET_KEY", "swap-terminal-dev")
     DB_PATH = _env("SWAP_DB_PATH", str(BASE_DIR / "swap_terminal.db"))

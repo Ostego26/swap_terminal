@@ -38,6 +38,9 @@ WHAT IT REIMPLEMENTS: NOTHING.
     the fee derivation     fee_ledger.FEE_LEDGER_SQL -- one SELECT, and the only
                            place the arithmetic exists (rules 5 and 20)
     the per-asset totals   fee_ledger.asset_totals()
+    what has been swept    fee_sweep.retention_by_asset() -- the same derivation
+                           services/admin_view.py renders and collect_fees.py
+                           decides against (rule 8)
     the printed column     report_block.labeled(), shared with open_swap.py and
                            show_swap.py
     how a tool names
@@ -63,6 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from config import Config
 from db import connect_db
 from fee_ledger import DRIFT_IS_ZERO_COIN, FeeRow, asset_totals, fee_rows
+from fee_sweep import retention_by_asset
 from microfortnights import format_duration
 from report_block import CONTINUATION, labeled
 from workers.common import db_path_source, get_config_dict, root_tool_command
@@ -133,7 +137,46 @@ def header_lines(db_path: str, config: dict, explicit_db: str = "") -> list[str]
     ]
 
 
-def total_lines(totals: list, rows: list[FeeRow], db_path: str = "") -> list[str]:
+def collection_lines(retention) -> list[str]:
+    """How much of this asset's accrued fee has actually been COLLECTED.
+
+    ADDED 2026-10-04, AND WITHOUT IT THIS REPORT WAS MISLEADING IN ONE DIRECTION.
+    Operator: "i NEED to collect a fee to be profitable." The `retained` figure
+    above is what each completed swap kept, derived from `swaps` and `payouts` --
+    and because it is DERIVED it does not go down when the fee is swept out. A
+    reader of this report before today would conclude the whole retained figure was
+    still sitting in the wallet, which stops being true the first time
+    collect_fees.py runs.
+
+    THE DERIVATION IS fee_sweep.retention_by_asset()'S AND IS NOT REPEATED HERE
+    (rule 8). services/admin_view.retained_fee_rows() renders the same three
+    figures in the hot-wallet panel, and collect_fees.py decides against them; one
+    subtraction, three readers.
+
+    NO COMMAND TO SWEEP IS PRINTED. This file's header says it has no --collect and
+    no --sweep and names no command that moves money, and that still holds: the
+    tool is NAMED so a reader knows where to look, which is rule 14's remedy-with-
+    the-finding, and the command that broadcasts is one an operator should reach by
+    reading collect_fees.py's own report rather than by pasting a line from a fee
+    summary.
+    """
+    if retention is None:
+        return []
+    return [
+        labeled("swept out", f"{retention.swept:.8f} {retention.asset} in {retention.sweeps} recorded "
+                             f"sweep(s)  <- what has LEFT the wallet, from `fee_sweeps`. The retained "
+                             f"figure above is derived from completed swaps and does NOT go down when "
+                             f"the fee is collected, so these two are read together or not at all"),
+        labeled("still here", f"{retention.sweepable:.8f} {retention.asset}  <- accrued minus swept: the "
+                              f"part of this desk's fee still inside the hot-wallet balance, mixed with "
+                              f"customer deposits in the same coin. collect_fees.py is what moves it, and "
+                              f"it refuses any sweep that would leave the wallet unable to fund an open "
+                              f"swap's payout"),
+    ]
+
+
+def total_lines(totals: list, rows: list[FeeRow], db_path: str = "",
+                retentions: dict | None = None) -> list[str]:
     """The per-asset answer, and the answer when there is none.
 
     "(none)" is a result and a blank gap is not (rule 14). The empty case says
@@ -191,6 +234,9 @@ def total_lines(totals: list, rows: list[FeeRow], db_path: str = "") -> list[str
                                        f"delivers the full amount and the wallet pays the fee separately) "
                                        f"and being flat it cost a small swap sixty times what it cost a "
                                        f"large one. Rows priced after that show 0 here"),
+        ])
+        lines.extend(collection_lines((retentions or {}).get(total.asset)))
+        lines.extend([
             labeled("drift, gross", f"{total.drift_abs:.8f} {total.asset} across {total.drifted} of "
                                     f"{total.swaps} payout(s)  <- READ THIS BESIDE THE NET, NOT INSTEAD OF "
                                     f"IT. Overpaid and underpaid swaps cancel in the net, so a net near zero "
@@ -316,6 +362,13 @@ def closing_lines(totals: list, config: dict, db_path: str = "") -> list[str]:
         "changes what a customer is paid or what a desk charges: whether to recompute the payout from the "
         "amount actually received, what the schedule should be, and where the retained fee should go. "
         "Nothing here does any of them.",
+        "    The THIRD of those now has a tool, as of 2026-10-04, and this sentence is corrected rather "
+        "than left standing: collect_fees.py reports the retained fee per asset against what has already "
+        "been swept, and with --apply it broadcasts the sweep to <ASSET>_FEE_SWEEP_DESTINATION. Where the "
+        "fee goes is still the operator's -- that variable has no default and a chain without one is "
+        "refused by name -- and so is whether to send at all. What has changed is that there is somewhere "
+        "to do it, and that a sweep which would leave a wallet unable to fund an open swap's payout is "
+        "refused rather than warned about.",
         f"    This is a report and it ends. There is no --set, no --collect and no --sweep; nothing above is "
         f"a command that writes, and the only command this file prints is another run of itself: "
         f"{self_command(db_path)}",
@@ -338,6 +391,12 @@ def read_report(db_path: str, config: dict) -> list[str]:
     connection = connect_db(db_path)
     try:
         rows = fee_rows(connection)
+        # READ FROM THE SAME CONNECTION, IN THE SAME try, so a database with no
+        # `fee_sweeps` table -- one created before 2026-10-04 and never reopened by
+        # a worker, since db.SCHEMA is what creates it -- raises the same named
+        # OperationalError below rather than a bare traceback halfway through a
+        # report about money.
+        retentions = {row.asset: row for row in retention_by_asset(connection)}
     except sqlite3.OperationalError as error:
         # NAMED, not broad. This is what a database file with no `swaps` or
         # `payouts` table raises, which is an ordinary state for a file created
@@ -351,7 +410,7 @@ def read_report(db_path: str, config: dict) -> list[str]:
     finally:
         connection.close()
     totals = asset_totals(rows)
-    return (total_lines(totals, rows, db_path) + swap_lines(rows)
+    return (total_lines(totals, rows, db_path, retentions) + swap_lines(rows)
             + closing_lines(totals, config, db_path))
 
 
