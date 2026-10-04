@@ -65,6 +65,7 @@ from gridcoin_credentials import (
 from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, may_read_a_wallet
 from report_block import LABEL_WIDTH
 from services.custody_separation import (
+    ATTRIBUTED,
     BY_DESIGN,
     CANNOT_BE_ASKED,
     DESK_OWNERSHIP_FROM_STATE,
@@ -77,6 +78,8 @@ from services.custody_separation import (
     STATES,
     cross_daemon_ownership_verdict,
     deposit_address_verdict,
+    gridcoin_account_label,
+    gridcoin_account_verdict,
     script_chain_verdict,
     solana_account_verdict,
     wallet_label,
@@ -169,15 +172,24 @@ def test_every_verdict_state_is_a_DIFFERENT_string():
     """
     assert len(set(STATES)) == len(STATES), f"two states share a spelling: {STATES}"
     # The literal IS the assertion (pyproject turns PLR2004 off in tests for exactly
-    # this): eight states are the closed set, and a ninth has to be added here
+    # this): nine states are the closed set, and a tenth has to be added here
     # deliberately, with a decision about whether wallet_custody.GOOD_STATES
     # includes it -- which is the decision that determines an exit code.
     #
-    # SEVEN UNTIL 2026-10-04, when CANNOT_BE_ASKED split out of NOT_ESTABLISHED.
-    # The decision this comment demands was made: it is NOT in GOOD_STATES, so the
-    # exit code stays non-zero for it -- a question Gridcoin cannot answer is not
-    # a separation established.
-    assert len(STATES) == 8, (
+    # THIS GATE HAS NOW DONE ITS JOB TWICE IN ONE DAY, which is the argument for a
+    # literal over a derived count. Seven until 2026-10-04, when CANNOT_BE_ASKED
+    # split out of NOT_ESTABLISHED; nine hours later ATTRIBUTED arrived and this
+    # line failed again, forcing the same decision a second time. Both decisions
+    # are recorded rather than implied:
+    #
+    #   CANNOT_BE_ASKED   NOT in GOOD_STATES. A question Gridcoin cannot answer is
+    #                     not a separation established, so it exits non-zero.
+    #   ATTRIBUTED        IN GOOD_STATES. The operator asked for one wallet, and
+    #                     inside one wallet an address in its own ACCOUNT is the
+    #                     answer at the strength the chain allows. The regression
+    #                     it exists to catch -- a desk address in the DEFAULT
+    #                     account -- still answers NOT SEPARATED and still fails.
+    assert len(STATES) == 9, (
         "a state was added or removed; decide whether wallet_custody.GOOD_STATES should include it"
     )
 
@@ -1720,3 +1732,154 @@ def test_the_report_names_no_wallet_WRITE_and_no_credential_FILE_anywhere(monkey
         assert "read_text" not in names and "open" not in names, (
             f"{relative} reads a file through a path method"
         )
+
+
+# ---------------------------------------------------------------------------
+# Gridcoin's one-wallet account route, added 2026-10-04. Seeded, no daemon.
+# ---------------------------------------------------------------------------
+
+def _ownership(verdict, account="", why="validateaddress answered ismine"):
+    """An AddressOwnership as chains/base.address_ownership() would return one.
+
+    THE REAL NAMEDTUPLE, not a stub, so a field added or renamed there fails here
+    instead of being silently absent from every test below.
+    """
+    return AddressOwnership(verdict, why, account)
+
+
+def test_the_account_label_is_DERIVED_from_the_one_swap_service_actually_uses():
+    """One rule, one authority. A literal here would be rule 8's bug with a delay.
+
+    services/swap_service.py:475 builds `label = f"swap_{swap_id}"` and that label
+    becomes the pre-0.17 ACCOUNT. If the two ever disagree, every correctly-derived
+    desk address reports MISCONFIGURED -- a report that contradicts the daemon it
+    inspected, which is the failure this whole module exists to prevent.
+
+    SO THIS READS THE SOURCE rather than restating the format. Pinning it against
+    "swap_x" would pass just as happily with swap_service.py changed underneath.
+
+    MUTATION (ran, caught): change gridcoin_account_label to f"desk_{swap_id}".
+    This fails, and so does the ATTRIBUTED test below.
+    """
+    source = pathlib.Path(__file__).resolve().parent.parent / "swap_terminal" / "services" / "swap_service.py"
+    text = source.read_text(encoding="utf-8")
+    assert 'label = f"swap_{swap_id}"' in text, (
+        "services/swap_service.py no longer derives the deposit-address label this way, so "
+        "gridcoin_account_label() is now wrong and the GRC desk-account check will report "
+        "MISCONFIGURED for every correctly-derived address"
+    )
+    assert gridcoin_account_label("s_abc123") == "swap_s_abc123"
+
+
+def test_the_desks_own_account_is_ATTRIBUTED_and_exits_zero():
+    """The operator's measured case: account == swap_<id>. The one-wallet answer.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-04 and this test is that reading:
+
+        validateaddress moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz
+          -> {"ismine": true, "account": "swap_s_539d922e9ef0a5d8", ...}
+
+    MUTATION (ran, caught): return SEPARATED here instead. Fails on the state --
+    which matters because SEPARATED means daemon-ENFORCED on BTC and an account
+    enforces nothing, so the two words must not be interchangeable.
+    """
+    verdict = gridcoin_account_verdict(
+        "GRC", "s_539d922e9ef0a5d8", "moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz",
+        _ownership(True, "swap_s_539d922e9ef0a5d8"),
+    )
+
+    assert verdict.state == ATTRIBUTED
+    assert verdict.state in wallet_custody.GOOD_STATES, (
+        "the operator asked for one wallet; the answer at the strength that allows must exit zero"
+    )
+    assert "swap_s_539d922e9ef0a5d8" in verdict.why, "the account has to be ON SCREEN, not implied"
+    assert "enforces NOTHING" in verdict.why, (
+        "ATTRIBUTED without its limit is SEPARATED with a different spelling, and a reader who "
+        "takes it for the stronger claim is the defect ATTRIBUTED was created to avoid"
+    )
+
+
+def test_the_DEFAULT_account_is_NOT_SEPARATED_rather_than_merely_unlabeled():
+    """An empty `account` FROM validateaddress means the default account. A defect.
+
+    This is the regression the check exists to catch: a desk deposit address that
+    landed where a bare getnewaddress and the GUI both reach. It must not pass.
+
+    MUTATION (ran, caught): return ATTRIBUTED for an empty account. This fails on
+    the state AND on the GOOD_STATES assertion, which is the right blast radius --
+    it would have made the tool green for the one arrangement it is looking for.
+    """
+    verdict = gridcoin_account_verdict(
+        "GRC", "s_abc", "moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz", _ownership(True, ""),
+    )
+
+    assert verdict.state == NOT_SEPARATED
+    assert verdict.state not in wallet_custody.GOOD_STATES
+    assert "swap_s_abc" in verdict.why, "the reader needs the account it SHOULD have been under"
+
+
+def test_an_empty_account_from_getaddressinfo_is_CANNOT_BE_ASKED_not_NOT_SEPARATED():
+    """"" IS TWO DIFFERENT ANSWERS and the discriminator is which RPC replied.
+
+    getaddressinfo (0.18+) has no `account` field at all -- it carries `labels` --
+    so "" from it means the question was never asked, not that the address is in
+    the default account. Opposite remedies: one is a defect to fix, the other
+    names no variable. Reading "" as one thing is how a report comes to disagree
+    with the daemon it inspected.
+
+    MUTATION (ran, caught): drop the `answered_by_pre_017` branch so every empty
+    account reads NOT SEPARATED. This test fails while the one above still passes
+    -- which is exactly the half a single-case test would have missed.
+    """
+    verdict = gridcoin_account_verdict(
+        "GRC", "s_abc", "bcrt1qexample", _ownership(True, "", "getaddressinfo answered ismine"),
+    )
+
+    assert verdict.state == CANNOT_BE_ASKED
+    assert "0.18+" in verdict.why or "labels" in verdict.why, (
+        "the reason has to say WHY it cannot be asked, or an operator goes looking for a setting"
+    )
+
+
+def test_a_third_account_is_MISCONFIGURED_rather_than_quietly_accepted():
+    """Derived as swap_<id>, reporting something else. Something relabeled it.
+
+    The operator's beacon address is the live example of a non-swap account in
+    that wallet: "Beacon Address for CPID 09ff71bf...". A desk address reporting
+    one would mean a setaccount or a reused address, and an account-based reading
+    of whose coins those are is wrong until it is reconciled.
+
+    MUTATION (ran, caught): make the final branch return ATTRIBUTED. Fails here.
+    """
+    verdict = gridcoin_account_verdict(
+        "GRC", "s_abc", "moimRB7znV9FgZGKUmLHukYusVmzKiY5r6",
+        _ownership(True, "Beacon Address for CPID 09ff71bf7098642c260fcbc9bd9c08c3 (at 3294366)"),
+    )
+
+    assert verdict.state == MISCONFIGURED
+    assert verdict.state not in wallet_custody.GOOD_STATES
+    assert "Beacon Address" in verdict.why and "swap_s_abc" in verdict.why, "both names, or nobody can act"
+
+
+@pytest.mark.parametrize(
+    ("verdict_in", "expected"),
+    [(None, NOT_ESTABLISHED), (False, NOT_THE_DESKS)],
+)
+def test_no_account_reading_can_outrank_ismine(verdict_in, expected):
+    """ismine is asked BEFORE the account, and neither failure can read as green.
+
+    An unanswered daemon is NOT ESTABLISHED; ismine=false on a swap's own deposit
+    address is NOT THE DESK'S and is a defect whatever account it names -- a
+    deposit the desk cannot see is a deposit it cannot spend.
+
+    MUTATION (ran, caught): check the account before ismine. The None case then
+    reads NOT SEPARATED off an empty account, inventing a custody answer out of a
+    daemon that never replied -- which is the single worst outcome available here.
+    """
+    verdict = gridcoin_account_verdict(
+        "GRC", "s_abc", "moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz",
+        _ownership(verdict_in, "swap_s_abc"),
+    )
+
+    assert verdict.state == expected
+    assert verdict.state not in wallet_custody.GOOD_STATES

@@ -101,6 +101,32 @@ BY_DESIGN = "BY DESIGN"
 #: is confirmed and irreversible.
 MISCONFIGURED = "MISCONFIGURED"
 
+#: The desk's address is filed under its OWN pre-0.17 account, distinct from the
+#: default account an operator's bare CLI and GUI reach. The question is ANSWERED
+#: and answered affirmatively -- so this IS in wallet_custody.GOOD_STATES -- at
+#: the strength this daemon family allows, which is weaker than SEPARATED and the
+#: word is different for exactly that reason.
+#:
+#: WHY NOT JUST CALL IT SEPARATED. On BTC and LTC, SEPARATED means the DAEMON
+#: REFUSES to cross the boundary: with two wallets loaded, a bare wallet RPC gets
+#: rpc code -19 and cannot land in desk_hot by accident. A pre-0.17 account
+#: enforces NOTHING. Coin selection ignores accounts, so the Gridcoin GUI will
+#: spend a desk UTXO to fund an operator's send without asking, and one wallet is
+#: one keyset behind one passphrase. Rendering both as SEPARATED would put a
+#: weaker guarantee under a word an operator has already learned means the strong
+#: one -- which is the vocabulary-stretching mistake DESK_OWNS exists because of,
+#: made a second time.
+#:
+#: WHAT IT DOES ESTABLISH, and it is not nothing: every address the desk derived
+#: is attributable to the swap it was derived for, by the daemon itself rather
+#: than by this application's records, so desk coins and operator coins can be
+#: told apart inside one wallet.dat. That is the honest answer to the operator's
+#: 2026-10-04 requirement -- "we need a solution where we can do all of this, but
+#: use one gui/wallet ... when it comes to gridcoin" -- and it needed no second
+#: daemon, no second datadir, no config change and no restart, because
+#: services/swap_service.py:475 has been deriving into `swap_{swap_id}` all along.
+ATTRIBUTED = "ATTRIBUTED"
+
 #: The payout wallet DOES hold the key for the deposit address it was asked
 #: about. Correct for a custodial desk, and never a finding.
 #:
@@ -231,7 +257,7 @@ GRIDCOIN_NO_WALLETNAME_EVIDENCE = (
 #: cut mid-word with nothing saying a tool did it -- which is what
 #: "ONE DESK ACCOUNT, BY DESIGN" did before it became "BY DESIGN".
 STATES = (SEPARATED, NOT_SEPARATED, BY_DESIGN, DESK_OWNS, NOT_THE_DESKS, MISCONFIGURED,
-          NOT_ESTABLISHED, CANNOT_BE_ASKED)
+          NOT_ESTABLISHED, CANNOT_BE_ASKED, ATTRIBUTED)
 
 
 class CustodyVerdict(NamedTuple):
@@ -339,11 +365,13 @@ def script_chain_verdict(
             f"it and neither is a setting: a SECOND {asset} daemon with its own datadir on its own "
             f"port (one wallet per datadir means a second wallet REQUIRES a second datadir -- and "
             f"copy block data only, never wallet.dat), which is the same missing thing the "
-            f"operator-daemon line is blocked on; or the pre-0.17 `account` field validateaddress "
-            f"already returns, which would separate the desk inside the ONE wallet this daemon has. "
-            f"The second is NOT YET ESTABLISHED as available -- the field is confirmed present on "
-            f"the operator's host, but whether `setaccount` is callable to WRITE it is unmeasured, "
-            f"and the help-text grep that would have answered it is the one a control run refuted"
+            f"operator-daemon line is blocked on; or the pre-0.17 `account` field, which the `desk "
+            f"account` line BELOW now reads and which needs neither. That second route is MEASURED "
+            f"rather than proposed as of 2026-10-04 -- a desk deposit address on the operator's "
+            f"host came back under account 'swap_s_539d922e9ef0a5d8' while 88 operator addresses "
+            f"sat in the default account -- so the separation was already present in this one "
+            f"wallet and nothing was reading it. Pass --swap to see that line; THIS line stays "
+            f"CANNOT BE ASKED because the WALLET question specifically has no answer here"
         ))
     serving = str(walletinfo["walletname"])
     asked_for = (configured_wallet or "").strip()
@@ -780,3 +808,128 @@ def what_this_cannot_establish() -> tuple[str, ...]:
         f"all, which no configuration fixes. Both print their reason and both exit non-zero -- a "
         f"green verdict is never the default here.",
     )
+
+
+def gridcoin_account_label(swap_id: str) -> str:
+    """The pre-0.17 account a desk deposit address for `swap_id` is filed under.
+
+    ONE SPELLING, DERIVED FROM THE ONE THAT ALREADY EXISTS. services/swap_service
+    .py:475 builds `label = f"swap_{swap_id}"` and hands it to
+    chains/base.RPCAdapter.get_new_address(), which calls `getnewaddress <label>`.
+    On a pre-0.17 daemon that first argument IS the account, so this function and
+    that line must agree forever or this check silently reports MISCONFIGURED for
+    every correctly-derived address. tests/test_custody_separation.py asserts the
+    two against each other rather than against a literal, which is what rule 8
+    asks when one rule has two sites and only one of them can be the authority.
+    """
+    return f"swap_{swap_id}"
+
+
+def gridcoin_account_verdict(
+    asset: str,
+    swap_id: str,
+    deposit_address: str,
+    ownership,
+) -> CustodyVerdict:
+    """Is the desk's deposit address in its OWN account, inside the one wallet?
+
+    THIS IS THE ANSWER TO "one gui/wallet" FOR GRIDCOIN, and it replaces a route
+    that required hardware the operator does not want to run. Before 2026-10-04
+    the only GRC separation route this tree knew was a SECOND daemon with a second
+    datadir, because `getwalletinfo` carries no `walletname` on this build and
+    that was the only field anything looked at. The operator asked for one wallet
+    instead, and the measurement that followed showed the separation was already
+    there:
+
+        validateaddress moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz
+          -> "account": "swap_s_539d922e9ef0a5d8"      <- a desk deposit address
+        validateaddress moimRB7znV9FgZGKUmLHukYusVmzKiY5r6
+          -> "account": "Beacon Address for CPID 09ff..."
+        getaddressesbyaccount ""
+          -> 88 addresses, and NEITHER of the above among them
+
+    Three accounts in one wallet.dat: the desk's per-swap accounts, the default
+    account holding the operator's own 88, and the beacon's. Gridcoin has been
+    filing them apart since the first swap and nothing was reading it.
+
+    `ownership` IS A chains/base.AddressOwnership, NOT A CONNECTION. The caller
+    makes the RPC; this function decides. That is rule 10 -- the decision is the
+    smallest testable piece and the tests seed it with no daemon at all -- and it
+    is what lets the repository's "verify by behavior" principle have something to
+    assert on.
+
+    WHY AN EMPTY `account` IS NOT ONE ANSWER. "" is ambiguous between "the DEFAULT
+    account, which is where the operator's own addresses live" and "this daemon has
+    no accounts at all", and those are opposite verdicts -- NOT SEPARATED is a
+    defect to act on, CANNOT BE ASKED names no variable. The discriminator is WHICH
+    RPC answered, which `ownership.why` carries: `validateaddress` is the pre-0.17
+    method and DOES return `account`, so "" from it means the default account;
+    `getaddressinfo` is the 0.18+ method, has no `account` field at all (it has
+    `labels`), and "" from it means the question was never asked. Reading "" as one
+    thing is how a report comes to disagree with the daemon it inspected.
+
+    THE ACCOUNT ENFORCES NOTHING AND THE VERDICT SAYS SO. See ATTRIBUTED's note:
+    coin selection ignores accounts, so the GUI can spend a desk UTXO, and one
+    wallet is one keyset behind one passphrase. A caller that renders ATTRIBUTED
+    as the same guarantee BTC's SEPARATED carries has undone the reason the two
+    words are different.
+    """
+    expected = gridcoin_account_label(swap_id)
+    answered_by_pre_017 = "validateaddress" in (ownership.why or "")
+    limit = (
+        f"WHAT THIS DOES NOT ESTABLISH: a pre-0.17 account enforces NOTHING. Coin selection "
+        f"ignores accounts, so the {asset} GUI can spend a desk UTXO to fund your own send "
+        f"without asking, and one wallet is one keyset behind one passphrase. This is "
+        f"attribution, not the daemon-enforced refusal BTC and LTC get from rpc code -19"
+    )
+
+    if ownership.verdict is None:
+        return CustodyVerdict(NOT_ESTABLISHED, (
+            f"{asset} swap {swap_id}: nobody answered for {deposit_address} ({ownership.why}), so "
+            f"which account it is filed under was not established. This is NOT 'not separated' -- "
+            f"a down daemon and a refused login both land here and neither says anything about "
+            f"custody"
+        ))
+    if not ownership.verdict:
+        return CustodyVerdict(NOT_THE_DESKS, (
+            f"{asset} swap {swap_id}: the wallet reports ismine=false for {deposit_address}, which "
+            f"is this swap's own deposit address. A deposit the desk cannot see is a deposit it "
+            f"cannot spend, so this is a defect regardless of any account -- and it means the "
+            f"address in the database was not derived by this wallet"
+        ))
+    if not ownership.account:
+        if answered_by_pre_017:
+            return CustodyVerdict(NOT_SEPARATED, (
+                f"{asset} swap {swap_id}: {deposit_address} is in the DEFAULT account (validateaddress "
+                f"answered with an empty `account`), which is where a bare getnewaddress and the "
+                f"{asset} GUI both land. The desk's deposit addresses and the operator's own coins "
+                f"are in one account as well as one wallet, so nothing distinguishes them. Expected "
+                f"account {expected!r} -- services/swap_service.py derives with "
+                f"`getnewaddress {expected}` and a pre-0.17 daemon files that as the account, so an "
+                f"empty one here means that derivation did not happen or was undone"
+            ))
+        return CustodyVerdict(CANNOT_BE_ASKED, (
+            f"{asset} swap {swap_id}: the reply for {deposit_address} carries no `account` field "
+            f"({ownership.why}), so which account it is filed under cannot be established from this "
+            f"daemon. getaddressinfo is the 0.18+ method and has no `account` field at all -- it "
+            f"carries `labels` instead -- so this is a daemon NEWER than the accounts API rather "
+            f"than one missing a setting. THERE IS NO VARIABLE TO CHANGE; on such a daemon the "
+            f"separation question is answered by a named WALLET instead, which is what BTC and LTC "
+            f"do here"
+        ))
+    if ownership.account == expected:
+        return CustodyVerdict(ATTRIBUTED, (
+            f"{asset} swap {swap_id}: {deposit_address} is filed under account {ownership.account!r}, "
+            f"which is this swap's own and NOT the default account the operator's bare CLI and GUI "
+            f"reach. The daemon itself attributes it -- services/swap_service.py derived it with "
+            f"`getnewaddress {expected}` and a pre-0.17 daemon reads that first argument as the "
+            f"account -- so desk coins and operator coins are distinguishable inside one wallet.dat, "
+            f"with no second daemon and no second datadir. {limit}"
+        ))
+    return CustodyVerdict(MISCONFIGURED, (
+        f"{asset} swap {swap_id}: {deposit_address} is filed under account {ownership.account!r} but "
+        f"this swap's addresses should be under {expected!r}. Two values that have to name one "
+        f"account name two different ones, so something relabeled it after derivation -- a "
+        f"`setaccount`, or an address reused from elsewhere in the wallet. Until it is reconciled, "
+        f"an account-based reading of which coins are the desk's is wrong for this address"
+    ))

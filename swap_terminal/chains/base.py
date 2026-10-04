@@ -458,6 +458,31 @@ class AddressOwnership(NamedTuple):
 
     verdict: bool | None
     why: str
+    #: The pre-0.17 `account` this address is filed under, when the daemon's reply
+    #: carries one, else "". Empty is AMBIGUOUS between "the default account" and
+    #: "this daemon has no accounts", so a caller that needs the difference must
+    #: check `why` for which method answered -- services/custody_separation.
+    #: gridcoin_account_verdict() does exactly that and documents why.
+    #:
+    #: WHY IT RIDES ALONG RATHER THAN COSTING A SECOND RPC. validateaddress
+    #: already returns it and this method already calls validateaddress, so a
+    #: separate getaccount/validateaddress pair in the caller would be two reads
+    #: for one reply and a second place asking the same question (rule 8).
+    #:
+    #: MEASURED ON THE OPERATOR'S GRIDCOIN v5.5.1.0 TESTNET DAEMON, 2026-10-04,
+    #: which is what made this field worth carrying:
+    #:
+    #:     moaSBv8gcwXRnmQhxJJAjUvXMd542jsNNz -> "swap_s_539d922e9ef0a5d8"
+    #:     moimRB7znV9FgZGKUmLHukYusVmzKiY5r6 -> "Beacon Address for CPID 09ff..."
+    #:
+    #: The first is a desk deposit address, filed by the daemon into an account
+    #: named for its swap because services/swap_service.py:475 derives it with
+    #: `getnewaddress f"swap_{swap_id}"` and a PRE-0.17 daemon reads that first
+    #: argument as the ACCOUNT (0.17 renamed it to "label" when multiwallet
+    #: arrived). getaddressesbyaccount "" returned 88 addresses on that host and
+    #: NEITHER of the two above was among them -- which is the separation, already
+    #: present in one wallet.dat, that nothing in this tree was reading.
+    account: str = ""
 
 
 class RPCAdapter:
@@ -612,7 +637,16 @@ class RPCAdapter:
                 unanswered.append(f"{method}: {exc}")
                 continue
             if isinstance(result, dict) and "ismine" in result:
-                return AddressOwnership(bool(result["ismine"]), f"{method} answered ismine")
+                # str() AND NOT the raw value: `account` is operator-supplied text
+                # on a pre-0.17 daemon and a non-string would propagate into a
+                # comparison and a report. A daemon with no accounts omits the key
+                # entirely, which .get() renders as "" -- see the field's note on
+                # why empty is ambiguous and who resolves it.
+                return AddressOwnership(
+                    bool(result["ismine"]),
+                    f"{method} answered ismine",
+                    str(result.get("account") or ""),
+                )
             unanswered.append(f"{method}: answered, with no `ismine` field")
         why = "; ".join(unanswered)
         logger.warning(

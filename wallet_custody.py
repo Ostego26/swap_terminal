@@ -154,6 +154,7 @@ from microfortnights import format_duration
 from network_target import may_read_a_wallet
 from report_block import CONTINUATION, labeled, wrapped
 from services.custody_separation import (
+    ATTRIBUTED,
     BY_DESIGN,
     CANNOT_BE_ASKED,
     DESK_OWNERSHIP_FROM_STATE,
@@ -163,6 +164,7 @@ from services.custody_separation import (
     STATES,
     cross_daemon_ownership_verdict,
     deposit_address_verdict,
+    gridcoin_account_verdict,
     script_chain_verdict,
     solana_account_verdict,
     what_this_cannot_establish,
@@ -232,7 +234,23 @@ DESK_DEPOSIT_CHECK = f"{CROSS_DAEMON_CHAIN} deposit addr"
 #: working correctly; counting it as a failure -- which the first draft did, by
 #: rendering it as NOT SEPARATED -- made this tool disagree with the design it
 #: inspects, and would have had an operator "fixing" the one line that was right.
-GOOD_STATES = (SEPARATED, BY_DESIGN, DESK_OWNS)
+#
+# ATTRIBUTED IS IN HERE, ADDED 2026-10-04, AND IT IS THE WEAKEST THING THIS TUPLE
+# ADMITS. The operator's requirement that day: "we need a solution where we can
+# do all of this, but use one gui/wallet ... when it comes to gridcoin." Inside
+# ONE wallet the strong answer is unavailable by construction -- there is no
+# second wallet for the daemon to refuse a bare call into -- so the question
+# becomes "is the desk's address in its own ACCOUNT", and measured on their host
+# it is: swap_s_539d922e9ef0a5d8, against 88 operator addresses in the default
+# account. That is the answer at the strength this chain allows, so it exits zero.
+#
+# WHAT KEEPS IT HONEST rather than a loosened threshold: the states it is NOT.
+# An address in the DEFAULT account still answers NOT SEPARATED, and one filed
+# under some third account answers MISCONFIGURED -- both non-zero. So the
+# regression this check exists to catch (a desk address landing where the
+# operator's GUI reaches) still fails the tool. What ATTRIBUTED concedes is the
+# ENFORCEMENT, not the answer, and its own `why` carries that in every rendering.
+GOOD_STATES = (SEPARATED, BY_DESIGN, DESK_OWNS, ATTRIBUTED)
 
 
 class Refused(Exception):
@@ -470,6 +488,22 @@ def script_chain_lines(asset: str, adapters: dict, row: dict | None) -> list[tup
     ownership = adapter.address_ownership(deposit_address)
     owned = deposit_address_verdict(asset, str(row["id"]), deposit_address, ownership.verdict, ownership.why)
     lines.append((f"{asset} deposit addr", owned.state, owned.why))
+    # THE ACCOUNT LINE IS THE FALLBACK FOR A DAEMON THAT CANNOT ANSWER BY WALLET,
+    # and it is gated on exactly that rather than on `asset == "GRC"`. A chain
+    # whose getwalletinfo carries `walletname` has already given the stronger
+    # answer two lines up, and asking a second mechanism for a question the first
+    # one answered is rule 8's two-implementations-of-one-rule -- the shape this
+    # file's cross-daemon comment already refuses for BTC and LTC. Gating on the
+    # STATE means a daemon that gains or loses the field moves itself between
+    # routes with no constant to maintain.
+    #
+    # NO ADDITIONAL RPC. `ownership` above is the same validateaddress reply, and
+    # chains/base.AddressOwnership now carries its `account` field for this
+    # purpose -- see that field's note for the 2026-10-04 measurement, and
+    # services/custody_separation.gridcoin_account_verdict() for the decision.
+    if verdict.state == CANNOT_BE_ASKED:
+        account = gridcoin_account_verdict(asset, str(row["id"]), deposit_address, ownership)
+        lines.append((f"{asset} desk account", account.state, account.why))
     return lines
 
 
