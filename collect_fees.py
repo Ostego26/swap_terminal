@@ -151,7 +151,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from chains.gridcoin_wallet_lock import GridcoinLockError
 from chains.registry import build_adapters
 from config import FEE_SWEEP_DESTINATION_TEMPLATE, Config, fee_sweep_destination
-from db import db_session
+from db import SCHEMA, apply_migrations, db_session
 from fee_ledger import asset_totals, fee_rows
 from fee_sweep import (
     ALREADY_SWEPT,
@@ -634,6 +634,46 @@ def main(argv: list[str] | None = None) -> int:
     _accruals.clear()
     sent = 0
     with db_session(db_path) as db:
+        # SCHEMA FIRST, BEFORE ANY SELECT. `fee_sweeps` arrived with this tool, so
+        # the first run against a database created before it has no such table --
+        # and on the operator's host 2026-10-04 this crashed with a raw
+        # `sqlite3.OperationalError: no such table: fee_sweeps` traceback, under
+        # BOTH the report and `--apply`. It died before reaching a send, so it
+        # failed safe, but by accident rather than by design: a tool that reaches
+        # the apply path and then dies on its own missing table has not earned the
+        # trust of signing anything.
+        #
+        # open_swap.py:967 already does exactly this and PRINTS that it did
+        # ("schema ensured; deposit_tag column added now: False"), which is rule
+        # 14's shape -- the reader learns what the run did to the database before
+        # it learns anything else. executescript(SCHEMA) is idempotent and
+        # apply_migrations() is what adds a column to a table that already exists,
+        # so running both on every start costs one statement and removes the whole
+        # class of "this tool predates that table".
+        #
+        # This is a READ in the report case, and the schema write is the one
+        # exception to "nothing is written" -- said on screen rather than buried,
+        # because the banner above claims no row is written and a CREATE TABLE is
+        # not nothing.
+        db.executescript(SCHEMA)
+        migrated = apply_migrations(db)
+        # The dict's own keys, not a count: apply_migrations() returns
+        # {deposit_tag_added, index_created, duplicates} and `or 'no'` on a dict
+        # that is always truthy would have printed the dict itself. Measured by
+        # calling it against an in-memory SCHEMA rather than read off its
+        # signature, which says only `-> dict`.
+        print(labeled("schema", f"ensured; deposit_tag added now {migrated['deposit_tag_added']}, "
+                                f"payout index created now {migrated['index_created']}  <- the only write "
+                                f"a REPORT run makes, and it creates TABLES rather than rows. `fee_sweeps` "
+                                f"arrived with this tool on 2026-10-04, so a database older than that has "
+                                f"none until this line runs. False on both is the normal case"),
+              flush=True)
+        if migrated["duplicates"]:
+            print(labeled("*** ALARM", f"{len(migrated['duplicates'])} swap(s) carry more than one LIVE "
+                                       f"payout row, so the one-live-payout index could not be created: "
+                                       f"{migrated['duplicates']}. That is a double-payout guard that is "
+                                       f"NOT in place; resolve those rows before trusting any sweep, "
+                                       f"because the accrual counts delivered payouts"), flush=True)
         totals = asset_totals(fee_rows(db))
         print(labeled("assets", f"{len(totals)}  <- destination assets with at least one delivered "
                                 f"payout. Never pooled: adding coins of different value and calling the "
