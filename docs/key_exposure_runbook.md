@@ -69,6 +69,33 @@ deletion you lose the record of what to check:
 
 Both should read 0. The second is the one that matters.
 
+**MEASURED 2026-10-04, BEFORE STEP 1 HAD BEEN RUN, and the result changes what
+step 1 is for.** Read off both clusters by the operator:
+
+    cluster        wallet lamports   SPL token accounts   with a nonzero amount
+    devnet                  655240                    6                       0
+    mainnet-beta                 0                    0                       0
+
+All six devnet token accounts read amount 0 at decimals 0 and hold 2039280
+lamports of rent each, so 655240 + 6 * 2039280 = 12890920 lamports (0.01289 SOL)
+is everything this keypair controls anywhere, and every lamport of it is rent on
+an empty account. The six are the vault accounts of the Serum market whose
+creation scripts were culled on 2026-10-04.
+
+So the step-2 check already passes on the cluster it says matters: mainnet-beta
+reads 0 out of 0 accounts because **this keypair was never funded on mainnet at
+all** -- that is not "the sweep ran", it is "there is nothing there". And step 1
+has nothing to move: `rotate_solana_key.mjs --move` would sweep 655240 lamports
+of devnet play money and iterate 6 token accounts of which 0 carry a balance.
+The tokens-before-SOL ordering it gets right is correct and, today, moot.
+
+**STEP 1 IS THEREFORE OPTIONAL AND STEPS 3 AND 4 ARE NOT.** The key is published
+regardless of its balance, so the thing still outstanding is the history purge,
+not the sweep. The one case that keeps step 1 live is funding: anything sent to
+that address from now on is sent to an address whose private key is on GitHub,
+and it would then need sweeping. Re-read the two balances before acting on this
+paragraph -- it is a measurement dated 2026-10-04, not a property of the key.
+
 **3. Then delete the five branches.**
 
     for b in claude/deposit-vout-migration claude/htlc-and-payout-guards \

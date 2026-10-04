@@ -726,11 +726,23 @@ class Config:
         # server.js:143 loads that keypair, and sendSolPayout() at :245 builds a
         # SystemProgram.transfer and calls sendAndConfirmTransaction with it --
         # a real signed transfer, which its own module header declares ("Can
-        # move funds: YES"). (services/solana.js does NOT sign: it imports
-        # Keypair and never uses it, and passes `owner: userAddress` as a string
-        # to a Serum order with `price: 1, // This should be dynamic`. A reader
-        # looking there for the signer finds nothing, which is why the sentence
-        # names server.js.)
+        # move funds: YES").
+        #
+        # THE PARENTHETICAL THAT USED TO FOLLOW NAMED A FILE THAT NO LONGER
+        # EXISTS, and it is rewritten rather than left standing because a
+        # comment pointing at a deleted file is the wrong-comment bug. It read:
+        # "(services/solana.js does NOT sign: it imports Keypair and never uses
+        # it, and passes `owner: userAddress` as a string to a Serum order with
+        # `price: 1, // This should be dynamic`. A reader looking there for the
+        # signer finds nothing, which is why the sentence names server.js.)"
+        #
+        # services/solana.js was deleted on 2026-10-04 with the rest of the
+        # Serum/wGRC order-book work, at the operator's instruction. What the
+        # parenthetical was FOR still holds and is worth keeping in one line:
+        # server.js is the ONLY thing in grc-sol-swap/ that signs, and it was
+        # worth saying so because a reader hunting for the Node signer had a
+        # second plausible file to look in. There is now exactly one, so the
+        # ambiguity the parenthetical resolved is gone rather than answered.
         #
         # THE CLAUSE ABOUT THIS TREE IS THE ONE THAT WENT WRONG, because a
         # Python payout path landed. SOL_PAYOUT_KEYPAIR_PATH is now read -- by

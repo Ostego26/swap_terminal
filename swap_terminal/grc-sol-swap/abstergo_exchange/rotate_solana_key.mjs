@@ -40,7 +40,51 @@
  * and the only node_modules in this tree holding them is this directory's. A
  * copy at the root would need NODE_PATH set or a second package.json, which is
  * a worse trade than one documented exception -- rule 10 is explicit that it is
- * the direction for new code, not a licence for churn that buys nothing.
+ * the direction for new code, not a license for churn that buys nothing.
+ *
+ * WHAT THE KEY ACTUALLY CONTROLS, MEASURED 2026-10-04 ON BOTH CLUSTERS
+ *
+ * This question had been open since 2026-09-27 and was re-established from
+ * scratch today, because the first measurement was never written down. That
+ * round trip is the whole argument for dating a measurement next to the code:
+ * the numbers below are not "the balance", they are the balance ON 2026-10-04,
+ * and the next reader has to re-read the clusters rather than trust them.
+ *
+ * Read off the clusters by the operator, for
+ * BGdUSPGWiwStabibSXwiLwJCsk6iXDTeyL6fgWbNcAvN:
+ *
+ *   cluster        wallet lamports   SPL token accounts   with a nonzero amount
+ *   devnet                  655240                    6                       0
+ *   mainnet-beta                 0                    0                       0
+ *
+ * All six devnet token accounts read amount 0 at decimals 0, and each holds
+ * 2039280 lamports of rent -- so 655240 + 6 * 2039280 = 12890920 lamports
+ * (0.01289 SOL) is the whole of what this keypair controls anywhere, and every
+ * lamport of it is rent on an empty account. The six are the deleted Serum
+ * market's vault accounts: empty shells.
+ *
+ * TWO CONSEQUENCES, and the denominators are stated because that is what makes
+ * them checkable rather than reassuring:
+ *
+ *   --move HAS NOTHING TO MOVE. The token sweep this file's "the order is the
+ *   whole point" section exists to get right iterates 6 accounts of which 0
+ *   carry a balance, so the tokens-before-SOL ordering is correct and, today,
+ *   moot. The SOL sweep would move 655240 lamports of devnet play money.
+ *
+ *   MAINNET WAS NEVER INVOLVED. 0 lamports and 0 token accounts out of 0 is not
+ *   "the sweep already ran" -- there is no account there at all. The mainnet
+ *   balance check in the runbook's step 2, the one it calls "the one that
+ *   matters", reads zero because this keypair was never funded on mainnet.
+ *
+ * THIS DOES NOT MEAN THE KEY IS SAFE TO USE. It is published -- in this
+ * repository's history at b3aa36a, reachable from five origin/ branches -- and
+ * publication is not undone by the account being empty. The measurement says
+ * only that it currently controls nothing, which is a statement about today's
+ * balances and not about the key. Anything funded to that address from now on
+ * is funded to an address whose private key is on GitHub. The file itself is
+ * NOT deleted by the cull that removed the Serum work on 2026-10-04: deleting
+ * key material is irreversible and is the operator's call, and deleting it
+ * would achieve nothing anyway, since the key is in history regardless.
  *
  * USAGE
  *

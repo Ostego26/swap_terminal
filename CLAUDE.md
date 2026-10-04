@@ -23,8 +23,23 @@ live here side by side:
   Atomic swap modules  `modules/atomic_*_client.py`, `modules/atomic_htlc_scripts.py`,
                        `modules/atomic_swapper.py` -- HTLC cross-chain swaps on
                        BTC / LTC / GRC.
-  Solana/Serum bridge  `grc-sol-swap/abstergo_exchange/` -- an Express server
+  Solana bridge        `grc-sol-swap/abstergo_exchange/` -- an Express server
                        verifying Gridcoin deposits and paying out on Solana.
+                       **WAS "Solana/Serum bridge" until 2026-10-04**, when the
+                       Serum/wGRC order-book work was culled at the operator's
+                       instruction: twelve files, 993 lines, including both
+                       market-creation scripts, the two stub Rust programs and
+                       the three Serum React components. The label is corrected
+                       rather than deleted because the name is how a reader
+                       decides whether this directory is where an order book
+                       lives, and it no longer is. Why it went: a matching venue
+                       is orthogonal to hashlocked settlement, and settling
+                       through it would need wGRC, which puts custodial trust
+                       back at the wrapping step and adds a mint authority as a
+                       new single point of failure. SPL/wGRC PAYOUT SUPPORT IN
+                       THE PYTHON TREE IS UNTOUCHED and is a different thing --
+                       `chains/solana.py` and `SOL_SPL_MINT` pay an SPL token
+                       out; they never needed a market.
 
 **The difference from Mammon that changes everything.** Mammon's rule 16 draws
 its safety line at "reversible by a deploy versus reversible only by a trade."
