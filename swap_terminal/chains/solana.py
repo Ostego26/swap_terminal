@@ -922,6 +922,41 @@ class SolanaAdapter:
 
     # --- the contract: validate_address --------------------------------------
 
+    def owns_address(self, address: str) -> bool | None:
+        """True when `address` IS this desk's payout account; None otherwise.
+
+        WITHOUT THIS METHOD, EVERY *-> SOL SWAP CRASHED. Measured 2026-10-05 opening
+        GRC -> SOL:
+
+            services/swap_service.py:703
+              owns = None if desk_account else adapters[to_asset].owns_address(...)
+            AttributeError: 'SolanaAdapter' object has no attribute 'owns_address'
+
+        SolanaAdapter deliberately does not subclass chains/base.RPCAdapter -- see this
+        class's docstring -- so it got none of RPCAdapter's methods for free, and this
+        one was never written. The guard is reached only when payout_source_account()
+        returns "", and SOL is deliberately absent from SHARED_ACCOUNT_PAYOUT_ASSETS
+        because its deposit account (SOL_DEPOSIT_ACCOUNT) and its payout account
+        (SOL_HOT_WALLET) are DIFFERENT accounts, unlike XRP's single one. So SOL is the
+        one asset that reaches this call, and nothing had ever reached it before: today
+        was the first *-> SOL swap anyone opened.
+
+        WHY True/None AND NEVER False, which is chains/xrp.py's reasoning with one
+        addition. Solana has no "is this mine" to ask: an account belongs to whoever
+        holds its key, and this adapter holds at most one. So "not our hot wallet"
+        cannot be reported as False -- the desk might control an account this process
+        knows nothing about, and a caller must not print "not yours" from a question
+        that was never answered.
+
+        What CAN be answered is the case the guard exists for: paying our own payout
+        account moves nothing and still marks the swap completed. That comparison is
+        exact, local, and needs no network call, so it is the one definite answer here.
+        """
+        target = (address or "").strip()
+        if not target or not self.hot_wallet:
+            return None
+        return True if target == self.hot_wallet else None
+
     def validate_address(self, address: str) -> bool:
         """True if this address can receive a payout. Never raises for a bad address.
 

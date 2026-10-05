@@ -1910,3 +1910,45 @@ def test_a_scan_that_skipped_NOTHING_still_prints_a_line(caplog):
     assert "did not re-read 0" in caplog.text
     assert "(none)" in caplog.text
     assert adapter.signatures_skipped == []
+
+
+# --- owns_address: the method whose absence crashed every *-> SOL swap ----------
+
+def test_owns_address_answers_True_only_for_our_own_payout_account():
+    """MUTATION: delete the method, which is what the tree had until 2026-10-05.
+
+    Opening GRC -> SOL that day died in the swap-creation guard:
+
+        services/swap_service.py:703
+          owns = None if desk_account else adapters[to_asset].owns_address(...)
+        AttributeError: 'SolanaAdapter' object has no attribute 'owns_address'
+
+    SolanaAdapter does not subclass chains/base.RPCAdapter -- by design, see its
+    docstring -- so it inherited none of RPCAdapter's methods, and SOL is the one
+    asset that reaches this call: payout_source_account() returns "" for it because
+    SOL's deposit and payout accounts are different, unlike XRP's single account.
+    Nothing had ever opened a *-> SOL swap before, so nothing had ever found it.
+    """
+    adapter = SolanaAdapter(url="http://never.invalid", hot_wallet=WALLET)
+
+    assert adapter.owns_address(WALLET) is True, (
+        "paying our own payout account moves nothing and still completes the swap"
+    )
+    assert adapter.owns_address(f"  {WALLET}  ") is True, "whitespace must not defeat it"
+
+
+def test_owns_address_is_None_and_never_False_for_anything_else():
+    """chains/xrp.py's reasoning: 'not established' is not 'not yours'.
+
+    Solana has no `ismine` to ask -- an account belongs to whoever holds its key,
+    and this adapter holds at most one -- so a different address cannot be reported
+    as False. The desk might control an account this process knows nothing about,
+    and services/swap_service logs a WARNING for None rather than refusing, which is
+    the correct handling of an unanswered question.
+    """
+    adapter = SolanaAdapter(url="http://never.invalid", hot_wallet=WALLET)
+    assert adapter.owns_address("CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp") is None
+    assert adapter.owns_address("") is None
+
+    # And with no hot wallet configured there is nothing to compare against at all.
+    assert SolanaAdapter(url="http://never.invalid").owns_address(WALLET) is None
