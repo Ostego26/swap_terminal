@@ -769,20 +769,65 @@ def quote_window(swap: dict, now_iso: str) -> dict:
     lost. Saying the second would be a plausible reading of a column name
     presented as a measurement (rule 17), and it would tell a customer their
     money is gone when it is not.
+
+    A SETTLED SWAP IS A THIRD CASE AND UNTIL 2026-10-05 THIS FUNCTION HAD ONLY
+    TWO. It branched on the clock alone, so a swap that had already paid out was
+    described by whichever side of the expiry it happened to be on. Measured on
+    s_b3ff505b6cac5c15, the first BTC -> LTC swap this terminal completed
+    (0.001 BTC in, 1.19550983 LTC out, 18.1s from open to `completed`),
+    show_swap.py printed over the finished row:
+
+        quote window    485.2µfn (586.9s)  <- Time left in the quoted rate window.
+
+    586.9 seconds of "time left" on a swap whose rate had been spent eleven
+    seconds earlier and whose payout was already irreversible on the LTC chain.
+    Both halves of that line are wrong in the same direction -- a countdown reads
+    as something a reader can still act on, and a settled swap offers nothing to
+    act on. The other side of the clock is no better: the same swap read an hour
+    later would have said the window "passed this long ago" and that a deposit
+    arriving now would "still be detected and still credited", which on a
+    completed swap is an invitation to send money to an address whose swap is
+    finished. That is the same defect DEPOSIT_ACCEPTING_STATUSES above was added
+    for, in the one place that was still deciding by timestamp instead of by
+    status.
+
+    So the status is read FIRST, from TERMINAL_STATUSES in this same module
+    rather than a fourth copy of that vocabulary, and `spent` is the answer for
+    every settled swap whether or not its expiry parses. `passed` keeps its
+    arithmetic meaning -- did the timestamp elapse -- because that is what it has
+    always meant and tests assert on it; it is `spent` that says the question no
+    longer decides anything.
     """
     remaining = remaining_seconds(swap.get("expires_at"), now_iso)
+    status = swap.get("status", "")
+    if status in TERMINAL_STATUSES:
+        return {
+            "known": remaining is not None,
+            "passed": remaining is not None and remaining < 0,
+            "spent": True,
+            "display": "(spent)",
+            "note": (
+                f"This swap is {status}: the quoted rate was already used and the window decides "
+                f"nothing now. It is neither a countdown nor an invitation to deposit."
+            ),
+        }
     if remaining is None:
-        return {"known": False, "passed": False, "display": "(unknown)", "note": "This swap has no readable quote expiry."}
+        return {
+            "known": False, "passed": False, "spent": False,
+            "display": "(unknown)", "note": "This swap has no readable quote expiry.",
+        }
     if remaining >= 0:
         return {
             "known": True,
             "passed": False,
+            "spent": False,
             "display": format_duration(remaining),
             "note": "Time left in the quoted rate window.",
         }
     return {
         "known": True,
         "passed": True,
+        "spent": False,
         "display": format_duration(-remaining),
         "note": (
             "The quoted rate window passed this long ago. Nothing in this system cancels a swap when that happens: "

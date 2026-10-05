@@ -79,6 +79,7 @@ from modules.htlc_assets import (
     PROVEN_DIRECTION,
     PROVEN_LIVE,
     PROVEN_SCRIPT_PAIRS,
+    SCRIPT_DRIVER,
     SCRIPT_HTLC_ASSETS,
     WORD_COVERED,
     WORD_PROVEN,
@@ -554,6 +555,46 @@ def test_settlement_line_is_the_mode_then_the_arrow_then_the_sentence():
     """
     mode, why = settlement_mode(*GRC_TO_XRP)
     assert settlement_line(*GRC_TO_XRP) == f"{mode}  <- {why}"
+
+
+def test_an_unproven_script_pair_names_the_DRIVER_it_has_no_run_for():
+    """MUTATION: put back "No completed BTC -> LTC swap is recorded in this tree".
+
+    That sentence was true when it was written and became false on 2026-10-05, when
+    s_b3ff505b6cac5c15 completed BTC -> LTC through the terminal -- 0.001 BTC in at 2
+    confirmations, 1.19550983 LTC out, 18.1s open to `completed`. A completed BTC ->
+    LTC swap IS recorded in this tree, in the `swaps` table, and show_swap.py printed
+    that sentence directly over the finished row.
+
+    THE VERDICT IS STILL `covered`, AND THIS TEST PINS BOTH HALVES. The custodial
+    path shares no code with the driver -- nothing in services, workers or routes
+    imports either one -- so a swap that ran there is not evidence about this one.
+    Recording it as evidence would be the COVERED-IS-NOT-RUN conflation this module
+    exists to prevent, arriving from the other direction: a swap that RAN is not
+    evidence for a driver it never entered. What was wrong was the DENOMINATOR of the
+    sentence, which is the identical defect PROVEN_SCRIPT_PAIRS already records about
+    its own BTC -> GRC row (rule 17: the denominator of a grep is the files it was
+    pointed at).
+    """
+    pair = ("BTC", "LTC")
+    assert pair not in PROVEN_SCRIPT_PAIRS, (
+        "BTC -> LTC completed CUSTODIALLY on 2026-10-05, not through the driver. If this "
+        "entry exists, a custodial run was recorded as atomic evidence."
+    )
+    verdict = settlement_verdict(*pair)
+    assert verdict["proven"] is False
+    assert verdict["mode"] == MODE_SCRIPT_HTLC
+
+    why = verdict["why"]
+    assert SCRIPT_DRIVER in why, "the sentence must say WHICH record has no run"
+    assert "is recorded in this tree" not in why, (
+        "a claim about every record in the tree; the measurement behind it only covered "
+        "the driver's runs, and a completed custodial swap of this pair now exists"
+    )
+    assert "CUSTODIAL" in why, "a reader must be told why the custodial completion is not evidence"
+
+    # AND THE PROVEN PAIR IS UNTOUCHED: this narrows a sentence, not a verdict.
+    assert settlement_verdict("BTC", "GRC")["proven"] is True
 
 
 def test_the_ESCROW_ASSET_is_not_also_a_script_asset():

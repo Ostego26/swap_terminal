@@ -493,6 +493,51 @@ def test_a_passed_quote_window_says_the_swap_was_not_canceled():
     assert "µfn" in live["display"]
 
 
+def test_a_settled_swap_gets_no_countdown_and_no_invitation_to_deposit():
+    """MUTATION: delete the TERMINAL_STATUSES branch from quote_window().
+
+    Without it this function branches on the clock alone, and a settled swap is
+    described by whichever side of its expiry it lands on. Both are wrong and
+    they are wrong in opposite directions, so ONE assertion cannot catch both --
+    which is why this test seeds the same completed swap twice.
+
+    Measured on s_b3ff505b6cac5c15, the first BTC -> LTC swap this terminal
+    completed, where show_swap.py printed over the finished row:
+
+        quote window    485.2µfn (586.9s)  <- Time left in the quoted rate window.
+
+    while the window still had time on it, and would have said the window
+    "passed this long ago" and that a deposit arriving now is "still detected and
+    still credited" an hour later. The second is the dangerous one: on a
+    completed swap that sentence invites money to an address whose swap is done.
+    """
+    for status in ("completed", "under_review", "failed"):
+        # WINDOW NOT YET ELAPSED -- the exact shape the live run printed.
+        live_clock = quote_window(make_swap(status=status, expires_at=seconds_before(-586.9)), NOW)
+        assert live_clock["spent"] is True
+        assert live_clock["display"] == "(spent)", "a settled swap must not render a countdown"
+        assert "µfn" not in live_clock["display"]
+        assert status in live_clock["note"]
+
+        # WINDOW ELAPSED -- the invitation to deposit into a finished swap.
+        stale_clock = quote_window(make_swap(status=status, expires_at=seconds_before(3600)), NOW)
+        assert stale_clock["spent"] is True
+        assert stale_clock["display"] == "(spent)"
+        assert "still credited" not in stale_clock["note"], (
+            "a settled swap must never tell a reader a deposit arriving now would be credited"
+        )
+
+        # An unreadable expiry does not change the answer: the status decides.
+        assert quote_window(make_swap(status=status, expires_at="garbage"), NOW)["spent"] is True
+
+    # AND THE LIVE STATUSES ARE UNTOUCHED, which is the half a status check is
+    # easiest to overshoot on -- an awaiting_deposit swap still needs its clock.
+    for status in ("awaiting_deposit", "confirming", "payout_pending", "paying"):
+        verdict = quote_window(make_swap(status=status, expires_at=seconds_before(-300)), NOW)
+        assert verdict["spent"] is False
+        assert "µfn" in verdict["display"]
+
+
 def test_an_unreadable_expiry_is_reported_as_unknown():
     window = quote_window(make_swap(expires_at="garbage"), NOW)
     assert window["known"] is False

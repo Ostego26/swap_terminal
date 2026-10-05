@@ -521,11 +521,38 @@ def settlement_verdict(from_asset: str, to_asset: str) -> dict:
         if proven:
             evidence = f"{WORD_PROVEN}: {PROVEN_SCRIPT_PAIRS[(source, destination)]}"
         else:
+            # "NO COMPLETED <PAIR> SWAP IS RECORDED IN THIS TREE" IS WHAT THIS SAID, AND
+            # ON 2026-10-05 IT BECAME FALSE WHILE STAYING TRUE ABOUT THE DRIVER.
+            #
+            # s_b3ff505b6cac5c15 completed BTC -> LTC through the terminal that day:
+            # 0.001 BTC in at 2 confirmations (txid 358970d1...2d5c16 vout 1), 1.19550983
+            # LTC out (txid 3a63ba91...6922f7, 2 confirmations), awaiting_deposit ->
+            # confirming -> payout_pending -> paying -> completed in 18.1s. So a completed
+            # BTC -> LTC swap IS recorded in this tree, in the `swaps` table, and this
+            # sentence was printed three times in that run's own output -- on the dry run,
+            # on the --apply, and by show_swap.py over the finished row. The last one is
+            # the defect: a reader looking at a completed BTC -> LTC swap was told no such
+            # swap exists.
+            #
+            # The verdict itself did not change and must not. That swap used the CUSTODIAL
+            # path -- deposit to an address this desk owns, payout from desk inventory, no
+            # hashlock, no atomicity -- and nothing in services, workers or routes imports
+            # either atomic driver. It shares no code with atomic_swap.py, so it is not
+            # evidence about it, which is the COVERED-IS-NOT-RUN distinction this module's
+            # docstring exists for, arriving from the other direction: a swap that RAN is
+            # not evidence for a driver it never entered. PROVEN_SCRIPT_PAIRS is unchanged.
+            #
+            # What was wrong was the DENOMINATOR of the sentence, exactly as it was for the
+            # BTC -> GRC row this table records: "recorded in this tree" is a claim about
+            # every record in the tree, and the measurement behind it only ever covered the
+            # driver's runs. So the sentence now says which record it is about.
             evidence = (
-                f"No completed {source} -> {destination} swap is recorded in this tree, so it is covered "
+                f"No {SCRIPT_DRIVER} run has completed {source} -> {destination}, so it is covered "
                 f"code rather than proven code. modules/htlc_assets.PROVEN_SCRIPT_PAIRS is the record "
                 f"and it holds "
-                f"{', '.join(f'{a} -> {b}' for a, b in sorted(PROVEN_SCRIPT_PAIRS)) or '(none)'}."
+                f"{', '.join(f'{a} -> {b}' for a, b in sorted(PROVEN_SCRIPT_PAIRS)) or '(none)'}. "
+                f"A {source} -> {destination} swap completed through the CUSTODIAL terminal path is "
+                f"not evidence here: that path shares no code with the driver."
             )
         detail = f"{covered} {evidence}"
     elif (
