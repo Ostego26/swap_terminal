@@ -67,6 +67,47 @@ import yaml
 from test_no_key_material_is_tracked import looks_like_an_ed25519_keypair
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+class _ComposeLoader(yaml.SafeLoader):
+    """SafeLoader that tolerates the Compose spec's own YAML tags.
+
+    The Compose specification defines `!reset` and `!override` for withdrawing or
+    replacing a key inherited from an earlier -f file. yaml.safe_load() refuses an
+    unrecognized tag outright, so the moment docker-compose.web.hostnet.yml used
+    `ports: !reset null` -- which is the only mechanism that actually removes an
+    inherited publish, an empty list does not -- this whole module stopped
+    COLLECTING: "ConstructorError ... could not determine a constructor for the
+    tag '!reset'", and every assertion in it went from passing to not running.
+
+    A gate that cannot parse the files it guards is worse than no gate, because
+    "1 error during collection" in a long suite reads like an environment problem
+    rather than like unguarded compose files.
+
+    The tag's VALUE is what matters here and its semantics do not: this module asks
+    which build contexts exist and which variables are required, and `!reset null`
+    on a ports key answers neither. So unknown tags resolve to their underlying
+    node and nothing pretends to interpret them.
+    """
+
+
+# tag_suffix is unused and must stay: PyYAML's add_multi_constructor calls this
+# with exactly three arguments. Not marked `noqa: ARG001` -- that rule is not
+# enabled for tests/, so the directive would suppress nothing and RUF100 said so.
+def _ignore_unknown_tag(loader, tag_suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_mapping(node)
+
+
+_ComposeLoader.add_multi_constructor("", _ignore_unknown_tag)
+
+
+def load_compose(path: Path) -> dict:
+    """Parse a compose file, tags and all. Returns {} for an empty file."""
+    return yaml.load(path.read_text(), Loader=_ComposeLoader) or {}  # noqa: S506 -- _ComposeLoader derives from SafeLoader; the only addition is a constructor that returns the plain node for compose's own !reset / !override tags
+
+
 #: EVERY compose file, not just docker-compose.yml. The stateful services were
 #: split into docker-compose.stateful.yml on 2026-10-05, and a gate that reads one
 #: file would have silently stopped covering half the services the moment that
@@ -89,7 +130,7 @@ def build_contexts() -> list[tuple[str, Path, Path]]:
     """
     found = []
     for compose in COMPOSE_FILES:
-        spec = yaml.safe_load(compose.read_text()) or {}
+        spec = load_compose(compose)
         for name, service in (spec.get("services") or {}).items():
             build = service.get("build")
             if not build:

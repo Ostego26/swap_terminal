@@ -1,0 +1,123 @@
+# The web service on the HOST's network namespace. Add this when the chain daemons
+# live on the host, which is the ordinary case.
+#
+# Role: file (operator entry point at the repository root per CLAUDE.md rule 10)
+# Reads: the process environment
+# Writes: nothing itself
+# Can move funds: it changes no credential and arms nothing. The service it
+#       overrides can (payout_worker), exactly as before.
+# Live-safe: it REMOVES a layer -- read the trade below before using it.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.web.yml \
+#                    -f docker-compose.web.hostnet.yml up -d web
+#
+# WHY THIS EXISTS. MEASURED ON THE OPERATOR'S HOST 2026-10-05.
+#
+# docker-compose.web.yml routes the container to the host with
+# `extra_hosts: host.docker.internal:host-gateway`, which resolved correctly:
+#
+#     host.docker.internal -> 172.17.0.1
+#
+# and every chain RPC still failed:
+#
+#     BTC       18443  unreachable (TimeoutError)
+#     LTC       19443  unreachable (TimeoutError)
+#     GRC       25715  unreachable (TimeoutError)
+#     GRC-desk  25779  unreachable (TimeoutError)
+#
+# TimeoutError AND NOT ConnectionRefused IS THE DIAGNOSIS. Refused means the
+# packet reached the host and nothing was listening on that port. Timed out means
+# the packet was DROPPED -- a firewall rule, which on Linux is the default posture
+# for traffic arriving from the docker bridge on a host running ufw. The resolution
+# worked; the delivery did not.
+#
+# The alternative fix is to open each daemon to the bridge subnet -- `rpcbind` plus
+# `rpcallowip=172.17.0.0/16` in four config files, and a firewall rule to match.
+# That widens the exposure of four daemons holding wallets so that one container
+# can reach them, and it is a change to live daemon configuration. Not worth it,
+# and not mine to make (rule 16).
+#
+# WHAT THE HOST NAMESPACE BUYS, and it is more than connectivity:
+#
+#   the chains work unchanged     127.0.0.1:18443 inside the container IS the host's
+#                                 loopback, so no *_RPC_HOST override, no daemon
+#                                 config change, no firewall rule. The container's
+#                                 environment becomes identical to the host
+#                                 deployment's, which is one fewer way for the two
+#                                 to differ.
+#   refuse_off_box() PASSES       services/kill_switch.refuse_off_box() reads the
+#                                 bind from /proc and refuses a 0.0.0.0 bind. Under
+#                                 the bridge that refusal was a false positive we
+#                                 had to live with, because the container had to
+#                                 bind 0.0.0.0 to be reachable at all. Here the app
+#                                 binds the host's real 127.0.0.1, so the guard is
+#                                 satisfied for the true reason rather than worked
+#                                 around -- and the kill switch WORKS.
+#
+# WHAT IT COSTS, said plainly rather than left for somebody to discover:
+#
+#   no network isolation          the container shares the host's network stack. It
+#                                 can reach anything the host can reach, and there
+#                                 is no published-port boundary left to narrow.
+#                                 This container exists for process lifecycle and
+#                                 pinned dependencies, not for network isolation --
+#                                 but if you believed you had the second, you do not
+#                                 have it here.
+#   no port remapping             `ports:` is meaningless under host networking and
+#                                 is cleared below rather than left to be silently
+#                                 ignored. The service binds SWAP_TERMINAL_PORT on
+#                                 the host directly, so it COLLIDES with a host
+#                                 gunicorn on the same port. Set SWAP_TERMINAL_PORT
+#                                 to something free -- 5101 below -- or stop the
+#                                 host one first.
+#   linux only                    host networking is a no-op on Docker Desktop for
+#                                 macOS and Windows, where the "host" is a VM. On
+#                                 those, the bridge plus a daemon opened to the
+#                                 subnet is the only route, and the firewall note
+#                                 above does not apply.
+
+services:
+  web:
+    network_mode: host
+
+    # `!reset null` AND NOT `[]`, AND THE DIFFERENCE IS LOAD BEARING. This said
+    # `ports: []` first, with a comment claiming that an empty list is how an
+    # override withdraws a base file's publish. Measured with `docker compose
+    # config` immediately afterward:
+    #
+    #     network_mode : host
+    #     ports        : [{host_ip: 127.0.0.1, target: 5000, published: '5100'}]
+    #
+    # Compose MERGES sequences, so an empty list contributes nothing and the base
+    # value survives untouched. The override read as if it had withdrawn the
+    # publish and had not -- and `ports` together with `network_mode: host` is a
+    # combination Docker rejects at `up`, so the file would have rendered cleanly
+    # and then failed to start, which is the worst place to find out.
+    #
+    # `!reset` is the Compose-spec tag that actually removes an inherited key
+    # (compose 2.24+; verified on 5.1.1, where both keys come back ABSENT rather
+    # than empty). A comment asserting a mechanism is worth exactly as much as the
+    # command that checks it.
+    ports: !reset null
+
+    # Same mechanism, same reason. extra_hosts is meaningless here anyway:
+    # host.docker.internal resolving to the host is the whole premise of the
+    # bridge setup, and this IS the host.
+    extra_hosts: !reset null
+
+    environment:
+      # THE HOST'S OWN LOOPBACK, and this is the line that makes the kill switch
+      # work. Under the bridge this had to be 0.0.0.0 or nothing could reach the
+      # app; here 127.0.0.1 is the host's 127.0.0.1, so the API is loopback-only
+      # AND refuse_off_box() sees a bind it accepts.
+      SWAP_TERMINAL_HOST: "127.0.0.1"
+      # NOT 5000. gunicorn.conf.py defaults to 5000 and so does the Express
+      # server; under host networking this binds the real port and would collide
+      # with a host gunicorn. 5101 matches what the smoke test used.
+      SWAP_TERMINAL_PORT: "${SWAP_TERMINAL_PORT:-5101}"
+      # 127.0.0.1 for every chain, because that is now the host's loopback. These
+      # are pass-throughs with the host's own default, so sourcing the operator's
+      # usual environment file is enough and no *_RPC_HOST override is needed.
+      BTC_RPC_HOST: "${BTC_RPC_HOST:-127.0.0.1}"
+      LTC_RPC_HOST: "${LTC_RPC_HOST:-127.0.0.1}"
+      GRC_RPC_HOST: "${GRC_RPC_HOST:-127.0.0.1}"
