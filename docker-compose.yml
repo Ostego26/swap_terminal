@@ -1,0 +1,147 @@
+# Containers for swap_terminal. ONE service so far, deliberately.
+#
+# Role: file (operator entry point at the repository root per CLAUDE.md rule 10 --
+#       this is what an operator, a launcher or a cron entry names)
+# Reads: the process environment of the shell that runs `docker compose`
+# Writes: nothing itself; the one service writes swap_intents.json on its volume
+# Can move funds: the `abstergo` service can, indirectly -- see its volume note
+# Live-safe: no secret is written here. Every CREDENTIAL and every ENDPOINT is
+#       `${NAME:-}` with no default, so an unset variable is an empty value the
+#       server refuses at startup rather than a working default nobody chose.
+#       Exactly two variables carry a default and neither is a credential:
+#       REQUIRE_GRIDCOIN_SHARED_SECRET=true (the fail-closed value) and
+#       GRIDCOIN_MIN_CONFIRMATIONS=6, which agrees with BOTH places that already
+#       state it -- server.js:88 and config.py:153's GRC_MIN_CONFIRMATIONS.
+#
+# INCREMENT 1 OF FIVE (docs/containerization_design_2026_10_03.md §9). The staging
+# order is smallest blast radius first, and no increment depends on a later one --
+# any of them can be the last. The other four services are NOT stubbed here on
+# purpose: a commented-out service is a thing a reader has to decide whether to
+# trust, and an empty one is worse. They arrive when they are built and verified.
+#
+# NOT YET CONTAINERIZED, so nobody reads this file as the whole topology:
+#   harness      (increment 2) regtest bitcoind + litecoind
+#   grc-desk     (increment 3) the second Gridcoin daemon -- it exists on the
+#                operator's host as of 2026-10-05 and is NOT in a container yet
+#   web+workers  (increment 4) gunicorn AND the three supervised workers, in ONE
+#                container -- splitting them blinds supervisor.unaccounted_workers(),
+#                which walks /proc to find the orphan no pid file accounts for
+#   operator-panel  stays on the host, as a recommendation rather than an omission
+#
+# The 34 root .py tools stay on the host in every increment. They are things an
+# operator RUNS, not services, and they need the database on a host path.
+
+services:
+  abstergo:
+    build:
+      context: ./swap_terminal/grc-sol-swap/abstergo_exchange
+    image: swap-terminal/abstergo:local
+    container_name: abstergo
+
+    # THE HOST PORT IS NOT 5000 AND THAT IS THE POINT. server.js:80 defaults PORT
+    # to 5000; swap_terminal/app.py:78 defaults to 5000 as well, and on the
+    # operator's host Flask already owns it. Inside the container there is nothing
+    # to collide with, so the container side stays 5000 and only the host side
+    # moves. ABSTERGO_HOST_PORT lets that be changed without editing this file.
+    # 127.0.0.1 and not 0.0.0.0: this server has no authentication of its own
+    # beyond a shared secret on ONE route, and publishing it off-box is a decision
+    # nobody has made (design doc §10, decision 4).
+    ports:
+      - "127.0.0.1:${ABSTERGO_HOST_PORT:-5001}:5000"
+
+    environment:
+      # FIVE CHECKS THROW AT IMPORT, BEFORE app.listen -- server.js:99-103. All
+      # five are listed here, because the first draft of this file listed only
+      # the Gridcoin RPC one and the container would have refused to start on
+      # VITE_API_URL with nothing in this file explaining why:
+      #
+      #     99   DEVNET_RPC_URL
+      #     100  VITE_API_URL
+      #     101  GRIDCOIN_DEPOSIT_ADDRESS or EXCHANGE_WALLET_ADDRESS
+      #     102  GRIDCOIN_RPC_URL or GRIDCOIN_RPC_HOST + GRIDCOIN_RPC_PORT
+      #     103  GRIDCOIN_RPC_USER and GRIDCOIN_RPC_PASSWORD
+      #
+      # Fail-closed startup is the behavior we want in a container: a
+      # misconfigured service must not reach "running". It does mean the first
+      # `docker compose up` on a shell that has not exported these exits
+      # immediately, and the message in `docker compose logs abstergo` names the
+      # variable. That is the design working, not a bug.
+      #
+      # NO DEFAULTS ON ANY CREDENTIAL OR ENDPOINT. `${NAME:-}` is an empty string
+      # when unset, which the checks above refuse. A default here would be this
+      # file choosing a credential or an endpoint nobody picked -- the same
+      # objection collect_fees.py makes about a defaulted fee-sweep address.
+      DEVNET_RPC_URL: "${DEVNET_RPC_URL:-}"
+      VITE_API_URL: "${VITE_API_URL:-}"
+      GRIDCOIN_DEPOSIT_ADDRESS: "${GRIDCOIN_DEPOSIT_ADDRESS:-}"
+      # server.js:77 accepts either spelling. Both are passed through so an
+      # operator whose shell already exports the older name does not have to
+      # learn that this file renamed it.
+      EXCHANGE_WALLET_ADDRESS: "${EXCHANGE_WALLET_ADDRESS:-}"
+      GRIDCOIN_RPC_URL: "${GRIDCOIN_RPC_URL:-}"
+      GRIDCOIN_RPC_HOST: "${GRIDCOIN_RPC_HOST:-}"
+      GRIDCOIN_RPC_PORT: "${GRIDCOIN_RPC_PORT:-}"
+      GRIDCOIN_RPC_USER: "${GRIDCOIN_RPC_USER:-}"
+      GRIDCOIN_RPC_PASSWORD: "${GRIDCOIN_RPC_PASSWORD:-}"
+      # server.js:94-97 falls back to these three bare names. Passed through for
+      # the same reason as EXCHANGE_WALLET_ADDRESS, and listed rather than
+      # omitted so a reader can see the whole set the server will actually read.
+      RPC_URL: "${RPC_URL:-}"
+      RPC_USER: "${RPC_USER:-}"
+      RPC_PASS: "${RPC_PASS:-}"
+
+      GRIDCOIN_VERIFY_SHARED_SECRET: "${GRIDCOIN_VERIFY_SHARED_SECRET:-}"
+      # Defaulted to true ON PURPOSE, and it is the one default in this block.
+      # auth.js:199 makes a missing secret FATAL while this is on; turning it off
+      # leaves POST /verify-gridcoin -- the step that marks an intent releasable
+      # -- unauthenticated. The safe value is the one that refuses to start.
+      REQUIRE_GRIDCOIN_SHARED_SECRET: "${REQUIRE_GRIDCOIN_SHARED_SECRET:-true}"
+
+      # 6 is not invented here. server.js:88 defaults to 6 and config.py:153's
+      # GRC_MIN_CONFIRMATIONS defaults to 6, so this file repeats a value the
+      # tree already agrees on in two places rather than introducing a third
+      # opinion -- which is what it would be if it said anything else.
+      GRIDCOIN_MIN_CONFIRMATIONS: "${GRIDCOIN_MIN_CONFIRMATIONS:-6}"
+      SOLANA_HOT_WALLET_PUBLIC_KEY: "${SOLANA_HOT_WALLET_PUBLIC_KEY:-}"
+      # Tuning knobs with in-code defaults (server.js:82, :87). Passed through so
+      # they can be changed without a rebuild; unset means the server's own value.
+      PRICE_CACHE_TTL_MS: "${PRICE_CACHE_TTL_MS:-}"
+      SWAP_INTENT_TTL_MS: "${SWAP_INTENT_TTL_MS:-}"
+
+      # SOLANA_PAYER_KEYPAIR_PATH IS DELIBERATELY ABSENT, and its absence is a
+      # posture, not an oversight. Unset, server.js:143 loads no payer and :696
+      # answers /execute with "Swap execution is disabled until
+      # SOLANA_PAYER_KEYPAIR_PATH is configured" -- the SOL payout leg is off.
+      # Arming it means mounting a private key into this container, which is a
+      # live-posture change and the operator's call (CLAUDE.md rule 16), not a
+      # line this file gets to write on their behalf. No key is read, copied or
+      # mounted by this change.
+
+      # The path INSIDE the container. The host side is the volume below.
+      SWAP_INTENTS_PATH: /data/swap_intents.json
+      PORT: "5000"
+
+    volumes:
+      # THE FUND-RELEASING FILE, ON A HOST PATH, AND THIS IS THE LOAD-BEARING LINE.
+      # swap_intents.json decides whether a release happens and has no connection
+      # to swap_terminal.db -- two systems of record with nothing reconciling them
+      # (design doc §12). On the container's writable layer it would die with the
+      # container; in the image it would be a stale snapshot. Neither is survivable
+      # for a file that decides money.
+      #
+      # The host directory must be writable by uid 1000, because the image runs as
+      # the non-root `node` user. The verification block below checks that before
+      # anything is started.
+      - "${ABSTERGO_STATE_DIR:-./runtime/abstergo}:/data"
+
+    # NOT "always". A server that cannot start because a credential is missing
+    # should STAY DOWN and be visible as down, not restart-loop while `docker
+    # compose ps` shows it flapping. unless-stopped restarts it across a host
+    # reboot and honors a deliberate `docker compose stop`.
+    restart: unless-stopped
+
+    # This is the reaper, and naming it here is rule 13's first bullet: a spawn and
+    # its reap are one change. `docker compose stop` sends SIGTERM, dumb-init
+    # forwards it, node exits. The 20s is generous for a server with no long
+    # operation; if it is ever hit, that is a finding rather than a tuning problem.
+    stop_grace_period: 20s

@@ -1,0 +1,48 @@
+# Keep the build context small, keep STATE out of the image, and keep KEY
+# MATERIAL off the wire to the Docker daemon.
+#
+# wgrc.json IS AN ED25519 SOLANA KEYPAIR AND IT IS SITTING IN THIS DIRECTORY.
+# Verified 2026-10-05: the file exists on disk and is untracked
+# (`git ls-files --error-unmatch` -> "Did you forget to 'git add'?"), which is
+# what tests/test_no_key_material_is_tracked.py exists to keep true -- it WAS
+# committed once, and docs/key_exposure_runbook.md is the cleanup that followed.
+#
+# The Dockerfile does not COPY it, so it was never going to reach the image. That
+# is not the hazard. `docker build` uploads the ENTIRE build context to the
+# daemon before any instruction runs, so without this line a private key gets
+# shipped off to the daemon's build cache on every single build, where nothing in
+# this repository can see it or clean it up. An image layer is auditable; a build
+# cache is not. Its value was not read to write this comment, and does not need
+# to be.
+wgrc.json
+# The key-rotation helper, for the same reason one level out: its default
+# --old-key IS wgrc.json (rotate_solana_key.mjs:121), and `--move` sweeps a
+# balance. A tool that moves funds has no business inside a service image, and
+# docs/key_exposure_runbook.md is where an operator is told to run it -- on the
+# host, deliberately, not by exec'ing into a container.
+rotate_solana_key.mjs
+#
+# swap_intents.json is a fund-releasing authority (design doc §12). If a copy
+# from the build context were baked into the image it would shadow the volume
+# mount on every rebuild, and the server would read intents that are a snapshot
+# of whenever someone last built -- stale records deciding whether money is
+# released.
+swap_intents.json
+#
+# services/ is excluded here as well as left out of the Dockerfile's COPY list.
+# Two mechanisms for one omission is deliberate: the Dockerfile explains WHY
+# (auth.js:37 -- an unauthenticated sendtoaddress route), and this keeps it out
+# of the context so a later `COPY . .` written by someone who did not read that
+# paragraph cannot quietly pull it back in.
+services
+#
+# The rest is ordinary context-size hygiene.
+node_modules
+.git
+tests
+eslint.config.js
+scan_solana_wallets.js
+testAddress.js
+README.md
+*.log
+.env

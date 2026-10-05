@@ -1,0 +1,9 @@
+Mount point for the abstergo container's /data volume. Tracked only so a fresh
+checkout has a directory to bind; everything written into it is ignored by
+.gitignore, because the file that lands here -- swap_intents.json -- is a
+fund-releasing authority and must never enter git history.
+
+The directory must be writable by uid 1000: the image runs as the non-root
+`node` user, and a bind mount is created with the host's ownership, so a
+root-owned directory here makes the server fail its first write rather than
+its startup.
