@@ -293,6 +293,35 @@ class Config:
     # which is the safe side of the same trade-off argued above -- and changing it is
     # a pricing decision the operator has not asked for (rule 16).
     LTC_NETWORK_FEE_RESERVE = _env_float("LTC_NETWORK_FEE_RESERVE", "0.001")
+    # 0.001, AND IT IS THE ONLY RESERVE HERE THAT THE CODE CAN NEVER MEASURE.
+    #
+    # services/quote_service.get_network_fee_reserve() asks the destination chain for a
+    # real fee before falling back to this constant. On LTC that works -- the BTC -> LTC
+    # swap on 2026-10-05 priced with "MEASURED off the LTC chain ... 0.0000282". On GRC
+    # it cannot, because GRIDCOIN HAS NO fundrawtransaction:
+    #
+    #     network fee  0.001 GRC reserved (FALLBACK: the configured GRC_NETWORK_FEE_RESERVE,
+    #                  because the chain could not be asked: fundrawtransaction refused, so
+    #                  no fee was measured (RPCError: Method not found (rpc code -32601)))
+    #
+    # So every GRC quote uses this number unvalidated, which makes it worth checking by
+    # hand at least once. CHECKED 2026-10-05, on swap s_c5bb0b9af6e28c90, the first
+    # *-> GRC swap this terminal ever paid (0.00003 BTC in, payout txid e090712c...d898):
+    #
+    #     desk balance   500.0 -> 235.41487261 tGRC        delta 264.58512739
+    #     payout amount  264.58412739 GRC
+    #     chain fee      0.00100000 GRC                    <- exactly this constant
+    #
+    # and the raw transaction agrees independently, from the RECEIVING wallet's view:
+    # one input of 500.00, two outputs of 235.41487261 and 264.58412739 summing to
+    # 499.999. The fallback is not approximately right, it is exact.
+    #
+    # WHAT WOULD INVALIDATE IT: the fee is per-kilobyte, so a payout spending many small
+    # inputs builds a larger transaction than this one's single input did. 0.001 is the
+    # measured floor for a 1-in-2-out send, not a ceiling for every send. Re-check it if
+    # a GRC payout ever fails for insufficient fee, and do not raise it speculatively --
+    # the reserve is subtracted from what a customer receives, so a padded number is a
+    # silent price change (rule 16).
     GRC_NETWORK_FEE_RESERVE = _env_float("GRC_NETWORK_FEE_RESERVE", "0.001")
     # ADDING THIS LINE IS A POSTURE CHANGE AND IT IS THE OPERATOR'S, MADE 2026-10-03.
     #
