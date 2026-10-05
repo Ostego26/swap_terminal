@@ -179,24 +179,62 @@ def test_the_deleted_field_names_are_gone_rather_than_kept_as_guesses():
     assert not hasattr(swap_readiness, "_STAKING_ONLY_FIELDS"), "the guessed tuple must stay deleted"
 
 
-def test_an_unrecognized_response_is_NOT_read_as_unlocked():
-    """Rule 17, and the reason this returns three answers rather than two.
+def test_an_unencrypted_grc_wallet_FAILS_rather_than_reporting_unknown():
+    """MUTATION: return SKIP here instead of FAIL, which is what it used to do.
 
-    These field names are NOT confirmed against a live Gridcoin daemon -- none is
-    reachable from the environment this was written in. Reporting an unrecognized
-    response as "unlocked" would be a guess in the voice of a measurement, and the
-    cost of being wrong is a swap created against a wallet that cannot pay it.
+    MEASURED ON THE DESK DAEMON 2026-10-05, and the measurement is why this moved
+    from SKIP to FAIL. getwalletinfo returned nine keys and no `unlocked_until`:
 
-    It also prints the keys the daemon DID return, which is how the real field
-    names get confirmed: the same way the XRP field names were, from
-    the operator's own run rather than from memory.
+        balance, keypoololdest, keypoolsize, masterkeyid, mining-error,
+        newmint, stake, staking, walletversion
+
+    and `walletpassphrase <a deliberately wrong string> 1` answered
+
+        -15  Error: running with an unencrypted wallet, but walletpassphrase was called.
+
+    So the absence is not an unknown, it is a diagnosis -- the one
+    chains/wallet_lock.ENCRYPTION_FIELD already documented, now confirmed behaviorally.
+
+    THE COST OF THE OLD VERDICT, on that same run: swap_readiness printed
+    "READY: all 41 checks passed" for a terminal that could not pay a single GRC
+    swap. Both GRC payout paths fail on an unencrypted wallet -- with the passphrase
+    set, walletlock raises -15 after the deposit is irreversible; without it,
+    PayoutUnlockUnavailable refuses before the send. A green run over that is rule
+    13's defect: "did nothing" rendering identically to "did work".
     """
-    state, detail = describe_wallet_lock({"balance": 1.0, "walletversion": 130000})
+    keys = {"balance": 500.0, "staking": True, "walletversion": 130000,
+            "masterkeyid": "abc", "keypoolsize": 100}
 
-    assert state == SKIP, "unknown must not be PASS"
-    assert state != PASS
-    assert "NOT ESTABLISHED" in detail
-    assert "walletversion" in detail, "it must echo the keys it saw so the names can be confirmed"
+    for can_unlock in (True, False):
+        state, detail = describe_wallet_lock(keys, can_unlock=can_unlock)
+        assert state == FAIL, (
+            f"can_unlock={can_unlock}: both GRC payout paths fail on an unencrypted "
+            f"wallet, so neither may report anything softer than FAIL"
+        )
+        assert "UNENCRYPTED" in detail
+        assert "AFTER the deposit is confirmed and irreversible" in detail
+        assert "walletversion" in detail, "it must still echo the keys it saw"
+        assert "NOT ESTABLISHED" not in detail, (
+            "this is a diagnosis now, not an unknown -- measured 2026-10-05"
+        )
+
+    # AND AN ENCRYPTED WALLET IS UNTOUCHED: the field present means the lock cycle
+    # works, and that case must not be dragged into this one.
+    state, _ = describe_wallet_lock({"unlocked_until": 0}, can_unlock=True)
+    assert state == PASS
+
+
+# test_an_unrecognized_response_is_NOT_read_as_unlocked() WAS HERE AND IS DELETED,
+# not moved and not weakened. It seeded exactly the response above -- getwalletinfo
+# with no lock field -- and asserted SKIP, i.e. "unknown". That reading is refuted:
+# measured 2026-10-05, the absence means UNENCRYPTED and both GRC payout paths fail.
+# The test it pinned is the behavior this file now treats as the defect, so keeping
+# it would be two tests asserting opposite verdicts about one seeded input (rule 2:
+# its test dies with it or changes to pin the stronger invariant).
+#
+# What it uniquely guarded -- "a response lacking the lock field must never read as
+# PASS" -- is strictly implied by the FAIL assertions above, for both values of
+# can_unlock. Nothing it covered is now uncovered.
 
 
 def test_an_empty_response_says_none_rather_than_printing_nothing():

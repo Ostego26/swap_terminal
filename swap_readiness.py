@@ -617,11 +617,47 @@ def describe_wallet_lock(info: dict, *, can_unlock: bool = False) -> tuple[str, 
     """
     present = {key: info[key] for key in _LOCK_FIELDS if key in info}
     if not present:
-        return SKIP, (
-            "lock state NOT ESTABLISHED -- getwalletinfo reported none of "
-            f"{', '.join(_LOCK_FIELDS)}. Keys it DID return: "
-            f"{', '.join(sorted(info)) or '(none)'}  <- paste this line back; the field names are "
-            "unconfirmed against a real Gridcoin daemon and this is how they get confirmed"
+        # AN ABSENT `unlocked_until` MEANS THE WALLET IS UNENCRYPTED, AND FOR GRC THAT
+        # IS A PAYOUT-BREAKING STATE RATHER THAN AN UNKNOWN ONE.
+        #
+        # This branch used to return SKIP and ask the operator to paste the key list
+        # back, because the field names were unconfirmed against a real daemon. They
+        # are confirmed now, on the desk daemon 2026-10-05, and the run that confirmed
+        # them is also the one that showed SKIP is the wrong verdict:
+        #
+        #   getwalletinfo keys: balance, keypoololdest, keypoolsize, masterkeyid,
+        #                       mining-error, newmint, stake, staking, walletversion
+        #   walletpassphrase <a deliberately wrong string> 1
+        #                    -> -15 "running with an unencrypted wallet"
+        #
+        # chains/wallet_lock.ENCRYPTION_FIELD already documents that `unlocked_until`
+        # appears ONLY for an encrypted wallet; the -15 is that inference confirmed
+        # behaviorally rather than read off a docstring.
+        #
+        # WHY IT IS A FAIL AND NOT A WARNING. Every GRC payout goes through
+        # services/payout_service.payout_unlock_context(), and for GRC there is no
+        # path that avoids the lock cycle:
+        #
+        #   passphrase SET    -> unlocked_for_payout() -> lock() -> walletlock
+        #                        -> -15 on an unencrypted wallet, so the payout raises
+        #   passphrase UNSET  -> PayoutUnlockUnavailable, refused before the send
+        #
+        # Both fail. The first fails AFTER the customer's deposit is confirmed and
+        # irreversible, which is the exact failure the surrounding code is written to
+        # prevent. On 2026-10-05 this check returned SKIP and the run printed
+        # "READY: all 41 checks passed" over a terminal that could not pay a single
+        # GRC swap -- rule 13's defect exactly: "did nothing" rendered as success.
+        return FAIL, (
+            f"the GRC wallet is UNENCRYPTED, so every GRC payout will FAIL -- and it fails "
+            f"AFTER the deposit is confirmed and irreversible. getwalletinfo returned no "
+            f"{', '.join(_LOCK_FIELDS)}, which appears only on an encrypted wallet "
+            f"(chains/wallet_lock.ENCRYPTION_FIELD); measured 2026-10-05, such a wallet answers "
+            f"walletpassphrase with -15 'running with an unencrypted wallet', and "
+            f"services/payout_service.payout_unlock_context() calls walletlock before every GRC "
+            f"send. With the passphrase set the send raises; without it the payout is refused. "
+            f"Either encrypt this wallet with the passphrase the environment already holds, or "
+            f"change the payout path to skip the lock cycle for an unencrypted wallet. "
+            f"Keys getwalletinfo DID return: {', '.join(sorted(info)) or '(none)'}"
         )
 
     unlocked_until = info.get("unlocked_until")
