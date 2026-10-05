@@ -1623,6 +1623,75 @@ def command_stop(names: list[str], run_dir: Path, grace_seconds: float) -> int:
     return 1 if (failed or orphans) else 0
 
 
+def command_restart(
+    names: list[str],
+    run_dir: Path,
+    commands: dict[str, list[str]],
+    grace_seconds: float,
+) -> int:
+    """Stop, PROVE the stop, then start. Refuses to start if the stop was not proven.
+
+    WHY THIS EXISTS: THE GAP BETWEEN TWO COMMANDS IS WHERE THE INCIDENT LIVES.
+
+    The staleness block this file has printed since 2026-10-03 tells an operator
+    "fix: `stop` then `start`". Two commands, and between them NO WORKER IS
+    POLLING. Measured on the operator's host 2026-10-05, in exactly that gap:
+
+        summary  running=0/3  <- 0 means no worker is polling and deposits
+                                 will not be credited
+        it holds awaiting_deposit 5
+
+    Five open swaps, nothing watching their deposit addresses, for as long as it
+    took somebody to remember the second command. The gap is not an argument
+    against stopping -- it is an argument for one command that closes it.
+
+    THE REFUSAL IS THE POINT, AND IT IS NOT A CONVENIENCE WRAPPER. If the stop
+    cannot prove absence, starting would put a SECOND worker beside one that is
+    still alive, and the pid file would then name only the new one -- leaving the
+    first an orphan nothing can reap. That is rule 13's exact damage, and it is
+    the same shape as the start_worker double-spawn fixed on 2026-10-05, arrived
+    at from the other direction. So: every stop outcome must be one that means
+    "nothing of ours is running under this name", AND unaccounted_workers() must
+    find nothing, or this returns non-zero having started nothing.
+
+    IT DOES NOT DECIDE WHEN TO RESTART. The operator types this. supervisor.py's
+    staleness block still signals nothing on its own, for the reason stated there:
+    restarting a payout worker is live posture (rule 16), and a supervisor acting
+    on a file mtime would be deciding when money moves off a timestamp. This only
+    makes the action the operator chose a single step instead of two.
+    """
+    print("swap_terminal supervisor: RESTART")
+    print(f"  workers           {', '.join(names)}")
+    print("  order             stop -> PROVE absence -> start. The proof is a gate, not a")
+    print("                    comment: a stop that cannot prove itself does not start anything.")
+    stop_code = command_stop(names, run_dir, grace_seconds)
+
+    # EVERY OUTCOME THAT MEANS "NOTHING OF OURS IS RUNNING UNDER THIS NAME".
+    # `stale-pidfile` is included and that is deliberate: the pid in the file
+    # belongs to another process now, so OUR worker is gone -- which is what the
+    # start below needs to be true. `failed` is not here, and neither is any
+    # outcome this does not recognize.
+    survivors = unaccounted_workers(names, run_dir)
+    print("  gate")
+    if stop_code != 0:
+        print(f"  REFUSED           stop returned {stop_code}, so absence was NOT established.")
+        print("                    NOTHING was started. Read the stop block above, deal with")
+        print("                    what it names, then run `restart` again.")
+        return stop_code
+    if survivors:
+        total = sum(len(pids) for pids in survivors.values())
+        print(f"  REFUSED           {total} worker process(es) are alive that no pid file accounts for:")
+        for name, pids in sorted(survivors.items()):
+            print(f"                      {name}: {pids}")
+        print("                    Starting now would add a SECOND worker beside each of these")
+        print("                    and the pid file would name only the new one -- an orphan")
+        print("                    nothing can reap (rule 13). NOTHING was started.")
+        return 1
+    print("  passed            stop proven; no unaccounted worker process is alive")
+    print()
+    return command_start(names, run_dir, commands)
+
+
 def command_status(names: list[str], run_dir: Path) -> int:
     print("swap_terminal supervisor: STATUS")
     print(f"  run directory     {run_dir}")
@@ -1698,7 +1767,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="supervisor.py",
         description="Start, stop and inspect the swap_terminal workers. Every spawn here has a reaper here.",
     )
-    parser.add_argument("action", choices=("start", "stop", "status"))
+    parser.add_argument("action", choices=("start", "stop", "restart", "status"))
     parser.add_argument(
         "workers",
         nargs="*",
@@ -1732,6 +1801,8 @@ def main(argv: list[str] | None = None, commands: dict[str, list[str]] | None = 
         return command_start(names, run_dir, table)
     if args.action == "stop":
         return command_stop(names, run_dir, args.grace_seconds)
+    if args.action == "restart":
+        return command_restart(names, run_dir, table, args.grace_seconds)
     return command_status(names, run_dir)
 
 

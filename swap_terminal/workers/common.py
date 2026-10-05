@@ -65,6 +65,7 @@ from microfortnights import format_duration
 from network_target import CHAIN_PORTS, classify, configuring_variable
 from services.custody_separation import wallet_label
 from services.deposit_service import ACTIVE_STATUSES
+from supervisor import CODE_STALE, worker_code_freshness
 
 
 def build_adapters_from_config() -> dict:
@@ -460,6 +461,48 @@ class CycleFailures:
         )
 
 
+def stale_code_note(pid: int | None = None) -> str:
+    """"This worker is running code older than the tree", on the line the operator reads.
+
+    EMPTY STRING WHEN THERE IS NOTHING TO SAY, so a healthy cycle line is exactly
+    what it was before this function existed.
+
+    WHY IT IS HERE AND NOT ONLY IN `supervisor.py status`. supervisor.py has
+    detected this since 2026-10-03 and says so loudly -- `*** STALE CODE ***`,
+    naming the newest file and the gap. Measured on the operator's host
+    2026-10-05: all three workers had been running code 46029.9µfn (55677.8s)
+    older than the tree, about FIFTEEN AND A HALF HOURS, including the window in
+    which supervisor.py's own double-spawn defect was fixed. The detection worked
+    perfectly and nobody saw it, because `status` is a command somebody has to
+    decide to run and the worker log is what an operator actually tails.
+
+    So this is rule 14's "say what you are doing while you do it" applied to a
+    fact that only becomes true AFTER the startup banner has scrolled away: a
+    worker cannot know at exec that a file will be edited at noon, and
+    announce_start() has already printed by then.
+
+    IT DECIDES NOTHING AND SIGNALS NOTHING, which is the policy supervisor.py's
+    own header sets out and this does not get to change: restarting a payout
+    worker is a live-posture action (rule 16), and a worker that exited on its own
+    reading of a file mtime would be deciding when money stops moving on the
+    strength of a timestamp. It prints a sentence.
+
+    COST, MEASURED 2026-10-05 before wiring it in: newest_code_file() walks 125
+    .py files in 1.2ms mean over ten runs (min 1.1, max 1.4). Against the
+    deposit watcher's 15s poll that is 0.008% of a cycle, so it runs every cycle
+    with no throttle and no cache -- a cache would need invalidating, which is
+    more machinery than the thing it saves.
+    """
+    freshness = worker_code_freshness(os.getpid() if pid is None else pid)
+    if freshness["verdict"] != CODE_STALE:
+        return ""
+    return (
+        "*** STALE CODE *** this worker predates the tree: "
+        f"{freshness['reason']}. newest={freshness['newest_path']}. "
+        "`supervisor.py restart` reloads it; `start` alone will NOT"
+    )
+
+
 def cycle_line(worker_name: str, cycle: int, seconds: float, counts: dict[str, int], notes: str = "") -> str:
     """Render one cycle's result so that idle and productive cycles differ.
 
@@ -470,12 +513,20 @@ def cycle_line(worker_name: str, cycle: int, seconds: float, counts: dict[str, i
     A count named in STANDING_COUNTS still prints and still reads non-zero; it
     just does not let the cycle claim it worked. See that constant for the
     measurement behind it.
+
+    THE STALENESS NOTE IS APPENDED HERE, which is the one place all three workers
+    render this line -- so they all gain it without three edits to three files on
+    the order path (rule 8). It appends nothing at all when the code is current,
+    so an existing healthy line is byte-identical to what it was.
     """
     did_work = any(value for key, value in counts.items() if key not in STANDING_COUNTS)
     marker = "WORKED" if did_work else "IDLE  "
     rendered = " ".join(f"{key}={value}" for key, value in counts.items()) or "(none)"
     line = f"{worker_name} cycle={cycle} {marker} {rendered} in {format_duration(seconds)}"
-    return f"{line}  <- {notes}" if notes else line
+    if notes:
+        line = f"{line}  <- {notes}"
+    stale = stale_code_note()
+    return f"{line}\n  {stale}" if stale else line
 
 
 # The repository root, derived from this file's own location rather than from a

@@ -99,6 +99,32 @@ services:
     ports:
       - "127.0.0.1:${SWAP_TERMINAL_HOST_PORT:-5100}:5000"
 
+    # 127.0.0.1 INSIDE A CONTAINER IS THE CONTAINER, AND THAT IS WHY THE UI CAME
+    # UP EMPTY. Measured on the operator's host 2026-10-05: GET / answered HTTP
+    # 200 and the swap selector had nothing in it. The page was fine; it had
+    # nothing to offer, because services/pair_view.offerable_pairs() is "allowed,
+    # AND BOTH CHAINS REACHABLE" and no chain was reachable. The BTC, LTC and GRC
+    # daemons run on the HOST, so a container asking 127.0.0.1:18443 asks itself.
+    #
+    # host-gateway resolves host.docker.internal to the address of the host from
+    # inside the container. It is the portable spelling: `network_mode: host` would
+    # also work and throws away the network namespace along with the 127.0.0.1
+    # publish guard, and hardcoding 172.17.0.1 assumes the default bridge subnet
+    # that any `docker network create` can change.
+    #
+    # SO THE RPC HOSTS MUST BE host.docker.internal, NOT 127.0.0.1. The variables
+    # below are pass-throughs, so that is the operator's shell to set -- and it is
+    # the one difference between the host deployment's environment and this one:
+    #
+    #     BTC_RPC_HOST=host.docker.internal LTC_RPC_HOST=host.docker.internal \
+    #     GRC_RPC_HOST=host.docker.internal
+    #
+    # An unreachable chain is not an error here and must not become one: config.py
+    # builds no adapter for an unconfigured chain and the UI lists the pair as
+    # unavailable, which is the correct failure for a missing endpoint.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     environment:
       # EXPLICIT, NEVER THE DEFAULT. config.py falls back to a path under its own
       # BASE_DIR (§3.2), which inside the image is the image -- a database that

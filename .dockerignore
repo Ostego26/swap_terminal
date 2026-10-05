@@ -37,6 +37,21 @@ swap_terminal/grc-sol-swap/abstergo_exchange/wgrc.json
 # (auth.js:37).
 swap_terminal/grc-sol-swap
 
+# THE VIRTUALENV, AND IT WAS NOT HERE UNTIL 2026-10-05. Measured on the
+# operator's host: `docker build` for the web service transferred 58.70MB of
+# context, against 82M of tree with .git (46M) already excluded -- the difference
+# is almost entirely .venv, which this file did not name. It is tens of megabytes
+# of somebody else's compiled wheels, uploaded to the daemon on every build, and
+# the image installs its own from requirements.txt so none of it is even used.
+#
+# pyproject.toml's ruff `exclude` has listed .venv since the file existed, so the
+# repository already knew the name. This file simply did not ask it.
+.venv
+venv
+env
+.tox
+*.egg-info
+
 # Caches and build output. __pycache__ in particular would ship .pyc files
 # compiled by whatever interpreter last ran here, next to the .py the image
 # installs -- and a stale .pyc beside a newer .py is a file that runs and is not
