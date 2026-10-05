@@ -7,21 +7,38 @@ Mainnet-safe: yes
 A CLEAN GATE, not a baseline (CLAUDE.md rule 19): the count this asserts is
 zero, so there is nothing to ratchet down and nothing to delete later.
 
-TWO GATES, AND THE SECOND ONE EXISTS BECAUSE THE FIRST REPORTED CLEAN WHILE THE
-KEY WAS STILL PUBLISHED. Measured 2026-10-05: `git ls-files` -- what the first
-test walks -- does not list the file, so that test passed; and
-`git ls-tree -r` over every ref found wgrc.json still in the tree of FIVE
-branches on origin:
+TWO GATES, because the index is one ref and a branch you can push is another.
+The second walks every LOCAL branch's tree, so a keypair committed on a side
+branch cannot be pushed just because it is absent from the branch you happen to
+have checked out.
 
-    origin/claude/deposit-vout-migration
-    origin/claude/htlc-and-payout-guards
-    origin/claude/htlc-client-fixes
-    origin/claude/regtest-harness
-    origin/claude/server-auth-and-intents
+REMOTE-TRACKING REFS ARE DELIBERATELY EXCLUDED, AND THE REASON IS AN ERROR MADE
+HERE ON 2026-10-05 THAT THIS COMMENT EXISTS TO PREVENT REPEATING. The first
+version of the second gate walked `refs/remotes` as well, found wgrc.json in the
+tree of five `origin/claude/*` refs, and reported -- in a commit message, with
+the branch names listed -- that a private key was readable off GitHub right then.
+It was not. Measured minutes later with `git ls-remote --heads origin`:
 
-A green suite next to a private key that anyone can `git show` off GitHub is the
-exact defect rule 13 names: "did nothing" rendering identically to "did work".
-The index is one ref. An exposure lives on all of them.
+    112b54b3  refs/heads/claude/xrp-adapter
+    e7f02b29  refs/heads/main
+
+TWO branches, and `git merge-base --is-ancestor` says NEITHER contains b3aa36a,
+the commit that added the key. The five branches had been deleted from origin;
+`git ls-tree origin/claude/htlc-client-fixes` on the operator's host answers
+"fatal: Not a valid object name". docs/key_exposure_runbook.md was right and the
+cleanup had already happened.
+
+What the walk actually measured was THIS CLONE'S STALENESS. A remote-tracking ref
+is a cached copy of what origin served whenever someone last fetched; it is not a
+statement about origin. So the gate was backwards in both directions: it raised a
+false alarm on any checkout with stale refs, and a fresh clone would pass it even
+if the remote genuinely were exposed. A test that reports on the wrong subject
+is worse than no test, because it spends the reader's trust.
+
+The remote is a NETWORK question and does not belong in a unit test. Checking it
+is `git ls-remote --heads origin` plus `git merge-base --is-ancestor`, run
+deliberately, against the live remote -- which is what should have been run
+before the alarm, not after.
 
 Why it matches on SHAPE rather than on filename. On 2026-09-25 `.gitignore`
 carried `*keypair*.json`, which is a guess about what somebody names a secret.
@@ -118,14 +135,18 @@ def test_no_tracked_file_is_an_ed25519_keypair():
 
 
 def refs() -> list[str]:
-    """Every local and remote-tracking ref, or an empty list if there are none.
+    """Every LOCAL branch, or an empty list if there are none.
 
-    An empty list is a real answer rather than a swallowed failure: a shallow
+    refs/heads only. See the module docstring for why refs/remotes is excluded:
+    a remote-tracking ref describes when this clone last fetched, not what the
+    remote serves, and walking it reported a false exposure once already.
+
+    An empty list is a real answer rather than a swallowed failure: a detached
     or ref-less checkout genuinely has nothing to walk, and the test below says
     so out loud instead of passing silently (rule 14 -- "(none)" is a result).
     """
     result = subprocess.run(
-        ["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"],
+        ["git", "for-each-ref", "--format=%(refname)", "refs/heads"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -191,8 +212,8 @@ def blob_is_an_ed25519_keypair(blob_sha: str) -> bool:
     )
 
 
-def test_no_ref_has_an_ed25519_keypair_in_its_tree():
-    """Zero across EVERY ref, not just the index.
+def test_no_local_branch_has_an_ed25519_keypair_in_its_tree():
+    """Zero across every local branch, not just the index.
 
     Scoped to ref TIPS rather than to all of history on purpose, and the
     distinction is the whole remediation. A key in an unreachable old commit is
@@ -210,16 +231,18 @@ def test_no_ref_has_an_ed25519_keypair_in_its_tree():
         if blob_is_an_ed25519_keypair(blob_sha)
     )
     assert all_refs, (
-        "no refs to walk -- this checkout has neither local branches nor "
-        "remote-tracking refs, so this gate checked NOTHING. That is not a pass."
+        "no local branches to walk, so this gate checked NOTHING. That is not a "
+        "pass -- say which it was (rule 17)."
     )
     assert not offenders, (
-        f"{len(offenders)} ref/path pairs have an ed25519 keypair at the branch TIP, "
-        f"out of {len(all_refs)} refs walked:\n  "
+        f"{len(offenders)} branch/path pairs have an ed25519 keypair at the branch "
+        f"TIP, out of {len(all_refs)} local branches walked:\n  "
         + "\n  ".join(offenders)
-        + "\n\nEvery one is readable by anyone who can clone this repository RIGHT NOW."
-        "\nMove whatever the key controls FIRST -- a pushed key is published, and"
-        "\ndeleting the branch afterward does not un-publish it. Then delete or rewrite"
-        "\nthe branches above. Rewriting shared history is the operator's call"
-        "\n(CLAUDE.md rule 4), so this gate reports it rather than doing it."
+        + "\n\nThese are LOCAL. Whether any of them is also on the remote is a separate"
+        "\nquestion this test does not answer and must not be assumed either way:"
+        "\n    git ls-remote --heads origin"
+        "\n    git merge-base --is-ancestor <the commit that added it> <each served sha>"
+        "\nIf it IS served, move whatever the key controls FIRST -- a pushed key is"
+        "\npublished, and deleting the branch afterward does not un-publish it."
+        "\nRewriting shared history is the operator's call (CLAUDE.md rule 4)."
     )
