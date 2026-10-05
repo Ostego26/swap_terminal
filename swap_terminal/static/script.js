@@ -286,7 +286,25 @@ function wireSwapForm() {
       say(region, "Swap " + swap.id + " created. Opening its page...", "result-working");
       window.location.href = "/swap/" + encodeURIComponent(swap.id);
     } catch (error) {
-      say(region, "No swap was created: " + error.message, "result-error");
+      // DO NOT PREPEND WHAT THE SERVER ALREADY SAID. Measured in the operator's
+      // browser 2026-10-04, when the new payout-ownership refusal fired for real:
+      //
+      //   No swap was created: No swap was created: mg3gJAm... is an address this
+      //   terminal's own GRC wallet holds the key for (ismine=true) ...
+      //
+      // Seven of the eight create-path raises in services/swap_service.py already
+      // open with that phrase, because the SERVER owns the sentence a customer
+      // reads -- it is the side that knows what was and was not written. This line
+      // added a second copy to every one of them, and the doubling was in the one
+      // place the refusal is actually useful: on screen, at the moment someone
+      // pasted the wrong address.
+      //
+      // The short raises ("Quote not found", "Quote expired") do NOT carry it, so
+      // the prefix is not simply deleted -- it is added only when absent. That is
+      // a rendering decision and not policy: the message text stays the server's.
+      var message = String(error.message || error);
+      var prefix = "No swap was created";
+      say(region, message.indexOf(prefix) === 0 ? message : prefix + ": " + message, "result-error");
     }
   });
 }

@@ -328,18 +328,63 @@ def reserve_inventory(db, asset: str, amount: float):
 
 
 def release_inventory_after_send(db, asset: str, amount: float):
+    """Release the reservation a sent payout was holding. Does NOT touch hot_confirmed.
+
+    IT USED TO DEBIT hot_confirmed AND THAT DROVE XRP NEGATIVE, TWICE, MEASURED ON
+    THE OPERATOR'S HOST. The line was:
+
+        float(row["hot_confirmed"]) - amount,     # beside a FLOORED hot_reserved
+
+    and the asymmetry was the tell: hot_reserved was clamped with max(..., 0.0)
+    and hot_confirmed was not.
+
+    WHY ONLY XRP, AND IT IS NOT A COINCIDENCE -- it is the whole diagnosis.
+    refresh_wallet_inventory() below OWNS hot_confirmed: it writes
+    `hot_confirmed = adapter.get_balance()` for every chain every 60s. So on
+    BTC/LTC/GRC/SOL this function's debit was overwritten by a measured balance
+    within a minute and was invisible. XRP's get_balance() REFUSES BY DESIGN --
+    chains/xrp.py holds no account of its own -- so refresh_wallet_inventory()
+    hits its `except` and, in its own words, "the row for that asset keeps its
+    previous values". Nothing ever corrected XRP, so every payout drove the column
+    further down with no floor and no corrector.
+
+    THE EVIDENCE, both readings exact rather than approximate:
+
+        2026-10-04 morning   hot_confirmed = -59.231412662192405, which is exactly
+                             the negated SUM of XRP's two payouts' pre-quantization
+                             amounts. repair_inventory_reservations.py DELETED the
+                             row rather than zeroing it, discriminating on < 0.
+        2026-10-04 20:52     hot_confirmed = -5.63518500 again, exactly the negated
+                             amount of payouts.id=30 -- the single XRP payout made
+                             after that repair. One payout, one re-break.
+
+    SO THE FIX IS ONE AUTHORITY PER COLUMN (rules 8 and 15), not a floor. Clamping
+    at zero would have stopped the negative number and kept the second writer: the
+    column would then read 0 for an asset whose balance nobody measured, which is
+    the "a stale balance is not a small balance -- it is a number nobody has
+    checked" distinction the admin page makes, inverted. hot_reserved is THIS
+    function's to release, because reserve_inventory() is what took it. The
+    measured balance belongs to the poller alone.
+
+    hot_available IS RECOMPUTED rather than carried, because it is derived:
+    refresh_wallet_inventory() defines it as `balance - reserved`, and this
+    function changes `reserved`. Writing the old value back -- which it did, as
+    `float(row["hot_available"])` -- left it describing a reservation that no
+    longer existed, so the three columns disagreed until the next poll. On XRP,
+    where there is no next poll, they disagreed permanently: -61.37835700 against
+    a hot_confirmed of -5.63518500 and a reserved of 55.74317200.
+
+    A ROW THAT DOES NOT EXIST IS STILL NOT CREATED HERE. The early return is
+    unchanged: an inventory row is the poller's to create, and inventing one from
+    a send would be this function guessing a balance again by another route.
+    """
     row = db.execute("SELECT * FROM wallet_inventory WHERE asset = ?", (asset,)).fetchone()
     if not row:
         return
+    reserved = max(float(row["hot_reserved"]) - amount, 0.0)
     db.execute(
-        "UPDATE wallet_inventory SET hot_reserved = ?, hot_confirmed = ?, hot_available = ?, updated_at = ? WHERE asset = ?",
-        (
-            max(float(row["hot_reserved"]) - amount, 0.0),
-            float(row["hot_confirmed"]) - amount,
-            float(row["hot_available"]),
-            utc_now_iso(),
-            asset,
-        ),
+        "UPDATE wallet_inventory SET hot_reserved = ?, hot_available = ?, updated_at = ? WHERE asset = ?",
+        (reserved, float(row["hot_confirmed"]) - reserved, utc_now_iso(), asset),
     )
 
 

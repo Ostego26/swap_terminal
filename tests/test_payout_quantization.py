@@ -929,12 +929,37 @@ def test_the_reservation_returns_to_zero_and_strands_NO_sub_unit_residue(tmp_pat
     finally:
         conn.close()
 
+    assert after["hot_available"] == 10000.0, (
+        "hot_available is derived (hot_confirmed - hot_reserved) and must be recomputed when the "
+        "reservation changes; carrying the old value forward left the three columns disagreeing"
+    )
     assert after["hot_reserved"] == 0.0, (
         f"hot_reserved is {after['hot_reserved']!r} after one payout, so a sub-unit reservation was "
         f"stranded. It is never released, so every payout would add another"
     )
-    assert after["hot_confirmed"] == 10000.0 - 1.19967368, (
-        "hot_confirmed must fall by the figure that LEFT THE WALLET, not by the booked figure"
+    # hot_confirmed IS NOT TOUCHED BY A RELEASE ANY MORE, and this assertion is the
+    # inversion of what it said until 2026-10-04: "hot_confirmed must fall by the
+    # figure that LEFT THE WALLET, not by the booked figure". That was true of the
+    # code and was the wrong thing to want.
+    #
+    # Debiting it here bought approximate accuracy between the send and the next
+    # 60s poll, and cost a PERMANENT negative on any asset the poller cannot
+    # measure. XRP's get_balance() refuses by design, so
+    # refresh_wallet_inventory() skips it and nothing ever corrected the debit:
+    # measured on the operator's host at -59.231412662192405 (the negated sum of
+    # two payouts) and then, one payout after that row was repaired, at
+    # -5.63518500. One writer per column (rules 8 and 15) is the fix; a floor at
+    # zero would have hidden it and broken repair_inventory_reservations.py's own
+    # `hot_confirmed < 0` discriminator.
+    #
+    # The 60s staleness this concedes is already what the admin page's FRESH/STALE
+    # marker and 300s threshold exist to report, and nothing gates a payout on this
+    # column -- measured 2026-10-04: largest_fundable_payout() and
+    # why_the_payout_cannot_be_funded() both read adapter.get_balance() and give
+    # identical answers with it at -6102.29 and at 0.
+    assert after["hot_confirmed"] == 10000.0, (
+        "a release debited hot_confirmed, which belongs to refresh_wallet_inventory() alone -- "
+        "on an asset whose balance cannot be polled that debit never gets corrected"
     )
 
 

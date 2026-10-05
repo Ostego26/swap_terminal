@@ -333,14 +333,40 @@ def test_the_measured_XRP_row_is_reproduced_BY_THE_REAL_FUNCTIONS(tmp_path):
             db.commit()
         row = db.execute("SELECT * FROM wallet_inventory WHERE asset = 'XRP'").fetchone()
 
-    assert row["hot_confirmed"] == XRP_NEGATED, (
-        f"the operator's host reads hot_confirmed={XRP_NEGATED!r}; these functions produced "
-        f"{row['hot_confirmed']!r}"
+    # THE DEFECT NO LONGER REPRODUCES, AND THIS TEST FLIPPED TO SAY SO -- which is
+    # the behavior its own docstring predicted before the cause was fixed: "it
+    # shows the test is pinned to the DEFECT and will fail the moment the cause is
+    # fixed". It did, so it now pins the fix instead of the fault.
+    #
+    # WHAT CHANGED: release_inventory_after_send() no longer writes hot_confirmed
+    # at all. That column belongs to refresh_wallet_inventory(), which sets it from
+    # adapter.get_balance() every 60s -- and XRP's get_balance() refuses by design,
+    # so the poller skips XRP and nothing ever corrected a debit made here. Two
+    # writers, one column, and only one of them could measure it.
+    #
+    # NOT A FLOOR, which the old MUTATION note above shows was considered and
+    # rejected: clamping at max(..., 0.0) would read 0.0 for an account that holds
+    # XRP nobody can count -- the "a stale balance is not a small balance" error
+    # inverted -- and would destroy the `hot_confirmed < 0` discriminator
+    # test_an_uncreditable_row_is_DROPPED_rather_than_zeroed depends on.
+    #
+    # XRP_NEGATED IS KEPT as the recorded measurement rather than deleted (rule 1:
+    # the drift is the point). It is what the operator's host read on 2026-10-04
+    # before the fix, and the assertion below is that these same functions can no
+    # longer produce it.
+    assert row["hot_confirmed"] == 0.0, (
+        f"a release wrote hot_confirmed again: {row['hot_confirmed']!r}. Before 2026-10-04 these "
+        f"same two calls produced {XRP_NEGATED!r} -- the exact negated sum of the two payouts, a "
+        f"ledger with a debit side and no credit side -- and the fix was to stop writing the column "
+        f"here rather than to floor it"
     )
-    assert row["hot_confirmed"] == -(XRP_PAYOUT_23 + XRP_PAYOUT_24), (
-        "the exact negation is the whole finding -- a ledger with a debit side and no credit side"
+    assert row["hot_confirmed"] != XRP_NEGATED, (
+        "the measured defect reproduced, so the cause is back"
     )
-    assert row["hot_reserved"] == 0.0
+    assert row["hot_reserved"] == 0.0, "the reservation this function DOES own must return to zero"
+    assert row["hot_available"] == 0.0, (
+        "hot_available is derived from the two columns above and must agree with them"
+    )
 
 
 def test_an_uncreditable_row_is_DROPPED_rather_than_zeroed(seeded):
