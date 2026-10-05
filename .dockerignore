@@ -58,6 +58,7 @@ env
 # the file you are reading.
 **/__pycache__
 **/*.pyc
+**/*.log
 .pytest_cache
 .ruff_cache
 .coverage
@@ -69,13 +70,29 @@ tests
 docs
 assets
 requirements-dev.txt
+# 5.49MB measured, and no Dockerfile COPYs a single file from it. tools/warbot and
+# tools/dleq_helper are operator-side helpers; the dleq_helper is a compiled binary
+# whose own .gitignore entry says its failure mode is "the cryptography is wrong".
+tools
 
-# RUNTIME STATE, AND THIS ONE IS NOT TIDINESS. runtime/ holds the abstergo volume
-# and the web/harness volume mount points. A swap_intents.json or a pid file baked
-# into an image SHADOWS the volume mounted over it in exactly the cases where the
-# mount fails -- so the image would quietly serve a snapshot of whenever somebody
-# last built, for a file that decides whether funds are released.
-runtime
+# RUNTIME STATE, AND THIS ONE IS NOT TIDINESS. It holds the container volume mount
+# points AND, under swap_terminal/, the live worker pid files, worker logs and
+# kill_switch.lock. A swap_intents.json or a pid file baked into an image SHADOWS
+# the volume mounted over it in exactly the cases where the mount fails -- so the
+# image would quietly serve a snapshot of whenever somebody last built, for files
+# that decide whether funds are released and whether a stop can be proven.
+#
+# `**/runtime` AND NOT `runtime`, AND THAT WAS A REAL BUG UNTIL 2026-10-05.
+# .dockerignore patterns are matched against the path relative to the CONTEXT
+# ROOT, so a bare `runtime` excluded ./runtime and nothing else --
+# swap_terminal/runtime/ went in every time, pid files and all. Measured on the
+# operator's host: the web build transferred 60.27MB of context AFTER .venv was
+# excluded, and that directory holds the logs of workers at cycle=3507 and
+# cycle=5344.
+#
+# The same root-anchoring applies to `*.log` below, which was excluding exactly
+# zero files because every log in this tree is at least one directory deep.
+**/runtime
 
 # Databases never belong in an image. swap_terminal.db is mounted, and a copy in
 # the image would be a second source of truth with no reconciliation -- the thing
