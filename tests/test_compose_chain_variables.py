@@ -77,15 +77,47 @@ _ENV_READ = re.compile(r'_env(?:_int|_float|_bool|_str)?\(\s*"([A-Z_][A-Z0-9_]*)
 #: A compose `environment:` key, at the service's own indentation.
 _COMPOSE_KEY = re.compile(r"^      ([A-Z_][A-Z0-9_]*):", re.MULTILINE)
 
-#: What counts as a CHAIN CREDENTIAL, which is the family this gate covers.
-#: Deliberately narrow: SWAP_DB_PATH and GUNICORN_WORKERS are not chain settings
-#: and a gate that demanded symmetry over everything would be wrong rather than
-#: strict.
+#: What counts as a CHAIN CREDENTIAL. Kept for the reverse direction only -- a
+#: chain-shaped name compose passes that config.py never reads.
 _CHAIN_SHAPED = re.compile(r"_RPC_|_HOT_WALLET$")
+
+#: config.py reads NO signing material, VERIFIED 2026-10-05: SOL_PAYOUT_KEYPAIR_PATH,
+#: XRP_PAYOUT_SECRET_SEED, GRIDCOIN_WALLET_PASSPHRASE and ST_ADAPTOR_FUNDING_SEED all
+#: live in services/ and none appears in config.py. That is what makes the forward
+#: assertion below safe to state as EVERYTHING config.py reads, with no allowlist:
+#: complete coverage of config.py arms nothing, so there is no tension between the
+#: gate and the unarmed posture the compose files deliberately keep.
+#:
+#: If a future config.py starts reading a signing variable, this list is the thing to
+#: revisit -- and the test below will start demanding compose pass it, which is the
+#: loud failure you want rather than a quiet arming.
+_SIGNING_VARIABLES = (
+    "SOL_PAYOUT_KEYPAIR_PATH",
+    "XRP_PAYOUT_SECRET_SEED",
+    "GRIDCOIN_WALLET_PASSPHRASE",
+    "ST_ADAPTOR_FUNDING_SEED",
+)
 
 
 def config_reads() -> set[str]:
-    return {name for name in _ENV_READ.findall(CONFIG_PY.read_text()) if _CHAIN_SHAPED.search(name)}
+    """EVERY name config.py reads through _env(), not just the chain family.
+
+    THE NARROW VERSION OF THIS FUNCTION IS WHY THE GATE AGREED WITH THE DEFECT.
+    It filtered on `_RPC_|_HOT_WALLET`, which is the same wrong idea the compose
+    file had -- so both missed the same NINETEEN variables and the suite was green.
+    A check derived from the same assumption as the thing it checks will always
+    agree with it (rule 8), and that is worse than no check because it certifies.
+
+    Measured 2026-10-05: config.py reads 44 variables; the compose file passed 30
+    of them under the narrow rule, and the nineteen it did not include
+    SOL_DEPOSIT_ACCOUNT and XRP_DEPOSIT_ACCOUNT (why SOL and XRP read UNAVAILABLE
+    as a SOURCE), every *_NETWORK_FEE_RESERVE (the `cannot_quote` condition that
+    pair_view.py's own docstring records as having badged GRC -> XRP AVAILABLE for
+    a quote that then refused), every *_MIN_CONFIRMATIONS, and DEFAULT_FEE_BPS,
+    AMOUNT_TOLERANCE_PCT and SMALL_SWAP_MANUAL_REVIEW_USD -- which decide what a
+    customer is quoted and when a swap is held for a human.
+    """
+    return set(_ENV_READ.findall(CONFIG_PY.read_text()))
 
 
 def compose_passes() -> set[str]:
@@ -96,8 +128,8 @@ def test_the_parse_found_something():
     """Otherwise both assertions below pass by comparing two empty sets (rule 17)."""
     reads = config_reads()
     passes = compose_passes()
-    assert len(reads) >= 10, (
-        f"only {len(reads)} chain variables parsed out of {CONFIG_PY.name}: {sorted(reads)}. "
+    assert len(reads) >= 40, (
+        f"only {len(reads)} variables parsed out of {CONFIG_PY.name}: {sorted(reads)}. "
         f"Either the _env() pattern no longer matches or the file was restructured, and "
         f"this gate is now checking nothing."
     )
@@ -107,17 +139,43 @@ def test_the_parse_found_something():
     )
 
 
-def test_every_chain_variable_config_reads_is_passed_to_the_container():
-    """The direction that produced "0 of 20 directions can be quoted right now"."""
+def test_config_py_reads_no_signing_material():
+    """The premise the forward assertion rests on, checked rather than assumed.
+
+    If this fails, "compose must pass everything config.py reads" has become a rule
+    that would ARM the container, and the next test must gain an explicit allowlist
+    before it is obeyed. Stated as its own test so that change is forced to be
+    deliberate instead of arriving as a mechanical fix to a failing assertion.
+    """
+    reads = config_reads()
+    armed = sorted(name for name in _SIGNING_VARIABLES if name in reads)
+    assert not armed, (
+        f"config.py now reads signing material: {armed}. The next test requires compose "
+        f"to pass everything config.py reads, which would arm the container. Add an "
+        f"explicit, justified exclusion there -- do not just make this pass."
+    )
+
+
+def test_every_variable_config_reads_is_passed_to_the_container():
+    """EVERYTHING config.py reads, which is the assertion the narrow version missed.
+
+    The *_RPC_PASS misspelling produced "0 of 20 directions can be quoted right
+    now" -- loud. The nineteen this now covers are mostly the quiet kind: a
+    container quoting at a different DEFAULT_FEE_BPS or holding at a different
+    AMOUNT_TOLERANCE_PCT than the host it is meant to replace, with nothing
+    anywhere saying the two disagree.
+    """
     missing = sorted(config_reads() - compose_passes())
     assert not missing, (
-        f"config.py reads these chain variables and {WEB_COMPOSE.name} does not pass them:\n  "
+        f"config.py reads these and {WEB_COMPOSE.name} does not pass them:\n  "
         + "\n  ".join(missing)
-        + "\n\nInside the container each arrives UNSET, which config.py treats as an"
-        "\nunconfigured chain -- so the adapter is not built, the pair reports unavailable,"
-        "\nand the UI says 0 of 20 with every daemon reachable and every credential"
-        "\nexported. A *_RPC_WALLET left out is worse: the adapter IS built, against the"
-        "\ndaemon's default wallet instead of desk_hot."
+        + "\n\nInside the container each arrives UNSET and config.py falls back to its"
+        "\nbuilt-in default, so the container runs on settings the host does not use."
+        "\nThe loud failures are the chain credentials -- no adapter, pair unavailable,"
+        "\n'0 of 20'. The QUIET ones are worse: a *_RPC_WALLET left out builds an adapter"
+        "\nagainst the daemon's default wallet instead of desk_hot, and a DEFAULT_FEE_BPS"
+        "\nor AMOUNT_TOLERANCE_PCT left out quotes and holds at a different number than"
+        "\nthe host, with nothing reporting the difference."
     )
 
 

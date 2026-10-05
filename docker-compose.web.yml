@@ -201,6 +201,49 @@ services:
       SOL_RPC_COMMITMENT: "${SOL_RPC_COMMITMENT:-}"
       SOL_RPC_TIMEOUT: "${SOL_RPC_TIMEOUT:-}"
       XRP_RPC_TIMEOUT: "${XRP_RPC_TIMEOUT:-}"
+
+      # NINETEEN MORE, MEASURED 2026-10-05 AND NOT ONE OF THEM GUESSED. The first
+      # version of this block covered the *_RPC_* family and stopped there, and
+      # the gate written to hold it used the pattern `_RPC_|_HOT_WALLET` -- so
+      # BOTH the file and its test missed the same nineteen variables, which is
+      # rule 8's shape: a check derived from the same wrong idea as the thing it
+      # checks agrees with it.
+      #
+      # The list below is every remaining name config.py reads through _env(),
+      # generated from the source rather than typed. config.py reads NO signing
+      # material -- SOL_PAYOUT_KEYPAIR_PATH, XRP_PAYOUT_SECRET_SEED,
+      # GRIDCOIN_WALLET_PASSPHRASE and ST_ADAPTOR_FUNDING_SEED all live in
+      # services/ -- so "pass everything config.py reads" is both complete and
+      # arms nothing. That is the invariant the gate now holds.
+      #
+      # deposit accounts -- WHY SOL AND XRP READ UNAVAILABLE AS A SOURCE.
+      SOL_DEPOSIT_ACCOUNT: "${SOL_DEPOSIT_ACCOUNT:-}"  # config.py default: ""
+      XRP_DEPOSIT_ACCOUNT: "${XRP_DEPOSIT_ACCOUNT:-}"  # config.py default: ""
+      SOL_SPL_MINT: "${SOL_SPL_MINT:-}"  # config.py default: ""
+      #
+      # network fee reserves -- the `cannot_quote` condition.
+      BTC_NETWORK_FEE_RESERVE: "${BTC_NETWORK_FEE_RESERVE:-}"  # config.py default: "0.0000282"
+      GRC_NETWORK_FEE_RESERVE: "${GRC_NETWORK_FEE_RESERVE:-}"  # config.py default: "0.001"
+      LTC_NETWORK_FEE_RESERVE: "${LTC_NETWORK_FEE_RESERVE:-}"  # config.py default: "0.001"
+      SOL_NETWORK_FEE_RESERVE: "${SOL_NETWORK_FEE_RESERVE:-}"  # config.py default: "0.000005"
+      XRP_NETWORK_FEE_RESERVE: "${XRP_NETWORK_FEE_RESERVE:-}"  # config.py default: "0.00001"
+      #
+      # confirmation thresholds -- a SAFETY setting, not a tuning knob.
+      BTC_MIN_CONFIRMATIONS: "${BTC_MIN_CONFIRMATIONS:-}"  # config.py default: "2"
+      GRC_MIN_CONFIRMATIONS: "${GRC_MIN_CONFIRMATIONS:-}"  # config.py default: "6"
+      LTC_MIN_CONFIRMATIONS: "${LTC_MIN_CONFIRMATIONS:-}"  # config.py default: "2"
+      SOL_MIN_CONFIRMATIONS: "${SOL_MIN_CONFIRMATIONS:-}"  # config.py default: "3"
+      XRP_MIN_CONFIRMATIONS: "${XRP_MIN_CONFIRMATIONS:-}"  # config.py default: "1"
+      #
+      # pricing and risk -- these decide what a customer is quoted.
+      DEFAULT_FEE_BPS: "${DEFAULT_FEE_BPS:-}"  # config.py default: "150"
+      AMOUNT_TOLERANCE_PCT: "${AMOUNT_TOLERANCE_PCT:-}"  # config.py default: "0.01"
+      QUOTE_TTL_SECONDS: "${QUOTE_TTL_SECONDS:-}"  # config.py default: "600"
+      RATE_CACHE_SECONDS: "${RATE_CACHE_SECONDS:-}"  # config.py default: "30"
+      SMALL_SWAP_MANUAL_REVIEW_USD: "${SMALL_SWAP_MANUAL_REVIEW_USD:-}"  # config.py default: "5000"
+      #
+      # the Flask session key.
+      SECRET_KEY: "${SECRET_KEY:-}"  # config.py default: "swap-terminal-dev"
       SOL_RPC_URL: "${SOL_RPC_URL:-}"
       XRP_RPC_URL: "${XRP_RPC_URL:-}"
 
