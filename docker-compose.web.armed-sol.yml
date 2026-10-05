@@ -1,0 +1,59 @@
+# ARMING SOL. Add this file and the container can SIGN AND BROADCAST SOL payouts.
+#
+# Role: file (operator entry point at the repository root per CLAUDE.md rule 10)
+# Reads: the process environment
+# Writes: nothing itself
+# Can move funds: THIS FILE IS WHAT MAKES IT ABLE TO, for SOL and nothing else.
+# Live-safe: NO. That is the entire point of it being a separate file.
+#
+# WHY A SEPARATE FILE PER CHAIN, AND WHY NOT ONE "armed" FILE.
+#
+# The first version of this was a single docker-compose.web.armed.yml carrying both
+# SOL_PAYOUT_KEYPAIR_HOST_FILE and XRP_PAYOUT_SECRET_SEED, and
+# tests/test_docker_build_context.py rejected it: at most one `${VAR:?}` per
+# compose file. The rule was written on 2026-10-05 after that exact defect shipped
+# twice -- compose interpolates EVERY variable in EVERY file it is given before it
+# looks at which service was named, so two required variables in one file mean you
+# must supply BOTH to use EITHER.
+#
+# Here that is not merely inconvenient, it is wrong. Arming SOL and arming XRP are
+# two custody decisions over two different keys on two different chains. Bundling
+# them would mean you could not arm the one you want without producing the other's
+# key -- so the gate caught a design mistake, not a formatting one.
+#
+# Arming is not a setting, it is a posture, and a posture should take an act to
+# enter. Naming this file on the command line is that act, and it is visible in
+# shell history and in `docker compose config`. Two more `${VAR:-}` pass-throughs
+# in docker-compose.web.yml would instead arm the container for anyone who happened
+# to have the variable exported -- which the operator's own shell does, since
+# `~/.swap_terminal_env` carries XRP_PAYOUT_SECRET_SEED and `supervisor.py status`
+# prints "*** ARMED, THIS PROCESS CAN SPEND XRP ***" because of it. The container
+# would be armed by inheritance rather than by decision.
+#
+# NEITHER FILE ARMS GRC OR THE ATOMIC-SWAP FUNDING PATH.
+# GRIDCOIN_WALLET_PASSPHRASE goes through a wallet unlock that is its own decision,
+# and ST_ADAPTOR_FUNDING_SEED must never sit on a long-lived service definition --
+# it belongs in a single `docker compose run --env` invocation, because argv is
+# world-readable through /proc.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.web.yml \
+#                    -f docker-compose.web.hostnet.yml \
+#                    -f docker-compose.web.armed-sol.yml up -d web
+#
+# THE KEYPAIR IS A FILE, MOUNTED READ-ONLY, AND ITS CONTENTS ARE NEVER READ HERE.
+# SOL_PAYOUT_KEYPAIR_PATH names a path, so the path must exist inside the
+# container. `:ro` so the container cannot rewrite or delete the operator's key.
+# The path inside is fixed at /keys/sol_payout.json, so the HOST location never
+# appears in an image, in a log line that echoes the variable, or in this file.
+
+services:
+  web:
+    volumes:
+      # `:?` rather than a default: a default would be this file guessing which
+      # key to hand a process that signs. There is no safe guess.
+      - "${SOL_PAYOUT_KEYPAIR_HOST_FILE:?set SOL_PAYOUT_KEYPAIR_HOST_FILE to the keypair file that owns the account SOL_HOT_WALLET announces. It is mounted READ-ONLY and its contents are never read, printed or copied by anything in this repository}:/keys/sol_payout.json:ro"
+
+    environment:
+      # The path INSIDE the container, fixed, so the host location stays out of
+      # the image and out of any log that echoes this variable.
+      SOL_PAYOUT_KEYPAIR_PATH: /keys/sol_payout.json
