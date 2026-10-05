@@ -150,6 +150,41 @@ class Config:
     SMALL_SWAP_MANUAL_REVIEW_USD = _env_float("SMALL_SWAP_MANUAL_REVIEW_USD", "5000")
     BTC_MIN_CONFIRMATIONS = _env_int("BTC_MIN_CONFIRMATIONS", "2")
     LTC_MIN_CONFIRMATIONS = _env_int("LTC_MIN_CONFIRMATIONS", "2")
+    # 6, AND GRIDCOIN'S OWN WALLET DOES NOT COUNT AN INCOMING PAYMENT UNTIL 10.
+    #
+    # Measured 2026-10-05 against the live testnet desk, funding it with 500 tGRC
+    # (txid 32294bc8...27728d) and polling the receiving wallet every 20s:
+    #
+    #     confirmations  2   balance 0.0    unconfirmed 500.0
+    #     confirmations  6   balance 0.0    unconfirmed 500.0   <- THIS tree calls it credited
+    #     confirmations  9   balance 0.0    unconfirmed 500.0
+    #     confirmations 10   balance 500.0  unconfirmed 0.0     <- the wallet first counts it
+    #
+    # The threshold is not arbitrary on Gridcoin's side. From its source, two
+    # different depths govern two different questions:
+    #
+    #     src/wallet/wallet.h:1412   IsConfirmed(): GetDepthInMainChain() >= 10
+    #     src/wallet/wallet.h:1456   IsTrusted():   nMinConfirmsRequiredToSendGRC = 3
+    #     src/wallet/wallet.cpp:3184 GetBalance() skips a tx that is !IsConfirmed() && !fFromMe
+    #
+    # `fFromMe` is false for a payment we RECEIVE, so an incoming deposit is excluded
+    # from getbalance until depth 10; coin selection for SENDING needs only depth 3.
+    #
+    # WHAT THIS MEANS HERE, and it is a reconciliation hazard rather than a loss:
+    # between depth 6 and depth 10 the terminal considers a GRC deposit fully
+    # confirmed while the wallet holding those coins reports a balance that does not
+    # include them. An operator reading the desk balance in that window sees nothing
+    # arrive for a swap this tree has already credited. It errs SAFE on the payout
+    # side -- services/payout_capacity reads a spendable figure, so capacity is
+    # understated rather than overstated, and a payout is refused rather than
+    # attempted against coins that are not there.
+    #
+    # NOT CHANGED TO 10 HERE. A deposit confirmation threshold decides when money is
+    # accepted, which is live posture and the operator's call (rule 16), and raising
+    # it roughly doubles the wait a GRC customer sees. The measurement is recorded so
+    # the decision is made against numbers rather than against the Bitcoin habit of
+    # assuming 6 means the same thing everywhere -- which is exactly the assumption
+    # that produced it.
     GRC_MIN_CONFIRMATIONS = _env_int("GRC_MIN_CONFIRMATIONS", "6")
     # SOL_MIN_CONFIRMATIONS IS NOT A COUNT OF BLOCKS. Solana has commitment
     # LEVELS -- processed / confirmed / finalized -- and this is a rung on the
