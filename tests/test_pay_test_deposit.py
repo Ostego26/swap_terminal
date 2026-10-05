@@ -372,3 +372,82 @@ def test_no_money_figure_on_the_funding_line_is_in_scientific_notation(monkeypat
     assert forbidden not in line, f"{forbidden!r} reached a line somebody reads before sending"
     assert "e-0" not in line
     assert "e+" not in line
+
+
+# --- the ownership check inverted when the adapter moved to the desk -----------
+
+class _Ownership:
+    def __init__(self, verdict, why=""):
+        self.verdict = verdict
+        self.why = why
+
+
+def _stub_adapter(monkeypatch, verdict, why=""):
+    """Replace the Gridcoin adapter with one that answers a seeded verdict."""
+    monkeypatch.setattr(tool, "missing_settings", lambda rpc, asset: [])
+
+    class _Adapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def address_ownership(self, _address):
+            return _Ownership(verdict, why)
+
+    monkeypatch.setattr(tool, "GridcoinAdapter", _Adapter)
+
+
+def test_an_address_the_desk_OWNS_is_refused_rather_than_required(monkeypatch):
+    """MUTATION: swap the True/False branches back, which is what they were.
+
+    Until 2026-10-05 this function refused an address the GRC wallet did NOT own,
+    on the premise that the terminal's GRC daemon was the operator's own wallet --
+    true while GRC_RPC_PORT was 25715. It became false when the port moved to the
+    desk daemon on 25779, and the two guards then disagreed about one address:
+
+        swap s_7170571c428b7912, SOL -> GRC, payout mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap
+        pay_test_deposit:         refused -- "the GRC wallet holds NO KEY"
+        services/payout_service:  requires exactly that, or the desk pays itself
+
+    The desk owning the payout address is the failure now: the coins never leave,
+    and the swap is marked completed anyway.
+    """
+    _stub_adapter(monkeypatch, verdict=True)
+    refusal = tool.ownership_refusal("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap")
+    assert refusal is not None, "an address the desk owns must be refused"
+    assert "OWNS the payout address" in refusal.what
+    assert "paying itself" in refusal.fix
+
+    _stub_adapter(monkeypatch, verdict=False)
+    assert tool.ownership_refusal("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap") is None, (
+        "an address the desk does NOT own is what a real payout needs"
+    )
+
+
+def test_an_unanswerable_ownership_question_is_still_refused(monkeypatch):
+    """None is not a no, and that half did not invert.
+
+    On 2026-10-01 a None from a shell with no GRC_RPC_* was read as "this chain
+    cannot answer ownership" when it was a connection refusal. Inverting the
+    True/False branches must not quietly turn the unknown case into a pass.
+    """
+    _stub_adapter(monkeypatch, verdict=None, why="connection refused")
+    refusal = tool.ownership_refusal("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap")
+    assert refusal is not None
+    assert "NOT ESTABLISHED" in refusal.what
+    assert "connection refused" in refusal.what
+
+
+def test_the_dropped_assurance_is_NAMED_rather_than_left_blank():
+    """Rule 14: the line that used to claim something must not silently vanish.
+
+    It read "payout owned YES -- the GRC wallet holds the key". That assurance is
+    genuinely gone -- the wallet that should own a customer payout is a different
+    daemon this shell has no credentials for -- so the replacement says it was not
+    checked, and prints the command that would check it.
+    """
+    lines = tool.ownership_lines("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap")
+    text = "\n".join(lines)
+    assert "NOT CHECKED" in text
+    assert "82.65 tGRC" in text, "the loss that justified the original check stays named"
+    assert "validateaddress mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap" in text
+    assert "YES" not in text, "it must not still claim the assurance it can no longer give"

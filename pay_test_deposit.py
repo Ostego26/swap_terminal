@@ -204,12 +204,37 @@ def swap_refusals(swap: dict | None, already_seen: int) -> list[Refusal]:
 
 
 def ownership_refusal(payout_address: str) -> Refusal | None:
-    """Refuse unless the GRC wallet holds the key for the payout address.
+    """Refuse when the terminal's GRC wallet OWNS the payout address.
 
-    FOR A REHEARSAL ONLY, and the asymmetry is deliberate and stated because it
-    reverses in production: paying yourself is the POINT here, and for a real
-    customer an owned payout address would be the alarm instead. This file is
-    testnet tooling, so it checks the rehearsal's invariant.
+    THIS CHECK INVERTED ON 2026-10-05, AND THE DOCSTRING IT REPLACED PREDICTED IT.
+    What stood here was:
+
+        Refuse unless the GRC wallet holds the key for the payout address.
+        FOR A REHEARSAL ONLY, and the asymmetry is deliberate and stated because
+        it reverses in production: paying yourself is the POINT here, and for a
+        real customer an owned payout address would be the alarm instead.
+
+    Both sentences were true. The premise under them was that the GRC daemon this
+    terminal talks to IS the operator's own wallet, so "ismine there" meant "I can
+    spend what I receive". That premise ended when GRC_RPC_PORT moved from 25715
+    (the testnet GUI wallet) to 25779 (the desk daemon): the adapter is now the
+    DESK, and an address the desk owns is the desk paying ITSELF -- which moves
+    nothing, marks the swap completed anyway, and is the exact condition
+    services/payout_service refuses on the real order path.
+
+    Measured when it fired: swap s_7170571c428b7912, SOL -> GRC, payout address
+    mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap. This function refused it for holding no
+    key, while the terminal's own gate requires precisely that. Two guards, one
+    address, opposite verdicts -- rule 8's drift, except the copies never agreed
+    in the first place; they agreed about a topology that changed underneath them.
+
+    WHAT IS NO LONGER CHECKED BY ANYONE, AND IT IS NAMED RATHER THAN DROPPED. The
+    original guard existed because 82.65 tGRC went to an address nobody held a key
+    for on 2026-10-01. That risk is unchanged and this process can no longer rule
+    it out: the wallet that SHOULD own a customer payout is a different daemon,
+    with different credentials, which this shell does not hold. So the caller
+    prints that it was not checked, with the command that would check it, instead
+    of a line claiming an assurance nobody produced.
 
     THREE ANSWERS, because chains/base.address_ownership() has three.
     `None` is refused and is NOT treated as a no: on 2026-10-01 a `None` from a
@@ -226,19 +251,48 @@ def ownership_refusal(payout_address: str) -> Refusal | None:
             "about the address; five runs on 2026-10-01 hit 127.0.0.1:80 for exactly this reason.",
         )
     result = GridcoinAdapter(**Config.RPC["GRC"]).address_ownership(payout_address)
-    if result.verdict is True:
-        return None
     if result.verdict is False:
+        return None
+    if result.verdict is True:
         return Refusal(
-            f"the GRC wallet holds NO KEY for the payout address {payout_address}",
-            "a payout there would be unspendable by you, which is what happened to 82.65 tGRC on "
-            "2026-10-01. Create a swap whose payout address came from `getnewaddress` on this daemon.",
+            f"the terminal's GRC wallet OWNS the payout address {payout_address}",
+            "that is the desk paying itself: the coins never leave, and the swap is marked completed "
+            "anyway. services/payout_service refuses the same condition on the real order path, so a "
+            "deposit sent now would be taken and then stranded. Use a payout address from the "
+            "CUSTOMER wallet, not from the daemon GRC_RPC_PORT names.",
         )
     return Refusal(
         f"ownership of {payout_address} is NOT ESTABLISHED -- {result.why}",
         "nobody answered, which is not the same as 'not yours'. If the reason above is a connection "
         "error the endpoint is wrong or down and the question is still answerable.",
     )
+
+
+def ownership_lines(payout_address: str) -> list[str]:
+    """What to print once ownership_refusal() has passed. Lines, not prints.
+
+    EXTRACTED 2026-10-05 rather than raising a lint ceiling. Adding the
+    not-checked paragraph below pushed main() past PLR0915, and rule 12 is
+    explicit that a main() over the ceiling is orchestration that has swallowed a
+    decision -- so the decision comes out and becomes callable with a seeded
+    address, which is also what makes the wording testable.
+
+    The second half is the load-bearing part. It says what this process did NOT
+    verify, because the alternative is a blank where an assurance used to be: this
+    line read "payout owned YES -- the GRC wallet holds the key" until the adapter
+    moved to the desk, and silently dropping it would leave a reader thinking the
+    old check still ran.
+    """
+    return [
+        "  payout owned    NO by the terminal's GRC wallet, asked of the daemon just now",
+        "                  <- which is what a real payout needs: an address the desk owns",
+        "                     would be the desk paying itself",
+        "  recipient can   NOT CHECKED. The wallet that should own this address is a",
+        "  spend it        DIFFERENT daemon and this shell holds no credentials for it.",
+        "                  82.65 tGRC went to an address nobody held a key for on",
+        "                  2026-10-01 and nothing here can rule that out. To check:",
+        f"                      gridcoinresearchd -testnet validateaddress {payout_address}",
+    ]
 
 
 def open_sol_swap(db, swap_id: str = "") -> dict | None:
@@ -541,7 +595,8 @@ def main(argv: list[str] | None = None) -> int:
         if ownership:
             refusals.append(ownership)
         else:
-            print("  payout owned    YES -- the GRC wallet holds the key, asked of the daemon just now")
+            for line in ownership_lines(str(swap.get("payout_address") or "")):
+                print(line)
         funding = sender_funding(args.keypair, float(swap["expected_input_amount"]))
         print(f"  sender funded   {funding.line}")
         if funding.refusal:
