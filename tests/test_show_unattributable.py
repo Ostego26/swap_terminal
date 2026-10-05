@@ -239,11 +239,33 @@ def test_an_outstanding_row_SAYS_nobody_has_been_given_the_coins(db_file, capsys
 
 def test_an_EMPTY_report_prints_none_and_not_a_blank_gap(db_file, capsys):
     """Rule 14. A blank gap is ambiguous between zero rows and a query that broke --
-    and a broken query about this table is the thing that happened."""
+    and a broken query about this table is the thing that happened.
+
+    THIS TEST USED TO MATCH THE PHRASE "reached a swap", AND THE PHRASE WAS WRONG.
+    The default run queries `resolved_at IS NULL`, so it never looks at resolved
+    rows -- yet the old message read "no unattributable deposits in any asset,
+    outstanding or not. Every deposit this terminal has seen reached a swap", which
+    asserts two things about data the SELECT excluded. Found 2026-10-05 while
+    writing show_late_deposits.py, which had copied the line verbatim: rule 8
+    exactly, where the second copy is how the first one's defect gets noticed.
+
+    So this now pins the STRONGER invariant rather than the old wording (rule 2: a
+    test dies with the behavior or changes to pin something stronger). Three things,
+    and the third is the one that was broken:
+
+      1. `(none)` is printed, not a blank gap
+      2. the zero is explained rather than left bare
+      3. the explanation does not speak for rows the query did not read
+    """
     assert show_unattributable.main(["--db", str(db_file)]) == 0
     out = capsys.readouterr().out
     assert "(none)" in out
-    assert "reached a swap" in out, "and says what zero MEANS, next to the zero"
+    assert "OUTSTANDING" in out, "says WHICH zero this is, next to the zero"
+    assert "outstanding or not" not in out, (
+        "the default run filters on resolved_at IS NULL, so it cannot report on "
+        "resolved rows"
+    )
+    assert "--include-resolved" in out, "and says what it did not look at"
 
 
 def test_the_empty_report_echoes_the_filter_that_produced_it(db_file, capsys):

@@ -711,3 +711,65 @@ def late_note(recorded: int, targets: int, *, window_seconds: float = LATE_DEPOS
         f"{window} window, their deposit addresses were re-read, and (none) carried a payment "
         f"that no deposit_events row already accounts for"
     )
+
+
+#: The rows an operator reads when the desk is holding coins no swap accounts for.
+#:
+#: HERE AND NOT IN THE ROOT TOOL, for the reason rule 20 gives: a filter over rows
+#: already in swap_terminal.db is a query, and a query that decides what
+#: "outstanding" means must answer the same way for every reader. The precedent is
+#: unattributable_deposit_service.OUTSTANDING_SQL, which derives the same predicate
+#: as a column for the same reason -- a root tool recomputing `resolved_at IS NULL`
+#: would be the second place that definition lived, which is rule 8's bug with a
+#: delay on it.
+#:
+#: swap_status IS THE CARRIED ONE, not a join to swaps. db.py:271-276 says why in
+#: the schema: an operator reading this a week later needs the status AT THE MOMENT
+#: the money arrived, because that is what decides whether the desk is holding a
+#: customer's extra send (the payout already completed) or may still owe the
+#: original payout too (it failed). Joining to swaps would give today's status,
+#: which is not the one that made this a late deposit. So this SELECT must NOT
+#: join, and that is a deliberate omission rather than a missing feature.
+OUTSTANDING_SQL = """
+SELECT
+    swap_id,
+    swap_status,
+    asset,
+    txid,
+    vout,
+    address,
+    amount,
+    confirmations,
+    first_seen_at,
+    last_seen_at,
+    resolved_at,
+    resolution_note,
+    CASE WHEN resolved_at IS NULL THEN 1 ELSE 0 END AS outstanding
+FROM late_deposits
+WHERE (:asset IS NULL OR asset = :asset)
+  AND (:include_resolved = 1 OR resolved_at IS NULL)
+-- Oldest first: the deposit somebody has been waiting longest on is the one that
+-- belongs at the top, the same ordering unattributable_deposit_service uses and
+-- for the same reason.
+ORDER BY first_seen_at ASC, id ASC
+"""
+
+
+def outstanding(db, asset: str | None = None, *, include_resolved: bool = False) -> list:
+    """Late deposits, oldest first; unresolved only unless asked for all of them.
+
+    Reads. Writes nothing, decides nothing, and in particular does NOT resolve:
+    deciding that one of these payments belongs to somebody, and sending them
+    coins, is fund movement and the operator's call (rule 16). This puts the
+    evidence for that call on a screen.
+
+    `asset=None` means every asset rather than none -- the SQL spells that as
+    `:asset IS NULL OR asset = :asset` so the filter is one predicate instead of
+    two code paths.
+    """
+    return list(
+        db.execute(
+            OUTSTANDING_SQL,
+            {"asset": asset, "include_resolved": 1 if include_resolved else 0},
+        ).fetchall()
+    )

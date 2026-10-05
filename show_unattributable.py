@@ -182,11 +182,23 @@ def total_lines(rows, args) -> list[str]:
     outstanding_count = sum(1 for row in rows if row["outstanding"])
     if not rows:
         scope = f"for {args.asset}" if args.asset else "in any asset"
-        shown = "" if args.include_resolved else ", outstanding or not"
+        # NOT ", outstanding or not", WHICH IS WHAT THIS SAID UNTIL 2026-10-05.
+        # Without --include-resolved the SELECT filters on `resolved_at IS NULL`, so
+        # it never looked at resolved rows and cannot report on them. The old wording
+        # asserted a fact about data the query excluded. Found while writing
+        # show_late_deposits.py, which had copied the line verbatim -- rule 8 exactly:
+        # the second copy is how the first one's defect gets noticed.
+        if args.include_resolved:
+            qualifier = "unattributable"
+            consequence = "Every deposit this terminal has seen reached a swap."
+        else:
+            qualifier = "OUTSTANDING unattributable"
+            consequence = (
+                "Resolved rows were not queried -- pass --include-resolved to see those."
+            )
         return [
             "",
-            f"(none)  <- no unattributable deposits {scope}{shown}. Every deposit "
-            "this terminal has seen reached a swap.",
+            f"(none)  <- no {qualifier} deposits {scope}. {consequence}",
         ]
     per_asset: dict[str, int] = {}
     for row in rows:
