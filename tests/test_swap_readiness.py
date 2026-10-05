@@ -1079,13 +1079,29 @@ def test_a_locked_wallet_with_a_passphrase_available_is_a_PASS():
     for one send and locks it again, and it unlocks from locked, which is what
     `walletpassphrase` is for. Leaving a staking wallet fully unlocked is the state
     to avoid, and that is the opposite of this one.
+
+    MEASURED AGAIN 2026-10-05, AND THE VERDICT SURVIVED WHILE THE SENTENCE DID NOT.
+    This used to assert the line said "CORRECT resting state", i.e. that 0 means
+    locked. It does not. The operator unlocked that wallet from the GUI padlock and
+    500 tGRC was sent out of it with no walletpassphrase call, while getwalletinfo
+    returned exactly {'unlocked_until': 0} -- because Gridcoin prints
+    GetUnlockDeadline().value_or(0) and a GUI unlock arms no deadline
+    (src/test/wallet_tests.cpp:1095-1097).
+
+    PASS is still correct and for the same reason: unlock_for_sending() opens the
+    wallet for one send from EITHER state. So this now pins the stronger property --
+    PASS, and a line that does not claim to know a state this field cannot show.
     """
     state, detail = describe_wallet_lock({"unlocked_until": 0}, can_unlock=True)
 
     assert state == PASS
-    assert "CORRECT resting state" in detail
     assert "unlock_for_sending" in detail, "the line must name what performs the unlock"
     assert "{'unlocked_until': 0}" in detail, "it still echoes what it read"
+    assert "NOT ESTABLISHED" in detail, "0 cannot distinguish locked from unlocked-no-deadline"
+    assert "CORRECT resting state" not in detail, (
+        "refuted 2026-10-05: a wallet reading exactly this paid out 500 tGRC"
+    )
+    assert "wallet is LOCKED" not in detail, "it must not assert a state it cannot see"
 
 
 def test_a_locked_wallet_with_no_passphrase_is_still_a_FAIL():
@@ -1094,13 +1110,23 @@ def test_a_locked_wallet_with_no_passphrase_is_still_a_FAIL():
     With nothing able to unlock it, a locked wallet means the payout refuses and
     the swap lands in 'failed', which nothing retries -- the failure that cost
     three rehearsals on 2026-10-01.
+
+    FAIL IS KEPT DELIBERATELY ON AN AMBIGUOUS READING, 2026-10-05. Since 0 covers
+    both locked and unlocked-with-no-deadline, this verdict is now a choice between
+    two unequal errors rather than a deduction: a false FAIL costs the operator an
+    investigation that finds nothing, while a false SKIP reports READY and strands a
+    confirmed, irreversible deposit when the payout cannot send.
     """
     state, detail = describe_wallet_lock({"unlocked_until": 0}, can_unlock=False)
 
     assert state == FAIL
-    assert "NOTHING CAN UNLOCK IT" in detail
+    assert "NOTHING IN THIS PROCESS CAN UNLOCK" in detail
     assert "GRIDCOIN_WALLET_PASSPHRASE is unset" in detail
     assert "CORRECT resting state" not in detail
+    assert "UNAMBIGUOUS" not in detail, "refuted 2026-10-05; the field cannot carry that claim"
+    assert "probe_wallet_unlock_scope" in detail, (
+        "it must point at the function that CAN settle this behaviorally"
+    )
 
 
 def test_the_unlock_capability_defaults_to_absent():
@@ -1190,10 +1216,10 @@ def test_check_gridcoin_reads_the_passphrase_from_the_environment(monkeypatch):
     swap_readiness.check_gridcoin()
     without = next(r for r in swap_readiness._results if r[1] == "GRC wallet lock")
 
-    assert with_passphrase[0] == PASS, "a locked wallet plus a passphrase is the correct resting state"
-    assert "CORRECT resting state" in with_passphrase[2]
+    assert with_passphrase[0] == PASS, "unlock_for_sending() opens the wallet from either state"
+    assert "NOT ESTABLISHED" in with_passphrase[2], "0 cannot separate locked from unlocked"
     assert without[0] == FAIL, "the SAME wallet, with nothing able to unlock it"
-    assert "NOTHING CAN UNLOCK IT" in without[2]
+    assert "NOTHING IN THIS PROCESS CAN UNLOCK" in without[2]
 
 
 def test_the_whole_run_is_READY_on_the_operators_actual_state(monkeypatch, capsys):

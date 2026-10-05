@@ -539,6 +539,48 @@ def check_xrp(account: str) -> None:
 #                              distinguishable from this field, which is the
 #                              limitation the paragraph above describes and it stands.
 #
+# "UNAMBIGUOUSLY" IS REFUTED, MEASURED 2026-10-05 ON THE OPERATOR'S TESTNET GUI.
+# The line above is kept as written because the drift is the point (rule 1): it was
+# measured, it was reasoned from, and it was wrong in the one direction that matters.
+#
+# What happened: the operator unlocked that wallet from the GUI padlock, and 500 tGRC
+# was then sent out of it with sendtoaddress and NO walletpassphrase call at all
+# (txid 32294bc8...27728d). Throughout, getwalletinfo on the same endpoint returned
+# exactly {'unlocked_until': 0}. A wallet that pays 500 coins is not locked.
+#
+# WHY THE 2026-09-26 MEASUREMENT MISSED IT, and it is not that the measurement was
+# sloppy -- it measured one unlock PATH and the conclusion was generalized to all of
+# them. From Gridcoin's source:
+#
+#     src/keystore.h:280          GetUnlockDeadline() returns std::optional<int64_t>
+#     src/wallet/rpcwallet.cpp    pushKV("unlocked_until", GetUnlockDeadline().value_or(0))
+#     src/test/wallet_tests.cpp:1095-1097
+#                                 // An unlock with no deadline arms nothing and is unaffected.
+#                                 Unlock(passphrase, UnlockScope::Full, std::nullopt)
+#                                 -> !IsLocked() && !GetUnlockDeadline().has_value()
+#
+# `walletpassphrase <phrase> <timeout>` always passes a deadline, so it always sets a
+# timestamp -- which is what was measured, and that part still holds. The GUI padlock
+# unlocks with std::nullopt: no deadline, nothing armed, the optional stays empty, and
+# value_or(0) renders it as 0. So 0 means "no auto-lock deadline", which covers BOTH
+# a locked wallet AND one unlocked indefinitely.
+#
+# The corrected table:
+#
+#   unlocked_until == 0        NOT ESTABLISHED. Either locked, or unlocked with no
+#                              auto-lock deadline (the GUI padlock). These are opposite
+#                              states and this field cannot separate them.
+#   unlocked_until > now       unlocked, with a deadline. Staking-only versus full is
+#                              still not distinguishable, as above.
+#
+# AND THERE IS ALREADY A FUNCTION IN THIS TREE THAT ANSWERS IT PROPERLY:
+# regtest/funding_steps.probe_wallet_unlock_scope() separates locked / staking-only /
+# can-sign BEHAVIORALLY, by handing signrawtransaction a decodable transaction the
+# wallet holds no key for -- it writes no key, broadcasts nothing and moves no balance.
+# It is bound to the regtest Run harness today, so sharing it with this file is an
+# extraction rather than an import. That is owed work under rule 8 and it is NOT done
+# here; what IS done is that this file stops asserting a state it cannot see.
+#
 # WHY THIS WAS BELIEVED THE OTHER WAY. The operator's earlier run read
 # `unlocked_until 0` on a wallet they described as "regularly unlocked for staking",
 # which looked like evidence that staking-only reports 0. It was not: the staking
@@ -613,16 +655,30 @@ def describe_wallet_lock(info: dict, *, can_unlock: bool = False) -> tuple[str, 
         # the `payout unlock` line printed beside it (rule 8).
         if can_unlock:
             return PASS, (
-                f"wallet is LOCKED ({present}) -- which is the CORRECT resting state, not a problem. "
-                f"GRIDCOIN_WALLET_PASSPHRASE is set, so payout_worker performs the full unlock for one "
-                f"send and locks it again afterwards (chains/gridcoin_wallet_lock.unlock_for_sending). "
-                f"Leaving a staking wallet fully unlocked is the state to avoid, and this is not it"
+                f"lock state NOT ESTABLISHED ({present}) -- and a payout works either way, which is why "
+                f"this passes. 0 means 'no auto-lock deadline', which covers a LOCKED wallet AND one "
+                f"unlocked indefinitely from the GUI padlock (measured 2026-10-05: 500 tGRC left a "
+                f"wallet reading exactly this, with no walletpassphrase call). GRIDCOIN_WALLET_PASSPHRASE "
+                f"is set, so payout_worker unlocks for one send and re-locks afterwards "
+                f"(chains/gridcoin_wallet_lock.unlock_for_sending) -- that path starts from either state. "
+                f"WHAT THIS LINE CANNOT TELL YOU is whether the wallet is sitting fully unlocked right "
+                f"now, which IS the exposure to avoid on a staking wallet. Check the GUI padlock"
             )
+        # FAIL RATHER THAN SKIP, ON A VALUE THIS FUNCTION ADMITS IS AMBIGUOUS, because the
+        # two possible errors are not the same size. If the wallet is really unlocked and
+        # this says FAIL, the operator investigates and finds nothing wrong -- a false
+        # alarm, and arguably the right one, since a staking wallet left open with no
+        # auto-lock deadline is the exposure this whole check exists to name. If the wallet
+        # is really locked and this said SKIP, the run reports READY and the payout fails
+        # mid-swap with a customer's deposit already taken and irreversible.
         return FAIL, (
-            f"wallet is LOCKED ({present}) and NOTHING CAN UNLOCK IT: a GRC payout cannot send, it is "
-            f"not staking either, and GRIDCOIN_WALLET_PASSPHRASE is unset in this process. This is "
-            f"UNAMBIGUOUS: measured 2026-09-26, a staking-only unlock sets unlocked_until to its "
-            f"timeout rather than leaving it at 0, so a 0 here means locked and nothing else"
+            f"a GRC payout may be unable to send ({present}) and NOTHING IN THIS PROCESS CAN UNLOCK: "
+            f"GRIDCOIN_WALLET_PASSPHRASE is unset. 0 means 'no auto-lock deadline' and covers both a "
+            f"LOCKED wallet and one unlocked indefinitely from the GUI -- it is NOT the unambiguous "
+            f"'locked' this line used to claim (refuted 2026-10-05; see the table above this function). "
+            f"Failing rather than skipping because the costly error is the other one: READY on a wallet "
+            f"that cannot pay strands a confirmed deposit. regtest/funding_steps."
+            f"probe_wallet_unlock_scope() settles it behaviorally and moves nothing"
         )
     # A timestamp is NOT reported as "can send", and the 2026-09-26 measurement
     # CONFIRMED that caution rather than removing it: a staking-only unlock does set
