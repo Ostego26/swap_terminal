@@ -1,0 +1,174 @@
+# The Flask UI and the three supervised workers. ONE container, ONE required variable.
+#
+# Role: file (operator entry point at the repository root per CLAUDE.md rule 10)
+# Reads: the process environment
+# Writes: nothing itself; the service writes swap_terminal.db and runtime state
+# Can move funds: YES -- payout_worker is one of the processes it starts. Nothing
+#       in this file arms it: no SOL_PAYOUT_KEYPAIR_PATH, no XRP_PAYOUT_SECRET_SEED,
+#       no ST_ADAPTOR_FUNDING_SEED, no wallet passphrase. Arming is live posture
+#       and the operator's decision (rule 16).
+# Live-safe: NO. Read the SWAP_DB_DIR comment below before mounting a database
+#       that holds real swaps, and stop the host's workers first -- see the
+#       banner immediately below.
+#
+# ONE REQUIRED VARIABLE PER FILE. THAT IS THE RULE THIS FILE EXISTS TO OBEY, and
+# it was learned twice.
+#
+# 2026-10-05, first attempt: all four services were in docker-compose.yml, so the
+# `${VAR:?}` guards on web and grc-desk made `docker compose up -d abstergo`
+# fail. Fixed by moving both out.
+#
+# 2026-10-05, SAME DAY, same defect one level in: web and grc-desk were moved into
+# ONE file, so `docker compose -f docker-compose.yml -f docker-compose.stateful.yml
+# up -d web` demanded GRC_DESK_DATADIR -- a variable that has nothing to do with
+# the web service. Measured on the operator's host: the command printed only
+# GRC_DESK_DATADIR errors, started nothing, and `curl` answered HTTP 000.
+#
+# `docker compose` interpolates EVERY variable in EVERY file it is given, before
+# it looks at which service was named. So a file may contain at most one service
+# with a required variable, or a service with a required variable must be alone
+# in its file. Splitting "the stateful ones" as a group was still grouping by the
+# wrong thing: the grouping that matters is which variables a command will be
+# forced to supply.
+#
+# BEFORE YOU START THIS, STOP THE HOST'S WORKERS. `supervisor.py status` on the
+# operator's host read `running=3/3` while this file was being written, and
+# starting this service on top of that gives TWO deposit watchers, TWO payout
+# workers and TWO reconcilers against one SQLite file. gunicorn.conf.py's closing
+# section records what that costs: two payout workers paid the same swap twice --
+# 2 sends, 1 swap. Compose cannot check that for you; it is the one precondition
+# this file can only state.
+#
+#     python3 swap_terminal/supervisor.py stop     # on the HOST, first
+#     docker compose -f docker-compose.yml -f docker-compose.web.yml up -d web
+
+services:
+  # ---------------------------------------------------------------------------
+  # INCREMENT 4 -- gunicorn AND the three workers. THE DATABASE INCREMENT.
+  #
+  # READ THIS BEFORE MOUNTING A DATABASE YOU CARE ABOUT.
+  #
+  # swap_terminal.db is WAL-mode SQLite, and WAL depends on shared-memory mapping
+  # that does not work correctly on every filesystem. On FUSE, virtiofs, NFS or
+  # an SMB share, the -shm file either fails or silently stops providing the
+  # locking WAL assumes -- and the failure mode is corruption, not an error.
+  # Docker Desktop on macOS and Windows mounts host paths over virtiofs/gRPC-FUSE,
+  # so this service is NOT safe there with a host bind mount, however well it
+  # appears to work.
+  #
+  # The check is one command on the host, against the directory you intend to
+  # mount, and it is NOT optional:
+  #
+  #     stat -f -c '%T  %n' <the directory holding swap_terminal.db>
+  #
+  # ext2/ext3, ext4, xfs, btrfs or zfs on a native Linux host: proceed.
+  # fuseblk, virtiofs, nfs, smb2 or 9p: STOP. Use a named docker volume instead,
+  # and accept that the root tools on the host can then no longer open the same
+  # file -- which is a real cost, not a detail, because show_late_deposits.py and
+  # the other 33 tools are how an operator sees anything.
+  #
+  # AND THE SECOND HAZARD, which containers do not cause and do not fix (§5):
+  # `busy_timeout` appears ZERO times in any .py in this repository, against five
+  # concurrent writers. SQLite's default busy timeout is 0, so a writer that finds
+  # the lock held raises SQLITE_BUSY immediately rather than waiting. That is the
+  # one database change that would actually help, and it is named as work rather
+  # than done here.
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    image: swap-terminal/web:local
+    container_name: swap-web
+    pull_policy: build
+
+    # 127.0.0.1 ON THE HOST SIDE, AND THE CONTAINER SIDE CANNOT BE LOOPBACK.
+    # gunicorn.conf.py defaults its bind to 127.0.0.1, which inside a container
+    # means the CONTAINER's loopback -- unreachable from the host, so the service
+    # would start, log cleanly, and answer nothing. SWAP_TERMINAL_HOST below is
+    # therefore 0.0.0.0, and the 127.0.0.1 in this publish line is what keeps it
+    # off-box rather than the bind address.
+    #
+    # THAT HAS A CONSEQUENCE THE OPERATOR MUST DECIDE (design doc §6.2, decision
+    # 4): kill_switch.refuse_off_box() reads the bind from /proc and REFUSES on a
+    # 0.0.0.0 bind. Inside a container that refusal is a false positive -- the
+    # publish is loopback-only -- but it is a refusal, and the controls stay
+    # refused until somebody changes refuse_off_box() to understand a namespace.
+    # That change is not made here: it would weaken a guard on the order path to
+    # suit a deployment, which is backwards.
+    ports:
+      - "127.0.0.1:${SWAP_TERMINAL_HOST_PORT:-5100}:5000"
+
+    environment:
+      # EXPLICIT, NEVER THE DEFAULT. config.py falls back to a path under its own
+      # BASE_DIR (§3.2), which inside the image is the image -- a database that
+      # looks like it works and is discarded by `docker compose down`.
+      SWAP_DB_PATH: /data/swap_terminal.db
+      ST_WORKER_RUN_DIR: /runtime
+      SWAP_TERMINAL_HOST: "0.0.0.0"
+      SWAP_TERMINAL_PORT: "5000"
+      # 2, matching gunicorn.conf.py's own default. Its closing section records why
+      # it is not 4: two payout workers paid the same swap twice, 2 sends for 1
+      # swap. The bottleneck here is SQLite's single writer lock, not CPU.
+      GUNICORN_WORKERS: "${GUNICORN_WORKERS:-2}"
+      ST_WORKER_GRACE_SECONDS: "${ST_WORKER_GRACE_SECONDS:-15}"
+
+      # Per-chain RPC, no defaults on any credential (same rule as abstergo).
+      BTC_RPC_HOST: "${BTC_RPC_HOST:-}"
+      BTC_RPC_PORT: "${BTC_RPC_PORT:-}"
+      BTC_RPC_USER: "${BTC_RPC_USER:-}"
+      BTC_RPC_PASSWORD: "${BTC_RPC_PASSWORD:-}"
+      LTC_RPC_HOST: "${LTC_RPC_HOST:-}"
+      LTC_RPC_PORT: "${LTC_RPC_PORT:-}"
+      LTC_RPC_USER: "${LTC_RPC_USER:-}"
+      LTC_RPC_PASSWORD: "${LTC_RPC_PASSWORD:-}"
+      GRC_RPC_HOST: "${GRC_RPC_HOST:-}"
+      # 25779 IS THE DESK. config.py:31 already documents this as the terminal's
+      # Gridcoin port, so the code expects the desk daemon rather than the
+      # customer's on 25715. Unset here means UNCONFIGURED_PORT and the GRC pair
+      # simply reports unavailable -- which is the right failure for a missing
+      # endpoint, not a guess at one.
+      GRC_RPC_PORT: "${GRC_RPC_PORT:-}"
+      GRC_RPC_USER: "${GRC_RPC_USER:-}"
+      GRC_RPC_PASSWORD: "${GRC_RPC_PASSWORD:-}"
+      SOL_RPC_URL: "${SOL_RPC_URL:-}"
+      XRP_RPC_URL: "${XRP_RPC_URL:-}"
+
+      # SIGNING MATERIAL IS ABSENT, ALL OF IT. SOL_PAYOUT_KEYPAIR_PATH,
+      # ST_ADAPTOR_FUNDING_SEED and every wallet passphrase. Unset, this container
+      # serves and watches and reconciles and cannot send. Arming it is live
+      # posture and the operator's call (rule 16); no line in this file arms it,
+      # and the keypair mount the design doc describes is deliberately not written
+      # out, because a commented-out mount is a thing somebody uncomments.
+
+    volumes:
+      # swap_terminal.db AND ITS -wal AND -shm SIDECARS ARE ONE UNIT and must be
+      # ONE mount. Mounting the .db file alone leaves WAL writing its sidecars
+      # into the image, where they are discarded -- and a WAL database separated
+      # from its WAL is a database missing its most recent committed writes.
+      # So this mounts the DIRECTORY, never the file.
+      - "${SWAP_DB_DIR:?set SWAP_DB_DIR to the directory holding swap_terminal.db, after running the stat -f check in the comment above}:/data"
+      # pid files, worker logs and kill_switch.lock. On the writable layer these
+      # die with the container, and a pid file that cannot outlive the process it
+      # names can never prove a stop across a restart (rule 13).
+      - "${ST_RUNTIME_DIR:-./runtime/web}:/runtime"
+
+    # on-failure:5 FOR THE SAME REASON abstergo's is on-failure:3 -- see that
+    # comment. `unless-stopped` was measured restart-looping a container that
+    # cannot start, so a web container missing SWAP_DB_PATH or an RPC credential
+    # would flap instead of showing as exited with the reason in its logs. Five
+    # rather than three because this one starts four processes and has more ways
+    # to lose a race on a slow host, and because a payout worker that genuinely
+    # died is worth a couple of extra attempts.
+    #
+    # IF YOU WANT THIS BACK AFTER A HOST REBOOT, that is `restart: always` and it
+    # is a deliberate choice, not a default -- it means a container that signs
+    # payouts comes up without anyone asking. Left as the operator's (rule 16).
+    restart: on-failure:5
+
+    # 45s, which must EXCEED ST_WORKER_GRACE_SECONDS (15) plus the gunicorn grace
+    # (20) with room to spare. The entrypoint stops the three workers FIRST and
+    # proves their absence through /proc before gunicorn is asked to go; a grace
+    # period shorter than that sequence SIGKILLs the entrypoint mid-proof, and the
+    # container then exits reporting success having proven nothing.
+    stop_grace_period: 45s

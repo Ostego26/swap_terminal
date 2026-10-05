@@ -59,6 +59,7 @@ place that definition lives (rule 8). A second copy here would be two answers to
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -231,4 +232,93 @@ def test_the_highest_stakes_mounts_are_required_not_defaulted(variable, service)
         f"{variable} has a DEFAULT (${{{variable}:-...}}) in one of "
         f"{[p.name for p in COMPOSE_FILES]}. A default for this mount starts a "
         f"container against a path nobody chose."
+    )
+
+
+#: Matches compose's required-variable form, `${NAME:?message}`.
+_REQUIRED_VAR = re.compile(r"\$\{([A-Z_][A-Z0-9_]*):\?")
+
+
+def required_variables(compose: Path) -> set[str]:
+    """The `${VAR:?}` names compose will actually interpolate, comments excluded.
+
+    COMMENTS MUST BE STRIPPED FIRST, and the first version of this did not do it.
+    These files explain the rule they obey, and the explanation necessarily writes
+    `${VAR:?reason}` as prose -- so the gate matched its own documentation and
+    reported a required variable literally named VAR, failing every file including
+    the base. Found by running it: the test went red on a tree that was correct.
+
+    A gate that cannot tell a file's code from a file's comments about its code is
+    the rule-8 defect it was written to prevent, wearing the shape of a regex.
+    """
+    names: set[str] = set()
+    for raw in compose.read_text().splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            continue
+        # A trailing ` #` comment on a real line, e.g. `PORT: "5000"  # why`.
+        code = raw.split(" #", 1)[0]
+        names.update(_REQUIRED_VAR.findall(code))
+    return names
+
+
+@pytest.mark.parametrize("compose", COMPOSE_FILES, ids=[p.name for p in COMPOSE_FILES])
+def test_each_compose_file_has_at_most_one_required_variable(compose):
+    """AT MOST ONE `${VAR:?}` PER FILE. This defect landed twice in one day.
+
+    `docker compose` interpolates EVERY variable in EVERY file it is given, before
+    it looks at which service was named. A required variable therefore taxes every
+    command that includes its file, not just the commands that use its service.
+
+      first time, 2026-10-05   all four services were in docker-compose.yml, so
+                               the guards on `web` and `grc-desk` made
+                               `docker compose up -d abstergo` fail with two
+                               errors about variables abstergo does not use. The
+                               two lowest-risk increments could not be started at
+                               all.
+      second time, SAME DAY    `web` and `grc-desk` were moved out together, into
+                               ONE file. So `docker compose -f docker-compose.yml
+                               -f docker-compose.stateful.yml up -d web` demanded
+                               GRC_DESK_DATADIR. Measured on the operator's host:
+                               the command started nothing and curl answered
+                               HTTP 000.
+
+    Splitting "the stateful ones" as a group was still grouping by the wrong
+    thing. The grouping that matters is not what a service IS, it is which
+    variables a command will be forced to supply -- so the unit is one required
+    variable per file.
+
+    The guards themselves are not negotiable and do not move: a default for
+    GRC_DESK_DATADIR would be a compose file choosing which wallet to open, and
+    pointed at the customer's datadir it is a second daemon on the customer's own
+    wallet. The fix is always to split the file, never to soften the guard.
+    """
+    required = required_variables(compose)
+    assert len(required) <= 1, (
+        f"{compose.name} requires {len(required)} different variables: {sorted(required)}.\n\n"
+        "Every `docker compose` command that includes this file must supply ALL of "
+        "them, even to start a service that uses none of them -- compose interpolates "
+        "the whole file before it selects a service. Move each required variable's "
+        "service into its own docker-compose.<name>.yml. Do NOT give any of them a "
+        "default to make this pass: the defaults are what these guards exist to "
+        "prevent."
+    )
+
+
+def test_no_two_overlay_files_require_different_variables_of_each_other():
+    """And the base file must require nothing, so it composes with every overlay.
+
+    docker-compose.yml is in every command by design -- it holds the services with
+    no required variable and the shared definitions. A required variable there is
+    the first version of this defect exactly: it would tax every overlay and every
+    service, including the ones that need nothing.
+    """
+    base = REPO_ROOT / "docker-compose.yml"
+    assert base in COMPOSE_FILES, f"no {base.name} among {[p.name for p in COMPOSE_FILES]}"
+    required = required_variables(base)
+    assert not required, (
+        f"{base.name} requires {sorted(required)}. It is included in every compose "
+        f"command, so anything required here is required to start EVERY service -- "
+        f"which is how `docker compose up -d abstergo` came to fail on a Gridcoin "
+        f"datadir variable. Move that service to its own overlay file."
     )

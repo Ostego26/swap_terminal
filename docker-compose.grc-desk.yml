@@ -1,0 +1,85 @@
+# The desk's Gridcoin daemon. ONE required variable, and it is the riskiest string here.
+#
+# Role: file (operator entry point at the repository root per CLAUDE.md rule 10)
+# Reads: the process environment
+# Writes: nothing itself; the service writes its datadir
+# Can move funds: it holds a wallet. No passphrase enters the container.
+# Live-safe: testnet only as configured (25779). Mainnet Gridcoin RPC is 15715
+#       and nothing here reaches it.
+#
+# ONE REQUIRED VARIABLE PER FILE. THAT IS THE RULE THIS FILE EXISTS TO OBEY, and
+# it was learned twice.
+#
+# 2026-10-05, first attempt: all four services were in docker-compose.yml, so the
+# `${VAR:?}` guards on web and grc-desk made `docker compose up -d abstergo`
+# fail. Fixed by moving both out.
+#
+# 2026-10-05, SAME DAY, same defect one level in: web and grc-desk were moved into
+# ONE file, so `docker compose -f docker-compose.yml -f docker-compose.stateful.yml
+# up -d web` demanded GRC_DESK_DATADIR -- a variable that has nothing to do with
+# the web service. Measured on the operator's host: the command printed only
+# GRC_DESK_DATADIR errors, started nothing, and `curl` answered HTTP 000.
+#
+# `docker compose` interpolates EVERY variable in EVERY file it is given, before
+# it looks at which service was named. So a file may contain at most one service
+# with a required variable, or a service with a required variable must be alone
+# in its file. Splitting "the stateful ones" as a group was still grouping by the
+# wrong thing: the grouping that matters is which variables a command will be
+# forced to supply.
+#
+# NOT OWED WORK. Read docker/grc-desk.Dockerfile's header first: the host daemon
+# at ~/.GridcoinResearch-desk on 25779 already does this job, with a wallet proven
+# separate from the customer's (validateaddress on a customer address answers
+# ismine:false, 156 addresses against 2). This image buys a provable stop and a
+# pinned build, and costs a from-source compile including Berkeley DB 4.8 plus
+# moving a live wallet's datadir into a bind mount.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.grc-desk.yml up -d grc-desk
+
+services:
+  # ---------------------------------------------------------------------------
+  # INCREMENT 3 -- the desk's Gridcoin daemon. NEVER BUILT, NEVER RUN, NOT OWED.
+  # Read docker/grc-desk.Dockerfile's header first. The host daemon at
+  # ~/.GridcoinResearch-desk on 25779 already does this job and is already proven
+  # to be a separate wallet. This service buys a provable stop and a pinned build,
+  # and costs a long from-source compile plus moving a live wallet's datadir into
+  # a bind mount.
+  # ---------------------------------------------------------------------------
+  grc-desk:
+    build:
+      context: .
+      dockerfile: docker/grc-desk.Dockerfile
+    image: swap-terminal/grc-desk:local
+    container_name: swap-grc-desk
+    pull_policy: build
+
+    ports:
+      - "127.0.0.1:${GRC_DESK_HOST_PORT:-25779}:25779"
+
+    volumes:
+      # NO DEFAULT, AND THE `:?` IS THE POINT. This is the highest-stakes single
+      # string in the topology: pointed at ~/.GridcoinResearch it is a SECOND
+      # DAEMON ON THE CUSTOMER'S OWN WALLET, which is the exact defect the desk
+      # split exists to prevent. A default here -- any default -- would be this
+      # file guessing which wallet to open. Compose refuses to start without it.
+      #
+      # The error text below says `-datadir=<that datadir>` and NOT
+      # `-datadir=$GRC_DESK_DATADIR`, which is what it said first. Compose
+      # interpolates inside its own `:?` message, so the variable -- being unset,
+      # which is the only time the message prints -- rendered as empty and the
+      # instruction came out as `-datadir= validateaddress`. An error message that
+      # hands the reader a broken command is worse than one that hands them none.
+      - "${GRC_DESK_DATADIR:?set GRC_DESK_DATADIR to the DESK datadir. It must NOT be the customer wallet (~/.GridcoinResearch). Verify with - gridcoinresearchd -datadir=<that datadir> validateaddress <a customer address> | grep ismine - which must answer false}:/data"
+
+    # on-failure:5, not unless-stopped. Same measurement, same reasoning as the
+    # two above. A daemon that cannot open its datadir -- the lock is held, the
+    # path is wrong, the wallet is from a newer Berkeley DB -- must be visible as
+    # exited with that error, not restarting every second behind it.
+    restart: on-failure:5
+
+    # 120s. A Gridcoin daemon flushes its wallet and block index on SIGTERM and
+    # that is not instant on a 3.3M-block chain. Too short and the runtime
+    # SIGKILLs it mid-flush, which is how a wallet or a block index gets corrupted
+    # -- and this host has already seen "Corruption: 956 missing files" once today
+    # from a different cause.
+    stop_grace_period: 120s
