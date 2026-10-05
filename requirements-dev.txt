@@ -26,3 +26,14 @@ pytest>=8.0,<10.0
 # passed" over the 84 files here, and pytest 9.1.1 is what runs the 83 tests.
 # A first draft of this file said <0.14 and <9.0, which excluded both.
 ruff>=0.6,<0.17
+
+# Parses docker-compose.yml for tests/test_docker_build_context.py, which asserts
+# that no build context in this repository can carry key material to the Docker
+# daemon. Declared rather than assumed: it was ALREADY INSTALLED here (6.0.1) and
+# a test that imports it would have passed silently on this machine and failed on
+# a clean checkout -- which is the same undeclared-dependency gap that
+# requirements.txt was written on 2026-10-05 to close, arriving in the dev list
+# instead. A regex over YAML was the alternative and is the wrong trade: the thing
+# being checked is a security invariant, and it should not rest on a pattern that
+# breaks when somebody reformats a mapping.
+PyYAML>=6.0,<7.0

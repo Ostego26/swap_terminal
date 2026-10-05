@@ -26,7 +26,7 @@
 
 FROM debian:bookworm-slim AS chains
 
-ARG BITCOIN_VERSION=27.1
+ARG BITCOIN_VERSION=28.1
 ARG LITECOIN_VERSION=0.21.4
 
 # BINARIES FROM THE PROJECTS' OWN RELEASE TARBALLS, not a distro package and not a
@@ -34,12 +34,23 @@ ARG LITECOIN_VERSION=0.21.4
 # and a random Docker Hub image is an unauditable binary on a machine that holds
 # keys -- even regtest-only, it shares a daemon with the host.
 #
-# VERSIONS ARE ARGs AND BOTH ARE A CHOICE I COULD NOT MEASURE. The operator's host
-# runs its own bitcoind and litecoind and nothing in this repository records which
-# versions; regtest/daemons.binary_version() asks the binary at runtime precisely
-# because the answer was never written down. These two are current releases, NOT
-# the host's versions, and the acceptance block below prints both so the difference
-# is visible rather than assumed (rule 17).
+# BOTH VERSIONS ARE NOW MEASURED, AND ONE OF THEM MOVED BECAUSE OF IT. The first
+# draft pinned BITCOIN_VERSION=27.1 as "a current release", chosen because nothing
+# in this repository records what the host runs -- regtest/daemons.binary_version()
+# asks the binary at runtime precisely because the answer was never written down.
+#
+# Measured on the operator's host 2026-10-05:
+#
+#     Bitcoin Core version v28.1.0
+#     Litecoin Core version v0.21.4
+#
+# So the Bitcoin pin moves 27.1 -> 28.1 to match, and the Litecoin pin was already
+# right. Matching the host matters more than being current: the harness opens the
+# same regtest datadirs the host daemons use, and a chainstate written by a newer
+# bitcoind is not readable by an older one. A container that downgrades the binary
+# over a shared datadir is a corruption waiting for whoever starts second.
+#
+# These are the first versions this repository has ever recorded.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
