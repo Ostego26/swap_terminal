@@ -40,8 +40,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
@@ -179,19 +177,63 @@ def test_a_CURRENT_process_appends_nothing_to_its_cycle_line():
     assert "STALE" not in line
 
 
-@pytest.mark.skipif(not Path("/proc/1").exists(), reason="needs /proc/1")
-def test_a_process_that_really_predates_the_tree_says_so():
-    """pid 1 started at boot, which is before any .py in this tree was last written.
+def test_the_note_is_WIRED_to_a_real_pid_and_a_real_tree():
+    """The gathering half: a real pid, a real walk, and one of the three verdicts.
 
-    A real pid rather than a stub, because the thing being checked is that the
-    wiring to /proc and to the tree is live -- code_freshness() itself is already
-    tested against seeded timestamps in tests/test_supervisor.py.
+    Asserts WHICH THREE, not which one. The verdict for any given pid depends on
+    when that process started relative to the newest .py file, and both move.
     """
-    note = stale_code_note(pid=1)
-    assert "*** STALE CODE ***" in note, f"pid 1 was not reported stale: {note!r}"
+    freshness = supervisor.worker_code_freshness(os.getpid())
+    assert freshness["verdict"] in (
+        supervisor.CODE_CURRENT,
+        supervisor.CODE_STALE,
+        supervisor.CODE_NOT_ESTABLISHED,
+    ), freshness
+    assert freshness["newest_path"], "the tree walk found no .py file at all"
+
+
+def test_a_STALE_verdict_produces_the_sentence_an_operator_needs(monkeypatch):
+    """The deciding half, against a SEEDED verdict rather than a real process.
+
+    THIS TEST USED TO USE pid 1 AND IT WAS FLAKY. The premise was "pid 1 started at
+    boot, which is before any .py in this tree was last written". That is false in a
+    container: measured 2026-10-05, /proc/1 reported a start time 5345.3µfn (6465.7s)
+    AFTER the newest .py, so pid 1 was correctly CURRENT and the test failed. It had
+    passed earlier the same day purely because the edit happened to be later than the
+    boot at that moment. A test whose verdict depends on when the suite is run
+    relative to the last edit is not a test of anything.
+
+    The split is the fix, and it follows what each half owns:
+      supervisor.worker_code_freshness()   gathers -- two reads and a call, already
+                                           tested against seeded timestamps in
+                                           tests/test_supervisor.py, and wired above
+      common.stale_code_note()             decides what the operator READS, which is
+                                           the only thing this file introduced
+
+    So the verdict is seeded here and the assertions are about the SENTENCE.
+    """
+    monkeypatch.setattr(
+        "workers.common.worker_code_freshness",
+        lambda _pid: {
+            "verdict": supervisor.CODE_STALE,
+            "reason": "this process started 46029.9µfn (55677.8s) BEFORE the newest .py file was modified",
+            "newest_path": "/x/swap_terminal/supervisor.py",
+            "code_modified_at": 1.0,
+            "process_started_at": 0.0,
+            "delta_seconds": -55677.8,
+        },
+    )
+    note = stale_code_note()
+    assert "*** STALE CODE ***" in note
     assert "BEFORE the newest .py file" in note, "the note does not say which way the gap runs"
+    assert "/x/swap_terminal/supervisor.py" in note, "the note must name the file that is newer"
     assert "restart" in note, (
         "the note must name the fix. `start` alone does NOT reload a running worker, and "
         "an operator who runs it reads spawned=0 already-running=3 as success"
     )
     assert "ufn" not in note, "rule 6: the unit is µfn, never an ASCII u"
+
+    # And it reaches the operator THROUGH the cycle line, which is the only place
+    # all three workers render anything.
+    line = cycle_line("payout_worker", 9, 0.2, {"pending_at_start": 0})
+    assert "*** STALE CODE ***" in line, "the note never reached the line an operator reads"

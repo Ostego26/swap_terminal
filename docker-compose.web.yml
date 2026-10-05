@@ -139,24 +139,68 @@ services:
       GUNICORN_WORKERS: "${GUNICORN_WORKERS:-2}"
       ST_WORKER_GRACE_SECONDS: "${ST_WORKER_GRACE_SECONDS:-15}"
 
-      # Per-chain RPC, no defaults on any credential (same rule as abstergo).
+      # EVERY NAME HERE IS MEASURED AGAINST config.py, NOT REMEMBERED, and the
+      # first draft of this block got three of them wrong in a way that killed
+      # three chains silently.
+      #
+      # It passed BTC_RPC_PASSWORD, LTC_RPC_PASSWORD and GRC_RPC_PASSWORD.
+      # config.py reads *_RPC_PASS. Measured on the operator's host 2026-10-05,
+      # from the server's own /api/health with all three daemons REACHABLE on the
+      # host namespace:
+      #
+      #     BTC  {'adapter_built': False, 'missing_settings': ['BTC_RPC_PASS']}
+      #     GRC  {'adapter_built': False, 'missing_settings': ['GRC_RPC_PASS']}
+      #     LTC  {'adapter_built': False, 'missing_settings': ['LTC_RPC_PASS']}
+      #     SOL  {'adapter_built': True,  'missing_settings': []}
+      #     XRP  {'adapter_built': True,  'missing_settings': []}
+      #
+      # So the UI showed "0 of 20 directions can be quoted right now" with every
+      # chain reachable and every credential exported in the shell. A misspelled
+      # pass-through is indistinguishable from an unconfigured chain, because the
+      # value arrives empty either way.
+      #
+      # THIS IS THE THIRD TIME IN ONE DAY. swap_terminal/gridcoin_credentials.py
+      # exists because ONE Gridcoin password is read under four spellings, and its
+      # docstring predicts the symptom exactly: "an HTTP 401 that reads as 'the
+      # wallet is broken' rather than 'you spelled the variable differently over
+      # here'". I used a fifth spelling in an acceptance block this morning, and
+      # then this block repeated the mistake for BTC and LTC as well.
+      # tests/test_compose_chain_variables.py now holds the whole family against
+      # config.py so a fourth time fails the suite instead of the UI.
+      #
+      # *_RPC_WALLET WAS MISSING ENTIRELY, and that one is not cosmetic. The host
+      # deployment runs BTC and LTC against wallet=desk_hot; without it the
+      # adapter talks to the daemon's DEFAULT wallet, so a deposit scan would
+      # watch the wrong wallet and a payout would spend from it. An unconfigured
+      # chain fails loudly; a chain configured against the wrong wallet does not.
       BTC_RPC_HOST: "${BTC_RPC_HOST:-}"
       BTC_RPC_PORT: "${BTC_RPC_PORT:-}"
       BTC_RPC_USER: "${BTC_RPC_USER:-}"
-      BTC_RPC_PASSWORD: "${BTC_RPC_PASSWORD:-}"
+      BTC_RPC_PASS: "${BTC_RPC_PASS:-}"
+      BTC_RPC_WALLET: "${BTC_RPC_WALLET:-}"
+      BTC_RPC_TIMEOUT: "${BTC_RPC_TIMEOUT:-}"
       LTC_RPC_HOST: "${LTC_RPC_HOST:-}"
       LTC_RPC_PORT: "${LTC_RPC_PORT:-}"
       LTC_RPC_USER: "${LTC_RPC_USER:-}"
-      LTC_RPC_PASSWORD: "${LTC_RPC_PASSWORD:-}"
+      LTC_RPC_PASS: "${LTC_RPC_PASS:-}"
+      LTC_RPC_WALLET: "${LTC_RPC_WALLET:-}"
+      LTC_RPC_TIMEOUT: "${LTC_RPC_TIMEOUT:-}"
+      # 25779 IS THE DESK. config.py:31 documents it as the terminal's Gridcoin
+      # port, so the code expects the desk daemon rather than the customer's on
+      # 25715. Unset means UNCONFIGURED_PORT and the GRC pair reports unavailable,
+      # which is the right failure for a missing endpoint rather than a guess at
+      # one. The operator's environment still says 25715 as of 2026-10-05; that is
+      # the pending role switch, not something this file should decide.
       GRC_RPC_HOST: "${GRC_RPC_HOST:-}"
-      # 25779 IS THE DESK. config.py:31 already documents this as the terminal's
-      # Gridcoin port, so the code expects the desk daemon rather than the
-      # customer's on 25715. Unset here means UNCONFIGURED_PORT and the GRC pair
-      # simply reports unavailable -- which is the right failure for a missing
-      # endpoint, not a guess at one.
       GRC_RPC_PORT: "${GRC_RPC_PORT:-}"
       GRC_RPC_USER: "${GRC_RPC_USER:-}"
-      GRC_RPC_PASSWORD: "${GRC_RPC_PASSWORD:-}"
+      GRC_RPC_PASS: "${GRC_RPC_PASS:-}"
+      GRC_RPC_WALLET: "${GRC_RPC_WALLET:-}"
+      GRC_RPC_TIMEOUT: "${GRC_RPC_TIMEOUT:-}"
+      SOL_HOT_WALLET: "${SOL_HOT_WALLET:-}"
+      SOL_RPC_COMMITMENT: "${SOL_RPC_COMMITMENT:-}"
+      SOL_RPC_TIMEOUT: "${SOL_RPC_TIMEOUT:-}"
+      XRP_RPC_TIMEOUT: "${XRP_RPC_TIMEOUT:-}"
       SOL_RPC_URL: "${SOL_RPC_URL:-}"
       XRP_RPC_URL: "${XRP_RPC_URL:-}"
 
