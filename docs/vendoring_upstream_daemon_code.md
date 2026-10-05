@@ -96,3 +96,24 @@ authorization above makes possible. Note what it does NOT make possible: none
 of them has been tested here, and a change to a daemon that holds a wallet is
 live posture. They are proposals until the operator builds and runs them
 (rule 16).
+
+**AND MEASURED 2026-10-05, PATCHING IS NOW THE WORSE OPTION FOR ALL THREE.**
+`getpeerinfo` on the operator's testnet node, 9 peers, subver as reported:
+
+    /Halford:5.5.1.8/   x1
+    /Halford:5.5.1.7/   x3
+    /Halford:5.5.1.4/   x1
+    /Halford:5.5.1.3/   x1
+    /Halford:5.5.1/     x3
+
+The node itself runs 5.5.1.0 with `-disableupdatecheck`, so the network is four
+patch levels ahead of it and `5.5.1.7` -- the build that carries `a951294df` --
+is the single most common version among its own peers. Upgrading gets all three
+fixes AND version parity with the chain; vendoring them into 5.5.1.0 gets the
+fixes and keeps the divergence. So the authorization above stands and these
+three stop being the reason to use it.
+
+That is not an argument against vendoring in general. It is the measurement
+that settles these three, and it only exists because somebody ran
+`getpeerinfo` for an unrelated reason -- which is the case for recording a
+number rather than reasoning about it.
