@@ -1,0 +1,73 @@
+# The build context for every service whose `context:` is the repository root --
+# today `harness` and `web`.
+#
+# THE FIRST ENTRY IS A PRIVATE KEY AND IT IS THE REASON THIS FILE EXISTS.
+# swap_terminal/grc-sol-swap/abstergo_exchange/wgrc.json is an ed25519 Solana
+# keypair, present on disk and untracked. The abstergo image already excluded it
+# through that directory's own .dockerignore -- and then `harness` and `web` were
+# added with `context: .`, which reintroduced the identical hazard from a
+# completely different direction, because a .dockerignore applies to ONE context
+# and the root is a different context.
+#
+# Measured 2026-10-05 before this file existed: the root tree is 82M, of which
+# .git is 46M, and the keypair was inside it. `docker build` uploads the ENTIRE
+# context to the daemon before the first instruction runs, so two builds a day
+# meant two copies of a private key into a build cache that nothing in this
+# repository can see or clean. No COPY line ever referenced it; that was never
+# the hazard.
+#
+# Its value has not been read.
+swap_terminal/grc-sol-swap/abstergo_exchange/wgrc.json
+# Belt and braces: any keypair-shaped name anywhere, because the lesson of
+# 2026-09-25 is that `*keypair*.json` in .gitignore did not match a file called
+# wgrc.json. A name pattern is a guess about what somebody names a secret, so the
+# explicit path above is the real guard and these are only the obvious cases.
+**/*keypair*.json
+**/id.json
+.env
+**/.env
+
+# NOTHING THAT BUILDS NEEDS THE HISTORY. 46M of the 82M.
+.git
+.gitignore
+
+# The whole abstergo subtree. It has its OWN image with its OWN context, and
+# neither harness nor web COPYs anything from it -- including services/gridcoin.js,
+# whose POST /deposit route sends Gridcoin with no authentication at all
+# (auth.js:37).
+swap_terminal/grc-sol-swap
+
+# Caches and build output. __pycache__ in particular would ship .pyc files
+# compiled by whatever interpreter last ran here, next to the .py the image
+# installs -- and a stale .pyc beside a newer .py is a file that runs and is not
+# the file you are reading.
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+**/node_modules
+
+# Not needed by either image. The web image deliberately ships no root tools and
+# no tests (see its Dockerfile), and docs are 0 bytes of runtime behavior.
+tests
+docs
+assets
+requirements-dev.txt
+
+# RUNTIME STATE, AND THIS ONE IS NOT TIDINESS. runtime/ holds the abstergo volume
+# and the web/harness volume mount points. A swap_intents.json or a pid file baked
+# into an image SHADOWS the volume mounted over it in exactly the cases where the
+# mount fails -- so the image would quietly serve a snapshot of whenever somebody
+# last built, for a file that decides whether funds are released.
+runtime
+
+# Databases never belong in an image. swap_terminal.db is mounted, and a copy in
+# the image would be a second source of truth with no reconciliation -- the thing
+# CLAUDE.md rule 15 is entirely about.
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite3
+
+docker-compose.yml

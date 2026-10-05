@@ -1,0 +1,6 @@
+Mount point for the `web` service's /runtime: worker pid files, worker logs and kill_switch.lock.
+On the container's writable layer these die with the container, and a pid file that
+cannot outlive the process it names can never prove a stop across a restart.
+
+Must be writable by uid 1000: both images run as a non-root user and a bind mount
+keeps the host's ownership.

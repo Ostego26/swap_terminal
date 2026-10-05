@@ -54,6 +54,14 @@ id.json
 tools/dleq_helper/dleq_helper
 .coverage
 
+# The two other container state volumes, for the same reason as abstergo below:
+# a pid file, a worker log, a regtest chain and a WAL sidecar are all runtime
+# state, and a checkout that carried them would overwrite a running desk's.
+runtime/regtest/*
+!runtime/regtest/.gitkeep
+runtime/web/*
+!runtime/web/.gitkeep
+
 # The abstergo container's state volume. swap_intents.json is a fund-releasing
 # authority (docs/containerization_design_2026_10_03.md §12) and must never be
 # committed: it would put live intent records in git history and, worse, a

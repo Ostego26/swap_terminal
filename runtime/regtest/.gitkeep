@@ -1,0 +1,6 @@
+Mount point for the `harness` service's /data: the regtest BTC and LTC datadirs, each with its own
+bitcoind.pid or litecoind.pid. regtest/daemons.stop_daemon() reads that pid file to
+PROVE the daemon is gone, so it has to outlive the container that wrote it.
+
+Must be writable by uid 1000: both images run as a non-root user and a bind mount
+keeps the host's ownership.
