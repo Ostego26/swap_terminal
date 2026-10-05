@@ -23,8 +23,9 @@
  *
  * DEFECT 1, MEASURED 2026-09-24: THE ENDPOINT THAT SPENDS MONEY HAD NO CHECK.
  *
- * Counted across the two Express servers under grc-sol-swap/abstergo_exchange/,
- * one of nine routes called the old requireSharedSecret():
+ * BEFORE -- the state that motivated this module. Counted across the two
+ * Express servers under grc-sol-swap/abstergo_exchange/, ONE of nine routes
+ * called the old requireSharedSecret():
  *
  *     server.js               GET  /health                      no
  *     server.js               GET  /prices                      no
@@ -36,18 +37,52 @@
  *     server.js               POST /swap-intents/:id/execute     no   <-- pays SOL
  *     services/gridcoin.js    POST /deposit                      no   <-- sendtoaddress
  *
- * `/execute` reads the intent store, checks `status === 'verified'`, and calls
- * sendSolPayout(). Anyone who could reach the port and produce an intentId
- * could trigger a signed Solana transfer out of the hot wallet. The intentId
- * is 12 random bytes, so it is not guessable -- but it is a BEARER token that
- * is handed to the browser, logged, and returned in full by an equally
- * unauthenticated GET, and "unguessable identifier" is not authentication.
+ * AFTER -- MEASURED 2026-10-05 by walking every app.get/app.post in server.js
+ * and asking which ones have a requireSharedSecret(req) call inside their
+ * handler. THREE of eight are now guarded:
  *
- * `services/gridcoin.js` POST /deposit is worse in kind and is dead in
- * practice: it calls the Gridcoin RPC `sendtoaddress` with an amount taken
+ *     server.js               GET  /health                      no
+ *     server.js               GET  /prices                      no
+ *     server.js               GET  /deposit-addresses           no
+ *     server.js               GET  /swap-intents/:intentId      YES  (server.js:492)
+ *     server.js               POST /quote/grc-to-sol            no
+ *     server.js               POST /swap-intents                no
+ *     server.js               POST /swap-intents/:id/verify-gridcoin   YES  (:600)
+ *     server.js               POST /swap-intents/:id/execute     YES  (:690)
+ *
+ * and the running server prints exactly that set in its startup banner
+ * (server.js:788), confirmed on the operator's host 2026-10-05:
+ *
+ *     Routes requiring the shared secret: GET /swap-intents/:id,
+ *     POST /swap-intents/:id/verify-gridcoin, POST /swap-intents/:id/execute
+ *
+ * BOTH TABLES ARE KEPT ON PURPOSE AND THE LABELS ARE THE POINT. Until
+ * 2026-10-05 only the BEFORE table was here, under a heading that did not say
+ * it was historical, followed by a paragraph in the PRESENT TENSE describing
+ * /execute as an open hole. It is not one and has not been for some time. A
+ * reader working from this file concluded that an unauthenticated route signs
+ * SOL transfers and said so out loud -- which is the cost of a stale comment
+ * about an auth boundary, and why the fix is to label the drift rather than to
+ * overwrite it.
+ *
+ * WHY /execute MATTERED, in the past tense it belongs in: it reads the intent
+ * store, checks `status === 'verified'`, and calls sendSolPayout(). While it
+ * was open, anyone who could reach the port and produce an intentId could
+ * trigger a signed Solana transfer out of the hot wallet. The intentId is 12
+ * random bytes, so it was not guessable -- but it is a BEARER token that is
+ * handed to the browser, logged, and was returned in full by an equally
+ * unauthenticated GET, and "unguessable identifier" is not authentication.
+ * That reasoning is why the route is guarded now, and the GET that leaks the
+ * token is guarded with it.
+ *
+ * `services/gridcoin.js` POST /deposit is worse in kind and is DEAD TWICE
+ * OVER. It calls the Gridcoin RPC `sendtoaddress` with an amount taken
  * straight from the request body, with no ceiling and no authentication at
- * all. It is gated here too rather than left as a live hole (see the note at
- * that call site about what it is and is not).
+ * all. It is gated here rather than left as a live hole (see the note at that
+ * call site). Measured 2026-10-05: nothing in the tree imports services/ --
+ * server.js's only local imports are ./auth.js and ./intent_store.js -- and
+ * the container image does not ship that directory at all, so the route has
+ * no process to run in.
  *
  * DEFECT 2: `!==` ON A SECRET IS TIMING-ATTACKABLE.
  *
