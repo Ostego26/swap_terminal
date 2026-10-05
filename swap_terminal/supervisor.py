@@ -453,6 +453,73 @@ def _proc_cmdline(pid: int) -> str:
     return " ".join(_proc_argv(pid))
 
 
+#: How long _settled_proc_cmdline() will wait for /proc to answer, and the step it
+#: polls at. Measured 2026-10-05 over 60 fresh spawns: the cmdline resolved in at most
+#: TWO polls (<=40ms) and a mean of 1.08, so most calls never sleep at all. 0.5s is
+#: twenty-five times the observed worst case, and the only thing that can spend the
+#: whole budget is a live pid whose cmdline is permanently empty -- a kernel thread or
+#: a process we may not read -- which for a worker pid file is already a "not ours"
+#: verdict. So the wait costs nothing on every path that matters.
+_CMDLINE_SETTLE_SECONDS = 0.5
+_CMDLINE_POLL_SECONDS = 0.02
+
+
+def _settled_proc_cmdline(pid: int) -> str:
+    """_proc_cmdline(), but waits out the fork/exec window instead of guessing past it.
+
+    THE DEFECT THIS REMOVES, AND IT IS THE SECOND HALF OF A FIX MADE ON 2026-10-02.
+    That fix established -- 400 trials, 38% -- that a just-spawned live process reads an
+    EMPTY cmdline between fork and exec, and made pid_is_still_ours() answer NO for an
+    empty read so a `stop` racing a `start` could not SIGTERM a bystander. Correct, and
+    it is still the behavior when the question cannot be resolved.
+
+    What it did not account for is that pid_is_still_ours() has THREE callers and they
+    fail in OPPOSITE directions:
+
+        stop_worker / the orphan scan   NO -> refuse to signal.  Safe.
+        start_worker:526                NO -> "not ours", so SPAWN A SECOND COPY.
+
+    So the same answer that stopped a stray SIGTERM opened a double-spawn, on the path
+    whose entire job per rule 13 is that every process has exactly one owner. A second
+    deposit worker is not a loud failure: both copies work, the pid file names only the
+    later one, and the earlier becomes an orphan nothing can reap -- which is the exact
+    damage rule 13 describes, arriving through the guard meant to prevent it.
+
+    MEASURED 2026-10-05 before writing this: 5 of 40 immediate reads after Popen said
+    "not ours" (12.5%), each one a start_worker() that would have spawned a second copy.
+    That is also why tests/test_supervisor.py's start-twice test failed once in a full
+    suite run and passed 5/5 alone -- under load the window widens. It was never a
+    flake; it was this, reported through a test.
+
+    PICKING A FAIL-SAFE DIRECTION WOULD HAVE BEEN A PATCH (rule 19). "Assume ours" at
+    the start site trades a double-spawn for a worker that silently never starts, which
+    is rule 14's silence. The ambiguity is RESOLVABLE instead: an empty cmdline for a
+    live pid either fills in within milliseconds (fork/exec, the common case) or never
+    (zombie, kernel thread). Measured, both resolve -- a zombie in ONE poll and 0.000s,
+    because process_alive() answers first.
+
+    Returns "" only when /proc gave a real and stable answer of "nothing", or when the
+    process is gone. The no-/proc case is untouched and still handled by the caller.
+    """
+    deadline = time.monotonic() + _CMDLINE_SETTLE_SECONDS
+    while True:
+        live = _proc_cmdline(pid)
+        if live:
+            return live
+        # THIS BRANCH IS WHAT KEEPS A DEAD PID FREE, and its POSITION is not the
+        # reason -- a comment here claimed it was, and swapping the two lines to check
+        # showed otherwise. On the first pass the deadline has not arrived either way,
+        # so the loop reaches this line regardless of which is written first; the order
+        # only decides anything on the final pass, where both answers are "" anyway.
+        # What matters is that the branch EXISTS: without it a dead or zombie pid waits
+        # out the whole budget, and stop_everything() walks several workers in a row.
+        if not process_alive(pid):
+            return ""
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(_CMDLINE_POLL_SECONDS)
+
+
 def pid_is_still_ours(pid: int, recorded_command: str) -> bool:
     """Guard against pid reuse before signaling.
 
@@ -469,7 +536,10 @@ def pid_is_still_ours(pid: int, recorded_command: str) -> bool:
     """
     if not recorded_command:
         return True
-    live = _proc_cmdline(pid)
+    # _settled_proc_cmdline() AND NOT _proc_cmdline(), since 2026-10-05. See that
+    # function: a bare read cannot tell a process mid-exec from one with no cmdline at
+    # all, and the two need opposite answers at this function's three call sites.
+    live = _settled_proc_cmdline(pid)
     if live:
         # The recorded command is the argv joined with spaces, so a prefix match on
         # the script path is the stable part: a worker that re-execs itself keeps

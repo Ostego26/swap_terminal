@@ -1267,10 +1267,21 @@ def test_the_supervisor_cli_starts_under_both_invocations(form, argv):
     pid file -- so this test cannot leave a worker behind, which rule 13 would
     make this suite's problem rather than this test's.
     """
-    result = subprocess.run(  # noqa: S603 -- sys.executable and literal argv, no shell and no user input
+    # sys.executable and a literal argv, no shell and no user input -- which is why
+    # this is safe. The sentence is kept as a plain comment and NOT as `noqa: S603`:
+    # pyproject.toml already disables S603 for tests/, so the directive matched
+    # nothing and RUF100 flagged it. A `noqa` that suppresses no finding is an unread
+    # claim (rule 19), while the reasoning behind it is still worth a reader's time
+    # (rule 1) -- so the claim goes and the reasoning stays.
+    #
+    # check=False IS EXPLICIT because this test asserts on returncode itself. The
+    # default is already False; PLW1510 wants it said out loud, and here it is load
+    # bearing: check=True would raise before the assertion below could report WHICH
+    # form failed and print its stderr, which is the only useful output this test has.
+    result = subprocess.run(
         [sys.executable, *argv],
         cwd=Path(__file__).resolve().parent.parent,
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, check=False,
     )
 
     assert result.returncode == 0, (
@@ -1279,4 +1290,140 @@ def test_the_supervisor_cli_starts_under_both_invocations(form, argv):
     assert "No module named" not in result.stderr
     assert "--grace" in result.stdout or "usage:" in result.stdout, (
         "a zero exit with no usage text would mean something other than the parser answered"
+    )
+
+
+def test_a_FRESH_SPAWN_is_recognized_as_ours_without_racing_its_own_exec():
+    """The other half of the 2026-10-02 fix, and the defect it introduced.
+
+    That fix made an empty cmdline answer NO so a `stop` racing a `start` could not
+    SIGTERM a bystander. pid_is_still_ours() has THREE callers and they fail in
+    opposite directions: NO means "refuse to signal" at the stop sites, and
+    "not ours, so spawn another" at start_worker. The same answer that closed a stray
+    SIGTERM opened a double-spawn.
+
+    MEASURED 2026-10-05: 5 of 40 immediate reads after Popen said NOT ours (12.5%),
+    each one a start_worker() that would have spawned a second copy. After the fix,
+    0 of 120, worst call 20.5ms against a 500ms budget.
+
+    Mutation-checked by pointing pid_is_still_ours() back at _proc_cmdline().
+    """
+    assert PROC_DIR_EXISTS, "this test's premise is a platform that has /proc"
+    own = f"{sys.executable} -c {SLEEPING_CHILD}"
+    verdicts = []
+    for _ in range(40):
+        child = subprocess.Popen([sys.executable, "-c", SLEEPING_CHILD])
+        try:
+            # NO WAIT. Asking immediately is the whole point -- this is the window.
+            verdicts.append(supervisor.pid_is_still_ours(child.pid, own))
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+    assert all(verdicts), (
+        f"the guard disowned {len(verdicts) - sum(verdicts)} of {len(verdicts)} of its "
+        f"OWN just-spawned processes; each one is a start_worker() that spawns a second "
+        f"copy and orphans the first (rule 13)"
+    )
+
+
+def test_start_worker_REFUSES_when_proc_is_still_mid_exec(tmp_path, monkeypatch):
+    """start_worker() must not spawn a second copy because /proc has not caught up.
+
+    DETERMINISTIC, AND THE FIRST VERSION OF THIS TEST WAS NOT. It called
+    start_worker() twice back to back, twenty times, and asserted every second call
+    said already-running. Mutation-checked by pointing pid_is_still_ours() back at
+    _proc_cmdline(): IT STILL PASSED. By the time the second call reads /proc, the
+    first child has had a Popen return, a pid-file write and a function return to
+    exec in, so the window is almost always shut. A test that cannot fail pins
+    nothing, and twenty real spawns is a slow way to pin nothing (rule 9).
+
+    So the window is INJECTED instead of raced. _proc_cmdline() returns "" for the
+    first read and the truth afterwards, which is exactly what the kernel does for a
+    process between fork and exec -- and is why the original start-twice test failed
+    once in a full-suite run and passed 5/5 alone.
+
+    What this asserts is the DECISION: given an empty first read of a live process
+    that the pid file names, start_worker answers already-running rather than
+    spawning. With pid_is_still_ours() on the bare read, the empty answer means "not
+    ours" and a second copy is started while the pid file keeps naming only one of
+    them -- an orphan nothing can reap, through the guard meant to prevent it.
+    """
+    first = supervisor.start_worker("sleeper", _sleeper_table()["sleeper"], tmp_path)
+    reads = {"n": 0}
+    real = supervisor._proc_cmdline
+
+    def one_empty_read(pid: int) -> str:
+        reads["n"] += 1
+        return "" if reads["n"] == 1 else real(pid)
+
+    try:
+        monkeypatch.setattr(supervisor, "_proc_cmdline", one_empty_read)
+        second = supervisor.start_worker("sleeper", _sleeper_table()["sleeper"], tmp_path)
+        if second["outcome"] == "started":
+            stray = second.get("process")
+            if stray is not None:
+                stray.kill()
+                stray.wait(timeout=10)
+        # THE OUTCOME FIRST, THE SCAFFOLDING SECOND. Both assertions fail under the
+        # mutation, and the order decides which message the reader gets: with the
+        # retry-count check first it reported "the empty read was never retried",
+        # which is true and tells you nothing about the bug. The defect is that a
+        # second copy got spawned, so that is the sentence that has to come out.
+        assert second["outcome"] == "already-running", (
+            "an empty first read of a LIVE pid the pid file names was taken as "
+            "'not ours' and a second copy was spawned"
+        )
+        assert second["pid"] == first["pid"]
+        # And only then: did the injection actually fire? A green pass with reads==1
+        # would mean this test proved nothing, which is worse than a red one.
+        assert reads["n"] >= 2, (
+            "the empty read was never retried, so this test did not exercise the "
+            "settling path at all"
+        )
+    finally:
+        monkeypatch.undo()
+        supervisor.stop_worker("sleeper", tmp_path, grace_seconds=5.0)
+        # EVERY PROCESS THIS TEST STARTED, BY ITS Popen HANDLE, and not through the
+        # pid file. Mutation-checking this test against the bare read made the point:
+        # the mutation spawns a second copy, the pid file then names only that one,
+        # stop_worker() reaps it, and _reap_zombie(first["pid"]) BLOCKED for the
+        # sleeper's full 120 seconds -- so the test failed by timing out instead of by
+        # saying what was wrong. That hang IS the orphan the defect creates, which
+        # makes it a fair demonstration and a terrible diagnostic. Cleanup that
+        # depends on the thing under test cannot be trusted to clean up after it.
+        handle = first.get("process")
+        if handle is not None:
+            handle.kill()
+            handle.wait(timeout=10)
+        _reap_zombie(first["pid"])
+
+
+def test_a_DEAD_pid_resolves_immediately_and_does_not_pay_the_settle_wait():
+    """A dead pid must cost nothing, because stop_everything() walks several in a row.
+
+    Measured 2026-10-05: one poll, 0.000s.
+
+    WHAT MAKES IT PROMPT IS THE process_alive() CHECK EXISTING, NOT ITS POSITION,
+    and the first version of this docstring said the position -- "if the order were
+    reversed every stop would stall for the full budget". THAT IS FALSE, and swapping
+    the two lines to check it is what showed so: on the first pass the deadline has
+    not arrived either way, so the loop reaches process_alive() and exits regardless
+    of which is written first. The ordering only decides anything on the final pass,
+    where both answers are "" anyway.
+
+    Mutation-checked the way that does bite: removing the process_alive() branch makes
+    a dead pid wait out the whole budget.
+    """
+    assert PROC_DIR_EXISTS, "this test's premise is a platform that has /proc"
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=10)
+    # Not reaped by os.waitpid, so the pid still exists as a zombie on some
+    # platforms; either way the cmdline is empty and the answer must be prompt.
+    started = time.monotonic()
+    live = supervisor._settled_proc_cmdline(child.pid)
+    elapsed = time.monotonic() - started
+    assert live == "", "a dead or zombie process has no cmdline"
+    assert elapsed < supervisor._CMDLINE_SETTLE_SECONDS / 2, (
+        f"took {elapsed:.3f}s of a {supervisor._CMDLINE_SETTLE_SECONDS}s budget; "
+        f"_settled_proc_cmdline() must exit on a dead pid instead of waiting one out"
     )
