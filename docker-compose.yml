@@ -38,6 +38,18 @@ services:
     image: swap-terminal/abstergo:local
     container_name: abstergo
 
+    # BUILD IT, NEVER TRY TO PULL IT. Without this, `docker compose up` attempts
+    # a registry pull of the local tag first and prints, before it builds:
+    #
+    #     pull access denied for swap-terminal/abstergo, repository does not
+    #     exist or may require 'docker login': denied
+    #
+    # Measured on the operator's host 2026-10-05. The build then succeeded and
+    # the message was cosmetic -- which is precisely why it has to go. Rule 14:
+    # an operator reading that line cannot tell a cosmetic pull miss from a real
+    # failure, and this image is local by construction and has no registry.
+    pull_policy: build
+
     # THE HOST PORT IS NOT 5000 AND THAT IS THE POINT. server.js:80 defaults PORT
     # to 5000; swap_terminal/app.py:78 defaults to 5000 as well, and on the
     # operator's host Flask already owns it. Inside the container there is nothing
@@ -46,8 +58,25 @@ services:
     # 127.0.0.1 and not 0.0.0.0: this server has no authentication of its own
     # beyond a shared secret on ONE route, and publishing it off-box is a decision
     # nobody has made (design doc §10, decision 4).
+    #
+    # IT WAS 5001 AND 5001 WAS ALSO TAKEN. Measured on the operator's host
+    # 2026-10-05, on the first `docker compose up` this file ever ran:
+    #
+    #     failed to bind host port 127.0.0.1:5001/tcp: address already in use
+    #
+    # and `curl http://127.0.0.1:5001/health` answered `404 page not found` --
+    # a reply from SOMETHING ELSE already listening there. 5001 was chosen by
+    # assuming the next number after a known collision was free, which is the
+    # same class of mistake as the collision it was avoiding (rule 17: a reason
+    # to believe a port is free is not having checked).
+    #
+    # 5057 is not special and is not claimed to be free either. It is far from
+    # the 5000-5010 band where this already went wrong twice, and it is a
+    # DEFAULT, not a requirement: if it collides, export ABSTERGO_HOST_PORT and
+    # nothing in this file needs editing. The preflight block in the session
+    # notes checks the port before `up` rather than discovering it during.
     ports:
-      - "127.0.0.1:${ABSTERGO_HOST_PORT:-5001}:5000"
+      - "127.0.0.1:${ABSTERGO_HOST_PORT:-5057}:5000"
 
     environment:
       # FIVE CHECKS THROW AT IMPORT, BEFORE app.listen -- server.js:99-103. All
