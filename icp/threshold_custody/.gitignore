@@ -1,0 +1,4 @@
+# Build output. The wasm is reproducible from source with
+#   cargo build --release --target wasm32-unknown-unknown
+# and a committed binary is a second artifact nobody diffs.
+target/

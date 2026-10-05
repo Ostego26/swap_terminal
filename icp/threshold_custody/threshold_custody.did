@@ -1,0 +1,15 @@
+type KeyConfig = record { key_name : text };
+
+type PublicKeyReply = record {
+  public_key_hex : text;
+  derivation_path : vec blob;
+  key_name : text;
+};
+
+type PublicKeyResult = variant { Ok : PublicKeyReply; Err : text };
+type ConfigResult = variant { Ok : KeyConfig; Err : text };
+
+service : (KeyConfig) -> {
+  config : () -> (ConfigResult) query;
+  public_key : (vec blob) -> (PublicKeyResult);
+}

@@ -1,0 +1,22 @@
+[package]
+name = "threshold_custody"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ic-cdk = "0.17"
+candid = "0.10"
+# A DIRECT DEPENDENCY even though candid re-exports Deserialize: the derive macro
+# expands to `serde::` paths, so the crate must be nameable at the call site.
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+# A canister pays for its own size in cycles at install time and lives inside a
+# module-size limit, so the usual release profile is not enough.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "canisters": {
+    "threshold_custody": {
+      "type": "rust",
+      "package": "threshold_custody",
+      "candid": "icp/threshold_custody/threshold_custody.did"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  }
+}

@@ -1,0 +1,50 @@
+# THE ICP HALF OF THE TOPOLOGY, under compose like everything else.
+#
+# `docker compose -f docker-compose.yml -f docker-compose.icp.yml up -d icp-replica`
+#
+# WHY A SEPARATE FILE rather than a service in docker-compose.yml: the same reason
+# the web and grc-desk files are separate. Compose interpolates every variable in
+# every -f file BEFORE it selects a service, so a required variable in one file
+# makes every service in the set unstartable -- measured on this project earlier.
+# This file introduces no required variable, but it also has no business being
+# started by someone who only wants the harness.
+services:
+  icp-replica:
+    build:
+      context: .
+      dockerfile: docker/icp-replica.Dockerfile
+    image: swap-terminal/icp-replica:local
+    container_name: swap-icp-replica
+    pull_policy: build
+
+    # READ-ONLY on the source, and that is the point rather than caution. The
+    # replica needs to SEE icp/ to build a canister from it; it has no reason to
+    # write there, and a container that can rewrite the repository is one whose
+    # output nobody can attribute.
+    volumes:
+      - "./icp:/repo/icp:ro"
+      - "./dfx.json:/repo/dfx.json:ro"
+      - "icp-state:/state"
+
+    ports:
+      # 4943 is dfx's own default, kept so that every command in every tutorial
+      # works unchanged from the host.
+      - "127.0.0.1:4943:4943"
+
+    # NOT "unless-stopped". Measured on this project 2026-10-05: unless-stopped
+    # restart-loops a crash exactly like always does, so a misconfigured replica
+    # comes back forever instead of staying visibly down. A local replica is
+    # started for a session of work and stopped after.
+    restart: "no"
+
+    healthcheck:
+      # The replica answering its own status endpoint, which is the artifact --
+      # not the process being up, which proves nothing (rule 13).
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4943/api/v2/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+volumes:
+  icp-state:
