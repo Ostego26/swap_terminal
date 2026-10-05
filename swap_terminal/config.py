@@ -507,6 +507,36 @@ class Config:
         # That is worse than a refused quote: it strands a customer's coins in a swap the
         # terminal cannot complete.
         #
+        # ====================================================================
+        # BOTH PARAGRAPHS ABOVE ARE NOW FALSE. RE-MEASURED 2026-10-05.
+        # ====================================================================
+        #
+        # They are kept rather than overwritten because the drift is the point (rule 1) and
+        # because each was the correct reason at the time. What changed:
+        #
+        #   SOL_NETWORK_FEE_RESERVE   EXISTS, 5e-06. The sentence "there is no
+        #                             SOL_NETWORK_FEE_RESERVE" is simply no longer true.
+        #   the send path             EXISTS. chains/solana.py:1722 send_to_address(),
+        #                             signing through chains/solana_signing.PayoutKeypair
+        #                             from SOL_PAYOUT_KEYPAIR_HOST_FILE. "holds no keypair
+        #                             and imports nothing that could" describes a file that
+        #                             has since grown both.
+        #   ("GRC", "SOL")            IS in ALLOWED_PAIRS. Read back from Config itself
+        #                             2026-10-05: GRC -> ['BTC', 'LTC', 'SOL', 'XRP'].
+        #
+        # And it PRICES: opening GRC -> SOL that day produced quote q_ba144fd941d124bd,
+        # 7.94453642384106e-05 SOL per GRC, estimated payout 0.015650736754966886 SOL.
+        #
+        # WHAT IT DID INSTEAD OF COMPLETING, and it was a different defect entirely: the
+        # swap-creation guard crashed with AttributeError, because SolanaAdapter had no
+        # owns_address() -- the first *-> SOL swap anyone had ever opened, so the first time
+        # that call was reached. Fixed in chains/solana.py; see that method's docstring.
+        #
+        # A READER TRUSTING THE TWO PARAGRAPHS ABOVE WOULD CONCLUDE GRC -> SOL IS IMPOSSIBLE
+        # and stop looking, which is exactly the cost rule 16 names for a wrong comment. The
+        # honest state: the pair is allowed, priced, and payable, and the one thing still
+        # unproven end to end is a GRC -> SOL swap paying an address the desk does not own.
+        #
         # STILL NEEDS SOL_DEPOSIT_ACCOUNT to be set before a SOL swap can be CREATED --
         # swap_service refuses while it is empty, and solana_chain_check.py now says so in its
         # summary. A pair being allowed and a swap being creatable are two different gates.
