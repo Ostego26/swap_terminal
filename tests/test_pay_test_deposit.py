@@ -404,7 +404,7 @@ def test_an_address_the_desk_OWNS_is_refused_rather_than_required(monkeypatch):
     true while GRC_RPC_PORT was 25715. It became false when the port moved to the
     desk daemon on 25779, and the two guards then disagreed about one address:
 
-        swap s_7170571c428b7912, SOL -> GRC, payout mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap
+        swap s_7170571c428b7912, SOL -> GRC, paying a customer address
         pay_test_deposit:         refused -- "the GRC wallet holds NO KEY"
         services/payout_service:  requires exactly that, or the desk pays itself
 
@@ -412,13 +412,13 @@ def test_an_address_the_desk_OWNS_is_refused_rather_than_required(monkeypatch):
     and the swap is marked completed anyway.
     """
     _stub_adapter(monkeypatch, verdict=True)
-    refusal = tool.ownership_refusal("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap")
+    refusal = tool.ownership_refusal(GRC_PAYOUT)
     assert refusal is not None, "an address the desk owns must be refused"
     assert "OWNS the payout address" in refusal.what
     assert "paying itself" in refusal.fix
 
     _stub_adapter(monkeypatch, verdict=False)
-    assert tool.ownership_refusal("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap") is None, (
+    assert tool.ownership_refusal(GRC_PAYOUT) is None, (
         "an address the desk does NOT own is what a real payout needs"
     )
 
@@ -431,7 +431,7 @@ def test_an_unanswerable_ownership_question_is_still_refused(monkeypatch):
     True/False branches must not quietly turn the unknown case into a pass.
     """
     _stub_adapter(monkeypatch, verdict=None, why="connection refused")
-    refusal = tool.ownership_refusal("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap")
+    refusal = tool.ownership_refusal(GRC_PAYOUT)
     assert refusal is not None
     assert "NOT ESTABLISHED" in refusal.what
     assert "connection refused" in refusal.what
@@ -445,9 +445,9 @@ def test_the_dropped_assurance_is_NAMED_rather_than_left_blank():
     daemon this shell has no credentials for -- so the replacement says it was not
     checked, and prints the command that would check it.
     """
-    lines = tool.ownership_lines("mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap")
+    lines = tool.ownership_lines(GRC_PAYOUT)
     text = "\n".join(lines)
     assert "NOT CHECKED" in text
     assert "82.65 tGRC" in text, "the loss that justified the original check stays named"
-    assert "validateaddress mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap" in text
+    assert f"validateaddress {GRC_PAYOUT}" in text
     assert "YES" not in text, "it must not still claim the assurance it can no longer give"

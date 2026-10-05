@@ -222,11 +222,17 @@ def ownership_refusal(payout_address: str) -> Refusal | None:
     nothing, marks the swap completed anyway, and is the exact condition
     services/payout_service refuses on the real order path.
 
-    Measured when it fired: swap s_7170571c428b7912, SOL -> GRC, payout address
-    mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap. This function refused it for holding no
+    Measured when it fired: swap s_7170571c428b7912, SOL -> GRC, paying a customer
+    address held by the testnet GUI wallet. This function refused it for holding no
     key, while the terminal's own gate requires precisely that. Two guards, one
     address, opposite verdicts -- rule 8's drift, except the copies never agreed
     in the first place; they agreed about a topology that changed underneath them.
+
+    THE ADDRESS IS NAMED BY ITS OWNER RATHER THAN SPELLED OUT, because spelling it
+    out is how tests/test_address_literals_are_valid.py's ceiling gets climbed --
+    and it caught me doing exactly that an hour after this was written: four new
+    literals, 60 -> 64, one of them this line. Rule 19: the baseline does not
+    absorb code being written now.
 
     WHAT IS NO LONGER CHECKED BY ANYONE, AND IT IS NAMED RATHER THAN DROPPED. The
     original guard existed because 82.65 tGRC went to an address nobody held a key

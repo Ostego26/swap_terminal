@@ -31,6 +31,7 @@ from chains.xrp_signing import MAINNET_NETWORK_IDS
 from chains.xrp_testnet import TESTNET_URL, saved_faucet_accounts
 
 import xrp_send_tagged
+from tests.valid_addresses import XRP_CUSTOMER_PAYOUT, XRP_HOT_ACCOUNT
 from xrp_send_tagged import (
     SIGNING_REFUSED,
     deposit_target_for_swap,
@@ -622,3 +623,49 @@ def test_an_expected_amount_of_zero_is_not_read_as_absent():
     amount, _source = xrp_send_tagged.resolve_amount("", target)
 
     assert amount == 0.0, "0.0 must come back as itself, not be replaced by the default"
+
+
+# --- the source account must be able to pay the destination --------------------
+
+def test_the_source_is_never_the_destination():
+    """MUTATION: return accounts[0] unconditionally, which is what it did.
+
+    MEASURED 2026-10-05 on swap s_276ca22597a385ac, the XRP leg of the
+    LTC/SOL/XRP -> GRC series. The source was chosen before the destination was
+    known, and `--swap` then resolved the destination from the swap row. For an
+    XRP swap that is XRP_DEPOSIT_ACCOUNT -- which on the operator's host IS the
+    first saved faucet account -- so the tool built a Payment from an account to
+    itself and xrpl-py refused it:
+
+        {'destination': 'An XRP payment transaction cannot have the same sender
+                         and destination.'}
+
+    Nothing reached the server and nothing was at risk, but it made XRP the one
+    deposit mechanism the terminal could not rehearse end to end.
+    """
+    # DERIVED, not spelled: tests/test_address_literals_are_valid.py caps address
+    # literals and two fresh ones here would climb it. Caught before pushing this
+    # time; an hour earlier the same mistake went in and turned the branch red.
+    deposit, other = XRP_HOT_ACCOUNT, XRP_CUSTOMER_PAYOUT
+    accounts = [
+        (Path("first.json"), deposit, "secret-for-the-deposit-account"),
+        (Path("second.json"), other, "secret-for-the-other-account"),
+    ]
+
+    chosen = xrp_send_tagged.choose_source(accounts, deposit)
+    assert chosen is not None
+    assert chosen[1] == other, "it must skip the account that IS the destination"
+
+    # The ordinary case is unchanged: paying somebody else still uses the first.
+    assert xrp_send_tagged.choose_source(accounts, other)[1] == deposit
+
+
+def test_no_usable_source_returns_None_rather_than_a_doomed_payment():
+    """The refusal case. Submitting would be rejected by the ledger anyway, so the
+    value of answering None is that the caller can say WHY in one sentence instead
+    of surfacing a model exception from four frames down."""
+    deposit = XRP_HOT_ACCOUNT
+    only_the_destination = [(Path("first.json"), deposit, "secret")]
+
+    assert xrp_send_tagged.choose_source(only_the_destination, deposit) is None
+    assert xrp_send_tagged.choose_source([], deposit) is None

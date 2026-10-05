@@ -338,6 +338,36 @@ def resolve_amount(explicit: str, target: DepositTarget | None) -> tuple[object,
 
 
 
+def choose_source(accounts, destination):
+    """The first saved account that is NOT the destination, or None.
+
+    WHY THIS IS NOT accounts[0], MEASURED 2026-10-05 ON swap s_276ca22597a385ac.
+    The source was chosen before the destination was known -- `accounts[0]`,
+    unconditionally -- and `--swap` then resolved the destination from the swap
+    row. For an XRP swap that row's deposit account is
+    XRP_DEPOSIT_ACCOUNT, which on this host IS the first saved faucet account. So
+    the tool built a Payment from an account to itself and xrpl-py refused it:
+
+        XRPLModelException: {'destination': 'An XRP payment transaction cannot
+                             have the same sender and destination.'}
+
+    That refusal is correct and the server never saw it, so nothing was at risk --
+    but it made XRP the one deposit mechanism this terminal could not rehearse,
+    and the fix is not to catch the exception. It is to stop choosing a source
+    that cannot pay the destination.
+
+    NOT A --from FLAG. A flag would let an operator route around this, which is
+    the shape of fix rule 19 calls a patch: the defect is that the choice ignored
+    an input it had, so the choice takes the input. With two saved accounts the
+    answer is unambiguous, and with none that works the caller refuses by name
+    rather than submitting something the ledger will reject.
+    """
+    for entry in accounts:
+        if entry[1] != destination:
+            return entry
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send one tagged TESTNET XRP payment. Dry run by default.")
     parser.add_argument("--to", default="", help="destination address (default: the second saved faucet account)")
@@ -396,6 +426,18 @@ def main() -> int:
         target = deposit_target_for_swap(database, swap_id, args.amount)
         destination, destination_tag = target.address, target.tag
         print(f"    account {destination}  tag {destination_tag}  <- from the swap row, not typed", flush=True)
+
+    # THE SOURCE IS RE-CHOSEN HERE, now that the destination is known. Before
+    # 2026-10-05 it was accounts[0] decided above, which for an XRP swap is the
+    # deposit account itself -- see choose_source() for the measurement.
+    chosen = choose_source(accounts, destination)
+    if chosen is None:
+        print(f"\nREFUSED: every saved faucet account IS {destination}, so there is no account "
+              f"that can pay it. An XRP payment cannot have the same sender and destination. "
+              f"Run `python3 fund_testnets.py --xrp` to create another account. Nothing was sent.",
+              file=sys.stderr)
+        return 2
+    source_path, source, secret = chosen
 
     amount, amount_source = resolve_amount(args.amount, target)
     drops = to_drops(amount)
