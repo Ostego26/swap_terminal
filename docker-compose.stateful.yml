@@ -152,7 +152,18 @@ services:
       # names can never prove a stop across a restart (rule 13).
       - "${ST_RUNTIME_DIR:-./runtime/web}:/runtime"
 
-    restart: unless-stopped
+    # on-failure:5 FOR THE SAME REASON abstergo's is on-failure:3 -- see that
+    # comment. `unless-stopped` was measured restart-looping a container that
+    # cannot start, so a web container missing SWAP_DB_PATH or an RPC credential
+    # would flap instead of showing as exited with the reason in its logs. Five
+    # rather than three because this one starts four processes and has more ways
+    # to lose a race on a slow host, and because a payout worker that genuinely
+    # died is worth a couple of extra attempts.
+    #
+    # IF YOU WANT THIS BACK AFTER A HOST REBOOT, that is `restart: always` and it
+    # is a deliberate choice, not a default -- it means a container that signs
+    # payouts comes up without anyone asking. Left as the operator's (rule 16).
+    restart: on-failure:5
 
     # 45s, which must EXCEED ST_WORKER_GRACE_SECONDS (15) plus the gunicorn grace
     # (20) with room to spare. The entrypoint stops the three workers FIRST and
@@ -195,7 +206,11 @@ services:
       # hands the reader a broken command is worse than one that hands them none.
       - "${GRC_DESK_DATADIR:?set GRC_DESK_DATADIR to the DESK datadir. It must NOT be the customer wallet (~/.GridcoinResearch). Verify with - gridcoinresearchd -datadir=<that datadir> validateaddress <a customer address> | grep ismine - which must answer false}:/data"
 
-    restart: unless-stopped
+    # on-failure:5, not unless-stopped. Same measurement, same reasoning as the
+    # two above. A daemon that cannot open its datadir -- the lock is held, the
+    # path is wrong, the wallet is from a newer Berkeley DB -- must be visible as
+    # exited with that error, not restarting every second behind it.
+    restart: on-failure:5
 
     # 120s. A Gridcoin daemon flushes its wallet and block index on SIGTERM and
     # that is not instant on a 3.3M-block chain. Too short and the runtime

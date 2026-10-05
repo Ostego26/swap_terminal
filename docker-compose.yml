@@ -121,6 +121,16 @@ services:
       # immediately, and the message in `docker compose logs abstergo` names the
       # variable. That is the design working, not a bug.
       #
+      # OBSERVED EXACTLY THAT, 2026-10-05, on the first run of this file:
+      #
+      #     abstergo | Error: DEVNET_RPC_URL is required
+      #     abstergo |     at file:///app/server.js:99:28
+      #
+      # DEVNET_RPC_URL is the FIRST of the five, so it is the one a cold shell
+      # hits; the other four are behind it and will surface one at a time as each
+      # is supplied. `docker compose logs abstergo` is where the name appears --
+      # `docker compose ps` only shows the exit.
+      #
       # NO DEFAULTS ON ANY CREDENTIAL OR ENDPOINT. `${NAME:-}` is an empty string
       # when unset, which the checks above refuse. A default here would be this
       # file choosing a credential or an endpoint nobody picked -- the same
@@ -188,11 +198,30 @@ services:
       # anything is started.
       - "${ABSTERGO_STATE_DIR:-./runtime/abstergo}:/data"
 
-    # NOT "always". A server that cannot start because a credential is missing
-    # should STAY DOWN and be visible as down, not restart-loop while `docker
-    # compose ps` shows it flapping. unless-stopped restarts it across a host
-    # reboot and honors a deliberate `docker compose stop`.
-    restart: unless-stopped
+    # `on-failure` WITH A CAP, AND NOT `unless-stopped`. THIS COMMENT USED TO SAY
+    # THE OPPOSITE AND WAS REFUTED BY THE FIRST RUN.
+    #
+    # It read: "NOT `always`. A server that cannot start because a credential is
+    # missing should STAY DOWN and be visible as down, not restart-loop while
+    # `docker compose ps` shows it flapping. unless-stopped restarts it across a
+    # host reboot and honors a deliberate `docker compose stop`."
+    #
+    # The INTENT was right and the setting does not deliver it. Measured on the
+    # operator's host 2026-10-05, first `docker compose up -d abstergo`, with
+    # DEVNET_RPC_URL unset so server.js:99 threw at import:
+    #
+    #     STATUS: Restarting (1) Less than a second ago
+    #
+    # `unless-stopped` restart-loops a crash exactly as hard as `always` does. The
+    # difference between them is only what happens after a deliberate stop and a
+    # host reboot, not what happens to a container that exits non-zero.
+    #
+    # `on-failure` with max-retries is the setting that actually does what the
+    # paragraph above wanted: a few attempts for a genuinely transient failure,
+    # then it gives up and sits there as `Exited (1)` where an operator can see it
+    # and `docker compose logs` still has the reason. A fail-closed startup check
+    # is worth nothing if the container hides it by restarting forever.
+    restart: on-failure:3
 
     # This is the reaper, and naming it here is rule 13's first bullet: a spawn and
     # its reap are one change. `docker compose stop` sends SIGTERM, dumb-init
