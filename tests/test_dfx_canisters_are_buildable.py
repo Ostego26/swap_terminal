@@ -44,6 +44,7 @@ run. This file only asserts that dfx and Cargo are describing the same project.
 from __future__ import annotations
 
 import json
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -170,3 +171,114 @@ def test_no_workspace_member_declares_a_profile():
         "these workspace members declare [profile.*], which Cargo ignores with only "
         f"a warning -- move the settings to the root Cargo.toml: {offenders}"
     )
+
+
+def declared_init_arg_files() -> list[tuple[str, str]]:
+    """(canister name, the init_arg_file path it declares) for every canister with one."""
+    return [
+        (name, spec["init_arg_file"])
+        for name, spec in (dfx_project().get("canisters") or {}).items()
+        if spec.get("init_arg_file")
+    ]
+
+
+def test_every_init_arg_file_is_git_ignored():
+    """An init_arg_file holds environment state and must never be committable.
+
+    THE HAZARD IS FORCED BY dfx AND IS NOT HYPOTHETICAL. DFINITY's ICP ledger
+    setup documentation says, verbatim, "`dfx.json` does not support referring to
+    values through environment variables. Values must be hardcoded in plain
+    text." The values it means are account identifiers read off a running replica
+    with `dfx ledger account-id`, and the same identity has a DIFFERENT account on
+    every fresh replica.
+
+    So a tracked init_arg_file is a file that claims to know something only a live
+    replica can answer, and it goes stale silently the moment the container is
+    recreated: the deploy succeeds, the ledger mints its supply to an account
+    nobody on this replica controls, and the first symptom arrives at a transfer.
+
+    `git check-ignore` is the instrument rather than a parse of .gitignore,
+    because reimplementing git's ignore-pattern matching is a second
+    implementation of somebody else's rule (rule 8) -- the same argument
+    test_docker_build_context.py makes for not simulating .dockerignore.
+    """
+    declared = declared_init_arg_files()
+    assert declared, (
+        "no canister in dfx.json declares an init_arg_file, so this test checked NOTHING "
+        "(rule 17). Delete it along with the mechanism if the ledger canister is gone."
+    )
+    not_ignored = []
+    for canister, path in declared:
+        # No shell, argv a fixed list, and `path` comes from this repository's own
+        # dfx.json rather than from input. `git` is resolved from PATH on purpose:
+        # an absolute path would break on every machine whose git is elsewhere, and
+        # this is a read-only query. No suppression directives on these two lines --
+        # S603 and S607 are not enabled for tests/, so a directive here would
+        # suppress nothing and RUF100 said exactly that (rule 19: a suppression is
+        # a claim you checked something, not decoration).
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        # 0 == ignored, 1 == NOT ignored, anything else == git itself failed and
+        # the question was not answered. The third case must not score as a pass:
+        # rule 17's "a check that examined nothing is not a pass".
+        if result.returncode == 1:
+            not_ignored.append(f"{canister} -> {path}")
+        elif result.returncode != 0:
+            raise AssertionError(
+                f"`git check-ignore {path}` exited {result.returncode}, so whether it is "
+                f"ignored is UNKNOWN rather than fine: {result.stderr.decode(errors='replace')}"
+            )
+    assert not not_ignored, (
+        "these init_arg_file paths are not git-ignored, so the account identifiers they "
+        f"hardcode can be committed: {not_ignored}"
+    )
+
+
+def test_a_canister_mirroring_a_mainnet_one_declares_its_remote_id():
+    """A local copy of a canister that EXISTS on mainnet must say where it lives there.
+
+    `remote.id.ic` is what stops dfx from trying to CREATE the canister on the ic
+    network -- it declares "this already exists there, at this id". For the ICP
+    ledger that id is the real one, holding real ICP, and the consequence of
+    omitting the block is that a stray `dfx deploy --network ic` treats a local
+    test ledger as something to deploy rather than something that exists.
+
+    Applied to any canister declared with a `wasm` URL under github.com/dfinity,
+    which is the signature of running somebody else's released canister locally
+    rather than building our own.
+    """
+    mirrors = [
+        (name, spec)
+        for name, spec in (dfx_project().get("canisters") or {}).items()
+        if "dfinity" in str(spec.get("wasm", ""))
+    ]
+    assert mirrors, (
+        "no canister in dfx.json runs a released DFINITY wasm, so this test checked NOTHING"
+    )
+    missing = [name for name, spec in mirrors if not (spec.get("remote") or {}).get("id", {}).get("ic")]
+    assert not missing, (
+        f"these canisters run a released DFINITY wasm with no remote.id.ic declared: {missing}. "
+        f"Without it dfx would try to CREATE them on mainnet instead of recognizing that they "
+        f"already exist there."
+    )
+
+
+def test_a_pinned_release_tag_is_used_rather_than_a_moving_reference():
+    """Every DFINITY artifact URL names a release tag, not `latest` or a branch.
+
+    A replica or ledger version is a consensus implementation; "whatever was
+    released this morning" is not a thing to debug a transfer against, which is
+    the same argument docker/icp-replica.Dockerfile already makes for pinning
+    DFX_VERSION rather than taking latest.
+    """
+    moving = []
+    for name, spec in (dfx_project().get("canisters") or {}).items():
+        for key in ("wasm", "candid"):
+            value = str(spec.get(key, ""))
+            if "dfinity" in value and ("/latest/" in value or "/master/" in value or "/main/" in value):
+                moving.append(f"{name}.{key} -> {value}")
+    assert not moving, f"these point at a moving reference instead of a release tag: {moving}"

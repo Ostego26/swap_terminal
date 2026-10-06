@@ -5,6 +5,17 @@
       "type": "rust",
       "package": "threshold_custody",
       "candid": "icp/threshold_custody/threshold_custody.did"
+    },
+    "icp_ledger_canister": {
+      "type": "custom",
+      "candid": "https://github.com/dfinity/ic/releases/download/ledger-suite-icp-2025-08-29/ledger.did",
+      "wasm": "https://github.com/dfinity/ic/releases/download/ledger-suite-icp-2025-08-29/ledger-canister_notify-method.wasm.gz",
+      "remote": {
+        "id": {
+          "ic": "ryjl3-tyaaa-aaaaa-aaaba-cai"
+        }
+      },
+      "init_arg_file": "icp/icp_ledger_init.did"
     }
   },
   "defaults": {
