@@ -37,6 +37,7 @@ from modules.address_authority import check_address, check_receive_address, expe
 
 from .custody_separation import payout_to_the_desk_refusal
 from .helpers import new_id, parse_iso, utc_now_iso
+from .icp_subaccount_service import allocate_subaccount_index
 from .payout_capacity import why_the_payout_cannot_be_funded
 from .xrp_tag_service import allocate_destination_tag
 
@@ -272,6 +273,69 @@ def why_cannot_take_deposits(config, adapters: dict, asset: str) -> str:
     except ValueError:
         return f"{asset} cannot take deposits: {variable} is unset or not a valid account"
     return ""
+
+
+#: Assets whose deposit address cannot be known until a row exists in the database.
+#: A THIRD SHAPE beside the two deposit_account() describes, and the reason is
+#: ordering rather than custody:
+#:
+#:   by address   BTC, LTC, GRC. get_new_address() derives it from the wallet, so it
+#:                is known before anything is written.
+#:   by tag       XRP, SOL. The account is configuration and known up front; the tag
+#:                is allocated after the swap row exists, because it has a FOREIGN KEY
+#:                to it.
+#:   db-allocated ICP. The address IS a function of an allocated index --
+#:                account_identifier(owner, subaccount) -- and icp_deposit_subaccounts
+#:                has the same FOREIGN KEY to swaps. So the index cannot be allocated
+#:                before the swap row, and the address cannot be computed before the
+#:                index. The swap is inserted with a placeholder and updated inside the
+#:                SAME transaction.
+#:
+#: WHY NOT DERIVE THE INDEX FROM THE SWAP ID and skip the ordering problem: because
+#: uniqueness would then rest on a hash not colliding rather than on a constraint, and
+#: two swaps sharing an index share a deposit address -- one customer's payment
+#: credited to another's swap. services/icp_subaccount_service's header argues this at
+#: length; this is the consequence.
+DB_ALLOCATED_DEPOSIT_ASSETS = frozenset({"ICP"})
+
+#: What sits in deposit_address between the INSERT and the UPDATE. Chosen so that it
+#: is NOT address-shaped: chains/icp.validate_address() rejects it, so even if a
+#: future edit let it escape the transaction, nothing would send to it and nothing
+#: would publish it as payable. An empty string would satisfy NOT NULL and look like
+#: a missing value, which is the ambiguity rule 14 is about.
+DEPOSIT_ADDRESS_PENDING_ALLOCATION = "PENDING_SUBACCOUNT_ALLOCATION"
+
+
+def allocate_db_deposit_address(db, adapters: dict, from_asset: str, swap_id: str) -> str:
+    """Allocate the index and return the deposit address for a db-allocated asset.
+
+    THE DECISION, extracted so it can be called with seeded inputs rather than only
+    through a swap creation that needs a quote and two live adapters (rule 10).
+
+    Allocation and derivation are ONE step on purpose. Two callers doing them
+    separately is how an index gets allocated and then an address derived from a
+    different one, which is silent: both halves look right and the customer's payment
+    lands where nobody is watching.
+
+    DOES NOT COMMIT, and must be called inside the transaction that wrote the swap
+    row -- the subaccount table has a FOREIGN KEY to swaps, so the row must exist, and
+    the swap must not be visible with its placeholder address if the allocation fails.
+    """
+    if from_asset not in DB_ALLOCATED_DEPOSIT_ASSETS:
+        raise ValueError(
+            f"{from_asset} is not a db-allocated deposit asset, so this function must not be "
+            f"called for it. The set is {sorted(DB_ALLOCATED_DEPOSIT_ASSETS)}"
+        )
+    adapter = adapters[from_asset]
+    index = allocate_subaccount_index(db, adapter.owner_principal, swap_id)
+    address = adapter.deposit_address(index)
+    if not adapter.validate_address(address):
+        raise ValueError(
+            f"the address derived for {from_asset} swap {swap_id} at subaccount {index} does not "
+            f"validate ({address!r}). NO swap may be created: a customer handed an address the "
+            f"adapter itself rejects would pay somewhere nothing is watching."
+        )
+    return address
 
 
 def deposit_account(config, adapters: dict, from_asset: str, swap_id: str) -> tuple[str, bool]:
@@ -886,7 +950,12 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     # Both config checks happen HERE, before anything is written: an unset or
     # invalid XRP_DEPOSIT_ACCOUNT must abort the swap rather than leave a row
     # behind. The tag itself is allocated after the INSERT, below.
-    deposit_address, needs_tag = deposit_account(config, adapters, from_asset, swap_id)
+    if from_asset in DB_ALLOCATED_DEPOSIT_ASSETS:
+        # The address is not knowable yet -- see DB_ALLOCATED_DEPOSIT_ASSETS. The
+        # placeholder is replaced below, after the INSERT, inside this transaction.
+        deposit_address, needs_tag = DEPOSIT_ADDRESS_PENDING_ALLOCATION, False
+    else:
+        deposit_address, needs_tag = deposit_account(config, adapters, from_asset, swap_id)
     now = utc_now_iso()
     swap = {
         "id": swap_id,
@@ -938,6 +1007,16 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     # row handing a customer a deposit instruction with no way to recognize the
     # payment. That is the outcome to want -- a failed creation costs a retry,
     # while a swap that takes a deposit it cannot attribute costs the deposit.
+    if from_asset in DB_ALLOCATED_DEPOSIT_ASSETS:
+        # AFTER the INSERT because icp_deposit_subaccounts has a FOREIGN KEY to swaps,
+        # and BEFORE the commit because a swap must never be visible carrying the
+        # placeholder. Both halves of that sentence are load-bearing: reverse the first
+        # and the allocating INSERT fails on the constraint; reverse the second and a
+        # customer can be shown PENDING_SUBACCOUNT_ALLOCATION as an address to pay.
+        deposit_address = allocate_db_deposit_address(db, adapters, from_asset, swap_id)
+        swap["deposit_address"] = deposit_address
+        db.execute("UPDATE swaps SET deposit_address = ? WHERE id = ?", (deposit_address, swap_id))
+
     if needs_tag:
         # from_asset is PASSED, and before 2026-10-01 it was not: the account was
         # checked against the XRP Ledger's format on every tag chain, so the first

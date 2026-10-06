@@ -48,7 +48,14 @@ from __future__ import annotations
 
 import sqlite3
 
-from ..chains.icp_account import PrincipalRefused, principal_to_bytes
+# ABSOLUTE, not `from ..chains...`. This repository puts swap_terminal/ on sys.path
+# (the sys.path.insert idiom every entry point uses), so `services` is a TOP-LEVEL
+# package and a two-dot relative import raises "attempted relative import beyond
+# top-level package" -- 49 collection errors the moment services/swap_service.py
+# imported this module. Every sibling here reaches chains/ the same way: see
+# swap_service's `from chains.registry import ...`.
+from chains.icp_account import PrincipalRefused, principal_to_bytes
+
 from .helpers import utc_now_iso
 
 #: The lowest index this service will ever issue. 0 is the desk's own account --
@@ -121,12 +128,36 @@ def allocate_subaccount_index(db, owner: str, swap_id: str) -> int:
         # allocation did not happen for a reason that is about the database rather
         # than about this swap, and reporting it as an allocation problem sends a
         # reader to the wrong place. Either way nothing is swallowed.
+        # WHICH CONSTRAINT IT WAS, because the two have opposite remedies and the
+        # first version of this message guessed. It said "the likeliest cause is that
+        # this swap already has one" for every IntegrityError -- which sent a reader
+        # looking for a duplicate allocation when the actual failure was a FOREIGN KEY
+        # violation, i.e. the swap row does not exist yet. Found by a test that
+        # allocated for an uncreated swap and read what came back (rule 14: the
+        # message is what an operator acts on).
+        text = str(error)
+        if "FOREIGN KEY" in text.upper():
+            explanation = (
+                f"swap {swap_id} does not exist in `swaps`, and icp_deposit_subaccounts has a "
+                f"FOREIGN KEY to it. Allocation must happen AFTER the swap row is inserted and "
+                f"inside the same transaction -- see services/swap_service's "
+                f"DB_ALLOCATED_DEPOSIT_ASSETS for why that ordering is forced"
+            )
+        elif "UNIQUE" in text.upper():
+            explanation = (
+                f"swap {swap_id} already holds a subaccount. Read it with "
+                f"subaccount_index_for_swap() rather than allocating again: two subaccounts for "
+                f"one swap means two published deposit addresses, and a payment to the one nobody "
+                f"polls looks exactly like a customer who never paid"
+            )
+        else:
+            explanation = (
+                "a constraint this function does not recognize was violated, so the remedy is not "
+                "inferable from here -- read the sqlite message"
+            )
         raise ICPSubaccountAllocationError(
             f"the allocating INSERT for swap {swap_id} under {owner} violated a constraint, so "
-            f"NO subaccount was issued: {error}. The likeliest cause is that this swap already "
-            f"has one -- read it with subaccount_index_for_swap() rather than allocating again, "
-            f"because two subaccounts for one swap means two published deposit addresses and a "
-            f"payment to the one nobody polls looks exactly like a customer who never paid."
+            f"NO subaccount was issued: {error}. {explanation}."
         ) from error
 
     if row is None:
