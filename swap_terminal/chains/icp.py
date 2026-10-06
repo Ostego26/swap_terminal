@@ -63,6 +63,7 @@ import json
 import re
 import shlex
 import subprocess
+from pathlib import Path
 
 from .coin_amounts import amount_to_base_units
 from .icp_account import (
@@ -158,6 +159,39 @@ class ICPCallFailed(RuntimeError):
     """
 
 
+#: The repository root, resolved from THIS FILE rather than from the working directory.
+#:
+#: WHY THIS IS NOT `Path.cwd()` AND NOT A BARE RELATIVE PATH. Measured 2026-10-06,
+#: before any ICP swap had been attempted through the UI: dfx_transport() built
+#:
+#:     ["docker", "compose", "-f", "docker-compose.yml", "-f", "docker-compose.icp.yml", ...]
+#:
+#: and passed no `cwd=`, so both paths resolved against whatever directory the
+#: CALLING process happened to be in. Every caller that matters is in the wrong one:
+#:
+#:     docker-compose.yml       from repo root: PRESENT | from swap_terminal/: ABSENT
+#:     docker-compose.icp.yml   from repo root: PRESENT | from swap_terminal/: ABSENT
+#:
+#: and swap_terminal/ is exactly where the app runs, because app.py imports
+#: `from routes.ui import bp` -- the package directory has to be the working
+#: directory for that to resolve. So every ICP call from the web app or a worker
+#: would have failed with compose's "no configuration file provided", which names
+#: the missing file and not the reason, on a path that had been measured working
+#: from a shell at the repo root all day.
+#:
+#: That is the gap between "tested" and "tested the way it runs": every measurement
+#: behind the ICP adapter was taken from an operator shell at the root, which is the
+#: one working directory the app never has.
+#:
+#: parents[2] because this file is <root>/swap_terminal/chains/icp.py -- chains,
+#: swap_terminal, root. Asserted at import rather than trusted: a file moved one
+#: level without updating this constant would otherwise point at swap_terminal/ and
+#: fail at the first ICP call instead of at startup.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_COMPOSE_FILES = (_REPO_ROOT / "docker-compose.yml", _REPO_ROOT / "docker-compose.icp.yml")
+
+
 def dfx_transport(service: str, timeout: float):
     """Return a `call(canister, method, argument) -> str` that runs dfx in compose.
 
@@ -176,16 +210,24 @@ def dfx_transport(service: str, timeout: float):
     """
 
     def call(canister: str, method: str, argument: str, output: str = "idl") -> str:
+        # ABSOLUTE compose paths AND an explicit cwd, which are two fixes for one
+        # measurement (see _REPO_ROOT). The absolute -f paths are what make the call
+        # work from any working directory; the cwd is what makes compose resolve the
+        # RELATIVE paths INSIDE those files -- `build: context: .`, the `./icp:/repo`
+        # mount -- against the root as well. Fixing only the -f paths would move the
+        # failure from "no configuration file provided" to a wrong build context,
+        # which is the harder one to read.
         argv = [
             "docker", "compose",
-            "-f", "docker-compose.yml",
-            "-f", "docker-compose.icp.yml",
+            "-f", str(_COMPOSE_FILES[0]),
+            "-f", str(_COMPOSE_FILES[1]),
             "exec", "-T", service,
             "dfx", "canister", "call", "--output", output, canister, method, argument,
         ]
         try:
             done = subprocess.run(  # noqa: S603 -- checked: no shell, argv is a fixed list, and the only caller-supplied elements are a canister id, a method name and a candid argument this repository builds
                 argv, capture_output=True, text=True, timeout=timeout, check=False,
+                cwd=_REPO_ROOT,
             )
         except subprocess.TimeoutExpired as error:
             raise ICPCallFailed(

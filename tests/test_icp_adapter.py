@@ -28,9 +28,11 @@ chains/icp_account.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from swap_terminal.chains import icp as icp_module
 from swap_terminal.chains.icp import ICP_DECIMALS, ICPAdapter, ICPCallFailed
 from swap_terminal.chains.icp_account import account_identifier, principal_to_text, subaccount_from_index
 
@@ -532,3 +534,52 @@ def test_get_new_address_REFUSES_because_the_index_must_come_from_SQL():
     a = scanning_adapter(blocks_page([]))
     with pytest.raises(ICPCallFailed, match="allocated in SQL"):
         a.get_new_address("swap_s_abc")
+
+
+# --- the transport's own working directory, which is not the one it was measured in
+
+
+def test_the_compose_files_the_transport_names_exist_from_ANY_directory(tmp_path, monkeypatch):
+    """Found 2026-10-06, before the first ICP swap was attempted through the UI.
+
+    dfx_transport() built `-f docker-compose.yml -f docker-compose.icp.yml` and passed
+    no cwd, so both resolved against the CALLING process's working directory. The app
+    runs with cwd=swap_terminal/ -- forced, because app.py does `from routes.ui import
+    bp` -- and neither file is there. Every ICP call from the web app or a worker would
+    have failed with compose's "no configuration file provided", which names the file
+    and not the reason.
+
+    Nothing caught it because every measurement behind this adapter was taken from an
+    operator shell at the repository root, which is the one working directory the app
+    never has.
+
+    The test chdirs somewhere with no compose file at all and asserts the paths the
+    transport NAMES are real files. That is the property; a cwd-relative path cannot
+    satisfy it.
+    """
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / "docker-compose.yml").exists(), "the fixture has to be a directory without one"
+
+    recorded = {}
+
+    def fake_run(argv, **kwargs):
+        recorded["argv"] = argv
+        recorded["cwd"] = kwargs.get("cwd")
+        raise AssertionError("argv captured; no docker is run in this test")
+
+    monkeypatch.setattr(icp_module.subprocess, "run", fake_run)
+    call = icp_module.dfx_transport("icp-replica", 5.0)
+    with pytest.raises(AssertionError, match="argv captured"):
+        call("a-canister", "a_method", "()")
+
+    argv = recorded["argv"]
+    named = [argv[i + 1] for i, element in enumerate(argv) if element == "-f"]
+    assert len(named) == 2, argv
+    for path in named:
+        assert Path(path).is_absolute(), f"{path} is relative, so it depends on the caller's cwd"
+        assert Path(path).is_file(), f"{path} is not a file from {tmp_path}"
+
+    # And the cwd, which is the other half: compose resolves the paths INSIDE those
+    # files (build contexts, the ./icp:/repo mount) against the process's directory.
+    assert recorded["cwd"] == icp_module._REPO_ROOT
+    assert (Path(recorded["cwd"]) / "docker-compose.yml").is_file()
