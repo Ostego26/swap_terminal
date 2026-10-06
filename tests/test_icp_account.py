@@ -20,29 +20,36 @@ cross-check and a measurement must not be written in the same voice:
                         besides, including the two the local replica actually
                         issued.
 
-  ACCOUNT IDENTIFIER    cross-checked against ic-py 1.0.1's
-                        AccountIdentifier.new, an independent Python
-                        implementation, which hashes the same domain separator in
-                        the same order with the same CRC32 prefix. That is
-                        agreement with somebody else's code, NOT agreement with a
-                        running ledger, and the difference matters: two
-                        implementations can share a misreading of a
-                        specification.
-
-                        The hex pinned in
-                        test_the_ledger_canisters_own_default_account is
-                        therefore labeled for what it is -- this code's output,
-                        held against change -- and the thing that would settle it
-                        absolutely is two commands on a host with dfx:
+  ACCOUNT IDENTIFIER    MEASURED against dfx, 2026-10-06, on the local replica
+                        in docker-compose.icp.yml. This paragraph used to say
+                        "cross-checked against ic-py 1.0.1's
+                        AccountIdentifier.new, which is agreement with somebody
+                        else's code, NOT agreement with a running ledger" and
+                        name the two commands that would settle it. They were
+                        run:
 
                             dfx identity get-principal
+                              ybr6p-5dyeb-...-fkhhf-cqe
                             dfx ledger account-id
+                              a0263999...6c12042
 
-                        feed the first into account_identifier() and it must
-                        equal the second. Until somebody runs that pair, the
-                        account identifier is cross-checked, not measured, and
-                        this docstring is where that is recorded rather than in a
-                        commit message nobody greps.
+                        account_identifier() on the first returns the second
+                        exactly. The pair is pinned in
+                        test_dfx_ledger_account_id_agrees_with_this_module, which
+                        is now the authority in this file; the ic-py agreement
+                        remains true and is no longer what the claim rests on.
+
+                        TWO THINGS THAT MEASUREMENT FOUND, neither of which was
+                        visible before it. That principal is 29 bytes -- exactly
+                        MAX_PRINCIPAL_BYTES -- so a limit written here from a
+                        specification turns out to be the ORDINARY case for a
+                        real identity rather than an edge, and a 29-byte refusal
+                        bug would have broken every self-authenticating principal
+                        while every test in this file passed. And its class tag
+                        is 0x02 (self-authenticating), where everything else
+                        tested here is a 10-byte canister id ending \x01\x01:
+                        the two principal shapes that exist, and only one of them
+                        had coverage.
 
   ICRC-1 TEXTUAL FORM   not implemented and not tested. See the module docstring:
                         it is named work, deliberately not guessed at.
@@ -250,3 +257,36 @@ def test_a_principal_is_not_an_account_identifier_and_the_reverse():
     ledger = principal_to_text(bytes.fromhex("00000000000000020101"))
     assert not is_account_identifier(ledger)
     assert not is_principal(account_identifier(ledger))
+
+
+#: `dfx identity get-principal` inside the replica container, 2026-10-06. A
+#: 29-byte self-authenticating principal -- the shape a real identity has, as
+#: opposed to the 10-byte canister ids every other test here uses.
+DFX_DEFAULT_IDENTITY = "ybr6p-5dyeb-d5vhs-rl366-n2zsw-muftf-orv27-ey4hk-3y4de-fkhhf-cqe"
+
+#: `dfx ledger account-id` for that identity, same command, same minute. NOT a
+#: value this code produced: it is what the IC's own tooling printed, which is the
+#: only reason it is written out as a literal here.
+DFX_DEFAULT_ACCOUNT_ID = "a0263999097bcda484aa158ee3a227034a1a5043f0db346ffecaf4b3a6c12042"
+
+
+def test_dfx_ledger_account_id_agrees_with_this_module():
+    """THE EXTERNAL CHECK. dfx printed both halves; this module must reproduce one from the other.
+
+    Everything else in this file either checks the code against itself or against
+    ic-py, and two implementations can share a misreading of a specification. This
+    is the one assertion whose right-hand side came from the Internet Computer's
+    own tooling, so it is the one that makes the 64-hex derivation a measurement
+    rather than a plausible reading (rule 17).
+
+    It also covers the two principal properties nothing else here does -- 29
+    bytes, which is the maximum and also the normal size for an identity, and the
+    0x02 self-authenticating class tag.
+    """
+    raw = principal_to_bytes(DFX_DEFAULT_IDENTITY)
+    assert len(raw) == MAX_PRINCIPAL_BYTES
+    assert raw[-1] == 0x02
+    assert principal_to_text(raw) == DFX_DEFAULT_IDENTITY
+    assert account_identifier(DFX_DEFAULT_IDENTITY) == DFX_DEFAULT_ACCOUNT_ID
+    assert is_account_identifier(DFX_DEFAULT_ACCOUNT_ID)
+    assert not is_principal(DFX_DEFAULT_ACCOUNT_ID)

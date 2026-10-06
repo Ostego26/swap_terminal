@@ -54,18 +54,35 @@ project real investigations:
                      first run of this code rather than being tuned until they
                      did.
 
-  account identifier read out of ic-py 1.0.1's `AccountIdentifier.new`
-                     (ic/principal.py), an independent Python implementation, and
-                     it agrees line for line with what is written below: sha224
-                     over b"\\x0Aaccount-id", then the principal's bytes, then a
-                     32-byte subaccount, with CRC32 of that digest prepended.
-                     That is a cross-check against somebody else's code, not a
-                     measurement against a running ledger. The thing that would
-                     settle it absolutely is one command on a host with dfx:
+  account identifier MEASURED against dfx, 2026-10-06, on the local replica in
+                     docker-compose.icp.yml:
 
-                         dfx ledger account-id
+                         dfx identity get-principal  ->  a 29-byte principal
+                         dfx ledger account-id       ->  a0263999...6c12042
 
-                     and the test file says so beside the value it pins.
+                     account_identifier() on the first returns the second
+                     exactly. The pair is pinned in
+                     tests/test_icp_account.test_dfx_ledger_account_id_agrees_with_this_module.
+
+                     THIS PARAGRAPH USED TO SAY "cross-check against somebody
+                     else's code, not a measurement against a running ledger",
+                     naming ic-py 1.0.1's `AccountIdentifier.new` and the command
+                     that would settle it. That was the honest state for about an
+                     hour and it is kept here because the distinction is the
+                     point: ic-py still agrees, line for line -- sha224 over
+                     b"\\x0Aaccount-id", then the principal's bytes, then a
+                     32-byte subaccount, with CRC32 of that digest prepended --
+                     but agreement between two implementations is not what the
+                     claim rests on any more.
+
+                     What the measurement FOUND, which is the argument for taking
+                     it rather than trusting the agreement: the dfx identity's
+                     principal is 29 bytes, exactly MAX_PRINCIPAL_BYTES. The
+                     limit below was written from a specification and reads like
+                     an edge case; it is the ordinary size of a real identity, so
+                     an off-by-one there would have refused every
+                     self-authenticating principal on the network while every
+                     canister-id test passed.
 
 WHAT ICP CHANGES ABOUT THE TERMINAL'S ASSUMPTIONS, recorded here because this is
 the first file in the repository to encounter it:
