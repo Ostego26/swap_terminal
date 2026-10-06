@@ -207,6 +207,27 @@ DIRECT_DRIVERS = frozenset({
 #: worse than refusing until the variables are exported. Changing how the service
 #: resolves its daemons is live posture and the operator's (rule 16).
 SERVICE_SIDE = frozenset({
+    # icp_custody_addresses.py, added 2026-10-06. SERVICE SIDE, and this one is not
+    # a judgment call: the file prints two columns, and the right-hand column's
+    # entire claim is "this is the address the desk is using RIGHT NOW". It gets it
+    # from build_adapters(Config.RPC).own_address(), which is the same construction
+    # the brokered terminal does, because any other daemon's address is not a weaker
+    # answer to that question -- it is an answer about a different wallet.
+    #
+    # The wrong-number-under-the-right-label failure here has a specific and nasty
+    # shape. The file's last column prints `same?`, and the operator reads it before
+    # deciding whether to move where desk funds live (armed state). A conf fallback
+    # resolving some other Gridcoin wallet would print `no` about an address the desk
+    # does not use -- harmless -- or, if that other wallet happened to hold the
+    # canister-derived address, `YES`, which would read as "the desk is already on
+    # the canister key" about a desk that is not. That is a one-word answer to an
+    # armed-state question, derived from the wrong daemon.
+    #
+    # It writes nothing and derives no key either way: chains/base.own_address()
+    # uses listreceivedbyaddress and getaddressesbylabel, never getnewaddress, and
+    # tests/test_icp_custody_addresses.py asserts that is the only adapter method
+    # this file calls.
+    "icp_custody_addresses.py",
     # correct_payout_amounts.py, added 2026-10-03. SERVICE SIDE, and the reason is
     # show_payout_fees.py's one step further on: it reads the transactions THIS
     # TERMINAL broadcast, by the txids in its own `payouts` rows, in order to write
