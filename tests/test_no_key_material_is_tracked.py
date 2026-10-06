@@ -246,3 +246,80 @@ def test_no_local_branch_has_an_ed25519_keypair_in_its_tree():
         "\npublished, and deleting the branch afterward does not un-publish it."
         "\nRewriting shared history is the operator's call (CLAUDE.md rule 4)."
     )
+
+
+#: Directory names whose contents are build output or tool state, never source.
+#: Matched as a PATH COMPONENT at any depth, which is the same thing a gitignore
+#: pattern with a trailing slash and no other slash does -- see the next test's
+#: docstring for why that equivalence is the subject here.
+GENERATED_DIRS = frozenset({"target", ".dfx", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache"})
+
+#: Extensions that are compiled output by definition. A tracked one is a binary
+#: nobody diffs and nobody can rebuild from, which is rule 2's argument against
+#: keeping a file "for reference" with the added cost of weight in every clone.
+COMPILED_SUFFIXES = frozenset({".rlib", ".rmeta", ".so", ".dylib", ".wasm", ".o", ".a", ".pyc"})
+
+
+def test_no_tracked_file_lives_in_a_generated_directory():
+    """A CLEAN GATE at zero, and it exists because 891 files got past the old one.
+
+    MEASURED 2026-10-06. When the Cargo workspace moved from the repository root
+    into icp/, I rewrote .gitignore's `target/` and `.dfx/` as `icp/target/` and
+    `icp/.dfx/` -- which looks like following the code and is the opposite.
+
+        A gitignore pattern with a trailing slash and NO other slash matches at
+        EVERY depth.
+
+    So bare `target/` already covered icp/target/ and everything else. Adding the
+    prefix made the pattern strictly NARROWER, and what it un-ignored was the
+    root target/ left behind by a build run before the move. `git add -A` swept it
+    in: 891 files, 198MB on disk, .rlib and .so binaries, 60MiB over the wire,
+    into a Python repository.
+
+    Nothing failed. The commit succeeded, the push succeeded, the suite stayed
+    green, and the only symptom was a `git pull` printing 900 filenames -- which
+    is the shape rule 13 is about, and it is why this is a test rather than a
+    corrected comment in .gitignore (rule 19: does it stop the symptom being
+    reported, or stop the cause existing).
+
+    IT DOES NOT PARSE .gitignore. Reimplementing git's matcher is a second
+    implementation of somebody else's rule (rule 8), and the failure above was
+    precisely a misreading of that rule -- so a reimplementation written by the
+    same reader would share the misreading. It asks the simpler, stricter
+    question instead: is any TRACKED path inside a directory whose contents are
+    generated? That is answerable from `git ls-files` alone, and it is true or
+    false regardless of which pattern was supposed to have caught it.
+    """
+    offenders = []
+    for path in tracked_files():
+        parts = set(Path(path).parts[:-1])
+        hit = parts & GENERATED_DIRS
+        if hit:
+            offenders.append(f"{path}  (inside {min(hit)}/)")
+    assert not offenders, (
+        f"{len(offenders)} tracked files live in generated directories. These are build "
+        f"output or tool state and belong in .gitignore -- note that a pattern like "
+        f"`target/` matches at EVERY depth, so it does not need a directory prefix:\n"
+        + "\n".join(f"  {line}" for line in offenders[:20])
+        + (f"\n  ... and {len(offenders) - 20} more" if len(offenders) > 20 else "")
+    )
+
+
+def test_no_tracked_file_is_compiled_output():
+    """The same defect caught by content-kind rather than by location.
+
+    A CLEAN GATE at zero. The directory test above would miss a .wasm committed
+    beside its source, which is the likelier mistake once a canister build is
+    something people run by hand: `cp` the artifact somewhere convenient, commit
+    it, and now the repository carries a binary that nobody can diff and that
+    silently stops matching the source it was built from.
+
+    The canister wasm in particular is reproducible -- icp/threshold_custody's own
+    header says so, with the exact command -- which is the whole argument for not
+    tracking it.
+    """
+    offenders = [path for path in tracked_files() if Path(path).suffix in COMPILED_SUFFIXES]
+    assert not offenders, (
+        f"these tracked files are compiled output: {offenders}. They are reproducible from "
+        f"source and a committed binary is a second artifact nobody diffs."
+    )

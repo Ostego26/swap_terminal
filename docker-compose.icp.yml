@@ -22,51 +22,62 @@ services:
     # write there, and a container that can rewrite the repository is one whose
     # output nobody can attribute.
     volumes:
-      # ONE DIRECTORY, NOT FOUR FILES, and that is the whole fix for a defect
-      # measured on the live host 2026-10-06. This block used to mount ./icp plus
-      # ./dfx.json, ./Cargo.toml and ./Cargo.lock individually, because dfx.json
-      # was at the repository root and the root cannot be mounted wholesale -- it
-      # holds the Python tree and a Solana keypair.
+      # ONE DIRECTORY, READ-WRITE, and both halves of that were learned the hard
+      # way on 2026-10-06. The history is kept because each wrong version looked
+      # more careful than the one that works.
       #
-      # A SINGLE-FILE BIND MOUNT FOLLOWS THE INODE. `git pull` does not edit a
-      # file in place; it writes a new one and renames it over the old, so the
-      # inode changes and the mount keeps showing the file that was there when the
-      # container started. Measured after a pull that added the ledger canister:
+      # ATTEMPT 1 -- ./dfx.json, ./Cargo.toml and ./Cargo.lock mounted as
+      # individual FILES, because dfx.json was at the repository root and the root
+      # cannot be mounted wholesale (it holds the Python tree and a Solana
+      # keypair). A single-file bind mount follows the INODE, and `git pull` does
+      # not edit a file in place -- it writes a new one and renames it over the
+      # old. Measured after a pull that added the ledger canister:
       #
       #   container  /repo/dfx.json  inode 40898326  259 bytes  grep -c icp_ledger_canister -> 0
       #   host       ./dfx.json      inode 40898329  704 bytes  grep -c icp_ledger_canister -> 1
       #
-      # The only symptom was `dfx deploy icp_ledger_canister` reporting "Canister
-      # 'icp_ledger_canister' not found in dfx.json" about a file that declares
-      # it. Nothing crashed and nothing warned, and it would have recurred on
-      # every pull -- rule 13, and rule 13's own answer: verify the artifact, not
-      # the deploy. A directory mount resolves names on each access and cannot go
-      # stale this way.
+      # The container had been reading a dfx.json that no longer existed on disk,
+      # and the only symptom was `dfx deploy` saying the canister was "not found
+      # in dfx.json" about a file that declares it. Nothing crashed, and it would
+      # have recurred on every pull. tests/test_docker_build_context.py's
+      # single-file-mount gate is what stops attempt 1 coming back.
       #
-      # READ-ONLY on the source, and that is the point rather than caution. The
-      # replica needs to SEE the project to build a canister from it; it has no
-      # reason to write there, and a container that can rewrite the repository is
-      # one whose output nobody can attribute.
-      - "./icp:/repo:ro"
+      # ATTEMPT 2 -- `./icp:/repo:ro` plus named volumes at /repo/target and
+      # /repo/.dfx, with a comment claiming "Docker layers mounts, so these two
+      # paths are writable while everything else under /repo is not." THAT WAS
+      # FALSE, and the container would not start at all:
+      #
+      #   error mounting ".../swap_terminal_icp-dfx/_data" to rootfs at
+      #   "/repo/.dfx": create mountpoint for /repo/.dfx mount: make mountpoint
+      #   "/repo/.dfx": mkdirat .../merged/repo/.dfx: read-only file system
+      #
+      # Docker has to CREATE the mountpoint, and neither directory exists in
+      # ./icp, so creating it means writing into a read-only rootfs. Layering a
+      # volume over a path that already exists works; conjuring one inside :ro
+      # does not.
+      #
+      # SO: READ-WRITE, which is what dfx actually requires. It writes .dfx/ (the
+      # canister ids) and target/ (the build) into its PROJECT directory and has
+      # no option to put either anywhere else -- there is no DFX_PROJECT_STATE_DIR
+      # to set. Fighting that with volumes is what broke attempt 2.
+      #
+      # The ":ro is the point rather than caution" line that used to be here is
+      # retracted: it was a claim about attribution, and what it bought in
+      # practice was two outages. What replaces it is narrower and checkable --
+      # the container can write exactly two paths in this tree, `target/` and
+      # `.dfx/`, and BOTH are gitignored at every depth, so `git status` in a
+      # checkout stays clean and tests/test_no_key_material_is_tracked.py fails if
+      # either is ever committed. Writing to the host also means the build cache
+      # and the canister ids survive `compose down` without a volume at all, which
+      # is what the volumes were for.
+      - "./icp:/repo"
 
-      # BUILD OUTPUT AND PROJECT STATE IN NAMED VOLUMES, mounted INSIDE the
-      # read-only bind above -- Docker layers mounts, so these two paths are
-      # writable while everything else under /repo is not.
-      #
-      # target/: the workspace root is /repo, so cargo puts it there. Without a
-      # volume it lands in the container's own layer and every `compose up` after
-      # a `down` pays a full cold rebuild of candid and ic-cdk -- 59.6s measured
-      # in the container for this one small canister, and it is the first of
-      # several.
-      #
-      # .dfx/: canister ids live in .dfx/<network>/canister_ids.json while the
-      # replica's own state lives under /state. Those two have to survive together
-      # or they disagree: a recreated container would hold a replica that still
-      # hosts bkyz2-fmaaa-aaaaa-qaaaq-cai beside a project that has forgotten the
-      # name, and `dfx deploy` would create a SECOND canister rather than upgrade
-      # the one holding the key.
-      - "icp-target:/repo/target"
-      - "icp-dfx:/repo/.dfx"
+      # IDENTITIES STAY OUT OF THE REPOSITORY TREE, and this is the one mount that
+      # is not about convenience. DFX_CONFIG_ROOT=/state (see the Dockerfile) is
+      # where dfx keeps identity keys, including the plaintext local `minter`. A
+      # read-write project mount plus identities inside it would put key material
+      # under a path somebody could `git add -f`. /state is a named volume outside
+      # /repo precisely so that cannot happen.
       - "icp-state:/state"
 
     ports:
@@ -91,5 +102,3 @@ services:
 
 volumes:
   icp-state:
-  icp-target:
-  icp-dfx:
