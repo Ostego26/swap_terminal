@@ -197,24 +197,143 @@ def test_underscores_in_the_candid_nat_are_parsed():
 # -- the path that moves money ---------------------------------------------
 
 
-def test_a_payout_refuses_and_names_the_gap_rather_than_sending():
-    """send_to_address is NOT wired, and the refusal explains why rather than failing vaguely.
+#: A deterministic nanosecond timestamp. NOT time.time_ns() -- the whole point of
+#: this field is that it must NOT come from a clock, so a test that read one would
+#: be testing the hazard rather than the fix.
+FIXED_NANOS = 1_759_700_000_000_000_000
 
-    icrc1_transfer takes an Account -- a principal plus an optional subaccount -- and
-    a customer supplies a 64-hex ACCOUNT IDENTIFIER, which is a SHA224 hash that
-    cannot be inverted to that pair. The payout needs the ICP ledger's legacy
-    `transfer` method. That is a real gap and this asserts it is reported as one.
+OK_BLOCK = "(variant { Ok = 42 : nat64 })"
+
+
+def sending_adapter(transfer_reply=OK_BLOCK, log=None) -> ICPAdapter:
+    return adapter({"icrc1_fee": f"({REAL_FEE_E8S} : nat)", "transfer": transfer_reply}, log=log)
+
+
+def test_a_send_without_an_idempotency_key_refuses_and_calls_the_ledger_ZERO_TIMES():
+    """THE DEFAULT IS THE DANGEROUS ONE, so the default refuses.
+
+    The ICP ledger deduplicates on (from, to, amount, fee, memo, created_at_time)
+    for 24 hours and answers a repeat with TxDuplicate carrying the ORIGINAL block
+    index -- but only when created_at_time is given. With it null the ledger stamps
+    its own time, every retry is a NEW transaction, and a payout worker that times
+    out and retries PAYS TWICE.
+
+    Read from the deployed ledger's interface (rs/ledger_suite/icp/ledger.did), and
+    the assertion that matters is the second one: a refusal that had already called
+    the ledger would be a refusal reported over a transfer that happened.
     """
     log: list = []
-    a = adapter(log=log)
-    with pytest.raises(ICPCallFailed, match="cannot be inverted"):
-        a.send_to_address(a.deposit_address(1), 1.0)
-    assert log == [], "a refused payout must not have called the ledger at all"
+    a = sending_adapter(log=log)
+    with pytest.raises(ICPCallFailed, match="created_at_time unset"):
+        a.send_to_address(a.deposit_address(1), 0.5)
+    assert log == [], "a refused send must not have called the ledger at all"
 
 
-def test_a_payout_to_an_invalid_address_refuses_before_anything_else():
+def test_a_send_passes_the_fee_it_read_from_the_ledger_not_a_constant():
+    """Legacy `transfer` REQUIRES the fee and rejects a mismatch with BadFee.
+
+    So the fee is read first and seeded differently here: if the adapter carried a
+    hardcoded 10_000 this would still pass against the real ledger today and fail
+    the day a ledger changes its fee, which is rule 8's drift with money attached.
+    """
     log: list = []
-    a = adapter(log=log)
+    a = adapter({"icrc1_fee": "(25_000 : nat)", "transfer": OK_BLOCK}, log=log)
+    a.send_to_address(a.deposit_address(1), 0.5, created_at_time_nanos=FIXED_NANOS)
+    methods = [m for _, m, _ in log]
+    assert methods == ["icrc1_fee", "transfer"], "the fee must be read BEFORE the transfer"
+    sent = log[1][2]
+    assert "fee = record { e8s = 25000 : nat64 }" in sent
+
+
+def test_the_destination_goes_out_as_a_32_BYTE_BLOB_not_as_text():
+    """`type AccountIdentifier = blob` in the ledger's own interface.
+
+    A 64-hex string passed as text would be a type error at best and, if candid
+    coerced it, 64 bytes of ASCII rather than the 32 bytes of the account. Every
+    byte is escaped uniformly, so the literal's shape does not depend on its value.
+    """
+    log: list = []
+    a = sending_adapter(log=log)
+    destination = a.deposit_address(1)
+    a.send_to_address(destination, 0.5, created_at_time_nanos=FIXED_NANOS)
+    sent = log[1][2]
+    assert destination not in sent, "the 64-hex text must not appear; the blob does"
+    expected = "".join(f"\\{b:02x}" for b in bytes.fromhex(destination))
+    assert f'to = "{expected}"' in sent
+    assert sent.count("\\") == 32, "32 bytes, each escaped"
+
+
+def test_the_amount_and_the_timestamp_are_carried_exactly():
+    log: list = []
+    a = sending_adapter(log=log)
+    assert a.send_to_address(a.deposit_address(1), 0.5, created_at_time_nanos=FIXED_NANOS) == "42"
+    sent = log[1][2]
+    assert "amount = record { e8s = 50000000 : nat64 }" in sent
+    assert f"created_at_time = opt record {{ timestamp_nanos = {FIXED_NANOS} : nat64 }}" in sent
+    assert "from_subaccount = null" in sent, "payouts leave the desk's default account"
+
+
+@pytest.mark.parametrize("reply,needle", [
+    ("(variant { Err = variant { BadFee = record { expected_fee = record { e8s = 10_000 : nat64 } } } })", "BadFee"),
+    ("(variant { Err = variant { InsufficientFunds = record { balance = record { e8s = 1 : nat64 } } } })", "NOT established"),
+    ("(variant { Err = variant { TxDuplicate = record { duplicate_of = 7 : nat64 } } })", "TxDuplicate"),
+    ("", "NOT established"),
+])
+def test_anything_but_a_block_index_raises_and_does_not_claim_nothing_moved(reply, needle):
+    """A failed send must not assert that no funds moved, because it does not know.
+
+    TxDuplicate in particular means an earlier identical transfer DID happen and the
+    reply carries its block index. A message saying "nothing was sent" there would
+    be false, and a BadFee is deliberately NOT retried at the expected figure --
+    a retry is a second send, and this method must never make two where one was
+    asked for.
+    """
+    a = sending_adapter(transfer_reply=reply)
+    with pytest.raises(ICPCallFailed, match=needle):
+        a.send_to_address(a.deposit_address(1), 0.5, created_at_time_nanos=FIXED_NANOS)
+
+
+def test_a_payout_to_an_invalid_address_refuses_before_reading_the_fee():
+    log: list = []
+    a = sending_adapter(log=log)
     with pytest.raises(ICPCallFailed, match="NOTHING was sent"):
-        a.send_to_address(OWNER, 1.0)
+        a.send_to_address(OWNER, 0.5, created_at_time_nanos=FIXED_NANOS)
     assert log == []
+
+
+# ---------------------------------------------------------------------------
+# The ledger's own derivation, as a cross-check on ours
+# ---------------------------------------------------------------------------
+
+
+def ledger_blob(hex_text: str) -> str:
+    return '(blob "' + "".join(f"\\{b:02x}" for b in bytes.fromhex(hex_text)) + '")'
+
+
+def test_the_ledger_and_this_repository_derive_the_same_account():
+    """The one assumption under every ICP address this terminal publishes.
+
+    `account_identifier : (Account) -> (AccountIdentifier) query` makes the ledger do
+    the derivation itself, so agreement is checkable for one query call. A
+    disagreement would mean a customer pays an address the ledger credits to
+    something else, and the watcher polls an account that stays at zero forever.
+    """
+    a = adapter({"account_identifier": ledger_blob(account_identifier(OWNER))})
+    agrees, why = a.verify_derivation()
+    assert agrees is True
+    assert account_identifier(OWNER) in why
+
+
+def test_a_disagreement_is_reported_as_total_rather_than_as_one_bad_address():
+    """Both sides are printed, and the message says every address is wrong."""
+    a = adapter({"account_identifier": ledger_blob(account_identifier(OWNER, subaccount_from_index(9)))})
+    agrees, why = a.verify_derivation()
+    assert agrees is False
+    assert "DISAGREEMENT" in why
+    assert "wrong" in why and "do not send" in why
+
+
+def test_a_blob_this_adapter_cannot_read_raises_rather_than_returning_empty():
+    a = adapter({"account_identifier": "(variant { Err = 1 })"})
+    with pytest.raises(ICPCallFailed, match="not empty"):
+        a.ledger_account_identifier()

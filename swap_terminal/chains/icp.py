@@ -42,8 +42,10 @@ is a function that can be called with seeded inputs.
 WHAT HAS NEVER BEEN EXERCISED, stated plainly because rule 16 draws the line at
 "a fix you cannot test here is a proposal": send_to_address has not been run
 against any ledger, local or otherwise. Its candid argument is constructed from
-the same encoder that the read paths use and its tests assert on the text it
-builds, which is not the same as a transfer having happened. The read paths have
+the real interface (dfinity/ic rs/ledger_suite/icp/ledger.did, read rather than
+recalled) and its tests assert on the text it builds, which is not the same as a
+transfer having happened. THIS PARAGRAPH IS THE ONE TO DELETE FIRST once the
+operator has run a transfer on the local replica. The read paths have
 been exercised against the real released ICP ledger on the local replica --
 icrc1_balance_of, icrc1_fee, icrc1_decimals and icrc1_symbol all answered, and
 the balance agreed with the account identifier this repository derived.
@@ -101,9 +103,55 @@ ICP_DECIMALS = 8
 #: raises below instead of producing a number.
 _NAT_RESULT = re.compile(r"\(\s*([\d_]+)\s*:\s*nat(?:64)?\s*\)")
 
-#: `(variant { Ok = 3 : nat })` from icrc1_transfer. The block index is the closest
+#: `(variant { Ok = 3 : nat64 })` from transfer. The block index is the closest
 #: thing ICP has to a txid.
 _TRANSFER_OK = re.compile(r"Ok\s*=\s*([\d_]+)")
+
+#: `(blob "\0a\1b...")` from account_identifier. dfx prints a candid blob as a
+#: quoted string of \xx escapes, with printable ASCII bytes left as themselves --
+#: which is why _blob_to_hex below cannot simply strip backslashes.
+_BLOB_RESULT = re.compile(r'blob\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _hex_to_blob(hex_text: str) -> str:
+    r"""A 64-hex account identifier as a candid blob literal for dfx.
+
+    EVERY byte is escaped as \xx, including the printable ones. dfx accepts a
+    mixed form, but emitting one would mean this function's output changes shape
+    with the VALUE -- and a 32-byte identifier containing an accidental `"` or `\`
+    would then need escaping rules this does not have. Uniform escapes have no such
+    case.
+    """
+    return '"' + "".join(f"\\{b:02x}" for b in bytes.fromhex(hex_text)) + '"'
+
+
+def _blob_to_hex(escaped: str) -> str:
+    r"""The hex of a candid blob literal dfx printed, undoing its mixed escaping.
+
+    dfx leaves printable ASCII as literal characters and escapes the rest as \xx,
+    so this walks the string rather than stripping backslashes -- a blob whose bytes
+    happen to spell letters would otherwise lose them.
+    """
+    out = bytearray()
+    index = 0
+    while index < len(escaped):
+        char = escaped[index]
+        # index + 3 <= len, so the two hex characters after the backslash both
+        # exist. A trailing lone backslash falls through to the literal branch rather
+        # than reading past the end.
+        if char == "\\" and index + 3 <= len(escaped):
+            pair = escaped[index + 1 : index + 3]
+            try:
+                out.append(int(pair, 16))
+            except ValueError:
+                out.extend(pair[:1].encode())
+                index += 2
+                continue
+            index += 3
+            continue
+        out.extend(char.encode())
+        index += 1
+    return out.hex()
 
 
 class ICPCallFailed(RuntimeError):
@@ -321,18 +369,82 @@ class ICPAdapter:
 
     # -- the path that moves money -----------------------------------------
 
-    def send_to_address(self, address: str, amount: float) -> str:
+    def ledger_account_identifier(self, subaccount_index: int | None = None) -> str:
+        """Ask the LEDGER to compute the account identifier, and return its answer.
+
+        A free cross-check the ledger offers (`account_identifier : (Account) ->
+        (AccountIdentifier) query`): it does the same SHA224-plus-CRC32 derivation
+        chains/icp_account does, from the same principal and subaccount. If the two
+        ever disagree, the deposit address this terminal publishes is not the account
+        the ledger credits -- a customer would pay and the watcher would poll an
+        account that stays at zero forever, with nothing erroring.
+
+        Returns the 64-hex form. Compare it with own_address() or
+        deposit_address(n); verify_derivation() below does exactly that.
+        """
+        out = self._call(self.ledger_canister_id, "account_identifier", self._account_argument(subaccount_index))
+        found = _BLOB_RESULT.search(out)
+        if not found:
+            raise ICPCallFailed(
+                f"account_identifier on {self.ledger_canister_id} returned text this adapter cannot "
+                f"read as a blob, so NO identifier was produced (it is not empty): {out.strip()[:200]!r}"
+            )
+        return _blob_to_hex(found.group(1))
+
+    def verify_derivation(self, subaccount_index: int | None = None) -> tuple[bool, str]:
+        """(agrees, explanation) -- does this repository's derivation match the ledger's?
+
+        THE CHECK WORTH RUNNING BEFORE ANY PAYOUT, because it is the one assumption
+        underneath every ICP address this system publishes and it costs one query
+        call. A disagreement is not a rounding difference: it means every deposit
+        address is wrong in the same way.
+        """
+        ours = self.own_address() if subaccount_index is None else self.deposit_address(subaccount_index)
+        theirs = self.ledger_account_identifier(subaccount_index)
+        where = "the desk's default account" if subaccount_index is None else f"subaccount {subaccount_index}"
+        if ours == theirs:
+            return True, f"{where}: this repository and the ledger derive the same account ({ours})"
+        return False, (
+            f"{where}: DISAGREEMENT. chains/icp_account derived {ours} and the ledger's own "
+            f"account_identifier says {theirs}. Every ICP address this terminal publishes is wrong "
+            f"in the same way; do not send or publish anything until this is resolved."
+        )
+
+    # -- the path that moves money -----------------------------------------
+
+    def send_to_address(self, address: str, amount: float, created_at_time_nanos: int | None = None) -> str:
         """Transfer `amount` ICP to a 64-hex account identifier. Returns the block index.
 
-        NEVER EXERCISED. See the module docstring: this has not been run against
-        any ledger. It is written so the payout path has something to call and so
-        its argument construction can be tested, and until an operator runs it once
-        against the local replica it is a proposal (rule 16).
+        THE LEDGER'S LEGACY `transfer`, NOT icrc1_transfer, and the reason is the gap
+        that blocked this method until 2026-10-06. icrc1_transfer takes an ICRC-1
+        Account -- a principal plus an optional subaccount -- and a customer supplies a
+        64-hex ACCOUNT IDENTIFIER, which is SHA224 over that pair and CANNOT BE
+        INVERTED. The legacy `transfer` takes the identifier directly, as a blob:
 
-        THE FEE IS NOT ADDED HERE. ICRC-1 deducts it from the sender on top of the
-        transferred amount, so `amount` is what the recipient receives. A caller
-        sizing a payout against desk inventory must leave chain_fee() behind, which
-        is what services/payout_service's reserve exists for on every other chain.
+            type AccountIdentifier = blob;        // 32 bytes, CRC32 || SHA224
+            transfer : (TransferArgs) -> (TransferResult);
+
+        read from the deployed ledger's own interface
+        (dfinity/ic rs/ledger_suite/icp/ledger.did), not from memory.
+
+        THE FEE IS READ FROM THE LEDGER AND PASSED EXPLICITLY, because legacy
+        `transfer` requires it and rejects a mismatch with `BadFee` naming
+        `expected_fee`. A BadFee is NOT retried here at the expected figure: a retry
+        is a second send attempt, and this method must never make two where a caller
+        asked for one. It refuses and reports what the ledger said instead.
+
+        created_at_time IS THE IDEMPOTENCY KEY AND THE DEFAULT IS THE DANGEROUS ONE.
+        The ledger deduplicates on (from, to, amount, fee, memo, created_at_time)
+        within a 24-hour window and returns TxDuplicate carrying the ORIGINAL block
+        index. With created_at_time null the ledger stamps its own time, so two
+        identical calls are two different transactions and a retry after a timeout
+        DOUBLE-PAYS. A caller that may retry -- which is every payout worker -- must
+        pass a value derived from the swap rather than from a clock, and then a retry
+        is answered with the first transfer's block index instead of sending again.
+
+        None is still the default because this signature has to match what the payout
+        path calls today, and silently inventing a key from a clock would be the same
+        bug wearing a safety label. The refusal below is what stops it mattering.
         """
         if not self.validate_address(address):
             raise ICPCallFailed(
@@ -342,21 +454,33 @@ class ICPAdapter:
         e8s = amount_to_base_units(amount, ICP_DECIMALS)
         if e8s <= 0:
             raise ICPCallFailed(f"{amount} ICP is {e8s} e8s; refusing to send a non-positive amount")
+        if created_at_time_nanos is None:
+            raise ICPCallFailed(
+                "refusing to send with created_at_time unset. The ICP ledger deduplicates on "
+                "(from, to, amount, fee, memo, created_at_time) for 24 hours and returns the "
+                "ORIGINAL block index for a repeat -- but only if created_at_time is given. With it "
+                "null the ledger stamps its own time, every retry is a NEW transaction, and a "
+                "payout worker that times out and retries pays twice. Pass a value derived from "
+                "the swap (not from a clock) and a retry becomes idempotent. NOTHING was sent."
+            )
+
+        fee_e8s = self._nat("icrc1_fee")
         argument = (
-            f"(record {{ to = record {{ owner = principal \"{self.owner_principal}\" }}; "
-            f"amount = {e8s} : nat }})"
+            "(record { memo = 0 : nat64; "
+            f"amount = record {{ e8s = {e8s} : nat64 }}; "
+            f"fee = record {{ e8s = {fee_e8s} : nat64 }}; "
+            "from_subaccount = null; "
+            f"to = {_hex_to_blob(address)}; "
+            f"created_at_time = opt record {{ timestamp_nanos = {created_at_time_nanos} : nat64 }} }})"
         )
-        # DELIBERATELY NOT THE REAL ARGUMENT YET. icrc1_transfer takes an Account
-        # record for `to`, and a 64-hex account identifier is a HASH -- it cannot be
-        # turned back into the principal and subaccount it was built from. So a
-        # payout to an arbitrary account identifier needs the legacy ledger
-        # `transfer` method (which takes the 64-hex form directly) rather than
-        # icrc1_transfer. That is a real gap, it is named here rather than papered
-        # over, and it is why this method raises instead of sending.
+        out = self._call(self.ledger_canister_id, "transfer", argument)
+        ok = _TRANSFER_OK.search(out)
+        if ok:
+            return ok.group(1).replace("_", "")
         raise ICPCallFailed(
-            "ICP payouts are not wired. icrc1_transfer takes an Account (principal plus optional "
-            "subaccount) and a customer supplies a 64-hex ACCOUNT IDENTIFIER, which is a SHA224 "
-            f"hash and cannot be inverted to that pair. The payout needs the ICP ledger's legacy "
-            f"`transfer` method, which accepts the 64-hex form directly. Nothing was sent. "
-            f"(would have been: {argument} to {address})"
+            f"transfer of {amount} ICP ({e8s} e8s, fee {fee_e8s} e8s) to {address} did not return a "
+            f"block index. Whether anything moved is NOT established by this message -- read the "
+            f"ledger's reply: {out.strip()[:400]!r}. A `TxDuplicate` means an earlier identical "
+            f"transfer already happened and carries its block index; a `BadFee` names the fee the "
+            f"ledger expects and is NOT retried here, because a retry is a second send."
         )
