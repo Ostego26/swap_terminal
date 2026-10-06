@@ -510,29 +510,72 @@ class Config:
         ("LTC", "BTC"),
         ("XRP", "BTC"),
         ("XRP", "LTC"),
-        # ICP IS NOT IN THIS SET YET, AND THE REASON IS A COUNT I GOT WRONG.
+        # ICP, ALL TEN DIRECTIONS, enabled 2026-10-06 at the operator's request ("enable
+        # all ten pairs"). TEN AND NOT TWO, and the count is the whole story of how this
+        # block got here.
         #
-        # Everything a pair needs is in place in BOTH directions, measured rather than
-        # argued: payouts (chains/icp.send_to_address via the ledger's legacy `transfer`
-        # -- 0.25 ICP moved on the local replica, desk 1000.0 -> 999.7499, and the same
-        # created_at_time returned the same block index and moved nothing); deposits
-        # (find_deposits_to_address reads query_blocks, one event per Transfer keyed on
-        # the block index, Mints excluded, archived ranges refused); creation
-        # (DB_ALLOCATED_DEPOSIT_ASSETS allocates the subaccount in SQL inside the swap's
-        # transaction); a USD price on both feeds; and ICP_NETWORK_FEE_RESERVE below.
+        # I told the operator that ("ICP","GRC") and ("GRC","ICP") could go in together
+        # and the symmetry invariant would hold. That was wrong.
+        # tests/test_allowed_pairs_are_serviceable derives the expected count as
+        # len(assets) * (len(assets) - 1) over the assets PRESENT IN THIS SET, so adding a
+        # sixth asset means thirty ordered pairs, not twenty-two:
         #
-        # WHAT I TOLD THE OPERATOR WAS THAT ("ICP","GRC") AND ("GRC","ICP") COULD GO IN
-        # TOGETHER AND THE INVARIANT WOULD HOLD. That is false.
-        # tests/test_allowed_pairs_are_serviceable computes the expected count as
-        # len(assets) * (len(assets) - 1) over the assets PRESENT IN THIS SET, so adding
-        # ICP makes it six assets and THIRTY ordered pairs. Two is not a legal increment;
-        # ten is -- ICP against BTC, GRC, LTC, SOL and XRP, both ways.
+        #     ICP against GRC alone    22 of 30   FAILS
+        #     ICP against everything   30 of 30   passes
         #
-        # All ten are serviceable by the gate's own criteria (every destination has a
-        # reserve, every asset has a price, the adapters exist when configured). But
-        # going from "enable both pairs" to enabling ten is a five-fold posture change on
-        # an instruction that was echoing my own wrong framing, so it waits for a word
-        # that knows the real number (rule 16).
+        # Two was never a legal increment. The previous revision of this comment held the
+        # pairs out and said so rather than quietly enabling eight the operator had not
+        # asked for; this revision is the answer to that, with the real number in it.
+        #
+        # ALL TEN MEET THE GATE'S CRITERIA, checked rather than assumed: every
+        # destination asset has a *_NETWORK_FEE_RESERVE (ICP's is below, and is the
+        # ledger's published icrc1_fee rather than an estimate), both assets of every
+        # pair carry a USD price on BOTH feeds each confirmed by a 200 that returned one,
+        # and chains/registry builds the ICP adapter whenever ICP_LEDGER_CANISTER_ID and
+        # ICP_OWNER_PRINCIPAL are set.
+        #
+        # WHAT MAKES BOTH DIRECTIONS COMPLETABLE, measured on the local replica
+        # 2026-10-06 and not argued:
+        #
+        #   creation     services/swap_service allocates the subaccount index in SQL
+        #                inside the swap's own transaction and derives the address from it
+        #                -- the third shape, see DB_ALLOCATED_DEPOSIT_ASSETS. Index 0 is
+        #                refused by a CHECK constraint because it is the desk's own
+        #                account.
+        #   deposits     chains/icp.find_deposits_to_address() reads query_blocks and
+        #                emits one event per Transfer into the address, keyed on the BLOCK
+        #                INDEX -- not a balance, because deposit_events is keyed (asset,
+        #                txid, vout) and summed, so a balance would hide a second payment
+        #                or double-count the first. Mints are excluded: block 0 of this
+        #                ledger is a Mint of the desk's whole opening supply. An archived
+        #                block range RAISES rather than being scanned past, because a
+        #                missed range is a deposit that was made and will never be seen.
+        #   payouts      chains/icp.send_to_address() uses the ledger's LEGACY `transfer`,
+        #                which takes the 64-hex account identifier as a blob --
+        #                icrc1_transfer cannot, since it wants an Account and an account
+        #                identifier is a SHA224 hash over one that cannot be inverted.
+        #                0.25 ICP moved: desk 1000.0 -> 999.7499 (amount plus the 0.0001
+        #                fee), block index 1. The same call with the same created_at_time
+        #                returned the SAME block index and moved nothing, so a retrying
+        #                payout worker cannot double-pay.
+        #
+        # WHAT THE CODE CANNOT ENFORCE AND AN OPERATOR SHOULD KNOW: the ledger these
+        # swaps settle against runs inside docker-compose.icp.yml's replica. A customer
+        # quoted ICP gets the real asset's price and a deposit address on a private
+        # network nobody outside this host can reach. That is the same posture as every
+        # other pair here, all testnet -- said out loud because ICP has no public testnet
+        # at all (DFINITY's own documentation: "there is no testnet for ICP"), so the
+        # usual tell, a tGRC- or tBTC-shaped address, is absent.
+        ("ICP", "BTC"),
+        ("BTC", "ICP"),
+        ("ICP", "GRC"),
+        ("GRC", "ICP"),
+        ("ICP", "LTC"),
+        ("LTC", "ICP"),
+        ("ICP", "SOL"),
+        ("SOL", "ICP"),
+        ("ICP", "XRP"),
+        ("XRP", "ICP"),
         # SOL -> GRC, enabled 2026-10-01 at the operator's request. ONE DIRECTION ONLY, and
         # the asymmetry is the whole point rather than an oversight.
         #
