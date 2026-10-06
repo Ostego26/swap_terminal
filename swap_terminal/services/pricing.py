@@ -141,14 +141,25 @@ IDS = {
     # pattern that were wrong. A near-name that prices SOMETHING is the dangerous
     # case, because it does not 404.
     #
-    # WHAT IS STILL UNCONFIRMED about this one, said plainly (rule 17): the id came
-    # from /search, not from /simple/price. That distinction is not pedantic here --
-    # _coingecko_raw() joins every id in this table into ONE batch request, so an id
-    # this endpoint does not know makes the response PARTIAL, and the missing-asset
-    # refusal below turns that into "no quote for any pair", not "no quote for ICP".
-    # The CoinPaprika sibling IS confirmed to price ($3.444476013739092, market cap
-    # $1,919,453,868 on 2026-10-06), and on the operator's host CoinPaprika is the
-    # feed that actually answers -- see _coingecko_raw()'s header for the 403.
+    # CONFIRMED BY PRICING, not merely by existing. This comment first said the id
+    # was "still unconfirmed ... came from /search, not from /simple/price", and that
+    # was true for about ten minutes. The batch endpoint this table is actually used
+    # against then answered from the operator's host:
+    #
+    #     /api/v3/simple/price?ids=internet-computer,bitcoin,gridcoin-research&vs_currencies=usd
+    #       {"internet-computer":{"usd":3.45},"bitcoin":{"usd":86167},
+    #        "gridcoin-research":{"usd":0.00926626}}   [http 200]
+    #
+    # Asked in the SAME batch shape _coingecko_raw() uses, which is the distinction
+    # that mattered: this function joins every id here into one request, so an id the
+    # endpoint does not know makes the response PARTIAL and the missing-asset refusal
+    # turns that into "no quote for ANY pair". A /search hit would not have ruled
+    # that out.
+    #
+    # Two independent feeds also agree on the number -- CoinGecko $3.45 against
+    # CoinPaprika $3.444476013739092, 0.16% apart -- which is stronger evidence that
+    # both ids name the same asset than either feed alone could give. The decoy
+    # `ict-internet-computer-technology` would not have done that.
     "ICP": "internet-computer",
     # SOL added 2026-09-29. The CoinGecko id is "solana" -- the project's name, not the
     # ticker, exactly as every line above it. "sol" would 404 and surface as a missing-price
@@ -404,6 +415,27 @@ def _coingecko_raw() -> tuple[dict, str]:
     code: it works from other hosts, it is the shape every field name here was
     written against, and one aggregator is a single point of failure whichever one
     it is.
+
+    THAT 403 NO LONGER HOLDS, MEASURED 2026-10-06 FROM THE SAME HOST. The paragraph
+    above is kept rather than rewritten because the drift is the point (rule 1) and
+    because the decision it justified -- keeping this as the first try -- turns out
+    to have been right for a reason nobody could have argued at the time:
+
+        /api/v3/simple/price?ids=internet-computer,bitcoin,gridcoin-research&vs_currencies=usd
+          {"internet-computer":{"usd":3.45},"bitcoin":{"usd":86167},
+           "gridcoin-research":{"usd":0.00926626}}   [http 200]
+
+    So the PRIMARY feed is answering again, and whichever feed a given quote was
+    priced from is no longer predictable from this file -- it is whichever answered,
+    which is what fetch_market_context() already records in `source` for exactly
+    this reason. A reader who assumed "in practice it is always CoinPaprika" from
+    the paragraph above would be wrong today and may be right again tomorrow; the
+    recorded `source` is the only thing that knows.
+
+    What is NOT established: whether the block lifted, or whether it only ever
+    covered this endpoint while /api/v3/search stayed open. Both were tried the same
+    minute and both answered, so the question is moot for this code and is left
+    unanswered rather than guessed (rule 17).
     """
     response = requests.get(
         COINGECKO_URL,

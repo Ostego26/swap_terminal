@@ -480,6 +480,43 @@ class Config:
         ("LTC", "BTC"),
         ("XRP", "BTC"),
         ("XRP", "LTC"),
+        # ICP IS DELIBERATELY ABSENT FROM THIS SET, and the reason is this set's own
+        # invariant rather than a missing prerequisite.
+        #
+        # Everything a pair needs is in place for ICP -> GRC, checked 2026-10-06 and
+        # not assumed: chains/registry builds the ICP adapter when
+        # ICP_LEDGER_CANISTER_ID and ICP_OWNER_PRINCIPAL are set (own_address()
+        # returned the account `dfx ledger account-id` prints, get_balance() 1000.0,
+        # chain_fee() 0.0001 from icrc1_fee()); both price feeds carry ICP, each
+        # confirmed by a 200 with a price, agreeing within 0.16%; and the reserve is
+        # the TO asset's, which for that direction is GRC_NETWORK_FEE_RESERVE and
+        # exists.
+        #
+        # BUT THIS SET IS SYMMETRIC AND COMPLETE, and that is enforced:
+        # tests/test_allowed_pairs_are_serviceable asserts every pair's reverse is
+        # present "with no table it can be silenced through", and that the count is
+        # exactly len(assets) * (len(assets) - 1). Both were tightened on 2026-10-04
+        # when the operator enabled all twenty directions, which SUPERSEDED the
+        # one-direction precedent SOL -> GRC set a few days earlier.
+        #
+        # So ICP cannot go in one direction, and the other direction cannot settle:
+        # chains/icp.py send_to_address() raises because icrc1_transfer takes an
+        # ICRC-1 Account (principal plus optional subaccount) while a customer gives a
+        # 64-hex ACCOUNT IDENTIFIER, which is SHA224 over that pair and cannot be
+        # inverted. Paying an arbitrary account identifier needs the ICP ledger's
+        # LEGACY `transfer` method, which takes the 64-hex form directly and is not
+        # wired.
+        #
+        # Adding both directions today would take a customer's GRC and strand it
+        # against a payout path that raises -- strictly worse than refusing the pair,
+        # and the same shape as the GRC -> XRP failure recorded above. Adding one
+        # direction would break the symmetry invariant, and adding an exemption table
+        # to permit it is the patch rule 19 forbids by name.
+        #
+        # WHAT UNBLOCKS IT: the legacy `transfer` call in chains/icp.py, exercised once
+        # against the local replica. Then both directions go in together and the
+        # invariant holds. That is a payout path, so it is live posture and the
+        # operator's to authorize (rule 16).
         # SOL -> GRC, enabled 2026-10-01 at the operator's request. ONE DIRECTION ONLY, and
         # the asymmetry is the whole point rather than an oversight.
         #
