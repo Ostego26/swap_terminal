@@ -819,6 +819,80 @@ END;
 # time, so this ordering is for a human reader rather than for the engine.
 SCHEMA = SCHEMA + XRP_DESTINATION_TAG_SCHEMA
 
+# ICP DEPOSIT SUBACCOUNTS -- the same problem as xrp_destination_tags, one chain
+# over, and NOT the same table. Read both before changing either (rule 8: where
+# two implementations genuinely differ, the difference belongs in a comment at
+# BOTH sites naming the other).
+#
+# WHAT IS THE SAME, and why this is a copy of that shape rather than an invention:
+# a shared account the desk owns, a per-swap label that tells one customer's
+# payment from another's, allocation that must be UNIQUE by database constraint
+# rather than by argument, and a row that may never be deleted or re-pointed. The
+# XRP table earned every one of those the hard way and they transfer unchanged.
+#
+# WHAT DIFFERS, and it is the reason these are two tables instead of one generic
+# one. The label lives in a different place on the wire: an XRP destination tag
+# is a 32-bit field the PAYER must set, a Solana memo is an instruction the PAYER
+# must attach, and an ICP subaccount is 32 bytes the RECEIVER chooses -- the payer
+# sends to an ordinary address and needs to know nothing. That changes the range
+# (2**32 against 2**256), changes what a missing label means (an unattributable
+# payment against an impossible state), and changes who can get it wrong. Merging
+# them would also mean editing the table that carries live XRP deposit
+# attribution for real swaps, which is a large diff on a live-money path with no
+# behavioral benefit -- the trade rule 10 refuses for directory layout.
+#
+# WHY THE FIRST ALLOCATABLE INDEX IS 1 AND NOT 0, AND THIS IS MEASURED. Subaccount
+# 0 (32 zero bytes) is the DEFAULT subaccount, which is to say it is the desk's own
+# main account. Confirmed 2026-10-06 against the real ICP ledger on the local
+# replica:
+#
+#     icrc1_balance_of(record { owner = principal "ybr6p-...-cqe" })
+#       -> 100_000_000_000 : nat
+#
+# with no subaccount given -- that is the desk's entire 1000 LICP inventory sitting
+# at index 0. Allocating index 0 to a swap would publish the desk's own holding
+# account as a customer deposit address, so every arriving payment would land
+# indistinguishably among the desk's own funds and the watcher would read the
+# inventory as the deposit.
+#
+# The contrast with XRP is worth keeping: chains/xrp_units.py reserves tag 0 on an
+# explicitly-labeled HYPOTHESIS about what senders emit as a placeholder. This
+# reservation is not a hypothesis. Index 0 is the desk's account, and the ledger
+# said so.
+ICP_DEPOSIT_SUBACCOUNT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS icp_deposit_subaccounts (
+    owner TEXT NOT NULL,
+    subaccount_index INTEGER NOT NULL,
+    swap_id TEXT NOT NULL,
+    allocated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, subaccount_index),
+    -- >= 1, never >= 0: index 0 is the desk's own account. See the comment above
+    -- this schema for the ledger reading that establishes it.
+    CONSTRAINT icp_subaccount_is_allocatable CHECK (subaccount_index >= 1),
+    FOREIGN KEY (swap_id) REFERENCES swaps(id)
+);
+
+-- ONE subaccount per swap. Two would mean two published deposit addresses for one
+-- swap, and a payment to the one the watcher is not polling looks exactly like a
+-- customer who never paid.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_icp_subaccount_one_per_swap
+    ON icp_deposit_subaccounts(swap_id);
+
+CREATE TRIGGER IF NOT EXISTS icp_deposit_subaccounts_are_never_released
+BEFORE DELETE ON icp_deposit_subaccounts
+BEGIN
+    SELECT RAISE(ABORT, 'icp_deposit_subaccounts rows are never deleted: allocation reads MAX(subaccount_index), so a deleted row lets the next index repeat one already published as a deposit address, and a late payment to it would credit the wrong swap');
+END;
+
+CREATE TRIGGER IF NOT EXISTS icp_deposit_subaccounts_are_never_repointed
+BEFORE UPDATE OF owner, subaccount_index, swap_id ON icp_deposit_subaccounts
+BEGIN
+    SELECT RAISE(ABORT, 'icp_deposit_subaccounts: owner, subaccount_index and swap_id are immutable once allocated. Re-pointing a subaccount at a different swap misattributes every payment already in flight to that address, and on ICP the address is derived from the pair so the customer cannot be told it moved');
+END;
+"""
+
+SCHEMA = SCHEMA + ICP_DEPOSIT_SUBACCOUNT_SCHEMA
+
 
 # The one live payout per swap, as a CONSTRAINT rather than a convention.
 #
