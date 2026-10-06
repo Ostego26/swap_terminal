@@ -60,6 +60,7 @@ on 5101 is precisely what this project's own orphans did to it.
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -74,11 +75,31 @@ from config import Config  # noqa: E402
 from swap_terminal.stack_authority import (  # noqa: E402
     STACK_PORTS,
     container_id,
+    container_label,
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
     stray_verdict,
 )
+
+#: Docker's absolute path, resolved once at import.
+#:
+#: NOT THE BARE NAME, and this is a fix rather than a lint appeasement. S607 ("partial
+#: executable path") fired on the `docker inspect` call added 2026-10-06 and did NOT
+#: fire on compose() ten lines below it -- which runs the same bare "docker" -- purely
+#: because compose() builds its argv in a variable and ruff cannot see the literal. So
+#: one call site was flagged and an identical one was not, which is rule 8's two
+#: spellings of one thing with a linter picking sides.
+#:
+#: Resolving it buys a real thing beyond satisfying the check: with a bare name,
+#: `docker` missing from PATH surfaces as a FileNotFoundError from deep inside a
+#: subprocess call, and the same error shape means both "docker is not installed" and
+#: "the id does not exist". Resolved here, absence is answerable once, by name, before
+#: any command runs -- which is what the `None` branch below reports.
+#:
+#: The `or "docker"` keeps the argv valid when docker is absent so the failure is
+#: docker's own "not found" rather than a TypeError about None.
+_DOCKER = shutil.which("docker") or "docker"
 
 #: The compose files this stack is assembled from, in the order `-f` wants them.
 #:
@@ -104,7 +125,7 @@ def compose(args: list[str], files: tuple[str, ...], check: bool = False) -> sub
     ICP call from the app earlier today (see that file's _REPO_ROOT comment). One
     measurement, two files, same fix.
     """
-    argv = ["docker", "compose"]
+    argv = [_DOCKER, "compose"]
     for name in files:
         argv += ["-f", str(REPO_ROOT / name)]
     argv += args
@@ -127,7 +148,27 @@ def report_listeners() -> list[dict]:
     for port, inode in sorted(inodes.items()):
         pid = owners.get(inode)
         if pid is None:
-            found.append({"port": port, "pid": None, "verdict": "owner unknown", "cmdline": ""})
+            # WHY AN OWNERLESS LISTENER IS THE EXPECTED READING FOR A PUBLISHED
+            # CONTAINER PORT, said here because a bare "UNKNOWN" reads as a failure.
+            # Measured 2026-10-06: :4943 showed a LISTEN row and no owner. The socket
+            # belongs to a root-owned docker-proxy, and pids_owning_inodes() cannot
+            # read /proc/<pid>/fd for a process this user does not own -- it catches
+            # the EACCES and moves on, by design, because a live /proc is full of pids
+            # that vanish mid-scan.
+            #
+            # So the honest line is "something is listening and this user cannot see
+            # what", NOT "nothing owns this port". Running as root would name it;
+            # nothing here asks for that, because reading other users' fds to
+            # prettify a report is a bad trade.
+            found.append({
+                "port": port, "pid": None, "verdict": "owner unknown", "container": None,
+                "reason": (
+                    "a LISTEN socket exists and its owner is not readable by this user -- the usual "
+                    "cause is a root-owned docker-proxy for a published container port, which is "
+                    "expected rather than wrong. `sudo ss -ltnp` names it; this file will not ask for root"
+                ),
+                "cmdline": "",
+            })
             continue
         try:
             cmdline = Path(f"/proc/{pid}/cmdline").read_text()
@@ -146,8 +187,25 @@ def report_listeners() -> list[dict]:
             inside = None
         if inside and verdict != "refused":
             verdict = "container"
+            # ASK DOCKER WHAT IT IS, so the line is self-describing (rule 14). The
+            # operator had to run `docker ps` themselves to turn an id into "st-ui on
+            # an untagged image", which is the round trip this avoids. A failure here
+            # degrades the label and never the verdict: `docker` may not be on PATH at
+            # all, and a report that died because it could not pretty-print a name
+            # would lose the finding it was printing.
+            named = ""
+            try:
+                inspected = subprocess.run(  # noqa: S603 -- no shell; argv is fixed but for the id read from /proc
+                    [_DOCKER, "inspect", "--format", "{{.Name}} {{.Config.Image}}", inside],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                if inspected.returncode == 0:
+                    named = container_label(inspected.stdout)
+            except (OSError, subprocess.SubprocessError):
+                named = ""
             reason = (
-                f"in container {inside}, which `docker compose ps` above does not list -- so it "
+                f"in container {inside}{' = ' + named if named else ' (docker could not name it)'}, "
+                f"which `docker compose ps` above does not list -- so it "
                 f"belongs to no compose project this stack names. Stop it with `docker stop {inside}`, "
                 f"after `docker inspect {inside}` names it"
             )

@@ -30,6 +30,7 @@ from pathlib import Path
 from swap_terminal.stack_authority import (
     NEVER_STOPPED,
     container_id,
+    container_label,
     hex_port,
     listening_inodes,
     pids_owning_inodes,
@@ -206,3 +207,32 @@ def test_something_that_merely_mentions_docker_is_not_a_container_id():
     """
     assert container_id("0::/system.slice/docker.service\n") is None
     assert container_id("0::/system.slice/docker-short.scope\n") is None
+
+
+def test_a_container_label_strips_dockers_leading_slash():
+    """`docker inspect --format '{{.Name}} {{.Config.Image}}'` writes /st-ui, docker ps writes st-ui.
+
+    Stripped so a reader comparing this report against `docker ps` does not have to
+    notice the difference -- which is the kind of one-character discrepancy that
+    makes an operator wonder whether they are looking at two things.
+
+    The real values from the live host 2026-10-06 are used: `st-ui` on image
+    93c22bb2a25a, a bare SHA with no tag, which is what says the image has since
+    been rebuilt and nothing names that build any more.
+    """
+    assert container_label("/st-ui 93c22bb2a25a") == "st-ui (image 93c22bb2a25a)"
+    assert container_label("/swap-icp-replica swap-terminal/icp-replica:local") == (
+        "swap-icp-replica (image swap-terminal/icp-replica:local)"
+    )
+
+
+def test_a_label_with_no_image_or_no_output_degrades_rather_than_raising():
+    """The report must survive docker answering oddly; the verdict does not depend on it.
+
+    An empty answer gives an empty label and swap_stack.py prints "(docker could not
+    name it)" -- the FINDING is the containerized listener, and losing the pretty name
+    must never lose the finding.
+    """
+    assert container_label("/just-a-name") == "just-a-name"
+    assert container_label("") == ""
+    assert container_label("   \n") == ""

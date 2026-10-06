@@ -252,6 +252,33 @@ def container_id(cgroup: str) -> str | None:
     return None
 
 
+def container_label(inspect_output: str) -> str:
+    """A human label out of `docker inspect --format '{{.Name}} {{.Config.Image}}'`.
+
+    WHY THE REPORT NEEDS THIS. On the live host 2026-10-06 the status output named a
+    container id and nothing else, so the operator ran `docker ps` to find out what
+    it was -- and the answer was worth having: the container was `st-ui`, with NO
+    PUBLISHED PORTS, on an image that is a bare SHA with no tag. That says three
+    things the id alone did not: it is on host networking (which is how a container
+    with no port mapping holds the host's 127.0.0.1:5101, and why
+    docker-compose.web.hostnet.yml is the overlay it came from), it is this project's
+    UI, and its image has since been rebuilt so nothing names that build any more.
+
+    Rule 14: "Pasted output has to be self-describing a day later, because it usually
+    is read a day later." A bare id is not.
+
+    Docker prefixes a container name with a slash in its JSON; it is stripped here
+    because every other place docker prints a name does not have it, and a reader
+    comparing this line to `docker ps` should not have to notice the difference.
+    """
+    parts = inspect_output.split()
+    if not parts:
+        return ""
+    name = parts[0].lstrip("/")
+    image = parts[1] if len(parts) > 1 else ""
+    return f"{name} (image {image})" if image else name
+
+
 def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
     """Can this port be bound right now? The ABSENCE assertion for a stop.
 
