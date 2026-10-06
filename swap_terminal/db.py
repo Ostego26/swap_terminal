@@ -1027,10 +1027,40 @@ def duplicate_live_payouts(conn: sqlite3.Connection) -> list:
     inferred, because "the index would have stopped it" says nothing about
     rows written before the index existed.
     """
+    # THE STATUS LIST IS DERIVED FROM PAYOUT_LIVE_STATUSES, NOT SPELLED AGAIN.
+    # Until 2026-10-06 this query read
+    #
+    #     "WHERE status IN ('created', 'broadcast', 'completed') "
+    #
+    # which is the SAME duplication the comment above PAYOUT_UNIQUE_INDEX_SQL is
+    # about -- and it SURVIVED the 2026-10-04 commit that removed it, about a
+    # hundred lines further down the same file. That is the specific way rule 8's
+    # failure hides: the fix was real, the comment explaining it was real, and the
+    # third copy was below the fold.
+    #
+    # It is worse here than at the index, because this function's whole job is to
+    # check what that index enforces. A fourth live status added to the tuple would
+    # move the constraint (the index derives) and NOT move this check (the string
+    # did not), so the diagnostic that exists to find a double payout the index
+    # missed would itself stop seeing the new kind. It would report zero and look
+    # like good news.
+    #
+    # Bound as parameters rather than formatted, which the index could not do: a
+    # partial index's WHERE clause is STORED text so it has to be interpolated,
+    # while an ordinary SELECT takes placeholders. Same vocabulary, one spelling,
+    # S608 DOES FIRE HERE and the noqa is a claim about what is interpolated, which
+    # I checked after first writing that it would not fire and being wrong. What goes
+    # into the f-string is a run of "?" characters whose LENGTH comes from a
+    # module-level tuple; the statuses themselves are bound. That is narrower than
+    # the identifier-interpolation case CLAUDE.md rule 12 sanctions -- not even a
+    # table name reaches the text, only punctuation -- and a reader can see it on the
+    # line above.
+    placeholders = ", ".join("?" for _ in PAYOUT_LIVE_STATUSES)
     return conn.execute(
-        "SELECT swap_id, COUNT(*) AS live_rows FROM payouts "
-        "WHERE status IN ('created', 'broadcast', 'completed') "
-        "GROUP BY swap_id HAVING COUNT(*) > 1 ORDER BY swap_id"
+        "SELECT swap_id, COUNT(*) AS live_rows FROM payouts "  # noqa: S608
+        f"WHERE status IN ({placeholders}) "
+        "GROUP BY swap_id HAVING COUNT(*) > 1 ORDER BY swap_id",
+        PAYOUT_LIVE_STATUSES,
     ).fetchall()
 
 
