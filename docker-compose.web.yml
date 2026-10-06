@@ -247,6 +247,21 @@ services:
       SOL_RPC_URL: "${SOL_RPC_URL:-}"
       XRP_RPC_URL: "${XRP_RPC_URL:-}"
 
+      # ICP. The adapter has no port and no URL: it reaches the ledger by running
+      # dfx in the icp-replica compose service -- chains/icp.py records the
+      # measurement that rules out every Python candid/agent library on this
+      # machine. These four are passed for the reason this whole block exists: a
+      # variable config.py reads and this file does not pass arrives UNSET inside
+      # the container, so the container runs on a different setting than the host
+      # with nothing reporting the difference.
+      #
+      # The first two default to "" in config.py, so an unset pair means NO ICP
+      # adapter is built rather than one aimed at the mainnet ledger.
+      ICP_LEDGER_CANISTER_ID: "${ICP_LEDGER_CANISTER_ID:-}"
+      ICP_OWNER_PRINCIPAL: "${ICP_OWNER_PRINCIPAL:-}"
+      ICP_DFX_SERVICE: "${ICP_DFX_SERVICE:-}"          # config.py default: "icp-replica"
+      ICP_CALL_TIMEOUT: "${ICP_CALL_TIMEOUT:-}"        # config.py default: "60"
+
       # SIGNING MATERIAL IS ABSENT, ALL OF IT. SOL_PAYOUT_KEYPAIR_PATH,
       # ST_ADAPTOR_FUNDING_SEED and every wallet passphrase. Unset, this container
       # serves and watches and reconciles and cannot send. Arming it is live

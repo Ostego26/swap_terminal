@@ -924,4 +924,30 @@ class Config:
             "min_confirmations": XRP_MIN_CONFIRMATIONS,
             "timeout": _env_float("XRP_RPC_TIMEOUT", "30"),
         },
+        # ICP. EVERY DEFAULT HERE IS EMPTY, AND THAT IS THE WHOLE POINT -- the
+        # plausible defaults are the dangerous ones. The mainnet ICP ledger is
+        # ryjl3-tyaaa-aaaaa-aaaba-cai and the public gateway is ic0.app; writing
+        # either as a default would give a checkout with nothing configured an
+        # adapter pointed at the real ledger, which is precisely the defect
+        # chains/registry.py's header records for BTC/LTC/GRC ("the entry existed,
+        # the default was the MAINNET port"). An empty string fails
+        # missing_settings() and the adapter is never constructed.
+        #
+        # THERE IS NO URL. Unlike SOL and XRP, the transport is not an HTTP
+        # endpoint this process speaks to directly: `ic-py` is the only Python
+        # candid/agent library and it does not install here (measured 2026-10-06 --
+        # its pinned antlr4 runtime has no wheel and will not build, and with a
+        # newer runtime its generated parser dies on "Could not deserialize ATN
+        # with version 3"). So the adapter delegates to dfx, which is the reference
+        # implementation, is pinned in docker/icp-replica.Dockerfile, and already
+        # holds the identities. `container` names the compose service that runs it.
+        "ICP": {
+            "ledger_canister_id": _env("ICP_LEDGER_CANISTER_ID"),
+            "owner_principal": _env("ICP_OWNER_PRINCIPAL"),
+            # A COMPOSE SERVICE name, not a container name. They differ here
+            # (`icp-replica` against `swap-icp-replica`) and `docker compose exec`
+            # takes the service; the container name gives "no such service".
+            "service": _env("ICP_DFX_SERVICE", "icp-replica"),
+            "timeout": _env_float("ICP_CALL_TIMEOUT", "60"),
+        },
     }

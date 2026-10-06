@@ -120,6 +120,13 @@ CHAIN_PORTS: dict[str, ChainPorts] = {
 _ENDPOINT_VARIABLES: dict[str, str] = {
     "SOL": "SOL_RPC_URL",
     "XRP": "XRP_RPC_URL",
+    # ICP has no port and no URL: the adapter reaches the ledger by running dfx in
+    # a compose service (chains/icp.py's header has the measurement that rules out
+    # every Python agent library). The canister id is what decides whether an
+    # adapter can exist at all, so it is the primary name -- and naming it here is
+    # what stops configuring_variable()'s <CHAIN>_RPC_PORT fallback from reporting
+    # `ICP_RPC_PORT`, a variable nothing reads.
+    "ICP": "ICP_LEDGER_CANISTER_ID",
 }
 
 

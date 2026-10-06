@@ -99,6 +99,7 @@ from network_target import configuring_variable
 
 from .bitcoin import BitcoinAdapter
 from .gridcoin import GridcoinAdapter
+from .icp import ICPAdapter
 from .litecoin import LitecoinAdapter
 from .solana import SolanaAdapter
 from .xrp import XRPAdapter
@@ -169,6 +170,12 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     xrp = rpc.get("XRP")
     if xrp and xrp.get("url"):
         adapters["XRP"] = XRPAdapter(**xrp)
+    # ICP is gated on missing_settings() rather than on one key, because it needs
+    # TWO values and either one alone is useless: a ledger with no owner cannot
+    # derive a deposit address, and an owner with no ledger has nothing to ask.
+    icp = rpc.get("ICP")
+    if icp and not missing_settings(rpc, "ICP"):
+        adapters["ICP"] = ICPAdapter(**icp)
     return adapters
 
 
@@ -192,12 +199,39 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
 # is that "configured" means the operator supplied those values. The three oldest
 # chains were checking one of three.
 
+#: (config key, the environment variable name that sets it). None means "ask
+#: network_target.configuring_variable()", which owns the primary name per chain.
+#:
+#: THE SECOND ELEMENT USED TO BE A SUFFIX appended to f"{asset}_RPC_", which worked
+#: for exactly as long as every chain's variables were shaped <ASSET>_RPC_*. ICP's
+#: are not -- it reads ICP_LEDGER_CANISTER_ID and ICP_OWNER_PRINCIPAL, with no port,
+#: no user and no password -- and the suffix scheme produced
+#: `['ICP_RPC_PORT', 'ICP_RPC_PORT']`: one name, repeated, for two settings, neither
+#: of which is that and neither of which exists.
+#:
+#: That is the precise defect this file's own header complains about ("a message
+#: that names one variable where three are needed sends a reader to check the
+#: setting that was already correct"), so it is fixed by making the table hold the
+#: real name rather than by adding a second override mechanism beside it (rule 8).
+#: tests/test_offline_reason_names_the_variables.py greps config.py for every name
+#: here, so a rename there fails a test instead of printing a variable nothing reads.
 _REQUIRED_SETTINGS: dict[str, tuple[tuple[str, str | None], ...]] = {
-    "BTC": (("port", None), ("user", "USER"), ("password", "PASS")),
-    "LTC": (("port", None), ("user", "USER"), ("password", "PASS")),
-    "GRC": (("port", None), ("user", "USER"), ("password", "PASS")),
+    "BTC": (("port", None), ("user", "BTC_RPC_USER"), ("password", "BTC_RPC_PASS")),
+    "LTC": (("port", None), ("user", "LTC_RPC_USER"), ("password", "LTC_RPC_PASS")),
+    "GRC": (("port", None), ("user", "GRC_RPC_USER"), ("password", "GRC_RPC_PASS")),
     "SOL": (("url", None),),
     "XRP": (("url", None),),
+    # TWO values, and neither has a safe default -- see config.py's ICP entry for
+    # why both are empty strings rather than the mainnet ledger id and somebody's
+    # principal. `service` IS defaulted (the compose service name) because guessing
+    # it wrong produces an adapter that cannot reach anything, which is a loud
+    # failure; guessing a canister id wrong produces an adapter that reaches the
+    # WRONG ledger, which is a quiet one.
+    #
+    # The first is None because network_target.configuring_variable() owns the
+    # primary name per chain and now knows ICP; the second is spelled out because
+    # there is no suffix convention that would produce it.
+    "ICP": (("ledger_canister_id", None), ("owner_principal", "ICP_OWNER_PRINCIPAL")),
 }
 
 
@@ -207,7 +241,7 @@ def missing_settings(rpc: Mapping[str, Mapping], asset: str) -> list[str]:
     Names rather than keys, because the answer goes to a person who has to export
     something. The primary one comes from network_target.configuring_variable() so
     it cannot drift from CHAIN_PORTS or from the workers' startup banner; the
-    credential names are derived as <ASSET>_RPC_USER and <ASSET>_RPC_PASS, which
+    other names are spelled out in _REQUIRED_SETTINGS rather than derived, which
     config.py uses for all three Bitcoin-derived chains without exception -- grep
     `_env("BTC_RPC_USER"` and its five siblings in Config.RPC rather than trusting
     a line number. This cited "config.py:157-206", and on 2026-10-03 those lines
@@ -237,9 +271,9 @@ def missing_settings(rpc: Mapping[str, Mapping], asset: str) -> list[str]:
     """
     entry = rpc.get(asset) or {}
     names = []
-    for key, suffix in _REQUIRED_SETTINGS.get(asset, ()):
+    for key, variable in _REQUIRED_SETTINGS.get(asset, ()):
         if not entry.get(key):
-            names.append(configuring_variable(asset) if suffix is None else f"{asset}_RPC_{suffix}")
+            names.append(configuring_variable(asset) if variable is None else variable)
     return names
 
 
