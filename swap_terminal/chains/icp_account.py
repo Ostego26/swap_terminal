@@ -84,6 +84,41 @@ project real investigations:
                      self-authenticating principal on the network while every
                      canister-id test passed.
 
+THE EQUIVALENCE THE WHOLE DEPOSIT DESIGN RESTS ON, MEASURED 2026-10-06 against
+the real ICP ledger canister (ledger-suite-icp-2025-08-29) running on the local
+replica. Until this was run it was the one claim here with nothing behind it but
+ic-py and a reading of the specification:
+
+    the ledger was FUNDED by a 64-hex account identifier this module derived,
+    written into its init arguments by icp_ledger_init.py --
+
+        a0263999097bcda484aa158ee3a227034a1a5043f0db346ffecaf4b3a6c12042
+        100_000_000_000 e8s
+
+    and then QUERIED the other way, by principal with no subaccount --
+
+        icrc1_balance_of(record { owner = principal "ybr6p-...-cqe" })
+          -> 100_000_000_000 : nat
+
+So account_identifier(p) and the ICRC-1 account (owner = p, subaccount = default)
+are THE SAME ACCOUNT on a real ledger. That is what makes a per-swap deposit
+address work at all: the deposit instruction handed to a customer is the 64-hex
+form, and the adapter detects the payment through icrc1_balance_of on the
+(principal, subaccount) pair. If the two encodings disagreed, the terminal would
+publish an address, the customer would pay it, and the watcher would query an
+account that stays at zero forever -- no error anywhere.
+
+Two other values came back from the same ledger and both matter here:
+
+    icrc1_decimals -> 8      so chains/coin_amounts.CHAIN_DECIMALS is the table
+                             that answers for ICP, not a second one.
+    icrc1_fee      -> 10_000 e8s. Which is what DFINITY's documented example
+                             seeds and what mainnet charges -- and it is STILL
+                             not a constant anywhere in this codebase, for the
+                             reason at the end of this docstring. Agreeing with
+                             the default does not make a copied number an
+                             authority.
+
 WHAT ICP CHANGES ABOUT THE TERMINAL'S ASSUMPTIONS, recorded here because this is
 the first file in the repository to encounter it:
 

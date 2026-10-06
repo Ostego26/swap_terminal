@@ -66,7 +66,11 @@ which matters because any 64 hex characters pass the weaker test, and that is
 exactly what a truncated copy-paste produces.
 
 THE FEE IS AN ARGUMENT HERE AND NOWHERE ELSE. 10_000 e8s is DFINITY's own example
-value and is what mainnet charges; it is a parameter of this file rather than a
+value, is what mainnet charges, and was CONFIRMED 2026-10-06 by asking the
+deployed ledger itself -- `icrc1_fee()` returned `(10_000 : nat)` on the local
+replica seeded by this file. That agreement is not a reason to promote it to a
+constant: a copied number that happens to match is still a second authority, and
+it would drift the day a ledger changes its fee with nothing failing (rule 8). it is a parameter of this file rather than a
 constant in the codebase because the running ledger reports its own fee through
 `icrc1_fee()`, and that is the only authority any adapter may read it from. A
 number copied into Python would be a second authority that drifts the day a
