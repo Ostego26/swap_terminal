@@ -312,19 +312,6 @@ LTC_REGTEST_TAPROOT = taproot_address("rltc", "ltc regtest taproot")
 BTC_FUTURE_WITNESS_V5 = segwit_address("tb", 5, hashlib.sha256(b"a witness version from 2030").digest())
 
 
-
-
-
-# The two forms a customer actually pastes, per network. Nobody holds a key for either: the
-# public keys are hash160 output zero-padded to 32 bytes, which is a point nobody can invert.
-
-# The two CORRUPTIONS the kind/length cross-check exists to catch: an integrated prefix on a
-# standard-length body, and a primary prefix on an integrated-length one. Both have a VALID
-# Keccak checksum, so the checksum cannot catch them and only the comparison can.
-
-
-
-
 def solana_address_for(phrase: str) -> str:
     """A Solana address: base58 of 32 bytes, with NO CHECKSUM, because that is the format.
 
@@ -374,7 +361,6 @@ def unplaceable_bech32(phrase: str) -> str:
     one is; nothing in this tree pays Dogecoin, which is what makes it safe as a stand-in.
     """
     return bech32_address("doge", phrase)
-
 
 
 SOL_PAYOUT = solana_address_for("swap_terminal test fixture SOL payout")

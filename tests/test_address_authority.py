@@ -1280,20 +1280,6 @@ def test_a_swap_paying_out_to_TAPROOT_can_be_CREATED(tmp_path):
 
 
 
-@pytest.mark.parametrize("fixture", [
-])
-def test_a_prefix_and_length_that_DISAGREE_are_still_refused(fixture):
-    """WHAT MAKES THIS A FIX RATHER THAN JUST ACCEPTING A LONGER STRING. Both of these have a
-    VALID Keccak checksum -- they are internally consistent -- so the checksum cannot catch
-    them and only the kind/length comparison can. Same shape as BIP-350 tying a checksum
-    constant to a witness version: an `integrated` prefix on a 65-byte body is a corruption,
-    not a shorter spelling.
-
-    MUTATION: delete the `len(body) != expected_body` check and both of these become VALID,
-    with the payment ID read out of a body that has none."""
-    verdict = check_address(fixture)
-    assert verdict.state == INVALID, verdict.why
-    assert "disagree" in verdict.why, "and the reason says which two facts conflict"
 
 
 

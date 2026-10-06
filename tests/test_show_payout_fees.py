@@ -63,6 +63,42 @@ class _Wallet:
         return {} if self._omit else {"fee": self._fee}
 
 
+def _assets_without_a_reserve() -> list[str]:
+    """Every TRADEABLE asset that has no `<ASSET>_NETWORK_FEE_RESERVE` on Config.
+
+    DERIVED FROM Config.ALLOWED_PAIRS, NOT SPELLED. Until 2026-10-06 three tests in
+    this file each carried
+
+        [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC") if not hasattr(...)]
+
+    which is rule 8's failure in the place it does the most damage: a test whose
+    whole job is to find an asset that lacks a reserve, looking only in a list of
+    assets somebody typed. The list was already wrong when this was written -- ICP
+    became tradeable on 2026-10-06 (ten pairs) and is absent from all three copies,
+    so an ICP without a reserve would have been invisible to the very tests that
+    exist to catch it. They would have skipped, said "every asset has a reserve
+    now", and been believed.
+
+    That is the reassuring direction of failure again, and it is the second instance
+    found today: the same shape as duplicate_live_payouts() hand-spelling the status
+    list its own index derives.
+
+    MEASURED 2026-10-06, after deriving it:
+
+        tradeable assets        BTC GRC ICP LTC SOL XRP   (6)
+        with a reserve          BTC GRC ICP LTC SOL XRP   (6)
+        without                 (none)
+
+    So all three call sites skip today, and that is now a TRUE statement about every
+    asset this terminal trades rather than about five of the six. The `(absent)`
+    branch in show_payout_fees.report_asset() is deliberately NOT deleted as dead
+    code: the next asset to be enabled reaches it before its reserve is set, which is
+    exactly the window these tests cover.
+    """
+    assets = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    return sorted(asset for asset in assets if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE"))
+
+
 def _collect():
     lines = []
     return lines, lines.append
@@ -169,8 +205,7 @@ def test_an_absent_reserve_says_the_quote_REFUSES_rather_than_printing_None():
     the next reserve to be set moves the example again instead of failing the test
     for the wrong reason -- and the skip says so out loud if none is left.
     """
-    absent = [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC")
-              if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE")]
+    absent = _assets_without_a_reserve()
     if not absent:
         pytest.skip("every asset has a reserve now, so there is no absent one to report -- and this "
                     "test and the (absent) branch it covers should be reconsidered together")
@@ -283,8 +318,7 @@ def test_main_gives_EVERY_asset_its_reserve_line_including_the_ones_with_no_payo
     # This was XRP's until 2026-10-03, when the operator set XRP_NETWORK_FEE_RESERVE
     # from a figure read off their own rippled. Derived from Config rather than
     # hardcoded, so setting SOL's moves the example instead of failing this test.
-    absent = [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC")
-              if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE")]
+    absent = _assets_without_a_reserve()
     for asset in absent:
         assert f"{asset}_NETWORK_FEE_RESERVE=(absent -- every quote paying out in this asset REFUSES)" in body, body
     # And the figures, which must print whether or not a reserve is configured: the
@@ -546,8 +580,7 @@ def test_an_asset_with_no_configured_reserve_reports_no_configured_ratio():
     header still says the reserve is absent and what that costs, which is the fact
     that reader needs.
     """
-    absent = [asset for asset in ("SOL", "XRP", "BTC", "LTC", "GRC")
-              if not hasattr(Config, f"{asset}_NETWORK_FEE_RESERVE")]
+    absent = _assets_without_a_reserve()
     if not absent:
         pytest.skip("every asset has a reserve now, so there is no absent one to report")
     lines, say = _collect()
