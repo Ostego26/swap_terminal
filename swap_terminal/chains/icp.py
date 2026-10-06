@@ -5,50 +5,30 @@ Role: module (a stage; the decisions it needs live in chains/icp_account.py and
 Reads: the ICRC-1 ledger canister named in Config.RPC["ICP"], by running dfx
 Writes: nothing in this repository. icrc1_transfer writes to a ledger.
 Can send orders: it CAN move funds -- send_to_address calls icrc1_transfer. See
-      WHAT HAS NEVER BEEN EXERCISED below: that path has not been run once.
-Live-safe: against a LOCAL REPLICA, yes, and that is the only thing it has been
-      pointed at. Nothing here defaults to mainnet (config.py's ICP entry has
-      empty defaults on purpose), and ICP has no testnet, so "the local replica"
-      is the whole of the safe territory.
+      THE PAYOUT PATH IS EXERCISED, 2026-10-06, against the real released ICP ledger on
+the local replica. This section used to say send_to_address "has not been run
+against any ledger, local or otherwise" and that the tests asserting on its
+constructed argument were "not the same as a transfer having happened". It has now
+happened:
 
-WHY THE TRANSPORT IS dfx AND NOT AN HTTP CLIENT, measured rather than preferred.
-SOL and XRP adapters hold a URL and speak JSON-RPC over HTTP. ICP speaks candid
-inside a CBOR agent envelope, and an update call additionally needs
-representation-independent request-id hashing plus certificate verification on the
-way back. There is one Python library for that, `ic-py`, and it does not install
-here -- measured 2026-10-06, three ways:
+    idempotency key   1791291996571772365      (real time, captured once)
+    before            desk 1000.0      subaccount 1 0.0
+    send 0.25 ICP     block index 1
+    after             desk 999.7499    subaccount 1 0.25
+    SAME key again    TxDuplicate
+    after             desk 999.7499    subaccount 1 0.25      unchanged
 
-    pip install ic-py
-      -> ERROR: Failed building wheel for antlr4-python3-runtime
-    pip install antlr4-python3-runtime==4.13.2   (succeeds alone)
-    then import ic.candid
-      -> Exception: Could not deserialize ATN with version 3 (expected 4)
+The desk moved by 0.2501 for a 0.25 transfer, which is the amount plus the
+0.0001 fee icrc1_fee() reported -- so the fee this adapter reads and the fee the
+ledger charged are the same number, measured rather than assumed. And the retry
+with the same key did not move funds: dedup behaves as the interface documents.
 
-ic-py's generated .did parser is locked to the antlr 4.9-era runtime, whose sdist
-will not build on this machine. Hand-rolling the agent protocol instead was
-considered and rejected: it is a second implementation of somebody else's wire
-format (rule 8) on a path that moves money, and the half that matters most --
-certificate verification -- is the half that cannot be tested from here, so a
-mistake in it would be silent. dfx IS the reference implementation, it is pinned in
-docker/icp-replica.Dockerfile, and it already holds the identities under /state.
-
-THE TRANSPORT IS A PARAMETER, which is what makes this file testable. `call` is
-injected and defaults to the dfx-in-compose implementation; every test in
-tests/test_icp_adapter.py passes a function returning seeded candid text, so the
-parsing, the refusals and the amount arithmetic are exercised with no container,
-no network, and no ledger. That is the same shape rule 10 asks for -- the decision
-is a function that can be called with seeded inputs.
-
-WHAT HAS NEVER BEEN EXERCISED, stated plainly because rule 16 draws the line at
-"a fix you cannot test here is a proposal": send_to_address has not been run
-against any ledger, local or otherwise. Its candid argument is constructed from
-the real interface (dfinity/ic rs/ledger_suite/icp/ledger.did, read rather than
-recalled) and its tests assert on the text it builds, which is not the same as a
-transfer having happened. THIS PARAGRAPH IS THE ONE TO DELETE FIRST once the
-operator has run a transfer on the local replica. The read paths have
-been exercised against the real released ICP ledger on the local replica --
-icrc1_balance_of, icrc1_fee, icrc1_decimals and icrc1_symbol all answered, and
-the balance agreed with the account identifier this repository derived.
+IT TOOK THREE REFUSALS TO GET THERE and each one corrected something real, which is
+the argument for a local ledger existing at all. A missing `blob` keyword (candid
+read 32 bytes as UTF-8 text); a created_at_time a year in the past (TxTooOld, 24h
+window, which refuted this file's own advice about not using a clock); and then
+raising on TxDuplicate, which the run above is what exposed. Every one of them would
+otherwise have been found by a payout worker.
 
 MEASURED THROUGH THIS CLASS, 2026-10-06, which is a different claim from "the
 ledger answered". build_adapters(Config.RPC)["ICP"] with the two variables set,
@@ -106,6 +86,11 @@ _NAT_RESULT = re.compile(r"\(\s*([\d_]+)\s*:\s*nat(?:64)?\s*\)")
 #: `(variant { Ok = 3 : nat64 })` from transfer. The block index is the closest
 #: thing ICP has to a txid.
 _TRANSFER_OK = re.compile(r"Ok\s*=\s*([\d_]+)")
+
+#: `Err = variant { TxDuplicate = record { duplicate_of = 1 : nat64 } }`. The ledger
+#: saying "this exact transfer already happened, here is its block index" -- which is
+#: SUCCESS for a retry, and the reason send_to_address returns it rather than raising.
+_TRANSFER_DUPLICATE = re.compile(r"TxDuplicate\s*=\s*record\s*\{\s*duplicate_of\s*=\s*([\d_]+)")
 
 #: `(blob "\0a\1b...")` from account_identifier. dfx prints a candid blob as a
 #: quoted string of \xx escapes, with printable ASCII bytes left as themselves --
@@ -512,14 +497,31 @@ class ICPAdapter:
         ok = _TRANSFER_OK.search(out)
         if ok:
             return ok.group(1).replace("_", "")
+
+        # TxDuplicate IS SUCCESS, AND RAISING ON IT WAS A DEFECT THIS FILE SHIPPED.
+        # The ledger is saying "this exact transfer already happened; its block index
+        # is <n>". That is precisely what the idempotency key exists to produce, so a
+        # retry after a timeout must get the SAME answer the first call would have
+        # given -- not an exception. Measured on the local replica 2026-10-06: the
+        # same call twice left desk 999.7499 and subaccount 1 at 0.25 both times, the
+        # second answering TxDuplicate, so the funds genuinely did not move twice.
+        #
+        # The version before this returned the block index on Ok and RAISED here,
+        # with a message telling the caller to read it as success. That put the
+        # decision in prose a payout worker would have had to parse, and the failure
+        # mode is specific: a worker retrying after a timeout sees an exception and
+        # marks a payout that SUCCEEDED as failed (rule 10 -- the decision belongs in
+        # a function, not in an error string).
+        duplicate = _TRANSFER_DUPLICATE.search(out)
+        if duplicate:
+            return duplicate.group(1).replace("_", "")
         raise ICPCallFailed(
             f"transfer of {amount} ICP ({e8s} e8s, fee {fee_e8s} e8s) to {address} did not return a "
             f"block index. Whether anything moved is NOT established by this message -- read the "
-            f"ledger's reply: {out.strip()[:400]!r}. Reading the three errors that carry an "
-            f"instruction: `TxDuplicate` means an earlier IDENTICAL transfer already happened and "
-            f"its block index is in the reply -- treat that as success, not as a failure to retry. "
-            f"`BadFee` names the fee the ledger expects and is NOT retried here, because a retry is "
-            f"a second send. `TxTooOld` means created_at_time is outside the ledger's window "
+            f"ledger's reply: {out.strip()[:400]!r}. TxDuplicate is NOT among the cases that reach "
+            f"here -- it is handled above as the success it is. Of what remains: `BadFee` names the "
+            f"fee the ledger expects and is NOT retried here, because a retry is a second send. "
+            f"`TxTooOld` means created_at_time is outside the ledger's window "
             f"(86_400_000_000_000ns = 24h): the key must be a REAL timestamp near now, so a swap "
             f"older than a day cannot be paid idempotently through it at all."
         )

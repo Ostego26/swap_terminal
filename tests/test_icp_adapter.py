@@ -296,7 +296,6 @@ def test_the_amount_and_the_timestamp_are_carried_exactly():
 @pytest.mark.parametrize("reply,needle", [
     ("(variant { Err = variant { BadFee = record { expected_fee = record { e8s = 10_000 : nat64 } } } })", "BadFee"),
     ("(variant { Err = variant { InsufficientFunds = record { balance = record { e8s = 1 : nat64 } } } })", "NOT established"),
-    ("(variant { Err = variant { TxDuplicate = record { duplicate_of = 7 : nat64 } } })", "TxDuplicate"),
     ("(variant { Err = variant { TxTooOld = record { allowed_window_nanos = 86_400_000_000_000 : nat64 } } })", "24h"),
     ("", "NOT established"),
 ])
@@ -312,6 +311,45 @@ def test_anything_but_a_block_index_raises_and_does_not_claim_nothing_moved(repl
     a = sending_adapter(transfer_reply=reply)
     with pytest.raises(ICPCallFailed, match=needle):
         a.send_to_address(a.deposit_address(1), 0.5, created_at_time_nanos=FIXED_NANOS)
+
+
+def test_a_duplicate_is_SUCCESS_and_returns_the_original_block_index():
+    """THE DEFECT THIS FILE SHIPPED, and the live run is what exposed it.
+
+    TxDuplicate means "this exact transfer already happened; its block index is
+    <n>". That is precisely what the idempotency key exists to produce, so a retry
+    after a timeout must get the SAME answer the first call gave.
+
+    The first version RAISED here, with a message telling the caller to read it as
+    success -- which put the decision in prose a payout worker would have had to
+    parse. The failure mode is specific: a worker retrying after a timeout sees an
+    exception and marks a payout that SUCCEEDED as failed.
+
+    Measured on the local replica 2026-10-06: the same call twice left desk 999.7499
+    and subaccount 1 at 0.25 both times, the second answering TxDuplicate. The funds
+    did not move twice, so an exception there would have been reporting a failure
+    that did not occur.
+    """
+    a = sending_adapter(
+        transfer_reply="(variant { Err = variant { TxDuplicate = record { duplicate_of = 1 : nat64 } } })"
+    )
+    assert a.send_to_address(a.deposit_address(1), 0.25, created_at_time_nanos=FIXED_NANOS) == "1"
+
+
+def test_the_same_call_twice_returns_the_same_block_index():
+    """What idempotency means at this boundary, asserted end to end.
+
+    First call Ok, second call TxDuplicate, and the caller cannot tell them apart --
+    which is the entire point. A payout worker that cannot distinguish "I just paid"
+    from "I already paid" cannot double-pay by retrying.
+    """
+    first = sending_adapter(transfer_reply="(variant { Ok = 1 : nat64 })")
+    retry = sending_adapter(
+        transfer_reply="(variant { Err = variant { TxDuplicate = record { duplicate_of = 1 : nat64 } } })"
+    )
+    destination = first.deposit_address(1)
+    assert first.send_to_address(destination, 0.25, created_at_time_nanos=FIXED_NANOS) == "1"
+    assert retry.send_to_address(destination, 0.25, created_at_time_nanos=FIXED_NANOS) == "1"
 
 
 def test_a_payout_to_an_invalid_address_refuses_before_reading_the_fee():
