@@ -267,6 +267,15 @@ services:
       # container quotes at a different reserve than the host with nothing reporting
       # the difference. config.py's default is the ledger's published icrc1_fee.
       ICP_NETWORK_FEE_RESERVE: "${ICP_NETWORK_FEE_RESERVE:-}"   # config.py default: "0.0001"
+      # The SOURCE-side threshold, and its absence from config.py was what made every
+      # ICP -> * swap creation raise KeyError until 2026-10-06. Passed for this block's
+      # standing reason: a variable config.py reads and this file omits arrives UNSET
+      # in the container, which here would mean the container credits an ICP deposit at
+      # a different depth than the host with nothing reporting the difference.
+      #
+      # config.py's default is 1 because the ICP ledger is FINAL at one block -- no
+      # reorg, no mempool -- not because 1 is a cautious guess.
+      ICP_MIN_CONFIRMATIONS: "${ICP_MIN_CONFIRMATIONS:-}"       # config.py default: "1"
 
       # SIGNING MATERIAL IS ABSENT, ALL OF IT. SOL_PAYOUT_KEYPAIR_PATH,
       # ST_ADAPTOR_FUNDING_SEED and every wallet passphrase. Unset, this container
