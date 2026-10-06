@@ -246,20 +246,34 @@ def test_a_send_passes_the_fee_it_read_from_the_ledger_not_a_constant():
 
 
 def test_the_destination_goes_out_as_a_32_BYTE_BLOB_not_as_text():
-    """`type AccountIdentifier = blob` in the ledger's own interface.
+    # RAW DOCSTRING, because the quoted dfx error below contains \ee and \cc and a
+    # non-raw string makes those invalid escape sequences. That surfaced as a
+    # DeprecationWarning from tests/test_xrp_balances.py, which ast.parse()s every
+    # .py in the tree -- so a bad escape anywhere becomes a warning in an unrelated
+    # test with only "<unknown>:249" to locate it.
+    r"""`type AccountIdentifier = blob` in the ledger's own interface.
 
-    A 64-hex string passed as text would be a type error at best and, if candid
-    coerced it, 64 bytes of ASCII rather than the 32 bytes of the account. Every
-    byte is escaped uniformly, so the literal's shape does not depend on its value.
+    THIS TEST PASSED WHILE THE CODE WAS WRONG, and that is the lesson in it. The
+    first version asserted the escapes and the byte count and never the `blob`
+    KEYWORD, so it agreed with an argument that said `to = "\ee\cc..."` -- which
+    candid reads as TEXT. dfx refused it on the live replica with "Not valid unicode
+    text", after the test had reported the property in its own name.
+
+    A test named for a property that does not assert the property is worse than no
+    test, because the name is what a reader trusts. The keyword is asserted first
+    here, before anything else about the literal.
     """
     log: list = []
     a = sending_adapter(log=log)
     destination = a.deposit_address(1)
     a.send_to_address(destination, 0.5, created_at_time_nanos=FIXED_NANOS)
     sent = log[1][2]
-    assert destination not in sent, "the 64-hex text must not appear; the blob does"
     expected = "".join(f"\\{b:02x}" for b in bytes.fromhex(destination))
-    assert f'to = "{expected}"' in sent
+    assert f'to = blob "{expected}"' in sent, (
+        "the destination must carry the `blob` keyword -- a bare quoted string is candid `text` "
+        "and dfx refuses 32 arbitrary bytes as UTF-8"
+    )
+    assert destination not in sent, "the 64-hex text must not appear; the blob does"
     assert sent.count("\\") == 32, "32 bytes, each escaped"
 
 

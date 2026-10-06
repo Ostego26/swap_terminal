@@ -116,13 +116,25 @@ _BLOB_RESULT = re.compile(r'blob\s*"((?:[^"\\]|\\.)*)"')
 def _hex_to_blob(hex_text: str) -> str:
     r"""A 64-hex account identifier as a candid blob literal for dfx.
 
+    THE `blob` KEYWORD IS PART OF THE VALUE AND LEAVING IT OFF IS WHY THE FIRST
+    TRANSFER FAILED. A bare quoted string in candid is `text`, so dfx tried to read
+    32 arbitrary bytes as UTF-8 and refused, on the live replica, 2026-10-06:
+
+        to = "\ee\cc\42\b3..."
+             ^^^^^^^^^^^^^^^^^^^^ Not valid unicode text
+        Error: Failed to create argument blob.
+
+    The asymmetry was visible in this file the whole time: _BLOB_RESULT already
+    matched `blob "..."` coming BACK from account_identifier, so the reader knew the
+    form the writer omitted.
+
     EVERY byte is escaped as \xx, including the printable ones. dfx accepts a
     mixed form, but emitting one would mean this function's output changes shape
     with the VALUE -- and a 32-byte identifier containing an accidental `"` or `\`
     would then need escaping rules this does not have. Uniform escapes have no such
     case.
     """
-    return '"' + "".join(f"\\{b:02x}" for b in bytes.fromhex(hex_text)) + '"'
+    return 'blob "' + "".join(f"\\{b:02x}" for b in bytes.fromhex(hex_text)) + '"'
 
 
 def _blob_to_hex(escaped: str) -> str:
