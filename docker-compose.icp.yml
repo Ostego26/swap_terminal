@@ -24,6 +24,41 @@ services:
     volumes:
       - "./icp:/repo/icp:ro"
       - "./dfx.json:/repo/dfx.json:ro"
+
+      # THE WORKSPACE MANIFEST AND ITS LOCK, and they are mounted because dfx
+      # cannot build without them: its Rust builder runs `cargo locate-project`
+      # from the directory holding dfx.json -- /repo -- and `locate-project`
+      # walks parents only. The first deploy in this container died exactly
+      # there ("could not find `Cargo.toml` in `/repo` or any parent
+      # directory"), with the canister already created, which is the shape rule
+      # 13 warns about: a step that got far enough to look like it worked.
+      - "./Cargo.toml:/repo/Cargo.toml:ro"
+
+      # :ro ON THE LOCK IS DELIBERATE AND IS A CHECK, not caution. The lock is
+      # complete, so a build that resolves cleanly never writes it; a build that
+      # WANTS to write it is telling you the container resolved different
+      # versions than the host did, and failing on "Read-only file system"
+      # reports that out loud instead of producing a canister built from
+      # dependencies no committed file names.
+      - "./Cargo.lock:/repo/Cargo.lock:ro"
+
+      # BUILD OUTPUT AND PROJECT STATE IN NAMED VOLUMES, for two different
+      # reasons, neither of which is speed alone.
+      #
+      # target/: a workspace puts it at the workspace root, which is the mounted
+      # /repo. Without a volume here it lands in the container's own layer and
+      # every `compose up` after a `down` pays a full cold rebuild of candid and
+      # ic-cdk -- 24.3s measured on the host for this one small canister, and
+      # this is the first of several.
+      #
+      # .dfx/: canister ids live in .dfx/<network>/canister_ids.json while the
+      # replica's own state lives under /state. Those two have to survive
+      # together or they disagree: a recreated container would hold a replica
+      # that still hosts bkyz2-fmaaa-aaaaa-qaaaq-cai beside a project that has
+      # forgotten the name, and `dfx deploy` would create a SECOND canister
+      # rather than upgrade the one holding the key.
+      - "icp-target:/repo/target"
+      - "icp-dfx:/repo/.dfx"
       - "icp-state:/state"
 
     ports:
@@ -48,3 +83,5 @@ services:
 
 volumes:
   icp-state:
+  icp-target:
+  icp-dfx:

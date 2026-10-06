@@ -68,3 +68,19 @@ runtime/web/*
 # checkout would overwrite a running desk's copy.
 runtime/abstergo/*
 !runtime/abstergo/.gitkeep
+
+# CARGO AND DFX BUILD OUTPUT, both at the repository root because that is where
+# the workspace is (see Cargo.toml's header for why dfx forces it there).
+#
+# target/ was ignored at icp/threshold_custody/.gitignore while that crate was
+# standalone, and that file is gone rather than kept: a workspace puts target/ at
+# the WORKSPACE root, so the crate-level directory can no longer be created even
+# by running `cargo build` from inside the crate, and an ignore line for a path
+# nothing can write is a line the next reader has to test to disbelieve (rule 9).
+#
+# .dfx/ is canister ids, the local replica's wasm copies, and generated candid
+# bindings. Ids are environment state -- the same canister has a different one on
+# every fresh replica -- so committing them would make a checkout claim to know
+# something only a running replica can answer.
+target/
+.dfx/
