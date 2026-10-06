@@ -43,9 +43,8 @@ status is invisible to the query and the row count does not move.
 
 import sqlite3
 
-import pytest
-
 import db
+import pytest
 
 
 @pytest.fixture
