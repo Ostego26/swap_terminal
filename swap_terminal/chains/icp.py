@@ -59,6 +59,7 @@ WHAT ICP DOES NOT HAVE, and where each one is handled:
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import subprocess
@@ -178,13 +179,13 @@ def dfx_transport(service: str, timeout: float):
     and would be mangled by a shell.
     """
 
-    def call(canister: str, method: str, argument: str) -> str:
+    def call(canister: str, method: str, argument: str, output: str = "idl") -> str:
         argv = [
             "docker", "compose",
             "-f", "docker-compose.yml",
             "-f", "docker-compose.icp.yml",
             "exec", "-T", service,
-            "dfx", "canister", "call", canister, method, argument,
+            "dfx", "canister", "call", "--output", output, canister, method, argument,
         ]
         try:
             done = subprocess.run(  # noqa: S603 -- checked: no shell, argv is a fixed list, and the only caller-supplied elements are a canister id, a method name and a candid argument this repository builds
@@ -203,6 +204,28 @@ def dfx_transport(service: str, timeout: float):
         return done.stdout
 
     return call
+
+
+def _transfer_operation(block: dict) -> dict | None:
+    """The Transfer record inside one query_blocks block, or None.
+
+    WHY THIS IS A FUNCTION AND NOT THREE LINES INLINE: it is where every shape
+    assumption about the ledger's reply lives, and rule 10 puts a decision somewhere
+    it can be called with seeded inputs. Three of those assumptions are not guessable
+    and were read off the live reply:
+
+      `operation` is an OPTIONAL variant, so JSON gives a LIST of zero or one element
+      -- not the variant directly. An empty list is a block whose operation is absent.
+      the variant itself is a one-key object: {"Transfer": {...}}, {"Mint": {...}}.
+      A Mint is NOT a deposit: the local ledger's own first block is a Mint of
+      100_000_000_000 e8s to the desk, which is the initial supply the init arguments
+      granted. Counting it would credit a swap with the desk's entire inventory.
+    """
+    operation = ((block or {}).get("transaction") or {}).get("operation") or []
+    if not operation:
+        return None
+    variant = operation[0] or {}
+    return variant.get("Transfer")
 
 
 class ICPAdapter:
@@ -271,6 +294,38 @@ class ICPAdapter:
                 f"desk inventory and the watcher would read the inventory as the deposit."
             )
         return account_identifier(self.owner_principal, subaccount_from_index(subaccount_index))
+
+    def get_new_address(self, label: str) -> str:
+        """REFUSES. An ICP deposit address cannot be derived by the adapter alone.
+
+        services/swap_service.derive_deposit_address() calls this for every chain whose
+        deposits are attributed BY ADDRESS, and ICP is such a chain -- but its address
+        is account_identifier(owner, subaccount), and the subaccount index must be
+        ALLOCATED, uniquely, in the same database transaction as the swap row.
+        services/icp_subaccount_service owns that and this adapter has no database.
+
+        So it refuses rather than returning something address-shaped, exactly as
+        chains/xrp.py refuses for its own reason. The two reasons differ and both are
+        worth knowing: XRP cannot derive a per-swap account because each would need
+        funding past the base reserve, so it uses one shared account and a tag. ICP CAN
+        derive 2**256 addresses for free -- the obstacle is only that uniqueness is a
+        database constraint, not an arithmetic property.
+
+        WHAT A WRONG ANSWER HERE WOULD COST, which is why this is a refusal and not a
+        best effort: returning own_address() would publish the DESK'S OWN account as a
+        customer deposit address, mixing the payment into desk inventory and leaving the
+        watcher reading the inventory as the deposit. Returning subaccount 1 for every
+        swap would attribute every customer's payment to whichever swap was checked
+        first. Both are silent.
+        """
+        raise ICPCallFailed(
+            f"ICP cannot derive a deposit address from the adapter alone (label {label!r}). The "
+            f"address is account_identifier(owner, subaccount) and the subaccount index must be "
+            f"allocated in SQL, in the same transaction as the swap row, by "
+            f"services/icp_subaccount_service.allocate_subaccount_index(). Refusing rather than "
+            f"returning the desk's own account, which would mix a customer's payment into desk "
+            f"inventory and make the watcher read the inventory as the deposit."
+        )
 
     def validate_address(self, address: str) -> bool:
         """Whether `address` is a 64-hex account identifier with a valid checksum.
@@ -352,6 +407,122 @@ class ICPAdapter:
         and agreement is still not a reason to hardcode it.
         """
         return self._nat("icrc1_fee") / 10**ICP_DECIMALS
+
+    def _call_json(self, method: str, argument: str):
+        """A ledger call parsed as JSON rather than as candid text.
+
+        dfx 0.24.3 supports `--output json` (checked: `idl, raw, pp, json`), and for
+        anything nested that is the difference between parsing and hoping. query_blocks
+        returns records inside variants inside optionals inside a vec; a regex over
+        that, on the path that decides whether a customer gets credited, is the kind of
+        second implementation of somebody else's format rule 8 warns about -- except
+        the cost of a miss here is an uncredited deposit rather than a merge conflict.
+
+        TWO SHAPE FACTS that JSON output forces and that the code below relies on,
+        measured against the live ledger rather than assumed:
+
+          a blob is a LIST OF INTEGERS, so bytes(value) is the conversion and no
+          escape handling is involved at all.
+          every number is a STRING ("100000000000"), because candid nat64 exceeds
+          what JSON numbers promise, so int() is required and a bare == against an
+          int would silently never match.
+        """
+        raw = self._call(self.ledger_canister_id, method, argument, "json")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ICPCallFailed(
+                f"{method} on {self.ledger_canister_id} did not return JSON, so NOTHING was parsed "
+                f"(this is not an empty result): {error}. Output began {raw[:200]!r}"
+            ) from error
+
+    def find_deposits_to_address(self, address: str, tx_limit: int = 500, skip_txids=frozenset()):
+        """Every ledger Transfer INTO `address`, as deposit events. THE WATCHER'S JOB.
+
+        Returns the shape services/deposit_service.record_deposit_event() consumes --
+        txid, vout, address, amount, confirmations -- so the ICP path needs no special
+        case there.
+
+        THE BLOCK INDEX IS THE TXID, and that is the whole reason this reads blocks
+        instead of balances. A balance is a single number: report it as an event and a
+        second deposit to the same subaccount either collides with the first row
+        (deposit_events is keyed on asset+txid+vout and the update path does not touch
+        amount, so the second payment would be invisible) or arrives as a new row that
+        SUMS with the first, crediting 0.75 for a 0.5 balance. refresh_swap_from_chain()
+        sums every row, so only one-event-per-payment is correct. A block index is
+        unique per payment and never reused, which is exactly what that key needs.
+
+        vout is 0 for every event. ICP has no outputs; the column exists because the
+        UTXO chains need it, and a constant keeps the key (asset, txid, vout) unique
+        per payment without inventing a meaning for it.
+
+        confirmations is 1 and means FINAL -- see deposit_confirmations() for why that
+        is a compatibility value rather than a chain fact.
+
+        ARCHIVED BLOCKS ARE REFUSED, NOT SKIPPED, and this is the part that would
+        otherwise lose a customer's money. Old blocks migrate off the ledger into
+        separate archive canisters; `blocks` then covers only what the ledger still
+        holds, and `archived_blocks` names the ranges that moved. A scan that read
+        `blocks` and ignored that field would silently miss deposits -- the customer
+        paid, the watcher polls forever, and nothing errors. So a non-empty
+        archived_blocks over the range being scanned RAISES. Measured on the local
+        replica 2026-10-06: `archived_blocks = vec {}` with chain_length 2, so the
+        refusal has never fired here and that is precisely why it is written now
+        rather than when it first bites.
+        """
+        if not self.validate_address(address):
+            raise ICPCallFailed(
+                f"{address!r} is not a valid ICP account identifier, so no scan was attempted. "
+                f"Returning no deposits for an unreadable address would look like an unpaid customer."
+            )
+        target = bytes.fromhex(address)
+
+        # One cheap call for chain_length. Asking for length 1 rather than 0 because a
+        # zero-length request is a shape the ledger need not answer usefully, and the
+        # response carries chain_length regardless of how many blocks come back.
+        head = self._call_json("query_blocks", "(record { start = 0 : nat64; length = 1 : nat64 })")
+        chain_length = int(head.get("chain_length", 0))
+        if chain_length == 0:
+            return []
+
+        window = min(int(tx_limit), chain_length)
+        start = chain_length - window
+        page = self._call_json(
+            "query_blocks",
+            f"(record {{ start = {start} : nat64; length = {window} : nat64 }})",
+        )
+        archived = page.get("archived_blocks") or []
+        if archived:
+            raise ICPCallFailed(
+                f"the ledger reports {len(archived)} archived block range(s) overlapping the scan of "
+                f"blocks {start}..{chain_length - 1}, so part of the history this scan needs is NOT "
+                f"in the reply. Refusing rather than returning a partial answer: a missing range "
+                f"means a deposit that was made and will never be seen, which is indistinguishable "
+                f"from a customer who did not pay. Reading an archive canister is not implemented."
+            )
+
+        first = int(page.get("first_block_index", start))
+        found = []
+        for offset, block in enumerate(page.get("blocks") or []):
+            index = str(first + offset)
+            if index in skip_txids:
+                continue
+            transfer = _transfer_operation(block)
+            if transfer is None:
+                continue
+            if bytes(transfer.get("to") or []) != target:
+                continue
+            e8s = int((transfer.get("amount") or {}).get("e8s", 0))
+            if e8s <= 0:
+                continue
+            found.append({
+                "txid": index,
+                "vout": 0,
+                "address": address,
+                "amount": e8s / 10**ICP_DECIMALS,
+                "confirmations": self.deposit_confirmations(),
+            })
+        return found
 
     def deposit_confirmations(self) -> int:
         """Always 1, and this is a COMPATIBILITY value rather than a chain fact.

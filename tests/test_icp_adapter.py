@@ -27,6 +27,8 @@ chains/icp_account.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from swap_terminal.chains.icp import ICP_DECIMALS, ICPAdapter, ICPCallFailed
@@ -396,3 +398,137 @@ def test_a_blob_this_adapter_cannot_read_raises_rather_than_returning_empty():
     a = adapter({"account_identifier": "(variant { Err = 1 })"})
     with pytest.raises(ICPCallFailed, match="not empty"):
         a.ledger_account_identifier()
+
+
+# ---------------------------------------------------------------------------
+# Deposit detection: blocks, not balances
+# ---------------------------------------------------------------------------
+
+
+def blocks_page(entries, *, first=0, chain_length=None, archived=()):
+    """A query_blocks reply in the JSON shape dfx --output json actually emits.
+
+    Copied from the live reply rather than imagined: a blob is a LIST OF INTEGERS,
+    every number is a STRING, and `operation` is an OPTIONAL variant so it arrives as
+    a list of zero or one one-key object.
+    """
+    return {
+        "chain_length": str(chain_length if chain_length is not None else first + len(entries)),
+        "first_block_index": str(first),
+        "archived_blocks": list(archived),
+        "blocks": [
+            {"transaction": {"operation": [{kind: {"to": list(bytes.fromhex(to)),
+                                                   "amount": {"e8s": str(e8s)}}}]}}
+            for kind, to, e8s in entries
+        ],
+    }
+
+
+def scanning_adapter(page, log=None) -> ICPAdapter:
+    """An adapter whose JSON calls all return `page`."""
+    def call(canister, method, argument, output="idl"):
+        if log is not None:
+            log.append((method, argument, output))
+        return json.dumps(page) if output == "json" else f"({REAL_FEE_E8S} : nat)"
+    return ICPAdapter(LEDGER, OWNER, call=call)
+
+
+def test_a_transfer_into_the_address_becomes_one_event_keyed_on_the_block_index():
+    """The block index is the txid, and that choice is the whole design.
+
+    deposit_events is keyed (asset, txid, vout) and refresh_swap_from_chain SUMS every
+    row. A balance reported as an event would either collide with the first row -- the
+    update path does not touch amount, so a second payment would be invisible -- or
+    arrive as a new row that sums with it, crediting 0.75 for a 0.5 balance. A block
+    index is unique per payment and never reused.
+    """
+    sub = account_identifier(OWNER, subaccount_from_index(1))
+    a = scanning_adapter(blocks_page([("Transfer", sub, 25_000_000)]))
+    assert a.find_deposits_to_address(sub) == [
+        {"txid": "0", "vout": 0, "address": sub, "amount": 0.25, "confirmations": 1}
+    ]
+
+
+def test_a_MINT_is_not_a_deposit():
+    """The local ledger's first block is a Mint of the desk's entire opening supply.
+
+    Counting it would credit a swap with 1000 ICP of desk inventory. Measured on the
+    replica: block 0 is `Mint` to the desk for 100_000_000_000 e8s, which is exactly
+    what the init arguments granted.
+    """
+    desk = account_identifier(OWNER)
+    a = scanning_adapter(blocks_page([("Mint", desk, 100_000_000_000)]))
+    assert a.find_deposits_to_address(desk) == []
+
+
+def test_a_transfer_to_a_DIFFERENT_subaccount_is_not_this_swaps_deposit():
+    """One customer's payment must not be attributed to another's swap."""
+    mine = account_identifier(OWNER, subaccount_from_index(1))
+    theirs = account_identifier(OWNER, subaccount_from_index(2))
+    a = scanning_adapter(blocks_page([("Transfer", theirs, 25_000_000)]))
+    assert a.find_deposits_to_address(mine) == []
+
+
+def test_the_block_index_accounts_for_first_block_index():
+    """A window into the chain does not start at 0, and an off-by-N here mislabels every txid."""
+    sub = account_identifier(OWNER, subaccount_from_index(1))
+    a = scanning_adapter(blocks_page([("Transfer", sub, 1)], first=97, chain_length=98))
+    assert [e["txid"] for e in a.find_deposits_to_address(sub)] == ["97"]
+
+
+def test_already_recorded_txids_are_skipped():
+    sub = account_identifier(OWNER, subaccount_from_index(1))
+    a = scanning_adapter(blocks_page([("Transfer", sub, 1), ("Transfer", sub, 2)]))
+    assert [e["txid"] for e in a.find_deposits_to_address(sub)] == ["0", "1"]
+    assert [e["txid"] for e in a.find_deposits_to_address(sub, skip_txids={"0"})] == ["1"]
+
+
+def test_archived_blocks_RAISE_rather_than_being_scanned_past():
+    """THE ONE THAT WOULD LOSE A CUSTOMER'S MONEY.
+
+    Old blocks migrate off the ledger into archive canisters; `blocks` then covers only
+    what the ledger still holds and `archived_blocks` names the ranges that moved. A
+    scan that ignored it would silently miss deposits -- the customer paid, the watcher
+    polls forever, and nothing errors, which is indistinguishable from not paying.
+
+    Measured on the local replica: archived_blocks is empty with chain_length 2, so
+    this refusal has never fired there. That is precisely why it is written now.
+    """
+    sub = account_identifier(OWNER, subaccount_from_index(1))
+    a = scanning_adapter(blocks_page([("Transfer", sub, 1)], archived=[{"start": "0", "length": "1"}]))
+    with pytest.raises(ICPCallFailed, match="never be seen"):
+        a.find_deposits_to_address(sub)
+
+
+def test_an_empty_ledger_yields_no_deposits_without_a_second_call():
+    log: list = []
+    a = scanning_adapter(blocks_page([], chain_length=0), log=log)
+    assert a.find_deposits_to_address(account_identifier(OWNER)) == []
+    assert len(log) == 1, "chain_length 0 needs no window scan"
+
+
+def test_an_invalid_address_refuses_rather_than_reporting_no_deposits():
+    """"No deposits" for an unreadable address looks exactly like an unpaid customer."""
+    a = scanning_adapter(blocks_page([]))
+    with pytest.raises(ICPCallFailed, match="no scan was attempted"):
+        a.find_deposits_to_address(OWNER)
+
+
+def test_output_that_is_not_json_raises_rather_than_being_read_as_empty():
+    def call(canister, method, argument, output="idl"):
+        return "not json at all"
+    a = ICPAdapter(LEDGER, OWNER, call=call)
+    with pytest.raises(ICPCallFailed, match="not an empty result"):
+        a.find_deposits_to_address(account_identifier(OWNER))
+
+
+def test_get_new_address_REFUSES_because_the_index_must_come_from_SQL():
+    """Returning anything address-shaped here is silent and costs a deposit.
+
+    own_address() would publish the DESK'S OWN account, mixing a customer's payment
+    into desk inventory. A fixed subaccount would attribute every customer's payment
+    to whichever swap was checked first.
+    """
+    a = scanning_adapter(blocks_page([]))
+    with pytest.raises(ICPCallFailed, match="allocated in SQL"):
+        a.get_new_address("swap_s_abc")
