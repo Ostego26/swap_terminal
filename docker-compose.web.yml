@@ -261,6 +261,12 @@ services:
       ICP_OWNER_PRINCIPAL: "${ICP_OWNER_PRINCIPAL:-}"
       ICP_DFX_SERVICE: "${ICP_DFX_SERVICE:-}"          # config.py default: "icp-replica"
       ICP_CALL_TIMEOUT: "${ICP_CALL_TIMEOUT:-}"        # config.py default: "60"
+      # The destination-side reserve, needed the moment any *->ICP pair is enabled.
+      # Passed now rather than then, for this block's standing reason: a variable
+      # config.py reads and this file omits arrives UNSET in the container, so the
+      # container quotes at a different reserve than the host with nothing reporting
+      # the difference. config.py's default is the ledger's published icrc1_fee.
+      ICP_NETWORK_FEE_RESERVE: "${ICP_NETWORK_FEE_RESERVE:-}"   # config.py default: "0.0001"
 
       # SIGNING MATERIAL IS ABSENT, ALL OF IT. SOL_PAYOUT_KEYPAIR_PATH,
       # ST_ADAPTOR_FUNDING_SEED and every wallet passphrase. Unset, this container

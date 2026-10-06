@@ -377,6 +377,36 @@ class Config:
     # SOL_HOT_WALLET. The page refuses the pair until those hold, which is what
     # makes adding this safe rather than a promise.
     SOL_NETWORK_FEE_RESERVE = _env_float("SOL_NETWORK_FEE_RESERVE", "0.000005")
+
+    # ICP. SET AT THE OPERATOR'S REQUEST 2026-10-06 ("set the icp network fee"), and it
+    # is the one reserve in this class that is not an estimate of anything.
+    #
+    # THE LEDGER PUBLISHES ITS FEE AND IT IS A CONSTANT -- not a function of inputs,
+    # size or congestion. Every line above is a guess at what a chain will charge for a
+    # transaction whose shape is not known yet: BTC's is a one-input p2wpkh send and
+    # over-reserves on purpose, LTC's and GRC's are measured averages. ICP's is READ:
+    #
+    #     icrc1_fee() -> (10_000 : nat)        = 0.0001 ICP
+    #
+    # confirmed twice on 2026-10-06 and a third time by arithmetic -- a 0.25 ICP
+    # transfer moved the desk from 1000.0 to 999.7499, which is 0.25 plus exactly
+    # 0.0001. The ICP ledger's own candid comment says "Must be 10000 e8s" for the
+    # legacy transfer's fee field, and it rejects any other value with BadFee.
+    #
+    # SO IT CANNOT BE WRONG IN THE USUAL WAY. The hazard this class of setting carries
+    # -- a reserve BELOW what the chain charges, which is the BTC_NETWORK_FEE_RESERVE
+    # defect recorded in tests/test_allowed_pairs_are_serviceable -- needs the real fee
+    # to exceed the reserve, and here the real fee is a published constant the adapter
+    # re-reads at send time anyway (chains/icp.chain_fee()).
+    #
+    # IT IS STILL NOT A CONSTANT IN CODE. send_to_address() passes what icrc1_fee()
+    # reports on every send, so if a ledger ever changed its fee the TRANSFER would
+    # follow it and only this display figure would go stale -- a visible 0.0001
+    # discrepancy in a quote rather than a rejected payout.
+    #
+    # INERT UNTIL A PAIR IS ENABLED, which ALLOWED_PAIRS' own ICP comment explains is
+    # not two pairs but ten.
+    ICP_NETWORK_FEE_RESERVE = _env_float("ICP_NETWORK_FEE_RESERVE", "0.0001")
     # ClassVar annotations: these are shared configuration read by every
     # request, not per-instance defaults. Config is never instantiated --
     # app.py copies its uppercase attributes into app.config -- so the
@@ -480,43 +510,29 @@ class Config:
         ("LTC", "BTC"),
         ("XRP", "BTC"),
         ("XRP", "LTC"),
-        # ICP IS DELIBERATELY ABSENT FROM THIS SET, and the reason is this set's own
-        # invariant rather than a missing prerequisite.
+        # ICP IS NOT IN THIS SET YET, AND THE REASON IS A COUNT I GOT WRONG.
         #
-        # Everything a pair needs is in place for ICP -> GRC, checked 2026-10-06 and
-        # not assumed: chains/registry builds the ICP adapter when
-        # ICP_LEDGER_CANISTER_ID and ICP_OWNER_PRINCIPAL are set (own_address()
-        # returned the account `dfx ledger account-id` prints, get_balance() 1000.0,
-        # chain_fee() 0.0001 from icrc1_fee()); both price feeds carry ICP, each
-        # confirmed by a 200 with a price, agreeing within 0.16%; and the reserve is
-        # the TO asset's, which for that direction is GRC_NETWORK_FEE_RESERVE and
-        # exists.
+        # Everything a pair needs is in place in BOTH directions, measured rather than
+        # argued: payouts (chains/icp.send_to_address via the ledger's legacy `transfer`
+        # -- 0.25 ICP moved on the local replica, desk 1000.0 -> 999.7499, and the same
+        # created_at_time returned the same block index and moved nothing); deposits
+        # (find_deposits_to_address reads query_blocks, one event per Transfer keyed on
+        # the block index, Mints excluded, archived ranges refused); creation
+        # (DB_ALLOCATED_DEPOSIT_ASSETS allocates the subaccount in SQL inside the swap's
+        # transaction); a USD price on both feeds; and ICP_NETWORK_FEE_RESERVE below.
         #
-        # BUT THIS SET IS SYMMETRIC AND COMPLETE, and that is enforced:
-        # tests/test_allowed_pairs_are_serviceable asserts every pair's reverse is
-        # present "with no table it can be silenced through", and that the count is
-        # exactly len(assets) * (len(assets) - 1). Both were tightened on 2026-10-04
-        # when the operator enabled all twenty directions, which SUPERSEDED the
-        # one-direction precedent SOL -> GRC set a few days earlier.
+        # WHAT I TOLD THE OPERATOR WAS THAT ("ICP","GRC") AND ("GRC","ICP") COULD GO IN
+        # TOGETHER AND THE INVARIANT WOULD HOLD. That is false.
+        # tests/test_allowed_pairs_are_serviceable computes the expected count as
+        # len(assets) * (len(assets) - 1) over the assets PRESENT IN THIS SET, so adding
+        # ICP makes it six assets and THIRTY ordered pairs. Two is not a legal increment;
+        # ten is -- ICP against BTC, GRC, LTC, SOL and XRP, both ways.
         #
-        # So ICP cannot go in one direction, and the other direction cannot settle:
-        # chains/icp.py send_to_address() raises because icrc1_transfer takes an
-        # ICRC-1 Account (principal plus optional subaccount) while a customer gives a
-        # 64-hex ACCOUNT IDENTIFIER, which is SHA224 over that pair and cannot be
-        # inverted. Paying an arbitrary account identifier needs the ICP ledger's
-        # LEGACY `transfer` method, which takes the 64-hex form directly and is not
-        # wired.
-        #
-        # Adding both directions today would take a customer's GRC and strand it
-        # against a payout path that raises -- strictly worse than refusing the pair,
-        # and the same shape as the GRC -> XRP failure recorded above. Adding one
-        # direction would break the symmetry invariant, and adding an exemption table
-        # to permit it is the patch rule 19 forbids by name.
-        #
-        # WHAT UNBLOCKS IT: the legacy `transfer` call in chains/icp.py, exercised once
-        # against the local replica. Then both directions go in together and the
-        # invariant holds. That is a payout path, so it is live posture and the
-        # operator's to authorize (rule 16).
+        # All ten are serviceable by the gate's own criteria (every destination has a
+        # reserve, every asset has a price, the adapters exist when configured). But
+        # going from "enable both pairs" to enabling ten is a five-fold posture change on
+        # an instruction that was echoing my own wrong framing, so it waits for a word
+        # that knows the real number (rule 16).
         # SOL -> GRC, enabled 2026-10-01 at the operator's request. ONE DIRECTION ONLY, and
         # the asymmetry is the whole point rather than an oversight.
         #
