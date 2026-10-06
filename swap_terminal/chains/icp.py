@@ -66,17 +66,13 @@ import subprocess
 
 from .coin_amounts import amount_to_base_units
 from .icp_account import (
+    ICP_DECIMALS,
     PrincipalRefused,
     account_identifier,
     is_account_identifier,
     principal_to_bytes,
     subaccount_from_index,
 )
-
-#: ICP is 8 decimals (e8s). Named here for readability at the call sites below;
-#: coin_amounts.CHAIN_DECIMALS is the table, and the ledger confirmed 8 via
-#: icrc1_decimals on 2026-10-06.
-ICP_DECIMALS = 8
 
 #: What `dfx canister call` prints for a nat: digits with underscore separators and
 #: a candid type suffix, e.g. `(100_000_000_000 : nat)`. Matched rather than
@@ -206,8 +202,14 @@ def dfx_transport(service: str, timeout: float):
     return call
 
 
-def _transfer_operation(block: dict) -> dict | None:
+def transfer_operation(block: dict) -> dict | None:
     """The Transfer record inside one query_blocks block, or None.
+
+    PUBLIC, and it started private. chains/payout_on_chain.py reads it too -- the payout
+    read-back asks the same question of the same reply shape as the deposit scan -- and a
+    name two modules import is not a private name. The alternative was a second copy of
+    these three shape assumptions in that file, which is rule 8's defect with the amount
+    of a payout riding on it.
 
     WHY THIS IS A FUNCTION AND NOT THREE LINES INLINE: it is where every shape
     assumption about the ledger's reply lives, and rule 10 puts a decision somewhere
@@ -507,7 +509,7 @@ class ICPAdapter:
             index = str(first + offset)
             if index in skip_txids:
                 continue
-            transfer = _transfer_operation(block)
+            transfer = transfer_operation(block)
             if transfer is None:
                 continue
             if bytes(transfer.get("to") or []) != target:

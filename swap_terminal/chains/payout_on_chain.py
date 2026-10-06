@@ -100,6 +100,8 @@ from script_pub_key import pays_address
 
 from .base import RPCError
 from .coin_amounts import CHAIN_DECIMALS
+from .icp import transfer_operation
+from .icp_account import ICP_DECIMALS
 from .solana import SolanaRPCError, native_delta_lamports
 from .solana_units import SOL_DECIMALS, base_units_to_amount
 from .xrp import XRPRPCError
@@ -285,9 +287,82 @@ def _delivered_solana(adapter, asset: str, txid: str, address: str) -> ChainAmou
 #: the bug). The two tables are deliberately keyed the same way, because a chain
 #: this terminal can quantize for and cannot read back is a gap worth seeing --
 #: tests/test_correct_payout_amounts.py asserts the two key sets are identical.
+def _delivered_icp(adapter, asset: str, txid: str, address: str) -> ChainAmount:
+    """ICP: the e8s the ledger recorded as delivered, from the block the txid names.
+
+    THE TXID IS A BLOCK INDEX, which makes this the cheapest read-back of the five: no
+    scan, no balance subtraction, no versioned-transaction hazard. query_blocks(start=N,
+    length=1) returns exactly the block whose number the payout row holds, and the
+    Transfer inside it carries the amount the ledger actually moved.
+
+    THE DESTINATION IS CHECKED, and that is the whole point rather than a formality. A
+    payout row pairs a block index with an address; if the block at that index paid
+    SOMEBODY ELSE, the row does not describe the payment it claims, and reporting its
+    amount anyway would write a confident figure about the wrong transaction. So a
+    mismatch is a refusal naming both accounts, not an amount.
+
+    A MINT IS NOT A PAYOUT either, for the same reason it is not a deposit: block 0 of a
+    freshly initialized ledger is a Mint, and a payout row pointing at one is a row that
+    is wrong about something.
+
+    ARCHIVED BLOCKS ARE A REFUSAL. An old payout's block will have migrated to an
+    archive canister, and the ledger then answers with an empty `blocks` and the range in
+    `archived_blocks`. Reading an archive is not implemented, so this says so -- a
+    corrected amount derived from a block nobody read would be the
+    wrong-number-under-the-right-label failure correct_payout_amounts.py exists to
+    remove, with VERIFIED as the label.
+    """
+    index = str(txid).strip()
+    if not index.isdigit():
+        return ChainAmount(None, (
+            f"{asset} payout txid {txid!r} is not a block index. ICP has no transaction hashes -- "
+            f"the closest thing is the ledger block number `transfer` returns -- so a non-numeric "
+            f"value here is a row written by something that did not know that"
+        ))
+    page = adapter._call_json(
+        "query_blocks", f"(record {{ start = {index} : nat64; length = 1 : nat64 }})"
+    )
+    archived = page.get("archived_blocks") or []
+    blocks = page.get("blocks") or []
+    if not blocks:
+        if archived:
+            return ChainAmount(None, (
+                f"{asset} block {index} has migrated to an archive canister ({len(archived)} range(s) "
+                f"reported), and reading an archive is not implemented. The amount is UNREAD rather "
+                f"than derived: a figure from a block nobody read would carry the label VERIFIED"
+            ))
+        return ChainAmount(None, (
+            f"the {asset} ledger returned no block at index {index} (chain_length "
+            f"{page.get('chain_length')!r}), so nothing was read. This is not a zero amount"
+        ))
+    transfer = transfer_operation(blocks[0])
+    if transfer is None:
+        return ChainAmount(None, (
+            f"{asset} block {index} holds no Transfer operation -- a Mint or Burn, or an absent "
+            f"operation. A payout row pointing at one is wrong about something, so no amount is "
+            f"reported from it"
+        ))
+    paid_to = bytes(transfer.get("to") or []).hex()
+    if paid_to != address.strip().lower():
+        return ChainAmount(None, (
+            f"{asset} block {index} paid {paid_to} and this payout row names {address}. The row does "
+            f"not describe that block, so its amount is NOT this payout's: reporting it would write a "
+            f"confident figure about somebody else's transaction"
+        ))
+    e8s = int((transfer.get("amount") or {}).get("e8s", 0))
+    return ChainAmount(
+        e8s / 10**ICP_DECIMALS,
+        f"read from the {asset} ledger: query_blocks block {index}, Transfer.amount.e8s = {e8s}",
+    )
+
+
 READERS = dict.fromkeys(CHAIN_DECIMALS, _delivered_bitcoin_family) | {
     "XRP": _delivered_xrp,
     "SOL": _delivered_solana,
+    # ICP is listed rather than derived, matching chains/payout_quantization.QUANTIZERS
+    # and for the same reason: its ledger takes and reports integer e8s, so it is not in
+    # CHAIN_DECIMALS and the fromkeys() above does not reach it.
+    "ICP": _delivered_icp,
 }
 
 

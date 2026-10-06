@@ -91,7 +91,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
-from chains import solana_address, xrp_address
+from chains import icp_account, solana_address, xrp_address
 from modules.address_network import (
     BASE58_VERSION_ASSETS,
     BASE58_VERSIONED_HASH160_LEN,
@@ -465,12 +465,62 @@ def _solana(address: str) -> AddressVerdict:
     )
 
 
+def _icp(address: str) -> AddressVerdict:
+    """The ICP verdict, delegated to chains/icp_account.py, which owns that encoding.
+
+    AN ICP ACCOUNT IDENTIFIER CARRIES A CHECKSUM, unlike Solana's, so this is a real
+    check rather than a length test: 64 hex characters whose leading 4 bytes are the
+    CRC32 of the remaining 28. A truncated or mistyped identifier fails it, which on a
+    payout path is the difference between an error and funds sent somewhere
+    unrecoverable.
+
+    THE NETWORK IS NOT_EXPRESSED, AND THAT IS A PROPERTY OF ICP RATHER THAN A GAP. An
+    account identifier is a hash; nothing in it says which network it belongs to, and
+    ICP has no testnet to distinguish from mainnet in the first place (DFINITY's own
+    documentation: "there is no testnet for ICP"). So the burn-proofing the Bitcoin
+    family gets from a version byte and XRP gets from its own encoding has no ICP
+    analogue -- said out loud here, because an operator reading VALID for an ICP address
+    is entitled to know it is a weaker statement about WHERE than the same word for
+    Bitcoin.
+
+    A PRINCIPAL IS REFUSED, and it is the likely paste error: `ybr6p-5dyeb-...` is an
+    identity, not a ledger address, and the two are different lengths over different
+    alphabets. The message names the distinction rather than saying "invalid", because
+    an operator holding both needs to know which one they pasted.
+    """
+    raw = address.strip() if isinstance(address, str) else ""
+    if icp_account.is_account_identifier(raw):
+        return AddressVerdict(
+            VALID,
+            f"{raw!r}: 64-hex ICP account identifier, CRC32 checksum verified locally with no network "
+            f"call. NOTE: an account identifier is a SHA224 hash and expresses NO network, and ICP has "
+            f"no testnet, so this says nothing about mainnet-versus-anything",
+            NOT_EXPRESSED,
+        )
+    if icp_account.is_principal(raw):
+        return AddressVerdict(
+            INVALID,
+            f"{raw!r} is a PRINCIPAL, not an ICP ledger address. A principal names an identity; the "
+            f"ledger is paid at an ACCOUNT IDENTIFIER, which is 64 hex characters derived from a "
+            f"principal and a subaccount by SHA224 -- and the derivation is one-way, so a principal "
+            f"cannot be converted here. Get the account identifier instead (`dfx ledger account-id`)",
+            NOT_EXPRESSED,
+        )
+    return AddressVerdict(
+        INVALID,
+        f"{address!r} is not an ICP account identifier: it is not 64 hex characters whose leading 4 "
+        f"bytes are the CRC32 of the remaining 28. A truncated copy-paste fails exactly here, which is "
+        f"the point -- the length-and-alphabet test alone would accept it",
+        UNKNOWN,
+    )
+
+
 # THE AUTHORITY. Asset -> the one function that knows that asset's address format.
 #
 # Every entry DELEGATES to the module that already owns the encoding rather than
 # reimplementing it (rule 8). Nothing in this file decodes anything itself: the Bitcoin
-# family reads modules/address_network.py's tables, XRP reads chains/xrp_address.py and SOL
-# reads chains/solana_address.py. That is deliberate -- a second implementation of an
+# family reads modules/address_network.py's tables, XRP reads chains/xrp_address.py, SOL
+# reads chains/solana_address.py and ICP reads chains/icp_account.py. That is deliberate -- a second implementation of an
 # encoding would agree with the first on the day it was written and drift from then on, and
 # the drift would be invisible until a payout burned.
 #
@@ -483,6 +533,7 @@ VALIDATORS: dict[str, Callable[[str], AddressVerdict]] = {
     "GRC": lambda address: _bitcoin_family("GRC", address),
     "XRP": _xrp,
     "SOL": _solana,
+    "ICP": _icp,
 }
 
 

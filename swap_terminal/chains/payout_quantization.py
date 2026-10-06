@@ -290,6 +290,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from .coin_amounts import CHAIN_DECIMALS, amount_to_base_units, fit_to_chain_precision
+from .icp_account import ICP_DECIMALS
 from .solana_units import SOL_DECIMALS, base_units_to_amount
 from .xrp_units import DROPS_PER_XRP, from_drops, to_drops
 
@@ -365,6 +366,35 @@ def _quantize_solana(amount: float, asset: str) -> tuple[float, str]:
     )
 
 
+def _quantize_icp(amount: float, asset: str) -> tuple[float, str]:
+    """ICP: whatever chains/icp.ICPAdapter.send_to_address() will put in the e8s field.
+
+    IT MIRRORS _quantize_solana AND NOT THE BITCOIN FAMILY, and the distinction is the
+    one chains/coin_amounts.CHAIN_DECIMALS draws: that table covers the chains whose RPC
+    takes a DECIMAL, and its own test asserts it covers exactly those. ICP's ledger does
+    not -- the legacy `transfer` takes `amount = record { e8s = N : nat64 }`, an integer,
+    exactly as Solana takes lamports. I added ICP to CHAIN_DECIMALS first, to get the
+    quantizer derived for free, and that test refused it: the table would then have
+    claimed something false about the interface.
+
+    EIGHT DECIMALS, CONFIRMED BY ASKING rather than inferred from the name "e8s":
+    icrc1_decimals() -> (8 : nat8) on the deployed ledger, 2026-10-06.
+
+    The conversion is amount_to_base_units() in both places, so this and the adapter
+    cannot disagree -- the property this whole module depends on (rule 8).
+    """
+    base_units = amount_to_base_units(amount, ICP_DECIMALS)
+    quantized = base_units_to_amount(base_units, ICP_DECIMALS)
+    if quantized == amount:
+        return amount, ""
+    return quantized, (
+        f"{asset} sends integer e8s, so {amount!r} is {base_units} e8s = {quantized!r} "
+        f"{asset} -- truncated DOWN by {Decimal(str(amount)) - Decimal(str(quantized))} {asset}, "
+        f"inheriting chains/coin_amounts.amount_to_base_units()'s direction so the desk never "
+        f"sends more than it quoted"
+    )
+
+
 #: asset -> the function that answers "what will this terminal hand this chain".
 #:
 #: THE BITCOIN FAMILY IS DERIVED FROM CHAIN_DECIMALS rather than listed, so a
@@ -380,6 +410,10 @@ def _quantize_solana(amount: float, asset: str) -> tuple[float, str]:
 QUANTIZERS = dict.fromkeys(CHAIN_DECIMALS, _quantize_bitcoin_family) | {
     "XRP": _quantize_xrp,
     "SOL": _quantize_solana,
+    # ICP is listed, not derived, for the reason _quantize_icp's docstring gives: its
+    # ledger takes integer e8s, so it does not belong in CHAIN_DECIMALS and cannot be
+    # picked up by the fromkeys() above.
+    "ICP": _quantize_icp,
 }
 
 

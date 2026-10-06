@@ -180,6 +180,16 @@ SUBACCOUNT_BYTES = 32
 #: vector the tests reach for first.
 DEFAULT_SUBACCOUNT = bytes(SUBACCOUNT_BYTES)
 
+#: ICP is 8 decimals -- e8s. CONFIRMED by asking the deployed ledger
+#: (icrc1_decimals -> (8 : nat8), 2026-10-06) rather than inferred from the name.
+#:
+#: IT LIVES HERE AND NOT IN chains/icp.py, which is where it started. That module
+#: imports subprocess for the dfx transport, and chains/payout_quantization.py is pure
+#: arithmetic that must not pull a process launcher in to learn a number -- the same
+#: circular-and-heavyweight import problem that module's own header records for
+#: SOL_DECIMALS. This file imports nothing but hashlib, base64 and zlib.
+ICP_DECIMALS = 8
+
 #: A principal is at most 29 bytes. The limit is in the interface specification
 #: and in ic-py's own MAX_LENGTH_IN_BYTES; it is asserted here so that a string
 #: that base32-decodes to something absurd is refused by LENGTH before anything
