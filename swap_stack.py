@@ -73,6 +73,7 @@ from config import Config  # noqa: E402
 
 from swap_terminal.stack_authority import (  # noqa: E402
     STACK_PORTS,
+    container_id,
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
@@ -133,9 +134,26 @@ def report_listeners() -> list[dict]:
         except OSError:
             cmdline = ""
         verdict, reason = stray_verdict(cmdline, REPO_ROOT)
+        # A CONTAINERIZED LISTENER OVERRIDES THE CMDLINE VERDICT, because a host path
+        # can never appear in its argv -- docker/web.Dockerfile puts this repository
+        # at /app, so stray_verdict()'s repo_root substring test cannot ever pass for
+        # it and it reads FOREIGN. Measured on the live host: the gunicorn on 5101 is
+        # THIS project's, in a container `docker compose ps` does not list, and the
+        # lever is `docker stop <id>` rather than a pid. See container_id().
+        try:
+            inside = container_id(Path(f"/proc/{pid}/cgroup").read_text())
+        except OSError:
+            inside = None
+        if inside and verdict != "refused":
+            verdict = "container"
+            reason = (
+                f"in container {inside}, which `docker compose ps` above does not list -- so it "
+                f"belongs to no compose project this stack names. Stop it with `docker stop {inside}`, "
+                f"after `docker inspect {inside}` names it"
+            )
         found.append({
             "port": port, "pid": pid, "verdict": verdict, "reason": reason,
-            "cmdline": cmdline.replace("\0", " ").strip(),
+            "cmdline": cmdline.replace("\0", " ").strip(), "container": inside,
         })
     return found
 
@@ -147,9 +165,10 @@ def print_listeners(found: list[dict]) -> None:
             f"{', '.join(str(p) for p in sorted(STACK_PORTS))} <- a result, not a blank")
         return
     for row in found:
-        label = {"ours": "OURS", "foreign": "FOREIGN", "refused": "CHAIN DAEMON", "owner unknown": "UNKNOWN"}[
-            row["verdict"]
-        ]
+        label = {
+            "ours": "OURS", "foreign": "FOREIGN", "refused": "CHAIN DAEMON",
+            "container": "IN A CONTAINER", "owner unknown": "UNKNOWN",
+        }[row["verdict"]]
         say(f"  {label:<17} :{row['port']} pid={row['pid']}  {STACK_PORTS[row['port']]}")
         if row.get("reason"):
             say(f"                    {row['reason']}")

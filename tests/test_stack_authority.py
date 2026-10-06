@@ -29,6 +29,7 @@ from pathlib import Path
 
 from swap_terminal.stack_authority import (
     NEVER_STOPPED,
+    container_id,
     hex_port,
     listening_inodes,
     pids_owning_inodes,
@@ -151,3 +152,57 @@ def test_the_absence_proof_is_a_BIND(tmp_path):
         assert port_is_free(port) is False, "a port with a listener on it is not free"
 
     assert port_is_free(port) is True, "and it is free once the holder is closed"
+
+
+# --- a listener inside a container, which the cmdline test cannot classify
+
+
+def test_a_containerized_process_is_recognized_by_its_cgroup_not_its_path():
+    """The defect this fixes, measured on the live host within an hour of shipping it.
+
+    stray_verdict() called the listener on 127.0.0.1:5101 FOREIGN -- "may be an
+    unrelated program that legitimately holds this port". Its command line was
+
+        /usr/local/bin/python3 /usr/local/bin/gunicorn -c /app/gunicorn.conf.py wsgi:app
+
+    which is THIS project's gunicorn inside a container: docker/web.Dockerfile puts
+    the repository at /app. The action (do not kill) was right and the reason was
+    wrong, which rule 16 treats as seriously as wrong code -- an operator reading
+    "unrelated program" would leave a copy of their own stack running on the belief
+    that it was somebody else's.
+
+    A host path can NEVER appear in that argv, so no amount of tuning the repo_root
+    substring test reaches it. The kernel's cgroup line is the answer, and it also
+    gives the operator the right lever: `docker stop <id>`, not a pid.
+    """
+    v2 = "0::/system.slice/docker-3f8a1b2c4d5e6f70819a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70.scope\n"
+    assert container_id(v2) == "3f8a1b2c4d5e"
+
+    v1 = (
+        "12:pids:/docker/3f8a1b2c4d5e6f70819a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70\n"
+        "11:memory:/docker/3f8a1b2c4d5e6f70819a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70\n"
+    )
+    assert container_id(v1) == "3f8a1b2c4d5e"
+
+
+def test_a_host_process_has_no_container_id():
+    """The negative case, which is what makes the positive one mean anything.
+
+    A plain systemd cgroup and a bare `0::/` must both read None -- if this returned
+    an id for a host process, every worker would be reported as containerized and
+    the operator would be told to `docker stop` a pid on their own machine.
+    """
+    assert container_id("0::/user.slice/user-1000.slice/session-3.scope\n") is None
+    assert container_id("0::/\n") is None
+    assert container_id("") is None
+
+
+def test_something_that_merely_mentions_docker_is_not_a_container_id():
+    """The id has to look like one. A cgroup path naming a docker.service is not a container.
+
+    Without the hex-and-length check this would return "service" or similar and the
+    report would print `docker stop service`, which is worse than saying nothing:
+    it is an instruction that fails in a way nobody can interpret.
+    """
+    assert container_id("0::/system.slice/docker.service\n") is None
+    assert container_id("0::/system.slice/docker-short.scope\n") is None

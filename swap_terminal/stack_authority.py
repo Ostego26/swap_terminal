@@ -86,6 +86,9 @@ STACK_PORTS = {
 #: command line, because a command line can contain a daemon's name for innocent
 #: reasons -- `tail -f bitcoind.log` must not be treated as bitcoind, and a grep
 #: for the pattern would be.
+#: What docker prints for a container id, and what this file prints to match it.
+_SHORT_ID_LENGTH = 12
+
 NEVER_STOPPED = {
     "bitcoind": "holds the BTC wallet this desk spends from; stopping it is the operator's",
     "litecoind": "holds the LTC wallet this desk spends from; stopping it is the operator's",
@@ -208,6 +211,45 @@ def stray_verdict(cmdline: str, repo_root: Path) -> tuple[str, str]:
         "nothing in its command line names this repository, so this file will not stop it -- "
         "it may be an unrelated program that legitimately holds this port"
     )
+
+
+def container_id(cgroup: str) -> str | None:
+    """The container id out of a /proc/<pid>/cgroup body, or None for a host process.
+
+    WHY THIS EXISTS, and it is a defect in stray_verdict() measured within an hour
+    of shipping it. On the live host 2026-10-06, the listener on 127.0.0.1:5101 was:
+
+        /usr/local/bin/python3 /usr/local/bin/gunicorn -c /app/gunicorn.conf.py wsgi:app
+
+    stray_verdict() called it FOREIGN -- "nothing in its command line names this
+    repository, so this file will not stop it -- it may be an unrelated program that
+    legitimately holds this port." The ACTION was right and the REASON was wrong,
+    which rule 16 calls a bug of the same seriousness as wrong code: that is this
+    project's own gunicorn, inside a container, and `/app` is where
+    docker/web.Dockerfile puts this repository. A host path could never appear in
+    its argv, so the repo_root substring test cannot ever pass for it.
+
+    It is invisible to `docker compose ps` because it belongs to no compose project
+    this stack names -- a leftover from a `docker run` or an earlier project name.
+    So the operator needs a DIFFERENT lever than a pid: `docker stop <id>`, and the
+    id is the thing worth printing.
+
+    The cgroup line is read rather than the command line because it is the kernel's
+    own answer to "is this pid in a container", where a path like /app is a guess
+    that a host directory named /app would satisfy by accident.
+
+    Both layouts are handled: cgroup v2 writes
+    `0::/system.slice/docker-<64hex>.scope` and v1 writes `.../docker/<64hex>`.
+    Returns the first twelve characters, which is what docker itself prints.
+    """
+    for line in cgroup.splitlines():
+        for marker in ("docker-", "docker/", "containerd-", "libpod-"):
+            if marker in line:
+                tail = line.rsplit(marker, 1)[1]
+                ident = tail.split(".")[0].strip("/")
+                if len(ident) >= _SHORT_ID_LENGTH and all(c in "0123456789abcdef" for c in ident):
+                    return ident[:_SHORT_ID_LENGTH]
+    return None
 
 
 def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
