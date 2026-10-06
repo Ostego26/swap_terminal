@@ -95,6 +95,7 @@ from services import pricing
 from services.pair_view import pair_serviceability
 from services.pricing import IDS
 from services.quote_service import create_quote
+from services.swap_service import get_min_confirmations
 from valid_addresses import GRC_PAYOUT, xrp_family_seed
 from workers.common import get_config_dict
 
@@ -506,14 +507,25 @@ def test_the_four_directions_the_operator_asked_for_are_enabled(pair):
     )
 
 
-def test_the_pair_set_is_exactly_twenty_of_twenty_over_five_assets():
+def test_the_pair_set_is_EVERY_ordered_pair_of_the_assets_it_carries():
     """The denominator, asserted rather than written in a comment somewhere (rule 3).
 
-    MEASURED 2026-10-04: 5 traded assets, 20 ordered pairs, 20 in
-    Config.ALLOWED_PAIRS. Stated as a product of the asset count rather than as a
-    literal 20, so adding a sixth asset makes this fail with arithmetic a reader can
-    follow -- a bare `== 20` would have to be found and edited, and a count whose
-    denominator is not stated beside it is the error rule 3 names.
+    RENAMED 2026-10-06, because the name and the first line of this docstring had
+    gone false while the assertion stayed true. They said "twenty of twenty over five
+    assets" and "MEASURED 2026-10-04: 5 traded assets, 20 ordered pairs"; ICP was
+    enabled on 2026-10-06 and the real numbers are:
+
+        6 traded assets, 30 ordered pairs, 30 in Config.ALLOWED_PAIRS
+
+    The body passed throughout, because it was written as a PRODUCT of the asset
+    count rather than a literal -- which is the thing that worked here and is worth
+    keeping. What failed is the part a reader trusts at a glance: rule 16's wrong
+    comment, in a test name, where it is read more often than the code under it. The
+    name no longer carries a count at all, so the next asset cannot falsify it.
+
+    Stated as a product rather than a literal 30 for the original reason: a bare
+    `== 30` would have to be found and edited, and a count whose denominator is not
+    stated beside it is the error rule 3 names.
 
     WHY A COUNT AT ALL, when the symmetry test above covers the shape: because
     symmetry holds for a smaller set too. Sixteen of twenty was symmetric on
@@ -525,6 +537,63 @@ def test_the_pair_set_is_exactly_twenty_of_twenty_over_five_assets():
     expected = len(assets) * (len(assets) - 1)
     assert len(Config.ALLOWED_PAIRS) == expected, (
         f"Config.ALLOWED_PAIRS holds {len(Config.ALLOWED_PAIRS)} of the {expected} ordered pairs over "
-        f"its {len(assets)} assets {sorted(assets)}. Every direction was enabled on 2026-10-04, so a "
+        f"its {len(assets)} assets {sorted(assets)}. Every direction was enabled -- the five-asset set on "
+        f"2026-10-04 and ICP's ten pairs on 2026-10-06 -- so a "
         f"shortfall means one was removed -- which is live posture and belongs to the operator"
+    )
+
+
+# --- the FOURTH requirement, which this file's own header did not list until now
+
+
+@pytest.mark.parametrize("asset", sorted({asset for pair in Config.ALLOWED_PAIRS for asset in pair}))
+def test_every_tradeable_asset_has_a_RESOLVABLE_min_confirmations(asset):
+    """A pair whose SOURCE asset has no `<ASSET>_MIN_CONFIRMATIONS` cannot create a swap.
+
+    THE DEFECT THIS WOULD HAVE CAUGHT, measured 2026-10-06 hours after the ten ICP
+    pairs were enabled and before any ICP deposit was attempted:
+
+        BTC  -> min_confirmations 2
+        GRC  -> min_confirmations 6
+        LTC  -> min_confirmations 2
+        SOL  -> min_confirmations 3
+        XRP  -> min_confirmations 1
+        ICP  -> KeyError: 'ICP_MIN_CONFIRMATIONS'   <- create_swap raised HERE
+
+    Every ICP -> * swap creation raised. The quote priced, the form offered the
+    direction, and the POST failed. No money was at risk -- the route catches it and
+    writes no swap row -- but five of the ten new pairs were dead and the only thing
+    that would have reported it was a customer trying one.
+
+    WHY THIS FILE AND NOT A NEW ONE (rule 8). Its header already enumerates what a
+    pair needs beyond ALLOWED_PAIRS membership -- an adapter, a USD price, a fee
+    reserve -- and says "CONFIG.ALLOWED_PAIRS IS NOT ENOUGH TO ENABLE A PAIR, and
+    this tree has learned that twice the expensive way." This is the third time and
+    the fourth requirement, so it belongs on that list rather than in a file of its
+    own that a reader of this one would never find.
+
+    IT CALLS THE REAL RESOLVER THROUGH A FLASK-SHAPED CONFIG, which is the only way
+    it catches anything. `hasattr(Config, f"{asset}_MIN_CONFIRMATIONS")` would pass
+    on a value that is not an int; asserting against a hand-written asset list is the
+    defect fixed in test_show_payout_fees.py this morning. So the asset list is
+    DERIVED from ALLOWED_PAIRS -- a seventh asset is covered the moment it is
+    enabled, without this file being edited -- and the config is built the way Flask
+    builds app.config, by copying UPPERCASE attributes, because that dict is what
+    get_min_confirmations() actually indexes at runtime.
+    """
+    flask_config = {name: getattr(Config, name) for name in dir(Config) if name.isupper()}
+    try:
+        threshold = get_min_confirmations(flask_config, asset)
+    except KeyError as missing:
+        raise AssertionError(
+            f"{asset} is in Config.ALLOWED_PAIRS and has no {missing} -- so every {asset} -> * swap "
+            f"creation raises KeyError at services/swap_service.get_min_confirmations(). The quote "
+            f"prices and the POST fails. Set it from the chain's own finality, not from a preference: "
+            f"a chain with no reorg is 1 (XRP, ICP), and a depth is a risk choice (BTC 2, GRC 6)"
+        ) from missing
+
+    assert isinstance(threshold, int), f"{asset}'s threshold is {type(threshold).__name__}, not an int"
+    assert threshold >= 1, (
+        f"{asset}_MIN_CONFIRMATIONS is {threshold}. Zero would credit a deposit the chain has not "
+        f"included in anything, which is a payout against money that can still disappear"
     )

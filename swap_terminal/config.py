@@ -407,6 +407,44 @@ class Config:
     # INERT UNTIL A PAIR IS ENABLED, which ALLOWED_PAIRS' own ICP comment explains is
     # not two pairs but ten.
     ICP_NETWORK_FEE_RESERVE = _env_float("ICP_NETWORK_FEE_RESERVE", "0.0001")
+
+    # WITHOUT THIS, EVERY ICP -> * SWAP CREATION RAISED KeyError. Measured
+    # 2026-10-06, before any ICP deposit was attempted:
+    #
+    #     BTC  -> min_confirmations 2
+    #     GRC  -> min_confirmations 6
+    #     LTC  -> min_confirmations 2
+    #     SOL  -> min_confirmations 3
+    #     XRP  -> min_confirmations 1
+    #     ICP  -> KeyError: 'ICP_MIN_CONFIRMATIONS'   <- create_swap raised HERE
+    #
+    # services/swap_service.get_min_confirmations() is
+    # `int(config[f"{asset}_MIN_CONFIRMATIONS"])` against app.config, which Flask
+    # fills from this class's UPPERCASE attributes -- so a missing attribute is a
+    # missing key. The ten ICP pairs were enabled hours earlier and the source side
+    # could not create a swap at all. No money was at risk (the route catches it and
+    # no swap row is written), but the pair was dead and nothing said so.
+    #
+    # WHY NOTHING CAUGHT IT. tests/test_icp_swap_creation.py calls
+    # allocate_db_deposit_address() directly and never create_swap() with ICP as
+    # from_asset -- the piece, not the path. Same gap as this morning's compose-path
+    # defect, in a different file: every ICP measurement was taken on the component.
+    # The gate added in tests/test_allowed_pairs_are_serviceable.py closes it for
+    # every future asset rather than for this one.
+    #
+    # 1 BECAUSE THE LEDGER IS FINAL AT ONE BLOCK, not as a risk preference. ICP has
+    # no reorg and no mempool: a transfer is final when the ledger returns a block
+    # index. Same reasoning and same value as XRP, for the same reason, and unlike
+    # BTC's 2 or GRC's 6 which ARE risk preferences an operator may tune.
+    #
+    # NOT THE SAME NUMBER AS chains/icp.py's deposit_confirmations(), WHICH ALSO
+    # RETURNS 1 (rule 8: two implementations that genuinely differ get the
+    # difference named at BOTH sites). That one is the OBSERVED count for a deposit
+    # the watcher found; this is the count REQUIRED before crediting. They coincide
+    # for ICP and are different quantities, which is why the adapter does not read
+    # this value -- if it did, raising this to 5 would make observed 5 and required 5
+    # and credit instantly anyway, silently defeating the knob.
+    ICP_MIN_CONFIRMATIONS = _env_int("ICP_MIN_CONFIRMATIONS", "1")
     # ClassVar annotations: these are shared configuration read by every
     # request, not per-instance defaults. Config is never instantiated --
     # app.py copies its uppercase attributes into app.config -- so the
