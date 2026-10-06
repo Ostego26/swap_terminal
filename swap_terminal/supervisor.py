@@ -122,7 +122,39 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Where pid files live. Overridable so a test can point it at a temp directory,
 # and so an operator can put it on a tmpfs. Kept out of git by .gitignore.
-DEFAULT_RUN_DIR = BASE_DIR / "runtime"
+#
+# IT READS ST_WORKER_RUN_DIR, AND UNTIL 2026-10-06 IT DID NOT. That omission is
+# rule 13's exact failure -- a spawn whose reaper cannot find it -- and it was
+# measured on the operator's live host, not reasoned about:
+#
+#   docker-compose.web.yml:133   ST_WORKER_RUN_DIR: /runtime
+#   docker/web_workers_entrypoint.py:70   RUN_DIR = getenv("ST_WORKER_RUN_DIR", ...)
+#   supervisor.py (here)         BASE_DIR / "runtime"   <- read no variable at all
+#
+# So inside the web container the ENTRYPOINT wrote its three pid files to
+# /runtime while THIS MODULE looked in /app/swap_terminal/runtime. One variable,
+# honored by the spawner and ignored by the reaper. What that produced, pasted
+# from the live host:
+#
+#   stopped   deposit_watcher pid=None  no pid file
+#   stopped   payout_worker   pid=None  no pid file
+#   stopped   reconcile_worker pid=None  no pid file
+#   *** ORPHAN *** deposit_watcher is ALIVE at pid 8 with no pid file naming it
+#   *** ORPHAN *** payout_worker is ALIVE at pid 9 with no pid file naming it
+#   *** ORPHAN *** reconcile_worker is ALIVE at pid 10 with no pid file naming it
+#   summary   running=0/3
+#
+# The supervisor called its OWN container's entrypoint-started workers orphans,
+# and reported running=0/3 with three workers polling. The /proc walk is what
+# saved it: unaccounted_workers() found them anyway and said so in capitals,
+# which is the only reason this was visible at all rather than a `stop` that
+# printed success having touched nothing. Rule 13's "a stop that cannot prove it
+# worked is not a stop" -- here the proof came from the scan and contradicted the
+# pid files, which is the loudest possible version of the same defect.
+#
+# The host is unaffected: ST_WORKER_RUN_DIR is unset there, so the default is
+# the same path it always was. Only the container's two halves now agree.
+DEFAULT_RUN_DIR = Path(os.environ.get("ST_WORKER_RUN_DIR") or BASE_DIR / "runtime")
 
 # How long a worker gets to exit on SIGTERM before SIGKILL. Seconds, because
 # signal.alarm-style waits and time.monotonic() arithmetic are an interface,

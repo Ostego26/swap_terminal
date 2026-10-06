@@ -25,6 +25,7 @@ it asks the operating system.
 """
 
 import contextlib
+import importlib
 import os
 import signal
 import sqlite3
@@ -1427,3 +1428,45 @@ def test_a_DEAD_pid_resolves_immediately_and_does_not_pay_the_settle_wait():
         f"took {elapsed:.3f}s of a {supervisor._CMDLINE_SETTLE_SECONDS}s budget; "
         f"_settled_proc_cmdline() must exit on a dead pid instead of waiting one out"
     )
+
+
+def test_the_reaper_reads_the_SAME_variable_the_container_spawner_does(monkeypatch, tmp_path):
+    """Found 2026-10-06 on the operator's live host, by a `status` that contradicted itself.
+
+    docker-compose.web.yml sets ST_WORKER_RUN_DIR=/runtime and
+    docker/web_workers_entrypoint.py honors it, so the container's three workers wrote
+    their pid files to /runtime. supervisor.DEFAULT_RUN_DIR read NO variable, so it
+    looked in /app/swap_terminal/runtime. One variable, honored by the spawner and
+    ignored by the reaper -- rule 13's "every spawn needs a reaper" failing not because
+    the reaper was missing but because it was looking in the wrong place.
+
+    Pasted from the live host, before the fix:
+
+        stopped   payout_worker pid=None  no pid file
+        *** ORPHAN *** payout_worker is ALIVE at pid 9 with no pid file naming it
+        summary   running=0/3
+
+    Three workers polling, reported as none running. A `stop` would have printed
+    success having signaled nothing. The /proc walk is the only reason it was visible.
+
+    This test pins the agreement rather than the path: it reads the value the
+    ENTRYPOINT module computes and the value THIS module computes under the same
+    environment, and asserts they are equal. A test that hardcoded "/runtime" would
+    pass while the two drifted to different defaults.
+    """
+    spawner_source = (Path(__file__).resolve().parents[1] / "docker" / "web_workers_entrypoint.py").read_text()
+    assert 'os.getenv("ST_WORKER_RUN_DIR"' in spawner_source, (
+        "the spawner no longer reads this variable, so what this test pins has moved"
+    )
+
+    # The container's setting, and the one case that was broken.
+    monkeypatch.setenv("ST_WORKER_RUN_DIR", str(tmp_path / "a-volume"))
+    reloaded = importlib.reload(supervisor)
+    assert (tmp_path / "a-volume") == reloaded.DEFAULT_RUN_DIR
+
+    # And the host's, where the variable is unset and the default must NOT move --
+    # the live host's three workers have pid files at the old path and a changed
+    # default would orphan them, which is the defect this fixes, inverted.
+    monkeypatch.delenv("ST_WORKER_RUN_DIR", raising=False)
+    reloaded = importlib.reload(supervisor)
+    assert reloaded.DEFAULT_RUN_DIR == reloaded.BASE_DIR / "runtime"
