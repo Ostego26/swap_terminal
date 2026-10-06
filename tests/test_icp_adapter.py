@@ -197,9 +197,15 @@ def test_underscores_in_the_candid_nat_are_parsed():
 # -- the path that moves money ---------------------------------------------
 
 
-#: A deterministic nanosecond timestamp. NOT time.time_ns() -- the whole point of
-#: this field is that it must NOT come from a clock, so a test that read one would
-#: be testing the hazard rather than the fix.
+#: A fixed nanosecond timestamp, used because these tests never reach a ledger: the
+#: same value twice is what dedup needs, and reading a clock here would test the
+#: hazard rather than the fix.
+#:
+#: IT IS NOT A USABLE KEY AGAINST A REAL LEDGER, and that distinction cost a live
+#: attempt. This exact constant is 2025-10-06 and the replica refused it with
+#: TxTooOld / allowed_window_nanos = 86_400_000_000_000 -- 24 hours. A real caller
+#: passes the swap's RECORDED CREATION TIME: a real timestamp, captured once, reused
+#: on every retry. See send_to_address's docstring.
 FIXED_NANOS = 1_759_700_000_000_000_000
 
 OK_BLOCK = "(variant { Ok = 42 : nat64 })"
@@ -291,6 +297,7 @@ def test_the_amount_and_the_timestamp_are_carried_exactly():
     ("(variant { Err = variant { BadFee = record { expected_fee = record { e8s = 10_000 : nat64 } } } })", "BadFee"),
     ("(variant { Err = variant { InsufficientFunds = record { balance = record { e8s = 1 : nat64 } } } })", "NOT established"),
     ("(variant { Err = variant { TxDuplicate = record { duplicate_of = 7 : nat64 } } })", "TxDuplicate"),
+    ("(variant { Err = variant { TxTooOld = record { allowed_window_nanos = 86_400_000_000_000 : nat64 } } })", "24h"),
     ("", "NOT established"),
 ])
 def test_anything_but_a_block_index_raises_and_does_not_claim_nothing_moved(reply, needle):

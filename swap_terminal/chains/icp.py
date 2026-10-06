@@ -446,13 +446,36 @@ class ICPAdapter:
         asked for one. It refuses and reports what the ledger said instead.
 
         created_at_time IS THE IDEMPOTENCY KEY AND THE DEFAULT IS THE DANGEROUS ONE.
-        The ledger deduplicates on (from, to, amount, fee, memo, created_at_time)
-        within a 24-hour window and returns TxDuplicate carrying the ORIGINAL block
-        index. With created_at_time null the ledger stamps its own time, so two
-        identical calls are two different transactions and a retry after a timeout
-        DOUBLE-PAYS. A caller that may retry -- which is every payout worker -- must
-        pass a value derived from the swap rather than from a clock, and then a retry
-        is answered with the first transfer's block index instead of sending again.
+        The ledger deduplicates on (from, to, amount, fee, memo, created_at_time) and
+        returns TxDuplicate carrying the ORIGINAL block index. With created_at_time
+        null the ledger stamps its own time, so two identical calls are two different
+        transactions and a retry after a timeout DOUBLE-PAYS.
+
+        IT MUST BE A REAL TIMESTAMP WITHIN 24 HOURS OF LEDGER TIME, and this
+        paragraph used to get that wrong. It said to pass "a value derived from the
+        swap rather than from a clock", which read as licence to use any
+        swap-deterministic number. The first attempt used a fixed constant and the
+        ledger refused it outright, measured on the local replica 2026-10-06:
+
+            Err = variant { TxTooOld = record {
+              allowed_window_nanos = 86_400_000_000_000 : nat64 } }
+
+        86_400_000_000_000ns is 24 hours. The constant was a year in the past, so it
+        was not merely non-idempotent -- it could not be sent at all. Nothing moved.
+
+        So the key is the swap's RECORDED CREATION TIME: real time, captured once
+        when the swap row was written, and reused unchanged on every retry. That
+        satisfies both constraints at once -- the same value on a retry gives dedup,
+        and a value from when the swap was created is inside the window for any swap
+        being paid promptly. What it must NOT be is `time.time_ns()` at send time,
+        because that is a different number on every retry, which is the double-pay
+        case wearing the shape of a fix.
+
+        THE COROLLARY IS A REAL LIMIT, not a detail: a swap whose recorded creation
+        time is more than 24 hours old CANNOT be paid idempotently through this
+        field. The ledger will refuse with TxTooOld, and whoever pays it has to
+        decide between a fresh key (no dedup protection) and not paying -- which is a
+        live-posture decision and does not belong in this adapter.
 
         None is still the default because this signature has to match what the payout
         path calls today, and silently inventing a key from a clock would be the same
@@ -492,7 +515,11 @@ class ICPAdapter:
         raise ICPCallFailed(
             f"transfer of {amount} ICP ({e8s} e8s, fee {fee_e8s} e8s) to {address} did not return a "
             f"block index. Whether anything moved is NOT established by this message -- read the "
-            f"ledger's reply: {out.strip()[:400]!r}. A `TxDuplicate` means an earlier identical "
-            f"transfer already happened and carries its block index; a `BadFee` names the fee the "
-            f"ledger expects and is NOT retried here, because a retry is a second send."
+            f"ledger's reply: {out.strip()[:400]!r}. Reading the three errors that carry an "
+            f"instruction: `TxDuplicate` means an earlier IDENTICAL transfer already happened and "
+            f"its block index is in the reply -- treat that as success, not as a failure to retry. "
+            f"`BadFee` names the fee the ledger expects and is NOT retried here, because a retry is "
+            f"a second send. `TxTooOld` means created_at_time is outside the ledger's window "
+            f"(86_400_000_000_000ns = 24h): the key must be a REAL timestamp near now, so a swap "
+            f"older than a day cannot be paid idempotently through it at all."
         )
