@@ -51,7 +51,19 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DFX_JSON = REPO_ROOT / "dfx.json"
+
+#: The dfx project lives in icp/, not at the repository root. It was at the root
+#: for two commits and moved on 2026-10-06 for a measured reason -- a root dfx.json
+#: forced the replica container to bind-mount individual FILES, and a single-file
+#: bind mount follows the inode, so `git pull` left the container reading a
+#: dfx.json that no longer existed. icp/Cargo.toml's header carries the numbers.
+#:
+#: Derived, not duplicated: PROJECT_DIR is the directory holding dfx.json, and
+#: every path below resolves against it, so the one invariant dfx actually
+#: enforces (`cargo locate-project` finds a manifest in dfx.json's OWN directory)
+#: is asserted wherever the project happens to live.
+DFX_JSON = REPO_ROOT / "icp" / "dfx.json"
+PROJECT_DIR = DFX_JSON.parent
 
 
 def dfx_project() -> dict:
@@ -67,11 +79,11 @@ def workspace_members() -> list[Path]:
     what is missing and what dfx will do about it -- not three collateral
     FileNotFoundErrors in helpers (rule 14: the message is the deliverable).
     """
-    manifest = REPO_ROOT / "Cargo.toml"
+    manifest = PROJECT_DIR / "Cargo.toml"
     if not manifest.is_file():
         return []
     root = tomllib.loads(manifest.read_text())
-    return [REPO_ROOT / member for member in root.get("workspace", {}).get("members", [])]
+    return [PROJECT_DIR / member for member in root.get("workspace", {}).get("members", [])]
 
 
 def member_manifests() -> list[tuple[str, Path]]:
@@ -139,14 +151,14 @@ def test_each_declared_candid_file_exists(canister, spec):
     """dfx reads this file to install the interface; a missing one fails mid-deploy."""
     declared = spec.get("candid")
     assert declared, f"canister {canister!r} declares no 'candid' file"
-    path = REPO_ROOT / declared
+    path = PROJECT_DIR / declared
     assert path.is_file(), f"canister {canister!r} declares candid {declared!r}; no such file"
 
 
 def test_every_workspace_member_has_a_manifest():
     """A member path with no Cargo.toml makes every cargo command in the tree fail."""
     missing = [
-        str(d.relative_to(REPO_ROOT)) for d in workspace_members() if not (d / "Cargo.toml").is_file()
+        str(d.relative_to(PROJECT_DIR)) for d in workspace_members() if not (d / "Cargo.toml").is_file()
     ]
     assert not missing, f"workspace members with no Cargo.toml: {missing}"
 
@@ -166,7 +178,7 @@ def test_no_workspace_member_declares_a_profile():
     offenders = []
     for name, manifest in member_manifests():
         if "profile" in tomllib.loads(manifest.read_text()):
-            offenders.append(f"{manifest.relative_to(REPO_ROOT)} (package {name})")
+            offenders.append(f"{manifest.relative_to(PROJECT_DIR)} (package {name})")
     assert not offenders, (
         "these workspace members declare [profile.*], which Cargo ignores with only "
         f"a warning -- move the settings to the root Cargo.toml: {offenders}"
@@ -217,7 +229,7 @@ def test_every_init_arg_file_is_git_ignored():
         # suppress nothing and RUF100 said exactly that (rule 19: a suppression is
         # a claim you checked something, not decoration).
         result = subprocess.run(
-            ["git", "check-ignore", "-q", path],
+            ["git", "check-ignore", "-q", str((PROJECT_DIR / path).relative_to(REPO_ROOT))],
             cwd=REPO_ROOT,
             capture_output=True,
             check=False,

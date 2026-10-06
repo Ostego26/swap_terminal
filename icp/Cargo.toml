@@ -1,0 +1,78 @@
+# THE CARGO WORKSPACE FOR THE CANISTERS. It sits in icp/, beside dfx.json, because
+# that is where dfx needs it -- not because this is a Rust project. The terminal is
+# Python and SQL and stays that way; everything Rust in this repository is under
+# this directory.
+#
+# Role: build manifest (no code of its own)
+# Reads: <canister>/Cargo.toml for every member listed below
+# Writes: icp/target, icp/Cargo.lock
+# Can move funds: no
+# Mainnet-safe: yes
+#
+# WHY IT IS HERE, IN icp/, BESIDE dfx.json -- AND WHY IT WAS AT THE REPOSITORY
+# ROOT FOR TWO COMMITS. Both halves are measured, and the second measurement
+# reversed the first.
+#
+# The constraint that has not changed: dfx's Rust builder shells out to
+# `cargo locate-project` from the directory that contains dfx.json, and
+# locate-project walks PARENTS only -- it never descends. So this manifest must
+# sit in dfx.json's own directory or above it. The first deploy died exactly
+# there:
+#
+#   Caused by: The pre-build all step failed
+#   Caused by: 'cargo locate-project' failed: error: could not find `Cargo.toml`
+#             in `/repo` or any parent directory
+#
+# WHAT THIS HEADER USED TO SAY, kept because the drift is the point (rule 1):
+# "Moving dfx.json down to icp/ would fix that and break the thing rule 10 asks
+# for: dfx.json is what an operator runs `dfx deploy` against, so it is an entry
+# point and belongs at the root where it is found by looking. So the manifest
+# comes up to meet it."
+#
+# THAT WAS WRONG, AND THE WAY IT FAILED IS THE ARGUMENT. Keeping dfx.json at the
+# repository root meant the replica container had to bind-mount three individual
+# FILES -- dfx.json, Cargo.toml, Cargo.lock -- because the root also holds the
+# Python tree and a Solana keypair, so mounting it wholesale is not an option. A
+# single-file bind mount follows the INODE, and `git pull` does not edit a file in
+# place: it writes a new one and renames it over the old. Measured on the live
+# host 2026-10-06, after a pull that added the ledger canister:
+#
+#     container  /repo/dfx.json   inode 40898326   259 bytes   grep -c icp_ledger_canister -> 0
+#     host       ./dfx.json       inode 40898329   704 bytes   grep -c icp_ledger_canister -> 1
+#
+# The container had been reading a dfx.json that no longer existed on disk, and
+# the only symptom was `dfx deploy icp_ledger_canister` reporting "Canister
+# 'icp_ledger_canister' not found in dfx.json" about a file that plainly declared
+# it. Nothing crashed, nothing warned, and it would have recurred on EVERY pull
+# -- which is rule 13's shape, and rule 13's own instruction: verify the artifact,
+# not the deploy.
+#
+# An operator never types `./dfx.json`; they type `docker compose ... dfx deploy`.
+# It is a config file read by a tool, not a runnable entry point, so rule 10 was
+# never asking for it at the root. With both files in icp/, the mount is a
+# DIRECTORY (./icp:/repo:ro), which cannot go stale this way, and the ICP project
+# is self-contained under one path -- which is what was asked for.
+#
+# MEMBERS ARE LISTED EXPLICITLY, not globbed as "icp/*". A glob would make a new
+# canister arrive in the build the moment somebody created a directory, and the
+# set of things that hold threshold keys is exactly the set that should cost a
+# deliberate line in a tracked file.
+[workspace]
+members = ["threshold_custody"]
+resolver = "2"
+
+# THE RELEASE PROFILE LIVES HERE AND NOWHERE ELSE, and that is forced rather than
+# chosen. Cargo ignores `[profile.*]` in a workspace MEMBER and only warns about
+# it ("profiles for the non root package will be ignored"), so leaving these
+# three lines in threshold_custody/Cargo.toml -- where they were written, and
+# where they worked while that crate was standalone -- would have silently
+# reverted the canister to the default release profile the moment this file
+# landed. Measured across exactly that change: 376425 bytes before, and the same
+# 376425 after, because the settings were moved in the same commit that created
+# the workspace. A canister pays for its own size in cycles at install time and
+# lives inside a module-size limit, which is why the profile is tuned at all.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

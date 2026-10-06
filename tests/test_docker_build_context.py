@@ -363,3 +363,77 @@ def test_no_two_overlay_files_require_different_variables_of_each_other():
         f"which is how `docker compose up -d abstergo` came to fail on a Gridcoin "
         f"datadir variable. Move that service to its own overlay file."
     )
+
+
+def bind_mounts() -> list[tuple[str, str, str]]:
+    """(compose file, service, the mount spec) for every host-path bind mount.
+
+    Named volumes are excluded by the leading-dot test: a source beginning with
+    "." is a path on the host, anything else is a volume name. Only the former can
+    have the inode problem below.
+    """
+    found = []
+    for compose in COMPOSE_FILES:
+        spec = load_compose(compose)
+        for name, service in (spec.get("services") or {}).items():
+            for mount in service.get("volumes") or []:
+                if isinstance(mount, str) and mount.startswith("."):
+                    found.append((compose.name, name, mount))
+                elif isinstance(mount, dict) and str(mount.get("source", "")).startswith("."):
+                    found.append((compose.name, name, f"{mount['source']}:{mount.get('target')}"))
+    return found
+
+
+def test_no_compose_file_bind_mounts_a_single_file():
+    """A single-file bind mount follows the INODE and goes stale on every `git pull`.
+
+    A CLEAN GATE, not a baseline (rule 19): the count asserted is zero.
+
+    MEASURED ON THE LIVE HOST, 2026-10-06. docker-compose.icp.yml mounted
+    ./dfx.json, ./Cargo.toml and ./Cargo.lock individually, because dfx.json was
+    at the repository root and the root cannot be mounted wholesale -- it holds the
+    Python tree and a Solana keypair. Then a pull added a canister to dfx.json:
+
+        container  /repo/dfx.json  inode 40898326  259 bytes  grep -c icp_ledger_canister -> 0
+        host       ./dfx.json      inode 40898329  704 bytes  grep -c icp_ledger_canister -> 1
+
+    `git pull` does not edit a file in place. It writes a new file and renames it
+    over the old, so the inode changes and a file bind mount keeps resolving to the
+    inode it captured at container start. The container had been reading a
+    dfx.json that no longer existed on disk.
+
+    THE ONLY SYMPTOM was `dfx deploy icp_ledger_canister` reporting "Canister
+    'icp_ledger_canister' not found in dfx.json" -- about a file that plainly
+    declared it. Nothing crashed, nothing warned, and it would have recurred on
+    every single pull. That is rule 13's shape, and rule 13's own instruction is
+    the fix: verify the artifact, not the deploy.
+
+    The resolution was structural -- dfx.json and the Cargo workspace moved into
+    icp/ so the mount is a directory, which resolves names on each access. This
+    gate exists because the next person to need "just one config file" in a
+    container will reach for exactly the mount that broke, and nothing about it
+    looks wrong.
+
+    IT CHECKS THE FILESYSTEM, not the spelling. A path is a file or it is not, and
+    a name that merely looks like one ("./icp" has no extension and is a
+    directory; "./docker-compose.web.yml" has three dots and is a file) cannot be
+    told apart any other way. A source that does not exist is reported too: a
+    bind mount Docker would silently create as an empty directory is its own
+    defect, and scoring it as a pass is what rule 17 calls examining nothing.
+    """
+    mounts = bind_mounts()
+    assert mounts, (
+        "no compose file in this repository bind-mounts a host path at all, so this test "
+        "checked NOTHING (rule 17)"
+    )
+    offenders = []
+    for compose, service, mount in mounts:
+        source = REPO_ROOT / mount.split(":")[0]
+        if source.is_file():
+            offenders.append(f"{compose}:{service} mounts the FILE {mount}")
+        elif not source.exists():
+            offenders.append(f"{compose}:{service} mounts {mount}, which does not exist on the host")
+    assert not offenders, (
+        "single-file bind mounts go stale on `git pull` because they follow the inode -- mount "
+        "the containing DIRECTORY instead:\n" + "\n".join(f"  {line}" for line in offenders)
+    )

@@ -16,6 +16,6 @@ serde = { version = "1", features = ["derive"] }
 # NO `[profile.release]` HERE. It used to be, and it worked while this crate was
 # standalone; the workspace manifest at the repository root took it over because
 # Cargo IGNORES a profile declared in a workspace member and only warns. The
-# settings and the measurement live at ../../Cargo.toml -- this comment exists so
+# settings and the measurement live at ../Cargo.toml -- this comment exists so
 # a reader who comes looking for opt-level in the crate that needs it is sent to
 # the one place it can take effect (rule 8: the difference belongs at both sites).

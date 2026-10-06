@@ -22,41 +22,49 @@ services:
     # write there, and a container that can rewrite the repository is one whose
     # output nobody can attribute.
     volumes:
-      - "./icp:/repo/icp:ro"
-      - "./dfx.json:/repo/dfx.json:ro"
-
-      # THE WORKSPACE MANIFEST AND ITS LOCK, and they are mounted because dfx
-      # cannot build without them: its Rust builder runs `cargo locate-project`
-      # from the directory holding dfx.json -- /repo -- and `locate-project`
-      # walks parents only. The first deploy in this container died exactly
-      # there ("could not find `Cargo.toml` in `/repo` or any parent
-      # directory"), with the canister already created, which is the shape rule
-      # 13 warns about: a step that got far enough to look like it worked.
-      - "./Cargo.toml:/repo/Cargo.toml:ro"
-
-      # :ro ON THE LOCK IS DELIBERATE AND IS A CHECK, not caution. The lock is
-      # complete, so a build that resolves cleanly never writes it; a build that
-      # WANTS to write it is telling you the container resolved different
-      # versions than the host did, and failing on "Read-only file system"
-      # reports that out loud instead of producing a canister built from
-      # dependencies no committed file names.
-      - "./Cargo.lock:/repo/Cargo.lock:ro"
-
-      # BUILD OUTPUT AND PROJECT STATE IN NAMED VOLUMES, for two different
-      # reasons, neither of which is speed alone.
+      # ONE DIRECTORY, NOT FOUR FILES, and that is the whole fix for a defect
+      # measured on the live host 2026-10-06. This block used to mount ./icp plus
+      # ./dfx.json, ./Cargo.toml and ./Cargo.lock individually, because dfx.json
+      # was at the repository root and the root cannot be mounted wholesale -- it
+      # holds the Python tree and a Solana keypair.
       #
-      # target/: a workspace puts it at the workspace root, which is the mounted
-      # /repo. Without a volume here it lands in the container's own layer and
-      # every `compose up` after a `down` pays a full cold rebuild of candid and
-      # ic-cdk -- 24.3s measured on the host for this one small canister, and
-      # this is the first of several.
+      # A SINGLE-FILE BIND MOUNT FOLLOWS THE INODE. `git pull` does not edit a
+      # file in place; it writes a new one and renames it over the old, so the
+      # inode changes and the mount keeps showing the file that was there when the
+      # container started. Measured after a pull that added the ledger canister:
+      #
+      #   container  /repo/dfx.json  inode 40898326  259 bytes  grep -c icp_ledger_canister -> 0
+      #   host       ./dfx.json      inode 40898329  704 bytes  grep -c icp_ledger_canister -> 1
+      #
+      # The only symptom was `dfx deploy icp_ledger_canister` reporting "Canister
+      # 'icp_ledger_canister' not found in dfx.json" about a file that declares
+      # it. Nothing crashed and nothing warned, and it would have recurred on
+      # every pull -- rule 13, and rule 13's own answer: verify the artifact, not
+      # the deploy. A directory mount resolves names on each access and cannot go
+      # stale this way.
+      #
+      # READ-ONLY on the source, and that is the point rather than caution. The
+      # replica needs to SEE the project to build a canister from it; it has no
+      # reason to write there, and a container that can rewrite the repository is
+      # one whose output nobody can attribute.
+      - "./icp:/repo:ro"
+
+      # BUILD OUTPUT AND PROJECT STATE IN NAMED VOLUMES, mounted INSIDE the
+      # read-only bind above -- Docker layers mounts, so these two paths are
+      # writable while everything else under /repo is not.
+      #
+      # target/: the workspace root is /repo, so cargo puts it there. Without a
+      # volume it lands in the container's own layer and every `compose up` after
+      # a `down` pays a full cold rebuild of candid and ic-cdk -- 59.6s measured
+      # in the container for this one small canister, and it is the first of
+      # several.
       #
       # .dfx/: canister ids live in .dfx/<network>/canister_ids.json while the
-      # replica's own state lives under /state. Those two have to survive
-      # together or they disagree: a recreated container would hold a replica
-      # that still hosts bkyz2-fmaaa-aaaaa-qaaaq-cai beside a project that has
-      # forgotten the name, and `dfx deploy` would create a SECOND canister
-      # rather than upgrade the one holding the key.
+      # replica's own state lives under /state. Those two have to survive together
+      # or they disagree: a recreated container would hold a replica that still
+      # hosts bkyz2-fmaaa-aaaaa-qaaaq-cai beside a project that has forgotten the
+      # name, and `dfx deploy` would create a SECOND canister rather than upgrade
+      # the one holding the key.
       - "icp-target:/repo/target"
       - "icp-dfx:/repo/.dfx"
       - "icp-state:/state"
