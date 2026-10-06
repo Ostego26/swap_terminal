@@ -48,6 +48,21 @@ been exercised against the real released ICP ledger on the local replica --
 icrc1_balance_of, icrc1_fee, icrc1_decimals and icrc1_symbol all answered, and
 the balance agreed with the account identifier this repository derived.
 
+MEASURED THROUGH THIS CLASS, 2026-10-06, which is a different claim from "the
+ledger answered". build_adapters(Config.RPC)["ICP"] with the two variables set,
+against the deployed ledger on the local replica:
+
+    ledger        bkyz2-fmaaa-aaaaa-qaaaq-cai
+    own_address() a0263999...6c12042     identical to `dfx ledger account-id`
+    get_balance() 1000.0 ICP             from (100_000_000_000 : nat)
+    chain_fee()   0.0001 ICP             from icrc1_fee(), (10_000 : nat)
+    deposit_address(1)                   eecc42b3...25eb4d, != own_address()
+
+So the whole path is exercised: the dfx subprocess transport, the underscore-
+separated candid nat regex, the e8s division, and the derivation agreeing with the
+IC's own tooling. Everything before this run went through a seeded transport, which
+proves the parsing against text I wrote rather than text dfx emits.
+
 WHAT ICP DOES NOT HAVE, and where each one is handled:
 
   confirmations   a transfer is final when the ledger returns a block index. There
