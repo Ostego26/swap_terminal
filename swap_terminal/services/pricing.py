@@ -126,6 +126,30 @@ IDS = {
     "LTC": "litecoin",
     "GRC": "gridcoin-research",
     "XRP": "ripple",
+    # ICP added 2026-10-06. The CoinGecko id is "internet-computer" -- the project's
+    # name, not the ticker, exactly as every line above it.
+    #
+    # LOOKED UP, NOT DERIVED, and the lookup is why. From the operator's host:
+    #
+    #     /api/v3/search?query=internet computer
+    #       internet-computer | Internet Computer | ICP | rank 56
+    #
+    # The naming pattern would have produced the same string this time, which is
+    # luck rather than method: the sibling CoinPaprika search returned
+    # `ict-internet-computer-technology` (rank 0) one row below the real asset, and
+    # services/coinpaprika.py's own header records three ids written from the
+    # pattern that were wrong. A near-name that prices SOMETHING is the dangerous
+    # case, because it does not 404.
+    #
+    # WHAT IS STILL UNCONFIRMED about this one, said plainly (rule 17): the id came
+    # from /search, not from /simple/price. That distinction is not pedantic here --
+    # _coingecko_raw() joins every id in this table into ONE batch request, so an id
+    # this endpoint does not know makes the response PARTIAL, and the missing-asset
+    # refusal below turns that into "no quote for any pair", not "no quote for ICP".
+    # The CoinPaprika sibling IS confirmed to price ($3.444476013739092, market cap
+    # $1,919,453,868 on 2026-10-06), and on the operator's host CoinPaprika is the
+    # feed that actually answers -- see _coingecko_raw()'s header for the 403.
+    "ICP": "internet-computer",
     # SOL added 2026-09-29. The CoinGecko id is "solana" -- the project's name, not the
     # ticker, exactly as every line above it. "sol" would 404 and surface as a missing-price
     # refusal rather than an error naming this table.

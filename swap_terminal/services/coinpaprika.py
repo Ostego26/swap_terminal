@@ -92,6 +92,33 @@ PAPRIKA_IDS = {
     "LTC": "ltc-litecoin",
     "GRC": "grc-gridcoin",
     "XRP": "xrp-xrp",
+    # ICP added 2026-10-06, CONFIRMED TO PRICE rather than confirmed to exist. From
+    # the operator's host:
+    #
+    #     /v1/search/?q=internet computer&c=currencies
+    #       icp-internet-computer            | Internet Computer            | ICP | rank 55
+    #       ict-internet-computer-technology | Internet Computer Technology | ICT | rank 0
+    #
+    #     /v1/tickers/icp-internet-computer
+    #       price    3.444476013739092
+    #       vol24h   86502337.58081645
+    #       mkt cap  1919453868
+    #
+    # THE SECOND SEARCH ROW IS THE WHOLE ARGUMENT for looking these up. `ict-...`
+    # is a rank-0 asset whose name begins with the same two words, and an id that
+    # prices the WRONG asset does not 404 -- it returns a number, and the number is
+    # used. The three ids above this line were each written from the naming pattern
+    # and each had to be corrected.
+    #
+    # The market cap is NON-ZERO, which matters beyond bookkeeping: GRC reports
+    # market_cap 0 from this feed, so services/market_context.turnover_finding()
+    # returns None and the thinness check is SILENTLY SKIPPED for it (see this
+    # module's header). ICP reports 1.92e9, so it gets the check GRC does not.
+    #
+    # ALSO NOTE: the search endpoint is /v1/search/ WITH the trailing slash. Without
+    # it the API answers 301 and a curl without -L yields HTML, which is how the
+    # first attempt at this lookup appeared to be a network block and was not.
+    "ICP": "icp-internet-computer",
     # NOTHING IN THIS TABLE IS UNCONFIRMED ANY MORE, and the last three moved for
     # the same reason in three steps. All three were written from CoinPaprika's
     # naming pattern rather than looked up. The first `--level` run on 2026-09-29

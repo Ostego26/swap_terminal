@@ -85,7 +85,15 @@ GRC_DERIVED_CAP = 7665794
 #: the walk below: a NEW id must be declared in one of these two sets, so it
 #: arrives either with its 200 recorded or with the marker. The loop is vacuous
 #: today and is one added id away from being the check again.
-MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP", "USDC", "USDT", "SOL"})
+#: ICP joined MEASURED on 2026-10-06, and it is measured in the strong sense this
+#: set means: `/v1/tickers/icp-internet-computer` returned a 200 carrying
+#: price 3.444476013739092, volume_24h 86502337.58081645 and market_cap
+#: 1919453868 from the operator's host -- not merely a search row saying the id
+#: exists. The search DID matter though: the row below the real asset was
+#: `ict-internet-computer-technology` at rank 0, and an id naming the wrong asset
+#: returns a number rather than a 404, which is the failure this whole set exists
+#: to make impossible to arrive quietly.
+MEASURED = frozenset({"BTC", "LTC", "GRC", "XRP", "USDC", "USDT", "SOL", "ICP"})
 UNCONFIRMED = frozenset()
 
 
