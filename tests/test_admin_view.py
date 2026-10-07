@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import pytest
 from chains.base import RPCAdapter
 from chains.bitcoin import BitcoinAdapter
+from config import Config
 from db import SCHEMA, dict_factory
 from services import admin_view
 from services.admin_view import (
@@ -841,3 +842,49 @@ def test_every_worker_the_supervisor_knows_has_a_consequence_written():
     missing = [name for name in worker_commands() if name not in WORKER_STOPPED_CONSEQUENCES]
 
     assert missing == [], f"these workers have no stopped-consequence written: {missing}"
+
+
+def test_every_tradeable_asset_has_an_attribution_model():
+    """A pair this terminal will QUOTE must be a pair it can tell a customer where to send.
+
+    THE DEFECT, measured 2026-10-07 on the first ICP swap this system ever
+    created -- s_2b89b9e979a194ce, ICP -> GRC. ICP had been in
+    Config.ALLOWED_PAIRS for hours and had no ATTRIBUTION_MODELS entry, so
+    swap_view.attribution_target() took its `.get(asset, "unknown")` fallback and
+    the customer page printed
+
+        Do not send anything yet. No deposit attribution model is recorded for ICP.
+
+    and then printed the deposit address anyway, eight rows lower in the Addresses
+    table. Two statements on one page disagreeing about whether it is safe to send
+    money, which the customer resolves by sending or by abandoning a swap the
+    system could service perfectly well.
+
+    WHY NOTHING CAUGHT IT, and this is the part worth fixing rather than the
+    instance. admin_view.chain_rows() builds its asset list as
+
+        {asset for pair in allowed for asset in pair} | set(ATTRIBUTION_MODELS)
+
+    -- a UNION. A missing model therefore produces a ROW, with the model half
+    blank, instead of an error: the one arrangement where an omission is
+    guaranteed to render and guaranteed not to fail. The existing gate above
+    checks the other direction (every address-model chain has a derivation), so
+    the half that broke was the only half unasserted.
+
+    Asserted against ALLOWED_PAIRS rather than a hardcoded list, so the next
+    chain admitted to a pair fails HERE, before a customer meets it (rule 19: fix
+    the cause, and the cause is that nothing compared these two tables).
+    """
+    tradeable = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    assert tradeable, "this test is worthless if no pair is allowed"
+    missing = sorted(tradeable - set(ATTRIBUTION_MODELS))
+    assert not missing, (
+        f"{missing} can be quoted but has no ATTRIBUTION_MODELS entry, so its customer page will say "
+        f"'No deposit attribution model is recorded' while printing the deposit address anyway. "
+        f"Add it to services/swap_view.ATTRIBUTION_MODELS, and if its model is 'address' add its "
+        f"ADDRESS_DERIVATIONS sentence too."
+    )
+    # And no asset may be in the table with a model attribution_target() cannot
+    # dispatch -- a typo there is the same page with the same two voices.
+    unroutable = sorted(a for a, m in ATTRIBUTION_MODELS.items() if m not in ("address", "tag"))
+    assert not unroutable, f"{unroutable} have a model attribution_target() does not handle"

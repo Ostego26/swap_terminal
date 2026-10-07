@@ -377,6 +377,33 @@ ATTRIBUTION_MODELS = {
     "BTC": "address",
     "LTC": "address",
     "GRC": "address",
+    # ICP IS ADDRESS-ATTRIBUTED, AND ITS ABSENCE HERE BROKE THE FIRST ICP SWAP
+    # EVER CREATED. Measured 2026-10-07 on s_2b89b9e979a194ce, ICP -> GRC, the
+    # first one: with no key here, attribution_target() fell through to
+    # `.get(asset, "unknown")` and the customer page printed
+    #
+    #     Do not send anything yet. No deposit attribution model is recorded for ICP.
+    #     How a ICP deposit is attributed to a swap is not described in this
+    #     application, so this page will not tell you where to send anything.
+    #
+    # and then printed the deposit address anyway, eight rows further down in the
+    # Addresses table. Two outputs on one page disagreeing about whether it is
+    # safe to send money -- rule 13's "skipped" beside "success", on the deposit
+    # path, where the customer resolves it by sending or by walking away.
+    #
+    # ADDRESS AND NOT TAG, established from the code rather than chosen: an ICP
+    # subaccount is 32 bytes the RECEIVER picks, so the customer is handed an
+    # ordinary 64-hex account identifier and there is no tag to forget -- that is
+    # services/icp_subaccount_service.py's own argument, and the uniqueness is
+    # enforced in SQL by icp_deposit_subaccounts' PRIMARY KEY plus db.py's
+    # CONSTRAINT icp_subaccount_is_allocatable, not by this table.
+    #
+    # Verified before changing what a customer is told, because the alternative is
+    # pointing them at an address nobody is watching (rule 17): ICPAdapter
+    # implements find_deposits_to_address, and deposit_service.refresh_swap_from_
+    # chain() is generic -- `adapters[asset].find_deposits_to_address(...)` -- so
+    # the watcher already scans these the same way it scans a Bitcoin address.
+    "ICP": "address",
     **dict.fromkeys(TAG_ATTRIBUTED_ASSETS, "tag"),
 }
 
@@ -399,6 +426,20 @@ ADDRESS_DERIVATIONS = {
     "BTC": "the daemon's `getnewaddress` -- an independent address whose key bitcoind stores in wallet.dat",
     "LTC": "the daemon's `getnewaddress` -- an independent address whose key litecoind stores in wallet.dat",
     "GRC": "the daemon's `getnewaddress` -- an independent address whose key the Gridcoin wallet stores in wallet.dat",
+    # ICP: NOT A KEY AT ALL, which is exactly the case this table was made
+    # per-asset to hold. The comment above predicted it -- "the first chain to
+    # join the model with any other derivation would turn one true sentence about
+    # three chains into a false sentence about a fourth" -- and ICP is that
+    # chain. There is no new keypair and nothing in a wallet.dat: the desk owns
+    # ONE principal, and each swap gets the next unused 32-byte subaccount index
+    # under it, allocated by one INSERT ... SELECT MAX(index)+1 in
+    # services/icp_subaccount_service.py. The 64 hex characters the customer sees
+    # are the account identifier that (owner principal, subaccount) hashes to.
+    "ICP": (
+        "the next unused subaccount index under the desk's single principal, allocated in SQL "
+        "(icp_deposit_subaccounts) -- NOT a new keypair, and nothing is stored in a wallet file. "
+        "Index 0 is the desk's own default subaccount and is never allocated to a swap"
+    ),
 }
 
 
@@ -435,6 +476,24 @@ def threshold_note(asset: str, threshold) -> str:
         return (
             f"{threshold} validated ledger -- the XRP Ledger does not reorganize, so there is no depth to "
             f"accumulate and no number of blocks to wait for"
+        )
+    # ICP, ADDED 2026-10-07 AFTER THIS FUNCTION DID THE THING IT EXISTS TO STOP.
+    # The first ICP swap's confirmation panel read "1 blocks must be mined on top
+    # of the deposit before a payout is released" -- the generic fallback below,
+    # which is false on ICP for the same reason it is false on XRP, and this
+    # docstring's whole argument is that printing one word over three different
+    # units is unit laundering arriving as a sentence (rule 6).
+    #
+    # chains/icp.py:50 states the semantics: "a transfer is final when the ledger
+    # returns a block index. There is nothing to wait for", and
+    # deposit_confirmations() returns a fixed 1 meaning FINAL rather than a depth
+    # that accumulates. So the number is a sentinel, not a count, and the sentence
+    # has to say so or the customer waits for a second block that cannot come.
+    if asset == "ICP":
+        return (
+            f"{threshold} and it means FINAL, not a depth -- an ICP transfer is settled the moment the "
+            f"ledger returns a block index for it, so there is nothing to accumulate and no second "
+            f"block to wait for"
         )
     return f"{threshold} blocks must be mined on top of the deposit before a payout is released"
 
