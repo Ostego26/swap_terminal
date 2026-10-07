@@ -280,7 +280,19 @@ services:
       # which is progress in diagnosis and not in capability. And an ICP PAYOUT needs
       # the desk's dfx identity, which lives in the replica container -- placing that
       # is key material and the operator's (rule 16).
-      ICP_DFX_NETWORK_URL: "${ICP_DFX_NETWORK_URL:-}"   # config.py default: "" (compose exec)
+      # DEFAULTED TO THE REPLICA HERE, unlike every other line in this block, and the
+      # asymmetry is the point: config.py's default is "" because the HOST can use
+      # the compose-exec transport, and inside this container that transport can
+      # never work. An empty value here would guarantee the failure the url exists to
+      # avoid, so the compose file supplies the value that is correct for the
+      # deployment it describes -- which is what a compose file is for.
+      #
+      # `icp-replica` resolves because both services are in this project with no
+      # `networks:` key anywhere in the three files, so both sit on the default
+      # compose network and service names resolve. The replica binds 0.0.0.0:4943
+      # (docker/icp-replica.Dockerfile CMD), not loopback, so it accepts the
+      # connection.
+      ICP_DFX_NETWORK_URL: "${ICP_DFX_NETWORK_URL:-http://icp-replica:4943}"
       # The destination-side reserve, needed the moment any *->ICP pair is enabled.
       # Passed now rather than then, for this block's standing reason: a variable
       # config.py reads and this file omits arrives UNSET in the container, so the

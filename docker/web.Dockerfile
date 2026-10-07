@@ -47,6 +47,55 @@ FROM python:3.12-slim-bookworm AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends dumb-init \
     && rm -rf /var/lib/apt/lists/*
 
+# dfx, SO THIS CONTAINER CAN REACH THE ICP LEDGER AT ALL.
+#
+# WHY IT IS HERE, measured 2026-10-06/07. Until now this stage installed only
+# dumb-init, and no compose file mounts /var/run/docker.sock -- so `docker` was
+# absent and chains/icp.py's original transport (`docker compose exec icp-replica
+# dfx ...`) could not run. The containerized deployment is the one that serves the
+# UI under gunicorn with nothing held in a terminal, which is what the operator
+# asked for three times in one sitting; it was also the one deployment where ICP
+# did not work.
+#
+# MOUNTING THE DAEMON SOCKET WOULD HAVE FIXED IT AND IS REFUSED. It hands a process
+# holding wallet RPC credentials control of the whole Docker daemon, which is a
+# larger grant than the problem. 03d09b2 added the alternative transport instead:
+# `dfx canister call --network http://icp-replica:4943`, which needs dfx in THIS
+# image and no docker at all. Set ICP_DFX_NETWORK_URL to use it.
+#
+# WHAT IT CAN AND CANNOT DO, measured on the operator's replica 2026-10-07 and not
+# reasoned about. With an anonymous identity:
+#
+#     dfx --identity anonymous canister call ... icrc1_fee '(record {})'
+#     (10_000 : nat)
+#
+# So READS need no identity, and every method the deposit side calls is a read --
+# query_blocks, icrc1_balance_of, icrc1_fee, account_identifier. ICP -> * therefore
+# works from this container with nothing moved.
+#
+# `transfer` DEBITS THE CALLER, so an ICP PAYOUT (* -> ICP) needs the desk's own dfx
+# identity, which exists only inside the replica container. NOTHING HERE MOVES IT,
+# and nothing here should: that is key material and the operator's (rule 16). No
+# identity is created, copied or mounted by this image.
+#
+# THE INSTALL IS THE SAME ONE docker/icp-replica.Dockerfile ALREADY USES, including
+# the version pin, rather than a second method (rule 8). Two ways of installing dfx
+# in one repository is two versions in one repository the first time one of them is
+# bumped, and "which dfx answered" is not a thing to debug a candid error against.
+# DFX_VERSION is an ARG at the same default for the same reason.
+#
+# libunwind8 and ca-certificates are dfx's, carried over from that file; curl is
+# needed by the installer and is NOT removed afterwards only because apt's lists
+# are, which is where the size is.
+ARG DFX_VERSION=0.24.3
+ENV DFXVM_INIT_YES=true
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libunwind8 \
+    && sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)" \
+    && apt-get purge -y curl && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/root/.local/share/dfx/bin:${PATH}"
+
 WORKDIR /app
 
 # PYTHONUNBUFFERED=1 because every one of these four processes is a progress report
