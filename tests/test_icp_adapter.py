@@ -583,3 +583,69 @@ def test_the_compose_files_the_transport_names_exist_from_ANY_directory(tmp_path
     # files (build contexts, the ./icp:/repo mount) against the process's directory.
     assert recorded["cwd"] == icp_module._REPO_ROOT
     assert (Path(recorded["cwd"]) / "docker-compose.yml").is_file()
+
+
+# --- the two transports, and which one a given deployment can use
+
+
+def _captured_argv(network_url, monkeypatch):
+    """Build a transport, call it, and return the argv it would have run."""
+    recorded = {}
+
+    def fake_run(argv, **kwargs):
+        recorded["argv"] = argv
+        recorded["cwd"] = kwargs.get("cwd")
+        raise AssertionError("argv captured")
+
+    monkeypatch.setattr(icp_module.subprocess, "run", fake_run)
+    call = icp_module.dfx_transport("icp-replica", 5.0, network_url)
+    with pytest.raises(AssertionError, match="argv captured"):
+        call("a-canister", "a_method", "()")
+    return recorded
+
+
+def test_the_URL_transport_runs_dfx_DIRECTLY_with_no_docker(monkeypatch):
+    """The transport the web container needs, because it has no docker at all.
+
+    Measured 2026-10-06/07: docker/web.Dockerfile's runtime stage installs only
+    dumb-init, and no compose file mounts /var/run/docker.sock. So the containerized
+    deployment -- the one that serves the UI under gunicorn with nothing held in a
+    terminal, which is what the operator asked for -- could not make an ICP call.
+    Mounting the daemon socket would fix it and must not be done: it hands a process
+    holding wallet RPC credentials control of the whole Docker daemon.
+
+    The asserted property is that `docker` appears NOWHERE in the argv, which is the
+    only thing that makes the call possible in that image -- and that no cwd is
+    pinned, because nothing is resolved relative to anything: dfx just opens an HTTP
+    connection to the url.
+    """
+    recorded = _captured_argv("http://icp-replica:4943", monkeypatch)
+    argv = recorded["argv"]
+
+    assert argv[0] == "dfx", argv
+    assert not any("docker" in element for element in argv), (
+        f"the url transport must not invoke docker; got {argv}"
+    )
+    assert "--network" in argv
+    assert argv[argv.index("--network") + 1] == "http://icp-replica:4943"
+    assert recorded["cwd"] is None, "nothing is resolved relative to a directory here"
+
+
+def test_the_COMPOSE_transport_is_unchanged_and_still_the_default(monkeypatch):
+    """An empty url keeps the transport that has actually been exercised live.
+
+    Empty by default on purpose: a plausible default is the dangerous kind here, and
+    the compose path is the one measured against this operator's replica -- the
+    0.25 ICP transfer, the idempotent retry, the block-based deposit read. Switching
+    transports silently on an unset variable would move every one of those onto a
+    path nothing has run.
+    """
+    recorded = _captured_argv("", monkeypatch)
+    argv = recorded["argv"]
+
+    assert argv[:2] == ["docker", "compose"], argv
+    assert "exec" in argv and "icp-replica" in argv
+    assert "--network" not in argv, "the compose transport reaches the replica by exec, not by url"
+    assert recorded["cwd"] == icp_module._REPO_ROOT, (
+        "compose resolves the relative paths INSIDE its files against the cwd"
+    )

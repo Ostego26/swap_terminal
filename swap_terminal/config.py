@@ -1083,5 +1083,25 @@ class Config:
             # takes the service; the container name gives "no such service".
             "service": _env("ICP_DFX_SERVICE", "icp-replica"),
             "timeout": _env_float("ICP_CALL_TIMEOUT", "60"),
+            # THE REPLICA'S URL, AND SETTING IT CHANGES WHICH TRANSPORT IS USED.
+            #
+            # Empty (the default) means `docker compose exec icp-replica dfx ...`,
+            # which needs docker on PATH and therefore only works from the HOST.
+            # Set, it means `dfx canister call --network <url>` run in this process,
+            # which is the only thing that can work from INSIDE the web container:
+            # docker/web.Dockerfile's runtime stage installs only dumb-init, and no
+            # compose file mounts /var/run/docker.sock.
+            #
+            # For the containerized deployment the value is the compose service name
+            # and the replica's port -- http://icp-replica:4943 -- not 127.0.0.1,
+            # which inside a container is the container's own loopback. That is the
+            # same mistake docker-compose.web.yml's own comment records about
+            # gunicorn's bind.
+            #
+            # EMPTY BY DEFAULT ON PURPOSE, for the reason the ICP entries above give:
+            # a plausible default is the dangerous kind. An unset value keeps the
+            # transport that has actually been exercised against this operator's
+            # replica rather than silently switching to one that has not.
+            "network_url": _env("ICP_DFX_NETWORK_URL"),
         },
     }

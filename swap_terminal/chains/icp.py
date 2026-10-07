@@ -192,8 +192,43 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILES = (_REPO_ROOT / "docker-compose.yml", _REPO_ROOT / "docker-compose.icp.yml")
 
 
-def dfx_transport(service: str, timeout: float):
-    """Return a `call(canister, method, argument) -> str` that runs dfx in compose.
+def dfx_transport(service: str, timeout: float, network_url: str = ""):
+    """Return a `call(canister, method, argument) -> str` that reaches the ledger.
+
+    TWO TRANSPORTS, CHOSEN BY `network_url`, because the one that works depends on
+    where this process is running -- and that is the whole reason this parameter
+    exists:
+
+      network_url set    `dfx canister call --network <url>` run IN THIS PROCESS's
+                         container or host. No docker needed, so a process with no
+                         docker CLI and no daemon socket can reach the replica over
+                         the compose network (`http://icp-replica:4943`).
+      network_url empty  `docker compose exec -T <service> dfx ...`, the original.
+                         Works from the host, where docker is on PATH.
+
+    WHY THE SECOND IS NOT ENOUGH, measured 2026-10-06/07. docker/web.Dockerfile's
+    runtime stage installs only dumb-init: no docker CLI, and no compose file mounts
+    /var/run/docker.sock. So the containerized deployment -- which is the one that
+    serves the UI under gunicorn with nothing in a terminal, and the one the operator
+    asked for three times -- could not make an ICP call at all. Mounting the daemon
+    socket would fix it and must not be done: it hands a process holding wallet RPC
+    credentials control of the whole Docker daemon.
+
+    WHAT THIS DOES NOT FIX, and it is the half that is not mine to decide: dfx in the
+    web image can READ the ledger with no identity (every method this adapter calls
+    for deposit detection -- query_blocks, icrc1_balance_of, icrc1_fee,
+    account_identifier -- is public), but `transfer` DEBITS THE CALLER, so an ICP
+    PAYOUT needs the desk's dfx identity, which currently exists only inside the
+    replica container. Placing that identity is key material and the operator's
+    (rule 16). Until then: ICP -> * works in either deployment, * -> ICP works only
+    where the identity is.
+
+    THAT READ/SEND SPLIT IS REASONED, NOT MEASURED, and the difference matters
+    (rule 17): it follows from the ledger's candid -- the query methods take no
+    caller and `transfer` has a `from_subaccount` resolved against the caller -- and
+    it has NOT been run against a replica with an anonymous identity from this
+    session, which has no replica. `verify_derivation()` is the cheapest thing that
+    would settle it: it calls only read methods.
 
     `service` is a COMPOSE SERVICE name (`icp-replica`), not a container name
     (`swap-icp-replica`). They differ in this project and `docker compose exec`
@@ -217,17 +252,36 @@ def dfx_transport(service: str, timeout: float):
         # mount -- against the root as well. Fixing only the -f paths would move the
         # failure from "no configuration file provided" to a wrong build context,
         # which is the harder one to read.
-        argv = [
-            "docker", "compose",
-            "-f", str(_COMPOSE_FILES[0]),
-            "-f", str(_COMPOSE_FILES[1]),
-            "exec", "-T", service,
-            "dfx", "canister", "call", "--output", output, canister, method, argument,
-        ]
+        dfx_argv = ["dfx", "canister", "call", "--output", output]
+        if network_url:
+            dfx_argv += ["--network", network_url]
+        dfx_argv += [canister, method, argument]
+
+        if network_url:
+            # IN-PROCESS dfx. No docker, no compose, no cwd requirement -- dfx resolves
+            # nothing relative here, it just opens an HTTP connection to the url.
+            argv = dfx_argv
+            run_cwd = None
+        else:
+            # ABSOLUTE compose paths AND an explicit cwd, which are two fixes for one
+            # measurement (see _REPO_ROOT). The absolute -f paths are what make the call
+            # work from any working directory; the cwd is what makes compose resolve the
+            # RELATIVE paths INSIDE those files -- `build: context: .`, the `./icp:/repo`
+            # mount -- against the root as well. Fixing only the -f paths would move the
+            # failure from "no configuration file provided" to a wrong build context,
+            # which is the harder one to read.
+            argv = [
+                "docker", "compose",
+                "-f", str(_COMPOSE_FILES[0]),
+                "-f", str(_COMPOSE_FILES[1]),
+                "exec", "-T", service,
+                *dfx_argv,
+            ]
+            run_cwd = _REPO_ROOT
         try:
             done = subprocess.run(  # noqa: S603 -- checked: no shell, argv is a fixed list, and the only caller-supplied elements are a canister id, a method name and a candid argument this repository builds
                 argv, capture_output=True, text=True, timeout=timeout, check=False,
-                cwd=_REPO_ROOT,
+                cwd=run_cwd,
             )
         except subprocess.TimeoutExpired as error:
             raise ICPCallFailed(
@@ -281,7 +335,26 @@ class ICPAdapter:
     checkout builds no ICP adapter at all rather than one aimed at mainnet.
     """
 
-    def __init__(self, ledger_canister_id: str, owner_principal: str, service: str = "icp-replica", timeout: float = 60.0, call=None):
+    def __init__(self, ledger_canister_id: str, owner_principal: str, call):
+        # `call` IS REQUIRED AND THE TRANSPORT SETTINGS ARE GONE FROM HERE.
+        #
+        # Until 2026-10-07 this took service, timeout and network_url as well and
+        # built its own transport when `call` was None. Adding network_url pushed it
+        # to six arguments and ruff's PLR0913/PLR0917 refused it -- correctly, and the
+        # fix is the one rule 12 names for C901: "extract the decision so it can be
+        # called with seeded inputs, not raise the ceiling."
+        #
+        # What the lint was pointing at is a layering error (rule 10): HOW the ledger
+        # is reached -- compose exec against a service, or dfx against a url, with
+        # what timeout -- is not something this adapter decides or needs to know. It
+        # needs a callable. chains/registry.py builds the transport from Config.RPC
+        # and hands it over, which is also what every test already did: all four
+        # construction sites in tests/ passed `call=` and none passed service or
+        # timeout, so the parameters existed for exactly one caller.
+        #
+        # Required rather than defaulted, because a default transport is a silent
+        # choice of endpoint -- the same reason Config.RPC["ICP"] defaults its ledger
+        # id and owner principal to empty instead of to mainnet's.
         """Validate what can be validated before anything opens a connection.
 
         Five parameters and no PLR0913 suppression: ruff does not raise it here and
@@ -308,9 +381,11 @@ class ICPAdapter:
             raise ValueError("ICP ledger_canister_id is empty; refusing to construct an adapter with no ledger")
         self.ledger_canister_id = ledger_canister_id
         self.owner_principal = owner_principal
-        self.service = service
-        self.timeout = timeout
-        self._call = call if call is not None else dfx_transport(service, timeout)
+        # self.service and self.timeout went with the parameters, 2026-10-07. Grepped
+        # the tree first (rule 2: the NAME, not the import graph): nothing in
+        # swap_terminal/ or tests/ ever read either one. They were state this object
+        # carried about a transport it no longer builds.
+        self._call = call
 
     # -- derivation, no I/O -------------------------------------------------
 

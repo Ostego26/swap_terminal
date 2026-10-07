@@ -261,6 +261,26 @@ services:
       ICP_OWNER_PRINCIPAL: "${ICP_OWNER_PRINCIPAL:-}"
       ICP_DFX_SERVICE: "${ICP_DFX_SERVICE:-}"          # config.py default: "icp-replica"
       ICP_CALL_TIMEOUT: "${ICP_CALL_TIMEOUT:-}"        # config.py default: "60"
+      # THE ONE THAT DECIDES WHETHER THIS CONTAINER CAN REACH ICP AT ALL.
+      #
+      # Empty means `docker compose exec icp-replica dfx ...`, which needs docker on
+      # PATH -- and the runtime stage of docker/web.Dockerfile installs only
+      # dumb-init, with no compose file mounting /var/run/docker.sock. So unset, an
+      # ICP call from this container fails with "docker: not found".
+      #
+      # Set, it means `dfx canister call --network <url>` run inside this container,
+      # which needs no docker at all. The value for this deployment is
+      # http://icp-replica:4943 -- the compose SERVICE name, not 127.0.0.1, which
+      # inside a container is this container's own loopback (the same mistake the
+      # bind comment above records about gunicorn).
+      #
+      # STILL NOT ENOUGH ON ITS OWN, and that is deliberate rather than an oversight:
+      # this image has no dfx binary yet either. Setting this without adding dfx to
+      # the image moves the failure from "docker: not found" to "dfx: not found",
+      # which is progress in diagnosis and not in capability. And an ICP PAYOUT needs
+      # the desk's dfx identity, which lives in the replica container -- placing that
+      # is key material and the operator's (rule 16).
+      ICP_DFX_NETWORK_URL: "${ICP_DFX_NETWORK_URL:-}"   # config.py default: "" (compose exec)
       # The destination-side reserve, needed the moment any *->ICP pair is enabled.
       # Passed now rather than then, for this block's standing reason: a variable
       # config.py reads and this file omits arrives UNSET in the container, so the

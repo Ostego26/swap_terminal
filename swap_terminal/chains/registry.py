@@ -99,7 +99,7 @@ from network_target import configuring_variable
 
 from .bitcoin import BitcoinAdapter
 from .gridcoin import GridcoinAdapter
-from .icp import ICPAdapter
+from .icp import ICPAdapter, dfx_transport
 from .litecoin import LitecoinAdapter
 from .solana import SolanaAdapter
 from .xrp import XRPAdapter
@@ -175,7 +175,22 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # derive a deposit address, and an owner with no ledger has nothing to ask.
     icp = rpc.get("ICP")
     if icp and not missing_settings(rpc, "ICP"):
-        adapters["ICP"] = ICPAdapter(**icp)
+        # THE TRANSPORT IS BUILT HERE, NOT INSIDE THE ADAPTER (rule 10). How the
+        # ledger is reached is deployment configuration -- which compose service, or
+        # which replica url, with what timeout -- and the adapter needs a callable,
+        # not those three values. Moved out of ICPAdapter.__init__ on 2026-10-07 when
+        # adding network_url took it to six parameters and ruff refused; the lint was
+        # pointing at the layering rather than at the count.
+        #
+        # network_url empty keeps `docker compose exec`, which works from the host.
+        # Set (http://icp-replica:4943 for the containerized deployment) it runs dfx
+        # in this process, which is the only transport available to the web container:
+        # that image has no docker CLI and no daemon socket.
+        adapters["ICP"] = ICPAdapter(
+            icp["ledger_canister_id"],
+            icp["owner_principal"],
+            dfx_transport(icp.get("service", "icp-replica"), icp.get("timeout", 60.0), icp.get("network_url", "")),
+        )
     return adapters
 
 
