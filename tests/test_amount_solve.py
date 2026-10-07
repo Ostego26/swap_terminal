@@ -25,12 +25,14 @@ from pathlib import Path
 
 import pytest
 from chains.amount_solve import (
+    CAPACITY_NOT_ESTABLISHED,
     CHAIN_PRECISION,
     UNSOLVABLE_FEE,
     UNSOLVABLE_OUTPUT,
     UNSOLVABLE_PRECISION,
     UNSOLVABLE_RATE,
     deposit_for_desired_payout,
+    max_deposit_for_capacity,
     payout_multiplier,
 )
 from chains.coin_amounts import CHAIN_DECIMALS
@@ -233,3 +235,85 @@ def test_the_precision_table_is_derived_and_not_retyped():
     assert CHAIN_PRECISION["ICP"] == ICP_DECIMALS
     for asset, decimals in CHAIN_DECIMALS.items():
         assert CHAIN_PRECISION[asset] == decimals
+
+
+# =============================================================================
+# THE DESK'S OWN CEILING, turned into a maximum deposit. Operator, 2026-10-07:
+# "basically we are the one picking up the other end of an htlc unless we find a
+# buyer out there on the chain." Measured the same day: all 30 pairs settle
+# CUSTODIALLY in the web terminal, so the desk is the counterparty on every one
+# and its inventory of the DESTINATION asset is the binding constraint.
+# =============================================================================
+
+
+@pytest.mark.parametrize("asset", sorted(CHAIN_PRECISION))
+def test_a_capacity_derived_maximum_never_exceeds_what_the_desk_can_pay(asset):
+    """The rounding direction, and it is the OPPOSITE of the other solve's.
+
+    deposit_for_desired_payout() rounds UP so a customer is never short of
+    expected_input_amount. This rounds DOWN so the desk is never shown a limit it
+    cannot honor -- a customer who sends the stated maximum and then has the
+    payout refused at broadcast is the 2026-10-03 failure
+    services/payout_capacity.py is named after.
+
+    Swept rather than spot-checked, for the same reason as the forward sweep: a
+    rounding error at particular decimal positions passes a single-value test.
+    """
+    rate = 321.7
+    for fee_bps in (0, 150, 500):
+        for ceiling in (0.00000001, 1.0, 407.51074481, 1000.0, 99999.99999999):
+            amount, reason = max_deposit_for_capacity(ceiling, rate, fee_bps, asset)
+            assert reason == "", f"{asset} ceiling {ceiling} at {fee_bps}bps refused: {reason}"
+            realised = forward_payout(amount, rate, fee_bps)
+            assert realised <= ceiling or realised == pytest.approx(ceiling, rel=1e-9), (
+                f"{asset}: the stated maximum deposit of {amount} would need a payout of {realised}, "
+                f"which is MORE than the {ceiling} the desk can fund. The customer sends it and the "
+                f"payout is refused after their money has moved."
+            )
+
+
+def test_the_two_solves_round_in_opposite_directions():
+    """One file, two directions, each away from whoever would find out too late.
+
+    Asserted together rather than in separate tests, because what matters is the
+    RELATIONSHIP -- that they bracket the exact answer from either side. A future
+    edit that made both round the same way would leave each individual test
+    passing while the pair became wrong.
+    """
+    rate, fee_bps, target = 321.7, 150, 300.0
+    exact = target / payout_multiplier(rate, fee_bps)
+
+    needed, _ = deposit_for_desired_payout(target, rate, fee_bps, "ICP")
+    allowed, _ = max_deposit_for_capacity(target, rate, fee_bps, "ICP")
+
+    assert needed >= exact, "the customer-facing solve must never ask for less than the exact figure"
+    assert allowed <= exact, "the capacity-facing solve must never offer more than the exact figure"
+    assert allowed <= needed, (
+        "the maximum the desk can honor must not exceed what the customer would need to send for the "
+        "same payout -- if it does, the two roundings have been swapped"
+    )
+
+
+def test_an_unreadable_balance_is_not_the_same_answer_as_an_empty_wallet():
+    """-1.0 means NOT ESTABLISHED and 0.0 means nothing to pay. Rule 13.
+
+    services/payout_capacity.largest_fundable_payout() chose -1.0 for exactly this
+    reason, in its own words: "0.0 is a legitimate answer for an empty wallet and
+    the two must not render the same way". This must carry that distinction
+    forward rather than collapsing both into "no maximum".
+    """
+    amount, reason = max_deposit_for_capacity(-1.0, 321.7, 150, "ICP")
+    assert (amount, reason) == (0.0, CAPACITY_NOT_ESTABLISHED)
+    assert "could not be read" in reason
+
+    # An EMPTY wallet is a real measurement and returns no reason at all, so the
+    # caller says "we cannot pay out any of this right now" rather than rendering
+    # a gap where a figure should be.
+    assert max_deposit_for_capacity(0.0, 321.7, 150, "ICP") == (0.0, "")
+
+
+def test_a_capacity_solve_refuses_the_same_unsolvable_inputs():
+    """The refusals must agree with the other direction's, or one of them is wrong."""
+    assert max_deposit_for_capacity(300.0, 0.0, 150, "ICP") == (0.0, UNSOLVABLE_RATE)
+    assert max_deposit_for_capacity(300.0, 321.7, 10000, "ICP") == (0.0, UNSOLVABLE_FEE)
+    assert max_deposit_for_capacity(300.0, 321.7, 150, "DOGE") == (0.0, UNSOLVABLE_PRECISION)
