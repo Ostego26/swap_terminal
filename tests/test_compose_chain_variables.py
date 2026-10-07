@@ -255,6 +255,24 @@ def test_no_chain_endpoint_defaults_to_the_CONTAINERS_own_loopback():
         name for name in loopback_defaults
         if f'{name}: "${{{name}:-}}"' in compose
     )
+    # AND THE HOST'S OWN VARIABLE MUST NOT REACH THE CONTAINER AT ALL, which is the
+    # half d5168a0 missed. Defaulting to host.docker.internal only helps when the
+    # variable is UNSET, and the operator's .env sets GRC_RPC_HOST=127.0.0.1 --
+    # correctly, since that IS right for the host deployment. The explicit value won
+    # and the container pointed at itself; measured 2026-10-07 when create_swap said
+    # "could not validate address with GRC daemon at 127.0.0.1:25779".
+    #
+    # One name whose correct value depends on where the process runs is rule 8's
+    # collision in an environment variable, so the container reads a DIFFERENT name.
+    inherits_the_hosts_value = sorted(
+        name for name in loopback_defaults
+        if f'{name}: "${{{name}:-' in compose
+    )
+    assert not inherits_the_hosts_value, (
+        f"{inherits_the_hosts_value} are passed to the container from the SAME variable the host "
+        f"uses, so a .env that correctly sets 127.0.0.1 for the host makes the container point at "
+        f"itself -- a default cannot override an explicitly set value. Read CONTAINER_<NAME> instead."
+    )
     assert not passed_empty, (
         f"{passed_empty} default to 127.0.0.1 in config.py and reach the container empty, so each "
         f"one points the container at its own loopback. Default them in docker-compose.web.yml to "

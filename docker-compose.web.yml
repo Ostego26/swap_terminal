@@ -173,6 +173,33 @@ services:
       # adapter talks to the daemon's DEFAULT wallet, so a deposit scan would
       # watch the wrong wallet and a payout would spend from it. An unconfigured
       # chain fails loudly; a chain configured against the wrong wallet does not.
+      # A CONTAINER-SPECIFIC VARIABLE, BECAUSE THE HOST'S CORRECT VALUE IS WRONG HERE.
+      #
+      # d5168a0 defaulted these to host.docker.internal and that was not enough, which
+      # the operator's own run showed on 2026-10-07: an ICP->GRC quote priced fine and
+      # create_swap still said
+      #
+      #     could not validate address with GRC daemon at 127.0.0.1:25779 ...
+      #     [Errno 111] Connection refused
+      #
+      # `${GRC_RPC_HOST:-host.docker.internal}` substitutes the default only when the
+      # variable is UNSET. The operator's .env sets GRC_RPC_HOST=127.0.0.1 -- correctly,
+      # because that IS the right value for the host deployment, where the daemon is on
+      # the host's own loopback. So the explicit value won, as compose is supposed to
+      # make it, and the container pointed at itself.
+      #
+      # ONE VARIABLE CANNOT SERVE BOTH DEPLOYMENTS. 127.0.0.1 is right on the host and
+      # can never be right in a container; host.docker.internal is right in a container
+      # and does not resolve on the host. A single name whose correct value differs by
+      # where the process runs is rule 8's collision in an environment variable -- the
+      # same shape as `enabled` meaning two things in two row builders, found hours
+      # earlier today.
+      #
+      # So the container reads CONTAINER_<ASSET>_RPC_HOST, defaulting to
+      # host.docker.internal, and the host's own variable no longer reaches it. Nothing
+      # needs to be set for the normal case; an operator whose daemons live in another
+      # container names that service through CONTAINER_*.
+      #
       # DEFAULTED TO host.docker.internal, NOT PASSED THROUGH EMPTY, and the reason is
       # the one the comment above this service already gives: inside a container
       # 127.0.0.1 is the CONTAINER, and config.py's default for each of these is
@@ -193,13 +220,13 @@ services:
       #
       # Still overridable: a deployment whose daemons live in another container names
       # that service instead. What is no longer possible is the silent 127.0.0.1.
-      BTC_RPC_HOST: "${BTC_RPC_HOST:-host.docker.internal}"
+      BTC_RPC_HOST: "${CONTAINER_BTC_RPC_HOST:-host.docker.internal}"
       BTC_RPC_PORT: "${BTC_RPC_PORT:-}"
       BTC_RPC_USER: "${BTC_RPC_USER:-}"
       BTC_RPC_PASS: "${BTC_RPC_PASS:-}"
       BTC_RPC_WALLET: "${BTC_RPC_WALLET:-}"
       BTC_RPC_TIMEOUT: "${BTC_RPC_TIMEOUT:-}"
-      LTC_RPC_HOST: "${LTC_RPC_HOST:-host.docker.internal}"
+      LTC_RPC_HOST: "${CONTAINER_LTC_RPC_HOST:-host.docker.internal}"
       LTC_RPC_PORT: "${LTC_RPC_PORT:-}"
       LTC_RPC_USER: "${LTC_RPC_USER:-}"
       LTC_RPC_PASS: "${LTC_RPC_PASS:-}"
@@ -211,7 +238,7 @@ services:
       # which is the right failure for a missing endpoint rather than a guess at
       # one. The operator's environment still says 25715 as of 2026-10-05; that is
       # the pending role switch, not something this file should decide.
-      GRC_RPC_HOST: "${GRC_RPC_HOST:-host.docker.internal}"
+      GRC_RPC_HOST: "${CONTAINER_GRC_RPC_HOST:-host.docker.internal}"
       GRC_RPC_PORT: "${GRC_RPC_PORT:-}"
       GRC_RPC_USER: "${GRC_RPC_USER:-}"
       GRC_RPC_PASS: "${GRC_RPC_PASS:-}"
