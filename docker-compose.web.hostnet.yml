@@ -121,3 +121,19 @@ services:
       BTC_RPC_HOST: "${BTC_RPC_HOST:-127.0.0.1}"
       LTC_RPC_HOST: "${LTC_RPC_HOST:-127.0.0.1}"
       GRC_RPC_HOST: "${GRC_RPC_HOST:-127.0.0.1}"
+
+      # THE ICP REPLICA BY LOOPBACK, NOT BY SERVICE NAME, added 2026-10-07 when ICP
+      # arrived -- this file predates it and would otherwise have left the one chain
+      # that is NOT on the host unreachable.
+      #
+      # docker-compose.web.yml sets ICP_DFX_NETWORK_URL to http://icp-replica:4943,
+      # which is right under the bridge: both services share the default compose
+      # network and the service name resolves. Under `network_mode: host` the
+      # container is NOT on that network, so `icp-replica` resolves to nothing. What
+      # it CAN reach is the replica's published port -- docker-compose.icp.yml
+      # publishes 127.0.0.1:4943 -- and under host networking that loopback is the
+      # host's own, exactly as it is for the chain daemons above.
+      #
+      # So the same substitution that makes BTC/LTC/GRC work makes ICP work: the host
+      # deployment's value is the right one here, which is this file's whole premise.
+      ICP_DFX_NETWORK_URL: "${ICP_DFX_NETWORK_URL:-http://127.0.0.1:4943}"

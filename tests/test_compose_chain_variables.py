@@ -279,3 +279,38 @@ def test_no_chain_endpoint_defaults_to_the_CONTAINERS_own_loopback():
         f"host.docker.internal (the extra_hosts entry already resolves it), or to the compose "
         f"service name if the daemon moves into a container."
     )
+
+
+def test_the_HOSTNET_overlay_points_ICP_at_LOOPBACK_not_at_the_service_name():
+    """Under `network_mode: host` a compose service name resolves to nothing.
+
+    docker-compose.web.hostnet.yml exists because the chain daemons live on the host
+    and the docker bridge cannot reach them -- measured 2026-10-05 and recorded in that
+    file's header: host.docker.internal resolved to 172.17.0.1 and all four daemons
+    still timed out, because traffic from the bridge is DROPPED by the default firewall
+    posture, which is a different failure from refused.
+
+    That file predates ICP. Under the bridge, ICP_DFX_NETWORK_URL is
+    http://icp-replica:4943 and correct, because both services share the default
+    compose network. Under host networking the container is not on that network at all,
+    so the service name is unresolvable and the one chain that is NOT on the host would
+    be the only one the overlay left broken.
+
+    The replica publishes 127.0.0.1:4943, and under host networking that loopback is
+    the host's own -- the same substitution that makes the chain daemons work.
+    """
+    overlay = (Path(__file__).resolve().parents[1] / "docker-compose.web.hostnet.yml").read_text()
+
+    assert "network_mode: host" in overlay, (
+        "this overlay no longer uses host networking, so what this test pins has moved"
+    )
+    assert "ICP_DFX_NETWORK_URL" in overlay, (
+        "the hostnet overlay does not override ICP_DFX_NETWORK_URL, so it inherits "
+        "http://icp-replica:4943 from docker-compose.web.yml -- a service name that "
+        "resolves to nothing outside the compose network"
+    )
+    icp_line = next(line for line in overlay.splitlines() if "ICP_DFX_NETWORK_URL:" in line)
+    assert "127.0.0.1" in icp_line, f"the override must be loopback, not a service name: {icp_line.strip()}"
+    assert "icp-replica" not in icp_line, (
+        f"the overlay still names the compose service, which does not resolve here: {icp_line.strip()}"
+    )
