@@ -42,9 +42,11 @@ status is invisible to the query and the row count does not move.
 """
 
 import sqlite3
+from pathlib import Path
 
 import db
 import pytest
+import swap_intents_schema
 
 
 @pytest.fixture
@@ -118,3 +120,58 @@ def test_the_index_derives_from_the_same_constant(conn):
 
     _seed(conn, "s_unguarded", "failed")
     _seed(conn, "s_unguarded", "failed")
+
+
+def test_the_two_payout_status_tuples_are_different_on_purpose_and_each_names_the_other():
+    """Two tuples, two tables, and a name that differs only by word order.
+
+    FOUND 2026-10-07 while drawing this project's topology from the tree:
+
+        db.PAYOUT_LIVE_STATUSES                   ("created", "broadcast", "completed")
+        swap_intents_schema.LIVE_PAYOUT_STATUSES  ("claimed", "broadcast", "completed")
+
+    Same length. Same last two elements. Different FIRST element. And the two
+    names are anagram-adjacent -- PAYOUT_LIVE versus LIVE_PAYOUT -- which is the
+    one kind of duplicate a reader cannot catch by reading.
+
+    THE DIFFERENCE IS LEGITIMATE and this test exists to KEEP it rather than to
+    remove it, which is the half of rule 8 that is easy to get backwards. They
+    govern two tables with two partial unique indexes: `payouts` /
+    idx_payouts_one_live_per_swap, where a row is CREATED and reserves inventory
+    against itself; and `swap_intent_payouts` /
+    idx_swap_intent_payouts_one_live_per_intent, where exactly one payer CLAIMS a
+    row before broadcasting. Merging them would be a behavior change on the order
+    path, so what rule 8 asks for here is the comment at BOTH sites naming the
+    other -- and when this was found, grep returned ZERO mentions of either name
+    in the other's file.
+
+    WHY IT IS WORTH A TEST AND NOT ONLY A COMMENT. Both tuples answer the same
+    sentence: "does a row in this status block a second payout for the same
+    thing?" Import the wrong one and the first element names a status the table
+    never writes, so the double-payout guard silently stops blocking the status
+    that does exist. Nothing fails. The failure is two payouts to one customer,
+    on chain, and a comment can be deleted by anyone tidying up.
+    """
+    # The shape they share, which is why they are confusable.
+    assert len(db.PAYOUT_LIVE_STATUSES) == len(swap_intents_schema.LIVE_PAYOUT_STATUSES)
+    assert db.PAYOUT_LIVE_STATUSES[1:] == swap_intents_schema.LIVE_PAYOUT_STATUSES[1:]
+
+    # The difference, asserted rather than assumed. If a future change merges
+    # these, this fails and the comments above both tuples say what to read first.
+    assert db.PAYOUT_LIVE_STATUSES[0] == "created"
+    assert swap_intents_schema.LIVE_PAYOUT_STATUSES[0] == "claimed"
+    assert db.PAYOUT_LIVE_STATUSES != swap_intents_schema.LIVE_PAYOUT_STATUSES
+
+    # Each file names the other. This is the textual half and it is deliberately
+    # textual: the thing being pinned IS a comment, and there is no behavior to
+    # seed for "a reader is told the other one exists". Everything above this line
+    # is behavioral.
+    db_source = Path(db.__file__).read_text()
+    intents_source = Path(swap_intents_schema.__file__).read_text()
+    assert "LIVE_PAYOUT_STATUSES" in db_source, (
+        "db.py must name swap_intents_schema.LIVE_PAYOUT_STATUSES -- rule 8 asks for the "
+        "difference at BOTH sites, and a reader who finds one must be told the other exists"
+    )
+    assert "PAYOUT_LIVE_STATUSES" in intents_source, (
+        "swap_intents_schema.py must name db.PAYOUT_LIVE_STATUSES, same reason"
+    )

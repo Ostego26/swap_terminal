@@ -909,6 +909,30 @@ SCHEMA = SCHEMA + ICP_DEPOSIT_SUBACCOUNT_SCHEMA
 # that have nothing to do with payouts. apply_migrations() below checks first
 # and reports instead.
 PAYOUT_UNIQUE_INDEX_NAME = "idx_payouts_one_live_per_swap"
+# THERE IS A SECOND TUPLE OF THIS SHAPE AND IT IS NOT THE SAME TUPLE.
+# swap_intents_schema.LIVE_PAYOUT_STATUSES is ("claimed", "broadcast",
+# "completed") -- same length, same last two elements, DIFFERENT FIRST ELEMENT,
+# and a name that differs from this one only by word order:
+#
+#     db.PAYOUT_LIVE_STATUSES         ("created", "broadcast", "completed")
+#     swap_intents_schema             ("claimed", "broadcast", "completed")
+#         .LIVE_PAYOUT_STATUSES
+#
+# The difference is REAL and must not be merged. They govern two tables with two
+# indexes: this one is `payouts` / idx_payouts_one_live_per_swap, written by
+# services/payout_service.py; the other is `swap_intent_payouts` /
+# idx_swap_intent_payouts_one_live_per_intent, the store swap_intents.json was
+# migrated into, whose payer CLAIMS a row before broadcasting. 'created' is not a
+# status that table uses and 'claimed' is not one this table uses.
+#
+# This comment exists because rule 8 asks for it at BOTH sites and neither had
+# it. Grepped 2026-10-07: zero mentions of either name in the other's file. The
+# hazard is not abstract -- both tuples answer "does this row block a second
+# payout for the same swap", and importing the wrong one gives a list whose first
+# element names a status the table never writes, so the double-payout guard stops
+# blocking the status that actually exists and nothing fails until two payouts for
+# one customer are on chain. tests/test_payout_live_statuses_have_one_spelling.py
+# asserts they stay different and that each file keeps naming the other.
 PAYOUT_LIVE_STATUSES = ("created", "broadcast", "completed")
 
 # THE INDEX'S STATUS LIST IS NOW DERIVED FROM THE CONSTANT ABOVE RATHER THAN

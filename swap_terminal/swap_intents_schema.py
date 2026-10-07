@@ -113,6 +113,18 @@ CLAIMABLE_STATUS = "verified"
 # Payout-row statuses that count as "live" for the partial unique index. A row
 # in any of these blocks a second payout for the same intent; 'failed' does not,
 # which is what makes an operator-driven retry possible.
+# THE OTHER HALF OF THE PAIR db.PAYOUT_LIVE_STATUSES NAMES. Same length, same
+# last two elements, DIFFERENT FIRST ELEMENT, and the two names differ only by
+# word order -- which is why each file now points at the other:
+#
+#     swap_intents_schema.LIVE_PAYOUT_STATUSES  ("claimed", ...)  this file
+#     db.PAYOUT_LIVE_STATUSES                   ("created", ...)  the other
+#
+# 'claimed' rather than 'created' because THIS table's payer claims a row and
+# then broadcasts, which is what makes exactly-one-payer enforceable by the index
+# below; `payouts` in db.py creates a row and reserves inventory against it, and
+# 'created' is the status that reservation reads. Two tables, two indexes, two
+# vocabularies, and merging them would be a behavior change on the order path.
 LIVE_PAYOUT_STATUSES: tuple[str, ...] = ("claimed", "broadcast", "completed")
 PAYOUT_STATUSES: tuple[str, ...] = (*LIVE_PAYOUT_STATUSES, "failed")
 
