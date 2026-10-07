@@ -74,9 +74,34 @@ ENV DFXVM_INIT_YES=true
 RUN sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"
 ENV PATH="/root/.local/share/dfx/bin:${PATH}"
 
-# STATE OUTSIDE THE WORKING DIRECTORY, so a `dfx start` survives a rebuild and so
-# the repository mount is not written into by the replica. A replica that keeps
-# its state in the source tree turns `git status` into a question about consensus.
+# IDENTITIES OUTSIDE THE WORKING DIRECTORY, so the repository mount is not written
+# into by the replica. A replica that keeps its keys in the source tree turns
+# `git status` into a question about key material.
+#
+# AND IT DOES *NOT* MAKE A `dfx start` SURVIVE ANYTHING, WHICH IS WHAT THIS COMMENT
+# CLAIMED FOR AS LONG AS IT EXISTED. It read "so a `dfx start` survives a rebuild",
+# and that sentence was the reason two separate incidents were misdiagnosed:
+# 8455339 (a `docker compose down` destroyed the ledger holding 1000 LICP) and
+# 1373fa3 (the threshold key changed across one ordinary container recreation,
+# 038b01b0... -> 03508d61...). Both were read as surprising. Neither was.
+#
+# MEASURED INSIDE THE RUNNING CONTAINER ON THE OPERATOR'S HOST, 2026-10-07:
+#
+#     /state                    40K    .config only  <- the named volume
+#     /root/.local/share/dfx    180M   network/local/<hash>/state  <- the replica,
+#                                      the canisters, the ledger
+#     /repo/.dfx                2.3M   canister ids and wasm copies
+#
+# DFX_CONFIG_ROOT sets where dfx keeps its CONFIG. It does not move its DATA. So
+# the volume has been faithfully persisting forty kilobytes of config while a
+# hundred and eighty megabytes of canister state sat on the container's writable
+# layer and died with it, every single time.
+#
+# docker-compose.icp.yml now mounts a second named volume at
+# /root/.local/share/dfx, which is the path that actually holds it. The proof is
+# 1373fa3's own test, which is the only thing that settles this: call
+# threshold_custody.public_key on the same canister id, `down`, `up`, call it
+# again, and the hex must match.
 ENV DFX_CONFIG_ROOT=/state
 WORKDIR /repo
 

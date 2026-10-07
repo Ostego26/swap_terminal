@@ -45,6 +45,7 @@ from services.admin_view import (
 )
 from services.swap_view import ADDRESS_DERIVATIONS, ATTRIBUTION_MODELS, STALL_AFTER_SECONDS
 from supervisor import worker_commands
+from valid_addresses import GRC_PAYOUT
 from workers.reconcile_worker import DEFAULT_POLL_SECONDS as RECONCILE_POLL
 
 NOW = "2026-09-26T12:00:00+00:00"
@@ -888,3 +889,123 @@ def test_every_tradeable_asset_has_an_attribution_model():
     # dispatch -- a typo there is the same page with the same two voices.
     unroutable = sorted(a for a, m in ATTRIBUTION_MODELS.items() if m not in ("address", "tag"))
     assert not unroutable, f"{unroutable} have a model attribution_target() does not handle"
+
+
+# =============================================================================
+# A FAILED PAYOUT'S REASON. Measured on the operator's host 2026-10-07: the first
+# ICP swap to ever have a deposit credited, s_ebb03e8dc1b96e1c, failed its GRC
+# payout and this panel rendered
+#
+#     40 | s_ebb03e8dc1b96e1c | GRC | 377.62531149 | failed | (none) | (not sent)
+#
+# with no cause -- while swap_audit_log held the whole sentence, written by the
+# same transaction that set the status. One join away, on the page an operator
+# reads during an incident.
+# =============================================================================
+
+#: The real refusal, as services/payout_service.py wrote it that night. Used
+#: verbatim rather than paraphrased: what is under test is that a sentence of THIS
+#: shape and length reaches the screen, and a short stand-in would not exercise
+#: the reason the template gives it a row of its own.
+GRC_UNLOCK_REFUSAL = (
+    "Payout failed: GRC payouts need the wallet fully unlocked, and GRIDCOIN_WALLET_PASSPHRASE is "
+    "not set in this process's environment. A GRC wallet left unlocked for staking CANNOT send -- "
+    "the daemon answers rpc code -4 -- so this refuses before attempting a send that would fail "
+    "and mark the swap terminally failed. Set GRIDCOIN_WALLET_PASSPHRASE for the worker process only."
+)
+
+
+def _payout_with_audit(db, swap_id, status, reasons):
+    """Seed a swap, one payout and the audit rows. `reasons` are (new_status, message).
+
+    THE SWAP COMES FIRST BECAUSE THE SCHEMA SAYS SO, and finding that out was the
+    useful part: inserting the payout alone raises `FOREIGN KEY constraint
+    failed`, because payouts.swap_id references swaps.id. A fixture that worked
+    around it -- PRAGMA foreign_keys=off, or a fabricated row -- would be testing
+    a database shape this application cannot produce.
+    """
+    seed_swap(db, swap_id, "failed")
+    db.execute(
+        "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at) "
+        "VALUES (?, 'GRC', ?, 377.62531149, '', ?, ?)",
+        (swap_id, GRC_PAYOUT, status, NOW),
+    )
+    for new_status, message in reasons:
+        db.execute(
+            "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at) "
+            "VALUES (?, 'paying', ?, ?, ?)",
+            (swap_id, new_status, message, NOW),
+        )
+    db.commit()
+
+
+def test_a_failed_payout_carries_the_reason_the_audit_log_recorded(db):
+    """The join, asserted on rows the real query returned.
+
+    Not "the SQL contains swap_audit_log" -- the behavioral-verification
+    principle is explicit that only "seeding condition X produced row Y" counts.
+    """
+    _payout_with_audit(db, "s_failed", "failed", [("failed", GRC_UNLOCK_REFUSAL)])
+    row = next(r for r in admin_view.payout_rows(db) if r["swap_id"] == "s_failed")
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == GRC_UNLOCK_REFUSAL
+    # The operator must be able to act on it, which means the variable is named.
+    assert "GRIDCOIN_WALLET_PASSPHRASE" in row["failure_reason"]
+
+
+def test_the_LATEST_failure_wins_not_the_first(db):
+    """A swap can fail, be rescued, and fail again -- rescue_payout.py exists.
+
+    The oldest audit row would then explain a failure that has been superseded,
+    which is worse than no reason: it sends the operator to fix something already
+    fixed. MAX(id) rather than MAX(created_at) because two rows written in one
+    transaction share a timestamp to the microsecond -- which is exactly what the
+    paying -> failed pair did on 2026-10-07.
+    """
+    _payout_with_audit(db, "s_twice", "failed", [
+        ("failed", "Payout failed: the FIRST cause, since fixed"),
+        ("failed", "Payout failed: the SECOND cause, which is the live one"),
+    ])
+    row = next(r for r in admin_view.payout_rows(db) if r["swap_id"] == "s_twice")
+    assert "SECOND cause" in row["failure_reason"]
+    assert "FIRST cause" not in row["failure_reason"]
+
+
+def test_a_successful_payout_gets_no_reason_and_no_borrowed_one(db):
+    """A broadcast payout must not inherit a failure sentence from its swap's past.
+
+    THE TRAP THIS PINS: a swap that failed once and was then paid has a 'failed'
+    audit row AND a broadcast payout. The subquery matches on swap_id, so without
+    the status check in the template this panel would print a refusal under a
+    payout that succeeded -- telling an operator money did not move when it did,
+    which is the worst direction for this page to be wrong in.
+    """
+    _payout_with_audit(db, "s_recovered", "broadcast", [("failed", GRC_UNLOCK_REFUSAL)])
+    row = next(r for r in admin_view.payout_rows(db) if r["swap_id"] == "s_recovered")
+    assert row["status"] == "broadcast"
+    # The query still returns it -- the join is on swap_id -- and the TEMPLATE is
+    # what must not render it. Asserted here so the condition is written down
+    # where the query is, since that is where a future reader will look.
+    assert row["failure_reason"] == GRC_UNLOCK_REFUSAL, (
+        "the subquery matches by swap_id, so this is expected -- the template gates on "
+        "status == 'failed', and test_web_surfaces asserts the rendering"
+    )
+
+
+def test_a_payout_whose_swap_has_no_audit_row_reports_None_rather_than_breaking(db):
+    """No audit row is a real state, and the template says so rather than blanking.
+
+    A failed payout with nothing recorded means whatever failed it wrote no audit
+    row, which is a defect in that code path -- so the page names it instead of
+    rendering an empty cell (rule 14).
+    """
+    # The swap first, for the FOREIGN KEY the helper above documents.
+    seed_swap(db, "s_silent", "failed")
+    db.execute(
+        "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at) "
+        "VALUES ('s_silent', 'GRC', ?, 1.0, '', 'failed', ?)",
+        (GRC_PAYOUT, NOW),
+    )
+    db.commit()
+    row = next(r for r in admin_view.payout_rows(db) if r["swap_id"] == "s_silent")
+    assert row["failure_reason"] is None

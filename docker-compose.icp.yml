@@ -80,6 +80,30 @@ services:
       # /repo precisely so that cannot happen.
       - "icp-state:/state"
 
+      # THE REPLICA'S ACTUAL STATE, AND ITS ABSENCE IS WHY TWO INCIDENTS LOOKED
+      # LIKE SURPRISES. Measured inside the running container 2026-10-07:
+      #
+      #     /state                    40K    .config only  <- the volume above
+      #     /root/.local/share/dfx    180M   network/local/<hash>/state
+      #     /repo/.dfx                2.3M   canister ids and wasm copies
+      #
+      # DFX_CONFIG_ROOT=/state moves dfx's CONFIG and not its DATA, so for as long
+      # as this file has existed the volume persisted forty kilobytes of config
+      # while the canisters lived on the container's writable layer. 8455339 (a
+      # `down` destroyed the ledger and its 1000 LICP) and 1373fa3 (the threshold
+      # key changed across one recreation) are the same defect seen twice.
+      #
+      # THE WHOLE DATA DIRECTORY AND NOT network/local, because the <hash> under it
+      # is derived from the network configuration -- change the config and dfx uses
+      # a different directory. Mounting the parent means the state follows the
+      # config rather than being orphaned beside it.
+      #
+      # THE FIRST `up` AFTER THIS LANDS STARTS FROM AN EMPTY VOLUME, so the ledger
+      # and threshold_custody must be deployed once more (icp_ledger_init.py, then
+      # `dfx deploy`). After that they persist, and the proof is 1373fa3's own
+      # test: public_key on the same canister id, `down`, `up`, same hex.
+      - "icp-replica-data:/root/.local/share/dfx"
+
     ports:
       # 4943 is dfx's own default, kept so that every command in every tutorial
       # works unchanged from the host.
@@ -102,3 +126,7 @@ services:
 
 volumes:
   icp-state:
+  # Named rather than bind-mounted: a bind would put 180M of replica state under
+  # the operator's checkout, where `git status` would have to ignore it and a
+  # `git clean -xdf` would silently destroy the ledger.
+  icp-replica-data:

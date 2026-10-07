@@ -394,12 +394,53 @@ def payout_rows(db, limit: int = 25) -> list[dict]:
     services/payout_service.py -- money possibly on chain with nothing recorded
     -- so it is surfaced rather than folded in with the rest, and the template
     labels it as the thing a human has to resolve.
+
+    A FAILED PAYOUT NOW CARRIES ITS REASON, AND IT WAS IN SQL ALL ALONG.
+
+    Measured on the operator's host 2026-10-07. The first ICP swap this system
+    ever completed a deposit for, s_ebb03e8dc1b96e1c, went created -> confirming
+    -> payout_pending -> paying -> failed, and this panel rendered
+
+        40 | s_ebb03e8dc1b96e1c | GRC | 377.62531149 | failed | (none) | (not sent)
+
+    with no cause, on the page the operator reads to find out what happened. The
+    `payouts` table has no column for why. But swap_audit_log already held the
+    whole sentence, written by the same transaction that set the status:
+
+        Payout failed: GRC payouts need the wallet fully unlocked, and
+        GRIDCOIN_WALLET_PASSPHRASE is not set in this process's environment...
+        Set GRIDCOIN_WALLET_PASSPHRASE for the worker process only.
+
+    The operator's own earlier paste shows the cost of not joining it: row 29,
+    `s_ae76ec53236ffcf6 | XRP | failed | (none) | (not sent)`, a payout that
+    failed days ago with its reason unread in a table one join away.
+
+    A JOIN AND NOT A NEW COLUMN, which is rule 20's "could this be a view?"
+    answered yes. A `payouts.failure_reason` column would be a SECOND place the
+    same sentence lives, written by the same code path -- rule 8's shape on the
+    one field an operator reads during an incident, and it would need a migration
+    against a live database to add. The audit log is already the authority for
+    what happened to a swap and when; this reads it.
+
+    THE CORRELATED SUBQUERY TAKES THE LATEST MATCHING AUDIT ROW, not the first.
+    A swap can fail a payout, be rescued, and fail again -- settle_payout.py and
+    rescue_payout.py both exist -- and the oldest row would then explain a
+    failure that has since been superseded. MAX(id) rather than MAX(created_at)
+    because two rows written in the same transaction share a timestamp to the
+    microsecond, which is exactly what the paying -> failed pair above did.
     """
     return db.execute(
         """
-        SELECT id, swap_id, asset, destination_address, amount, txid, status, created_at, sent_at
-        FROM payouts
-        ORDER BY id DESC
+        SELECT p.id, p.swap_id, p.asset, p.destination_address, p.amount, p.txid,
+               p.status, p.created_at, p.sent_at,
+               (SELECT a.message
+                  FROM swap_audit_log AS a
+                 WHERE a.swap_id = p.swap_id
+                   AND a.new_status = 'failed'
+                 ORDER BY a.id DESC
+                 LIMIT 1) AS failure_reason
+        FROM payouts AS p
+        ORDER BY p.id DESC
         LIMIT ?
         """,
         (int(limit),),

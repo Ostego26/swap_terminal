@@ -956,6 +956,34 @@
         <td class="mono breakable">{{ row.txid or '(none)' }}</td>
         <td>{{ row.sent_at or '(not sent)' }}</td>
       </tr>
+      {#- WHY A FAILED PAYOUT GETS A SECOND ROW RATHER THAN AN EIGHTH COLUMN.
+          This table's width was measured at 31 chars over 7 cols -> 428px, which
+          is what lets it be a NARROW panel in the grid (see this file's header).
+          The refusal sentences are 200+ characters -- the GRC one below runs to
+          nearly 300 -- so an eighth column would put every row into horizontal
+          scroll to carry a cell that is empty on all but the failures.
+
+          A full-width row under the failure costs nothing when there is none,
+          and on 2026-10-07 this panel showed the operator
+          `40 | s_ebb03e8dc1b96e1c | GRC | failed | (none) | (not sent)` with the
+          cause sitting in swap_audit_log one join away. Rule 14: state what the
+          number means, next to the number -- and `failed` is the number here. -#}
+      {% if row.status == 'failed' and row.failure_reason %}
+      <tr class="row-reason">
+        <td></td>
+        <td colspan="6" class="reason-cell">{{ row.failure_reason }}</td>
+      </tr>
+      {% elif row.status == 'failed' %}
+      {#- FAILED WITH NO RECORDED REASON IS ITSELF A FINDING, not a blank. It
+          means nothing wrote an audit row for the transition, which is a defect
+          in whatever failed it -- and saying so is how the next one gets fixed. -#}
+      <tr class="row-reason">
+        <td></td>
+        <td colspan="6" class="reason-cell">(no reason recorded) &larr; looked for: swap_audit_log
+           WHERE swap_id = this swap AND new_status = 'failed'. Nothing wrote one, which is a defect
+           in whatever marked this payout failed rather than an absence of cause.</td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
