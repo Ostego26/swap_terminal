@@ -422,10 +422,13 @@ def cmd_up(files: tuple[str, ...]) -> int:
             say(f"                    :{port} BOUND  {STACK_PORTS[port]}")
     say("                    (a bound port here is the answer; `status` names the owner)")
     say("")
-    say("  note              ICP IS THE ONE PAIR THIS DEPLOYMENT CANNOT DO. The web image has")
-    say("                    no dfx and no docker CLI, and the desk's dfx signing identity lives")
-    say("                    in the replica container. Every other pair works; an ICP swap needs")
-    say("                    the host deployment until that is fixed.")
+    say("  note on ICP       ICP -> * WORKS HERE as of 9795188: dfx is in the web image and")
+    say("                    reaches the replica by url, and reads need no identity -- measured")
+    say("                    on the operator's replica, `icrc1_fee` with --identity anonymous")
+    say("                    returned (10_000 : nat).")
+    say("                    * -> ICP DOES NOT. `transfer` debits the CALLER, so a payout needs")
+    say("                    the desk's dfx identity, which exists only inside the replica")
+    say("                    container. Placing it is key material and the operator's.")
     return 0
 
 

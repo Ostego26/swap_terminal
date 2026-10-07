@@ -89,12 +89,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends dumb-init \
 # are, which is where the size is.
 ARG DFX_VERSION=0.24.3
 ENV DFXVM_INIT_YES=true
+ENV PATH="/root/.local/share/dfx/bin:${PATH}"
+
+# `dfxvm default` IS EXPLICIT AND THE FIRST ATTEMPT RELIED ON AN ENV VAR INSTEAD.
+# Measured on the operator's host 2026-10-07: the image built, dfx was present, and
+# calling it said
+#
+#     error: Unable to determine which dfx version to call. To set a default
+#     error: version, run:  dfxvm default <version>
+#
+# What install.sh puts on PATH is dfxvm -- a version MANAGER and a shim -- and the
+# shim refuses rather than guessing when no default is selected. I had assumed
+# `ARG DFX_VERSION` would reach the installer and make it select one, because
+# docker/icp-replica.Dockerfile does exactly that and its dfx works. Whatever makes
+# that true there did not carry here, and the assumption is the defect: rule 17's
+# "a reason to believe something is not the same as having checked it."
+#
+# So the version is selected by a command that names it, and `curl` STAYS -- the
+# first attempt purged it, and dfxvm fetches the dfx binary itself, which a removed
+# curl may be exactly what blocks.
+#
+# THE BUILD NOW PROVES IT. `RUN dfx --version` fails the build if dfx is not
+# callable, which is rule 13's "verify the artifact, not the deploy" applied one
+# stage earlier: this file could not be tested from the container that wrote it
+# (internetcomputer.org is unreachable from there), so the build itself is the only
+# place the check can live. A broken install is now a red build instead of a working
+# container that cannot make an ICP call.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl libunwind8 \
     && sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)" \
-    && apt-get purge -y curl && apt-get autoremove -y \
+    && dfxvm default "${DFX_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
-ENV PATH="/root/.local/share/dfx/bin:${PATH}"
+RUN dfx --version
 
 WORKDIR /app
 
