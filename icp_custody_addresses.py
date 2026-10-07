@@ -26,6 +26,26 @@ state, it is the operator's call and not mine (rule 16), and this file exists
 precisely so the comparison can be looked at before anybody decides. It prints two
 columns and changes nothing.
 
+THE KEY CHANGES WHEN THE REPLICA IS RECREATED, AND THAT IS MEASURED. Same canister
+id, same `dfx_test_key` name, two different keys across one container recreation on
+2026-10-07:
+
+    before   038b01b0b6d5f09ce5375c30453fcda4ea7e9b451d3b72b7bc185ee2dbe4c6a8e6
+    after    03508d617633f3ddf921aa52f23ab17db64da9d1680a29ef342768c6fab258075a
+
+So every address this file prints is a derivation of a key that does not survive
+`docker compose down`. Funds sent to a canister-derived address on a LOCAL replica
+become unreachable the next time the container is replaced -- not "probably", and not
+only on a rebuild: the recreation that produced the two keys above was an ordinary
+stop-and-start cycle.
+
+THIS IS A PROPERTY OF dfx_test_key AND NOT OF CANISTER CUSTODY. Mainnet's threshold
+key (`key_1`) is held by a subnet and outlives any single canister or replica, which
+is the whole premise of the design. What it means is narrower and still sharp: THE
+LOCAL REPLICA CANNOT BE USED TO VALIDATE DURABILITY. A local run proves the
+derivation works and proves nothing about whether an address persists, and anybody
+reading this output must treat the addresses as throwaway.
+
 WHAT A READER MUST NOT CONCLUDE FROM THE OUTPUT. The key is `dfx_test_key`, which
 exists only inside this container: it is a local replica's own threshold key and
 controls nothing on any real chain. The mainnet addresses printed below are
@@ -188,6 +208,12 @@ def main() -> int:
 
     key = bytes.fromhex(public_key_hex)
     print(f"\npublic key   {public_key_hex}")
+    # SAID ON THE SCREEN AND NOT ONLY IN THE HEADER (rule 14): an operator reads the
+    # output, and the output is what gets pasted back a day later. Measured 2026-10-07
+    # across one container recreation -- see this file's header for both key values.
+    print("             NOT STABLE: a local replica issues a NEW dfx_test_key when its")
+    print("             container is recreated, so every address below is THROWAWAY.")
+    print("             Measured 2026-10-07: one stop-and-start changed this key.")
     print(f"             {len(key)} bytes, prefix 0x{key[0]:02x}  <- 33 and 0x02/0x03 is a compressed secp256k1 point")
 
     adapters = build_adapters(Config.RPC)
