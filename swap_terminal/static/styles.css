@@ -63,40 +63,65 @@
    * second theme nobody asked for and nobody could read (rule 9).
    * ===================================================================== */
 
-  /* Near-black with a green cast, not pure #000: a phosphor tube glows into
-   * its own glass, and pure black makes the green look pasted on top. */
-  --bg: #050a06;
-  --bg-sunken: #020501;
-  --surface: #0a1309;
-  --surface-2: #0e1a0d;
+  /* Near-black, and now with a trace of BLUE as well as green, because blue is
+   * structural in this palette rather than decorative. Pure #000 makes an
+   * emissive colour look pasted on; a tube glows into its own glass. */
+  --bg: #04080a;
+  --bg-sunken: #010406;
+  --surface: #08120f;
+  --surface-2: #0b1813;
 
-  /* The phosphor itself, dimmed in three steps. Nothing on screen is white. */
+  /* THE PHOSPHOR IS STILL THE VOICE OF THE PAGE. Body text, labels, every
+   * number -- green, dimmed in three steps, and nothing is white. */
   --ink: #3cff6e;
   --ink-soft: #27b84e;
   --ink-faint: #1a7a34;
 
-  --line: #16401f;
-  --line-strong: #2a7a3d;
+  /* Frames lean blue so that structure and content are different hues: a
+   * border is the machine, the green inside it is the reading. */
+  --line: #124049;
+  --line-strong: #1f6f80;
 
-  --accent: #3cff6e;
-  --accent-ink: #050a06;
-  --accent-soft: #0d2412;
+  /* =====================================================================
+   * BLUE IS BACK AND IT IS DOING A JOB. Operator, 2026-10-07: "i do want
+   * more color but still want the main black and green and blue lookout."
+   *
+   * The first Pip-Boy pass was two hues on purpose, and it cost something
+   * real: `ok`, `working` and `accent` were the SAME green, so "this is
+   * settled" and "this is in progress" looked identical and only the word
+   * and the border told them apart. That is the colour-alone prohibition
+   * satisfied on a technicality rather than honoured.
+   *
+   * Green now means SETTLED and blue means IN MOTION, which is the division
+   * the status vocabulary already makes: services/swap_view.py's rail runs
+   * deposit -> seen -> confirming -> credited -> paying -> done, and every
+   * stage before the last is something happening rather than something true.
+   * ===================================================================== */
+  --accent: #38bdf8;
+  --accent-ink: #04080a;
+  --accent-soft: #06222e;
 
   --ok: #3cff6e;
   --ok-soft: #0c2412;
-  /* Waiting is a DIMMER green rather than a different hue: a customer waiting
-   * on blocks is not in a warning state, and the old indigo has no place on a
-   * two-hue tube. */
-  --waiting: #2a9b4a;
-  --waiting-soft: #091a0d;
-  --working: #3cff6e;
-  --working-soft: #0d2412;
+  /* Waiting and working are both BLUE and deliberately not the same blue: one
+   * is the desk waiting on a customer, the other is the desk doing something.
+   * Distinguishable at a glance without reading, which is what a status colour
+   * is for. */
+  --waiting: #4f8ff7;
+  --waiting-soft: #081528;
+  --working: #38bdf8;
+  --working-soft: #06222e;
   --slow: #ffb000;
   --slow-soft: #241a00;
   --halted: #ff3b30;
   --halted-soft: #260806;
-  --unknown: #1a7a34;
-  --unknown-soft: #0a1409;
+  /* UNKNOWN IS VIOLET AND THAT IS THE POINT OF THE SIXTH COLOUR. It used to be
+   * a dim green, which made "nobody has established this" look like a quiet
+   * version of "fine" -- the worst direction for an unmeasured value to read
+   * in (rule 13: did-nothing must not look like did-work). Violet is in no
+   * other state's family, so it cannot be mistaken for a dimmer anything. */
+  --unknown: #a78bfa;
+  --unknown-soft: #150e26;
 
   --s1: 0.25rem;
   --s2: 0.5rem;
@@ -140,10 +165,15 @@
    * so every descendant inherits one source of truth for it. */
   --glow: 0 0 1px rgba(60, 255, 110, 0.55), 0 0 6px rgba(60, 255, 110, 0.22);
   --glow-strong: 0 0 2px rgba(60, 255, 110, 0.8), 0 0 10px rgba(60, 255, 110, 0.35);
+  /* A BLUE BLOOM FOR THE BLUE ELEMENTS. A green halo under blue text reads as a
+   * printing error rather than a glow -- the bloom has to be the colour of the
+   * thing emitting it. Used by the accent rules below; body keeps the green one
+   * because body text is green. */
+  --glow-accent: 0 0 1px rgba(56, 189, 248, 0.6), 0 0 8px rgba(56, 189, 248, 0.25);
 
   /* The shadow is a green bloom rather than a black drop: light does not cast
    * a dark shadow on an emissive display. */
-  --shadow: 0 0 0 1px rgba(42, 122, 61, 0.45), 0 0 18px rgba(60, 255, 110, 0.07);
+  --shadow: 0 0 0 1px rgba(31, 111, 128, 0.5), 0 0 18px rgba(56, 189, 248, 0.06);
 }
 
 * { box-sizing: border-box; }
@@ -167,7 +197,9 @@ body {
   text-shadow: var(--glow);
   /* A faint vignette, because a CRT is brighter in the middle. Fixed so it does
    * not travel with the scroll -- the glass does not move. */
-  background-image: radial-gradient(ellipse at 50% 40%, rgba(60, 255, 110, 0.045), transparent 70%);
+  background-image:
+    radial-gradient(ellipse at 50% 40%, rgba(60, 255, 110, 0.04), transparent 70%),
+    radial-gradient(ellipse at 50% 110%, rgba(56, 189, 248, 0.05), transparent 65%);
   background-attachment: fixed;
 }
 
@@ -424,8 +456,24 @@ button.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
+  /* NO TEXT GLOW ON A FILLED BUTTON. body's bloom is inherited by everything,
+   * and a green halo around near-black text sitting on blue reads as a printing
+   * misregistration rather than a glow. The BOX glows instead, which is what an
+   * emissive key on a panel actually does. */
+  text-shadow: none;
+  box-shadow: var(--glow-accent);
 }
 button.primary:hover { filter: brightness(1.08); }
+
+/* THE ACCENT'S OWN BLOOM, wherever blue is the ink rather than the fill. A link
+ * and a stage marker are blue TEXT, so they emit blue -- inheriting body's green
+ * halo under them was the single thing that made the first pass look like two
+ * themes fighting. */
+a,
+.panel-accent > h2,
+.stage-current {
+  text-shadow: var(--glow-accent);
+}
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;

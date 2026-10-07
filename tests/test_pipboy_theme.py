@@ -102,22 +102,54 @@ def test_the_state_border_treatments_survived_the_retheme():
     assert "solid var(--halted)" in CSS, "the halted state's solid rule is gone"
 
 
-def test_slow_and_halted_are_not_the_same_colour():
-    """Two states one hue apart would be the colour-alone failure, inverted.
+def test_no_two_states_share_a_colour():
+    """Every state is its own hue, which the first Pip-Boy pass did NOT satisfy.
 
-    The operator asked for "green black and red". Amber is the one addition, and
-    it is here because `--slow` and `--halted` would otherwise both be red with
-    only a border weight between them. It is also the Pip-Boy's own second
-    phosphor, so it is in the world rather than imported into it -- but the reason
-    it is allowed is this assertion, not the lore.
+    THIS TEST ASSERTED THE DEFECT UNTIL 2026-10-07. It was
+    test_slow_and_halted_are_not_the_same_colour, and its last line read
+
+        assert token("ok") == token("working") == token("accent")
+
+    -- pinning that settled and in-progress were the SAME green. That was a true
+    description of the two-hue palette and a bad property to hold: "this swap is
+    done" and "this swap is mid-payout" looked identical, and only the word and
+    the border weight told them apart. The colour-alone prohibition in
+    styles.css's header was being satisfied on a technicality rather than
+    honoured, by a test that locked it in place.
+
+    Operator, same day: "i do want more color but still want the main black and
+    green and blue lookout." So green now means SETTLED and blue means IN MOTION
+    -- the division services/swap_view.py's own status rail already makes, where
+    every stage before the last is something happening rather than something
+    true.
+
+    ASSERTED AS MUTUAL DISTINCTNESS rather than as a list of pairs, so it scales:
+    a seventh state added later cannot quietly borrow a sixth state's colour, and
+    nobody has to remember to add a line here.
     """
+    states = ("ok", "waiting", "working", "slow", "halted", "unknown")
+
     def token(name):
         found = re.search(rf"--{name}:\s*([^;]+);", CSS)
         assert found, f"--{name} is not declared"
         return found.group(1).strip()
 
-    assert token("slow") != token("halted")
-    assert token("ok") != token("halted"), "settled and halted must never share a colour"
-    # And the green states agree with each other, because they ARE one state on a
-    # two-hue tube: ok, working and accent all read as "this is fine".
-    assert token("ok") == token("working") == token("accent")
+    colours = {name: token(name) for name in states}
+    clashes = [
+        (a, b) for i, a in enumerate(states) for b in states[i + 1:]
+        if colours[a] == colours[b]
+    ]
+    assert not clashes, (
+        f"these states share a colour: {clashes}. On a palette this dark the hue is the only "
+        f"thing read at a glance -- the word and the border are what a reader falls back to, not "
+        f"what they use first. Colours are: {colours}"
+    )
+
+    # AND THE TWO STRUCTURAL HUES ARE THE ONES THE OPERATOR ASKED FOR: the page's
+    # voice is green (`--ink`) and its accent is blue. A retheme that made the
+    # accent green again would collapse settled and in-progress back together.
+    assert token("ink") == token("ok"), "body text and the settled state are the same phosphor green"
+    assert token("accent") == token("working"), "the accent IS the in-motion colour, not a third thing"
+    assert token("accent") != token("ok"), (
+        "the accent must not be the settled green -- that is the collapse this test exists to stop"
+    )
