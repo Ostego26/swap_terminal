@@ -123,7 +123,59 @@
       {% endfor %}
     </tbody>
   </table>
-  <ul class="swapgrid">
+  {#- ONE LAMP PER COIN, AND IT IS POINT/CLICK. Operator 2026-10-07: "grc led ltc led,
+      etc should indicate which pairs are available for that coin. if all are available
+      green. if some but not all, yellow. none....red."
+
+      THE COLOUR IS NOT THE WHOLE ANSWER AND THE LAMP SAYS SO. A coin can be fine
+      OUTBOUND and unusable INBOUND -- measured 2026-10-07, ICP -> BTC/GRC/LTC quote and
+      nothing -> ICP does, because an ICP payout needs the desk's dfx identity and a read
+      does not. An amber lamp over that is true and useless: it answers neither "can I
+      get ICP out" nor "can I get ICP in", and those have opposite answers. So each lamp
+      carries both counts, in the tile, not only in a tooltip -- a customer reads the
+      screen (rule 14).
+
+      A <button> rather than a div with a click handler, so it is reachable by keyboard
+      and announced as pressable without any ARIA added by hand. With JavaScript off it
+      is an inert button beside counts that are already correct, which is the whole panel
+      still working -- the filtering is a convenience over a list that is complete on the
+      server. -#}
+  <ul class="lampstrip" id="lampstrip">
+    {% for lamp in lamps %}
+    <li>
+      <button type="button"
+              class="lamp lamp-{{ lamp.key }}"
+              data-asset="{{ lamp.asset }}"
+              aria-pressed="false"
+              title="{{ lamp.detail }}">
+        <span class="lamp-dot" aria-hidden="true"></span>
+        <span class="lamp-asset">{{ lamp.asset }}</span>
+        <span class="lamp-word">{{ lamp.word }}</span>
+        <span class="lamp-counts">out {{ lamp.out_available }}/{{ lamp.out_total }}
+          &middot; in {{ lamp.in_available }}/{{ lamp.in_total }}</span>
+      </button>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="panel-note" id="lamp-filter-note">Click a coin to show only its directions. Click it again to
+     show all. <strong>out</strong> is that coin going out of your hands into the desk's;
+     <strong>in</strong> is the desk paying it to you.</p>
+  {#- THE LAMP KEY, iterated from services/pair_view.ASSET_ROLLUP_STATES for the reason
+      the pair key is iterated from CUSTOMER_STATES: a state that exists without an entry
+      here is a colour nobody can look up. -#}
+  <table class="kvt">
+    <caption class="subbox-title">What a coin's lamp means</caption>
+    <tbody>
+      {% for state in rollup_states %}
+      <tr>
+        <th scope="row">{{ badges.level_badge(state.level, state.word) }}</th>
+        <td>{{ state.note }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <ul class="swapgrid" id="swapgrid">
     {% for pair in pairs %}
     {#- ONE LINE PER TILE, AND THE SENTENCE IS NOT ON IT. The first version carried
         pair.customer.note inside every tile, and a paste of thirteen tiles then held
@@ -138,7 +190,8 @@
 
         A span rather than a block for the pair, so the tile is one line in a paste:
         "BTC -> GRC ✓AVAILABLE". With a block it was three. -#}
-    <li class="swaptile swaptile-{{ pair.customer.key }}">
+    <li class="swaptile swaptile-{{ pair.customer.key }}"
+        data-from="{{ pair.from_asset }}" data-to="{{ pair.to_asset }}">
       <span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
       {{ badges.level_badge(pair.customer.level, pair.customer.word) }}
     </li>

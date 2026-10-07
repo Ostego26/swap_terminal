@@ -601,6 +601,63 @@ function wireWalletMenu() {
   });
 }
 
+function wireLampFilter() {
+  // ONE LAMP PER COIN, CLICKED TO FILTER THE DIRECTION GRID. Operator 2026-10-07:
+  // "grc led ltc led, etc should indicate which pairs are available for that coin"
+  // and the page should be "point/click".
+  //
+  // EVERY NUMBER ON THE PAGE IS ALREADY CORRECT WITHOUT THIS. The lamps, their
+  // counts and the "N of M directions" line are rendered by the server from
+  // services/pair_view.asset_rollups(). This function hides tiles and nothing else,
+  // so with JavaScript off the panel is complete and merely unfiltered -- which is
+  // why the lamps are <button>s on a page that works without them rather than the
+  // only way to read the state.
+  const strip = document.getElementById("lampstrip");
+  const grid = document.getElementById("swapgrid");
+  const note = document.getElementById("lamp-filter-note");
+  if (!strip || !grid) return;
+
+  const tiles = Array.from(grid.querySelectorAll(".swaptile"));
+
+  function apply(asset) {
+    let shown = 0;
+    for (const tile of tiles) {
+      // A COIN'S DIRECTIONS ARE BOTH HALVES. Filtering on `from` alone would answer
+      // "what can I send this as", and the lamp's own counts report in AND out --
+      // a filter narrower than the lamp beside it would contradict it.
+      const involved =
+        !asset || tile.dataset.from === asset || tile.dataset.to === asset;
+      tile.hidden = !involved;
+      if (involved) shown += 1;
+    }
+    for (const lamp of strip.querySelectorAll(".lamp")) {
+      lamp.setAttribute("aria-pressed", String(lamp.dataset.asset === asset));
+    }
+    if (note) {
+      // SAY WHAT THE SCREEN IS NOW SHOWING, with its denominator (rule 3). A filter
+      // that silently removes rows is indistinguishable from a page that has fewer,
+      // and "3 shown" without "of 30" says nothing about whether something is wrong.
+      note.textContent = asset
+        ? "Showing " + shown + " of " + tiles.length + " directions, filtered to " + asset +
+          ". Click " + asset + " again to show all."
+        : "Click a coin to show only its directions. Click it again to show all. " +
+          "out is that coin going out of your hands into the desk's; in is the desk paying it to you.";
+    }
+  }
+
+  let active = "";
+  strip.addEventListener("click", function (event) {
+    const lamp = event.target.closest(".lamp");
+    if (!lamp) return;
+    // CLICKING THE ACTIVE LAMP CLEARS THE FILTER rather than reapplying it. Without
+    // this there is no way back to the full list except reloading, which is the
+    // failure mode of every filter that only ever narrows.
+    active = lamp.dataset.asset === active ? "" : lamp.dataset.asset;
+    apply(active);
+  });
+}
+
+wireLampFilter();
 wireQuoteForm();
 wireSwapForm();
 wireLivePolling();

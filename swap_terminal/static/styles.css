@@ -1214,3 +1214,73 @@ h2:target {
   padding: var(--s2);
   border-radius: var(--radius-sm);
 }
+
+/* ONE LAMP PER COIN -- the operator's "grc led ltc led" (2026-10-07).
+ *
+ * THE COLOURS ARE THE EXISTING LEVEL TOKENS, not new ones: --ok, --waiting, --halted
+ * are what the pair badges and the swap status page already use, so a reader learns
+ * one scheme and a theme change moves both (rule 8). services/pair_view's
+ * _ASSET_ROLLUP maps all/some/none onto those same three levels for the same reason.
+ *
+ * The dot is a real element rather than a ::before, so the colour is addressable and a
+ * screen reader is told to skip it (aria-hidden) while the WORD beside it carries the
+ * state. A lamp whose only signal is colour is unreadable to anyone who cannot see it,
+ * and this page's whole key is built on the word. */
+.lampstrip {
+  list-style: none;
+  margin: 0 0 var(--s2);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.lamp {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas: "dot asset" "word word" "counts counts";
+  align-items: center;
+  gap: 0.15rem 0.4rem;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lamp:hover { border-color: var(--accent); }
+.lamp:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* PRESSED IS A BORDER AND A BACKGROUND, NOT A COLOUR CHANGE. The lamp's colour means
+ * availability; if "selected" also used colour, a customer could not tell a selected
+ * amber coin from an unselected one. aria-pressed carries it for assistive tech. */
+.lamp[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.lamp-dot { grid-area: dot; width: 0.7rem; height: 0.7rem; border-radius: 50%; }
+.lamp-asset { grid-area: asset; font-weight: 700; font-family: var(--mono); }
+.lamp-word { grid-area: word; font-size: var(--t-sm); font-weight: 600; letter-spacing: 0.04em; }
+.lamp-counts { grid-area: counts; font-size: var(--t-sm); font-family: var(--mono); opacity: 0.85; }
+
+.lamp-all { border-left-color: var(--ok); }
+.lamp-all .lamp-dot { background: var(--ok); }
+.lamp-all .lamp-word { color: var(--ok); }
+
+.lamp-some { border-left-color: var(--waiting); border-left-style: dashed; }
+.lamp-some .lamp-dot { background: var(--waiting); }
+.lamp-some .lamp-word { color: var(--waiting); }
+
+.lamp-none { border-left-color: var(--halted); }
+.lamp-none .lamp-dot { background: var(--halted); }
+.lamp-none .lamp-word { color: var(--halted); }
+
+/* A tile the lamp filter has hidden. `hidden` alone is overridden by .swaptile's
+ * display, which is the oldest trap in CSS and the reason this is explicit. */
+.swaptile[hidden] { display: none; }

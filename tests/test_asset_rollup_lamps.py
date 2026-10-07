@@ -20,6 +20,9 @@ or "can I get ICP in". So the split is asserted as hard as the colour.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader
 from services.pair_view import ASSET_ROLLUP_STATES, asset_rollups
 
 
@@ -127,3 +130,71 @@ def test_a_lamp_can_never_be_greener_than_the_rows_it_came_from():
     moved = _by_asset(rows)["BTC"]
     assert moved["key"] == "some", "a row going unavailable must move the lamp off green"
     assert moved["available"] <= moved["total"]
+
+
+# --- and the same three states, RENDERED, because a decision nobody draws is invisible
+
+
+def _rendered(lamps):
+    """index.html's lamp strip, rendered with seeded lamps and nothing else real.
+
+    The template is rendered directly rather than through a request, because the
+    question here is what the LAMP MARKUP does with a given rollup -- and routing a
+    real request through it would require a config whose adapters produce the mixed
+    state, which is the one state this container cannot produce (it has no chains).
+    The decision itself is covered above against seeded rows.
+    """
+    root = Path(__file__).resolve().parents[1] / "swap_terminal" / "templates"
+    env = Environment(loader=FileSystemLoader(str(root)), autoescape=True)
+    source = (root / "index.html").read_text()
+    start = source.index('<ul class="lampstrip"')
+    end = source.index("</ul>", start) + len("</ul>")
+    return env.from_string(source[start:end]).render(lamps=lamps)
+
+
+def test_each_lamp_renders_its_colour_class_its_word_and_BOTH_counts():
+    """The colour answers "is anything wrong"; the counts answer "which half".
+
+    Pinned together because the colour alone is what the operator asked for and the
+    counts are what make an amber lamp actionable. A render that dropped the counts
+    would satisfy the brief and still leave ICP's lamp saying "some" to a customer
+    whose question has two opposite answers.
+    """
+    markup = _rendered(
+        asset_rollups(
+            _rows(
+                ("ICP", "BTC", True), ("BTC", "ICP", False),
+                ("BTC", "LTC", True), ("LTC", "BTC", True),
+                ("SOL", "BTC", False), ("BTC", "SOL", False),
+            )
+        )
+    )
+
+    assert 'class="lamp lamp-all"' in markup, "LTC's every direction works and must be green"
+    assert 'class="lamp lamp-some"' in markup, "ICP works one way only and must be amber"
+    assert 'class="lamp lamp-none"' in markup, "SOL works neither way and must be red"
+
+    for word in ("ALL", "SOME", "NONE"):
+        assert f">{word}</span>" in markup, f"{word} is a colour with no word beside it"
+
+    assert "out 1/1" in markup and "in 0/1" in markup, (
+        "ICP's split must be ON THE TILE, not only in a tooltip -- a customer reads the screen"
+    )
+
+
+def test_every_lamp_is_a_BUTTON_carrying_the_asset_it_filters():
+    """point/click, keyboard-reachable, and inert-but-honest with JavaScript off.
+
+    A <button> rather than a div with a handler: reachable by keyboard and announced
+    as pressable with no hand-added ARIA. aria-pressed starts false and the filter
+    script is the only thing that changes it, so a page with JS off shows an unpressed
+    button beside counts that are already correct -- the panel complete and merely
+    unfiltered.
+    """
+    markup = _rendered(asset_rollups(_rows(("BTC", "LTC", True), ("LTC", "BTC", True))))
+
+    assert markup.count("<button") == 2, "one button per coin"
+    assert 'type="button"' in markup, "a submit button inside a page with forms would submit one"
+    assert 'aria-pressed="false"' in markup, "the pressed state has to be announced, not just colored"
+    for asset in ("BTC", "LTC"):
+        assert f'data-asset="{asset}"' in markup, f"{asset}'s button does not say what it filters"

@@ -71,8 +71,10 @@ from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from services.helpers import utc_now_iso
 from services.pair_view import (
+    ASSET_ROLLUP_STATES,
     CUSTOMER_STATES,
     allowed_pair_rows,
+    asset_rollups,
     customer_availability,
     offerable_pairs,
 )
@@ -108,6 +110,12 @@ def index():
         "index.html",
         pairs=pairs,
         customer_states=CUSTOMER_STATES,
+        # ONE LAMP PER COIN, derived from the rows just built rather than evaluated a
+        # second time. Operator 2026-10-07: "grc led ltc led, etc should indicate which
+        # pairs are available for that coin." asset_rollups() is pure and the lamp is a
+        # MIRROR of `pairs` -- a direction those rows call unavailable cannot show green.
+        lamps=asset_rollups(pairs),
+        rollup_states=ASSET_ROLLUP_STATES,
         offerable=offerable,
         quote_ttl_seconds=current_app.config["QUOTE_TTL_SECONDS"],
         fee_bps=current_app.config["DEFAULT_FEE_BPS"],

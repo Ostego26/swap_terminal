@@ -163,6 +163,25 @@ def value_for(markup: str, label: str) -> str:
     raise AssertionError(f"no table row is labeled {label!r}; the page has {labels_of(markup)}")
 
 
+#: One direction tile, as the page renders it: the state class, then its contents.
+#:
+#: ONE PATTERN RATHER THAN THREE COPIES, and three copies is why this exists. Until
+#: 2026-10-07 three tests each carried
+#:
+#:     r'<li class="swaptile swaptile-([a-z]+)">(.*?)</li>'
+#:
+#: and all three broke the moment the tile gained `data-from`/`data-to` attributes for
+#: the coin-lamp filter -- because each one required `>` to follow the class
+#: immediately. Five tests failed on one markup change that altered nothing they were
+#: testing. That is rule 8's duplication with the drift arriving all at once instead of
+#: slowly, and it is also what CLAUDE.md means about matching text instead of behavior:
+#: the property these tests hold is "one tile per direction, naming it, with an
+#: explained marker", and none of them is about where the `>` is.
+#:
+#: `[^>]*` after the class so any attribute may be added without touching this again.
+_TILE = r'<li class="swaptile swaptile-([a-z]+)"[^>]*>(.*?)</li>'
+
+
 # --- every box renders, and every box has a heading ------------------------
 
 
@@ -183,7 +202,7 @@ def test_every_allowed_direction_gets_exactly_one_indicator(client):
     """
     body = client.get("/").get_data(as_text=True)
     allowed = client.application.config["ALLOWED_PAIRS"]
-    tiles = re.findall(r'<li class="swaptile swaptile-([a-z]+)">(.*?)</li>', body, flags=re.DOTALL)
+    tiles = re.findall(_TILE, body, flags=re.DOTALL)
     assert len(tiles) == len(allowed), (
         f"{len(allowed)} directions are allowed and the page drew {len(tiles)} indicators"
     )
@@ -218,7 +237,7 @@ def test_no_indicator_is_blank_and_every_marker_it_uses_is_explained(client, mon
     fully_reachable(client, monkeypatch, *{asset for pair in allowed for asset in pair})
     body = client.get("/").get_data(as_text=True)
 
-    tiles = re.findall(r'<li class="swaptile swaptile-[a-z]+">(.*?)</li>', body, flags=re.DOTALL)
+    tiles = [inner for _state, inner in re.findall(_TILE, body, flags=re.DOTALL)]
     assert tiles, "no indicator rendered at all"
     for inner in tiles:
         assert '<span class="badge-glyph"' in inner, "a tile carries no glyph, so it fails in grayscale"
@@ -1365,7 +1384,7 @@ def test_a_probe_panel_with_nothing_to_contact_says_that_rather_than_naming_zero
 def _tiles(body):
     """Each indicator as (state key, direction, badge word)."""
     found = []
-    for state, inner in re.findall(r'<li class="swaptile swaptile-([a-z]+)">(.*?)</li>', body, flags=re.DOTALL):
+    for state, inner in re.findall(_TILE, body, flags=re.DOTALL):
         label = re.search(r'<span class="pair-label">(.*?)</span>', inner, flags=re.DOTALL)
         word = re.search(r'<span class="badge-word">(.*?)</span>', inner, flags=re.DOTALL)
         found.append((
