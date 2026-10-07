@@ -192,6 +192,56 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILES = (_REPO_ROOT / "docker-compose.yml", _REPO_ROOT / "docker-compose.icp.yml")
 
 
+#: Lines of dfx output that carry KEY MATERIAL and must never be surfaced.
+#:
+#: WHY THIS IS NOT OPTIONAL AND NOT A STYLE CHOICE. Measured twice on 2026-10-07, the
+#: second time WITH `--identity anonymous` already in the command:
+#:
+#:     Creating the "default" identity.
+#:       - generating new key at /home/swap/.config/dfx/identity/default/identity.pem
+#:     Your seed phrase: <24 words>
+#:
+#: dfx bootstraps its identity store on first run in a fresh container and prints the
+#: mnemonic, BEFORE it honors --identity. So the flag was necessary -- anonymous is
+#: the right caller for every read here -- and it is not sufficient: it cannot stop
+#: dfx from writing that line.
+#:
+#: What IS this repository's to control is whether the line is passed on, and it was
+#: not: ICPCallFailed embedded dfx's stderr and stdout verbatim, so the mnemonic went
+#: into an exception message, a worker log, and the operator's terminal. The
+#: operator's standing instruction is that a key is never moved, copied, read back or
+#: echoed. A secret that arrives from a subprocess is still a secret.
+#:
+#: Matched on the LINE, and the whole line is dropped rather than the words masked --
+#: a partial mnemonic is still a reduced search space, and nothing downstream needs
+#: any part of it.
+_SECRET_MARKERS = ("seed phrase", "identity.pem", "private key", "secret key")
+
+
+def redact_secrets(text: str) -> str:
+    """Drop every line of dfx output that carries key material. See _SECRET_MARKERS.
+
+    Returns the text with each offending line replaced by a marker that says one was
+    removed -- rule 14's "(none) is a result": a silently shortened error message
+    would leave a reader wondering what they are not being told, and the fact that
+    dfx emitted a key IS diagnostic information worth keeping.
+    """
+    kept = []
+    removed = 0
+    for line in text.splitlines():
+        if any(marker in line.lower() for marker in _SECRET_MARKERS):
+            removed += 1
+            continue
+        kept.append(line)
+    if removed:
+        kept.append(
+            f"[{removed} line(s) of dfx output withheld: they carried key material. dfx bootstraps "
+            f"an identity on first run in a fresh container and prints its mnemonic; this adapter "
+            f"never passes that on. The identity is unused -- every call here is --identity anonymous.]"
+        )
+    return "\n".join(kept)
+
+
 def dfx_transport(service: str, timeout: float, network_url: str = ""):
     """Return a `call(canister, method, argument) -> str` that reaches the ledger.
 
@@ -323,9 +373,16 @@ def dfx_transport(service: str, timeout: float, network_url: str = ""):
         if done.returncode != 0:
             raise ICPCallFailed(
                 f"dfx exited {done.returncode} for {method} on {canister}: "
-                f"{done.stderr.strip() or '(no stderr)'}. Command was: {shlex.join(argv)}"
+                f"{redact_secrets(done.stderr.strip()) or '(no stderr)'}. "
+                f"Command was: {shlex.join(argv)}"
             )
-        return done.stdout
+        # REDACTED ON THE WAY OUT TOO, not only in the error path. dfx's identity
+        # bootstrap goes to whichever stream it chooses, and this value is parsed,
+        # logged and in some paths shown. No candid value line contains any of
+        # _SECRET_MARKERS, so removing those lines cannot damage a real answer -- and
+        # the one time it changes anything is the time a mnemonic would otherwise have
+        # been returned into the application.
+        return redact_secrets(done.stdout)
 
     return call
 

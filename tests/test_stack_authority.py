@@ -381,3 +381,48 @@ def test_a_timeout_and_an_unrecognized_outcome_are_both_NOT_READY():
     ready, detail = readiness_verdict("something nobody anticipated")
     assert ready is False
     assert "treated as NOT ready" in detail
+
+
+def test_DOWN_stops_containers_and_does_NOT_remove_them(monkeypatch, capsys):
+    """It removed the replica's container on 2026-10-07 and the ledger canister went with it.
+
+    MEASURED, on the operator's host, after `swap_stack.py down && swap_stack.py up`:
+
+        reject code DestinationInvalid, reject message Canister
+        bkyz2-fmaaa-aaaaa-qaaaq-cai not found, error code Some("IC0301")
+
+    The ICP ledger -- deployed, initialized and holding the desk's 1000 test ICP
+    across two days of work -- was no longer in the replica. `docker compose down`
+    removes containers, and that state did not survive its container.
+
+    `stop` answers the same question: nothing of this stack is running when `down`
+    returns, which is what an operator means by it, and the port-bind proof is what
+    makes that a measurement. Removing the containers was never part of the
+    requirement; it was the default verb I reached for.
+
+    Asserted behaviorally -- the compose subcommand is captured from a stub -- because
+    the whole defect was a one-word difference in an argv that no test looked at.
+    """
+    captured = {}
+
+    def fake_compose(args, files, check=False):
+        captured["args"] = list(args)
+
+        class _Done:
+            returncode, stdout, stderr = 0, "", ""
+        return _Done()
+
+    monkeypatch.setattr(swap_stack, "compose", fake_compose)
+    monkeypatch.setattr(swap_stack.supervisor, "main", lambda argv: 0)
+    monkeypatch.setattr(swap_stack, "report_listeners", list)
+    monkeypatch.setattr(swap_stack, "port_is_free", lambda port, host="127.0.0.1": True)
+
+    swap_stack.cmd_down(swap_stack.COMPOSE_FILES)
+
+    assert captured["args"] == ["stop"], (
+        f"`down` ran `docker compose {' '.join(captured['args'])}`. `down` REMOVES containers, "
+        f"which destroyed the replica's ledger canister on 2026-10-07. Use `stop`: nothing runs "
+        f"after it, and the writable layer survives."
+    )
+    printed = capsys.readouterr().out
+    assert "not removed" in printed, "the operator must be told which of the two verbs ran (rule 14)"

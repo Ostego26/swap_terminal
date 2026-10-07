@@ -340,18 +340,47 @@ def cmd_down(files: tuple[str, ...]) -> int:
     say("swap_stack: DOWN")
     say(f"  database          {Config.DB_PATH}")
     say("  order             workers (SIGTERM + grace, absence PROVEN) -> containers -> prove ports free")
+    say("  containers        STOPPED, not removed -- `docker compose down` removed the replica's")
+    say("                    container on 2026-10-07 and its ledger canister went with it. Nothing")
+    say("                    of this stack runs when this returns, which is what `down` is for.")
     say("  never stopped     chain daemons, and a FOREIGN listener on one of our ports. Both are")
     say("                    reported below rather than passed over in silence")
     say("")
     say("  1. workers")
     supervisor.main(["stop", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
     say("")
-    say("  2. containers")
-    done = compose(["down"], files)
+    say("  2. containers -- STOPPED, NOT REMOVED. See the comment below.")
+    # `stop` AND NOT `down`, AND THIS COST THE OPERATOR THEIR LEDGER STATE ONCE.
+    #
+    # Measured 2026-10-07. After `swap_stack.py down && swap_stack.py up`, the first
+    # ICP call answered:
+    #
+    #     reject code DestinationInvalid, reject message Canister
+    #     bkyz2-fmaaa-aaaaa-qaaaq-cai not found, error code Some("IC0301")
+    #
+    # The ledger canister -- holding the desk's 1000 test ICP, deployed and funded
+    # across two days of work -- was not in the replica any more. `docker compose
+    # down` REMOVES containers, and the replica's canister state did not survive its
+    # container. docker/icp-replica.Dockerfile sets DFX_CONFIG_ROOT=/state with a
+    # comment saying it is "so a `dfx start` survives a rebuild"; that claim is now in
+    # doubt and is NOT established either way from here.
+    #
+    # `stop` satisfies what `down` is for -- nothing of this stack is running when it
+    # returns, which is the question an operator asks -- while leaving the containers,
+    # and therefore their writable layers, intact. The port proof below is unchanged
+    # and is what makes "nothing running" a measurement rather than a claim.
+    #
+    # WHAT THIS DOES NOT FIX, said plainly rather than left to be rediscovered: `up`
+    # RECREATES a container when its image changes, so the next rebuild of the replica
+    # image loses the ledger again. The real fix is getting the replica's state onto
+    # the icp-state volume, which needs a measurement of where dfx actually puts it --
+    # a question no session without a running replica can answer. Until then, redeploy
+    # after a replica rebuild: icp_ledger_init.py and `dfx deploy` are the path.
+    done = compose(["stop"], files)
     for line in (done.stderr or done.stdout).strip().splitlines():
         say(f"                    {line}")
     if done.returncode != 0:
-        say(f"  FAILED            docker compose down exited {done.returncode}")
+        say(f"  FAILED            docker compose stop exited {done.returncode}")
     say("")
     say("  3. proof -- absence is the assertion, not an exit code (rule 13)")
     remaining = report_listeners()

@@ -670,3 +670,76 @@ def test_the_COMPOSE_transport_is_unchanged_and_still_the_default(monkeypatch):
     assert recorded["cwd"] == icp_module._REPO_ROOT, (
         "compose resolves the relative paths INSIDE its files against the cwd"
     )
+
+
+# --- key material in dfx's own output, which this adapter must never pass on
+
+
+_DFX_BOOTSTRAP = '''Creating the "default" identity.
+WARNING: The "default" identity is not stored securely.
+  - generating new key at /home/swap/.config/dfx/identity/default/identity.pem
+Your seed phrase: inherit decrease finish rotate under town inquiry cotton spend home into hawk
+This can be used to reconstruct your key in case of emergency.
+Created the "default" identity.
+(10_000 : nat)'''
+
+
+def test_a_mnemonic_from_dfx_NEVER_reaches_a_caller():
+    """Measured twice on 2026-10-07, the second time with --identity anonymous already set.
+
+    dfx bootstraps its identity store on first run in a fresh container and prints the
+    24-word mnemonic, BEFORE it honors --identity. So the flag was necessary --
+    anonymous is the correct caller for every read this transport makes -- and it is
+    not sufficient: it cannot stop dfx writing that line.
+
+    What this repository DOES control is whether the line is passed on, and it was
+    not: ICPCallFailed embedded dfx's output verbatim, so a mnemonic went into an
+    exception message, a worker log and the operator's terminal -- from a read-only
+    fee lookup. The operator's standing instruction is that a key is never moved,
+    copied, read back or echoed, and a secret arriving from a subprocess is still a
+    secret.
+
+    The whole LINE is dropped rather than the words masked: a partial mnemonic is a
+    reduced search space, and nothing downstream needs any part of it.
+    """
+    cleaned = icp_module.redact_secrets(_DFX_BOOTSTRAP)
+
+    for word in ("inherit decrease finish", "seed phrase", "identity.pem"):
+        assert word not in cleaned, f"{word!r} survived redaction: {cleaned!r}"
+    assert "(10_000 : nat)" in cleaned, "the actual answer must survive -- this is on the read path"
+    assert "withheld" in cleaned, (
+        "a silently shortened message leaves a reader wondering what they are not being told, "
+        "and the fact that dfx emitted a key is itself diagnostic (rule 14)"
+    )
+
+
+def test_redaction_leaves_ordinary_output_untouched():
+    """It must not eat a real answer, or every ICP read becomes a parse failure."""
+    plain = "(10_000 : nat)"
+    assert icp_module.redact_secrets(plain) == plain
+
+    multi = "WARN: Cannot fetch Candid interface for icrc1_fee\n(10_000 : nat)"
+    assert icp_module.redact_secrets(multi) == multi
+
+
+def test_the_transport_redacts_what_it_RETURNS_and_what_it_RAISES(monkeypatch):
+    """Both paths, because dfx chooses which stream its bootstrap goes to.
+
+    Behavioral rather than a check that redact_secrets is called somewhere: a stub
+    subprocess returns the bootstrap text on stdout for the success case and on
+    stderr for the failure case, and the mnemonic must appear in neither outcome.
+    """
+    class _Done:
+        def __init__(self, code, out, err):
+            self.returncode, self.stdout, self.stderr = code, out, err
+
+    monkeypatch.setattr(icp_module.subprocess, "run", lambda *a, **k: _Done(0, _DFX_BOOTSTRAP, ""))
+    call = icp_module.dfx_transport("icp-replica", 5.0, "http://icp-replica:4943")
+    assert "inherit decrease finish" not in call("a-canister", "icrc1_fee", "()")
+
+    monkeypatch.setattr(icp_module.subprocess, "run", lambda *a, **k: _Done(255, "", _DFX_BOOTSTRAP))
+    call = icp_module.dfx_transport("icp-replica", 5.0, "http://icp-replica:4943")
+    with pytest.raises(ICPCallFailed) as raised:
+        call("a-canister", "icrc1_fee", "()")
+    assert "inherit decrease finish" not in str(raised.value)
+    assert "seed phrase" not in str(raised.value)
