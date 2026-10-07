@@ -921,7 +921,7 @@ def loopback_listener():
 #: broadcast", which is a claim a new route can legitimately join by being
 #: checked. So the name says that, and joining it requires the check below.
 #:
-#: /atm, REVIEWED 2026-10-07 AND HERE IS THE REVIEW. The ATM flow's single POST
+#: `/`, REVIEWED 2026-10-07 AND HERE IS THE REVIEW. The ATM flow's single POST
 #: writes a `quotes` row and a `swaps` row by calling services/quote_service.
 #: create_quote() and services/swap_service.create_swap() -- the SAME two
 #: functions /api/quotes and /api/swaps already call, so it adds no capability
@@ -932,8 +932,14 @@ def loopback_listener():
 #: address_authority, wizard). The payout -- the only broadcast in a swap's life
 #: -- is services/payout_service.py's, reached by the payout worker, exactly as
 #: for a swap created through the one-page form.
+#: `/atm` BECAME `/` ON 2026-10-07 and this gate caught the move, which is the
+#: second time tonight it has caught a route of mine arriving unreviewed. The
+#: ATM flow replaced templates/index.html on the operator's instruction, so its
+#: POST handler moved to the customer entry point -- SAME function, same imports,
+#: same two service calls. The review below is unchanged because nothing about
+#: the handler changed; only the URL it answers on.
 REVIEWED_NON_SPAWNING_POST_ROUTES = frozenset(
-    {"/api/quotes", "/api/swaps", "/swap/<swap_id>/address-proof", "/atm"}
+    {"/api/quotes", "/api/swaps", "/swap/<swap_id>/address-proof", "/"}
 )
 
 

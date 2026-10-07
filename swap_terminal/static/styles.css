@@ -13,9 +13,13 @@
  * 8's shape in a stylesheet: the copies agree the day they are written, and the
  * drift shows up as one button that is very slightly the wrong blue.
  *
- * DARK MODE IS A TOKEN REDEFINITION, not a second stylesheet. One
- * prefers-color-scheme block re-points the same names, so a rule written once
- * works in both themes and cannot be updated in one and forgotten in the other.
+ * THERE IS ONE THEME AND IT IS DARK, since the Pip-Boy retheme of 2026-10-07.
+ * This used to read "DARK MODE IS A TOKEN REDEFINITION, not a second
+ * stylesheet", describing a prefers-color-scheme block that re-pointed the same
+ * names. That block is deleted: a phosphor tube has no light variant, and
+ * keeping one would be a second theme nobody asked for (rule 9). The tokens are
+ * still declared once and still the only place a colour is written, which is the
+ * half of that sentence that was load-bearing.
  *
  * NO STATE IS SIGNALED BY COLOR ALONE. Every state badge carries a glyph and a
  * word (templates/_badges.html), and the rules here add a border treatment on
@@ -28,42 +32,72 @@
  */
 
 :root {
-  /* Surfaces, from page backward to raised cards. */
-  --bg: #f4f6f8;
-  --bg-sunken: #e9edf1;
-  --surface: #ffffff;
-  --surface-2: #f8fafb;
+  /* =====================================================================
+   * PIP-BOY. Operator, 2026-10-07: "make the theme green black and red and
+   * use more pip boy looks from fallout."
+   *
+   * THE PALETTE IS TWO HUES AND A BACKGROUND, which is the whole ask: a
+   * phosphor green on near-black, red for anything halted. Every colour below
+   * is one of those three or a dimmed step between them.
+   *
+   * AMBER IS THE ONE ADDITION AND IT IS JUSTIFIED RATHER THAN SNUCK IN.
+   * `--slow` and `--halted` would otherwise both be red, and the only thing
+   * telling them apart would be a border weight -- a double rule versus a
+   * heavy one. This file's own header forbids leaning on a single channel, and
+   * two states sharing a colour is that failure wearing a different hat. Amber
+   * is also the Pip-Boy's actual second phosphor, so it is in the world rather
+   * than imported into it.
+   *
+   * THE BORDER TREATMENTS MATTER MORE NOW, NOT LESS. Solid for settled, dashed
+   * for waiting, double for slow, heavy for halted -- on a palette of two hues
+   * those carry more of the signal than they did on the old blues and greens,
+   * so none of them is touched below. Same for the glyph and the word every
+   * badge carries in templates/_badges.html: a green-and-red-only status is
+   * unreadable to roughly 8% of men and to everyone in a grayscale paste, and
+   * these pages get pasted.
+   *
+   * THERE IS NO LIGHT MODE AND THE prefers-color-scheme BLOCK IS GONE. It used
+   * to re-point these same names for dark, which the header still called "a
+   * token redefinition, not a second stylesheet" -- correct then, and dead now:
+   * a Pip-Boy renders on a CRT in a vault, and a light variant would be a
+   * second theme nobody asked for and nobody could read (rule 9).
+   * ===================================================================== */
 
-  /* Ink. Three weights is enough; a fourth gray always ends up ambiguous. */
-  --ink: #16202a;
-  --ink-soft: #46565f;
-  --ink-faint: #6e7f89;
+  /* Near-black with a green cast, not pure #000: a phosphor tube glows into
+   * its own glass, and pure black makes the green look pasted on top. */
+  --bg: #050a06;
+  --bg-sunken: #020501;
+  --surface: #0a1309;
+  --surface-2: #0e1a0d;
 
-  --line: #d3dce2;
-  --line-strong: #9fb0ba;
+  /* The phosphor itself, dimmed in three steps. Nothing on screen is white. */
+  --ink: #3cff6e;
+  --ink-soft: #27b84e;
+  --ink-faint: #1a7a34;
 
-  /* Accent, and one per state. The state hues are chosen to stay separable in
-   * grayscale as well as in color: done is darkest, waiting is mid, slow and
-   * halted are lighter but carry heavier borders. */
-  --accent: #1f6fb2;
-  --accent-ink: #ffffff;
-  --accent-soft: #e6f0f9;
+  --line: #16401f;
+  --line-strong: #2a7a3d;
 
-  --ok: #1d6f42;
-  --ok-soft: #e4f2e9;
-  --waiting: #4a5a8a;
-  --waiting-soft: #eaedf7;
-  --working: #1f6fb2;
-  --working-soft: #e6f0f9;
-  --slow: #8a5a10;
-  --slow-soft: #fbf0dc;
-  --halted: #8a2b2b;
-  --halted-soft: #f9e8e8;
-  --unknown: #5b5b5b;
-  --unknown-soft: #ededed;
+  --accent: #3cff6e;
+  --accent-ink: #050a06;
+  --accent-soft: #0d2412;
 
-  /* Spacing scale: 4px steps, named by size rather than by use, so a rule can
-   * pick one without inventing a new value. */
+  --ok: #3cff6e;
+  --ok-soft: #0c2412;
+  /* Waiting is a DIMMER green rather than a different hue: a customer waiting
+   * on blocks is not in a warning state, and the old indigo has no place on a
+   * two-hue tube. */
+  --waiting: #2a9b4a;
+  --waiting-soft: #091a0d;
+  --working: #3cff6e;
+  --working-soft: #0d2412;
+  --slow: #ffb000;
+  --slow-soft: #241a00;
+  --halted: #ff3b30;
+  --halted-soft: #260806;
+  --unknown: #1a7a34;
+  --unknown-soft: #0a1409;
+
   --s1: 0.25rem;
   --s2: 0.5rem;
   --s3: 0.75rem;
@@ -71,8 +105,6 @@
   --s5: 1.5rem;
   --s6: 2rem;
   --s7: 3rem;
-
-  /* Type scale. */
   --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --t-xs: 0.78rem;
@@ -81,47 +113,37 @@
   --t-lg: 1.25rem;
   --t-xl: 1.75rem;
   --t-2xl: 2.25rem;
-
   --radius: 10px;
   --radius-sm: 6px;
-  --shadow: 0 1px 2px rgba(16, 32, 42, 0.06), 0 6px 18px rgba(16, 32, 42, 0.06);
   --gutter: 16px;
   --measure: 72ch;
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0f1418;
-    --bg-sunken: #0a0e11;
-    --surface: #161d23;
-    --surface-2: #1b242b;
+  /* THE ONE COLOUR ON THIS PAGE THAT IS NOT PHOSPHOR, AND IT IS FUNCTIONAL.
+   *
+   * A QR code needs light quiet zones. A scanner looks for the contrast between
+   * the dark modules and a light surround, and a green-on-black QR is a QR
+   * nothing can read -- so this stays white on a tube where nothing else is.
+   *
+   * IT WAS A BARE `#fff` IN THE RULE UNTIL 2026-10-07, with the reason in a
+   * trailing comment, and tests/test_pipboy_theme.py caught it on its first run:
+   * the file's header promises every colour is a token declared once, and this
+   * was the counterexample sitting in the stylesheet the whole time. Promoting it
+   * is the fix rather than exempting it -- the literal belongs here, where
+   * literals live, and the reason travels with it.
+   *
+   * This is also the one token a future retheme must NOT touch. It is not a
+   * style choice; it is whether a customer can scan a deposit address. */
+  --qr-quiet-zone: #ffffff;
 
-    --ink: #e8eef2;
-    --ink-soft: #b3c1cb;
-    --ink-faint: #8595a0;
+  /* THE GLOW, which is most of what makes this read as a tube rather than a
+   * dark theme. A text-shadow in the ink colour at low alpha, applied to body
+   * so every descendant inherits one source of truth for it. */
+  --glow: 0 0 1px rgba(60, 255, 110, 0.55), 0 0 6px rgba(60, 255, 110, 0.22);
+  --glow-strong: 0 0 2px rgba(60, 255, 110, 0.8), 0 0 10px rgba(60, 255, 110, 0.35);
 
-    --line: #2a353e;
-    --line-strong: #47565f;
-
-    --accent: #6fb2e8;
-    --accent-ink: #0f1418;
-    --accent-soft: #16262f;
-
-    --ok: #7fd3a0;
-    --ok-soft: #14241b;
-    --waiting: #a8b4e0;
-    --waiting-soft: #191d2c;
-    --working: #6fb2e8;
-    --working-soft: #14222c;
-    --slow: #e0b46a;
-    --slow-soft: #261f13;
-    --halted: #ea9292;
-    --halted-soft: #2a1717;
-    --unknown: #b0b0b0;
-    --unknown-soft: #1e1e1e;
-
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.35);
-  }
+  /* The shadow is a green bloom rather than a black drop: light does not cast
+   * a dark shadow on an emissive display. */
+  --shadow: 0 0 0 1px rgba(42, 122, 61, 0.45), 0 0 18px rgba(60, 255, 110, 0.07);
 }
 
 * { box-sizing: border-box; }
@@ -130,10 +152,58 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: var(--font);
+  /* MONOSPACE EVERYWHERE, which is most of the Pip-Boy look before a single
+   * effect is added: a vault terminal has one typeface and it is the one the
+   * tube was built to draw. `--mono` is already declared above and was already
+   * used for addresses and txids, so this is the existing token applied wider
+   * rather than a new one. */
+  font-family: var(--mono);
   font-size: var(--t-md);
   line-height: 1.55;
   -webkit-text-size-adjust: 100%;
+  /* The phosphor bloom. On body so every descendant inherits ONE source of
+   * truth for it (rule 8 in a stylesheet) rather than each rule growing its
+   * own text-shadow that drifts by a pixel. */
+  text-shadow: var(--glow);
+  /* A faint vignette, because a CRT is brighter in the middle. Fixed so it does
+   * not travel with the scroll -- the glass does not move. */
+  background-image: radial-gradient(ellipse at 50% 40%, rgba(60, 255, 110, 0.045), transparent 70%);
+  background-attachment: fixed;
+}
+
+/* THE SCANLINES, as a fixed overlay rather than a repeating background on body.
+ *
+ * pointer-events: none is the load-bearing line. Without it this layer sits over
+ * every button on both surfaces and swallows the clicks -- which on the operator
+ * page is the kill switch and on the customer page is the step the swap is on.
+ * An ornament that eats input is worse than no ornament.
+ *
+ * aria-hidden is impossible on a pseudo-element, which is exactly why it is one:
+ * ::after on body is invisible to the accessibility tree by construction, where a
+ * real <div> would need the attribute and could lose it in an edit.
+ *
+ * 3px because 2px aliases into a moire pattern at common device pixel ratios and
+ * 4px reads as blinds rather than scanlines. Checked at 1x and 2x.
+ */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.18) 3px
+  );
+}
+
+/* A reader who has asked for less motion has not asked for less contrast, so the
+ * scanlines stay and only the bloom is reduced -- the glow is the part that can
+ * make small type swim. */
+@media (prefers-reduced-motion: reduce) {
+  body { text-shadow: none; }
 }
 
 .skip {
@@ -239,7 +309,18 @@ h1 {
   line-height: 1.15;
   letter-spacing: -0.02em;
 }
-h2 { margin: 0 0 var(--s2); font-size: var(--t-lg); letter-spacing: -0.01em; }
+/* TERMINAL HEADINGS: uppercase and tracked OUT, not in. The negative
+ * letter-spacing here was tuned for a humanist sans; on a monospace face at
+ * uppercase it closes the gaps and the words stop being scannable. Pip-Boy
+ * section labels are spaced apart, which is also what makes them read as a
+ * machine's labels rather than a document's. */
+h2 {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-lg);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-shadow: var(--glow-strong);
+}
 h3 { margin: 0 0 var(--s2); font-size: var(--t-md); }
 .lede { margin: 0; max-width: var(--measure); color: var(--ink-soft); }
 .panel-note {
@@ -1210,7 +1291,7 @@ h2:target {
   width: 196px;
   max-width: 100%;
   height: auto;
-  background: #fff;   /* a QR needs light quiet zones; dark mode must not invert it */
+  background: var(--qr-quiet-zone);
   padding: var(--s2);
   border-radius: var(--radius-sm);
 }
