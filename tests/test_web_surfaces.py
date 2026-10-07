@@ -30,6 +30,7 @@ import pytest
 from config import Config
 from db import SCHEMA, dict_factory
 from network_target import configuring_variable
+from page_markup import TILE_WITH_LABEL
 from services import coinpaprika, market_context, pricing
 from services.wallet_leveling import PEG_ASSETS
 from valid_addresses import GRC_DESK_DEPOSIT, GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
@@ -1089,10 +1090,9 @@ def test_the_reason_says_it_cannot_pay_rather_than_that_it_is_unreachable(client
     # key, and BTC has no adapter at all.
     states = {
         html.unescape(re.sub(r"\s+", " ", label)).strip(): state
-        for state, label in re.findall(
-            r'<li class="swaptile swaptile-([a-z]+)">\s*<span class="pair-label">(.*?)</span>',
-            body, flags=re.DOTALL,
-        )
+        # page_markup.TILE_WITH_LABEL rather than a fourth copy of this pattern: the
+        # three that existed all broke on one added tile attribute (rule 8).
+        for state, label in re.findall(TILE_WITH_LABEL, body, flags=re.DOTALL)
     }
     into_xrp = states.get("GRC → XRP")
     offline_pair = states.get("BTC → GRC")

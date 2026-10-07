@@ -79,6 +79,7 @@ import pytest
 from chains.registry import build_adapters, missing_settings, why_unconfigured
 from config import Config
 from db import SCHEMA, dict_factory
+from page_markup import tile_detail
 from services.pair_view import allowed_pair_rows, customer_availability
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
@@ -213,18 +214,19 @@ def test_the_customer_tile_for_the_reported_pairs_is_offline_and_names_no_variab
     text = visible_text(body)
 
     for from_asset, to_asset in REPORTED_PAIRS:
-        tile = re.search(
-            rf'<li class="swaptile swaptile-(\w+)">\s*<span class="pair-label">\s*'
-            rf"{from_asset}\s*&#8594;\s*{to_asset}\s*</span>(.*?)</li>",
-            body,
-            re.DOTALL,
-        )
-        assert tile, f"the customer page rendered no tile for {from_asset} -> {to_asset}"
-        assert tile.group(1) == "unreachable", (
-            f"{from_asset} -> {to_asset} rendered as {tile.group(1)!r}; with neither chain's "
+        # MATCHED THROUGH tests/page_markup, not with a regex spelled here. This
+        # test's own copy required the closing angle bracket to follow the class
+        # immediately, so it failed the day the tile gained data-from/data-to for the
+        # coin-lamp filter -- a markup change that altered nothing it tests. Three
+        # files carried that pattern and all three broke at once (rule 8).
+        detail = tile_detail(body, from_asset, to_asset)
+        assert detail, f"the customer page rendered no tile for {from_asset} -> {to_asset}"
+        state, inner = detail
+        assert state == "unreachable", (
+            f"{from_asset} -> {to_asset} rendered as {state!r}; with neither chain's "
             "adapter constructed the state is 'unreachable'"
         )
-        assert "OFFLINE" in visible_text(tile.group(2)), (
+        assert "OFFLINE" in visible_text(inner), (
             f"the {from_asset} -> {to_asset} tile carries no word beside its glyph"
         )
 
