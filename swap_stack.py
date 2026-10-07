@@ -130,7 +130,31 @@ COMPOSE_FILES = ("docker-compose.yml", "docker-compose.icp.yml", "docker-compose
 #: wholesale -- if abstergo or harness IS up, from a bare `docker compose up` or an
 #: earlier session, `down` should take it with the rest rather than leave it behind
 #: for the same reason the 5101 container was worth finding.
-UP_SERVICES = ("icp-replica", "web")
+#: `web` IS DELIBERATELY NOT HERE, and leaving it in was a defect measured on the
+#: live host 2026-10-07 within minutes of shipping it. docker/web.Dockerfile's CMD is
+#: docker/web_workers_entrypoint.py, which SPAWNS THE THREE WORKERS. So an `up` that
+#: started `web` alongside supervisor.start() put six workers on one database -- two
+#: of them payout workers -- which is the exact condition flagged that same morning
+#: after finding it by accident, and tests/test_payout_concurrency.py measures as
+#: 2 sends for 1 deposit.
+#:
+#: THE TWO DEPLOYMENTS ARE MUTUALLY EXCLUSIVE, NOT COMPOSABLE, and that is the fact
+#: this constant now encodes:
+#:
+#:   containerized   `web` serves the UI and runs the workers, all inside one
+#:                   container. Started with `docker compose up web`, deliberately
+#:                   not by this file.
+#:   host            supervisor.py runs the workers and `python app.py` serves the
+#:                   UI. What this file's `up` does.
+#:
+#: Choosing the host deployment as the one `up` performs is not arbitrary: ICP is
+#: only reachable from it. The web container cannot make an ICP call -- no docker CLI
+#: in the image, and more fundamentally the desk's dfx signing identity lives in the
+#: replica container where that container has no path to it.
+#:
+#: `down` still removes `web` with everything else, because stopping is where
+#: "everything this terminal uses" applies without qualification.
+UP_SERVICES = ("icp-replica",)
 
 
 def say(line: str) -> None:
@@ -333,8 +357,9 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("  about to spawn    A PAYOUT WORKER THAT CAN BROADCAST, on every chain this environment arms.")
     say("                    Stop now if this database is pointed at a funded mainnet wallet.")
     say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
-    say("                    docker-compose.yml also defines `abstergo` and `harness` with no")
-    say("                    profiles: gate, and a bare `up` would start the TEST HARNESS too")
+    say("                    docker-compose.yml defines `abstergo` and `harness` with no profiles:")
+    say("                    gate, so a bare `up` starts the TEST HARNESS too; and `web` runs its")
+    say("                    own three workers, which beside these would be six on one database")
     say("  order             containers (so a worker's first cycle finds its replica up) -> workers")
     say("")
     say("  1. containers")
@@ -348,10 +373,12 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("  2. workers")
     supervisor.main(["start", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
     say("")
-    say("  note              the customer UI is NOT started here. It is `python app.py` from")
-    say("                    swap_terminal/, or the `web` compose service -- and the compose one")
-    say("                    cannot make an ICP call (no docker CLI in that image; see")
-    say("                    chains/icp.py). `status` lists whichever is up.")
+    say("  note              the customer UI is NOT started here, and `web` is NOT started here.")
+    say("                    Run `python app.py` from swap_terminal/ for it. The `web` compose")
+    say("                    service is the OTHER deployment: its entrypoint runs its own three")
+    say("                    workers, so starting it beside these would put SIX workers and TWO")
+    say("                    payout workers on one database. It also cannot make an ICP call --")
+    say("                    the desk's dfx identity lives in the replica container.")
     return 0
 
 

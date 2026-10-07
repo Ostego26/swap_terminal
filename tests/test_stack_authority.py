@@ -27,6 +27,7 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 
+import swap_stack
 from swap_terminal.stack_authority import (
     NEVER_STOPPED,
     container_id,
@@ -236,3 +237,46 @@ def test_a_label_with_no_image_or_no_output_degrades_rather_than_raising():
     assert container_label("/just-a-name") == "just-a-name"
     assert container_label("") == ""
     assert container_label("   \n") == ""
+
+
+def test_UP_does_not_start_the_service_that_runs_its_own_workers():
+    """Six workers on one database, two of them payout workers. Measured 2026-10-07.
+
+    f756b1b's `up` passed the compose files and let compose start everything; 26715f3
+    narrowed that to ("icp-replica", "web"). BOTH were wrong about `web`, and the
+    operator's own run is what showed it -- the output listed
+
+        Container swap-web Started
+        ALREADY RUNNING deposit_watcher pid=3285268
+
+    docker/web.Dockerfile's CMD is docker/web_workers_entrypoint.py, which spawns the
+    three workers. So `up` started a container that runs three workers beside the
+    three supervisor.start() had running: SIX on one database, TWO payout workers.
+    tests/test_payout_concurrency.py measures that exact condition as 2 sends for 1
+    deposit, and it is the condition flagged on the live host the previous morning
+    after finding it by accident.
+
+    THE TWO DEPLOYMENTS ARE MUTUALLY EXCLUSIVE, which is the property pinned here:
+    `web` serves the UI AND runs the workers in one container; the host deployment
+    runs the workers under supervisor.py and serves the UI with app.py. There is no
+    composition of the two that is correct, so `up` must perform exactly one.
+
+    This reads the real module rather than restating the tuple, and asserts the
+    entrypoint still spawns workers -- if that ever stops being true, this test
+    should be revisited rather than silently keeping a service out of `up` for a
+    reason that has expired.
+    """
+    assert "web" not in swap_stack.UP_SERVICES, (
+        "`web` runs its own three workers (docker/web.Dockerfile CMD -> "
+        "web_workers_entrypoint.py), so starting it beside supervisor.start() puts six "
+        "workers and two payout workers on one database"
+    )
+    assert "harness" not in swap_stack.UP_SERVICES, "the test harness is never part of `up`"
+    assert "abstergo" not in swap_stack.UP_SERVICES, "abstergo is not part of this stack"
+    assert swap_stack.UP_SERVICES, "`up` must still start something"
+
+    entrypoint = (Path(swap_stack.__file__).resolve().parent / "docker" / "web_workers_entrypoint.py").read_text()
+    assert "start_worker" in entrypoint or "supervisor" in entrypoint, (
+        "web_workers_entrypoint.py no longer appears to start workers, so the reason `web` is "
+        "excluded from UP_SERVICES may have expired -- re-read it rather than leaving this as is"
+    )
