@@ -110,6 +110,28 @@ _DOCKER = shutil.which("docker") or "docker"
 #: sort order. An operator wanting an armed overlay names it with --compose-file.
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.icp.yml", "docker-compose.web.yml")
 
+#: The services `up` starts, NAMED rather than left to compose's default of "all of
+#: them in every -f file".
+#:
+#: THIS IS A FIX, MEASURED 2026-10-07. docker-compose.yml also defines `abstergo` (a
+#: GRC-SOL exchange under swap_terminal/grc-sol-swap/) and `harness` (the test
+#: harness, docker/harness.Dockerfile), and NEITHER carries a `profiles:` key --
+#: checked across all three files, there is not one. Compose starts every service in
+#: every file it is given unless told otherwise, so the first `swap_stack.py up`
+#: would have built and started a TEST HARNESS on a host holding real testnet
+#: wallets, plus an exchange container nothing in this stack talks to.
+#:
+#: That is the opposite of what `up` is for and it is the kind of surprise a single
+#: command must never have: the operator asked for one lever over their stack, not a
+#: lever that also starts whatever else happens to live in the same yaml.
+#:
+#: `down` is deliberately NOT narrowed the same way. "Stop everything this swap
+#: terminal uses" is the whole point of it, so it removes the project's containers
+#: wholesale -- if abstergo or harness IS up, from a bare `docker compose up` or an
+#: earlier session, `down` should take it with the rest rather than leave it behind
+#: for the same reason the 5101 container was worth finding.
+UP_SERVICES = ("icp-replica", "web")
+
 
 def say(line: str) -> None:
     """Print immediately. Rule 14: silence is indistinguishable from hung."""
@@ -310,10 +332,13 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
     say("  about to spawn    A PAYOUT WORKER THAT CAN BROADCAST, on every chain this environment arms.")
     say("                    Stop now if this database is pointed at a funded mainnet wallet.")
+    say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
+    say("                    docker-compose.yml also defines `abstergo` and `harness` with no")
+    say("                    profiles: gate, and a bare `up` would start the TEST HARNESS too")
     say("  order             containers (so a worker's first cycle finds its replica up) -> workers")
     say("")
     say("  1. containers")
-    done = compose(["up", "-d"], files)
+    done = compose(["up", "-d", *UP_SERVICES], files)
     for line in (done.stderr or done.stdout).strip().splitlines():
         say(f"                    {line}")
     if done.returncode != 0:
