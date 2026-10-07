@@ -655,14 +655,48 @@ def cmd_up(files: tuple[str, ...]) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The command line this file accepts. Its own function so a test can ask it.
+
+    EXTRACTED 2026-10-07 BECAUSE THE FLAG SET WAS ONLY REACHABLE BY RUNNING THE
+    STACK. `--compose-file` existed and `-f` did not, while the help string read
+    "Repeatable, in -f order" -- and no test could catch that, because asserting
+    on it meant calling main(), which runs docker. So the only check available
+    was reading the help text, which was the thing that was already wrong.
+
+    Rule 10: the decision is "which spellings does this accept", and a decision
+    that can only be exercised by starting containers is a decision nobody has
+    checked (rule 17).
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("action", choices=("status", "up", "down"))
+    # `-f` AS WELL AS `--compose-file`, AND THE HELP TEXT IS WHY THIS IS A FIX
+    # RATHER THAN A CONVENIENCE. Until 2026-10-07 this took only the long form
+    # while its own help string read "Repeatable, in -f order" -- naming a flag
+    # the parser then rejected. The operator typed `-f` from that sentence and
+    # got
+    #
+    #     swap_stack.py: error: unrecognized arguments: -f docker-compose.yml ...
+    #
+    # after a `git pull`, so the first thing the new code did was refuse a
+    # command this file had told them to write (rule 16: a wrong comment is a bug,
+    # and help text is a comment the operator actually reads).
+    #
+    # `-f` is also the right alias on the merits and not only for the apology:
+    # every overlay in this directory is named in `docker compose -f` form in the
+    # comments above, in docs/, and in the muscle memory of anybody who has run
+    # compose by hand. A tool that wraps compose and refuses compose's own flag
+    # makes the operator translate at the one moment they are debugging
+    # something else.
     parser.add_argument(
-        "--compose-file", action="append", default=None,
+        "-f", "--compose-file", action="append", default=None,
         help=f"override the compose files (default: {', '.join(COMPOSE_FILES)}). Repeatable, in -f order.",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     files = tuple(args.compose_file) if args.compose_file else COMPOSE_FILES
     return {"status": cmd_status, "up": cmd_up, "down": cmd_down}[args.action](files)
 

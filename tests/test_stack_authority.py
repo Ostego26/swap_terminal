@@ -512,3 +512,66 @@ def test_a_bound_port_with_no_listener_is_not_a_proven_stop():
     # the weaker of them would bury the lever (a pid) under a `ss` suggestion.
     assert down_verdict([4943], 1) == "not_down"
     assert set(DOWN_VERDICTS) == {"down", "stopped_not_proven", "not_down"}
+
+
+def test_the_compose_file_flag_accepts_the_form_its_own_help_text_names():
+    """`-f` reaches the same destination as `--compose-file`, on the REAL parser.
+
+    THE DEFECT, 2026-10-07. swap_stack.py accepted `--compose-file` only, while
+    its own help read "Repeatable, in -f order". The operator read that sentence,
+    typed `-f`, and got
+
+        swap_stack.py: error: unrecognized arguments: -f docker-compose.yml ...
+
+    immediately after a pull -- so the first thing the new code did was refuse a
+    command this file had told them to write. Rule 16's wrong comment, in the one
+    place an operator actually reads comments.
+
+    ASSERTED THROUGH swap_stack.build_parser(), not a parser this test builds.
+    The first version of this test constructed its own ArgumentParser with the
+    flags it expected and asserted on that, which proves only that argparse works
+    -- a false pass of exactly the shape the behavioral-verification principle
+    refuses. build_parser() was extracted from main() so the real thing is
+    reachable without starting containers.
+    """
+    parser = swap_stack.build_parser()
+
+    short = parser.parse_args(["up", "-f", "a.yml", "-f", "b.yml"])
+    long_form = parser.parse_args(["up", "--compose-file", "a.yml", "--compose-file", "b.yml"])
+    assert short.compose_file == ["a.yml", "b.yml"], "-f must be repeatable and ordered"
+    assert short.compose_file == long_form.compose_file, "the two spellings must land in one place"
+
+    # The default, so that an override is distinguishable from no override at all.
+    assert parser.parse_args(["up"]).compose_file is None
+    assert swap_stack.COMPOSE_FILES == (
+        "docker-compose.yml", "docker-compose.icp.yml", "docker-compose.web.yml",
+    ), "the hostnet and armed overlays are ALTERNATIVES and must stay off the default"
+
+
+def test_the_help_text_names_only_flags_the_parser_accepts():
+    """Every `-x`/`--x` the help string mentions must actually parse.
+
+    The defect above was not that `-f` was missing -- it was that the help NAMED
+    a flag the parser rejected, and nothing could notice. This generalizes it:
+    whatever spelling the help advertises, the parser must take. Written as a
+    loop over the advertised flags rather than a check for `-f` specifically,
+    because pinning the one instance would leave the next one free to recur.
+    """
+    parser = swap_stack.build_parser()
+    advertised = {
+        token.rstrip(".,)")
+        for action in parser._actions  # argparse exposes no public reader for help strings; read-only
+        for token in (action.help or "").split()
+        if token.startswith("-") and len(token.rstrip(".,)")) > 1
+    }
+    assert advertised, "this test is worthless if the help mentions no flags at all"
+    accepted = {
+        option
+        for action in parser._actions  # same, and read-only
+        for option in action.option_strings
+    }
+    unaccepted = sorted(advertised - accepted)
+    assert not unaccepted, (
+        f"the help text advertises {unaccepted}, which the parser does not accept. "
+        "That is how an operator was told to type `-f` at a parser that refused it."
+    )
