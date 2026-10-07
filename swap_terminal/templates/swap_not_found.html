@@ -25,6 +25,6 @@
   {{ badges.empty('swap exists with the ID you asked for', 'swaps WHERE id = the value you entered') }}
   <p class="panel-note">Nothing was changed by asking. Check the ID for a missing character &#8212; it looks like
      <code>s_</code> followed by 16 hexadecimal digits &#8212; or start again from the
-     <a href="{{ url_for('ui.index') }}">swap form</a>.</p>
+     <a href="{{ url_for('atm.start') }}">swap form</a>.</p>
 </section>
 {% endblock %}

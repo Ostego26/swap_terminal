@@ -119,6 +119,47 @@ def seed_swap(client, swap_id, status, **overrides):
 # --- the customer surface ---------------------------------------------------
 
 
+
+def offered_pairs(client) -> set[tuple[str, str]]:
+    """Every (source, destination) the ATM flow will actually let a customer PICK.
+
+    THE REPLACEMENT FOR `value="FROM:TO" in body`, WHICH DIED WITH THE SELECT.
+    templates/index.html carried one <select> whose options were "FROM:TO", so
+    "is this pair offered" was a substring test. The ATM asks the two halves on
+    two screens -- step 1 `value="ICP"`, step 2 `value="GRC"` -- so there is no
+    combined token to look for, and three tests guarding real 2026-09-26 and
+    2026-10-03 incidents were asserting against a string that no longer exists.
+
+    ONE HELPER AND NOT THREE REGEXES, because this is one question (rule 8) and
+    because it is now a WALK rather than a match: each source is posted and the
+    real step-2 screen is read. That makes these tests harder than they were --
+    a select renders its options from one list in one request, while this drives
+    the handler once per source, so a step-2 filter disagreeing with step 1 fails
+    here even though both read the same rows.
+
+    SELECTABILITY, NOT PRESENCE. The ATM renders an unavailable destination
+    GREYED with its reason rather than hiding it (rule 14), so a `disabled`
+    button is LISTED and not OFFERED -- which is exactly the distinction
+    test_a_destination_that_cannot_pay_out_is_not_offered is about.
+    """
+    first = client.get("/").get_data(as_text=True)
+    sources = {
+        match.group(1)
+        for match in re.finditer(r'<button[^>]*name="from_asset"[^>]*>', first, re.DOTALL)
+        if "disabled" not in match.group(0)
+        for match in [re.search(r'value="([A-Z]+)"', match.group(0))] if match
+    }
+    offered = set()
+    for source in sources:
+        step2 = client.post("/", data={"from_asset": source}).get_data(as_text=True)
+        for button in re.finditer(r'<button[^>]*name="to_asset"[^>]*>', step2, re.DOTALL):
+            if "disabled" in button.group(0):
+                continue
+            destination = re.search(r'value="([A-Z]+)"', button.group(0))
+            if destination:
+                offered.add((source, destination.group(1)))
+    return offered
+
 def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(client, monkeypatch):
     """The form reads BOTH authorities: what is allowed, and what has an adapter.
 
@@ -152,17 +193,19 @@ def test_the_swap_form_offers_exactly_the_pairs_whose_chains_are_reachable(clien
     # right answer for an unconfigured terminal and the wrong premise for this test.
     with_deposit_accounts(client, monkeypatch)
     body = client.get("/").get_data(as_text=True)
+    offered = offered_pairs(client)
 
     for from_asset, to_asset in allowed:
-        option = f'value="{from_asset}:{to_asset}"'
         # `and quotable(...)`: see quotable() above. Reachable is necessary and, since
         # 2026-10-03, not sufficient -- a pair whose destination has no fee reserve is
         # correctly NOT offered even with both chains up, and asserting it must be
         # offered was this test asserting the defect.
         if from_asset in reachable_assets and to_asset in reachable_assets and quotable((from_asset, to_asset)):
-            assert option in body, f"{from_asset}->{to_asset} is reachable and quotable and must be offered"
+            assert (from_asset, to_asset) in offered, (
+                f"{from_asset}->{to_asset} is reachable and quotable and must be offered"
+            )
         else:
-            assert option not in body, (
+            assert (from_asset, to_asset) not in offered, (
                 f"{from_asset}->{to_asset} was offered, but one of its chains has no adapter -- "
                 f"this is the shape that printed 'GRC' at the operator"
             )
@@ -267,17 +310,18 @@ def test_every_allowed_pair_is_offered_when_every_chain_is_reachable(client, mon
         "no allowed pair has a destination fee reserve, so this test would assert nothing. "
         "That is a real finding, not a setup problem -- read config.py"
     )
+    offered = offered_pairs(client)
     for from_asset, to_asset in expected:
-        assert f'value="{from_asset}:{to_asset}"' in body, (from_asset, to_asset)
+        assert (from_asset, to_asset) in offered, (from_asset, to_asset)
     for from_asset, to_asset in sorted(set(allowed) - set(expected)):
         why = (
             f"no {to_asset}_NETWORK_FEE_RESERVE exists"
             if not quotable((from_asset, to_asset))
             else f"the {to_asset} cluster could not be asked for the rent-exempt minimum in this premise"
         )
-        assert f'value="{from_asset}:{to_asset}"' not in body, (
+        assert (from_asset, to_asset) not in offered, (
             f"{from_asset}->{to_asset} was offered and {why}, so the quote for it refuses -- "
-            f"the form offered a pair the next click cannot price"
+            f"the flow offered a pair the next step cannot price"
         )
     assert 'badge-word">DISABLED<' not in body, "nothing is unreachable here, so nothing may be badged DISABLED"
     if len(expected) == len(allowed):
@@ -1048,11 +1092,20 @@ def test_a_destination_that_cannot_pay_out_is_not_offered(client, monkeypatch):
     )
 
     body = client.get("/").get_data(as_text=True)
+    offered = offered_pairs(client)
 
-    assert 'value="XRP:GRC"' in body, "GRC can pay out, so XRP -> GRC must still be offered"
-    assert 'value="GRC:XRP"' not in body, (
+    assert ("XRP", "GRC") in offered, "GRC can pay out, so XRP -> GRC must still be offered"
+    assert ("GRC", "XRP") not in offered, (
         "XRP cannot pay out, so GRC -> XRP must not be offered -- a deposit into it is stranded"
     )
+    # AND STILL LISTED, in the reference grid step 1 carries. I first asserted here
+    # that GRC -> XRP also appears GREYED on step 2, and it cannot in this fixture:
+    # with only GRC and XRP configured and XRP unable to pay out, GRC has ZERO
+    # working outbound directions, so step 1 correctly refuses GRC as a source and
+    # step 2 is unreachable from it. That is the ATM being stricter than the page it
+    # replaced, not a gap -- and the greyed-destination property is pinned where it
+    # IS reachable, in tests/test_wizard.py::
+    # test_an_unavailable_destination_is_shown_greyed_with_its_reason_not_hidden.
     assert "swaptile-unavailable" in body, (
         "the unofferable pair must still be LISTED and marked unusable, not hidden"
     )
@@ -1482,7 +1535,7 @@ def test_a_closed_swap_says_the_listed_address_is_not_accepting_anything(client)
     assert "Still accepting?" not in live.get_data(as_text=True)
 
 
-def test_the_payout_field_does_not_ask_the_browser_to_autofill_it(client):
+def test_the_payout_field_does_not_ask_the_browser_to_autofill_it(client, monkeypatch):
     """autocomplete="off" is IGNORED by Chrome-family browsers. Measured, three times.
 
     On the operator's host 2026-10-01 this field carried autocomplete="off" and
@@ -1501,10 +1554,29 @@ def test_the_payout_field_does_not_ask_the_browser_to_autofill_it(client):
     MUTATION: put autocomplete="off" back, or drop the clearing function, and the
     page returns to the state that cost three swaps.
     """
-    body = client.get("/").get_data(as_text=True)
-    field = [line for line in body.splitlines() if 'id="payout_address"' in line]
-    assert field, "the payout address input is gone entirely"
-    markup = " ".join(field)
+    # STEP 4 OF THE FLOW, NOT `/`, AND THAT NEEDS REACHABLE CHAINS. index.html
+    # carried this field on the landing page unconditionally; the ATM asks for it
+    # on its own screen, reached only by answering the three before it -- so a
+    # fixture with no adapters now stops at step 1 and the field is correctly
+    # absent. The invariant under test is unchanged and so is the measurement that
+    # earned it; only what has to be true to RENDER the field moved.
+    fully_reachable(client, monkeypatch, "XRP", "GRC")
+    body = client.post("/", data={
+        "from_asset": "XRP", "to_asset": "GRC", "amount": "1.0", "amount_side": "send",
+    }).get_data(as_text=True)
+    # THE WHOLE TAG, NOT THE LINE IT STARTS ON. This read `[line for line in
+    # body.splitlines() if 'id="payout_address"' in line]`, which worked while
+    # index.html kept the attributes on one line and broke the moment the ATM
+    # template wrapped them over four -- reporting a missing autocomplete on a
+    # field that has one. The invariant is about the TAG, so the extraction is too;
+    # reformatting a template to satisfy a test's parser would be the wrong half to
+    # change.
+    tag = re.search(r'<input[^>]*id="payout_address"[^>]*>', body, re.DOTALL)
+    assert tag, (
+        "the payout address input is not on step 4. If the flow refused earlier, this fixture's "
+        "chains are not reachable enough to reach that screen -- check the question it renders"
+    )
+    markup = " ".join(tag.group(0).split())
 
     assert 'autocomplete="off"' not in markup, (
         "Chrome-family browsers ignore autocomplete=off on fields they classify, and this is one"

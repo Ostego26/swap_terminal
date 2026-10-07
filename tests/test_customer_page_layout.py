@@ -1453,12 +1453,26 @@ def test_every_reason_that_left_the_customer_page_is_on_the_operator_page(client
         )
 
 
-def test_the_indicators_and_the_form_cannot_disagree(client, monkeypatch):
-    """A direction shown as available that the form does not offer is a new contradiction.
+def test_the_indicators_and_what_the_flow_offers_cannot_disagree(client, monkeypatch):
+    """A direction shown as available that the flow will not let you pick is a contradiction.
 
-    Exactly the kind removed between /admin and / earlier today, so it is pinned
-    rather than left to inspection: the set of directions marked available must be
-    the set of options the select renders, both ways.
+    REWRITTEN 2026-10-07 WHEN THE SELECT DISAPPEARED, and the invariant got
+    stronger rather than weaker. The old version compared the availability tiles
+    against `<option value="FROM:TO">` in a single select. templates/index.html is
+    gone -- the ATM flow at / replaced it on the operator's instruction -- so
+    "offered" became the empty set and this test failed with
+    `marked available but not offered: ['XRP → GRC']`.
+
+    Deleting it would have dropped a real guard: the tiles and the thing a customer
+    can actually choose are two readings of one question, and this project has
+    already paid for them disagreeing (the /admin-versus-/ lamp split earlier the
+    same day). So it now asks the FLOW: for every tile marked available, walk to
+    step 2 with that source and require the destination to come back selectable.
+
+    THAT IS A HARDER CLAIM THAN THE OLD ONE. A select renders its options from one
+    list in one request; this drives the real handler once per source and reads
+    what the real screen offers, so a step-2 filter that disagreed with the tiles
+    would fail here even though both came from the same rows.
     """
     monkeypatch.setitem(client.application.config, "ADAPTERS", {
         "GRC": StubAdapter(can_spend=True), "XRP": StubAdapter(can_spend=False),
@@ -1467,13 +1481,22 @@ def test_the_indicators_and_the_form_cannot_disagree(client, monkeypatch):
     body = client.get("/").get_data(as_text=True)
 
     marked = {direction for state, direction, _ in _tiles(body) if state == "available"}
-    offered = {
-        f"{source} → {destination}"
-        for source, destination in re.findall(r'<option value="([A-Z]+):([A-Z]+)"', body)
-    }
+    assert marked, "this fixture marked nothing available; the assertion would be vacuous"
+
+    offered = set()
+    for source in {direction.split(" → ")[0] for direction in marked}:
+        step2 = client.post("/", data={"from_asset": source}).get_data(as_text=True)
+        # A destination is OFFERED only if its button is not disabled. The ATM
+        # renders unavailable ones greyed with the reason rather than hiding them
+        # (rule 14), so presence is not the test -- selectability is.
+        for button in re.findall(r'<button type="submit" name="to_asset"[^>]*>', step2):
+            destination = re.search(r'value="([A-Z]+)"', button)
+            if destination and "disabled" not in button:
+                offered.add(f"{source} → {destination.group(1)}")
+
     assert marked == offered, (
-        f"marked available but not offered: {sorted(marked - offered)}; "
-        f"offered but not marked available: {sorted(offered - marked)}"
+        f"marked available but step 2 will not offer: {sorted(marked - offered)}; "
+        f"step 2 offers but not marked available: {sorted(offered - marked)}"
     )
 
 

@@ -713,7 +713,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     port, detail = serving_verdict(probes)
     if port:
         say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
-        say(f"                    the ATM flow is at http://127.0.0.1:{port}/atm")
+        say(f"                    the swap flow is at http://127.0.0.1:{port}/")
     else:
         say(f"  NOT SERVING       {detail}")
         say("                    The containers may be up and the page is not answering, which is a")

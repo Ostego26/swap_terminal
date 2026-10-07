@@ -52,7 +52,12 @@ from chains.amount_solve import (
 from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from modules.address_authority import check_address
-from services.pair_view import allowed_pair_rows
+from services.pair_view import (
+    ASSET_ROLLUP_STATES,
+    CUSTOMER_STATES,
+    allowed_pair_rows,
+    customer_availability,
+)
 from services.payout_capacity import largest_fundable_payout
 from services.pricing import derive_pair_rate, fetch_usd_prices
 from services.quote_service import create_quote, get_network_fee_reserve
@@ -153,8 +158,28 @@ def render_step(answers: dict, error: str = "") -> str:
             answers.get("to_asset", ""), from_asset, _rate_hint(answers)
         )
 
+    # THE THREE THINGS THAT CAME ACROSS FROM templates/index.html when it was
+    # deleted, built ONLY for step 1 -- see start()'s docstring for why each one
+    # had to survive. Mid-flow they would be noise: a customer answering "how
+    # much?" is not shopping for a pair, and the legend explains lamps that are no
+    # longer on screen.
+    #
+    # DERIVED FROM THE ROWS ALREADY BUILT, never evaluated a second time. That is
+    # services/pair_view.py's own header rule, and the defect it records is a page
+    # badging a pair ENABLED that another reading of the same question refused.
+    show_reference = step["number"] == 1
+    reference_pairs = []
+    if show_reference:
+        for row in rows:
+            row["customer"] = customer_availability(row)
+        reference_pairs = rows
+
     context = {
         "surface": "user",
+        "show_reference": show_reference,
+        "reference_pairs": reference_pairs,
+        "customer_states": CUSTOMER_STATES,
+        "rollup_states": ASSET_ROLLUP_STATES,
         # THE LIMIT, AND THE SENTENCE WHEN THERE IS NO LIMIT TO STATE. Three
         # distinguishable cases reach the template and it must not collapse them:
         # a real maximum, a maximum of zero (the desk holds nothing of the
@@ -187,19 +212,71 @@ def render_step(answers: dict, error: str = "") -> str:
     return render_template("atm.html", **context)
 
 
-@bp.get("/atm")
+@bp.get("/")
 def start():
-    """Step 1, with nothing answered. A GET so the flow is linkable and bookmarkable."""
+    """Step 1, with nothing answered. A GET so the flow is linkable and bookmarkable.
+
+    `/` SINCE 2026-10-07, ON THE OPERATOR'S INSTRUCTION: "we should merge the swap
+    UI and the atm terminal into just the ATM terminal with any cool features from
+    the swap terminal included." routes/ui.index() and templates/index.html are
+    gone with that change, so there is ONE page a customer can start a swap from
+    and the question "which one ran?" has no second answer (rules 2 and 9).
+
+    ONE URL, AND THE `/atm` ALIAS IS GONE. It was the staging URL while this flow
+    lived alongside the old page, and keeping it as a second rule looked free. It
+    was not: Flask's url_for() picked `/atm` over `/`, so base.html's brand link,
+    the nav, swap_not_found.html and the blank-lookup redirect ALL pointed at the
+    alias while the canonical URL went unused. A customer landing on / and clicking
+    the brand moved to /atm for no reason they could see.
+
+    Measured rather than reasoned -- `url_for("atm.start")` returned "/atm" with
+    both rules registered, and tests/test_web_surfaces.py's lookup test caught it
+    by asserting the blank-submit redirect ends with "/". Two URLs for one page is
+    rule 2's "which one is it?" with no upside, and a bookmark a few hours old is
+    not worth it.
+
+    WHAT CAME ACROSS FROM THE OLD PAGE, because deleting it would otherwise have
+    taken three things a customer needs with it:
+
+      the swap lookup       a returning customer has NO other way in. A swap is a
+                            wait measured in blocks, so they close the tab -- and
+                            without this they would have to keep the /swap/<id>
+                            URL themselves.
+      the lamp legend       a colour nobody can look up is a colour that says
+                            nothing, which is why pair_view derives the legend from
+                            the same table the lamps read.
+      the full pair grid    all 30 ordered pairs. The ATM shows only what is
+                            reachable from the choice in hand, so "what does this
+                            terminal do at all" had no answer without it.
+
+    What did NOT come across: the hero, and both forms. The two numbered panels
+    ("1 Get a quote", "2 Create the swap") are what the six steps replace, and
+    keeping them would be the duplication this merge exists to remove.
+    """
     return render_step({})
 
 
-@bp.post("/atm")
+@bp.post("/")
 def advance():
     """Take one answer, judge it, and draw the next screen -- or the same one with why not.
 
     A SINGLE POST TARGET rather than one per step. The step is decided from the
     answers, so a per-step URL would be a second claim about where the customer
     is, and the two would disagree the first time a browser re-posted an old form.
+
+    `/` TAKES THE POST, AND IT DID NOT WHEN THE MERGE FIRST LANDED. `/` became the
+    entry point and only the GET moved, so a POST to `/` answered 405 Method Not
+    Allowed. A browser never saw it: the form's action is url_for("atm.advance"),
+    which resolved to the then-still-present /atm alias. What it DID do was move
+    the customer from / to /atm on their first answer, so the URL changed under
+    them halfway through a flow. The alias is now gone (see start()) and this is
+    the only route.
+
+    Found by test_the_indicators_and_what_the_flow_offers_cannot_disagree, which
+    posts to / directly and reported `marked available but step 2 will not offer:
+    ['XRP → GRC']`. Every decision underneath was correct -- destinations_for(XRP)
+    returned GRC selectable -- and the page it was asserting on was a 405 error
+    document. A test that drives the real URL found what a browser hid.
     """
     answers = collected()
 

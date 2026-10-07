@@ -370,9 +370,40 @@ def reject_amount(typed: str, side: str, ceiling: float, ceiling_reason: str) ->
     if bad:
         return bad
     if ceiling_reason:
-        # NOT ESTABLISHED is not the same as a ceiling of zero, and the customer
-        # is told which. payout_capacity's -1.0 sentinel exists for this (rule 13).
-        return ceiling_reason
+        # AN UNREADABLE CEILING DOES NOT BLOCK, AND THE FIRST VERSION OF THIS
+        # FUNCTION RETURNED `ceiling_reason` HERE AND DID.
+        #
+        # That was wrong in two ways and the second is the one that matters. It
+        # contradicted the screen it governs: templates/_atm_amount.html says, for
+        # exactly this case, "You can still type an amount; it is checked again
+        # before anything is created" -- so the page invited an answer the
+        # validator then refused. Two of mine disagreeing on one screen, which is
+        # the defect class this session has been finding all evening.
+        #
+        # And it inverts payout_capacity's own distinction, which I was careful
+        # about everywhere else in this file. largest_fundable_payout() returns
+        # -1.0 for NOT ESTABLISHED precisely because 0.0 is a legitimate answer
+        # for an empty wallet "and the two must not render the same way". A price
+        # feed that did not answer, or a balance RPC that timed out, is not the
+        # desk refusing -- it is nothing having been measured.
+        #
+        # FAIL-CLOSED IS NOT FREE HERE, which is the argument for passing. The
+        # authority on whether a swap may exist is
+        # services/swap_service.create_swap(), which runs the real capacity gate
+        # at creation and refuses then. Blocking at step 3 on an unreadable
+        # balance adds no safety the authority does not already provide, and costs
+        # a hard stop on a transient RPC failure -- for a figure this screen itself
+        # calls a hint.
+        #
+        # A CEILING OF ZERO WITH NO REASON IS DIFFERENT and still blocks, below:
+        # that is a measurement saying the desk holds nothing of the destination
+        # asset, and sending into it would take a deposit nothing can pay out.
+        return ""
+    if ceiling == 0:
+        return (
+            "This desk cannot pay out any of the coin you asked for right now, so no amount of "
+            "what you are sending can be swapped for it."
+        )
     if side == "send" and amount > ceiling:
         return (
             f"The most this desk can take right now is {ceiling}, because that is all it can pay out "

@@ -159,7 +159,7 @@ def client(tmp_path, monkeypatch):
 
 def post(client, **answers):
     """One step's POST, with every answer this flow carries."""
-    return client.post("/atm", data=answers, follow_redirects=False)
+    return client.post("/", data=answers, follow_redirects=False)
 
 
 def asking(response) -> str:
@@ -177,7 +177,7 @@ def asking(response) -> str:
 
 def test_the_flow_opens_on_the_first_question(client):
     """A GET, so the flow is linkable and survives a closed tab."""
-    page = client.get("/atm")
+    page = client.get("/")
     assert page.status_code == 200
     body = page.get_data(as_text=True)
     assert asking(page) == "What are you sending?"
@@ -190,7 +190,7 @@ def test_the_flow_opens_on_the_first_question(client):
 
 def test_a_coin_the_desk_cannot_serve_is_offered_disabled_with_its_count(client, monkeypatch):
     """SOL and XRP have no adapter here, so no SOL/XRP direction can be quoted."""
-    body = client.get("/atm").get_data(as_text=True)
+    body = client.get("/").get_data(as_text=True)
     # The lamp's own count reaches the screen, which is rule 14's "state what the
     # number means, next to the number".
     assert "0/5 out" in body, "a coin with nothing serviceable must show its denominator"
@@ -290,7 +290,7 @@ def test_a_valid_address_reaches_the_review_which_names_the_counterparty(client)
 def test_going_back_from_the_review_returns_to_the_address_question(client):
     """Back posts, so the server decides what to clear."""
     page = client.post(
-        "/atm",
+        "/",
         data={
             "from_asset": "ICP", "to_asset": "GRC", "amount": "0.001", "amount_side": "send",
             "payout_address": GRC_PAYOUT, "back": "4",
@@ -307,7 +307,7 @@ def test_confirming_creates_a_swap_and_hands_off_to_its_own_page(client):
     would be two pages telling a customer where to send money.
     """
     page = client.post(
-        "/atm",
+        "/",
         data={
             "from_asset": "ICP", "to_asset": "GRC", "amount": "0.001", "amount_side": "send",
             "payout_address": GRC_PAYOUT, "confirmed": "1",

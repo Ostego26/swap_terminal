@@ -68,59 +68,12 @@ not own it.
 """
 
 from db import get_db
-from flask import Blueprint, current_app, redirect, render_template, request, url_for
+from flask import Blueprint, redirect, render_template, request, url_for
 from services.helpers import utc_now_iso
-from services.pair_view import (
-    ASSET_ROLLUP_STATES,
-    CUSTOMER_STATES,
-    allowed_pair_rows,
-    asset_rollups,
-    customer_availability,
-    offerable_pairs,
-)
 from services.swap_service import get_swap
 from services.swap_view import swap_display
 
 bp = Blueprint("ui", __name__)
-
-
-@bp.get("/")
-def index():
-    pairs = allowed_pair_rows(current_app.config, current_app.config["ADAPTERS"])
-    # WHAT A CUSTOMER IS SHOWN, attached here and decided in
-    # services/pair_view.customer_availability() -- not branched on in the
-    # template. Operator instruction 2026-10-02: "the user screen should just have
-    # graphical indicators to what's availble for them to swap." The template had
-    # `'ENABLED' if pair.enabled else 'DISABLED'`, a binary with nowhere for a
-    # third case to live, which is why it badged a reachable-but-unpayable pair
-    # DISABLED while /admin called it CANNOT COMPLETE in the same process.
-    #
-    # ONE INDICATOR PER ROW, derived from the row the verdict already produced, so
-    # the tiles cannot disagree with `offerable` below. The agreement is asserted
-    # in tests/test_customer_page_layout.py rather than left to inspection.
-    for row in pairs:
-        row["customer"] = customer_availability(row)
-    # The select iterates `offerable`; the list iterates `pairs`. Two names for two
-    # jobs, filtered in Python rather than in the template so the rule stays where a
-    # test can call it -- and through services/pair_view.offerable_pairs(), which
-    # /api/health also uses, so the page and the endpoint cannot come to disagree
-    # about which pairs can complete.
-    offerable = offerable_pairs(pairs)
-    return render_template(
-        "index.html",
-        pairs=pairs,
-        customer_states=CUSTOMER_STATES,
-        # ONE LAMP PER COIN, derived from the rows just built rather than evaluated a
-        # second time. Operator 2026-10-07: "grc led ltc led, etc should indicate which
-        # pairs are available for that coin." asset_rollups() is pure and the lamp is a
-        # MIRROR of `pairs` -- a direction those rows call unavailable cannot show green.
-        lamps=asset_rollups(pairs),
-        rollup_states=ASSET_ROLLUP_STATES,
-        offerable=offerable,
-        quote_ttl_seconds=current_app.config["QUOTE_TTL_SECONDS"],
-        fee_bps=current_app.config["DEFAULT_FEE_BPS"],
-        tolerance_pct=current_app.config["AMOUNT_TOLERANCE_PCT"],
-    )
 
 
 @bp.get("/swap-lookup")
@@ -137,7 +90,7 @@ def swap_lookup():
     """
     swap_id = (request.args.get("swap_id") or "").strip()
     if not swap_id:
-        return redirect(url_for("ui.index"))
+        return redirect(url_for("atm.start"))
     return redirect(url_for("ui.swap_page", swap_id=swap_id))
 
 

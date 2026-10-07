@@ -31,12 +31,12 @@
   <a class="skip" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="{{ url_for('ui.index') }}">
+      <a class="brand" href="{{ url_for('atm.start') }}">
         <span class="brand-mark" aria-hidden="true">&#8646;</span>
         <span class="brand-text">Swap Terminal</span>
       </a>
       <nav class="topnav" aria-label="Surfaces">
-        <a href="{{ url_for('ui.index') }}"{% if surface == 'user' %} class="here" aria-current="page"{% endif %}>Swap</a>
+        <a href="{{ url_for('atm.start') }}"{% if surface == 'user' %} class="here" aria-current="page"{% endif %}>Swap</a>
         <a href="{{ url_for('admin.admin_page') }}"{% if surface == 'admin' %} class="here" aria-current="page"{% endif %}>Operator</a>
       </nav>
     </div>

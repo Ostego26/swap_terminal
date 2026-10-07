@@ -20,12 +20,15 @@ or "can I get ICP in". So the split is asserted as hard as the colour.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from config import Config
 from jinja2 import Environment, FileSystemLoader
 from services.admin_view import pair_rows
 from services.pair_view import ASSET_ROLLUP_STATES, allowed_pair_rows, asset_rollups
+
+import app as app_module  # isort: skip
 
 
 def _rows(*specs: tuple[str, str, bool]) -> list[dict]:
@@ -143,7 +146,15 @@ def test_a_lamp_can_never_be_greener_than_the_rows_it_came_from():
 
 
 def _rendered(lamps):
-    """index.html's lamp strip, rendered with seeded lamps and nothing else real.
+    """admin.html's lamp strip, rendered with seeded lamps and nothing else real.
+
+    IT WAS index.html's UNTIL 2026-10-07, when the ATM flow replaced that page on
+    the operator's instruction. The COMBINED per-coin lamp -- both counts, both
+    directions -- survives on the operator surface, which is where a reader wants
+    one number per coin. The customer surface asks the two halves on two screens
+    instead, so its step-1 lamp is OUTBOUND ONLY by design (services/wizard.
+    source_lamps() carries the argument: ICP is green to send and red to receive,
+    and one lamp cannot answer both).
 
     The template is rendered directly rather than through a request, because the
     question here is what the LAMP MARKUP does with a given rollup -- and routing a
@@ -153,10 +164,12 @@ def _rendered(lamps):
     """
     root = Path(__file__).resolve().parents[1] / "swap_terminal" / "templates"
     env = Environment(loader=FileSystemLoader(str(root)), autoescape=True)
-    source = (root / "index.html").read_text()
+    source = (root / "admin.html").read_text()
     start = source.index('<ul class="lampstrip"')
     end = source.index("</ul>", start) + len("</ul>")
-    return env.from_string(source[start:end]).render(lamps=lamps)
+    # admin.html iterates `data.asset_lamps`; this renders the fragment alone, so the
+    # seeded lamps arrive under that name rather than as a bare `lamps`.
+    return env.from_string(source[start:end]).render(data={"asset_lamps": lamps})
 
 
 def test_each_lamp_renders_its_colour_class_its_word_and_BOTH_counts():
@@ -189,22 +202,49 @@ def test_each_lamp_renders_its_colour_class_its_word_and_BOTH_counts():
     )
 
 
-def test_every_lamp_is_a_BUTTON_carrying_the_asset_it_filters():
-    """point/click, keyboard-reachable, and inert-but-honest with JavaScript off.
+def test_the_customer_lamp_is_a_SUBMIT_button_that_advances_rather_than_filters():
+    """The filter lamp is gone, and what replaced it does the same job better.
 
-    A <button> rather than a div with a handler: reachable by keyboard and announced
-    as pressable with no hand-added ARIA. aria-pressed starts false and the filter
-    script is the only thing that changes it, so a page with JS off shows an unpressed
-    button beside counts that are already correct -- the panel complete and merely
-    unfiltered.
+    THIS TEST USED TO BE test_every_lamp_is_a_BUTTON_carrying_the_asset_it_filters,
+    and it pinned templates/index.html's lamp strip: `type="button"`,
+    `aria-pressed="false"`, `data-asset="BTC"`, and a script that narrowed thirty
+    pair tiles down to one coin's. That page is gone -- the ATM flow replaced it on
+    2026-10-07 -- and so is that affordance, from both surfaces:
+
+      /admin   lamps are <span>, deliberately. Its own comment: "The lamps are
+               inert markers on this page, so they are spans and not buttons: a
+               button that does nothing is worse than no button."
+      /        step 1's lamps are SUBMIT buttons that answer the question. Picking
+               a coin IS the filter -- step 2 then shows only that coin's
+               directions, decided on the server by
+               services/wizard.destinations_for().
+
+    SO THE FEATURE WAS NOT LOST, IT WAS ABSORBED, and that is why this is a
+    rewrite rather than a deletion (rule 2: its test dies with it or changes to
+    pin the stronger invariant). The stronger invariant is that the lamp a
+    customer clicks ADVANCES the flow: a `type="button"` here would do nothing at
+    all, which is the failure the old test was guarding against from the other
+    direction.
     """
-    markup = _rendered(asset_rollups(_rows(("BTC", "LTC", True), ("LTC", "BTC", True))))
+    with app_module.app.test_request_context("/"):
+        body = app_module.app.test_client().get("/").get_data(as_text=True)
 
-    assert markup.count("<button") == 2, "one button per coin"
-    assert 'type="button"' in markup, "a submit button inside a page with forms would submit one"
-    assert 'aria-pressed="false"' in markup, "the pressed state has to be announced, not just colored"
-    for asset in ("BTC", "LTC"):
-        assert f'data-asset="{asset}"' in markup, f"{asset}'s button does not say what it filters"
+    buttons = re.findall(r'<button[^>]*name="from_asset"[^>]*>', body, re.DOTALL)
+    assert buttons, "step 1 renders no coin buttons at all"
+    for button in buttons:
+        assert 'type="submit"' in button, (
+            "a coin on step 1 must SUBMIT -- it is the answer to the question, not a filter. A "
+            "type=button here does nothing, which is the state the old filter test guarded against"
+        )
+        assert 'name="from_asset"' in button and re.search(r'value="[A-Z]+"', button), (
+            "the button must carry the asset it answers with, or the server cannot tell what was picked"
+        )
+    # AND NO aria-pressed, because nothing is in a pressed state: these are not
+    # toggles. Announcing one would describe an affordance the page does not have.
+    assert "aria-pressed" not in body, (
+        "aria-pressed describes a toggle. Step 1's lamps answer a question and move on, so a "
+        "pressed state would be a claim about behavior that no longer exists"
+    )
 
 
 # --- the two surfaces cannot disagree about a coin
