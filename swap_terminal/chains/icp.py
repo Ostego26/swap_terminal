@@ -254,7 +254,39 @@ def dfx_transport(service: str, timeout: float, network_url: str = ""):
         # which is the harder one to read.
         dfx_argv = ["dfx", "canister", "call", "--output", output]
         if network_url:
-            dfx_argv += ["--network", network_url]
+            # --identity anonymous, AND LEAVING IT OFF PRINTED A SEED PHRASE TO THE
+            # OPERATOR'S TERMINAL. Measured 2026-10-07, the first real call through
+            # this transport from inside the web container:
+            #
+            #     Creating the "default" identity.
+            #     - generating new key at /home/swap/.config/dfx/identity/default/identity.pem
+            #     Your seed phrase: <24 words, printed in full>
+            #
+            # dfx has no identity in a fresh container, so it CREATED one and echoed
+            # its mnemonic on stdout. Two separate defects in one line:
+            #
+            #   1. KEY MATERIAL WAS GENERATED AND DISPLAYED by a read-only balance
+            #      check. The operator's standing instruction is that a key is never
+            #      moved, read back or echoed, and this repository printed a brand new
+            #      one. It held nothing and the container is discarded by
+            #      `swap_stack.py down`, which is luck about where it happened rather
+            #      than a property of the code.
+            #   2. Every call would write to the filesystem on first use, so a
+            #      read-only path was not read-only.
+            #
+            # Anonymous is not a workaround, it is the CORRECT identity for this
+            # transport, and that is measured rather than assumed: the operator ran
+            # `dfx --identity anonymous ... icrc1_fee` against their replica and got
+            # (10_000 : nat). Every method reached from here -- query_blocks,
+            # icrc1_balance_of, icrc1_fee, account_identifier -- is public and takes
+            # no caller.
+            #
+            # A TRANSFER UNDER THIS TRANSPORT WILL NOW FAIL LOUDLY, debiting an empty
+            # anonymous account, and that is the right failure: a * -> ICP payout
+            # needs the DESK's identity, which exists only in the replica container.
+            # Silently creating a key and signing with it is the alternative, and it
+            # is what just happened.
+            dfx_argv += ["--identity", "anonymous", "--network", network_url]
         dfx_argv += [canister, method, argument]
 
         if network_url:

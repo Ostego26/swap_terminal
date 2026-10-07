@@ -63,6 +63,9 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -79,8 +82,24 @@ from swap_terminal.stack_authority import (  # noqa: E402
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
+    readiness_verdict,
     stray_verdict,
 )
+
+#: The replica's own status endpoint, and how long `up` waits for it.
+#:
+#: dfx serves /api/v2/status; a 200 is the replica saying it is up. 60s because a
+#: fresh `dfx start` on a cold volume takes appreciably longer than the container
+#: takes to be "Started", which is the whole gap this probe closes -- measured
+#: 2026-10-07, when a call issued immediately after `up` reported :4943 BOUND got
+#: Connection refused.
+#:
+#: Seconds, not microfortnights, because they are passed to urlopen(timeout=) and to
+#: time.monotonic() arithmetic -- an interface, not a report (rule 6). The figure is
+#: PRINTED in microfortnights.
+_REPLICA_STATUS_URL = "http://127.0.0.1:4943/api/v2/status"
+_REPLICA_WAIT_SECONDS = 60.0
+_REPLICA_PROBE_TIMEOUT_SECONDS = 2.0
 
 #: Docker's absolute path, resolved once at import.
 #:
@@ -353,6 +372,117 @@ def cmd_down(files: tuple[str, ...]) -> int:
     return 0
 
 
+def wait_for_replica() -> tuple[bool, str, float]:
+    """Poll the replica's /api/v2/status until it answers. (ready, detail, seconds waited).
+
+    THE DEFECT THIS CLOSES IS IN THIS FILE'S OWN REPORT. `up` printed
+
+        :4943 BOUND  ICP replica (dfx) -- the local ledger and the custody canister
+
+    and the next command got `Connection refused` from the same replica. Both true: a
+    published container port is bound by docker-proxy the moment the container is
+    created, so binding proves docker did its part and says nothing about whether dfx
+    inside has opened anything. Rule 13's "verify the artifact, not the deploy", one
+    layer deeper than the bind that was already an improvement on compose's exit code.
+
+    Progress is printed per attempt (rule 14): a cold `dfx start` can take tens of
+    seconds and a silent wait is indistinguishable from a hang, which on this project
+    resolves as Ctrl-C.
+    """
+    started = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with urllib.request.urlopen(
+                _REPLICA_STATUS_URL, timeout=_REPLICA_PROBE_TIMEOUT_SECONDS
+            ) as answer:
+                outcome: object = answer.status
+        except urllib.error.HTTPError as error:
+            outcome = error.code
+        except (OSError, urllib.error.URLError) as error:
+            outcome = getattr(error, "reason", error)
+            if not isinstance(outcome, BaseException):
+                outcome = error
+        ready, detail = readiness_verdict(outcome)
+        waited = time.monotonic() - started
+        if ready:
+            return True, detail, waited
+        if waited >= _REPLICA_WAIT_SECONDS:
+            return False, detail, waited
+        say(f"                    attempt {attempt}: {detail} ({waited:.1f}s elapsed, waiting)")
+        time.sleep(1.0)
+
+
+def host_workers_running() -> dict[str, int | None]:
+    """{name: pid} for every supervisor worker that is alive. THE DECISION `up` refuses on.
+
+    Its own function because it IS a decision -- "may this deployment start" -- and
+    rule 10 puts a decision in the smallest testable thing rather than inside
+    orchestration. Extracted 2026-10-07 when ruff's PLR0915 said cmd_up had swallowed
+    62 statements; rule 12's answer to that complaint is to extract, not to raise the
+    ceiling, and what came out was the part that decides.
+
+    Reads supervisor.worker_commands() -- the supervisor's OWN table -- so a fourth
+    worker added there is covered without editing this file (rule 8).
+    """
+    running: dict[str, int | None] = {}
+    for name in supervisor.worker_commands():
+        state = supervisor.worker_status(name, supervisor.DEFAULT_RUN_DIR)
+        if state.get("state") == "running":
+            running[name] = state.get("pid")
+    return running
+
+
+def _say_up_banner() -> None:
+    say("swap_stack: UP")
+    say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
+    say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
+    say("                    docker-compose.yml defines `abstergo` and `harness` with no profiles:")
+    say("                    gate, so a bare `docker compose up` starts the TEST HARNESS too")
+    say("  deployment        CONTAINERIZED. `web` runs gunicorn (gunicorn.conf.py, wsgi:app) AND")
+    say("                    the three workers, both inside the container. NO host worker is")
+    say("                    started here and `python app.py` is not needed -- that is the Flask")
+    say("                    DEVELOPMENT server, which says so itself on every start.")
+    say("  about to arm      THE CONTAINER'S PAYOUT WORKER CAN BROADCAST on whatever the")
+    say("                    container's environment arms. docker-compose.web.yml passes no")
+    say("                    signing material, so unset means it serves and cannot send.")
+
+
+def _say_refusal(running: dict[str, int | None]) -> None:
+    for name, pid in running.items():
+        say(f"  RUNNING           {name} pid={pid}")
+    say("")
+    say(f"  REFUSED           {len(running)} host worker(s) are running, and `web` starts three more.")
+    say("                    That is six workers and TWO payout workers on one database, which")
+    say("                    tests/test_payout_concurrency.py measures as 2 sends for 1 deposit.")
+    say("                    Nothing was started. Pick ONE deployment:")
+    say("                      containerized   cd swap_terminal && python supervisor.py stop")
+    say("                                      then this command again")
+    say("                      host            leave them running; serve with gunicorn rather")
+    say("                                      than app.py:  gunicorn -c gunicorn.conf.py wsgi:app")
+
+
+def _say_serving() -> None:
+    for port in sorted(STACK_PORTS):
+        if not port_is_free(port):
+            say(f"                    :{port} bound  {STACK_PORTS[port]}")
+    say("                    BOUND IS NOT READY for a published container port: docker-proxy binds")
+    say("                    it when the container is created, before anything inside listens.")
+
+
+def _say_icp_note() -> None:
+    say("  note on ICP       ICP -> * WORKS HERE as of 9795188: dfx is in the web image and")
+    say("                    reaches the replica by url with --identity anonymous, and reads need")
+    say("                    no identity -- measured on the operator's replica, `icrc1_fee` with")
+    say("                    --identity anonymous returned (10_000 : nat). Anonymous is explicit")
+    say("                    because leaving it off made dfx CREATE an identity and print its")
+    say("                    seed phrase to the terminal (2026-10-07).")
+    say("                    * -> ICP DOES NOT. `transfer` debits the CALLER, so a payout needs")
+    say("                    the desk's dfx identity, which exists only inside the replica")
+    say("                    container. Placing it is key material and the operator's.")
+
+
 def cmd_up(files: tuple[str, ...]) -> int:
     """Start the CONTAINERIZED deployment: gunicorn and the workers, inside `web`.
 
@@ -366,44 +496,16 @@ def cmd_up(files: tuple[str, ...]) -> int:
     requirement: a page serving after `docker up`, under gunicorn, with nothing held
     in a terminal.
     """
-    say("swap_stack: UP")
-    say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
-    say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
-    say("                    docker-compose.yml defines `abstergo` and `harness` with no profiles:")
-    say("                    gate, so a bare `docker compose up` starts the TEST HARNESS too")
-    say("  deployment        CONTAINERIZED. `web` runs gunicorn (gunicorn.conf.py, wsgi:app) AND")
-    say("                    the three workers, both inside the container. NO host worker is")
-    say("                    started here and `python app.py` is not needed -- that is the Flask")
-    say("                    DEVELOPMENT server, which says so itself on every start.")
-    say("  about to arm      THE CONTAINER'S PAYOUT WORKER CAN BROADCAST on whatever the")
-    say("                    container's environment arms. docker-compose.web.yml passes no")
-    say("                    signing material, so unset means it serves and cannot send.")
+    _say_up_banner()
     say("")
 
     # THE REFUSAL, BEFORE ANY CONTAINER STARTS. Checked rather than assumed, because
     # "the operator probably stopped them" is exactly the reasoning that produced the
     # six-worker state this guards against.
     say("  1. is a HOST deployment already running?")
-    running = {}
-    # worker_commands() is the supervisor's OWN table of what a worker is, keyed by
-    # name. Iterating it rather than a list spelled here means a fourth worker added
-    # to the supervisor is checked by this refusal without editing this file (rule 8).
-    for name in supervisor.worker_commands():
-        state = supervisor.worker_status(name, supervisor.DEFAULT_RUN_DIR)
-        if state.get("state") == "running":
-            running[name] = state.get("pid")
+    running = host_workers_running()
     if running:
-        for name, pid in running.items():
-            say(f"  RUNNING           {name} pid={pid}")
-        say("")
-        say(f"  REFUSED           {len(running)} host worker(s) are running, and `web` starts three more.")
-        say("                    That is six workers and TWO payout workers on one database, which")
-        say("                    tests/test_payout_concurrency.py measures as 2 sends for 1 deposit.")
-        say("                    Nothing was started. Pick ONE deployment:")
-        say("                      containerized   cd swap_terminal && python supervisor.py stop")
-        say("                                      then this command again")
-        say("                      host            leave them running; serve with gunicorn rather")
-        say("                                      than app.py:  gunicorn -c gunicorn.conf.py wsgi:app")
+        _say_refusal(running)
         return 1
     say("  (none)            no host worker is running, so the container's three are the only ones")
     say("")
@@ -416,19 +518,23 @@ def cmd_up(files: tuple[str, ...]) -> int:
         say(f"  FAILED            docker compose up exited {done.returncode}")
         return 1
     say("")
+
     say("  3. what is serving -- asked, not assumed")
-    for port in sorted(STACK_PORTS):
-        if not port_is_free(port):
-            say(f"                    :{port} BOUND  {STACK_PORTS[port]}")
-    say("                    (a bound port here is the answer; `status` names the owner)")
+    _say_serving()
     say("")
-    say("  note on ICP       ICP -> * WORKS HERE as of 9795188: dfx is in the web image and")
-    say("                    reaches the replica by url, and reads need no identity -- measured")
-    say("                    on the operator's replica, `icrc1_fee` with --identity anonymous")
-    say("                    returned (10_000 : nat).")
-    say("                    * -> ICP DOES NOT. `transfer` debits the CALLER, so a payout needs")
-    say("                    the desk's dfx identity, which exists only inside the replica")
-    say("                    container. Placing it is key material and the operator's.")
+
+    say("  4. is the replica ANSWERING? (bound is not ready)")
+    ready, detail, waited = wait_for_replica()
+    shown = f"{waited / 1.2096:.1f}\u00b5fn ({waited:.1f}s)"
+    if ready:
+        say(f"  READY             {_REPLICA_STATUS_URL} {detail} after {shown}")
+    else:
+        say(f"  NOT READY         {_REPLICA_STATUS_URL} {detail}, gave up after {shown}")
+        say("                    The containers ARE up; the replica is not serving yet or not at all.")
+        say("                    Every ICP call will fail until it is. `docker compose logs icp-replica`")
+        say("                    is where dfx says why.")
+    say("")
+    _say_icp_note()
     return 0
 
 

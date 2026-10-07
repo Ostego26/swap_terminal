@@ -86,6 +86,9 @@ STACK_PORTS = {
 #: command line, because a command line can contain a daemon's name for innocent
 #: reasons -- `tail -f bitcoind.log` must not be treated as bitcoind, and a grep
 #: for the pattern would be.
+#: dfx's /api/v2/status answers this when the replica is up.
+_HTTP_OK = 200
+
 #: What docker prints for a container id, and what this file prints to match it.
 _SHORT_ID_LENGTH = 12
 
@@ -250,6 +253,43 @@ def container_id(cgroup: str) -> str | None:
                 if len(ident) >= _SHORT_ID_LENGTH and all(c in "0123456789abcdef" for c in ident):
                     return ident[:_SHORT_ID_LENGTH]
     return None
+
+
+def readiness_verdict(outcome: object) -> tuple[bool, str]:
+    """Interpret one probe of a service's own endpoint: (ready, what it means).
+
+    WHY A PROBE AT ALL, when swap_stack.py already binds the port. Measured
+    2026-10-07: `up` reported
+
+        :4943 BOUND  ICP replica (dfx) -- the local ledger and the custody canister
+
+    and the very next command got `Connection refused (os error 111)` from
+    http://icp-replica:4943. Both are true. A PUBLISHED container port is bound by
+    docker-proxy the instant the container is created, before the process inside has
+    opened anything -- so "bound" proves docker did its part and says nothing about
+    the service.
+
+    That is rule 13's "verify the artifact, not the deploy" catching my own check:
+    binding was already the improvement over trusting compose's exit code, and it is
+    still one layer short of the question an operator has, which is "can I use it".
+
+    Takes the OUTCOME of a probe -- an HTTP status int, or the exception raised --
+    rather than performing one, so the interpretation is testable without a socket.
+    """
+    if isinstance(outcome, int):
+        # dfx's /api/v2/status answers 200. Anything else came from something that
+        # is listening, which is what this is asked to decide, so it is reported
+        # with its code rather than collapsed into "not ready".
+        if outcome == _HTTP_OK:
+            return True, f"answered {outcome}"
+        return True, f"answered {outcome} -- listening, but not the 200 dfx's status gives"
+    if isinstance(outcome, ConnectionRefusedError):
+        return False, "connection refused -- the port is bound and nothing is listening behind it yet"
+    if isinstance(outcome, TimeoutError):
+        return False, "timed out -- something accepted the connection and did not answer"
+    if isinstance(outcome, OSError):
+        return False, f"{type(outcome).__name__}: {outcome}"
+    return False, f"unrecognized probe outcome {outcome!r} -- treated as NOT ready rather than guessed"
 
 
 def container_label(inspect_output: str) -> str:

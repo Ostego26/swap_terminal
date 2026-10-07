@@ -37,6 +37,7 @@ from swap_terminal.stack_authority import (
     pids_owning_inodes,
     port_is_free,
     process_name,
+    readiness_verdict,
     stray_verdict,
 )
 
@@ -270,8 +271,6 @@ def test_UP_starts_the_CONTAINERIZED_deployment_and_never_both():
     operator probably stopped them" is the reasoning that produced the six-worker
     state in the first place.
     """
-    source = Path(swap_stack.__file__).read_text()
-
     assert "web" in swap_stack.UP_SERVICES, (
         "`web` is what serves the UI under gunicorn; without it `up` leaves the operator "
         "running the Flask development server by hand"
@@ -279,18 +278,106 @@ def test_UP_starts_the_CONTAINERIZED_deployment_and_never_both():
     assert "harness" not in swap_stack.UP_SERVICES, "the test harness is never part of `up`"
     assert "abstergo" not in swap_stack.UP_SERVICES, "abstergo is not part of this stack"
 
-    # The half that makes including `web` safe: cmd_up must NOT also start host workers.
-    up_body = source[source.index("def cmd_up("):source.index("def main(")]
-    assert 'supervisor.main(["start"' not in up_body, (
-        "cmd_up starts host workers AND the web container, which is the six-worker state"
-    )
-    assert "REFUSED" in up_body and "worker_commands()" in up_body, (
-        "cmd_up must read the supervisor's own worker table and refuse when a host "
-        "deployment is already running, rather than assuming it is not"
-    )
-
     entrypoint = (Path(swap_stack.__file__).resolve().parent / "docker" / "web_workers_entrypoint.py").read_text()
     assert "gunicorn" in entrypoint, (
         "the web container no longer appears to run gunicorn, so the reason `up` prefers it "
         "over `python app.py` may have expired -- re-read it rather than leaving this as is"
     )
+
+
+def test_UP_REFUSES_and_starts_NOTHING_when_a_host_worker_is_alive(monkeypatch, capsys):
+    """The "exactly one deployment" half, RUN rather than read out of the source.
+
+    THIS TEST USED TO GREP cmd_up's SOURCE for "REFUSED" and "worker_commands()", and
+    an extraction on 2026-10-07 moved both into helpers and broke it while the
+    behavior was unchanged. That is a test pinning WHERE code lives instead of what it
+    does -- the same "the SQL text contains X" evidence CLAUDE.md refuses, in Python.
+    It would also have passed on a cmd_up that printed the word REFUSED and started
+    the containers anyway.
+
+    So it calls the real cmd_up with one host worker alive and asserts the two things
+    that matter: it returns non-zero, and compose IS NEVER RUN. The compose stub
+    raises, so a cmd_up that started containers fails loudly here rather than being
+    caught by a flag nobody set.
+    """
+    monkeypatch.setattr(swap_stack, "host_workers_running", lambda: {"payout_worker": 31337})
+
+    def compose_must_not_run(*args, **kwargs):
+        raise AssertionError("cmd_up ran docker compose despite a host worker being alive")
+
+    monkeypatch.setattr(swap_stack, "compose", compose_must_not_run)
+
+    assert swap_stack.cmd_up(swap_stack.COMPOSE_FILES) == 1, "a refusal must not report success"
+
+    printed = capsys.readouterr().out
+    assert "REFUSED" in printed, "the operator has to be told, not just given an exit code (rule 14)"
+    assert "31337" in printed, "and told WHICH process, or they cannot act on it"
+    assert "supervisor.py stop" in printed, "and how to resolve it"
+
+
+def test_the_refusal_reads_the_supervisors_OWN_worker_table(monkeypatch):
+    """host_workers_running() must not carry its own list of worker names (rule 8).
+
+    A fourth worker added to supervisor.py has to be covered without editing
+    swap_stack.py, or the refusal goes blind to exactly the worker somebody just
+    added -- and the failure is six workers on one database, silently.
+    """
+    asked = []
+
+    monkeypatch.setattr(swap_stack.supervisor, "worker_commands", lambda: {"a_new_worker": ["x"]})
+    monkeypatch.setattr(
+        swap_stack.supervisor, "worker_status",
+        lambda name, run_dir: asked.append(name) or {"state": "running", "pid": 7},
+    )
+
+    assert swap_stack.host_workers_running() == {"a_new_worker": 7}
+    assert asked == ["a_new_worker"], "it asked about the supervisor's worker, not a hardcoded set"
+
+
+def test_a_refused_connection_is_NOT_READY_even_though_the_port_is_bound():
+    """The defect: `up` said BOUND and the next command got Connection refused.
+
+    Measured 2026-10-07. swap_stack.py's `up` printed
+
+        :4943 BOUND  ICP replica (dfx) -- the local ledger and the custody canister
+
+    and the very next call to http://icp-replica:4943 failed with
+    `Connection refused (os error 111)`. Both statements were true: a PUBLISHED
+    container port is bound by docker-proxy the instant the container is created,
+    before the process inside has opened anything.
+
+    So binding proves docker did its part and says nothing about the service -- which
+    is rule 13's "verify the artifact, not the deploy" catching the bind check that
+    was itself added as the improvement over trusting compose's exit code. One layer
+    short of the question an operator actually has.
+    """
+    ready, detail = readiness_verdict(ConnectionRefusedError(111, "Connection refused"))
+    assert ready is False
+    assert "nothing is listening" in detail
+
+
+def test_an_answer_is_READY_and_a_non_200_is_still_listening():
+    """200 is dfx's /api/v2/status. Another code means something IS there, which is the question."""
+    ready, detail = readiness_verdict(200)
+    assert ready is True
+    assert "200" in detail
+
+    ready, detail = readiness_verdict(503)
+    assert ready is True, "a 503 came from a process that is listening, which is what is asked"
+    assert "503" in detail and "not the 200" in detail
+
+
+def test_a_timeout_and_an_unrecognized_outcome_are_both_NOT_READY():
+    """Defaulting to NOT ready is the safe direction: it waits rather than reporting a lie.
+
+    The unrecognized branch matters because `up` acts on this verdict. A probe outcome
+    this function does not understand must not read as success -- it would print READY
+    for a replica nobody asked anything of.
+    """
+    ready, detail = readiness_verdict(TimeoutError("timed out"))
+    assert ready is False
+    assert "did not answer" in detail
+
+    ready, detail = readiness_verdict("something nobody anticipated")
+    assert ready is False
+    assert "treated as NOT ready" in detail

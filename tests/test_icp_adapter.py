@@ -630,6 +630,22 @@ def test_the_URL_transport_runs_dfx_DIRECTLY_with_no_docker(monkeypatch):
     assert argv[argv.index("--network") + 1] == "http://icp-replica:4943"
     assert recorded["cwd"] is None, "nothing is resolved relative to a directory here"
 
+    # --identity anonymous, AND ITS ABSENCE PRINTED A SEED PHRASE. Measured
+    # 2026-10-07 on the first real call through this transport from the web
+    # container: dfx had no identity, so it CREATED one, wrote
+    # /home/swap/.config/dfx/identity/default/identity.pem, and echoed the 24-word
+    # mnemonic on stdout -- from a read-only fee lookup. Two defects at once: key
+    # material generated and displayed by a read path, and a read path writing to
+    # the filesystem on first use.
+    #
+    # Anonymous is the CORRECT identity here and that is measured, not assumed: the
+    # operator ran `dfx --identity anonymous ... icrc1_fee` against their replica
+    # and got (10_000 : nat). Every method this transport reaches is public.
+    assert "--identity" in argv, (
+        "without an explicit identity dfx CREATES one on first use and prints its seed phrase"
+    )
+    assert argv[argv.index("--identity") + 1] == "anonymous"
+
 
 def test_the_COMPOSE_transport_is_unchanged_and_still_the_default(monkeypatch):
     """An empty url keeps the transport that has actually been exercised live.
@@ -646,6 +662,11 @@ def test_the_COMPOSE_transport_is_unchanged_and_still_the_default(monkeypatch):
     assert argv[:2] == ["docker", "compose"], argv
     assert "exec" in argv and "icp-replica" in argv
     assert "--network" not in argv, "the compose transport reaches the replica by exec, not by url"
+    assert "--identity" not in argv, (
+        "the compose transport runs INSIDE the replica container, where the desk's own identity "
+        "is the default and is the one a * -> ICP payout must sign with. Forcing anonymous here "
+        "would make every ICP payout debit an empty account"
+    )
     assert recorded["cwd"] == icp_module._REPO_ROOT, (
         "compose resolves the relative paths INSIDE its files against the cwd"
     )
