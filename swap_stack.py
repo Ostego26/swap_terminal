@@ -79,9 +79,11 @@ from swap_terminal.stack_authority import (  # noqa: E402
     STACK_PORTS,
     container_id,
     container_label,
+    down_verdict,
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
+    proc_net_tcp_tables,
     readiness_verdict,
     stray_verdict,
 )
@@ -204,12 +206,41 @@ def compose(args: list[str], files: tuple[str, ...], check: bool = False) -> sub
 
 def report_listeners() -> list[dict]:
     """Every process LISTENing on one of STACK_PORTS, classified. Reads, changes nothing."""
-    try:
-        proc_net = Path("/proc/net/tcp").read_text()
-    except OSError as error:
-        say(f"  listeners         CANNOT BE READ: {error}. The port half of this report is MISSING,")
+    # BOTH FAMILIES, AND READING ONLY ONE OF THEM PRODUCED A SELF-CONTRADICTING
+    # REPORT ON 2026-10-07. `swap_stack.py down` printed, in the same block:
+    #
+    #     :4943 STILL BOUND  <- bind attempted, not inferred
+    #     :5100 STILL BOUND  <- bind attempted, not inferred
+    #     (none)            nothing is LISTENing on any of 4943, 5000, 5100, ...
+    #
+    # Two measurements, both honest, and between them an unresolvable question --
+    # because this function read /proc/net/tcp and nothing else. Docker publishes a
+    # port on BOTH 0.0.0.0 and ::, and a dual-stack socket bound to :: with
+    # IPV6_V6ONLY off captures IPv4 connections while appearing ONLY in
+    # /proc/net/tcp6. So an IPv6 listener holding one of our ports was invisible
+    # here and failed the bind over in port_is_free() -- "(none)" meant "none that
+    # this scan can see", which is precisely the voice rule 17 forbids.
+    #
+    # listening_inodes() already anticipated this: its own comment says "two rows
+    # for one port means tcp and tcp6 both carry it, same socket" -- a case its
+    # only caller made impossible to reach. hex_port() rsplits on the last colon,
+    # so a 32-hex-character tcp6 local_address parses through the identical path
+    # with no special case.
+    #
+    # tcp IS REQUIRED AND tcp6 IS NOT. A kernel booted with ipv6.disable=1 has no
+    # /proc/net/tcp6 at all, and refusing to report anything because the optional
+    # half is absent would lose the half that works. A missing /proc/net/tcp, by
+    # contrast, means this report cannot be made.
+    proc_net, missing = proc_net_tcp_tables(Path("/proc/net"))
+    if "tcp" in missing:
+        say("  listeners         /proc/net/tcp CANNOT BE READ. The port half of this report is MISSING,")
         say("                    which is not the same as 'nothing is listening'")
         return []
+    if "tcp6" in missing:
+        # Said out loud rather than passed over: an operator reading "(none)" is
+        # entitled to know which families were actually looked at (rule 14).
+        say("  listeners         /proc/net/tcp6 is absent -- IPv4 only was scanned. On a kernel with")
+        say("                    IPv6 disabled that is complete; otherwise an IPv6 listener is unseen")
     inodes = listening_inodes(proc_net, set(STACK_PORTS))
     owners = pids_owning_inodes(set(inodes.values()), Path("/proc"))
     found = []
@@ -327,6 +358,29 @@ def cmd_status(files: tuple[str, ...]) -> int:
     return 0
 
 
+def print_bound_but_no_listener(bound: list[int]) -> None:
+    """Say that a stop is UNPROVEN for these ports, and name the two readings.
+
+    Its own function because cmd_down() crossed PLR0915 when this was inlined,
+    and rule 12 is explicit that the fix is to extract rather than raise the
+    ceiling. The decision itself is down_verdict() in stack_authority.py; this
+    is only how it reads on screen.
+    """
+    ports = ", ".join(f":{port}" for port in bound)
+    say(f"  STOPPED, NOT PROVEN  nothing this project owns is LISTENing, but {ports} could not be")
+    say("                    bound just now, so the absence is NOT proven for those ports.")
+    say("                    Two readings, and this cannot tell them apart from here:")
+    say("                      TIME_WAIT   the usual one. A socket whose process is already gone")
+    say("                                  holds the address for ~60s; port_is_free() omits")
+    say("                                  SO_REUSEADDR on purpose, so it reads as bound. Benign,")
+    say("                                  clears itself, and `up` will bind once it does.")
+    say("                      a listener  owned by a user whose /proc this one cannot read, so")
+    say("                                  the scan above could not name it. NOT benign.")
+    say(f"                    `sudo ss -ltnp | grep -E '{('|'.join(str(p) for p in bound))}'` separates them:")
+    say("                    output means a listener, no output means TIME_WAIT. Re-running `down`")
+    say("                    after a minute is the cheaper check -- `free` then means TIME_WAIT.")
+
+
 def cmd_down(files: tuple[str, ...]) -> int:
     """Stop this terminal's processes and containers, then PROVE it.
 
@@ -385,19 +439,53 @@ def cmd_down(files: tuple[str, ...]) -> int:
     say("  3. proof -- absence is the assertion, not an exit code (rule 13)")
     remaining = report_listeners()
     still = [row for row in remaining if row["verdict"] == "ours"]
+    bound = []
     for port in sorted(STACK_PORTS):
         free = port_is_free(port)
+        if not free:
+            bound.append(port)
         say(f"                    :{port} {'free' if free else 'STILL BOUND'}  <- bind attempted, not inferred")
     print_listeners(remaining)
-    if still:
+    verdict = down_verdict(bound, len(still))
+    if verdict == "not_down":
         say("")
         say(f"  NOT DOWN          {len(still)} listener(s) this project owns are still up and are named above.")
         say("                    They were started by something neither the supervisor nor compose names --")
         say("                    `swap_stack.py status` after killing them by pid is how to confirm.")
         return 1
     say("")
-    say("  summary           every process this file owns is gone, proven by bind. Chain daemons")
-    say("                    and any FOREIGN listener are untouched and listed above.")
+    # A SUMMARY THAT CLAIMED PROOF OVER A PORT IT HAD JUST REPORTED STILL BOUND.
+    #
+    # Measured 2026-10-07 on the operator's host. This block printed, verbatim:
+    #
+    #     :4943 STILL BOUND  <- bind attempted, not inferred
+    #     :5100 STILL BOUND  <- bind attempted, not inferred
+    #     (none)            nothing is LISTENing on any of 4943, 5000, 5100, ...
+    #     summary           every process this file owns is gone, proven by bind.
+    #
+    # The summary was reached because `still` was empty, and `still` counts
+    # LISTENERS -- so two failed binds were measured, printed, and then not looked
+    # at by the line that claimed to have proven something by binding. That is
+    # rule 13's "skipped" beside "success" in one block, and rule 14's "did
+    # nothing" wearing the same face as "did work", in the file whose entire third
+    # section exists to be the proof.
+    #
+    # WHAT A BOUND PORT WITH NO LISTENER ACTUALLY MEANS is not one thing, which is
+    # why this reports rather than deciding. port_is_free() deliberately omits
+    # SO_REUSEADDR, so a socket in TIME_WAIT -- the ordinary residue of a server
+    # that just served a connection and exited -- reads as bound and is benign and
+    # clears itself. An IPv6 listener used to read this way too; report_listeners()
+    # now scans /proc/net/tcp6 for exactly that reason, so this path is narrower
+    # than it was, and still not empty: a listener owned by another user with no
+    # readable cgroup lands in "owner unknown", not in `still`.
+    #
+    # So the honest summary distinguishes the two and claims proof for neither.
+    if verdict == "stopped_not_proven":
+        print_bound_but_no_listener(bound)
+        return 1
+    say("  summary           every process this file owns is gone, proven by bind: every port in")
+    say(f"                    {', '.join(str(p) for p in sorted(STACK_PORTS))} was bindable, and nothing is LISTENing on any")
+    say("                    of them. Chain daemons and any FOREIGN listener are untouched, above.")
     return 0
 
 

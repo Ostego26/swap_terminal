@@ -140,6 +140,13 @@ def listening_inodes(proc_net_tcp: str, ports: set[int]) -> dict[int, int]:
         if port in ports:
             # The LAST listener wins only in the sense that a port has one; two
             # rows for one port means tcp and tcp6 both carry it, same socket.
+            #
+            # THAT CASE BECAME REACHABLE ON 2026-10-07 and was not before. This
+            # comment described a dual-stack socket while the only caller read
+            # /proc/net/tcp alone, so tcp6 rows never arrived here -- which is
+            # what let an IPv6-only listener hold one of our ports invisibly.
+            # proc_net_tcp_tables() now supplies both tables, and the sentence
+            # above is a measurement rather than a plan.
             found[port] = int(fields[9])
     return found
 
@@ -338,3 +345,107 @@ def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
         except OSError:
             return False
     return True
+
+
+# =============================================================================
+# THE TWO DECISIONS A `down` MAKES, extracted here on 2026-10-07 because both
+# were inlined in swap_stack.py's cmd_down() and one of them was WRONG THERE for
+# as long as it existed -- in the block whose whole purpose is to be the proof.
+# Rule 10: the thing that decides is the smallest, most testable piece at the
+# bottom, and "the only way to test it is to run the whole thing" is how this
+# defect survived. These are callable with seeded inputs.
+# =============================================================================
+
+#: The families of /proc/net TCP tables a listener scan must read. BOTH, and
+#: reading only the first produced a report that contradicted itself -- see
+#: proc_net_tcp_tables() below.
+PROC_NET_TCP_TABLES = ("tcp", "tcp6")
+
+
+def proc_net_tcp_tables(proc_net: Path) -> tuple[str, list[str]]:
+    """Concatenated /proc/net/tcp + /proc/net/tcp6 text, and which tables were MISSING.
+
+    `proc_net` is a directory argument rather than a hardcoded /proc/net so a
+    test seeds both tables as ordinary files and asserts on the answer with no
+    socket open anywhere -- the same reason listening_inodes() takes text.
+
+    WHY BOTH, measured 2026-10-07 on the operator's host. `swap_stack.py down`
+    printed, in one block:
+
+        :4943 STILL BOUND  <- bind attempted, not inferred
+        (none)             nothing is LISTENing on any of 4943, 5000, 5100, ...
+
+    Two honest measurements and no way to reconcile them, because the scan read
+    /proc/net/tcp alone. Docker publishes a port on 0.0.0.0 AND ::, and a socket
+    bound to :: with IPV6_V6ONLY off answers IPv4 connections while appearing
+    only in /proc/net/tcp6. So an IPv6 listener on one of our ports was invisible
+    to the scan and failed the bind in port_is_free(): "(none)" meant "none this
+    scan can see", which rule 17 forbids writing in a measurement's voice.
+
+    listening_inodes() had anticipated it -- its comment reads "two rows for one
+    port means tcp and tcp6 both carry it, same socket" -- about a case its only
+    caller could never produce. hex_port() rsplits on the last colon, so a
+    32-hex-character tcp6 local_address parses through the identical path.
+
+    A MISSING TABLE IS RETURNED, NOT RAISED, and the two are not equivalent. A
+    kernel booted with ipv6.disable=1 has no tcp6 at all, and there the IPv4 scan
+    is complete; a missing tcp means the report cannot be made. The caller says
+    which out loud (rule 14) instead of printing "(none)" over a scan it only
+    half ran.
+    """
+    body = ""
+    missing: list[str] = []
+    for table in PROC_NET_TCP_TABLES:
+        try:
+            body += (proc_net / table).read_text()
+        except OSError:
+            missing.append(table)
+    return body, missing
+
+
+#: What a `down` established. Ordered by how much it claims, least first.
+DOWN_VERDICTS = ("not_down", "stopped_not_proven", "down")
+
+
+def down_verdict(bound_ports: list[int] | tuple[int, ...], owned_listeners: int) -> str:
+    """What a stop actually established. One of DOWN_VERDICTS.
+
+    `bound_ports` are the stack ports that could NOT be bound after the stop;
+    `owned_listeners` is how many LISTEN sockets the scan attributed to this
+    project. Both are measurements the caller has already taken -- this only
+    decides what they add up to, which is exactly the step that was wrong.
+
+    THE DEFECT, measured 2026-10-07 on the operator's host. cmd_down() branched
+    on the listener count alone and then printed
+
+        summary  every process this file owns is gone, proven by bind.
+
+    immediately below its own two lines reading `STILL BOUND`. Two failed binds
+    were measured, printed, and not looked at by the sentence claiming to have
+    proven something by binding. Rule 13's "skipped" beside "success" in one
+    block; rule 14's "did nothing" wearing the face of "did work".
+
+    The three answers, and the middle one is the one that did not exist:
+
+      not_down             a listener this project owns survived the stop. The
+                           lever is a pid and `status` names it.
+      stopped_not_proven   nothing of ours is LISTENing and some port would not
+                           bind. Ambiguous ON PURPOSE: port_is_free() omits
+                           SO_REUSEADDR, so a socket in TIME_WAIT -- the ordinary
+                           residue of a server that just served and exited --
+                           reads as bound and is benign; and a listener owned by
+                           a user whose /proc this one cannot read lands in
+                           "owner unknown" rather than here. The caller prints
+                           both readings and how to separate them.
+      down                 nothing LISTENing and every port bindable. The only
+                           answer that may say "proven".
+
+    A LISTENER WINS OVER A BOUND PORT, and not merely because it is worse: a
+    surviving listener is a port that is bound, so the two findings are the same
+    finding seen twice, and reporting the weaker one would bury the lever.
+    """
+    if owned_listeners:
+        return "not_down"
+    if bound_ports:
+        return "stopped_not_proven"
+    return "down"

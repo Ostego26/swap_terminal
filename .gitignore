@@ -114,3 +114,26 @@ target/
 # Values must be hardcoded in plain text." dfx's own answer to that is
 # init_arg_file, a PATH in dfx.json, so the path is tracked and the file is not.
 icp/icp_ledger_init.did
+
+# THE DESKTOP LAUNCHER'S OWN RUNTIME STATE, at runtime/ rather than
+# swap_terminal/runtime/ above -- and the two directories are different places,
+# which is the whole reason this entry was missing. swap_terminal_desktop.py:100
+# puts LOCK_PATH at `runtime/launcher.lock` and :865 puts the Chromium profile at
+# `runtime/browser-profile`, both relative to the REPOSITORY root, while the
+# `swap_terminal/runtime/` line above covers the supervisor's pid files inside the
+# PACKAGE. One ignore line was written and the other never was.
+#
+# Measured on the operator's host 2026-10-07: both showed as untracked in a
+# `git status` that the operator was reading to find out what was blocking a
+# `git pull`. That is the exact cost rule 14 names -- runtime noise hiding the
+# one line that mattered (a modified collect_fees.py) in a list of nine.
+#
+# A lock file is also the one thing in this project that must NEVER be tracked:
+# a checkout carrying launcher.lock hands the next start a pid file that outlives
+# its process, which is rule 13's stale-lock refusal arriving by git. The browser
+# profile is worse than noise -- it is a Chromium profile directory, so it
+# accumulates cookies and session storage for whatever the launcher opened.
+runtime/launcher.lock
+runtime/launcher.pid
+runtime/launcher.log
+runtime/browser-profile/

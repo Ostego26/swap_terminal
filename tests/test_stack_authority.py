@@ -29,13 +29,16 @@ from pathlib import Path
 
 import swap_stack
 from swap_terminal.stack_authority import (
+    DOWN_VERDICTS,
     NEVER_STOPPED,
     container_id,
     container_label,
+    down_verdict,
     hex_port,
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
+    proc_net_tcp_tables,
     process_name,
     readiness_verdict,
     stray_verdict,
@@ -426,3 +429,86 @@ def test_DOWN_stops_containers_and_does_NOT_remove_them(monkeypatch, capsys):
     )
     printed = capsys.readouterr().out
     assert "not removed" in printed, "the operator must be told which of the two verbs ran (rule 14)"
+
+
+# =============================================================================
+# THE TWO DECISIONS A `down` MAKES. Both were inlined in swap_stack.py's
+# cmd_down() until 2026-10-07 and one of them was wrong there, in the block whose
+# only job is to be the proof. These exist because "the only way to test it is to
+# run the whole stop" is how that survived (rule 10).
+# =============================================================================
+
+
+def test_an_ipv6_only_listener_is_seen(tmp_path):
+    """A listener that appears ONLY in /proc/net/tcp6 must be found.
+
+    THE DEFECT THIS PINS, measured 2026-10-07 on the operator's host. `down`
+    printed `:4943 STILL BOUND` and, four lines later, `(none) nothing is
+    LISTENing on any of 4943, ...`. Both measurements were honest and they could
+    not both be acted on, because the scan read /proc/net/tcp and nothing else
+    while docker publishes on 0.0.0.0 AND ::.
+
+    Seeded as a tcp6 LISTEN row with an EMPTY tcp table, which is the arrangement
+    the old code was blind to -- an IPv6 row alongside an IPv4 one would pass
+    either way and would not have failed before the fix.
+    """
+    (tmp_path / "tcp").write_text(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+    )
+    (tmp_path / "tcp6").write_text(
+        "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        "   0: 00000000000000000000000000000000:134F 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 987654 1 0000 100 0\n"
+    )
+    body, missing = proc_net_tcp_tables(tmp_path)
+    assert missing == []
+    # 0x134F == 4943, the ICP replica's port.
+    assert listening_inodes(body, {4943}) == {4943: 987654}
+
+
+def test_a_missing_tcp6_is_reported_and_a_missing_tcp_is_not_fatal_the_same_way(tmp_path):
+    """tcp is required, tcp6 is optional, and the caller is told which is absent.
+
+    A kernel booted with ipv6.disable=1 has no /proc/net/tcp6, and refusing to
+    report anything there would lose the half that works. A missing tcp means the
+    report cannot be made. Returning the names rather than raising is what lets
+    swap_stack.py say which out loud (rule 14) instead of printing "(none)" over
+    a scan it only half ran.
+    """
+    (tmp_path / "tcp").write_text("header\n")
+    body, missing = proc_net_tcp_tables(tmp_path)
+    assert missing == ["tcp6"]
+    assert body == "header\n"
+
+    empty = tmp_path / "none"
+    empty.mkdir()
+    body, missing = proc_net_tcp_tables(empty)
+    assert missing == ["tcp", "tcp6"]
+    assert body == ""
+
+
+def test_a_bound_port_with_no_listener_is_not_a_proven_stop():
+    """`down` must not claim proof over a port it just reported STILL BOUND.
+
+    THE DEFECT, measured 2026-10-07 on the operator's host. cmd_down() printed
+
+        :4943 STILL BOUND  <- bind attempted, not inferred
+        :5100 STILL BOUND  <- bind attempted, not inferred
+        (none)             nothing is LISTENing on any of 4943, 5000, 5100, ...
+        summary            every process this file owns is gone, proven by bind.
+
+    It branched on the listener count alone, so two failed binds were measured,
+    printed, and then not looked at by the sentence claiming to have proven
+    something by binding -- rule 13's "skipped" beside "success" in one block.
+
+    The middle verdict is the one that did not exist. It is ambiguous ON PURPOSE:
+    port_is_free() omits SO_REUSEADDR so TIME_WAIT reads as bound, and this cannot
+    tell that from a listener owned by an unreadable /proc.
+    """
+    assert down_verdict([], 0) == "down"
+    assert down_verdict([4943, 5100], 0) == "stopped_not_proven"
+    assert down_verdict([], 1) == "not_down"
+    # A SURVIVING LISTENER WINS, and not only because it is worse: it is itself a
+    # bound port, so the two findings are one finding seen twice, and reporting
+    # the weaker of them would bury the lever (a pid) under a `ss` suggestion.
+    assert down_verdict([4943], 1) == "not_down"
+    assert set(DOWN_VERDICTS) == {"down", "stopped_not_proven", "not_down"}
