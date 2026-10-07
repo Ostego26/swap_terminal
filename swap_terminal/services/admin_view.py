@@ -75,7 +75,7 @@ from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 # module knew one of the three conditions pair_view has had since 2026-10-01.
 from .custody_separation import wallet_label
 from .helpers import parse_iso, utc_now_iso
-from .pair_view import pair_serviceability
+from .pair_view import ASSET_ROLLUP_STATES, asset_rollups, pair_serviceability
 from .swap_service import TAG_ATTRIBUTION, why_cannot_take_deposits
 from .swap_view import (
     ADDRESS_DERIVATIONS,
@@ -1317,6 +1317,20 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
         "pairs": _pairs,
         "pair_matrix": pair_matrix(_pairs),
         "pair_assets": pair_assets(_pairs),
+        # A FOURTH SHAPE OVER THE SAME ROWS, and the same argument as the other two:
+        # services/pair_view.asset_rollups() is an INDEX over `_pairs`, not a second
+        # derivation of serviceability. This module's header records what a second
+        # derivation cost -- pair_rows() once carried the first of three conditions and
+        # told the operator a pair was ENABLED that the customer page was refusing in
+        # the same process -- so the lamp a this page shows and the lamp the customer
+        # page shows are the same function over the same rows.
+        #
+        # THE CUSTOMER PAGE AND THIS ONE DIFFER IN WHAT THEY SHOW, NOT IN WHAT THEY
+        # KNOW, which is the distinction /admin's own header draws about audience. The
+        # colour and the out/in counts are identical; this page keeps the matrix beneath
+        # them, because an operator needs the per-cell reason and a customer does not.
+        "asset_lamps": asset_rollups(_pairs),
+        "asset_lamp_states": ASSET_ROLLUP_STATES,
         "chains": chain_rows(config, adapters),
         "workers": worker_rows(run_dir),
         "pricing": pricing_panel(),

@@ -22,14 +22,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from config import Config
 from jinja2 import Environment, FileSystemLoader
-from services.pair_view import ASSET_ROLLUP_STATES, asset_rollups
+from services.admin_view import pair_rows
+from services.pair_view import ASSET_ROLLUP_STATES, allowed_pair_rows, asset_rollups
 
 
 def _rows(*specs: tuple[str, str, bool]) -> list[dict]:
     """Rows shaped like allowed_pair_rows()' output, with only the keys the rollup reads."""
     return [
-        {"from_asset": source, "to_asset": destination, "enabled": enabled, "label": f"{source} -> {destination}"}
+        # `serviceable` is what the rollup reads, and the name matters: `enabled`
+        # means the verdict in pair_view's rows and "is in ALLOWED_PAIRS" in
+        # admin_view's, which is what painted /admin's lamps green while the customer
+        # page's were red. Seeding only `serviceable` means a rollup that went back to
+        # reading `enabled` fails here with a KeyError rather than quietly.
+        {"from_asset": source, "to_asset": destination, "serviceable": enabled, "label": f"{source} -> {destination}"}
         for source, destination, enabled in specs
     ]
 
@@ -126,7 +133,7 @@ def test_a_lamp_can_never_be_greener_than_the_rows_it_came_from():
     rows = _rows(("BTC", "LTC", True), ("LTC", "BTC", True))
     assert _by_asset(rows)["BTC"]["key"] == "all"
 
-    rows[0]["enabled"] = False
+    rows[0]["serviceable"] = False
     moved = _by_asset(rows)["BTC"]
     assert moved["key"] == "some", "a row going unavailable must move the lamp off green"
     assert moved["available"] <= moved["total"]
@@ -198,3 +205,70 @@ def test_every_lamp_is_a_BUTTON_carrying_the_asset_it_filters():
     assert 'aria-pressed="false"' in markup, "the pressed state has to be announced, not just colored"
     for asset in ("BTC", "LTC"):
         assert f'data-asset="{asset}"' in markup, f"{asset}'s button does not say what it filters"
+
+
+# --- the two surfaces cannot disagree about a coin
+
+
+def test_BOTH_row_builders_carry_the_verdict_under_THE_SAME_NAME():
+    """`enabled` means two different things in the two row shapes. Measured 2026-10-07.
+
+    The coin lamps landed on the customer page and then on /admin, and the two pages
+    drew OPPOSITE colours -- six red and six green -- in the same process, from the same
+    config. Not a second evaluation of serviceability, which this tree already guards:
+    a NAME COLLISION.
+
+        services.pair_view.allowed_pair_rows()     enabled == the verdict
+        services.admin_view.pair_rows()            enabled == "is in ALLOWED_PAIRS",
+                                                   and `serviceable` is the verdict
+
+    asset_rollups() read `enabled`, so it was right on one shape and wrong on the other,
+    and nothing could tell -- both are bools and both are present. That is rule 8
+    arriving through a key name rather than through duplicated logic, which is the
+    variety no amount of "don't evaluate it twice" catches.
+
+    THE PROPERTY PINNED HERE is the one that makes the fix hold: both builders carry
+    `serviceable`, and on BOTH it means the verdict. Whether `enabled` keeps its second
+    meaning is not this test's business -- five consumers read it and renaming it is a
+    bigger change than naming the collision -- but a reader of either shape must be able
+    to ask one question with one word.
+    """
+    config = {name: getattr(Config, name) for name in dir(Config) if name.isupper()}
+
+    customer = allowed_pair_rows(config, {})
+    operator = pair_rows(config, {})
+    assert customer and operator, "both builders must produce rows or this test checked nothing"
+
+    for label, rows in (("pair_view", customer), ("admin_view", operator)):
+        for row in rows:
+            assert "serviceable" in row, (
+                f"{label}'s rows carry no `serviceable` key, so asset_rollups() cannot read the "
+                f"verdict by one name and the two surfaces can disagree about a coin again"
+            )
+            assert isinstance(row["serviceable"], bool), f"{label}: {row['serviceable']!r} is not a verdict"
+
+
+def test_THE_TWO_PAGES_ROLL_UP_TO_THE_SAME_LAMPS():
+    """Same function, same rows, same answer -- asserted end to end rather than argued.
+
+    This is the assertion that would have failed on 2026-10-07 and did not exist. The
+    rollup is run over BOTH row builders' output and the lamps compared key by key: a
+    colour, and both counts. If a future row shape reintroduces the collision under
+    another name, this fails naming the coin.
+    """
+    config = {name: getattr(Config, name) for name in dir(Config) if name.isupper()}
+
+    customer = {lamp["asset"]: lamp for lamp in asset_rollups(allowed_pair_rows(config, {}))}
+    operator = {lamp["asset"]: lamp for lamp in asset_rollups(pair_rows(config, {}))}
+
+    assert set(customer) == set(operator), (
+        f"the two surfaces do not even list the same coins: {sorted(customer)} vs {sorted(operator)}"
+    )
+    for asset in sorted(customer):
+        for field in ("key", "out_available", "out_total", "in_available", "in_total"):
+            assert customer[asset][field] == operator[asset][field], (
+                f"{asset}'s lamp differs between the customer page and /admin on {field}: "
+                f"{customer[asset][field]!r} vs {operator[asset][field]!r}. The two surfaces are "
+                f"reading the same rows through the same function, so a difference is a row-shape "
+                f"disagreement -- which is what painted six red lamps and six green ones."
+            )

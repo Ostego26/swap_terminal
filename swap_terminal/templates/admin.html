@@ -774,6 +774,56 @@
       an unconfigured asset is a whole row and a whole column of the same badge,
       which is one reading instead of twenty. What a paste must not lose is which
       asset is the problem and what to do, and both are in the Chains panel above. -#}
+  {#- ONE LAMP PER COIN, ABOVE THE MATRIX. Operator 2026-10-07: "grc led ltc led, etc
+      should indicate which pairs are available for that coin. if all are available
+      green. if some but not all, yellow. none....red."
+
+      THE SAME FUNCTION AS THE CUSTOMER PAGE, over the same rows --
+      services/pair_view.asset_rollups() -- so the two surfaces cannot disagree about a
+      coin. That is this page's oldest lesson: services/admin_view.pair_rows() once
+      carried the first of three serviceability conditions and told the operator a pair
+      was ENABLED that the customer page was refusing in the same process.
+
+      THE MATRIX STAYS BENEATH IT and the lamps do not replace it. A lamp is a ROLLUP
+      and this page's audience needs the per-cell reason -- the matrix's own note
+      explains that an unconfigured asset reads as a whole row and column of one badge,
+      which is the reading a rollup compresses to one dot. Both, with the dot first,
+      because "is anything wrong with GRC" is the faster question.
+
+      NO FILTER HERE, unlike the customer page. Hiding cells in a matrix breaks the
+      grid -- a row with gaps is a row an operator has to recount -- and the shape IS
+      the information on this surface. The lamps are inert markers on this page, so they
+      are spans and not buttons: a button that does nothing is worse than no button. -#}
+  <ul class="lampstrip">
+    {% for lamp in data.asset_lamps %}
+    <li>
+      <span class="lamp lamp-{{ lamp.key }}" title="{{ lamp.detail }}">
+        <span class="lamp-dot" aria-hidden="true"></span>
+        <span class="lamp-asset">{{ lamp.asset }}</span>
+        <span class="lamp-word">{{ lamp.word }}</span>
+        <span class="lamp-counts">out {{ lamp.out_available }}/{{ lamp.out_total }}
+          &middot; in {{ lamp.in_available }}/{{ lamp.in_total }}</span>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="panel-note">A coin's lamp rolls up every direction it appears in, BOTH ways.
+     <strong>out</strong> is that coin leaving a customer for the desk; <strong>in</strong> is the desk
+     paying it out. The two halves can disagree and the colour alone cannot say which --
+     measured 2026-10-07, ICP read <code>out 3/5 &middot; in 0/5</code>, because an ICP payout needs the
+     desk's dfx identity and a read does not.</p>
+  <table class="kvt">
+    <caption class="subbox-title">What a coin's lamp means</caption>
+    <tbody>
+      {% for state in data.asset_lamp_states %}
+      <tr>
+        <th scope="row">{{ badges.level_badge(state.level, state.word) }}</th>
+        <td>{{ state.note }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
   <div class="scroll-x">
   <table class="matrix">
     <caption class="subbox-title">Every ordered pair. Row = what a customer sends, column = what they receive.</caption>

@@ -237,6 +237,27 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
                 "to_asset": to_asset,
                 "label": f"{from_asset} -> {to_asset}",
                 "enabled": verdict["serviceable"],
+                # `serviceable` AS WELL AS `enabled`, AND THEY ARE THE SAME VALUE HERE.
+                # Added 2026-10-07 because `enabled` MEANS TWO DIFFERENT THINGS in the
+                # two row shapes this tree builds, and asset_rollups() read it and got
+                # the wrong answer on one of them:
+                #
+                #   here (pair_view)            enabled == serviceable, the verdict
+                #   admin_view.pair_rows()      enabled == "in ALLOWED_PAIRS", and
+                #                               `serviceable` is the verdict
+                #
+                # Measured the day the coin lamps landed on both pages: the customer
+                # page drew six RED lamps and /admin drew six GREEN ones, in the same
+                # process, from the same config. That is this module's own oldest
+                # lesson arriving through a key name instead of through a second
+                # evaluation -- one word, two meanings, and the surface that read it
+                # could not tell (rule 8).
+                #
+                # asset_rollups() now reads `serviceable`, which both shapes carry and
+                # which means one thing. `enabled` is kept exactly as it was: /admin's
+                # own note counts it, operator_panel.py reads it, and renaming a key
+                # five consumers read is a bigger change than naming the collision.
+                "serviceable": verdict["serviceable"],
                 # HOW THIS PAIR WOULD SETTLE, AND THAT IT DOES NOT SETTLE THAT WAY
                 # HERE. Added 2026-10-03. Serviceability and settlement are different
                 # questions and neither answers the other: GRC -> XRP can be
@@ -417,8 +438,14 @@ def asset_rollups(rows: list[dict]) -> list[dict]:
     for asset in assets:
         out = [row for row in rows if row["from_asset"] == asset]
         into = [row for row in rows if row["to_asset"] == asset]
-        out_ok = [row for row in out if row["enabled"]]
-        in_ok = [row for row in into if row["enabled"]]
+        # `serviceable` AND NOT `enabled`. See the comment on that key in
+        # allowed_pair_rows(): `enabled` means the verdict here and "is in
+        # ALLOWED_PAIRS" in services/admin_view.pair_rows(), so a rollup reading it
+        # painted /admin's lamps green while the customer page's were red, in the same
+        # process. KeyError rather than .get() is deliberate -- a row shape that lacks
+        # the verdict must fail loudly, not roll up as unavailable and look like news.
+        out_ok = [row for row in out if row["serviceable"]]
+        in_ok = [row for row in into if row["serviceable"]]
         total = len(out) + len(into)
         available = len(out_ok) + len(in_ok)
 
