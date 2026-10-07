@@ -1,0 +1,40 @@
+// threshold_custody's init argument. TRACKED IN GIT, unlike icp_ledger_init.did.
+//
+// WHY THIS FILE EXISTS. `dfx deploy` failed on the operator's host 2026-10-07:
+//
+//     Failed to install wasm module to canister 'threshold_custody'.
+//     Caused by: Failed to create argument blob.
+//     Caused by: Invalid data: Expected arguments but found none.
+//
+// threshold_custody/threshold_custody.did declares `service : (KeyConfig) -> { ... }`
+// and src/lib.rs has `#[ic_cdk::init] fn init(config: KeyConfig)`, so the canister
+// REQUIRES an argument at install. dfx.json named none, so `dfx deploy` with no
+// canister argument could never install it -- the ledger alone deployed fine, which
+// is why this went unnoticed: every ICP measurement so far needed only the ledger.
+//
+// AN init_arg_file RATHER THAN AN INLINE init_arg, for a reason that is about this
+// comment: dfx.json is JSON and JSON has no comments. The reasoning below has to live
+// somewhere a reader will find it, and candid text files take `//`. It also matches
+// what icp_ledger_canister already does, so there is one pattern here and not two
+// (rule 8).
+//
+// TRACKED, AND THE LEDGER'S IS NOT, AND THE DIFFERENCE IS THE POINT.
+// icp/icp_ledger_init.did is gitignored (.gitignore:116) because it carries ACCOUNT
+// IDENTIFIERS, which are environment state: the same identity has a different account
+// on every fresh replica, so a tracked copy would claim to know something only a
+// running replica can answer. This file carries a KEY NAME, which is the same string
+// on every local replica there has ever been. Nothing here goes stale when the
+// container is recreated, so tracking it means `dfx deploy` works on a fresh checkout
+// without a generation step.
+//
+// dfx_test_key IS LOCAL-ONLY AND THAT IS NOT A LIMITATION OF THIS FILE. It is the
+// threshold ECDSA key name a local replica provides; mainnet's is key_1 and a test
+// subnet's is test_key_1. A canister deployed to mainnet needs that value changed, and
+// DFINITY's own documentation says dfx.json "does not support referring to values
+// through environment variables. Values must be hardcoded in plain text" -- so the
+// change would be to this file, deliberately, by whoever deploys there. Nothing in
+// this tree deploys to mainnet, and icp/dfx.json's icp_ledger_canister entry carries
+// `remote.id.ic` naming the real ledger precisely so dfx refuses to create one there.
+//
+// WHAT READS IT: icp/dfx.json's threshold_custody.init_arg_file. Nothing else.
+(record { key_name = "dfx_test_key" })

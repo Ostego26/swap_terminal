@@ -44,6 +44,7 @@ run. This file only asserts that dfx and Cargo are describing the same project.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -194,8 +195,31 @@ def declared_init_arg_files() -> list[tuple[str, str]]:
     ]
 
 
-def test_every_init_arg_file_is_git_ignored():
-    """An init_arg_file holds environment state and must never be committable.
+def test_every_init_arg_file_CARRYING_ENVIRONMENT_STATE_is_git_ignored():
+    """An init_arg_file holding environment state must never be committable.
+
+    NARROWED 2026-10-07, FROM "every init_arg_file" TO "every one that carries
+    environment state", because the original generalized from a sample of ONE. When
+    this was written the only init_arg_file was the ledger's, which hardcodes ACCOUNT
+    IDENTIFIERS -- and the docstring below names exactly that as the hazard. The rule
+    it enforced was broader than the rule it described.
+
+    What that cost: threshold_custody needs an init argument too (its candid is
+    `service : (KeyConfig) -> { ... }`), and its argument is a KEY NAME --
+    "dfx_test_key", the same string on every local replica there has ever been.
+    Nothing about it goes stale when a container is recreated, so it SHOULD be
+    tracked, or `dfx deploy` cannot work on a fresh checkout without a generation
+    step that has nothing to generate. The old gate forbade that.
+
+    So the instrument is now the file's CONTENT: a 64-hex account identifier is
+    environment state and forces the ignore; a file without one may be tracked. That
+    is strictly sharper -- it still catches the ledger's file being un-ignored, and it
+    now also catches a NEW tracked file that hardcodes an account id, which the old
+    name-based rule would have caught only by accident of the filename.
+
+    A file that is ABSENT is required to be ignored, which is the cautious direction:
+    the ledger's is generated and gitignored, so absent-and-ignored is its healthy
+    state, and a file this test cannot read is not a file it may clear.
 
     THE HAZARD IS FORCED BY dfx AND IS NOT HYPOTHETICAL. DFINITY's ICP ledger
     setup documentation says, verbatim, "`dfx.json` does not support referring to
@@ -219,8 +243,20 @@ def test_every_init_arg_file_is_git_ignored():
         "no canister in dfx.json declares an init_arg_file, so this test checked NOTHING "
         "(rule 17). Delete it along with the mechanism if the ledger canister is gone."
     )
+    #: A 64-hex token is an ICP account identifier, which is what makes a file
+    #: environment state: the same identity has a different account on every fresh
+    #: replica. Matched with a word boundary so a longer hex blob is not mistaken for
+    #: one.
+    account_identifier = re.compile(r"\b[0-9a-f]{64}\b")
+
     not_ignored = []
     for canister, path in declared:
+        on_disk = PROJECT_DIR / path
+        if on_disk.exists() and not account_identifier.search(on_disk.read_text()):
+            # No account identifier, so nothing here goes stale when the replica is
+            # recreated and tracking it is what lets `dfx deploy` work on a fresh
+            # checkout. threshold_custody_init.did is this case and says so at length.
+            continue
         # No shell, argv a fixed list, and `path` comes from this repository's own
         # dfx.json rather than from input. `git` is resolved from PATH on purpose:
         # an absolute path would break on every machine whose git is elsewhere, and
@@ -245,8 +281,59 @@ def test_every_init_arg_file_is_git_ignored():
                 f"ignored is UNKNOWN rather than fine: {result.stderr.decode(errors='replace')}"
             )
     assert not not_ignored, (
-        "these init_arg_file paths are not git-ignored, so the account identifiers they "
-        f"hardcode can be committed: {not_ignored}"
+        "these init_arg_file paths contain a 64-hex account identifier AND are not git-ignored, "
+        f"so environment state can be committed: {not_ignored}"
+    )
+
+
+def test_a_canister_whose_CANDID_takes_init_ARGUMENTS_declares_them():
+    """`dfx deploy` cannot install a canister whose init argument nobody supplied.
+
+    THE DEFECT THIS WOULD HAVE CAUGHT, measured on the operator's host 2026-10-07:
+
+        Failed to install wasm module to canister 'threshold_custody'.
+        Caused by: Failed to create argument blob.
+        Caused by: Invalid data: Expected arguments but found none.
+
+    threshold_custody/threshold_custody.did declares `service : (KeyConfig) -> { ... }`
+    and src/lib.rs has `#[ic_cdk::init] fn init(config: KeyConfig)`. dfx.json named
+    neither init_arg nor init_arg_file, so a plain `dfx deploy` could never install it.
+
+    WHY IT WENT UNNOTICED FOR A DAY. Every ICP measurement this repository has taken
+    needed only the LEDGER -- account derivation, balances, the fee, a real transfer,
+    block reads -- and `dfx deploy icp_ledger_canister` names one canister and
+    succeeds. The whole-project deploy is the only thing that touches this canister,
+    and nothing ran it until the ledger had to be rebuilt.
+
+    The gate reads the CANDID rather than the Rust, because candid is what dfx reads
+    to build the argument blob -- it is the file that decides, so it is the file to
+    ask. A canister whose candid is a URL (the ledger's) is skipped: it cannot be read
+    without a network, and the ledger declares an init_arg_file regardless.
+    """
+    needs_argument = re.compile(r"service\s*:\s*\(([^)]*)\)\s*->")
+    checked = []
+    missing = []
+    for canister, spec in dfx_project().get("canisters", {}).items():
+        candid = spec.get("candid", "")
+        if not candid or candid.startswith(("http://", "https://")):
+            continue
+        candid_path = PROJECT_DIR / candid
+        if not candid_path.exists():
+            continue
+        found = needs_argument.search(candid_path.read_text())
+        if not found or not found.group(1).strip():
+            continue
+        checked.append(canister)
+        if not (spec.get("init_arg") or spec.get("init_arg_file")):
+            missing.append(f"{canister} (candid: service : ({found.group(1).strip()}) -> ...)")
+
+    assert checked, (
+        "no canister with a local candid declares init arguments, so this test checked NOTHING "
+        "(rule 17). Delete it rather than leave a gate with no subject."
+    )
+    assert not missing, (
+        f"these canisters require an init argument and dfx.json supplies none, so `dfx deploy` "
+        f"fails on them with 'Expected arguments but found none': {missing}"
     )
 
 

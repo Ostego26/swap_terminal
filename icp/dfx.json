@@ -4,7 +4,8 @@
     "threshold_custody": {
       "type": "rust",
       "package": "threshold_custody",
-      "candid": "threshold_custody/threshold_custody.did"
+      "candid": "threshold_custody/threshold_custody.did",
+      "init_arg_file": "threshold_custody_init.did"
     },
     "icp_ledger_canister": {
       "type": "custom",
