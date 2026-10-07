@@ -1,0 +1,108 @@
+{#
+  The ATM flow's shell: the progress strip, then whichever one question is current.
+
+  Role: template (structure only; holds no decision)
+  Reads: what routes/atm.render_step() passed
+  Writes: nothing
+  Can move funds: no. The review step's button posts to the same handler, which
+          calls the same create_swap() the one-page form calls.
+  Mainnet-safe: yes
+
+  ONE QUESTION PER SCREEN. Operator 2026-10-07: "i really want the UI to be like
+  an ATM sequence of steps." The page this will replace shows the lamps, the pair
+  grid, the terms, a quote form, a create form and a lookup box on one scroll.
+
+  THE PARTIAL IS CHOSEN BY A LOOKUP, NOT A BRANCH. `step.key` was decided by
+  services/wizard.current_step(); including "_atm_" ~ step.key is the same shape
+  base.html's header allows -- "a lookup on a value some function in services/
+  already decided". An {% if step.number == 3 %} chain here would be the step
+  decision living in two places, which is the pair of authorities rule 8 is about.
+
+  EVERY ANSWER IS RE-POSTED AS A HIDDEN FIELD, from `carried`. No session (the
+  SECRET_KEY default is "swap-terminal-dev") and no server-side flow state (rule
+  15 allows one authority, and until the review there is nothing worth
+  recovering). The browser carries ANSWERS and decides nothing: which step is
+  current, whether an answer is usable and what the maximum is are all function
+  calls on the server.
+#}
+{% extends "base.html" %}
+{% import "_badges.html" as badges %}
+{% block title %}{{ step.question }} &middot; Swap Terminal{% endblock %}
+
+{% block content %}
+<section class="panel atm" aria-labelledby="atm-question">
+
+  {#- THE STRIP IS A LIST OF STATES, not a percentage. A percentage of six steps
+      is a number nobody acts on, and `done`/`current`/`future` is the vocabulary
+      the live swap page's stage strip already uses, so the two read as one system.
+
+      aria-current on the current step rather than colour alone: the strip must
+      survive a grayscale paste, which is how these pages reach a conversation. -#}
+  <ol class="atm-strip" aria-label="Where you are">
+    {% for entry in steps %}
+    <li class="atm-step atm-step-{{ entry.state }}"
+        {% if entry.state == 'current' %}aria-current="step"{% endif %}>
+      <span class="atm-step-num">{{ entry.number }}</span>
+      <span class="atm-step-name">{{ entry.question }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <h1 id="atm-question" class="atm-question">{{ step.question }}</h1>
+  <p class="atm-hint">{{ step.hint }}</p>
+
+  {#- A REFUSAL IS SHOWN WHERE THE QUESTION IS, never as a line the customer has
+      to scroll for, and it is the SERVICE'S OWN SENTENCE -- services/wizard.py's
+      reject_* functions return the lamp's or the row's wording rather than a
+      second phrasing of it, so the tile and the error cannot say two things. -#}
+  {% if error %}
+  <p class="atm-error" role="alert">
+    {{ badges.level_badge('halted', 'NOT YET') }}
+    <span class="atm-error-text">{{ error }}</span>
+  </p>
+  {% endif %}
+
+  {#- WHAT HAS BEEN CHOSEN SO FAR, visible on every screen after the first. An ATM
+      shows you the card and the amount while it asks the next thing; a flow that
+      hides its own answers makes the review the first time anybody can check them. -#}
+  {% if answers.from_asset %}
+  <dl class="atm-sofar">
+    <div><dt>Sending</dt><dd>{{ answers.from_asset }}</dd></div>
+    {% if answers.to_asset %}<div><dt>Receiving</dt><dd>{{ answers.to_asset }}</dd></div>{% endif %}
+    {% if answers.amount %}
+    <div><dt>{{ 'You send' if answers.amount_side != 'receive' else 'You want' }}</dt>
+      <dd>{{ answers.amount }} {{ answers.from_asset if answers.amount_side != 'receive' else answers.to_asset }}</dd></div>
+    {% endif %}
+    {% if answers.payout_address %}
+    <div><dt>Paid to</dt><dd class="mono breakable">{{ answers.payout_address }}</dd></div>
+    {% endif %}
+  </dl>
+  {% endif %}
+
+  <form class="atm-form" method="post" action="{{ url_for('atm.advance') }}" novalidate>
+    {#- The answers already given, carried forward. `carried` is a tuple in
+        routes/atm.py, so a field no step asked for cannot arrive in a crafted post
+        and be echoed back out of here. -#}
+    {% for field in carried %}
+      {% if answers.get(field) %}<input type="hidden" name="{{ field }}" value="{{ answers[field] }}">{% endif %}
+    {% endfor %}
+
+    {% include "_atm_" ~ step.key ~ ".html" %}
+
+    {#- BACK IS A SUBMIT BUTTON AND NOT A LINK, because going back has to post the
+        answers so the server can decide what to clear -- services/wizard.
+        answers_after_back() drops the target's answer AND everything after it, or
+        the flow bounces straight forward and the button appears to do nothing.
+
+        It is ABSENT rather than disabled when it cannot be used, and the reason is
+        printed instead: at the deposit screen there is a swap and an issued
+        address, and a greyed button invites a click that explains nothing. -#}
+    {% if back_allowed %}
+    <button type="submit" name="back" value="{{ step.number - 1 }}" class="atm-back">&#8592; Back</button>
+    {% elif back_reason and step.number > 1 %}
+    <p class="atm-note">{{ back_reason }}</p>
+    {% endif %}
+  </form>
+
+</section>
+{% endblock %}

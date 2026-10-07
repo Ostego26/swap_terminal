@@ -1,0 +1,60 @@
+{#
+  Step 5: the review. Every figure once more, then the only button that commits.
+
+  WHAT THIS SCREEN MUST SAY THAT THE OLD FORM NEVER DID: who the counterparty is.
+  Commit 26e2d79's own message was "Two atomic settlement mechanisms, a custodial
+  third, and no screen saying which one a pair used". Measured 2026-10-07: every
+  one of the 30 pairs settles CUSTODIALLY here -- three have an atomic path that
+  has run green and the web terminal still does not use it. So a customer
+  confirming any pair is extending credit to this desk between their deposit
+  confirming and their payout broadcasting, and that is a fact about the product
+  rather than a disclaimer.
+
+  THE QUOTE IS CREATED AFTER THIS BUTTON, NOT BEFORE. QUOTE_TTL_SECONDS is the
+  price window, and a customer reading a review is exactly the person likely to
+  pause -- so pricing at step 3 and committing here would routinely hit an expired
+  quote and fail with a message about a quote id. Pricing on confirm means the
+  figures below are an ESTIMATE at the rate just read, and this screen says so
+  rather than implying a fixed price it does not hold.
+#}
+<dl class="atm-review">
+  <div><dt>You send</dt>
+    <dd>{{ answers.amount if answers.amount_side != 'receive' else '&#8776; solved from what you want' | safe }}
+        {{ answers.from_asset }}</dd></div>
+  <div><dt>You receive</dt>
+    <dd>{{ answers.amount if answers.amount_side == 'receive' else 'priced when you confirm' }}
+        {{ answers.to_asset }}</dd></div>
+  <div><dt>Fee</dt><dd>{{ fee_bps }} bps, taken by sending that much less</dd></div>
+  <div><dt>Paid to</dt><dd class="mono breakable">{{ answers.payout_address }}</dd></div>
+  <div><dt>Deposit tolerance</dt>
+    <dd>&plusmn;{{ (tolerance_pct * 100) | round(2) }}% &mdash; a deposit outside that band waits for an
+        operator instead of paying out automatically</dd></div>
+</dl>
+
+{#- WHO YOU ARE TRADING WITH, from the row's own settlement verdict rather than a
+    sentence written here. `settlement` is None only if the pair vanished between
+    screens, which is a state worth printing rather than hiding (rule 14). -#}
+{% if settlement %}
+<div class="atm-counterparty">
+  <h2>Who you are trading with</h2>
+  <p>{{ settlement.headline }}</p>
+  <p class="atm-note">This desk takes your {{ answers.from_asset }} and pays you {{ answers.to_asset }}
+     from its own wallet. Between your deposit confirming and your payout being broadcast, this desk
+     holds your funds.</p>
+</div>
+{% else %}
+<p class="atm-error" role="alert">This pair's settlement could not be read just now, so this screen
+   cannot tell you who the counterparty is. Go back rather than confirming.</p>
+{% endif %}
+
+{#- THE COMMIT. `confirmed` is what services/wizard.current_step() reads to know
+    the review was answered, and routes/atm.advance() only calls _commit() when it
+    is present AND the step is REVIEW_STEP -- two conditions, because a stray
+    `confirmed` in a crafted post must not be able to create a swap from an
+    incomplete flow. -#}
+<button type="submit" name="confirmed" value="1" class="primary atm-commit"
+        {% if not settlement %}disabled aria-disabled="true"{% endif %}>
+  Create the swap
+</button>
+<p class="atm-note">This creates the swap and issues a deposit address. After that there is no going
+   back: the address belongs to this swap alone and cannot be reassigned.</p>

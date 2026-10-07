@@ -58,6 +58,7 @@ from log_setup import configure_logging
 from microfortnights import format_duration
 from network_target import CHAIN_PORTS, mainnet_chains, startup_lines
 from routes.admin import bp as admin_bp
+from routes.atm import bp as atm_bp
 from routes.grc_login import bp as grc_login_bp
 from routes.health import bp as health_bp
 from routes.kill_switch import bp as kill_switch_bp
@@ -198,6 +199,11 @@ def create_app() -> Flask:
     # different audiences and different exposure: see routes/admin.py's header
     # for the authentication question, which is named rather than solved.
     app.register_blueprint(ui_bp)
+    # THE ATM FLOW, at /atm. It will become / in its own commit (143 tests across
+    # five files pin the current customer page, and one diff that both adds this
+    # and deletes that evidence leaves no way to tell a wizard bug from a test
+    # deletion). Registered after ui_bp so url_for('ui.index') keeps resolving.
+    app.register_blueprint(atm_bp)
     app.register_blueprint(admin_bp)
     # routes/grc_login.py owns the address-proof panel: a customer proves they
     # hold the key to a GRC address by signing a challenge in their OWN wallet.

@@ -1,0 +1,63 @@
+{#
+  Step 3: how much? Either side, and the desk's own limit stated before you type.
+
+  THE LIMIT IS THE POINT OF THIS SCREEN. Operator 2026-10-07: "basically we are
+  the one picking up the other end of an htlc unless we find a buyer out there on
+  the chain." Measured the same day: all 30 pairs settle CUSTODIALLY in this
+  terminal, so the desk is the counterparty on every one and its inventory of the
+  DESTINATION asset is the binding constraint. services/quote_service.py performs
+  no capacity check; services/swap_service.create_swap() performs it last. Without
+  the figure below, a customer answers every question and is refused on the final
+  screen -- the dead end an ATM exists not to have.
+
+  EITHER SIDE, because the operator asked for it and because
+  chains/amount_solve.py's inverse is exact: the payout is a function of the rate
+  and the fee alone, so "I want 300 GRC" solves in closed form with nothing
+  measured. The two sides round in OPPOSITE directions, each away from whoever
+  would otherwise find out after the money moved -- the file says which.
+#}
+{#- THE LIMIT, BEFORE THE BOX. Three cases and they must read differently: a real
+    maximum, a maximum of ZERO (the desk holds none of the destination asset --
+    which is an answer), and NOT ESTABLISHED (the price feed or the balance did not
+    read). Collapsing the last two would tell a customer the desk is empty when the
+    truth is that nothing could be measured -- rule 13's "did nothing must not look
+    like did work", on a figure they are about to size a deposit against. -#}
+{% if ceiling_refusal %}
+<p class="atm-limit atm-limit-unknown">
+  <strong>No maximum can be shown right now.</strong> {{ ceiling_refusal }}
+  You can still type an amount; it is checked again before anything is created.
+</p>
+{% elif ceiling == 0 %}
+<p class="atm-limit atm-limit-none">
+  <strong>This desk cannot pay out any {{ answers.to_asset }} right now</strong>, so no amount of
+  {{ answers.from_asset }} can be swapped for it. {{ ceiling_how }}
+</p>
+{% else %}
+<p class="atm-limit">
+  <strong>Most you can send: {{ ceiling }} {{ answers.from_asset }}</strong>
+  &mdash; because that is all this desk can pay out on the other side
+  ({{ payout_ceiling }} {{ answers.to_asset }}). {{ ceiling_how }}
+</p>
+{% endif %}
+
+<fieldset class="atm-sides">
+  <legend>Which figure are you typing?</legend>
+  {#- The side is a radio and not a guess. A box that silently decided whether
+      "300" meant sent or received would be the one field on this screen whose
+      meaning the customer cannot check (rule 14). -#}
+  {% for side in amount_sides %}
+  <label class="atm-side">
+    <input type="radio" name="amount_side" value="{{ side }}"
+           {% if (answers.amount_side or 'send') == side %}checked{% endif %}>
+    {{ 'I am sending this much ' ~ answers.from_asset if side == 'send' else 'I want this much ' ~ answers.to_asset }}
+  </label>
+  {% endfor %}
+</fieldset>
+
+<div class="field">
+  <label for="amount">Amount</label>
+  <input id="amount" name="amount" type="number" min="0" step="any" inputmode="decimal"
+         value="{{ answers.amount or '' }}" autocomplete="off" required>
+</div>
+
+<button type="submit" class="primary">Next</button>

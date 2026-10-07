@@ -1,0 +1,37 @@
+{#
+  Step 2: what do you want back? Only what the chosen source can become.
+
+  UNAVAILABLE DESTINATIONS ARE GREYED WITH THEIR REASON, which is
+  services/wizard.destinations_for()'s decision and not this template's: it
+  returns them with selectable False and the ROW's own sentence, sorted after the
+  working ones. A customer who came to get ICP out needs to see that ICP is a pair
+  this terminal knows AND that the direction is down -- hiding it collapses the two.
+#}
+<ul class="atm-choices" role="list">
+  {% for option in options %}
+  <li>
+    <button type="submit" name="to_asset" value="{{ option.asset }}"
+            class="atm-choice {{ 'lamp-all' if option.selectable else 'lamp-none' }}"
+            {% if not option.selectable %}disabled aria-disabled="true"{% endif %}
+            {% if option.reason %}title="{{ option.reason }}"{% endif %}>
+      <span class="lamp-dot" aria-hidden="true"></span>
+      <span class="atm-choice-asset">{{ option.asset }}</span>
+      <span class="lamp-word">{{ 'AVAILABLE' if option.selectable else 'NOT NOW' }}</span>
+    </button>
+  </li>
+  {% endfor %}
+</ul>
+{#- THE REASONS, ONCE EACH, BELOW THE GRID. Per-tile sentences were removed from
+    the pair page on 2026-10-07 because thirteen tiles repeated one sentence eleven
+    times; the same duplication would arrive here with five. -#}
+{% set refused = options | rejectattr('selectable') | list %}
+{% if refused %}
+<ul class="atm-reasons">
+  {% for option in refused %}
+  <li><strong>{{ answers.from_asset }} &#8594; {{ option.asset }}</strong>: {{ option.reason }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if not options %}
+<p class="atm-note">{{ badges.empty('destinations', 'Config.ALLOWED_PAIRS for ' ~ answers.from_asset) }}</p>
+{% endif %}

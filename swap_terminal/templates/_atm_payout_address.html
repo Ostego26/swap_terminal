@@ -1,0 +1,27 @@
+{#
+  Step 4: where should it go? The customer's own address on the receiving chain.
+
+  THE VERDICT IS modules/address_authority.check_address()'S AND NOT THIS
+  SCREEN'S. routes/atm._judge() reads it and services/wizard.
+  reject_payout_address() renders its sentence. A second opinion about whether a
+  string is an address on a chain would be rule 8's shape on the one field that
+  decides where the money lands -- and address_authority already carries the
+  per-chain validators, including ICP's.
+
+  NO autocomplete AND NO BROWSER VALIDATION PATTERN. A pattern here would be a
+  third spelling of the per-chain address rule, in a language the server cannot
+  check; `autocomplete="one-time-code"` is what index.html uses on the same field
+  so a browser does not offer the customer somebody else's saved address.
+#}
+<div class="field">
+  <label for="payout_address">Your {{ answers.to_asset }} address</label>
+  <input id="payout_address" name="payout_address" type="text"
+         value="{{ answers.payout_address or '' }}"
+         autocomplete="one-time-code" spellcheck="false"
+         class="mono" required>
+  <p class="field-note">This is where the {{ answers.to_asset }} goes. It is checked against
+     {{ answers.to_asset }}'s own rules before you can go on, but nothing can check that it is
+     <em>yours</em> -- paste it from your wallet rather than typing it.</p>
+</div>
+
+<button type="submit" class="primary">Next</button>

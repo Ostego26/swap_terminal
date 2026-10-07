@@ -41,6 +41,15 @@ than offering a button that silently does something else.
 
 from __future__ import annotations
 
+from .pair_view import ASSET_ROLLUP_STATES
+
+#: The lamp vocabulary, BORROWED rather than restated. services/pair_view.py owns
+#: the level/word/note for each of all/some/none, and the existing customer page
+#: renders its legend from the same table. A second vocabulary here would be a
+#: wizard whose green means something slightly different from the green one screen
+#: over -- rule 8's drift, on the one element whose whole job is to be comparable.
+_LAMP_VOCABULARY = {state["key"]: state for state in ASSET_ROLLUP_STATES}
+
 #: The flow, in order. `needs` is the answer the step collects; `question` is what
 #: the screen asks, in the customer's words rather than the schema's.
 #:
@@ -92,6 +101,16 @@ STEPS: tuple[dict, ...] = (
         "hint": "The swap exists and this address belongs to it alone.",
     },
 )
+
+#: The review screen -- the last one that is still only answers, and the one
+#: whose button commits. Named rather than written as 5, because a literal 5 in a
+#: route is PLR2004 and, worse, is a second claim about where the review is.
+REVIEW_STEP = 5
+
+#: The step that asks how much. Named for the same reason REVIEW_STEP is: a bare
+#: 3 in answers_after_back() is PLR2004 and a second claim about which step owns
+#: the amount.
+AMOUNT_STEP = 3
 
 #: The first step a customer cannot leave by going back. See the module docstring:
 #: at this point a swap row exists and a deposit address has been issued.
@@ -153,6 +172,10 @@ def source_lamps(rows: list[dict]) -> list[dict]:
         lamps.append({
             "asset": asset,
             "key": key,
+            # level/word/note come from pair_view's table, so this lamp and the one
+            # on the page it replaces cannot disagree about what a colour means.
+            "level": _LAMP_VOCABULARY[key]["level"],
+            "word": _LAMP_VOCABULARY[key]["word"],
             "available": len(ok),
             "total": len(out),
             "selectable": bool(ok),
@@ -263,3 +286,157 @@ def progress(step_number: int) -> list[dict]:
         }
         for step in STEPS
     ]
+
+
+# =============================================================================
+# PER-STEP REFUSALS. Each takes what the caller has already read and returns the
+# sentence to show, or "" to go on. Separate from current_step() because that one
+# answers "which screen" and these answer "is this answer usable" -- two questions
+# whose answers differ (a bad address keeps you on step 4; a missing one puts you
+# there), and collapsing them is how a flow starts rejecting answers by sending
+# the customer somewhere unexplained.
+#
+# NO I/O HERE. The caller reads the lamps, the destination list and the address
+# verdict; these only judge. That is what lets the whole flow be tested without a
+# Flask client, an adapter or a chain.
+# =============================================================================
+
+
+def reject_source(asset: str, lamps: list[dict]) -> str:
+    """"" when `asset` may be sent, else why not."""
+    if not asset:
+        return "Pick the coin you are sending."
+    match = next((lamp for lamp in lamps if lamp["asset"] == asset), None)
+    if match is None:
+        return f"This terminal does not swap {asset}."
+    if not match["selectable"]:
+        # The lamp's own sentence, rather than a second wording of it. A customer
+        # who reads "0 of 5 directions out of ICP can be quoted right now" on the
+        # tile and something different on the error has been told two things.
+        return match["detail"]
+    return ""
+
+
+def reject_destination(asset: str, options: list[dict]) -> str:
+    """"" when `asset` may be received from the chosen source, else why not."""
+    if not asset:
+        return "Pick the coin you want back."
+    match = next((option for option in options if option["asset"] == asset), None)
+    if match is None:
+        return "That pair is not one this terminal swaps."
+    if not match["selectable"]:
+        return match["reason"]
+    return ""
+
+
+def amount_as_number(typed: str) -> tuple[float, str]:
+    """(amount, "") or (0.0, why it is not a usable number).
+
+    ITS OWN FUNCTION BECAUSE reject_amount() CROSSED PLR0911 (7 returns > 6) WITH
+    IT INLINE, and rule 12 is explicit that the fix is to extract the decision
+    rather than raise the ceiling or add a noqa. It is also the half worth calling
+    alone: a caller that wants the number AND the refusal gets both without
+    re-parsing, which is how a template ends up with its own float() call.
+
+    A BLANK AND A NON-NUMBER ARE DIFFERENT SENTENCES. "Type an amount" is for
+    somebody who has not answered; naming the text back is for somebody who
+    answered with "1,5" or "1.0.0" and needs to see what was read.
+    """
+    if not str(typed).strip():
+        return 0.0, "Type an amount."
+    try:
+        amount = float(typed)
+    except (TypeError, ValueError):
+        return 0.0, f"{typed!r} is not a number."
+    if amount <= 0:
+        return 0.0, "An amount has to be more than zero."
+    return amount, ""
+
+
+def reject_amount(typed: str, side: str, ceiling: float, ceiling_reason: str) -> str:
+    """"" when the typed amount is usable, else why not. Does NOT price anything.
+
+    `ceiling` is the maximum DEPOSIT the desk can honor, already solved by
+    chains/amount_solve.max_deposit_for_capacity(), and `ceiling_reason` is its
+    refusal if it had one. Checked here rather than at the confirm screen because
+    services/quote_service.py performs no capacity check at all and
+    services/swap_service.create_swap() performs it at the very end -- so without
+    this the customer answers every question and is refused on the last screen,
+    which is the dead end an ATM exists not to have.
+    """
+    if side not in AMOUNT_SIDES:
+        return f"Choose whether that figure is what you send or what you receive ({' or '.join(AMOUNT_SIDES)})."
+    amount, bad = amount_as_number(typed)
+    if bad:
+        return bad
+    if ceiling_reason:
+        # NOT ESTABLISHED is not the same as a ceiling of zero, and the customer
+        # is told which. payout_capacity's -1.0 sentinel exists for this (rule 13).
+        return ceiling_reason
+    if side == "send" and amount > ceiling:
+        return (
+            f"The most this desk can take right now is {ceiling}, because that is all it can pay out "
+            f"on the other side. Send that or less."
+        )
+    return ""
+
+
+def reject_payout_address(address: str, refuses: bool, reason: str) -> str:
+    """"" when the address can receive, else the verdict's own sentence.
+
+    `refuses`/`reason` come from modules/address_authority.check_address(), read
+    by the caller. The verdict is NOT re-derived here: that module is the one
+    authority on whether a string is an address on a chain, and a second opinion
+    in a wizard is rule 8's shape on the field that decides where money lands.
+    """
+    if not address.strip():
+        return "Type the address you want paid."
+    if refuses:
+        return reason or "That address cannot receive on this chain."
+    return ""
+
+
+def answers_after_back(answers: dict, target: int) -> dict:
+    """`answers` with the target step's answer and everything after it cleared.
+
+    A NEW DICT, not a mutation, so a caller can render the old and new side by side
+    and a test can assert the input was not touched.
+
+    WHY CLEARING IS NECESSARY AND NOT TIDINESS. current_step() returns the first
+    step whose answer is missing. Go back to step 2 while step 2's answer is still
+    set and it is not missing, so the flow bounces straight forward again -- a back
+    button that visibly does nothing, which is rule 13's "a stop that cannot prove
+    it worked" wearing a different hat.
+
+    AND EVERYTHING AFTER IT, WHICH IS THE HALF THAT IS EASY TO MISS. Returning to
+    step 1 to change the source while `to_asset` is still set leaves a pair the
+    customer never chose -- ICP->GRC becomes BTC->GRC silently, with the amount and
+    the quote still sized for the old one. The later answers are not merely stale,
+    they are answers to questions that no longer apply.
+
+    THE QUOTE ALWAYS GOES, AND IT NEEDS ITS OWN LINE. A quote is priced for one
+    pair and one size; carrying it past any edit would let create_swap() be called
+    with a quote that does not match the screen the customer just agreed to. It is
+    popped explicitly because `quote_id` is no step's `needs` -- the loop above
+    cannot reach it.
+
+    `confirmed` NEEDS NO SUCH LINE AND USED TO HAVE ONE. Step 5's `needs` IS
+    "confirmed", so the loop already clears it for every target from 1 to 5, and
+    those are every target may_go_back() permits. The explicit pop was therefore
+    dead on every reachable path -- found 2026-10-07 by a mutation that deleted it
+    and passed all seventeen tests, which is what a surviving mutation is for.
+    Kept as a comment rather than as a line, because consent to figures that have
+    changed is not consent and the next reader should know where that is enforced
+    (rule 9: delete the dead code, keep the reasoning).
+    """
+    cleared = dict(answers)
+    for step in STEPS:
+        if step["number"] >= target and step["needs"]:
+            cleared.pop(step["needs"], None)
+    cleared.pop("quote_id", None)
+    # amount_side is not a STEPS answer -- it is HOW step 3 was answered -- so it
+    # is cleared with the amount rather than surviving it, or a customer who typed
+    # a receive-side figure and went back finds the box labelled for the other side.
+    if target <= AMOUNT_STEP:
+        cleared.pop("amount_side", None)
+    return cleared

@@ -1,0 +1,34 @@
+{#
+  Step 1: what are you sending? One lamp per coin, OUTBOUND ONLY.
+
+  THE LAMP HERE IS NOT THE LAMP ON THE PAIR PAGE, and services/wizard.
+  source_lamps() carries the argument: an asset can be good as a SOURCE and
+  unusable as a DESTINATION. ICP is measured to be exactly that, so the combined
+  rollup is amber while the answer to "can I send ICP" is an unqualified yes.
+  Reusing the combined lamp here would make a customer hesitate over a direction
+  that works.
+
+  A DEAD COIN IS SHOWN, DISABLED, WITH ITS COUNT -- not hidden. "ICP is not
+  offered" and "every ICP direction is down right now" deserve different
+  reactions, and a missing tile cannot tell them apart (rule 14).
+#}
+<ul class="atm-choices" role="list">
+  {% for lamp in lamps %}
+  <li>
+    <button type="submit" name="from_asset" value="{{ lamp.asset }}"
+            class="atm-choice lamp-{{ lamp.key }}"
+            {% if not lamp.selectable %}disabled aria-disabled="true"{% endif %}
+            title="{{ lamp.detail }}">
+      <span class="lamp-dot" aria-hidden="true"></span>
+      <span class="atm-choice-asset">{{ lamp.asset }}</span>
+      {#- The word as well as the colour, so the tile survives a grayscale paste
+          and a red/green-blind reader, exactly as base.html's badges do. -#}
+      <span class="lamp-word">{{ lamp.word }}</span>
+      <span class="lamp-counts">{{ lamp.available }}/{{ lamp.total }} out</span>
+    </button>
+  </li>
+  {% endfor %}
+</ul>
+{% if not lamps %}
+<p class="atm-note">{{ badges.empty('coins', 'Config.ALLOWED_PAIRS') }}</p>
+{% endif %}

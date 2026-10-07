@@ -21,8 +21,11 @@ import pytest
 from services.pair_view import asset_rollups
 from services.wizard import (
     AMOUNT_SIDES,
+    AMOUNT_STEP,
     POINT_OF_NO_RETURN,
+    REVIEW_STEP,
     STEPS,
+    answers_after_back,
     current_step,
     destinations_for,
     may_go_back,
@@ -278,3 +281,113 @@ def test_the_progress_strip_marks_exactly_one_step_current():
         assert len(current) == 1, f"at step {number} the strip marks {len(current)} steps current"
         assert current[0]["number"] == number
         assert [entry["number"] for entry in strip if entry["state"] == "done"] == list(range(1, number))
+
+
+# =============================================================================
+# GOING BACK. The half that is easy to get wrong is not the refusal at step 6 --
+# it is what a permitted back must CLEAR, because clearing too little produces a
+# button that visibly does nothing and clearing too little in the other direction
+# produces a pair the customer never chose.
+# =============================================================================
+
+
+def test_going_back_clears_the_question_being_returned_to():
+    """Keeping the answer makes current_step() bounce straight forward again.
+
+    current_step() returns the first step whose answer is MISSING. Go back to
+    step 2 with step 2's answer still set and it is not missing, so the flow
+    returns to step 3 immediately -- a back button that appears to do nothing,
+    which is rule 13's "a stop that cannot prove it worked".
+    """
+    full = {
+        "from_asset": "ICP", "to_asset": "GRC", "amount": "1.0",
+        "amount_side": "send", "payout_address": GRC_PAYOUT,
+    }
+    assert current_step(full)["number"] == 5
+
+    back_to_2 = answers_after_back(full, 2)
+    assert current_step(back_to_2)["number"] == 2, "the flow must actually land on step 2"
+    assert "to_asset" not in back_to_2
+
+
+def test_going_back_also_clears_every_answer_AFTER_the_target():
+    """The half that is easy to miss, and it silently changes the pair.
+
+    Return to step 1 to change the source while `to_asset` is still set and the
+    customer gets a pair they never chose: pick BTC and ICP->GRC becomes BTC->GRC,
+    with the amount still sized for the old pair. The later answers are not merely
+    stale -- they answer questions that no longer apply.
+    """
+    full = {
+        "from_asset": "ICP", "to_asset": "GRC", "amount": "1.0",
+        "amount_side": "receive", "payout_address": GRC_PAYOUT,
+        "quote_id": "q_123", "confirmed": "1",
+    }
+    back_to_1 = answers_after_back(full, 1)
+    assert current_step(back_to_1)["number"] == 1
+    for gone in ("from_asset", "to_asset", "amount", "payout_address", "quote_id", "confirmed"):
+        assert gone not in back_to_1, f"{gone} survived a return to step 1"
+
+
+def test_the_quote_and_the_consent_are_always_discarded():
+    """A quote is priced for one pair and one size; consent is to figures on a screen.
+
+    Carrying a quote past any edit would let create_swap() be called with a quote
+    that does not match what the customer agreed to. Carrying `confirmed` would
+    treat consent to the old figures as consent to the new ones.
+
+    Asserted for EVERY permitted target rather than one, because the exemption
+    that matters would be a single step where the carry-forward was kept.
+    """
+    full = {
+        "from_asset": "ICP", "to_asset": "GRC", "amount": "1.0", "amount_side": "send",
+        "payout_address": GRC_PAYOUT, "quote_id": "q_123", "confirmed": "1",
+    }
+    for target in (1, 2, 3, 4, 5):
+        cleared = answers_after_back(full, target)
+        assert "quote_id" not in cleared, f"a quote survived a return to step {target}"
+        assert "confirmed" not in cleared, f"consent survived a return to step {target}"
+
+
+def test_the_amount_side_is_cleared_with_the_amount_and_not_after_it():
+    """Returning to step 4 keeps how step 3 was answered; returning to step 3 does not.
+
+    A customer who typed a receive-side figure, went back to the amount, and found
+    the box labelled "what you send" with their receive-side number still in it
+    would be looking at a figure that means something other than what the label
+    says -- which is rule 14's "state what the number means" failing on the field
+    the whole screen is about.
+    """
+    full = {
+        "from_asset": "ICP", "to_asset": "GRC", "amount": "300",
+        "amount_side": "receive", "payout_address": GRC_PAYOUT,
+    }
+    assert "amount_side" not in answers_after_back(full, 3), "the side goes with the amount"
+    assert "amount_side" not in answers_after_back(full, 1)
+    # Step 4 is AFTER the amount, so the amount and its side both survive.
+    kept = answers_after_back(full, 4)
+    assert kept["amount"] == "300"
+    assert kept["amount_side"] == "receive"
+
+
+def test_going_back_does_not_mutate_what_it_was_given():
+    """A new dict, so a caller can render both and a test can assert the input is intact."""
+    full = {"from_asset": "ICP", "to_asset": "GRC"}
+    before = dict(full)
+    answers_after_back(full, 1)
+    assert full == before, "answers_after_back mutated its argument"
+
+
+def test_the_named_step_constants_match_their_positions_in_STEPS():
+    """REVIEW_STEP and AMOUNT_STEP exist so no route writes a bare 5 or 3.
+
+    They are a second spelling of a position STEPS already defines, which is
+    exactly the shape that drifts (rule 8) -- so the agreement is asserted rather
+    than assumed.
+    """
+    assert step_by_number(REVIEW_STEP)["key"] == "confirm"
+    assert step_by_number(AMOUNT_STEP)["key"] == "amount"
+    assert REVIEW_STEP == POINT_OF_NO_RETURN - 1, (
+        "the review must be the step immediately before the irreversible one, or a confirmed flow "
+        "either commits early or never reaches the commit at all"
+    )

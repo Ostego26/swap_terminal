@@ -1,0 +1,19 @@
+{#
+  Step 6 exists in services/wizard.STEPS and is NOT normally rendered here.
+
+  routes/atm._commit() redirects to /swap/<id> once the swap exists, because that
+  page already shows the deposit address, the attribution model, the confirmation
+  threshold with its meaning, the stage strip and the live poll -- everything
+  "send your coin" means. A second rendering would be two pages telling a customer
+  where to send money, which is rule 8's duplication on the one screen where
+  disagreement costs the deposit.
+
+  THIS FILE IS THE HONEST ANSWER FOR THE PATH THAT REACHES HERE ANYWAY: a post
+  carrying a swap_id, which current_step() short-circuits to step 6. Rendering
+  nothing would be a blank screen holding a swap id (rule 14's ambiguous gap), so
+  it hands the customer the link instead of re-deriving the page behind it.
+#}
+<p class="atm-note">This swap already exists. Its deposit address and live status are on its own
+   page, which is the one place that shows them.</p>
+<p><a class="primary" href="{{ url_for('ui.swap_page', swap_id=answers.swap_id) }}">Open swap
+   {{ answers.swap_id }}</a></p>

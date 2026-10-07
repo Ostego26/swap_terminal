@@ -894,7 +894,8 @@ def loopback_listener():
     listener.close()
 
 
-#: THE WRITE SURFACES THAT ALREADY EXISTED, enumerated from the app's real url map
+#: THE WRITE SURFACES REVIEWED AGAINST THIS FILE'S CLAIM, enumerated from the
+#: app's real url map
 #: on 2026-10-02 rather than from memory. The first draft of the test below
 #: asserted that /admin/controls was the ONLY POST in the application and that was
 #: simply false -- three others were already there:
@@ -908,8 +909,31 @@ def loopback_listener():
 #: broader claim and checking it afterwards is exactly the rule 17 failure of
 #: saying a plausible thing in the register of a measurement, caught here only
 #: because the assertion was run.
-PRE_EXISTING_POST_ROUTES = frozenset(
-    {"/api/quotes", "/api/swaps", "/swap/<swap_id>/address-proof"}
+#:
+#: RENAMED FROM PRE_EXISTING_POST_ROUTES ON 2026-10-07, when /atm arrived and this
+#: gate caught it: "a write surface arrived that nobody has reviewed against this
+#: file's claims: ['/atm']", which is the gate working exactly as intended.
+#:
+#: The rename is not cosmetic. Adding a route written today to a set called
+#: PRE_EXISTING would be false on its face AND would be rule 19's forbidden move
+#: -- "never add a baseline line for code you are writing now". What this set
+#: actually holds is "POST routes somebody has checked cannot signal, spawn or
+#: broadcast", which is a claim a new route can legitimately join by being
+#: checked. So the name says that, and joining it requires the check below.
+#:
+#: /atm, REVIEWED 2026-10-07 AND HERE IS THE REVIEW. The ATM flow's single POST
+#: writes a `quotes` row and a `swaps` row by calling services/quote_service.
+#: create_quote() and services/swap_service.create_swap() -- the SAME two
+#: functions /api/quotes and /api/swaps already call, so it adds no capability
+#: either of those does not have. Grepped 2026-10-07 for subprocess, Popen,
+#: os.kill, signal, nohup, execv, broadcast, sendtoaddress and send_to_address in
+#: routes/atm.py: none present. Its imports are the two service functions above
+#: plus read-only helpers (pair_view, payout_capacity, pricing,
+#: address_authority, wizard). The payout -- the only broadcast in a swap's life
+#: -- is services/payout_service.py's, reached by the payout worker, exactly as
+#: for a swap created through the one-page form.
+REVIEWED_NON_SPAWNING_POST_ROUTES = frozenset(
+    {"/api/quotes", "/api/swaps", "/swap/<swap_id>/address-proof", "/atm"}
 )
 
 
@@ -917,7 +941,7 @@ def test_the_controls_route_is_the_only_post_that_can_signal_or_spawn_a_process(
     """Asserted over the app's REAL url map, so the claim survives the next edit
     rather than depending on somebody reading three files.
 
-    The claim is not "the only POST" -- see PRE_EXISTING_POST_ROUTES above, which
+    The claim is not "the only POST" -- see REVIEWED_NON_SPAWNING_POST_ROUTES above, which
     is what measuring it produced. It is that exactly one route can send a signal
     or spawn a process, and this is it. A fourth POST appearing that is not in
     that set fails here, which is the point: a new write surface should have to be
@@ -930,7 +954,7 @@ def test_the_controls_route_is_the_only_post_that_can_signal_or_spawn_a_process(
     gets = {rule.rule for rule in app_module.app.url_map.iter_rules() if "GET" in rule.methods}
     assert "/admin/controls" in posts, "the controls endpoint does not accept a POST; the buttons do nothing"
     assert "/admin/controls" in gets, "the controls page cannot be opened, only submitted to"
-    unexpected = posts - PRE_EXISTING_POST_ROUTES - {"/admin/controls"}
+    unexpected = posts - REVIEWED_NON_SPAWNING_POST_ROUTES - {"/admin/controls"}
     assert not unexpected, (
         f"a write surface arrived that nobody has reviewed against this file's claims: {sorted(unexpected)}"
     )
