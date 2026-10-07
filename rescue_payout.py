@@ -160,6 +160,51 @@ SELF = "rescue_payout.py"
 #:                                 fits the amount to the chain's eight decimals
 #:                                 before the send, so a payout no longer reaches
 #:                                 the parser with seventeen.
+#:   "not set in this process's environment"
+#:                                 ADDED 2026-10-07, after the first ICP deposit
+#:                                 this system ever credited -- 1.00000000 ICP,
+#:                                 block index 1, to the subaccount for
+#:                                 s_ebb03e8dc1b96e1c -- had its GRC payout refuse
+#:                                 and this tool correctly declined to re-drive it.
+#:                                 The refusal was right for its own reason: an
+#:                                 unrecognized message is absence of evidence. The
+#:                                 evidence exists and is recorded here rather than
+#:                                 inferred from the wording, which is what this
+#:                                 list demands of every entry.
+#:
+#:                                 THE RAISE PRECEDES THE BODY, STRUCTURALLY.
+#:                                 services/payout_service.py:828 is
+#:                                 `with payout_unlock_context(destination_asset,
+#:                                 adapter):` and broadcast_payout() is at :835,
+#:                                 INSIDE it. payout_unlock_context() is a plain
+#:                                 function returning a context manager -- not a
+#:                                 @contextmanager generator -- so its
+#:                                 `if not passphrase: raise` at :1111 fires while
+#:                                 the `with` EXPRESSION is being evaluated, before
+#:                                 any context manager exists and therefore before
+#:                                 the body can be entered at all. There is no path
+#:                                 from that raise to a send.
+#:
+#:                                 THE EXCEPTION TYPE IS CATEGORICALLY SEPARATE.
+#:                                 PayoutUnlockUnavailable's own docstring: "no
+#:                                 transaction was created, nothing reached any
+#:                                 daemon". It exists as its own class precisely so
+#:                                 it cannot be confused with a send that failed.
+#:
+#:                                 AND THE WORKER LOG SHOWS NO SEND BETWEEN THEM.
+#:                                 On the operator's host: the amount-quantization
+#:                                 line at 20:26:09,280, then `payout FAILED` at
+#:                                 20:26:09,285. Five milliseconds and no RPC.
+#:
+#:                                 Three independent places, which is the standard
+#:                                 this file's header sets. MATCHED ON THE
+#:                                 ENVIRONMENT CLAUSE rather than on "GRC payouts
+#:                                 need the wallet fully unlocked", because
+#:                                 payout_service.py builds that sentence from
+#:                                 `{asset}` and WALLET_UNLOCK_ASSETS can grow -- a
+#:                                 marker naming GRC would silently stop matching
+#:                                 the day a second chain joined, which is rule 8's
+#:                                 drift in a safety check.
 PRE_SIGNING_MARKERS = (
     "holds no key that could",
     "solanasendnotarmed",
@@ -167,6 +212,7 @@ PRE_SIGNING_MARKERS = (
     "solanaclusterrefused",
     "pynacl is not importable",
     "invalid amount (rpc code -3)",
+    "not set in this process's environment",
 )
 
 

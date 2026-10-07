@@ -1,0 +1,66 @@
+# ARM GRC PAYOUTS in the containerized deployment. An OVERLAY, inert unless named.
+#
+# Role: compose overlay (configuration only; no decision)
+# Reads: the process environment -- GRIDCOIN_WALLET_PASSPHRASE
+# Writes: nothing
+# Can move funds: YES, INDIRECTLY AND THAT IS THE WHOLE POINT. Naming this file
+#        gives the container's payout worker the passphrase it needs, and a GRC
+#        payout then broadcasts. Not naming it is the unarmed state.
+# Mainnet-safe: it chooses no network. It arms whatever GRC_RPC_PORT points at.
+#
+# WHY THIS FILE DID NOT EXIST UNTIL 2026-10-07, AND WHAT IT COST.
+#
+# docker-compose.web.armed-xrp.yml says, in as many words: "GRIDCOIN_WALLET_PASSPHRASE
+# goes through a wallet unlock that is its own decision". Correct, and the
+# consequence was never written down: there was no way to make that decision for a
+# CONTAINERIZED deployment at all. The host supervisor could be started from a shell
+# holding the passphrase; `swap_stack.py up` runs the payout worker INSIDE a container
+# that no compose file passes one to.
+#
+# Measured on the operator's host that night. The first ICP deposit this system ever
+# saw -- 1.00000000 ICP, block index 1, to the subaccount for s_ebb03e8dc1b96e1c --
+# credited correctly, and the GRC payout refused:
+#
+#     Payout failed: GRC payouts need the wallet fully unlocked, and
+#     GRIDCOIN_WALLET_PASSPHRASE is not set in this process's environment.
+#
+# So the deposit was taken and the payout could not be made, structurally, by any
+# container this repository could start. That is the gap this file closes.
+#
+# IT DOES NOT MAKE THE DECISION FOR ANYBODY. Creating the file arms nothing: compose
+# only reads it when it is named with -f, and `:?` below means an unexported variable
+# is an ERROR rather than a container that silently cannot sign.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.icp.yml \
+#                    -f docker-compose.web.yml \
+#                    -f docker-compose.web.hostnet.yml \
+#                    -f docker-compose.web.armed-grc.yml up -d web
+#
+# READ THE PASSPHRASE INTO THE SHELL WITHOUT PUTTING IT IN HISTORY OR ARGV:
+#
+#     read -rs GRIDCOIN_WALLET_PASSPHRASE && export GRIDCOIN_WALLET_PASSPHRASE
+#
+# `read -rs` does not echo and does not reach shell history; `export` puts it in the
+# environment compose reads. It is never a command-line argument, because argv is
+# world-readable through /proc -- the same rule every other signing variable in this
+# project follows, and the reason this is a `${VAR}` reference and not a literal.
+#
+# WHAT ARMING GRC MEANS, stated so it is not discovered afterwards. A GRC wallet left
+# unlocked for STAKING cannot send -- the daemon answers rpc code -4 -- so
+# services/payout_service.unlocked_for_payout() fully unlocks the wallet for ONE send
+# and re-locks it. While that window is open the wallet can spend, and the window is
+# held by a process in a container. That is a real exposure and it is the decision
+# this file asks the operator to make deliberately rather than inherit.
+
+services:
+  web:
+    environment:
+      # AN ENVIRONMENT VARIABLE AND NOT AN ARGUMENT: argv is world-readable through
+      # /proc, so a passphrase on a command line is a passphrase any process on the
+      # host can read.
+      #
+      # `:?` and not `:-`. An empty value is the UNARMED state, which is exactly what
+      # NOT naming this file already gives -- so an unset variable means the unarmed
+      # form was wanted and should produce an error, not an armed container that
+      # cannot actually sign. Same judgment, same wording, as armed-xrp and armed-sol.
+      GRIDCOIN_WALLET_PASSPHRASE: "${GRIDCOIN_WALLET_PASSPHRASE:?export GRIDCOIN_WALLET_PASSPHRASE in the shell that runs docker compose (read -rs GRIDCOIN_WALLET_PASSPHRASE && export GRIDCOIN_WALLET_PASSPHRASE), or drop this file for the unarmed form. Never pass it as a command-line argument -- argv is world-readable through /proc}"

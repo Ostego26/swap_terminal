@@ -269,3 +269,98 @@ def test_a_bare_invalid_amount_without_the_code_is_NOT_recognized():
     """
     assert not refused_before_signing("Invalid amount")
     assert not refused_before_signing("the node reported an invalid amount after relay")
+
+
+#: The refusal exactly as services/payout_service.py wrote it on the operator's host
+#: at 20:26:09 on 2026-10-07, for s_ebb03e8dc1b96e1c -- the first ICP deposit this
+#: system ever credited. Used verbatim rather than paraphrased: what is under test is
+#: that the marker matches THIS string, and a tidied version could pass while the
+#: real one did not.
+GRC_UNLOCK_REFUSAL = (
+    "GRC payouts need the wallet fully unlocked, and GRIDCOIN_WALLET_PASSPHRASE is not set in this "
+    "process's environment. A GRC wallet left unlocked for staking CANNOT send -- the daemon answers "
+    "rpc code -4 -- so this refuses before attempting a send that would fail and mark the swap "
+    "terminally failed. Set GRIDCOIN_WALLET_PASSPHRASE for the worker process only."
+)
+
+
+def test_a_missing_unlock_passphrase_is_recognized_as_pre_signing():
+    """The raise happens while the `with` EXPRESSION is evaluated, so no body runs.
+
+    THE EVIDENCE, recorded here rather than inferred from the wording, which is what
+    PRE_SIGNING_MARKERS demands of every entry. Three independent places:
+
+      STRUCTURE   services/payout_service.py:828 is `with payout_unlock_context(
+                  destination_asset, adapter):` and broadcast_payout() is at :835,
+                  INSIDE it. payout_unlock_context() is a plain function returning a
+                  context manager -- NOT a @contextmanager generator -- so its
+                  `if not passphrase: raise` at :1111 fires while the `with`
+                  expression is being evaluated. No context manager exists yet, so
+                  the body cannot have been entered. There is no path from that
+                  raise to a send.
+
+      TYPE        PayoutUnlockUnavailable's docstring: "no transaction was created,
+                  nothing reached any daemon". It is its own class precisely so it
+                  cannot be confused with a send that failed.
+
+      LOG         on the operator's host, the amount-quantization line at
+                  20:26:09,280 and `payout FAILED` at 20:26:09,285. Five
+                  milliseconds, no RPC between them.
+    """
+    assert refused_before_signing(GRC_UNLOCK_REFUSAL)
+    # And through the audit-log form, which is what rescue_payout actually reads --
+    # services/payout_service.py prefixes it when writing the row.
+    assert refused_before_signing(f"Payout failed: {GRC_UNLOCK_REFUSAL}")
+
+
+def test_the_marker_does_not_name_GRC_so_a_second_unlock_chain_still_matches():
+    """Matched on the ENVIRONMENT clause, not on "GRC payouts need...".
+
+    payout_service.py builds that sentence from `{asset}`, and
+    chains/gridcoin_wallet_lock.WALLET_UNLOCK_ASSETS is a frozenset that can grow. A
+    marker naming GRC would silently stop matching the day a second chain needed an
+    unlock -- rule 8's drift, inside a safety check, where the failure mode is a
+    stranded deposit nobody can rescue.
+    """
+    assert refused_before_signing(GRC_UNLOCK_REFUSAL.replace("GRC", "FUTURECOIN"))
+    assert refused_before_signing(
+        "FUTURECOIN payouts need the wallet fully unlocked, and FUTURECOIN_WALLET_PASSPHRASE is not "
+        "set in this process's environment."
+    )
+
+
+def test_the_new_marker_does_not_widen_into_anything_that_reached_a_daemon():
+    """The danger of a phrase-shaped marker: what else now matches that should not.
+
+    "not set in this process's environment" is specific to a PRECONDITION check --
+    something was unset, so nothing was attempted. These are the shapes that must
+    still refuse, and each one is a case where money may be on chain.
+
+    THE FIRST VERSION OF THIS TEST MISSED THE OBVIOUS WIDENING, found by a mutation
+    that shortened the marker to just "not set" -- all nineteen tests passed. None of
+    the unsafe strings below contained those two words, so the test could not see it,
+    and a bare "not set" matches plenty of things that happened AFTER a broadcast.
+    The cases carrying "not set" are therefore first, and they are the ones that
+    matter: the marker has to be specific to an UNSET ENVIRONMENT VARIABLE, which is
+    a precondition check, rather than to the words "not set" appearing anywhere.
+    """
+    for unsafe in (
+        # THE WIDENING CASES. Each contains "not set" and each is post-broadcast or
+        # unknown, so a marker short enough to match them is a marker that would
+        # re-drive a payout that may already be on chain.
+        "payout failed: txid not set after broadcast",
+        "payout failed: sent_at was not set when the worker returned",
+        "payout failed: the transaction was accepted but confirmations are not set yet",
+        "payout failed: wallet responded but the fee field is not set",
+        # And the shapes that never mentioned it.
+        "payout failed: socket timeout after 30s",
+        "payout failed: connection reset by peer",
+        "payout failed: read timed out waiting for sendtoaddress",
+        "payout failed: insufficient funds (rpc code -6)",
+        "payout failed: SolanaWireMismatch after signing",
+        "payout failed: the daemon accepted the transaction and the re-lock raised",
+    ):
+        assert not refused_before_signing(unsafe), (
+            f"{unsafe!r} now reads as pre-signing. Every one of these can leave money moving, which "
+            f"is what this file exists to refuse."
+        )
