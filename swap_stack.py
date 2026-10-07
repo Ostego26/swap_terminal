@@ -77,6 +77,7 @@ from config import Config  # noqa: E402
 
 from swap_terminal.stack_authority import (  # noqa: E402
     STACK_PORTS,
+    WEB_PORT_CANDIDATES,
     container_id,
     container_label,
     down_verdict,
@@ -85,8 +86,18 @@ from swap_terminal.stack_authority import (  # noqa: E402
     port_is_free,
     proc_net_tcp_tables,
     readiness_verdict,
+    serving_verdict,
     stray_verdict,
 )
+
+#: How long each web-port probe may take, and the marker for one that answered.
+#:
+#: SECONDS, and short on purpose: a gunicorn that will answer does so as soon as it
+#: has bound, so the replica's 60s budget spent on four candidate ports would make
+#: a down stack take four minutes to say it is down (rule 14 -- the report has to
+#: arrive while the operator is still reading).
+_WEB_PROBE_BUDGET_SECONDS = 3.0
+_WEB_PROBE_OK = 200
 
 #: The replica's own status endpoint, and how long `up` waits for it.
 #:
@@ -489,10 +500,30 @@ def cmd_down(files: tuple[str, ...]) -> int:
     return 0
 
 
-def wait_for_replica() -> tuple[bool, str, float]:
-    """Poll the replica's /api/v2/status until it answers. (ready, detail, seconds waited).
+def wait_for_http(url: str, budget_seconds: float) -> tuple[bool, str, float]:
+    """Poll `url` until it answers. (ready, detail, seconds waited).
 
-    THE DEFECT THIS CLOSES IS IN THIS FILE'S OWN REPORT. `up` printed
+    GENERALIZED FROM wait_for_replica() ON 2026-10-07, BECAUSE `up` NEEDED THE
+    SAME PROBE FOR THE THING A CUSTOMER ACTUALLY OPENS AND DID NOT HAVE IT.
+
+    That gap cost the operator a round the same day. `up` reported
+
+        4. is the replica ANSWERING? (bound is not ready)
+        READY  http://127.0.0.1:4943/api/v2/status answered 200 after 0.2µfn (0.2s)
+
+    and then `curl http://127.0.0.1:5101/atm` got `Failed to connect ... Couldn't
+    connect to server`. Both true, and the report said SUCCESS: the replica was
+    checked and the web service was not, so a dead page and a live one printed the
+    same way. That is rule 13's "treat 'skipped' plus 'success' in the same output
+    as a defect in the output", in the file whose whole job is to answer "is it
+    up?" -- and I had already named this gap one round earlier and not fixed it,
+    which is the part worth recording.
+
+    One probe, two callers (rule 8). The URL and the budget are arguments because
+    a cold `dfx start` and a gunicorn boot are not the same wait.
+
+    THE DEFECT THIS FUNCTION ORIGINALLY CLOSED, kept because it is the measurement
+    that justified having a probe at all rather than trusting a bind. `up` printed
 
         :4943 BOUND  ICP replica (dfx) -- the local ledger and the custody canister
 
@@ -511,8 +542,19 @@ def wait_for_replica() -> tuple[bool, str, float]:
     while True:
         attempt += 1
         try:
+            # THE URL IS NEVER INPUT. Every caller builds it from the literal
+            # "http://127.0.0.1:" plus either a constant path or an int from
+            # stack_authority.WEB_PORT_CANDIDATES, so no scheme but http can
+            # appear and S310's concern (file: or a custom scheme arriving from
+            # somewhere) cannot.
+            #
+            # This comment used to START with the word "noqa", and ruff read it as
+            # a BLANKET noqa directive and then reported it as unused (RUF100).
+            # A comment whose first word is noqa is a suppression, whatever the
+            # rest of the sentence says -- which is a good argument for rule 19's
+            # position that a suppression should be rare enough to be deliberate.
             with urllib.request.urlopen(
-                _REPLICA_STATUS_URL, timeout=_REPLICA_PROBE_TIMEOUT_SECONDS
+                url, timeout=_REPLICA_PROBE_TIMEOUT_SECONDS
             ) as answer:
                 outcome: object = answer.status
         except urllib.error.HTTPError as error:
@@ -525,7 +567,7 @@ def wait_for_replica() -> tuple[bool, str, float]:
         waited = time.monotonic() - started
         if ready:
             return True, detail, waited
-        if waited >= _REPLICA_WAIT_SECONDS:
+        if waited >= budget_seconds:
             return False, detail, waited
         say(f"                    attempt {attempt}: {detail} ({waited:.1f}s elapsed, waiting)")
         time.sleep(1.0)
@@ -641,7 +683,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("")
 
     say("  4. is the replica ANSWERING? (bound is not ready)")
-    ready, detail, waited = wait_for_replica()
+    ready, detail, waited = wait_for_http(_REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
     shown = f"{waited / 1.2096:.1f}\u00b5fn ({waited:.1f}s)"
     if ready:
         say(f"  READY             {_REPLICA_STATUS_URL} {detail} after {shown}")
@@ -651,8 +693,39 @@ def cmd_up(files: tuple[str, ...]) -> int:
         say("                    Every ICP call will fail until it is. `docker compose logs icp-replica`")
         say("                    is where dfx says why.")
     say("")
+
+    # STEP 5, AND ITS ABSENCE IS WHY THE OPERATOR SAW A SUCCESSFUL `up` OVER A DEAD
+    # PAGE. On 2026-10-07 this block printed READY for the replica, returned 0, and
+    # the next command got `Couldn't connect to server` on :5101. The replica was
+    # checked; the thing a customer opens was not; and the two outcomes printed the
+    # same way. I had named this gap one round earlier and shipped another `up`
+    # without it, which is the part this comment exists to record.
+    say("  5. is the PAGE serving? (the thing a customer opens)")
+    probes: dict[int, object] = {}
+    for port in WEB_PORT_CANDIDATES:
+        # ONE SHORT ATTEMPT PER PORT, not the replica's 60s budget. A gunicorn that
+        # is going to answer answers immediately once it has bound; the long wait
+        # exists for a cold `dfx start` and spending it four times over would make
+        # a down stack take four minutes to say so.
+        ready, detail, _ = wait_for_http(f"http://127.0.0.1:{port}/", _WEB_PROBE_BUDGET_SECONDS)
+        probes[port] = _WEB_PROBE_OK if ready else detail
+        say(f"                    :{port} {detail}")
+    port, detail = serving_verdict(probes)
+    if port:
+        say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
+        say(f"                    the ATM flow is at http://127.0.0.1:{port}/atm")
+    else:
+        say(f"  NOT SERVING       {detail}")
+        say("                    The containers may be up and the page is not answering, which is a")
+        say("                    DIFFERENT failure from a container that never started -- step 2 above")
+        say("                    says which. `docker compose logs --tail=40 web` is where gunicorn says")
+        say("                    why; an ImportError in a route is the usual cause after a pull.")
+    say("")
     _say_icp_note()
-    return 0
+    # NOT 0 WHEN THE PAGE IS DEAD. An `up` that exits 0 over an unreachable page is
+    # the same defect one layer out: a script reading the exit code, and an operator
+    # skimming for errors, both conclude it worked.
+    return 0 if port else 1
 
 
 def build_parser() -> argparse.ArgumentParser:

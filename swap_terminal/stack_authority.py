@@ -291,7 +291,25 @@ def readiness_verdict(outcome: object) -> tuple[bool, str]:
             return True, f"answered {outcome}"
         return True, f"answered {outcome} -- listening, but not the 200 dfx's status gives"
     if isinstance(outcome, ConnectionRefusedError):
-        return False, "connection refused -- the port is bound and nothing is listening behind it yet"
+        # TWO READINGS AND THIS SENTENCE USED TO ASSERT ONLY ONE OF THEM, WHICH
+        # MADE IT FALSE HALF THE TIME. It read "the port is bound and nothing is
+        # listening behind it yet", which is correct for a PUBLISHED container port
+        # -- docker-proxy binds it at container creation, so a refusal means the
+        # proxy is there and the process inside has not opened anything.
+        #
+        # It is wrong for a port on the HOST's own loopback, which is what
+        # docker-compose.web.hostnet.yml produces: under `network_mode: host`
+        # there is no docker-proxy, so a refusal means nothing is bound AT ALL.
+        # Caught 2026-10-07 when the web probe printed that sentence for :5101
+        # under the hostnet overlay -- rule 16's wrong comment, except this one
+        # prints on a screen the operator is using to decide what to fix.
+        #
+        # Neither reading is derivable from the refusal itself, so both are named.
+        return False, (
+            "connection refused -- either nothing is bound here at all, or a published container "
+            "port is bound by docker-proxy and the process inside has not opened it yet. "
+            "`docker compose ps` distinguishes them"
+        )
     if isinstance(outcome, TimeoutError):
         return False, "timed out -- something accepted the connection and did not answer"
     if isinstance(outcome, OSError):
@@ -449,3 +467,50 @@ def down_verdict(bound_ports: list[int] | tuple[int, ...], owned_listeners: int)
     if bound_ports:
         return "stopped_not_proven"
     return "down"
+
+
+#: The stack ports a CUSTOMER-FACING page could be on, in the order to try them.
+#:
+#: FOUR CANDIDATES BECAUSE THE OVERLAY DECIDES, AND `up` MUST NOT NEED TO KNOW
+#: WHICH. docker-compose.web.yml publishes 127.0.0.1:5100 -> 5000;
+#: docker-compose.web.hostnet.yml uses host networking and binds
+#: SWAP_TERMINAL_PORT, which defaults to 5101 there; config.py's own default is
+#: 5000 and 5102 is where app.py was moved when 5101 was taken. A prober that
+#: hardcoded one of them would report NOT SERVING for a stack that was serving
+#: perfectly well one overlay over.
+#:
+#: 4943 IS DELIBERATELY ABSENT. It is the ICP replica, which answers /api/v2/status
+#: and not /, so probing it here would either report the page as live on the
+#: replica's port or report a 404 as a dead page. It has its own probe.
+WEB_PORT_CANDIDATES = (5101, 5100, 5000, 5102)
+
+
+def serving_verdict(answers: dict[int, object]) -> tuple[int, str]:
+    """(port, detail) for the first candidate that answered, or (0, why none did).
+
+    PURE, so the decision "is the page serving" is testable without a socket --
+    the caller does the probing and hands the outcomes in, exactly as
+    listening_inodes() takes text rather than a path.
+
+    WHY THIS IS A DECISION AND NOT A LOOP IN THE REPORT. `up` printed READY for
+    the replica and said nothing about the web service on 2026-10-07, and the
+    operator's next command got `Couldn't connect to server` on :5101. A dead page
+    and a live one printed identically, which is rule 13's "skipped plus success
+    in the same output is a defect in the output". Making the verdict a function
+    is what lets a test assert that an all-refused probe does NOT read as serving.
+    """
+    for port in WEB_PORT_CANDIDATES:
+        outcome = answers.get(port)
+        if outcome is None:
+            continue
+        ready, detail = readiness_verdict(outcome)
+        if ready:
+            return port, detail
+    if not answers:
+        return 0, "no port was probed, so whether the page is serving is NOT ESTABLISHED"
+    tried = ", ".join(
+        f":{port} {readiness_verdict(answers[port])[1]}"
+        for port in WEB_PORT_CANDIDATES
+        if port in answers
+    )
+    return 0, f"nothing answered on any candidate port -- {tried}"

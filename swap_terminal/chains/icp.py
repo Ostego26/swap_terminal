@@ -424,6 +424,43 @@ class ICPAdapter:
     checkout builds no ICP adapter at all rather than one aimed at mainnet.
     """
 
+    # WHY ICP CANNOT PAY OUT, SAID OUT LOUD. The verdict was already correct and
+    # SILENT, which is the half this fixes.
+    #
+    # This class does not subclass base.RPCAdapter, so registry.py's
+    # `getattr(adapter, "can_spend", False)` fail-closed and ICP read as unpayable
+    # -- the right answer, reached by an absence. What the operator's /admin page
+    # then printed, 2026-10-07, was:
+    #
+    #     ICP  receive NO
+    #     ICP cannot pay out, and its adapter does not say why
+    #     -- see chains/base.RPCAdapter.can_spend
+    #
+    # That fallback sentence is registry.py's, for exactly this case. Every other
+    # unpayable chain names what to set: SOL names SOL_PAYOUT_KEYPAIR_PATH, XRP
+    # names XRP_PAYOUT_SECRET_SEED. ICP named nothing, so the page could show
+    # `in 0/5` and not say what would change it (rule 14: state what the number
+    # means, next to the number).
+    #
+    # DECLARING THESE CHANGES NO BEHAVIOR, and that is checked rather than assumed:
+    # getattr already returned False and now returns False explicitly. What changes
+    # is the sentence beside it.
+    #
+    # THE REASON IS A PROPERTY OF THE LEDGER AND NOT A MISSING SETTING, which is
+    # why the wording differs from SOL's and XRP's. `transfer` debits the CALLER,
+    # so a payout has to be signed by the desk's own dfx identity -- and reads need
+    # no identity at all, which is why ICP -> * works while * -> ICP does not.
+    # Placing that identity is key material and the operator's (rule 16).
+    can_spend = False
+    payout_refusal = (
+        "ICP cannot pay out from this process: the ledger's `transfer` debits the CALLER, so a "
+        "payout must be signed by the desk's own dfx identity, and this process has none -- it "
+        "makes every ledger call with `--identity anonymous`, which is sufficient for balances "
+        "and fees and cannot move funds. This is why ICP -> * works and * -> ICP does not. "
+        "Placing the desk identity where this process can reach it is a custody decision with no "
+        "default: it is key material, and nothing in this repository moves, copies or reads it."
+    )
+
     def __init__(self, ledger_canister_id: str, owner_principal: str, call):
         # `call` IS REQUIRED AND THE TRANSPORT SETTINGS ARE GONE FROM HERE.
         #

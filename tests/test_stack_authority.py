@@ -337,7 +337,7 @@ def test_the_refusal_reads_the_supervisors_OWN_worker_table(monkeypatch):
     assert asked == ["a_new_worker"], "it asked about the supervisor's worker, not a hardcoded set"
 
 
-def test_a_refused_connection_is_NOT_READY_even_though_the_port_is_bound():
+def test_a_refused_connection_is_NOT_READY_and_names_both_things_it_can_mean():
     """The defect: `up` said BOUND and the next command got Connection refused.
 
     Measured 2026-10-07. swap_stack.py's `up` printed
@@ -353,10 +353,28 @@ def test_a_refused_connection_is_NOT_READY_even_though_the_port_is_bound():
     is rule 13's "verify the artifact, not the deploy" catching the bind check that
     was itself added as the improvement over trusting compose's exit code. One layer
     short of the question an operator actually has.
+    AND THE OLD NAME OF THIS TEST CARRIED THE HALF-TRUTH. It was
+    test_a_refused_connection_is_NOT_READY_even_though_the_port_is_bound, and it
+    asserted the sentence said "nothing is listening" -- both of which assume the
+    port IS bound. That holds for a PUBLISHED container port and is false for a
+    port on the host's own loopback: under docker-compose.web.hostnet.yml's
+    `network_mode: host` there is no docker-proxy, so a refusal means nothing is
+    bound AT ALL. Caught 2026-10-07 when the new web probe printed that sentence
+    for :5101 under that overlay.
+
+    Neither reading is derivable from the refusal itself, so the verdict names
+    both and points at the command that distinguishes them. Renamed rather than
+    kept, because a test whose NAME asserts the wrong thing is read by everyone
+    who greps for it (rule 2: its test changes to pin the stronger invariant).
     """
     ready, detail = readiness_verdict(ConnectionRefusedError(111, "Connection refused"))
     assert ready is False
-    assert "nothing is listening" in detail
+    # BOTH readings present, and neither stated as the only one.
+    assert "nothing is bound here at all" in detail
+    assert "docker-proxy" in detail
+    assert "docker compose ps" in detail, "say how to tell them apart, not just that they differ"
+    # AND NOT THE OLD ASSERTION, which claimed one of the two as fact.
+    assert "the port is bound and nothing is listening behind it" not in detail
 
 
 def test_an_answer_is_READY_and_a_non_200_is_still_listening():
