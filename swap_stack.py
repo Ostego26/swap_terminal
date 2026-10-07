@@ -130,31 +130,34 @@ COMPOSE_FILES = ("docker-compose.yml", "docker-compose.icp.yml", "docker-compose
 #: wholesale -- if abstergo or harness IS up, from a bare `docker compose up` or an
 #: earlier session, `down` should take it with the rest rather than leave it behind
 #: for the same reason the 5101 container was worth finding.
-#: `web` IS DELIBERATELY NOT HERE, and leaving it in was a defect measured on the
-#: live host 2026-10-07 within minutes of shipping it. docker/web.Dockerfile's CMD is
-#: docker/web_workers_entrypoint.py, which SPAWNS THE THREE WORKERS. So an `up` that
-#: started `web` alongside supervisor.start() put six workers on one database -- two
-#: of them payout workers -- which is the exact condition flagged that same morning
-#: after finding it by accident, and tests/test_payout_concurrency.py measures as
-#: 2 sends for 1 deposit.
+#: The services `up` starts. `web` IS one of them, and 5ecf442 removing it was the
+#: wrong half of a correct observation.
 #:
-#: THE TWO DEPLOYMENTS ARE MUTUALLY EXCLUSIVE, NOT COMPOSABLE, and that is the fact
-#: this constant now encodes:
+#: THE OBSERVATION WAS RIGHT: the two deployments are mutually exclusive, because
+#: docker/web.Dockerfile's CMD is docker/web_workers_entrypoint.py, which starts
+#: gunicorn AND the three workers. Running `web` beside supervisor.start() put six
+#: workers and two payout workers on one database -- measured on the operator's host
+#: 2026-10-07 from their own `up` output.
 #:
-#:   containerized   `web` serves the UI and runs the workers, all inside one
-#:                   container. Started with `docker compose up web`, deliberately
-#:                   not by this file.
-#:   host            supervisor.py runs the workers and `python app.py` serves the
-#:                   UI. What this file's `up` does.
+#: 5ecf442 THEN PICKED THE WRONG ONE. It kept the host deployment, which leaves the
+#: operator running `python app.py` in a terminal -- the Flask DEVELOPMENT server,
+#: which prints "Do not use it in a production deployment" every time it starts. The
+#: operator's requirement, stated three ways in one sitting: "it should all be under
+#: docker", "that web page should be serving after the docker container is running",
+#: "transition from just flask to a gunicorn wsgi server".
 #:
-#: Choosing the host deployment as the one `up` performs is not arbitrary: ICP is
-#: only reachable from it. The web container cannot make an ICP call -- no docker CLI
-#: in the image, and more fundamentally the desk's dfx signing identity lives in the
-#: replica container where that container has no path to it.
+#: All three are the same change, because the containerized deployment already IS
+#: gunicorn: web_workers_entrypoint.py runs `gunicorn -c gunicorn.conf.py wsgi:app`.
+#: `python app.py` is the dev server and the only reason it was being used is that
+#: `up` was starting the wrong deployment. So `up` starts the containerized one and
+#: REFUSES rather than adding to a running host one -- see cmd_up().
 #:
-#: `down` still removes `web` with everything else, because stopping is where
-#: "everything this terminal uses" applies without qualification.
-UP_SERVICES = ("icp-replica",)
+#: WHAT IS STILL NOT SOLVED BY THIS, stated here so it is not discovered later: the
+#: web container cannot make an ICP call. No dfx and no docker CLI in the image, and
+#: the desk's dfx signing identity lives in the replica container. Every other pair
+#: works; ICP does not. That is the next piece of work and it is NOT fixed by this
+#: constant.
+UP_SERVICES = ("icp-replica", "web")
 
 
 def say(line: str) -> None:
@@ -351,34 +354,78 @@ def cmd_down(files: tuple[str, ...]) -> int:
 
 
 def cmd_up(files: tuple[str, ...]) -> int:
-    """Containers first, then workers. The reverse of `down`, for the same reason."""
+    """Start the CONTAINERIZED deployment: gunicorn and the workers, inside `web`.
+
+    IT STARTS NO HOST WORKER, and that is the whole shape of this command. The web
+    container's entrypoint starts the three workers itself, so a host set alongside
+    them is six workers and two payout workers on one database -- which this file
+    found on the operator's host and then caused.
+
+    So the two deployments are offered as a CHOICE, not a sum, and `up` performs the
+    containerized one because that is the one that answers the operator's actual
+    requirement: a page serving after `docker up`, under gunicorn, with nothing held
+    in a terminal.
+    """
     say("swap_stack: UP")
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
-    say("  about to spawn    A PAYOUT WORKER THAT CAN BROADCAST, on every chain this environment arms.")
-    say("                    Stop now if this database is pointed at a funded mainnet wallet.")
     say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
     say("                    docker-compose.yml defines `abstergo` and `harness` with no profiles:")
-    say("                    gate, so a bare `up` starts the TEST HARNESS too; and `web` runs its")
-    say("                    own three workers, which beside these would be six on one database")
-    say("  order             containers (so a worker's first cycle finds its replica up) -> workers")
+    say("                    gate, so a bare `docker compose up` starts the TEST HARNESS too")
+    say("  deployment        CONTAINERIZED. `web` runs gunicorn (gunicorn.conf.py, wsgi:app) AND")
+    say("                    the three workers, both inside the container. NO host worker is")
+    say("                    started here and `python app.py` is not needed -- that is the Flask")
+    say("                    DEVELOPMENT server, which says so itself on every start.")
+    say("  about to arm      THE CONTAINER'S PAYOUT WORKER CAN BROADCAST on whatever the")
+    say("                    container's environment arms. docker-compose.web.yml passes no")
+    say("                    signing material, so unset means it serves and cannot send.")
     say("")
-    say("  1. containers")
+
+    # THE REFUSAL, BEFORE ANY CONTAINER STARTS. Checked rather than assumed, because
+    # "the operator probably stopped them" is exactly the reasoning that produced the
+    # six-worker state this guards against.
+    say("  1. is a HOST deployment already running?")
+    running = {}
+    # worker_commands() is the supervisor's OWN table of what a worker is, keyed by
+    # name. Iterating it rather than a list spelled here means a fourth worker added
+    # to the supervisor is checked by this refusal without editing this file (rule 8).
+    for name in supervisor.worker_commands():
+        state = supervisor.worker_status(name, supervisor.DEFAULT_RUN_DIR)
+        if state.get("state") == "running":
+            running[name] = state.get("pid")
+    if running:
+        for name, pid in running.items():
+            say(f"  RUNNING           {name} pid={pid}")
+        say("")
+        say(f"  REFUSED           {len(running)} host worker(s) are running, and `web` starts three more.")
+        say("                    That is six workers and TWO payout workers on one database, which")
+        say("                    tests/test_payout_concurrency.py measures as 2 sends for 1 deposit.")
+        say("                    Nothing was started. Pick ONE deployment:")
+        say("                      containerized   cd swap_terminal && python supervisor.py stop")
+        say("                                      then this command again")
+        say("                      host            leave them running; serve with gunicorn rather")
+        say("                                      than app.py:  gunicorn -c gunicorn.conf.py wsgi:app")
+        return 1
+    say("  (none)            no host worker is running, so the container's three are the only ones")
+    say("")
+
+    say("  2. containers")
     done = compose(["up", "-d", *UP_SERVICES], files)
     for line in (done.stderr or done.stdout).strip().splitlines():
         say(f"                    {line}")
     if done.returncode != 0:
-        say(f"  FAILED            docker compose up exited {done.returncode}; NOT starting workers")
+        say(f"  FAILED            docker compose up exited {done.returncode}")
         return 1
     say("")
-    say("  2. workers")
-    supervisor.main(["start", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
+    say("  3. what is serving -- asked, not assumed")
+    for port in sorted(STACK_PORTS):
+        if not port_is_free(port):
+            say(f"                    :{port} BOUND  {STACK_PORTS[port]}")
+    say("                    (a bound port here is the answer; `status` names the owner)")
     say("")
-    say("  note              the customer UI is NOT started here, and `web` is NOT started here.")
-    say("                    Run `python app.py` from swap_terminal/ for it. The `web` compose")
-    say("                    service is the OTHER deployment: its entrypoint runs its own three")
-    say("                    workers, so starting it beside these would put SIX workers and TWO")
-    say("                    payout workers on one database. It also cannot make an ICP call --")
-    say("                    the desk's dfx identity lives in the replica container.")
+    say("  note              ICP IS THE ONE PAIR THIS DEPLOYMENT CANNOT DO. The web image has")
+    say("                    no dfx and no docker CLI, and the desk's dfx signing identity lives")
+    say("                    in the replica container. Every other pair works; an ICP swap needs")
+    say("                    the host deployment until that is fixed.")
     return 0
 
 

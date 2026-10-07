@@ -239,44 +239,58 @@ def test_a_label_with_no_image_or_no_output_degrades_rather_than_raising():
     assert container_label("   \n") == ""
 
 
-def test_UP_does_not_start_the_service_that_runs_its_own_workers():
+def test_UP_starts_the_CONTAINERIZED_deployment_and_never_both():
     """Six workers on one database, two of them payout workers. Measured 2026-10-07.
 
-    f756b1b's `up` passed the compose files and let compose start everything; 26715f3
-    narrowed that to ("icp-replica", "web"). BOTH were wrong about `web`, and the
-    operator's own run is what showed it -- the output listed
+    f756b1b's `up` passed the compose files and let compose start everything. The
+    operator's own run showed what that did:
 
         Container swap-web Started
         ALREADY RUNNING deposit_watcher pid=3285268
 
-    docker/web.Dockerfile's CMD is docker/web_workers_entrypoint.py, which spawns the
-    three workers. So `up` started a container that runs three workers beside the
-    three supervisor.start() had running: SIX on one database, TWO payout workers.
-    tests/test_payout_concurrency.py measures that exact condition as 2 sends for 1
-    deposit, and it is the condition flagged on the live host the previous morning
-    after finding it by accident.
+    docker/web.Dockerfile's CMD is docker/web_workers_entrypoint.py, which starts
+    gunicorn AND the three workers. So `up` started a container running three workers
+    beside the three the host supervisor already had: SIX on one database, TWO payout
+    workers, which tests/test_payout_concurrency.py measures as 2 sends for 1 deposit.
 
-    THE TWO DEPLOYMENTS ARE MUTUALLY EXCLUSIVE, which is the property pinned here:
-    `web` serves the UI AND runs the workers in one container; the host deployment
-    runs the workers under supervisor.py and serves the UI with app.py. There is no
-    composition of the two that is correct, so `up` must perform exactly one.
+    5ecf442 fixed it by dropping `web` from UP_SERVICES and keeping the host
+    deployment. THAT WAS THE WRONG HALF of a correct observation, and this test was
+    written to pin it. The observation -- the deployments are mutually exclusive -- is
+    right. Keeping the host one leaves the operator running `python app.py`, the Flask
+    DEVELOPMENT server, in a terminal.
 
-    This reads the real module rather than restating the tuple, and asserts the
-    entrypoint still spawns workers -- if that ever stops being true, this test
-    should be revisited rather than silently keeping a service out of `up` for a
-    reason that has expired.
+    So the property is not "web is excluded". It is: `up` performs EXACTLY ONE
+    deployment, and the one it performs is the containerized one, because that is the
+    one that serves a page under gunicorn after `docker up` with nothing in a
+    terminal.
+
+    cmd_up()'s refusal is what enforces the "exactly one" half at runtime -- it reads
+    the supervisor's own worker table and declines before starting any container if a
+    host worker is alive. That is checked rather than assumed precisely because "the
+    operator probably stopped them" is the reasoning that produced the six-worker
+    state in the first place.
     """
-    assert "web" not in swap_stack.UP_SERVICES, (
-        "`web` runs its own three workers (docker/web.Dockerfile CMD -> "
-        "web_workers_entrypoint.py), so starting it beside supervisor.start() puts six "
-        "workers and two payout workers on one database"
+    source = Path(swap_stack.__file__).read_text()
+
+    assert "web" in swap_stack.UP_SERVICES, (
+        "`web` is what serves the UI under gunicorn; without it `up` leaves the operator "
+        "running the Flask development server by hand"
     )
     assert "harness" not in swap_stack.UP_SERVICES, "the test harness is never part of `up`"
     assert "abstergo" not in swap_stack.UP_SERVICES, "abstergo is not part of this stack"
-    assert swap_stack.UP_SERVICES, "`up` must still start something"
+
+    # The half that makes including `web` safe: cmd_up must NOT also start host workers.
+    up_body = source[source.index("def cmd_up("):source.index("def main(")]
+    assert 'supervisor.main(["start"' not in up_body, (
+        "cmd_up starts host workers AND the web container, which is the six-worker state"
+    )
+    assert "REFUSED" in up_body and "worker_commands()" in up_body, (
+        "cmd_up must read the supervisor's own worker table and refuse when a host "
+        "deployment is already running, rather than assuming it is not"
+    )
 
     entrypoint = (Path(swap_stack.__file__).resolve().parent / "docker" / "web_workers_entrypoint.py").read_text()
-    assert "start_worker" in entrypoint or "supervisor" in entrypoint, (
-        "web_workers_entrypoint.py no longer appears to start workers, so the reason `web` is "
-        "excluded from UP_SERVICES may have expired -- re-read it rather than leaving this as is"
+    assert "gunicorn" in entrypoint, (
+        "the web container no longer appears to run gunicorn, so the reason `up` prefers it "
+        "over `python app.py` may have expired -- re-read it rather than leaving this as is"
     )
