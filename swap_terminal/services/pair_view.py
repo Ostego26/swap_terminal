@@ -361,6 +361,103 @@ def customer_availability(row: dict) -> dict:
     return {"key": key, **_CUSTOMER_AVAILABILITY[key]}
 
 
+#: WHAT ONE COIN'S LAMP MEANS, and the three levels reuse the vocabulary
+#: _CUSTOMER_AVAILABILITY already uses for a PAIR -- ok, waiting, halted -- so one
+#: stylesheet colors both and a reader learns one scheme (rule 8). Operator,
+#: 2026-10-07: "grc led ltc led, etc should indicate which pairs are available for
+#: that coin. if all are available green. if some but not all, yellow. none....red."
+_ASSET_ROLLUP = {
+    "all": {
+        "level": "ok",
+        "word": "ALL",
+        "note": "every direction involving this coin can be quoted right now.",
+    },
+    "some": {
+        "level": "waiting",
+        "word": "SOME",
+        "note": "some directions involving this coin work and some do not. The counts say which half.",
+    },
+    "none": {
+        "level": "halted",
+        "word": "NONE",
+        "note": "no direction involving this coin can be quoted right now.",
+    },
+}
+
+#: The three lamp states in reading order, for the page's key. DERIVED, for the
+#: reason CUSTOMER_STATES is derived: a hand-written legend drifts first at the state
+#: it does not explain, which is a glyph nobody can look up.
+ASSET_ROLLUP_STATES = tuple({"key": key, **value} for key, value in _ASSET_ROLLUP.items())
+
+
+def asset_rollups(rows: list[dict]) -> list[dict]:
+    """One lamp per coin, rolled up from the pair rows. Pure: no config, no adapters.
+
+    THE ROLLUP IS OVER BOTH DIRECTIONS and the lamp ALSO CARRIES THE SPLIT, which is
+    the part that matters and the part a single colour cannot say. A coin can be
+    perfectly good as a SOURCE and unusable as a DESTINATION -- measured 2026-10-07,
+    ICP is exactly that: ICP -> BTC/GRC/LTC quote, and nothing -> ICP does, because
+    a payout needs the desk's dfx identity and reads do not. One amber lamp over that
+    is true and useless: it says "some" to a customer whose actual question is "can I
+    get ICP out" or "can I get ICP in", and those have opposite answers.
+    
+    So every lamp reports out_available/out_total and in_available/in_total beside
+    its colour. Rule 14's "state what the number means, next to the number" -- a
+    customer reads the screen, not this docstring.
+
+    DERIVED FROM THE ROWS allowed_pair_rows() ALREADY BUILT, never re-evaluated. A
+    second evaluation of serviceability is the defect this module's own header
+    records: services/admin_view.pair_rows() once had the first of three conditions
+    and told the operator a pair was ENABLED that the customer page was refusing in
+    the same process. The lamp is a VIEW of those rows (rule 5's mirror, not an
+    authority) and a pair the rows call unavailable cannot be green here.
+    """
+    assets = sorted({asset for row in rows for asset in (row["from_asset"], row["to_asset"])})
+    lamps = []
+    for asset in assets:
+        out = [row for row in rows if row["from_asset"] == asset]
+        into = [row for row in rows if row["to_asset"] == asset]
+        out_ok = [row for row in out if row["enabled"]]
+        in_ok = [row for row in into if row["enabled"]]
+        total = len(out) + len(into)
+        available = len(out_ok) + len(in_ok)
+
+        # ZERO DIRECTIONS IS "none", NOT "all". An asset with no pairs at all would
+        # otherwise satisfy "every direction works" vacuously and show green -- the
+        # same vacuous-truth trap a test that checks nothing falls into (rule 17). It
+        # cannot arise from ALLOWED_PAIRS today, which is why it is handled here
+        # rather than discovered later.
+        if total == 0 or available == 0:
+            key = "none"
+        elif available == total:
+            key = "all"
+        else:
+            key = "some"
+
+        lamps.append(
+            {
+                "asset": asset,
+                "key": key,
+                **_ASSET_ROLLUP[key],
+                "available": available,
+                "total": total,
+                "out_available": len(out_ok),
+                "out_total": len(out),
+                "in_available": len(in_ok),
+                "in_total": len(into),
+                # The sentence the lamp's tooltip shows. Built here rather than in a
+                # template so one place decides what a lamp SAYS, and a test can
+                # assert on it without rendering HTML.
+                "detail": (
+                    f"{asset}: {len(out_ok)} of {len(out)} outbound "
+                    f"({asset} -> something) and {len(in_ok)} of {len(into)} inbound "
+                    f"(something -> {asset}) can be quoted right now"
+                ),
+            }
+        )
+    return lamps
+
+
 def offerable_pairs(rows: list[dict]) -> list[dict]:
     """The rows a caller may actually OFFER: allowed, and both chains reachable.
 
