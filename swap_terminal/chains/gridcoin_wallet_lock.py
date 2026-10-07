@@ -254,6 +254,29 @@ def unlocked_for_payout(adapter, passphrase: str, seconds: int = DEFAULT_UNLOCK_
     restore ITSELF fails, that is raised as GridcoinLockError -- chained from the
     body's exception when there was one, so neither is lost. A wallet left in a
     state nobody chose must never be a silent outcome.
+
+    "ALWAYS RESTORES" IS FALSE FOR ONE PATH AND THAT PATH FIRED TWICE ON
+    2026-10-07. The sentence above describes the body raising. It does NOT cover
+    `unlock_for_sending` itself raising, because that call is one statement ABOVE
+    the `try`, so the `finally` holding unlock_for_staking() is never entered.
+
+    Measured on the operator's host. A mangled paste armed the container with a
+    command fragment instead of the passphrase, and s_ebb03e8dc1b96e1c failed
+    twice with `Error: The wallet passphrase entered was incorrect. (rpc code
+    -14)`. Each attempt ran lock(adapter) at the line above, then raised -- so the
+    wallet was left LOCKED, with staking off, and nothing said so.
+
+    THE EXPOSURE IS THE SAFE DIRECTION AND THE COST IS REAL ANYWAY. Leaving a
+    wallet LOCKED cannot spend, which is the right way to fail; but an operator who
+    was staking is no longer staking, and the only notice was a payout failure
+    message about a passphrase.
+
+    WHY THE FIX IS NOT "MOVE THE LOCK INSIDE THE TRY". Restoring the staking
+    unlock needs THE PASSPHRASE, and a wrong passphrase is exactly what failed --
+    so there is nothing this function could do to restore it. What it can do is
+    SAY so, which is what unlock_for_sending()'s refusal now carries: the wallet
+    is locked, staking is off, and re-unlocking it for staking is a command the
+    operator runs with a passphrase this process does not have.
     """
     lock(adapter)
     unlock_for_sending(adapter, passphrase, seconds)

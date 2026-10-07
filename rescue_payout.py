@@ -160,6 +160,43 @@ SELF = "rescue_payout.py"
 #:                                 fits the amount to the chain's eight decimals
 #:                                 before the send, so a payout no longer reaches
 #:                                 the parser with seventeen.
+#:   "(rpc code -14)"
+#:                                 ADDED 2026-10-07, minutes after the entry
+#:                                 below, when s_ebb03e8dc1b96e1c failed a SECOND
+#:                                 time -- `Error: The wallet passphrase entered
+#:                                 was incorrect. (rpc code -14)`. A mangled paste
+#:                                 had armed the container with a fragment of a
+#:                                 command instead of the passphrase, so the
+#:                                 rescue handed the swap back to a worker that
+#:                                 could not unlock the wallet.
+#:
+#:                                 THE PROOF IS STRUCTURAL AND CLEANER THAN THE
+#:                                 UNSET CASE. chains/gridcoin_wallet_lock.
+#:                                 unlocked_for_payout() is a generator context
+#:                                 manager and its first three statements are:
+#:
+#:                                     lock(adapter)                       # 258
+#:                                     unlock_for_sending(adapter, pass..) # 259
+#:                                     try:
+#:                                         yield                           # 261
+#:
+#:                                 -14 is raised by line 259, which is BEFORE the
+#:                                 `try` is entered and before `yield`. The body
+#:                                 of the `with` -- holding broadcast_payout() --
+#:                                 is reached only at that yield, so it cannot
+#:                                 have executed.
+#:
+#:                                 AND THE WALLET WAS LOCKED WHEN IT RAISED, by
+#:                                 line 258, one statement earlier. A locked
+#:                                 Gridcoin wallet cannot send at all: sendtoaddress
+#:                                 answers -13. So even a body that had somehow run
+#:                                 could not have broadcast anything.
+#:
+#:                                 -14 IS RPC_WALLET_PASSPHRASE_INCORRECT, which by
+#:                                 definition means the wallet did not open. It is
+#:                                 not a send that failed; it is a send that was
+#:                                 never possible.
+#:
 #:   "not set in this process's environment"
 #:                                 ADDED 2026-10-07, after the first ICP deposit
 #:                                 this system ever credited -- 1.00000000 ICP,
@@ -213,6 +250,7 @@ PRE_SIGNING_MARKERS = (
     "pynacl is not importable",
     "invalid amount (rpc code -3)",
     "not set in this process's environment",
+    "(rpc code -14)",
 )
 
 

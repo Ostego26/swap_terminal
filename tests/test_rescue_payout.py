@@ -364,3 +364,74 @@ def test_the_new_marker_does_not_widen_into_anything_that_reached_a_daemon():
             f"{unsafe!r} now reads as pre-signing. Every one of these can leave money moving, which "
             f"is what this file exists to refuse."
         )
+
+
+def test_an_incorrect_passphrase_is_recognized_as_pre_signing():
+    """rpc -14 raises one statement ABOVE the `try`, so the body cannot have run.
+
+    Measured on the operator's host 2026-10-07, minutes after the marker below was
+    added: s_ebb03e8dc1b96e1c failed a SECOND time with `Error: The wallet
+    passphrase entered was incorrect. (rpc code -14)`, because a mangled paste had
+    armed the container with a fragment of a command instead of the passphrase.
+
+    THE PROOF IS STRUCTURAL. chains/gridcoin_wallet_lock.unlocked_for_payout() is
+    a generator context manager whose first statements are
+
+        lock(adapter)                          # 258
+        unlock_for_sending(adapter, pass..)    # 259  <- raises -14
+        try:
+            yield                              # 261  <- the body
+
+    so the raise happens before the `try` is entered and before `yield`.
+    broadcast_payout() is in that body and is reached only at the yield.
+
+    AND THE WALLET WAS LOCKED ONE STATEMENT EARLIER. A locked Gridcoin wallet
+    answers -13 to sendtoaddress, so even a body that had somehow executed could
+    not have broadcast. -14 is RPC_WALLET_PASSPHRASE_INCORRECT, which by
+    definition means the wallet never opened: not a send that failed, a send that
+    was never possible.
+    """
+    assert refused_before_signing("Error: The wallet passphrase entered was incorrect. (rpc code -14)")
+    assert refused_before_signing("Payout failed: Error: The wallet passphrase entered was incorrect. (rpc code -14)")
+
+
+def test_the_code_is_what_carries_the_proof_not_the_word_incorrect():
+    """Without the code, the marker would match anything calling itself incorrect.
+
+    "incorrect" alone could be a daemon's wording for a rejected transaction --
+    something that reached a network. "(rpc code -14)" pins it to the passphrase
+    check, which is what proves the wallet never opened. Same judgment as the
+    "(rpc code -3)" entry above, and for the same reason.
+    """
+    assert not refused_before_signing("payout failed: the amount was incorrect")
+    assert not refused_before_signing("payout failed: incorrect")
+    # And the neighbouring codes must NOT be swept in. -13 is WALLET_UNLOCK_NEEDED
+    # and is also pre-signing, but it is not proven here and absence of evidence is
+    # not evidence (rule 2); -6 is insufficient funds, which the wallet decides
+    # while BUILDING a transaction and is deliberately out.
+    assert not refused_before_signing("payout failed: (rpc code -13)")
+    assert not refused_before_signing("insufficient funds (rpc code -6)")
+
+
+def test_two_failed_payout_rows_do_not_block_a_rescue_but_a_live_one_does():
+    """s_ebb03e8dc1b96e1c had TWO failed rows after the second attempt.
+
+    The rule is about LIVE rows and txids, not about how many attempts were made:
+    db.PAYOUT_LIVE_STATUSES is ('created','broadcast','completed'), and 'failed' is
+    none of them. A rescue that refused on row COUNT would strand a swap for
+    having been rescued once already -- which is the exact situation the operator
+    was in.
+    """
+    two_failed = [
+        {"status": "failed", "txid": "", "amount": 377.62531149, "asset": "GRC"},
+        {"status": "failed", "txid": "", "amount": 377.62531149, "asset": "GRC"},
+    ]
+    swap = {"id": "s_twice_failed", "status": "failed", "from_asset": "ICP", "to_asset": "GRC",
+            "failed_reason": "Error: The wallet passphrase entered was incorrect. (rpc code -14)"}
+    allowed, _ = rescue_verdict(swap, two_failed)
+    assert allowed, "two failed rows with no txid must still be rescuable"
+
+    # One LIVE row refuses, however many failed ones sit beside it.
+    with_live = [*two_failed, {"status": "created", "txid": "", "amount": 1.0, "asset": "GRC"}]
+    allowed, _ = rescue_verdict(swap, with_live)
+    assert not allowed, "a live row means money may be on chain and must refuse"
