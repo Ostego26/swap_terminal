@@ -120,6 +120,37 @@ def _live_pids_carrying(token: str) -> list[int]:
     return found
 
 
+def _wait_until_scanned(pid: int, name: str, run_dir) -> list[int]:
+    """Poll unaccounted_workers() until it sees `pid`, or give up after a bounded wait.
+
+    WHY A WAIT AND NOT ONE SCAN. supervisor.unaccounted_workers() reads _proc_argv(),
+    which reads /proc/<pid>/cmdline UNSETTLED -- deliberately, because that scan runs
+    against long-lived workers where the fork/exec window has closed years ago in
+    computer terms. supervisor._settled_proc_cmdline() exists for the other case and
+    its own comment records the measurement: 400 trials, and _proc_cmdline() read
+    EMPTY for a just-spawned process.
+
+    A test that calls Popen and scans on the next line is in exactly that window. It
+    passed every time it was run alone and FAILED ONCE in a full-suite run on
+    2026-10-07, which is the shape of a race rather than of a defect: the child had
+    not finished exec, /proc gave it an empty cmdline, and the scan correctly skipped
+    something that did not yet look like a worker.
+
+    So the production code is right and the test's setup was. "Flake" is not a root
+    cause (CLAUDE.md) -- this is the cause, and waiting for the condition the test
+    DEPENDS ON is the fix, not a retry around the assertion it is making.
+
+    Returns the pids the scan attributes to `name`, so the caller still asserts on the
+    scan's real answer rather than on this function's patience.
+    """
+    deadline = time.monotonic() + 5.0
+    while True:
+        seen = supervisor.unaccounted_workers([name], run_dir).get(name, [])
+        if pid in seen or time.monotonic() >= deadline:
+            return seen
+        time.sleep(0.02)
+
+
 def _kill_all(pids) -> None:
     for pid in pids:
         try:
@@ -523,7 +554,7 @@ def test_an_orphan_makes_a_clean_stop_not_proven(tmp_path, monkeypatch):
     try:
         # No pid file was ever written for it, which is the whole point.
         assert not supervisor.pid_file(tmp_path, "sleeper").exists()
-        assert child.pid in supervisor.unaccounted_workers(["sleeper"], tmp_path).get("sleeper", []), (
+        assert child.pid in _wait_until_scanned(child.pid, "sleeper", tmp_path), (
             "setup: the scan must see the orphan, or this test proves nothing"
         )
 
