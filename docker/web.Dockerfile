@@ -89,7 +89,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends dumb-init \
 # are, which is where the size is.
 ARG DFX_VERSION=0.24.3
 ENV DFXVM_INIT_YES=true
-ENV PATH="/root/.local/share/dfx/bin:${PATH}"
 
 # `dfxvm default` IS EXPLICIT AND THE FIRST ATTEMPT RELIED ON AN ENV VAR INSTEAD.
 # Measured on the operator's host 2026-10-07: the image built, dfx was present, and
@@ -118,9 +117,12 @@ ENV PATH="/root/.local/share/dfx/bin:${PATH}"
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl libunwind8 \
     && sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)" \
-    && dfxvm default "${DFX_VERSION}" \
+    && /root/.local/share/dfx/bin/dfxvm default "${DFX_VERSION}" \
+    && DFX_REAL="$(find /root/.local/share/dfx/versions -type f -name dfx | head -1)" \
+    && { test -n "$DFX_REAL" || { echo "FAILED: no versioned dfx binary under /root/.local/share/dfx/versions"; \
+         find /root/.local/share/dfx -maxdepth 3 | head -40; exit 1; }; } \
+    && install -m 0755 "$DFX_REAL" /usr/local/bin/dfx \
     && rm -rf /var/lib/apt/lists/*
-RUN dfx --version
 
 WORKDIR /app
 
@@ -159,6 +161,31 @@ COPY docker/web_workers_entrypoint.py ./docker/web_workers_entrypoint.py
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin swap \
     && chown -R swap:swap /app
 USER swap
+
+# THE dfx PROOF IS HERE, AFTER `USER swap`, AND THAT PLACEMENT IS THE WHOLE POINT.
+#
+# d8d4a6b put `RUN dfx --version` above this line and the build went GREEN while the
+# runtime still failed. Measured on the operator's host:
+#
+#     $ docker compose ... exec -T web dfx --version
+#     error: Unable to determine which dfx version to call.
+#
+# A build-stage RUN executes as ROOT. install.sh had put dfx under
+# /root/.local/share/dfx, and `swap` (uid 1000) cannot read root's home -- so the
+# dfxvm shim found no recorded version for the user that actually runs gunicorn and
+# the workers. My proof proved the wrong thing: it tested the build user, and the
+# question is about the runtime user.
+#
+# TWO CHANGES, and they are two halves of one fix. The install above now copies the
+# VERSIONED dfx binary to /usr/local/bin/dfx -- so there is no dfxvm shim and no
+# per-user config in the runtime path at all, and nothing depends on a HOME. And the
+# proof runs HERE, as `swap`, which is the only user whose answer matters.
+#
+# The binary's location is DISCOVERED by `find` rather than hardcoded, because the
+# layout under .../dfx/versions is not something I established, and the build fails
+# with a directory listing if it is not there -- a red build that tells me the layout
+# beats a guess that silently installs nothing.
+RUN dfx --version
 
 # SWAP_DB_PATH HAS NO DEFAULT HERE ON PURPOSE. config.py falls back to a path under
 # its own BASE_DIR (§3.2), which inside this image is the IMAGE -- so an unset

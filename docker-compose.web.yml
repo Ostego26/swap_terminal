@@ -173,13 +173,33 @@ services:
       # adapter talks to the daemon's DEFAULT wallet, so a deposit scan would
       # watch the wrong wallet and a payout would spend from it. An unconfigured
       # chain fails loudly; a chain configured against the wrong wallet does not.
-      BTC_RPC_HOST: "${BTC_RPC_HOST:-}"
+      # DEFAULTED TO host.docker.internal, NOT PASSED THROUGH EMPTY, and the reason is
+      # the one the comment above this service already gives: inside a container
+      # 127.0.0.1 is the CONTAINER, and config.py's default for each of these is
+      # 127.0.0.1. So an unset value here does not mean "use the default" -- it means
+      # "point at a daemon that is not in this container", every time.
+      #
+      # MEASURED 2026-10-07 on the operator's host, from the customer UI. An ICP->GRC
+      # quote priced fine (327.21 GRC per ICP, CoinGecko) and create_swap then said:
+      #
+      #     could not validate address with GRC daemon at 127.0.0.1:25779 ...
+      #     [Errno 111] Connection refused
+      #
+      # The comment 80 lines above spells the exact export line an operator needs. It
+      # was right and it was not enough: a file that documents a value it could supply
+      # is a file that makes the operator do by hand what it knows. Supplying it is the
+      # same decision as ICP_DFX_NETWORK_URL below -- the compose file supplies what is
+      # correct for the deployment it describes.
+      #
+      # Still overridable: a deployment whose daemons live in another container names
+      # that service instead. What is no longer possible is the silent 127.0.0.1.
+      BTC_RPC_HOST: "${BTC_RPC_HOST:-host.docker.internal}"
       BTC_RPC_PORT: "${BTC_RPC_PORT:-}"
       BTC_RPC_USER: "${BTC_RPC_USER:-}"
       BTC_RPC_PASS: "${BTC_RPC_PASS:-}"
       BTC_RPC_WALLET: "${BTC_RPC_WALLET:-}"
       BTC_RPC_TIMEOUT: "${BTC_RPC_TIMEOUT:-}"
-      LTC_RPC_HOST: "${LTC_RPC_HOST:-}"
+      LTC_RPC_HOST: "${LTC_RPC_HOST:-host.docker.internal}"
       LTC_RPC_PORT: "${LTC_RPC_PORT:-}"
       LTC_RPC_USER: "${LTC_RPC_USER:-}"
       LTC_RPC_PASS: "${LTC_RPC_PASS:-}"
@@ -191,7 +211,7 @@ services:
       # which is the right failure for a missing endpoint rather than a guess at
       # one. The operator's environment still says 25715 as of 2026-10-05; that is
       # the pending role switch, not something this file should decide.
-      GRC_RPC_HOST: "${GRC_RPC_HOST:-}"
+      GRC_RPC_HOST: "${GRC_RPC_HOST:-host.docker.internal}"
       GRC_RPC_PORT: "${GRC_RPC_PORT:-}"
       GRC_RPC_USER: "${GRC_RPC_USER:-}"
       GRC_RPC_PASS: "${GRC_RPC_PASS:-}"

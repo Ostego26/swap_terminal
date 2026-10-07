@@ -214,3 +214,50 @@ def test_each_rpc_chain_gets_its_wallet_variable(asset):
         f"daemon's DEFAULT wallet, builds successfully, and then watches the wrong wallet "
         f"for deposits and pays out of it."
     )
+
+
+def test_no_chain_endpoint_defaults_to_the_CONTAINERS_own_loopback():
+    """A `${VAR:-}` whose config.py default is 127.0.0.1 is a guaranteed failure inside a container.
+
+    MEASURED 2026-10-07 from the customer UI, after the stack moved into docker. An
+    ICP->GRC quote priced correctly and create_swap refused:
+
+        could not validate address with GRC daemon at 127.0.0.1:25779 ...
+        [Errno 111] Connection refused
+
+    config.py defaults BTC_RPC_HOST, LTC_RPC_HOST and GRC_RPC_HOST to 127.0.0.1,
+    which is right on the host and is the CONTAINER inside a container. The compose
+    file passed all three through empty, so "unset" did not mean "use the default" --
+    it meant "point at a daemon that is not here".
+
+    What makes this worth a gate rather than a one-line fix: the same compose file
+    already carried a comment, eighty lines above, spelling the exact export an
+    operator needed. It was correct and it was not enough. A file that documents a
+    value it could supply makes the operator do by hand what it already knows -- and
+    nothing failed until a customer-facing create_swap did.
+
+    The property is derived from config.py rather than from a list of variable names
+    typed here: any endpoint variable whose fallback is loopback must not reach the
+    container empty. A seventh chain is covered the day it is added.
+    """
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.web.yml").read_text()
+    config_source = (Path(__file__).resolve().parents[1] / "swap_terminal" / "config.py").read_text()
+
+    loopback_defaults = set(
+        re.findall(r'_env\(\s*"([A-Z0-9_]+)"\s*,\s*"127\.0\.0\.1"\s*\)', config_source)
+    )
+    assert loopback_defaults, (
+        "no variable in config.py defaults to 127.0.0.1 any more, so this gate has no subject -- "
+        "delete it rather than leaving a test that passes by measuring nothing (rule 19)"
+    )
+
+    passed_empty = sorted(
+        name for name in loopback_defaults
+        if f'{name}: "${{{name}:-}}"' in compose
+    )
+    assert not passed_empty, (
+        f"{passed_empty} default to 127.0.0.1 in config.py and reach the container empty, so each "
+        f"one points the container at its own loopback. Default them in docker-compose.web.yml to "
+        f"host.docker.internal (the extra_hosts entry already resolves it), or to the compose "
+        f"service name if the daemon moves into a container."
+    )
