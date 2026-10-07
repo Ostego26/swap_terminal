@@ -122,6 +122,18 @@
    * other state's family, so it cannot be mistaken for a dimmer anything. */
   --unknown: #a78bfa;
   --unknown-soft: #150e26;
+  /* EXPIRED IS A DEAD PHOSPHOR, added 2026-10-07 with expire_swap.py. A retired
+   * swap is settled-and-nothing-happened, which is a state the six colours above
+   * had no honest slot for: --ok is the bright settled green and would read as
+   * "your swap finished", --halted red would read as "somebody is deciding about
+   * your money", and --unknown violet means "this page has no mapping", which is
+   * a statement about the code rather than about the swap. A desaturated green is
+   * the same hue as settled with the glow taken out of it -- the Pip-Boy's own
+   * way of showing a line that is no longer live -- and it is dim enough that it
+   * cannot be mistaken for --ok beside it. The glyph and the word carry it in
+   * grayscale either way (templates/_badges.html). */
+  --expired: #6f8f79;
+  --expired-soft: #0c1512;
 
   --s1: 0.25rem;
   --s2: 0.5rem;
@@ -610,6 +622,11 @@ button:disabled {
 .badge-working { color: var(--working); background: var(--working-soft); }
 .badge-slow, .badge-fresh-stale { color: var(--slow); background: var(--slow-soft); border-style: double; border-width: 3px; }
 .badge-halted, .badge-failed { color: var(--halted); background: var(--halted-soft); border-width: 2px; }
+/* Expired gets the same SOLID border as a settled swap, because it IS settled --
+ * what distinguishes it is the dimmed colour, the circled-slash glyph and the
+ * word. A dashed or double rule would group it with waiting or slow, which are
+ * both states where something is still expected to happen. */
+.badge-expired { color: var(--expired); background: var(--expired-soft); }
 .badge-unknown, .badge-fresh-missing, .badge-fresh-unreadable {
   color: var(--unknown);
   background: var(--unknown-soft);
@@ -633,6 +650,7 @@ button:disabled {
 .level-slow { border-left-color: var(--slow); border-left-style: double; border-left-width: 6px; }
 .level-halted { border-left-color: var(--halted); }
 .level-failed { border-left-color: var(--halted); }
+.level-expired { border-left-color: var(--expired); }
 .level-unknown { border-left-color: var(--unknown); border-left-style: dotted; }
 
 .status-head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }

@@ -27,8 +27,11 @@ from services.swap_service import (
     TAG_ATTRIBUTION,
 )
 from services.swap_view import (
+    DEPOSIT_ACCEPTING_STATUSES,
+    HALTED_STATUSES,
     STAGE_ORDER,
     STALL_AFTER_SECONDS,
+    TERMINAL_STATUSES,
     attention,
     confirmation_progress,
     deposit_instruction,
@@ -100,19 +103,48 @@ def test_every_status_the_code_writes_has_a_meaning():
         assert meaning["known"] is True, status
         assert meaning["headline"], status
         assert meaning["detail"], status
-        assert meaning["kind"] in {"waiting", "working", "done", "halted", "failed"}, status
+        assert meaning["kind"] in {"waiting", "working", "done", "halted", "failed", "expired"}, status
 
 
-def test_expired_is_not_a_swap_status_in_this_tree():
-    """`expired` belongs to the Express bridge's intents table, not to swaps.
+def test_expired_is_a_retirement_and_never_reads_as_progress_or_a_halt():
+    """What `expired` must mean on a customer's screen, now that something writes it.
 
-    Measured by grep: every occurrence of the literal is in
-    swap_intents_schema.py or migrate_swap_intents.py. Nothing sets
-    swaps.status = 'expired'. So this module must treat it as unrecognized
-    rather than quietly giving it a friendly meaning -- which would tell a
-    customer their swap was canceled by a clock that does not exist.
+    THIS TEST REPLACES ONE THAT PINNED THE OPPOSITE, and the replacement is the
+    rule rather than a special case: CLAUDE.md rule 2 says a test for something
+    deleted either dies with it or changes to pin the stronger invariant. The old
+    one read:
+
+    > def test_expired_is_not_a_swap_status_in_this_tree():
+    >     '''`expired` belongs to the Express bridge's intents table, not to swaps.
+    >     Measured by grep: every occurrence of the literal is in
+    >     swap_intents_schema.py or migrate_swap_intents.py. Nothing sets
+    >     swaps.status = 'expired'.'''
+    >     assert status_meaning("expired")["known"] is False
+
+    That measurement was correct on 2026-09-26 and expire_swap.py falsified it on
+    2026-10-07 by writing the status. Deleting the test outright would have left
+    nothing asserting the thing it actually cared about -- that a clock must not be
+    allowed to tell a customer their swap was canceled -- so what it asserted
+    (`known is False`) is replaced by what it MEANT:
+
+      - the status is known, so the page does not render "Unrecognized status" at
+        somebody holding a retired swap
+      - it is terminal, so no stall clock runs against it
+      - it is NOT in DEPOSIT_ACCEPTING_STATUSES, so the page never shows a send
+        target for it. That is the stronger half: the old test got this for free
+        from `known is False`, and an unmapped status with a deposit panel would
+        have been the 2026-09-26 under_review defect again.
+      - it is NOT a stage on the rail and NOT halted, so it reads as neither
+        progress nor a decision somebody owes the customer.
     """
-    assert status_meaning("expired")["known"] is False
+    meaning = status_meaning("expired")
+    assert meaning["known"] is True
+    assert meaning["kind"] == "expired"
+    assert "expired" in TERMINAL_STATUSES
+    assert "expired" not in DEPOSIT_ACCEPTING_STATUSES
+    assert "expired" not in STAGE_ORDER
+    assert "expired" not in HALTED_STATUSES
+    assert "expired" not in STALL_AFTER_SECONDS
 
 
 def test_an_unknown_status_renders_as_unknown_and_shows_the_raw_value():

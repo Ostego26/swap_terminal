@@ -76,9 +76,10 @@ resolution of the middle state, and the difference is named at both sites (rule 
 WHAT COUNTS AS AN OBLIGATION, WHICH IS A CHOICE AND IS MEASURED
 =============================================================================
 
-services/swap_view.TERMINAL_STATUSES is `{completed, under_review, failed}`, so
-the swaps a worker will still pay are everything else: awaiting_deposit,
-deposit_seen, confirming, payout_pending, paying. Those are the obligation floor,
+services/swap_view.TERMINAL_STATUSES is `{completed, under_review, failed,
+expired}`, so the swaps a worker will still pay are everything else:
+awaiting_deposit, deposit_seen, confirming, payout_pending, paying. Those are the
+obligation floor,
 each at payout_amount() plus its own network_fee_reserve, because the wallet has
 to hold the payout AND the chain fee that sends it (the reason
 payout_capacity.why_the_payout_cannot_be_funded() adds rather than subtracts it).
@@ -136,12 +137,14 @@ the only way to guarantee that is to ask the same function.
 
 from __future__ import annotations
 
+import json
 from typing import NamedTuple
 
 from chains.payout_quantization import quantize_for_chain
 from config import FEE_SWEEP_DESTINATION_TEMPLATE
 from services.helpers import utc_now_iso
 from services.payout_service import payout_amount
+from services.swap_view import TERMINAL_STATUSES
 
 #: The three states a `fee_sweeps` row can hold. Spelled once so the writers below
 #: and the readers in collect_fees.py cannot drift (rule 8).
@@ -205,6 +208,28 @@ ORDER BY id ASC
 #: is rule 11's "did every consumer follow automatically?" answered by a test
 #: instead of by a derivation, which is the trade S608 forces and is why it is
 #: written down rather than left to be noticed.
+#: INTERPOLATED FROM services/swap_view.TERMINAL_STATUSES, not spelled here. It
+#: read `status NOT IN ('completed', 'under_review', 'failed')` as a literal until
+#: 2026-10-07 -- a hand-written copy of a set this module's own header already
+#: names as the authority, which is rule 8's "bug with a delay on it", and the
+#: delay ran out the moment a ninth status arrived.
+#:
+#: THE DRIFT WAS NOT HYPOTHETICAL AND IT RAN THE EXPENSIVE WAY. expire_swap.py
+#: retires a swap that never received a deposit, and an `expired` swap missing from
+#: this predicate is still counted as money the wallet must retain -- so the tool
+#: built to free the floor would have freed nothing, silently, while every test
+#: passed. Measured on the operator's host 2026-10-07: seven GRC swaps in
+#: `awaiting_deposit` with no deposit row between them, owing 2,499.69447667 GRC
+#: against a hot wallet holding 11.00248643. That floor refuses every sweep on the
+#: asset, which is the outcome this module's header says it exists to prevent.
+#:
+#: THE STATUSES GO IN AS BIND PARAMETERS, not as interpolated literals, and that
+#: was the second attempt. The first built them into the text and carried a
+#: `noqa: S608` saying "identifiers, not input" -- which is the claim rule 12
+#: permits, and it was the wrong claim: a status here is a VALUE being compared
+#: against a column, not a table or column name, so there is nothing that needs
+#: interpolating and the suppression would have been quieting a finding instead of
+#: removing its cause (rule 19). OPEN_SWAPS_PARAMS below is what callers pass.
 OPEN_SWAPS_SQL = """
 SELECT id,
        status,
@@ -215,9 +240,28 @@ SELECT id,
        network_fee_reserve
 FROM swaps
 WHERE to_asset = ?
-  AND status NOT IN ('completed', 'under_review', 'failed')
+  AND status NOT IN (SELECT value FROM json_each(?))
 ORDER BY created_at ASC
 """
+
+#: The one bind value the predicate above needs: this set as a JSON array, so the
+#: number of statuses is not baked into the SQL text either.
+#:
+#: json_each() RATHER THAN A GENERATED RUN OF `?`. Both are parameterized and
+#: neither interpolates a value; the difference is that a `?`-per-status predicate
+#: still builds its text from len(TERMINAL_STATUSES) at import time, so the query
+#: an operator pastes and the query this module runs are two different strings the
+#: day a status is added. With json_each the text is FIXED -- there is one
+#: placeholder whatever the vocabulary does -- which is the same reason
+#: BEHAVIORAL_VERIFICATION_PRINCIPLE gives for distrusting SQL whose shape changes
+#: between runs. It is available unconditionally: SQLite has shipped JSON1 in the
+#: amalgamation by default since 3.38 (2022), and tests/test_fee_sweep.py asserts
+#: the predicate actually excludes a seeded `expired` swap rather than trusting
+#: that it parses.
+#:
+#: SORTED, so the value is stable across processes; a frozenset's iteration order
+#: is not.
+OPEN_SWAPS_PARAMS = json.dumps(sorted(TERMINAL_STATUSES))
 
 #: The swaps that are terminal but could be REVIVED into a payout: a halted one
 #: through resolve_halted_swap.py, a failed one through settle_payout.py. Reported
@@ -226,6 +270,15 @@ ORDER BY created_at ASC
 #:
 #: 'completed' is the only status excluded, because a completed swap has its payout
 #: broadcast and a broadcast cannot be re-sent.
+#:
+#: SPELLED OUT RATHER THAN DERIVED AS "TERMINAL MINUS completed", which is what it
+#: was on the day it was written and is no longer the same set. `expired` is
+#: terminal and is NOT revivable in this sense: there is nothing to revive, because
+#: expire_swap.py refuses any swap carrying a deposit row, so no money ever arrived
+#: for one. Reporting it here would print a "could become a payout" total for swaps
+#: that cannot, which is the direction that scares an operator out of a sweep they
+#: are entitled to. The difference is named at both sites (rule 8): OPEN_SWAPS_SQL
+#: above derives from the set, this one deliberately does not.
 REVIVABLE_SWAPS_SQL = """
 SELECT id,
        status,
@@ -389,7 +442,7 @@ def obligation(db, asset: str) -> Obligation:
     it reads three tables and takes no balance, no adapter and no network.
     """
     open_total, open_swaps = _owed_for(
-        db.execute(OPEN_SWAPS_SQL, (asset,)).fetchall()
+        db.execute(OPEN_SWAPS_SQL, (asset, OPEN_SWAPS_PARAMS)).fetchall()
     )
     revivable, revivable_swaps = _owed_for(db.execute(REVIVABLE_SWAPS_SQL, (asset,)).fetchall())
     row = db.execute(

@@ -632,6 +632,21 @@ gunicorn workers    2    GUNICORN_WORKERS default "2" (gunicorn.conf.py:121)
 ```
 
 Plus 1 transient process per root tool invocation, 8 of which write.
+
+> ADDED 2026-10-07: `expire_swap.py` joined the root one-shot operator tools, so
+> there are 9 of them -- and the "8 of which write" above is UNCHANGED, which is
+> the only reason the table is not re-measured here. Checked rather than assumed:
+> `grep -nE "INSERT INTO|UPDATE [a-z_]+ SET|DELETE FROM" expire_swap.py` returns
+> nothing. It writes through `services/swap_service.set_swap_status()`, the same
+> compare-and-swap the workers use, so its write is counted under that module and
+> not as a tenth writer.
+>
+> The 24-file and 8-tool figures themselves are NOT re-measured, deliberately. A
+> cruder grep than whatever produced them counts 22 and 8 today, with
+> `repair_inventory_reservations.py` present and `fund_testnets.py` absent -- two
+> instruments, so the difference says nothing about drift (rule 17: a reason to
+> believe is not a measurement). The figures above stand as what was measured on
+> 2026-10-03, by whatever read them.
 **NOT ESTABLISHED: the actual contention rate on the operator's host.** Nothing
 in this tree counts `database is locked` -- grepped, 0 occurrences of that string
 in any `.py` -- so there is no log line, no counter and no table from which a

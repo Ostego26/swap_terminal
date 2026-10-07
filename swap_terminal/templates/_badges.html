@@ -21,6 +21,7 @@
     SLOW          exclamation     taking longer than this page expects
     HALTED        filled square   stopped on purpose, waiting on a human
     FAILED        cross           stopped because something broke
+    EXPIRED       circled slash   retired without a deposit; nothing arrived
     UNKNOWN       question mark   this page has no mapping for the value
     FRESH         filled circle   a reading younger than its threshold
     STALE         triangle        a reading older than its threshold
@@ -36,6 +37,7 @@
       'slow': '&#33;',
       'halted': '&#9632;',
       'failed': '&#10007;',
+      'expired': '&#8856;',
       'unknown': '&#63;'
     } -%}
 {%- set words = {
@@ -45,6 +47,7 @@
       'slow': 'SLOW',
       'halted': 'HALTED',
       'failed': 'FAILED',
+      'expired': 'EXPIRED',
       'unknown': 'UNKNOWN'
     } -%}
 <span class="badge badge-{{ level }}"><span class="badge-glyph" aria-hidden="true">{{ glyphs.get(level, '&#63;')|safe }}</span><span class="badge-word">{{ text or words.get(level, level|upper) }}</span></span>

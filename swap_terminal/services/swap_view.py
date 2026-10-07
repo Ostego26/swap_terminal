@@ -41,17 +41,31 @@ place:
     completed          services/payout_service.process_pending_payouts()
     failed             same function, send_to_address() raised
 
-`expired` is NOT one of them, and that mattered enough to check twice. It
-appears four times in the tree and every occurrence is in
-swap_intents_schema.py / migrate_swap_intents.py, which describe the Express
-bridge's OWN intents table -- a different table, a different state machine.
-**Nothing in this tree ever sets swaps.status = 'expired'**, even though every
-swap row carries an `expires_at` copied from its quote. So this module reports a
-passed `expires_at` as a fact about the QUOTE WINDOW and explicitly says the
-swap has not been canceled, because claiming otherwise would tell a customer
-their coins will not be credited when in fact a deposit arriving now still
-credits normally. That is the difference between reading the code and assuming
-what an `expires_at` column must do.
+A NINTH ARRIVED 2026-10-07 and the paragraph it replaces is kept below, because
+the reasoning in it was correct on the day it was measured and the drift is the
+point (CLAUDE.md rule 1):
+
+> `expired` is NOT one of them, and that mattered enough to check twice. It
+> appears four times in the tree and every occurrence is in
+> swap_intents_schema.py / migrate_swap_intents.py, which describe the Express
+> bridge's OWN intents table -- a different table, a different state machine.
+> **Nothing in this tree ever sets swaps.status = 'expired'**, even though every
+> swap row carries an `expires_at` copied from its quote.
+
+    expired            expire_swap.py, at the repository root, and ONLY with
+                       --apply. No worker writes it and no web request can.
+
+WHAT HAS NOT CHANGED IS THE THING THAT PARAGRAPH WAS PROTECTING, and it is worth
+being explicit because the status now exists and the temptation is to wire the
+clock to it: **a passed `expires_at` still does not mean a swap is expired.**
+Nothing reads that column and decides anything (quote_window() below says so with
+its own measurement), and expire_swap.py requires the lapse PLUS a grace window
+PLUS zero deposit rows PLUS an operator typing --apply. So this module still
+reports a passed window as a fact about the QUOTE WINDOW and still says the swap
+has not been canceled -- because for a swap still in `awaiting_deposit` that
+remains exactly true, and a deposit arriving now still credits normally. The
+difference between a lapsed quote and a retired swap is now visible in the status
+column, which is where it belonged.
 
 UNKNOWN STATUS RENDERS AS UNKNOWN. A status this module has never heard of is
 reported with `known=False` and its raw value shown, never folded into the
@@ -183,6 +197,40 @@ STATUS_MEANINGS = {
         "headline": "Payout failed",
         "detail": "The payout could not be broadcast. The recorded reason is below.",
     },
+    # ADDED 2026-10-07 WITH expire_swap.py, and the sentence this entry had to get
+    # right is the second one.
+    #
+    # Until that tool existed, `expired` was written by nothing in this tree and
+    # this module's own docstring said so at length -- a swap whose quote window
+    # had lapsed stayed `awaiting_deposit` forever, and the desk's obligation floor
+    # (swap_terminal/fee_sweep.obligation()) kept retaining the payout for it.
+    # Measured on the operator's host 2026-10-07: seven such GRC swaps, owing
+    # 2,499.69447667 GRC against a hot wallet holding 11.00248643.
+    #
+    # `kind` IS ITS OWN SIXTH VALUE rather than `done` or `halted`, because it is
+    # neither and both of those readings are actively wrong on a customer's screen:
+    # `done` is styled with the settled green and would tell somebody their swap
+    # finished, and `halted` says a human is deciding about their money when
+    # nothing of theirs ever arrived. The honest statement is the third one -- this
+    # swap was retired without a deposit and nothing of yours is in it.
+    #
+    # WHAT THE DETAIL MUST NOT SAY, and this is the part expire_swap.py's refusals
+    # are built to keep true: not "your deposit was lost", and not "your deposit
+    # was returned". Neither happened. The tool refuses any swap carrying so much
+    # as one deposit_events row, so a swap reaching this status has no record of
+    # money -- and the detail tells the one customer who DID send late what
+    # actually happens to it, because services/late_deposit_service.py records a
+    # payment to a non-active swap's address rather than crediting it.
+    "expired": {
+        "kind": "expired",
+        "headline": "Retired -- no deposit arrived",
+        "detail": (
+            "Nothing was ever received for this swap, so it was retired and the coins it would have paid out are "
+            "no longer held for it. Nothing of yours is in it and nothing was sent. If you did pay into it, the "
+            "payment is recorded against this swap's address and a person resolves it by hand -- it is not lost, "
+            "and it is not credited automatically either. Start a new swap for a fresh rate."
+        ),
+    },
 }
 
 # The statuses during which sending MORE coins to the deposit target is still a
@@ -204,7 +252,22 @@ DEPOSIT_ACCEPTING_STATUSES = frozenset({"awaiting_deposit", "deposit_seen", "con
 
 # Terminal as far as this page is concerned: no worker advances them and no
 # amount of elapsed time says anything about them, so they get no stall clock.
-TERMINAL_STATUSES = frozenset({"completed", "under_review", "failed"})
+#
+# `expired` JOINED THEM 2026-10-07 and it is terminal in the strongest sense of
+# the four: `completed` has a broadcast behind it, `under_review` and `failed` are
+# both REVIVABLE by an operator tool (resolve_halted_swap.py, settle_payout.py),
+# and an expired swap has nothing to revive -- no deposit, no payout row, no
+# money. expire_swap.py --revive exists anyway, because "nothing arrived" is a
+# statement about this database and not about the chain (rule 17), and the one
+# case it is wrong about is a deposit in flight while the watcher was down.
+#
+# THE SET IS READ BY MORE THAN THIS MODULE, which is why a status is added here
+# rather than to a second list: swap_terminal/fee_sweep.OPEN_SWAPS_SQL builds its
+# obligation floor from the COMPLEMENT of this set, so an expired swap stops being
+# retained for the moment it lands here and nobody has to remember a second edit.
+# That is the whole point of the import and it is the measured reason this status
+# exists -- see fee_sweep's header for the 2,499.69 GRC it was retaining.
+TERMINAL_STATUSES = frozenset({"completed", "under_review", "failed", "expired"})
 
 # The statuses that are terminal because they are WAITING ON A PERSON.
 #
@@ -819,11 +882,17 @@ def elapsed_seconds(since_iso: str | None, now_iso: str) -> float | None:
 def quote_window(swap: dict, now_iso: str) -> dict:
     """Whether the quoted window has passed, and what that does NOT mean.
 
-    MEASURED: nothing in this tree sets swaps.status = 'expired', and no worker
-    reads swaps.expires_at at all -- grepped across swap_terminal/ on
-    2026-09-26; the only `expires_at` read is
-    services/swap_service.get_quote_or_raise(), which guards QUOTE reuse before
-    a swap exists. So a passed window means the rate was quoted a while ago, and
+    MEASURED 2026-09-26, and the first clause was overtaken 2026-10-07 while the
+    second -- the one this function's answer rests on -- was not. expire_swap.py
+    now writes swaps.status = 'expired', so "nothing sets it" is false; but NO
+    WORKER STILL READS swaps.expires_at AND DECIDES ANYTHING. Re-grepped across
+    swap_terminal/ on 2026-10-07: the only reads are
+    services/swap_service.get_quote_or_raise(), which guards QUOTE reuse before a
+    swap exists, and expire_swap.quote_window_lapsed(), which is an operator tool
+    that writes only with --apply and refuses on any deposit row. Nothing
+    automatic turns a passed timestamp into a retired swap, which is the property
+    the rest of this docstring depends on. So a passed window means the rate was
+    quoted a while ago, and
     it does NOT mean the swap was canceled or that a deposit arriving now is
     lost. Saying the second would be a plausible reading of a column name
     presented as a measurement (rule 17), and it would tell a customer their
@@ -902,7 +971,8 @@ def attention(swap: dict, now_iso: str) -> dict:
     a page that renders a healthy five-minute wait identically to a payout
     worker that died four hours ago has told the reader nothing.
 
-    Returns `level` in (ok, waiting, slow, halted, failed, unknown), with a
+    Returns `level` in (ok, waiting, working, slow, halted, failed, expired,
+    unknown), with a
     headline and a detail that both name what is being waited on. `level` is
     what the template styles; the text is what makes it legible without color.
     """
@@ -912,7 +982,23 @@ def attention(swap: dict, now_iso: str) -> dict:
     if kind == "unknown":
         return {"level": "unknown", "headline": meaning["headline"], "detail": meaning["detail"], "waited": None}
     if status in TERMINAL_STATUSES:
-        level = {"completed": "ok", "under_review": "halted", "failed": "failed"}[status]
+        # DERIVED FROM THE STATUS'S OWN `kind`, exactly as the non-terminal path at
+        # the bottom of this function already does. This read
+        #
+        #     {"completed": "ok", "under_review": "halted", "failed": "failed"}[status]
+        #
+        # until 2026-10-07, which is a second table keyed by status sitting beside
+        # STATUS_MEANINGS -- rule 8's duplicate, and this one was a KeyError rather
+        # than a drift: adding `expired` to TERMINAL_STATUSES above would have made
+        # attention() raise on the first expired swap a customer opened, taking out
+        # the whole page. The literal was not wrong, it was unextendable.
+        #
+        # `done` -> `ok` IS THE ONLY NON-IDENTITY MAPPING, and it is a naming gap
+        # rather than a decision: the CSS class and the badge are `ok` (one of the
+        # seven levels this function documents) while the status vocabulary calls
+        # that state `done`. Renaming either would touch the stylesheet, the badge
+        # macros and every template that styles a level, for no reader benefit.
+        level = "ok" if kind == "done" else kind
         return {"level": level, "headline": meaning["headline"], "detail": meaning["detail"], "waited": None}
 
     waited = elapsed_seconds(swap.get("updated_at"), now_iso)

@@ -61,7 +61,7 @@ from chains.payout_quantization import quantize_for_chain  # noqa: E402
 from db import SCHEMA, connect_db  # noqa: E402
 
 import collect_fees  # noqa: E402
-from swap_terminal.fee_sweep import obligation  # noqa: E402
+from swap_terminal.fee_sweep import OPEN_SWAPS_PARAMS, OPEN_SWAPS_SQL, obligation  # noqa: E402
 from tests.recording_rpc_adapter import RecordingRPCAdapter  # noqa: E402
 from tests.test_fee_ledger import Seed, seed_payout, seed_swap  # noqa: E402
 from tests.valid_addresses import GRC_PAYOUT  # noqa: E402
@@ -613,13 +613,30 @@ def test_the_grc_send_goes_through_the_lock_cycle_the_payout_path_uses(monkeypat
 def test_the_obligation_floor_retains_for_exactly_the_non_terminal_statuses(db_path):
     """Every status in the vocabulary, seeded, and the split asserted against it.
 
-    THIS TEST IS THE DERIVATION fee_sweep.OPEN_SWAPS_SQL COULD NOT HAVE. That query
-    spells the three terminal statuses as SQL literals, because interpolating
-    services/swap_view.TERMINAL_STATUSES earns ruff's S608 and rule 19 forbids
-    answering a finding with a suppression -- so the agreement between the two is
-    held here instead, behaviorally. A status added to STATUS_MEANINGS, or moved
-    into or out of TERMINAL_STATUSES, fails this by name rather than quietly
-    changing what the hot wallet is allowed to keep.
+    IT RUNS THE REAL QUERY NOW, AND THE PARAGRAPH IT REPLACES IS WHY THAT MATTERS.
+    This used to read:
+
+    > THIS TEST IS THE DERIVATION fee_sweep.OPEN_SWAPS_SQL COULD NOT HAVE. That
+    > query spells the three terminal statuses as SQL literals, because
+    > interpolating services/swap_view.TERMINAL_STATUSES earns ruff's S608 and rule
+    > 19 forbids answering a finding with a suppression -- so the agreement between
+    > the two is held here instead, behaviorally.
+
+    and it held that agreement by SPELLING THE PREDICATE A SECOND TIME, right here,
+    which is the duplicate rule 8 is about rather than a guard against it: the copy
+    in this file agreed with the copy in fee_sweep.py on the day both were written,
+    and on 2026-10-07 a ninth status (`expired`) was added to TERMINAL_STATUSES and
+    the two disagreed. A test carrying its own copy of the thing under test can only
+    ever assert that its copy is self-consistent -- which is the exact failure
+    BEHAVIORAL_VERIFICATION_PRINCIPLE names: "never accept 'the SQL text contains X'
+    as evidence a gate is enforced."
+
+    So it executes fee_sweep.OPEN_SWAPS_SQL with fee_sweep.OPEN_SWAPS_PARAMS, which
+    is what obligation() runs, and the suppression that forced the duplicate is
+    gone: the statuses are bind values through json_each() rather than interpolated
+    text. A status added to STATUS_MEANINGS, or moved into or out of
+    TERMINAL_STATUSES, still fails this by name rather than quietly changing what
+    the hot wallet is allowed to keep.
 
     Asserted as a SET of swap ids rather than as a total, so a failure says WHICH
     status moved sides instead of only that a number changed.
@@ -627,6 +644,34 @@ def test_the_obligation_floor_retains_for_exactly_the_non_terminal_statuses(db_p
     MUTATION: add 'payout_pending' to the SQL's NOT IN list. This fails, naming
     that swap -- and it is the status that matters most, since a payout_pending
     swap is one a worker will pay on its next poll. Verified 2026-10-04.
+
+    RE-MUTATED 2026-10-07 AGAINST THE PARAMETERIZED FORM, AND THE RESULT CHANGED
+    WHAT THIS TEST IS FOR -- recorded rather than quietly left, because a mutation
+    that no longer applies reads as a mutation that survived.
+
+    The old mutation (add 'payout_pending' to the SQL's NOT IN list) still fails
+    this, and so does narrowing the predicate any other way: `AND status <>
+    'paying'` appended to it fails with `s_paying` missing from the left side.
+    Verified 2026-10-07.
+
+    But editing TERMINAL_STATUSES no longer fails it AT ALL, in either direction --
+    verified by removing 'expired' from the set and running this file: 43 passed.
+    That is not a weakness that crept in, it is the duplicate being gone: both the
+    query and this test's expectation now derive from the same frozenset, so they
+    cannot disagree, and a test asserting that a thing equals itself is the
+    tautology the old hand-spelled copy was hiding behind. What still has to be
+    asserted BEHAVIORALLY is that the floor actually changes when a status moves
+    sides, and that lives in tests/test_expire_swap.py::
+    test_an_expired_swap_leaves_the_obligation_floor -- which builds the floor with
+    obligation(), retires a swap with the real tool, and builds it again. That one
+    DOES fail when 'expired' leaves TERMINAL_STATUSES.
+
+    What this test still pins on its own, and the mutations that prove it:
+      - obligation() agrees with the real query's row set, for every status in the
+        vocabulary at once ( `AND status <> 'paying'` fails it)
+      - `revivable` is exactly under_review and failed, so an expired swap is not
+        reported as a payout waiting to happen (adding 'expired' to
+        REVIVABLE_SWAPS_SQL fails it, and fails test_expire_swap.py with it)
     """
     from services.swap_view import (  # noqa: PLC0415 -- checked: imported here beside the assertion that reads it, so a reader sees what the expectation is derived from. The module is already imported transitively by collect_fees at the top of this file.
         STATUS_MEANINGS,
@@ -639,14 +684,12 @@ def test_the_obligation_floor_retains_for_exactly_the_non_terminal_statuses(db_p
     try:
         retained_for = {
             str(row["id"])
-            for row in connection.execute(
-                # THE SAME PREDICATE fee_sweep.OPEN_SWAPS_SQL CARRIES, spelled here
-                # so the assertion below compares the SQL's answer against
-                # TERMINAL_STATUSES rather than against obligation()'s own count
-                # alone -- which would agree with itself whatever the list said.
-                "SELECT id FROM swaps WHERE to_asset = 'GRC'"
-                " AND status NOT IN ('completed', 'under_review', 'failed')"
-            ).fetchall()
+            # THE QUERY ITSELF, with the parameters obligation() passes it. Not a
+            # paraphrase and not a fragment: the assertion below compares the real
+            # predicate's answer against TERMINAL_STATUSES, where comparing against
+            # obligation()'s own count alone would agree with itself whatever the
+            # predicate said.
+            for row in connection.execute(OPEN_SWAPS_SQL, ("GRC", OPEN_SWAPS_PARAMS)).fetchall()
         }
         owed = obligation(connection, "GRC")
     finally:
