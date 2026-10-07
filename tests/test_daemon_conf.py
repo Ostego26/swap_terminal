@@ -207,6 +207,33 @@ DIRECT_DRIVERS = frozenset({
 #: worse than refusing until the variables are exported. Changing how the service
 #: resolves its daemons is live posture and the operator's (rule 16).
 SERVICE_SIDE = frozenset({
+    # fund_desk.py, added 2026-10-07. SERVICE SIDE for the DESTINATION, and the
+    # register caught it before it had a side -- which is the test working, since
+    # this file reaches TWO Gridcoin daemons and they land on opposite answers.
+    #
+    # THE DESK SIDE IS NOT A JUDGMENT CALL. The whole purpose is to raise the
+    # balance the payout worker spends from, so it must top up EXACTLY the wallet
+    # the brokered terminal pays customers out of -- build_adapters(Config.RPC),
+    # the same construction the service makes. A conf fallback resolving some
+    # other Gridcoin wallet would do the worst available thing: broadcast a real
+    # send, confirm it, print a txid, and leave the desk at 11 GRC while the
+    # screen said it had been funded. Every open swap would still be unpayable
+    # and the evidence would say otherwise.
+    #
+    # THE SOURCE SIDE DOES NOT GO THROUGH THE RESOLVER EITHER, and for a different
+    # reason that is worth stating so nobody "fixes" it: the operator's own daemon
+    # is resolved from GRC_OPERATOR_RPC_HOST/PORT/USER/PASS through
+    # gridcoin_credentials.operator_endpoint(), which deliberately has NO fallback
+    # at all -- not to a conf, not to the desk's GRC_RPC_*. That is custody
+    # separation rather than configuration convenience: a source that could silently
+    # become the desk's own wallet is the self-transfer fund_desk.direction_verdict()
+    # exists to refuse, and a conf fallback is one of the two ways to arrive at it.
+    #
+    # It is the first entry here that SENDS. Both port numbers go through
+    # network_target.may_read_a_wallet() before any socket opens, so mainnet 15715
+    # is refused rather than connected to, and tests/test_fund_desk.py asserts no
+    # adapter is even constructed for it.
+    "fund_desk.py",
     # icp_custody_addresses.py, added 2026-10-06. SERVICE SIDE, and this one is not
     # a judgment call: the file prints two columns, and the right-hand column's
     # entire claim is "this is the address the desk is using RIGHT NOW". It gets it

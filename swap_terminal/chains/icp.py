@@ -3,8 +3,16 @@
 Role: module (a stage; the decisions it needs live in chains/icp_account.py and
       services/icp_subaccount_service.py, which it calls)
 Reads: the ICRC-1 ledger canister named in Config.RPC["ICP"], by running dfx
-Writes: nothing in this repository. icrc1_transfer writes to a ledger.
-Can send orders: it CAN move funds -- send_to_address calls icrc1_transfer. See
+Writes: nothing in this repository. The ledger's legacy `transfer` writes to a ledger.
+Can send orders: it CAN move funds -- send_to_address calls the ledger's legacy
+      `transfer`. THESE TWO LINES SAID `icrc1_transfer` UNTIL 2026-10-07 and that
+      was wrong at both sites: send_to_address() has called legacy `transfer` since
+      2026-10-06, and its own docstring explains at length why it has to -- an
+      icrc1_transfer takes an ICRC-1 Account and a customer supplies a 64-hex
+      account identifier, which is a non-invertible SHA224 over one. A header
+      naming the wrong ledger method is the wrong-comment-is-a-bug case (rule 16):
+      a reader checking whether this file can mint would have gone looking at the
+      ICRC-1 endpoint, which this file never calls. See
       THE PAYOUT PATH IS EXERCISED, 2026-10-06, against the real released ICP ledger on
 the local replica. This section used to say send_to_address "has not been run
 against any ledger, local or otherwise" and that the tests asserting on its
@@ -242,8 +250,111 @@ def redact_secrets(text: str) -> str:
     return "\n".join(kept)
 
 
-def dfx_transport(service: str, timeout: float, network_url: str = ""):
+def transfer_argument(
+    *, to_account: str, e8s: int, fee_e8s: int, created_at_time_nanos: int, memo: int = 0
+) -> str:
+    """The candid argument for the ledger's legacy `transfer`. THE MONEY-MOVING STRING.
+
+    KEYWORD-ONLY, because every parameter is a number or a hex string and three of
+    them are interchangeable at a call site: `e8s`, `fee_e8s` and
+    `created_at_time_nanos` are all ints, and transposing the first two would send
+    the fee as the amount. That is the transposition hazard ruff's PLR0913 exists to
+    flag, answered by naming rather than by a suppression (rule 19).
+
+    EXTRACTED 2026-10-07, when fund_desk.py needed to build the same record to MINT.
+    A mint is this identical call -- the legacy `transfer`, from the ledger's
+    minting account -- so a second f-string in the top-up tool would have been two
+    copies of the one string in this repository that decides where money goes
+    (rule 8). The copies agree on the day they are written; the field this one would
+    have drifted on is `fee`, which a mint must send as 0 and a payout must send as
+    `icrc1_fee()`.
+
+    THE FEE IS A PARAMETER AND HAS NO DEFAULT, for that exact reason. Defaulting it
+    either way makes one of the two callers silently wrong: 0 on a desk payout is
+    `BadFee` (recoverable, loud), and `icrc1_fee()` on a mint is also `BadFee` --
+    the minting account is charged nothing, so naming a fee from it is a mismatch.
+    Neither default is safe, so there is none.
+
+    `blob` AND UNIFORM ESCAPING COME FROM _hex_to_blob, which carries the record of
+    the first failed transfer: omitting the keyword made candid read 32 bytes as
+    `text` and answer "Not valid unicode text / Failed to create argument blob".
+
+    created_at_time IS REQUIRED HERE TOO, as an int rather than an optional. The
+    ledger deduplicates on (from, to, amount, fee, memo, created_at_time), so a
+    caller that has no key to pass must be made to decide rather than handed a null
+    that turns every retry into a second transaction -- see send_to_address()'s
+    refusal, which is where that decision is enforced for the payout path.
+    """
+    return (
+        f"(record {{ memo = {memo} : nat64; "
+        f"amount = record {{ e8s = {e8s} : nat64 }}; "
+        f"fee = record {{ e8s = {fee_e8s} : nat64 }}; "
+        "from_subaccount = null; "
+        f"to = {_hex_to_blob(to_account)}; "
+        f"created_at_time = opt record {{ timestamp_nanos = {created_at_time_nanos} : nat64 }} }})"
+    )
+
+
+def transfer_block_index(reply: str) -> str:
+    """The block index a `transfer` reply reports, or "" if it reports none.
+
+    TxDuplicate IS SUCCESS, AND RAISING ON IT WAS A DEFECT THIS FILE SHIPPED. The
+    ledger is saying "this exact transfer already happened; its block index is <n>".
+    That is precisely what the idempotency key exists to produce, so a retry after a
+    timeout must get the SAME answer the first call would have given -- not an
+    exception. Measured on the local replica 2026-10-06: the same call twice left
+    desk 999.7499 and subaccount 1 at 0.25 both times, the second answering
+    TxDuplicate, so the funds genuinely did not move twice.
+
+    The version before that returned the block index on Ok and RAISED on duplicate,
+    with a message telling the caller to read it as success. That put the decision in
+    prose a payout worker would have had to parse, and the failure mode is specific:
+    a worker retrying after a timeout sees an exception and marks a payout that
+    SUCCEEDED as failed (rule 10 -- the decision belongs in a function, not in an
+    error string).
+
+    EXTRACTED FROM send_to_address() 2026-10-07 alongside transfer_argument(), and
+    for the same reason: fund_desk.py reads the reply of the same call, and "which
+    replies mean the money moved" is not a question two files may answer separately.
+    The underscores the ledger prints in large numbers are stripped here, in one
+    place, rather than at each caller.
+
+    "" RATHER THAN None, so a caller can write `if index:` and so the one thing this
+    function must never do -- turn an unrecognized reply into a plausible block
+    index -- is impossible by type.
+    """
+    for pattern in (_TRANSFER_OK, _TRANSFER_DUPLICATE):
+        found = pattern.search(reply)
+        if found:
+            return found.group(1).replace("_", "")
+    return ""
+
+
+def dfx_transport(service: str, timeout: float, network_url: str = "", identity: str = ""):
     """Return a `call(canister, method, argument) -> str` that reaches the ledger.
+
+    `identity` NAMES THE dfx IDENTITY TO SIGN AS, and it was added 2026-10-07 for
+    the one caller that needs an identity neither default can give it: a top-up of
+    the desk's own balance is a transfer FROM the ledger's minting account, which
+    only the `minter` identity can sign (icp_ledger_init.py writes that account
+    into `minting_account`, and transfers from it are mints).
+
+    EMPTY KEEPS EXACTLY THE BEHAVIOR BOTH TRANSPORTS ALREADY HAD, which is why
+    this is a parameter on the existing launcher rather than a second one. Under
+    the URL transport, empty still means `--identity anonymous` -- the measured
+    correct identity there, and the thing that stops dfx GENERATING a key and
+    echoing its mnemonic (see the long note in `call` below). Under the compose
+    transport, empty still means NO --identity flag at all, so dfx uses the
+    replica container's own default, which is the identity a * -> ICP payout must
+    sign with; tests/test_icp_adapter.py asserts both of those by name.
+
+    A SECOND LAUNCHER WAS THE ALTERNATIVE AND IS THE THING THIS REPOSITORY KEEPS
+    PAYING FOR (rule 8). icp_custody_addresses.py:99-102 already states the rule
+    for this exact function -- it routes through here "rather than a second
+    implementation of 'run dfx in compose'" -- and a top-up tool building its own
+    argv would have had to re-derive the absolute compose paths, the explicit cwd,
+    the `-T`, and redact_secrets() on both streams, each of which exists because
+    of a separate measured failure.
 
     TWO TRANSPORTS, CHOSEN BY `network_url`, because the one that works depends on
     where this process is running -- and that is the whole reason this parameter
@@ -336,7 +447,17 @@ def dfx_transport(service: str, timeout: float, network_url: str = ""):
             # needs the DESK's identity, which exists only in the replica container.
             # Silently creating a key and signing with it is the alternative, and it
             # is what just happened.
-            dfx_argv += ["--identity", "anonymous", "--network", network_url]
+            dfx_argv += ["--identity", identity or "anonymous", "--network", network_url]
+        elif identity:
+            # THE COMPOSE TRANSPORT TAKES AN IDENTITY ONLY WHEN ONE IS ASKED FOR,
+            # and the asymmetry with the branch above is deliberate rather than an
+            # oversight. Inside the replica container dfx HAS identities -- the
+            # desk's own is the default there, and `minter` exists beside it
+            # (docker-compose.icp.yml keeps them on the icp-state volume) -- so
+            # omitting the flag selects the right one for a payout. Defaulting to
+            # anonymous here would make every ICP payout debit an empty account,
+            # which is what tests/test_icp_adapter.py pins by name.
+            dfx_argv += ["--identity", identity]
         dfx_argv += [canister, method, argument]
 
         if network_url:
@@ -901,36 +1022,15 @@ class ICPAdapter:
             )
 
         fee_e8s = self._nat("icrc1_fee")
-        argument = (
-            "(record { memo = 0 : nat64; "
-            f"amount = record {{ e8s = {e8s} : nat64 }}; "
-            f"fee = record {{ e8s = {fee_e8s} : nat64 }}; "
-            "from_subaccount = null; "
-            f"to = {_hex_to_blob(address)}; "
-            f"created_at_time = opt record {{ timestamp_nanos = {created_at_time_nanos} : nat64 }} }})"
+        argument = transfer_argument(
+            to_account=address, e8s=e8s, fee_e8s=fee_e8s,
+            created_at_time_nanos=created_at_time_nanos,
         )
         out = self._call(self.ledger_canister_id, "transfer", argument)
-        ok = _TRANSFER_OK.search(out)
-        if ok:
-            return ok.group(1).replace("_", "")
+        index = transfer_block_index(out)
+        if index:
+            return index
 
-        # TxDuplicate IS SUCCESS, AND RAISING ON IT WAS A DEFECT THIS FILE SHIPPED.
-        # The ledger is saying "this exact transfer already happened; its block index
-        # is <n>". That is precisely what the idempotency key exists to produce, so a
-        # retry after a timeout must get the SAME answer the first call would have
-        # given -- not an exception. Measured on the local replica 2026-10-06: the
-        # same call twice left desk 999.7499 and subaccount 1 at 0.25 both times, the
-        # second answering TxDuplicate, so the funds genuinely did not move twice.
-        #
-        # The version before this returned the block index on Ok and RAISED here,
-        # with a message telling the caller to read it as success. That put the
-        # decision in prose a payout worker would have had to parse, and the failure
-        # mode is specific: a worker retrying after a timeout sees an exception and
-        # marks a payout that SUCCEEDED as failed (rule 10 -- the decision belongs in
-        # a function, not in an error string).
-        duplicate = _TRANSFER_DUPLICATE.search(out)
-        if duplicate:
-            return duplicate.group(1).replace("_", "")
         raise ICPCallFailed(
             f"transfer of {amount} ICP ({e8s} e8s, fee {fee_e8s} e8s) to {address} did not return a "
             f"block index. Whether anything moved is NOT established by this message -- read the "

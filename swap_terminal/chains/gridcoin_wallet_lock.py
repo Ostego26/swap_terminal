@@ -274,12 +274,41 @@ def unlocked_for_payout(adapter, passphrase: str, seconds: int = DEFAULT_UNLOCK_
     WHY THE FIX IS NOT "MOVE THE LOCK INSIDE THE TRY". Restoring the staking
     unlock needs THE PASSPHRASE, and a wrong passphrase is exactly what failed --
     so there is nothing this function could do to restore it. What it can do is
-    SAY so, which is what unlock_for_sending()'s refusal now carries: the wallet
-    is locked, staking is off, and re-unlocking it for staking is a command the
-    operator runs with a passphrase this process does not have.
+    SAY so.
+
+    AND UNTIL 2026-10-07 IT DID NOT, which is the second half of the same defect.
+    The paragraph above used to end "...which is what unlock_for_sending()'s
+    refusal now carries", and that was a claim about code that was never written:
+    unlock_for_sending()'s body raises the daemon's own RPCError and says nothing
+    about the lock this function took one line earlier. So the measurement was
+    recorded, the fix was described, and the description was shipped instead of the
+    fix -- which is worse than either, because a reader checking whether the
+    failure explains itself finds a docstring saying it does.
+
+    It is written below now, HERE rather than in unlock_for_sending(), and the
+    placement is the point: this function is what called lock(), so this is the
+    only frame that knows the wallet was staking a moment ago. unlock_for_sending()
+    has other callers that did not lock first, and a message from there claiming
+    staking was turned off would be wrong for every one of them (rule 8 -- the
+    difference belongs where it is true).
     """
     lock(adapter)
-    unlock_for_sending(adapter, passphrase, seconds)
+    try:
+        unlock_for_sending(adapter, passphrase, seconds)
+    except Exception as error:
+        # NOT A RETRY AND NOT A RESTORE. There is nothing to restore with: the
+        # staking unlock needs the same passphrase that just failed. This re-raises
+        # with what the operator has to know -- their wallet is locked, it is not
+        # staking, and only they hold what fixes it.
+        reason = (
+            f"the wallet was LOCKED by this call and the unlock then FAILED, so it is locked AND "
+            f"NOT STAKING. Nothing was sent. This cannot be restored from here: re-enabling staking "
+            f"needs the same passphrase that just failed, which this process does not have. Run "
+            f"`walletpassphrase <your passphrase> {STAKING_UNLOCK_SECONDS} true` against this daemon "
+            f"to put it back to staking. The daemon said: {error}"
+        )
+        logger.error("gridcoin wallet: unlock for sending FAILED -- %s", reason)
+        raise GridcoinLockError(reason) from error
     try:
         yield
     finally:

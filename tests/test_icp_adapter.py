@@ -667,6 +667,14 @@ def test_the_COMPOSE_transport_is_unchanged_and_still_the_default(monkeypatch):
         "is the default and is the one a * -> ICP payout must sign with. Forcing anonymous here "
         "would make every ICP payout debit an empty account"
     )
+    # WITH AN IDENTITY ASKED FOR, THIS TRANSPORT DOES PASS ONE, and that is tested
+    # in tests/test_fund_desk.py::test_the_mint_identity_reaches_dfx_and_the_read_
+    # identity_does_not rather than here -- named at both sites (rule 8) because the
+    # assertion above reads as "this transport never signs", which has been the
+    # whole truth only until 2026-10-07. dfx_transport() gained an `identity`
+    # parameter for fund_desk.py's ICP mint, which must sign as `minter`; EMPTY
+    # still means no flag, which is what this assertion is about and what keeps
+    # payouts signing as the container's default.
     assert recorded["cwd"] == icp_module._REPO_ROOT, (
         "compose resolves the relative paths INSIDE its files against the cwd"
     )
