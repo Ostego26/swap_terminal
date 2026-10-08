@@ -463,12 +463,40 @@ class Ledger:
 
 
 def mint_plan(reply: str) -> tuple[dict, Ledger]:
+    """A plan shaped the way icp_plan() returns one, including the e8s it derived.
+
+    `e8s` IS ON THE PLAN AND NOT RE-DERIVED FROM `amount`, which is the thing under
+    test: the ledger's transfer takes an integer, so icp_plan() converts once and
+    renders the float from it. A fixture that omitted e8s would pass against an
+    icp_mint() that converted the float a second time -- the duplicate this shape
+    exists to prevent.
+    """
     ledger = Ledger(reply)
     return {
-        "refusal": "", "asset": "ICP", "destination": "a" * 64, "amount": 5.0, "why": "",
-        "held": 1.0, "available": None, "mint": ledger, "ledger": "bkyz2-fmaaa-aaaaa-qaaaq-cai",
-        "source_label": "",
+        "refusal": "", "asset": "ICP", "destination": "a" * 64, "amount": 5.0, "e8s": 500_000_000,
+        "why": "", "held": 1.0, "available": None, "mint": ledger,
+        "ledger": "bkyz2-fmaaa-aaaaa-qaaaq-cai", "source_label": "",
     }, ledger
+
+
+def test_the_mint_sends_the_integer_the_plan_derived_and_not_a_reconversion():
+    """A plan whose float and integer disagree must send the INTEGER.
+
+    This is the only test that can tell the two apart, and it is why the fixture
+    above carries both: an e8s of 1 against an amount of 5.0 is not a state
+    icp_plan() can produce, which is exactly what makes it a probe. If icp_mint()
+    ever converts the float again, the argument says 500000000.
+
+    THE REAL CASE IT GUARDS, measured on the operator's host 2026-10-07: the first
+    ICP dry run printed `amount 1.050200000000018`, fifteen digits of binary
+    floating-point artifact in a number about to become e8s. One conversion, at the
+    plan, is what keeps the printed figure and the sent figure the same number.
+    """
+    plan, ledger = mint_plan("(variant { Ok = 3 })")
+    plan["e8s"] = 1
+    assert icp_mint(plan, 1) == "3"
+    [(_canister, _method, argument)] = ledger.calls
+    assert "amount = record { e8s = 1 : nat64 }" in argument
 
 
 def test_a_mint_names_a_zero_fee_and_the_desk_account():

@@ -116,11 +116,12 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
-from chains.coin_amounts import amount_to_base_units
+from chains.coin_amounts import amount_to_base_units, fit_to_chain_precision
 from chains.gridcoin import GridcoinAdapter
 from chains.gridcoin_wallet_lock import (
     STAKING_UNLOCK_SECONDS,
@@ -481,6 +482,19 @@ def grc_plan(console_say, target: float) -> dict:
                 f"stays with the operator (from {reserve_how})  <- all TESTNET, established by the "
                 f"port gate above before either socket opened")
     amount, why = amount_to_move(held, target, available, reserve)
+    # QUANTIZED HERE SO THE DRY RUN PRINTS THE FIGURE THE APPLY RUN SENDS.
+    # chains/base.send_to_address() runs fit_to_chain_precision() on whatever it is
+    # handed and logs the reduction -- so without this the two runs could differ in
+    # the last decimal place and only the second would say so. Idempotent: fitting an
+    # already-fitted amount changes nothing, which is what makes it safe to do twice.
+    #
+    # THE ICP SIDE CANNOT USE THIS FUNCTION, and the difference is named at both
+    # sites (rule 8): CHAIN_DECIMALS covers the chains whose RPC takes a DECIMAL
+    # amount, and ICP -- like XRP and SOL -- is handed integer base units instead,
+    # so icp_plan() quantizes through amount_to_base_units() and carries the integer.
+    amount, fitted = fit_to_chain_precision(amount, "GRC")
+    if fitted:
+        console_say(f"precision   {fitted}")
     return {
         "refusal": "", "asset": "GRC", "source": source, "destination": destination,
         "amount": amount, "why": why, "held": held, "available": available,
@@ -583,9 +597,33 @@ def icp_plan(console_say, target: float, minter_identity: str) -> dict:
     # refuse everything. This keeps amount_to_move() the single arithmetic without
     # teaching it about minting.
     amount, why = amount_to_move(held, target, max(target - held, 0.0), source_reserve=0.0)
+    # "keeps 0.0 spare" IS TRUE AND MISLEADING, so it is answered rather than left.
+    # amount_to_move() does not know this is a mint, and passing the shortfall as the
+    # source balance makes its sentence end with a spare of zero -- which reads as a
+    # source that was just emptied. There is no source: the minting account holds
+    # nothing by construction and icp_ledger_init.py refuses a minter that also holds
+    # a balance.
+    why += (
+        ". There is no source balance to cap against: a mint CREATES the tokens, so the only limit "
+        "is the target"
+    )
+    # E8S IS THE AUTHORITY AND THE FLOAT IS A RENDERING OF IT, which is the opposite
+    # way round from the GRC side above -- the ledger's `transfer` takes
+    # `amount = record { e8s = N : nat64 }`, an integer, so the decimal figure only
+    # ever existed to be converted.
+    #
+    # IT IS CONVERTED ONCE, HERE, AND CARRIED. The operator's first ICP dry run
+    # printed `amount 1.050200000000018` -- 1000.0 - 998.9498 in binary floating
+    # point, fifteen digits of artifact in a number about to become 105020000 e8s.
+    # Converting in icp_mint() instead would leave the printed figure and the sent
+    # figure derived separately from a float, which is rule 8's duplicate on the one
+    # value that decides how much moves.
+    e8s = amount_to_base_units(amount, ICP_DECIMALS)
+    amount = float(Decimal(e8s) / Decimal(10) ** ICP_DECIMALS)
     return {
         "refusal": "", "asset": "ICP", "destination": destination, "amount": amount, "why": why,
-        "held": held, "available": None, "mint": mint, "ledger": icp["ledger_canister_id"],
+        "e8s": e8s, "held": held, "available": None, "mint": mint,
+        "ledger": icp["ledger_canister_id"],
         "source_label": f"the ledger's minting account, signed by dfx identity {minter_identity!r}",
     }
 
@@ -602,7 +640,10 @@ def icp_mint(plan: dict, created_at_time_nanos: int) -> str:
     operator to pass it back with --idempotency-key if they re-run.
     """
     argument = transfer_argument(
-        to_account=plan["destination"], e8s=amount_to_base_units(plan["amount"], ICP_DECIMALS),
+        # plan["e8s"], NOT a second conversion of plan["amount"]. icp_plan() derived
+        # the integer and then derived the printed float FROM it, so re-converting
+        # here would be the only place the two could disagree.
+        to_account=plan["destination"], e8s=plan["e8s"],
         fee_e8s=MINT_FEE_E8S, created_at_time_nanos=created_at_time_nanos,
     )
     index = transfer_block_index(plan["mint"](plan["ledger"], "transfer", argument))
