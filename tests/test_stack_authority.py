@@ -1847,3 +1847,88 @@ def test_the_steps_up_prints_are_numbered_consecutively():
         f"renumbers every one after it, and an operator reading '3' twice cannot tell which "
         f"check they are watching"
     )
+
+
+def test_a_failed_lookup_is_unknown_and_not_absent():
+    """A FAIL-OPEN I SHIPPED AND CAUGHT BY RUNNING IT, not by reading it back.
+
+    `docker compose ps -q` returns no container id when it FAILS, exactly as it
+    does when no container exists. The branches were ordered `if not container ->
+    absent` before `if reason -> unknown`, so a lookup that never happened answered
+
+        absent -- `up` will create one, and docker-compose.icp.yml mounts
+        /root/.local/share/dfx from a named volume, so its canisters will survive
+
+    for a replica that might be holding the ledger in its writable layer. That is
+    the precise false all-clear the whole verdict exists to refuse, reached through
+    the door of argument ordering.
+
+    It was invisible in the seeded tests because every one of them passed a
+    container id with a reason, which never exercises the overlap. It surfaced the
+    first time the function ran against a real docker that could not answer.
+    """
+    status, headline, detail = replica_state_verdict("", "", "docker compose ps exited 1: no daemon")
+    assert status == "unknown", (
+        f"a failed lookup classified as {status} -- `absent` here reads as 'nothing is at "
+        f"risk', which is permission to run a command that can destroy the ledger"
+    )
+    said = " ".join([headline, *detail])
+    assert "no daemon" in said, f"docker's own sentence is what the operator acts on: {said}"
+    assert "named volume, so its canisters will survive" not in said, (
+        "the absent branch's reassurance must not be reachable without a reading"
+    )
+
+
+def test_no_verdict_prints_a_command_with_a_placeholder_in_it():
+    """`docker inspect ?` reached the operator, and a command in output gets run.
+
+    The id was a literal "?" passed to dodge the ordering bug above -- so the
+    workaround and the defect were the same line. Rule 14's "pasted output has to
+    be self-describing" cuts here: a command naming an id that does not exist is
+    worse than no command, because the reader spends the attempt before doubting
+    the line.
+    """
+    for container, reason in (("", "docker compose ps exited 1"), ("abc123", "docker inspect exited 1")):
+        _status, headline, detail = replica_state_verdict(container, "", reason)
+        for line in [headline, *detail]:
+            assert "?`" not in line and "inspect ?" not in line, (
+                f"a placeholder leaked into a command the operator is invited to run: {line}"
+            )
+        if not container:
+            assert "docker inspect" not in " ".join(detail), (
+                "with no container id resolved there is nothing to inspect, so the remedy "
+                "must point at resolving it instead"
+            )
+
+
+def test_the_preflight_inspects_the_stack_up_will_act_on(monkeypatch, capsys):
+    """`-f` overrides which compose files `up` uses, and the pre-flight must follow.
+
+    It read the module-level COMPOSE_FILES while cmd_up acts on its `files`
+    argument, so `swap_stack.py up -f something.yml` would have resolved the
+    DEFAULT stack's replica, inspected THAT container's mounts, and printed the
+    answer as a pre-flight for a rebuild of a different one. A reading of the
+    wrong thing is worse than no reading: it carries the authority of having
+    checked.
+    """
+    seen: list[tuple] = []
+
+    class _Done:
+        returncode, stdout, stderr = 1, "", "stubbed: nothing ran"
+
+    def fake_compose(args, files, **_kwargs):
+        seen.append((tuple(args), files))
+        return _Done()
+
+    monkeypatch.setattr(swap_stack, "compose", fake_compose)
+    swap_stack._say_replica_state(("alpha.yml", "beta.yml"))
+    capsys.readouterr()
+    assert seen, "the pre-flight ran no compose command at all"
+    args, files = seen[0]
+    assert files == ("alpha.yml", "beta.yml"), (
+        f"the pre-flight asked compose about {files} while `up` was given "
+        f"('alpha.yml', 'beta.yml')"
+    )
+    assert args[:2] == ("ps", "-q"), (
+        f"the container is resolved by asking compose, not by guessing a name: {args}"
+    )

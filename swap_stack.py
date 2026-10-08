@@ -1119,7 +1119,7 @@ def _say_code_version_repeat(status: str, headline: str) -> None:
     say("                    by current code, so check it against origin before acting on it.")
 
 
-def replica_state() -> tuple[str, str, list[str]]:
+def replica_state(files: tuple[str, ...]) -> tuple[str, str, list[str]]:
     """Ask the LIVE replica container where its dfx state is. Changes nothing.
 
     Two reads and neither writes: `docker compose ps -q icp-replica` for the
@@ -1140,14 +1140,14 @@ def replica_state() -> tuple[str, str, list[str]]:
     Destination answers exactly that.
     """
     try:
-        listed = compose(["ps", "-q", _DFX_SERVICE], files=COMPOSE_FILES,
+        listed = compose(["ps", "-q", _DFX_SERVICE], files=files,
                          timeout=_CANISTER_ID_TIMEOUT_SECONDS)
     except (subprocess.TimeoutExpired, OSError) as error:
-        return replica_state_verdict("?", "", f"{type(error).__name__} running docker compose ps")
+        return replica_state_verdict("", "", f"{type(error).__name__} running docker compose ps")
     if listed.returncode != 0:
         return replica_state_verdict(
-            "?", "", f"docker compose ps exited {listed.returncode}: "
-                     f"{listed.stderr.strip() or '(no stderr)'}")
+            "", "", f"docker compose ps exited {listed.returncode}: "
+                    f"{listed.stderr.strip() or '(no stderr)'}")
     lines = listed.stdout.strip().splitlines()
     container = lines[0].strip() if lines else ""
     if not container:
@@ -1168,7 +1168,7 @@ def replica_state() -> tuple[str, str, list[str]]:
     return replica_state_verdict(container, inspected.stdout)
 
 
-def _say_replica_state() -> None:
+def _say_replica_state(files: tuple[str, ...]) -> None:
     """The pre-flight, printed BEFORE `up` touches an image (rule 14: announce first).
 
     A warning after the rebuild is a post-mortem. This one has to land while the
@@ -1177,7 +1177,7 @@ def _say_replica_state() -> None:
     thing to nobody who was about to act on it.
     """
     say(f"  replica state     is {REPLICA_STATE_PATH} on a mount that outlives a recreate?")
-    status, headline, detail = replica_state()
+    status, headline, detail = replica_state(files)
     say(f"  {('SAFE' if status == 'on_volume' else status.upper()):<16}  {headline}")
     for line in detail:
         say(f"                    {line}")
@@ -1263,7 +1263,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
 
     # ASKED BEFORE THE REBUILD, because afterwards the answer cannot help.
     say("  2. can this `up` cost the canisters?")
-    _say_replica_state()
+    _say_replica_state(files)
     say("")
 
     say("  3. containers")

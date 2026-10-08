@@ -1008,20 +1008,22 @@ def replica_state_verdict(
     at_path = [line.split() for line in mounts.splitlines()
                if line.split()[1:2] == [REPLICA_STATE_PATH]]
     protected = [fields for fields in at_path if fields[0] in durable]
+    if reason:
+        return (
+            "unknown",
+            f"COULD NOT READ the replica's mounts: {reason}",
+            ["so this does NOT say the replica's state is safe -- it says nobody checked.",
+             *([f"`docker inspect {container}` names them; the one that matters is "
+                f"{REPLICA_STATE_PATH}."] if container else
+               ["the replica container could not even be resolved, so there is no id to "
+                "inspect. `docker compose ps icp-replica` is the next thing to look at."])],
+        )
     if not container:
         return (
             "absent",
             "no replica container exists yet",
             [f"`up` will create one, and docker-compose.icp.yml mounts {REPLICA_STATE_PATH}",
              "from a named volume, so its canisters will survive a later recreate."],
-        )
-    if reason:
-        return (
-            "unknown",
-            f"COULD NOT READ the replica's mounts: {reason}",
-            ["so this does NOT say the replica's state is safe -- it says nobody checked.",
-             f"`docker inspect {container}` names them; the one that matters is",
-             f"{REPLICA_STATE_PATH}."],
         )
     if protected:
         kind = protected[0][0]
