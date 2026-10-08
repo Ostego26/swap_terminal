@@ -201,6 +201,105 @@ def test_an_older_daemon_with_no_getbalances_says_so_instead_of_printing_zero():
     assert "ENCRYPTED" in out and "passphrase" in out, out
 
 
+class _AccountShadowed(_Adapter):
+    """A pre-0.17 daemon where a bare `getbalance` skips account-assigned outputs.
+
+    THE OPERATOR'S HOST, 2026-10-08, measured after a 1,988.99751357 GRC transfer
+    landed with 3 confirmations:
+
+        getbalance ()          11.00248643
+        getbalance ("*", 0)    2000.0
+        listunspent 0          2000.0 total, the new output present and spendable
+
+    The stub above answers by METHOD NAME alone, which is why this subclass exists:
+    the whole defect is that one method returns two different numbers depending on
+    its first argument, and a fixture that cannot express that would have reported
+    agreement -- which is what the suite did before this class was written.
+    """
+
+    def __init__(self, bare: float, whole, answers=None):
+        super().__init__(dict(answers or {
+            "getblockchaininfo": {"chain": "testnet"},
+            "getblockcount": 3304792,
+            "getwalletinfo": {"unlocked_until": 1822988493},
+        }))
+        self.answers["getbalance"] = bare
+        self._whole = whole
+
+    def call(self, method, *params):
+        if method == "getbalance" and params and params[0] == "*":
+            self.asked.append(method)
+            if self._whole is None:
+                raise RuntimeError("Accounting API is deprecated (rpc code -1)")
+            return self._whole
+        return super().call(method, *params)
+
+
+def test_a_wallet_holding_more_than_getbalance_admits_says_so_loudly():
+    """The defect that made a 2000 GRC wallet read as 11, 2026-10-08.
+
+    `services/swap_service` creates every deposit address with
+    getnewaddress("swap_<id>"), and on a pre-0.17 daemon that first argument is an
+    ACCOUNT rather than a label -- so the desk's own deposit addresses are invisible
+    to a bare `getbalance`. The operator's 1,988.99751357 GRC had THREE confirmations
+    and was in `listunspent`, and the screen still said 11.00248643.
+
+    THE ALARM NAMES THE CONSEQUENCE, not just the discrepancy, because the number
+    matters to a decision made elsewhere: chains/base.get_balance() makes the bare
+    call and payout_service.refresh_wallet_inventory() stores it as hot_confirmed
+    every 60s, so the desk refuses payouts and fee sweeps it could fund.
+
+    MUTATION: compare with `==` instead of a tolerance, or drop the alarm entirely.
+    Dropping it fails here on the "HOLDS MORE" line. Verified 2026-10-08.
+    """
+    adapter = _AccountShadowed(11.00248643, 2000.0)
+    recorder = _Recorder()
+    held = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
+    out = recorder.text()
+
+    assert "HOLDS MORE THAN `getbalance` ADMITS" in out, out
+    assert "1988.99751357" in out, f"the shadowed amount itself must be named:\n{out}"
+    assert "2000.00000000" in out, out
+    assert "hot_confirmed" in out, f"the alarm must name what reads the smaller figure:\n{out}"
+    assert "listunspent 0" in out, f"and how to confirm it independently:\n{out}"
+    # THE RETURNED FIGURE IS WHAT THE WALLET HOLDS. say_what_levels_them() asks what
+    # it would take to reach a target, and returning the bare figure would have said
+    # the desk needed another 1,988.99 GRC while that exact amount sat in it.
+    assert held is not None
+    assert float(held) == pytest.approx(2000.0)
+
+
+def test_two_agreeing_readings_print_no_alarm_at_all():
+    """Every chain where the accounts idiom does not apply must stay quiet.
+
+    An alarm on a wallet that is fine is the cried-wolf noise this file has already
+    fixed once, for XRP's get_balance().
+    """
+    adapter = _AccountShadowed(49.87654321, 49.87654321)
+    recorder = _Recorder()
+    chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
+    out = recorder.text()
+    assert "HOLDS MORE" not in out, out
+    assert "shadowed" not in out, out
+
+
+def test_an_unreadable_second_opinion_says_so_rather_than_claiming_agreement():
+    """Rule 14: a missing second reading is a missing reading, not a clean bill.
+
+    MUTATION: return (bare, "") when the "*" form raises. This fails -- the output
+    would claim agreement it never established, which is the fail-open direction.
+    """
+    adapter = _AccountShadowed(11.00248643, None)
+    recorder = _Recorder()
+    held = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
+    out = recorder.text()
+    assert "whole     not reported" in out, out
+    assert "HOLDS MORE" not in out, "nothing was established, so nothing is alleged"
+    assert float(held) == pytest.approx(11.00248643), (
+        "with no second reading the only figure available is the bare one"
+    )
+
+
 def test_an_unconfigured_chain_names_the_variable_that_is_missing():
     """Rule 14: "no adapter" is useless; which environment variable is actionable."""
     recorder = _Recorder()
