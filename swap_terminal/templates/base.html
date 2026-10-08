@@ -41,14 +41,41 @@
   <a class="skip" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="{{ url_for('atm.start') }}">
+      {#- THE BRAND GOES HOME WITHIN THE CURRENT SURFACE, NOT ACROSS TO THE OTHER
+          ONE. It was `url_for('atm.start')` unconditionally, so clicking the logo
+          on the operator dashboard dropped you into the customer ATM -- which is
+          the second route out of the operator surface and the easier one to hit
+          by accident, because a logo is where everybody clicks to get back. -#}
+      <a class="brand" href="{{ url_for('admin.admin_page') if surface == 'admin' else url_for('atm.start') }}">
         <span class="brand-mark" aria-hidden="true">&#8646;</span>
         <span class="brand-text">Swap Terminal</span>
       </a>
+      {#- NO LINK FROM THE OPERATOR SURFACE TO THE CUSTOMER ONE. Operator,
+          2026-10-08: "you can get to the swap terminal from the operator
+          terminal . NO."
+
+          This nav used to render both links on every page, with only the `here`
+          class conditional -- so the operator pages advertised the customer flow
+          and the brand above pointed at it too. The operator's own navigation is
+          the tab strip in _admin_tabs.html; this strip is for choosing a SURFACE,
+          and from the operator side there is now no surface to choose.
+
+          THE WHOLE <nav> IS SUPPRESSED RATHER THAN LEFT HOLDING ONE ITEM. A nav
+          labelled "Surfaces" containing a single link to the page you are already
+          on is noise with a landmark role attached -- a screen reader announces a
+          navigation region that navigates nowhere. Rule 14's "(none) is a result"
+          does not apply to chrome: an empty nav is not a result an operator
+          needs, it is a control that should not be there.
+
+          The customer side keeps both, and that direction was NOT what the
+          operator objected to -- see the note in the commit; it is one line to
+          change if they want it symmetrical. -#}
+      {% if surface != 'admin' %}
       <nav class="topnav" aria-label="Surfaces">
         <a href="{{ url_for('atm.start') }}"{% if surface == 'user' %} class="here" aria-current="page"{% endif %}>Swap</a>
         <a href="{{ url_for('admin.admin_page') }}"{% if surface == 'admin' %} class="here" aria-current="page"{% endif %}>Operator</a>
       </nav>
+      {% endif %}
     </div>
   </header>
 

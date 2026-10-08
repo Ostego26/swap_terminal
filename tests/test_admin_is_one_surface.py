@@ -103,7 +103,14 @@ def test_both_admin_pages_use_the_one_shell(client, path, _tab):
     with every one of those tokens unresolved.
     """
     html = client.get(path).data.decode()
-    assert 'class="topnav"' in html, f"{path} has no surface nav -- it is not in the shared shell"
+    # THE HEADER, NOT THE NAV INSIDE IT. This asserted `class="topnav"` until the
+    # operator asked for the operator surface to stop linking to the customer one
+    # -- which suppresses that nav on exactly these two pages. The invariant
+    # ("both pages are in the one shell") did not change; the evidence for it did,
+    # and a test that pins the evidence rather than the invariant fails on a
+    # correct change. base.html's topbar and footer are the shell.
+    assert 'class="topbar"' in html, f"{path} has no topbar -- it is not in the shared shell"
+    assert 'class="brand"' in html, f"{path} has no brand mark -- it is not in the shared shell"
     assert "styles.css" in html, (
         f"{path} does not load styles.css. kill_switch.css's tokens reference that file's "
         ":root palette, so without it they resolve to nothing."
@@ -223,4 +230,65 @@ def test_the_surface_the_strip_cannot_link_to_is_named():
     assert "localhost:4943" not in markup, (
         "the partial's MARKUP contains a replica URL. If that includes a canister id it is a "
         "guess, and a guessed id links to somebody else's deployment."
+    )
+
+
+@pytest.mark.parametrize(("path", "_tab"), ADMIN_PAGES)
+def test_no_operator_page_offers_a_way_into_the_customer_flow(client, path, _tab):
+    """Operator, 2026-10-08: "you can get to the swap terminal from the operator
+    terminal . NO."
+
+    THERE WERE TWO ROUTES AND THE SECOND WAS THE EASIER ONE TO HIT. base.html's
+    topnav rendered both surface links on every page with only the `here` class
+    conditional -- and the brand above it was `url_for('atm.start')`
+    unconditionally, so clicking the logo on the operator dashboard dropped you
+    into the customer ATM. A logo is where everybody clicks to get back, so the
+    one nobody would have listed was the one that would actually have fired.
+
+    ASSERTED OVER THE WHOLE RENDERED PAGE, not just the header, because the
+    point is that no operator page offers the route -- a link added to the footer
+    or into a prose paragraph later would satisfy a header-only check while being
+    the same defect.
+    """
+    html = client.get(path).data.decode()
+
+    # Every href on the page, resolved to the paths this app actually serves.
+    hrefs = set(re.findall(r'href="([^"]*)"', html))
+    customer = {"/", "/swap-lookup"}
+    offending = sorted(hrefs & customer)
+    assert not offending, (
+        f"{path} links to {offending}, which is the customer flow. The operator surface must "
+        "not offer a way into it. The operator's own navigation is the tab strip in "
+        "_admin_tabs.html; base.html suppresses the surface nav when surface == 'admin'."
+    )
+
+    # And the brand specifically, by name, because it is the route that was
+    # missed the first time this was asked for.
+    brand = re.search(r'class="brand" href="([^"]*)"', html)
+    assert brand, f"{path} has no brand link at all -- base.html's header changed shape"
+    assert brand.group(1) != "/", (
+        f"{path}'s brand/logo points at the customer ATM. On the operator surface it must go "
+        "to the operator's own home."
+    )
+
+
+def test_the_customer_page_is_NOT_changed_by_that(client):
+    """The objection was one-directional, and this pins that reading.
+
+    The operator named operator -> swap. The reverse link still exists, and
+    whether it should is a separate question with a separate argument: /admin's
+    own banner says it is unauthenticated and exposes every swap id, deposit
+    address, payout address and balance, so a link to it from a customer page is
+    arguably worse. That is raised rather than acted on, and this test makes the
+    current state deliberate instead of accidental -- so a future pass removing
+    it has to mean to.
+    """
+    html = client.get("/").data.decode()
+    assert 'class="topnav"' in html, (
+        "the customer page lost its surface nav. Only the OPERATOR side was asked to lose it."
+    )
+    assert 'href="/admin"' in html, (
+        "the customer page no longer links to /admin. That may well be right -- see this "
+        "test's docstring -- but it was not what was asked for, so it should be a decision "
+        "rather than a side effect."
     )
