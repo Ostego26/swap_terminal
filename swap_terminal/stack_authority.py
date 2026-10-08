@@ -223,6 +223,126 @@ def stray_verdict(cmdline: str, repo_root: Path) -> tuple[str, str]:
     )
 
 
+#: The verdicts report_listeners() can return, and what each one licenses.
+#:
+#: NAMED AS A SET so print_listeners()'s label map can be asserted complete rather
+#: than discovered incomplete by a KeyError in front of the operator -- that map
+#: indexes on the verdict with [], so a verdict with no label raises mid-report and
+#: takes the finding down with it.
+LISTENER_VERDICTS = (
+    "ours",
+    "ours (container)",
+    "container",
+    "foreign",
+    "refused",
+    "owner unknown",
+)
+
+
+def container_verdict(container: str | None, stack_container_ids: frozenset[str]) -> tuple[str, str]:
+    """Is a containerized listener one of THIS stack's containers? (verdict, reason).
+
+    PURE. The caller asks docker which containers the stack has and hands the ids
+    in, exactly as serving_verdict() takes probe outcomes rather than opening
+    sockets -- so the decision is testable with no daemon, no socket and no docker
+    on PATH.
+
+    ---------------------------------------------------------------------------
+    THE DEFECT THIS EXISTS TO FIX, measured on the operator's host 2026-10-08
+    ---------------------------------------------------------------------------
+
+    `swap_stack.py status` printed this about the container that was serving the
+    operator's page:
+
+        IN A CONTAINER    :5101 pid=85833
+                          in container 40bfc3701f79 = swap-web (image
+                          swap-terminal/web:local), which `docker compose ps`
+                          above does not list -- so it belongs to no compose
+                          project this stack names. Stop it with
+                          `docker stop 40bfc3701f79`
+
+    `docker compose ps` DID list it. It was four lines further up the same
+    report, named swap-web, service `web`, Up 13 hours. The tool told the
+    operator to stop the web container that was serving their UI, and gave a
+    reason that its own output contradicted.
+
+    HOW IT GOT THERE, because the mechanism is the lesson. On 2026-10-06 the
+    listener on 5101 genuinely WAS a container no compose project named -- a
+    leftover from a `docker run` or an earlier project name -- and
+    container_id()'s docstring still records that measurement correctly. The
+    finding was then written into the report as a SENTENCE rather than as a
+    check: every containerized listener got told it belonged to no compose
+    project, because on the day it was written every containerized listener did.
+
+    That is a measurement hardening into a fact, which is what rule 17 forbids
+    and what rule 3 means by stating the denominator. The claim "`docker compose
+    ps` does not list it" is cheap to actually TEST -- `docker compose ps -q` is
+    the same question the sentence was asserting an answer to -- so it is tested
+    here and the sentence is now produced by the branch it describes.
+
+    WHY THIS IS WORSE THAN A WRONG COMMENT. `docker stop <id>` on a serving web
+    container is a live action against the thing the operator asked to run, handed
+    to them with a reason that reads as measured. Rule 16's line is "reversible by
+    a deploy versus reversible only by a trade", and this is the third category it
+    does not name: advice that is wrong in the direction of destroying working
+    state. A refusal or a verdict that misnames its condition is the one thing it
+    must not do.
+
+    ---------------------------------------------------------------------------
+
+    @param container  the 12-character id from container_id(), or None for a host
+                      process.
+    @param stack_container_ids  every container id `docker compose ps -q` reported
+                      for this stack, full length. Empty means either the stack has
+                      no containers or docker could not be asked -- see below.
+    """
+    if container is None:
+        raise ValueError("container_verdict is for containerized listeners; container was None")
+
+    # PREFIX MATCH, because the two sides are different lengths by construction:
+    # container_id() returns the first twelve characters (what docker prints) and
+    # `docker compose ps -q` returns the full 64. Comparing them with == would
+    # never match and would send every container down the "not ours" branch --
+    # which is the bug being fixed, reintroduced by the fix.
+    for full in stack_container_ids:
+        if full.startswith(container):
+            # NO STOP COMMAND APPEARS IN THIS STRING, and that is deliberate
+            # rather than a phrasing preference. The first version ended "`...
+            # down` is the lever, not `docker stop`" -- which names the right
+            # lever and still puts a `docker stop` in front of an operator who
+            # is skimming a report for something to paste. A message must not
+            # contain a command it does not want run; the test asserts the
+            # absence of the substring for exactly that reason, and the way to
+            # satisfy it is to not write one.
+            return "ours (container)", (
+                f"container {container} IS one this stack's compose files manage -- it is in "
+                "the `docker compose ps` listing above. Nothing to do about it here: "
+                "`swap_stack.py down` is what stops this stack's containers"
+            )
+
+    if not stack_container_ids:
+        # DOCKER COULD NOT BE ASKED, OR THE STACK HAS NO CONTAINERS, and these are
+        # not the same thing -- but neither licenses the "belongs to no compose
+        # project" claim, because that claim requires a listing to be absent FROM.
+        # Saying so is the fail-closed answer: the operator is told what is not
+        # known rather than handed a stop command built on an unasked question.
+        return "container", (
+            f"container {container} holds this port, and this report could not establish whether "
+            "any compose project manages it -- `docker compose ps -q` returned nothing, which is "
+            "either a stack with no containers or a docker that could not be reached. "
+            f"`docker inspect {container}` names it. NO stop is suggested, because "
+            "'not in a listing' cannot be concluded from a listing that was never obtained"
+        )
+
+    return "container", (
+        f"container {container} is NOT among the {len(stack_container_ids)} container(s) "
+        "`docker compose ps` lists for this stack, so it belongs to no compose project this "
+        "stack names -- a leftover from a `docker run` or an earlier project name is the usual "
+        f"cause. The lever is `docker stop {container}`, after `docker inspect {container}` "
+        "names it"
+    )
+
+
 def container_id(cgroup: str) -> str | None:
     """The container id out of a /proc/<pid>/cgroup body, or None for a host process.
 

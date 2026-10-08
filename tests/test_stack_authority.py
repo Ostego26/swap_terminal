@@ -24,15 +24,20 @@ pids_owning_inodes() takes its root as an argument for exactly this reason.
 
 from __future__ import annotations
 
+import re
 import socket
 from pathlib import Path
+
+import pytest
 
 import swap_stack
 from swap_terminal.stack_authority import (
     DOWN_VERDICTS,
+    LISTENER_VERDICTS,
     NEVER_STOPPED,
     container_id,
     container_label,
+    container_verdict,
     down_verdict,
     hex_port,
     listening_inodes,
@@ -435,7 +440,7 @@ def test_DOWN_stops_containers_and_does_NOT_remove_them(monkeypatch, capsys):
 
     monkeypatch.setattr(swap_stack, "compose", fake_compose)
     monkeypatch.setattr(swap_stack.supervisor, "main", lambda argv: 0)
-    monkeypatch.setattr(swap_stack, "report_listeners", list)
+    monkeypatch.setattr(swap_stack, "report_listeners", lambda files: [])
     monkeypatch.setattr(swap_stack, "port_is_free", lambda port, host="127.0.0.1": True)
 
     swap_stack.cmd_down(swap_stack.COMPOSE_FILES)
@@ -644,4 +649,170 @@ def test_the_help_text_names_only_flags_the_parser_accepts():
     assert not unaccepted, (
         f"the help text advertises {unaccepted}, which the parser does not accept. "
         "That is how an operator was told to type `-f` at a parser that refused it."
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE CONTAINERIZED VERDICT. Measured defect, 2026-10-08.
+#
+# `swap_stack.py status` on the operator's host printed, about the container
+# that was serving their page:
+#
+#     IN A CONTAINER    :5101 pid=85833
+#                       in container 40bfc3701f79 = swap-web ..., which
+#                       `docker compose ps` above does not list -- so it
+#                       belongs to no compose project this stack names.
+#                       Stop it with `docker stop 40bfc3701f79`
+#
+# `docker compose ps` DID list it, four lines up the same report. The tool told
+# the operator to stop the web container serving their UI and gave a reason its
+# own output contradicted, because the 2026-10-06 finding ("a container no
+# compose project names") had been written in as a SENTENCE rather than as a
+# check. These pin the check.
+# ---------------------------------------------------------------------------
+
+
+def test_a_container_this_stack_manages_is_OURS_and_gets_no_stop_advice():
+    """The exact case that was reported backwards."""
+    full = "40bfc3701f79aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233"
+    verdict, reason = container_verdict("40bfc3701f79", frozenset({full}))
+
+    assert verdict == "ours (container)", (
+        "a container `docker compose ps` lists for this stack is this stack's own. "
+        "Calling it a stray is what sent `docker stop` at a serving web container."
+    )
+    # THE STOP ADVICE IS THE HARM, so its absence is asserted directly rather
+    # than inferred from the verdict string.
+    assert "docker stop" not in reason, (
+        f"a container we manage must not be handed a `docker stop`: {reason}"
+    )
+    assert "belongs to no compose project" not in reason, (
+        f"the false claim must be gone, not merely outvoted: {reason}"
+    )
+    assert "swap_stack.py down" in reason, "the real lever has to be named"
+
+
+def test_the_prefix_match_is_what_makes_it_work_at_all():
+    """A 12-character id against 64-character ids. `==` would never match.
+
+    This is the fix reintroducing the bug if it is written carelessly:
+    container_id() returns the first twelve characters, because that is what
+    docker prints, and `docker compose ps -q` returns the full 64. Compared with
+    equality every container falls through to "not ours" -- which is exactly the
+    behavior being fixed, with a check in front of it that cannot ever fire.
+    """
+    full = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+    assert len(full) == 64
+    short = full[:12]
+    assert len(short) == 12
+    assert container_verdict(short, frozenset({full}))[0] == "ours (container)"
+    # And a container whose id merely SHARES A PREFIX LENGTH but not the prefix
+    # is not ours. Twelve hex characters is 48 bits; a collision is not a thing
+    # to design against, but a wrong answer here is a stop aimed at a stranger.
+    assert container_verdict("ffffffffffff", frozenset({full}))[0] == "container"
+
+
+def test_a_container_NOT_in_the_listing_is_still_reported_as_a_stray():
+    """The 2026-10-06 case is real and must keep working.
+
+    The fix must not swing the other way. A leftover from a `docker run` or an
+    earlier project name genuinely is not ours, genuinely holds our port, and
+    `docker stop <id>` genuinely is the lever -- so that reason has to survive.
+    """
+    verdict, reason = container_verdict(
+        "deadbeefcafe",
+        frozenset({"0" * 64, "1" * 64}),
+    )
+    assert verdict == "container"
+    assert "docker stop deadbeefcafe" in reason, reason
+    assert "belongs to no compose project" in reason, reason
+    # The denominator, because rule 3 asks for it and because "not in a list of
+    # two" and "not in a list of forty" are different strengths of statement.
+    assert "2 container(s)" in reason, reason
+
+
+def test_an_UNOBTAINED_listing_claims_nothing_either_way():
+    """Empty is not evidence of absence, and this is the branch that says so.
+
+    docker may not be installed, the daemon may be down, the project may have no
+    containers. None of those licenses "belongs to no compose project this stack
+    names" -- that claim needs a listing to be absent FROM. Rule 17's line
+    between a reason to believe and having checked, as a code path.
+    """
+    verdict, reason = container_verdict("abc123abc123", frozenset())
+    assert verdict == "container", "unknown membership is not ownership"
+    assert "docker stop" not in reason, (
+        "no stop may be suggested on the strength of a question that was never asked: "
+        f"{reason}"
+    )
+    assert "could not establish" in reason, reason
+    assert "never obtained" in reason, reason
+    assert "docker inspect abc123abc123" in reason, "the operator still needs a way to look"
+
+
+def test_a_host_process_is_a_programming_error_not_a_verdict():
+    """None means the caller sent a non-containerized listener down this path.
+
+    Raising rather than returning a verdict, because a silent answer here would
+    classify every host process as a container with whatever reason the empty
+    branch produces -- and that reason talks about docker listings, which would
+    be nonsense attached to a host gunicorn.
+    """
+    with pytest.raises(ValueError, match="containerized"):
+        container_verdict(None, frozenset({"a" * 64}))
+
+
+def test_every_listener_verdict_has_a_label_in_the_report():
+    """print_listeners() indexes its label map with [], so a gap is a crash.
+
+    It raises KeyError in the middle of printing, which loses the finding it was
+    printing -- the report dies on the row it most needed to show. Adding a
+    verdict without a label is a one-line change that passes every other test,
+    which is why this one reads the map out of the module rather than restating
+    it.
+    """
+    source = (swap_stack.REPO_ROOT / "swap_stack.py").read_text()
+    block = re.search(r"label = \{(.*?)\}\[row\[", source, re.DOTALL)
+    assert block, "could not find print_listeners()'s label map; if it was restructured, follow it"
+    labeled = set(re.findall(r'"([^"]+)":\s*"[^"]*"', block.group(1)))
+
+    missing = sorted(set(LISTENER_VERDICTS) - labeled)
+    assert not missing, (
+        f"LISTENER_VERDICTS contains {missing}, which print_listeners()'s label map does not "
+        "cover. That map indexes with [], so one of these rows raises KeyError mid-report."
+    )
+    # And the other direction: a label for a verdict nothing can produce is dead
+    # code pretending to be coverage (rule 9).
+    orphans = sorted(labeled - set(LISTENER_VERDICTS))
+    assert not orphans, (
+        f"print_listeners() labels {orphans}, which is not in LISTENER_VERDICTS -- either the "
+        "verdict was renamed and the label was left, or the set was not updated."
+    )
+
+
+def test_down_counts_our_own_container_as_still_running():
+    """`down` must not prove absence while its own web container still serves.
+
+    cmd_down filtered `row["verdict"] == "ours"` and every containerized listener
+    read "container", so a surviving compose service of ours was invisible to the
+    proof -- `down` could print "every process this file owns is gone, proven by
+    bind" over a gunicorn still answering on 5101. Read out of the source for the
+    same reason as the test above: the alternative is running a real `down`.
+    """
+    source = (swap_stack.REPO_ROOT / "swap_stack.py").read_text()
+    pattern = 'still = [row for row in remaining if row["verdict"]'
+    assert pattern in source, (
+        "could not find cmd_down()'s `still` filter; if it moved, follow it"
+    )
+    tail = source[source.index(pattern) + len(pattern) :]
+    counted = set(re.findall(r'"([^"]+)"', tail[: tail.index("]")]))
+
+    assert "ours" in counted, "a surviving host process of ours was always counted; keep it"
+    assert "ours (container)" in counted, (
+        "a surviving CONTAINER of ours must count as not-down too. Without it, `down` claims "
+        "proof while the compose service it just stopped is still listening."
+    )
+    assert "container" not in counted, (
+        "a container that is NOT ours must stay uncounted -- `down` never stopped it and must "
+        "not report a failure to stop what it never touched."
     )

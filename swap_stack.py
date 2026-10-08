@@ -80,6 +80,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     WEB_PORT_CANDIDATES,
     container_id,
     container_label,
+    container_verdict,
     down_verdict,
     listening_inodes,
     pids_owning_inodes,
@@ -215,8 +216,132 @@ def compose(args: list[str], files: tuple[str, ...], check: bool = False) -> sub
     )
 
 
-def report_listeners() -> list[dict]:
-    """Every process LISTENing on one of STACK_PORTS, classified. Reads, changes nothing."""
+def classify_listener(port: int, pid: int | None, ours_containers: frozenset[str]) -> dict:
+    """One LISTEN socket on a stack port, classified into a report row.
+
+    Reads /proc/<pid>/cmdline and /proc/<pid>/cgroup and may shell out to `docker
+    inspect` for a label. Changes nothing.
+
+    EXTRACTED FROM report_listeners() 2026-10-08, when adding the compose-membership
+    check pushed that function to C901 11 > 10. Rule 12 says exactly what that
+    complaint means and what it does not license: "A main() past the ceiling is
+    orchestration that has swallowed decisions, which is rule 10's defect wearing a
+    lint code. The fix is to extract the decision so it can be called with seeded
+    inputs, not to raise the ceiling." This is the part that decides; what is left
+    behind is the part that scans.
+
+    And the extraction is what makes the containerized verdict reachable from a
+    test at all. Before it, the only way to exercise that branch was to have a
+    container actually listening on one of this stack's ports.
+    """
+    if pid is None:
+        # WHY AN OWNERLESS LISTENER IS THE EXPECTED READING FOR A PUBLISHED
+        # CONTAINER PORT, said here because a bare "UNKNOWN" reads as a failure.
+        # Measured 2026-10-06: :4943 showed a LISTEN row and no owner. The socket
+        # belongs to a root-owned docker-proxy, and pids_owning_inodes() cannot
+        # read /proc/<pid>/fd for a process this user does not own -- it catches
+        # PermissionError per pid and moves on, so the answer is "this user cannot
+        # see what", NOT "nothing owns this port". Running as root would name it;
+        # nothing here asks for that, because reading other users' fds to
+        # prettify a report is a bad trade.
+        return {
+            "port": port, "pid": None, "verdict": "owner unknown", "container": None,
+            "reason": (
+                "a LISTEN socket exists and its owner is not readable by this user -- the usual "
+                "cause is a root-owned docker-proxy for a published container port, which is "
+                "expected rather than wrong. `sudo ss -ltnp` names it; this file will not ask for root"
+            ),
+            "cmdline": "",
+        }
+
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_text()
+    except OSError:
+        cmdline = ""
+    verdict, reason = stray_verdict(cmdline, REPO_ROOT)
+
+    # A CONTAINERIZED LISTENER OVERRIDES THE CMDLINE VERDICT, because a host path
+    # can never appear in its argv -- docker/web.Dockerfile puts this repository
+    # at /app, so stray_verdict()'s repo_root substring test cannot ever pass for
+    # it and it reads FOREIGN. Measured on the live host: the gunicorn on 5101 is
+    # THIS project's, and the lever is `docker stop <id>` or `swap_stack.py down`
+    # rather than a pid. See container_id().
+    try:
+        inside = container_id(Path(f"/proc/{pid}/cgroup").read_text())
+    except OSError:
+        inside = None
+
+    if inside and verdict != "refused":
+        # ASK DOCKER WHAT IT IS, so the line is self-describing (rule 14). The
+        # operator had to run `docker ps` themselves to turn an id into "st-ui on
+        # an untagged image", which is the round trip this avoids. A failure here
+        # degrades the label and never the verdict: `docker` may not be on PATH at
+        # all, and a report that died because it could not pretty-print a name
+        # would lose the finding it was printing.
+        named = ""
+        try:
+            inspected = subprocess.run(  # noqa: S603 -- no shell; argv is fixed but for the id read from /proc
+                [_DOCKER, "inspect", "--format", "{{.Name}} {{.Config.Image}}", inside],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if inspected.returncode == 0:
+                named = container_label(inspected.stdout)
+        except (OSError, subprocess.SubprocessError):
+            named = ""
+
+        # THE VERDICT IS NOW DECIDED RATHER THAN ASSERTED, and that is the fix of
+        # 2026-10-08. This branch used to set verdict = "container" and then state,
+        # as a finished sentence, that `docker compose ps` did not list the
+        # container -- for EVERY container, having asked nothing. On the operator's
+        # host it therefore told them to `docker stop` the web container that was
+        # serving their own page, four lines under a `docker compose ps` table
+        # listing it. container_verdict() takes the listing and returns the reason
+        # that matches, so the sentence and the branch cannot disagree.
+        verdict, reason = container_verdict(inside, ours_containers)
+        if named:
+            reason = f"{named}: {reason}"
+
+    return {
+        "port": port, "pid": pid, "verdict": verdict, "reason": reason,
+        "cmdline": cmdline.replace("\0", " ").strip(), "container": inside,
+    }
+
+
+def stack_container_ids(files: tuple[str, ...]) -> frozenset[str]:
+    """Every container id `docker compose ps -q` reports for this stack. Read-only.
+
+    ASKED RATHER THAN ASSERTED, which is the entire point of it existing.
+    report_listeners() used to TELL the operator that a containerized listener
+    "belongs to no compose project this stack names" without ever asking -- see
+    container_verdict() for what that cost. This is the question that sentence was
+    answering.
+
+    `ps -q` rather than parsing the `ps` table: ids are what /proc/<pid>/cgroup
+    yields, so comparing ids compares like with like, and a table whose column
+    layout shifts between docker versions is not something a verdict should rest
+    on. `--all` is deliberately NOT passed -- a stopped container cannot be
+    holding a LISTEN socket, so including one would only add ids that can never
+    match.
+
+    A FAILURE RETURNS EMPTY AND IS NOT AN ERROR. docker may not be installed, the
+    daemon may be down, the project may have no containers; container_verdict()
+    handles the empty set by refusing to claim anything about compose membership
+    rather than by guessing, so the three cases stay distinguishable to a reader.
+    """
+    done = compose(["ps", "-q"], files)
+    if done.returncode != 0:
+        return frozenset()
+    return frozenset(line.strip() for line in done.stdout.splitlines() if line.strip())
+
+
+def report_listeners(files: tuple[str, ...]) -> list[dict]:
+    """Every process LISTENing on one of STACK_PORTS, classified. Reads, changes nothing.
+
+    TAKES THE COMPOSE FILES as of 2026-10-08, because classifying a containerized
+    listener requires knowing which containers this stack has, and only the compose
+    files can answer that. See container_verdict().
+    """
+    ours_containers = stack_container_ids(files)
     # BOTH FAMILIES, AND READING ONLY ONE OF THEM PRODUCED A SELF-CONTRADICTING
     # REPORT ON 2026-10-07. `swap_stack.py down` printed, in the same block:
     #
@@ -256,75 +381,8 @@ def report_listeners() -> list[dict]:
     owners = pids_owning_inodes(set(inodes.values()), Path("/proc"))
     found = []
     for port, inode in sorted(inodes.items()):
-        pid = owners.get(inode)
-        if pid is None:
-            # WHY AN OWNERLESS LISTENER IS THE EXPECTED READING FOR A PUBLISHED
-            # CONTAINER PORT, said here because a bare "UNKNOWN" reads as a failure.
-            # Measured 2026-10-06: :4943 showed a LISTEN row and no owner. The socket
-            # belongs to a root-owned docker-proxy, and pids_owning_inodes() cannot
-            # read /proc/<pid>/fd for a process this user does not own -- it catches
-            # the EACCES and moves on, by design, because a live /proc is full of pids
-            # that vanish mid-scan.
-            #
-            # So the honest line is "something is listening and this user cannot see
-            # what", NOT "nothing owns this port". Running as root would name it;
-            # nothing here asks for that, because reading other users' fds to
-            # prettify a report is a bad trade.
-            found.append({
-                "port": port, "pid": None, "verdict": "owner unknown", "container": None,
-                "reason": (
-                    "a LISTEN socket exists and its owner is not readable by this user -- the usual "
-                    "cause is a root-owned docker-proxy for a published container port, which is "
-                    "expected rather than wrong. `sudo ss -ltnp` names it; this file will not ask for root"
-                ),
-                "cmdline": "",
-            })
-            continue
-        try:
-            cmdline = Path(f"/proc/{pid}/cmdline").read_text()
-        except OSError:
-            cmdline = ""
-        verdict, reason = stray_verdict(cmdline, REPO_ROOT)
-        # A CONTAINERIZED LISTENER OVERRIDES THE CMDLINE VERDICT, because a host path
-        # can never appear in its argv -- docker/web.Dockerfile puts this repository
-        # at /app, so stray_verdict()'s repo_root substring test cannot ever pass for
-        # it and it reads FOREIGN. Measured on the live host: the gunicorn on 5101 is
-        # THIS project's, in a container `docker compose ps` does not list, and the
-        # lever is `docker stop <id>` rather than a pid. See container_id().
-        try:
-            inside = container_id(Path(f"/proc/{pid}/cgroup").read_text())
-        except OSError:
-            inside = None
-        if inside and verdict != "refused":
-            verdict = "container"
-            # ASK DOCKER WHAT IT IS, so the line is self-describing (rule 14). The
-            # operator had to run `docker ps` themselves to turn an id into "st-ui on
-            # an untagged image", which is the round trip this avoids. A failure here
-            # degrades the label and never the verdict: `docker` may not be on PATH at
-            # all, and a report that died because it could not pretty-print a name
-            # would lose the finding it was printing.
-            named = ""
-            try:
-                inspected = subprocess.run(  # noqa: S603 -- no shell; argv is fixed but for the id read from /proc
-                    [_DOCKER, "inspect", "--format", "{{.Name}} {{.Config.Image}}", inside],
-                    capture_output=True, text=True, timeout=10, check=False,
-                )
-                if inspected.returncode == 0:
-                    named = container_label(inspected.stdout)
-            except (OSError, subprocess.SubprocessError):
-                named = ""
-            reason = (
-                f"in container {inside}{' = ' + named if named else ' (docker could not name it)'}, "
-                f"which `docker compose ps` above does not list -- so it "
-                f"belongs to no compose project this stack names. Stop it with `docker stop {inside}`, "
-                f"after `docker inspect {inside}` names it"
-            )
-        found.append({
-            "port": port, "pid": pid, "verdict": verdict, "reason": reason,
-            "cmdline": cmdline.replace("\0", " ").strip(), "container": inside,
-        })
+        found.append(classify_listener(port, owners.get(inode), ours_containers))
     return found
-
 
 def print_listeners(found: list[dict]) -> None:
     say("  http listeners    what is answering on this stack's ports")
@@ -333,9 +391,17 @@ def print_listeners(found: list[dict]) -> None:
             f"{', '.join(str(p) for p in sorted(STACK_PORTS))} <- a result, not a blank")
         return
     for row in found:
+        # EVERY VERDICT IN stack_authority.LISTENER_VERDICTS NEEDS AN ENTRY HERE.
+        # This indexes with [], so a verdict with no label raises mid-report and
+        # takes the finding down with it -- which is why that set is named over
+        # there and tests/test_stack_authority.py asserts this map covers it.
         label = {
-            "ours": "OURS", "foreign": "FOREIGN", "refused": "CHAIN DAEMON",
-            "container": "IN A CONTAINER", "owner unknown": "UNKNOWN",
+            "ours": "OURS",
+            "ours (container)": "OURS (CONTAINER)",
+            "foreign": "FOREIGN",
+            "refused": "CHAIN DAEMON",
+            "container": "IN A CONTAINER",
+            "owner unknown": "UNKNOWN",
         }[row["verdict"]]
         say(f"  {label:<17} :{row['port']} pid={row['pid']}  {STACK_PORTS[row['port']]}")
         if row.get("reason"):
@@ -362,7 +428,7 @@ def cmd_status(files: tuple[str, ...]) -> int:
         for line in body.splitlines():
             say(f"                    {line}")
     say("")
-    print_listeners(report_listeners())
+    print_listeners(report_listeners(files))
     say("")
     say("  workers           supervisor.py owns these; this is its own report")
     supervisor.main(["status", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
@@ -448,8 +514,21 @@ def cmd_down(files: tuple[str, ...]) -> int:
         say(f"  FAILED            docker compose stop exited {done.returncode}")
     say("")
     say("  3. proof -- absence is the assertion, not an exit code (rule 13)")
-    remaining = report_listeners()
-    still = [row for row in remaining if row["verdict"] == "ours"]
+    remaining = report_listeners(files)
+    # A SURVIVING CONTAINER OF OURS IS "NOT DOWN" TOO, and it was not counted here
+    # until 2026-10-08. This read `== "ours"` alone, and every containerized
+    # listener classified as "container" -- this stack's own web container
+    # included -- so `down` could print "every process this file owns is gone,
+    # proven by bind" while the compose service it had just told to stop was still
+    # serving on 5101. Same defect down_verdict() was written to fix, one category
+    # out: the measurement was taken and then not looked at by the sentence
+    # claiming to have proven something from it.
+    #
+    # "container" -- a container that is NOT ours -- stays uncounted on purpose.
+    # `down` never stopped it and must not report a failure to stop what it never
+    # touched; print_listeners() prints it with its own reason and the operator
+    # decides.
+    still = [row for row in remaining if row["verdict"] in ("ours", "ours (container)")]
     bound = []
     for port in sorted(STACK_PORTS):
         free = port_is_free(port)
