@@ -43,6 +43,11 @@ type HttpResponse = record {
   status_code : nat16;
   headers : vec record { text; text };
   body : blob;
+  // opt bool, and `true` means "re-send this as an update call". See the field's
+  // comment in src/lib.rs: a QUERY response the gateway cannot verify is a 500
+  // the browser reports as "Certification values not found", which is what this
+  // console did the first time it was deployed (2026-10-08).
+  upgrade : opt bool;
 };
 
 type FeeResult = variant { Ok : nat16; Err : text };
@@ -71,6 +76,12 @@ service : (Posture) -> {
   set_confirmations : (text, nat32, text) -> (BlocksResult);
   set_armed : (text, bool, text) -> (ArmedResult);
 
-  // The console. GET returns HTML; anything else returns 405 naming where writes go.
+  // THE CONSOLE, AND IT IS TWO METHODS BECAUSE THE GATEWAY REQUIRES IT TO BE.
+  // http_request is a query that returns `upgrade = opt true` and nothing else;
+  // the gateway then calls http_request_update, whose response goes through
+  // consensus and therefore needs no certificate. GET renders the page; anything
+  // else returns 405 naming where writes go. Both live in the update, because a
+  // 405 from the query would have been just as uncertified as the page was.
   http_request : (HttpRequest) -> (HttpResponse) query;
+  http_request_update : (HttpRequest) -> (HttpResponse);
 }

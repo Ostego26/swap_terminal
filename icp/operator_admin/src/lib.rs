@@ -594,6 +594,47 @@ pub struct HttpResponse {
     pub status_code: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Ask the HTTP gateway to re-send this request as an UPDATE call.
+    ///
+    /// THIS FIELD IS WHY THE CONSOLE WORKS AT ALL, and its absence is the defect
+    /// it was added to fix. Measured on the operator's replica 2026-10-08, the
+    /// first time this canister was ever deployed: the console answered
+    ///
+    /// ```text
+    /// http gateway: 500    60 bytes
+    /// ```
+    ///
+    /// and the browser said, verbatim, "Response verification failed:
+    /// Certification values not found".
+    ///
+    /// WHAT THE GATEWAY ACTUALLY REQUIRES. A QUERY response is produced by one
+    /// replica with nothing standing behind it -- a single malicious node could
+    /// return any page it liked -- so the HTTP Gateway Protocol will not serve a
+    /// query response to a browser unless the canister certifies it, with an
+    /// `IC-Certificate` header carrying a certificate and a witness tree rooted
+    /// in the 32 bytes of certified data the canister has published. No header,
+    /// no page: the gateway returns 500 and the canister never learns why.
+    ///
+    /// WHY NOT CERTIFY IT. Certifying means maintaining a certification tree and
+    /// re-publishing a root hash on every state change, because
+    /// `set_certified_data` holds 32 bytes and nothing more. This page is derived
+    /// from the posture AND the full audit log, so every write would have to
+    /// re-hash a page nobody is reading at that moment. That is real machinery to
+    /// maintain, and the thing it buys -- a browser cryptographically verifying
+    /// an operator console served from the operator's own laptop over
+    /// 127.0.0.1 -- is not a threat this deployment has.
+    ///
+    /// WHAT upgrade = Some(true) DOES INSTEAD. The gateway re-sends the identical
+    /// request as an UPDATE call to `http_request_update`. An update goes through
+    /// consensus, so its response is already backed by the subnet and the
+    /// protocol skips response verification entirely. It costs one extra round
+    /// trip and a couple of seconds, which for a page an operator opens a few
+    /// times a day is the correct trade and for an asset served per page-load
+    /// would not be.
+    ///
+    /// None on a response that is already the answer; the update handler sets it
+    /// None precisely so a response cannot ask to be upgraded twice.
+    pub upgrade: Option<bool>,
 }
 
 /// Only a CONTROLLER may write.
@@ -804,14 +845,40 @@ fn set_armed(asset: String, armed: bool, note: String) -> Result<Vec<String>, St
     Ok(posture().armed)
 }
 
+/// The console, as the gateway asks for it: tell it to come back as an update.
+///
+/// NO WORK IS DONE HERE AND NO BODY IS RETURNED, deliberately. Whatever this
+/// query returned would be discarded -- the gateway re-issues the request the
+/// moment it sees `upgrade = Some(true)` -- so rendering the page here would
+/// render it twice per page load and throw one away. The empty body is the
+/// honest representation of that.
+///
+/// THE 405 MOVED WITH IT, which is the part worth saying out loud: a non-GET
+/// used to be refused right here, in the query. That refusal was just as
+/// uncertified as the page was, so it hit the same gateway 500 and the operator
+/// would have seen a server error where this canister had written a careful
+/// explanation. Both paths now run in `http_request_update`, where a response
+/// is backed by consensus and actually reaches the caller.
 #[ic_cdk::query]
-fn http_request(request: HttpRequest) -> HttpResponse {
+fn http_request(_request: HttpRequest) -> HttpResponse {
+    HttpResponse {
+        status_code: 200,
+        headers: vec![],
+        body: Vec::new(),
+        upgrade: Some(true),
+    }
+}
+
+/// The console, for real. Reached only because `http_request` asked for it.
+#[ic_cdk::update]
+fn http_request_update(request: HttpRequest) -> HttpResponse {
     // GET ONLY, AND THE REFUSAL IS THE POINT RATHER THAN A FORMALITY. A POST here
     // would arrive with no principal -- the HTTP gateway does not carry one -- so
     // the only honest answer to one is 405 naming where writes actually go.
     if request.method.to_uppercase() != "GET" {
         return HttpResponse {
             status_code: 405,
+            upgrade: None,
             headers: vec![("Content-Type".to_string(), "text/plain; charset=utf-8".to_string())],
             body: b"405 -- this console is read-only. Requests through the HTTP gateway arrive \
                     ANONYMOUS, so a write accepted here would be an unauthenticated change to the \
@@ -825,9 +892,28 @@ fn http_request(request: HttpRequest) -> HttpResponse {
         let state = s.borrow();
         (state.posture.clone(), state.audit.clone())
     });
-    let html = render_console(&posture, &audit, &ic_cdk::id().to_text());
+    console_response(&posture, &audit, &ic_cdk::id().to_text())
+}
+
+/// The 200 that carries the console. PURE, and that is the point of it existing.
+///
+/// EXTRACTED 2026-10-08, while fixing the gateway 500, because the GET path could
+/// not be reached from a test at all: `http_request_update` calls `ic_cdk::id()`,
+/// which panics outside a canister, so every assertion about the response a
+/// browser actually receives -- its status, its `upgrade` field, its headers --
+/// was unreachable. The 405 branch was testable only by accident, because it
+/// happens to return before that call.
+///
+/// Rule 10, and it is the same move the rest of this file already made for
+/// `render_console` and the validators: the thing that decides is the smallest
+/// piece at the bottom, and the handler above it is left holding only the parts
+/// that need a canister (reading STATE, asking its own id).
+fn console_response(posture: &Posture, audit: &[AuditEntry], canister: &str) -> HttpResponse {
     HttpResponse {
         status_code: 200,
+        // None, NOT Some(false): this response IS the answer. A response that
+        // asked to be upgraded again would loop the gateway.
+        upgrade: None,
         headers: vec![
             ("Content-Type".to_string(), "text/html; charset=utf-8".to_string()),
             // NO CACHING. The whole value of this page is that it shows what the
@@ -841,7 +927,7 @@ fn http_request(request: HttpRequest) -> HttpResponse {
                 "default-src 'none'; style-src 'unsafe-inline'".to_string(),
             ),
         ],
-        body: html.into_bytes(),
+        body: render_console(posture, audit, canister).into_bytes(),
     }
 }
 
@@ -1157,5 +1243,216 @@ mod tests {
         for forbidden in ["<script", "src=\"http", "href=\"http", "@import", "fetch(", "onload="] {
             assert!(!html.contains(forbidden), "the page loads {forbidden}");
         }
+    }
+
+    // =========================================================================
+    // THE GATEWAY 500. Measured on the operator's replica 2026-10-08, the first
+    // time this canister was ever deployed:
+    //
+    //     http gateway: 500    60 bytes
+    //
+    // and in the browser, verbatim: "Response verification failed: Certification
+    // values not found". The canister was fine; `posture '()'` answered through
+    // Candid on the same replica in the same minute. The HTTP Gateway Protocol
+    // will not serve a QUERY response it cannot verify against certified data,
+    // this canister published none, and nothing in it could have told you that --
+    // the 500 is generated by the gateway, before the body is ever looked at.
+    //
+    // These pin the fix: the query asks to be upgraded, and the responses that
+    // carry real answers come from the update, where consensus has already
+    // backed them and no certificate is required.
+    // =========================================================================
+
+    fn request(method: &str) -> HttpRequest {
+        HttpRequest {
+            method: method.to_string(),
+            url: "/".to_string(),
+            headers: vec![],
+            body: vec![],
+        }
+    }
+
+    #[test]
+    fn the_query_ALWAYS_asks_to_be_upgraded_and_renders_nothing() {
+        // Every method and every url, because the query cannot usefully decide
+        // anything: it has no certificate to offer, so the only response it can
+        // give that a browser will ever see is "come back as an update". A query
+        // that tried to answer here would be a 500 with a careful body nobody
+        // receives.
+        for method in ["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "get", "Get"] {
+            let response = http_request(request(method));
+            assert_eq!(
+                response.upgrade,
+                Some(true),
+                "{method}: the query must ask the gateway to re-send as an update; \
+                 without it the gateway answers 500 'Certification values not found'"
+            );
+            assert!(
+                response.body.is_empty(),
+                "{method}: the body is discarded when the gateway upgrades, so rendering \
+                 one here renders the page twice per load and throws one away"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_GET_is_refused_by_the_UPDATE_where_the_answer_can_be_delivered() {
+        // THE 405 MOVED, and that is a fix rather than a relocation. It used to be
+        // returned by the query, which made it exactly as uncertified as the page
+        // was -- so a POST would have produced a gateway 500 where this canister
+        // had written a careful explanation of where writes go. Reachable from a
+        // test because the branch returns before `ic_cdk::id()`.
+        for method in ["POST", "PUT", "DELETE", "PATCH"] {
+            let response = http_request_update(request(method));
+            assert_eq!(response.status_code, 405, "{method} must be refused");
+            assert_eq!(
+                response.upgrade, None,
+                "{method}: a response that is already the answer must not ask to be \
+                 upgraded again -- that loops the gateway"
+            );
+            let body = String::from_utf8(response.body.clone()).expect("the refusal is utf-8");
+            // Rule 14 and the refusal rule together: a refusal has to say what it
+            // refused and where the caller should actually go.
+            assert!(body.contains("read-only"), "{method}: {body}");
+            assert!(body.contains("ANONYMOUS"), "{method}: must say WHY, not just no: {body}");
+            assert!(body.contains("Candid"), "{method}: must name where writes go: {body}");
+        }
+    }
+
+    #[test]
+    fn the_console_response_is_the_answer_and_never_asks_for_another_upgrade() {
+        // The response a browser actually renders. `upgrade: Some(false)` would be
+        // wrong in a quieter way than Some(true) -- the gateway treats any present
+        // value as a decision -- so None is asserted exactly.
+        let response = console_response(&seeded(), &[], "br5f7-7uaaa-aaaaa-qaaca-cai");
+        assert_eq!(response.status_code, 200);
+        assert_eq!(
+            response.upgrade, None,
+            "the page IS the answer; asking to be upgraded again loops the gateway"
+        );
+        assert!(!response.body.is_empty(), "a 200 with an empty body is the 500 all over again");
+        let body = String::from_utf8(response.body.clone()).expect("the page is utf-8");
+        assert!(body.contains("br5f7-7uaaa-aaaaa-qaaca-cai"), "the page names its own canister");
+    }
+
+    #[test]
+    fn the_hand_written_did_declares_exactly_what_the_rust_exports() {
+        // RULE 8, AND THIS FILE IS ONE OF ITS TWO COPIES. operator_admin.did is a
+        // hand-written statement of this canister's interface, and lib.rs is the
+        // interface. Two representations of one thing agree on the day they are
+        // written and drift from then on -- and the drift here is not cosmetic:
+        // dfx.json names the .did as the canister's `candid`, so it is what gets
+        // INSTALLED as the declared interface. A method the Rust exports and the
+        // .did omits is a method the Candid UI will not show and a caller cannot
+        // discover; a method the .did declares and the Rust does not export is a
+        // button in that UI that fails when pressed.
+        //
+        // WHY IT IS A TEST AND NOT A GENERATED FILE. Generating the .did at build
+        // time is the cleaner answer and it needs a build step that runs the wasm
+        // or a packtool, which dfx.json currently sets to "". This closes the gap
+        // that matters -- the method sets -- with no new machinery, and
+        // __export_service() means the comparison is against the REAL interface
+        // rather than a paraphrase of it.
+        //
+        // ONLY THE METHOD NAMES AND THEIR QUERY-NESS are compared. Type names
+        // legitimately differ: candid::export_service! calls the result of
+        // add_pair "Result" while the .did calls it "PairsResult", and a name is
+        // not an interface -- the shapes are what callers encode against, and
+        // renaming a variant alias breaks nobody. Asserting on names would make
+        // this test fail for reasons that are not defects, which is the kind of
+        // test somebody eventually deletes.
+        fn methods(did: &str) -> Vec<String> {
+            let service = did
+                .split_once("service :")
+                .expect("no `service :` block")
+                .1;
+            let mut found: Vec<String> = service
+                .lines()
+                .map(str::trim)
+                // Comments carry prose with colons and parentheses in it, and this
+                // file's comments are long. Dropping them first is what keeps the
+                // parse honest.
+                .filter(|line| !line.starts_with("//"))
+                .filter_map(|line| {
+                    let (name, rest) = line.split_once(" : ")?;
+                    if !rest.contains("->") {
+                        return None;
+                    }
+                    let kind = if rest.contains("query") { "query" } else { "update" };
+                    Some(format!("{name} ({kind})"))
+                })
+                .collect();
+            found.sort();
+            found
+        }
+
+        let generated = methods(&__export_service());
+        let declared = methods(&include_str!("../operator_admin.did").to_string());
+
+        assert!(!generated.is_empty(), "parsed no methods out of the generated candid");
+        assert_eq!(
+            declared, generated,
+            "\noperator_admin.did and lib.rs disagree about this canister's interface.\n  \
+             .did declares: {declared:?}\n  rust exports:  {generated:?}\n\
+             dfx.json installs the .did as the declared interface, so whichever is wrong, \
+             the one callers see is the .did."
+        );
+    }
+
+    #[test]
+    fn the_did_declares_the_upgrade_field_the_gateway_reads() {
+        // Narrower than the test above and aimed at the actual 2026-10-08 defect,
+        // which was not a missing METHOD but a missing FIELD. HttpResponse without
+        // `upgrade` is a canister that cannot ask to be re-called as an update, and
+        // the symptom is a gateway 500 the canister never sees. The method-set
+        // comparison above would not have caught it.
+        let did = include_str!("../operator_admin.did");
+        // BOUNDED BY THE NEXT `type` DECLARATION, NOT BY THE NEXT "};", and the
+        // first version of this test did the latter and failed on a correct file.
+        // `headers : vec record { text; text };` is a FIELD of this very record and
+        // it ends in "};", so splitting on that stopped three lines early and the
+        // test reported a missing `upgrade` field to a file that had one. A test
+        // that fails for a reason that is not a defect is the kind somebody
+        // eventually deletes, which would have cost the check entirely.
+        let after = did
+            .split_once("type HttpResponse = record {")
+            .expect("no HttpResponse type in the .did")
+            .1;
+        let response_type = after.split_once("\ntype ").map_or(after, |(head, _)| head);
+        assert!(
+            response_type.contains("upgrade : opt bool"),
+            "operator_admin.did's HttpResponse is missing `upgrade : opt bool`. Without it the \
+             HTTP gateway cannot be told to re-send as an update, every query response needs a \
+             certificate this canister does not publish, and the console answers 500 \
+             'Certification values not found' -- which is exactly what it did the first time \
+             it was deployed. The type reads:{response_type}"
+        );
+    }
+
+    #[test]
+    fn the_console_response_sends_html_uncached_and_locked_down() {
+        // The three headers, read out of the response rather than restated, because
+        // a Content-Type the browser does not get is a page it downloads instead of
+        // displaying -- which is how a 200 can still look broken.
+        let response = console_response(&seeded(), &[], "aaaaa-aa");
+        let header = |name: &str| {
+            response
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("no {name} header; the response has {:?}", response.headers))
+        };
+        assert!(header("Content-Type").starts_with("text/html"), "{}", header("Content-Type"));
+        assert_eq!(
+            header("Cache-Control"),
+            "no-store",
+            "a cached posture page is the stale-truth failure this repository keeps paying for"
+        );
+        assert!(
+            header("Content-Security-Policy").contains("default-src 'none'"),
+            "{}",
+            header("Content-Security-Policy")
+        );
     }
 }
