@@ -54,6 +54,7 @@ import inspect
 import math
 import sqlite3
 from pathlib import Path
+from time import time
 
 import pytest
 from config import Config
@@ -342,7 +343,17 @@ def test_a_PARTIAL_coingecko_response_falls_through_to_the_other_feed(monkeypatc
     complete = {cg_id: {"usd": 1.0, "usd_market_cap": 2.0, "usd_24h_vol": 3.0,
                         "usd_24h_change": 0.5, "last_updated_at": 1700000000}
                 for cg_id in IDS.values()}
-    monkeypatch.setattr(pricing, "_coinpaprika_raw", lambda: (complete, "CoinPaprika"))
+    # THE STUB TAKES THE DEADLINE, added 2026-10-08 when the price path gained a
+    # total budget (see tests/test_price_fetch_is_bounded.py: 15s + 6x15s = 105s
+    # against gunicorn's 60s worker timeout). It ASSERTS the deadline is a real
+    # future timestamp rather than accepting and ignoring it -- a stub with
+    # `*args` would stay green with the budget threaded nowhere, which is the
+    # failure this signature change exists to make impossible.
+    def _paprika_answers(deadline):
+        assert deadline > time(), f"the fallback was handed a deadline already past: {deadline}"
+        return complete, "CoinPaprika"
+
+    monkeypatch.setattr(pricing, "_coinpaprika_raw", _paprika_answers)
     pricing._cache.update({"raw": None, "prices": None, "context": None, "expires_at": 0.0})
 
     prices = fetch_usd_prices(30)
@@ -363,10 +374,14 @@ def test_BOTH_feeds_failing_reports_BOTH_reasons(monkeypatch):
     MUTATION: raise only the paprika error and this fails on the CoinGecko half.
     Verified 2026-09-30.
     """
-    def _gecko_dies():
+    # Both take the deadline the budget threads through them -- see the note in
+    # test_a_PARTIAL_coingecko_response_falls_through_to_the_other_feed.
+    def _gecko_dies(deadline):
+        assert deadline > time(), f"CoinGecko was handed a deadline already past: {deadline}"
         raise RuntimeError("403 Client Error from the edge")
 
-    def _paprika_dies():
+    def _paprika_dies(deadline):
+        assert deadline > time(), f"the fallback was handed a deadline already past: {deadline}"
         raise RuntimeError("id not found")
 
     monkeypatch.setattr(pricing, "_coingecko_raw", _gecko_dies)

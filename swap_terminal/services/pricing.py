@@ -94,6 +94,7 @@ TWO THINGS ABOUT HOW THIS IS SHAPED, AND BOTH ARE THE POINT.
    function costs one extra name and breaks nothing.
 """
 
+import os
 from dataclasses import dataclass, fields
 from datetime import datetime
 from threading import Lock
@@ -114,6 +115,67 @@ import requests
 _cache = {"raw": None, "prices": None, "context": None, "fetched_at": 0.0, "expires_at": 0.0,
           "source": ""}
 _lock = Lock()
+
+# =============================================================================
+# THE TOTAL TIME ONE QUOTE MAY SPEND FETCHING PRICES
+#
+# MEASURED FROM THIS FILE 2026-10-08, after the operator reported "there's
+# something wrong with the terminal swap portion. it freezes up."
+#
+#   coingecko      1 request  x 15s =  15s
+#   coinpaprika    6 requests x 15s =  90s   (ONE REQUEST PER ASSET, sequential)
+#   worst case                       105s   in a single web request
+#   gunicorn timeout                  60s   <- the worker is KILLED here
+#   gunicorn workers                    2   <- and the other one is all that is left
+#
+# Every one of those per-call timeouts is correct on its own and the total is a
+# defect: the price path can outrun the server that is running it by 45 seconds.
+# When it does, gunicorn kills the worker mid-request -- the browser gets a hang
+# and then a dropped connection, not an error page -- and with `workers = 2`,
+# ONE more concurrent request in that window leaves the whole site unresponsive.
+# A customer's swap page polls every 15s, so that second request is not
+# hypothetical.
+#
+# THIS IS THE ARITHMETIC, NOT A DIAGNOSIS OF THE OPERATOR'S FREEZE. Whether
+# their feeds are actually timing out is a measurement nobody has taken yet
+# (rule 17); what is established is that the code can exceed its own server's
+# limit, which is worth fixing on its own terms.
+#
+# THE DEFAULT IS DELIBERATELY NOT TIGHT. 45s is under gunicorn's 60s and above
+# anything that can succeed today, so no fetch that currently returns a price
+# starts failing -- the change converts a 60s WORKER KILL into a clean refusal
+# at 45s and nothing else. A tighter budget (a customer should not watch a blank
+# page for 45 seconds either) would refuse quotes that currently succeed, which
+# is rule 16's live posture and the operator's call, not mine.
+#
+# ASCII in the name and `_SECONDS` in it, per rule 6: an environment variable is
+# an interface, not a report.
+PRICE_FETCH_BUDGET_SECONDS = float(os.getenv("ST_PRICE_FETCH_BUDGET_SECONDS", "45"))
+
+#: Below this much remaining budget, the next HTTP call is NOT started.
+#:
+#: Starting a request with half a second left buys a guaranteed timeout and
+#: spends the half second doing it. Refusing to start is the same answer sooner,
+#: and it is the difference between a budget and a formality.
+_MINIMUM_USEFUL_CALL_SECONDS = 1.0
+
+
+def call_timeout(deadline: float, now: float, per_call: float) -> float:
+    """How long the next price request may take. 0.0 means DO NOT START IT. Pure.
+
+    The whole decision, in one testable function (rule 10), because the thing
+    that goes wrong with a budget is always arithmetic: an off-by-one that lets
+    the last call run with the full per-call timeout puts the total back over the
+    server's limit, and nothing about the code looks different when it does.
+
+    `per_call` is still respected -- the budget is a CEILING, not a replacement.
+    A 15s feed call with 40s of budget left still gets 15s, so a single slow feed
+    behaves exactly as it does today.
+    """
+    remaining = deadline - now
+    if remaining <= _MINIMUM_USEFUL_CALL_SECONDS:
+        return 0.0
+    return min(per_call, remaining)
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 # One table, and everything below is DERIVED from it. It used to be paired with a
@@ -311,11 +373,15 @@ def _fetch_raw(ttl_seconds: int) -> dict:
     now = time()
     if _cache["raw"] is not None and now < _cache["expires_at"]:
         return _cache
+    # ONE DEADLINE FOR BOTH FEEDS, taken once here rather than per call. The
+    # fallback is what makes a per-call timeout insufficient: CoinGecko's 15s and
+    # CoinPaprika's six 15s calls are each reasonable and they add to 105s.
+    deadline = now + PRICE_FETCH_BUDGET_SECONDS
     try:
-        raw, source = _coingecko_raw()
+        raw, source = _coingecko_raw(deadline)
     except Exception as coingecko_error:  # noqa: BLE001 -- checked: a non-200, a transport failure, a shape that is not JSON and a partial response all mean the same thing to this function -- CoinGecko did not price this, try the other feed. The reason is not swallowed: it is carried into the fallback's own failure message below, so a run where BOTH feeds fail reports BOTH reasons.
         try:
-            raw, source = _coinpaprika_raw()
+            raw, source = _coinpaprika_raw(deadline)
         except Exception as paprika_error:
             raise PriceSourceError(
                 f"no price feed answered. CoinGecko: {type(coingecko_error).__name__}: "
@@ -405,7 +471,25 @@ def _require_every_asset(raw: dict, source: str) -> dict:
     return raw
 
 
-def _coingecko_raw() -> tuple[dict, str]:
+def _budgeted(deadline: float, per_call: float, feed: str) -> float:
+    """The per-call timeout, or raise when there is no budget left to spend.
+
+    RAISES RATHER THAN RETURNING 0, because `requests.get(timeout=0)` is not "do
+    not call" -- it is a call that fails instantly in a way indistinguishable
+    from the feed being down, and _fetch_raw()'s message would then blame
+    CoinGecko for this file's own bookkeeping. The exception says which it was.
+    """
+    allowed = call_timeout(deadline, time(), per_call)
+    if not allowed:
+        raise PriceSourceError(
+            f"{feed} was not called: the {PRICE_FETCH_BUDGET_SECONDS:.0f}s price-fetch budget "
+            f"was already spent. This is a TIMEOUT OF OUR OWN, not a feed failure -- raise "
+            f"ST_PRICE_FETCH_BUDGET_SECONDS if the feeds here are legitimately this slow"
+        )
+    return allowed
+
+
+def _coingecko_raw(deadline: float) -> tuple[dict, str]:
     """CoinGecko's /simple/price, keyed by its own ids. The original path, unchanged.
 
     KEPT AS THE FIRST TRY rather than replaced. Measured 2026-09-29 and -30 from
@@ -442,13 +526,13 @@ def _coingecko_raw() -> tuple[dict, str]:
         # The context flags cost no extra round trip: they are parameters on the
         # request this path already made. See the header.
         params={"ids": ",".join(IDS.values()), "vs_currencies": "usd", **CONTEXT_PARAMS},
-        timeout=15,
+        timeout=_budgeted(deadline, 15, 'CoinGecko'),
     )
     response.raise_for_status()
     return _require_every_asset(response.json(), "CoinGecko"), "CoinGecko"
 
 
-def _coinpaprika_raw() -> tuple[dict, str]:
+def _coinpaprika_raw(deadline: float) -> tuple[dict, str]:
     """CoinPaprika, reshaped into CoinGecko's own response shape.
 
     THE RESHAPE IS THE WHOLE DESIGN. fetch_usd_prices() and
@@ -474,15 +558,39 @@ def _coinpaprika_raw() -> tuple[dict, str]:
     it: a cap that is derived and a cap that was reported are the same float
     and different claims.
     """
-    from services.coinpaprika import (  # noqa: PLC0415 -- checked: imported inside the function so that a host without `requests` can still import services.pricing for its pure helpers, which is the same reason the drivers defer their price imports.
-        PAPRIKA_IDS,
-        fetch_quote,
-    )
+    # THE MODULE, NOT THREE NAMES FROM IT, and that is a lint finding resolved
+    # rather than suppressed. Adding `TIMEOUT_SECONDS as PAPRIKA_TIMEOUT_SECONDS`
+    # to the old `from ... import (PAPRIKA_IDS, fetch_quote)` made ruff split the
+    # statement in two (isort gives an aliased import its own), and the half it
+    # created carried no `noqa` -- so one deliberate deferred import would have
+    # been suppressed on one line and reported on the next. Rule 19: a second
+    # suppression to quiet that is a patch. Importing the module takes the alias
+    # away entirely, and `coinpaprika.TIMEOUT_SECONDS` says whose timeout it is
+    # at the call site, which the alias existed to do.
+    # Deferred on purpose, and PLC0415 is suppressed for that reason rather than
+    # to quiet it: a host without `requests` can still import services.pricing for
+    # its pure helpers, which is why the drivers defer their price imports too.
+    from services import coinpaprika  # noqa: PLC0415 -- see the three lines above
 
     raw, unpriced = {}, {}
     for asset, cg_id in IDS.items():
+        # THE BUDGET IS CHECKED PER ASSET, which is the whole point of putting it
+        # here: this loop is six sequential requests and it is where 90 of the
+        # 105 worst-case seconds live. When it runs out, the remaining assets are
+        # recorded as unpriced with the budget as the reason and the loop STOPS
+        # -- so the refusal below names them exactly as a feed failure would, and
+        # the operator reading it can tell "ran out of time" from "CoinPaprika
+        # said 404", which are different problems with different fixes.
+        allowed = call_timeout(deadline, time(), coinpaprika.TIMEOUT_SECONDS)
+        if not allowed:
+            for remaining_asset in list(IDS)[list(IDS).index(asset):]:
+                unpriced[remaining_asset] = (
+                    f"not attempted -- the {PRICE_FETCH_BUDGET_SECONDS:.0f}s price-fetch budget "
+                    f"was spent before reaching it"
+                )
+            break
         try:
-            quote = fetch_quote(asset)
+            quote = coinpaprika.fetch_quote(asset, timeout=allowed)
         except Exception as error:  # noqa: BLE001 -- checked: one asset failing must not lose the others; every failure is collected and _require_every_asset() below raises naming exactly which assets are missing, which is more useful than the first exception.
             unpriced[asset] = f"{type(error).__name__}: {error}"
             continue
@@ -498,7 +606,7 @@ def _coinpaprika_raw() -> tuple[dict, str]:
             f"CoinPaprika could not price {', '.join(sorted(unpriced))}: "
             + "; ".join(f"{asset}: {why}" for asset, why in sorted(unpriced.items()))
             + f". Ids are <symbol>-<slug> and are NOT guessable -- see PAPRIKA_IDS, where "
-              f"{', '.join(sorted(PAPRIKA_IDS))} are mapped and each carries the 200 that "
+              f"{', '.join(sorted(coinpaprika.PAPRIKA_IDS))} are mapped and each carries the 200 that "
               f"confirmed it. A 404 here is a wrong id, not a missing asset."
         )
     return _require_every_asset(raw, "CoinPaprika"), "CoinPaprika"
