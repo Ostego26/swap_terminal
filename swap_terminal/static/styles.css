@@ -340,6 +340,42 @@ main,
   color: var(--accent-ink);
   font-size: var(--t-md);
 }
+/* The wordmark beside it. Unstyled until 2026-10-08, so the brand read as the
+ * glyph plus body text rather than as one mark. */
+.brand-text { font-weight: 700; letter-spacing: 0.01em; }
+
+/* ===========================================================================
+ * THE LAST FOUR UNSTYLED CLASSES, closed 2026-10-08 so the gate over this tree
+ * can be CLEAN rather than a list of exceptions. Measured that morning: 49
+ * class names the templates emit had no rule in any stylesheet. These were the
+ * remainder after the ATM flow (28) and the operator surface (6 more).
+ *
+ * Rule 19: "A ratchet that reaches zero gets DELETED, along with its baseline
+ * file. A clean gate is the goal; a shrinking baseline is a way station." Four
+ * was close enough to zero that naming them as known work would have been
+ * choosing the way station.
+ * ======================================================================== */
+
+/* The word beside the copy glyph. `aria-live="polite"` on it means it ANNOUNCES
+ * -- it changes to "Copied" -- so its width shifting is visible, and a fixed
+ * minimum stops the button resizing under the cursor mid-click. */
+.copy-word { min-width: 5ch; display: inline-block; }
+
+/* THE LIVE REGION'S WRAPPER, on the swap page and on its not-found fragment.
+ * It carries data-status and data-level for the polling swap page to read, and
+ * it is a GRID rather than unstyled so the fragment that replaces it lands in
+ * the same box -- an HTMX swap into an unstyled div is how a page jumps when
+ * the content arrives. */
+.live { display: grid; gap: var(--s3); }
+
+/* A WALLET THIS DESK CANNOT SIGN WITH, dimmed and marked. Its sibling
+ * `.wallet-entry` was styled and this modifier was not, so "we hold this key"
+ * and "we do not" rendered identically -- which on a payout page is the one
+ * distinction that decides whether a swap can complete. Not color alone: the
+ * entry also carries its own text, and this dims the whole row so the
+ * difference survives a grayscale paste. */
+.wallet-entry-unusable { opacity: 0.55; border-left-color: var(--ink-faint); }
+
 .topnav { display: flex; gap: var(--s1); }
 .topnav a {
   padding: var(--s2) var(--s3);
@@ -563,6 +599,31 @@ button:disabled {
 }
 .empty-params { display: block; color: var(--ink-faint); font-size: var(--t-xs); }
 
+/* THE MIDDLE SPAN OF THE `(none)` BLOCK, which had no rule at all until
+ * 2026-10-08. `.empty`, `.empty-mark` and `.empty-params` were styled and the
+ * one carrying the actual SENTENCE -- "no payout is stuck at status='created'"
+ * -- inherited whatever it landed in. It renders either way, which is why
+ * nothing reported it; found by reading every class the templates emit against
+ * every rule in static/*.css. Rule 14 asks for `(none)` to be a legible result,
+ * and the mark being bold while the sentence beside it is unstyled is a
+ * half-formatted result. */
+.empty-what { color: var(--ink); }
+
+/* A FAILURE REASON UNDER THE ROW IT BELONGS TO. Both were unstyled, so a
+ * payout's recorded failure -- the most important text in that table -- rendered
+ * as an ordinary cell spanning six columns, with nothing tying it to the row
+ * above or marking it as a reason rather than more data. */
+.row-reason td { border-top: none; padding-top: 0; }
+
+.reason-cell {
+  color: var(--halted);
+  font-size: var(--t-sm);
+  /* Indented and ruled on the left, so it reads as belonging to the row above
+   * rather than as its own record. */
+  padding-left: var(--s4);
+  border-left: 2px solid var(--halted);
+}
+
 .callout {
   margin: var(--s3) 0;
   padding: var(--s3);
@@ -647,6 +708,14 @@ button:disabled {
   vertical-align: middle;
 }
 .badge-glyph { font-weight: 700; }
+
+/* THE WORD HALF OF EVERY BADGE, and it had no rule. _badges.html's header is
+ * explicit that "THE GLYPH AND THE WORD BOTH CARRY THE MEANING. Color is the
+ * third channel, not the first" -- and the glyph was styled while the word,
+ * which is the half that survives a grayscale paste, inherited whatever it fell
+ * in. The letter-spacing is what makes a six-character all-caps state legible
+ * at this size. */
+.badge-word { font-weight: 600; letter-spacing: 0.04em; }
 .badge-age { font-weight: 500; opacity: 0.85; font-family: var(--mono); letter-spacing: 0; }
 
 .badge-ok, .badge-fresh-fresh { color: var(--ok); background: var(--ok-soft); }
@@ -1878,3 +1947,74 @@ h2:target {
   font-size: var(--t-sm);
   color: var(--ink-soft);
 }
+
+/* ===========================================================================
+ * THE OPERATOR SURFACE'S TAB STRIP. Operator, 2026-10-08: "make all the admin
+ * pages under one admin page that is found with tabls or hyperlinks."
+ *
+ * Before this, /admin and /admin/controls were two pages that are one surface,
+ * joined only by text: a sentence in the middle of the dashboard's prose went
+ * one way and a breadcrumb came back. Neither told you the other existed until
+ * you read far enough.
+ *
+ * NOT base.html's topnav, WHICH IS A DIFFERENT QUESTION. That strip picks the
+ * SURFACE -- Swap or Operator, customer or operator -- and this one picks the
+ * page within the operator's. Two levels, so a reader can tell "I am on the
+ * operator side" from "I am on its read-only page", and the current tab is
+ * marked with aria-current as well as a color.
+ * ======================================================================== */
+
+.admin-tabs { display: grid; gap: var(--s2); margin-bottom: var(--s4); }
+
+.admin-tabs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  /* A rule under the row, so the tabs read as attached to the page below them
+   * rather than as a row of loose buttons. */
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-tab {
+  display: block;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--bg-sunken);
+  color: var(--ink-soft);
+  text-decoration: none;
+  /* Pulled down one pixel onto the rule above, so the current tab can cover it
+   * and the rest cannot. */
+  margin-bottom: -1px;
+}
+
+.admin-tab:hover, .admin-tab:focus-visible { color: var(--ink); border-color: var(--line-strong); }
+
+/* THE CURRENT TAB IS THREE THINGS AT ONCE, not a color: it is brighter, it is
+ * bordered in the accent, and its bottom edge is OPEN onto the page -- the
+ * strip's own rule is covered by the tab's background. In a grayscale paste the
+ * open edge still says which page you are on, which is this stylesheet's
+ * standing requirement (see its header) applied to navigation. */
+.admin-tab-here {
+  background: var(--surface);
+  border-color: var(--accent);
+  color: var(--accent);
+  border-bottom: 1px solid var(--surface);
+  font-weight: 700;
+}
+
+.admin-tabs-note {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-faint);
+  max-width: 80ch;
+}
+
+/* The controls page's own wrapper, now that it sits inside base.html's main
+ * rather than being its own document. kill_switch.css still sets its width and
+ * padding; this only stops those fighting the shell's own gutter. */
+.killsw-main { max-width: none; padding: 0; }

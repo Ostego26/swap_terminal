@@ -62,23 +62,28 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "swap_terminal" / "templates"
 STATIC = REPO_ROOT / "swap_terminal" / "static"
 
-#: The ATM flow: its shell and every step partial it includes.
+#: EVERY template in the tree, globbed -- and it was an explicit eight-name list
+#: for most of a day.
 #:
-#: NAMED EXPLICITLY rather than globbed as `_atm_*`. A glob would silently
-#: start covering a partial somebody adds -- which sounds like a feature and is
-#: how a clean gate turns into a failing one on unrelated work, which rule 19
-#: calls "a ratchet somebody deletes". A new ATM screen joins this list in the
-#: commit that adds it.
-ATM_TEMPLATES = (
-    "atm.html",
-    "_atm_from_asset.html",
-    "_atm_to_asset.html",
-    "_atm_amount.html",
-    "_atm_payout_address.html",
-    "_atm_confirm.html",
-    "_atm_deposit.html",
-    "_asset_mark.html",
-)
+#: The list existed because the count was not zero. When this gate was written
+#: the ATM flow had 28 unstyled classes and the rest of the tree had 21 more, so
+#: covering everything would have failed on surfaces the change was not touching
+#: -- which rule 12 refuses ("clean the files you TOUCHED -- not the tree") and
+#: rule 19 calls "a ratchet that fails on ordinary work is a ratchet somebody
+#: deletes". The list was the honest scope for a gate that had to pass.
+#:
+#: Then the count reached zero. 28 went with the ATM stylesheet, 6 more with the
+#: operator surface (empty-what, reason-cell, row-reason, badge-word,
+#: brand-text, killsw-form-stop) and the last 4 on the customer swap pages
+#: (copy-word, live, wallet-entry-unusable) -- so the list became the way
+#: station rule 19 names: "A ratchet that reaches zero gets DELETED... A clean
+#: gate is the goal; a shrinking baseline is a way station."
+#:
+#: A GLOB IS NOW THE STRICTER CHOICE, not the looser one. A template somebody
+#: adds is covered the day it lands, which is the whole point: the defect this
+#: file exists for is a widget shipped without a stylesheet, and that is exactly
+#: what a new template is at risk of being.
+TEMPLATE_DIR_GLOB = "*.html"
 
 #: A Jinja expression or statement anywhere inside a class attribute.
 #:
@@ -151,14 +156,16 @@ def unstyled_in(template: Path, styled: set[str]) -> list[str]:
     return missing
 
 
-@pytest.mark.parametrize("name", ATM_TEMPLATES)
-def test_every_class_the_atm_emits_has_a_rule(name):
+def all_templates() -> list[str]:
+    """Every template, sorted. Asserted non-empty by the test that uses it."""
+    return sorted(path.name for path in TEMPLATES.glob(TEMPLATE_DIR_GLOB))
+
+
+@pytest.mark.parametrize("name", all_templates())
+def test_every_class_any_template_emits_has_a_rule(name):
     """One parametrization per template, so a failure names the file."""
     template = TEMPLATES / name
-    assert template.is_file(), (
-        f"{template} is missing. If an ATM screen was renamed or removed, update "
-        "ATM_TEMPLATES in the same commit -- this list is deliberately explicit."
-    )
+    assert template.is_file(), f"{template} vanished between collection and run"
 
     unstyled = unstyled_in(template, styled_class_names())
     assert not unstyled, (
@@ -274,3 +281,18 @@ def test_each_coin_has_an_accent_rule_and_a_token_behind_it():
             "own header), so a hex value spelled in the rule instead would be the drift that "
             "file exists to prevent."
         )
+
+
+def test_there_are_templates_to_check_at_all():
+    """A glob that matches nothing makes every parametrized test vacuous.
+
+    The failure mode this guards: templates move to a subdirectory, the glob
+    stops matching, and a file full of green tests reports on nothing. Rule 14's
+    did-nothing-looks-like-did-work, inside the gate.
+    """
+    found = all_templates()
+    assert len(found) >= 15, (
+        f"only {len(found)} template(s) under {TEMPLATES} matched {TEMPLATE_DIR_GLOB!r}. "
+        "There were 21 when this gate went tree-wide; a sharp drop means the glob stopped "
+        "finding them, not that the templates were deleted."
+    )

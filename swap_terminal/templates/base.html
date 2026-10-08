@@ -26,6 +26,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Swap Terminal{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  {#- A PAGE MAY ADD A SHEET, IT MAY NOT REPLACE THIS ONE. styles.css is always
+      first and always present, so :root's palette is defined before anything a
+      page brings -- which is what lets kill_switch.css hold thirteen tokens
+      that POINT at that palette instead of thirteen colors of its own.
+
+      Added 2026-10-08 so the kill-switch controls could join this shell. Its own
+      header had recorded why it could not: "base.html, static/styles.css and
+      templates/admin.html were off-limits to the change that wrote this", which
+      was a constraint on that change and not a property of the page. -#}
+  {% block head_extra %}{% endblock %}
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>

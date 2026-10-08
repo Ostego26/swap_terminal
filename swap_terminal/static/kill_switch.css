@@ -43,19 +43,48 @@
  * matched pair of buttons.
  */
 
+/* ===========================================================================
+ * EVERY TOKEN NOW POINTS AT styles.css's PALETTE. This block held thirteen
+ * literal colors and they described a LIGHT page -- #1b1f23 ink on #ffffff
+ * surfaces, GitHub's palette -- inside a terminal whose every other page is
+ * phosphor green on near-black.
+ *
+ * Operator, 2026-10-08: "make all the admin pages under one admin page that is
+ * found with tabls or hyperlinks." Tabs put these two pages side by side, and
+ * side by side a light page and a dark one do not read as one surface however
+ * the navigation is arranged. A second palette is rule 8 in CSS: two
+ * definitions of "this is a warning", agreeing about nothing, each correct in
+ * its own file.
+ *
+ * WHY THE TOKENS ARE REPOINTED RATHER THAN THE RULES REWRITTEN. The 290 lines
+ * below are prefixed `killsw-` throughout and their LAYOUT is not the problem
+ * -- the asymmetry between a defensive stop and an arming start is deliberate
+ * and documented above. Repointing thirteen names re-themes all of it in one
+ * place, which is the smallest change that makes the two pages one surface, and
+ * it leaves the selectors that this page's tests assert on untouched.
+ *
+ * THE NAMES STAY `--killsw-*` ON PURPOSE. They are this page's vocabulary --
+ * `proven`, `notproven`, `refused` are verdicts the stop panel reports and have
+ * no counterpart on the dashboard -- so they are a LAYER over the palette, not
+ * a copy of it. What is removed is the second set of VALUES, which is the half
+ * that drifts.
+ * ======================================================================== */
+
 :root {
-  --killsw-ink: #1b1f23;
-  --killsw-muted: #57606a;
-  --killsw-rule: #d0d7de;
-  --killsw-surface: #ffffff;
-  --killsw-code-surface: #f3f5f7;
-  --killsw-proven: #1a7f37;
-  --killsw-notproven: #a40e26;
-  --killsw-refused: #8a6d00;
-  --killsw-inert: #57606a;
-  --killsw-warn-surface: #fff8e5;
-  --killsw-alarm-surface: #fff0f1;
-  --killsw-ok-surface: #f2fbf4;
+  --killsw-ink: var(--ink);
+  --killsw-muted: var(--ink-soft);
+  --killsw-rule: var(--line);
+  --killsw-surface: var(--surface);
+  --killsw-code-surface: var(--bg-sunken);
+  /* The three verdicts, onto the status colors the rest of the system uses:
+   * green settled, red halted, amber a true reading that blocks you. */
+  --killsw-proven: var(--ok);
+  --killsw-notproven: var(--halted);
+  --killsw-refused: var(--slow);
+  --killsw-inert: var(--ink-faint);
+  --killsw-warn-surface: var(--slow-soft);
+  --killsw-alarm-surface: var(--halted-soft);
+  --killsw-ok-surface: var(--ok-soft);
   --killsw-gap: 16px;
 }
 
@@ -226,6 +255,12 @@
 }
 .killsw-form-start { border-color: var(--killsw-notproven); background: var(--killsw-warn-surface); }
 
+/* THE STOP FORM HAD NO RULE while its start sibling above did, so the asymmetry
+ * this file's header calls "the design" -- a defensive stop against an arming
+ * start -- existed in the markup and on only one of the two. Green edge for the
+ * reversible action, and no warning surface: a stop needs no alarm behind it. */
+.killsw-form-stop { border-color: var(--killsw-proven); }
+
 .killsw-warning { margin: 8px 0; }
 .killsw-warning-text {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -253,7 +288,10 @@
 .killsw-button-stop { border-color: var(--killsw-ink); }
 /* The arming button is the only filled one on the page. It is the only control
  * here that can start a process which broadcasts. */
-.killsw-button-start { background: var(--killsw-notproven); border-color: var(--killsw-notproven); color: #ffffff; }
+/* --accent-ink, not a literal white: styles.css's button.primary uses it for
+ * "ink on a filled button" and that is the same job here. The last hex value in
+ * this file. */
+.killsw-button-start { background: var(--killsw-notproven); border-color: var(--killsw-notproven); color: var(--accent-ink); }
 .killsw-button:focus-visible { outline: 3px solid var(--killsw-ink); outline-offset: 2px; }
 
 /* --- current state ---------------------------------------------------------- */
@@ -271,20 +309,17 @@
 .killsw-scope dd { margin: 2px 0 0 0; font-size: 14px; color: var(--killsw-muted); }
 .killsw-scope-cannot dt { color: var(--killsw-refused); }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --killsw-ink: #e6edf3;
-    --killsw-muted: #9aa7b2;
-    --killsw-rule: #30363d;
-    --killsw-surface: #0d1117;
-    --killsw-code-surface: #161b22;
-    --killsw-proven: #3fb950;
-    --killsw-notproven: #ff7b72;
-    --killsw-refused: #d29922;
-    --killsw-inert: #9aa7b2;
-    --killsw-warn-surface: #241c06;
-    --killsw-alarm-surface: #2b1416;
-    --killsw-ok-surface: #0f2417;
-  }
-  :root:not([data-theme="light"]) .killsw-button-start { color: #140407; }
-}
+/* THE prefers-color-scheme BLOCK IS GONE, AND IT HELD A THIRD PALETTE.
+ *
+ * It redefined all thirteen tokens with GitHub's dark values -- so this file
+ * carried one set for light, one for dark, and styles.css carried the system's
+ * own. Three definitions of "this is a warning".
+ *
+ * styles.css deleted its equivalent block for the reason stated in its header:
+ * "a Pip-Boy renders on a CRT in a vault, and a light variant would be a second
+ * theme nobody asked for and nobody could read". With the tokens above now
+ * pointing at that palette, keeping this block was worse than redundant -- it
+ * would OVERRIDE the shared values on a dark-preferring browser and leave the
+ * shared ones only on a light-preferring one, so the page's theme would depend
+ * on a setting the rest of the terminal ignores. Removed under rule 9: the
+ * moment the tokens were repointed, this became dead code that still ran. */

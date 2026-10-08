@@ -7,35 +7,48 @@
   Can move funds: no by itself; see _kill_switch.html, which it includes.
   Mainnet-safe: yes to render.
 
-  WHY IT EXTENDS NOTHING. base.html, static/styles.css and templates/admin.html
+  IT EXTENDS base.html AS OF 2026-10-08, AND USED TO EXTEND NOTHING. Its own
+  header gave the reason: "base.html, static/styles.css and templates/admin.html
   were off-limits to the change that wrote this -- another agent had just
   restructured the operator page into tabs -- and the point of keeping this
-  change self-contained is that neither side has to wait for the other. It is a
-  complete document instead: doctype, charset, viewport, one stylesheet of its
-  own, every selector prefixed.
+  change self-contained is that neither side has to wait for the other." That
+  was a constraint on one change, not a property of this page, and it cost
+  something visible: a complete document with its own stylesheet meant its own
+  palette, and kill_switch.css held THIRTEEN literal colors describing a LIGHT
+  page -- #1b1f23 ink on #ffffff -- inside a terminal that is phosphor green on
+  near-black everywhere else. A light page and a dark one do not read as one
+  surface however the navigation between them is arranged.
 
-  IT IS NOT THE DESTINATION. The panel belongs on /admin beside the Workers
-  card; this page is how it is reachable and testable before that include lands,
-  and it stays afterwards as the no-JavaScript direct link an operator can
-  bookmark -- which matters more here than on any other page in this tree,
-  because the moment you need a stop button is the moment something on this host
-  is already misbehaving and the big page may be the thing that is slow.
+  So: this shell, the shared palette (kill_switch.css's tokens now POINT at
+  styles.css's :root rather than redefining it), and the tab strip both admin
+  pages carry.
+
+  IT IS STILL ITS OWN PAGE AND THAT IS DELIBERATE. The controls do not move onto
+  /admin, because /admin's stated guarantee is that nothing on it changes
+  anything and this page arms a payout worker that broadcasts --
+  _admin_tabs.html carries that argument. What this page keeps is what its
+  original header claimed for it: the no-JavaScript direct link an operator can
+  bookmark, which matters more here than anywhere else in this tree, because the
+  moment you need a stop button is the moment something on this host is already
+  misbehaving and the big page may be the thing that is slow.
 
   NO <script> ANYWHERE, AND THAT IS STRUCTURAL. A stop button that needs
   JavaScript to work does nothing when a script fails to load. The form is a
   plain form, the response is a plain render.
-#}<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Start and stop the workers &#183; operator</title>
+#}{% extends "base.html" %}
+{% import "_admin_tabs.html" as admin_tabs %}
+{% set surface = 'admin' %}
+{% block title %}Start and stop the workers &#183; Operator{% endblock %}
+
+{#- kill_switch.css SECOND, after styles.css, so :root's palette is already
+    defined when its thirteen tokens reference it. -#}
+{% block head_extra %}
   <link rel="stylesheet" href="{{ url_for('static', filename='kill_switch.css') }}">
-</head>
-<body class="killsw-page">
-  <main class="killsw-main">
-    <p class="killsw-breadcrumb"><a href="{{ url_for('admin.admin_page') }}">&#8592; back to the operator page</a></p>
-    {% include "_kill_switch.html" %}
-  </main>
-</body>
-</html>
+{% endblock %}
+
+{% block content %}
+{{ admin_tabs.admin_tabs('controls') }}
+<div class="killsw-main">
+  {% include "_kill_switch.html" %}
+</div>
+{% endblock %}

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "_badges.html" as badges %}
+{% import "_admin_tabs.html" as admin_tabs %}
 {% set surface = 'admin' %}
 {% block title %}Operator &#183; Swap Terminal{% endblock %}
 {#
@@ -28,6 +29,11 @@
 #}
 
 {% block content %}
+{#- THE STRIP FIRST, ABOVE THE HERO. An operator landing here has to be able to
+    see that a second admin page exists before reading fourteen sections of this
+    one -- which is how /admin/controls was reachable before 2026-10-08: through
+    one sentence in the middle of the prose below. -#}
+{{ admin_tabs.admin_tabs('state') }}
 <section class="hero hero-tight">
   <p class="eyebrow">Operator surface &#183; read-only</p>
   <h1>System state</h1>

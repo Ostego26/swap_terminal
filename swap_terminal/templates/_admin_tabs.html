@@ -1,0 +1,62 @@
+{#
+  The operator surface's tab strip. One admin surface, two pages.
+
+  Role: template partial (rendering only; holds no decision)
+  Reads: the `current` key its caller passes
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  Operator, 2026-10-08: "make all the admin pages under one admin page that is
+  found with tabls or hyperlinks." Before this, /admin/controls was reachable
+  only through a sentence in the middle of /admin's prose, and /admin was
+  reachable from it only through a breadcrumb -- two pages that are one surface,
+  joined by text.
+
+  TABS AND NOT A MERGE, and the distinction is a safety property rather than a
+  layout preference. /admin opens "Operator surface - read-only" and means it:
+  its own header records that there is NO form on that page which posts
+  anywhere. The controls page exists to arm a payout worker that broadcasts.
+  Folding the second into the first would put a start button on the page whose
+  stated guarantee is that nothing on it changes anything -- and that guarantee
+  is load-bearing, because it is what makes the dashboard safe to leave open.
+  The operator asked for "tabs or hyperlinks", so the ask is satisfied without
+  spending it.
+
+  WHY THE CONTROLS PAGE STAYS A SEPARATE DOCUMENT AT ALL, from its own header:
+  "the moment you need a stop button is the moment something on this host is
+  already misbehaving and the big page may be the thing that is slow." A tab is
+  a link; the direct URL still works and is still bookmarkable.
+
+  THE CANISTER CONSOLE IS NAMED AND NOT LINKED, which is the honest option. It
+  is served by the operator_admin canister at http://<its-id>.localhost:4943/,
+  and this process cannot know that id: every fresh replica issues different
+  ones, the id lives in the replica's own state, and nothing mounts it into this
+  container. `swap_stack.py status` asks the replica and prints the URL. A tab
+  pointing at a guessed id would link to another deployment (rule 17).
+#}
+
+{% macro admin_tabs(current) -%}
+{%- set tabs = [
+      ('state',    'System state', url_for('admin.admin_page'),
+       'the read-only picture: workers, balances, chains, pairs, payouts'),
+      ('controls', 'Start / stop workers', url_for('kill_switch.controls_page'),
+       'the only operator page with a button -- starting arms a payout worker that broadcasts'),
+    ] -%}
+<nav class="admin-tabs" aria-label="Operator pages">
+  <ul class="admin-tabs-list" role="list">
+    {%- for key, label, href, what in tabs %}
+    <li>
+      <a href="{{ href }}" class="admin-tab{% if key == current %} admin-tab-here{% endif %}"
+         {% if key == current %}aria-current="page"{% endif %} title="{{ what }}">{{ label }}</a>
+    </li>
+    {%- endfor %}
+  </ul>
+  {#- Rule 14: the surface this strip cannot link to is named rather than left
+      out, because an operator who knows there are three admin surfaces and sees
+      two tabs is owed the reason. -#}
+  <p class="admin-tabs-note">The canister's own operator console is a third surface, served by
+     <code>operator_admin</code> on the ICP replica rather than by this server &mdash; so this page
+     cannot know its address. <code>swap_stack.py status</code> asks the replica and prints it.</p>
+</nav>
+{%- endmacro %}
