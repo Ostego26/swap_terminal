@@ -121,12 +121,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+from chains.base import RPCError
 from chains.coin_amounts import amount_to_base_units, fit_to_chain_precision
 from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network, is_named
 from chains.gridcoin import GridcoinAdapter
 from chains.gridcoin_wallet_lock import (
     STAKING_UNLOCK_SECONDS,
     GridcoinLockError,
+    lock,
     unlock_for_staking,
     unlocked_for_payout,
 )
@@ -349,6 +351,112 @@ def chain_fee_for(asset: str) -> tuple[float | None, str]:
             f"{asset}_NETWORK_FEE_RESERVE could not be read, so what the sending wallet must keep "
             f"back for the chain fee is unknown and no amount can be sized: {refusal}"
         )
+
+
+#: What the daemon says when `walletpassphrase` is called on a wallet that is ALREADY
+#: open: RPC_WALLET_ALREADY_UNLOCKED. It refuses WITHOUT checking the passphrase, which
+#: is why this needs its own branch rather than being one more kind of failure.
+#:
+#: MATCHED AS A SUBSTRING ON THE CODE, which is the idiom this repository already uses
+#: for exactly this problem: chains/gridcoin_wallet_lock.WALLET_UNLOCK_NEEDED_MARKERS
+#: matches "-13" in the message text, and rescue_payout.PRE_SIGNING_MARKERS matches
+#: "(rpc code -14)". chains/base.py puts the code into the message it raises, which is
+#: the only reason any of them can be told apart.
+#:
+#: THE CODE AND NOT THE WORDING. "already unlocked" would be a plausible match and is
+#: the wrong thing to key on: a daemon is free to reword its errors, and the numeric
+#: code is the part that is part of the protocol.
+ALREADY_UNLOCKED_MARKER = "(rpc code -17)"
+
+#: RPC_WALLET_PASSPHRASE_INCORRECT. The wallet did not open, and nothing this process
+#: can do will change that.
+#:
+#: NAMED AFTER THE CONDITION AND NOT THE SECRET, which is what answers ruff's S105
+#: here rather than a `noqa`. The first spelling was REJECTED_UNLOCK_MARKER and S105
+#: was right to fire: a constant whose name says passphrase and whose value is a
+#: string literal is indistinguishable from a hardcoded secret to a checker, a grep,
+#: or a reader skimming. This names what the daemon REJECTED, which is also the more
+#: accurate description -- it sits beside ALREADY_UNLOCKED_MARKER, and both are
+#: daemon conditions rather than anything of ours (rule 19: remove the cause).
+REJECTED_UNLOCK_MARKER = "(rpc code -14)"
+
+
+def prove_passphrase(adapter, passphrase: str) -> str:
+    """Prove the passphrase opens this wallet. "" if it does, else the refusal. THE PROOF.
+
+    A STAKING-ONLY UNLOCK IS THE TEST, because it needs no prior lock -- so on a wrong
+    passphrase the wallet is untouched, which is the whole reason this runs before
+    unlocked_for_payout() takes its lock. See grc_send() for the three staking
+    interruptions that bought that ordering on 2026-10-08.
+
+    AND AN ALREADY-OPEN WALLET BROKE IT THE SAME DAY, which is why this is a function
+    rather than a try/except at the call site. The operator restored staking with
+    --restore-staking, which left the wallet unlocked; the very next --apply then hit
+
+        Error: Wallet is already unlocked, use walletlock first if need to change
+        unlock settings. (rpc code -17)
+
+    and the first version of this check reported that as "the passphrase did NOT open
+    this wallet ... rpc code -14 is RPC_WALLET_PASSPHRASE_INCORRECT" -- a sentence
+    asserting a code the daemon had not returned, about a passphrase that was right.
+    My own safety addition became the thing blocking a correct send, and it blocked it
+    with a false explanation.
+
+    -17 PROVES NOTHING ON ITS OWN, and that is the honest reading: the daemon refused
+    the unlock without looking at the passphrase. So the wallet is LOCKED and the
+    unlock retried, which is the only way to test it -- and it costs nothing extra
+    here, because the caller's unlocked_for_payout() locks on its very next statement
+    anyway. Either the retry proves the passphrase with the wallet left staking, or it
+    fails and says the wallet is now locked and not staking, which is true.
+
+    EVERY OTHER FAILURE REFUSES WITHOUT A DIAGNOSIS. A dead socket, a timeout, an
+    unrecognized code: none of them is proof, and rule 2's distinction is the whole
+    point -- "I could not prove it" is not "it is wrong", and the refusal says which.
+    """
+    try:
+        unlock_for_staking(adapter, passphrase)
+        return ""
+    except RPCError as error:
+        if ALREADY_UNLOCKED_MARKER not in str(error):
+            return _unlock_refusal(error, locked=False)
+    # ALREADY OPEN. Lock it and ask properly. The caller locks immediately after this
+    # returns, so the lock is not a cost this check is adding.
+    lock(adapter)
+    try:
+        unlock_for_staking(adapter, passphrase)
+    except RPCError as error:
+        return _unlock_refusal(error, locked=True)
+    return ""
+
+
+def _unlock_refusal(error: Exception, *, locked: bool) -> str:
+    """The sentence for a failed unlock, which must say what state the wallet is IN.
+
+    `locked` is the thing a reader needs and the thing a message cannot guess: the
+    same daemon error means "nothing was touched" before the lock and "your staking is
+    off" after it. chains/gridcoin_wallet_lock.restore_failed_because() draws the
+    identical distinction for the identical reason, and is not reused here only
+    because its sentences are about a restore rather than about a proof.
+    """
+    text = str(error)
+    wrong = REJECTED_UNLOCK_MARKER in text
+    what = (
+        "is WRONG -- rpc code -14 is RPC_WALLET_PASSPHRASE_INCORRECT, so the wallet did not open"
+        if wrong else
+        "could not be PROVED either way: the daemon failed for a reason this tool does not "
+        "recognize, and an unproved passphrase is refused rather than tried"
+    )
+    state = (
+        "The wallet was already unlocked, so it was LOCKED to ask properly and is now LOCKED AND "
+        "NOT STAKING. Put it back with:  python3 " + SELF + " --asset GRC --restore-staking --apply"
+        if locked else
+        "NOTHING WAS LOCKED -- if that wallet was staking, it still is. This check runs before the "
+        "lock for exactly that reason."
+    )
+    return (
+        f"the passphrase in {OPERATOR_UNLOCK_ENV_VAR} {what}, so nothing was sent. {state}\n\n"
+        f"  The daemon said: {error}"
+    )
 
 
 def network_gate(adapter, whose: str) -> str:
@@ -828,27 +936,15 @@ def grc_send(plan: dict) -> str:
     # Re-ordering that is a change to how live payouts take a lock, which is the
     # operator's (rule 16) -- so the difference is named at both sites rather than
     # fixed on one and forgotten.
-    try:
-        unlock_for_staking(plan["source"], passphrase)
-    # BROAD ON PURPOSE AND WITH NO SUPPRESSION NEEDED: ruff's BLE001 does not fire on
-    # a catch that RE-RAISES, which this one does, so a `noqa` here would be an unused
-    # directive claiming a check nobody has to make (rule 19 -- and RUF100 says so).
-    # The breadth is still deliberate: the adapter raises RPCError for a -14 and
-    # requests' own exceptions for a dead socket, and BOTH mean "not proved". Neither
-    # can be reported as success, and nothing was locked, so there is no state to
-    # unwind on either.
-    except Exception as error:
+    proof_refusal = prove_passphrase(plan["source"], passphrase)
+    if proof_refusal:
         raise RuntimeError(
-            f"the passphrase in {OPERATOR_UNLOCK_ENV_VAR} did NOT open this wallet, so nothing was "
-            f"sent and NOTHING WAS LOCKED -- if that wallet was staking, it still is. This check "
-            f"runs before the lock for exactly that reason.\n\n"
-            f"  The daemon said: {error}\n\n"
-            f"  rpc code -14 is RPC_WALLET_PASSPHRASE_INCORRECT: the wallet did not open. Note that "
-            f"this is a DIFFERENT secret from the RPC password -- the balances printed above prove "
-            f"the rpcpassword is right, so what is wrong is the wallet's ENCRYPTION passphrase. The "
-            f"GUI on {plan['source_label']} will tell you which one that wallet has, and its unlock "
+            f"{proof_refusal}\n\n"
+            f"  Note that the wallet's ENCRYPTION passphrase is a DIFFERENT secret from the RPC "
+            f"password -- the balances printed above prove the rpcpassword is right. The GUI on "
+            f"{plan['source_label']} will tell you which one that wallet has, and its unlock "
             f"dialog keeps the secret out of argv and out of shell history."
-        ) from error
+        )
 
     try:
         with unlocked_for_payout(plan["source"], passphrase):

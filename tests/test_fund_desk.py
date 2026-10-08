@@ -485,6 +485,125 @@ def test_the_destination_is_read_and_never_created(monkeypatch):
     assert "getnewaddress" not in source.methods
 
 
+class Unlocking(Wallet):
+    """A wallet whose walletpassphrase answers from a scripted list of outcomes.
+
+    Each entry is either None (the unlock succeeds) or an RPCError to raise, consumed
+    in order -- which is what lets a test say "refuses with -17, then succeeds once
+    locked" without a daemon. `walletlock` is recorded like any other call, and it is
+    the thing most of these tests assert on.
+    """
+
+    def __init__(self, *outcomes, balance: float = 1000.0, **kwargs):
+        super().__init__(balance, **kwargs)
+        self._outcomes = list(outcomes)
+
+    def call(self, method, *params):
+        if method == "walletpassphrase":
+            self.calls.append((method, params))
+            outcome = self._outcomes.pop(0) if self._outcomes else None
+            if outcome is not None:
+                raise outcome
+            return None
+        return super().call(method, *params)
+
+
+ALREADY_UNLOCKED = RPCError(
+    "Error: Wallet is already unlocked, use walletlock first if need to change unlock "
+    "settings. (rpc code -17)"
+)
+REJECTED = RPCError("Error: The wallet passphrase entered was incorrect. (rpc code -14)")
+
+
+def test_an_already_unlocked_wallet_is_locked_and_asked_properly():
+    """The defect the operator hit minutes after the precheck shipped, 2026-10-08.
+
+    --restore-staking left their wallet OPEN, so the next --apply got
+
+        Error: Wallet is already unlocked, use walletlock first if need to change
+        unlock settings. (rpc code -17)
+
+    and the first version of this check reported it as "the passphrase did NOT open
+    this wallet ... rpc code -14 is RPC_WALLET_PASSPHRASE_INCORRECT" -- asserting a
+    code the daemon had not returned, about a passphrase that was correct. My own
+    safety addition became the thing blocking a correct send, with a false
+    explanation.
+
+    -17 PROVES NOTHING: the daemon refuses without checking. So the wallet is locked
+    and the unlock retried, which is the only way to test it -- and costs nothing,
+    because unlocked_for_payout() locks on its very next statement anyway.
+
+    MUTATION: treat -17 as success and return "". This fails, because the sequence
+    would be a single walletpassphrase with no lock and no retry -- a send proceeding
+    on a passphrase nothing had checked. Verified 2026-10-08.
+    """
+    wallet = Unlocking(ALREADY_UNLOCKED, None)
+    assert fund_desk.prove_passphrase(wallet, "not-a-real-secret") == ""
+    assert wallet.methods == ["walletpassphrase", "walletlock", "walletpassphrase"]
+
+
+def test_a_rejected_retry_after_the_lock_says_the_staking_is_off():
+    """And names the command that puts it back, because that state is now true.
+
+    The two outcomes of the same daemon error mean different things to a reader: before
+    the lock nothing was touched, after it their staking is off. A message that could
+    not tell them apart is the one this replaced.
+    """
+    wallet = Unlocking(ALREADY_UNLOCKED, REJECTED)
+    refusal = fund_desk.prove_passphrase(wallet, "not-a-real-secret")
+    assert "is WRONG" in refusal
+    assert "LOCKED AND NOT STAKING" in refusal
+    assert "--restore-staking --apply" in refusal
+    assert wallet.methods == ["walletpassphrase", "walletlock", "walletpassphrase"]
+
+
+def test_a_rejection_before_any_lock_says_the_staking_survived():
+    wallet = Unlocking(REJECTED)
+    refusal = fund_desk.prove_passphrase(wallet, "not-a-real-secret")
+    assert "is WRONG" in refusal
+    assert "NOTHING WAS LOCKED" in refusal
+    assert "still is" in refusal
+    assert "walletlock" not in wallet.methods, "a wrong passphrase must not cost the staking unlock"
+
+
+def test_an_unrecognized_failure_is_refused_without_a_diagnosis():
+    """Rule 2: "I could not prove it" is not "it is wrong", and the refusal says which.
+
+    A dead socket is not a wrong passphrase, and a message claiming -14 about a
+    timeout is the false-explanation defect again in a different shape.
+    """
+    wallet = Unlocking(RPCError("Connection refused"))
+    refusal = fund_desk.prove_passphrase(wallet, "not-a-real-secret")
+    assert "could not be PROVED either way" in refusal
+    assert "-14" not in refusal, "it must not assert a code the daemon never returned"
+    assert "walletlock" not in wallet.methods
+
+
+def test_the_send_completes_against_an_already_unlocked_wallet(monkeypatch):
+    """End to end on the operator's exact state: staking restored, then a send.
+
+    The lock cycle that reaches the chain is unchanged; what is new is the two extra
+    calls in front of it, which is the price of proving the passphrase on a wallet
+    that was already open.
+    """
+    source = Unlocking(ALREADY_UNLOCKED, None, balance=3687.32154338)
+    desk = Wallet(11.00248643, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "not-a-real-secret-and-reaches-no-daemon")
+    plan = grc_plan(lambda _text: None, 2000.0)
+    grc_send(plan)
+    assert [m for m in source.methods if m in ("walletlock", "walletpassphrase", "sendtoaddress")] == [
+        # the proof: refused as already-open, locked, asked again
+        "walletpassphrase", "walletlock", "walletpassphrase",
+        # then unlocked_for_payout()'s own cycle, unchanged
+        "walletlock", "walletpassphrase", "sendtoaddress", "walletlock", "walletpassphrase",
+    ]
+    # 2000.0 - 11.00248643, NOT the capped balance: the source has 3687 and is nowhere
+    # near the cap, so the amount is the shortfall. This is the operator's exact figure
+    # from 2026-10-08, which is why these two numbers are the seeded balances.
+    assert source.sent == [pytest.approx(1988.99751357)]
+
+
 def test_a_wrong_passphrase_never_reaches_the_lock(monkeypatch):
     """The defect that cost the operator's staking wallet THREE times, 2026-10-08.
 
