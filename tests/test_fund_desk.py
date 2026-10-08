@@ -415,21 +415,71 @@ def test_the_send_happens_inside_the_unlock_window_in_that_order(monkeypatch):
     assert source.sent == [pytest.approx(89.0)]
 
 
-def test_no_passphrase_in_the_environment_sends_nothing_and_names_the_variable(monkeypatch):
+@pytest.mark.parametrize(("value", "fragment"), [
+    (None, "is NOT SET in this process's environment"),
+    ("", "IS set and is EMPTY"),
+    ("   ", "contains only whitespace"),
+    ("\n", "contains only whitespace"),
+])
+def test_unset_empty_and_whitespace_are_three_refusals_that_say_which(monkeypatch, value, fragment):
+    """All three send nothing, and the message names the one that held.
+
+    THE MIDDLE CASE COST A ROUND TRIP, 2026-10-08. The operator ran
+    `read -rs <VAR> && export <VAR>`, a trailing newline from the pasted line was
+    already in stdin so `read` consumed it and returned "", `export` exported the
+    empty string -- and this refused with "is not set" about a variable that WAS set.
+    A refusal naming the wrong condition sends a reader to the wrong fix, which is
+    the one thing a refusal must not do.
+
+    WHITESPACE IS THE DANGEROUS ONE, and is why `.strip()` is in the check rather
+    than bare truthiness: a single pasted space is truthy, so it would reach
+    walletpassphrase, fail with rpc code -14, and leave the operator's STAKING
+    wallet locked and not staking -- the failure
+    chains/gridcoin_wallet_lock.unlocked_for_payout() records from 2026-10-07.
+
+    MUTATION: `if not passphrase.strip():` -> `if not passphrase:`. The two
+    whitespace rows fail, and they fail by REACHING the unlock, which the
+    walletpassphrase assertion below is what catches. Verified 2026-10-08.
+    """
     source = Wallet(1000.0)
     desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
     wire(monkeypatch, source=source, desk=desk)
-    monkeypatch.delenv(OPERATOR_UNLOCK_ENV_VAR, raising=False)
+    if value is None:
+        monkeypatch.delenv(OPERATOR_UNLOCK_ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, value)
     plan = grc_plan(lambda _text: None, 100.0)
     with pytest.raises(RuntimeError) as raised:
         grc_send(plan)
-    assert OPERATOR_UNLOCK_ENV_VAR in str(raised.value)
-    assert "GRIDCOIN_WALLET_PASSPHRASE is the desk's" in str(raised.value)
+    message = str(raised.value)
+    assert fragment in message
+    assert OPERATOR_UNLOCK_ENV_VAR in message
+    assert "GRIDCOIN_WALLET_PASSPHRASE is the desk's" in message
+    assert "/dev/tty" in message, "the refusal names the fix for the cause that produced it"
     assert source.sent == []
     assert "walletpassphrase" not in source.methods, (
         "the wallet must not even be locked before the passphrase is known to exist -- locking it "
         "and failing is what leaves the operator's staking wallet off"
     )
+    assert "walletlock" not in source.methods
+
+
+def test_the_refusal_never_echoes_the_value_it_rejected(monkeypatch):
+    """The message names the VARIABLE and the state, never the content.
+
+    Asserted because the obvious way to write "contains only whitespace" is to show
+    what it contained, and this tool's whole contract is that the value never reaches
+    the screen.
+    """
+    source = Wallet(1000.0)
+    desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "   ")
+    plan = grc_plan(lambda _text: None, 100.0)
+    with pytest.raises(RuntimeError) as raised:
+        grc_send(plan)
+    assert "'   '" not in str(raised.value)
+    assert '"   "' not in str(raised.value)
 
 
 def test_the_tool_accepts_no_passphrase_argument_at_all():

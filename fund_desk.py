@@ -512,14 +512,47 @@ def grc_send(plan: dict) -> str:
     """
     import os  # noqa: PLC0415 -- checked: imported here so the one read of the environment sits beside the paragraph explaining where the secret may come from, rather than at the top where a reader would have to go looking for which function uses it.
 
-    passphrase = os.environ.get(OPERATOR_UNLOCK_ENV_VAR, "")
-    if not passphrase:
+    raw = os.environ.get(OPERATOR_UNLOCK_ENV_VAR)
+    passphrase = raw or ""
+    if not passphrase.strip():
+        # UNSET, EMPTY AND WHITESPACE ARE THREE CONDITIONS AND THIS USED TO REPORT
+        # ONE. The operator hit the middle case on 2026-10-08: they ran
+        # `read -rs <VAR> && export <VAR>`, the prompt returned instantly, and this
+        # refused with "is not set" -- about a variable that WAS set, to "". A
+        # trailing newline in the pasted line is already sitting in stdin when
+        # `read` runs, so it reads that newline and returns an empty value, and
+        # `export` then exports the empty string. Telling them to export something
+        # they had just exported is a refusal that sends a reader looking in the
+        # wrong place, which is the one thing a refusal must not do.
+        #
+        # gridcoin_credentials._first_set() already draws this distinction for the
+        # RPC variables and names the same cause, so the vocabulary exists in this
+        # tree; what was missing was saying which one held here.
+        #
+        # WHITESPACE IS REFUSED RATHER THAN SENT, and that is the dangerous one of
+        # the three. A single pasted space is truthy, so without .strip() it would
+        # reach walletpassphrase, fail with rpc code -14, and leave the operator's
+        # STAKING wallet locked and not staking -- the exact failure
+        # chains/gridcoin_wallet_lock.unlocked_for_payout() records from
+        # 2026-10-07. Refusing here cannot have that cost.
+        state = {
+            None: "is NOT SET in this process's environment",
+            "": "IS set and is EMPTY -- the variable exists with a zero-length value",
+        }.get(raw, "IS set and contains only whitespace")
         raise RuntimeError(
-            f"{OPERATOR_UNLOCK_ENV_VAR} is not set in this process's environment, so the "
-            f"operator's wallet cannot be unlocked and NOTHING was sent. It is the OPERATOR "
-            f"wallet's passphrase and not the desk's -- GRIDCOIN_WALLET_PASSPHRASE is the desk's, "
-            f"and the two wallets are not assumed to share a secret. Export it into the shell that "
-            f"runs this (never as a command-line argument: argv is world-readable through /proc)."
+            f"{OPERATOR_UNLOCK_ENV_VAR} {state}, so the operator's wallet cannot be unlocked and "
+            f"NOTHING was sent -- the wallet was not even locked, because this check runs before "
+            f"the unlock.\n\n"
+            f"  IF YOU JUST RAN `read`: a trailing newline in the pasted line is already in stdin, "
+            f"so `read` consumes it and returns an empty value before you can type. Read from the "
+            f"terminal instead of stdin, which cannot be fed by a paste:\n"
+            f"      read -rs {OPERATOR_UNLOCK_ENV_VAR} < /dev/tty && export {OPERATOR_UNLOCK_ENV_VAR}\n"
+            f"  Then confirm WITHOUT printing it -- the length only:\n"
+            f"      echo \"length=${{#{OPERATOR_UNLOCK_ENV_VAR}}}\"\n\n"
+            f"  It is the OPERATOR wallet's passphrase and not the desk's: "
+            f"GRIDCOIN_WALLET_PASSPHRASE is the desk's, and the two wallets are not assumed to "
+            f"share a secret. Never pass it as a command-line argument -- argv is world-readable "
+            f"through /proc."
         )
     try:
         with unlocked_for_payout(plan["source"], passphrase):
