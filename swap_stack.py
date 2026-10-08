@@ -80,12 +80,13 @@ from microfortnights import format_duration  # noqa: E402  -- same sys.path.inse
 
 from swap_terminal.stack_authority import (  # noqa: E402
     CANDID_UI_CANISTER_NAME,
-    CANISTER_SURFACES,
     REPLICA_STATUS_URL,
     STACK_PORTS,
     VERSION_STATUSES_WORTH_REPEATING,
     WEB_PORT_CANDIDATES,
+    CanisterLookups,
     GitReading,
+    canister_lookup_names,
     canister_lookup_verdict,
     code_version_verdict,
     container_id,
@@ -788,7 +789,7 @@ def probe_serving_port() -> tuple[int, str]:
     return serving_verdict(probes)
 
 
-def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[str], int, str]:
+def canister_ids(files: tuple[str, ...]) -> CanisterLookups:
     """Ask the replica for each canister's id. ({name: id or None}, what went wrong).
 
     THE I/O HALF OF THE SURFACE MAP. stack_authority.surface_map() decides what may
@@ -816,91 +817,90 @@ def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[st
     (rule 14). The reasons are returned rather than printed so the caller keeps
     control of the order lines appear in.
     """
+    lookups = canister_lookup_names()
     found: dict[str, str | None] = {}
     trouble: list[str] = []
     #: How many dfx ANSWERED were not deployed. Counted rather than inferred from
     #: `found`, where a None also covers "could not ask" -- the two must reach the
     #: map distinguishable.
     absent = 0
-    for index, (name, _serves_page, _what) in enumerate(CANISTER_SURFACES, start=1):
-        say(f"                    asking {index}/{len(CANISTER_SURFACES)} {name}")
-        try:
-            done = compose(
-                ["exec", "-T", _DFX_SERVICE, "dfx", "canister", "id", name],
-                files, timeout=_CANISTER_ID_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            # NAMED SEPARATELY FROM A NON-ZERO EXIT, because the two mean different
-            # things and the operator's next command differs: a timeout is a docker
-            # or a replica that is not answering at all, where a non-zero exit is
-            # dfx answering that it cannot tell you.
-            found[name] = None
-            trouble.append(
-                f"{name}: `dfx canister id` did not answer within "
-                f"{format_duration(_CANISTER_ID_TIMEOUT_SECONDS)}, so NOTHING was read for it"
-            )
-            continue
-        except OSError as error:
-            # docker not on PATH is an OSError from subprocess, and it is the one
-            # cause that makes every later lookup fail the same way. Said with its
-            # own text rather than collapsed into "could not read".
-            found[name] = None
-            trouble.append(f"{name}: could not run docker at all -- {type(error).__name__}: {error}")
-            continue
-        # THE LAST LINE OF stdout, NOT ALL OF IT. dfx prints warnings ("Using the
-        # default definition for the 'local' shared network") above its answer on
-        # some versions, and a report that pasted the whole buffer into a url would
-        # produce an unopenable link that LOOKS like one -- which is the one thing
-        # the map must not do.
-        # THE DECISION IS canister_lookup_verdict's, AND IT SEPARATES "NOT
-        # DEPLOYED" FROM "COULD NOT ASK" -- which this loop used to merge. See
-        # that function: the merge is what let three canisters disappear
-        # unremarked on the operator's host, 2026-10-08.
-        ident, kind, why = canister_lookup_verdict(done.returncode, done.stdout, done.stderr)
-        found[name] = ident
+    ui_id = ""
+    read = 0
+    for index, name in enumerate(lookups, start=1):
+        # THE CANDID UI IS ASKED IN THIS LOOP, NOT BESIDE IT. 4d82caf gave it its
+        # own copy of the try/compose/except/verdict block, and the copy is what
+        # desynchronized the counter from the work: the loop said `3/3` and then a
+        # fourth lookup happened under it. Rule 8 -- two copies of one rule agree
+        # on the day they are written. These two lasted one commit.
+        is_ui = name == CANDID_UI_CANISTER_NAME
+        say(f"                    asking {index}/{len(lookups)} {name}"
+            + ("  <- the Candid UI canister itself; every CANDID link is a query against it"
+               if is_ui else ""))
+        ident, kind, why = _ask_canister_id(name, files)
+        if is_ui:
+            ui_id = ident
+        else:
+            found[name] = ident
         if kind == "found":
+            read += 1
             continue
-        if kind == "not_deployed":
+        if kind == "not_deployed" and not is_ui:
             absent += 1
             trouble.append(
                 f"{name}: NOT DEPLOYED -- dfx answered: {why}. This is not a failure to "
                 "read; the replica does not have this canister"
             )
             continue
+        # WHAT IT COSTS, NOT JUST THAT IT FAILED. The UI's consequence is different
+        # in kind from a surface canister's: one row goes missing versus EVERY
+        # Candid link going missing, and the operator cannot work that out from a
+        # bare "could not read".
         trouble.append(
-            f"{name}: `docker compose exec -T {_DFX_SERVICE} dfx canister id {name}` "
-            f"exited {done.returncode}: {why}"
+            f"{name}: {why}" + (
+                ". The Candid UI canister's own id was NOT read, so no CANDID link is "
+                "written -- a link built on a guessed UI id loads the wrong canister's "
+                "interface and looks correct doing it" if is_ui else ""
+            )
         )
-    # THE CANDID UI'S OWN ID, ASKED LIKE EVERY OTHER. It is not a surface row --
-    # nobody opens Candid UI directly -- but every CANDID link in the map is a
-    # query against it, so an unread id means those links cannot be written.
-    #
-    # IT USED TO BE A HARDCODED CONSTANT and was wrong on this operator's replica
-    # for a whole session: local ids come off a fixed sequence in CREATION ORDER,
-    # so the UI canister's id moves when the number of canisters created before it
-    # changes. See stack_authority.CANDID_UI_CANISTER_NAME for the measurement.
-    say(f"                    asking {CANDID_UI_CANISTER_NAME} (the Candid UI canister itself)")
-    ui_id = ""
+    return CanisterLookups(ids=found, trouble=trouble, absent=absent, ui_id=ui_id,
+                           asked=len(lookups), read=read)
+
+
+def _ask_canister_id(name: str, files: tuple[str, ...]) -> tuple[str, str, str]:
+    """One `dfx canister id`. Returns (id, kind, why) -- kind is the verdict's own.
+
+    THE ONE PLACE A LOOKUP IS PERFORMED, extracted when merging the Candid UI's
+    duplicate copy back into the loop (rule 8/9: consolidation creates dead code,
+    and the cull runs with the merge). The caller decides what a failure MEANS for
+    the canister it asked about; this decides nothing beyond what dfx said.
+
+    `kind` is canister_lookup_verdict()'s vocabulary -- found / not_deployed /
+    unreachable -- and the two ways to not reach dfx at all are folded into
+    `unreachable` with their own `why`, because the operator's next command differs:
+    a timeout is docker or the replica not answering, an OSError is docker not being
+    there, and a non-zero exit is dfx answering that it cannot tell you.
+    """
     try:
         done = compose(
-            ["exec", "-T", _DFX_SERVICE, "dfx", "canister", "id", CANDID_UI_CANISTER_NAME],
+            ["exec", "-T", _DFX_SERVICE, "dfx", "canister", "id", name],
             files, timeout=_CANISTER_ID_TIMEOUT_SECONDS,
         )
-    except (subprocess.TimeoutExpired, OSError) as error:
-        trouble.append(
-            f"{CANDID_UI_CANISTER_NAME}: could not be asked -- {type(error).__name__}. Every "
-            "CANDID link is a query against this canister, so none will be written"
+    except subprocess.TimeoutExpired:
+        return "", "unreachable", (
+            f"`dfx canister id` did not answer within "
+            f"{format_duration(_CANISTER_ID_TIMEOUT_SECONDS)}, so NOTHING was read for it"
         )
-    else:
-        ui_id, kind, why = canister_lookup_verdict(done.returncode, done.stdout, done.stderr)
-        if kind != "found":
-            ui_id = ""
-            trouble.append(
-                f"{CANDID_UI_CANISTER_NAME}: {why}. The Candid UI canister's own id was NOT "
-                "read, so no CANDID link is written -- a link built on a guessed UI id loads "
-                "the wrong canister's interface and looks correct doing it"
-            )
-    return found, trouble, absent, ui_id
+    except OSError as error:
+        return "", "unreachable", f"could not run docker at all -- {type(error).__name__}: {error}"
+    # THE LAST LINE OF stdout, NOT ALL OF IT, and the decision is
+    # canister_lookup_verdict's -- it separates "not deployed" from "could not
+    # ask", which this loop used to merge. That merge is what let three canisters
+    # disappear unremarked on the operator's host, 2026-10-08.
+    ident, kind, why = canister_lookup_verdict(done.returncode, done.stdout, done.stderr)
+    if kind == "unreachable":
+        why = (f"`docker compose exec -T {_DFX_SERVICE} dfx canister id {name}` "
+               f"exited {done.returncode}: {why}")
+    return ident, kind, why
 
 
 def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
@@ -916,15 +916,29 @@ def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
     `id COULD NOT BE READ` three times wants the reason above it, not below it --
     the reason is what they act on and the map is what they were asking for.
     """
-    say(f"  canister ids      `dfx canister id` x{len(CANISTER_SURFACES)} in the `{_DFX_SERVICE}` service, up to")
-    say(f"                    {format_duration(_CANISTER_ID_TIMEOUT_SECONDS)} each -- asked, never hardcoded (ids are per-replica)")
-    ids, trouble, absent, ui_id = canister_ids(files)
-    for line in trouble:
+    # THE SCALE, AND IT IS THE REAL ONE. This said x3 while asking four, so an
+    # operator reading "up to 10.0s each" budgeted thirty seconds for a step that
+    # can take forty (rule 14: announce the target and the scale UP FRONT, and the
+    # scale has to be the scale). The worst case is spelled out rather than left as
+    # multiplication the reader does on a line they are already waiting through.
+    asking = canister_lookup_names()
+    say(f"  canister ids      `dfx canister id` x{len(asking)} in the `{_DFX_SERVICE}` service, up to")
+    say(f"                    {format_duration(_CANISTER_ID_TIMEOUT_SECONDS)} each "
+        f"({format_duration(_CANISTER_ID_TIMEOUT_SECONDS * len(asking))} if every one times out)"
+        f" -- asked, never hardcoded (ids are per-replica)")
+    looked = canister_ids(files)
+    for line in looked.trouble:
         say(f"  COULD NOT READ    {line}")
-    if not trouble:
-        say(f"  read              all {len(ids)} canister ids")
+    # ALWAYS A COUNT, AND ALWAYS OVER ITS DENOMINATOR (rule 3). This used to print
+    # `read all 3 canister ids` on a clean run and NOTHING at all on a dirty one,
+    # so a partial read -- three of four, with the Candid UI missing -- had no
+    # number anywhere; the operator had to count trouble lines to work out what
+    # succeeded. `read 3/4` says it in the place they are already looking.
+    marker = "read" if looked.read == looked.asked else "PARTIAL"
+    say(f"  {marker:<16}  {looked.read}/{looked.asked} ids read, "
+        f"{', '.join(asking)}")
     say("")
-    for line in surface_map(serving_port, ids, absent, ui_id):
+    for line in surface_map(serving_port, looked.ids, looked.absent, looked.ui_id):
         say(line)
 
 

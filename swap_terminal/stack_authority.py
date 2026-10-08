@@ -922,6 +922,69 @@ def code_version_verdict(reading: GitReading) -> tuple[str, str, list[str]]:
 #: operator somebody else's canister." It did exactly the "or worse".
 CANDID_UI_CANISTER_NAME = "__Candid_UI"
 
+def canister_lookup_names() -> tuple[str, ...]:
+    """Every name `dfx canister id` is asked for, in the order asked. DERIVED, not listed.
+
+    ONE PLACE, BECAUSE TWO WERE ALREADY WRONG (rule 8). 4d82caf added the
+    __Candid_UI lookup outside the loop that counts them, and the operator's
+    2026-10-08 `status` printed the result:
+
+        canister ids      `dfx canister id` x3 in the `icp-replica` service, up to
+                          8.3µfn (10.0s) each
+                          asking 1/3 operator_admin
+                          asking 2/3 threshold_custody
+                          asking 3/3 icp_ledger_canister
+                          asking __Candid_UI (the Candid UI canister itself)
+        read              all 3 canister ids
+
+    Four lookups announced as three, a counter that reached 3/3 and then kept
+    going, and a summary claiming three reads after four succeeded. Rule 3: "state
+    the denominator: a count without what it was counted out of has caused real
+    errors here more than once." Rule 14: "State what the number means, next to the
+    number" -- an operator reading `x3 ... up to 10.0s each` budgets 30 seconds for
+    a step that can take 40.
+
+    None of it was wrong by one edit. It was wrong because the count was written
+    down in three places and the list of lookups in two, so adding a lookup in one
+    of them left the other four spellings describing the old shape. Deriving the
+    tuple here makes the next addition arrive in the header, the counter and the
+    summary at once.
+
+    The Candid UI goes LAST on purpose: the three project canisters are what the
+    operator asked for, and the UI is what makes their CANDID links writable. If
+    the replica is wedged, the three that matter have already been attempted when
+    the fourth times out.
+    """
+    return (*(name for name, _serves_page, _what in CANISTER_SURFACES), CANDID_UI_CANISTER_NAME)
+
+
+@dataclass(frozen=True)
+class CanisterLookups:
+    """What one pass of `dfx canister id` read. Produced by swap_stack.canister_ids().
+
+    A READING OBJECT RATHER THAN A GROWING TUPLE, the same shape as GitReading and
+    for the same reason: this started as `(found, trouble)`, became a 4-tuple when
+    the Candid UI id was added, and `asked`/`read` would have made it six. Every
+    caller unpacking six positional values in order is a transposition waiting to
+    happen, and two of them are ints that mean different things.
+
+    `ids` holds ONLY the three surface canisters, because that is what surface_map()
+    renders; `ui_id` is kept apart because it is not a row, it is what makes the
+    other rows' CANDID links writable.
+
+    `asked` and `read` are counted rather than derived from len(ids), which is the
+    defect this type was introduced with: len(ids) is 3 no matter how many lookups
+    ran.
+    """
+
+    ids: dict[str, str | None]
+    trouble: list[str]
+    absent: int
+    ui_id: str
+    asked: int
+    read: int
+
+
 #: The replica's own status endpoint, and the ONE place it is spelled.
 #:
 #: MOVED HERE FROM swap_stack.py ON 2026-10-08, where it was `_REPLICA_STATUS_URL`

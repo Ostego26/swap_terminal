@@ -43,6 +43,7 @@ from swap_terminal.stack_authority import (
     WEB_SURFACES,
     GitReading,
     candid_url,
+    canister_lookup_names,
     canister_lookup_verdict,
     canister_surface_lines,
     code_version_verdict,
@@ -1570,4 +1571,136 @@ def test_current_disclaims_the_fetch_it_did_not_do():
     assert "nothing is fetched here" in said, (
         f"the current verdict must disclaim the fetch it did not do, or it reads as a "
         f"check against GitHub: {said}"
+    )
+
+
+# =============================================================================
+# THE COUNT AND THE WORK IT COUNTS
+#
+# 4d82caf added a fourth `dfx canister id` lookup outside the loop that counts
+# them, and the operator's 2026-10-08 `status` printed the result: `x3` in the
+# header, `asking 1/3`..`3/3` and then a fourth ask under it, and `read all 3
+# canister ids` after four succeeded. One commit, four spellings of a count that
+# lived in three places.
+#
+# These pin ANNOUNCED == PERFORMED, which is the invariant that broke, rather
+# than the number 4 -- which would pass just as happily the next time a lookup is
+# added without the header.
+# =============================================================================
+
+
+def _surface_map_output(capsys, answer, serving_port=5100) -> str:
+    """Run the REAL printer with only the dfx call stubbed, and return what it said.
+
+    Behavioral verification: the defect was in what reached the screen, so the
+    assertion has to be on what reaches the screen. Asserting that
+    canister_lookup_names() has four entries would have passed throughout the whole
+    period the header said three.
+    """
+    original = swap_stack._ask_canister_id
+    swap_stack._ask_canister_id = answer
+    try:
+        swap_stack._say_surface_map((), serving_port)
+    finally:
+        swap_stack._ask_canister_id = original
+    return capsys.readouterr().out
+
+
+def _all_found(name, _files):
+    return f"bkyz2-{name[:5]}-cai", "found", ""
+
+
+def test_the_announced_number_of_lookups_is_the_number_performed(capsys):
+    """The exact defect, pinned as a relationship rather than as a literal."""
+    out = _surface_map_output(capsys, _all_found)
+    announced = re.search(r"`dfx canister id` x(\d+) in the", out)
+    assert announced, f"the header no longer announces a count at all:\n{out}"
+    asks = re.findall(r"asking (\d+)/(\d+) (\S+)", out)
+    assert asks, f"no progress counter was printed:\n{out}"
+    performed = len(asks)
+    assert int(announced.group(1)) == performed, (
+        f"the header announced {announced.group(1)} lookups and {performed} were performed. "
+        f"an operator reads the header to budget the wait, and this is the line that lied "
+        f"on 2026-10-08:\n{out}"
+    )
+    assert {int(total) for _i, total, _n in asks} == {performed}, (
+        f"the counter's denominator disagrees with the number of asks: {asks}"
+    )
+    assert [int(i) for i, _t, _n in asks] == list(range(1, performed + 1)), (
+        f"the counter does not run 1..N without a gap or a repeat: {asks}"
+    )
+
+
+def test_every_canister_the_map_renders_is_a_canister_that_was_asked_for():
+    """Rule 8: the lookup list is DERIVED from the surface rows, not typed beside them.
+
+    A hand-maintained second list is the defect with a delay on it -- a row added to
+    CANISTER_SURFACES and not to the lookups would render as `id COULD NOT BE READ`
+    forever, which looks like a replica problem and is not one.
+    """
+    looked_up = canister_lookup_names()
+    rendered = {name for name, _serves_page, _what in CANISTER_SURFACES}
+    assert rendered <= set(looked_up), (
+        f"{rendered - set(looked_up)} is rendered in the map and never asked for"
+    )
+    assert CANDID_UI_CANISTER_NAME in looked_up, (
+        "the Candid UI canister's id makes every CANDID link writable; not asking for it "
+        "is the hardcoded-id defect returning"
+    )
+    assert len(looked_up) == len(rendered) + 1, (
+        f"the lookup list is not the surface rows plus the Candid UI: {looked_up}"
+    )
+    assert looked_up[-1] == CANDID_UI_CANISTER_NAME, (
+        "the UI goes last: if the replica is wedged, the three the operator asked about "
+        "have already been attempted when the fourth times out"
+    )
+
+
+def test_a_partial_read_is_counted_and_does_not_look_like_a_complete_one(capsys):
+    """Rule 3 (state the denominator) and rule 14 (did-nothing must not look like did-work).
+
+    The old line printed `read all 3 canister ids` on a clean run and NOTHING on a
+    dirty one, so a three-of-four read had no number anywhere -- the operator had to
+    count trouble lines to work out what had succeeded.
+    """
+    complete = _surface_map_output(capsys, _all_found)
+    assert re.search(r"read\s+4/4 ids read", complete), complete
+
+    def ui_missing(name, files):
+        if name == CANDID_UI_CANISTER_NAME:
+            return "", "unreachable", "exited 1: Cannot find canister id"
+        return _all_found(name, files)
+
+    partial = _surface_map_output(capsys, ui_missing)
+    assert re.search(r"PARTIAL\s+3/4 ids read", partial), (
+        f"a three-of-four read must carry its own count and its own word:\n{partial}"
+    )
+    # SCOPED TO THE SUMMARY LINE, and the first version of this was not: it banned
+    # "4/4" anywhere in the output, which the progress counter legitimately prints
+    # as `asking 4/4 __Candid_UI`. Four asks DID happen; three succeeded. The
+    # assertion is about what the summary claims, not about the digits appearing.
+    summary = [line for line in partial.splitlines() if "ids read" in line]
+    assert len(summary) == 1, f"expected exactly one summary line: {summary}"
+    assert "4/4" not in summary[0], f"a partial read reported a complete count: {summary[0]}"
+    assert "PARTIAL" not in complete, (
+        f"a complete read was marked partial, which is the alarm that makes real ones "
+        f"get ignored:\n{complete}"
+    )
+
+
+def test_a_missing_candid_ui_says_what_it_costs(capsys):
+    """Not "could not read" -- WHICH links stop being written, and why none is faked."""
+    out = _surface_map_output(capsys, lambda name, files: (
+        ("", "unreachable", "exited 1: Cannot find canister id")
+        if name == CANDID_UI_CANISTER_NAME else _all_found(name, files)
+    ))
+    cost = [line for line in out.splitlines() if CANDID_UI_CANISTER_NAME in line
+            and "COULD NOT READ" in line]
+    assert cost, f"the failed Candid UI lookup produced no trouble line:\n{out}"
+    said = " ".join(cost)
+    assert "no CANDID link is written" in said, (
+        f"the operator is told a lookup failed without being told what stops working: {said}"
+    )
+    assert "wrong canister's interface" in said, (
+        f"and without being told why a guessed id is not the safer option: {said}"
     )
