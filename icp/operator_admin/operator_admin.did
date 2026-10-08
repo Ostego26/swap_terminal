@@ -1,0 +1,76 @@
+// The operator posture canister's interface.
+//
+// HAND-WRITTEN AND KEPT IN STEP BY A TEST, not generated at build time. dfx reads
+// this file to build the Candid UI and to type-check calls, and generating it needs
+// candid-extractor plus a wasm build -- a toolchain the hygiene tests deliberately
+// do not require (tests/test_dfx_canisters_are_buildable.py explains why). So the
+// file is explicit and tests/test_operator_admin_canister.py asserts every method
+// named here exists in the Rust source, and the reverse.
+//
+// THE CONSOLE IS WHAT A PERSON SHOULD USE. This interface exists for dfx and for
+// the terminal, if it is ever wired; http_request serves a rendered page at
+// http://<canister-id>.localhost:4943 which says the same things with labels.
+
+type Pair = record {
+  from : text;
+  to : text;
+};
+
+type Posture = record {
+  pairs : vec Pair;
+  fee_bps : nat16;
+  confirmations : vec record { text; nat32 };
+  armed : vec text;
+};
+
+type AuditEntry = record {
+  at : nat64;
+  by : text;
+  field : text;
+  was : text;
+  now : text;
+  note : text;
+};
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec record { text; text };
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec record { text; text };
+  body : blob;
+};
+
+type FeeResult = variant { Ok : nat16; Err : text };
+type PairsResult = variant { Ok : vec Pair; Err : text };
+type BlocksResult = variant { Ok : nat32; Err : text };
+type ArmedResult = variant { Ok : vec text; Err : text };
+
+// The init argument is the posture this canister starts holding, seeded from the
+// terminal's own configuration so the console says something real on first load.
+// icp_operator_admin.py at the repository root prints the deploy command with that
+// seed filled in from config.py -- which keeps ONE authority for the values and no
+// tracked file duplicating them (rule 8).
+service : (Posture) -> {
+  // Reads. Public on purpose: there is nothing secret in a posture, and a console
+  // that needed an identity could not be a page.
+  posture : () -> (Posture) query;
+  audit : () -> (vec AuditEntry) query;
+  confirmations : (text) -> (opt nat32) query;
+
+  // Writes. CONTROLLER ONLY, checked in the method rather than by convention, and
+  // each one takes a one-line reason that goes into the audit entry beside the old
+  // and new values.
+  set_fee_bps : (nat16, text) -> (FeeResult);
+  add_pair : (Pair, text) -> (PairsResult);
+  remove_pair : (Pair, text) -> (PairsResult);
+  set_confirmations : (text, nat32, text) -> (BlocksResult);
+  set_armed : (text, bool, text) -> (ArmedResult);
+
+  // The console. GET returns HTML; anything else returns 405 naming where writes go.
+  http_request : (HttpRequest) -> (HttpResponse) query;
+}

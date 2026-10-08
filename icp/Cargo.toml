@@ -58,7 +58,7 @@
 # set of things that hold threshold keys is exactly the set that should cost a
 # deliberate line in a tracked file.
 [workspace]
-members = ["threshold_custody"]
+members = ["threshold_custody", "operator_admin"]
 resolver = "2"
 
 # THE RELEASE PROFILE LIVES HERE AND NOWHERE ELSE, and that is forced rather than

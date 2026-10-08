@@ -1,0 +1,25 @@
+[package]
+name = "operator_admin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# rlib ALONGSIDE cdylib, which threshold_custody does not need and this crate
+# does: `cargo test` cannot link a test binary against a cdylib-only crate, and
+# every decision in here -- validation, rendering, escaping -- is a pure function
+# whose whole point is being assertable without a replica. dfx builds the cdylib
+# and ignores the rlib.
+
+[dependencies]
+ic-cdk = "0.17"
+candid = "0.10"
+# A DIRECT DEPENDENCY even though candid re-exports Deserialize: the derive macro
+# expands to `serde::` paths, so the crate must be nameable at the call site.
+# Same reason as threshold_custody/Cargo.toml.
+serde = { version = "1", features = ["derive"] }
+
+# NO `[profile.release]` HERE. Cargo ignores a profile declared in a workspace
+# member and only warns; the settings live in ../Cargo.toml, which carries the
+# measurement. Named here so a reader looking for opt-level is sent to the one
+# place it takes effect (rule 8).

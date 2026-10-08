@@ -7,6 +7,12 @@
       "candid": "threshold_custody/threshold_custody.did",
       "init_arg_file": "threshold_custody_init.did"
     },
+    "operator_admin": {
+      "type": "rust",
+      "package": "operator_admin",
+      "candid": "operator_admin/operator_admin.did",
+      "init_arg_file": "operator_admin_init.did"
+    },
     "icp_ledger_canister": {
       "type": "custom",
       "candid": "https://github.com/dfinity/ic/releases/download/ledger-suite-icp-2025-08-29/ledger.did",
