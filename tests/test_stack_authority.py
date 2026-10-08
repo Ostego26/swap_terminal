@@ -24,6 +24,7 @@ pids_owning_inodes() takes its root as an argument for exactly this reason.
 
 from __future__ import annotations
 
+import inspect
 import re
 import socket
 from pathlib import Path
@@ -37,6 +38,7 @@ from swap_terminal.stack_authority import (
     DOWN_VERDICTS,
     LISTENER_VERDICTS,
     NEVER_STOPPED,
+    REPLICA_STATE_PATH,
     REPLICA_STATUS_URL,
     VERSION_STATUSES_WORTH_REPEATING,
     WEB_PORT_CANDIDATES,
@@ -58,6 +60,7 @@ from swap_terminal.stack_authority import (
     proc_net_tcp_tables,
     process_name,
     readiness_verdict,
+    replica_state_verdict,
     stray_verdict,
     surface_map,
     version_status,
@@ -1703,4 +1706,144 @@ def test_a_missing_candid_ui_says_what_it_costs(capsys):
     )
     assert "wrong canister's interface" in said, (
         f"and without being told why a guessed id is not the safer option: {said}"
+    )
+
+
+# =============================================================================
+# WHERE THE REPLICA KEEPS ITS STATE
+#
+# On 2026-10-08 my instruction to `down && up` destroyed three canisters,
+# including the ICP ledger holding the desk's 998.9498 LICP. What was written
+# afterwards was an ARGUMENT -- "any container created since 28de99c has the
+# volume, so the exposure is now impossible to create" -- and rule 17 is about
+# exactly that: a reason to believe is not a reading. These pin the reading.
+# =============================================================================
+
+_ON_VOLUME = f"volume {REPLICA_STATE_PATH}\nbind /repo\n"
+_IN_LAYER = "bind /repo\nvolume /some/other/path\n"
+
+
+def test_replica_state_classifies_every_case():
+    assert replica_state_verdict("abc123", _ON_VOLUME)[0] == "on_volume"
+    assert replica_state_verdict("abc123", _IN_LAYER)[0] == "not_durable"
+    assert replica_state_verdict("", "")[0] == "absent"
+    assert replica_state_verdict("abc123", "", "docker inspect exited 1")[0] == "unknown"
+
+
+def test_a_bind_at_the_dfx_path_is_protected_not_an_alarm():
+    """The hazard is "dies when the container is replaced", and a bind does not.
+
+    docker-compose.icp.yml argues against a bind for a different reason -- 180M of
+    replica state under the operator's checkout, where `git clean -xdf` would take
+    the ledger -- and that is a layout objection, not a durability one. Reporting a
+    bind as in_layer would be a false alarm, and rule 13's whole complaint about
+    these warnings is that the false one is what makes the real one get ignored.
+    """
+    status, headline, _detail = replica_state_verdict("abc123", f"bind {REPLICA_STATE_PATH}\n")
+    assert status == "on_volume", "a bind mount at the dfx path survives a recreate"
+    assert "bind" in headline, f"and the operator should be told which it is: {headline}"
+
+
+def test_a_tmpfs_at_the_dfx_path_is_not_protection():
+    """RAM, not storage -- and the first version of this verdict called it safe.
+
+    The protection test was "is anything mounted at that path", which a tmpfs
+    satisfies. A tmpfs holding the ledger would not survive `docker restart`, let
+    alone the recreate this whole check is about, so reporting it as on_volume is
+    a WORSE hazard reported as safety. A mutation caught it; no amount of reading
+    the line back did.
+    """
+    status, _headline, detail = replica_state_verdict("abc123", f"tmpfs {REPLICA_STATE_PATH}\n")
+    assert status == "not_durable", (
+        "a tmpfs is RAM; the ledger would not survive a restart, let alone a recreate"
+    )
+    assert "RAM rather than storage" in detail[0], (
+        f"and the operator must be told WHICH kind of not-durable they have, because the "
+        f"remedy differs: {detail[0]}"
+    )
+
+
+def test_state_that_cannot_survive_a_recreate_is_shouted_and_priced():
+    """Not "unprotected" -- WHAT is lost, by what mechanism, and that `up` still exits 0."""
+    status, headline, detail = replica_state_verdict("abc123", _IN_LAYER)
+    assert status == "not_durable"
+    assert "***" in headline, f"the one verdict that must not be skimmed past: {headline}"
+    said = " ".join(detail)
+    for owed in ("RECREATES", "ledger", "threshold_custody", "operator_admin", "SERVING"):
+        assert owed in said, (
+            f"the operator is told the state is unprotected without being told {owed!r} -- "
+            f"which is the fact that makes it worth stopping for: {said}"
+        )
+    assert "OPERATOR'S CALL" in said, (
+        "the remedy destroys canisters either way, so it is proposed and not performed "
+        "(rule 16: live posture comes back)"
+    )
+
+
+def test_mounts_that_could_not_be_read_are_never_reported_safe():
+    """FAIL CLOSED, and here a false all-clear is permission to run a destructive command."""
+    status, headline, detail = replica_state_verdict("abc123", "", "docker inspect exited 1: no such object")
+    assert status == "unknown"
+    said = " ".join([headline, *detail]).lower()
+    assert "nobody checked" in said, said
+    assert "does not say the replica's state is safe" in said, (
+        f"the disclaimer has to be explicit, not merely an absence: {said}"
+    )
+    # THE AFFIRMATIVE PHRASES ONLY, which the first version of this got wrong: it
+    # banned the bare word "safe", and the unknown verdict correctly CONTAINS it,
+    # in "this does NOT say the replica's state is safe". Banning a word rather
+    # than a claim fails on the sentence that makes the claim honestly.
+    for claim in ("is on a volume mount", "is on a bind mount", "does not take the canisters"):
+        assert claim not in said, f"an unreadable inspect printed {claim!r}: {said}"
+    assert "no such object" in said, "git's... docker's own sentence is what the operator acts on"
+
+
+def test_an_absent_container_says_so_rather_than_printing_nothing():
+    """Rule 14: "(none) is a result; a blank gap is ambiguous between zero and broken"."""
+    status, headline, detail = replica_state_verdict("", "")
+    assert status == "absent"
+    said = " ".join([headline, *detail])
+    assert "no replica container exists yet" in said
+    assert "named volume" in said, (
+        f"and that the one `up` is about to create WILL be protected, which is the "
+        f"reassurance that stops this reading as a warning: {said}"
+    )
+
+
+def test_the_dfx_state_path_matches_the_compose_file_that_mounts_it():
+    """Rule 8: two spellings of one path, and a drift here is silent in both directions.
+
+    If REPLICA_STATE_PATH stopped matching the compose file's mount destination, a
+    correctly-protected replica would report in_layer (a false alarm, which teaches
+    the operator to ignore the line) or an unprotected one would report on_volume
+    (permission to run the command that cost three canisters). The compose file is
+    the authority; this asserts the reader still agrees with it.
+    """
+    compose_file = Path(swap_stack.__file__).parent / "docker-compose.icp.yml"
+    body = compose_file.read_text(encoding="utf-8")
+    mounts = re.findall(r'^\s*-\s*"([^"]+):([^":]+)"\s*$', body, re.MULTILINE)
+    destinations = [dest for _source, dest in mounts]
+    assert REPLICA_STATE_PATH in destinations, (
+        f"{REPLICA_STATE_PATH} is not mounted anywhere in {compose_file.name}; its mount "
+        f"destinations are {destinations}. Either the compose file moved the state and this "
+        f"constant did not follow, or the volume was removed entirely"
+    )
+
+
+def test_the_steps_up_prints_are_numbered_consecutively():
+    """Inserting a step renumbers the rest, and I got this wrong in the same commit.
+
+    SOURCE-BASED ON PURPOSE, and it is the one place in this file where that is the
+    honest choice: the numbers are literals in say() calls, running cmd_up() needs
+    docker, and the claim under test -- "these literals count 1..N" -- has no
+    behavior to exercise. The behavioral-verification principle is about not
+    accepting "the SQL text contains X" as proof a GATE is enforced; there is no
+    gate here, only a sequence of printed labels.
+    """
+    steps = re.findall(r'say\("  (\d+)\. ', inspect.getsource(swap_stack.cmd_up))
+    assert steps, "cmd_up prints no numbered steps at all"
+    assert [int(n) for n in steps] == list(range(1, len(steps) + 1)), (
+        f"the steps `up` prints are not 1..{len(steps)} in order: {steps}. inserting a step "
+        f"renumbers every one after it, and an operator reading '3' twice cannot tell which "
+        f"check they are watching"
     )

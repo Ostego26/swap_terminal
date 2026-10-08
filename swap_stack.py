@@ -80,6 +80,7 @@ from microfortnights import format_duration  # noqa: E402  -- same sys.path.inse
 
 from swap_terminal.stack_authority import (  # noqa: E402
     CANDID_UI_CANISTER_NAME,
+    REPLICA_STATE_PATH,
     REPLICA_STATUS_URL,
     STACK_PORTS,
     VERSION_STATUSES_WORTH_REPEATING,
@@ -98,6 +99,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     port_is_free,
     proc_net_tcp_tables,
     readiness_verdict,
+    replica_state_verdict,
     serving_verdict,
     stray_verdict,
     surface_map,
@@ -496,7 +498,8 @@ def cmd_status(files: tuple[str, ...]) -> int:
     # cheaper and is the wrong question: readiness_verdict()'s measurement is that a
     # published container port is bound by docker-proxy before anything inside has
     # opened a socket, so a url built from "bound" is a link to something that
-    # answers nothing. probe_serving_port() is the same prober `up` step 5 uses, so
+    # answers nothing. probe_serving_port() is the same prober `up`'s page check uses,
+    # so
     # the two commands cannot describe different systems (rule 8).
     #
     # IT COSTS UP TO FOUR PROBES AND THREE DOCKER LOOKUPS, which is why the scale is
@@ -1116,6 +1119,70 @@ def _say_code_version_repeat(status: str, headline: str) -> None:
     say("                    by current code, so check it against origin before acting on it.")
 
 
+def replica_state() -> tuple[str, str, list[str]]:
+    """Ask the LIVE replica container where its dfx state is. Changes nothing.
+
+    Two reads and neither writes: `docker compose ps -q icp-replica` for the
+    container id, then `docker inspect` for its mounts.
+
+    THE SERVICE NAME, NOT THE CONTAINER NAME. `docker compose ps -q` resolves
+    whatever compose currently calls the container, so a `container_name:` change
+    in docker-compose.icp.yml cannot silently make this inspect nothing and report
+    `absent` -- which would be the quietest possible false all-clear. Rule 13's
+    "prefer a pid file to a `pgrep -f` pattern" is the same instinct: ask the thing
+    that owns the name rather than guessing what it looks like today.
+
+    `.Type` AND `.Destination` ONLY. Not `.Name`: the volume's full name is
+    `swap_terminal_icp-replica-data` under one project name and something else
+    under another, and matching it would report a correctly-mounted replica as
+    unprotected the first time anyone ran with COMPOSE_PROJECT_NAME set. What the
+    verdict needs is "is anything durable mounted at the dfx path", and Type plus
+    Destination answers exactly that.
+    """
+    try:
+        listed = compose(["ps", "-q", _DFX_SERVICE], files=COMPOSE_FILES,
+                         timeout=_CANISTER_ID_TIMEOUT_SECONDS)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return replica_state_verdict("?", "", f"{type(error).__name__} running docker compose ps")
+    if listed.returncode != 0:
+        return replica_state_verdict(
+            "?", "", f"docker compose ps exited {listed.returncode}: "
+                     f"{listed.stderr.strip() or '(no stderr)'}")
+    lines = listed.stdout.strip().splitlines()
+    container = lines[0].strip() if lines else ""
+    if not container:
+        return replica_state_verdict("", "")
+    try:
+        inspected = subprocess.run(  # noqa: S603 -- no shell; argv is this file's literals plus an id compose printed
+            [_DOCKER, "inspect", "--format",
+             "{{range .Mounts}}{{.Type}} {{.Destination}}\n{{end}}", container],
+            capture_output=True, text=True, check=False,
+            timeout=_CANISTER_ID_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return replica_state_verdict(container, "", f"{type(error).__name__} running docker inspect")
+    if inspected.returncode != 0:
+        return replica_state_verdict(
+            container, "", f"docker inspect exited {inspected.returncode}: "
+                           f"{inspected.stderr.strip() or '(no stderr)'}")
+    return replica_state_verdict(container, inspected.stdout)
+
+
+def _say_replica_state() -> None:
+    """The pre-flight, printed BEFORE `up` touches an image (rule 14: announce first).
+
+    A warning after the rebuild is a post-mortem. This one has to land while the
+    operator can still decide not to run the command, which is the whole difference
+    between this and the paragraph in f3a42fe's commit message saying the same
+    thing to nobody who was about to act on it.
+    """
+    say(f"  replica state     is {REPLICA_STATE_PATH} on a mount that outlives a recreate?")
+    status, headline, detail = replica_state()
+    say(f"  {('SAFE' if status == 'on_volume' else status.upper()):<16}  {headline}")
+    for line in detail:
+        say(f"                    {line}")
+
+
 def _say_up_banner() -> tuple[str, str]:
     say("swap_stack: UP")
     code = _say_code_version()
@@ -1194,7 +1261,12 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("  (none)            no host worker is running, so the container's three are the only ones")
     say("")
 
-    say("  2. containers")
+    # ASKED BEFORE THE REBUILD, because afterwards the answer cannot help.
+    say("  2. can this `up` cost the canisters?")
+    _say_replica_state()
+    say("")
+
+    say("  3. containers")
     done = compose(["up", "-d", *UP_SERVICES], files)
     for line in (done.stderr or done.stdout).strip().splitlines():
         say(f"                    {line}")
@@ -1203,11 +1275,11 @@ def cmd_up(files: tuple[str, ...]) -> int:
         return 1
     say("")
 
-    say("  3. what is serving -- asked, not assumed")
+    say("  4. what is serving -- asked, not assumed")
     _say_serving()
     say("")
 
-    say("  4. is the replica ANSWERING? (bound is not ready)")
+    say("  5. is the replica ANSWERING? (bound is not ready)")
     ready, detail, waited = wait_for_http(REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
     # format_duration() RATHER THAN A SECOND 1.2096, which is what this line held
     # until 2026-10-08. Rule 6 names the helper for exactly this reason -- "Use it
@@ -1231,7 +1303,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # checked; the thing a customer opens was not; and the two outcomes printed the
     # same way. I had named this gap one round earlier and shipped another `up`
     # without it, which is the part this comment exists to record.
-    say("  5. is the PAGE serving? (the thing a customer opens)")
+    say("  6. is the PAGE serving? (the thing a customer opens)")
     port, detail = probe_serving_port()
     if port:
         say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
@@ -1255,7 +1327,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # IT RUNS EVEN WHEN THE PAGE IS DEAD, deliberately. The map is MORE useful then
     # -- it is the list of what would be reachable, and it is printed as paths
     # rather than links so it cannot be read as a claim that anything serves.
-    say("  6. WHERE EVERYTHING IS")
+    say("  7. WHERE EVERYTHING IS")
     _say_surface_map(files, port)
     say("")
     _say_icp_note()

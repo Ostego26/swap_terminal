@@ -922,6 +922,134 @@ def code_version_verdict(reading: GitReading) -> tuple[str, str, list[str]]:
 #: operator somebody else's canister." It did exactly the "or worse".
 CANDID_UI_CANISTER_NAME = "__Candid_UI"
 
+# =============================================================================
+# WHERE THE REPLICA KEEPS ITS STATE, ASKED BEFORE `up` CAN COST IT
+#
+# ON 2026-10-08 MY INSTRUCTION DESTROYED THREE CANISTERS ON THE OPERATOR'S HOST.
+# I told them to `down && up` to pick up a stylesheet without checking what `up`
+# does to the replica. Their container predated 28de99c (which added
+# `icp-replica-data:/root/.local/share/dfx`) by about two hours, so its dfx state
+# lived in the container's WRITABLE LAYER. `up` rebuilt both images; compose
+# recreates a container whose image has changed; the layer went with it. The ICP
+# ledger holding the desk's 998.9498 LICP, threshold_custody and operator_admin
+# were gone, and `up` printed SERVING and exited 0.
+#
+# WHAT WAS WRITTEN AFTERWARDS WAS AN ARGUMENT, NOT A CHECK. f3a42fe's commit
+# message says "on any container created since 28de99c the state is on a volume
+# and survives, so the remaining exposure is a container older than that commit --
+# which is now impossible to create." Every clause of that is plausible and none
+# of it is a reading. Rule 17: "a reason to believe something is not the same as
+# having checked it, and the two must never be written in the same voice." Rule
+# 13 says the same thing one step later: "verify the artifact, not the deploy...
+# check the pid that owns the lock is one you started."
+#
+# So this asks the container. `docker inspect` lists what is actually mounted
+# where, and the question "is the dfx state on a volume" has a yes or no answer
+# that costs one call. An operator about to run `up` is told which they have
+# BEFORE the images rebuild, which is the only moment the answer can change
+# anything.
+#
+# FAIL CLOSED, the third time in this file and for the third reason: here a false
+# "you are safe" is an instruction to proceed with a command that can destroy a
+# ledger. `unknown` says the check did not happen.
+# =============================================================================
+
+#: Where dfx keeps the local replica's state inside the container, and the ONE
+#: place this file spells it.
+#:
+#: It must match docker-compose.icp.yml's `icp-replica-data:/root/.local/share/dfx`
+#: exactly -- a second spelling that drifts would report the state unprotected
+#: while it is fine, or the reverse. The compose file is the authority; this is the
+#: reader, and replica_state_verdict() is written so a mismatch surfaces as
+#: `not_durable` (loud, checkable) rather than as a quiet pass.
+REPLICA_STATE_PATH = "/root/.local/share/dfx"
+
+
+def replica_state_verdict(
+    container: str, mounts: str, reason: str = "",
+) -> tuple[str, str, list[str]]:
+    """Is the replica's dfx state on a volume, or in a container that `up` can replace?
+
+    Pure. Takes the container id (empty if none exists) and the text of
+    `docker inspect --format '{{range .Mounts}}{{.Type}} {{.Destination}}...'`.
+
+      absent       no replica container yet, so `up` will create one WITH the
+                   volume. Nothing is at risk, and the line says so rather than
+                   printing nothing (rule 14: "(none) is a result").
+      on_volume    REPLICA_STATE_PATH is a volume or bind mount. Survives a recreate.
+      not_durable  a container exists and nothing that outlives it is mounted
+                   there. The 2026-10-08 shape, and the only verdict that shouts.
+      unknown      the mounts could not be read. NEVER reads as on_volume.
+
+    A BIND COUNTS AS PROTECTED and is not treated as the hazard, because the hazard
+    is specifically "this data dies when the container is replaced" -- a bind
+    outlives the container as surely as a volume does. docker-compose.icp.yml
+    argues against a bind for a different reason (180M of replica state under the
+    operator's checkout, where `git clean -xdf` would take the ledger), and that is
+    a layout objection, not a durability one. A false alarm here is not harmless:
+    rule 13's whole complaint about these warnings is that the false one is what
+    makes the real one get ignored.
+
+    A TMPFS DOES NOT, AND THE FIRST VERSION OF THIS SAID IT DID. The test for
+    protection was "is anything mounted at that path", which a tmpfs satisfies --
+    and a tmpfs is RAM, so the ledger would not survive `docker restart`, let alone
+    a recreate. That is a WORSE version of the hazard being warned about, reported
+    as safety. It was caught by a mutation rather than by reading it back: docker's
+    mount types are volume, bind, tmpfs and npipe, and only the first two are
+    storage.
+
+    The verdict is named for what it decides -- will this outlive the container --
+    rather than for the one cause it was written about. `not_durable` covers both
+    "no mount at all" and "a mount that is RAM", and the detail says which.
+    """
+    #: The docker mount types that outlive the container they are attached to.
+    #: volume and bind are storage; tmpfs is RAM and npipe is a Windows pipe.
+    durable = ("volume", "bind")
+    at_path = [line.split() for line in mounts.splitlines()
+               if line.split()[1:2] == [REPLICA_STATE_PATH]]
+    protected = [fields for fields in at_path if fields[0] in durable]
+    if not container:
+        return (
+            "absent",
+            "no replica container exists yet",
+            [f"`up` will create one, and docker-compose.icp.yml mounts {REPLICA_STATE_PATH}",
+             "from a named volume, so its canisters will survive a later recreate."],
+        )
+    if reason:
+        return (
+            "unknown",
+            f"COULD NOT READ the replica's mounts: {reason}",
+            ["so this does NOT say the replica's state is safe -- it says nobody checked.",
+             f"`docker inspect {container}` names them; the one that matters is",
+             f"{REPLICA_STATE_PATH}."],
+        )
+    if protected:
+        kind = protected[0][0]
+        return (
+            "on_volume",
+            f"replica state is on a {kind} mount at {REPLICA_STATE_PATH}",
+            ["so a rebuilt image recreating this container does NOT take the canisters",
+             "with it -- checked on this container just now, not assumed from its age."],
+        )
+    return (
+        "not_durable",
+        "*** THE REPLICA'S dfx STATE WILL NOT SURVIVE A RECREATE. ***",
+        [(f"{REPLICA_STATE_PATH} is a {at_path[0][0]} mount in container {container}, and that "
+          "is RAM rather than storage." if at_path else
+          f"nothing is mounted at {REPLICA_STATE_PATH} in container {container}, so the state "
+          "is in its writable layer."),
+         "`up` rebuilds both images, and compose RECREATES a container whose image",
+         "changed -- which deletes that layer. the ICP ledger, threshold_custody and",
+         "operator_admin would go with it, and `up` would still print SERVING.",
+         "this is what happened on 2026-10-08 and it cost the desk's minted LICP.",
+         "remedy: `docker compose -f docker-compose.yml -f docker-compose.icp.yml up -d",
+         "--force-recreate icp-replica` ONCE, deliberately, accepting the loss now and",
+         "redeploying -- rather than discovering it after an unrelated rebuild. THE",
+         "OPERATOR'S CALL: it destroys canisters either way, and only they know",
+         "whether anything is mid-flight."],
+    )
+
+
 def canister_lookup_names() -> tuple[str, ...]:
     """Every name `dfx canister id` is asked for, in the order asked. DERIVED, not listed.
 
@@ -1232,7 +1360,7 @@ def canister_surface_lines(
 
     THE REPLICA'S OWN STATUS URL IS PRINTED EITHER WAY and is labeled DEBUG, not
     PAGE. It is a fixed address rather than an id-dependent one, so it is knowable
-    with nothing running -- and `up`'s step 4 probes it and says READY or NOT
+    with nothing running -- and `up`'s replica-readiness check probes it and says READY or NOT
     READY, so the operator is never left reading this line as a liveness claim.
     """
     read = {name: canister_ids.get(name) for name, _page, _what in CANISTER_SURFACES}
@@ -1304,7 +1432,13 @@ def canister_surface_lines(
             )
             lines.append(f"{_MAP_CONTINUATION}{what}")
     lines.append(f"    {'DEBUG':<6} {'replica status':<20} {REPLICA_STATUS_URL}")
-    lines.append(f"{_MAP_CONTINUATION}dfx's own health endpoint -- what `up` step 4 probes. NOT a page")
+    # NAMED, NOT NUMBERED. This used to read "what `up` step 4 probes" and went stale
+    # the moment a step was inserted ahead of it -- a printed line, in the report whose
+    # whole job is to be trustworthy at a glance (rule 16: a wrong comment is a bug, and
+    # this one was a wrong LINE). A step number is spelled once where the step is; naming
+    # the check instead means nothing to keep in sync.
+    lines.append(f"{_MAP_CONTINUATION}dfx's own health endpoint -- what `up` probes before "
+                 "trusting the replica. NOT a page")
     return lines
 
 
