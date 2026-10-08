@@ -215,6 +215,12 @@ class _AccountShadowed(_Adapter):
     the whole defect is that one method returns two different numbers depending on
     its first argument, and a fixture that cannot express that would have reported
     agreement -- which is what the suite did before this class was written.
+
+    IT MODELS THE EFFECT AND NOT A CAUSE, deliberately. Two explanations were
+    refuted the same evening -- account assignment, and the documented minconf of 1 --
+    and shadow_note()'s docstring records both. A fixture built around either would
+    have pinned a story rather than the behavior, and the behavior is the part that
+    is measured: these two calls can disagree, and the tool must say so.
     """
 
     def __init__(self, bare: float, whole, answers=None):
@@ -238,16 +244,19 @@ class _AccountShadowed(_Adapter):
 def test_a_wallet_holding_more_than_getbalance_admits_says_so_loudly():
     """The defect that made a 2000 GRC wallet read as 11, 2026-10-08.
 
-    `services/swap_service` creates every deposit address with
-    getnewaddress("swap_<id>"), and on a pre-0.17 daemon that first argument is an
-    ACCOUNT rather than a label -- so the desk's own deposit addresses are invisible
-    to a bare `getbalance`. The operator's 1,988.99751357 GRC had THREE confirmations
-    and was in `listunspent`, and the screen still said 11.00248643.
+    The operator's 1,988.99751357 GRC had THREE confirmations and was in
+    `listunspent`, and the screen still said 11.00248643. Eleven blocks later the
+    bare call read 2000.0 on its own.
 
-    THE ALARM NAMES THE CONSEQUENCE, not just the discrepancy, because the number
+    WHAT IS ASSERTED HERE IS THE EFFECT, because the cause is not established and two
+    of my explanations for it were refuted within the hour (see shadow_note()). The
+    alarm must name the discrepancy, the amount, and the CONSEQUENCE -- the number
     matters to a decision made elsewhere: chains/base.get_balance() makes the bare
     call and payout_service.refresh_wallet_inventory() stores it as hot_confirmed
     every 60s, so the desk refuses payouts and fee sweeps it could fund.
+
+    AND IT MUST SAY THE WAIT RESOLVES IT, which is the one thing a reader can act on:
+    an hour went into looking for coins that were already there.
 
     MUTATION: compare with `==` instead of a tolerance, or drop the alarm entirely.
     Dropping it fails here on the "HOLDS MORE" line. Verified 2026-10-08.
@@ -262,6 +271,14 @@ def test_a_wallet_holding_more_than_getbalance_admits_says_so_loudly():
     assert "2000.00000000" in out, out
     assert "hot_confirmed" in out, f"the alarm must name what reads the smaller figure:\n{out}"
     assert "listunspent 0" in out, f"and how to confirm it independently:\n{out}"
+    assert "resolves itself as the deposit confirms" in out, (
+        f"the one actionable fact -- waiting fixes it -- must be on the screen:\n{out}"
+    )
+    assert "NOT established" in out, (
+        f"the cause is unknown and the alarm must not invent one; two explanations were refuted "
+        f"on the day this was written:\n{out}"
+    )
+    assert "ACCOUNT" not in out, "the refuted account explanation must not be asserted to a reader"
     # THE RETURNED FIGURE IS WHAT THE WALLET HOLDS. say_what_levels_them() asks what
     # it would take to reach a target, and returning the bare figure would have said
     # the desk needed another 1,988.99 GRC while that exact amount sat in it.

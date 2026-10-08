@@ -170,37 +170,54 @@ def shadow_note(bare: float, whole: float | None, unreadable: str, chain: str) -
     """The lines to print when the wallet holds more than `getbalance` admits.
 
     MEASURED ON THE OPERATOR'S HOST 2026-10-08, and this function exists because the
-    screen said 11 while the wallet held 2000. After a 1,988.99751357 GRC transfer
-    landed with 3 confirmations:
+    screen said 11 while the wallet held 2000. In ONE script invocation, after a
+    1,988.99751357 GRC transfer:
 
         getbalance ()          11.00248643     <- what chains/base.get_balance() calls
         getbalance ("*", 0)    2000.0
-        listunspent 0          2000.0 total, the new output present and spendable
-        getaccount <addr>      swap_s_52a6abc998ad4e68
+        listunspent 0          2000.0 total, the new output at 3 CONFIRMATIONS
+        getinfo.balance        11.00248643
 
-    THE CAUSE IS THE ACCOUNT, and it is this tree's own doing: services/swap_service
-    creates every deposit address with `getnewaddress("swap_<id>")`, and on a
-    pre-0.17 daemon that first argument is an ACCOUNT, not a label. A bare
-    `getbalance` on this build does not count outputs assigned to a named account, so
-    the desk's own deposit addresses are invisible to the desk's own balance reader.
-    `getbalance ''` and `listaccounts` both refuse outright on that daemon --
-    "Accounting API is deprecated ... add enableaccounts=1" -- which is why the
-    accounts cannot simply be read back.
+    Eleven blocks later, bare `getbalance` read 2000.0 on its own, and `getbalance`
+    and `getbalance "*"` agreed on BTC, LTC and GRC alike.
 
-    WHY THIS IS AN ALARM AND NOT A FOOTNOTE. chains/base.get_balance() is the bare
-    call, and services/payout_service.refresh_wallet_inventory() stores it as
-    `hot_confirmed` for every chain every 60s, where payout_capacity then decides
-    whether a payout can be funded. A desk that believes it holds 11 GRC while
-    holding 2000 refuses every GRC payout and every fee sweep, with the money sitting
-    right there.
+    THE MECHANISM IS NOT ESTABLISHED, AND TWO EXPLANATIONS OF MINE WERE REFUTED. They
+    are recorded because the next person will reach for the same two:
 
-    IT IS NOT FIXED HERE, deliberately, and that is rule 16's line rather than
-    reluctance: changing which RPC get_balance() calls changes what the desk believes
-    it can pay out, which is live posture and the operator's call. This function
-    makes the divergence impossible to miss on a screen they already run.
+      ACCOUNTS. `getaccount` on that address answers `swap_s_52a6abc998ad4e68`, and
+        services/swap_service creates every deposit address with
+        getnewaddress("swap_<id>") -- which on a pre-0.17 daemon is an ACCOUNT, not a
+        label. Consistent, and refuted: a bare `getbalance` later returned the full
+        2000.0 while the address still belonged to that account, and the daemon's own
+        help says "If account is not specified, returns the server's total available
+        balance".
+      THE DOCUMENTED minconf. Refuted by that same help: `minconf` defaults to 1,
+        and the output was excluded at THREE confirmations.
+
+    So something in this daemon's "total available balance" applied a threshold
+    higher than the documented 1, and what it is has not been read out of anything.
+    The bracket is all that is measured: EXCLUDED at 3 confirmations, INCLUDED by
+    about 14. Pinning it needs a fresh receive watched across each confirmation,
+    which needs another deposit and has not been done.
+
+    WHY THE ALARM IS STILL WORTH PRINTING WITHOUT THE CAUSE. The effect is what costs
+    something, and it is established: chains/base.get_balance() makes the bare call,
+    and services/payout_service.refresh_wallet_inventory() stores it as hot_confirmed
+    for every chain every 60s, where payout_capacity then decides whether a payout
+    can be funded. For some window after a deposit arrives, the desk believes it
+    holds less than it does and refuses payouts and sweeps it could fund. A reader
+    who sees these two figures disagree knows to wait rather than to go looking for
+    missing coins -- which is the hour this cost.
+
+    NOTHING IS PROPOSED FOR get_balance(), and that is a conclusion rather than
+    caution. The one-line change that suggested itself -- `getbalance "*"` -- was
+    measured to make NO difference on any of the three chains. The knob that does
+    matter is minconf, and lowering it would count UNCONFIRMED inputs as spendable,
+    which is the wrong direction for a payout check. A conservative balance is the
+    safe failure here.
 
     Returns a LIST so the caller prints nothing at all when the two agree, which is
-    every chain where the accounts idiom does not apply.
+    every chain and every moment outside that window.
     """
     if whole is None:
         return [f"    whole     not reported ({unreadable})  <- `getbalance \"*\"` would be the "
@@ -209,16 +226,16 @@ def shadow_note(bare: float, whole: float | None, unreadable: str, chain: str) -
         return []
     return [
         "    *** THE WALLET HOLDS MORE THAN `getbalance` ADMITS ***",
-        f"    whole     {whole:.8f} {chain}  <- `getbalance \"*\"`, the documented form; Bitcoin "
-        f"Core's own help says the dummy argument should be `*`",
-        f"    shadowed  {whole - bare:.8f} {chain} is in the wallet and NOT in the figure above. On "
-        f"a pre-0.17 daemon a bare `getbalance` skips outputs assigned to a named ACCOUNT, and "
-        f"services/swap_service creates every deposit address with getnewaddress(\"swap_<id>\") -- "
-        f"which on that build IS an account",
+        f"    whole     {whole:.8f} {chain}  <- `getbalance \"*\"`, which counts the whole wallet",
+        f"    shadowed  {whole - bare:.8f} {chain} is in the wallet and NOT in the figure above. "
+        f"Measured 2026-10-08 on a freshly received GRC deposit: excluded at 3 confirmations, "
+        f"counted by about 14. WHY is NOT established -- this daemon's help says minconf defaults "
+        f"to 1, so the threshold it actually applied is something else",
         f"    consequence  chains/base.get_balance() makes the BARE call, and "
         f"payout_service.refresh_wallet_inventory() stores it as hot_confirmed every 60s. So the "
         f"desk believes it holds {bare:.8f} and will refuse payouts and fee sweeps it could "
-        f"actually fund. Confirm with: listunspent 0",
+        f"actually fund. This resolves itself as the deposit confirms. Confirm the coins are there "
+        f"with: listunspent 0",
     ]
 
 
