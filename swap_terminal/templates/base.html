@@ -70,12 +70,18 @@
           The customer side keeps both, and that direction was NOT what the
           operator objected to -- see the note in the commit; it is one line to
           change if they want it symmetrical. -#}
-      {% if surface != 'admin' %}
-      <nav class="topnav" aria-label="Surfaces">
-        <a href="{{ url_for('atm.start') }}"{% if surface == 'user' %} class="here" aria-current="page"{% endif %}>Swap</a>
-        <a href="{{ url_for('admin.admin_page') }}"{% if surface == 'admin' %} class="here" aria-current="page"{% endif %}>Operator</a>
-      </nav>
-      {% endif %}
+      {# THE SURFACE NAV IS GONE ENTIRELY, both sides, 2026-10-08. The comment
+         above records the half-measure it replaces: the operator side was
+         suppressed and the customer side kept, with "that direction was NOT
+         what the operator objected to... it is one line to change if they want
+         it symmetrical." They did, and it was.
+
+         The strip's only two items were the page you are on and the surface you
+         may not reach from here, so nothing is lost by removing the element
+         rather than emptying it -- an empty <nav> is a landmark a screen reader
+         announces as navigation that navigates nowhere. The brand link still
+         returns a customer to the start of the flow and an operator to /admin,
+         which is same-surface in both cases. -#}
     </div>
   </header>
 

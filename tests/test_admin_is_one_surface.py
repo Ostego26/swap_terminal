@@ -27,6 +27,17 @@ WHAT WAS WRONG, three things rather than one:
                THIRD set. A light page and a dark one do not read as one surface
                however the navigation between them is arranged.
 
+THE CUSTOMER-DIRECTION RULE IS NOT HERE ANY MORE. This file used to carry
+test_the_customer_page_is_NOT_changed_by_that, which pinned the customer page's
+link to /admin so that removing it "has to mean to". On 2026-10-08 the operator
+meant to -- "operator and swap should not be acceabbile to eat other" -- so that
+link, the surface nav and five operator->customer links in admin.html are all
+gone, and the invariant is now BOTH directions in
+tests/test_surfaces_do_not_link_to_each_other.py. The old test is deleted rather
+than kept passing against a weaker claim (rule 2: its test dies with it or
+changes to pin the stronger invariant). It did its job -- the removal was a
+decision rather than a side effect.
+
 TABS AND NOT A MERGE, and that is a safety property. /admin opens "Operator
 surface - read-only" and its own header records that no form on it posts
 anywhere. The controls page arms a payout worker that broadcasts. Folding the
@@ -269,26 +280,4 @@ def test_no_operator_page_offers_a_way_into_the_customer_flow(client, path, _tab
     assert brand.group(1) != "/", (
         f"{path}'s brand/logo points at the customer ATM. On the operator surface it must go "
         "to the operator's own home."
-    )
-
-
-def test_the_customer_page_is_NOT_changed_by_that(client):
-    """The objection was one-directional, and this pins that reading.
-
-    The operator named operator -> swap. The reverse link still exists, and
-    whether it should is a separate question with a separate argument: /admin's
-    own banner says it is unauthenticated and exposes every swap id, deposit
-    address, payout address and balance, so a link to it from a customer page is
-    arguably worse. That is raised rather than acted on, and this test makes the
-    current state deliberate instead of accidental -- so a future pass removing
-    it has to mean to.
-    """
-    html = client.get("/").data.decode()
-    assert 'class="topnav"' in html, (
-        "the customer page lost its surface nav. Only the OPERATOR side was asked to lose it."
-    )
-    assert 'href="/admin"' in html, (
-        "the customer page no longer links to /admin. That may well be right -- see this "
-        "test's docstring -- but it was not what was asked for, so it should be a decision "
-        "rather than a side effect."
     )

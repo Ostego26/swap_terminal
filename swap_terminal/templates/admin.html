@@ -2,6 +2,33 @@
 {% import "_badges.html" as badges %}
 {% import "_admin_tabs.html" as admin_tabs %}
 {% set surface = 'admin' %}
+{# OPERATOR AND CUSTOMER DO NOT LINK TO EACH OTHER, EITHER WAY.
+
+   Operator, 2026-10-08: "operator and swap should not be acceabbile to eat
+   other. the operator page will be a secure page locally." That is the SECOND
+   time, and the first time I only did half of it: when they said "you can get
+   to the swap terminal from the operator terminal . NO." I removed the topnav
+   from this surface and reported it done. I never checked the tables. FIVE
+   swap-id cells in this file were `<a href="{{ url_for('ui.swap_page', ...) }}">`
+   -- unresolved_payouts, in_flight, and three more -- so every row of five
+   tables was a live link out of the operator surface into the customer flow.
+   The nav was the one I could see; the rows were the ones that mattered,
+   because an operator clicks a swap id far more often than a nav item.
+
+   That is rule 2's warning in a template: "I could not find a caller" is not
+   "there is no caller", and I had not looked. One grep for url_for would have
+   found all five the first time.
+
+   WHAT IT COSTS, named rather than glossed: the operator can no longer open a
+   swap's customer page in one click from here. The id stays selectable text,
+   every column the link used to lead to is already on this page, and
+   /api/swaps/<id> serves the same row as JSON. Reaching the customer surface is
+   now a deliberate act -- typing the URL -- which is exactly the property being
+   asked for.
+
+   tests/test_surfaces_do_not_link_to_each_other.py renders both surfaces and
+   resolves every URL it finds back to a blueprint, so a new crossing fails
+   whichever direction it is added in. -#}
 {% block title %}Operator &#183; Swap Terminal{% endblock %}
 {#
   The operator's read-only picture.
@@ -211,7 +238,7 @@
       {% for row in data.unresolved_payouts %}
       <tr class="row-alarm">
         <td>{{ row.id }}</td>
-        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td class="mono breakable">{{ row.swap_id }}</td>
         <td>{{ row.asset }}</td>
         <td class="num">{{ '%.8f'|format(row.amount) }}</td>
         <td class="mono">{{ row.created_at }}</td>
@@ -282,7 +309,7 @@
     <tbody>
       {% for row in data.in_flight %}
       <tr>
-        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.id) }}">{{ row.id }}</a></td>
+        <td class="mono breakable">{{ row.id }}</td>
         <td><code>{{ row.status }}</code></td>
         <td>{{ row.from_asset }}&#8594;{{ row.to_asset }}</td>
         <td class="num">{{ '%.8f'|format(row.expected_input_amount) }}</td>
@@ -928,7 +955,7 @@
     <tbody>
       {% for row in data.deposits %}
       <tr>
-        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td class="mono breakable">{{ row.swap_id }}</td>
         <td>{{ row.asset }}</td>
         <td class="mono breakable">{{ row.txid }}</td>
         <td class="num">{{ row.vout }}</td>
@@ -955,7 +982,7 @@
       {% for row in data.payouts %}
       <tr class="{% if row.status == 'created' %}row-alarm{% endif %}">
         <td>{{ row.id }}</td>
-        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td class="mono breakable">{{ row.swap_id }}</td>
         <td>{{ row.asset }}</td>
         <td class="num">{{ '%.8f'|format(row.amount) }}</td>
         <td><code>{{ row.status }}</code></td>
@@ -1012,7 +1039,7 @@
       {% for row in data.transitions %}
       <tr>
         <td class="mono">{{ row.created_at }}</td>
-        <td class="mono breakable"><a href="{{ url_for('ui.swap_page', swap_id=row.swap_id) }}">{{ row.swap_id }}</a></td>
+        <td class="mono breakable">{{ row.swap_id }}</td>
         <td><code>{{ row.old_status or '(new)' }}</code></td>
         <td><code>{{ row.new_status }}</code></td>
         {#- `''` WAS A BLANK GAP AND THIS PAGE'S OWN RULE FORBIDS ONE (rule 14).
