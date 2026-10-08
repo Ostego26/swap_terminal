@@ -44,10 +44,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from chains import daemon_network
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ABSTERGO = REPO_ROOT / "swap_terminal" / "grc-sol-swap" / "abstergo_exchange"
 SERVER_JS = ABSTERGO / "server.js"
 AUTH_JS = ABSTERGO / "auth.js"
+DAEMON_NETWORK_JS = ABSTERGO / "daemon_network.js"
 
 _ROUTE = re.compile(r"app\.(get|post|put|delete|patch)\('([^']+)'")
 _GUARD = re.compile(r"^\s*requireSharedSecret\(req\);")
@@ -177,4 +180,61 @@ def test_auth_js_route_table_is_labeled_as_historical():
         "auth.js documents the old auth boundary and not the current one. A file that "
         "states only the superseded state is how a reader concludes an unauthenticated "
         "route signs SOL transfers -- which happened on 2026-10-05."
+    )
+
+
+def test_the_js_network_allowlist_equals_the_python_one_string_for_string():
+    """The GRC test-network allowlist exists twice. Make the drift loud from BOTH sides.
+
+    swap_terminal/chains/daemon_network.py owns CHAIN_TEST_NETWORKS. A second
+    copy of its GRC row lives in JavaScript, at
+    swap_terminal/grc-sol-swap/abstergo_exchange/daemon_network.js, because
+    services/gridcoin.js spends GRC from a Node process that cannot import a
+    Python module -- measured 2026-10-08, that route was the only money-moving
+    path in this repository with no network check at all.
+
+    WHY THIS TEST AND NOT JUST THE JS ONE. abstergo_exchange/tests/
+    daemon_network.test.js already pins the JS list against three literals, so
+    editing the JS fails there. That is ONE direction. Nothing made editing the
+    PYTHON side fail, and the Python side is the authority -- so the copy could
+    have been left behind by a change to the original, which is precisely the
+    direction rule 8 warns about: "the copies agree on the day they are written
+    and drift from then on, and the drift is invisible: each one looks correct
+    in its own file."
+
+    This closes the other direction. Add a network to CHAIN_TEST_NETWORKS["GRC"]
+    and this fails, naming the JS file that did not follow.
+
+    READS THE JS AS TEXT, which is normally the thing the behavioral-verification
+    principle refuses -- and the exception is narrow enough to state: the
+    assertion is not about what the JS gate DOES (that is tested by running it,
+    in its own suite, with seeded RPC answers) but about whether two literal
+    lists are the same literal list. There is no Node runtime in the Python
+    suite, so comparing the source text is the only way this direction can be
+    checked at all, and the alternative is not checking it.
+    """
+    assert DAEMON_NETWORK_JS.is_file(), (
+        f"{DAEMON_NETWORK_JS} is missing. It is the network gate services/gridcoin.js "
+        "imports before every sendtoaddress; without it that route spends from whatever "
+        "GRIDCOIN_RPC_URL names, which is what it did until 2026-10-08."
+    )
+
+    source = DAEMON_NETWORK_JS.read_text()
+    match = re.search(r"GRC_TEST_NETWORKS\s*=\s*Object\.freeze\(\[([^\]]*)\]\)", source)
+    assert match, (
+        "could not find `GRC_TEST_NETWORKS = Object.freeze([...])` in "
+        f"{DAEMON_NETWORK_JS.name}. If that constant was renamed or restructured, this "
+        "test has to follow it -- do not delete the test, because then nothing checks "
+        "that the JS gate still agrees with CHAIN_TEST_NETWORKS."
+    )
+    js_networks = sorted(token.strip().strip("'\"") for token in match.group(1).split(",") if token.strip())
+
+    python_networks = sorted(daemon_network.CHAIN_TEST_NETWORKS["GRC"])
+
+    assert js_networks == python_networks, (
+        f"the GRC test-network allowlists have diverged.\n"
+        f"  python  swap_terminal/chains/daemon_network.py  {python_networks}\n"
+        f"  js      {DAEMON_NETWORK_JS.name}                {js_networks}\n"
+        "Both gate a Gridcoin spend. Whichever one you changed, change the other, and "
+        "note at both sites why if they must genuinely differ (rule 8)."
     )

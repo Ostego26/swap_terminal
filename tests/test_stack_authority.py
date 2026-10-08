@@ -566,6 +566,58 @@ def test_the_compose_file_flag_accepts_the_form_its_own_help_text_names():
     ), "the hostnet and armed overlays are ALTERNATIVES and must stay off the default"
 
 
+def test_every_compose_file_the_default_names_exists_on_disk():
+    """`up` must not hand docker a `-f` for a file that is not there.
+
+    THE ASSERTION ABOVE PINS THE STRINGS AND THAT IS NOT THE SAME CHECK. It
+    compares COMPOSE_FILES against three literals, so renaming
+    docker-compose.web.yml on disk leaves it green -- the tuple still equals the
+    literals it is compared with, and both are now wrong together. A test that
+    pins a name rather than the artifact the name resolves to is rule 13's
+    "verify the artifact, not the deploy" wearing a different hat, and the
+    operator finds out instead of the suite: `docker compose` exits non-zero on
+    the first missing `-f` before it looks at a single service.
+
+    WHAT MADE THIS WORTH WRITING, measured 2026-10-08. docker-compose.yml's own
+    header told the operator to start the web service with
+
+        docker compose -f docker-compose.yml -f docker-compose.stateful.yml up -d web
+
+    and no file by that name has existed since the day it was named. The
+    stateful services were split out together on 2026-10-05, then split again
+    the SAME DAY into one file per required variable (docker-compose.web.yml and
+    docker-compose.grc-desk.yml). Both of those files recorded the correction in
+    their own headers; docker-compose.yml, the file an operator reads first, did
+    not -- so the one pasteable command in it was dead for three days.
+
+    That particular line was prose and this test could never have caught it. A
+    gate over comment text cannot tell "here is the command to run" from "here
+    is the command that broke", and five of the 35 `-f docker-compose*.yml`
+    references in the tree are deliberate citations of the dead name inside
+    paragraphs explaining the fix. Gating prose would have flagged all five and
+    the only way to pass would be a marker a future reader learns to type, which
+    rule 19 calls a suppression.
+
+    So this gates the half that IS mechanical: the tuple `up` actually runs
+    with. It would not have caught the stale comment, and it will catch the next
+    rename -- which is the one of the two that stops an operator's command
+    working without anybody writing a word.
+    """
+    # swap_stack.REPO_ROOT, not a path this test computes. compose() builds its
+    # argv as `["-f", str(REPO_ROOT / name)]` (swap_stack.py:211), so joining
+    # against the same attribute means the test resolves what docker will be
+    # handed rather than something that merely agrees with it today.
+    root = swap_stack.REPO_ROOT
+    missing = [name for name in swap_stack.COMPOSE_FILES if not (root / name).is_file()]
+    assert not missing, (
+        f"COMPOSE_FILES names {missing}, which {'is' if len(missing) == 1 else 'are'} not "
+        f"on disk under {root}. Present: "
+        f"{sorted(q.name for q in root.glob('docker-compose*.yml')) or '(none)'}. "
+        "`swap_stack.py up` passes every one of these to docker as `-f`, and docker "
+        "exits non-zero on the first one it cannot open, before it reads any service."
+    )
+
+
 def test_the_help_text_names_only_flags_the_parser_accepts():
     """Every `-x`/`--x` the help string mentions must actually parse.
 

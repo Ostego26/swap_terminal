@@ -35,6 +35,20 @@ from __future__ import annotations
 #: daemons' own vocabularies, and inventing "anything that is not main" would authorize
 #: a network none of them has ever answered. An allowlist refuses the unknown; a
 #: denylist admits it.
+#:
+#: THERE IS A SECOND COPY OF THE GRC ROW, IN JAVASCRIPT, AND RULE 8 SAYS TO NAME IT
+#: HERE: swap_terminal/grc-sol-swap/abstergo_exchange/daemon_network.js holds
+#: GRC_TEST_NETWORKS and mirrors chain_network()'s two-route probe below. It exists
+#: because services/gridcoin.js spends GRC from a Node process and, measured
+#: 2026-10-08, was the only money-moving path in this repository with no network check
+#: at all -- a Node process cannot import this module, and shelling out to python3
+#: from inside a request handler on a spend path is worse than a named duplicate.
+#:
+#: The JS copy carries the GRC row ONLY, not BTC or LTC, because nothing in that
+#: directory touches either chain. Its own header explains that omission, and
+#: abstergo_exchange/tests/daemon_network.test.js asserts its allowlist equals this
+#: one string for string, so widening or narrowing either side fails a test that
+#: names the other file rather than drifting silently.
 CHAIN_TEST_NETWORKS = {
     "BTC": frozenset({"test", "testnet", "regtest", "signet"}),
     "LTC": frozenset({"test", "testnet", "regtest"}),

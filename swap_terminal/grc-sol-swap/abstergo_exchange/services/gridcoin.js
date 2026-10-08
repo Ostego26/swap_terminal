@@ -8,8 +8,16 @@
  * Can move funds: YES. `handleGridcoinSwap` calls the Gridcoin RPC method
  *        `sendtoaddress` with an amount taken from the request body. That is a
  *        wallet spend and it is final once relayed.
- * Mainnet-safe: NO. There is no network selector here at all; whatever
- *        GRIDCOIN_RPC_URL points at is what gets spent from.
+ * Mainnet-safe: yes as of 2026-10-08, and it was NO until that day. The line
+ *        here used to read "There is no network selector here at all; whatever
+ *        GRIDCOIN_RPC_URL points at is what gets spent from", and that was
+ *        true: this was the only money-moving path in the repository with no
+ *        network check. handleGridcoinSwap now reads the daemon's network
+ *        before every sendtoaddress and refuses anything outside the GRC test
+ *        allowlist, including a daemon that names no network. The gate is
+ *        ../daemon_network.js and the decision is tested in
+ *        tests/daemon_network.test.js; the WIRING is not tested, because that
+ *        needs a daemon -- see that file.
  *
  * ---------------------------------------------------------------------------
  * READ THIS BEFORE RUNNING IT. Measured 2026-09-24.
@@ -26,8 +34,21 @@
  * EXCHANGE_WALLET_ADDRESS is not a customer depositing; it is an internal
  * sweep with a customer-facing name. `wrapGrcToWgrc` is an empty function with
  * a comment saying the minting logic "goes here", so the second half of what
- * this route claims to do does not exist. src/GridcoinBalance.jsx:38 posts to
- * it from the browser.
+ * this route claims to do does not exist.
+ *
+ * THIS PARAGRAPH ENDED WITH "src/GridcoinBalance.jsx:38 posts to it from the
+ * browser" UNTIL 2026-10-08, AND THAT FILE NO LONGER EXISTS -- 97c820a deleted
+ * the frontend ("One of the two UIs could not build and nothing in the tree
+ * referenced it"). Verified by looking: there is no src/ directory here and no
+ * file named GridcoinBalance anywhere in the tree.
+ *
+ * It matters because it was the ONE caller this header could name, and the
+ * paragraph below ("WHAT CHANGED") is written around breaking it. With it gone,
+ * `/deposit` has no caller of any kind: no import, no fetch, no launcher, no
+ * shell script, no compose service -- the image does not even ship this
+ * directory. The residual the header hands to the operator is therefore
+ * narrower than it was, and it is exactly one thing: somebody running
+ * `node services/gridcoin.js` by hand.
  *
  * WHY IT IS STILL HERE. Rule 2 says prove a thing is dead before deleting it,
  * and rule 2's own guard says "I could not find a caller" is not "there is no
@@ -41,11 +62,24 @@
  *
  * WHAT CHANGED. The shared secret is now required on `/deposit`, using the same
  * constant-time check as server.js (auth.js). That strictly REMOVES the ability
- * to move funds from unauthenticated callers and adds none. It does break
- * src/GridcoinBalance.jsx, which has no secret to present -- deliberately, and
+ * to move funds from unauthenticated callers and adds none. It did break
+ * src/GridcoinBalance.jsx, which had no secret to present -- deliberately, and
  * said here rather than discovered later: a browser button that spends from the
  * hot wallet with no authentication is the defect, not the thing to preserve.
- * Nothing else in this file's behavior was touched.
+ * (That file has since been deleted outright; see above.)
+ *
+ * WHAT CHANGED 2026-10-08: THE NETWORK GATE. handleGridcoinSwap reads the
+ * daemon's network -- getblockchaininfo.chain, falling back to getinfo.testnet
+ * -- and refuses the send unless the answer is in the GRC test allowlist. An
+ * unreadable network refuses too; it is not read as "probably testnet". Like
+ * the shared secret, this only ever REMOVES an ability to spend, and the
+ * refusal returns 403 with its reason rather than a bare 500, because "this
+ * daemon is not one we spend from" and "this route is broken" are different
+ * answers and retrying helps with only one of them.
+ *
+ * The gate is a named duplicate of swap_terminal/chains/daemon_network.py and
+ * that file is named at both sites per rule 8. Nothing else in this file's
+ * behavior was touched.
  */
 
 import express from 'express';
@@ -60,6 +94,7 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 
 import { describeSharedSecretConfig, requireSharedSecret } from '../auth.js';
+import { isNamed, networkFromRpcAnswers, spendVerdict } from '../daemon_network.js';
 
 // Load environment variables
 dotenv.config();
@@ -123,6 +158,16 @@ app.post('/deposit', async (req, res) => {
       return res.status(400).json({ error: 'Deposit failed' });
     }
   } catch (error) {
+    // A NETWORK REFUSAL IS NOT AN INTERNAL ERROR, and before the gate existed
+    // there was nothing here that could tell the two apart. 500 says "this
+    // route is broken, retry later"; a refusal says "this daemon is not one
+    // this repository will spend from, and retrying changes nothing". Rule 14:
+    // did-nothing must not look the same as did-work, and a refusal must name
+    // the condition it refused on rather than the operator guessing.
+    if (error && error.networkRefusal) {
+      console.error('Refusing deposit:', error.message);
+      return res.status(403).json({ error: error.message, refused: 'network' });
+    }
     // Annotated, not changed (rule 12's BLE001 test). The caller is told 500
     // and the real cause is printed, so a failure cannot be mistaken here for
     // a success. What this DOES hide is whether the send happened: see the
@@ -132,8 +177,96 @@ app.post('/deposit', async (req, res) => {
   }
 });
 
+/**
+ * One Gridcoin JSON-RPC call. Returns the result, or throws.
+ *
+ * Extracted so the network probe and the send use ONE transport rather than
+ * two spellings of axios.post. There were two reasons not to leave the probe
+ * inline: a probe that builds its own request can drift from the request it is
+ * meant to be vouching for (different URL source, different timeout), and a
+ * reader has to check both to know what the gate actually tested.
+ */
+async function gridcoinRpc(method, params = []) {
+  const response = await axios.post(process.env.GRIDCOIN_RPC_URL, {
+    jsonrpc: '2.0',
+    method,
+    params,
+    id: 1,
+  });
+  if (response.data.error) {
+    const error = new Error(`${method}: ${response.data.error.message || 'RPC error'}`);
+    error.rpcCode = response.data.error.code;
+    throw error;
+  }
+  return response.data.result;
+}
+
+/**
+ * Which network GRIDCOIN_RPC_URL points at, asked the way the Python senders ask.
+ *
+ * Both routes are tried and NEITHER failure is thrown: an older daemon has no
+ * getblockchaininfo and answers "Method not found", so a throw there is the
+ * signal to try getinfo, not an error. The errors are handed to
+ * networkFromRpcAnswers, which folds them into the "unknown" string so an
+ * operator sees WHY the network could not be read rather than only that it
+ * could not. Whatever comes back, spendVerdict() refuses anything that is not
+ * in the GRC test allowlist -- including "unknown".
+ */
+async function readDaemonNetwork() {
+  const answers = {};
+  for (const [method, key] of [['getblockchaininfo', 'blockchainInfo'], ['getinfo', 'info']]) {
+    try {
+      answers[key] = await gridcoinRpc(method);
+    } catch (error) {
+      // noqa-equivalent: caught BROADLY and the caller CAN tell the failure
+      // from a real answer, because the Error object itself is what gets
+      // passed on and networkFromRpcAnswers names it in the refusal. This is
+      // the one case CLAUDE.md rule 12 allows a broad catch -- a probe that
+      // must not die on one unsupported method -- and the handler says so in
+      // its return value exactly as that rule requires.
+      answers[key] = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  return networkFromRpcAnswers(answers);
+}
+
 // Handle Gridcoin deposit transfer to exchange wallet
 async function handleGridcoinSwap(grcAmount, exchangeWalletAddress) {
+  // THE NETWORK GATE, AND IT RUNS BEFORE EVERY SEND RATHER THAN ONCE AT
+  // STARTUP. Added 2026-10-08. GRIDCOIN_RPC_URL is read from the environment at
+  // call time by gridcoinRpc above, so a verdict cached at boot would be a
+  // verdict about a URL this call is not necessarily using. One extra RPC
+  // round trip on a path that is about to spend money is not a cost worth
+  // optimizing, and rule 13's "verify the artifact, not the deploy" is the
+  // same argument: check the daemon you are about to send through.
+  //
+  // WHY THIS FILE AND WHY NOW. Every Gridcoin send on the Python side goes
+  // through swap_terminal/chains/daemon_network.py and refuses a daemon whose
+  // network is not in an allowlist. This route asked nothing: measured
+  // 2026-10-08, it was the only money-moving path in the repository with no
+  // network check of any kind, which its own header admitted in the words
+  // "Mainnet-safe: NO. There is no network selector here at all". The gate is
+  // in ../daemon_network.js, it is a pure function, and the 11 assertions in
+  // tests/daemon_network.test.js are the only part of this that could be
+  // tested without a daemon -- see that file's note on what is NOT covered.
+  const network = await readDaemonNetwork();
+  const verdict = spendVerdict(network);
+  if (!verdict.allowed) {
+    // Refuse LOUDLY and name the condition. The amount and destination are
+    // printed because an operator reading this line needs to know which send
+    // was stopped; the RPC URL is not, because it carries credentials in
+    // userinfo form on this daemon's usual spelling.
+    console.error(
+      `REFUSED: sendtoaddress ${grcAmount} GRC to ${exchangeWalletAddress} -- ${verdict.reason}`,
+    );
+    const refusal = new Error(`refusing to spend on network=${network}: ${verdict.reason}`);
+    refusal.networkRefusal = true;
+    throw refusal;
+  }
+  console.log(
+    `network=${network} allowed; sending ${grcAmount} GRC to ${exchangeWalletAddress}`,
+  );
+
   try {
     const response = await axios.post(process.env.GRIDCOIN_RPC_URL, {
       jsonrpc: '2.0',
@@ -176,8 +309,25 @@ async function wrapGrcToWgrc(amount, userAddress) {
   // You should mint the wrapped token here and confirm the transaction
 }
 
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`Server running at http://localhost:${port}`);
   console.log(`Gridcoin RPC URL: ${process.env.GRIDCOIN_RPC_URL}  <- this route SPENDS from the wallet behind this endpoint`);
   console.log('POST /deposit requires the shared secret; it calls sendtoaddress with the amount from the request body and has no ceiling');
+
+  // ANNOUNCE THE POSTURE AT STARTUP, not only at the moment of a refusal.
+  // Rule 14: an operator who starts this by hand -- the one way it can be
+  // started at all -- should be able to read off the screen whether a send
+  // would be permitted, instead of discovering it by sending. This probe is
+  // ADVISORY and nothing branches on it: handleGridcoinSwap re-reads the
+  // network before every send, because GRIDCOIN_RPC_URL is environment and can
+  // name a different daemon by then.
+  const network = await readDaemonNetwork();
+  const verdict = spendVerdict(network);
+  if (!isNamed(network)) {
+    console.log(`network: ${network}  <- a send would be REFUSED; the daemon named no network`);
+  } else {
+    console.log(
+      `network: ${network}  <- a send would be ${verdict.allowed ? 'ALLOWED' : 'REFUSED'}: ${verdict.reason}`,
+    );
+  }
 });
