@@ -56,6 +56,7 @@ from fund_desk import (  # noqa: E402
     grc_plan,
     grc_send,
     icp_mint,
+    network_gate,
     staking_verdict,
 )
 from tests.recording_rpc_adapter import RecordingRPCAdapter  # noqa: E402
@@ -241,13 +242,34 @@ def test_an_unrecognized_port_is_refused_rather_than_guessed():
 
 
 class Wallet(RecordingRPCAdapter):
-    """A recording GRC adapter with a settable balance and one known address."""
+    """A recording GRC adapter with a settable balance, one known address, and a network.
 
-    def __init__(self, balance: float, address: str = "", owns: tuple[str, ...] = ()):
+    `network` DEFAULTS TO A TEST CHAIN because every test but the network ones is
+    about something else, and it is settable because the gate that reads it is the
+    one standing between this tool and a mainnet wallet. It answers through
+    getblockchaininfo.chain, which is the first route
+    chains/daemon_network.chain_network() tries.
+    """
+
+    def __init__(self, balance: float, address: str = "", owns: tuple[str, ...] = (),
+                 network: str | None = "regtest"):
         super().__init__("GRC")
         self._balance = balance
         self._address = address
+        self._network = network
         self.owned_addresses = set(owns)
+
+    def call(self, method, *params):
+        if method == "getblockchaininfo":
+            self.calls.append((method, params))
+            # None models a daemon that does not answer the question at all, which
+            # chain_network() then retries through getinfo and finally reports as
+            # unknown -- the case this tool must refuse rather than assume.
+            return {} if self._network is None else {"chain": self._network}
+        if method == "getinfo" and self._network is None:
+            self.calls.append((method, params))
+            return {}
+        return super().call(method, *params)
 
     def get_balance(self) -> float:
         return self._balance
@@ -291,6 +313,77 @@ def wire(monkeypatch, *, source: Wallet | None, desk: Wallet,
                 "port": desk_port, "wallet": "", "timeout": 30.0},
     })
     return built
+
+
+@pytest.mark.parametrize(("network", "fragment"), [
+    ("main", "*** THIS IS A MAINNET DAEMON ***"),
+    ("something-nobody-has-heard-of", "is not one of"),
+    (None, "did not name its network"),
+])
+def test_a_daemon_that_is_not_on_a_test_chain_is_refused_before_its_wallet_is_read(
+    monkeypatch, network, fragment,
+):
+    """The defect `pgrep -af gridcoin` exposed on 2026-10-08.
+
+    Three Gridcoin processes were running on that host: a MAINNET GUI on the default
+    datadir, a second GUI taking `-testnet` on the COMMAND LINE with no datadir, and
+    the desk daemon. Nothing at all was running against the datadir whose conf
+    supplied this tool's credentials -- they authenticated because two confs share an
+    rpcuser and rpcpassword.
+
+    Until this gate existed the only network question asked was
+    may_read_a_wallet(), which classifies a PORT NUMBER, and the output then claimed
+    "all TESTNET, established by the port gate above" -- a claim that gate cannot
+    make. fund_testnets.check_gridcoin_testnet() had carried the warning since
+    2026-09-25: a conf in a directory named testnet is not a testnet.
+
+    AND THE WALLET MUST NOT BE READ EITHER, which is why this asserts on getbalance
+    rather than only on the refusal: wallet_custody.py records the run where a balance
+    reader hit the mainnet daemon and printed 157,797 real GRC into a terminal whose
+    output goes into a chat transcript. Refusing after reading it would be too late.
+
+    MUTATION: move the network_gate() call below the balance reads. `getbalance`
+    appears and this fails. Verified 2026-10-08.
+    """
+    source = Wallet(3687.32154338, network=network)
+    desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    plan = grc_plan(lambda _text: None, 2000.0)
+    assert fragment in plan["refusal"]
+    assert "getbalance" not in source.methods, (
+        "a daemon off a test chain must have NOTHING read from its wallet -- not a balance, not an "
+        "address, not an ownership answer"
+    )
+    assert "validateaddress" not in source.methods
+    assert source.sent == []
+
+
+def test_an_unreadable_network_fails_closed_rather_than_assuming_testnet():
+    """chains/daemon_network's allowlist is the point: unknown is refused, not admitted.
+
+    MUTATION: `if network in CHAIN_TEST_NETWORKS["GRC"]` -> `if network not in
+    {"main"}`. The None row above passes and this fails, which is the direction that
+    would send coins off an unestablished chain.
+    """
+    assert network_gate(Wallet(1.0, network=None), "the operator's") != ""
+    assert network_gate(Wallet(1.0, network="regtest"), "the operator's") == ""
+    assert network_gate(Wallet(1.0, network="testnet"), "the operator's") == ""
+    assert network_gate(Wallet(1.0, network="test"), "the operator's") == ""
+
+
+def test_the_restore_refuses_a_mainnet_daemon_before_unlocking_it(monkeypatch, capsys):
+    """A restore must not unlock a mainnet wallet either, even though it only unlocks.
+
+    `walletpassphrase` against the real wallet would be a write to a daemon holding
+    real coins, so the gate comes before it here as well.
+    """
+    wallet = Wallet(157797.0, network="main")
+    wire(monkeypatch, source=wallet, desk=Wallet(11.0))
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "not-a-real-secret-and-reaches-no-daemon")
+    assert fund_desk.main(["--asset", "GRC", "--restore-staking", "--apply"]) == 3
+    assert "walletpassphrase" not in wallet.methods
+    assert "getwalletinfo" not in wallet.methods, "not even the lock state is read off a mainnet wallet"
+    assert "MAINNET DAEMON" in capsys.readouterr().out
 
 
 def test_a_mainnet_operator_port_builds_no_adapter_at_all(monkeypatch):

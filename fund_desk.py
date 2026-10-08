@@ -122,6 +122,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from chains.coin_amounts import amount_to_base_units, fit_to_chain_precision
+from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network, is_named
 from chains.gridcoin import GridcoinAdapter
 from chains.gridcoin_wallet_lock import (
     STAKING_UNLOCK_SECONDS,
@@ -350,6 +351,61 @@ def chain_fee_for(asset: str) -> tuple[float | None, str]:
         )
 
 
+def network_gate(adapter, whose: str) -> str:
+    """The refusal if this DAEMON is not on a test network, or "". ASKED, NOT INFERRED.
+
+    THE PORT GATE IS NOT THIS CHECK AND THIS FILE CLAIMED IT WAS. Until 2026-10-08
+    the only network question asked here was network_target.may_read_a_wallet(), which
+    classifies a PORT NUMBER -- and the balance line then printed "all TESTNET,
+    established by the port gate above", which that gate cannot establish. A port
+    number is a convention; the network is a property of the daemon.
+
+    MEASURED ON THE OPERATOR'S HOST THE SAME DAY, which is what turns this from
+    pedantry into the defect it is. `pgrep -af gridcoin` found three processes:
+
+        4604     gridcoinresearch  -datadir=~/.GridcoinResearch -min
+        340262   gridcoinresearch  -testnet  (NO -datadir)
+        2586595  gridcoinresearchd -datadir=~/.GridcoinResearch-desk -daemon
+
+    The first is a MAINNET GUI holding real coins. The second takes `-testnet` on the
+    COMMAND LINE with no datadir of its own. And NOTHING is running against
+    ~/.GridcoinResearch-testnet-clean -- which is the conf this tool's credentials
+    came from, because it was the file that declared rpcport=25715. So the daemon
+    answering on 25715 is not the one whose conf was read; it authenticated because
+    those two confs share an rpcuser and rpcpassword.
+
+    fund_testnets.check_gridcoin_testnet() already carries this exact warning, from
+    2026-09-25: "a conf in a directory named `testnet` is not a testnet ... since
+    Gridcoin also takes -testnet on the command line". That function therefore reads
+    the network off the daemon and refuses a mainnet answer. This file did not, and
+    was one correct passphrase away from sending 1,988.99 coins out of a wallet whose
+    network nobody had established.
+
+    chains/daemon_network.chain_network() IS THE AUTHORITY and is called rather than
+    re-derived (rule 8): it reads getblockchaininfo.chain, falls back to
+    getinfo.testnet for an older build, and returns "unknown (...)" when neither
+    answers. CHAIN_TEST_NETWORKS is an ALLOWLIST, so an unreadable network refuses --
+    fail closed, never "probably testnet".
+    """
+    network = chain_network(adapter)
+    if network in CHAIN_TEST_NETWORKS["GRC"]:
+        return ""
+    if not is_named(network):
+        return (
+            f"{whose} daemon did not name its network ({network}), so whether it is a test chain "
+            f"was NOT established and nothing was read from its wallet. An unreadable network is "
+            f"refused rather than assumed: this tool sends coins, and a port number is a "
+            f"convention while the network is a property of the daemon"
+        )
+    return (
+        f"{whose} daemon answered network {network!r}, which is not one of "
+        f"{sorted(CHAIN_TEST_NETWORKS['GRC'])}. *** THIS IS A MAINNET DAEMON *** and nothing was "
+        f"read from its wallet or sent from it. The port being a test port is not the same fact: "
+        f"Gridcoin takes -testnet on the command line, so a conf's rpcport says nothing about "
+        f"which chain the process on it is following"
+    )
+
+
 def _port_gate(chain: str, port: int, whose: str, variable: str) -> str:
     """The refusal if `port` is not a test chain, or "" -- asked BEFORE any socket.
 
@@ -442,7 +498,21 @@ def grc_plan(console_say, target: float) -> dict:
         # wallet_custody.read_operator_ownership() constructs it the same way.
         wallet="", timeout=OPERATOR_RPC_TIMEOUT_SECONDS,
     )
+    # THE FIRST THING ASKED OF EITHER DAEMON, before an address, a balance or an
+    # ownership question. A mainnet daemon must have nothing read from its wallet at
+    # all -- wallet_custody.py records the 2026-09-25 run where a balance reader hit
+    # one and printed 157,797 real GRC into a terminal whose output goes into a chat
+    # transcript.
+    gate = network_gate(source, "the operator's")
+    if gate:
+        return {"refusal": gate}
     desk = build_adapters(Config.RPC)["GRC"]
+    gate = network_gate(desk, "the desk's")
+    if gate:
+        return {"refusal": gate}
+    console_say("networks   both daemons ANSWERED a test network -- asked with "
+                "getblockchaininfo.chain, falling back to getinfo.testnet; an unreadable answer "
+                "would have refused")
 
     console_say("destination   reading an address the DESK wallet already has "
                 "(own_address, a READ -- getnewaddress is a wallet write and is not called)")
@@ -480,8 +550,8 @@ def grc_plan(console_say, target: float) -> dict:
     if reserve is None:
         return {"refusal": reserve_how}
     console_say(f"balances   desk {held} GRC   operator {available} GRC   chain fee {reserve} GRC "
-                f"stays with the operator (from {reserve_how})  <- all TESTNET, established by the "
-                f"port gate above before either socket opened")
+                f"stays with the operator (from {reserve_how})  <- all TESTNET, which each DAEMON "
+                f"was asked rather than inferred from its port number (see network_gate)")
     amount, why = amount_to_move(held, target, available, reserve)
     # QUANTIZED HERE SO THE DRY RUN PRINTS THE FIGURE THE APPLY RUN SENDS.
     # chains/base.send_to_address() runs fit_to_chain_precision() on whatever it is
@@ -656,6 +726,10 @@ def restore_staking(console_say, apply: bool) -> int:
         user=endpoint.user, password=endpoint.password, host=endpoint.host, port=endpoint.port,
         wallet="", timeout=OPERATOR_RPC_TIMEOUT_SECONDS,
     )
+    gate = network_gate(adapter, "the operator's")
+    if gate:
+        print(f"\n  REFUSED and nothing was changed: {gate}", flush=True)
+        return 3
     before = adapter.call("getwalletinfo") or {}
     open_now, why = staking_verdict(before.get("unlocked_until"), time.time())
     console_say(f"before     {why}")
