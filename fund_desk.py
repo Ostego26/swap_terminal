@@ -126,6 +126,7 @@ from chains.gridcoin import GridcoinAdapter
 from chains.gridcoin_wallet_lock import (
     STAKING_UNLOCK_SECONDS,
     GridcoinLockError,
+    unlock_for_staking,
     unlocked_for_payout,
 )
 from chains.icp import dfx_transport, transfer_argument, transfer_block_index
@@ -502,8 +503,15 @@ def grc_plan(console_say, target: float) -> dict:
     }
 
 
-def grc_send(plan: dict) -> str:
-    """Broadcast the GRC top-up. Returns the txid. THE ONLY SEND IN THIS FILE.
+def operator_passphrase() -> str:
+    """The operator wallet's passphrase from the environment, or a refusal naming WHICH state.
+
+    EXTRACTED FROM grc_send() 2026-10-08, when --restore-staking became a second
+    caller that needs the identical refusal. A second copy of a three-state check on
+    a secret is rule 8's duplicate on the one value that decides whether a wallet
+    opens, and the states it distinguishes were themselves a correction made hours
+    earlier -- so the copies would have started out agreeing and drifted from the
+    first edit.
 
     THE PASSPHRASE COMES FROM THE ENVIRONMENT AND NOWHERE ELSE. Not a flag, not a
     prompt, not a file: argv is world-readable through /proc, and an interactive
@@ -514,46 +522,218 @@ def grc_send(plan: dict) -> str:
 
     raw = os.environ.get(OPERATOR_UNLOCK_ENV_VAR)
     passphrase = raw or ""
-    if not passphrase.strip():
-        # UNSET, EMPTY AND WHITESPACE ARE THREE CONDITIONS AND THIS USED TO REPORT
-        # ONE. The operator hit the middle case on 2026-10-08: they ran
-        # `read -rs <VAR> && export <VAR>`, the prompt returned instantly, and this
-        # refused with "is not set" -- about a variable that WAS set, to "". A
-        # trailing newline in the pasted line is already sitting in stdin when
-        # `read` runs, so it reads that newline and returns an empty value, and
-        # `export` then exports the empty string. Telling them to export something
-        # they had just exported is a refusal that sends a reader looking in the
-        # wrong place, which is the one thing a refusal must not do.
-        #
-        # gridcoin_credentials._first_set() already draws this distinction for the
-        # RPC variables and names the same cause, so the vocabulary exists in this
-        # tree; what was missing was saying which one held here.
-        #
-        # WHITESPACE IS REFUSED RATHER THAN SENT, and that is the dangerous one of
-        # the three. A single pasted space is truthy, so without .strip() it would
-        # reach walletpassphrase, fail with rpc code -14, and leave the operator's
-        # STAKING wallet locked and not staking -- the exact failure
-        # chains/gridcoin_wallet_lock.unlocked_for_payout() records from
-        # 2026-10-07. Refusing here cannot have that cost.
-        state = {
-            None: "is NOT SET in this process's environment",
-            "": "IS set and is EMPTY -- the variable exists with a zero-length value",
-        }.get(raw, "IS set and contains only whitespace")
-        raise RuntimeError(
-            f"{OPERATOR_UNLOCK_ENV_VAR} {state}, so the operator's wallet cannot be unlocked and "
-            f"NOTHING was sent -- the wallet was not even locked, because this check runs before "
-            f"the unlock.\n\n"
-            f"  IF YOU JUST RAN `read`: a trailing newline in the pasted line is already in stdin, "
-            f"so `read` consumes it and returns an empty value before you can type. Read from the "
-            f"terminal instead of stdin, which cannot be fed by a paste:\n"
-            f"      read -rs {OPERATOR_UNLOCK_ENV_VAR} < /dev/tty && export {OPERATOR_UNLOCK_ENV_VAR}\n"
-            f"  Then confirm WITHOUT printing it -- the length only:\n"
-            f"      echo \"length=${{#{OPERATOR_UNLOCK_ENV_VAR}}}\"\n\n"
-            f"  It is the OPERATOR wallet's passphrase and not the desk's: "
-            f"GRIDCOIN_WALLET_PASSPHRASE is the desk's, and the two wallets are not assumed to "
-            f"share a secret. Never pass it as a command-line argument -- argv is world-readable "
-            f"through /proc."
+    if passphrase.strip():
+        return passphrase
+    # UNSET, EMPTY AND WHITESPACE ARE THREE CONDITIONS AND THIS USED TO REPORT
+    # ONE. The operator hit the middle case on 2026-10-08: they ran
+    # `read -rs <VAR> && export <VAR>`, the prompt returned instantly, and this
+    # refused with "is not set" -- about a variable that WAS set, to "". A
+    # trailing newline in the pasted line is already sitting in the terminal's
+    # input queue when `read` runs, so it reads that newline and returns an
+    # empty value, and `export` then exports the empty string. Telling them to
+    # export something they had just exported is a refusal that sends a reader
+    # looking in the wrong place, which is the one thing a refusal must not do.
+    #
+    # AND THE FIRST FIX NAMED HERE WAS ALSO WRONG, which is why the advice below
+    # is a loop rather than a redirect. It said to run `read ... < /dev/tty`
+    # "which cannot be fed by a paste". Measured on the operator's host the same
+    # day: that returned instantly too, and `${#VAR}` read 0. `/dev/tty`
+    # redirects stdin TO the terminal, and the queued newline is IN the
+    # terminal -- so the redirect changes which file descriptor is read and not
+    # what is waiting in it. A loop that refuses an empty value is the thing
+    # that actually works, because it consumes the stray newline on its first
+    # pass and blocks on its second. Measured working the same day: it prompted
+    # twice and the length read 10.
+    #
+    # WHITESPACE IS REFUSED RATHER THAN SENT, and that is the dangerous one of
+    # the three. A single pasted space is truthy, so without .strip() it would
+    # reach walletpassphrase, fail with rpc code -14, and leave the operator's
+    # STAKING wallet locked and not staking -- which is exactly what a WRONG
+    # passphrase then did on 2026-10-08, so the cost is measured rather than
+    # hypothetical.
+    state = {
+        None: "is NOT SET in this process's environment",
+        "": "IS set and is EMPTY -- the variable exists with a zero-length value",
+    }.get(raw, "IS set and contains only whitespace")
+    raise RuntimeError(
+        f"{OPERATOR_UNLOCK_ENV_VAR} {state}, so the operator's wallet cannot be unlocked and "
+        f"NOTHING was sent -- the wallet was not even locked, because this check runs before "
+        f"the unlock.\n\n"
+        f"  IF YOU JUST RAN `read` AND IT RETURNED INSTANTLY: a newline is already sitting in "
+        f"the terminal's input queue -- a pasted line ends with one -- so `read` consumes that "
+        f"and returns empty before you can type. `< /dev/tty` does NOT fix it: that redirects "
+        f"stdin to the terminal, and the queued newline is IN the terminal. Loop until it is "
+        f"non-empty instead, which consumes the stray newline on the first pass and waits on "
+        f"the second, and prints the length so you can see it landed:\n"
+        f"      while [ -z \"${{{OPERATOR_UNLOCK_ENV_VAR}:-}}\" ]; do printf 'passphrase: '; "
+        f"IFS= read -rs {OPERATOR_UNLOCK_ENV_VAR} < /dev/tty; printf '\\n'; done; "
+        f"export {OPERATOR_UNLOCK_ENV_VAR}; echo \"length=${{#{OPERATOR_UNLOCK_ENV_VAR}}}\"\n"
+        f"  The length is the only thing printed. The value never is.\n\n"
+        f"  It is the OPERATOR wallet's passphrase and not the desk's: "
+        f"GRIDCOIN_WALLET_PASSPHRASE is the desk's, and the two wallets are not assumed to "
+        f"share a secret. Never pass it as a command-line argument -- argv is world-readable "
+        f"through /proc."
+    )
+
+
+def staking_verdict(unlocked_until: object, now_epoch: float) -> tuple[bool, str]:
+    """Is this wallet unlocked for staking? (yes, the sentence). THE PROOF, as a function.
+
+    RULE 13: A RESTORE THAT CANNOT PROVE IT WORKED IS NOT A RESTORE. The exit code of
+    `walletpassphrase` says the call returned, not that the wallet is open -- so
+    restore_staking() reads getwalletinfo back afterwards and this decides what the
+    answer means. Separated from the read so it can be asserted with seeded values
+    and no daemon.
+
+    `unlocked_until` IS THE FIELD AND ITS THREE SHAPES MEAN THREE THINGS:
+      absent / None   the wallet is NOT ENCRYPTED. There is nothing to unlock and
+                      nothing was locked either, so this is reported rather than
+                      treated as a failure.
+      0               ENCRYPTED AND LOCKED. This is the state a failed unlock leaves,
+                      and the one an operator is trying to get out of.
+      a timestamp     unlocked until then. In the future is open; in the past is a
+                      daemon that has not updated the field yet, which is reported as
+                      locked because that is what it can spend like.
+    """
+    if unlocked_until is None:
+        return True, (
+            "this wallet is NOT ENCRYPTED -- getwalletinfo reports no unlocked_until -- so there "
+            "is nothing to unlock and nothing was ever locked. Staking is unaffected"
         )
+    try:
+        until = float(unlocked_until)
+    except (TypeError, ValueError):
+        return False, (
+            f"getwalletinfo reported unlocked_until={unlocked_until!r}, which is not a number, so "
+            f"whether this wallet is open was NOT established. Absence of a readable answer is not "
+            f"an answer"
+        )
+    if until <= 0:
+        return False, (
+            "unlocked_until is 0, so the wallet is ENCRYPTED AND LOCKED. It is not staking, and the "
+            "passphrase this process was given did not open it"
+        )
+    remaining = until - now_epoch
+    if remaining <= 0:
+        return False, (
+            f"unlocked_until is {int(until)}, which is {format_duration(-remaining)} in the PAST, so "
+            f"the wallet is locked whatever the field says"
+        )
+    return True, (
+        f"unlocked_until is {int(until)}, which is {format_duration(remaining)} from now -- the "
+        f"wallet is open for staking"
+    )
+
+
+def restore_staking(console_say, apply: bool) -> int:
+    """Put the operator's wallet back to a staking unlock, and PROVE it. Sends nothing.
+
+    WHY THIS EXISTS, MEASURED 2026-10-08. grc_send() locks the operator's wallet
+    before it unlocks it for sending, so a WRONG passphrase leaves that wallet locked
+    and not staking -- and that happened on the operator's host, to the staking
+    wallet, within an hour of the refusal for it being written. The refusal told them
+    to run `walletpassphrase <phrase> 31536000 true` by hand, which is the one shape
+    this repository forbids: a secret in argv, world-readable through /proc and
+    recorded in shell history.
+
+    A TOOL THAT CREATES A STATE AND CANNOT UNDO IT IS HALF A TOOL. This is the other
+    half, and it reuses every gate the send does -- the same endpoint resolution, the
+    same port refusal before any socket, the same three-state passphrase check -- so
+    there is no second path to the operator's wallet with weaker checks on it.
+
+    IT UNLOCKS FOR STAKING ONLY, never for sending: `walletpassphrase <phrase>
+    <seconds> true`. The third argument is what makes it staking-only, and a wallet
+    unlocked this way refuses sendtoaddress. So the worst this can do on a correct
+    passphrase is restore the state the daemon was in before, which is the definition
+    of a restore.
+    """
+    endpoint, refusal = grc_endpoints()
+    if endpoint is None:
+        print(f"\n  REFUSED and nothing was changed: {refusal}", flush=True)
+        return 3
+    console_say(f"wallet     the operator's own daemon at {endpoint.label}")
+    adapter = GridcoinAdapter(
+        user=endpoint.user, password=endpoint.password, host=endpoint.host, port=endpoint.port,
+        wallet="", timeout=OPERATOR_RPC_TIMEOUT_SECONDS,
+    )
+    before = adapter.call("getwalletinfo") or {}
+    open_now, why = staking_verdict(before.get("unlocked_until"), time.time())
+    console_say(f"before     {why}")
+    if open_now:
+        console_say("nothing to do: this wallet is already open, so no unlock was attempted")
+        return 0
+    if not apply:
+        print(f"\nDRY RUN: nothing was changed. To restore staking:\n"
+              f"    python3 {SELF} --asset GRC --restore-staking --apply\n"
+              f"    ...with {OPERATOR_UNLOCK_ENV_VAR} exported in that shell.", flush=True)
+        return 0
+
+    console_say(f"unlocking  walletpassphrase for {STAKING_UNLOCK_SECONDS}s STAKING ONLY -- the "
+                f"third argument is what makes it staking-only, and a wallet opened this way "
+                f"refuses sendtoaddress")
+    unlock_for_staking(adapter, operator_passphrase())
+    # READ IT BACK. The call returning is not the wallet being open (rule 13: verify
+    # the artifact, not the deploy), and a restore that reports success on a call's
+    # exit code is the shape this file's own failure took.
+    after = adapter.call("getwalletinfo") or {}
+    restored, why = staking_verdict(after.get("unlocked_until"), time.time())
+    console_say(f"after      {why}")
+    if not restored:
+        print("\n  THE UNLOCK RETURNED AND THE WALLET IS STILL NOT OPEN. That is the daemon's "
+              "answer read back, not this tool's guess -- nothing here can fix it, and the "
+              "passphrase is the only candidate.", flush=True)
+        return 3
+    print("\n  RESTORED   the wallet is unlocked for staking again", flush=True)
+    return 0
+
+
+def argument_refusal(args) -> str:
+    """The parser-level refusal for a combination argparse cannot express, or "".
+
+    A FUNCTION BECAUSE main() WAS OVER THE CEILING, and rule 12 says the ceiling is
+    telling you a decision wants extracting rather than suppressing. It is also the
+    better home: "which flags make sense together" is answerable from the parsed
+    arguments alone, with no daemon and no database, so it is testable without either.
+
+    `--target` IS NOT `required=True` ANY MORE, and that is what makes this necessary:
+    a restore needs no target, and argparse has no way to say "required unless". The
+    alternative was a subparser pair, which would have split one tool's flags across
+    two help screens for one shared mode.
+    """
+    if args.restore_staking:
+        if args.asset != "GRC":
+            return "--restore-staking is GRC only: no other chain here has a wallet lock."
+        return ""
+    if args.target is None:
+        return "--target is required: say what balance the desk should end up holding."
+    return ""
+
+
+def _restore_mode(say, apply: bool) -> int:
+    """Announce the restore and run it. Split out of main() to keep it under the ceiling.
+
+    Rule 12's answer rather than a suppression: adding this mode put main() at twelve
+    branches against ruff's ten, and the thing that wanted its own frame was the mode
+    itself -- it shares nothing with the send path but the announcement shape.
+    """
+    say("mechanism  RESTORE STAKING. walletpassphrase against the OPERATOR's wallet with the "
+        "staking-only flag set, which opens it for staking and NOT for sending -- a wallet "
+        "opened this way refuses sendtoaddress. Nothing is sent and no balance changes.")
+    say("why        a failed send locks that wallet BEFORE it unlocks it for sending, so a wrong "
+        "passphrase leaves it locked and NOT STAKING. This puts it back, and reads getwalletinfo "
+        "afterwards to prove it rather than trusting the call's exit code.")
+    return restore_staking(say, apply)
+
+
+def grc_send(plan: dict) -> str:
+    """Broadcast the GRC top-up. Returns the txid. THE ONLY SEND IN THIS FILE.
+
+    THE PASSPHRASE COMES FROM THE ENVIRONMENT AND NOWHERE ELSE. Not a flag, not a
+    prompt, not a file: argv is world-readable through /proc, and an interactive
+    `read` inside a pasted block consumes the rest of the paste -- which happened on
+    2026-10-07 and armed a container with a command fragment instead of a secret.
+    """
+    passphrase = operator_passphrase()
     try:
         with unlocked_for_payout(plan["source"], passphrase):
             return plan["source"].send_to_address(plan["destination"], plan["amount"])
@@ -736,9 +916,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--asset", required=True, choices=sorted(MECHANISMS),
                         help="which hot wallet to top up")
-    parser.add_argument("--target", type=float, required=True,
+    parser.add_argument("--target", type=float, default=None,
                         help="the balance to bring the desk UP TO, in whole units of the asset. "
-                             "Not the amount to move -- what is already held is subtracted.")
+                             "Not the amount to move -- what is already held is subtracted. "
+                             "Required unless --restore-staking.")
+    parser.add_argument("--restore-staking", action="store_true",
+                        help="GRC only: put the operator's wallet back to a STAKING-ONLY unlock "
+                             "and read getwalletinfo back to prove it. Sends nothing and moves "
+                             "nothing. This is what undoes a failed send's lock -- see "
+                             "restore_staking() for the 2026-10-08 run that made it necessary.")
     parser.add_argument("--minter-identity", default=DEFAULT_MINTER_IDENTITY,
                         help=f"ICP only: the dfx identity that owns the ledger's minting account "
                              f"(default {DEFAULT_MINTER_IDENTITY!r}). Nothing in this tree records "
@@ -759,6 +945,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     started = time.monotonic()
+    bad_arguments = argument_refusal(args)
+    if bad_arguments:
+        parser.error(bad_arguments)
 
     def say(text: str) -> None:
         """Rule 14: announce before, not only after. Printed as it happens, flushed."""
@@ -767,6 +956,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{SELF}: {'APPLY -- funds WILL move' if args.apply else 'DRY RUN -- nothing is sent'}",
           flush=True)
     say(f"asset      {args.asset}")
+    if args.restore_staking:
+        exit_code = _restore_mode(say, args.apply)
+        print(labeled("done in", format_duration(time.monotonic() - started)), flush=True)
+        return exit_code
     say(f"mechanism  {MECHANISMS[args.asset]}")
     say(f"target     {args.target} {args.asset} held by the desk after this")
 

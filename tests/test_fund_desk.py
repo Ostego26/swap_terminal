@@ -55,6 +55,7 @@ from fund_desk import (  # noqa: E402
     grc_plan,
     grc_send,
     icp_mint,
+    staking_verdict,
 )
 from tests.recording_rpc_adapter import RecordingRPCAdapter  # noqa: E402
 from tests.valid_addresses import GRC_DESK_DEPOSIT, GRC_PAYOUT  # noqa: E402
@@ -455,13 +456,51 @@ def test_unset_empty_and_whitespace_are_three_refusals_that_say_which(monkeypatc
     assert fragment in message
     assert OPERATOR_UNLOCK_ENV_VAR in message
     assert "GRIDCOIN_WALLET_PASSPHRASE is the desk's" in message
-    assert "/dev/tty" in message, "the refusal names the fix for the cause that produced it"
+    assert "while [ -z " in message, "the refusal names the fix for the cause that produced it"
     assert source.sent == []
     assert "walletpassphrase" not in source.methods, (
         "the wallet must not even be locked before the passphrase is known to exist -- locking it "
         "and failing is what leaves the operator's staking wallet off"
     )
     assert "walletlock" not in source.methods
+
+
+def test_the_shell_line_the_refusal_emits_actually_parses(monkeypatch):
+    """A refusal that hands over a command must hand over a VALID one.
+
+    THE FIRST FIX THIS MESSAGE RECOMMENDED DID NOT WORK, which is why this test
+    exists. It said to run `read ... < /dev/tty`, "which cannot be fed by a paste" --
+    and measured on the operator's host 2026-10-08 that returned instantly too, with
+    `${#VAR}` reading 0, because /dev/tty redirects which descriptor is read and not
+    what is queued in the terminal. Wrong advice inside an operator-facing refusal is
+    worse than no advice: they ran it three times.
+
+    SYNTAX IS WHAT THIS CAN CHECK, AND IT IS NOT THE WHOLE PROPERTY -- said plainly
+    rather than implied (rule 17). `bash -n` establishes the line parses. It does NOT
+    establish that the loop drains a queued newline, because that needs a terminal
+    and this suite has none. That half was measured by hand: fed an empty line
+    followed by a real one, the loop prompts twice and reports the real value's
+    length. What a test can hold is that the line an operator is told to paste is not
+    malformed, which is the failure mode a long f-string with nested quotes and
+    escapes invites.
+    """
+    import re  # noqa: PLC0415 -- checked: used only here, beside the pattern it compiles.
+    import subprocess  # noqa: PLC0415 -- checked: used only here; `bash -n` parses without executing.
+
+    source = Wallet(1000.0)
+    desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    monkeypatch.delenv(OPERATOR_UNLOCK_ENV_VAR, raising=False)
+    plan = grc_plan(lambda _text: None, 100.0)
+    with pytest.raises(RuntimeError) as raised:
+        grc_send(plan)
+
+    [line] = re.findall(r"^\s*(while \[ -z .*)$", str(raised.value), re.MULTILINE)
+    checked = subprocess.run(["bash", "-n", "-c", line], capture_output=True, text=True, check=False)
+    assert checked.returncode == 0, f"the refusal emits a line bash cannot parse: {checked.stderr}"
+    assert OPERATOR_UNLOCK_ENV_VAR in line
+    assert "read -rs" in line
+    assert f"${{#{OPERATOR_UNLOCK_ENV_VAR}}}" in line, "it prints the LENGTH so the operator can see it landed"
 
 
 def test_the_refusal_never_echoes_the_value_it_rejected(monkeypatch):
@@ -495,6 +534,164 @@ def test_the_tool_accepts_no_passphrase_argument_at_all():
     source = (APP_ROOT / "fund_desk.py").read_text()
     assert "input(" not in source
     assert "getpass" not in source
+
+
+# ------------------------------------------- restoring the staking unlock
+
+
+@pytest.mark.parametrize(("unlocked_until", "open_now", "fragment"), [
+    (None, True, "NOT ENCRYPTED"),
+    (0, False, "ENCRYPTED AND LOCKED"),
+    (0.0, False, "ENCRYPTED AND LOCKED"),
+    (1_800_000_000, True, "the wallet is open for staking"),
+    (1_000_000_000, False, "in the PAST"),
+    ("not a number", False, "NOT established"),
+])
+def test_the_staking_proof_reads_every_shape_of_unlocked_until(unlocked_until, open_now, fragment):
+    """getwalletinfo's one field has three meanings and a fourth that is unreadable.
+
+    THE 0 CASE IS THE ONE THAT MATTERS: it is the state a failed unlock leaves, which
+    happened to the operator's staking wallet on 2026-10-08, and it is the state the
+    restore has to be able to recognize both before and after its own call.
+
+    THE ABSENT CASE MUST NOT READ AS A FAILURE. An unencrypted wallet has no
+    unlocked_until at all, so there is nothing to unlock and nothing was ever locked
+    -- reporting that as "not open" would send an operator hunting for a passphrase
+    that does not exist. chain_balances.py draws the same distinction from the same
+    field.
+
+    MUTATION: `if until <= 0:` -> `if until < 0:`. The two zero rows flip to "open",
+    which would make the restore report success against a locked wallet -- the one
+    direction that matters. Verified 2026-10-08.
+    """
+    # now is FIXED rather than time.time(), so these rows mean the same thing in a
+    # year. 1_500_000_000 sits between the two timestamps above.
+    restored, why = staking_verdict(unlocked_until, 1_500_000_000)
+    assert restored is open_now
+    assert fragment in why
+
+
+def test_the_restore_reads_the_wallet_back_rather_than_trusting_the_call(monkeypatch, capsys):
+    """Rule 13: a stop that cannot prove it worked is not a stop, and nor is a restore.
+
+    The stub answers LOCKED before and OPEN after, which is the successful path, and
+    the assertion is that `getwalletinfo` was called TWICE -- once to decide whether
+    anything was needed, once to prove it landed. A restore that reported on
+    walletpassphrase's return value is the shape this file's own failure took.
+
+    MUTATION: delete the second getwalletinfo read and return 0 after the unlock. The
+    call-count assertion fails. Verified 2026-10-08.
+    """
+    class Locked(Wallet):
+        def __init__(self):
+            super().__init__(1000.0)
+            self.opened = False
+
+        def call(self, method, *params):
+            if method == "getwalletinfo":
+                self.calls.append((method, params))
+                return {"unlocked_until": 1_800_000_000 if self.opened else 0}
+            if method == "walletpassphrase":
+                self.opened = True
+            return super().call(method, *params)
+
+    wallet = Locked()
+    wire(monkeypatch, source=wallet, desk=Wallet(11.0))
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "not-a-real-secret-and-reaches-no-daemon")
+    monkeypatch.setattr(fund_desk.time, "time", lambda: 1_500_000_000)
+
+    assert fund_desk.main(["--asset", "GRC", "--restore-staking", "--apply"]) == 0
+
+    assert wallet.methods.count("getwalletinfo") == 2, (
+        "the restore must read the wallet back after unlocking it, not report on the call's return"
+    )
+    assert "walletpassphrase" in wallet.methods
+    assert wallet.sent == [], "a restore sends nothing"
+    out = capsys.readouterr().out
+    assert "ENCRYPTED AND LOCKED" in out
+    assert "RESTORED" in out
+
+
+def test_the_restore_is_staking_only_and_never_a_send_unlock(monkeypatch):
+    """`walletpassphrase <phrase> <seconds> true` -- the third argument is the whole point.
+
+    A wallet opened with it refuses sendtoaddress, so the worst a correct passphrase
+    can do here is put the daemon back where it was. Asserted on the recorded
+    parameters, because the difference between a restore and an arming is that one
+    boolean.
+    """
+    class Locked(Wallet):
+        def call(self, method, *params):
+            if method == "getwalletinfo":
+                self.calls.append((method, params))
+                return {"unlocked_until": 0}
+            return super().call(method, *params)
+
+    wallet = Locked(1000.0)
+    wire(monkeypatch, source=wallet, desk=Wallet(11.0))
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "not-a-real-secret-and-reaches-no-daemon")
+    monkeypatch.setattr(fund_desk.time, "time", lambda: 1_500_000_000)
+
+    # Returns 3 because the stub never opens, which is the OTHER thing worth pinning:
+    # an unlock that returns and leaves the wallet shut is reported as a failure.
+    assert fund_desk.main(["--asset", "GRC", "--restore-staking", "--apply"]) == 3
+    [(_method, params)] = [c for c in wallet.calls if c[0] == "walletpassphrase"]
+    assert params[2] is True, "the staking-only flag is what keeps this from arming a send"
+    assert params[1] == fund_desk.STAKING_UNLOCK_SECONDS
+    assert wallet.sent == []
+
+
+def test_an_already_open_wallet_is_left_alone(monkeypatch):
+    """No unlock is attempted, so a correct-but-unnecessary run cannot fail on a passphrase."""
+    class Open(Wallet):
+        def call(self, method, *params):
+            if method == "getwalletinfo":
+                self.calls.append((method, params))
+                return {"unlocked_until": 1_800_000_000}
+            return super().call(method, *params)
+
+    wallet = Open(1000.0)
+    wire(monkeypatch, source=wallet, desk=Wallet(11.0))
+    monkeypatch.delenv(OPERATOR_UNLOCK_ENV_VAR, raising=False)
+    monkeypatch.setattr(fund_desk.time, "time", lambda: 1_500_000_000)
+    assert fund_desk.main(["--asset", "GRC", "--restore-staking", "--apply"]) == 0
+    assert "walletpassphrase" not in wallet.methods
+
+
+def test_a_dry_run_restore_changes_nothing(monkeypatch):
+    class Locked(Wallet):
+        def call(self, method, *params):
+            if method == "getwalletinfo":
+                self.calls.append((method, params))
+                return {"unlocked_until": 0}
+            return super().call(method, *params)
+
+    wallet = Locked(1000.0)
+    wire(monkeypatch, source=wallet, desk=Wallet(11.0))
+    monkeypatch.setattr(fund_desk.time, "time", lambda: 1_500_000_000)
+    assert fund_desk.main(["--asset", "GRC", "--restore-staking"]) == 0
+    assert "walletpassphrase" not in wallet.methods
+
+
+@pytest.mark.parametrize(("argv", "fragment"), [
+    (["--asset", "ICP", "--restore-staking"], "GRC only"),
+    (["--asset", "GRC"], "--target is required"),
+])
+def test_the_flag_combinations_argparse_cannot_express_are_refused(argv, fragment):
+    """`--target` stopped being required=True, so "required unless" is checked by hand.
+
+    MUTATION: `return ""` at the top of argument_refusal(). A bare `--asset GRC` then
+    reaches grc_plan() with target=None and fails on a comparison instead of on a
+    sentence, which is a traceback where a refusal belongs.
+    """
+    parsed = build_parser().parse_args(argv)
+    assert fragment in fund_desk.argument_refusal(parsed)
+
+
+def test_a_target_with_no_restore_flag_is_accepted():
+    assert fund_desk.argument_refusal(build_parser().parse_args(
+        ["--asset", "GRC", "--target", "2000"]
+    )) == ""
 
 
 # --------------------------------------------------------- what reaches the ledger
