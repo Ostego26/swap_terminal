@@ -32,7 +32,7 @@ import pytest
 
 import swap_stack
 from swap_terminal.stack_authority import (
-    CANDID_UI_CANISTER_ID,
+    CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
     DOWN_VERDICTS,
     LISTENER_VERDICTS,
@@ -40,6 +40,7 @@ from swap_terminal.stack_authority import (
     REPLICA_STATUS_URL,
     WEB_PORT_CANDIDATES,
     WEB_SURFACES,
+    candid_url,
     canister_lookup_verdict,
     canister_surface_lines,
     container_id,
@@ -940,13 +941,18 @@ def test_a_canister_id_that_was_read_is_printed_exactly():
     `dfx canister id` is the only authority for it, so the map's job is to carry
     it unaltered into both URL shapes.
     """
-    body = "\n".join(canister_surface_lines(_SEEDED_IDS))
+    # A SEEDED UI ID, because the Candid link is a query against that canister and
+    # it is no longer a constant -- see CANDID_UI_CANISTER_NAME. Deliberately NOT
+    # the "be2us" that used to be hardcoded: a test that happens to pass the old
+    # constant back in would not notice the constant returning.
+    ui = "bd3sg-teaaa-aaaaa-qaaba-cai"
+    body = "\n".join(canister_surface_lines(_SEEDED_IDS, ui_canister_id=ui))
     assert "id COULD NOT BE READ" not in body
     assert f"http://{_SEEDED_IDS['operator_admin']}.localhost:4943/" in body, (
         "operator_admin serves its own page; that URL is the answer to the operator's question"
     )
     for name, ident in _SEEDED_IDS.items():
-        assert f"?canisterId={CANDID_UI_CANISTER_ID}&id={ident}" in body, (
+        assert f"?canisterId={ui}&id={ident}" in body, (
             f"{name} must have a Candid link, and it is a query against the Candid UI canister "
             "with the target as a parameter -- not a path under the target"
         )
@@ -1247,3 +1253,78 @@ def test_the_map_still_says_COULD_NOT_READ_when_dfx_was_never_asked():
         "an unreachable docker must not be reported as a destroyed deployment"
     )
     assert "says nothing about whether they are deployed" in quiet
+
+
+def test_an_unread_candid_ui_id_writes_NO_LINK_rather_than_a_guessed_one():
+    """The fix for the live defect of 2026-10-08, pinned at fail-closed.
+
+    THE DEFECT. `CANDID_UI_CANISTER_ID = "be2us-64aaa-aaaaa-qaabq-cai"` was a
+    hardcoded constant, under a comment asserting the Candid UI "is the SAME id on
+    every fresh replica -- unlike the project's own canisters, which are issued per
+    replica and must be asked for." The operator's redeploy printed its creations
+    in order and refuted it: a local replica hands out ids from a fixed sequence in
+    CREATION ORDER, the UI canister landed THIRD that time (bd3sg-teaaa-aaaaa-qaaba-cai),
+    and be2us had become the default identity's WALLET canister. Every CANDID row
+    in the map pointed at the wallet, loading the wrong canister's interface while
+    looking entirely correct.
+
+    That is the exact failure canister_ids()'s own docstring describes -- "an id
+    written into this repository is a link to a deployment that no longer exists --
+    or worse, resolves and shows the operator somebody else's canister" -- and this
+    constant was the one place in the file exempt from it.
+
+    WHY FAIL CLOSED RATHER THAN FALL BACK. There is no id to fall back TO: any
+    default is the guess that just failed. A missing link costs the operator one
+    `dfx canister id` call; a wrong one costs them whatever they conclude from the
+    wrong canister's interface.
+    """
+    no_ui = "\n".join(canister_surface_lines(_SEEDED_IDS, ui_canister_id=""))
+
+    assert "?canisterId=" not in no_ui, (
+        "a Candid URL was written with no UI canister id. Whatever id it carries is a guess, "
+        "and a guessed Candid link shows the wrong canister's interface."
+    )
+    assert "be2us" not in no_ui, "the old hardcoded id must not survive as a fallback anywhere"
+    assert "NO CANDID LINK" in no_ui, "the absence must be stated, not left as a blank (rule 14)"
+
+    # EVERY refusing line names the lookup, not just one of them. The first
+    # version of this assertion was `CANDID_UI_CANISTER_NAME in no_ui` -- true if
+    # ANY line named it -- and a mutation that stripped the name from one of the
+    # two refusal sites survived, because the other still carried it. There are
+    # two shapes (a page canister's "its Candid interface: NOT LINKED" and a
+    # Candid-only row's "NO CANDID LINK"), so the check has to be per-line.
+    refusals = [
+        line for line in no_ui.splitlines()
+        if "NO CANDID LINK" in line or "NOT LINKED" in line
+    ]
+    assert len(refusals) >= 2, (
+        f"expected a refusal for the page canister AND each Candid-only one; got {refusals}"
+    )
+    for line in refusals:
+        assert CANDID_UI_CANISTER_NAME in line, (
+            f"this refusal does not name {CANDID_UI_CANISTER_NAME}, so the operator is told the "
+            f"link is missing without being told which lookup produces it: {line.strip()}"
+        )
+    # The ids that WERE read are still printed: one unread id must not suppress
+    # three known ones.
+    for ident in _SEEDED_IDS.values():
+        assert ident in no_ui, f"{ident} was read and must still appear"
+
+
+def test_the_candid_url_builder_refuses_an_empty_ui_id():
+    """The decision itself, below the rendering. Pure.
+
+    candid_url() returning "" for an unknown UI id is what makes every caller's
+    fail-closed branch reachable; a builder that returned a URL with an empty
+    canisterId would produce `?canisterId=&id=...`, which loads and shows nothing
+    while looking like a link somebody meant to write.
+    """
+    assert candid_url("bkyz2-fmaaa-aaaaa-qaaaq-cai", "") == ""
+    built = candid_url("bkyz2-fmaaa-aaaaa-qaaaq-cai", "bd3sg-teaaa-aaaaa-qaaba-cai")
+    assert built == (
+        "http://127.0.0.1:4943/?canisterId=bd3sg-teaaa-aaaaa-qaaba-cai"
+        "&id=bkyz2-fmaaa-aaaaa-qaaaq-cai"
+    ), built
+    # The order matters and is the thing that was easy to get backwards: the UI
+    # canister is what the browser loads, the target is its parameter.
+    assert built.index("canisterId=bd3sg") < built.index("id=bkyz2")

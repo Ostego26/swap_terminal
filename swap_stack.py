@@ -79,6 +79,7 @@ from config import Config  # noqa: E402
 from microfortnights import format_duration  # noqa: E402  -- same sys.path.insert
 
 from swap_terminal.stack_authority import (  # noqa: E402
+    CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
     REPLICA_STATUS_URL,
     STACK_PORTS,
@@ -774,7 +775,7 @@ def probe_serving_port() -> tuple[int, str]:
     return serving_verdict(probes)
 
 
-def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[str], int]:
+def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[str], int, str]:
     """Ask the replica for each canister's id. ({name: id or None}, what went wrong).
 
     THE I/O HALF OF THE SURFACE MAP. stack_authority.surface_map() decides what may
@@ -857,7 +858,36 @@ def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[st
             f"{name}: `docker compose exec -T {_DFX_SERVICE} dfx canister id {name}` "
             f"exited {done.returncode}: {why}"
         )
-    return found, trouble, absent
+    # THE CANDID UI'S OWN ID, ASKED LIKE EVERY OTHER. It is not a surface row --
+    # nobody opens Candid UI directly -- but every CANDID link in the map is a
+    # query against it, so an unread id means those links cannot be written.
+    #
+    # IT USED TO BE A HARDCODED CONSTANT and was wrong on this operator's replica
+    # for a whole session: local ids come off a fixed sequence in CREATION ORDER,
+    # so the UI canister's id moves when the number of canisters created before it
+    # changes. See stack_authority.CANDID_UI_CANISTER_NAME for the measurement.
+    say(f"                    asking {CANDID_UI_CANISTER_NAME} (the Candid UI canister itself)")
+    ui_id = ""
+    try:
+        done = compose(
+            ["exec", "-T", _DFX_SERVICE, "dfx", "canister", "id", CANDID_UI_CANISTER_NAME],
+            files, timeout=_CANISTER_ID_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        trouble.append(
+            f"{CANDID_UI_CANISTER_NAME}: could not be asked -- {type(error).__name__}. Every "
+            "CANDID link is a query against this canister, so none will be written"
+        )
+    else:
+        ui_id, kind, why = canister_lookup_verdict(done.returncode, done.stdout, done.stderr)
+        if kind != "found":
+            ui_id = ""
+            trouble.append(
+                f"{CANDID_UI_CANISTER_NAME}: {why}. The Candid UI canister's own id was NOT "
+                "read, so no CANDID link is written -- a link built on a guessed UI id loads "
+                "the wrong canister's interface and looks correct doing it"
+            )
+    return found, trouble, absent, ui_id
 
 
 def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
@@ -875,13 +905,13 @@ def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
     """
     say(f"  canister ids      `dfx canister id` x{len(CANISTER_SURFACES)} in the `{_DFX_SERVICE}` service, up to")
     say(f"                    {format_duration(_CANISTER_ID_TIMEOUT_SECONDS)} each -- asked, never hardcoded (ids are per-replica)")
-    ids, trouble, absent = canister_ids(files)
+    ids, trouble, absent, ui_id = canister_ids(files)
     for line in trouble:
         say(f"  COULD NOT READ    {line}")
     if not trouble:
         say(f"  read              all {len(ids)} canister ids")
     say("")
-    for line in surface_map(serving_port, ids, absent):
+    for line in surface_map(serving_port, ids, absent, ui_id):
         say(line)
 
 

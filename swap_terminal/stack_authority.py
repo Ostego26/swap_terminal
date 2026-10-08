@@ -681,13 +681,41 @@ def serving_verdict(answers: dict[int, object]) -> tuple[int, str]:
 # test that asserts no URL appears when nothing answered.
 # =============================================================================
 
-#: The Candid UI canister dfx deploys beside every local project, and it is the
-#: SAME id on every fresh replica -- unlike the project's own canisters, which are
-#: issued per replica and must be asked for.
+#: The name dfx files the Candid UI canister under in canister_ids.json.
 #:
-#: Its own constant because the Candid link is built from it three times below and
-#: a second spelling of an id is rule 8's bug with a delay on it.
-CANDID_UI_CANISTER_ID = "be2us-64aaa-aaaaa-qaabq-cai"
+#: THIS REPLACED A HARDCODED ID, AND THE COMMENT ABOVE THAT ID WAS FLATLY WRONG.
+#: It read:
+#:
+#:     The Candid UI canister dfx deploys beside every local project, and it is
+#:     the SAME id on every fresh replica -- unlike the project's own canisters,
+#:     which are issued per replica and must be asked for.
+#:
+#: with CANDID_UI_CANISTER_ID = "be2us-64aaa-aaaaa-qaabq-cai" under it. Refuted by
+#: the operator's own redeploy, 2026-10-08, which printed its canister creations in
+#: order:
+#:
+#:     1  minter's wallet canister     bnz7o-iuaaa-aaaaa-qaaaa-cai
+#:     2  icp_ledger_canister          bkyz2-fmaaa-aaaaa-qaaaq-cai
+#:     3  the UI canister              bd3sg-teaaa-aaaaa-qaaba-cai
+#:     4  default's wallet canister    be2us-64aaa-aaaaa-qaabq-cai
+#:     5  threshold_custody            br5f7-7uaaa-aaaaa-qaaca-cai
+#:     6  operator_admin               bw4dl-smaaa-aaaaa-qaacq-cai
+#:
+#: A local replica hands out ids from a fixed sequence in CREATION ORDER, so which
+#: one the Candid UI gets depends on how many canisters were made before it. The
+#: previous deployment created a wallet first and the UI landed fourth, which is
+#: where "be2us" came from; this one created the UI third. So for a whole session
+#: every CANDID row in the surface map pointed at `be2us` -- by then the DEFAULT
+#: IDENTITY'S WALLET CANISTER -- and the links loaded the wrong canister's
+#: interface while looking entirely correct.
+#:
+#: The id is now asked for exactly like the other three, and the link is simply
+#: NOT PRINTED when it cannot be read. That is the rule canister_ids()'s own
+#: docstring already stated and this constant was the exception to: "a canister id
+#: is replica-issued environment state... an id written into this repository is a
+#: link to a deployment that no longer exists -- or worse, resolves and shows the
+#: operator somebody else's canister." It did exactly the "or worse".
+CANDID_UI_CANISTER_NAME = "__Candid_UI"
 
 #: The replica's own status endpoint, and the ONE place it is spelled.
 #:
@@ -786,15 +814,26 @@ _MAP_CONTINUATION = " " * 20
 _MAP_TARGET_GAP = 2
 
 
-def candid_url(canister_id: str) -> str:
-    """The Candid UI link for one canister. The ONE place that shape is written.
+def candid_url(canister_id: str, ui_canister_id: str) -> str:
+    """The Candid UI link for one canister, or "" when the UI's id is unknown.
 
     Candid UI is a canister itself, so the link is a query against IT with the
     target's id as a parameter -- not a path under the target. Getting that
     backwards produces a URL that loads and shows the wrong canister's interface,
     which is why this is a function rather than an f-string at three call sites.
+
+    `ui_canister_id` IS AN ARGUMENT AND NOT A CONSTANT as of 2026-10-08, and the
+    constant it replaced was wrong on the operator's live replica for a whole
+    session -- see CANDID_UI_CANISTER_NAME for the creation-order evidence.
+
+    AN EMPTY STRING IN GIVES AN EMPTY STRING OUT, which the caller prints as a
+    refusal rather than a link. Fail closed: a Candid URL built on an id nobody
+    read is the "resolves and shows the operator somebody else's canister" case,
+    and the one thing worse than no link is a confident wrong one.
     """
-    return f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={CANDID_UI_CANISTER_ID}&id={canister_id}"
+    if not ui_canister_id:
+        return ""
+    return f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={ui_canister_id}&id={canister_id}"
 
 
 def web_surface_lines(serving_port: int | None) -> list[str]:
@@ -901,6 +940,7 @@ def canister_lookup_verdict(returncode: int, stdout: str, stderr: str) -> tuple[
 def canister_surface_lines(
     canister_ids: Mapping[str, str | None],
     absent: int = 0,
+    ui_canister_id: str = "",
 ) -> list[str]:
     """The ICP half of the surface map. Pure.
 
@@ -963,17 +1003,37 @@ def canister_surface_lines(
         if ident is None:
             marker = "NOT DEPLOYED on this replica" if absent else "id COULD NOT BE READ"
             lines.append(f"    {'PAGE' if serves_page else 'CANDID':<6} {name:<20} {marker}")
-            shape = (f"http://<id>.localhost:{REPLICA_PORT}/" if serves_page
-                     else f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={CANDID_UI_CANISTER_ID}&id=<id>")
+            # THE SHAPE, WITH WHICHEVER HALF IS KNOWN. A page's URL needs only the
+            # canister's own id, so its shape is always printable; a Candid URL
+            # needs the UI canister's id TOO, and when that was not read the
+            # shape says so rather than naming an id nobody asked for.
+            if serves_page:
+                shape = f"http://<id>.localhost:{REPLICA_PORT}/"
+            elif ui_canister_id:
+                shape = f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={ui_canister_id}&id=<id>"
+            else:
+                shape = (f"http://127.0.0.1:{REPLICA_PORT}/?canisterId=<the Candid UI canister>"
+                         "&id=<id> -- neither id was read")
             lines.append(f"{_MAP_CONTINUATION}{what}")
             lines.append(f"{_MAP_CONTINUATION}its URL would be {shape} -- the id is the missing part")
             continue
         if serves_page:
             lines.append(f"    {'PAGE':<6} {name:<20} http://{ident}.localhost:{REPLICA_PORT}/")
             lines.append(f"{_MAP_CONTINUATION}{what}")
-            lines.append(f"{_MAP_CONTINUATION}its Candid interface: {candid_url(ident)}")
+            candid = candid_url(ident, ui_canister_id)
+            lines.append(
+                f"{_MAP_CONTINUATION}its Candid interface: {candid}" if candid
+                else f"{_MAP_CONTINUATION}its Candid interface: NOT LINKED -- "
+                     f"`dfx canister id {CANDID_UI_CANISTER_NAME}` was not read, and a Candid "
+                     "link built on a guessed UI id shows the wrong canister's interface"
+            )
         else:
-            lines.append(f"    {'CANDID':<6} {name:<20} {candid_url(ident)}")
+            candid = candid_url(ident, ui_canister_id)
+            lines.append(
+                f"    {'CANDID':<6} {name:<20} {candid}" if candid
+                else f"    {'CANDID':<6} {name:<20} id {ident} read; NO CANDID LINK -- "
+                     f"`dfx canister id {CANDID_UI_CANISTER_NAME}` was not read"
+            )
             lines.append(f"{_MAP_CONTINUATION}{what}")
     lines.append(f"    {'DEBUG':<6} {'replica status':<20} {REPLICA_STATUS_URL}")
     lines.append(f"{_MAP_CONTINUATION}dfx's own health endpoint -- what `up` step 4 probes. NOT a page")
@@ -984,6 +1044,7 @@ def surface_map(
     serving_port: int | None,
     canister_ids: Mapping[str, str | None],
     absent: int = 0,
+    ui_canister_id: str = "",
 ) -> list[str]:
     """WHERE IS EVERYTHING. The whole map, as lines, ready for swap_stack.say().
 
@@ -1011,4 +1072,4 @@ def surface_map(
         f"{_MAP_CONTINUATION}operator's. JSON = a machine reads it, so JSON in a browser is not a",
         f"{_MAP_CONTINUATION}broken page. CANDID/DEBUG = a developer surface and not a page at all.",
     ]
-    return header + web_surface_lines(serving_port) + canister_surface_lines(canister_ids, absent)
+    return header + web_surface_lines(serving_port) + canister_surface_lines(canister_ids, absent, ui_canister_id)
