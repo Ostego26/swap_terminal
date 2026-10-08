@@ -734,6 +734,48 @@ def grc_send(plan: dict) -> str:
     2026-10-07 and armed a container with a command fragment instead of a secret.
     """
     passphrase = operator_passphrase()
+    # THE PASSPHRASE IS PROVED BEFORE ANYTHING IS LOCKED, and this is the third
+    # time the operator's staking wallet paid for its absence. 2026-10-08: a wrong
+    # passphrase knocked that wallet out of staking on the first --apply, again on a
+    # retry, and again on a third -- because unlocked_for_payout() calls lock()
+    # BEFORE unlock_for_sending(), so a wrong secret costs the staking state and
+    # cannot restore it.
+    #
+    # A STAKING-ONLY UNLOCK IS THE CHEAPEST POSSIBLE TEST and it needs no prior
+    # lock. On a correct passphrase it leaves the wallet in exactly the resting state
+    # unlocked_for_payout() restores it to anyway, so it costs one extra RPC and
+    # nothing else. On a wrong one it raises with the daemon's own -14 and the wallet
+    # is UNTOUCHED -- still staking, if it was.
+    #
+    # THE SAME HAZARD IS STILL IN THE PAYOUT PATH and is deliberately not changed
+    # here. services/payout_service.payout_unlock_context() enters
+    # unlocked_for_payout() the same way for every GRC payout, so a wrong
+    # GRIDCOIN_WALLET_PASSPHRASE there has the same cost on the DESK wallet.
+    # Re-ordering that is a change to how live payouts take a lock, which is the
+    # operator's (rule 16) -- so the difference is named at both sites rather than
+    # fixed on one and forgotten.
+    try:
+        unlock_for_staking(plan["source"], passphrase)
+    # BROAD ON PURPOSE AND WITH NO SUPPRESSION NEEDED: ruff's BLE001 does not fire on
+    # a catch that RE-RAISES, which this one does, so a `noqa` here would be an unused
+    # directive claiming a check nobody has to make (rule 19 -- and RUF100 says so).
+    # The breadth is still deliberate: the adapter raises RPCError for a -14 and
+    # requests' own exceptions for a dead socket, and BOTH mean "not proved". Neither
+    # can be reported as success, and nothing was locked, so there is no state to
+    # unwind on either.
+    except Exception as error:
+        raise RuntimeError(
+            f"the passphrase in {OPERATOR_UNLOCK_ENV_VAR} did NOT open this wallet, so nothing was "
+            f"sent and NOTHING WAS LOCKED -- if that wallet was staking, it still is. This check "
+            f"runs before the lock for exactly that reason.\n\n"
+            f"  The daemon said: {error}\n\n"
+            f"  rpc code -14 is RPC_WALLET_PASSPHRASE_INCORRECT: the wallet did not open. Note that "
+            f"this is a DIFFERENT secret from the RPC password -- the balances printed above prove "
+            f"the rpcpassword is right, so what is wrong is the wallet's ENCRYPTION passphrase. The "
+            f"GUI on {plan['source_label']} will tell you which one that wallet has, and its unlock "
+            f"dialog keeps the secret out of argv and out of shell history."
+        ) from error
+
     try:
         with unlocked_for_payout(plan["source"], passphrase):
             return plan["source"].send_to_address(plan["destination"], plan["amount"])
@@ -887,8 +929,9 @@ def icp_mint(plan: dict, created_at_time_nanos: int) -> str:
 MECHANISMS = {
     "GRC": (
         "SEND from the operator's own gridcoinresearchd to the desk's. Real coins moving between "
-        "two testnet wallets on this host; needs the operator wallet's passphrase from the "
-        "environment, and a wrong one leaves that wallet locked and NOT STAKING."
+        "two testnet wallets on this host; needs the operator wallet's ENCRYPTION passphrase from "
+        "the environment, which is a different secret from the RPC password. A wrong one is "
+        "refused BEFORE anything is locked, so it cannot cost that wallet its staking unlock."
     ),
     "ICP": (
         "MINT. A transfer FROM the local ledger's minting account, signed by the `minter` dfx "

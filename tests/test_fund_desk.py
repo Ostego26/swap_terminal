@@ -41,6 +41,7 @@ APP_ROOT = Path(__file__).resolve().parent.parent
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+from chains.base import RPCError  # noqa: E402
 from gridcoin_credentials import OperatorEndpoint  # noqa: E402
 
 import fund_desk  # noqa: E402
@@ -391,6 +392,70 @@ def test_the_destination_is_read_and_never_created(monkeypatch):
     assert "getnewaddress" not in source.methods
 
 
+def test_a_wrong_passphrase_never_reaches_the_lock(monkeypatch):
+    """The defect that cost the operator's staking wallet THREE times, 2026-10-08.
+
+    unlocked_for_payout() calls lock() before unlock_for_sending(), so a wrong
+    passphrase knocks a staking wallet out of staking and cannot put it back -- the
+    restore needs the same secret that just failed. Their wallet took that three
+    times in a row on one evening.
+
+    SO THE PASSPHRASE IS PROVED FIRST, with a staking-only unlock, which needs no
+    prior lock. The assertion that matters is `walletlock` NOT in the recorded
+    methods: on a wrong passphrase the wallet must be exactly as it was found.
+
+    MUTATION: delete the precheck. `walletlock` appears and this fails, which is the
+    whole cost. Verified 2026-10-08.
+    """
+    class Wrong(Wallet):
+        def call(self, method, *params):
+            self.calls.append((method, params))
+            if method == "walletpassphrase":
+                raise RPCError("Error: The wallet passphrase entered was incorrect. (rpc code -14)")
+            return super().call(method, *params) if method != "walletpassphrase" else None
+
+    source = Wrong(1000.0)
+    desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "wrong-but-not-a-real-secret")
+    plan = grc_plan(lambda _text: None, 100.0)
+
+    with pytest.raises(RuntimeError) as raised:
+        grc_send(plan)
+
+    assert "walletlock" not in source.methods, (
+        "a wrong passphrase must not cost the wallet its staking unlock -- the proof comes first"
+    )
+    assert source.sent == []
+    message = str(raised.value)
+    assert "NOTHING WAS LOCKED" in message
+    assert "still is" in message, "it must say the staking state survived, which is the point"
+    assert "-14" in message
+    assert "ENCRYPTION passphrase" in message, (
+        "the rpcpassword worked (the balances were read), so the message has to name WHICH secret "
+        "is wrong -- the operator chased the wrong one otherwise"
+    )
+
+
+def test_the_proof_is_staking_only_so_it_cannot_arm_a_send(monkeypatch):
+    """The precheck's own unlock must carry the staking-only flag.
+
+    Otherwise the "cheapest possible test" would leave the operator's wallet open for
+    SENDING on its way to a send it might then refuse -- a window nobody asked for.
+    The first walletpassphrase recorded is the precheck's, and its third parameter is
+    what decides which kind of unlock it was.
+    """
+    source = Wallet(1000.0)
+    desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    monkeypatch.setenv(OPERATOR_UNLOCK_ENV_VAR, "not-a-real-secret-and-reaches-no-daemon")
+    plan = grc_plan(lambda _text: None, 100.0)
+    grc_send(plan)
+    first_unlock = next(params for method, params in source.calls if method == "walletpassphrase")
+    assert first_unlock[2] is True, "the precheck must be staking-only, not a send unlock"
+    assert first_unlock[1] == fund_desk.STAKING_UNLOCK_SECONDS
+
+
 def test_the_send_happens_inside_the_unlock_window_in_that_order(monkeypatch):
     """lock -> unlock -> send -> lock -> unlock for staking, as a SEQUENCE.
 
@@ -411,6 +476,11 @@ def test_the_send_happens_inside_the_unlock_window_in_that_order(monkeypatch):
 
     assert [m for m in source.methods if m in
             ("walletlock", "walletpassphrase", "sendtoaddress")] == [
+        # THE FIRST walletpassphrase IS THE PRECHECK, added 2026-10-08 and the reason
+        # this list grew by one: it proves the passphrase with a staking-only unlock
+        # BEFORE the lock, so a wrong one cannot cost the wallet its staking state.
+        # The rest is unlocked_for_payout()'s cycle unchanged.
+        "walletpassphrase",
         "walletlock", "walletpassphrase", "sendtoaddress", "walletlock", "walletpassphrase",
     ]
     assert source.sent == [pytest.approx(89.0)]
@@ -853,5 +923,14 @@ def test_both_mechanisms_say_whether_they_mint_or_send():
     """
     assert MECHANISMS["ICP"].startswith("MINT")
     assert MECHANISMS["GRC"].startswith("SEND")
-    assert "NOT STAKING" in MECHANISMS["GRC"]
+    # THIS ASSERTED "NOT STAKING" UNTIL 2026-10-08, when the description stopped
+    # warning about a cost the tool can no longer impose. Rule 2: the test changes to
+    # pin the stronger claim rather than being deleted -- the text has to say the
+    # staking unlock is SAFE from a wrong passphrase, and say WHY (the refusal comes
+    # before the lock), because that is now the operator-facing promise.
+    assert "staking unlock" in MECHANISMS["GRC"]
+    assert "BEFORE anything is locked" in MECHANISMS["GRC"]
+    # And it must still distinguish the two secrets: the operator chased the wrong one
+    # for three runs because the RPC password was right and the wallet's was not.
+    assert "ENCRYPTION passphrase" in MECHANISMS["GRC"]
     assert GRC_PAYOUT not in MECHANISMS["GRC"], "no address belongs in a mechanism description"
