@@ -111,6 +111,62 @@ def test_a_capped_amount_says_it_is_capped_and_says_what_is_still_short():
     assert "still short by 39.0" in why
 
 
+#: The measured GRC chain fee, from config.GRC_NETWORK_FEE_RESERVE. Named here so
+#: the two tests below read against a figure rather than a literal.
+GRC_CHAIN_FEE = 0.001
+
+
+def test_the_chain_fee_stays_with_the_source_and_never_shrinks_the_amount():
+    """The defect the operator's first real dry run exposed, 2026-10-07.
+
+    It printed `amount 3687.32154338` against an operator balance of exactly
+    3687.32154338 -- the whole wallet -- and `sendtoaddress` takes the fee from the
+    sending wallet's own inputs ON TOP of what it delivers. That send had nothing
+    left to pay the fee with and would have come back "Insufficient funds": an
+    --apply run failing for a reason the dry run printed as a go.
+
+    BOTH HALVES ARE ASSERTED, because getting this backwards is the easy mistake.
+    With room to spare, the amount is the FULL shortfall -- the fee shrinks what the
+    source can spare, never what the recipient receives, since a payout short by the
+    fee leaves the desk short by the fee. With the balance exactly equal to the
+    shortfall, the amount drops by the fee.
+
+    MUTATION: subtract the reserve from the returned amount instead of from the
+    source. The first assertion fails (88.999 where 89.0 is owed). Verified 2026-10-07.
+    """
+    plenty, _why = amount_to_move(11.0, 100.0, 1000.0, GRC_CHAIN_FEE)
+    assert plenty == pytest.approx(89.0), "the recipient gets the full shortfall"
+
+    exact, why = amount_to_move(11.0, 100.0, 89.0, GRC_CHAIN_FEE)
+    assert exact == pytest.approx(89.0 - GRC_CHAIN_FEE), "the source keeps the fee back"
+    assert "CAPPED AT THE SOURCE" in why
+    assert "stays behind for the chain fee" in why
+
+
+def test_a_source_holding_less_than_the_fee_can_spare_nothing():
+    """And it says so as a fact about the source rather than a negative amount.
+
+    MUTATION: drop the `max(..., 0.0)`. `spare` goes to -0.0009, which is falsey
+    enough to still refuse here but would read as a direction anywhere it was
+    printed. The assertion on the sentence is what catches it.
+    """
+    amount, why = amount_to_move(11.0, 100.0, 0.0005, GRC_CHAIN_FEE)
+    assert amount == 0.0
+    assert "can spare 0.0" in why
+    assert "fact about the SOURCE" in why
+
+
+def test_with_no_reserve_the_sentence_says_nothing_about_a_fee():
+    """A mint has no chain fee, so the fee clause must not appear in its reasoning.
+
+    icp_plan() passes source_reserve=0.0 explicitly. A top-up whose explanation
+    mentioned a fee the ledger does not charge would send the reader looking for a
+    figure that is not there.
+    """
+    _amount, why = amount_to_move(1.0, 1000.0, 999.0, 0.0)
+    assert "chain fee" not in why
+
+
 def test_being_already_funded_and_an_empty_source_are_different_sentences():
     """Both move 0.0, and conflating them is rule 14's "did nothing" failure."""
     _, funded = amount_to_move(500.0, 100.0, 1000.0)
@@ -262,6 +318,43 @@ def test_a_destination_the_source_also_owns_is_refused_and_nothing_is_sent(monke
     plan = grc_plan(lambda _text: None, 100.0)
     assert "self-transfer" in plan["refusal"]
     assert source.sent == [], "a refused plan must not have sent anything"
+
+
+def test_the_plan_keeps_the_chain_fee_back_from_the_whole_source_balance(monkeypatch):
+    """End to end, on the shape the operator actually hit: target far above the source.
+
+    The source's ENTIRE balance is the cap, so this is the run where the missing
+    reserve would have produced an unsendable amount. Asserted against the real
+    config figure through the real chain_fee_for(), not against a literal.
+    """
+    source = Wallet(3687.32154338)
+    desk = Wallet(11.00248643, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))
+    wire(monkeypatch, source=source, desk=desk)
+    plan = grc_plan(lambda _text: None, 120549.32)
+    fee, how = fund_desk.chain_fee_for("GRC")
+    assert how == "GRC_NETWORK_FEE_RESERVE"
+    assert plan["amount"] == pytest.approx(3687.32154338 - fee)
+    assert plan["amount"] < 3687.32154338, (
+        "the whole balance is not sendable: sendtoaddress pays the fee from the sending wallet's "
+        "own inputs on top of what it delivers, so a full-balance send has nothing to pay it with"
+    )
+
+
+def test_the_chain_fee_comes_from_the_one_authority_and_not_the_config_class():
+    """chain_fee_for() builds a MAPPING, because get_network_fee_reserve() indexes one.
+
+    The first version passed the Config CLASS and failed with
+    `TypeError: argument of type 'type' is not iterable` out of that function's
+    `if key not in config`. Four tests caught it; a live run would have been the
+    operator's third refusal in a row.
+    """
+    fee, how = fund_desk.chain_fee_for("GRC")
+    assert isinstance(fee, float)
+    assert fee > 0
+    assert how == "GRC_NETWORK_FEE_RESERVE"
+    missing, why = fund_desk.chain_fee_for("DOGE")
+    assert missing is None
+    assert "DOGE_NETWORK_FEE_RESERVE" in why
 
 
 def test_the_go_path_plans_the_shortfall_and_sends_nothing_by_itself(monkeypatch):

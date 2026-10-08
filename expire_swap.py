@@ -401,8 +401,8 @@ def judge(rows, now_iso: str, grace_seconds: float) -> tuple[list, list]:
     return retirable, refused
 
 
-def released_obligation(retirable) -> float:
-    """What retiring these would take off the hot wallet's floor. THE NUMBER.
+def released_obligation(retirable) -> dict[str, float]:
+    """What retiring these takes off the floor, PER PAYOUT ASSET. THE NUMBERS.
 
     payout + network_fee_reserve per swap, which is exactly what
     fee_sweep._owed_for() sums -- the wallet has to hold the payout AND the chain
@@ -411,11 +411,30 @@ def released_obligation(retirable) -> float:
     the agreement between the two is held by tests/test_expire_swap.py, which
     builds a floor with fee_sweep.obligation() before and after a retirement and
     asserts the difference IS this figure.
+
+    PER ASSET, AND IT RETURNED ONE FLOAT UNTIL THE OPERATOR RAN IT. On their host,
+    2026-10-07, the first real `--all` dry run printed:
+
+        obligation this would release  2177.564301805834
+
+    over seven swaps of which six paid out in GRC and one in LTC. That figure is
+    2176.355... GRC plus 1.209... LTC added together: a quantity in no unit, printed
+    beside the sentence "which is exactly what fee_sweep.obligation() counts" --
+    which made it worse, because obligation() takes an ASSET and could never produce
+    it. fee_sweep holds one floor per asset because one hot wallet holds one coin;
+    summing across them answers a question nobody has ("how much stuff do we owe")
+    and hides both real answers.
+
+    Rule 3 is the rule it broke -- state the denominator -- and this is the version
+    of that failure that survives a careful reader, because every individual number
+    going in was right. A dict makes the unit impossible to lose: the caller prints
+    one line per asset and there is nothing to add up.
     """
-    return sum(
-        float(row["output_amount_estimate"]) + float(row["network_fee_reserve"] or 0.0)
-        for row, _reason in retirable
-    )
+    totals: dict[str, float] = {}
+    for row, _reason in retirable:
+        owed = float(row["output_amount_estimate"]) + float(row["network_fee_reserve"] or 0.0)
+        totals[row["to_asset"]] = totals.get(row["to_asset"], 0.0) + owed
+    return totals
 
 
 def _print_verdicts(rows, retirable, refused) -> None:
@@ -517,9 +536,14 @@ def main(argv: list[str] | None = None) -> int:
                       "failure (see the REFUSED list above for which condition each one missed).",
                       flush=True)
             else:
-                print(f"\n  obligation this would release  {released_obligation(retirable)}  <- summed "
-                      f"over the {len(retirable)} retirable swap(s), payout + network_fee_reserve each, "
-                      f"which is exactly what fee_sweep.obligation() counts", flush=True)
+                released = released_obligation(retirable)
+                print("\n  obligation this would release, PER PAYOUT ASSET  <- one line per coin "
+                      "because one hot wallet holds one coin; fee_sweep.obligation() takes an asset "
+                      "and there is no such thing as a cross-asset total", flush=True)
+                for asset, owed in sorted(released.items()):
+                    count = sum(1 for row, _why in retirable if row["to_asset"] == asset)
+                    print(f"               {owed} {asset}  over {count} swap(s), payout + "
+                          f"network_fee_reserve each", flush=True)
                 if args.apply:
                     moved = _retire(db, retirable)
                     print(f"\n  {moved} of {len(retirable)} retired, {len(retirable) - moved} declined "

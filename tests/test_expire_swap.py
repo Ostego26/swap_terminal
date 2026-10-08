@@ -237,7 +237,46 @@ def test_judge_returns_both_lists_with_their_reasons():
 
 def test_released_obligation_sums_the_payout_and_the_chain_fee():
     retirable = [(swap_row(id="s_a"), ""), (swap_row(id="s_b"), "")]
-    assert released_obligation(retirable) == pytest.approx(2 * (PAYOUT + RESERVE))
+    assert released_obligation(retirable) == {"GRC": pytest.approx(2 * (PAYOUT + RESERVE))}
+
+
+def test_two_payout_assets_are_never_added_together():
+    """The defect the operator's first real run printed, as a test.
+
+    On their host 2026-10-07 the `--all` dry run summed six GRC-paying swaps and one
+    LTC-paying one into `2177.564301805834` -- 2176.355 GRC plus 1.209 LTC, a
+    quantity in no unit, printed beside a sentence claiming it was what
+    fee_sweep.obligation() counts. obligation() takes an ASSET and could never have
+    produced it, which is what makes this rule 3 (state the denominator) rather than
+    an arithmetic slip: every number going in was correct.
+
+    MUTATION: `totals[row["to_asset"]] = ...` -> `totals["all"] = ...`. This fails
+    with one key where two are expected. The single-asset test above passes under
+    that mutation, which is why this one exists separately.
+    """
+    retirable = [
+        (swap_row(id="s_grc", to_asset="GRC"), ""),
+        (swap_row(id="s_ltc", to_asset="LTC", output_amount_estimate=1.2, network_fee_reserve=0.001), ""),
+    ]
+    released = released_obligation(retirable)
+    assert sorted(released) == ["GRC", "LTC"]
+    assert released["GRC"] == pytest.approx(PAYOUT + RESERVE)
+    assert released["LTC"] == pytest.approx(1.201)
+
+
+def test_the_printed_total_names_its_asset_and_its_count(db_path, capsys):
+    """Rule 3 again, at the place a reader actually sees it.
+
+    A figure with no unit beside it is the thing that shipped; a figure with no COUNT
+    beside it cannot be told from one large swap, which is the other half of the same
+    rule. Both are asserted on the real output of the real tool.
+    """
+    seed(db_path, "s_one")
+    seed(db_path, "s_two")
+    expire_swap.main(["--all", "--db", db_path])
+    out = capsys.readouterr().out
+    assert "PER PAYOUT ASSET" in out
+    assert f"{2 * (PAYOUT + RESERVE)} GRC  over 2 swap(s)" in out
 
 
 # ----------------------------------------------------------- the real thing
@@ -458,8 +497,8 @@ def test_an_expired_swap_leaves_the_obligation_floor(db_path):
     assert after.open_swaps == 0
     assert after.floor == 0.0
     assert before.floor - after.floor == pytest.approx(released_obligation(
-        [({"output_amount_estimate": PAYOUT, "network_fee_reserve": RESERVE}, "")]
-    ))
+        [({"output_amount_estimate": PAYOUT, "network_fee_reserve": RESERVE, "to_asset": "GRC"}, "")]
+    )["GRC"])
     # AND IT IS NOT COUNTED AS REVIVABLE EITHER. An expired swap has nothing to
     # revive -- expire_swap refuses any swap with a deposit row -- so reporting it
     # beside the floor as "could become a payout" would scare an operator out of a

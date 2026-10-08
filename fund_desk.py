@@ -140,6 +140,8 @@ from gridcoin_credentials import (
 from microfortnights import format_duration
 from network_target import may_read_a_wallet
 from report_block import labeled
+from services.quote_service import get_network_fee_reserve
+from workers.common import get_config_dict
 
 SELF = "fund_desk.py"
 
@@ -191,23 +193,43 @@ DEFAULT_MINTER_IDENTITY = "minter"
 MINT_FEE_E8S = 0
 
 
-def amount_to_move(held: float, target: float, source_available: float) -> tuple[float, str]:
+def amount_to_move(
+    held: float, target: float, source_balance: float, source_reserve: float = 0.0
+) -> tuple[float, str]:
     """How much to move to bring `held` up to `target`. THE ARITHMETIC, on its own.
 
     Returns (amount, why). `amount` is 0.0 for every case that moves nothing, so a
     caller cannot broadcast a figure this function refused -- the same shape
     fee_sweep.SweepPlan uses for the same reason.
 
-    AT THE BOTTOM AND PURE (rule 10): three floats in, a number and a sentence out,
+    AT THE BOTTOM AND PURE (rule 10): four floats in, a number and a sentence out,
     no adapter, no socket, no chain. It is the only part of a top-up that can be
     asserted exhaustively, and every refusal below is a case a live run would
     otherwise discover with a daemon in the loop.
 
-    THE SHORTFALL IS CAPPED AT WHAT THE SOURCE HAS, rather than refused outright,
-    and that is a judgment with a reason: a partial top-up is useful -- it is strictly
-    more inventory than before -- and refusing it would leave the desk at 11 GRC
-    because the operator was 10 short of the full figure. The sentence says it was
-    capped, because a number that silently means something else is rule 14's defect.
+    THE SHORTFALL IS CAPPED AT WHAT THE SOURCE CAN SPARE, rather than refused
+    outright, and that is a judgment with a reason: a partial top-up is useful -- it
+    is strictly more inventory than before -- and refusing it would leave the desk at
+    11 GRC because the operator was 10 short of the full figure. The sentence says it
+    was capped, because a number that silently means something else is rule 14's
+    defect.
+
+    `source_reserve` IS THE CHAIN FEE THE SOURCE MUST STILL PAY, and leaving it out
+    was a defect the operator's first real dry run exposed, 2026-10-07. The cap read
+
+        amount 3687.32154338   <- the operator wallet's ENTIRE balance
+
+    and `sendtoaddress` takes the fee from the sending wallet's own inputs, on top of
+    the amount delivered (quote_service.get_network_fee_reserve()'s whole measured
+    point: a payout of X delivers exactly X and the wallet separately pays the fee).
+    So that send had no inputs left to pay with and would have come back
+    "Insufficient funds" -- an --apply run that failed for a reason the dry run
+    printed as a go.
+
+    IT IS SUBTRACTED FROM THE SOURCE AND NEVER FROM THE AMOUNT, which is the half
+    that is easy to get backwards. The recipient must receive the full figure; what
+    shrinks is how much the source can spare. Subtracting it from the amount instead
+    would deliver less than the plan said and leave the desk short by the fee.
     """
     if target <= 0:
         return 0.0, f"the target is {target}, so there is nothing to reach"
@@ -217,21 +239,28 @@ def amount_to_move(held: float, target: float, source_available: float) -> tuple
             f"the desk already holds {held}, which is at or above the target of {target}. "
             f"Nothing needs to move"
         )
-    if source_available <= 0:
+    # max(..., 0.0) because a source holding LESS than the chain fee can spare
+    # nothing at all, and a negative "available" would read as a direction.
+    spare = max(source_balance - source_reserve, 0.0)
+    fee_note = (
+        f" (its balance is {source_balance} and {source_reserve} stays behind for the chain fee, "
+        f"which sendtoaddress takes from the sending wallet's own inputs on top of what it delivers)"
+        if source_reserve else ""
+    )
+    if spare <= 0:
         return 0.0, (
-            f"the desk is short {shortfall} and the source has {source_available} available, so "
-            f"nothing can move. This is a fact about the SOURCE, not a refusal about the desk"
+            f"the desk is short {shortfall} and the source can spare {spare}{fee_note}, so nothing "
+            f"can move. This is a fact about the SOURCE, not a refusal about the desk"
         )
-    if source_available < shortfall:
-        return source_available, (
+    if spare < shortfall:
+        return spare, (
             f"CAPPED AT THE SOURCE. The desk is short {shortfall} and the source can spare "
-            f"{source_available}, so this moves all of it and leaves the desk "
-            f"{held + source_available} against a target of {target} -- still short by "
-            f"{shortfall - source_available}"
+            f"{spare}{fee_note}, so this moves all of it and leaves the desk {held + spare} "
+            f"against a target of {target} -- still short by {shortfall - spare}"
         )
     return shortfall, (
         f"the desk holds {held}, the target is {target}, so this moves the {shortfall} difference "
-        f"and the source keeps {source_available - shortfall}"
+        f"and the source keeps {spare - shortfall} spare{fee_note}"
     )
 
 
@@ -284,6 +313,41 @@ def direction_verdict(destination: str, desk_owns: bool | None, source_owns: boo
     return ""
 
 
+def chain_fee_for(asset: str) -> tuple[float | None, str]:
+    """What the chain charges the SOURCE to move `asset`. (fee, how) -- or (None, why).
+
+    services/quote_service.get_network_fee_reserve() IS THE AUTHORITY AND IS CALLED
+    RATHER THAN THE CONFIG KEY READ DIRECTLY (rule 8), which is the same choice
+    collect_fees.chain_fee_for() made and states for the same reason: that function's
+    docstring carries the 2026-10-01 measurement of what the figure is and is not --
+    what the desk expects one payout to cost it, paid out of the sending wallet's own
+    inputs and never deducted from the amount delivered -- and
+    `getattr(Config, f"{asset}_NETWORK_FEE_RESERVE")` here would be a third reader of
+    the same key with none of that attached.
+
+    IT TAKES NO `config` ARGUMENT, and that is the difference from collect_fees'
+    version, named here because rule 8 asks for it at both sites: that one is handed
+    the mapping its caller already built, and this file has no Flask app and no
+    worker context. workers.common.get_config_dict() is how a root tool makes one --
+    `{k: getattr(Config, k) for k in dir(Config) if k.isupper()}` -- and passing the
+    Config CLASS instead is what the first version did. It failed with
+    `TypeError: argument of type 'type' is not iterable` out of
+    get_network_fee_reserve()'s `if key not in config`, because a class is not a
+    mapping. Caught by four tests rather than by a live run, which is the only reason
+    it is a footnote and not a third defect in the operator's terminal.
+
+    ValueError BECOMES (None, sentence) rather than propagating: a missing reserve is
+    a thing to refuse the top-up over and report, not a traceback.
+    """
+    try:
+        return get_network_fee_reserve(get_config_dict(), asset), f"{asset}_NETWORK_FEE_RESERVE"
+    except ValueError as refusal:
+        return None, (
+            f"{asset}_NETWORK_FEE_RESERVE could not be read, so what the sending wallet must keep "
+            f"back for the chain fee is unknown and no amount can be sized: {refusal}"
+        )
+
+
 def _port_gate(chain: str, port: int, whose: str, variable: str) -> str:
     """The refusal if `port` is not a test chain, or "" -- asked BEFORE any socket.
 
@@ -299,6 +363,58 @@ def _port_gate(chain: str, port: int, whose: str, variable: str) -> str:
     return f"{whose} port {port} was REFUSED and nothing connected to it: {why}. Here that port comes from {variable}"
 
 
+def grc_endpoints():
+    """(the operator's endpoint, "") or (None, refusal). EVERY CHECK THAT NEEDS NO SOCKET.
+
+    EXTRACTED FROM grc_plan() 2026-10-07, when adding the chain-fee read put that
+    function at seven returns against ruff's PLR0911 ceiling of six. Rule 12 says
+    the ceiling is telling you a decision wants its own function rather than a
+    suppression, and the grouping it suggested is a real one: everything here is
+    answerable from two integers, a hostname and three environment variables, so it
+    all happens BEFORE anything opens a connection. That ordering is the file's main
+    safety property and it is easier to see as one function than as four early
+    returns among the reads.
+    """
+    endpoint, refusal = operator_endpoint()
+    if endpoint is None:
+        # operator_endpoint()'s own sentence already names which variables are unset
+        # and why there is no fallback to the desk's credentials, so this adds the
+        # one thing it cannot know: WHICH daemon is wanted on this host. Repeating
+        # the export line it already printed would be two sentences competing to be
+        # the instruction.
+        return None, (
+            f"{refusal} On this host the daemon you want is the operator's own on 25715, not the "
+            f"desk's on 25779 -- and 25715 answering the desk's credentials with 401 Authorization "
+            f"Required is the custody separation working, not a fault to route around."
+        )
+
+    desk_port = int(Config.RPC.get("GRC", {}).get("port") or 0)
+    for whose, port, variable in (
+        ("the operator's", endpoint.port, OPERATOR_PORT_VARIABLE),
+        ("the desk's", desk_port, "GRC_RPC_PORT"),
+    ):
+        gate = _port_gate("GRC", port, whose, variable)
+        if gate:
+            return None, gate
+
+    if endpoint.port == desk_port and endpoint.host == Config.RPC["GRC"].get("host", "127.0.0.1"):
+        # CAUGHT WITHOUT A SOCKET, which is why it is here and not left to
+        # direction_verdict() below. Same host and same port IS one daemon, so the
+        # ownership reads would both answer True and the refusal would be correct
+        # -- but it would have cost two RPC calls and an unlock to establish what
+        # two integers already say.
+        return None, (
+            f"{OPERATOR_PORT_VARIABLE} and GRC_RPC_PORT are both {desk_port} on {endpoint.host}, "
+            f"so the source and the destination are ONE daemon. A top-up from a wallet to itself "
+            f"moves nothing and costs a chain fee. Point {OPERATOR_UNLOCK_ENV_VAR}'s wallet at "
+            f"the operator's own daemon -- 25715 on this host -- and run this again."
+        )
+
+    if missing_settings(Config.RPC, "GRC"):
+        return None, f"the DESK's GRC daemon is not configured: {why_unconfigured('GRC', Config.RPC)}"
+    return endpoint, ""
+
+
 def grc_plan(console_say, target: float) -> dict:
     """Everything a GRC top-up needs, decided and read, with nothing sent.
 
@@ -312,45 +428,9 @@ def grc_plan(console_say, target: float) -> dict:
     order because that one was argued out there: resolve the environment, refuse a
     wrong network BEFORE constructing anything, and only then open a socket.
     """
-    endpoint, refusal = operator_endpoint()
+    endpoint, refusal = grc_endpoints()
     if endpoint is None:
-        # operator_endpoint()'s own sentence already names which variables are unset
-        # and why there is no fallback to the desk's credentials, so this adds the
-        # one thing it cannot know: WHICH daemon is wanted on this host. Repeating
-        # the export line it already printed would be two sentences competing to be
-        # the instruction.
-        return {"refusal": (
-            f"{refusal} On this host the daemon you want is the operator's own on 25715, not the "
-            f"desk's on 25779 -- and 25715 answering the desk's credentials with 401 Authorization "
-            f"Required is the custody separation working, not a fault to route around."
-        )}
-
-    desk_port = int(Config.RPC.get("GRC", {}).get("port") or 0)
-    for whose, port, variable in (
-        ("the operator's", endpoint.port, OPERATOR_PORT_VARIABLE),
-        ("the desk's", desk_port, "GRC_RPC_PORT"),
-    ):
-        gate = _port_gate("GRC", port, whose, variable)
-        if gate:
-            return {"refusal": gate}
-
-    if endpoint.port == desk_port and endpoint.host == Config.RPC["GRC"].get("host", "127.0.0.1"):
-        # CAUGHT WITHOUT A SOCKET, which is why it is here and not left to
-        # direction_verdict() below. Same host and same port IS one daemon, so the
-        # ownership reads would both answer True and the refusal would be correct
-        # -- but it would have cost two RPC calls and an unlock to establish what
-        # two integers already say.
-        return {"refusal": (
-            f"{OPERATOR_PORT_VARIABLE} and GRC_RPC_PORT are both {desk_port} on {endpoint.host}, "
-            f"so the source and the destination are ONE daemon. A top-up from a wallet to itself "
-            f"moves nothing and costs a chain fee. Point {OPERATOR_UNLOCK_ENV_VAR}'s wallet at "
-            f"the operator's own daemon -- 25715 on this host -- and run this again."
-        )}
-
-    missing = missing_settings(Config.RPC, "GRC")
-    if missing:
-        return {"refusal": f"the DESK's GRC daemon is not configured: {why_unconfigured('GRC', Config.RPC)}"}
-
+        return {"refusal": refusal}
     console_say(f"source   the operator's own daemon at {endpoint.label} (from "
                 f"{', '.join(OPERATOR_REQUIRED_VARIABLES)})")
     source = GridcoinAdapter(
@@ -387,9 +467,20 @@ def grc_plan(console_say, target: float) -> dict:
     # cannot size a transfer without it -- and the port gate above has already
     # established the daemon is a TEST chain before this line runs, which is the
     # condition that made the old leak a leak.
-    console_say(f"balances   desk {held} GRC   operator {available} GRC  <- both TESTNET, "
-                f"established by the port gate above before either socket opened")
-    amount, why = amount_to_move(held, target, available)
+    # THE SOURCE'S OWN CHAIN FEE, from the one place that maps an asset to one
+    # (rule 8). get_network_fee_reserve() is "what the desk EXPECTS one payout on
+    # this chain to cost it" -- measured at 0.001 GRC on this operator's host
+    # 2026-10-01, to the last digit, against a payout whose own address made the
+    # wallet delta exactly -0.001. It is the desk's reserve rather than the
+    # operator's, and that is the right figure anyway: the same chain charges both
+    # wallets the same, and nothing in this tree records a separate one.
+    reserve, reserve_how = chain_fee_for("GRC")
+    if reserve is None:
+        return {"refusal": reserve_how}
+    console_say(f"balances   desk {held} GRC   operator {available} GRC   chain fee {reserve} GRC "
+                f"stays with the operator (from {reserve_how})  <- all TESTNET, established by the "
+                f"port gate above before either socket opened")
+    amount, why = amount_to_move(held, target, available, reserve)
     return {
         "refusal": "", "asset": "GRC", "source": source, "destination": destination,
         "amount": amount, "why": why, "held": held, "available": available,
@@ -491,7 +582,7 @@ def icp_plan(console_say, target: float, minter_identity: str) -> dict:
     # source balance, so passing the target would cap nothing and passing 0 would
     # refuse everything. This keeps amount_to_move() the single arithmetic without
     # teaching it about minting.
-    amount, why = amount_to_move(held, target, max(target - held, 0.0))
+    amount, why = amount_to_move(held, target, max(target - held, 0.0), source_reserve=0.0)
     return {
         "refusal": "", "asset": "ICP", "destination": destination, "amount": amount, "why": why,
         "held": held, "available": None, "mint": mint, "ledger": icp["ledger_canister_id"],
