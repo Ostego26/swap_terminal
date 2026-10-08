@@ -78,7 +78,19 @@ STACK_PORTS = {
     4943: "ICP replica (dfx) -- the local ledger and the custody canister",
     5000: "config.py's default SWAP_TERMINAL_PORT",
     5100: "the usual published port of the `web` compose service",
-    5101: "a host gunicorn was found here 2026-10-06 owned by nothing",
+    # 5101 IS THE `web` SERVICE'S PORT. It used to read "a host gunicorn was found
+    # here 2026-10-06 owned by nothing", which was a true finding and the wrong
+    # label: it described an INCIDENT at this port rather than what the port IS,
+    # so once the containerized deployment was serving correctly the report read
+    #
+    #     OURS (CONTAINER)  :5101 pid=85833  a host gunicorn was found here
+    #                       2026-10-06 owned by nothing
+    #
+    # on the operator's own healthy stack (2026-10-08) -- a correct container
+    # annotated with somebody else's orphan. The incident is kept as history
+    # because it is why this port is scanned at all; it is no longer the name.
+    5101: "the `web` service, where gunicorn serves the ATM and /admin "
+          "(a stray host gunicorn was once found here, 2026-10-06)",
     5102: "where app.py was moved when 5101 was already taken",
 }
 

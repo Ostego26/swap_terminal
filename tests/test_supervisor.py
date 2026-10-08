@@ -1470,3 +1470,49 @@ def test_the_reaper_reads_the_SAME_variable_the_container_spawner_does(monkeypat
     monkeypatch.delenv("ST_WORKER_RUN_DIR", raising=False)
     reloaded = importlib.reload(supervisor)
     assert reloaded.DEFAULT_RUN_DIR == reloaded.BASE_DIR / "runtime"
+
+
+def test_status_with_no_host_worker_does_not_claim_deposits_are_uncredited(tmp_path, capsys):
+    """The summary counts HOST workers. It must not assert what it cannot see.
+
+    MEASURED ON THE OPERATOR'S HOST, 2026-10-08. This line read
+
+        running=0/3  <- expected 3 while swaps are open; 0 means no worker is
+                        polling and deposits will not be credited
+
+    while the containerized deployment had been up fourteen hours and /admin --
+    served by that container, reading the container's own /runtime -- showed
+    deposit_watcher, payout_worker and reconcile_worker all RUNNING at pids 8, 9
+    and 10. The count was right about the host and the sentence after it was
+    false about the system.
+
+    WHY THIS ONE IS WORTH A TEST RATHER THAN A CORRECTION. The remedy the false
+    alarm invites is the double-pay condition: an operator with an open swap who
+    believes nothing is polling starts the host workers, `web` already runs
+    three, and six workers with TWO payout workers against one SQLite file is
+    what gunicorn.conf.py records as 2 sends for 1 swap. A wrong status line
+    whose fix costs money is not in the same category as a wrong status line.
+    """
+    table = {name: [sys.executable, "-c", SLEEPING_CHILD]
+             for name in ("deposit_watcher", "payout_worker", "reconcile_worker")}
+    assert supervisor.main(["status", "--run-dir", str(tmp_path)], commands=table) == 0
+    out = capsys.readouterr().out
+
+    assert "running=0/3" in out, "the count itself must still be printed"
+    assert "HOST workers" in out, (
+        "the count must say WHICH workers it counted -- it walks one run directory and a "
+        "containerized deployment runs its own three where this cannot see them"
+    )
+    assert "deposits will not be credited" not in out, (
+        "the summary must not assert that deposits are uncredited. It cannot see the "
+        "containerized deployment's workers, so with `web` up the claim is simply false."
+    )
+    # The two readings the operator has to tell apart, and the warning that makes
+    # the wrong one safe.
+    assert "If NO deployment is running" in out, "the genuinely-broken case must still be named"
+    assert "CONTAINERIZED" in out, "the other reading must be named, not left to be deduced"
+    assert "swap_stack.py status" in out, "name the command that can see both deployments"
+    assert "TWO payout workers" in out, (
+        "the warning against resolving this line by starting the host workers must be on "
+        "the screen, because that is the action the line invites"
+    )

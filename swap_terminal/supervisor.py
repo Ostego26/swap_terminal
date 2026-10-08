@@ -1764,10 +1764,55 @@ def command_status(names: list[str], run_dir: Path) -> int:
     running = sum(1 for state in states if state["state"] == "running")
     stale = sum(1 for verdict in verdicts if verdict == CODE_STALE)
     unknown_age = sum(1 for verdict in verdicts if verdict == CODE_NOT_ESTABLISHED)
+    # WHAT THIS COUNTS IS HOST WORKERS IN THIS RUN DIRECTORY, AND THE LINE USED TO
+    # CLAIM MORE THAN THAT. It read:
+    #
+    #     running=0/3  <- expected 3 while swaps are open; 0 means no worker is
+    #                     polling and deposits will not be credited
+    #
+    # and on the operator's host 2026-10-08 that was FALSE while it was printed.
+    # The containerized deployment had been up fourteen hours; /admin -- served by
+    # that container, reading the container's own /runtime -- showed
+    # deposit_watcher, payout_worker and reconcile_worker all RUNNING at pids 8, 9
+    # and 10. This report walks the HOST's run directory and cannot see any of
+    # them, because the container mounts its own and its pids are namespaced.
+    #
+    # WHY THAT PARTICULAR WRONG SENTENCE COSTS MONEY RATHER THAN FACE. An operator
+    # who believes "deposits will not be credited" with an open swap starts the
+    # host workers -- and `web` already runs three, so that is six workers and TWO
+    # payout workers against one SQLite file, which gunicorn.conf.py's closing
+    # section records as two sends for one swap. The false alarm's remedy is the
+    # double-pay condition.
+    #
+    # So the count says what it measured and names the thing that can see both
+    # deployments. It does NOT try to detect the container from here: the only
+    # evidence available on the host is pid files under the mount, holding
+    # container-namespace pids that os.kill cannot check, and a guess dressed as a
+    # reading is what this comment is about (rule 17).
     print(
-        f"  summary           running={running}/{len(names)}  <- expected {len(names)} while swaps are open; "
-        "0 means no worker is polling and deposits will not be credited"
+        f"  summary           running={running}/{len(names)} HOST workers in {run_dir}"
     )
+    if not running:
+        print(
+            "                    0 of them. If NO deployment is running, deposits are not being "
+            "credited and that is the thing to fix."
+        )
+        print(
+            "                    If the CONTAINERIZED deployment is up, its `web` container runs "
+            "these same three inside itself and this report cannot see them -- it reads the host's "
+            "run directory only. `swap_stack.py status` sees both; /admin, served by the container, "
+            "reports the container's own."
+        )
+        print(
+            "                    DO NOT START THE HOST WORKERS to resolve this line without "
+            "checking which is running: `web` plus a host set is six workers and TWO payout "
+            "workers on one database, and that pays one swap twice."
+        )
+    elif running < len(names):
+        print(
+            f"                    expected {len(names)} while swaps are open, so "
+            f"{len(names) - running} is not polling"
+        )
     # A SECOND SUMMARY LINE RATHER THAN A LONGER FIRST ONE, and it is always
     # printed -- including `stale=0 unknown-age=0`, because "no stale worker" and
     # "this check did not run" must not render identically (rule 14). The counts
