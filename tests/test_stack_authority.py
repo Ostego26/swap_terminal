@@ -40,6 +40,7 @@ from swap_terminal.stack_authority import (
     REPLICA_STATUS_URL,
     WEB_PORT_CANDIDATES,
     WEB_SURFACES,
+    canister_lookup_verdict,
     canister_surface_lines,
     container_id,
     container_label,
@@ -1129,3 +1130,120 @@ def test_the_short_web_probe_is_quiet_and_the_replicas_long_wait_is_not():
         "operator who cannot tell working from hung reaches for Ctrl-C, which on this "
         f"project means killing a live cycle. The call reads: {replica_call}"
     )
+
+
+# ---------------------------------------------------------------------------
+# "NOT DEPLOYED" IS NOT "COULD NOT READ". Measured 2026-10-08, and the merge of
+# the two cost the operator three canisters without a word of warning.
+#
+# Their replica container was created two hours before
+# icp-replica-data:/root/.local/share/dfx entered docker-compose.icp.yml, so its
+# dfx state was in the container's WRITABLE LAYER. `down` stopped it and the
+# layer survived -- which is exactly what `down` was rewritten to guarantee.
+# Then `up` rebuilt both images, compose recreated the container because its
+# image had changed, and the layer went with it: the ICP ledger holding the
+# desk's 998.9498 LICP, threshold_custody, and operator_admin.
+#
+# `up` asked dfx for each id. dfx answered, three times:
+#
+#     Error: Cannot find canister id. Please issue 'dfx canister create <name>'.
+#
+# and the report printed COULD NOT READ, under a header reading "Two causes and
+# this cannot tell them apart: docker/dfx was not reachable, or the canisters
+# are not deployed on this replica." dfx had just told them apart. `up` printed
+# SERVING and exited 0.
+# ---------------------------------------------------------------------------
+
+#: What dfx actually said, verbatim, so the match is tested against the real
+#: string rather than a paraphrase of it.
+DFX_ABSENT_STDERR = (
+    "Error: Cannot find canister id. Please issue 'dfx canister create operator_admin'."
+)
+
+
+def test_dfx_saying_it_cannot_find_the_id_is_NOT_DEPLOYED_and_not_unreachable():
+    """The exact output, and the exact distinction that was missing."""
+    ident, kind, why = canister_lookup_verdict(255, "", DFX_ABSENT_STDERR)
+    assert ident is None
+    assert kind == "not_deployed", (
+        "dfx ANSWERED that the replica has no such canister. Filing that as 'unreachable' is "
+        "what let three canisters vanish behind a line an operator reads as a docker hiccup."
+    )
+    assert "Cannot find canister id" in why, "the operator must see what dfx actually said"
+
+
+def test_a_docker_failure_is_unreachable_and_claims_nothing_about_deployment():
+    """The other direction, and it is the worse one to get wrong.
+
+    Asserting a canister is absent because docker would not answer would tell an
+    operator their canisters are gone while they are sitting there -- a false
+    alarm of exactly the kind that makes the real one get ignored.
+    """
+    for returncode, stdout, stderr in (
+        (1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"),
+        (1, "", 'service "icp-replica" is not running'),
+        (125, "", "Error response from daemon: No such container"),
+        (1, "", ""),
+    ):
+        ident, kind, _why = canister_lookup_verdict(returncode, stdout, stderr)
+        assert ident is None
+        assert kind == "unreachable", (
+            f"{stderr!r} must read as unreachable, not as a claim about deployment"
+        )
+
+
+def test_an_id_that_was_read_is_found_even_behind_dfx_warnings():
+    """dfx prints warnings above its answer on some versions.
+
+    The LAST line is the id. Pasting the whole buffer into a url produces an
+    unopenable link that LOOKS like one, which is the one thing the map must not
+    do -- so this pins that the warning is dropped and the id survives.
+    """
+    noisy = (
+        "Using the default definition for the 'local' shared network because\n"
+        "/root/.config/dfx/networks.json does not exist.\n"
+        "br5f7-7uaaa-aaaaa-qaaca-cai"
+    )
+    ident, kind, _why = canister_lookup_verdict(0, noisy, "")
+    assert kind == "found"
+    assert ident == "br5f7-7uaaa-aaaaa-qaaca-cai", f"got {ident!r}"
+
+
+def test_an_empty_success_is_not_an_id():
+    """returncode 0 with no output must not become an empty-string id.
+
+    An empty id interpolates into `http://.localhost:4943/`, a link that resolves
+    to nothing and looks deliberate.
+    """
+    ident, kind, _why = canister_lookup_verdict(0, "   \n", "")
+    assert ident is None
+    assert kind == "unreachable"
+
+
+def test_the_map_SHOUTS_when_the_replica_has_none_and_says_what_it_costs():
+    """The line the operator should have seen instead of COULD NOT READ."""
+    shouted = "\n".join(surface_map(5100, {}, absent=3))
+    assert "NO CANISTERS DEPLOYED" in shouted
+    assert "THEY ARE GONE" in shouted, (
+        "the map must say what it means for a replica that HAD canisters, because that is "
+        "the reading an operator needs within one second of seeing it"
+    )
+    assert "dfx deploy" in shouted, "name the remedy"
+    assert "icp_ledger_init.did" in shouted, (
+        "a redeployed ledger restores only what that file seeds -- a balance minted "
+        "afterwards has to be minted again, and not saying so invites a wrong all-clear"
+    )
+    assert "NOT DEPLOYED on this replica" in shouted, "each canister's own row must say it too"
+    assert "cannot tell them apart" not in shouted, (
+        "the header must stop claiming the causes are indistinguishable; dfx distinguished them"
+    )
+
+
+def test_the_map_still_says_COULD_NOT_READ_when_dfx_was_never_asked():
+    """absent=0 with nothing read is the docker-unreachable case, and differs."""
+    quiet = "\n".join(surface_map(5100, {}, absent=0))
+    assert "COULD NOT BE READ" in quiet
+    assert "NO CANISTERS DEPLOYED" not in quiet, (
+        "an unreachable docker must not be reported as a destroyed deployment"
+    )
+    assert "says nothing about whether they are deployed" in quiet

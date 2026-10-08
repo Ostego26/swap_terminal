@@ -834,8 +834,80 @@ def web_surface_lines(serving_port: int | None) -> list[str]:
     return lines
 
 
-def canister_surface_lines(canister_ids: Mapping[str, str | None]) -> list[str]:
+#: What dfx says when the replica has no such canister.
+#:
+#: VERBATIM FROM dfx, measured on the operator's host 2026-10-08:
+#:
+#:     Error: Cannot find canister id. Please issue 'dfx canister create operator_admin'.
+#:
+#: Matched on the stable half of that sentence. dfx interpolates the canister name
+#: into the second half and has changed the wording of such messages between
+#: versions, so the prefix is what is matched and a miss falls through to
+#: "unreachable" -- which is the safe direction to be wrong in, because it claims
+#: less.
+CANISTER_ABSENT_MARKER = "Cannot find canister id"
+
+
+def canister_lookup_verdict(returncode: int, stdout: str, stderr: str) -> tuple[str | None, str, str]:
+    """What `dfx canister id <name>` actually told us. (id, kind, reason). PURE.
+
+    kind is one of:
+      found          an id was read.
+      not_deployed   dfx ANSWERED and said the replica has no such canister.
+      unreachable    dfx could not be asked, or failed for some other reason.
+
+    ---------------------------------------------------------------------------
+    WHY not_deployed EXISTS AS A SEPARATE ANSWER. Measured on the operator's host
+    2026-10-08, and it cost them three canisters.
+    ---------------------------------------------------------------------------
+
+    Their replica container had been created two hours BEFORE
+    `icp-replica-data:/root/.local/share/dfx` entered docker-compose.icp.yml
+    (28de99c, 2026-10-07 20:38 UTC), so its dfx state lived in the container's
+    WRITABLE LAYER rather than on the volume. `swap_stack.py down` stopped it and
+    the layer survived, which is what `down` was rewritten to guarantee. Then `up`
+    rebuilt both images, compose recreated the container because its image had
+    changed, and the writable layer went with it -- the ledger holding the desk's
+    998.9498 LICP, threshold_custody, and operator_admin, deployed that morning.
+
+    `up` ASKED, AND dfx ANSWERED, AND THE REPORT SAID IT COULD NOT TELL. All three
+    lookups came back with the sentence above, and all three were filed under
+    "COULD NOT READ" beneath a header reading "Two causes and this cannot tell
+    them apart: docker/dfx was not reachable, or the canisters are not deployed on
+    this replica."
+
+    That sentence was false at the moment it printed. dfx had just distinguished
+    them. An operator reading COULD NOT READ assumes a docker hiccup and moves on;
+    the fact available was "this replica has no canisters at all", which on a
+    replica that had three an hour earlier is the loudest thing on the screen.
+    Rule 14's "did nothing must not look like did work" and rule 17's refusal to
+    state an unknown where a measurement exists, in one line of output.
+
+    THE CONSEQUENCE IS NOT COSMETIC. Every `* -> ICP` quote, the desk's ICP
+    balance and the operator console all stop working, and nothing else in the
+    stack reports it: `up` printed SERVING and exited 0.
+    """
+    ident = stdout.strip().splitlines()[-1].strip() if stdout.strip() else ""
+    if returncode == 0 and ident:
+        return ident, "found", f"read as {ident}"
+
+    complaint = (stderr or stdout).strip()
+    why = complaint.splitlines()[-1] if complaint else "(no output)"
+    if CANISTER_ABSENT_MARKER in complaint:
+        return None, "not_deployed", why
+    return None, "unreachable", why
+
+
+def canister_surface_lines(
+    canister_ids: Mapping[str, str | None],
+    absent: int = 0,
+) -> list[str]:
     """The ICP half of the surface map. Pure.
+
+    @param absent  how many canisters dfx ANSWERED were not deployed, as counted
+                   by canister_lookup_verdict(). Zero means either they were all
+                   read or dfx could not be asked -- two states the header below
+                   must not merge, which is the whole subject of that function.
 
     @param canister_ids  {name: id}, where a value of None means the id was NOT
                          established -- docker unreachable, dfx failed, or the
@@ -861,18 +933,36 @@ def canister_surface_lines(canister_ids: Mapping[str, str | None]) -> list[str]:
             "  canisters         asked of the replica with `dfx canister id`, never hardcoded: every",
             f"{_MAP_CONTINUATION}fresh replica issues different ids, so an id in a file is somebody else's",
         ]
+    elif absent:
+        # dfx ANSWERED: the replica has none of them. This is a different and much
+        # louder fact than "could not read", and conflating the two is what let
+        # three canisters disappear unremarked on 2026-10-08 -- see
+        # canister_lookup_verdict() for the whole incident.
+        lines = [
+            "  canisters         *** THE REPLICA HAS NO CANISTERS DEPLOYED. *** Not 'could not read' --",
+            f"{_MAP_CONTINUATION}dfx answered, for {absent} of {len(read)}, that it cannot find the id.",
+            f"{_MAP_CONTINUATION}IF THIS REPLICA HAD CANISTERS BEFORE, THEY ARE GONE: a replica whose dfx",
+            f"{_MAP_CONTINUATION}state was in the container's writable layer loses all of it when the",
+            f"{_MAP_CONTINUATION}container is recreated, which `up` does whenever an image rebuilds.",
+            f"{_MAP_CONTINUATION}Every * -> ICP quote, the desk's ICP balance and the operator console",
+            f"{_MAP_CONTINUATION}stop working until they are back. `cd icp && dfx deploy` recreates them;",
+            f"{_MAP_CONTINUATION}a redeployed ledger restores only what icp_ledger_init.did seeds, so a",
+            f"{_MAP_CONTINUATION}balance that was minted after deployment must be minted again.",
+        ]
     else:
         lines = [
-            "  canisters         ids COULD NOT BE READ, so NONE is printed below. Two causes and this",
-            f"{_MAP_CONTINUATION}cannot tell them apart: docker/dfx was not reachable, or the canisters",
-            f"{_MAP_CONTINUATION}are not deployed on this replica. Nothing is guessed -- every fresh",
-            f"{_MAP_CONTINUATION}replica issues different ids, so a guess would link to another deployment.",
-            f"{_MAP_CONTINUATION}`docker compose exec -T icp-replica dfx canister id <name>` is the answer.",
+            "  canisters         ids COULD NOT BE READ, so NONE is printed below. dfx could not be",
+            f"{_MAP_CONTINUATION}asked -- docker absent, the daemon down, or the replica not answering --",
+            f"{_MAP_CONTINUATION}so this says nothing about whether they are deployed. Nothing is guessed:",
+            f"{_MAP_CONTINUATION}every fresh replica issues different ids, so a guess would link to",
+            f"{_MAP_CONTINUATION}another deployment. `docker compose exec -T icp-replica dfx canister id",
+            f"{_MAP_CONTINUATION}<name>` is the answer.",
         ]
     for name, serves_page, what in CANISTER_SURFACES:
         ident = read[name]
         if ident is None:
-            lines.append(f"    {'PAGE' if serves_page else 'CANDID':<6} {name:<20} id COULD NOT BE READ")
+            marker = "NOT DEPLOYED on this replica" if absent else "id COULD NOT BE READ"
+            lines.append(f"    {'PAGE' if serves_page else 'CANDID':<6} {name:<20} {marker}")
             shape = (f"http://<id>.localhost:{REPLICA_PORT}/" if serves_page
                      else f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={CANDID_UI_CANISTER_ID}&id=<id>")
             lines.append(f"{_MAP_CONTINUATION}{what}")
@@ -890,7 +980,11 @@ def canister_surface_lines(canister_ids: Mapping[str, str | None]) -> list[str]:
     return lines
 
 
-def surface_map(serving_port: int | None, canister_ids: Mapping[str, str | None]) -> list[str]:
+def surface_map(
+    serving_port: int | None,
+    canister_ids: Mapping[str, str | None],
+    absent: int = 0,
+) -> list[str]:
     """WHERE IS EVERYTHING. The whole map, as lines, ready for swap_stack.say().
 
     Pure, and it is the only thing `up` and `status` both call for this -- one map,
@@ -917,4 +1011,4 @@ def surface_map(serving_port: int | None, canister_ids: Mapping[str, str | None]
         f"{_MAP_CONTINUATION}operator's. JSON = a machine reads it, so JSON in a browser is not a",
         f"{_MAP_CONTINUATION}broken page. CANDID/DEBUG = a developer surface and not a page at all.",
     ]
-    return header + web_surface_lines(serving_port) + canister_surface_lines(canister_ids)
+    return header + web_surface_lines(serving_port) + canister_surface_lines(canister_ids, absent)

@@ -83,6 +83,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     REPLICA_STATUS_URL,
     STACK_PORTS,
     WEB_PORT_CANDIDATES,
+    canister_lookup_verdict,
     container_id,
     container_label,
     container_verdict,
@@ -773,7 +774,7 @@ def probe_serving_port() -> tuple[int, str]:
     return serving_verdict(probes)
 
 
-def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[str]]:
+def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[str], int]:
     """Ask the replica for each canister's id. ({name: id or None}, what went wrong).
 
     THE I/O HALF OF THE SURFACE MAP. stack_authority.surface_map() decides what may
@@ -803,6 +804,10 @@ def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[st
     """
     found: dict[str, str | None] = {}
     trouble: list[str] = []
+    #: How many dfx ANSWERED were not deployed. Counted rather than inferred from
+    #: `found`, where a None also covers "could not ask" -- the two must reach the
+    #: map distinguishable.
+    absent = 0
     for index, (name, _serves_page, _what) in enumerate(CANISTER_SURFACES, start=1):
         say(f"                    asking {index}/{len(CANISTER_SURFACES)} {name}")
         try:
@@ -833,21 +838,26 @@ def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[st
         # some versions, and a report that pasted the whole buffer into a url would
         # produce an unopenable link that LOOKS like one -- which is the one thing
         # the map must not do.
-        ident = done.stdout.strip().splitlines()[-1].strip() if done.stdout.strip() else ""
-        if done.returncode == 0 and ident:
-            found[name] = ident
+        # THE DECISION IS canister_lookup_verdict's, AND IT SEPARATES "NOT
+        # DEPLOYED" FROM "COULD NOT ASK" -- which this loop used to merge. See
+        # that function: the merge is what let three canisters disappear
+        # unremarked on the operator's host, 2026-10-08.
+        ident, kind, why = canister_lookup_verdict(done.returncode, done.stdout, done.stderr)
+        found[name] = ident
+        if kind == "found":
             continue
-        found[name] = None
-        # The LAST line again, and of stderr first: compose puts the cause there and
-        # an unhelpful "exited 1" above it. `(no output)` rather than a blank,
-        # because a silent failure and an unread one must not look alike (rule 14).
-        complaint = (done.stderr or done.stdout).strip()
-        why = complaint.splitlines()[-1] if complaint else "(no output)"
+        if kind == "not_deployed":
+            absent += 1
+            trouble.append(
+                f"{name}: NOT DEPLOYED -- dfx answered: {why}. This is not a failure to "
+                "read; the replica does not have this canister"
+            )
+            continue
         trouble.append(
             f"{name}: `docker compose exec -T {_DFX_SERVICE} dfx canister id {name}` "
             f"exited {done.returncode}: {why}"
         )
-    return found, trouble
+    return found, trouble, absent
 
 
 def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
@@ -865,13 +875,13 @@ def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
     """
     say(f"  canister ids      `dfx canister id` x{len(CANISTER_SURFACES)} in the `{_DFX_SERVICE}` service, up to")
     say(f"                    {format_duration(_CANISTER_ID_TIMEOUT_SECONDS)} each -- asked, never hardcoded (ids are per-replica)")
-    ids, trouble = canister_ids(files)
+    ids, trouble, absent = canister_ids(files)
     for line in trouble:
         say(f"  COULD NOT READ    {line}")
     if not trouble:
         say(f"  read              all {len(ids)} canister ids")
     say("")
-    for line in surface_map(serving_port, ids):
+    for line in surface_map(serving_port, ids, absent):
         say(line)
 
 
