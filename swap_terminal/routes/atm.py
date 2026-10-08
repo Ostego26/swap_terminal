@@ -13,14 +13,26 @@ Can move funds: NO ORDER IS SENT HERE. Step 5 creates a swap row and a deposit
 Mainnet-safe: yes to serve. It can take a customer's deposit instruction, which
        is what it is for; it signs nothing.
 
-WHY THIS EXISTS AT /atm AND NOT AT / YET. Operator, 2026-10-07: "i really want
-the UI to be like an ATM sequence of steps", and, asked whether to replace the
-one-page form or run alongside it, "Replace it". It will. It is here first
-because 143 tests across five files pin the current customer page, and a single
-commit that both introduces this flow AND deletes that evidence leaves no way to
-tell a wizard bug from a test deletion. The swap happens in its own commit, with
-those tests triaged there: the ones pinning behavior this flow also has move, and
-the ones pinning the old page's shape die with it (rule 2).
+THIS IS AT `/`. Operator, 2026-10-07: "i really want the UI to be like an ATM
+sequence of steps", and, asked whether to replace the one-page form or run
+alongside it, "Replace it". It did -- `@bp.get("/")` and `@bp.post("/")` below
+are what is registered, routes/ui.index() and templates/index.html are gone, and
+start()'s own docstring records the move.
+
+THIS PARAGRAPH SAID "WHY THIS EXISTS AT /atm AND NOT AT / YET" UNTIL 2026-10-08,
+in the future tense, twenty lines above a function docstring stating the move as
+done -- and `/atm` has been registered nowhere since the day it moved. Kept as a
+correction rather than overwritten because a module header is what a reader
+trusts at a glance, and this one contradicted the file it sat on top of: rule
+19's "one of those files said both things twenty lines apart", found by somebody
+reading the two together rather than by anything failing.
+
+WHY IT WAS AT /atm FIRST, which is the part still worth knowing: 143 tests
+across five files pinned the one-page customer form, and a single commit that
+both introduced this flow AND deleted that evidence leaves no way to tell a
+wizard bug from a test deletion. The swap got its own commit with those tests
+triaged -- the ones pinning behavior this flow also has moved, the ones pinning
+the old page's shape died with it (rule 2).
 
 NO SESSION AND NO SERVER-SIDE FLOW STATE. The answers post forward as hidden
 fields and the server re-decides the current step from them on every request.

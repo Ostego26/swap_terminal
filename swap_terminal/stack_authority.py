@@ -3,7 +3,8 @@
 Role: submodule (decisions only -- every function here is pure or takes its
       filesystem root as an argument, so a test can run it against a fake /proc)
 Reads: nothing on its own. Callers pass it text read from /proc, a directory to
-       scan, and the compose files on disk.
+       scan, the compose files on disk, the port a probe found answering, and the
+       canister ids `dfx canister id` returned.
 Writes: nothing. No process is signaled from this file and no command is run.
 Can move funds: no. There is no chain call, no RPC and no send path here.
 Live-safe: yes to import and yes to call. It decides; swap_stack.py acts.
@@ -59,6 +60,7 @@ even then only when the caller passes the flag that says so.
 from __future__ import annotations
 
 import socket
+from collections.abc import Mapping
 from pathlib import Path
 
 #: The ports this terminal's HTTP surfaces are reachable on, and what each means.
@@ -634,3 +636,273 @@ def serving_verdict(answers: dict[int, object]) -> tuple[int, str]:
         if port in answers
     )
     return 0, f"nothing answered on any candidate port -- {tried}"
+
+
+# =============================================================================
+# THE SURFACE MAP: one place that answers "where is everything".
+#
+# Operator, 2026-10-08: "so we have 3 canisters now. 3 different hyperlinks.
+# where's the main landing page for the atm screen?"
+#
+# THAT QUESTION HAD AN ANSWER AND NOTHING IN THIS SYSTEM PRINTED IT. `up` said
+# SERVING and gave one URL; `status` listed containers, listeners and workers and
+# gave none. Between the Flask app, the replica and three canisters the operator
+# was holding four-plus URLs in their head, and the one they most needed -- the
+# landing page -- was the one that had just MOVED: `/atm` became `/` on
+# 2026-10-07 (routes/atm.py::start()'s docstring records the instruction), and
+# routes/ui.index() and templates/index.html went with it. So the URL in anyone's
+# memory was the stale one.
+#
+# This is rule 14 applied to the question rather than to a wait: "Pasted output
+# has to be self-describing a day later, because it usually is read a day later."
+# A report that proves the stack is up and does not say what is now reachable
+# makes the operator go and find out, which is the round trip rule 20 says not to
+# charge them.
+#
+# WHY IT IS A PURE FUNCTION HERE AND NOT A PRINT LOOP IN swap_stack.py (rule 10).
+# The map contains exactly one decision and it is a dangerous one: WHETHER A URL
+# MAY BE WRITTEN DOWN AT ALL. A line reading `http://127.0.0.1:5101/` beside a
+# port nothing answered on is worse than printing nothing -- it is the report
+# asserting that something serves, which is the same class of defect as
+# container_verdict()'s old sentence telling the operator to `docker stop` the
+# container serving their page. Here it is a decision with seeded inputs and a
+# test that asserts no URL appears when nothing answered.
+# =============================================================================
+
+#: The Candid UI canister dfx deploys beside every local project, and it is the
+#: SAME id on every fresh replica -- unlike the project's own canisters, which are
+#: issued per replica and must be asked for.
+#:
+#: Its own constant because the Candid link is built from it three times below and
+#: a second spelling of an id is rule 8's bug with a delay on it.
+CANDID_UI_CANISTER_ID = "be2us-64aaa-aaaaa-qaabq-cai"
+
+#: The replica's own status endpoint, and the ONE place it is spelled.
+#:
+#: MOVED HERE FROM swap_stack.py ON 2026-10-08, where it was `_REPLICA_STATUS_URL`
+#: and was about to be spelled a second time by the surface map -- which is rule 8
+#: exactly: "Two copies of one rule is not redundancy, it is a bug with a delay on
+#: it." swap_stack.py imports it and still owns the WAIT BUDGETS, because how long
+#: to wait for a cold `dfx start` is that file's business and the address is not.
+#:
+#: 127.0.0.1 and not `icp-replica`: this is the url a probe on the HOST uses, which
+#: is what both callers are. The in-container url is ICP_DFX_NETWORK_URL and
+#: chains/icp.py owns it.
+REPLICA_STATUS_URL = "http://127.0.0.1:4943/api/v2/status"
+
+#: The port the replica, the Candid UI and every canister page share.
+REPLICA_PORT = 4943
+
+#: Every HTTP surface the Flask app in the `swap-web` container serves, as
+#: (kind, path, what it is and which file declares it).
+#:
+#: MEASURED FROM swap_terminal/routes/ ON 2026-10-08 by reading the decorators, not
+#: from memory: atm.py has `@bp.get("/")` and `@bp.post("/")`, ui.py has
+#: `/swap-lookup` and `/swap/<swap_id>`, grc_login.py has
+#: `/swap/<swap_id>/address-proof`, admin.py has `/admin` plus the three
+#: `/api/admin/*` reads, kill_switch.py has CONTROLS_PATH = "/admin/controls" on
+#: both GET and POST, and rates/quotes/swaps/health have the five `/api/*` rows.
+#:
+#: THE KIND COLUMN IS THE WHOLE POINT OF THE TABLE and not decoration. The
+#: operator's question was "where is the landing page", and a list that renders a
+#: JSON endpoint and a customer page in the same voice does not answer it:
+#:
+#:   PAGE    a human opens it in a browser and a screen is rendered
+#:   ADMIN   a page too, and the operator's rather than a customer's
+#:   JSON    a machine reads it. Opening one in a browser shows JSON, which is not
+#:           a broken page -- saying so here is cheaper than the support question
+#:
+#: `/swap/<id>/fragment` IS DELIBERATELY ABSENT. It exists (ui.py:112) and it is an
+#: HTMX partial -- a fragment of the swap page, not a surface anybody opens. A map
+#: that lists it invites somebody to open it and conclude the page is broken.
+WEB_SURFACES = (
+    ("PAGE", "/", "THE LANDING PAGE -- the ATM flow; GET=step 1, POST=advance (routes/atm.py)"),
+    ("PAGE", "/swap/<id>", "one swap's live state; the URL a customer keeps (routes/ui.py)"),
+    ("PAGE", "/swap/<id>/address-proof", "the GRC address-proof step (routes/grc_login.py)"),
+    ("PAGE", "/swap-lookup", "a returning customer's way back in (routes/ui.py)"),
+    ("ADMIN", "/admin", "the operator dashboard (routes/admin.py)"),
+    ("ADMIN", "/admin/controls", "the kill switch -- the only operator route taking a POST (routes/kill_switch.py)"),
+    ("JSON", "/api/rates", "the rate table (routes/rates.py)"),
+    ("JSON", "/api/quotes", "POST: price one pair (routes/quotes.py)"),
+    ("JSON", "/api/swaps", "POST: create a swap (routes/swaps.py)"),
+    ("JSON", "/api/swaps/<id>", "one swap, as the page reads it (routes/swaps.py)"),
+    ("JSON", "/api/health", "liveness (routes/health.py)"),
+    ("JSON", "/api/admin/overview", "the dashboard's own data (routes/admin.py)"),
+    ("JSON", "/api/admin/chains", "per-chain probes (routes/admin.py)"),
+    ("JSON", "/api/admin/peg", "the peg reading (routes/admin.py)"),
+)
+
+#: The three canisters this stack deploys, as (name, serves_a_page, what it is).
+#:
+#: NAMES FROM icp/dfx.json, which is the authority for what exists; the IDS ARE NOT
+#: HERE AND MUST NOT BE, because a fresh replica issues a different id for every
+#: canister and a hardcoded one would be a link to somebody else's deployment.
+#: canister_surface_lines() takes them as an argument for that reason and prints
+#: COULD NOT BE READ rather than a guess (rule 17).
+#:
+#: TWO OF THE THREE WILL NEVER HAVE A PAGE, and saying so is the point of the
+#: boolean. icp_ledger_canister is DFINITY's released ledger wasm (dfx.json pins
+#: the ledger-suite-icp-2025-08-29 release) and threshold_custody is key
+#: derivation; neither has a frontend to grow one in. An operator who has been
+#: handed "three canisters, three hyperlinks" needs to know that two of those
+#: links are developer surfaces, or they will keep looking for the page.
+#:
+#: operator_admin DOES serve its own page, and that is measured rather than
+#: assumed: on 2026-10-08 http://<its-id>.localhost:4943/ answered 200 text/html,
+#: 6227 bytes.
+#:
+#: operator_admin is FIRST because it is the one with a page.
+CANISTER_SURFACES = (
+    ("operator_admin", True,
+     "the operator console, served BY the canister itself -- 200 text/html, 6227 bytes, measured 2026-10-08"),
+    ("threshold_custody", False,
+     "key derivation. NO page, and there will never be one -- Candid is its only surface"),
+    ("icp_ledger_canister", False,
+     "DFINITY's released ledger wasm. NO page, and there will never be one -- Candid is its only surface"),
+)
+
+#: Column the continuation text of a map line starts at, matching print_listeners().
+_MAP_CONTINUATION = " " * 20
+
+#: Gap between the URL-or-path column and the description column.
+#:
+#: The column itself is MEASURED FROM THE ROWS rather than fixed, because the two
+#: modes differ by the whole length of a URL: `http://127.0.0.1:5101/api/admin/
+#: overview` is 42 characters and the same row as a path is 19. A constant wide
+#: enough for the first leaves 23 columns of whitespace in the second, which is
+#: how an aligned table turns into two unrelated columns on an 80-wide terminal.
+_MAP_TARGET_GAP = 2
+
+
+def candid_url(canister_id: str) -> str:
+    """The Candid UI link for one canister. The ONE place that shape is written.
+
+    Candid UI is a canister itself, so the link is a query against IT with the
+    target's id as a parameter -- not a path under the target. Getting that
+    backwards produces a URL that loads and shows the wrong canister's interface,
+    which is why this is a function rather than an f-string at three call sites.
+    """
+    return f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={CANDID_UI_CANISTER_ID}&id={canister_id}"
+
+
+def web_surface_lines(serving_port: int | None) -> list[str]:
+    """The web-app half of the surface map. Pure.
+
+    @param serving_port  the port serving_verdict() established ANSWERED, or None.
+                         0 IS ACCEPTED AND MEANS NONE, because that is literally
+                         what serving_verdict() returns for "nothing answered" --
+                         a caller forwarding its first return value must not have
+                         to remember to translate, and `if serving_port:` treating
+                         0 as a port would be the one bug this function exists to
+                         not have.
+
+    THE DECISION: a URL is written only when a port answered. With none, the same
+    rows print as PATHS, under a line saying so. Those are not interchangeable --
+    `http://127.0.0.1:5101/admin` is a claim that something is there, and an
+    operator pastes it and gets a connection refused they then have to diagnose.
+    A bare `/admin` claims nothing and still answers "where is the page".
+    """
+    base = f"http://127.0.0.1:{serving_port}" if serving_port else ""
+    if base:
+        lines = [
+            f"  web app           the Flask app in the `swap-web` container, answering on :{serving_port}",
+            f"{_MAP_CONTINUATION}-- so every row below is a LINK, probed just now rather than assumed",
+        ]
+    else:
+        candidates = ", ".join(str(port) for port in WEB_PORT_CANDIDATES)
+        lines = [
+            f"  web app           NO URL: nothing answered on {candidates}, so the rows below are",
+            f"{_MAP_CONTINUATION}PATHS AND NOT LINKS -- the app is not serving them right now",
+        ]
+    width = max(len(base + path) for _kind, path, _what in WEB_SURFACES) + _MAP_TARGET_GAP
+    lines += [
+        f"    {kind:<6} {base + path:<{width}} {what}"
+        for kind, path, what in WEB_SURFACES
+    ]
+    return lines
+
+
+def canister_surface_lines(canister_ids: Mapping[str, str | None]) -> list[str]:
+    """The ICP half of the surface map. Pure.
+
+    @param canister_ids  {name: id}, where a value of None means the id was NOT
+                         established -- docker unreachable, dfx failed, or the
+                         canister is not deployed. A name missing from the mapping
+                         is treated identically to None, so a caller that could
+                         not run docker at all may pass {}.
+
+    THE DECISION: an id that was not read is printed as COULD NOT BE READ, with
+    the shape of the URL it would have formed and the command that answers it.
+    Never a placeholder that looks like an id, and never an empty section (rule
+    14: "(none) is a result; a blank gap is ambiguous between zero rows and a
+    query that broke"). Rule 17's form of the same thing: a reason to believe a
+    canister id is not having read it.
+
+    THE REPLICA'S OWN STATUS URL IS PRINTED EITHER WAY and is labeled DEBUG, not
+    PAGE. It is a fixed address rather than an id-dependent one, so it is knowable
+    with nothing running -- and `up`'s step 4 probes it and says READY or NOT
+    READY, so the operator is never left reading this line as a liveness claim.
+    """
+    read = {name: canister_ids.get(name) for name, _page, _what in CANISTER_SURFACES}
+    if any(read.values()):
+        lines = [
+            "  canisters         asked of the replica with `dfx canister id`, never hardcoded: every",
+            f"{_MAP_CONTINUATION}fresh replica issues different ids, so an id in a file is somebody else's",
+        ]
+    else:
+        lines = [
+            "  canisters         ids COULD NOT BE READ, so NONE is printed below. Two causes and this",
+            f"{_MAP_CONTINUATION}cannot tell them apart: docker/dfx was not reachable, or the canisters",
+            f"{_MAP_CONTINUATION}are not deployed on this replica. Nothing is guessed -- every fresh",
+            f"{_MAP_CONTINUATION}replica issues different ids, so a guess would link to another deployment.",
+            f"{_MAP_CONTINUATION}`docker compose exec -T icp-replica dfx canister id <name>` is the answer.",
+        ]
+    for name, serves_page, what in CANISTER_SURFACES:
+        ident = read[name]
+        if ident is None:
+            lines.append(f"    {'PAGE' if serves_page else 'CANDID':<6} {name:<20} id COULD NOT BE READ")
+            shape = (f"http://<id>.localhost:{REPLICA_PORT}/" if serves_page
+                     else f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={CANDID_UI_CANISTER_ID}&id=<id>")
+            lines.append(f"{_MAP_CONTINUATION}{what}")
+            lines.append(f"{_MAP_CONTINUATION}its URL would be {shape} -- the id is the missing part")
+            continue
+        if serves_page:
+            lines.append(f"    {'PAGE':<6} {name:<20} http://{ident}.localhost:{REPLICA_PORT}/")
+            lines.append(f"{_MAP_CONTINUATION}{what}")
+            lines.append(f"{_MAP_CONTINUATION}its Candid interface: {candid_url(ident)}")
+        else:
+            lines.append(f"    {'CANDID':<6} {name:<20} {candid_url(ident)}")
+            lines.append(f"{_MAP_CONTINUATION}{what}")
+    lines.append(f"    {'DEBUG':<6} {'replica status':<20} {REPLICA_STATUS_URL}")
+    lines.append(f"{_MAP_CONTINUATION}dfx's own health endpoint -- what `up` step 4 probes. NOT a page")
+    return lines
+
+
+def surface_map(serving_port: int | None, canister_ids: Mapping[str, str | None]) -> list[str]:
+    """WHERE IS EVERYTHING. The whole map, as lines, ready for swap_stack.say().
+
+    Pure, and it is the only thing `up` and `status` both call for this -- one map,
+    two readers, so the two commands cannot drift into describing different systems
+    (rule 8). The I/O that produces both arguments lives in swap_stack.py: a probe
+    of WEB_PORT_CANDIDATES for the port, and `dfx canister id` inside the replica
+    container for the ids.
+
+    IT IS A LIST AND NOT A PRINT so a test can read every line it would have shown
+    and assert on the one thing that matters -- that a URL appears only for a port
+    that answered and an id that was actually read. A print loop's output is only
+    checkable by capturing stdout, which is how a report gets shipped with a URL in
+    it that nothing serves.
+
+    SPLIT IN THREE BECAUSE ONE FUNCTION WOULD CROSS C901, and rule 12 is explicit
+    that the fix is to extract the decision rather than raise the ceiling. The two
+    halves are also the two independent decisions -- "may a web URL be written"
+    and "may a canister id be written" -- so they are worth asserting separately.
+    """
+    header = [
+        "  surface map       WHERE EVERYTHING IS, in one place. Operator 2026-10-08: \"so we have 3",
+        f"{_MAP_CONTINUATION}canisters now. 3 different hyperlinks. where's the main landing page for",
+        f"{_MAP_CONTINUATION}the atm screen?\"  PAGE = a human opens it. ADMIN = a page, the",
+        f"{_MAP_CONTINUATION}operator's. JSON = a machine reads it, so JSON in a browser is not a",
+        f"{_MAP_CONTINUATION}broken page. CANDID/DEBUG = a developer surface and not a page at all.",
+    ]
+    return header + web_surface_lines(serving_port) + canister_surface_lines(canister_ids)

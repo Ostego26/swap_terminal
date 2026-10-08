@@ -32,9 +32,15 @@ import pytest
 
 import swap_stack
 from swap_terminal.stack_authority import (
+    CANDID_UI_CANISTER_ID,
+    CANISTER_SURFACES,
     DOWN_VERDICTS,
     LISTENER_VERDICTS,
     NEVER_STOPPED,
+    REPLICA_STATUS_URL,
+    WEB_PORT_CANDIDATES,
+    WEB_SURFACES,
+    canister_surface_lines,
     container_id,
     container_label,
     container_verdict,
@@ -47,6 +53,8 @@ from swap_terminal.stack_authority import (
     process_name,
     readiness_verdict,
     stray_verdict,
+    surface_map,
+    web_surface_lines,
 )
 
 # A real /proc/net/tcp body. 0100007F is 127.0.0.1 little-endian; 13EE is 5102.
@@ -815,4 +823,309 @@ def test_down_counts_our_own_container_as_still_running():
     assert "container" not in counted, (
         "a container that is NOT ours must stay uncounted -- `down` never stopped it and must "
         "not report a failure to stop what it never touched."
+    )
+
+
+# =============================================================================
+# THE SURFACE MAP: does it ever write down a URL for something that is not there?
+#
+# Operator, 2026-10-08: "so we have 3 canisters now. 3 different hyperlinks.
+# where's the main landing page for the atm screen?"
+#
+# The map answers that, and its whole risk is the answer being confidently wrong.
+# A printed `http://127.0.0.1:5101/admin` is a claim that something serves there;
+# a printed canister id is a claim that a canister with that id exists on this
+# replica. Both claims are cheap to make and expensive to read -- the operator
+# pastes one, gets nothing, and now has a second problem to diagnose. These tests
+# seed the two inputs and assert on the one thing: NOTHING IS WRITTEN DOWN THAT
+# WAS NOT MEASURED.
+#
+# Same shape as container_verdict()'s tests above, and for the same reason: the
+# defect that function fixed was a SENTENCE asserting the result of a check
+# nobody ran.
+# =============================================================================
+
+#: Ids shaped like real ones (`dfx canister id` output), and deliberately not the
+#: ids on any host -- a test that pinned the operator's own ids would start failing
+#: the next time their replica volume was recreated, which is exactly the
+#: per-replica churn the map refuses to hardcode for.
+_SEEDED_IDS = {
+    "operator_admin": "uxrrr-q7777-77774-qaaaq-cai",
+    "threshold_custody": "ulvla-h7777-77774-qaacq-cai",
+    "icp_ledger_canister": "uzt4z-lp777-77774-qaabq-cai",
+}
+
+
+def test_a_url_is_written_only_for_the_port_that_answered():
+    """MUTATION: build the URL from WEB_PORT_CANDIDATES[0] instead of the argument.
+
+    That passes every "is there a link" assertion and prints :5101 for a stack
+    serving on :5100 -- the operator clicks and gets nothing. The port is the one
+    piece of this that was MEASURED, so it is the one piece that must appear.
+    """
+    lines = web_surface_lines(5100)
+    rows = [line for line in lines if line.lstrip().startswith(("PAGE", "ADMIN", "JSON"))]
+    assert len(rows) == len(WEB_SURFACES), "every declared surface gets a row"
+    assert all("http://127.0.0.1:5100" in row for row in rows)
+
+    # And no other candidate port is named as a URL anywhere in the block.
+    for port in WEB_PORT_CANDIDATES:
+        if port != 5100:
+            assert f"http://127.0.0.1:{port}" not in "\n".join(lines), (
+                f"a URL on :{port} appeared while :5100 was the port that answered"
+            )
+
+
+def test_nothing_answered_prints_paths_and_not_one_url():
+    """The whole point. MUTATION: drop the `if serving_port` and always build a URL.
+
+    With nothing serving, every candidate port would then be rendered as a link --
+    four URLs, none of which answers -- and `up` already exits 1 in that state, so
+    the operator would be reading "NOT SERVING" directly above a list of links.
+    """
+    body = "\n".join(web_surface_lines(None))
+    assert "http://" not in body, "nothing answered, so NO url may be written down"
+    assert "/admin/controls" in body and "/swap-lookup" in body, (
+        "the paths still have to be listed -- the question 'where is the page' has an "
+        "answer even when nothing is serving it"
+    )
+    assert "PATHS AND NOT LINKS" in body, (
+        "a reader must be told these are paths; a bare list of paths beside a healthy-looking "
+        "report is ambiguous between 'not serving' and 'serving, badly formatted'"
+    )
+
+
+def test_serving_verdicts_zero_means_nothing_answered_not_port_zero():
+    """serving_verdict() returns 0 for "none answered". MUTATION: `is not None`.
+
+    That is the bug this guards: `if serving_port is not None` treats the 0 that
+    serving_verdict() literally returns as a port, and the map prints
+    `http://127.0.0.1:0/` for every surface. cmd_up forwards that return value
+    straight in, so the mutation is one character and reaches the operator.
+    """
+    assert web_surface_lines(0) == web_surface_lines(None)
+    assert "http://" not in "\n".join(web_surface_lines(0))
+
+
+def test_a_canister_id_that_was_not_read_is_never_invented():
+    """MUTATION: fall back to a placeholder id, or skip the canister entirely.
+
+    A placeholder renders as a URL that looks openable; skipping it prints an
+    empty section, which rule 14 forbids for exactly this reason -- "a blank gap
+    is ambiguous between zero rows and a query that broke". Both are worse than
+    saying what is not known.
+    """
+    body = "\n".join(canister_surface_lines({}))
+    for name, _page, _what in CANISTER_SURFACES:
+        assert name in body, f"{name} must still be named when its id could not be read"
+    assert body.count("id COULD NOT BE READ") == len(CANISTER_SURFACES)
+
+    # No canister page URL can exist, because the id is the whole hostname.
+    assert ".localhost:4943/" not in body.replace("http://<id>.localhost:4943/", ""), (
+        "a canister page URL was built without an id"
+    )
+    # And no Candid link carrying anything but the explicit `<id>` marker.
+    for link in re.findall(r"id=([^\s]+)", body):
+        assert link == "<id>", f"a Candid link was built with {link!r}, which was never read"
+
+    assert "Nothing is guessed" in body and "dfx canister id" in body, (
+        "the operator needs the reason and the command, not just the absence"
+    )
+
+
+def test_a_canister_id_that_was_read_is_printed_exactly():
+    """MUTATION: truncate, lowercase or reorder the id. A canister id is a checksum.
+
+    `dfx canister id` is the only authority for it, so the map's job is to carry
+    it unaltered into both URL shapes.
+    """
+    body = "\n".join(canister_surface_lines(_SEEDED_IDS))
+    assert "id COULD NOT BE READ" not in body
+    assert f"http://{_SEEDED_IDS['operator_admin']}.localhost:4943/" in body, (
+        "operator_admin serves its own page; that URL is the answer to the operator's question"
+    )
+    for name, ident in _SEEDED_IDS.items():
+        assert f"?canisterId={CANDID_UI_CANISTER_ID}&id={ident}" in body, (
+            f"{name} must have a Candid link, and it is a query against the Candid UI canister "
+            "with the target as a parameter -- not a path under the target"
+        )
+
+
+def test_only_the_canister_that_has_a_page_is_offered_as_one():
+    """MUTATION: mark all three PAGE, or mark operator_admin CANDID.
+
+    This is the distinction the operator asked for in so many words: three
+    canisters, three hyperlinks, which one is the page? Two of them never will be
+    -- the ledger is DFINITY's released wasm and threshold_custody is key
+    derivation -- so offering them as pages sends the operator to a 404 and then
+    back here to ask again.
+    """
+    pages = [name for name, serves_page, _what in CANISTER_SURFACES if serves_page]
+    assert pages == ["operator_admin"], (
+        "exactly one canister serves a page, measured 2026-10-08 as 200 text/html 6227 bytes"
+    )
+
+    for body in ("\n".join(canister_surface_lines(_SEEDED_IDS)), "\n".join(canister_surface_lines({}))):
+        for line in body.splitlines():
+            if line.lstrip().startswith("PAGE"):
+                assert "operator_admin" in line, f"a non-page canister was offered as a page: {line}"
+            if "threshold_custody" in line or "icp_ledger_canister" in line:
+                assert not line.lstrip().startswith("PAGE")
+        assert "NO page, and there will never be one" in body
+
+
+def test_the_replica_status_url_is_labeled_debug_and_not_a_page():
+    """It is a fixed address, so it prints with nothing running -- and must not read
+    as a liveness claim. MUTATION: label it PAGE, or drop the "NOT a page" clause.
+    """
+    body = "\n".join(canister_surface_lines({}))
+    status_line = next(line for line in body.splitlines() if REPLICA_STATUS_URL in line)
+    assert status_line.lstrip().startswith("DEBUG")
+    assert "NOT a page" in body
+
+
+def test_the_landing_page_is_named_as_the_landing_page():
+    """The operator's literal question was "where's the main landing page".
+
+    MUTATION: leave `/` as an unannotated row, or list it anywhere but first. A map
+    where `/` reads like `/api/health` does not answer the question that produced
+    it -- and the answer MOVED on 2026-10-07 (routes/atm.py::start()), so the URL
+    in anybody's memory is the retired `/atm`.
+    """
+    kind, path, what = WEB_SURFACES[0]
+    assert (kind, path) == ("PAGE", "/"), "the landing page is the first row of the map"
+    assert "LANDING PAGE" in what
+    # AND THE RETIRED URL IS NOWHERE IN THE TARGET COLUMN. Checked against the
+    # targets rather than the whole block, because the descriptions legitimately
+    # say "routes/atm.py" -- the file is still called that; only the URL moved.
+    for line in surface_map(5101, _SEEDED_IDS):
+        fields = line.split()
+        if len(fields) > 1 and fields[0] in ("PAGE", "ADMIN", "JSON"):
+            assert not fields[1].endswith("/atm"), (
+                f"{fields[1]} is the URL retired on 2026-10-07 when the flow moved to / -- "
+                "printing it sends a customer to a 404, and it is the stale URL this map exists "
+                "to replace"
+            )
+
+
+def test_the_map_lists_every_route_the_app_actually_declares():
+    """Read the decorators and compare. The map going stale IS the defect it fixes.
+
+    `/atm` -> `/` happened on 2026-10-07 and nothing anywhere had to be updated,
+    which is why the operator was holding a stale URL. A hand-maintained list of
+    routes is rule 8's "two copies of one rule... the copies agree on the day they
+    are written and drift from then on", so the second copy is checked against the
+    first here rather than trusted.
+
+    `/swap/<id>/fragment` is EXCLUDED ON PURPOSE: it is an HTMX partial, not a
+    surface anybody opens, and a map that lists it invites somebody to open it and
+    conclude the page is broken.
+    """
+    declared = set()
+    for route_file in sorted((swap_stack.REPO_ROOT / "swap_terminal" / "routes").glob("*.py")):
+        source = route_file.read_text()
+        constants = dict(re.findall(r'^(\w+)\s*=\s*"([^"]+)"', source, re.MULTILINE))
+        for argument in re.findall(r"@bp\.(?:get|post)\(\s*([^)]+?)\s*\)", source):
+            literal = argument.strip()
+            if literal.startswith(('"', "'")):
+                declared.add(literal.strip("\"'"))
+            elif literal in constants:
+                declared.add(constants[literal])
+            else:
+                raise AssertionError(
+                    f"{route_file.name} registers a route from {literal!r}, which this test cannot "
+                    "resolve -- follow it rather than letting the comparison silently shrink"
+                )
+
+    def normalize(path: str) -> str:
+        return re.sub(r"<[^>]+>", "<id>", path)
+
+    declared = {normalize(path) for path in declared} - {"/swap/<id>/fragment"}
+    mapped = {path for _kind, path, _what in WEB_SURFACES}
+
+    assert not declared - mapped, (
+        f"routes/ declares {sorted(declared - mapped)}, which the surface map does not list. "
+        "A surface nothing names is the state the operator complained about."
+    )
+    assert not mapped - declared, (
+        f"the surface map lists {sorted(mapped - declared)}, which no route declares -- a link "
+        "to a path that 404s is worse than no link"
+    )
+
+
+def test_both_up_and_status_print_the_map():
+    """One map, two commands. MUTATION: call it from `up` only.
+
+    `up` is run once and `status` is run whenever the operator has lost track,
+    which is precisely when the question "where is everything" gets asked. Read
+    out of the source for the same reason as the two tests above: the alternative
+    is running a real `up` against docker.
+    """
+    source = (swap_stack.REPO_ROOT / "swap_stack.py").read_text()
+    for command in ("def cmd_up(", "def cmd_status("):
+        body = source[source.index(command) : source.index(command) + 6000]
+        body = body[: body.index("\ndef ") if "\ndef " in body else len(body)]
+        assert "_say_surface_map(" in body, f"{command.strip()} does not print the surface map"
+
+    assert "def probe_serving_port(" in source, (
+        "the prober must be one function both commands call; two loops drift (rule 8)"
+    )
+
+
+def test_the_replica_status_url_is_spelled_in_exactly_one_place():
+    """MUTATION: re-add the literal to swap_stack.py. Rule 8, measured by grep.
+
+    It WAS in both for about an hour on 2026-10-08 while the map was being
+    written, which is how long it takes for this kind of duplicate to appear.
+    """
+    assert REPLICA_STATUS_URL == "http://127.0.0.1:4943/api/v2/status"
+    for name in ("swap_stack.py", "swap_terminal/stack_authority.py"):
+        source = (swap_stack.REPO_ROOT / name).read_text()
+        spelled = source.count('"' + REPLICA_STATUS_URL + '"')
+        expected = 1 if name.endswith("stack_authority.py") else 0
+        assert spelled == expected, (
+            f"{name} spells the replica status URL {spelled} time(s), expected {expected} -- the "
+            "address belongs to stack_authority.py and the wait budgets to swap_stack.py"
+        )
+
+
+def test_the_short_web_probe_is_quiet_and_the_replicas_long_wait_is_not():
+    """Rule 14 by its own criterion, not applied uniformly.
+
+    wait_for_http() prints a line per attempt, which is correct for the replica:
+    60 seconds against a cold `dfx start`, where silence is indistinguishable
+    from a hang and resolves as Ctrl-C on this project.
+
+    It is wrong for the web probe. That budget is 3 seconds PER PORT and
+    probe_serving_port() prints each port's outcome as it goes, so the per-port
+    line already IS the progress -- and the per-attempt lines on top of it put
+    twelve near-identical sentences in front of the surface map, in `status`, a
+    read-only command whose value is a quick answer. Twelve copies of one
+    sentence is the same defect as silence, approached from the other side.
+
+    Read out of the source because the alternative is waiting out two real
+    probes against ports nothing is serving.
+    """
+    source = (swap_stack.REPO_ROOT / "swap_stack.py").read_text()
+
+    # LOCATED BY THE BUDGET CONSTANT, not by matching the url literal: the call
+    # spans several lines and its f-string carries quotes that any regex written
+    # here has to escape past, which is how the first version of this test ended
+    # up with a pattern that would not parse.
+    web_at = source.index("_WEB_PROBE_BUDGET_SECONDS, announce")
+    assert web_at, "unreachable; index() raises"
+    web_call = source[source.rindex("wait_for_http(", 0, web_at) : web_at + 60]
+    assert "announce=False" in web_call, (
+        "the per-port web probe must pass announce=False. Without it, `status` prints "
+        "wait_for_http's per-attempt line for every attempt on every candidate port "
+        f"before the surface map. The call reads: {web_call}"
+    )
+
+    replica_at = source.index("wait_for_http(REPLICA_STATUS_URL")
+    replica_call = source[replica_at : source.index(")", replica_at) + 1]
+    assert "announce=False" not in replica_call, (
+        "the replica's wait must KEEP its per-attempt progress. Its budget is 60s against a "
+        "cold `dfx start`, and a silent wait that long is what rule 14 exists for -- an "
+        "operator who cannot tell working from hung reaches for Ctrl-C, which on this "
+        f"project means killing a live cycle. The call reads: {replica_call}"
     )

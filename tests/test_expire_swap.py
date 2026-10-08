@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -59,13 +60,47 @@ from expire_swap import (  # noqa: E402
 from swap_terminal.fee_sweep import obligation  # noqa: E402
 from tests.valid_addresses import BTC_REGTEST_DEPOSIT, GRC_PAYOUT  # noqa: E402
 
-#: The clock every test hands in. expire_swap takes `now_iso` as an argument
+#: The clock the UNIT tests hand in. expire_swap takes `now_iso` as an argument
 #: everywhere a window is judged, so no test patches time.
+#:
+#: THE END-TO-END TESTS CANNOT HAND IN A CLOCK, and this header used to read as
+#: though they could. expire_swap.main() has no `--now` flag -- deliberately,
+#: because a clock argument on a tool that RETIRES swaps is one typo away from
+#: retiring a window that has not lapsed -- so every test that calls main()
+#: judges against the real system clock.
+#:
+#: That combination is a time bomb and it went off on 2026-10-08, one day after
+#: these constants were written: test_apply_retires_only_the_unfunded_swap seeded
+#: `s_fresh` with the absolute JUST_NOW below, main() judged it against the real
+#: clock, and ten-minutes-ago had become more-than-a-day-ago. The test passed the
+#: day it was written and failed the next, which is the "a measurement ages"
+#: failure CLAUDE.md records about prose, arriving in a fixture.
+#:
+#: So: ABSOLUTE constants for the unit tests, which are handed NOW and are
+#: therefore fixed forever, and inside_grace_of_the_real_clock() below for the
+#: one case judged by the real one.
 NOW = "2026-10-07T12:00:00+00:00"
-#: Lapsed well past the default 24h grace.
+#: Lapsed well past the default 24h grace. SAFE AS AN ABSOLUTE VALUE in an
+#: end-to-end test too, and it is the seed() default for that reason: a window
+#: that has already lapsed only ever lapses further, so time moving cannot turn
+#: this verdict over. Only "recent" rots.
 LONG_AGO = "2026-10-01T00:10:00+00:00"
-#: Lapsed, but minutes ago -- inside the grace window.
+#: Lapsed, but minutes before NOW -- inside the grace window. FOR UNIT TESTS
+#: ONLY, the ones that pass NOW explicitly. Handing this to a test that calls
+#: main() is the defect described above.
 JUST_NOW = "2026-10-07T11:50:00+00:00"
+
+
+def inside_grace_of_the_real_clock() -> str:
+    """An `expires_at` that is lapsed but still inside the grace window, NOW.
+
+    For the end-to-end tests only -- the ones that call expire_swap.main() and
+    are therefore judged against the real system clock. Ten minutes is far
+    inside the 24h default grace and far outside any plausible test runtime, so
+    this is stable in both directions where the absolute JUST_NOW was stable in
+    neither.
+    """
+    return (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
 
 GRACE = expire_swap.DEFAULT_GRACE_SECONDS
 
@@ -366,7 +401,10 @@ def test_apply_retires_only_the_unfunded_swap(db_path, capsys):
     """
     seed(db_path, "s_unfunded")
     seed(db_path, "s_paid", deposit_rows=1)
-    seed(db_path, "s_fresh", expires_at=JUST_NOW)
+    # RELATIVE TO THE REAL CLOCK, because main() below judges against it and has
+    # no --now. The absolute JUST_NOW was here and made this test pass on
+    # 2026-10-07 and fail on 2026-10-08 -- see the constant's comment.
+    seed(db_path, "s_fresh", expires_at=inside_grace_of_the_real_clock())
     assert expire_swap.main(["--all", "--db", db_path, "--apply"]) == 0
     assert statuses(db_path) == {
         "s_unfunded": RETIRED, "s_paid": RETIRABLE_FROM, "s_fresh": RETIRABLE_FROM,

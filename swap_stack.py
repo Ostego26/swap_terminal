@@ -3,7 +3,9 @@
 
 Role: file (entry point -- what an operator, a launcher or a cron entry names)
 Reads: docker compose's own `ps`, /proc for listeners, the supervisor's run
-       directory and pid files, and Config for the database path it echoes
+       directory and pid files, Config for the database path it echoes, an HTTP
+       GET of / on each candidate web port, and `dfx canister id` inside the
+       replica container -- the last two are the surface map's two inputs
 Writes: nothing of its own. `down` signals processes through supervisor.stop_worker()
        and removes containers through `docker compose down`; neither is a file
        this writes.
@@ -74,8 +76,11 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 import supervisor  # noqa: E402  -- after the sys.path.insert above, same as every root tool
 from config import Config  # noqa: E402
+from microfortnights import format_duration  # noqa: E402  -- same sys.path.insert
 
 from swap_terminal.stack_authority import (  # noqa: E402
+    CANISTER_SURFACES,
+    REPLICA_STATUS_URL,
     STACK_PORTS,
     WEB_PORT_CANDIDATES,
     container_id,
@@ -89,6 +94,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     readiness_verdict,
     serving_verdict,
     stray_verdict,
+    surface_map,
 )
 
 #: How long each web-port probe may take, and the marker for one that answered.
@@ -100,7 +106,14 @@ from swap_terminal.stack_authority import (  # noqa: E402
 _WEB_PROBE_BUDGET_SECONDS = 3.0
 _WEB_PROBE_OK = 200
 
-#: The replica's own status endpoint, and how long `up` waits for it.
+#: How long `up` waits for the replica to answer, and how long one probe may take.
+#:
+#: THE URL ITSELF IS stack_authority.REPLICA_STATUS_URL AND NO LONGER LIVES HERE.
+#: It was a private `_REPLICA_STATUS_URL` in this file until 2026-10-08, when the
+#: surface map needed the same address and the choice was a second spelling or one
+#: constant -- rule 8: "Two copies of one rule is not redundancy, it is a bug with
+#: a delay on it." The ADDRESS is a fact about the stack and belongs beside
+#: STACK_PORTS; the WAIT BUDGETS are this command's policy and stay here.
 #:
 #: dfx serves /api/v2/status; a 200 is the replica saying it is up. 60s because a
 #: fresh `dfx start` on a cold volume takes appreciably longer than the container
@@ -111,9 +124,26 @@ _WEB_PROBE_OK = 200
 #: Seconds, not microfortnights, because they are passed to urlopen(timeout=) and to
 #: time.monotonic() arithmetic -- an interface, not a report (rule 6). The figure is
 #: PRINTED in microfortnights.
-_REPLICA_STATUS_URL = "http://127.0.0.1:4943/api/v2/status"
 _REPLICA_WAIT_SECONDS = 60.0
 _REPLICA_PROBE_TIMEOUT_SECONDS = 2.0
+
+#: The compose service `dfx` runs in, and how long one `dfx canister id` may take.
+#:
+#: THE SERVICE NAME IS A COMPOSE SERVICE (`icp-replica`), NOT THE CONTAINER NAME
+#: (`swap-icp-replica`). They differ in this project -- docker-compose.icp.yml sets
+#: container_name -- and `docker compose exec` takes the service, which is the same
+#: distinction chains/icp.py records at its own dfx call site. config.py's
+#: ICP_DFX_SERVICE default is this string; it is repeated rather than imported
+#: because that default is the APP's transport setting and this is a report asking
+#: a question of a container it just started. If they ever need to agree, the fix
+#: is for both to read Config, not for one to guess.
+#:
+#: 10s each, matching the `docker inspect` lookup in classify_listener(): both are
+#: auxiliary questions that make a report self-describing, and neither is worth
+#: hanging the report for. Three lookups run back to back, so the worst case is
+#: 30s and the operator is told the scale before the wait (rule 14).
+_DFX_SERVICE = "icp-replica"
+_CANISTER_ID_TIMEOUT_SECONDS = 10.0
 
 #: Docker's absolute path, resolved once at import.
 #:
@@ -198,7 +228,9 @@ def say(line: str) -> None:
     print(line, flush=True)
 
 
-def compose(args: list[str], files: tuple[str, ...], check: bool = False) -> subprocess.CompletedProcess:
+def compose(
+    args: list[str], files: tuple[str, ...], check: bool = False, timeout: float | None = None,
+) -> subprocess.CompletedProcess:
     """Run one `docker compose` command with this stack's files, from the repo root.
 
     `cwd=REPO_ROOT` is not decoration. Compose resolves the relative paths INSIDE
@@ -206,13 +238,23 @@ def compose(args: list[str], files: tuple[str, ...], check: bool = False) -> sub
     process's working directory, and the same omission in chains/icp.py broke every
     ICP call from the app earlier today (see that file's _REPO_ROOT comment). One
     measurement, two files, same fix.
+
+    `timeout` IS OPTIONAL AND DEFAULTS TO NONE, which is what every caller before
+    2026-10-08 got and still gets: `up`, `down` and `ps` are the work the operator
+    asked for, and cutting one off at an arbitrary second would abandon a build or
+    a teardown midway. It exists for the AUXILIARY lookups added with the surface
+    map -- a `dfx canister id` that makes a report self-describing is never worth
+    hanging the report for, which is the same trade classify_listener() already
+    makes with timeout=10 on its `docker inspect`. The caller catches
+    subprocess.TimeoutExpired; it is not swallowed here, because a lookup that
+    timed out and a lookup that answered "no such canister" must not read alike.
     """
     argv = [_DOCKER, "compose"]
     for name in files:
         argv += ["-f", str(REPO_ROOT / name)]
     argv += args
     return subprocess.run(  # noqa: S603 -- no shell; argv is this file's own list plus a subcommand
-        argv, cwd=REPO_ROOT, capture_output=True, text=True, check=check,
+        argv, cwd=REPO_ROOT, capture_output=True, text=True, check=check, timeout=timeout,
     )
 
 
@@ -432,6 +474,24 @@ def cmd_status(files: tuple[str, ...]) -> int:
     say("")
     say("  workers           supervisor.py owns these; this is its own report")
     supervisor.main(["status", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
+    say("")
+
+    # THE SURFACE MAP, AND `status` PROBES FOR IT RATHER THAN REUSING THE LISTENER
+    # SCAN ABOVE. The scan knows which of these ports has a LISTEN socket, which is
+    # cheaper and is the wrong question: readiness_verdict()'s measurement is that a
+    # published container port is bound by docker-proxy before anything inside has
+    # opened a socket, so a url built from "bound" is a link to something that
+    # answers nothing. probe_serving_port() is the same prober `up` step 5 uses, so
+    # the two commands cannot describe different systems (rule 8).
+    #
+    # IT COSTS UP TO FOUR PROBES AND THREE DOCKER LOOKUPS, which is why the scale is
+    # printed first (rule 14). `status` was about a second before this; it is now
+    # the slowest of the three commands when nothing is up, and an operator who
+    # cannot see why would read it as hung.
+    say(f"  web probe         probing {len(WEB_PORT_CANDIDATES)} candidate web ports, up to "
+        f"{format_duration(_WEB_PROBE_BUDGET_SECONDS)} each -- a BOUND port above is not a serving one")
+    port, _detail = probe_serving_port()
+    _say_surface_map(files, port)
     return 0
 
 
@@ -579,7 +639,7 @@ def cmd_down(files: tuple[str, ...]) -> int:
     return 0
 
 
-def wait_for_http(url: str, budget_seconds: float) -> tuple[bool, str, float]:
+def wait_for_http(url: str, budget_seconds: float, *, announce: bool = True) -> tuple[bool, str, float]:
     """Poll `url` until it answers. (ready, detail, seconds waited).
 
     GENERALIZED FROM wait_for_replica() ON 2026-10-07, BECAUSE `up` NEEDED THE
@@ -615,6 +675,21 @@ def wait_for_http(url: str, budget_seconds: float) -> tuple[bool, str, float]:
     Progress is printed per attempt (rule 14): a cold `dfx start` can take tens of
     seconds and a silent wait is indistinguishable from a hang, which on this project
     resolves as Ctrl-C.
+
+    `announce=False` TURNS THAT OFF, AND RULE 14 IS WHY RATHER THAN AN EXCEPTION
+    TO IT. The rule's own criterion is "anything that can exceed a couple of
+    seconds", and it is aimed at the failure it names: an operator who cannot
+    tell working from hung reaches for Ctrl-C. That is the replica's wait --
+    60 seconds against a cold `dfx start`, and it keeps the progress.
+
+    The web probe is not that wait. Its budget is 3 seconds PER PORT and
+    probe_serving_port() prints the outcome for each port as it goes, so the
+    per-port line already is the progress. The per-attempt lines on top of it
+    were 12 near-identical sentences before the surface map, added to `status`
+    -- a read-only command whose whole value is a quick answer -- by a probe
+    lifted out of `up`. Rule 14 is about output a reader can act on, and twelve
+    copies of one sentence is the same defect as silence approached from the
+    other side.
     """
     started = time.monotonic()
     attempt = 0
@@ -648,8 +723,156 @@ def wait_for_http(url: str, budget_seconds: float) -> tuple[bool, str, float]:
             return True, detail, waited
         if waited >= budget_seconds:
             return False, detail, waited
-        say(f"                    attempt {attempt}: {detail} ({waited:.1f}s elapsed, waiting)")
+        # RULE 6, AND THIS LINE WAS THE ONE PLACE IN THIS FILE STILL PRINTING BARE
+        # SECONDS -- found 2026-10-08 while grepping my own additions for the same
+        # mistake. "Every timing this system reports -- logs, status lines, reports,
+        # diagnostics, tables -- is in microfortnights", and a progress counter read
+        # against a `_SECONDS` budget is exactly the case the rule says to print
+        # both halves for. Written as `elapsed <both>` rather than inside the
+        # parentheses it used to sit in, because format_duration() brings its own.
+        if announce:
+            say(f"                    attempt {attempt}: {detail}  elapsed {format_duration(waited)}, waiting")
         time.sleep(1.0)
+
+
+def probe_serving_port() -> tuple[int, str]:
+    """Probe every WEB_PORT_CANDIDATES port and return serving_verdict()'s answer.
+
+    ONE PROBER, TWO CALLERS (rule 8). This loop was inline in cmd_up() until
+    2026-10-08, when `status` needed the same answer for the surface map -- and the
+    alternative to extracting it was a second copy, which is the shape this
+    repository keeps paying for: "The copies agree on the day they are written and
+    drift from then on."
+
+    IT MUST BE A PROBE AND NOT THE LISTENER SCAN, which is the one thing worth
+    being explicit about. report_listeners() already knows which of these ports has
+    a LISTEN socket, and that is cheaper -- and it is the wrong question.
+    readiness_verdict()'s whole measurement is that a published container port is
+    bound by docker-proxy the moment the container is created, before anything
+    inside has opened a socket. A map built from "bound" would print the operator a
+    link to a port that answers nothing, which is precisely what
+    stack_authority.surface_map() exists to never do.
+
+    Prints one line per port as it goes (rule 14): four ports at
+    _WEB_PROBE_BUDGET_SECONDS each is a wait long enough to read as a hang.
+    """
+    probes: dict[int, object] = {}
+    for port in WEB_PORT_CANDIDATES:
+        # ONE SHORT ATTEMPT PER PORT, not the replica's 60s budget. A gunicorn that
+        # is going to answer answers immediately once it has bound; the long wait
+        # exists for a cold `dfx start` and spending it four times over would make
+        # a down stack take four minutes to say so.
+        # announce=False: the per-port line two lines down IS this probe's progress,
+        # and the per-attempt lines underneath it put twelve near-identical sentences
+        # in front of the surface map. See wait_for_http().
+        ready, detail, _ = wait_for_http(
+            f"http://127.0.0.1:{port}/", _WEB_PROBE_BUDGET_SECONDS, announce=False
+        )
+        probes[port] = _WEB_PROBE_OK if ready else detail
+        say(f"                    :{port} {detail}")
+    return serving_verdict(probes)
+
+
+def canister_ids(files: tuple[str, ...]) -> tuple[dict[str, str | None], list[str]]:
+    """Ask the replica for each canister's id. ({name: id or None}, what went wrong).
+
+    THE I/O HALF OF THE SURFACE MAP. stack_authority.surface_map() decides what may
+    be printed; this is the only part that runs anything, which is why it is here
+    and not there (rule 10 -- "It decides; swap_stack.py acts", as that file's own
+    header puts it).
+
+    ASKED, NEVER HARDCODED, and this is the same lesson container_verdict() cost.
+    A canister id is replica-issued environment state: every fresh `dfx start` on a
+    clean volume mints different ids, so an id written into this repository is a
+    link to a deployment that no longer exists -- or worse, resolves and shows the
+    operator somebody else's canister. fund_desk.py already says this in its own
+    refusal ("The canister ids are replica-issued environment state and nothing in
+    this checkout can know them"). So the ids come from `dfx canister id <name>`,
+    run in the replica container where dfx's own .dfx/local/canister_ids.json is.
+
+    THE NAMES COME FROM stack_authority.CANISTER_SURFACES, which takes them from
+    icp/dfx.json -- so a fourth canister appears in the map by being added in one
+    place rather than two (rule 8).
+
+    A FAILURE IS A None AND A SENTENCE, NOT AN EXCEPTION AND NOT A GUESS. Docker
+    may be absent, the daemon down, the replica not started, the canister not
+    deployed; none of those is an error in a report, and all of them are things the
+    operator is entitled to be told rather than left to infer from a blank
+    (rule 14). The reasons are returned rather than printed so the caller keeps
+    control of the order lines appear in.
+    """
+    found: dict[str, str | None] = {}
+    trouble: list[str] = []
+    for index, (name, _serves_page, _what) in enumerate(CANISTER_SURFACES, start=1):
+        say(f"                    asking {index}/{len(CANISTER_SURFACES)} {name}")
+        try:
+            done = compose(
+                ["exec", "-T", _DFX_SERVICE, "dfx", "canister", "id", name],
+                files, timeout=_CANISTER_ID_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            # NAMED SEPARATELY FROM A NON-ZERO EXIT, because the two mean different
+            # things and the operator's next command differs: a timeout is a docker
+            # or a replica that is not answering at all, where a non-zero exit is
+            # dfx answering that it cannot tell you.
+            found[name] = None
+            trouble.append(
+                f"{name}: `dfx canister id` did not answer within "
+                f"{format_duration(_CANISTER_ID_TIMEOUT_SECONDS)}, so NOTHING was read for it"
+            )
+            continue
+        except OSError as error:
+            # docker not on PATH is an OSError from subprocess, and it is the one
+            # cause that makes every later lookup fail the same way. Said with its
+            # own text rather than collapsed into "could not read".
+            found[name] = None
+            trouble.append(f"{name}: could not run docker at all -- {type(error).__name__}: {error}")
+            continue
+        # THE LAST LINE OF stdout, NOT ALL OF IT. dfx prints warnings ("Using the
+        # default definition for the 'local' shared network") above its answer on
+        # some versions, and a report that pasted the whole buffer into a url would
+        # produce an unopenable link that LOOKS like one -- which is the one thing
+        # the map must not do.
+        ident = done.stdout.strip().splitlines()[-1].strip() if done.stdout.strip() else ""
+        if done.returncode == 0 and ident:
+            found[name] = ident
+            continue
+        found[name] = None
+        # The LAST line again, and of stderr first: compose puts the cause there and
+        # an unhelpful "exited 1" above it. `(no output)` rather than a blank,
+        # because a silent failure and an unread one must not look alike (rule 14).
+        complaint = (done.stderr or done.stdout).strip()
+        why = complaint.splitlines()[-1] if complaint else "(no output)"
+        trouble.append(
+            f"{name}: `docker compose exec -T {_DFX_SERVICE} dfx canister id {name}` "
+            f"exited {done.returncode}: {why}"
+        )
+    return found, trouble
+
+
+def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
+    """Print the surface map. Both `up` and `status` end with this.
+
+    ANNOUNCED BEFORE THE WAIT, NOT AFTER IT (rule 14: "Print the target and the
+    scale up front... A line that only appears on completion is invisible during
+    the wait, which is exactly when it is needed"). Three `docker compose exec`
+    lookups at _CANISTER_ID_TIMEOUT_SECONDS each is up to 30s of blinking cursor,
+    and on this project a blinking cursor resolves as Ctrl-C.
+
+    THE TROUBLE LINES COME FIRST, before the map they explain. An operator reading
+    `id COULD NOT BE READ` three times wants the reason above it, not below it --
+    the reason is what they act on and the map is what they were asking for.
+    """
+    say(f"  canister ids      `dfx canister id` x{len(CANISTER_SURFACES)} in the `{_DFX_SERVICE}` service, up to")
+    say(f"                    {format_duration(_CANISTER_ID_TIMEOUT_SECONDS)} each -- asked, never hardcoded (ids are per-replica)")
+    ids, trouble = canister_ids(files)
+    for line in trouble:
+        say(f"  COULD NOT READ    {line}")
+    if not trouble:
+        say(f"  read              all {len(ids)} canister ids")
+    say("")
+    for line in surface_map(serving_port, ids):
+        say(line)
 
 
 def host_workers_running() -> dict[str, int | None]:
@@ -762,12 +985,18 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("")
 
     say("  4. is the replica ANSWERING? (bound is not ready)")
-    ready, detail, waited = wait_for_http(_REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
-    shown = f"{waited / 1.2096:.1f}\u00b5fn ({waited:.1f}s)"
+    ready, detail, waited = wait_for_http(REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
+    # format_duration() RATHER THAN A SECOND 1.2096, which is what this line held
+    # until 2026-10-08. Rule 6 names the helper for exactly this reason -- "Use it
+    # rather than writing 1.2096 again; the constant already appears separately in
+    # [two files], which is two too many" -- and microfortnights.py is where the
+    # constant and the `2.3µfn (2.8s)` form both live. Identical output, one fewer
+    # copy of the conversion.
+    shown = format_duration(waited)
     if ready:
-        say(f"  READY             {_REPLICA_STATUS_URL} {detail} after {shown}")
+        say(f"  READY             {REPLICA_STATUS_URL} {detail} after {shown}")
     else:
-        say(f"  NOT READY         {_REPLICA_STATUS_URL} {detail}, gave up after {shown}")
+        say(f"  NOT READY         {REPLICA_STATUS_URL} {detail}, gave up after {shown}")
         say("                    The containers ARE up; the replica is not serving yet or not at all.")
         say("                    Every ICP call will fail until it is. `docker compose logs icp-replica`")
         say("                    is where dfx says why.")
@@ -780,16 +1009,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # same way. I had named this gap one round earlier and shipped another `up`
     # without it, which is the part this comment exists to record.
     say("  5. is the PAGE serving? (the thing a customer opens)")
-    probes: dict[int, object] = {}
-    for port in WEB_PORT_CANDIDATES:
-        # ONE SHORT ATTEMPT PER PORT, not the replica's 60s budget. A gunicorn that
-        # is going to answer answers immediately once it has bound; the long wait
-        # exists for a cold `dfx start` and spending it four times over would make
-        # a down stack take four minutes to say so.
-        ready, detail, _ = wait_for_http(f"http://127.0.0.1:{port}/", _WEB_PROBE_BUDGET_SECONDS)
-        probes[port] = _WEB_PROBE_OK if ready else detail
-        say(f"                    :{port} {detail}")
-    port, detail = serving_verdict(probes)
+    port, detail = probe_serving_port()
     if port:
         say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
         say(f"                    the swap flow is at http://127.0.0.1:{port}/")
@@ -799,6 +1019,21 @@ def cmd_up(files: tuple[str, ...]) -> int:
         say("                    DIFFERENT failure from a container that never started -- step 2 above")
         say("                    says which. `docker compose logs --tail=40 web` is where gunicorn says")
         say("                    why; an ImportError in a route is the usual cause after a pull.")
+    say("")
+
+    # STEP 6, AND THE OPERATOR ASKED FOR IT IN THESE WORDS ON 2026-10-08: "so we
+    # have 3 canisters now. 3 different hyperlinks. where's the main landing page
+    # for the atm screen?" Step 5 above answers "is the page up" and gives ONE url;
+    # it does not say what that url serves, that `/` is now the ATM landing page
+    # (it moved from /atm on 2026-10-07), that /admin exists, or which of the three
+    # canisters has a page at all. Four-plus urls were being held in the operator's
+    # head because nothing printed them.
+    #
+    # IT RUNS EVEN WHEN THE PAGE IS DEAD, deliberately. The map is MORE useful then
+    # -- it is the list of what would be reachable, and it is printed as paths
+    # rather than links so it cannot be read as a claim that anything serves.
+    say("  6. WHERE EVERYTHING IS")
+    _say_surface_map(files, port)
     say("")
     _say_icp_note()
     # NOT 0 WHEN THE PAGE IS DEAD. An `up` that exits 0 over an unreachable page is
