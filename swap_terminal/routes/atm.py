@@ -53,7 +53,6 @@ from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from modules.address_authority import check_address
 from services.pair_view import (
-    ASSET_ROLLUP_STATES,
     CUSTOMER_STATES,
     allowed_pair_rows,
     customer_availability,
@@ -179,7 +178,6 @@ def render_step(answers: dict, error: str = "") -> str:
         "show_reference": show_reference,
         "reference_pairs": reference_pairs,
         "customer_states": CUSTOMER_STATES,
-        "rollup_states": ASSET_ROLLUP_STATES,
         # THE LIMIT, AND THE SENTENCE WHEN THERE IS NO LIMIT TO STATE. Three
         # distinguishable cases reach the template and it must not collapse them:
         # a real maximum, a maximum of zero (the desk holds nothing of the

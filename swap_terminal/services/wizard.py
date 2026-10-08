@@ -41,6 +41,7 @@ than offering a button that silently does something else.
 
 from __future__ import annotations
 
+from .asset_identity import color_class_for, symbol_for, symbol_title_for
 from .pair_view import ASSET_ROLLUP_STATES
 
 #: The lamp vocabulary, BORROWED rather than restated. services/pair_view.py owns
@@ -179,6 +180,15 @@ def source_lamps(rows: list[dict]) -> list[dict]:
             "available": len(ok),
             "total": len(out),
             "selectable": bool(ok),
+            # THE COIN'S IDENTITY, READ FROM services/asset_identity.py RATHER
+            # THAN SPELLED IN THE TEMPLATE. Rule 8: five surfaces show a coin,
+            # and a symbol written into one Jinja file is a symbol the other
+            # four do not have -- with nothing failing, because a missing glyph
+            # renders as an empty span. The step-2 options below carry the same
+            # three keys from the same three functions.
+            "symbol": symbol_for(asset),
+            "symbol_title": symbol_title_for(asset),
+            "color_class": color_class_for(asset),
             "detail": (
                 f"{asset}: {len(ok)} of {len(out)} directions out of {asset} can be quoted right now"
                 if out
@@ -205,6 +215,10 @@ def destinations_for(rows: list[dict], from_asset: str) -> list[dict]:
             {
                 "asset": row["to_asset"],
                 "selectable": bool(row["serviceable"]),
+                # Same three keys as source_lamps() above, from the same table.
+                "symbol": symbol_for(row["to_asset"]),
+                "symbol_title": symbol_title_for(row["to_asset"]),
+                "color_class": color_class_for(row["to_asset"]),
                 "reason": "" if row["serviceable"] else (row.get("reason") or "this direction cannot be quoted now"),
             }
             for row in out

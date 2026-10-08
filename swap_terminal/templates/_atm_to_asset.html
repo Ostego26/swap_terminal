@@ -7,15 +7,24 @@
   working ones. A customer who came to get ICP out needs to see that ICP is a pair
   this terminal knows AND that the direction is down -- hiding it collapses the two.
 #}
+{% import "_asset_mark.html" as marks %}
 <ul class="atm-choices" role="list">
   {% for option in options %}
   <li>
+    {#- Same three classes as step 1 and the same division: `atm-choice` is the
+        layout, `lamp-{all,none}` is the state and carries colour only, the coin
+        class colours the mark and symbol. See step 1 for why `lamp` is absent. -#}
     <button type="submit" name="to_asset" value="{{ option.asset }}"
-            class="atm-choice {{ 'lamp-all' if option.selectable else 'lamp-none' }}"
+            class="atm-choice {{ 'lamp-all' if option.selectable else 'lamp-none' }} {{ option.color_class }}"
             {% if not option.selectable %}disabled aria-disabled="true"{% endif %}
             {% if option.reason %}title="{{ option.reason }}"{% endif %}>
+      <span class="atm-choice-mark">
+        {{ marks.asset_mark(option.asset) }}
+        <span class="atm-choice-symbol" aria-hidden="true"
+              title="{{ option.symbol_title }}">{{ option.symbol }}</span>
+      </span>
       <span class="lamp-dot" aria-hidden="true"></span>
-      <span class="atm-choice-asset">{{ option.asset }}</span>
+      <span class="lamp-asset">{{ option.asset }}</span>
       <span class="lamp-word">{{ 'AVAILABLE' if option.selectable else 'NOT NOW' }}</span>
     </button>
   </li>

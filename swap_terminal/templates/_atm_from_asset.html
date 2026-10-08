@@ -12,15 +12,42 @@
   offered" and "every ICP direction is down right now" deserve different
   reactions, and a missing tile cannot tell them apart (rule 14).
 #}
+{% import "_asset_mark.html" as marks %}
 <ul class="atm-choices" role="list">
   {% for lamp in lamps %}
   <li>
+    {#- THREE CLASSES, AND EACH OWNS ONE THING. `atm-choice` is the LAYOUT --
+        it declares the grid that every `grid-area` on the spans below places
+        itself into. `lamp-<state>` is the STATE, and carries nothing but
+        colour and border treatment. The coin class colours the mark and the
+        symbol and only those two, so a customer can tell which coin a tile is
+        and whether it works from two separate channels.
+
+        `lamp` IS DELIBERATELY ABSENT, and it was added here for one round
+        before being taken back out. These tiles rendered unstyled until
+        2026-10-08 because `.atm-choice` had no rules at all while the spans
+        carried `grid-area`, and `.lamp` -- which admin.html's strip sets -- was
+        the only thing declaring those areas. Borrowing it looked like the fix.
+        It is not: `.atm-choice` now declares its own grid WITH the extra `mark`
+        row, so adding `.lamp` puts a second `display:grid` and a second
+        `grid-template-areas` on the same element and the winner is whichever
+        rule sits later in the file. A mutation test caught it -- stripping
+        `grid-template-areas` from `.lamp` changed nothing here, which is the
+        proof it was never load-bearing on this surface. -#}
     <button type="submit" name="from_asset" value="{{ lamp.asset }}"
-            class="atm-choice lamp-{{ lamp.key }}"
+            class="atm-choice lamp-{{ lamp.key }} {{ lamp.color_class }}"
             {% if not lamp.selectable %}disabled aria-disabled="true"{% endif %}
             title="{{ lamp.detail }}">
+      <span class="atm-choice-mark">
+        {{ marks.asset_mark(lamp.asset) }}
+        {#- aria-hidden because the SVG beside it already carries aria-label with
+            the ticker, and the ticker is in the tile again below -- a screen
+            reader announcing "infinity ICP ICP" is three readings of one fact. -#}
+        <span class="atm-choice-symbol" aria-hidden="true"
+              title="{{ lamp.symbol_title }}">{{ lamp.symbol }}</span>
+      </span>
       <span class="lamp-dot" aria-hidden="true"></span>
-      <span class="atm-choice-asset">{{ lamp.asset }}</span>
+      <span class="lamp-asset">{{ lamp.asset }}</span>
       {#- The word as well as the colour, so the tile survives a grayscale paste
           and a red/green-blind reader, exactly as base.html's badges do. -#}
       <span class="lamp-word">{{ lamp.word }}</span>

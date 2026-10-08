@@ -149,17 +149,26 @@
     <summary>Every direction this terminal knows &mdash; {{ reference_pairs | length }} pairs over
       {{ lamps | length }} coins</summary>
 
-    <table class="kvt">
-      <caption class="subbox-title">What a coin's lamp means</caption>
-      <tbody>
-        {% for state in rollup_states %}
-        <tr>
-          <th scope="row">{{ badges.level_badge(state.level, state.word) }}</th>
-          <td>{{ state.note }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    {#- THE "WHAT A COIN'S LAMP MEANS" TABLE WAS HERE AND IS GONE (2026-10-08).
+        Operator: "get rid of anything redundant."
+
+        MEASURED, not trimmed by taste: it rendered rollup_states -- the
+        ALL/SOME/NONE vocabulary of the COIN tiles -- inside a <details> whose
+        grid renders only `pair.customer.*` badges, four lines below. So it
+        explained a widget that is not in this block, under a heading about pair
+        directions, while the widget it described sits at the top of the page
+        where a reader looking at a lamp cannot see it.
+
+        And the tiles do not need it. Each one carries a drawn mark, the coin's
+        symbol, a state dot, the WORD (ALL/SOME/NONE) and the counts, plus
+        `title="{{ lamp.detail }}"` -- "BTC: 2 of 5 directions out of BTC can be
+        quoted right now", which is the generic legend row made specific to the
+        tile under the cursor. The legend restated the weaker version of a
+        sentence already attached to every instance.
+
+        "What the markers mean" below STAYS: those badges ARE in this block, its
+        states are the pair verdicts the grid renders, and nothing else on the
+        page explains ENABLED vs CANNOT COMPLETE. -#}
 
     {#- ONE LINE PER TILE AND THE SENTENCE IS NOT ON IT. The sentence is per STATE,
         so it is in the key below -- once each. Carried over verbatim from the page

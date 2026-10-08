@@ -186,6 +186,38 @@
   /* The shadow is a green bloom rather than a black drop: light does not cast
    * a dark shadow on an emissive display. */
   --shadow: 0 0 0 1px rgba(31, 111, 128, 0.5), 0 0 18px rgba(56, 189, 248, 0.06);
+
+  /* =====================================================================
+   * ONE ACCENT PER COIN. Operator, 2026-10-08: "please make the atm screen
+   * have more color use images and alt codes for each currency symbol."
+   *
+   * THESE DO NOT TOUCH THE STATUS CHANNEL, and that boundary is the whole
+   * design of this block rather than a caveat on it. Every colour above
+   * answers "what is happening" -- green settled, blue in motion, amber slow,
+   * red halted, violet unmeasured -- and a coin tile already carries one of
+   * those on its dot, its word and its border. Painting the WHOLE tile in the
+   * coin's colour would overwrite that: a customer could not tell a working
+   * BTC tile from a dead one, because both would be orange.
+   *
+   * So a coin's colour lands on its DRAWN MARK and its SYMBOL only. Shape and
+   * hue say which coin; the lamp beside them says whether it works. Two
+   * questions, two channels, and neither borrowed for the other -- which is
+   * this file's own prohibition on leaning on one channel, applied to the
+   * thing that was about to break it.
+   *
+   * THE HUES ARE EACH PROJECT'S OWN, not six slices of a wheel: a reader who
+   * knows the coins recognises them before reading, and that recognition is
+   * the only thing a per-coin colour buys. GRC is the exception and takes the
+   * page's own phosphor, because Gridcoin has no brand colour this file can
+   * cite -- the same honesty services/asset_identity.py applies to its missing
+   * symbol, rather than assigning one and implying it came from somewhere.
+   * ===================================================================== */
+  --coin-btc: #f7931a;
+  --coin-ltc: #a6a9aa;
+  --coin-icp: #ec1e79;
+  --coin-sol: #14f195;
+  --coin-xrp: #23b4e8;
+  --coin-grc: var(--ink);
 }
 
 * { box-sizing: border-box; }
@@ -1431,3 +1463,418 @@ h2:target {
 /* A tile the lamp filter has hidden. `hidden` alone is overridden by .swaptile's
  * display, which is the oldest trap in CSS and the reason this is explicit. */
 .swaptile[hidden] { display: none; }
+
+/* ===========================================================================
+ * THE ATM'S COIN TILES, AND THEY HAD NO CSS AT ALL UNTIL 2026-10-08.
+ *
+ * MEASURED, not inferred: `.atm-choices`, `.atm-choice` and
+ * `.atm-choice-asset` had ZERO rules in this file between them, while
+ * `.lamp-dot`, `.lamp-word` and `.lamp-counts` each carried a `grid-area`.
+ * Those area names belong to `.lamp` (grid-template-areas: "dot asset" "word
+ * word" "counts counts"), which admin.html's lamp strip sets and the ATM's
+ * tiles never did -- so every grid-area on the children pointed at a grid that
+ * did not exist and the three spans flowed inline with no separation.
+ *
+ * What the operator saw on their own screen, pasted back verbatim:
+ *
+ *     BTCSOME 2/5 out
+ *
+ * Two labels run together and an unstyled button around them. The request that
+ * produced this block was "make the atm screen have more color" -- and the
+ * reason it looked plain was not a shortage of colour, it was a widget nobody
+ * had styled. Recorded here because the fix would otherwise read as a
+ * restyling of something that worked.
+ *
+ * HOW IT DRIFTED, since that is the reusable part: one widget, two spellings.
+ * admin.html says `class="lamp lamp-{{ key }}"` and
+ * _atm_from_asset.html said `class="atm-choice lamp-{{ key }}"` -- the state
+ * modifier matched, the base class did not, and nothing failed because an
+ * unstyled button is still a button. Rule 8's shape exactly, in CSS. The
+ * templates now emit `lamp-asset` like admin.html does, so one selector styles
+ * the asset code on every surface that shows a coin.
+ * ======================================================================== */
+
+.atm-choices {
+  list-style: none;
+  margin: var(--s4) 0 0;
+  padding: 0;
+  display: grid;
+  /* auto-fill rather than a fixed column count: six coins on a desk monitor and
+   * two on a phone, with no breakpoint to maintain. */
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: var(--s3);
+}
+
+.atm-choice {
+  /* THE SAME AREAS AS `.lamp`, PLUS ONE FOR THE MARK. The mark spans both
+   * columns on its own row above the dot/ticker pair, so a tile reads
+   * top-to-bottom: what coin (drawn), what coin (named), does it work. */
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    "mark mark"
+    "dot asset"
+    "word word"
+    "counts counts";
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  /* The state colour arrives on the left edge from the `.lamp-*` rules above,
+   * exactly as it does on the operator's strip. Declared here so the width is
+   * the tile's and the colour is the state's. */
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms linear, background 120ms linear, transform 120ms linear;
+}
+
+.atm-choice:hover:not([disabled]),
+.atm-choice:focus-visible {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+  /* A lift of one pixel, not a scale: a scaled tile resamples the SVG mark and
+   * the 1px strokes go soft, which looks like a rendering fault rather than a
+   * hover. */
+  transform: translateY(-1px);
+}
+
+.atm-choice[disabled] {
+  cursor: not-allowed;
+  /* DIMMED, NOT HIDDEN, and the tile keeps its mark and its word.
+   * _atm_from_asset.html's header is explicit that "ICP is not offered" and
+   * "every ICP direction is down right now" deserve different reactions and a
+   * missing tile cannot tell them apart. 0.45 is low enough to read as
+   * unavailable and high enough that the reason in the title is still worth
+   * hovering for. */
+  opacity: 0.45;
+  transform: none;
+}
+
+/* THE MARK AND THE SYMBOL CARRY THE COIN'S COLOUR. Nothing else does -- see
+ * the per-coin token block on :root for why the tile body must not. */
+.atm-choice-mark {
+  grid-area: mark;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s1);
+}
+
+.coin-mark {
+  flex: none;
+  display: block;
+}
+
+.atm-choice-symbol {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  line-height: 1;
+  font-weight: 700;
+  /* A SYMBOL WITH NO GLYPH FALLS BACK TO THE TICKER (GRC), which is three
+   * characters where the others are one. Shrinking it keeps the row of tiles
+   * from stepping, and `ch` rather than `rem` so the limit tracks the font the
+   * glyph is actually drawn in. */
+  max-width: 4ch;
+  overflow: hidden;
+}
+
+/* One rule per coin, and both the drawn mark and the symbol take it. */
+.coin-btc .coin-mark, .coin-btc .atm-choice-symbol { color: var(--coin-btc); }
+.coin-ltc .coin-mark, .coin-ltc .atm-choice-symbol { color: var(--coin-ltc); }
+.coin-icp .coin-mark, .coin-icp .atm-choice-symbol { color: var(--coin-icp); }
+.coin-sol .coin-mark, .coin-sol .atm-choice-symbol { color: var(--coin-sol); }
+.coin-xrp .coin-mark, .coin-xrp .atm-choice-symbol { color: var(--coin-xrp); }
+.coin-grc .coin-mark, .coin-grc .atm-choice-symbol { color: var(--coin-grc); }
+
+/* The reasons list under step 2's grid. Unstyled before this block too. */
+.atm-reasons {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+}
+
+.atm-reasons li {
+  padding-left: var(--s3);
+  border-left: 2px solid var(--halted);
+}
+
+.atm-reasons strong {
+  font-family: var(--mono);
+  color: var(--ink);
+}
+
+/* ===========================================================================
+ * THE ATM FLOW. THIS WHOLE SURFACE HAD NO CSS UNTIL 2026-10-08.
+ *
+ * MEASURED, by reading every class the templates emit against every rule in
+ * static/*.css with the Jinja stripped out first: 49 class names in the tree
+ * had no rule anywhere, and 28 of them were the ATM's -- `atm`, `atm-strip`,
+ * `atm-step-num`, `atm-step-name`, `atm-question`, `atm-hint`, `atm-error`,
+ * `atm-error-text`, `atm-sofar`, `atm-form`, `atm-back`, `atm-note`,
+ * `atm-sides`, `atm-side`, `atm-limit` and its two variants, `atm-review`,
+ * `atm-counterparty`, `atm-commit`. Every screen of the flow a customer walks
+ * through, start to deposit.
+ *
+ * The request that produced this block was "make the atm screen have more
+ * color" (operator, 2026-10-08). The screen was not short of colour, it was
+ * short of a stylesheet: unstyled text with a handful of styled badges in it.
+ * That is recorded because "added colour" is the wrong description of the
+ * change, and the next person reading a diff full of new rules deserves to
+ * know they are not a restyling of something that worked.
+ *
+ * tests/test_atm_surface_is_styled.py is the clean gate: every class these
+ * templates emit must have a rule. No baseline, because the only honest number
+ * for a defect you are fixing is zero (rule 19).
+ *
+ * WHAT IS STILL UNSTYLED, named rather than left to be rediscovered (rule 12
+ * says clean the files you touched and do not go looking, and rule 19 says the
+ * remainder is named work rather than a new baseline):
+ *     base.html         brand-text
+ *     _badges.html      badge-word
+ *     _copy_field.html  copy-word
+ *     admin.html        empty-what, reason-cell, row-reason
+ *     swap.html         wallet-entry-unusable
+ *     _swap_live.html   live            (also swap_not_found_fragment.html)
+ * Seven names on four other surfaces. They are not in this change's files.
+ * ======================================================================== */
+
+.atm { display: grid; gap: var(--s4); }
+
+/* ---- the step strip. A LIST OF STATES, never a percentage: atm.html's own
+ * comment says why, and `done`/`current`/`future` is the vocabulary the live
+ * swap page's rail already uses so the two read as one machine. */
+.atm-strip {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+.atm-step {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: var(--t-sm);
+  color: var(--ink-faint);
+  background: var(--bg-sunken);
+}
+
+.atm-step-num {
+  font-family: var(--mono);
+  font-weight: 700;
+  /* A fixed box so the names line up down the strip whatever the digit. */
+  min-width: 1.25rem;
+  text-align: center;
+}
+
+.atm-step-name { white-space: nowrap; }
+
+/* THREE STATES, THREE CHANNELS EACH -- colour, border treatment and weight --
+ * for the reason this file's header gives: a strip that says where you are
+ * only in colour says nothing in a grayscale paste, and these pages get
+ * pasted. Solid-and-bright for current, dim for future, green for done. */
+.atm-step-done { color: var(--ok); border-color: var(--ok); }
+.atm-step-current {
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: solid;
+  border-width: 2px;
+  background: var(--accent-soft);
+  font-weight: 700;
+  text-shadow: var(--glow-accent);
+}
+.atm-step-future { border-style: dashed; opacity: 0.7; }
+
+/* ---- the one question, and it is the loudest thing on the screen. The whole
+ * premise of the flow is one question per screen (operator, 2026-10-07: "i
+ * really want the UI to be like an ATM sequence of steps"), so the question
+ * gets the scale that premise implies. */
+.atm-question {
+  margin: 0;
+  font-size: var(--t-xl, 1.6rem);
+  line-height: 1.2;
+  color: var(--ink);
+  text-shadow: var(--glow);
+}
+
+.atm-hint { margin: 0; color: var(--ink-soft); max-width: 60ch; }
+
+.atm-note {
+  margin: var(--s3) 0 0;
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+  max-width: 70ch;
+}
+
+/* ---- a refusal, WHERE THE QUESTION IS. atm.html's comment: never as a line
+ * the customer has to scroll for. Red edge, not a red page. */
+.atm-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin: 0;
+  padding: var(--s3);
+  background: var(--halted-soft);
+  border: 1px solid var(--halted);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+}
+
+.atm-error-text { color: var(--ink); }
+
+/* ---- what has been answered so far. Quiet by design: it is context for the
+ * current question, not a second question. */
+.atm-sofar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--s2) var(--s4);
+  margin: 0;
+  padding: var(--s3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: var(--t-sm);
+}
+
+.atm-sofar dt { color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.atm-sofar dd { margin: 0; color: var(--ink); font-family: var(--mono); }
+
+.atm-form { display: grid; gap: var(--s4); }
+
+/* BACK IS A SUBMIT BUTTON AND MUST NOT LOOK LIKE THE PRIMARY ONE. It posts the
+ * answers so the server can decide what to clear (atm.html's comment), so it
+ * cannot be a link -- and a secondary action styled like the commit button is
+ * how somebody goes backwards by accident at step 5. */
+.atm-back {
+  justify-self: start;
+  padding: var(--s2) var(--s3);
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+
+.atm-back:hover, .atm-back:focus-visible { color: var(--ink); border-color: var(--accent); }
+
+/* ---- step 3: which side of the trade the amount refers to. */
+.atm-sides {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.atm-side {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.atm-side:hover { border-color: var(--line-strong); }
+/* :has() so the CHOSEN side is visibly chosen. Where it is unsupported the
+ * radio itself still shows which, so this degrades to plain tiles rather than
+ * to an unanswerable screen. */
+.atm-side:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+/* ---- the ceiling, and its THREE readings. _atm_amount.html distinguishes a
+ * real maximum, a maximum of zero, and "could not be established" -- three
+ * cases routes/atm.py refuses to collapse (rule 14), so they must not render
+ * alike either. */
+.atm-limit {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--ok);
+  background: var(--ok-soft);
+  font-size: var(--t-sm);
+  color: var(--ink);
+}
+
+/* Zero is a REAL ANSWER -- the desk holds none of the destination asset -- so
+ * it is amber, the colour of a true reading that blocks you, not red. */
+.atm-limit-none { border-left-color: var(--slow); background: var(--slow-soft); }
+
+/* UNKNOWN IS VIOLET, matching --unknown's own justification on :root: "nobody
+ * has established this" must not look like a quiet version of fine. A ceiling
+ * that could not be read is the one case where proceeding is a guess. */
+.atm-limit-unknown { border-left-color: var(--unknown); background: var(--unknown-soft); }
+
+/* ---- step 5: the review. */
+.atm-review {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.atm-review > div {
+  display: grid;
+  grid-template-columns: minmax(8rem, 12rem) 1fr;
+  gap: var(--s3);
+  align-items: baseline;
+}
+
+.atm-review dt { color: var(--ink-faint); }
+.atm-review dd { margin: 0; color: var(--ink); }
+
+/* WHO HOLDS THE MONEY. _atm_confirm.html exists to say this, and it is the one
+ * block on the flow that is deliberately uncomfortable to skim: every pair here
+ * settles custodially, so the customer is extending credit to this desk between
+ * their deposit confirming and their payout broadcasting. Amber and boxed. */
+.atm-counterparty {
+  padding: var(--s3);
+  border: 1px solid var(--slow);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--slow-soft);
+}
+
+.atm-counterparty p { margin: 0 0 var(--s2); }
+.atm-counterparty p:last-child { margin-bottom: 0; }
+
+/* The commit button, and it is the only control on the flow that creates a
+ * swap. Sized and coloured to be unmistakable -- and NOT red, because red here
+ * would read as a warning rather than as the action the customer came for. */
+.atm-commit {
+  padding: var(--s3) var(--s5, 1.5rem);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* ---- step 4's note under the address field. */
+.field-note {
+  margin: var(--s1) 0 0;
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+}

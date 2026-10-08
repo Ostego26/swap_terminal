@@ -1,0 +1,78 @@
+{#
+  One drawn mark per coin. Inline SVG, keyed on the ticker.
+
+  Role: template partial (rendering only)
+  Reads: an asset ticker
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  INLINE AND NOT A FILE, AND THAT IS A CONSTRAINT RATHER THAN A STYLE CHOICE.
+  Operator, 2026-10-08: "use images". An <img src> would be a sixth request per
+  tile and a remote resource on a page whose whole posture is that it loads
+  nothing -- the operator console on the canister ships
+  `default-src 'none'` and means it. Inline paths cost one parse, cannot 404
+  halfway through a swap, and work with the network unplugged.
+
+  `currentColor` ON EVERY STROKE, so the coin's accent class in styles.css
+  colors the mark without this file knowing a single hex value (rule 8: the
+  palette is declared once, on :root).
+
+  THESE ARE NOT THE PROJECTS' LOGOS. They are six distinguishable glyphs drawn
+  to be told apart at 28px in a row: a reader picks the tile by shape and the
+  ticker underneath says what it is. Claiming to reproduce a brand mark would
+  invite somebody to trust this file as the reference for one, which it is not.
+
+  WHERE A PROJECT HAS A LETTERFORM, THE MARK IS THAT LETTER rather than a
+  metaphor for the project -- ₿, Ǥ, Ł are drawn as the stroked letters they are,
+  and only SOL, XRP and ICP get a shape. GRC was the exception that proved the
+  rule: it was drawn as a computing MESH while this file believed it had no
+  symbol, which is a mark describing what the coin is ABOUT instead of what it
+  is CALLED, and those are not interchangeable.
+
+  A TICKER WITH NO MARK GETS A RING AND ITS INITIAL, not an empty box. Same
+  reason services/asset_identity.symbol_for() falls back to the ticker: a blank
+  where a graphic belongs reads as a broken page rather than as a coin nobody
+  has drawn yet (rule 14).
+#}
+
+{% macro asset_mark(asset, size=28) -%}
+{%- set code = asset | upper -%}
+<svg class="coin-mark" width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24"
+     role="img" aria-label="{{ code }}" focusable="false"
+     fill="none" stroke="currentColor" stroke-width="1.6"
+     stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="10"></circle>
+  {%- if code == 'BTC' %}
+  {#- The ₿: a B with two ascenders through it. -#}
+  <path d="M9.5 7v10M12 7V5.5M12 18.5V17M9.5 7h4a2.5 2.5 0 0 1 0 5h-4m0 0h4.5a2.5 2.5 0 0 1 0 5H9.5"></path>
+  {%- elif code == 'LTC' %}
+  {#- The Ł: a stroked L. -#}
+  <path d="M13.5 6.5 11 17h5M8.5 12.5l5-2"></path>
+  {%- elif code == 'GRC' %}
+  {#- THE STROKED G, which is Gridcoin's own: its branding writes the project as
+      Ǥridcoin.Network (U+01E4). This was a 4-line GRID until 2026-10-08, drawn
+      on the belief that GRC had no symbol to draw -- the operator supplied the
+      citation and services/asset_identity.py's header records the correction.
+      A mesh was a reasonable stand-in for a coin about distributed computing
+      and it is the wrong mark when the project has a letterform of its own. -#}
+  <path d="M15.2 9.2a4 4 0 1 0 .8 3.3h-3.2M7.5 12.7h7.2"></path>
+  {%- elif code == 'ICP' %}
+  {#- The infinity loop, which IS the Internet Computer's mark. -#}
+  <path d="M8.2 10.2a2.6 2.6 0 1 0 0 3.6l3.8-3.6a2.6 2.6 0 1 1 0 3.6l-3.8-3.6"></path>
+  {%- elif code == 'SOL' %}
+  {#- Three slanted bars. -#}
+  <path d="M7.5 9h7.5l1.5-1.8H9zM16.5 12H9l-1.5 1.8h7.5zM7.5 16.8h7.5l1.5-1.8H9z"
+        fill="currentColor" stroke="none"></path>
+  {%- elif code == 'XRP' %}
+  {#- An X, which is Ripple's current mark. -#}
+  <path d="M8 8l8 8M16 8l-8 8"></path>
+  {%- else %}
+  {#- Unknown ticker: the ring above plus its first letter. Deliberately plain,
+      so a coin nobody has drawn looks UNDRAWN rather than looking like a glyph
+      somebody chose. -#}
+  <text x="12" y="16" text-anchor="middle" font-size="10" fill="currentColor"
+        stroke="none">{{ code[:1] }}</text>
+  {%- endif %}
+</svg>
+{%- endmacro %}
