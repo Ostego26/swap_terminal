@@ -38,11 +38,14 @@ from swap_terminal.stack_authority import (
     LISTENER_VERDICTS,
     NEVER_STOPPED,
     REPLICA_STATUS_URL,
+    VERSION_STATUSES_WORTH_REPEATING,
     WEB_PORT_CANDIDATES,
     WEB_SURFACES,
+    GitReading,
     candid_url,
     canister_lookup_verdict,
     canister_surface_lines,
+    code_version_verdict,
     container_id,
     container_label,
     container_verdict,
@@ -56,6 +59,7 @@ from swap_terminal.stack_authority import (
     readiness_verdict,
     stray_verdict,
     surface_map,
+    version_status,
     web_surface_lines,
 )
 
@@ -1328,3 +1332,242 @@ def test_the_candid_url_builder_refuses_an_empty_ui_id():
     # The order matters and is the thing that was easy to get backwards: the UI
     # canister is what the browser loads, the target is its parameter.
     assert built.index("canisterId=bd3sg") < built.index("id=bkyz2")
+
+
+# =============================================================================
+# WHICH CODE PRINTED THIS
+#
+# The operator ran `up` on 2026-10-08 and pasted sixty lines back. Three of them
+# named `be2us-64aaa-aaaaa-qaabq-cai` as the Candid UI canister -- an id that
+# 4d82caf had deleted and pushed eleven minutes earlier, and that their own dfx
+# output in the same terminal had already contradicted. Nothing in sixty lines of
+# deliberately self-describing output said which commit produced them.
+#
+# These tests pin the half that must not regress: a report that cannot establish
+# it is current says so, and NEVER degrades into saying it is.
+# =============================================================================
+
+
+def _reading(**fields) -> GitReading:
+    """A GitReading that is current unless a test says otherwise.
+
+    The default is the HAPPY case on purpose: every test below then names only the
+    one field it is about, so a reader sees the input that produces the verdict
+    rather than seven keyword arguments of noise.
+    """
+    base = {
+        "head": "4d82caf", "branch": "claude/xrp-adapter", "modified": 0,
+        "behind": 0, "ahead": 0, "upstream": "origin/claude/xrp-adapter", "reason": "",
+    }
+    return GitReading(**{**base, **fields})
+
+
+def test_version_status_classifies_every_case():
+    """The classification table, asserted as a table."""
+    assert version_status(_reading()) == "current"
+    assert version_status(_reading(behind=1)) == "stale"
+    assert version_status(_reading(behind=1, ahead=2)) == "diverged"
+    assert version_status(_reading(ahead=2)) == "ahead"
+    assert version_status(_reading(modified=3)) == "modified"
+    assert version_status(_reading(upstream="", reason="no upstream")) == "unknown"
+    assert version_status(_reading(head="", reason="git is not on PATH")) == "unknown"
+
+
+def test_an_uncomparable_checkout_never_reads_as_current():
+    """FAIL CLOSED. The one assertion this whole section exists for.
+
+    A version check that degrades to "looks fine" when it cannot check is worse
+    than no version check, because it converts "nobody looked" into an all-clear
+    the operator has no reason to doubt. Same shape as candid_url() returning ""
+    rather than a link built on an id nobody read.
+    """
+    for broken in (
+        _reading(upstream="", reason="fatal: upstream branch not stored as a remote-tracking branch"),
+        _reading(head="", reason="git is not on PATH"),
+        _reading(upstream="", reason="could not count commits against origin/x: boom"),
+    ):
+        status, headline, detail = code_version_verdict(broken)
+        assert status == "unknown", f"{broken} classified as {status}"
+        said = " ".join([headline, *detail]).lower()
+        for claim in ("tree clean", "== origin", "as last fetched", "up to date"):
+            assert claim not in said, (
+                f"a reading that could not be compared printed {claim!r}, which an operator "
+                f"reads as an all-clear: {said}"
+            )
+        assert "nobody checked" in said or "names no commit" in said, (
+            f"an unknown verdict must say nobody checked, not merely omit the claim: {said}"
+        )
+
+
+def test_a_stale_run_cannot_be_skimmed_as_a_current_one():
+    """Rule 14: 'did nothing' must not look like 'did work'. Here: old must not look new."""
+    _s, current_head, _d = code_version_verdict(_reading())
+    stale_status, stale_head, stale_detail = code_version_verdict(_reading(behind=1))
+    assert stale_status == "stale"
+    assert "***" in stale_head and "***" not in current_head, (
+        "the stale headline must be visually distinct from the current one; an operator "
+        f"skims sixty lines and reads the shape. current={current_head!r} stale={stale_head!r}"
+    )
+    assert "BEHIND origin/claude/xrp-adapter" in stale_head
+    said = " ".join(stale_detail)
+    assert "ALREADY FIXED" in said, "a reader must be told the defect below may be fixed already"
+    assert "NOTHING NEEDS REBUILDING" in said, (
+        "the remedy is cheap only because swap_stack.py runs on the host; an operator who "
+        "thinks a pull needs a rebuild will not do it mid-session"
+    )
+
+
+def test_the_remedy_is_a_command_the_operator_can_paste():
+    """`git pull origin claude/xrp-adapter`, not `git pull origin/claude/xrp-adapter`.
+
+    The operator pastes what this prints. A ref spelled with the slash is not a
+    valid `git pull` invocation, and a remedy that errors is worse than none --
+    it costs the round trip AND the trust in the next line this tool prints.
+    """
+    _status, _headline, detail = code_version_verdict(_reading(behind=2))
+    remedy = next(line for line in detail if line.startswith("remedy:"))
+    assert "git pull origin claude/xrp-adapter" in remedy, remedy
+    assert "origin/claude/xrp-adapter" not in remedy, (
+        f"the upstream ref was pasted whole into a pull command: {remedy}"
+    )
+
+
+def test_a_dirty_tree_on_a_stale_branch_is_still_stale_and_still_says_dirty():
+    """Precedence, and the fact that the quieter half is not lost to it."""
+    status, headline, detail = code_version_verdict(_reading(behind=1, modified=3))
+    assert status == "stale", "a dirty tree must not downgrade a stale warning"
+    said = " ".join([headline, *detail])
+    assert "3 tracked files MODIFIED" in said, (
+        f"the dirty count disappeared when the branch was also stale: {said}"
+    )
+
+
+def test_counts_read_as_english_at_one():
+    """One commit, not 1 commits. The line is read by a person, every run."""
+    _s, one, _d = code_version_verdict(_reading(behind=1))
+    _s, two, _d = code_version_verdict(_reading(behind=2))
+    assert "1 COMMIT BEHIND" in one and "2 COMMITS BEHIND" in two
+    _s, head_one, _d = code_version_verdict(_reading(modified=1))
+    assert "1 tracked file MODIFIED" in head_one, head_one
+
+
+def test_every_status_worth_repeating_is_one_the_classifier_can_produce():
+    """Rule 8's shape: a second spelling of a vocabulary drifts from the first.
+
+    VERSION_STATUSES_WORTH_REPEATING is a hand-written set of status strings, and
+    a typo in it would make the end-of-run warning silently never fire -- the
+    failure would be a MISSING line, which nothing else would ever notice.
+    """
+    producible = {
+        version_status(_reading(**case))
+        for case in ({}, {"behind": 1}, {"behind": 1, "ahead": 2}, {"ahead": 2},
+                     {"modified": 1}, {"upstream": ""}, {"head": ""})
+    }
+    assert producible >= VERSION_STATUSES_WORTH_REPEATING, (
+        f"{VERSION_STATUSES_WORTH_REPEATING - producible} can never be returned, so the "
+        f"end-of-run warning for it would never fire"
+    )
+    assert {"stale", "diverged"} == VERSION_STATUSES_WORTH_REPEATING, (
+        "the two where the output can be WRONG relative to code that already exists"
+    )
+
+
+def test_the_repeat_fires_only_for_the_two_loud_statuses(capsys):
+    """And it fires at all. Both halves, because either one alone is a broken warning."""
+    for quiet in ("current", "modified", "ahead", "unknown"):
+        swap_stack._say_code_version_repeat(quiet, "whatever")
+        assert capsys.readouterr().out == "", f"{quiet} printed a second warning nobody acts on"
+    for loud in sorted(VERSION_STATUSES_WORTH_REPEATING):
+        swap_stack._say_code_version_repeat(loud, "*** 1 COMMIT BEHIND origin/x. ***")
+        printed = capsys.readouterr().out
+        assert "1 COMMIT BEHIND" in printed, f"{loud} printed no end-of-run warning: {printed!r}"
+        assert "nothing above was produced" in printed, (
+            f"the repeat must say what it is repeating ABOUT, not just repeat: {printed!r}"
+        )
+
+
+def test_git_reading_carries_the_reason_a_read_failed(monkeypatch):
+    """Every failure path, and each one must arrive with git's own sentence attached.
+
+    A reading that says `unknown` with no reason tells the operator to go and find
+    out -- the round trip rule 20 says not to charge them. canister_lookup_verdict()
+    was written for the same defect one command over.
+    """
+    answers: dict[tuple, tuple[int, str]] = {}
+    monkeypatch.setattr(swap_stack, "_git", lambda *a: answers.get(a, (0, "")))
+    monkeypatch.setattr(swap_stack.shutil, "which", lambda _name: "/usr/bin/git")
+
+    answers = {
+        ("rev-parse", "--short", "HEAD"): (0, "4d82caf"),
+        ("rev-parse", "--abbrev-ref", "HEAD"): (0, "claude/xrp-adapter"),
+        ("status", "--porcelain", "--untracked-files=no"): (0, ""),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"):
+            (128, "fatal: no upstream configured for branch 'claude/xrp-adapter'"),
+    }
+    no_upstream = swap_stack.git_reading()
+    assert no_upstream.head == "4d82caf" and no_upstream.upstream == ""
+    assert "no upstream configured" in no_upstream.reason, no_upstream.reason
+
+    answers[("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")] = (0, "origin/main")
+    answers[("rev-list", "--left-right", "--count", "HEAD...origin/main")] = (0, "not a number")
+    unparseable = swap_stack.git_reading()
+    assert unparseable.upstream == "", (
+        "an unreadable commit count must not leave the upstream set with 0 behind, which "
+        "would print as 'your code is current'"
+    )
+    assert "not a number" in unparseable.reason, unparseable.reason
+
+    answers[("rev-list", "--left-right", "--count", "HEAD...origin/main")] = (0, "2\t5")
+    counted = swap_stack.git_reading()
+    assert (counted.ahead, counted.behind) == (2, 5), (
+        "`--left-right --count` prints LEFT then RIGHT, and HEAD is the left side -- "
+        "transposing them turns 'you are 5 behind' into 'you are 5 ahead'"
+    )
+    assert version_status(counted) == "diverged"
+
+
+def test_a_tree_that_could_not_be_read_is_not_reported_clean(monkeypatch):
+    """The quietest fail-open there was, and the easiest to write by accident.
+
+    THE STUB FAILS EXACTLY ONE READ, and the first version of this test did not --
+    it answered every call after the branch lookup with the same error, so the
+    upstream read failed too and produced `unknown` by itself. A mutation making
+    `_git_local_state` report a clean tree on a failed `git status` SURVIVED that
+    test, because the verdict was already being decided by the wrong failure. The
+    stub below lets everything else succeed, so the tree read is the only thing
+    that can produce the verdict.
+    """
+    monkeypatch.setattr(swap_stack.shutil, "which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(swap_stack, "_git", lambda *a: (
+        (0, "4d82caf") if a[:2] == ("rev-parse", "--short") else
+        (0, "claude/x") if a == ("rev-parse", "--abbrev-ref", "HEAD") else
+        (1, "fatal: index.lock exists") if a[0] == "status" else
+        (0, "origin/claude/x") if a[-1] == "@{upstream}" else
+        (0, "0\t0")
+    ))
+    reading = swap_stack.git_reading()
+    assert version_status(reading) == "unknown", (
+        f"a tree that could not be read was classified {version_status(reading)}: {reading}"
+    )
+    assert "index.lock" in reading.reason, reading.reason
+
+
+def test_current_disclaims_the_fetch_it_did_not_do():
+    """`current` means 'matches what you last fetched', and must say so in those words.
+
+    Nothing on this path makes a network call -- deliberately, because a fetch in
+    front of `up` can hang before any container starts, and it would write refs the
+    report is only supposed to read. So a detail reading "the code here is current"
+    would be a claim about GitHub that nobody checked: the same fail-open as the
+    unknown case, wearing the happy path's clothes. An operator who last fetched
+    yesterday would read it and stop looking, which is exactly the 2026-10-08
+    failure with the warning inverted.
+    """
+    status, headline, detail = code_version_verdict(_reading())
+    assert status == "current"
+    said = " ".join([headline, *detail])
+    assert "as last fetched" in said, said
+    assert "nothing is fetched here" in said, (
+        f"the current verdict must disclaim the fetch it did not do, or it reads as a "
+        f"check against GitHub: {said}"
+    )

@@ -83,8 +83,11 @@ from swap_terminal.stack_authority import (  # noqa: E402
     CANISTER_SURFACES,
     REPLICA_STATUS_URL,
     STACK_PORTS,
+    VERSION_STATUSES_WORTH_REPEATING,
     WEB_PORT_CANDIDATES,
+    GitReading,
     canister_lookup_verdict,
+    code_version_verdict,
     container_id,
     container_label,
     container_verdict,
@@ -165,6 +168,14 @@ _CANISTER_ID_TIMEOUT_SECONDS = 10.0
 #: The `or "docker"` keeps the argv valid when docker is absent so the failure is
 #: docker's own "not found" rather than a TypeError about None.
 _DOCKER = shutil.which("docker") or "docker"
+
+#: Same treatment for git, for the same two reasons: one spelling, and absence
+#: answerable by name instead of as a FileNotFoundError from inside subprocess.
+#:
+#: git being missing is NOT a failure of this tool -- the stack runs fine without
+#: it. It only means nothing can say which commit is running, which git_reading()
+#: reports as exactly that rather than as an error.
+_GIT = shutil.which("git") or "git"
 
 #: The compose files this stack is assembled from, in the order `-f` wants them.
 #:
@@ -457,6 +468,7 @@ def print_listeners(found: list[dict]) -> None:
 def cmd_status(files: tuple[str, ...]) -> int:
     """Everything that is running, from all three reapers, in one place."""
     say("swap_stack: STATUS")
+    code = _say_code_version()
     say(f"  repository        {REPO_ROOT}")
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
     say(f"  compose files     {', '.join(files)}")
@@ -494,6 +506,7 @@ def cmd_status(files: tuple[str, ...]) -> int:
         f"{format_duration(_WEB_PROBE_BUDGET_SECONDS)} each -- a BOUND port above is not a serving one")
     port, _detail = probe_serving_port()
     _say_surface_map(files, port)
+    _say_code_version_repeat(*code)
     return 0
 
 
@@ -935,8 +948,163 @@ def host_workers_running() -> dict[str, int | None]:
     return running
 
 
-def _say_up_banner() -> None:
+#: How long any one read-only `git` call may take before this gives up on it.
+#:
+#: SHORT BECAUSE IT IS NEVER THE WORK. `up` is about to build images and start
+#: containers; a report line about which commit is running is not worth delaying
+#: that, and a git call that hangs (a lock held by an editor, a slow filesystem)
+#: must degrade to "could not read" rather than to a blinking cursor -- which is
+#: rule 14's failure mode and the same trade compose() already makes for the
+#: `dfx canister id` lookups.
+_GIT_TIMEOUT_SECONDS = 5.0
+
+
+def _git(*args: str) -> tuple[int, str]:
+    """Run one READ-ONLY git command in REPO_ROOT. Returns (returncode, output).
+
+    Every caller below passes a read-only subcommand and there is no path here
+    that writes: no fetch, no pull, no gc. That is deliberate and is stated in
+    code_version_verdict()'s own comment -- a report must not mutate the checkout
+    it is reporting on, and a fetch in front of `up` is a network call that can
+    hang before any container starts.
+
+    stderr is folded into the returned text ON FAILURE ONLY, because git puts the
+    useful sentence there: `fatal: upstream branch 'refs/heads/...' not stored as
+    a remote-tracking branch` is exactly what the operator needs to see, and a
+    bare returncode would make this report say "could not read" with no why --
+    which is the defect canister_lookup_verdict() was written to stop.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 -- no shell; argv is this file's own literals
+            [_GIT, *args], cwd=REPO_ROOT, capture_output=True, text=True,
+            check=False, timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, f"git {' '.join(args)} did not answer within {format_duration(_GIT_TIMEOUT_SECONDS)}"
+    except OSError as error:  # git vanished between the which() and the run
+        return 1, f"git {' '.join(args)} could not be run: {error}"
+    if done.returncode != 0:
+        return done.returncode, (done.stderr.strip() or done.stdout.strip() or "(no output)")
+    return 0, done.stdout.strip()
+
+
+def _git_local_state() -> tuple[str, str, int, str]:
+    """HEAD, branch, and the count of modified TRACKED files. A reason on any failure.
+
+    The half of the reading that needs no remote. Split from the upstream half when
+    ruff counted seven returns in one function (PLR0911) -- rule 12's answer to that
+    is to extract rather than raise the ceiling, and what came out is the right seam
+    anyway: this half answers "which commit, and does the tree match it", the other
+    answers "and is that the current one", and each is now exercisable on its own.
+
+    `--untracked-files=no` is deliberate. A tree with `runtime/` logs, a `.db-wal`
+    and a scratch script in it is the NORMAL state of a working checkout, and
+    counting those would make every run report a modified tree -- a warning that
+    fires always is a warning nobody reads.
+    """
+    if shutil.which(_GIT) is None:
+        return "", "", 0, f"{_GIT} is not on PATH, so no commit can be named"
+    rc, head = _git("rev-parse", "--short", "HEAD")
+    if rc != 0:
+        return "", "", 0, f"could not read HEAD: {head}"
+    rc_b, branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    named = branch if rc_b == 0 else ""
+    rc_s, dirty = _git("status", "--porcelain", "--untracked-files=no")
+    if rc_s != 0:
+        # NOT "assume clean". A tree whose state could not be read is a tree whose
+        # commit id does not describe this output, and saying so is the point.
+        return head, named, 0, f"could not read the working tree: {dirty}"
+    return head, named, len([line for line in dirty.splitlines() if line.strip()]), ""
+
+
+def _git_upstream_state(branch: str) -> tuple[str, int, int, str]:
+    """The upstream ref and (behind, ahead) against it. A reason on any failure.
+
+    `@{upstream}` rather than a hardcoded `origin/<branch>`: the operator's branch
+    and remote are theirs to name, and guessing them is the hardcoded-canister-id
+    mistake with different letters. When it is not configured -- which is this
+    container's own state, `fatal: upstream branch 'refs/heads/claude/xrp-adapter'
+    not stored as a remote-tracking branch` -- git's sentence becomes the reason,
+    because "could not read" with no why is the defect canister_lookup_verdict()
+    was written to stop.
+
+    NOTHING HERE FETCHES. The counts are against origin as the checkout last saw
+    it, which code_version_verdict() states in those words rather than letting a
+    reader take a match for a check against GitHub. A fetch would be a network call
+    in front of `up` that can hang before any container starts, and a write to the
+    refs of the checkout this is only supposed to report on.
+    """
+    rc_u, upstream = _git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    if rc_u != 0 or not upstream:
+        return "", 0, 0, upstream or f"no upstream is configured for {branch or 'HEAD'}"
+    rc_c, counts = _git("rev-list", "--left-right", "--count", f"HEAD...{upstream}")
+    if rc_c != 0:
+        return "", 0, 0, f"could not count commits against {upstream}: {counts}"
+    try:
+        ahead, behind = (int(part) for part in counts.split())
+    except ValueError as error:
+        # `--count` prints exactly two integers separated by a tab, left then right,
+        # and HEAD is the left side. Unpacking catches BOTH ways that can fail -- a
+        # non-integer and the wrong number of fields -- in one place, which is why
+        # this is an unpack rather than a length check and an isdigit() sweep.
+        #
+        # RETURNING A REASON RATHER THAN 0/0 IS THE POINT. A fabricated "0 behind"
+        # reads on screen as "your code is current", which is the exact false
+        # all-clear this whole section exists to stop.
+        return "", 0, 0, f"could not read `{counts}` as a commit count: {error}"
+    return upstream, behind, ahead, ""
+
+
+def git_reading() -> GitReading:
+    """Read which commit this HOST checkout is running. Changes nothing.
+
+    FAILS CLOSED AT EVERY STEP. Any read that does not answer carries its REASON
+    into the reading, and code_version_verdict() turns that into `unknown` -- never
+    into `current`. That ordering matters more than the happy path: the defect this
+    whole section exists for is a report that looked right while being produced by
+    old code, and a version check that quietly degrades to "looks fine" reproduces
+    it exactly one level up.
+    """
+    head, branch, modified, reason = _git_local_state()
+    if reason:
+        return GitReading(head=head, branch=branch, modified=modified, reason=reason)
+    upstream, behind, ahead, reason = _git_upstream_state(branch)
+    return GitReading(head=head, branch=branch, modified=modified,
+                      behind=behind, ahead=ahead, upstream=upstream, reason=reason)
+
+
+def _say_code_version() -> tuple[str, str]:
+    """Print WHICH CODE THIS IS, as the first rows of a run. Returns it for the repeat."""
+    status, headline, detail = code_version_verdict(git_reading())
+    say(f"  code              {headline}")
+    for line in detail:
+        say(f"                    {line}")
+    return status, headline
+
+
+def _say_code_version_repeat(status: str, headline: str) -> None:
+    """Say it AGAIN at the end, for the two statuses where the output can be wrong.
+
+    THE OPERATOR READS THE BOTTOM. `up` prints sixty-odd lines and the banner is
+    gone off the top of a terminal long before the surface map arrives -- which is
+    exactly what happened on 2026-10-08: the paste that revealed this defect was
+    complete, and a warning in its first rows would still have been twelve screens
+    above the wrong URLs it was warning about.
+
+    Rule 14's "make 'did nothing' look different from 'did work'" is the same
+    sentence: a run of stale code must not END the way a current one does.
+    """
+    if status not in VERSION_STATUSES_WORTH_REPEATING:
+        return
+    say("")
+    say(f"  code              {headline}")
+    say("                    ^ printed at the TOP of this run too. nothing above was produced")
+    say("                    by current code, so check it against origin before acting on it.")
+
+
+def _say_up_banner() -> tuple[str, str]:
     say("swap_stack: UP")
+    code = _say_code_version()
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
     say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
     say("                    docker-compose.yml defines `abstergo` and `harness` with no profiles:")
@@ -948,6 +1116,7 @@ def _say_up_banner() -> None:
     say("  about to arm      THE CONTAINER'S PAYOUT WORKER CAN BROADCAST on whatever the")
     say("                    container's environment arms. docker-compose.web.yml passes no")
     say("                    signing material, so unset means it serves and cannot send.")
+    return code
 
 
 def _say_refusal(running: dict[str, int | None]) -> None:
@@ -997,7 +1166,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     requirement: a page serving after `docker up`, under gunicorn, with nothing held
     in a terminal.
     """
-    _say_up_banner()
+    code = _say_up_banner()
     say("")
 
     # THE REFUSAL, BEFORE ANY CONTAINER STARTS. Checked rather than assumed, because
@@ -1076,6 +1245,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     _say_surface_map(files, port)
     say("")
     _say_icp_note()
+    _say_code_version_repeat(*code)
     # NOT 0 WHEN THE PAGE IS DEAD. An `up` that exits 0 over an unreachable page is
     # the same defect one layer out: a script reading the exit code, and an operator
     # skimming for errors, both conclude it worked.

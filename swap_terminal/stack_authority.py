@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 #: The ports this terminal's HTTP surfaces are reachable on, and what each means.
@@ -648,6 +649,210 @@ def serving_verdict(answers: dict[int, object]) -> tuple[int, str]:
         if port in answers
     )
     return 0, f"nothing answered on any candidate port -- {tried}"
+
+
+# =============================================================================
+# WHICH CODE PRINTED THIS
+#
+# MEASURED FROM THE OPERATOR'S OWN PASTE, 2026-10-08, and it is the second half
+# of the Candid-UI defect rather than a separate one.
+#
+# They ran `up` and pasted sixty lines back. Three of those lines read
+#
+#     CANDID threshold_custody  http://127.0.0.1:4943/?canisterId=be2us-64aaa-aaaaa-qaabq-cai&id=...
+#
+# naming a canister id that 4d82caf had deleted and pushed eleven minutes
+# earlier -- and that their OWN dfx output, in the same terminal, had already
+# contradicted. The report was wrong, the fix existed, and nothing in sixty
+# lines of deliberately self-describing output said which commit had produced
+# them. The operator had no way to tell a stale run from a current one, and
+# neither did I: I had to infer it from a string that could only come from the
+# old constant.
+#
+# THIS IS RULE 13 AT THE REPORT RATHER THAN AT THE DEPLOY. "When a deploy
+# depends on new code actually running, verify the artifact, not the deploy."
+# swap_stack.py runs on the HOST, outside both containers, so a `git pull` alone
+# changes what it prints -- there is no image to rebuild and nothing to restart.
+# That makes staleness cheap to fix and completely invisible, which is the worst
+# combination: an operator who pulls and one who does not get output that looks
+# identical.
+#
+# And rule 14: "Echo the parameters that decide the answer... Pasted output has
+# to be self-describing a day later, because it usually is read a day later."
+# The commit is the parameter that decides every other line.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO: fetch. `up` is about to start containers
+# and a network call that can hang in front of that is a worse failure than the
+# one being fixed; a fetch also WRITES refs, which a report must not. So the
+# comparison is against origin as the checkout last saw it, and every line that
+# reports a match SAYS SO rather than letting "current" be read as "current with
+# GitHub". Making it a real check would mean fetching, and that belongs to a
+# command the operator runs on purpose.
+#
+# FAIL CLOSED, the same shape as candid_url(): when the comparison cannot be
+# made, the verdict is `unknown` and says nobody checked. It never degrades to
+# `current`, because a confident wrong all-clear is exactly what cost the last
+# session -- and a report that silently stops checking is how an operator learns
+# to ignore the line.
+# =============================================================================
+
+#: Verdicts that must be REPEATED at the end of a long run, not just in the banner.
+#:
+#: Only the two where the output can be WRONG relative to code that already exists.
+#: `modified` and `unknown` print in the banner and stop there: a modified tree is
+#: usually the operator editing on purpose, and `unknown` is this container's normal
+#: state (its clone carries no origin ref for the working branch), so repeating
+#: either would put a line nobody acts on at the bottom of every run. Rule 12's note
+#: about a ratchet that fails on ordinary work applies to warnings too -- one that
+#: fires every time is one the reader stops seeing, and it would take the two that
+#: matter down with it.
+VERSION_STATUSES_WORTH_REPEATING = frozenset({"stale", "diverged"})
+
+
+@dataclass(frozen=True)
+class GitReading:
+    """What a caller read from git about the checkout swap_stack.py is running from.
+
+    ONE OBJECT RATHER THAN SEVEN ARGUMENTS, and ruff said so (PLR0913/PLR0917)
+    before the shape was obvious. It is the better design anyway: the caller takes
+    one reading and hands it over, so a test seeds a reading instead of remembering
+    the order of seven positional strings and ints.
+
+    `modified` counts TRACKED files only -- see code_version_verdict().
+    `behind`/`ahead` are against `upstream` AS THE CHECKOUT LAST FETCHED IT.
+    `reason` carries WHY a field is empty, so `unknown` can say what stopped it
+    rather than just that something did.
+    """
+
+    head: str = ""
+    branch: str = ""
+    modified: int = 0
+    behind: int = 0
+    ahead: int = 0
+    upstream: str = ""
+    reason: str = ""
+
+
+def version_status(reading: GitReading) -> str:
+    """Classify a GitReading into one of six statuses. Pure, and the whole decision.
+
+    SEPARATE FROM THE WORDING ON PURPOSE. A mutation that breaks the classification
+    and a mutation that breaks a sentence are different defects, and folding them
+    into one function means a test of either passes on the other. This half is six
+    lines and can be asserted on directly; code_version_verdict() below only chooses
+    which paragraph to print for the answer this gives.
+
+      stale     behind, with nothing local. The loudest: output below may describe
+                a defect that is already fixed on origin.
+      diverged  behind AND ahead. Same warning, plus a merge to come.
+      ahead     local commits not pushed, nothing to pull. Not a correctness problem
+                for the report, so it is stated and not shouted.
+      modified  tracked files differ from HEAD, so the output matches NO commit.
+      current   matches the last-seen origin, clean tree.
+      unknown   the comparison could not be made. NEVER collapses into current.
+
+    The order is a precedence, not a sequence of independent tests: a dirty tree on
+    a stale branch is still stale, and the dirty count rides in the louder verdict's
+    detail rather than replacing it.
+    """
+    if not reading.head or not reading.upstream:
+        return "unknown"
+    if reading.behind:
+        return "diverged" if reading.ahead else "stale"
+    if reading.modified:
+        return "modified"
+    return "ahead" if reading.ahead else "current"
+
+
+def code_version_verdict(reading: GitReading) -> tuple[str, str, list[str]]:
+    """Which commit produced this report, and whether it is the current one. Pure.
+
+    Returns `(status, headline, detail)` ready for swap_stack.say(). Reads nothing
+    and runs nothing (rule 10): the decision "may this output be trusted as current"
+    is testable with a seeded GitReading, where the same logic inside the print loop
+    would need a git repository in a known state to exercise at all.
+
+    `modified` counts TRACKED files only. Untracked ones are excluded on purpose:
+    `runtime/`, `*.db-wal` and a scratch script would make every run report a
+    modified tree, and a warning that fires on every run is one the reader stops
+    seeing.
+
+    Nothing here fetches, so `current` means "matches what you last saw of origin"
+    and the headline says that in those words rather than letting a reader take it
+    for a check against GitHub.
+    """
+    status = version_status(reading)
+    dirty = f"{reading.modified} tracked file{'' if reading.modified == 1 else 's'} MODIFIED"
+    where = f"{reading.head} ({reading.branch})" if reading.branch else reading.head
+    behind_n = f"{reading.behind} COMMIT{'' if reading.behind == 1 else 'S'}"
+    also_dirty = [f"note: {dirty} on top of that."] if reading.modified else []
+    # `git pull origin main` reads better to paste than `git pull origin/main`, and
+    # the operator pastes it. Only the FIRST slash splits: a branch may contain more.
+    pull = f"git pull {reading.upstream.replace('/', ' ', 1)}" if "/" in reading.upstream else "git pull"
+    stale_body = [
+        "anything below may describe a defect that is ALREADY FIXED on origin. read it",
+        "as a record of old code, not as a reading of the system.",
+    ]
+
+    if status == "unknown" and not reading.head:
+        headline = f"NOT READ: {reading.reason or 'git could not be run here'}"
+        detail = [
+            "this output names no commit, so a day from now nobody can tell which code",
+            "produced it -- including whoever pasted it. that is the whole defect this",
+            "line exists to prevent, and it is not fixed by the line failing quietly.",
+        ]
+    elif status == "unknown":
+        headline = where
+        detail = [
+            f"NOT COMPARED to any origin ref: "
+            f"{reading.reason or 'this checkout has no upstream for ' + (reading.branch or 'HEAD')}",
+            "so this does NOT say the code is current. it says nobody checked.",
+        ] + ([f"and {dirty}, so it matches no commit either."] if reading.modified else [])
+    elif status == "diverged":
+        headline = f"*** THIS OUTPUT IS FROM CODE {behind_n} BEHIND {reading.upstream}. ***"
+        detail = [
+            f"running {where}.",
+            f"it also has {reading.ahead} local commit{'' if reading.ahead == 1 else 's'} "
+            f"{reading.upstream} does not.",
+            *stale_body,
+            # THE COMMAND ALONE ON ITS LINE. The operator copies it off the screen,
+            # and a remedy with half a sentence trailing it gets copied with the
+            # sentence -- which is how `warbot.sh stop  # only if asked` once became
+            # a pasted command with a comment on it.
+            f"remedy: {pull}",
+            "which will be a MERGE, not a fast-forward, because of those local commits.",
+            "then re-run this command.",
+            *also_dirty,
+        ]
+    elif status == "stale":
+        headline = f"*** THIS OUTPUT IS FROM CODE {behind_n} BEHIND {reading.upstream}. ***"
+        detail = [
+            f"running {where}.",
+            f"{reading.upstream} has {reading.behind} newer "
+            f"commit{'' if reading.behind == 1 else 's'}, fetched and not merged.",
+            *stale_body,
+            f"remedy: {pull}",
+            "then re-run this command. NOTHING NEEDS REBUILDING -- swap_stack.py runs on",
+            "the host, so a pull alone changes what it prints.",
+            *also_dirty,
+        ]
+    elif status == "modified":
+        headline = f"{where} + {dirty}"
+        detail = [
+            "so this output matches NO commit, and the id above does not describe it.",
+            "untracked files are not counted -- only changes to files git is tracking.",
+        ]
+    elif status == "ahead":
+        headline = (f"{where}, {reading.ahead} commit{'' if reading.ahead == 1 else 's'} "
+                    f"ahead of {reading.upstream}, tree clean")
+        detail = ["nothing to pull. the code here is newer than the origin ref last fetched."]
+    else:
+        headline = f"{where}, tree clean, == {reading.upstream} as last fetched"
+        detail = [
+            "nothing is fetched here, so that is a match against what you last saw of",
+            "origin, not a check against GitHub.",
+        ]
+    return status, headline, detail
 
 
 # =============================================================================
