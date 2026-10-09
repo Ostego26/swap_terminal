@@ -59,10 +59,16 @@
     "Why no figures" row below prints the reason beside it. -#}
 <dl class="atm-review">
   <div><dt>You send</dt>
-    <dd class="num">{% if estimate and not estimate.refusal %}{{ estimate.send }}{% elif answers.amount_side != 'receive' %}{{ answers.amount }}{% else %}&#8776; solved when you confirm{% endif %}
+    {#- ONLY THE SOLVED BRANCH IS FILTERED. The second branch is the string the
+        customer TYPED and must be echoed back exactly -- running it through a
+        number formatter would show them a different figure from the one in the
+        box they filled in. The third is a sentence. `| coin` with no argument
+        here because the asset is printed on the line below, shared by all three
+        branches. -#}
+    <dd class="num">{% if estimate and not estimate.refusal %}{{ estimate.send | coin }}{% elif answers.amount_side != 'receive' %}{{ answers.amount }}{% else %}&#8776; solved when you confirm{% endif %}
         {{ answers.from_asset }}</dd></div>
   <div><dt>You receive</dt>
-    <dd class="num">{% if estimate and not estimate.refusal %}{{ estimate.receive }}{% elif answers.amount_side == 'receive' %}{{ answers.amount }}{% else %}priced when you confirm{% endif %}
+    <dd class="num">{% if estimate and not estimate.refusal %}{{ estimate.receive | coin }}{% elif answers.amount_side == 'receive' %}{{ answers.amount }}{% else %}priced when you confirm{% endif %}
         {{ answers.to_asset }}</dd></div>
   {% if estimate and estimate.refusal %}
   <div><dt>Why no figures</dt><dd>{{ estimate.refusal }}</dd></div>

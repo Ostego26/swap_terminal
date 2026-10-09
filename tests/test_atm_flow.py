@@ -40,6 +40,11 @@ from chains.amount_solve import (
 from chains.icp_account import account_identifier, subaccount_from_index
 from config import Config
 from db import SCHEMA, dict_factory
+from engineering_notation import (
+    EXPONENT_STEP,
+    engineering_notation,
+    needs_engineering,
+)
 from modules.htlc_assets import (
     WORD_BROKERED,
     WORD_COVERED,
@@ -673,6 +678,116 @@ def test_getting_the_quote_actually_produces_figures_on_the_next_screen(client):
     )
     assert refusal == ""
     assert f"{expected} GRC" in reading(aside), f"the screen does not state {expected} GRC"
+
+
+def test_no_amount_on_the_review_screen_is_in_scientific_notation(client):
+    """THE DEFECT, END TO END, on the screen before "Create the swap".
+
+    The operator's own 2026-10-09 render, walking BTC -> GRC for 1000 GRC:
+
+        You send       8.061e-05 BTC
+        You receive    1000.09376816 GRC
+
+    Nobody reads `8.061e-05` as an amount of money, and it is the figure a
+    customer is about to put into a wallet. Python's float str() switches to
+    scientific notation below 1e-4, and these two rows were the only amount
+    renderings in templates/ that interpolated a raw float -- measured the same
+    day, 19 of the 23 use `'%.8f'|format` and cannot produce an exponent.
+
+    ASSERTED ON THE RENDERED SCREEN, not on engineering_notation(). The formatter
+    has its own sixteen tests in tests/test_engineering_notation.py and every one
+    of them passes whether or not any template calls it. A mutation reverting
+    either `| coin` to `{{ estimate.send }}` fails here and nowhere else, which
+    is the behavioral-verification principle: run the real thing and assert on
+    what it actually produced.
+    """
+    # 100 GRC, NOT 1000, AND THE FIGURE IS LOAD-BEARING. At these stub prices
+    # (BTC_USD 62000 / GRC_USD 0.031 = 2,000,000 GRC per BTC) a 1000 GRC payout
+    # solves to 0.00050762 BTC, which writes PLAINLY -- so the first version of
+    # this test asserted "no scientific notation" on a screen that could never
+    # have shown any, and the mutation reverting `| coin` passed it clean. The
+    # boundary is 197 GRC; 100 GRC solves to 5.077e-05, which str() renders as
+    # scientific notation, and it is inside the desk's 407.51074481 GRC balance.
+    #
+    # The guard below is what keeps that true: if the stub prices move, this test
+    # fails LOUDLY instead of quietly going vacuous again.
+    page = post(client, from_asset="BTC", to_asset="GRC", amount="100",
+                amount_side="receive", payout_address=GRC_PAYOUT)
+    assert asking(page) == "Is this right?"
+    # BOTH PARTIALS, ON THE TWO SCREENS THAT CARRY THEM. They are different files
+    # and a mutation reverting one passed a test that read only the other --
+    # measured, this test was green with `| coin` removed from _atm_costs.html.
+    #
+    # And they are not on the same screen, which is the part that caught me out:
+    # services/wizard._SCREEN_FURNITURE gives the REVIEW step `("estimate",)`
+    # only, so step 5 has no <aside> at all and reading for one raised
+    # ValueError. `costs` is on steps 1, 3 and 4, and step 4 is the one that also
+    # has a solved estimate to print.
+    body = page.get_data(as_text=True)
+    figures = reading(element(body, '<dl class="atm-review"', "dl"))
+
+    address_step = post(client, from_asset="BTC", to_asset="GRC", amount="100",
+                        amount_side="receive")
+    aside = element(address_step.get_data(as_text=True), '<aside class="atm-aside"', "aside")
+    figures += "  " + reading(aside)
+
+    rate = USD_PRICES["BTC_USD"] / USD_PRICES["GRC_USD"]
+    solved, refusal = deposit_for_desired_payout(
+        100.0, rate, int(client.application.config["DEFAULT_FEE_BPS"]), "BTC"
+    )
+    assert not refusal, refusal
+    assert needs_engineering(solved), (
+        f"this test is VACUOUS: the solved deposit {solved!r} writes plainly as {solved}, so "
+        f"the screen would pass the assertions below with the formatter removed. Pick a smaller "
+        f"payout, or the stub prices have moved."
+    )
+
+    # PYTHON'S OWN EXPONENT SPELLING, which is zero-padded to two digits --
+    # `e-05`, not `e-5`. Searching for a bare "e-" would match the engineering
+    # form this screen is now SUPPOSED to print and the test could never pass.
+    scientific = re.findall(r"\d[eE][-+]0\d", figures)
+    assert not scientific, (
+        f"the review screen shows scientific notation to a customer: {scientific} in {figures}"
+    )
+
+    # And every exponent that IS shown is a multiple of three (the instruction).
+    for exponent in re.findall(r"\d[eE]([-+]?\d+)", figures):
+        assert int(exponent) % EXPONENT_STEP == 0, (
+            f"exponent {exponent} on the review screen is not a multiple of {EXPONENT_STEP}: "
+            f"{figures}"
+        )
+
+
+def test_the_deposit_figure_the_review_shows_is_the_solved_one_formatted(client):
+    """The formatting must not change WHICH number is shown, only how.
+
+    Guards the direction a display fix can go wrong: `| coin` rounding, or being
+    applied to the wrong branch, would put a different figure in front of the
+    customer than the solver produced -- which is worse than scientific
+    notation, because it looks fine.
+
+    Derived from the real solver rather than a literal, the same way
+    test_a_customer_who_typed_what_they_want_is_told_what_to_send is.
+    """
+    rate = USD_PRICES["BTC_USD"] / USD_PRICES["GRC_USD"]
+    fee_bps = int(client.application.config["DEFAULT_FEE_BPS"])
+    solved, refusal = deposit_for_desired_payout(100.0, rate, fee_bps, "BTC")
+    assert not refusal, refusal
+    # SAME GUARD, SAME REASON as the test above. With a payout whose deposit
+    # writes plainly, engineering_notation(solved) IS the plain string and this
+    # test would pass against a template that never calls the formatter.
+    assert needs_engineering(solved), (
+        f"this test is VACUOUS: {solved!r} needs no exponent, so asserting its engineering form "
+        f"is on screen asserts nothing about the formatter"
+    )
+
+    page = post(client, from_asset="BTC", to_asset="GRC", amount="100",
+                amount_side="receive", payout_address=GRC_PAYOUT)
+    review = element(page.get_data(as_text=True), '<dl class="atm-review"', "dl")
+    assert engineering_notation(solved) in reading(review), (
+        f"the screen does not show the solved deposit {solved!r} "
+        f"(as {engineering_notation(solved)}): {reading(review)}"
+    )
 
 
 def test_a_customer_who_typed_what_they_want_is_told_what_to_send(client):

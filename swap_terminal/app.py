@@ -53,6 +53,7 @@ from collections.abc import Mapping
 from chains.registry import build_adapters
 from config import Config
 from db import close_db, init_db
+from engineering_notation import coin_amount_text
 from flask import Flask
 from log_setup import configure_logging
 from microfortnights import format_duration
@@ -191,6 +192,24 @@ def create_app() -> Flask:
             ", ".join(on_mainnet),
             ", ".join(CHAIN_PORTS[c].port_variable for c in on_mainnet),
         )
+
+    # THE ONE REGISTRATION OF THE AMOUNT FORMAT (engineering_notation.py).
+    #
+    # A FILTER RATHER THAN A FORMATTED FIELD ON THE DICT, because the two
+    # templates that need it render the figure inside a three-branch `{% if %}`
+    # whose other branches are sentences -- `estimate.send_text` would have to
+    # exist for those branches too, and a sentence named `_text` alongside a
+    # number named `_text` is how the next reader prints one where the other
+    # belongs. A filter applies at the point of rendering and nowhere else.
+    #
+    # NOT a float-to-string convenience: engineering_notation() is the house
+    # answer to a measured defect (the ATM review printed `8.061e-05 BTC` to a
+    # customer about to send it), and registering it here is what stops the
+    # fifth template spelling `{{ x }} {{ asset }}` by hand. Measured 2026-10-09:
+    # 19 amount renderings in templates/ already use `'%.8f'|format`, which
+    # cannot produce an exponent, and exactly 4 interpolated a raw float. Those 4
+    # were the whole defect.
+    app.jinja_env.filters["coin"] = coin_amount_text
 
     app.teardown_appcontext(close_db)
     # routes/ui.py owns the customer pages (`/`, `/swap/<id>`) and

@@ -73,8 +73,12 @@
   </p>
   {% else %}
   <dl class="atm-estimate">
-    <div><dt>You send</dt><dd class="num">{{ estimate.send }} {{ answers.from_asset }}</dd></div>
-    <div><dt>You receive</dt><dd class="num">{{ estimate.receive }} {{ answers.to_asset }}</dd></div>
+    {#- `| coin` is engineering_notation.coin_amount_text, registered in app.py.
+        NOT `{{ x }} {{ asset }}`: a raw float below 0.0001 renders as
+        `8.061e-05` through Python's str(), which is what this screen showed a
+        customer on 2026-10-09. -#}
+    <div><dt>You send</dt><dd class="num">{{ estimate.send | coin(answers.from_asset) }}</dd></div>
+    <div><dt>You receive</dt><dd class="num">{{ estimate.receive | coin(answers.to_asset) }}</dd></div>
     <div><dt>Service fee</dt><dd class="num">{{ fee_bps }} bps</dd></div>
   </dl>
   <p class="atm-estimate-note">
