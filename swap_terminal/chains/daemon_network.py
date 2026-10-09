@@ -179,3 +179,82 @@ def payable_bech32_prefix(asset: str, network: str) -> str | None:
     which is why only it can be answered.
     """
     return PAYABLE_BECH32_PREFIX.get(asset, {}).get(network) or None
+
+
+#: WHY payable_bech32_prefix() RETURNING None IS NOT ENOUGH, and this is a defect
+#: that shipped and was caught by the operator's FIRST run of the report, 2026-10-09.
+#:
+#: That function's own docstring says "THREE OUTCOMES COLLAPSED TO TWO WOULD BE THE
+#: DEFECT HERE, so read None as 'nobody has said' and never as 'it has none'".
+#: stack_authority.chain_network_lines() -- written the same hour, one module over --
+#: took None and printed:
+#:
+#:     XRP   testnet (network_id 1) no bech32 on this chain -- its addresses are
+#:                                  base58, which cannot name a network
+#:
+#: Every clause of that is invented. XRP is not in PAYABLE_BECH32_PREFIX at all, so
+#: None there means "this table knows nothing about this chain" -- not "this chain has
+#: no bech32", which is GRC's answer and GRC's alone. The report stated a fact about a
+#: chain the table had never been given a row for, in the confident register of the
+#: lines beside it (rule 17: a reason to believe is not a measurement, and the two must
+#: never be written in the same voice).
+#:
+#: A CLASSIFIER RATHER THAN A SENTENCE, because the four cases are a DECISION and
+#: decisions belong at the bottom where they can be called with seeded inputs
+#: (rule 10). The caller maps a constant to prose; it does not re-derive which case it
+#: is holding. That re-derivation is what went wrong: a renderer cannot tell
+#: "GRC has none" from "nobody said" once both have arrived as None.
+PREFIX_KNOWN = "prefix_known"
+NO_BECH32_ON_THIS_CHAIN = "no_bech32_on_this_chain"
+CHAIN_NOT_IN_TABLE = "chain_not_in_table"
+NETWORK_NOT_IN_TABLE = "network_not_in_table"
+
+#: Every value bech32_prefix_status() can return, so a caller rendering one per case
+#: can be TESTED for covering them all rather than discovering a gap on an operator's
+#: screen. swap_stack.py already uses this shape for LISTENER_VERDICTS and
+#: DOWN_VERDICTS and the comment at stack_authority.py:509 says why: "EVERY VERDICT IN
+#: stack_authority.LISTENER_VERDICTS NEEDS AN ENTRY HERE."
+BECH32_PREFIX_STATUSES = (
+    PREFIX_KNOWN,
+    NO_BECH32_ON_THIS_CHAIN,
+    CHAIN_NOT_IN_TABLE,
+    NETWORK_NOT_IN_TABLE,
+)
+
+
+def bech32_prefix_status(asset: str, network: str) -> tuple[str, str | None]:
+    """Which of FOUR things is true about this chain's bech32 prefix, and the prefix if any.
+
+    Returns `(status, prefix)` where status is one of BECH32_PREFIX_STATUSES and
+    prefix is a string only when status is PREFIX_KNOWN.
+
+      PREFIX_KNOWN             this chain uses bech32 and this network's prefix is
+                               known. Say it.
+      NO_BECH32_ON_THIS_CHAIN  the chain HAS a row and the row is empty, which is a
+                               positive fact somebody recorded: Gridcoin has no
+                               bech32 at all. Say that.
+      CHAIN_NOT_IN_TABLE       no row exists. XRP, ICP and SOL are not bitcoin-family
+                               chains and this table was never given a row for them.
+                               SAY NOTHING ABOUT THEIR ADDRESSES -- this is the case
+                               the report got wrong, and the correct amount to say
+                               about a chain nobody recorded is none.
+      NETWORK_NOT_IN_TABLE     the chain is known, this network name is not. Either
+                               chain_network()'s "unknown (...)" sentinel, or a
+                               network string no chainparams.cpp here was read for.
+                               Say that it is NOT ESTABLISHED, never that there is none.
+
+    THE TWO MIDDLE CASES BOTH ARRIVE AS None FROM payable_bech32_prefix() AND MEAN
+    OPPOSITE THINGS -- "we checked and there is none" against "nobody has checked".
+    That is the whole reason this function exists rather than callers testing for
+    None, and CLAUDE.md rule 2's line is the general form: "I could not find a
+    caller" is not "there is no caller"; say which one you established.
+    """
+    by_network = PAYABLE_BECH32_PREFIX.get(asset)
+    if by_network is None:
+        return CHAIN_NOT_IN_TABLE, None
+    if not by_network:
+        return NO_BECH32_ON_THIS_CHAIN, None
+    prefix = by_network.get(network)
+    if not prefix:
+        return NETWORK_NOT_IN_TABLE, None
+    return PREFIX_KNOWN, prefix

@@ -32,9 +32,14 @@ from pathlib import Path
 
 import pytest
 
+# BECH32_PREFIX_STATUSES is imported FROM ITS OWNER, not re-exported through
+# stack_authority, which does not use the tuple itself -- only the four members.
+from chains.daemon_network import BECH32_PREFIX_STATUSES
+
 import swap_stack
 from swap_terminal import stack_authority
 from swap_terminal.stack_authority import (
+    _PREFIX_NOTES,
     CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
     CHAIN_EXIT_CODES,
@@ -2843,3 +2848,67 @@ def test_rows_with_nothing_reachable_produce_no_section_at_all():
     none did.
     """
     assert chain_network_lines([{"asset": "ICP", "probed": False, "reachable": None, "network": None}]) == []
+
+
+def test_a_chain_the_prefix_table_has_no_ROW_for_gets_no_invented_sentence():
+    """THE DEFECT THE OPERATOR'S FIRST RUN CAUGHT, 2026-10-09, pinned at the renderer.
+
+    It printed, for XRP, "no bech32 on this chain -- its addresses are base58,
+    which cannot name a network" -- a claim about a chain
+    chains/daemon_network.PAYABLE_BECH32_PREFIX has no row for, in the same
+    confident register as the measured rows beside it (rule 17).
+
+    The network name is STILL PRINTED. Saying nothing about the addresses is the
+    fix; dropping the row would throw away the one thing that was measured.
+    """
+    lines = chain_network_lines([_answered("XRP", "testnet (network_id 1)")])
+    blob = "\n".join(lines)
+    assert "testnet (network_id 1)" in blob, "the measured network must survive the fix"
+    assert "base58" not in blob
+    assert "bech32" not in blob
+    assert "NOT ESTABLISHED" not in blob, "nothing was asked about XRP's addresses, so nothing is pending"
+
+
+def test_a_known_chain_on_an_unreadable_network_says_NOT_ESTABLISHED():
+    """Litecoin plainly HAS bech32. What is missing is which network, so say that."""
+    blob = "\n".join(chain_network_lines([_answered("LTC", "some-network-nobody-read")]))
+    assert "NOT ESTABLISHED" in blob
+    assert "no bech32 on this chain" not in blob
+
+
+def test_every_prefix_status_has_a_rendering():
+    """EVERY VERDICT NEEDS AN ENTRY HERE -- the same guard LISTENER_VERDICTS carries.
+
+    The shipped defect was a MISSING CASE, and a chain of `if`s cannot be asserted
+    complete. A map can.
+    """
+    assert set(_PREFIX_NOTES) == set(BECH32_PREFIX_STATUSES)
+
+
+def test_no_line_carries_trailing_whitespace():
+    """CHAIN_NOT_IN_TABLE renders empty, which left the XRP row ending in column padding.
+
+    The operator pastes these blocks back, and trailing whitespace in a pasted
+    block is noise in a diff and in a terminal alike.
+    """
+    rows = [
+        _answered("BTC", "regtest"),
+        _answered("XRP", "testnet (network_id 1)"),
+        _answered("GRC", "test"),
+    ]
+    for line in chain_network_lines(rows):
+        assert line == line.rstrip(), repr(line)
+
+
+def test_the_network_column_widens_for_the_longest_network_in_hand():
+    """It was a hardcoded `:<9` and the XRP adapter answers a 22-character string.
+
+    A constant width is a guess about data this function is HANDED. Asserted by
+    checking the notes all begin at the same column, which is what alignment means.
+    """
+    rows = [_answered("BTC", "regtest"), _answered("XRP", "testnet (network_id 1)")]
+    lines = [line for line in chain_network_lines(rows) if line.startswith("  BTC")]
+    assert len(lines) == 1
+    assert "pays bcrt1" in lines[0]
+    # the BTC note must sit past where XRP's long network name ends
+    assert lines[0].index("pays bcrt1") > len("  XRP   testnet (network_id 1)")

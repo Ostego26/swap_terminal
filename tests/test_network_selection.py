@@ -348,3 +348,102 @@ def test_the_asset_keys_match_the_decoder_exactly():
     above raises KeyError. Both directions are failures, so both are asserted.
     """
     assert set(daemon_network.PAYABLE_BECH32_PREFIX) == set(address_network.BECH32_HRPS_BY_ASSET)
+
+
+# ---------------------------------------------------------------------------
+# FOUR OUTCOMES, NOT TWO, and this section exists because the two-outcome
+# version SHIPPED and the operator's first run of the report caught it, 2026-10-09:
+#
+#   XRP   testnet (network_id 1) no bech32 on this chain -- its addresses are
+#                                base58, which cannot name a network
+#
+# Every clause invented. XRP has no row in PAYABLE_BECH32_PREFIX, so None there
+# means "this table knows nothing about this chain" -- not GRC's "we checked and
+# there is none". payable_bech32_prefix()'s own docstring warned against exactly
+# this collapse, and the renderer one module over did it anyway, which is why the
+# distinction is now a classifier a caller cannot re-derive wrongly.
+# ---------------------------------------------------------------------------
+
+
+def test_a_chain_with_NO_ROW_is_not_told_it_has_no_bech32():
+    """The defect, pinned. XRP, ICP and SOL are not bitcoin-family chains.
+
+    MUTATION CHECKED: collapsing CHAIN_NOT_IN_TABLE into NO_BECH32_ON_THIS_CHAIN
+    -- which is what the shipped code did by testing for a bare None -- fails here.
+    """
+    for asset in ("XRP", "ICP", "SOL"):
+        status, prefix = daemon_network.bech32_prefix_status(asset, "testnet (network_id 1)")
+        assert status == daemon_network.CHAIN_NOT_IN_TABLE, asset
+        assert prefix is None
+        assert status != daemon_network.NO_BECH32_ON_THIS_CHAIN, (
+            f"{asset} has no row at all, which is NOT the same as having no bech32"
+        )
+
+
+def test_GRC_having_NO_BECH32_is_a_recorded_fact_and_reads_as_one():
+    """An EMPTY row is somebody's positive finding; an ABSENT row is nobody's.
+
+    address_network.BECH32_HRPS_BY_ASSET makes the same distinction for the same
+    reason and its comment says so: "GRC is present with an EMPTY table on
+    purpose... an absent key would mean 'nobody has said'."
+    """
+    status, prefix = daemon_network.bech32_prefix_status("GRC", "test")
+    assert status == daemon_network.NO_BECH32_ON_THIS_CHAIN
+    assert prefix is None
+
+
+def test_a_KNOWN_chain_on_an_UNKNOWN_network_is_not_established_rather_than_absent():
+    """The fourth case, and the one that fails most dangerously if collapsed.
+
+    A Litecoin daemon whose network could not be read must not produce "no bech32
+    on this chain". Litecoin plainly has bech32; what is missing is the network.
+    """
+    for network in ("unknown (getinfo: no `testnet` field)", "", "mainnet", "signet"):
+        status, prefix = daemon_network.bech32_prefix_status("LTC", network)
+        assert status == daemon_network.NETWORK_NOT_IN_TABLE, network
+        assert prefix is None
+
+
+def test_the_known_case_still_carries_the_prefix():
+    assert daemon_network.bech32_prefix_status("LTC", "regtest") == (
+        daemon_network.PREFIX_KNOWN,
+        "rltc1",
+    )
+
+
+def test_every_status_the_classifier_can_return_is_in_the_published_tuple():
+    """A caller rendering one line per case can only be tested against a complete list.
+
+    Reached by exercising all four, so a FIFTH case added to the classifier and
+    forgotten in BECH32_PREFIX_STATUSES fails here rather than on a screen.
+    """
+    reached = {
+        daemon_network.bech32_prefix_status(asset, network)[0]
+        for asset, network in [
+            ("LTC", "regtest"),
+            ("GRC", "test"),
+            ("XRP", "test"),
+            ("LTC", "nonsense"),
+        ]
+    }
+    assert reached == set(daemon_network.BECH32_PREFIX_STATUSES)
+    assert len(daemon_network.BECH32_PREFIX_STATUSES) == len(set(daemon_network.BECH32_PREFIX_STATUSES))
+
+
+def test_the_classifier_and_the_accessor_never_disagree():
+    """payable_bech32_prefix() stays as the simple accessor and must not drift from this.
+
+    Two functions over one table is rule 8's shape, and the justification is that
+    one answers a question the other cannot. That is only true while they agree
+    about the case they BOTH cover.
+    """
+    cases = [
+        (asset, network)
+        for asset in ("BTC", "LTC", "GRC", "XRP")
+        for network in ("main", "test", "testnet", "regtest", "signet", "", "unknown (x)")
+    ]
+    for asset, network in cases:
+        status, prefix = daemon_network.bech32_prefix_status(asset, network)
+        accessor = daemon_network.payable_bech32_prefix(asset, network)
+        assert prefix == accessor, f"{asset}/{network}: {prefix!r} vs {accessor!r}"
+        assert (status == daemon_network.PREFIX_KNOWN) == (accessor is not None)

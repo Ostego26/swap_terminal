@@ -69,7 +69,13 @@ from pathlib import Path
 # names and which address prefix each one pays, and this file only renders them.
 # SAFE FOR THIS FILE'S STDLIB-ONLY CONTRACT -- daemon_network.py imports nothing
 # but __future__, so swap_stack.py on the host still needs no dependency.
-from chains.daemon_network import payable_bech32_prefix
+from chains.daemon_network import (
+    CHAIN_NOT_IN_TABLE,
+    NETWORK_NOT_IN_TABLE,
+    NO_BECH32_ON_THIS_CHAIN,
+    PREFIX_KNOWN,
+    bech32_prefix_status,
+)
 
 #: The ports this terminal's HTTP surfaces are reachable on, and what each means.
 #:
@@ -1330,6 +1336,43 @@ def probe_failure_detail(detail: object, end: int = _DETAIL_END) -> str:
     return f"{text[:end]} [+{dropped} chars] {text[-end:]}"
 
 
+#: WHAT TO SAY ABOUT EACH chains/daemon_network.bech32_prefix_status() OUTCOME.
+#:
+#: A MAP RATHER THAN A CHAIN OF `if`s, so tests/test_stack_authority.py can assert it
+#: covers BECH32_PREFIX_STATUSES exactly -- the same guard swap_stack.py uses for
+#: LISTENER_VERDICTS and DOWN_VERDICTS, where the comment at the dispatch site reads
+#: "EVERY VERDICT IN stack_authority.LISTENER_VERDICTS NEEDS AN ENTRY HERE."
+#:
+#: THE THIRD AND FOURTH ENTRIES EXIST BECAUSE THEIR ABSENCE SHIPPED, 2026-10-09. This
+#: renderer branched on a bare None and printed "no bech32 on this chain -- its
+#: addresses are base58" for XRP, a chain daemon_network's table has no row for. The
+#: sentence was invented and it read exactly as confidently as the measured rows above
+#: it. CHAIN_NOT_IN_TABLE now renders as the empty string on purpose: the correct
+#: amount to say about a chain nobody recorded is nothing, and the network name on the
+#: same line is still worth printing on its own.
+_PREFIX_NOTES = {
+    PREFIX_KNOWN: "pays {prefix}... addresses, and only those",
+    NO_BECH32_ON_THIS_CHAIN: "no bech32 on this chain -- its addresses are base58, which cannot name a network",
+    CHAIN_NOT_IN_TABLE: "",
+    NETWORK_NOT_IN_TABLE: (
+        "which addresses this network pays is NOT ESTABLISHED -- no chainparams was read for "
+        "that network name"
+    ),
+}
+
+
+def _prefix_note(asset: str, network: str) -> str:
+    """One clause about which addresses this daemon can pay. May be empty, on purpose.
+
+    Holds NO decision: bech32_prefix_status() decides which of four cases this is
+    and this looks the sentence up (rule 10). The KeyError on an unmapped status is
+    deliberate and matches chain_exit_code()'s: a verdict nobody wrote a rendering
+    for must fail loudly in a test, not print blank on an operator's screen.
+    """
+    status, prefix = bech32_prefix_status(asset, network)
+    return _PREFIX_NOTES[status].format(prefix=prefix)
+
+
 def chain_network_lines(rows: object) -> list[str]:
     """Name the network each answered daemon reports, and the addresses it can pay.
 
@@ -1366,7 +1409,8 @@ def chain_network_lines(rows: object) -> list[str]:
     """
     if not isinstance(rows, list):
         return []
-    lines = []
+    named = []
+    unnamed = []
     mainnet_seen = []
     for row in rows:
         if not isinstance(row, Mapping) or row.get("reachable") is not True:
@@ -1374,24 +1418,30 @@ def chain_network_lines(rows: object) -> list[str]:
         asset = str(row.get("asset") or "?")
         network = row.get("network")
         if not network:
-            # ANSWERED BUT WOULD NOT NAME ITS NETWORK is a third outcome and it
-            # gets its own line (rule 14: "did nothing" must not look like "did
-            # work"). probe_chain() puts None here for exactly this case and
-            # puts its reason in `detail`, which the refused branch prints.
-            lines.append(f"  {asset:<5} would not name its network -- so NOTHING is established about")
-            lines.append(f"  {'':<5} which chain it is on, reachable or not")
+            # ANSWERED BUT WOULD NOT NAME ITS NETWORK is its own outcome and gets
+            # its own line (rule 14: "did nothing" must not look like "did work").
+            # probe_chain() puts None here for exactly this case and puts its
+            # reason in `detail`, which the refused branch prints.
+            unnamed.append(f"  {asset:<5} would not name its network -- so NOTHING is established")
+            unnamed.append(f"  {'':<5} about which chain it is on, reachable or not")
             continue
-        network = str(network)
-        prefix = payable_bech32_prefix(asset, network)
-        note = (
-            f"pays {prefix}... addresses, and only those"
-            if prefix
-            else "no bech32 on this chain -- its addresses are base58, which cannot "
-            "name a network"
-        )
-        lines.append(f"  {asset:<5} {network:<9} {note}")
-        if network == "main":
+        named.append((asset, str(network)))
+        if str(network) == "main":
             mainnet_seen.append(asset)
+    # COLUMN WIDTH FROM THE ROWS IN HAND, not a constant. It was `:<9` when first
+    # written and the operator's first run put `testnet (network_id 1)` in it --
+    # the XRP adapter's own network string, 22 characters -- which pushed every
+    # note on that line out of alignment. A hardcoded width is a guess about data
+    # this function is handed, and rule 14 is about output somebody has to read.
+    width = max((len(network) for _asset, network in named), default=0)
+    # rstrip BECAUSE A NOTE MAY BE EMPTY. CHAIN_NOT_IN_TABLE renders as "" on
+    # purpose, and without this the XRP row ends in the padding of a column whose
+    # content is absent -- trailing whitespace in a block the operator pastes back.
+    lines = [
+        f"  {asset:<5} {network:<{width}}  {_prefix_note(asset, network)}".rstrip()
+        for asset, network in named
+    ]
+    lines.extend(unnamed)
     if not lines:
         return []
     header = [
