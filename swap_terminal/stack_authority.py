@@ -1052,6 +1052,116 @@ def replica_state_verdict(
     )
 
 
+# =============================================================================
+# CAN THE CONTAINER REACH THE CHAIN DAEMONS?
+#
+# `up` asked whether the replica answers and whether the page serves, and never
+# asked this. On 2026-10-08 that cost the operator a day:
+#
+#   - BTC, GRC and LTC balances sat 28357.7µfn (34301.5s -- 9.5 hours) stale on
+#     /admin while ICP and SOL were 92.7µfn (112.2s) fresh. Same worker, same
+#     60s loop. Nothing shouted.
+#   - every Confirm froze, because the three unreachable daemons were DROPPING
+#     packets rather than refusing them, so each of create_swap()'s two or three
+#     RPCs waited out its full 30s timeout and gunicorn killed the worker at 60.
+#   - `up` printed SERVING and exited 0 through all of it.
+#
+# THE CAUSE WAS NOT IN THIS REPOSITORY and that is exactly why `up` has to ask.
+# The daemons run on the host; the container reaches them as
+# host.docker.internal, which resolved fine. ufw's default deny dropped the
+# packets, and underneath that bitcoind and litecoind were bound to 127.0.0.1
+# only. None of it is visible from the host -- `curl 127.0.0.1:18443` from the
+# operator's own shell works perfectly while the container cannot get through.
+# The question is not "are the daemons up", it is "can THIS CONTAINER reach
+# them", and only something inside the container can answer it.
+#
+# SO IT ASKS THE RUNNING APP. /api/admin/chains is served by the web container
+# and probes from inside it, which is the only vantage point that matters. It
+# became affordable to call on every `up` in e03a006, which bounded it: the same
+# endpoint returned HTTP 500 after 60.18s with an empty body before that, and
+# 200 in 0.19s after.
+# =============================================================================
+
+#: A chain row whose `reachable` is this means the probe was never run for it --
+#: no adapter, no read-only probe implemented, or the budget ran out. It is NOT
+#: a failure and must never be counted as one (rule 14: a false alarm is what
+#: makes a real one get ignored).
+_NOT_ASKED = None
+
+
+def chain_reachability_verdict(rows: object, trouble: str = "") -> tuple[str, str, list[str]]:
+    """Can the container reach its chain daemons? Pure; takes /api/admin/chains' body.
+
+    Returns `(status, headline, detail)`.
+
+      reachable     every chain that CAN be probed answered.
+      unreachable   at least one did not. The loud one, and it names which.
+      none_asked    no chain in the list has a probe -- nothing was established.
+      unknown       the endpoint could not be read. NEVER reads as reachable.
+
+    `rows` is whatever json.loads() produced, including None or a dict, because
+    this is handed the result of parsing a response that may be an error page.
+    Anything that is not a list of row-shaped dicts is `unknown` with the reason,
+    rather than an exception out of a report (rule 12: a broad catch is only
+    legitimate when the caller can tell a failure from a real answer -- here the
+    status is the answer and `unknown` is not `reachable`).
+
+    A chain with reachable=None is NOT COUNTED AS A FAILURE. ICP and SOL have no
+    read-only probe in this application by design, and reporting them alongside a
+    daemon that is actually refusing connections would put two unrelated things
+    under one alarm -- which is how an operator learns to skim past it.
+    """
+    if trouble:
+        return "unknown", f"COULD NOT ASK: {trouble}", [
+            "so this does NOT say the chains are reachable -- it says nobody asked.",
+            "the app serves /api/admin/chains and probes from INSIDE the container, which is",
+            "the only vantage point that matters: the daemons answer the host just fine.",
+        ]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) and "asset" in row for row in rows):
+        return "unknown", "COULD NOT ASK: /api/admin/chains did not return a list of chain rows", [
+            f"got {type(rows).__name__}, which is what an error page parses to. Open the URL by",
+            "hand; this says nothing about reachability either way.",
+        ]
+
+    answered = [row["asset"] for row in rows if row.get("reachable") is True]
+    refused = [row for row in rows if row.get("reachable") is False]
+    not_asked = [row["asset"] for row in rows if row.get("reachable") is _NOT_ASKED]
+
+    if not answered and not refused:
+        return "none_asked", "no chain in this deployment has a read-only probe", [
+            f"{', '.join(not_asked) or '(none)'} -- nothing was established about reachability.",
+        ]
+    if not refused:
+        return "reachable", f"all {len(answered)} probeable chain(s) answered: {', '.join(answered)}", [
+            f"not asked: {', '.join(not_asked)} -- no read-only probe for those adapters, which is"
+            if not_asked else "every configured chain with a probe was asked.",
+            *(["by design and not a fault."] if not_asked else []),
+        ]
+
+    detail = [
+        f"answered: {', '.join(answered) or '(none)'}",
+        "",
+        "WHAT THIS COSTS, and none of it reports as an error anywhere else:",
+        "  - deposits on these chains are NOT being watched, so a customer's coin arrives and",
+        "    nothing credits it. /admin's hot-wallet rows go STALE rather than shouting.",
+        "  - every pair paying out in one of them refuses at create_swap, AFTER the quote.",
+        "  - if the daemon DROPS rather than refuses, each RPC waits out its 30s timeout and",
+        "    two or three of them in one Confirm exceeds gunicorn's 60s -- the worker is",
+        "    killed and the page hangs. Measured on the operator's host 2026-10-08.",
+        "",
+        "the daemons run on the HOST and this was asked from INSIDE the container, so",
+        "`curl` from your own shell proving they are up does not contradict any of it.",
+    ]
+    return "unreachable", (
+        f"*** {len(refused)} CHAIN(S) THE CONTAINER CANNOT REACH: "
+        f"{', '.join(row['asset'] for row in refused)} ***"
+    ), [
+        *(f"  {row['asset']}: {str(row.get('detail') or '(no reason given)')[:150]}" for row in refused),
+        "",
+        *detail,
+    ]
+
+
 def canister_lookup_names() -> tuple[str, ...]:
     """Every name `dfx canister id` is asked for, in the order asked. DERIVED, not listed.
 

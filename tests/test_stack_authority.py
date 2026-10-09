@@ -48,6 +48,7 @@ from swap_terminal.stack_authority import (
     canister_lookup_names,
     canister_lookup_verdict,
     canister_surface_lines,
+    chain_reachability_verdict,
     code_version_verdict,
     container_id,
     container_label,
@@ -1931,4 +1932,118 @@ def test_the_preflight_inspects_the_stack_up_will_act_on(monkeypatch, capsys):
     )
     assert args[:2] == ("ps", "-q"), (
         f"the container is resolved by asking compose, not by guessing a name: {args}"
+    )
+
+
+# =============================================================================
+# CAN THE CONTAINER REACH THE CHAIN DAEMONS?
+#
+# `up` asked whether the replica answers and whether the page serves, and never
+# asked this. On 2026-10-08 that cost the operator a day: BTC, GRC and LTC
+# balances sat 34,301 seconds stale on /admin while ICP and SOL were 112 seconds
+# fresh, every Confirm froze, and `up` printed SERVING and exited 0 through all
+# of it. The cause was ufw dropping packets on the docker bridge plus two
+# daemons bound loopback-only -- none of which is visible from the host, where
+# `curl 127.0.0.1:18443` works perfectly.
+# =============================================================================
+
+
+def _chain_rows(**reachable) -> list[dict]:
+    """Rows in /api/admin/chains' shape. `reachable=` per asset: True, False or None."""
+    return [
+        {"asset": asset, "probed": state is not None, "reachable": state,
+         "network": "regtest" if state else None,
+         "detail": "answered" if state else f"did not answer: stub for {asset}"}
+        for asset, state in reachable.items()
+    ]
+
+
+def test_a_chain_with_no_probe_is_not_counted_as_a_failure():
+    """ICP and SOL have no read-only probe BY DESIGN, and an alarm that includes
+    them is the false alarm that teaches an operator to skim past the real one."""
+    status, headline, detail = chain_reachability_verdict(
+        _chain_rows(BTC=True, XRP=True, ICP=None, SOL=None)
+    )
+    assert status == "reachable", f"{status}: {headline}"
+    said = " ".join([headline, *detail])
+    assert "ICP, SOL" in said and "by design" in said, (
+        f"the unprobed chains must be named AND excused, or the operator reads the count as "
+        f"a gap: {said}"
+    )
+
+
+def test_one_unreachable_chain_is_named_and_shouted():
+    status, headline, detail = chain_reachability_verdict(
+        _chain_rows(BTC=False, GRC=False, LTC=False, XRP=True, ICP=None, SOL=None)
+    )
+    assert status == "unreachable"
+    # STARTSWITH, NOT `in`. The marker is written at BOTH ends of the headline, so
+    # `"***" in headline` stayed true when a mutation stripped the leading one --
+    # the same weak-assertion shape that let a Candid-link mutation survive earlier
+    # today. The first characters are what an operator's eye lands on.
+    assert headline.startswith("***"), f"the one verdict that must not be skimmed: {headline}"
+    assert "CANNOT REACH" in headline, (
+        f"and it must say so in the words an operator scans for, not in prose: {headline}"
+    )
+    for asset in ("BTC", "GRC", "LTC"):
+        assert asset in headline, f"{asset} is unreachable and not in the headline: {headline}"
+    assert "XRP" not in headline, f"a chain that ANSWERED is named as unreachable: {headline}"
+    said = " ".join(detail)
+    assert "answered: XRP" in said, f"the working chains must be named too: {said}"
+    for owed in ("NOT being watched", "refuses at create_swap", "60s"):
+        assert owed in said, (
+            f"the operator is told a chain is unreachable without being told {owed!r} -- which "
+            f"is the part that makes it worth stopping for: {said}"
+        )
+    assert "asked from INSIDE the container" in said, (
+        "an operator whose own curl works will dismiss this unless told where it was asked from"
+    )
+
+
+def test_an_endpoint_that_could_not_be_read_never_reads_as_reachable():
+    """FAIL CLOSED. The third time in this file, and here a false all-clear means
+    the operator stops looking while deposits go uncredited."""
+    for rows, trouble in (
+        # A VALID BODY WITH A TROUBLE REASON. This case is the one that isolates
+        # the `trouble` branch: every other input here is ALSO caught by the
+        # shape check below it, so a mutation disabling `if trouble:` survived
+        # until this line existed -- the verdict was right for the wrong reason.
+        (_chain_rows(BTC=True, XRP=True), "the page is not serving, so its probe cannot be asked"),
+        (None, "connection refused"),
+        ({"error": "boom"}, ""),
+        ("<html>500</html>", ""),
+        ([{"not": "a chain row"}], ""),
+    ):
+        status, headline, detail = chain_reachability_verdict(rows, trouble)
+        assert status == "unknown", f"{rows!r}/{trouble!r} classified as {status}"
+        said = " ".join([headline, *detail]).lower()
+        assert "nobody asked" in said or "says nothing about reachability" in said, said
+        assert "all " not in said, f"an unreadable answer claimed a count: {said}"
+
+
+def test_the_empty_case_says_nothing_was_established():
+    """Rule 14: "(none) is a result". No probeable chain is not an all-clear."""
+    status, headline, _detail = chain_reachability_verdict(_chain_rows(ICP=None, SOL=None))
+    assert status == "none_asked", f"{status}: {headline}"
+    assert status != "reachable", "zero chains probed must never report as all reachable"
+
+
+def test_up_actually_asks_before_it_prints_SERVING():
+    """The wiring, which the pure tests above cannot reach.
+
+    SOURCE-BASED, and justified the same way the step-numbering test is: cmd_up
+    needs docker to run, and the claim under test is "this function calls that
+    one", which has no behavior to exercise without a stack. A mutation deleting
+    the call from cmd_up left every verdict test green, because a verdict nobody
+    invokes is indistinguishable from one that always agrees.
+    """
+    source = inspect.getsource(swap_stack.cmd_up)
+    assert "_say_chain_reachability(" in source, (
+        "cmd_up no longer asks whether the container can reach the chain daemons. That check "
+        "exists because `up` printed SERVING and exit 0 for 9.5 hours while three chains were "
+        "unreachable and every Confirm froze"
+    )
+    assert "chain daemons" in source, (
+        "the step is called but no longer announces itself, so an operator watching the probe "
+        "cannot tell what it is waiting on (rule 14)"
     )

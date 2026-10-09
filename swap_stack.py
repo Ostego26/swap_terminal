@@ -62,6 +62,7 @@ on 5101 is precisely what this project's own orphans did to it.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     GitReading,
     canister_lookup_names,
     canister_lookup_verdict,
+    chain_reachability_verdict,
     code_version_verdict,
     container_id,
     container_label,
@@ -1183,6 +1185,91 @@ def _say_replica_state(files: tuple[str, ...]) -> None:
         say(f"                    {line}")
 
 
+#: How long `up` waits for /api/admin/chains. Seconds; it is an argument to urlopen.
+#:
+#: GENEROUS ON PURPOSE, and it is a ceiling rather than an expectation. The
+#: endpoint bounds its own work at 45s (admin_view.CHAIN_PROBE_BUDGET_SECONDS) and
+#: answers in 0.19s when the daemons refuse fast, so this only has to be above the
+#: endpoint's own budget -- otherwise `up` would report "could not ask" for a probe
+#: that was about to answer, which is the false alarm that teaches an operator to
+#: skip the line.
+_CHAIN_PROBE_FETCH_TIMEOUT_SECONDS = 50.0
+
+
+def chain_reachability(serving_port: int) -> tuple[str, str, list[str]]:
+    """Ask the RUNNING APP which chains it can reach. Changes nothing.
+
+    FROM INSIDE THE CONTAINER, WHICH IS THE ONLY VANTAGE POINT THAT ANSWERS THE
+    QUESTION. `up` runs on the host, where the daemons are on 127.0.0.1 and
+    perfectly reachable; the container sees them through host.docker.internal
+    across a bridge that a firewall can drop and a loopback-only bind can refuse.
+    Probing from here would report healthy while every swap froze -- which is
+    exactly the state the operator was in on 2026-10-08.
+
+    So this fetches the app's own /api/admin/chains, which probes from where it
+    matters. Read-only: the endpoint makes one or two read RPCs per chain and
+    signs nothing.
+    """
+    if not serving_port:
+        return chain_reachability_verdict(None, "the page is not serving, so its probe cannot be asked")
+    # The scheme is this file's own literal and the host is 127.0.0.1; the only
+    # variable is a port this file probed. No `noqa: S310` here: ruff does not
+    # raise it for an f-string whose literal prefix IS the scheme, and RUF100
+    # caught the suppression I added anyway -- a noqa for a finding that never
+    # fires is a claim nobody checked (rule 19).
+    url = f"http://127.0.0.1:{serving_port}/api/admin/chains"
+    try:
+        with urllib.request.urlopen(url, timeout=_CHAIN_PROBE_FETCH_TIMEOUT_SECONDS) as answer:
+            body = answer.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        # NAMED SEPARATELY because this is the shape the defect had: HTTP 500 with
+        # an empty body after 60.18s is gunicorn killing the worker, not a chain
+        # answering, and an operator shown "could not ask" would go looking at the
+        # chains instead of at the timeout.
+        return chain_reachability_verdict(None, f"{url} answered HTTP {error.code} -- if that is 500 "
+                                                f"with an empty body, the worker was killed mid-probe")
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return chain_reachability_verdict(None, f"{url}: {type(error).__name__}: {error}")
+    try:
+        rows = json.loads(body)
+    except json.JSONDecodeError as error:
+        return chain_reachability_verdict(None, f"{url} returned something that is not JSON: {error}")
+    return chain_reachability_verdict(rows)
+
+
+def _say_chain_reachability(serving_port: int) -> None:
+    """Print it. Announced before the wait, because the wait can be real (rule 14)."""
+    say("  chain daemons     can the CONTAINER reach them? asked of the app, not of this host --")
+    say("                    the daemons are on 127.0.0.1 here and across a bridge from there")
+    status, headline, detail = chain_reachability(serving_port)
+    say(f"  {('REACHABLE' if status == 'reachable' else status.upper()):<16}  {headline}")
+    for line in detail:
+        say(f"                    {line}" if line else "")
+
+
+def _say_page_serving() -> int:
+    """Probe the web ports and say which of two things happened. Returns the port, or 0.
+
+    EXTRACTED FROM cmd_up 2026-10-09, when adding the chain-reachability step put
+    it at PLR0915 52 statements > 50. Rule 12's answer to that complaint is to
+    extract rather than raise the ceiling, and this is the right thing to take
+    out: it holds no decision -- probe_serving_port() makes the one decision and
+    this only chooses which paragraph to print for it.
+    """
+    port, detail = probe_serving_port()
+    if port:
+        say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
+        say(f"                    the swap flow is at http://127.0.0.1:{port}/")
+        return port
+    say(f"  NOT SERVING       {detail}")
+    say("                    The containers may be up and the page is not answering, which is a")
+    say("                    DIFFERENT failure from a container that never started -- the container")
+    say("                    step above says which. `docker compose logs --tail=40 web` is where")
+    say("                    gunicorn says why; an ImportError in a route is the usual cause")
+    say("                    after a pull.")
+    return 0
+
+
 def _say_up_banner() -> tuple[str, str]:
     say("swap_stack: UP")
     code = _say_code_version()
@@ -1304,21 +1391,12 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # same way. I had named this gap one round earlier and shipped another `up`
     # without it, which is the part this comment exists to record.
     say("  6. is the PAGE serving? (the thing a customer opens)")
-    port, detail = probe_serving_port()
-    if port:
-        say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
-        say(f"                    the swap flow is at http://127.0.0.1:{port}/")
-    else:
-        say(f"  NOT SERVING       {detail}")
-        say("                    The containers may be up and the page is not answering, which is a")
-        say("                    DIFFERENT failure from a container that never started -- step 2 above")
-        say("                    says which. `docker compose logs --tail=40 web` is where gunicorn says")
-        say("                    why; an ImportError in a route is the usual cause after a pull.")
+    port = _say_page_serving()
     say("")
 
-    # STEP 6, AND THE OPERATOR ASKED FOR IT IN THESE WORDS ON 2026-10-08: "so we
-    # have 3 canisters now. 3 different hyperlinks. where's the main landing page
-    # for the atm screen?" Step 5 above answers "is the page up" and gives ONE url;
+    # THE OPERATOR ASKED FOR IT IN THESE WORDS ON 2026-10-08: "so we have 3
+    # canisters now. 3 different hyperlinks. where's the main landing page for the
+    # atm screen?" The page check above answers "is the page up" and gives ONE url;
     # it does not say what that url serves, that `/` is now the ATM landing page
     # (it moved from /atm on 2026-10-07), that /admin exists, or which of the three
     # canisters has a page at all. Four-plus urls were being held in the operator's
@@ -1327,7 +1405,11 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # IT RUNS EVEN WHEN THE PAGE IS DEAD, deliberately. The map is MORE useful then
     # -- it is the list of what would be reachable, and it is printed as paths
     # rather than links so it cannot be read as a claim that anything serves.
-    say("  7. WHERE EVERYTHING IS")
+    say("  7. can the container reach the chain daemons?")
+    _say_chain_reachability(port)
+    say("")
+
+    say("  8. WHERE EVERYTHING IS")
     _say_surface_map(files, port)
     say("")
     _say_icp_note()
