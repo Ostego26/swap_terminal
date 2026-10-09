@@ -100,9 +100,11 @@ import os
 import secrets
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
@@ -134,7 +136,7 @@ from modules.htlc_timelock import (
     SECONDS_PER_BLOCK,
     contract_locktime,
 )
-from regtest.keys import generate_key
+from regtest.keys import RegtestKey, generate_key
 from step_console import Console
 
 # THE DAEMON'S OWN CODE for "no wallet", matched as a string because these clients
@@ -309,6 +311,75 @@ class PlannedLeg:
         return self.blocks_remaining * SECONDS_PER_BLOCK[self.leg.asset]
 
 
+class ScriptChainClient(Protocol):
+    """WHAT THIS DRIVER ASKS OF A CHAIN CLIENT, written down so a checker can hold it.
+
+    A Protocol and not a base class, because BTCClient, LTCClient and GRCClient share no
+    ancestor -- they are three independent classes in three modules that happen to agree on
+    these three method signatures, and `script_client_classes()` is the only place that
+    knows all three. Declaring a common base would be a refactor across three files on the
+    fund path for no behavioral gain, which is the trade rule 10 refuses for layout and rule
+    12 refuses for a tree-wide sweep. A Protocol states the same contract from the consumer's
+    side, which is where the contract is actually depended on.
+
+    IT WAS `object`, AND THE COST WAS SPECIFIC rather than theoretical. `FundedLeg.client`
+    was annotated `object`, so NOTHING checked `client.redeem_contract(...)` or
+    `client.refund_contract(...)` -- not the attribute, and not one argument. The comment
+    above claim_leg()'s call still records what that let through: on 2026-09-27 a `secret`
+    was passed as `.hex()` instead of bytes, reached `bytes([length]) + data`, and died with
+    "can't concat str to bytes" WITH BOTH LEGS ALREADY FUNDED. That comment ends "The types
+    are checked against all three signatures now (atomic_{btc,ltc,grc}_client.redeem_contract):
+    str, int, bytes, bytes, str, str" -- which was true of a person reading them once. It is
+    now true of every run of `ruff`/pyright over this file, which is the difference between a
+    claim and a check (rule 17). pyright 1.1.414 reported both accesses on 2026-10-09.
+
+    THE TYPES ARE COPIED FROM THE CLIENTS, NOT INVENTED HERE, and all three agree exactly.
+    `rpc_call` is reached indirectly, through client_caller() in FundedLeg.call(): it is
+    declared because it is required at RUNTIME, and a Protocol listing only what this file
+    spells out would be a smaller promise than the code needs. Its `Any` is the real return
+    of a JSON-RPC call and is what LTCClient.rpc_call already declares -- not a widening to
+    stop something being checked.
+
+    WHY CALLABLE ATTRIBUTES RATHER THAN `def` STUBS, which is the shape this was first
+    written in. redeem_contract takes SEVEN parameters and refund_contract six keyword-only
+    ones, so each stub tripped PLR0913/PLR0917 -- the same findings the three real clients
+    carry a justified `noqa` for, because the count is the spend's own inputs and rule 12
+    refuses to reorder a fund-path signature to satisfy a ceiling. Repeating those
+    suppressions here to describe a signature would be adding a suppression to make a check
+    pass, which rule 19 forbids outright, so the contract is stated as types instead of as
+    definitions. No lint fires on a type.
+
+    WHAT THAT COSTS, AND IT IS THE ONE THING THIS DOES NOT CHECK. `Callable` can express
+    positional parameters and cannot express keyword ones, so redeem_contract's six are
+    checked at the call site and refund_contract's six are not -- it is held only as
+    "callable, returns str". The positional one is the half with the recorded live failure,
+    so that is the right way round if only one can be had, but a wrong type in a
+    refund_contract keyword would still pass this file. Closing it needs the `def` stubs and
+    the two suppressions above, which is the operator's call rather than mine.
+
+    WHAT IS ALSO NOT VERIFIED, said plainly rather than implied: nothing asserts the three
+    classes SATISFY this. They arrive through `script_client_classes() -> dict[str, type]`,
+    so pyright sees an unparameterized `type` and checks nothing on the way IN. Annotating
+    that function `-> dict[str, type[ScriptChainClient]]` would close the loop and make a
+    client that drifted from these types an error at its own definition; it lives in
+    swap_terminal/modules/htlc_assets.py, which this change may not touch.
+    """
+
+    #: The generic JSON-RPC escape hatch. Not called by name in this file -- client_caller()
+    #: in FundedLeg.call() reaches it -- but required of every client all the same.
+    rpc_call: Callable[..., Any]
+
+    #: Spend the HASHLOCK branch: (contract_txid, contract_vout, redeem_script, secret,
+    #: participant_privkey, destination_address) -> txid. THE FOURTH IS THE PREIMAGE AND IT
+    #: IS BYTES; this is the one position that has already cost a live run.
+    redeem_contract: Callable[[str, int, bytes, bytes, str, str], str]
+
+    #: Spend the TIMELOCK branch -> txid. Keyword-only in all three clients (contract_txid,
+    #: contract_vout, redeem_script, locktime, refund_privkey, refund_address), which is why
+    #: the arguments are not typed here: see the docstring above.
+    refund_contract: Callable[..., str]
+
+
 @dataclass(frozen=True)
 class FundedLeg:
     """A leg that exists on a chain: what it is, what funding it produced, and the client
@@ -324,7 +395,7 @@ class FundedLeg:
 
     leg: Leg
     funded: dict
-    client: object
+    client: ScriptChainClient
 
     @property
     def asset(self) -> str:
@@ -1029,7 +1100,7 @@ def refund_leg(step: Step, funded_leg: FundedLeg, party: Party) -> str:
     return str(txid)
 
 
-def mint_parties(step: Step, assets: tuple[str, str]) -> dict[tuple[str, str], object]:
+def mint_parties(step: Step, assets: tuple[str, str]) -> dict[tuple[str, str], RegtestKey]:
     """Four throwaway keypairs -- one per (chain, role) -- generated IN THIS PROCESS.
 
     NOT `dumpprivkey`, AND THAT IS NOT A STYLE CHOICE. The obvious route is getnewaddress
@@ -1061,7 +1132,13 @@ def mint_parties(step: Step, assets: tuple[str, str]) -> dict[tuple[str, str], o
         (chain B, participant)  funds leg B; its address is leg B's REFUND branch
     """
     step.announce("mint four throwaway keypairs, in this process, never written to disk")
-    parties: dict[tuple[str, str], object] = {}
+    # RegtestKey, not `object`, which is what this said until 2026-10-09. generate_key()
+    # has declared `-> RegtestKey` all along, so the annotation was throwing away a type
+    # that was already there -- and the comprehension two lines below reads `.address` off
+    # every value, which is the access pyright 1.1.414 reported. An `object` here also hid
+    # the thing the next line is FOR: the four addresses must be distinct, and `.address`
+    # is the field that decides it.
+    parties: dict[tuple[str, str], RegtestKey] = {}
     for asset in assets:
         for role in (ROLE_INITIATOR, ROLE_PARTICIPANT):
             key = generate_key()

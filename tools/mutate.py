@@ -50,15 +50,35 @@ from pathlib import Path
 # THE ABSOLUTE PATH TO git, RESOLVED ONCE. ruff's S607 objects to "git" as a bare name and it is
 # right to: a partial path is resolved against PATH at call time, so whatever `git` is first on
 # PATH runs. Answered by resolving it rather than by a noqa (rule 19: a suppression is not a
-# fix), and a missing git is a refusal here rather than a confusing failure later.
+# fix), and a missing git is a refusal rather than a confusing failure later.
+#
+# WHERE THAT REFUSAL IS, because this line used to say "here" and it is not here. `shutil.which`
+# returns None when git is absent; the refusal is the FIRST thing main() does, ahead of argument
+# parsing, because a missing git makes every other complaint beside the point. It is deliberately
+# not at this line: a module-level `sys.exit` is an import-time side effect, and this module's own
+# header promises it contacts and changes nothing on import.
+#
+# AND THAT IS WHY THE RESOLVED PATH IS PASSED AS AN ARGUMENT rather than read back out of this
+# global by each helper. `uncommitted()` used to read `GIT` directly, so its `[GIT, "status", ...]`
+# was a list of `str | None`: the refusal was real, but it was reachable only by reading main(),
+# and a SECOND caller of `uncommitted()` would have inherited no refusal at all -- it would have
+# handed None to subprocess and failed with git's own argument error, which is the "confusing
+# failure later" this comment claims to have prevented. pyright 1.1.414 flagged exactly that on
+# 2026-10-09. Threading it through makes main()'s refusal the only way to obtain a `str`, so the
+# guarantee holds by construction for every caller instead of by inspection of one -- which is
+# the same argument as the rest of this file: a property that has to be remembered is not a fix.
 GIT = shutil.which("git")
 
 # argv: <file> <old> <new> [pytest args...]
 MINIMUM_ARGUMENTS = 3
 
 
-def uncommitted(path: Path) -> str | None:
+def uncommitted(git: str, path: Path) -> str | None:
     """The porcelain status for `path`, or None when it matches HEAD.
+
+    `git` is the resolved absolute path to the binary, taken as an argument rather than read out
+    of the module global so that main()'s "no git on PATH" refusal is the only way to call this
+    at all -- see the comment on GIT. A `str` here is a thing the caller had to have refused for.
 
     `git status --porcelain -- <path>` prints nothing for a clean tracked file. An UNTRACKED
     file prints `??`, and that is refused too and deliberately: `git checkout --` cannot restore
@@ -66,7 +86,7 @@ def uncommitted(path: Path) -> str | None:
     accident in the opposite direction, and a far quieter one.
     """
     result = subprocess.run(  # noqa: S603 -- checked: every element is either the resolved absolute path to git or a fixed literal, except `path`, which is passed after `--` so git reads it as a pathspec and never as an option. No shell is involved (shell=False is the default and is what makes the list form safe), so nothing here is interpretable as a command.
-        [GIT, "status", "--porcelain", "--", str(path)],
+        [git, "status", "--porcelain", "--", str(path)],
         capture_output=True, text=True, check=True,
     )
     return result.stdout.strip() or None
@@ -118,6 +138,10 @@ def main(argv: list[str]) -> int:
         print("REFUSING: no `git` on PATH. This tool's only safety property is that it restores "
               "from HEAD, and it cannot do that without git.")
         return 2
+    # Bound to a local once the refusal above has passed, and every git call below uses THIS and
+    # never the global. A narrowed global is a type checker's courtesy; a local is a fact, and
+    # this is the one line that turns the refusal into the reason the path is a `str`.
+    git = GIT
     if len(argv) < MINIMUM_ARGUMENTS:
         print(__doc__)
         return 2
@@ -128,7 +152,7 @@ def main(argv: list[str]) -> int:
         print(f"REFUSING: {target} is not a file")
         return 2
 
-    dirty = uncommitted(target)
+    dirty = uncommitted(git, target)
     if dirty is not None:
         print(f"REFUSING TO MUTATE {target}: it has uncommitted changes.\n")
         print(f"    git status --porcelain -- {target}\n    {dirty}\n")
@@ -161,9 +185,9 @@ def main(argv: list[str]) -> int:
         # ALWAYS, including on KeyboardInterrupt: a mutant left in the tree is worse than the
         # mutation never having run, because it looks like working code.
         subprocess.run(  # noqa: S603 -- checked: same as the status call above -- resolved git path, fixed literals, and `target` after `--` so it is a pathspec. check=True on purpose: if the RESTORE fails, this must be loud rather than leaving a mutant in the tree.
-            [GIT, "checkout", "--", str(target)], check=True,
+            [git, "checkout", "--", str(target)], check=True,
         )
-        still_dirty = uncommitted(target)
+        still_dirty = uncommitted(git, target)
         print(f"restored {target}" if still_dirty is None
               else f"WARNING: {target} is still dirty after restore: {still_dirty}")
 

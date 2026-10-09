@@ -247,6 +247,7 @@ import hashlib
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
@@ -258,6 +259,7 @@ if str(APP_ROOT) not in sys.path:
     # and xrp_htlc_escrow.py both document at their own copy of these lines.
     sys.path.insert(0, str(APP_ROOT))
 
+from chains.base import RPCAdapter  # noqa: E402 -- the sys.path line above must run first
 from chains.daemon_conf import conf_fallback_settings  # noqa: E402 -- same
 from chains.daemon_network import CHAIN_TEST_NETWORKS, chain_network  # noqa: E402 -- same
 from chains.registry import build_adapters  # noqa: E402 -- the sys.path line above must run first
@@ -308,6 +310,7 @@ from xrp_htlc_escrow import (  # noqa: E402 -- same: the escrow payloads and the
     escrow_finish_tx,
     finish_fee_drops,
     ripple_time,
+    submitted_sequence,
     wait_validated,
 )
 
@@ -499,10 +502,27 @@ class ScriptLeg:
 
 
 def swap_timelocks(now_unix: float, chain_tip_height: int, *, hours_scale: float = 1.0,
-                   direction: str = XRP_FIRST, chain: str = DEFAULT_CHAIN) -> tuple[int, int, dict]:
+                   direction: str = XRP_FIRST,
+                   chain: str = DEFAULT_CHAIN) -> tuple[int, ScriptLeg, dict]:
     """The two legs' timelocks, in the two chains' own clocks.
 
-    Returns (xrp_cancel_after_ripple_seconds, chain_timeout_height, explanation).
+    Returns (xrp_cancel_after_ripple_seconds, the script leg, explanation).
+
+    THAT SECOND ELEMENT USED TO BE DECLARED `int` AND DOCUMENTED AS
+    `chain_timeout_height`, AND HAS BEEN A `ScriptLeg` SINCE THE CLASS WAS WRITTEN. The
+    annotation and this sentence described the shape from before ScriptLeg existed -- the
+    class docstring above says it was extracted when assert_timelock_ordering() tripped
+    PLR0913 -- and the return statement moved while neither of these did. pyright 1.1.414
+    found it on 2026-10-09, at four places in one story: here, and the three uses in main()
+    that pass or read the value it actually returns.
+    
+    NOTHING RAN WRONG, and that is the point rather than a reason to shrug. Every caller in
+    the tree already treats element 2 as a leg, so the runtime was never inconsistent; what
+    was wrong was the only thing a reader checks first. `-> tuple[int, int, dict]` invites
+    exactly one mistake -- `tip + returned[1]` or `returned[1] + blocks`, arithmetic on a
+    frozen dataclass -- and the reader who makes it is the reader who trusted the signature.
+    Rule 16: a wrong comment is a bug, fixed with the same seriousness as the code, and here
+    the signature and the docstring were the same bug written twice.
 
     THE TWO CLOCKS ARE DIFFERENT KINDS and that is the whole difficulty. XRPL's
     CancelAfter is an instant, counted in seconds from 2000-01-01. Gridcoin's
@@ -842,8 +862,22 @@ class SwapContext:
     #: operator-facing line in both runners names it, and a line that says GRC while the
     #: run funds BTC is rule 14's defect at the one moment it costs money.
     chain: str
-    grc: object
-    submit_xrp: object
+    #: The GENERIC RPC handle on the script chain's daemon -- getnewaddress, the tip,
+    #: walletpassphrase, and reading a claim's scriptSig back. `RPCAdapter` rather than
+    #: `object`, which is what it said until 2026-10-09: build_adapters() only ever puts a
+    #: BitcoinAdapter, LitecoinAdapter or GridcoinAdapter here and all three derive from it,
+    #: so `object` was not a conservative annotation, it was an absent one -- and it made
+    #: `grc.call(...)` unreadable to a checker at the three places main() uses it, which is
+    #: where pyright 1.1.414 found this. The `.call` this names is the only method this
+    #: driver asks of it; see `script_client` below for the OTHER handle on the same daemon.
+    grc: RPCAdapter
+    #: main()'s own submit_xrp closure: one XRPL submission, signed with the secret the
+    #: CALLER names (the CHAIN_FIRST direction uses two different secrets in one run, which
+    #: is why the secret is a parameter and not closed over). Declared as the callable it is
+    #: rather than as `object`, which made every `ctx.submit_xrp(...)` in both runners read
+    #: as a call on a non-callable -- four of this file's findings, and the annotation that
+    #: would have caught a caller passing the two arguments the wrong way round.
+    submit_xrp: Callable[[dict, str], dict]
     secret: bytes
     secret_hash: bytes
     condition: str
@@ -871,6 +905,68 @@ class SwapContext:
     leg_keys: ScriptLegKeys
 
 
+def the_escrow_to_finish(console: Console, created: dict, *, if_the_create_is_refused: str,
+                         if_there_is_no_sequence: str) -> int | None:
+    """Is the escrow that was just submitted one a later step can FINISH? Its number, or None.
+
+    Two questions that were asked separately in each runner and have one answer: did the
+    EscrowCreate apply, and did the response come back with the Sequence that NAMES the
+    escrow. Either No means no later step can be built, so the caller's only job is to stop.
+    Both are reported here, so a None has already been explained on screen.
+
+    IT TAKES THE RESPONSE AND NOT THE CONTEXT, which is the part worth saying out loud. The
+    first version of this took `ctx` and built and submitted the EscrowCreate itself -- the
+    payload is identical in both directions, so that was rule 8's merge and it looked right.
+    It broke tests/test_swap_direction_parties.py -- three tests, with
+    `run_chain_first() creates 0 escrows; it should create exactly one` -- and that test is
+    correct to break. It reads `escrow_create_tx(ctx.a_xrp, ctx.b_xrp, ...)` out of EACH
+    RUNNER's own AST, because the bug it was written for was run_chain_first escrowing B->A
+    while its docstring said A->B: one side paid twice. Sharing the payload would make that
+    bug impossible AND leave that test measuring nothing, which is a trade only the operator
+    should make -- the test's own `_runner()` already refuses rather than passes when its
+    subject moves out from under it ("this test no longer measures it"), and that instinct
+    is the right one. So the payload stays spelled out in both runners where the parties can
+    be read, and only the CHECKS are shared.
+
+    THE TWO REFUSAL SENTENCES ARE PARAMETERS BECAUSE THE EXPOSURE GENUINELY DIFFERS (rule 8's
+    other branch). In XRP_FIRST this is the first leg funded and nothing else is at risk; in
+    CHAIN_FIRST the script leg is already funded when this runs. One shared sentence would be
+    wrong in one of the two places, and the line an operator reads at the worst moment is the
+    one that must be right (rule 14). An empty string prints nothing, which is what XRP_FIRST
+    wants for a refused create: no leg is funded, so there is no recovery to describe.
+
+    EXTRACTED 2026-10-09 because adding the OfferSequence refusal took both runners to C901
+    11 and run_chain_first to PLR0911 7. Rule 12: a function past the ceiling is orchestration
+    that has swallowed a decision, answered by lifting the decision out rather than by raising
+    the ceiling -- and this collapses the runners' two branches back into the one they had.
+    """
+    if not console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
+                         engine_result(created) == "tesSUCCESS"):
+        if if_the_create_is_refused:
+            console.say(if_the_create_is_refused)
+        return None
+
+    # READ THROUGH xrp_htlc_escrow.submitted_sequence() AND REFUSED ON, rather than read
+    # inline and hoped about. `(created.get("tx_json") or {}).get("Sequence")` stood in each
+    # runner and both fed straight into escrow_finish_tx(offer_sequence: int). A response
+    # carrying no Sequence therefore put `"OfferSequence": None` into the finish payload --
+    # in XRP_FIRST at step 10, which is AFTER A has claimed the script leg and PUBLISHED THE
+    # SECRET. The malformed field would be rejected and the operator would be reading a
+    # failed finish with a public preimage and nothing connecting it back to this step.
+    #
+    # REFUSING HERE IS WHAT MAKES THAT CHEAP: in XRP_FIRST the script leg is not funded yet
+    # and the secret has not been published, so the recovery is one timelock and nothing
+    # else. pyright 1.1.414 found both call sites on 2026-10-09.
+    sequence, why = submitted_sequence(created)
+    if sequence is None:
+        console.check("the escrow's OfferSequence", why, "an integer Sequence", ok=False)
+        console.say(if_there_is_no_sequence)
+        return None
+
+    wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
+    return sequence
+
+
 def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this is the protocol's ORDER, five acts across two chains, and every decision inside it is extracted (the timelocks above, the preimage read in modules/htlc_spend, the payloads in xrp_htlc_escrow, the vout lookup in htlc_vout). Rule 10 puts the order in the file named after the thing being done; splitting it would hide the sequence, and the sequence IS the security property.
     """A funds XRP first, B funds GRC, A claims GRC, B reads the scriptSig, B claims XRP.
 
@@ -880,12 +976,25 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
     ctx.console.step(6, f"A funds the XRP leg: {XRP_DROPS} drops to B, hashlocked and timelocked")
     b_before = balance_drops(ctx.b_xrp)
     created = ctx.submit_xrp(escrow_create_tx(ctx.a_xrp, ctx.b_xrp, XRP_DROPS, ctx.condition,
-                                          ctx.xrp_cancel_after), ctx.a_xrp_secret)
-    if not ctx.console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
-                         engine_result(created) == "tesSUCCESS"):
+                                              ctx.xrp_cancel_after), ctx.a_xrp_secret)
+    # NOTHING TO SAY ON A REFUSED CREATE IN THIS DIRECTION: the XRP leg is the first thing
+    # funded, so a create that was refused leaves nothing anywhere and there is no recovery
+    # to describe. That is the one asymmetry with run_chain_first, which has a funded script
+    # leg to account for at the same point.
+    escrow_sequence = the_escrow_to_finish(
+        ctx.console, created,
+        if_the_create_is_refused="",
+        if_there_is_no_sequence=(
+            f"THE XRP LEG IS FUNDED AND NOTHING ELSE WAS SUBMITTED. An EscrowFinish names an escrow by "
+            f"Owner plus OfferSequence -- there is no hash for it -- so step 10 cannot be built and the "
+            f"{ctx.chain} leg is deliberately NOT funded. Nothing is lost: the escrow returns to A at "
+            f"CancelAfter {ctx.xrp_cancel_after}, and the secret was never published so nobody can finish "
+            f"it. Do NOT publish the secret. xrp_balances.py reads an escrow's OfferSequence back off its "
+            f"EscrowCreate if it is needed by hand."
+        ),
+    )
+    if escrow_sequence is None:
         return False
-    escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
-    wait_validated(ctx.console, (created.get("tx_json") or {}).get("hash", ""))
     ctx.console.say(f"OfferSequence={escrow_sequence} -- how the finish in step 9 names this escrow")
 
     # LAZY, and PLC0415 is suppressed for one checked reason written here rather
@@ -979,12 +1088,28 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
         else:
             ctx.console.say(f"attempt {attempt}: could not read the claim yet ({'; '.join(reasons) or '(none)'})")
         time.sleep(READ_POLL_SECONDS)
-    if not ctx.console.check("the secret was recovered from the chain", "yes" if revealed else None,
-                         "a push whose sha256 matches the commitment", revealed is not None):
+    # WRITTEN AS `if revealed is None` RATHER THAN AS A TEST OF check()'s RETURN VALUE, and the
+    # behavior is identical: console.check() returns its own `ok`, so `if not check(...)` was
+    # already "if the read failed". What changed is that the refusal is now visible AS a
+    # refusal -- to a reader and to a checker. preimage_fulfillment() below declares
+    # `preimage: bytes`, and pyright 1.1.414 reported `bytes | None` reaching it on
+    # 2026-10-09 because the only thing standing between the two was a bool that came back
+    # out of a printer. A None preimage would have reached the encoder and died inside it,
+    # several lines from the loop that actually failed.
+    #
+    # THE VALUE IS STILL NEVER PRINTED, which is the constraint this restructuring had to
+    # respect: the branch reports only whether a matching push was FOUND ("yes", or nothing),
+    # exactly as before. The preimage is what unlocks the escrow and it goes on a public
+    # ledger only when a claim is submitted -- never through this console.
+    if revealed is None:
+        ctx.console.check("the secret was recovered from the chain", None,
+                          "a push whose sha256 matches the commitment", ok=False)
         ctx.console.say(f"B cannot finish the escrow without it and recovers the {ctx.chain} at height "
                         f"{ctx.chain_timeout} -- except that A HAS ALREADY CLAIMED the {ctx.chain}. Read "
                         f"{claim_txid} by hand; the secret is in it.")
         return False
+    ctx.console.check("the secret was recovered from the chain", "yes",
+                      "a push whose sha256 matches the commitment", ok=True)
     # THE ASSERTION THAT THE READ IS REAL. `revealed` came from the chain and
     # `ctx.secret` from memory, and they must be equal -- if this file ever finished
     # the escrow using `ctx.secret` directly it would still WORK here, while proving
@@ -1016,7 +1141,19 @@ def run_xrp_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: this i
                     f"{ctx.a_grc} less the spend's miner fee (txid {claim_txid})")
     ctx.console.say(f"XRP: {XRP_DROPS} drops from {ctx.a_xrp} to {ctx.b_xrp}, released by the same secret")
     ctx.console.say("interlocked by one sha256, with neither party ever sending the other the preimage.")
-    return False
+    # THE SUCCESS RETURN, AND IT SAID `return False` HERE UNTIL 2026-10-09 -- with the
+    # `return True` sitting UNREACHABLE on the next line, both written in a7ab61de on
+    # 2026-09-27 when this function gained its `-> bool`. So the direction that has actually
+    # run end to end (OK=15 on 2026-09-26, see the module header) reported FAILURE on
+    # completion, while run_chain_first returns True at the identical point and this
+    # function's own docstring says "Returns True when the swap completed".
+    #
+    # NOTHING OBSERVED IT, which is why it survived twelve days: main() calls `runner(ctx)`
+    # and DISCARDS the result, so the value has no reader today and no run could have shown
+    # it. That is the argument for fixing it rather than noting it -- the first caller to
+    # branch on it would conclude a completed swap had failed, and the function it would be
+    # trusting is the one whose docstring it had just read. Rule 9: `return True` after
+    # `return False` is dead code, and the dead half here was the correct half.
     return True
 
 
@@ -1095,19 +1232,32 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
     # swap, and no test caught it because no test drove the runner.
     console.step(7, f"A funds the XRP leg: {XRP_DROPS} drops to B, expiring FIRST")
     b_before = balance_drops(ctx.b_xrp)
+    # BOTH REFUSALS HAVE SOMETHING TO ACCOUNT FOR IN THIS DIRECTION, because the script leg
+    # is already funded by the time this runs -- which is the whole reason the two sentences
+    # are arguments rather than one shared line in escrow_the_xrp_leg().
     created = ctx.submit_xrp(escrow_create_tx(ctx.a_xrp, ctx.b_xrp, XRP_DROPS, ctx.condition,
                                               ctx.xrp_cancel_after), ctx.a_xrp_secret)
-    if not console.check("XRP leg funded", describe_result(created), "tesSUCCESS",
-                         engine_result(created) == "tesSUCCESS"):
-        console.say(f"the {ctx.chain} leg IS funded ({funding_txid}) and the XRP leg is not. Nobody has the secret, so "
-                    f"nobody can claim the {ctx.chain}: it returns to B at height {ctx.chain_timeout}. Do NOT publish "
-                    f"the secret.")
+    escrow_sequence = the_escrow_to_finish(
+        console, created,
+        if_the_create_is_refused=(
+            f"the {ctx.chain} leg IS funded ({funding_txid}) and the XRP leg is not. Nobody has the secret, "
+            f"so nobody can claim the {ctx.chain}: it returns to B at height {ctx.chain_timeout}. Do NOT "
+            f"publish the secret."
+        ),
+        if_there_is_no_sequence=(
+            f"BOTH LEGS ARE FUNDED AND NEITHER IS CLAIMED. An EscrowFinish names an escrow by Owner plus "
+            f"OfferSequence and there is no hash for it, so step 8 cannot be built from here and NOTHING "
+            f"FURTHER WAS SUBMITTED. The secret was NOT published, so nobody can claim either leg: A "
+            f"recovers its XRP at CancelAfter {ctx.xrp_cancel_after} and B recovers its {ctx.chain} at "
+            f"height {ctx.chain_timeout}. Do NOT publish the secret. xrp_balances.py reads an escrow's "
+            f"OfferSequence back off its EscrowCreate if it is needed by hand."
+        ),
+    )
+    if escrow_sequence is None:
         return False
-    escrow_sequence = (created.get("tx_json") or {}).get("Sequence")
     # THE OWNER IS THE ACCOUNT THAT CREATED IT, which is A in this direction. It read
     # ctx.b_xrp while B was (wrongly) the creator; both moved together.
     escrow_owner = ctx.a_xrp
-    wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
     console.say(f"OfferSequence={escrow_sequence}, Owner={escrow_owner} -- how the finish below names this escrow")
 
     console.step(8, "B claims the XRP with the secret -- which PUBLISHES it in the Fulfillment")
@@ -1173,12 +1323,21 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
         console.say(f"attempt {attempt}: read the transaction, but its Fulfillment does not hash to the "
                     f"commitment -- this is not a finish of this escrow")
         time.sleep(READ_POLL_SECONDS)
-    if not console.check("the secret was recovered from the XRP ledger", "yes" if revealed else None,
-                         "a Fulfillment whose sha256 matches the commitment", revealed is not None):
+    # The same restructuring as the other direction, for the same reason and with the same
+    # constraint: claim_the_script_leg() below declares `secret: bytes`, the loop above can
+    # leave `revealed` None, and the only thing between them was console.check()'s return
+    # value -- which a reader has to go and look up and a checker cannot follow at all. The
+    # preimage is still never printed; this reports only that a matching Fulfillment was
+    # found.
+    if revealed is None:
+        console.check("the secret was recovered from the XRP ledger", None,
+                      "a Fulfillment whose sha256 matches the commitment", ok=False)
         console.say(f"A cannot claim the {ctx.chain} without it and the {ctx.chain} returns to B at height "
                     f"{ctx.chain_timeout} -- except that B HAS ALREADY TAKEN THE XRP. Read {finish_hash} by hand; "
                     f"the secret is in its Fulfillment field.")
         return False
+    console.check("the secret was recovered from the XRP ledger", "yes",
+                  "a Fulfillment whose sha256 matches the commitment", ok=True)
     # The same assertion the other direction makes: `revealed` came from the
     # ledger and `secret` from memory. A version that claimed with `secret`
     # directly would work here and prove nothing, because a real B has no such
@@ -1202,7 +1361,19 @@ def run_chain_first(ctx: SwapContext) -> bool:  # noqa: PLR0915 -- checked: same
                     f"so the claim can be retried before height {ctx.chain_timeout}, after which the coins return "
                     f"to the refund branch anyway.")
         return False
-    console.check(f"B claimed the {ctx.chain}", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
+    # "B claimed the {chain}" STOOD HERE UNTIL 2026-10-09, AND IT IS A IN THIS DIRECTION.
+    # Everything around it already said so: the step header above is "A claims the {chain}
+    # with the secret it read", the except branch three lines up reports the FAILURE of this
+    # same check as "A claimed the {chain}", and this function's docstring opens "B funds GRC
+    # first, A funds XRP, B claims XRP, A reads the Fulfillment, A claims GRC". B is the party
+    # that claimed the XRP, at step 8.
+    #
+    # WHY A LABEL IS WORTH A FIX. console.summary() lists results BY LABEL, so the pass and
+    # the fail of one check went into the summary under two different names -- and the name
+    # the operator sees on the successful path names the wrong party at the step that
+    # completes the swap. Rule 16: a wrong comment is a bug, and a line printed to an
+    # operator is a comment that is read every single run.
+    console.check(f"A claimed the {ctx.chain}", f"txid={claim_txid}", "a broadcast txid", bool(claim_txid))
 
     console.banner("WHAT CHANGED HANDS")
     console.say(f"XRP: {XRP_DROPS} drops from {ctx.b_xrp} to {ctx.a_xrp}, claimed with the secret ({finish_hash})")
@@ -1286,7 +1457,7 @@ def describe_the_dry_run(console: Console, args, chain: str, leg: ScriptLeg,  # 
     console.say("re-run with --run to perform the swap.")
 
 
-def resolve_the_script_chain_adapter(console: Console, chain: str) -> tuple[object | None, dict]:
+def resolve_the_script_chain_adapter(console: Console, chain: str) -> tuple[RPCAdapter | None, dict]:
     """The adapter AND the settings it was built from, resolved once.
 
     RETURNS THE SETTINGS, NOT JUST THE ADAPTER, and that is the fix for the third

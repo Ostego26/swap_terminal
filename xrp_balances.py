@@ -142,6 +142,23 @@ def _sequence_from_the_creating_tx(console, escrow: dict, inputs):
     owner. This operator's account holds two, so that is a live way to cancel the wrong 1 XRP.
     """
     previous = escrow.get("PreviousTxnID")
+    if not isinstance(previous, str) or not previous:
+        # THE REFUSAL THAT USED TO LIVE ONLY AT THE CALL SITE, AND NOW LIVES WITH THE READ.
+        # report_account() tested `one.get("PreviousTxnID")` before calling, so within this
+        # script `previous` was never None -- but the guard belonged to that one caller and not
+        # to this function, and the seven other callers (all tests) inherited nothing. pyright
+        # 1.1.414 named the consequence on 2026-10-09: `_TX_ALREADY_READ[previous] = created`
+        # keyed the cache with `str | None`, and a None key is the one thing
+        # test_only_the_tx_read_is_cached_and_it_is_keyed_BY_THE_HASH asserts cannot happen.
+        #
+        # WHAT WOULD HAVE HAPPENED WITHOUT IT is the "confusing failure later" shape: `tx None`
+        # goes to the network, rippled rejects it, and the handler below reports a FAILED READ.
+        # "the read failed" and "there was nothing to read" are different facts about the ledger
+        # and the second one is knowable here without spending a round trip on it.
+        console.say("                           no `PreviousTxnID` on this entry, so there is no "
+                    "pointer to the EscrowCreate -- nothing to read, and OfferSequence stays "
+                    "UNKNOWN rather than absent")
+        return inputs
     if previous in _TX_ALREADY_READ:
         created = _TX_ALREADY_READ[previous]
         # SAID OUT LOUD RATHER THAN SILENTLY SKIPPED (rule 14). A reader comparing two accounts'
@@ -327,7 +344,13 @@ def report_account(console: Console, address: str, base_reserve, inc_reserve) ->
         # they belong to. Rule 14 is about whether the screen can be acted on, and a number
         # under the wrong heading is worse than no number.
         console.say("              EscrowCancel  <- what reclaiming this escrow would need")
-        if not inputs.ready and inputs.missing == ("OfferSequence",) and one.get("PreviousTxnID"):
+        # THE `PreviousTxnID` TEST THAT WAS THE THIRD CLAUSE HERE IS NOW INSIDE
+        # _sequence_from_the_creating_tx(), because it is that read's own precondition and not
+        # this report's: held here it guarded one caller and left the function itself able to
+        # ask the ledger for `tx None` (rule 8 -- one owner for one rule). What stays is the
+        # clause that is genuinely this block's business: do not spend a read when the sequence
+        # is already known, or when something OTHER than the sequence is what is missing.
+        if not inputs.ready and inputs.missing == ("OfferSequence",):
             inputs = _sequence_from_the_creating_tx(console, one, inputs)
         ready = "YES, both fields present" if inputs.ready else f"NO, missing {', '.join(inputs.missing)}"
         console.say(f"                           buildable from this entry?  {ready}")

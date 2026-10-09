@@ -359,6 +359,91 @@ def engine_result(result: dict) -> str:
     return str(result.get("engine_result") or result.get("error") or "(none)")
 
 
+def submitted_sequence(result: dict) -> tuple[int | None, str]:
+    """The Sequence the ledger assigned the EscrowCreate just submitted. Returns (sequence, why).
+
+    WHY THIS IS A FUNCTION AND WHY IT REFUSES RATHER THAN DEFAULTING. `OfferSequence` plus
+    `Owner` is how the XRP Ledger IDENTIFIES an escrow -- there is no hash to name it by -- so
+    every one of steps 5, 6, 8 and 9 is built around this number. main() read it inline at BOTH
+    create sites -- `tx_json = created.get("tx_json") or {}` then `tx_json.get("Sequence")` --
+    and passed the result straight into escrow_finish_tx() (steps 5 and 6, from escrow [A]) and
+    escrow_cancel_tx() (steps 8 and 9, from escrow [B]), whose `offer_sequence` is declared
+    `int` in both. A response that carried no Sequence therefore put `"OfferSequence": None`
+    into a transaction dict and SUBMITTED it: a malformed field, rejected by the ledger a step
+    after the create whose response was the real cause, with nothing on screen joining the two
+    -- the "confusing failure later" shape this tree keeps paying for. pyright 1.1.414 flagged
+    all four call sites on 2026-10-09.
+
+    THE ONE THING IT CHECKS is that the Sequence is an integer, and `bool` is excluded because
+    it is a subclass of `int` and `True` would otherwise sail through as sequence 1 -- naming a
+    DIFFERENT escrow of the same owner, which is the mis-cancel chains/xrp_escrow.py's
+    offer_sequence_from() carries its own long warning about.
+
+    AND WHAT IT DELIBERATELY DOES NOT CHECK, because that is the difference from
+    chains/xrp_escrow.offer_sequence_from() and rule 8 says to name it at both sites. That one
+    reads a `tx` LOOKUP of a transaction reached through `PreviousTxnID`, which points at
+    whatever LAST modified a ledger entry, so it must verify `TransactionType == "EscrowCreate"`
+    before trusting the Sequence. Here the response is the submit reply to a transaction THIS
+    process built two lines earlier, so its identity is not in question -- and whether rippled's
+    submit reply echoes `TransactionType` back is not established anywhere in this tree, so
+    checking it would be a guess that can only fail on the operator's machine (rule 17). The
+    note at the other site could not be added from this session: it lives in
+    swap_terminal/chains/xrp_escrow.py, which is outside the files this change may touch.
+    """
+    tx_json = result.get("tx_json") or {}
+    sequence = tx_json.get("Sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int):
+        return None, f"no integer Sequence on the submit response (got {sequence!r})"
+    return sequence, ""
+
+
+def create_escrow(console: Console, submitter, secret: str, tx_json: dict, label: str) -> int | None:
+    """Submit one EscrowCreate and come back with the number that NAMES the escrow, or None.
+
+    EXTRACTED 2026-10-09, and the lint code that asked for it is the one rule 12 writes about at
+    length: adding the Sequence refusal below to each of main()'s two create blocks took main()
+    to C901 12 and PLR0911 8, which rule 12 says to answer by extracting the decision rather
+    than by raising the ceiling. The two blocks were already near-identical -- submit, check
+    accepted, read the sequence, wait for validation -- so this is rule 8's merge as well: one
+    copy of "create an escrow and come back with its identity", called twice, where two copies
+    would have drifted from the day they were written. main() keeps the ORDER of the nine steps,
+    which is what rule 10 says a file at the root is for.
+
+    A None IS A REFUSAL THAT HAS ALREADY BEEN REPORTED. There are two of them and the caller
+    does not need to tell them apart -- both mean no further step can be built -- but an
+    operator does, so each says on screen which happened and what it costs.
+
+    [A] AND [B] BOTH ANNOUNCE THEIR SEQUENCE NOW. Only [A] did before, and [B] is the escrow
+    with drops still locked in it when the run ends: steps 8 and 9 name it by this number, and a
+    number that decides two steps belongs on the screen (rule 14).
+    """
+    created = submit(console, submitter, secret, tx_json)
+    if not console.check(f"EscrowCreate {label} accepted", describe_result(created), "tesSUCCESS",
+                         engine_result(created) == "tesSUCCESS"):
+        return None
+
+    # READ AFTER THE ACCEPTED CHECK, not before it. A create that was refused carries no
+    # Sequence either, and reporting the missing field first puts the consequence above the
+    # cause -- the same ordering defect this file's header records for `got=(none)`.
+    sequence, why = submitted_sequence(created)
+    if sequence is None:
+        console.check(f"the EscrowCreate {label} Sequence came back", why, "an integer Sequence",
+                      ok=False)
+        console.say("EscrowFinish and EscrowCancel name an escrow by Owner plus OfferSequence -- there "
+                    "is no hash for it -- so none of the remaining steps can be built. STOPPING HERE "
+                    "RATHER THAN SUBMITTING: a transaction carrying OfferSequence=None is a malformed "
+                    "field, and the rejection would arrive several steps away from its cause.")
+        console.say("THE ESCROW ABOVE IS ON THE LEDGER and its drops are locked. Nothing here can "
+                    "cancel it without that sequence; its CancelAfter still applies, and "
+                    "xrp_balances.py reads the sequence back off the EscrowCreate for this situation.")
+        return None
+
+    console.say(f"OfferSequence for the finish/cancel below = {sequence} (the CREATE's Sequence; "
+                f"EscrowFinish names the escrow by it, not by a hash)")
+    wait_validated(console, (created.get("tx_json") or {}).get("hash", ""))
+    return sequence
+
+
 def wait_validated(console: Console, tx_hash: str) -> dict:
     """Poll until the transaction is in a VALIDATED ledger, or give up saying so.
 
@@ -480,16 +565,11 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
 
     before = balance_drops(receiver)
     console.step(4, f"EscrowCreate [A]: {ESCROW_DROPS} drops with the condition and the timelock")
-    created = submit(console, submitter_submit, sender_secret,
-                     escrow_create_tx(sender, receiver, ESCROW_DROPS, condition, cancel_after))
-    tx_json = created.get("tx_json") or {}
-    escrow_sequence = tx_json.get("Sequence")
-    if not console.check("EscrowCreate [A] accepted", describe_result(created), "tesSUCCESS",
-                         engine_result(created) == "tesSUCCESS"):
+    escrow_sequence = create_escrow(
+        console, submitter_submit, sender_secret,
+        escrow_create_tx(sender, receiver, ESCROW_DROPS, condition, cancel_after), "[A]")
+    if escrow_sequence is None:
         return console.summary()
-    console.say(f"OfferSequence for the finish/cancel below = {escrow_sequence} (the CREATE's Sequence; "
-                f"EscrowFinish names the escrow by it, not by a hash)")
-    wait_validated(console, tx_json.get("hash", ""))
 
     console.step(5, "EscrowFinish with a WRONG fulfillment must be REFUSED -- this is the hashlock")
     wrong = preimage_fulfillment(bytes(HTLC_PREIMAGE_BYTES))  # a fulfillment for all-zero bytes
@@ -523,14 +603,11 @@ def main() -> int:  # noqa: PLR0915 -- checked: this is the nine-step SEQUENCE, 
     console.say("a dedicated escrow, never the one step 6 finished -- if an early cancel were wrongly accepted, "
                 "the object it destroyed must not be the one the last step depends on.")
     refund_cancel_after = ripple_time(time.time() + args.cancel_after)
-    created_b = submit(console, submitter_submit, sender_secret,
-                       escrow_create_tx(sender, receiver, ESCROW_DROPS, condition, refund_cancel_after))
-    tx_b = created_b.get("tx_json") or {}
-    sequence_b = tx_b.get("Sequence")
-    if not console.check("EscrowCreate [B] accepted", describe_result(created_b), "tesSUCCESS",
-                         engine_result(created_b) == "tesSUCCESS"):
+    sequence_b = create_escrow(
+        console, submitter_submit, sender_secret,
+        escrow_create_tx(sender, receiver, ESCROW_DROPS, condition, refund_cancel_after), "[B]")
+    if sequence_b is None:
         return console.summary()
-    wait_validated(console, tx_b.get("hash", ""))
     sender_before_cancel = balance_drops(sender)
 
     console.step(8, "EscrowCancel BEFORE CancelAfter must be REFUSED -- this is the timelock")
