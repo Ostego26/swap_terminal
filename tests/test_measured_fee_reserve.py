@@ -20,6 +20,7 @@ low, LTC 4.7x high -- and no single value fixes both.
 
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from time import time
 
@@ -56,9 +57,15 @@ CONFIGURED = 0.00002
 class MeasuringAdapter:
     """An adapter that answers measure_send_fee, recording the amount it was asked about."""
 
-    def __init__(self, fee=0.0000282, how="fundrawtransaction selected real inputs"):
+    # `fee=None` IS A SUPPORTED VALUE AND THE SIGNATURE HAS TO SAY SO. It is the
+    # branch below -- a daemon with no fundrawtransaction, which is Gridcoin, and
+    # what test_a_daemon_without_fundrawtransaction_falls_back_and_carries_its_words
+    # constructs. Inferred from the default alone the parameter reads `float`, so the
+    # one case this stub exists to model was the one a checker called wrong.
+    def __init__(self, fee: float | None = 0.0000282,
+                 how: str = "fundrawtransaction selected real inputs"):
         self._fee, self._how = fee, how
-        self.asked = []
+        self.asked: list[tuple[str, float]] = []
 
     def measure_send_fee(self, address, amount):
         self.asked.append((address, amount))
@@ -247,7 +254,23 @@ def test_a_quote_with_no_adapters_still_prices(config):
 
 
 class WalletWithAddresses:
-    """An adapter whose wallet can be ASKED for an address it already owns."""
+    """An adapter whose wallet can be ASKED for an address it already owns.
+
+    THIS STUB DOES NOT IMPLEMENT own_address(). Each test attaches the REAL
+    RPCAdapter.own_address to the instance --
+    `adapter.own_address = RPCAdapter.own_address.__get__(adapter)` -- so what
+    runs is chains/base.py's own two-read fallback over this class's stub
+    `call()`. A stub that implemented the fallback itself would assert that the
+    fixture's author understood it, which is not the property under test.
+
+    DECLARED HERE, ASSIGNED THERE. The annotation below creates no attribute at
+    runtime (a bare annotation in a class body only populates __annotations__),
+    so nothing about this stub's behavior changes; it states the type the four
+    tests attach and read back, which is what makes both the assignment and the
+    `adapter.own_address()` call checkable.
+    """
+
+    own_address: Callable[[], str]
 
     def __init__(self, received=None, labeled=None, fail=()):
         self._received = received if received is not None else [{"address": BTC_REGTEST_DEPOSIT}]

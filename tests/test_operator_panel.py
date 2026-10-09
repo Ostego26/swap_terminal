@@ -26,6 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from time import time as _now
+from types import ModuleType
 
 import pytest
 from regtest import daemons, funding_steps, steps
@@ -43,14 +44,61 @@ from services.quote_service import create_quote  # isort: skip -- same
 from services.swap_service import create_swap  # isort: skip -- same
 
 
-def _entry():
-    """Import operator_panel.py, the root entry point, the way the other entry-point tests do."""
+def _entry() -> ModuleType:
+    """Import operator_panel.py, the root entry point, the way the other entry-point tests do.
+
+    BOTH FAILURES OF THE LOAD ARE NAMED, which they were not. `spec_from_file_location()`
+    returns None when the path does not exist or no loader claims it, and `spec.loader` is
+    None for a spec that carries no loader -- so a missing or renamed operator_panel.py
+    arrived at every one of the ~25 tests below as `AttributeError: 'NoneType' object has no
+    attribute 'loader'`, which names neither the file nor the reason. The panel is the file
+    with the buttons that spend coin; "the suite could not find it" has to read as that.
+
+    They are raises rather than asserts because this runs OUTSIDE a test body as well (it is
+    called from module-level-ish helpers) and because the condition is a broken checkout, not
+    a failed expectation.
+    """
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root / "swap_terminal"))
-    spec = importlib.util.spec_from_file_location("operator_panel_entry", root / "operator_panel.py")
+    source = root / "operator_panel.py"
+    spec = importlib.util.spec_from_file_location("operator_panel_entry", source)
+    if spec is None:
+        raise RegtestSetupError(
+            f"no import spec for {source} -- the panel entry point is missing or unreadable, so "
+            f"nothing in this file can be checked against it"
+        )
+    if spec.loader is None:
+        raise RegtestSetupError(f"the import spec for {source} carries no loader, so it cannot be executed")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _entry_source(entry: ModuleType | None = None) -> str:
+    """operator_panel.py's own text, read back through the module object that loaded it.
+
+    EIGHT TESTS BELOW READ THIS FILE'S SOURCE and every one of them spelled
+    `Path(_entry().__file__).read_text(encoding="utf-8")` for itself. One answer to one
+    question, eight times (rule 8) -- and `ModuleType.__file__` is `str | None`, so each of
+    the eight carried its own way of turning a module with no file into
+    `TypeError: argument should be a str or an os.PathLike object ... not <class 'NoneType'>`
+    from inside a test about a JavaScript region.
+
+    `entry` is accepted so the three callers that already hold the module do not execute
+    operator_panel.py a second time just to read its text.
+    """
+    module = entry if entry is not None else _entry()
+    # getattr WITH A DEFAULT COVERS BOTH SHAPES OF THE SAME FAILURE, and they are different
+    # at runtime: a module built by module_from_spec() always HAS __file__ and it can be None,
+    # while a bare types.ModuleType has no such attribute at all and raises AttributeError on
+    # the read. Measured 2026-10-09 on both. One check, one message, either way.
+    path = getattr(module, "__file__", None)
+    if path is None:
+        raise RegtestSetupError(
+            f"the loaded panel module {module.__name__!r} has no __file__, so its source cannot be "
+            f"read -- every assertion about the panel's own text depends on this"
+        )
+    return Path(path).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +253,15 @@ def test_stop_PROVES_the_process_is_gone_rather_than_trusting_the_signal(tmp_pat
 
     said = runner.stop()
 
-    assert runner._process.poll() is not None, "the process must actually be GONE, not signalled"
+    # THE PROCESS HANDLE IS NAMED BEFORE IT IS POLLED. `_process` is `Popen | None`, and None
+    # is a different failure from "still running": it means the runner never held a child at
+    # all, so there was nothing for stop() to prove gone and this test has not measured a
+    # reaping. Without this line that case arrives as `AttributeError: 'NoneType' object has
+    # no attribute 'poll'`, which reads like a bug in the test rather than a stop that never
+    # started anything (rule 13: make the absence the assertion).
+    child = runner._process
+    assert child is not None, "the runner holds no process handle, so no stop can be proven"
+    assert child.poll() is not None, "the process must actually be GONE, not signalled"
     assert runner.state().alive is False
     assert "stopped" in said or "KILLED" in said
     assert said, "and stop always says what happened"
@@ -237,7 +293,9 @@ def test_a_run_that_IGNORES_the_first_signal_is_killed_and_the_difference_is_rep
 
     said = runner.stop()
 
-    assert runner._process.poll() is not None
+    child = runner._process
+    assert child is not None, "the runner holds no process handle, so no SIGKILL can be proven"
+    assert child.poll() is not None
     assert "KILLED" in said, said
     assert "interrupted mid-step" in said, "and it says what that means for the output above"
 
@@ -726,7 +784,13 @@ def test_a_REFUSED_call_and_a_FAILED_call_read_differently(monkeypatch):
         def node(self, wallet=True):
             return self
 
-        def call(self, method, *args):
+        # ANNOTATED `-> dict` THOUGH THE BODY ALWAYS RAISES, because _Works below overrides
+        # this method and RETURNS a dict. Left unannotated, the inferred return of a body
+        # that only raises is NoReturn -- "this never comes back" -- which makes the subclass
+        # an illegal override of its own base. The annotation states what a real
+        # RegtestRPC.call() answers; the body still raises, which is the whole point of this
+        # stub and is unchanged.
+        def call(self, method, *args) -> dict:
             raise RuntimeError("the daemon said -1")
 
     refused = decisions.call_read_only(_Run(), "sendtoaddress", [])
@@ -1205,7 +1269,7 @@ def test_STARTUP_SAYS_WHY_A_CHAIN_HAS_NO_CONSOLE_IN_WORDS_NOT_IN_A_KeyError():
                 "terminal"
             )
 
-    source = Path(entry.__file__).read_text(encoding="utf-8")
+    source = _entry_source(entry)
     assert 'if tab.kind == "none"' not in source and 'tab.kind == "none"' not in source, (
         "the skip that never skipped"
     )
@@ -1325,7 +1389,7 @@ def test_THE_STARTUP_GATE_IS_NOT_THE_THING_BEING_QUIETED():
     They run once, they are never repeated, and wrapping them would buy nothing and risk the
     one output on this screen that must never be conditional.
     """
-    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    source = _entry_source()
     wrapped = source.index("run.console = decisions.SaysEachLineOnce(console)")
     gated = source.index("funding_steps.assert_test_network(run)")
     assert gated < wrapped, "the gate prints through the real console, unwrapped"
@@ -1580,7 +1644,7 @@ def test_the_swapper_region_is_admin_views_overview_and_holds_no_query_of_its_ow
     implementation -- and it would agree on the day it was written and drift after,
     which is the whole failure rule 8 opens with.
     """
-    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    source = _entry_source()
     body = source[source.index("def swapper_payload("):source.index("def answer_a_worker_switch(")]
     code = "\n".join(line for line in body.splitlines() if not line.strip().startswith("#"))
     assert "overview(" in code, "the panel no longer calls the shared assembly"
@@ -1664,7 +1728,7 @@ def test_every_overview_FIELD_the_panel_renders_actually_EXISTS(tmp_path):
     with db_session(str(db_path)) as db:
         payload = overview(db, config, {}, run_dir=tmp_path)
 
-    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    source = _entry_source()
     script = source[source.index("async function loadSwapper("):source.index('$("checkall").onclick')]
 
     # `const o = d.overview`, so every o.<name> is a top-level key of the payload.
@@ -1909,7 +1973,7 @@ def test_A_TABS_CONSOLE_OFFERS_ONLY_WHAT_THAT_TAB_CAN_ANSWER():
     fail; nothing else does.
     """
     entry = _entry()
-    source = Path(entry.__file__).read_text(encoding="utf-8")
+    source = _entry_source(entry)
 
     # The option list comes from the per-tab field, and the global writer is gone.
     assert 'd.console_methods' in source, "the dropdown is not filled from the tab's own list"
@@ -1969,7 +2033,7 @@ def test_every_CONTROLS_FIELD_the_panel_renders_actually_EXISTS():
     the field and the shape it is missing from.
     """
     entry = _entry()
-    source = Path(entry.__file__).read_text(encoding="utf-8")
+    source = _entry_source(entry)
     # SLICED TO THE NEXT BANNER, whichever it is. This read to "// THE SWAPPER REGION." until
     # the teller script was added between the two, at which point the walk picked up the
     # teller's own `r` callbacks and attributed their fields to the controls payload.
@@ -2018,7 +2082,7 @@ def test_the_controls_pane_holds_no_POLICY_of_its_own():
     So the pane may branch on `kind` for exactly two things: which POST body shape to send, and
     whether a live state exists to show. It may not decide whether a button is allowed.
     """
-    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    source = _entry_source()
     script = source[source.index("async function loadControls("):source.index("// THE SWAPPER REGION.")]
     code = "\n".join(line for line in script.splitlines() if not line.strip().startswith("//"))
 
@@ -2119,7 +2183,7 @@ def test_every_TELLER_FIELD_the_pane_renders_actually_EXISTS(tmp_path):
         quote = create_quote(db, config, "GRC", "LTC", 10)
         swap = create_swap(db, config, adapters, quote["id"], GRC_PAYOUT)
 
-    source = Path(_entry().__file__).read_text(encoding="utf-8")
+    source = _entry_source()
     script = source[source.index("let tellerQuote = null;"):source.index("// THE SWAPPER REGION.")]
     code = "\n".join(line for line in script.splitlines() if not line.strip().startswith("//"))
 
@@ -2205,6 +2269,16 @@ def test_the_teller_routes_REACH_THE_SAME_SERVICES_the_web_form_does():
     for name in ("answer_a_teller_quote", "answer_a_teller_swap"):
         tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(entry, name))))
         function = tree.body[0]
+        # IT HAS TO BE A FUNCTION FOR `.body` TO MEAN THE FUNCTION'S STATEMENTS. Both
+        # `def` and `async def` carry one and the docstring strip below is right for
+        # either; anything else -- getattr handing back a class, or a route that becomes
+        # an assignment -- has a `.body` that means something different or none at all,
+        # and the walk would then assert over the wrong statements or die with
+        # `AttributeError: 'ClassDef' object has no attribute ...`.
+        assert isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef), (
+            f"{name} parsed as {type(function).__name__}, not a function definition, so the "
+            f"statement walk below is not reading that route's body"
+        )
         statements = function.body
         if (isinstance(statements[0], ast.Expr)
                 and isinstance(statements[0].value, ast.Constant)

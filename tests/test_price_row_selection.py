@@ -44,25 +44,38 @@ import pytest
 pytest.importorskip("pandas", reason="transactions.py imports pandas; it is not in requirements.txt")
 pytest.importorskip("yfinance", reason="transactions.py imports yfinance; it is not in requirements.txt")
 
-# Stub tkinter before importing transactions.py. Only the GUI class touches it,
-# and nothing in this file constructs that class.
+# Stub tkinter before importing transactions.py, and the stub is EMPTY on
+# purpose.
+#
+# IT USED TO CARRY TWELVE NAMES -- Tk, Label, Listbox, Button, StringVar, X,
+# BOTH, END, LEFT, DISABLED, NORMAL and a `tkinter.messagebox` submodule -- and
+# every one of them was dead. MEASURED 2026-10-09 rather than reasoned about: a
+# fresh interpreter with `sys.modules["tkinter"] = types.ModuleType("tkinter")`
+# and nothing else imports transactions.py and runs both functions under test.
+# The reason is readable off the file: transactions.py has `import tkinter as
+# tk` and no `from tkinter import ...`, and every `tk.<name>` reference sits
+# inside TxViewerApp's methods or main(), so not one is evaluated at import.
+# There is no messagebox import in that file at all.
+#
+# The names mattered because they were WRONG to carry, not merely surplus. A
+# stub that declares a surface nobody touches is read as a description of what
+# the module under test needs (rule 9: dead code gets read, greped past and
+# copied from), and the next person adding a GUI test would have copied eleven
+# placeholders that have never once been looked up.
+#
+# tests/test_transactions_announces_its_chain.py stubs the same module the same
+# way, for the same file, and already did it with bare modules; named here so a
+# reader who finds one knows the other exists (rule 8).
+#
+# THE `if` GUARD RATHER THAN sys.modules.setdefault(), which is the same
+# operation in one line and is what that sibling file uses. Ruff's E402 treats
+# an `if` block as allowed preamble before an import -- the conditional-import
+# idiom -- and a bare call statement as not, so the one-liner costs an E402 on
+# the `from transactions import ...` below and a `noqa` to answer it. Measured
+# 2026-10-09 on both forms. A suppression to buy a shorter line is the trade
+# rule 19 refuses, so the block stays a block.
 if "tkinter" not in sys.modules:
-    _tk = types.ModuleType("tkinter")
-    _tk.Tk = object
-    _tk.Label = object
-    _tk.Listbox = object
-    _tk.Button = object
-    _tk.StringVar = object
-    _tk.X = "x"
-    _tk.BOTH = "both"
-    _tk.END = "end"
-    _tk.LEFT = "left"
-    _tk.DISABLED = "disabled"
-    _tk.NORMAL = "normal"
-    _messagebox = types.ModuleType("tkinter.messagebox")
-    _tk.messagebox = _messagebox
-    sys.modules["tkinter"] = _tk
-    sys.modules["tkinter.messagebox"] = _messagebox
+    sys.modules["tkinter"] = types.ModuleType("tkinter")
 
 from transactions import (
     select_cryptocompare_row,
@@ -87,12 +100,16 @@ def test_it_picks_the_latest_row_at_or_before_the_target():
         _row(date(2026, 3, 14), close=2.0),
         _row(date(2026, 3, 16), close=3.0),  # after the target: must not win
     ]
-    assert select_cryptocompare_row(rows, TARGET)["close"] == 2.0
+    picked = select_cryptocompare_row(rows, TARGET)
+    assert picked is not None, "the 3-14 row is at or before the target and had to be selected"
+    assert picked["close"] == 2.0
 
 
 def test_a_row_exactly_on_the_target_date_is_eligible():
     rows = [_row(date(2026, 3, 14), close=1.0), _row(TARGET, close=9.0)]
-    assert select_cryptocompare_row(rows, TARGET)["close"] == 9.0
+    picked = select_cryptocompare_row(rows, TARGET)
+    assert picked is not None, "a row ON the target date is eligible and had to be selected"
+    assert picked["close"] == 9.0
 
 
 def test_rows_entirely_after_the_target_select_nothing():
@@ -105,7 +122,9 @@ def test_rows_entirely_after_the_target_select_nothing():
 
 def test_rows_with_a_non_positive_timestamp_are_skipped_not_trusted():
     rows = [_row(date(2026, 3, 14), close=5.0), {"time": 0, "close": 99.0}]
-    assert select_cryptocompare_row(rows, TARGET)["close"] == 5.0
+    picked = select_cryptocompare_row(rows, TARGET)
+    assert picked is not None, "skipping the time=0 row must not cost the good row beside it"
+    assert picked["close"] == 5.0
     rows = [{"time": -1, "close": 99.0}]
     assert select_cryptocompare_row(rows, TARGET) is None
 
@@ -117,7 +136,9 @@ def test_anything_that_is_not_a_list_of_rows_selects_nothing(junk):
 
 def test_non_dict_entries_inside_the_list_are_skipped():
     rows = ["nonsense", None, _row(date(2026, 3, 14), close=4.0)]
-    assert select_cryptocompare_row(rows, TARGET)["close"] == 4.0
+    picked = select_cryptocompare_row(rows, TARGET)
+    assert picked is not None, "skipping the non-dict entries must not cost the real row beside them"
+    assert picked["close"] == 4.0
 
 
 # --- usable_close_or_open ----------------------------------------------------

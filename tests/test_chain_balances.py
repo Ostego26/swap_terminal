@@ -312,6 +312,22 @@ def test_an_unreadable_second_opinion_says_so_rather_than_claiming_agreement():
     out = recorder.text()
     assert "whole     not reported" in out, out
     assert "HOLDS MORE" not in out, "nothing was established, so nothing is alleged"
+    # THE None GUARD BEFORE THE float(), and it is the assertion this test was
+    # missing rather than a formality. report_chain() returns `Decimal | None`:
+    # None for every chain it could not read. The whole point of this case is
+    # that an unreadable SECOND opinion must not cost the FIRST one, so a None
+    # here is precisely the regression under test -- and without this line that
+    # regression arrives as `TypeError: float() argument must be a string or a
+    # real number, not 'NoneType'` from the line below, which names neither the
+    # chain, the figure, nor what was expected. A test whose guarded failure is
+    # a stack trace has stopped reporting the thing it measures.
+    #
+    # Its sibling above (the two-figures-disagree case) already asserts this;
+    # this one did not, which is rule 8's drift between two copies of one check.
+    assert held is not None, (
+        f"report_chain() returned None for a daemon whose BARE getbalance answered. An unreadable "
+        f"`getbalance \"*\"` costs the comparison and must not cost the reading:\n{out}"
+    )
     assert float(held) == pytest.approx(11.00248643), (
         "with no second reading the only figure available is the bare one"
     )

@@ -141,6 +141,19 @@ def test_GRC_is_measurably_thin_and_the_others_are_not():
     )
     for payload in (XRP_TICKER, LTC_TICKER):
         quote = quote_from_ticker(payload["symbol"], payload)
+        # THE None GUARD ON THIS BRANCH TOO, which the GRC line above already has
+        # and this loop did not -- rule 8's drift between two copies of one check.
+        # It is not a formality here: turnover is None whenever the cap or the
+        # volume is unusable, and `turnover_finding()` SKIPS the thinness check on
+        # a None rather than reporting THIN, which is the fail-open this file
+        # exists to prevent (the GRC assertion above says so in as many words).
+        # Without it a None arrives as `TypeError: '>' not supported between
+        # instances of 'NoneType' and 'float'` -- a failure that names neither the
+        # asset nor what was expected, on a loop that runs two of them.
+        assert quote.turnover is not None, (
+            f"{quote.asset} has no turnover at all, so the thinness check was SKIPPED rather than "
+            f"passed: cap={quote.market_cap_usd} volume={quote.volume_24h_usd}"
+        )
         assert quote.turnover > THIN_TURNOVER, f"{quote.asset} should be nowhere near thin"
 
 
