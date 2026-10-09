@@ -454,6 +454,17 @@ by grepping for the NAME rather than the import graph (rule 2).
   pass touched (rule 12) and the comment should be written by whoever next has a
   reason to be in that file.
 
+- **[PARTLY CLOSED by `swapterm rebuild`, C38]** `up` still reports the code
+  version of the HOST CHECKOUT and still starts the container without rebuilding
+  it — that is unchanged, and deliberate: `up` is the command you run to look at
+  things, and a build on every `up` would be minutes of cold cache for a status
+  check. What is closed is that there is now a safe way to rebuild (`web` only,
+  never the replica). What remains is that `up` cannot DETECT the mismatch: it
+  should read the commit back OUT of the container and say "the container is N
+  commits behind, run `swapterm rebuild`". That needs a commit marker baked at
+  image build time, which is a Dockerfile change, and I would want to watch one
+  real build before claiming it works. Original note follows.
+
 - **`up` reports the code version of the HOST CHECKOUT and starts the container
   without rebuilding it.** `git_reading()`'s own docstring says it reads "which
   commit this HOST checkout is running", and `cmd_up` runs `docker compose up -d
@@ -483,6 +494,7 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C38 | **`swapterm rebuild` — the action a `git pull` actually needs.** `docker/web.Dockerfile:150` is `COPY swap_terminal ./swap_terminal`, so the app is BAKED IN and the only mounts are `/data` and `/runtime`: a pull changes nothing the container serves, while `up` reports the HOST checkout's commit and passes no `--build`. That is rule 13's "verify the artifact, not the deploy" failing in the section written to prevent it. `rebuild` builds **`web` only, by name** — a bare `docker compose build` builds every service in all three `-f` files, and `up` RECREATES a container whose image changed, which is what destroyed the ledger canister on 2026-10-07 while `up` went on printing SERVING. Then it `restart`s rather than `up`s, because a fresh image is no reason to skip proving the stop. A failed build changes NOTHING — the old image is still serving. Three mutations each caught: bare build, ignored exit code, `cmd_up` instead of `cmd_restart` | `this commit` |
 | C36 | **I made `("BTC","LTC","GRC")` a sixth spelling, in the commit about consolidating duplicated chain knowledge.** `config.py:308` and `workers/common.py:108` both already record it as spelled five times, and `config.py:1339` says there is deliberately no tuple in that file *"-- rule 8 counts copies"*. Found only by going looking afterwards. `BITCOIN_FAMILY` now derives from `coin_amounts.CHAIN_DECIMALS`, whose own docstring explains XRP/SOL are absent because they send integer base units — a property of not being Bitcoin-family, decided where it had to be. The other five are **not** merged: they are five different concepts (wallet custody, swapper support, fee measurability, P2PKH, Core release) that can diverge, so each now NAMES the other four, which is rule 8's harder half. **The value test was not enough** — restoring the literal passed it clean, so the derivation is asserted on the source | `this commit` |
 | C37 | And twenty minutes later I nearly wrote the **sixth** copy of the `spec_from_file_location` loader, in the test for that same commit. `OPEN_FINDINGS` has said *"One conftest.py helper fixes all five"* since they were counted. `conftest.root_entry_point()` is now that helper, and it is better than all five: it takes a RELATIVE PATH (one of the five loads `docker/icp_replica_entrypoint.py`, not a root file), keeps the two deliberate distinct module names, drops the `sys.path.insert` that conftest already does, and **checks the file exists first** — which `test_solana_payout.py` measured as the gap, since a nonexistent path still produces a perfectly good spec, so `spec is None` never fires for the realistic failure | `this commit` |
 | C34 | **`swapterm` on PATH, plus Up / Down / Restart icons.** Operator: *"i need like icons on the desktop and shell commands like swaptermi up or down"*, *"swapterm restart"*. New `restart` action, and a `swapterm` wrapper installed to `~/.local/bin` with the venv interpreter and repo path baked in at install time — same reason the `.desktop` `Exec=` is rewritten: a desktop session's `python3` is the SYSTEM one, with neither xrpl-py nor gunicorn. All four launchers route through that one wrapper, so an icon cannot start the stack a different way from the shell. One `.desktop` template renders all three actions. `--desktop-files` also drops them on the desktop, and the GNOME trust step is **said rather than attempted** (`gio` needs the session bus, which a session over ssh does not have, and a swallowed failure leaves an icon that silently does nothing) | `this commit` |

@@ -1710,6 +1710,83 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: The one service `rebuild` is allowed to build, and the one it must never touch.
+#:
+#: NAMED AS A PAIR RATHER THAN AS A FILTER, because the dangerous half is the
+#: omission and an omission is invisible. `docker compose build` with no service
+#: builds EVERY service in the three -f files, and `up` then RECREATES any
+#: container whose image changed -- which deletes the writable layer the ICP
+#: replica keeps its canisters in. That is not a hypothetical: it happened on
+#: 2026-10-07 and cost the desk's ledger canister, holding its test ICP, with
+#: `up` still printing SERVING afterwards. stack_authority.py's replica-state
+#: section carries the measurement.
+#:
+#: WHY REBUILDING `web` IS SAFE AND REBUILDING `icp-replica` IS NOT, which is the
+#: asymmetry this constant exists to encode. docker/web.Dockerfile:150 is
+#: `COPY swap_terminal ./swap_terminal` -- the application is BAKED IN, and the
+#: only mounts are /data (the database directory) and /runtime. So recreating
+#: `web` loses nothing that was not already on a volume, and NOT rebuilding it
+#: means the container keeps serving whatever code was baked at its last build,
+#: however many times the host checkout is pulled. The replica is the opposite:
+#: its state is in the container, so recreating it is the loss.
+REBUILDABLE_SERVICE = "web"
+NEVER_REBUILT_SERVICE = "icp-replica"
+
+
+def cmd_rebuild(files: tuple[str, ...]) -> int:
+    """Rebuild the `web` image from the current checkout, then restart. Never the replica.
+
+    THE ACTION A `git pull` ACTUALLY NEEDS, and the gap it closes is one `up`'s own
+    version check could not see: git_reading() reports which commit the HOST
+    CHECKOUT is on, `up` passes no --build, and the application is baked into the
+    web image. So after a pull, `up` prints `code <new sha>, tree clean` while the
+    container serves the old code -- the exact shape of defect rule 13 names
+    ("verify the artifact, not the deploy") in the section written to prevent it.
+
+    IT BUILDS ONE SERVICE BY NAME. A bare `docker compose build` would build every
+    service in all three -f files, including icp-replica, and `up` recreates a
+    container whose image changed -- which is how the replica's canisters were
+    destroyed on 2026-10-07. The service name is not a convenience here; it is the
+    safety property, and REBUILDABLE_SERVICE carries the reasoning.
+
+    THEN `restart`, NOT `up`: a fresh image is no reason to skip proving the stop,
+    and starting a rebuilt container alongside a survivor is the same orphan
+    problem with newer code in it.
+    """
+    say("swap_stack: REBUILD")
+    say(f"  builds            {REBUILDABLE_SERVICE} ONLY, by name. `docker compose build` with no")
+    say("                    service would build every service in all three -f files.")
+    say(f"  never built       {NEVER_REBUILT_SERVICE}. Its canister state lives in the container's")
+    say("                    writable layer, and `up` RECREATES a container whose image changed --")
+    say("                    which destroyed the desk's ledger canister on 2026-10-07 while `up`")
+    say("                    went on printing SERVING. Rebuild it deliberately or not at all.")
+    say("  why this exists   docker/web.Dockerfile COPYs swap_terminal/ INTO the image, so a")
+    say("                    `git pull` changes nothing the container serves until this runs.")
+    say("                    `up` reports the HOST checkout's commit and passes no --build.")
+    say("")
+    code = _say_code_version()
+    say(f"  building          docker compose build {REBUILDABLE_SERVICE} -- this is the slow step,")
+    say("                    minutes on a cold layer cache, and it prints compose's own progress")
+    say("")
+    done = compose(["build", REBUILDABLE_SERVICE], files)
+    for line in (done.stderr or done.stdout).strip().splitlines():
+        say(f"                    {line}")
+    if done.returncode != 0:
+        say("")
+        say(f"  BUILD FAILED      docker compose build exited {done.returncode}. NOTHING WAS")
+        say("                    STOPPED and nothing was restarted, so the stack is exactly as")
+        say("                    you left it -- the old image is still there and still serving.")
+        say("                    Fix the build and run this again; `swapterm status` shows the")
+        say("                    stack is untouched.")
+        _say_code_version_repeat(*code)
+        return done.returncode
+    say("")
+    say(f"  BUILT             {REBUILDABLE_SERVICE} image rebuilt from this checkout. Restarting now,")
+    say("                    which is where the stop gets proven before anything starts.")
+    say("")
+    return cmd_restart(files)
+
+
 def cmd_restart(files: tuple[str, ...]) -> int:
     """Stop everything, PROVE it stopped, and only then start. Refuses otherwise.
 
@@ -1789,6 +1866,7 @@ ACTIONS = {
     "up": cmd_up,
     "down": cmd_down,
     "restart": cmd_restart,
+    "rebuild": cmd_rebuild,
     "chains": cmd_chains,
 }
 

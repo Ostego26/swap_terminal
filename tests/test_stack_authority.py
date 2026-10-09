@@ -2287,6 +2287,20 @@ def test_both_causes_reach_the_verdict_and_not_just_the_boilerplate():
     assert "timed out" in said, f"LTC's cause did not reach the report: {said}"
 
 
+class _Built:
+    """What compose() returns, as much of it as cmd_rebuild() reads.
+
+    A stand-in rather than a real subprocess.CompletedProcess because the point of
+    these tests is which ARGUMENTS reach compose, and running docker to find that
+    out would make them untestable anywhere without a daemon.
+    """
+
+    def __init__(self, returncode: int):
+        self.returncode = returncode
+        self.stdout = ""
+        self.stderr = ""
+
+
 # =============================================================================
 # `restart` REFUSES TO START ON A STOP IT COULD NOT PROVE
 #
@@ -2299,6 +2313,85 @@ def test_both_causes_reach_the_verdict_and_not_just_the_boilerplate():
 # unproven stop is how that is manufactured, so these pin the refusal rather than
 # the happy path.
 # =============================================================================
+
+
+def test_rebuild_builds_web_by_name_and_never_the_replica(monkeypatch, capsys):
+    """THE SAFETY PROPERTY, and it is an omission, which is why it is asserted.
+
+    `docker compose build` with no service builds EVERY service in all three -f
+    files, and `up` RECREATES a container whose image changed -- which deletes the
+    writable layer the ICP replica keeps its canisters in. That destroyed the
+    desk's ledger canister on 2026-10-07, with `up` still printing SERVING
+    afterwards.
+
+    MUTATION: `compose(["build"], files)`. Nothing else in the suite notices, the
+    command still works, and the next run takes the replica with it.
+    """
+    calls = []
+    monkeypatch.setattr(swap_stack, "compose",
+                        lambda args, _files, **kw: calls.append(args) or _Built(0))
+    monkeypatch.setattr(swap_stack, "cmd_restart", lambda _files: 0)
+    monkeypatch.setattr(swap_stack, "_say_code_version", lambda: ("abc1234", "clean"))
+    monkeypatch.setattr(swap_stack, "_say_code_version_repeat", lambda *_a: None)
+
+    swap_stack.cmd_rebuild(("docker-compose.yml",))
+
+    assert calls == [["build", swap_stack.REBUILDABLE_SERVICE]], (
+        f"rebuild ran {calls}; it must build exactly one service, BY NAME"
+    )
+    assert swap_stack.NEVER_REBUILT_SERVICE not in str(calls), (
+        f"{swap_stack.NEVER_REBUILT_SERVICE} was named in a build command: {calls}"
+    )
+    said = capsys.readouterr().out
+    assert swap_stack.NEVER_REBUILT_SERVICE in said, (
+        "the output does not say which service is deliberately NOT rebuilt, so an operator "
+        "cannot tell that from an oversight (rule 14)"
+    )
+    assert "2026-10-07" in said, "and does not say what rebuilding it cost"
+
+
+def test_a_failed_build_stops_and_restarts_nothing(monkeypatch, capsys):
+    """A broken build must leave the running stack exactly as it was.
+
+    The old image is still there and still serving, so the honest behavior is to
+    change nothing -- not to tear down a working stack because a new image could
+    not be produced. MUTATION: ignore the return code and fall through to
+    cmd_restart(); the operator then has a stopped stack AND no new image.
+    """
+    monkeypatch.setattr(swap_stack, "compose", lambda _args, _files, **kw: _Built(2))
+    restarted = []
+    monkeypatch.setattr(swap_stack, "cmd_restart", lambda _files: restarted.append("r") or 0)
+    monkeypatch.setattr(swap_stack, "_say_code_version", lambda: ("abc1234", "clean"))
+    monkeypatch.setattr(swap_stack, "_say_code_version_repeat", lambda *_a: None)
+
+    code = swap_stack.cmd_rebuild(("docker-compose.yml",))
+
+    assert restarted == [], "a failed build went on to stop and start the stack anyway"
+    assert code == 2, f"the build's own exit code must survive; got {code}"
+    said = capsys.readouterr().out
+    assert "NOTHING WAS" in said and "STOPPED" in said, said
+    assert "still serving" in said, f"the operator is not told the stack is untouched: {said}"
+
+
+def test_rebuild_restarts_rather_than_merely_starting(monkeypatch, capsys):
+    """A fresh image is no reason to skip proving the stop.
+
+    Starting a rebuilt container alongside a survivor is the same orphan problem
+    with newer code in it -- and newer code holding a lock is harder to diagnose,
+    not easier, because the version check now agrees.
+    """
+    monkeypatch.setattr(swap_stack, "compose", lambda _args, _files, **kw: _Built(0))
+    monkeypatch.setattr(swap_stack, "_say_code_version", lambda: ("abc1234", "clean"))
+    monkeypatch.setattr(swap_stack, "_say_code_version_repeat", lambda *_a: None)
+    went = []
+    monkeypatch.setattr(swap_stack, "cmd_restart", lambda _files: went.append("restart") or 0)
+    monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: went.append("up") or 0)
+
+    swap_stack.cmd_rebuild(("docker-compose.yml",))
+
+    assert went == ["restart"], (
+        f"rebuild went {went}; calling cmd_up directly would skip the proof gate"
+    )
 
 
 def test_restart_starts_nothing_when_the_stop_could_not_be_proven(monkeypatch, capsys):
