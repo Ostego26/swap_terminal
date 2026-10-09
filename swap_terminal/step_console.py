@@ -26,6 +26,35 @@ has no use for. The two are named at each other so a reader who finds one knows
 the other exists: that one is the two-chain harness's console, this one is for a
 verifier that talks to one chain.
 
+AND THE PARAGRAPH ABOVE NAMED THE HARMLESS DIFFERENCE AND NOT THE DANGEROUS ONE,
+which is why this one exists (2026-10-09). The two classes share a NAME, share
+five method names, and disagree about the fourth argument of the one method that
+decides whether something passed:
+
+    step_console.Console.check(label, got, expected, ok: bool)    -> bool
+    regtest.console.Console.check(label, got, expected, outcome: str) -> str
+
+regtest/console.py's verdicts are STRINGS -- OK = "OK", FAIL = "FAIL",
+SKIP = "SKIP", XFAIL = "XFAIL" -- and every non-empty string is truthy. So
+`step_console_instance.check(label, got, expected, FAIL)` prints "OK  ", appends
+a PASS to self.results, and summary() returns exit code 0. A FAIL constant
+produces a pass and a clean exit, silently, which is precisely rule 13's "a cycle
+that did no work must not report the same way as one that did".
+
+MEASURED 2026-10-09, AND IT IS LATENT RATHER THAN LIVE: 19 files import a Console,
+8 this one and 11 that one, and NO file imports both. All 82 check() calls in the
+8 files that import this one pass a real boolean -- checked, not assumed. What
+makes it worth a guard rather than a note is that the two populations are one
+copy-paste apart: a reader moving a line between a `from regtest.console import
+FAIL, OK, Console` file (11 precedents) and a `from step_console import Console`
+file (8 precedents) gets a silent wrong verdict and an exit 0, and nothing in
+either file looks wrong.
+
+So check() REFUSES a non-bool rather than trusting the annotation. That is the
+same shape as the six validating boundaries widened to `object` on the same day,
+and `ok: object` is the honest type for the same reason: this function takes
+whatever arrives and answers with a named refusal.
+
 The step COUNT is a constructor argument rather than the hardcoded `/9` this
 grew up with. All three verifiers happen to have nine steps and the fourth will
 not.
@@ -62,7 +91,30 @@ class Console:
     def say(self, text: str) -> None:
         print(f"          {text}", flush=True)
 
-    def check(self, label: str, got: object, expected: object, ok: bool) -> bool:
+    def check(self, label: str, got: object, expected: object, ok: object) -> bool:
+        """Print one assertion, record it, and return the verdict.
+
+        `ok: object` RATHER THAN `ok: bool`, AND THE REFUSAL BELOW IS WHY. See this
+        module's header: regtest/console.py's Console has the same name and the same
+        method with a verdict STRING in this position, every one of which is truthy,
+        so crossing the two turns a FAIL into a printed OK and an exit code of 0.
+        Annotating `bool` did not stop that and could not -- nothing type-checks the
+        82 call sites at runtime, and the crossing arrives by copy-paste rather than
+        by anyone writing a wrong type on purpose.
+
+        `is not True and is not False` rather than isinstance, because
+        `isinstance(1, bool)` is False but `isinstance(True, int)` is True and the
+        asymmetry invites exactly one more wrong assumption. Identity against the two
+        singletons says what is meant: this takes a verdict, not a truthy value.
+        """
+        if ok is not True and ok is not False:
+            raise TypeError(
+                f"check({label!r}) was given ok={ok!r} ({type(ok).__name__}), which is not a bool. "
+                f"If that came from regtest/console.py's OK/FAIL/SKIP/XFAIL, those are STRINGS and "
+                f"every one of them is truthy -- passing FAIL here would have printed OK and exited 0. "
+                f"That module's Console is a different class with the same name; this one wants True "
+                f"or False."
+            )
         shown = got if got not in (None, "", [], {}) else "(none)"
         print(f"          {'OK  ' if ok else 'FAIL'}  {label}: got={shown}  expected={expected}  "
               f"[{self._elapsed()}]", flush=True)
