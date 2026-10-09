@@ -112,6 +112,44 @@ def seed_swap(client, swap_id, status="confirming", **overrides):
     return swap_id
 
 
+def only_group(pattern: str, text: str, what: str, group: int | str = 1) -> str:
+    """`re.search(...).group(n)`, with the miss refused by name instead of crashing.
+
+    FIVE SITES IN THIS FILE DID `re.search(...).group(1)` WITH NO CHECK, and all five
+    assert on page markup. When a template changes so the pattern stops matching,
+    that line dies with
+
+        AttributeError: 'NoneType' object has no attribute 'group'
+
+    which names neither the pattern nor the page nor the selector -- and on a test
+    file whose whole job is "a field tidied out of a template does not fail
+    anything: the page still renders, still returns 200, and the fact is simply
+    gone", a crash that cannot say WHAT went missing is the worst available
+    outcome. It also reads, to anyone skimming a red run, like a broken test rather
+    than a missing element.
+
+    THE FILE ALREADY KNEW THIS. Four lines above one of the five sits
+
+        assert rule, f"{selector} has no rule"
+
+    doing exactly the right thing in a loop, with the very next statement outside
+    the loop doing the wrong one. That is the shape bucket F found four times the
+    same day -- one guarded branch and one unguarded branch in the same test.
+
+    ONE FUNCTION RATHER THAN FIVE INLINE ASSERTS, because the five are one rule
+    ("this markup must be present and here is what it is for") and five copies of
+    an assertion drift in their wording, which is what a reader of a failure
+    actually consumes.
+    """
+    found = re.search(pattern, text, flags=re.DOTALL)
+    assert found is not None, (
+        f"{what}: nothing in this page matched {pattern!r}. Either the markup moved and this "
+        f"test needs its pattern updated, or the element is gone -- which is the thing this "
+        f"file exists to catch, so it must not arrive as an AttributeError."
+    )
+    return found.group(group)
+
+
 def rows_of(markup: str) -> list[tuple[str, str]]:
     """Every (row label, row value) pair the page rendered as a table row.
 
@@ -191,6 +229,46 @@ _TILE = r'<li class="swaptile swaptile-([a-z]+)"[^>]*>(.*?)</li>'
 # --- every box renders, and every box has a heading ------------------------
 
 
+def test_a_pattern_that_stops_matching_says_so_instead_of_crashing():
+    """The positive control for only_group(), and it needs to be one.
+
+    I tried to establish this by mutation instead -- renaming `class="tabstrip"` in
+    admin.html, then `.matrix .matrix-corner` in styles.css -- and BOTH times a
+    guard that already existed higher in the same test fired first, so the helper's
+    message was never reached and the mutation proved nothing about it. Two sites
+    out of five already had the check; the other three did not, and a control that
+    only runs when the redundant guard is absent is not a control.
+
+    So the helper is asserted directly. What this pins is that the refusal names
+    the PATTERN and says which of the two things went wrong -- the markup moved, or
+    the element is gone -- because the AttributeError it replaces says neither:
+
+        AttributeError: 'NoneType' object has no attribute 'group'
+
+    On a file whose own header says "a field tidied out of a template does not fail
+    anything: the page still renders, still returns 200, and the fact is simply
+    gone", a crash that cannot name what went missing is the worst outcome
+    available, and it reads to anyone skimming a red run as a broken test rather
+    than a missing element.
+    """
+    assert only_group(r"<b>(.*?)</b>", "<b>here</b>", "a bold run") == "here"
+
+    with pytest.raises(AssertionError) as raised:
+        only_group(r'<nav class="tabstrip"[^>]*>(.*?)</nav>', "<p>no nav at all</p>", "the tab strip")
+    message = str(raised.value)
+    assert "the tab strip" in message, "the refusal must say what was being looked for"
+    assert "tabstrip" in message, "and show the pattern, so a stale pattern is distinguishable"
+    assert "markup moved" in message and "element is gone" in message, (
+        "it must name BOTH readings; which one it is decides whether the test or the page is wrong"
+    )
+
+    # DOTALL is not optional here and is why the helper owns the flag: every
+    # pattern in this file spans lines, and re.search without it silently matches
+    # nothing against real markup -- the same failure, arriving as a miss rather
+    # than as an error.
+    assert only_group(r"<p>(.*?)</p>", "<p>one\ntwo</p>", "a paragraph") == "one\ntwo"
+
+
 def test_every_allowed_direction_gets_exactly_one_indicator(client):
     """One tile per allowed direction, each naming the direction.
 
@@ -213,8 +291,8 @@ def test_every_allowed_direction_gets_exactly_one_indicator(client):
         f"{len(allowed)} directions are allowed and the page drew {len(tiles)} indicators"
     )
     named = {
-        html.unescape(re.sub(r"\s+", " ", re.search(r'<span class="pair-label">(.*?)</span>', inner,
-                                                    flags=re.DOTALL).group(1))).strip()
+        html.unescape(re.sub(r"\s+", " ", only_group(
+            r'<span class="pair-label">(.*?)</span>', inner, "a swap tile's pair label"))).strip()
         for _, inner in tiles
     }
     assert named == {f"{source} \u2192 {destination}" for source, destination in allowed}, (
@@ -1136,7 +1214,7 @@ def test_the_alarm_panel_is_still_the_first_thing_after_the_page_header(client):
     # above while pushing the alarm out of the top-left cell, which is the position
     # this test exists to hold: a payout row stuck at 'created' means money possibly
     # on chain with no txid recorded.
-    first_band = re.search(r'<div class="band">(.*?)\n</div>', body, flags=re.DOTALL).group(1)
+    first_band = only_group(r'<div class="band">(.*?)\n</div>', body, "the first band on /admin")
     sections = re.findall(r'<section class="panel[^"]*"[^>]*aria-labelledby="([^"]+)"', first_band)
     assert sections[0] == "stuck-heading", (
         f"the alarm is not the first cell of the first band; the band holds {sections}"
@@ -1167,7 +1245,7 @@ def test_no_wide_table_was_put_in_a_half_width_band(client):
     budget_px = 526
     for band in re.findall(r'<div class="band">(.*?)\n</div>', body, flags=re.DOTALL):
         for table in re.findall(r"<table(?! class=\"kvt\").*?</table>", band, flags=re.DOTALL):
-            columns = len(re.findall(r"<th", re.search(r"<thead>(.*?)</thead>", table, re.DOTALL).group(1))) \
+            columns = len(re.findall(r"<th", only_group(r"<thead>(.*?)</thead>", table, "a table's header row"))) \
                 if "<thead>" in table else 0
             widest = 0
             for row in re.finditer(r"<tr[^>]*>(.*?)</tr>", table, flags=re.DOTALL):
@@ -1478,7 +1556,7 @@ def test_the_matrixs_row_header_survives_a_sideways_scroll():
         body = rule.group(1)
         assert "position: sticky" in body, f"{selector} does not stick, so a sideways scroll hides it"
         assert "left: 0" in body, f"{selector} sticks but names no left offset"
-    corner = re.search(r"\.matrix \.matrix-corner\s*\{(.*?)\}", css, flags=re.DOTALL).group(1)
+    corner = only_group(r"\.matrix \.matrix-corner\s*\{(.*?)\}", css, ".matrix .matrix-corner in styles.css")
     assert "top: 0" in corner, (
         "the corner must stick to the top as well, or the column header slides over it"
     )
@@ -2106,7 +2184,7 @@ def test_every_tab_is_a_same_document_link_so_a_probe_result_cannot_be_discarded
     navigate and would take the result with it.
     """
     markup = client.get("/admin").get_data(as_text=True)
-    strip = re.search(r'<nav class="tabstrip"[^>]*>(.*?)</nav>', markup, flags=re.DOTALL).group(1)
+    strip = only_group(r'<nav class="tabstrip"[^>]*>(.*?)</nav>', markup, "the /admin tab strip")
 
     for attributes in re.findall(r"<a ([^>]*)>", strip):
         href = re.search(r'href="([^"]*)"', attributes)
