@@ -60,6 +60,41 @@ ignore = [
 # that asserts only that the constant equals itself.
 "tests/*" = ["S101", "S603", "S607", "PLR2004"]
 
+[tool.pyright]
+# WHERE PYLANCE HAS TO LOOK, and this is a TOOLING fix rather than a code one.
+#
+# The operator's editor reported, 2026-10-09:
+#
+#     icp_operator_admin.py:74  Import "config" could not be resolved
+#     icp_operator_admin.py:75  Import "microfortnights" could not be resolved
+#     icp_operator_admin.py:76  Import "report_block" could not be resolved
+#
+# All three are FALSE. That file does
+#
+#     sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
+#
+# twelve lines above them, and it imports and runs cleanly -- checked by executing
+# the module, not by reading it. Pylance cannot follow a sys.path mutation that
+# happens at runtime, so it resolves those names against the repository root where
+# they do not exist.
+#
+# FORTY-TWO ROOT TOOLS DO THE SAME THING, so this is not one file's problem and
+# fixing it one file at a time would be forty-two edits for a checker's benefit.
+# `extraPaths` tells Pylance what every one of those lines already tells Python.
+#
+# IT PAPERS OVER NOTHING. The note in [tool.pytest.ini_options] below says the
+# rootless imports are "rule 10's layout gap, not something this config should
+# paper over by rewriting every import" -- and that still holds. This does not
+# change an import, a path, or anything at runtime; it stops an editor reporting
+# three errors that are not there. A red squiggle on correct code is the same
+# defect class as a warning that fires on every run (rule 13): the reader learns
+# to ignore it, and then misses the real one.
+# BOTH ROOTS, because the tools use both. Counted 2026-10-09 across the 42 root
+# tools that do this: 33 insert `<repo>/swap_terminal` and 3 insert `<repo>`
+# itself. A list with only the first leaves the second group reporting the same
+# false errors, which is the half-fix that makes the whole line untrustworthy.
+extraPaths = ["swap_terminal", "."]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # swap_terminal/ is on sys.path via tests/conftest.py, because the application
