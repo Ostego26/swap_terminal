@@ -101,6 +101,7 @@ from threading import Lock
 from time import time
 
 import requests
+from services.deadline import call_timeout
 
 # The cache holds the RAW CoinGecko body plus both derived views, so a cache hit
 # returns the identical dict object fetch_usd_prices() has always returned and
@@ -152,30 +153,14 @@ _lock = Lock()
 # an interface, not a report.
 PRICE_FETCH_BUDGET_SECONDS = float(os.getenv("ST_PRICE_FETCH_BUDGET_SECONDS", "45"))
 
-#: Below this much remaining budget, the next HTTP call is NOT started.
-#:
-#: Starting a request with half a second left buys a guaranteed timeout and
-#: spends the half second doing it. Refusing to start is the same answer sooner,
-#: and it is the difference between a budget and a formality.
-_MINIMUM_USEFUL_CALL_SECONDS = 1.0
-
-
-def call_timeout(deadline: float, now: float, per_call: float) -> float:
-    """How long the next price request may take. 0.0 means DO NOT START IT. Pure.
-
-    The whole decision, in one testable function (rule 10), because the thing
-    that goes wrong with a budget is always arithmetic: an off-by-one that lets
-    the last call run with the full per-call timeout puts the total back over the
-    server's limit, and nothing about the code looks different when it does.
-
-    `per_call` is still respected -- the budget is a CEILING, not a replacement.
-    A 15s feed call with 40s of budget left still gets 15s, so a single slow feed
-    behaves exactly as it does today.
-    """
-    remaining = deadline - now
-    if remaining <= _MINIMUM_USEFUL_CALL_SECONDS:
-        return 0.0
-    return min(per_call, remaining)
+# call_timeout() LIVES IN services/deadline.py and is re-exported here.
+#
+# It was written in this file and had a second caller the same day --
+# services/admin_view.probe_chains(), whose six chains x two RPCs x 30s is the
+# same defect with different numbers. Rule 8: the moment a rule has two callers
+# it belongs where both can reach it, and a copy left behind is the bug with a
+# delay on it. The name stays importable from here because the tests and the
+# callers in this file already use it.
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 # One table, and everything below is DERIVED from it. It used to be paired with a

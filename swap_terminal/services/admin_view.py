@@ -60,13 +60,16 @@ workers/common.py names this one.
 
 from __future__ import annotations
 
-from time import time
+import os
+from collections.abc import Callable
+from time import monotonic, time
 
 from chains.base import RPCAdapter
 from chains.daemon_network import chain_network, is_named
 from chains.registry import why_cannot_pay_out, why_unconfigured
 from microfortnights import format_duration
 from modules.htlc_assets import settlement_verdict
+from services.deadline import MINIMUM_USEFUL_CALL_SECONDS, call_timeout
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
 # THE PAIR VERDICT COMES FROM pair_view AND IS NOT COMPUTED IN THIS FILE.
@@ -1499,12 +1502,79 @@ def _ask_network(adapter) -> str:
     return chain_network(adapter)
 
 
-def probe_chains(adapters: dict, assets: tuple[str, ...] | None = None) -> list[dict]:
+#: The total time ONE /api/admin/chains request may spend probing, in seconds.
+#:
+#: MEASURED ON THE OPERATOR'S HOST, 2026-10-08:
+#:
+#:     all chain probes : HTTP 500  60.182023s total
+#:     --- what each daemon said ---
+#:     (empty)
+#:
+#: 60.18s is gunicorn's 60s worker timeout, not a chain answering. Six configured
+#: chains, up to two read-only RPCs each, 30s per RPC by the adapter's default, is
+#: up to 360s in one request. The worker was killed, the body was never written,
+#: and the probe that exists to say WHICH chain is unreachable said nothing at all
+#: -- while costing one of two workers.
+#:
+#: 45s, under gunicorn's 60, for the same reason as pricing's budget: nothing that
+#: can succeed today starts failing, and a worker kill becomes a partial answer.
+CHAIN_PROBE_BUDGET_SECONDS = float(os.getenv("ST_CHAIN_PROBE_BUDGET_SECONDS", "45"))
+
+
+def probe_chains(
+    adapters: dict,
+    assets: tuple[str, ...] | None = None,
+    budget_seconds: float | None = None,
+    now: Callable[[], float] = monotonic,
+) -> list[dict]:
     """Probe every configured chain, read-only. Never raises.
 
     One call for an adapter with its own network(); up to two for a
     Bitcoin-style daemon -- the reachability read, then the naming read that
     older builds need. See _ask_network().
+
+    WITHIN ONE TOTAL BUDGET, AND EVERY CHAIN STILL GETS A ROW. That is the whole
+    change from the list comprehension this replaced. Stopping the loop would hand
+    the template five rows where six were expected, and a missing row reads as
+    fine -- rule 14's "(none) is a result; a blank gap is ambiguous between zero
+    rows and a query that broke". An unprobed chain reports probed=False with the
+    budget named, which is the shape probe_chain() already uses for "not
+    configured".
+
+    THE ORDER IS THE ORDER THEY ARE ASKED IN, and the budget is spent in it, so a
+    chain late in the alphabet is the one that goes unprobed when an early one
+    hangs. That does NOT mean the later chains are worse -- only that they were
+    later, and the detail says so.
+
+    `now` is injectable so a test can exhaust the budget without sleeping. It is
+    monotonic() rather than time() because a wall-clock step -- an NTP correction
+    mid-probe -- would otherwise move the deadline under it.
     """
     names = tuple(sorted(adapters)) if assets is None else assets
-    return [probe_chain(asset, adapters.get(asset)) for asset in names]
+    budget = CHAIN_PROBE_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+    deadline = now() + budget
+    results: list[dict] = []
+    for asset in names:
+        adapter = adapters.get(asset)
+        # THE BUDGET IS NOT SPENT ON A CHAIN THAT MAKES NO CALL. "not configured"
+        # and "no probe implemented" are answered from memory, so letting an
+        # exhausted budget mask them would replace a precise answer with a vaguer
+        # one for no saving at all.
+        makes_a_call = adapter is not None and probe_kind(adapter) != "none"
+        if makes_a_call and not call_timeout(deadline, now(), MINIMUM_USEFUL_CALL_SECONDS):
+            results.append({
+                "asset": asset,
+                "probed": False,
+                "reachable": None,
+                "network": None,
+                "detail": (
+                    f"NOT PROBED -- the {budget:.0f}s budget for this whole request was spent by "
+                    f"the chains asked before it. This says NOTHING about whether {asset} is "
+                    f"reachable; it says nobody asked. A budget spent in full means at least one "
+                    f"chain above did not answer -- find it there, not here. "
+                    f"ST_CHAIN_PROBE_BUDGET_SECONDS raises the ceiling"
+                ),
+            })
+            continue
+        results.append(probe_chain(asset, adapter))
+    return results
