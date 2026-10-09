@@ -250,7 +250,14 @@ def parse_and_reencode_as_testnet_p2pkh(address: str) -> str:
         # reached the ValueError below and was reported as an INVALID FORMAT. It is not: it is
         # a valid address this CONVERSION cannot serve, and those are different facts.
         decoded = decode_segwit_address(raw)
-        if decoded.ok:
+        # `program is not None` IS `decoded.ok`: SegwitAddress.ok is defined as exactly that
+        # expression (modules/address_network.py, the `ok` property on the NamedTuple). It is
+        # written out and bound to a name here because a property body cannot narrow
+        # `decoded.program` for the three reads below, and those reads take len() of it and
+        # concatenate it as bytes. Through `.ok` the None never got checked at the sites that
+        # index it; through `program` it is checked once, where a reader can see it.
+        program = decoded.program
+        if program is not None:
             if decoded.witness_version != 0:
                 # THE REFUSAL IS RIGHT AND THE OLD MESSAGE WAS WRONG. A witness v1 output key is
                 # 32 bytes of x-only public key, not a HASH160, so there is NO P2PKH equivalent
@@ -261,17 +268,17 @@ def parse_and_reencode_as_testnet_p2pkh(address: str) -> str:
                 raise ValueError(
                     f"{address} is a VALID {decoded.encoding} witness v{decoded.witness_version} "
                     f"address ({decoded.why}), but this function converts to a testnet P2PKH and a "
-                    f"{len(decoded.program)}-byte witness v{decoded.witness_version} program is not "
+                    f"{len(program)}-byte witness v{decoded.witness_version} program is not "
                     f"a HASH160. There is no P2PKH equivalent of a Taproot output, so this is a "
                     f"refusal about THE CONVERSION and not about the address. The address itself "
                     f"passes modules/address_authority.check_address()"
                 )
-            if len(decoded.program) == WITNESS_V0_KEYHASH_LEN:
-                reencoded = base58.b58encode_check(TESTNET_P2PKH_VERSION + decoded.program).decode()
+            if len(program) == WITNESS_V0_KEYHASH_LEN:
+                reencoded = base58.b58encode_check(TESTNET_P2PKH_VERSION + program).decode()
                 logger.debug(f"Successfully re-encoded Bech32 address to Base58: {reencoded}")
                 return reencoded
             raise ValueError(
-                f"{address} is a valid witness v0 address with a {len(decoded.program)}-byte "
+                f"{address} is a valid witness v0 address with a {len(program)}-byte "
                 f"program (P2WSH), and a script hash has no P2PKH equivalent either. Same "
                 f"distinction as the Taproot case above: the address is fine, the conversion is "
                 f"not available"

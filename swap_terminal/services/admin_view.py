@@ -953,7 +953,15 @@ def _endpoint_text(asset: str, adapter) -> str:
         return "(not configured -- no adapter was constructed)"
     line = getattr(adapter, "endpoint_line", None)
     if callable(line):
-        return line().strip()
+        # str() AROUND IT, because `callable()` proves only that it can be CALLED. Nothing here
+        # knows what an adapter's endpoint_line() returns -- `adapter` is duck-typed and the
+        # attribute is fetched by name -- so `.strip()` on the result was an unchecked bet on
+        # a type this function never established. A row that renders an unexpected value
+        # visibly wrong is the right failure for a read-only admin page; an AttributeError
+        # inside a page builder takes the whole surface down, which is the opposite of rule
+        # 14's "(none) is a result". str() of a str is the identical object's text, so the
+        # normal case is unchanged.
+        return str(line()).strip()
     host = getattr(adapter, "host", "?")
     port = getattr(adapter, "port", "?")
     # wallet_label() RATHER THAN `or "(default wallet)"`, 2026-10-03. This file

@@ -1025,7 +1025,14 @@ def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None,
                     unspent_as_of.pop(point, None)
             elif not spender and unspent_as_of is not None and tip is not None:
                 unspent_as_of[point] = tip
-        value = funding_steps.satoshis_to_coins(outpoint.value_satoshis)
+        # str(), FOR THE REASON WRITTEN OUT AT funding_steps.funding_needed_coins(): PaymentRow
+        # declares `value_coins: str` and this handed it a Decimal, and these rows go into
+        # operator_panel.funding_payload()'s "rows" list, which is serialized by
+        # `json.dumps(handler())` on GET /api/funding. A Decimal there raises TypeError, which
+        # `guarded()` renders as a 500 in place of the funding table. Checked at the
+        # interpreter rather than reasoned about. The rendered digits are unchanged:
+        # str(Decimal) is what the f-string on the candidate line below already produced.
+        value = str(funding_steps.satoshis_to_coins(outpoint.value_satoshis))
         if spender:
             # THE DESCRIPTION IS CARRIED, not replaced. It is the only thing that says whether
             # this answer was measured just now or remembered from an earlier look, and rule 17

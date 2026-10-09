@@ -346,6 +346,30 @@ class LTCClient:
             Dict[str, Any]: A dictionary containing contract details.
         """
         logger.info("Creating LTC HTLC contract.")
+        # THE DEFAULT IS KEPT AND THE REFUSAL IS MOVED HERE, which is the only half of this
+        # that was missing. `secret_hash: str | None = None` is this client's documented
+        # divergence from the other two (the table in the module header, row "secret_hash
+        # required?"), and modules/htlc_contract_api.create_contract_kwargs() already refuses
+        # a falsy one with the sentence that matters -- "an HTLC without a hashlock is a
+        # timelocked gift" -- so the ONE path the application uses is covered.
+        #
+        # What was not covered is a direct call. With secret_hash=None, build_htlc_redeem_script
+        # reaches push_data(None) and dies on `TypeError: object of type 'NoneType' has no
+        # len()` (checked by calling it, 2026-10-09), five frames from the cause and with
+        # nothing naming the hashlock. Nothing is broadcast either way -- this is the first
+        # statement in the method and the send is three steps later -- so this changes the
+        # MESSAGE and not the outcome.
+        #
+        # Rule 8: the other copy of this refusal is create_contract_kwargs(), which guards the
+        # application path. A reader who finds one must be told the other exists.
+        if not secret_hash:
+            raise ValueError(
+                "LTC create_contract() was called with no secret hash. An HTLC without a hashlock "
+                "is a timelocked gift -- anyone may take it at expiry and the counterparty's leg is "
+                "not bound to it. This client defaults secret_hash to None for the reason in its "
+                "module header; modules/htlc_contract_api.create_contract_kwargs() is the path that "
+                "never lets that default be reached."
+            )
         # Build the HTLC redeem script.
         redeem_script = build_htlc_redeem_script(secret_hash, participant_address, refund_address, locktime)
         redeem_hex = redeem_script.hex()

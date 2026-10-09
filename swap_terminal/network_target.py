@@ -255,7 +255,20 @@ def may_read_a_wallet(chain: str, port: int) -> tuple[bool, str]:
             f"established -- and an unknown port may be a mainnet daemon on a custom -rpcport. "
             f"Refusing to connect rather than guessing"
         )
-    return True, f"port {port} is a test chain (mainnet is {known.mainnet_port})"
+    # TEST IS NOW THE EXPLICIT BRANCH AND UNRECOGNIZED IS THE FALLTHROUGH, which is the same
+    # answer for every reachable input and a readable one for the input that is not. classify()
+    # returns UNRECOGNIZED whenever `CHAIN_PORTS.get(chain)` is None (its own `if known is None`
+    # branch), so "TEST with no row" cannot happen -- but that argument lived in another
+    # function, and as a bare trailing `return` this line read `known.mainnet_port` off a value
+    # the three lines above had each guarded with `if known`. If it ever did happen, the
+    # sentence below is the true one: which chain this is was not established.
+    if verdict == "TEST" and known is not None:
+        return True, f"port {port} is a test chain (mainnet is {known.mainnet_port})"
+    return False, (
+        f"port {port} is not a {chain} port this tree knows, so which chain it is was NOT "
+        f"established -- and an unknown port may be a mainnet daemon on a custom -rpcport. "
+        f"Refusing to connect rather than guessing"
+    )
 
 
 def describe(chain: str, host: str, port: int) -> str:
@@ -274,7 +287,10 @@ def describe(chain: str, host: str, port: int) -> str:
     location = f"{host}:{port}"
     if verdict == "MAINNET":
         return f"{chain:4} {location:24} <- *** MAINNET, REAL MONEY ***"
-    if verdict == "TEST":
+    # `and known is not None` for the reason given in may_read_a_wallet() above: classify()
+    # never answers TEST without a CHAIN_PORTS row, and the UNRECOGNIZED line below already
+    # spells the no-row case, so this makes the guard visible without inventing a branch.
+    if verdict == "TEST" and known is not None:
         return f"{chain:4} {location:24} <- test chain (mainnet is {known.mainnet_port})"
     mainnet = f"; mainnet is {known.mainnet_port}" if known else ""
     return (

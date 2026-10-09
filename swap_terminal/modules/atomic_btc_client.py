@@ -549,13 +549,34 @@ class BTCClient:
 # For testing purposes:
 if __name__ == "__main__":
     try:
-        # Ensure that BTC_RPC_URL, BTC_RPC_USER and BTC_RPC_PASS are set in the
-        # environment. BTC_HTLC_PRIVKEY is no longer read by anything -- see the
-        # module header.
+        # "ENSURE THAT ... ARE SET" IS NOW SOMETHING THIS BLOCK DOES, NOT SOMETHING IT ASKS
+        # FOR. It used to be a comment above three `os.environ.get(name)` calls, each of which
+        # hands None straight to a parameter typed `str`. BTCClient.__init__ does refuse a
+        # falsy triple, so nothing was ever sent on a missing variable -- but it refuses with
+        # "Missing BTC RPC credentials.", which does not say WHICH, and this block broadcasts,
+        # so the one thing the operator needs is the name of the variable to export (rule 14).
+        #
+        # SystemExit rather than ValueError, deliberately: it is a BaseException, so the
+        # `except Exception` at the bottom of this block does not turn the refusal back into
+        # "Error during testing:" with the diagnosis buried in it.
+        #
+        # The same three lines are in the GRC client's demo block, which this file's header
+        # already declares is identical on purpose; the LTC client reads the same variables
+        # with literal DEFAULTS, and its own header calls that "a habit worth stopping", so
+        # the default is not the shape to copy here.
+        #
+        # BTC_HTLC_PRIVKEY is no longer read by anything -- see the module header.
+        _missing = [name for name in ("BTC_RPC_URL", "BTC_RPC_USER", "BTC_RPC_PASS")
+                    if not os.environ.get(name)]
+        if _missing:
+            raise SystemExit(
+                f"not set: {', '.join(_missing)}  <- this demo block BROADCASTS a real funding "
+                f"transaction, so it refuses rather than guessing. Export all three and re-run."
+            )
         client = BTCClient(
-            os.environ.get("BTC_RPC_URL"),
-            os.environ.get("BTC_RPC_USER"),
-            os.environ.get("BTC_RPC_PASS")
+            os.environ["BTC_RPC_URL"],
+            os.environ["BTC_RPC_USER"],
+            os.environ["BTC_RPC_PASS"]
         )
         example_contract = client.create_contract(
             amount_btc=Decimal("0.0001"),

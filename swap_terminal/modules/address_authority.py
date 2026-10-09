@@ -220,8 +220,14 @@ def _bitcoin_family(asset: str, address: str) -> AddressVerdict:
     asserted on directly -- which is rule 10's whole argument for putting a decision at the
     bottom.
     """
-    if bech32_hrp(address) is not None:
-        return _bitcoin_bech32(asset, address)
+    claimed_hrp = bech32_hrp(address)
+    if claimed_hrp is not None:
+        # PASSED IN RATHER THAN RE-READ. _bitcoin_bech32() used to call bech32_hrp(address) a
+        # second time and its docstring carried the invariant in prose -- "called only for a
+        # string that CLAIMS an hrp this repository knows". Handing it the value this branch
+        # already proved non-None makes that structural: the parameter is `str`, so there is no
+        # second call that could answer differently and no None to reach `_asset_owning_hrp`.
+        return _bitcoin_bech32(asset, address, claimed_hrp)
     unplaceable = _unknown_hrp_but_valid_bech32(address)
     if unplaceable is not None:
         return unplaceable
@@ -262,10 +268,14 @@ def _unknown_hrp_but_valid_bech32(address: str) -> AddressVerdict | None:
     )
 
 
-def _bitcoin_bech32(asset: str, address: str) -> AddressVerdict:
-    """The bech32 half. Called only for a string that CLAIMS an hrp this repository knows."""
+def _bitcoin_bech32(asset: str, address: str, claimed: str) -> AddressVerdict:
+    """The bech32 half, for a string whose claimed hrp the CALLER has already read.
+
+    `claimed` is a parameter rather than something this function re-derives, because that is
+    the only form in which "called only for a string that claims an hrp" is a fact instead of
+    a sentence. _bitcoin_family() computes it to decide whether to come here at all.
+    """
     hrps = BECH32_HRPS_BY_ASSET[asset]
-    claimed = bech32_hrp(address)
     if not hrps:
         # GRC. Its entry is an empty table rather than an absent key precisely so this
         # branch can be reached with a definite answer. atomic_grc_client.py's usage

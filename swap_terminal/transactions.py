@@ -282,6 +282,95 @@ def normalize_transactions(transactions: Any) -> list[dict[str, Any]]:
     return [normalize_transaction(tx) for tx in transactions]
 
 
+# --- pandas return types, and the one gap that produced 60 of this file's 65 ---
+#
+# pandas 3.0.6 ships py.typed, so a checker reads its inline annotations as
+# authoritative -- and two of the calls below carry NO return annotation at all
+# in that release: `pandas.to_numeric` (pandas/core/tools/numeric.py:51) and
+# `Series.__getitem__`. The return is therefore inferred from the body, and for
+# `to_numeric` that body yields a twenty-member union
+#
+#     float | int | Number | number | NAType | NaTType | Timestamp | Timedelta
+#     | ndarray | Index | DatetimeIndex | TimedeltaIndex | ExtensionArray
+#     | ArrowExtensionArray | BooleanArray | FloatingArray | IntegerArray
+#     | Series | Any | Unknown
+#
+# because the SAME function returns a scalar for a scalar argument and a Series
+# for a Series argument. The old code assigned that back onto the name it came
+# from, so the Series identity was lost and every later `.dropna()`, every
+# `series.index = ...` and both `return series` statements were then checked
+# against each scalar member that has none of those.
+#
+# MEASURED with pyright 1.1.414 on 2026-10-09: that single gap was 60 of this
+# file's 65 findings -- 10 reports of `.dropna`, 19 of `.index` and 1 return
+# type, times the TWO places the identical three lines were written. Sixty
+# reports of one defect, which is also why the three lines are now one function
+# (rule 8: two copies of one rule is a bug with a delay on it).
+#
+# WHAT `as_series` IS NOT. It is not a cast and not an assertion. The isinstance
+# arm returns the IDENTICAL object -- no copy, no reindex, no dtype change --
+# and the other arm CONSTRUCTS a Series instead of hoping for one, which makes
+# the function total over everything `to_numeric` can hand back. The previous
+# code was not: handed a scalar it would have raised AttributeError on
+# `.dropna`.
+
+
+def as_series(obj: Any) -> pd.Series:
+    """The pd.Series that pandas' un-annotated returns hand back, as a pd.Series."""
+    if isinstance(obj, pd.Series):
+        return obj
+    return pd.Series(obj)
+
+
+def normalized_dates(values: pd.Index) -> pd.DatetimeIndex:
+    """Dates at midnight -- the index every price lookup in this file keys on.
+
+    THE ONE PYRIGHT FINDING THIS FILE KEEPS LIVES HERE, and it is a pandas
+    packaging gap rather than a defect in this line. `DatetimeIndex.normalize`
+    is not a method written on the class: pandas attaches it at class-creation
+    time from a list comprehension over `DatetimeArray._datetimelike_methods`
+    (pandas/core/indexes/datetimes.py:116, `@inherit_names(..., wrap=True)`),
+    and a static checker cannot follow a decorator that computes its own name
+    list. `DatetimeArray.normalize` itself IS declared, at
+    pandas/core/arrays/datetimes.py:1154 -- the method exists and is public and
+    documented; only the copy onto the Index is invisible.
+
+    Checked on 2026-10-09 rather than assumed, and every pyright-clean
+    alternative was rejected for CHANGING BEHAVIOR to satisfy a checker:
+
+      - `idx.to_numpy().astype("datetime64[D]")` typechecks, and truncates a
+        tz-aware index in UTC rather than in its own zone, and lands at day
+        resolution where `normalize()` preserves the unit. Both change which
+        rows `target_date in close_series.index` matches.
+      - `.floor("D")`, `.round("D")`, `.to_period("D")` and `.date` are all
+        attached by the same decorator and report the same way.
+      - `pd.Series(idx).dt.normalize()` reports nothing only because pyright
+        resolves `.dt` to Unknown, which is silence rather than a check.
+      - and widening this parameter to `Any` makes the finding disappear
+        without making it false: pyright then resolves `pd.to_datetime(Any)` to
+        Unknown and stops checking the attribute at all. That is the one
+        temptation worth naming, because it LOOKS like a clean file. The
+        parameter is `pd.Index` because that is what both callers pass --
+        `df.index` and `series.index` -- and a true type with one honest
+        finding beats a false type with none.
+
+    Installing pandas-stubs would settle it, and that is a requirements change
+    outside this file.
+    """
+    return pd.to_datetime(values).normalize()
+
+
+def numeric_series_on_dates(values: Any) -> pd.Series:
+    """Numeric values, missing ones dropped, keyed by date at midnight.
+
+    This was written out twice inside extract_close_series(), once per input
+    shape, three identical lines each time.
+    """
+    series = as_series(pd.to_numeric(values, errors="coerce")).dropna()
+    series.index = normalized_dates(series.index)
+    return series
+
+
 def load_full_grc_data() -> pd.DataFrame | None:
     global grc_data_cache  # noqa: PLW0603 -- checked: module-level memo cache and per-run circuit breaker. Both are process-wide by design -- the point of the breaker is that one 429 disables a source for the WHOLE run -- and threading them through every caller is a larger change than this file warrants.
     if grc_data_cache is None:
@@ -291,7 +380,7 @@ def load_full_grc_data() -> pd.DataFrame | None:
             if df is None or df.empty:
                 logging.error("No data returned for %s", YAHOO_TICKER)
                 return None
-            df.index = pd.to_datetime(df.index).normalize()
+            df.index = normalized_dates(df.index)
             grc_data_cache = df
         except Exception as exc:  # noqa: BLE001 -- checked: yfinance raises a wide, undocumented range (network, parse, empty frame). None is distinguishable from a result because every caller tests `is None`, and this function's contract is "a DataFrame or nothing".
             logging.error("Error downloading %s data: %s", YAHOO_TICKER, exc)
@@ -304,9 +393,15 @@ def extract_close_series(df: pd.DataFrame | pd.Series | None) -> pd.Series:
         return pd.Series(dtype=float)
 
     if isinstance(df, pd.Series):
-        series = pd.to_numeric(df, errors="coerce").dropna()
-        series.index = pd.to_datetime(series.index).normalize()
-        return series
+        # No caller in the tree passes a Series today -- grepped by NAME rather
+        # than by import graph (rule 2) on 2026-10-09: `extract_close_series`
+        # appears three times in the whole repository, this definition and the
+        # two calls in fetch_grc_price_from_yahoo() and
+        # get_latest_grc_price_record(), both of which pass
+        # load_full_grc_data()'s DataFrame. The arm stays because the parameter
+        # type advertises it; what went away is its being a SECOND COPY of the
+        # tail of this function.
+        return numeric_series_on_dates(df)
 
     close_obj = None
     if isinstance(df, pd.DataFrame):
@@ -330,9 +425,7 @@ def extract_close_series(df: pd.DataFrame | pd.Series | None) -> pd.Series:
     else:
         series = close_obj
 
-    series = pd.to_numeric(series, errors="coerce").dropna()
-    series.index = pd.to_datetime(series.index).normalize()
-    return series
+    return numeric_series_on_dates(series)
 
 
 def needs_price_refresh(tx: dict[str, Any]) -> bool:
@@ -633,7 +726,7 @@ def fetch_grc_price_from_yahoo(date_str: str) -> PriceRecord | None:  # noqa: PL
                 "source_date": target_date.strftime("%Y-%m-%d"),
             }
 
-        prior_series = close_series[close_series.index <= target_date]
+        prior_series = as_series(close_series[close_series.index <= target_date])
         if prior_series.empty:
             logging.warning("No Yahoo price exists on or before %s", target_date.date())
             return None
@@ -852,7 +945,37 @@ def update_transactions_with_prices(transactions: Any) -> list[dict[str, Any]]:
 
 
 def as_timestamp(value: Any) -> pd.Timestamp:
-    return pd.Timestamp(value)
+    """A real Timestamp, or a named refusal -- never NaT wearing the annotation.
+
+    `pd.Timestamp(None)`, `pd.Timestamp(pd.NaT)` and `pd.Timestamp(float("nan"))`
+    all return NaT, checked at the interpreter on 2026-10-09 rather than read
+    off the docs. So the `-> pd.Timestamp` above was a claim this function did
+    not perform, and NaT can genuinely arrive: `pd.to_datetime` turns a missing
+    index entry into NaT without raising, `.dropna()` drops missing VALUES and
+    not missing index labels, and get_latest_grc_price_record() reads
+    `close_series.index[-1]` with no mask in front of it.
+
+    What happened then, measured: `NaT.strftime("%Y-%m-%d")` raises
+    `ValueError: NaTType does not support strftime`, which the caller's broad
+    `except Exception` turns into "this source had nothing" -- the right
+    outcome reached by an accident three frames away, and reported under a
+    message that names strftime rather than the missing date.
+
+    The other caller, fetch_grc_price_from_yahoo(), cannot reach it: its
+    `close_series.index <= target_date` mask is False for NaT, so NaT rows are
+    already excluded before `.index[-1]`.
+
+    Raising here does not change what either caller returns -- both are inside
+    the same broad except, so the result is still None and the source is still
+    skipped. It changes what the log says from a pandas formatting error to the
+    actual cause, and it makes the annotation true.
+    """
+    stamp = pd.Timestamp(value)
+    if not isinstance(stamp, pd.Timestamp):
+        # NaT is a NaTType, not a Timestamp -- `isinstance(pd.NaT,
+        # pd.Timestamp)` is False, checked. This is the narrowing, not a guess.
+        raise ValueError(f"not a date: {value!r} parsed as NaT")
+    return stamp
 
 
 class TxViewerApp:

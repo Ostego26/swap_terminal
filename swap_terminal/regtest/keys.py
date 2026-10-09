@@ -231,6 +231,63 @@ def refuse_unsubstituted_placeholder(seed: str) -> None:
         )
 
 
+def _key_from_scalar(candidate: bytes) -> RegtestKey:
+    """A RegtestKey from 32 bytes already checked to be a valid secp256k1 scalar.
+
+    ONE OWNER FOR THE DERIVATION. These four lines -- signing key, compressed public key,
+    base58check P2PKH address, RegtestKey -- were written out twice, once in key_from_seed()
+    and once in generate_key(), differing only in where the scalar came from. Rule 8: two
+    copies of one rule agree on the day they are written. The drift this particular pair
+    invites is the worst kind available here, because the compressed/uncompressed choice and
+    the version byte both decide WHICH ADDRESS a key controls -- so an edit to one copy would
+    produce a harness that funds an address it cannot spend from, and the failure would surface
+    as a script error rather than as a key error.
+
+    THE CALLER STILL OWNS THE REJECTION SAMPLING, deliberately: generate_key() samples from
+    os.urandom and key_from_seed() walks a counter over a seeded hash, which are different
+    decisions about where entropy comes from. Only the encoding is shared.
+
+    The scalar is never logged, never printed and never returned as text; see the module header
+    and RegtestKey's own docstring for where that rule is kept.
+
+    THE PUBLIC-KEY DERIVATION IS SPELLED IN TWO PLACES AND STAYS THAT WAY, which rule 8
+    requires be said at BOTH sites rather than at neither. The other one is
+    modules/htlc_spend.public_key_for(), which takes the encoding as an
+    argument because a WIF can ask for either, and it is the same three operations:
+    SigningKey.from_string(key, curve=SECP256k1).get_verifying_key().to_string("compressed").
+
+    They are NOT merged, for the reason modules/atomic_htlc_scripts.push_data() gives about
+    regtest/txbuild.push_data(): regtest/ is the harness that MEASURES the fund path, and an
+    instrument that imports the thing it measures cannot tell "the script is wrong" from "the
+    shared encoder is wrong". A compression or version-byte defect reached through one import
+    would put the identical defect in the key the harness signs with AND in the pubkey the
+    client pushes, so the two would agree and the harness would report the script sound. If
+    either is ever changed, change both.
+
+    BOTH ALSO CARRY THE SAME PYRIGHT FINDING, and it is a packaging gap in ecdsa 0.19.2 rather
+    than a defect here: that release ships no py.typed and typeshed has no stub for it, so
+    pyright infers `SigningKey.get_verifying_key()` from its body, `return self.verifying_key`.
+    `SigningKey.__init__` sets that attribute to None (ecdsa/keys.py:765) and every classmethod
+    that fills it in -- from_string, from_secret_exponent, from_pem -- assigns through a LOCAL
+    named `self` (`self = cls(_error__please_use_generate=True)`, ecdsa/keys.py:795), which
+    pyright does not count as a declaration of the class attribute. The inferred type is
+    therefore exactly `None`, not `VerifyingKey | None`, and the library's own docstring says
+    `:rtype: VerifyingKey`.
+
+    NOTHING IN THIS FILE CAN FIX THAT HONESTLY. An `if vk is None: raise` narrows `None` to
+    `Never`, which makes the two lines after it UNCHECKED rather than checked -- it would
+    remove the report by removing the analysis, and it guards nothing at runtime that is not
+    already a crash. The real fix is a stub for the library (a `typings/ecdsa/keys.pyi`
+    declaring `verifying_key: VerifyingKey | None`, which pyright reads from `./typings` with
+    no config change) and it is a tree-wide change to how every ecdsa import is resolved, so
+    it is named here and left to the operator.
+    """
+    signing_key = SigningKey.from_string(candidate, curve=SECP256k1)
+    public_key = signing_key.get_verifying_key().to_string("compressed")
+    address = base58.b58encode_check(TESTNET_P2PKH_VERSION + hash160(public_key)).decode()
+    return RegtestKey(private_key=candidate, public_key=public_key, address=address)
+
+
 def key_from_seed(seed: str, role: str) -> RegtestKey:
     """A keypair derived DETERMINISTICALLY from an operator-supplied seed, so its address is
     stable across runs.
@@ -280,10 +337,7 @@ def key_from_seed(seed: str, role: str) -> RegtestKey:
         if 0 < scalar < SECP256K1_ORDER:
             break
         counter += 1
-    signing_key = SigningKey.from_string(candidate, curve=SECP256k1)
-    public_key = signing_key.get_verifying_key().to_string("compressed")
-    address = base58.b58encode_check(TESTNET_P2PKH_VERSION + hash160(public_key)).decode()
-    return RegtestKey(private_key=candidate, public_key=public_key, address=address)
+    return _key_from_scalar(candidate)
 
 
 def generate_key() -> RegtestKey:
@@ -300,7 +354,4 @@ def generate_key() -> RegtestKey:
         scalar = int.from_bytes(candidate, "big")
         if 0 < scalar < SECP256K1_ORDER:
             break
-    signing_key = SigningKey.from_string(candidate, curve=SECP256k1)
-    public_key = signing_key.get_verifying_key().to_string("compressed")
-    address = base58.b58encode_check(TESTNET_P2PKH_VERSION + hash160(public_key)).decode()
-    return RegtestKey(private_key=candidate, public_key=public_key, address=address)
+    return _key_from_scalar(candidate)

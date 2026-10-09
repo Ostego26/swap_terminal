@@ -761,12 +761,28 @@ class GRCClient:
 # For testing purposes:
 if __name__ == "__main__":
     try:
-        # Ensure that the following environment variables are set:
-        # GRC_RPC_URL, GRC_RPC_USER, GRC_RPC_PASS, and GRC_WALLET_PASSPHRASE.
+        # THE SAME REFUSAL AS THE BTC CLIENT'S DEMO BLOCK, for the same reason and in the same
+        # words: the comment that used to sit here said "Ensure that the following environment
+        # variables are set" above three `os.environ.get(name)` calls that pass None into
+        # parameters typed `str`. GRCClient.__init__ refuses a falsy triple, so nothing was
+        # ever sent -- but it cannot name which variable is missing, and this block broadcasts.
+        # Rule 8: the other site is modules/atomic_btc_client.py's `__main__`, and this file's
+        # header already records that the demo blocks are identical on purpose.
+        #
+        # GRC_WALLET_PASSPHRASE is NOT in the list, and that is not an omission: __init__
+        # defaults it to "" for an unencrypted wallet, so an absent one is a legitimate
+        # configuration rather than a missing requirement.
+        _missing = [name for name in ("GRC_RPC_URL", "GRC_RPC_USER", "GRC_RPC_PASS")
+                    if not os.environ.get(name)]
+        if _missing:
+            raise SystemExit(
+                f"not set: {', '.join(_missing)}  <- this demo block BROADCASTS a real funding "
+                f"transaction, so it refuses rather than guessing. Export all three and re-run."
+            )
         client = GRCClient(
-            os.environ.get("GRC_RPC_URL"),
-            os.environ.get("GRC_RPC_USER"),
-            os.environ.get("GRC_RPC_PASS")
+            os.environ["GRC_RPC_URL"],
+            os.environ["GRC_RPC_USER"],
+            os.environ["GRC_RPC_PASS"]
         )
         example_contract = client.create_contract(
             amount_grc=Decimal("1.0"),

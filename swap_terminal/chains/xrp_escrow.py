@@ -254,7 +254,15 @@ def offer_sequence_from(created: object) -> tuple[int | None, str]:
     if not isinstance(created, dict):
         return None, f"not a tx response: {type(created).__name__}"
 
-    body = created.get("tx_json") if isinstance(created.get("tx_json"), dict) else created
+    # ONE READ, BOUND TO A NAME, and the name is what makes the dict check visible.
+    # This was `created.get("tx_json") if isinstance(created.get("tx_json"), dict) else created`
+    # -- two calls returning the same value, with the isinstance applied to one of them and the
+    # OTHER one used. A checker cannot narrow a method call, so `body` stayed `... | None` and
+    # both `body.get(...)` reads below were unchecked; a reader cannot see that the two calls
+    # must agree either. They do agree here (dict.get is pure), so this is the same answer with
+    # the check where it can be read -- and one fewer dict lookup on a path that runs per escrow.
+    nested = created.get("tx_json")
+    body = nested if isinstance(nested, dict) else created
     kind = body.get("TransactionType")
     if kind != "EscrowCreate":
         return None, (

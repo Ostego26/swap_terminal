@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from modules.htlc_contract_api import create_contract_kwargs
-from regtest.keys import generate_key
+from regtest.keys import RegtestKey, generate_key
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,14 @@ class ScriptLegKeys:
     `.refund.address`, never the objects.
     """
 
-    claim: object
-    refund: object
+    # RegtestKey, NOT `object`, WHICH IS WHAT THESE SAID UNTIL 2026-10-09. generate_key() is
+    # already imported from the same module, so naming the type it returns costs one word and
+    # buys the three attribute reads below -- `.address` twice and `.wif` once -- being checked
+    # at all. Under `object` none of them was: a checker reports `address` as unknown, which is
+    # three findings, and a RENAME of any of those attributes in regtest/keys.py would have
+    # been invisible here until the claim failed on a funded contract.
+    claim: RegtestKey
+    refund: RegtestKey
 
     @property
     def claim_address(self) -> str:

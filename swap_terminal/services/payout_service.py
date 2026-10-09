@@ -823,7 +823,28 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
             # the send raises -- a wallet left fully unlocked because a payout failed
             # is the outcome that must not happen.
             adapter = adapters[destination_asset]
-            recorded = False
+            # ONE NAME CARRYING BOTH FACTS, 2026-10-09, AND NO BEHAVIOR CHANGE.
+            #
+            # This was `recorded = False` plus a `txid` assigned INSIDE the `with` below, and
+            # the two could only be read together by trusting that they were set on adjacent
+            # lines. A checker cannot: it reports `txid` as possibly unbound at both reads in
+            # the `except GridcoinLockError` handler, because the only thing that makes them
+            # safe is `if not recorded: raise` -- a different variable.
+            #
+            # `recorded_txid is None` IS `not recorded`. Both were set at the identical point,
+            # immediately after _record_broadcast() returns, so the branch takes the same arm
+            # for every input. `is None` rather than falsiness, deliberately: a daemon that
+            # ever returned an empty txid must still count as RECORDED here, because the
+            # payouts row and the swap status were already committed and treating that as "not
+            # recorded" would re-raise and mark a delivered payment failed -- which is the
+            # 2026-09-26 defect this whole block exists to prevent, arrived at from the other
+            # direction.
+            #
+            # tests/test_payout_concurrency.py's
+            # test_a_failed_send_whose_restore_also_fails_is_a_payout_failure() is the one that
+            # pins the re-raise arm, and it asserts on the recorded reason specifically so that
+            # a NameError from THIS handler cannot pass as the daemon's own failure.
+            recorded_txid: str | None = None
             try:
                 with payout_unlock_context(destination_asset, adapter):
                     # broadcast_payout() rather than adapter.send_to_address() since
@@ -849,26 +870,27 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
                     # path, and it was caused by a wallet-housekeeping call that has
                     # nothing to do with whether the payment was delivered.
                     #
-                    # The commit is what makes it durable, and `recorded` is set only
-                    # after it returns -- so a database failure here is still a
+                    # The commit is what makes it durable, and `recorded_txid` is set
+                    # only after it returns -- so a database failure here is still a
                     # payout failure, while a LOCK failure after it is not.
                     _record_broadcast(db, swap, amount, txid)
-                    recorded = True
+                    recorded_txid = txid
             except GridcoinLockError:
                 # THE PAYOUT IS ALREADY DURABLE. The wallet's lock state is a separate
                 # problem with its own loud message (chains/gridcoin_wallet_lock.py
                 # distinguishes "locked, not staking" from "may still be unlocked"),
                 # and treating it as a payout failure is what mislabeled a delivered
                 # payment. Re-raised when the send never got as far as being recorded,
-                # because then it IS the payout's failure.
-                if not recorded:
+                # because then it IS the payout's failure -- `recorded_txid is None` is that
+                # test, and it holds the txid the message below needs for the same reason.
+                if recorded_txid is None:
                     raise
                 logger.exception(
                     "payout for swap %s WAS BROADCAST as %s and is recorded as completed. The wallet's "
                     "lock state could not be restored afterwards -- read the message above and act on "
                     "the wallet, NOT on the swap.",
                     swap["id"],
-                    txid,
+                    recorded_txid,
                 )
                 db.execute(
                     "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
@@ -877,7 +899,7 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
                         swap["id"],
                         "completed",
                         "completed",
-                        f"payout broadcast {txid}; wallet lock restore FAILED afterwards",
+                        f"payout broadcast {recorded_txid}; wallet lock restore FAILED afterwards",
                         utc_now_iso(),
                     ),
                 )

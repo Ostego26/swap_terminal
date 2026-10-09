@@ -866,7 +866,11 @@ def report_recent_payments(run: Run, funding_key: RegtestKey | None) -> None:
             "on. There is no way to recover a seed from an address."
         )
         return
-    if found:
+    # `and funding_key is not None` IS THE RETURN ABOVE, SPELLED WHERE IT IS RELIED ON. The
+    # `if found and funding_key is None` block three lines up returns, so every path that
+    # reaches here with `found` truthy has a key -- and the block below reads
+    # `funding_key.address`, which was the one unguarded read of it in this function.
+    if found and funding_key is not None:
         run.say(
             f"    IF ONE OF THOSE IS WHERE YOU MEANT TO SEND, THE SEED IS WHAT CHANGED, not the "
             f"payment. {FUNDING_SEED_VARIABLE} derives the address, so a different seed is a "
@@ -2546,7 +2550,22 @@ def funding_needed_coins(run: Run) -> str:
     total = (Decimal(LOCK_COIN[run.asset])
              + Decimal(FUNDING_HEADROOM_COIN[run.asset])
              + Decimal(SPLIT_FEE_ALLOWANCE_COIN))
-    return satoshis_to_coins(coins_to_satoshis(str(total)))
+    # str(), AND IT IS A FIX RATHER THAN AN ANNOTATION CHANGE. satoshis_to_coins() returns a
+    # Decimal; this function is declared `-> str`; and the declaration is the one that is
+    # right, because one of the two callers is operator_panel.funding_payload(), whose dict
+    # goes through `json.dumps(handler())` for GET /api/funding.
+    #
+    # MEASURED 2026-10-09 at the interpreter: `json.dumps({"needed": Decimal("1.51010000")})`
+    # raises `TypeError: Object of type Decimal is not JSON serializable`. The panel's
+    # `guarded()` turns that into a readable 500, so the funding region of the page -- the
+    # address, the amount to send, and every payment row -- rendered as a server error instead
+    # of as the funding picture, on the one screen whose job is to tell the operator what to
+    # send. Nothing about the NUMBER changes: `str(Decimal("1.51010000"))` is "1.51010000",
+    # byte for byte what the f-string in no_usable_funding_message() already printed.
+    #
+    # regtest/operator_panel.PaymentRow.value_coins is the second declared-str-given-Decimal on
+    # the same payload and is fixed in the same pass; it is the other half of the same route.
+    return str(satoshis_to_coins(coins_to_satoshis(str(total))))
 
 
 def no_usable_funding_message(run: Run, funding_key: RegtestKey) -> str:
