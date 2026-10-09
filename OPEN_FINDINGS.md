@@ -396,6 +396,25 @@ by grepping for the NAME rather than the import graph (rule 2).
   sweep across files you were not already in is a large diff with no behavioral
   benefit. Named work, not a baseline (rule 19).
 
+- **"everything stops safely. all services daemons are done" — the chain daemons
+  are deliberately NOT included, and that is the one part of the ask I did not
+  build.** `bitcoind`, `litecoind` and `gridcoinresearchd` hold the wallets this
+  desk spends from, nothing in this repo has their passphrase, and
+  `stack_authority.py`'s own header refuses to mark them stoppable *"ever, under
+  any flag"* for a specific reason: a stop it performed could not be undone by
+  the `up` that follows. So `down` and `restart` stop every worker, container and
+  server this terminal owns, PROVE each port free, and report the daemons as LEFT
+  RUNNING with that reason attached.
+
+  If you do want `swapterm down` to take the daemons too, say so and I will add
+  it as a separate explicit flag rather than folding it into `down` — it is
+  irreversible from here, it would need your passphrase to recover from, and it
+  is exactly the live-posture call rule 16 sends back to you. Everything else in
+  the ask ("all services, database, etc.") is already covered: the workers get
+  SIGTERM plus a grace period while the daemons are still reachable, so a send in
+  flight finishes or fails cleanly rather than losing its RPC underneath it, and
+  the database is closed by those workers exiting.
+
 - **Should the GRC wallet-path warning become a refusal?** `wallet_path_warning()`
   currently logs at WARNING. A hard refusal at URL-construction time would fail
   fast and visibly instead of producing a 404 mid-payout, and on a configuration
@@ -454,6 +473,8 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C34 | **`swapterm` on PATH, plus Up / Down / Restart icons.** Operator: *"i need like icons on the desktop and shell commands like swaptermi up or down"*, *"swapterm restart"*. New `restart` action, and a `swapterm` wrapper installed to `~/.local/bin` with the venv interpreter and repo path baked in at install time — same reason the `.desktop` `Exec=` is rewritten: a desktop session's `python3` is the SYSTEM one, with neither xrpl-py nor gunicorn. All four launchers route through that one wrapper, so an icon cannot start the stack a different way from the shell. One `.desktop` template renders all three actions. `--desktop-files` also drops them on the desktop, and the GNOME trust step is **said rather than attempted** (`gio` needs the session bus, which a session over ssh does not have, and a swallowed failure leaves an icon that silently does nothing) | `this commit` |
+| C35 | **`restart` refuses to start on a stop it could not prove** — the gate, not the sequence. Rule 13's own incident is twelve cycles printing `exit_code=0` beside "another cycle is already running pid=...; skipping": a stale process holding the lock, every cycle reporting success, zero work done. `down → up` unconditionally reintroduces exactly that, is one line shorter, and reads as obviously correct. Mutation-checked both ways: removing the gate, and returning `down`'s exit code instead of `up`'s. Exit code is `up`'s so `swapterm restart && …` chains on the stack actually SERVING | `this commit` |
 | C32 | **GRC/LTC/BTC capability knowledge was spelled in prose across eleven files** — all correct, all measured, none askable. `chains/base.py:339`, `payout_quantization.py:211`, `rpc_method_support.py:21`, `script_chain.py:549`, `htlc_fee.py:232`, `htlc_rpc.py:377`, `funding_steps.py:505`, `daemons.py:853`, `admin_view.py:1496`, `custody_separation.py:234`, `fee_sweep.py:564` — and `daemons.py:658` says out loud that one file held two copies of the `uptime` fact. New `chains/daemon_capabilities.py` is the one place to ask: a capability map with the Core release each feature arrived in, and an **equivalence tree keyed by the JOB** (operator: *"a tree of equivalence betwen rpc comamnds for ltc, btc, and grc"*). Every row names the function that ALREADY resolves the divergence rather than re-implementing it. **Evidence is a field** — `MEASURED` vs `RELEASE_HISTORY` — and `unverified_on_this_deployment()` lists the three rows I could not test here (rule 17) | `this commit` |
 | C33 | **A `/wallet/<name>` path would be built for GRC, which has no such endpoint.** `chains/base.RPCAdapter.url` AND `chains/daemon_conf.rpc_url()` both append it whenever a wallet is configured, for any chain, with no test between them — two copies of one rule, and the rule neither has is that multi-wallet HTTP arrived in Core **0.17**, which `base.py:339` already records Gridcoin as predating. **Latent, not live**: `GRC_RPC_WALLET` defaults to `""` and the 403 came from a bare `http://host:25779/`. One env var from breaking every GRC call including payouts, and it would read as a transport failure rather than a config error. Now reported at startup by `wallet_path_warning()`; **turning it into a refusal is the operator's call (rule 16)** — it is the order path and I cannot see your `.env` | `this commit` |
 | C31 | A test I wrote this session was **flaky by construction** and had been passing on luck since `8287f1c`. `assert grc.startswith("S")` over a RANDOM `generate_key()` — but a one-byte version prefix does not pin the leading base58 digit. Measured over 2000 random keys: **272 failures, 13.6%**, against **0** for the version-byte assertion that replaced it. It surfaced in a full-suite run and passed in isolation, the shape that gets written off as a flake. `0x3E`'s 25-byte range straddles a base58 carry where `0x00` and `0x30` do not, which is why the same heuristic is safe for BTC and LTC and not for GRC. **And the repo already knew**: `test_address_network.py:91` records that a `not startswith("S")` check "called it testnet, which is what it was written to prevent", and two more files note `startswith("S")` "had it answering backwards" — three written refutations, and I wrote a fourth instance. Now asserts `network_of_version(b58decode_check(addr)[0])`, the round trip through production rather than a literal | `this commit` |

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# swapterm -- one command for the whole swap terminal.
+#
+# Role: file (entry point; installed onto PATH by install_desktop_icon.py)
+# Reads: nothing of its own. Every argument goes to swap_stack.py.
+# Writes: nothing of its own.
+# Can send orders: no, and `up` does not either -- it STARTS the container whose
+#       payout worker can, if the container's environment arms it.
+# Mainnet-safe: as safe as the action asked for. `status` and `chains` are
+#       read-only; `up`, `down` and `restart` start and stop this terminal's own
+#       processes and never the chain daemons.
+#
+# THIS FILE IS A TEMPLATE AND IS NOT ITSELF RUNNABLE. The two tokens below are
+# replaced at install time by install_desktop_icon.py, for the same reason the
+# .desktop Exec= line is rewritten: a shell launched from a desktop session, a
+# cron entry, or another directory has none of this repo's context. In
+# particular `python3` on PATH is the SYSTEM python, which has neither xrpl-py
+# nor gunicorn -- so the interpreter is baked in rather than looked up.
+#
+# WHY A WRAPPER AND NOT A SYMLINK TO swap_stack.py. A symlink would run under
+# whatever python happened to be first on PATH, which is the defect above. It
+# would also lose the cwd: compose resolves `build: context: .` and the
+# `./icp:/repo` mount against the process's working directory, which is why
+# swap_stack.compose() passes cwd=REPO_ROOT -- and why this cd's first, so that
+# every docker command behaves the same from a desktop icon as from a shell in
+# the repo.
+set -euo pipefail
+
+SWAPTERM_PYTHON="__SWAPTERM_PYTHON__"
+SWAPTERM_REPO="__SWAPTERM_REPO__"
+
+# FAIL WITH A SENTENCE, NOT A STACK TRACE. A moved repo or a deleted venv is the
+# ordinary way this breaks, and an operator who typed `swapterm up` should be
+# told which of the two it was (rule 14: state what the number means, next to
+# the number -- here, which path is missing).
+if [ ! -x "$SWAPTERM_PYTHON" ]; then
+    echo "swapterm: the interpreter baked in at install time is gone:" >&2
+    echo "    $SWAPTERM_PYTHON" >&2
+    echo "  The venv was probably removed or rebuilt. Re-run:" >&2
+    echo "    python3 $SWAPTERM_REPO/install_desktop_icon.py --apply" >&2
+    exit 127
+fi
+if [ ! -d "$SWAPTERM_REPO" ]; then
+    echo "swapterm: the repository baked in at install time is gone:" >&2
+    echo "    $SWAPTERM_REPO" >&2
+    echo "  If you moved it, re-run install_desktop_icon.py --apply from the new location." >&2
+    exit 127
+fi
+
+# NO ARGUMENT IS NOT AN ERROR, it is somebody asking what this does. Printing
+# swap_stack.py's own --help rather than a usage line written here keeps one
+# spelling of the action list (rule 8): `choices` there is derived from ACTIONS,
+# so an action added to that dict appears here with no edit to this file.
+if [ "$#" -eq 0 ]; then
+    echo "swapterm -- the swap terminal, from anywhere. Repo: $SWAPTERM_REPO"
+    echo
+    exec "$SWAPTERM_PYTHON" "$SWAPTERM_REPO/swap_stack.py" --help
+fi
+
+# `cd` BEFORE exec, not `python -C`: see the header. Every docker compose call
+# inside swap_stack.py resolves relative paths against this directory.
+cd "$SWAPTERM_REPO"
+exec "$SWAPTERM_PYTHON" "$SWAPTERM_REPO/swap_stack.py" "$@"

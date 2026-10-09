@@ -1710,6 +1710,67 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def cmd_restart(files: tuple[str, ...]) -> int:
+    """Stop everything, PROVE it stopped, and only then start. Refuses otherwise.
+
+    Operator, 2026-10-09: "swapterm restart".
+
+    THE REFUSAL IS THE WHOLE POINT, and it is rule 13 rather than caution. That
+    rule's own incident is twelve consecutive cycles printing
+
+        warbot_cycle_lock: another cycle is already running pid=3286636; skipping
+        cycle_end=... exit_code=0
+
+    -- a stale process from before a deploy owning the lock, every cycle
+    reporting success, zero work done, no error anywhere. Starting on top of a
+    stop that could not be proven is how that is manufactured: `up` would bind
+    what it could, the survivor would keep what it had, and both would report
+    fine.
+
+    So this is `down` then `up` with a GATE between them, not a sequence. cmd_down
+    returns non-zero when a listener this project owns is still up, or when a port
+    could not be bound -- and in both cases the honest next step is for a person
+    to look, not for this to start a second copy of something.
+
+    WHAT IT DOES NOT STOP, because `down` does not and must not: the chain
+    daemons. bitcoind, litecoind and gridcoinresearchd hold the wallets this desk
+    spends from, nothing here has their passphrase, and a `restart` that took
+    them down could not bring them back up -- stack_authority.py's own header
+    refuses to mark them stoppable "ever, under any flag" for exactly that
+    reason. `down` names them as LEFT RUNNING rather than passing over them in
+    silence, and that is the correct behavior for a restart too: a wallet daemon
+    surviving a terminal restart is the system working.
+
+    Exit code is `up`'s once the gate opens, so `swapterm restart && something`
+    chains on the stack actually serving rather than on the stop having happened.
+    """
+    say("swap_stack: RESTART")
+    say("  sequence          down -> PROVE the stop -> up. The proof is a GATE, not a step:")
+    say("                    if `down` cannot prove the stop, NOTHING IS STARTED and this")
+    say("                    exits non-zero. Starting over a survivor is how a stale process")
+    say("                    ends up holding a lock while every cycle reports success (rule 13).")
+    say("  not stopped       the chain daemons, deliberately. They hold the wallets, nothing")
+    say("                    here has their passphrase, and a stop this cannot undo is not one")
+    say("                    to automate. `down` names them below.")
+    say("")
+    stopped = cmd_down(files)
+    say("")
+    if stopped != 0:
+        say("  REFUSED TO START  `down` exited "
+            f"{stopped}, so the stop is NOT PROVEN and nothing was started.")
+        say("                    What to do, in order:")
+        say("                      1. read the listener table above -- it names what survived")
+        say("                      2. `swap_stack.py status` to see it again after acting")
+        say("                      3. kill the named pid, then `swap_stack.py restart` again")
+        say("                    A second `up` on top of a survivor is the failure this refusal")
+        say("                    exists to prevent, and it reports success while doing nothing.")
+        return stopped
+    say("  STOP PROVEN       every listener this project owns is gone and every port bound")
+    say("                    free. Starting now.")
+    say("")
+    return cmd_up(files)
+
+
 #: Every action this file takes, and the function each one runs. THE ONLY LIST.
 #:
 #: argparse's `choices` is derived from this (build_parser), so the two cannot
@@ -1727,6 +1788,7 @@ ACTIONS = {
     "status": cmd_status,
     "up": cmd_up,
     "down": cmd_down,
+    "restart": cmd_restart,
     "chains": cmd_chains,
 }
 

@@ -269,6 +269,152 @@ def test_the_browser_command_never_carries_no_sandbox(tmp_path):
 
 # --- the desktop entry -------------------------------------------------------
 
+# =============================================================================
+# `swapterm` ON PATH, AND THE THREE ACTION ICONS
+#
+# Operator, 2026-10-09: "i need like icons on the desktop and shell commands
+# like swaptermi up or down and everything stops safely. all services daemons
+# are done database, etc." and "swapterm restart".
+#
+# The command and the icons both route through the SAME installed wrapper, so
+# these pin that routing as well as the rendering -- an icon that started the
+# stack a different way from the shell command is rule 8's two spellings, and
+# the one that drifts is the one nobody runs.
+# =============================================================================
+
+
+def test_the_command_bakes_both_paths_and_leaves_no_placeholder():
+    """A leftover token would be a shell script that execs the literal word.
+
+    MUTATION: drop either .replace() in rendered_command(). The script then
+    contains __SWAPTERM_PYTHON__ and fails with "No such file or directory" on a
+    path the operator cannot find in any config, which is the worst kind of
+    failure to debug from an icon that just closed.
+    """
+    text = install_desktop_icon.rendered_command("/venv/bin/python3", Path("/repo"))
+    assert "__SWAPTERM_PYTHON__" not in text, "the interpreter token survived"
+    assert "__SWAPTERM_REPO__" not in text, "the repo token survived"
+    assert 'SWAPTERM_PYTHON="/venv/bin/python3"' in text
+    assert 'SWAPTERM_REPO="/repo"' in text
+    assert "__SWAPTERM" not in text, f"an unreplaced token remains: {text}"
+
+
+def test_the_rendered_command_is_valid_shell():
+    """Rendered, not the template -- the template is deliberately not runnable.
+
+    `bash -n` parses without executing. A quoting mistake in a file that runs
+    `docker compose stop` is worth catching here rather than on the operator's
+    host, and this is the whole of what a syntax check can establish.
+    """
+    text = install_desktop_icon.rendered_command("/venv/bin/python3", Path("/repo"))
+    done = subprocess.run(
+        ["/bin/bash", "-n", "/dev/stdin"],
+        input=text, capture_output=True, text=True, timeout=30,
+        # check=False DELIBERATELY: a non-zero return IS the finding here, and
+        # `check=True` would raise CalledProcessError instead of letting the
+        # assertion below print bash's own complaint.
+        check=False,
+    )
+    assert done.returncode == 0, f"bash refused the rendered command: {done.stderr}"
+
+
+def test_the_action_icons_go_through_the_installed_command_not_their_own_python():
+    """ONE WAY TO START THE STACK (rule 8).
+
+    If an icon's Exec were `python3 swap_stack.py up` it would be a second
+    spelling of how the stack starts -- with its own interpreter resolution, its
+    own working directory, and no reason to stay in step with the shell command.
+    Routing the icons through `swapterm` means fixing the wrapper fixes all four
+    launchers.
+    """
+    for action, name, comment in install_desktop_icon.ACTION_ENTRIES:
+        text = install_desktop_icon.rendered_action_entry(
+            action, name, comment, Path("/home/op/.local/bin/swapterm"), Path("/i.svg")
+        )
+        assert "__SWAPTERM" not in text, f"{action}: an unreplaced token remains"
+        assert f"Exec=/home/op/.local/bin/swapterm {action}" in text, text
+        assert "swap_stack.py" not in text, (
+            f"{action}'s Exec names swap_stack.py directly, which is a second way to start "
+            f"the stack and will drift from the wrapper"
+        )
+        assert "Terminal=true" in text, (
+            f"{action} would run with no terminal, so its eight steps and any refusal go "
+            f"nowhere and the icon reads as doing nothing (rule 14)"
+        )
+
+
+def test_every_action_icon_says_what_it_does_NOT_stop():
+    """An icon carries no documentation, and "Down" reads as taking everything.
+
+    stack_authority.py's header refuses to mark a chain daemon stoppable "ever,
+    under any flag" because they hold the wallets and nothing here has their
+    passphrase. The Comment is the only place a one-click user learns that, so
+    the two destructive-sounding actions must say it.
+    """
+    comments = {action: comment for action, _name, comment in install_desktop_icon.ACTION_ENTRIES}
+    for action in ("down", "restart"):
+        assert "chain daemon" in comments[action], (
+            f"the {action} icon does not say the chain daemons are left running: {comments[action]}"
+        )
+    assert "no chain daemon" in comments["up"].lower(), comments["up"]
+
+
+def test_the_dry_run_names_exactly_what_the_real_run_writes():
+    """Rule 8, on the two halves an operator trusts differently.
+
+    The dry run is the ONLY thing read before this writes into a home directory,
+    where a mistake is not undone by a git checkout. If planned_writes() and
+    write_entries() could disagree, the file that got added to one and not the
+    other would be the one nobody expected.
+
+    Asserted against the FUNCTION's targets rather than a hand-written list, so
+    adding an action to ACTION_ENTRIES cannot make this stale.
+    """
+    planned = [target for target, _what in install_desktop_icon.planned_writes(desktop_files=False)]
+    assert install_desktop_icon.COMMAND_TARGET in planned
+    assert install_desktop_icon.DESKTOP_TARGET in planned
+    assert install_desktop_icon.ICON_TARGET in planned
+    for action, _name, _comment in install_desktop_icon.ACTION_ENTRIES:
+        assert install_desktop_icon.DESKTOP_DIR / f"swap-terminal-{action}.desktop" in planned, action
+    # And the desktop-files half adds exactly the three, nothing else.
+    with_desktop = [t for t, _w in install_desktop_icon.planned_writes(desktop_files=True)]
+    added = [t for t in with_desktop if t not in planned]
+    assert len(added) == len(install_desktop_icon.ACTION_ENTRIES), added
+    assert all(t.parent == Path.home() / "Desktop" for t in added), added
+
+
+def test_a_bin_dir_this_installer_just_created_is_reported_as_not_on_PATH():
+    """Rule 14, from the other side: "INSTALLED" plus `command not found`.
+
+    Ubuntu's ~/.profile adds ~/.local/bin to PATH only if the directory EXISTED
+    AT LOGIN. Installing into a directory this script just made means no shell
+    finds `swapterm` until the next login, and an installer that did not say so
+    would be reporting success for something that does not work yet.
+    """
+    on_path, note = install_desktop_icon.path_note(Path("/home/op/.local/bin"), "/usr/bin:/bin")
+    assert on_path is False
+    assert "NOT on" in note and "log out" in note, note
+    on_path, note = install_desktop_icon.path_note(
+        Path("/home/op/.local/bin"), "/usr/bin:/home/op/.local/bin:/bin"
+    )
+    assert on_path is True, note
+
+
+def test_a_space_in_either_exec_path_refuses_the_whole_install():
+    """Two different paths, and both end up in an Exec= line.
+
+    The repo launcher goes into the GUI entry's Exec and the INSTALLED COMMAND
+    goes into all three action entries'. A space in either splits that line into
+    the wrong argv, and .desktop quoting is its own small grammar -- so this
+    refuses rather than quoting and hoping.
+    """
+    safe, note = install_desktop_icon.paths_are_safe_for_exec(
+        "/venv/bin/python3", Path("/home/My Files/swapterm")
+    )
+    assert safe is False
+    assert "space" in note, note
+
+
 def test_the_rendered_entry_has_no_placeholders_left():
     entry = install_desktop_icon.rendered_desktop_entry(
         "/home/op/.venv/bin/python3", Path("/home/op/swap_terminal/swap_terminal_desktop.py"),

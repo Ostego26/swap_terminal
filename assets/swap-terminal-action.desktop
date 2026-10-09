@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=__SWAPTERM_NAME__
+GenericName=Atomic swap terminal
+Comment=__SWAPTERM_COMMENT__
+# REWRITTEN BY install_desktop_icon.py, exactly as swap-terminal.desktop's Exec is
+# and for the same reason: a .desktop Exec= must be absolute, because the desktop
+# runs it with a minimal environment and no working directory of ours.
+#
+# ONE TEMPLATE, THREE ENTRIES. up, down and restart differ only in the action word
+# and the two sentences above it, so three near-identical .desktop files would be
+# rule 8's copies-that-drift -- the kind where somebody fixes the Icon= line in one
+# of them. The installer's ACTION_ENTRIES table is the only place the three differ.
+Exec=__SWAPTERM_EXEC__
+Icon=__SWAPTERM_ICON__
+# Terminal=true DELIBERATELY, and more so here than for the GUI launcher. `up` prints
+# eight numbered steps including which chains the container can reach and whether any
+# is MAINNET; `down` prints the proof that each port is free; `restart` refuses to
+# start when a stop could not be proven and says what to do instead. With
+# Terminal=false every one of those goes nowhere and a refusal is indistinguishable
+# from the icon doing nothing (rule 14).
+Terminal=true
+Categories=Office;Finance;
+Keywords=swap;crypto;gridcoin;xrp;__SWAPTERM_ACTION__;
+StartupNotify=true

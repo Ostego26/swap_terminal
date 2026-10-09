@@ -2287,6 +2287,107 @@ def test_both_causes_reach_the_verdict_and_not_just_the_boilerplate():
     assert "timed out" in said, f"LTC's cause did not reach the report: {said}"
 
 
+# =============================================================================
+# `restart` REFUSES TO START ON A STOP IT COULD NOT PROVE
+#
+# Operator, 2026-10-09: "swapterm restart".
+#
+# The sequencing is trivial; the GATE is the whole value. CLAUDE.md rule 13's own
+# incident is twelve consecutive cycles printing `exit_code=0` beside "another
+# cycle is already running pid=3286636; skipping" -- a stale process owning the
+# lock, every cycle reporting success, zero work done. Starting on top of an
+# unproven stop is how that is manufactured, so these pin the refusal rather than
+# the happy path.
+# =============================================================================
+
+
+def test_restart_starts_nothing_when_the_stop_could_not_be_proven(monkeypatch, capsys):
+    """THE GATE. MUTATION: `cmd_down(files); return cmd_up(files)`.
+
+    That mutation is one line shorter, reads as obviously correct, and reintroduces
+    exactly the failure rule 13 was written for -- `up` binds what it can, the
+    survivor keeps what it had, and both report fine.
+    """
+    started = []
+    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: 1)
+    monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: started.append("up") or 0)
+
+    code = swap_stack.cmd_restart(("docker-compose.yml",))
+
+    assert started == [], "cmd_up ran after a stop that was NOT proven"
+    assert code == 1, f"a refusal must not exit 0; got {code}"
+    said = capsys.readouterr().out
+    assert "REFUSED TO START" in said, said
+    assert "NOT PROVEN" in said, said
+    # And it must say what to DO, not merely that it refused (rule 14).
+    assert "kill the named pid" in said, f"the refusal gives no next step: {said}"
+
+
+def test_restart_starts_once_the_stop_is_proven_and_returns_ups_code(monkeypatch, capsys):
+    """The gate opens, and the exit code is `up`'s rather than `down`'s.
+
+    So `swapterm restart && something` chains on the stack actually SERVING. A
+    restart that returned down's 0 while up failed would report success for a
+    terminal that is not running -- the same did-nothing-looks-like-did-work
+    shape, one command out.
+    """
+    order = []
+    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: order.append("down") or 0)
+    monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: order.append("up") or 7)
+
+    code = swap_stack.cmd_restart(("docker-compose.yml",))
+
+    assert order == ["down", "up"], f"wrong order, or something did not run: {order}"
+    assert code == 7, f"restart returned {code} rather than up's own 7"
+    assert "STOP PROVEN" in capsys.readouterr().out
+
+
+def test_restart_says_up_front_that_it_leaves_the_chain_daemons_running(monkeypatch, capsys):
+    """Before the wait, not after it (rule 14), and before anything is stopped.
+
+    "everything stops safely" is what was asked for, and the honest answer is
+    that the wallet daemons are deliberately NOT part of everything:
+    stack_authority.py's header refuses to mark them stoppable "ever, under any
+    flag" because nothing here holds their passphrase, so a stop it performed
+    could not be undone by the `up` that follows. An operator reading
+    `swapterm restart` must not have to discover that from the absence of a line.
+    """
+    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: 1)
+    monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: 0)
+    swap_stack.cmd_restart(("docker-compose.yml",))
+    said = capsys.readouterr().out
+    header = said.split("swap_stack: DOWN")[0]
+    assert "chain daemons" in header, (
+        f"the restart banner does not mention the chain daemons before acting: {header}"
+    )
+    assert "passphrase" in header, f"and does not say WHY they are left: {header}"
+
+
+def test_every_action_is_reachable_from_the_command_line_and_dispatchable():
+    """argparse's choices and the dispatch table are ONE list, so neither can orphan.
+
+    They were two hand-written spellings until `chains` was added, 26 lines apart.
+    The two failure modes that held: an action argparse accepts and then KeyErrors
+    on, and an action that dispatches fine and cannot be typed. `restart` is the
+    first action added since the derivation, so this is the first time that holds
+    by construction rather than by my having edited both.
+    """
+    parser = swap_stack.build_parser()
+    # parser._actions, and no `noqa`: SLF001 is not in this repo's selected rules,
+    # so a marker for it would be a claim about a finding that never fires (rule
+    # 19). The private access is deliberate -- argparse exposes no public reader
+    # for a positional's choices, and the alternative is parsing --help text,
+    # which would be a second spelling of the very list under test.
+    action = next(a for a in parser._actions if a.dest == "action")
+    assert set(action.choices) == set(swap_stack.ACTIONS), (
+        f"the parser accepts {set(action.choices)} and the dispatch knows "
+        f"{set(swap_stack.ACTIONS)}"
+    )
+    assert "restart" in swap_stack.ACTIONS
+    for name, function in swap_stack.ACTIONS.items():
+        assert callable(function), f"{name} dispatches to something that is not callable"
+
+
 def test_only_a_reachable_verdict_exits_zero():
     """`chains` is a health check, and three of its four verdicts are not success.
 
