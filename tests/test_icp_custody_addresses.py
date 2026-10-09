@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import inspect
 
+import base58
 import pytest
 from modules.address_authority import expected_network
 from modules.address_network import MAINNET, TESTNET
-from modules.pubkey_address import address_from_public_key
+from modules.pubkey_address import address_from_public_key, network_of_version
 from network_target import UNCONFIGURED_PORT
 from regtest.keys import generate_key
 from valid_addresses import base58_testnet, bech32_address
@@ -306,7 +307,48 @@ def test_the_three_version_bytes_are_not_the_same_byte(monkeypatch):
         f"REGTEST-configured BTC daemon ({grc}) -- which is the defect exactly: one network "
         f"for every chain"
     )
-    assert grc.startswith("S"), f"GRC mainnet P2PKH starts with S, got {grc}"
+    # THE VERSION BYTE, NOT THE FIRST CHARACTER, and this line was the second
+    # kind for one full day. It read
+    #
+    #     assert grc.startswith("S"), f"GRC mainnet P2PKH starts with S, got {grc}"
+    #
+    # which is FLAKY BY CONSTRUCTION: generate_key() is random, and a one-byte
+    # version prefix does not pin the leading base58 digit. Measured over 600
+    # random keys per version, 2026-10-09:
+    #
+    #     GRC mainnet   0x3E    'S' 88.7%   'R' 11.3%   <- this assertion
+    #     testnet P2PKH 0x6F    'm' 83.7%   'n' 16.3%   <- never 'S'
+    #     testnet P2SH  0xC4    '2' 100%
+    #     BTC mainnet   0x00    '1' 100%
+    #     LTC mainnet   0x30    'L' 100%
+    #
+    # So it failed about one run in nine and had been passing on luck since
+    # 8287f1c. It surfaced in a full-suite run and passed in isolation, which is
+    # the shape that gets written off as a flake -- 0x3E's 25-byte value range
+    # straddles a base58 carry where 0x00 and 0x30 do not, which is why Bitcoin
+    # and Litecoin get away with the same heuristic and Gridcoin does not.
+    #
+    # WORSE, THE REPOSITORY ALREADY KNEW. tests/test_address_network.py:91 says a
+    # `not startswith("S")` check "called it testnet, which is what it was
+    # written to prevent", and test_open_swap.py and test_xrp_swap_attribution.py
+    # each record that `startswith("S")` "had it answering backwards". Three
+    # written refutations, and I wrote a fourth instance of the heuristic -- rule
+    # 8's copies-drift, except the parent was already known to be wrong.
+    #
+    # The decode is base58's own b58decode_check, the exact inverse of the
+    # b58encode_check that modules/pubkey_address builds the address with (rule
+    # 12: the domain API), and network_of_version() is that module's own reverse
+    # lookup -- so this asserts the round trip through production rather than
+    # against a literal that could drift from P2PKH_VERSION_FOR.
+    assert network_of_version(base58.b58decode_check(grc)[0]) == MAINNET, (
+        f"the GRC address derived against a MAINNET-configured daemon does not carry the "
+        f"mainnet version byte: {grc} decodes to 0x{base58.b58decode_check(grc)[0]:02x}, and "
+        f"P2PKH_VERSION_FOR says mainnet GRC is 0x3e"
+    )
+    assert network_of_version(base58.b58decode_check(btc)[0]) == TESTNET, (
+        f"and the REGTEST-configured BTC daemon's address does not carry a testnet version "
+        f"byte: {btc} decodes to 0x{base58.b58decode_check(btc)[0]:02x}"
+    )
     assert btc[0] in "mn", f"BTC testnet P2PKH starts with m or n, got {btc}"
 
 
