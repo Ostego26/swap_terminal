@@ -22,16 +22,22 @@ from pathlib import Path
 import pytest
 from chains.coin_amounts import CHAIN_DECIMALS
 from chains.daemon_capabilities import (
+    _REFUSAL_REMEDIES,
     BITCOIN_FAMILY,
     CAPABILITIES,
     EQUIVALENTS,
     MEASURED,
+    NOT_THIS_DEPLOYMENT,
     RELEASE_HISTORY,
+    UPSTREAM_SOURCE,
+    _capability,
     absence_note,
     calls_for,
     differences_for,
     has,
     jobs_that_diverge,
+    refusal_remedy,
+    refusal_shape,
     serves_wallet_path,
     unresolved_divergences,
     unverified_on_this_deployment,
@@ -171,11 +177,21 @@ def test_a_chain_nobody_checked_answers_None_and_not_False():
 
 
 def test_every_row_says_whether_it_was_measured_or_read_off_release_notes():
-    """The evidence field is not decoration; a row without it is a row in two voices."""
+    """The evidence field is not decoration; a row without it is a row in two voices.
+
+    WIDENED 2026-10-09 when UPSTREAM_SOURCE arrived, and the STRONGER invariant is
+    the point rather than the third name: the list it checks against is now derived
+    from the two filters instead of spelled here, so a FOURTH kind added without
+    being classified as measured-here-or-not fails this test. The old literal pair
+    would have had to be edited by hand on every addition, which is a hand-maintained
+    copy of a vocabulary -- rule 8's failure with a delay on it.
+    """
+    classified = {MEASURED, *NOT_THIS_DEPLOYMENT}
     for capability in CAPABILITIES:
-        assert capability.evidence in (MEASURED, RELEASE_HISTORY), (
-            f"{capability.name} carries evidence {capability.evidence!r}, which is neither "
-            f"a measurement nor release history"
+        assert capability.evidence in classified, (
+            f"{capability.name} carries evidence {capability.evidence!r}, which no filter in "
+            f"the module classifies -- it is in neither MEASURED nor NOT_THIS_DEPLOYMENT, so "
+            f"unverified_on_this_deployment() silently omits it"
         )
         assert capability.recorded_at.strip(), f"{capability.name} does not say where it came from"
 
@@ -183,16 +199,26 @@ def test_every_row_says_whether_it_was_measured_or_read_off_release_notes():
 def test_the_unverified_rows_are_listed_and_are_the_ones_i_could_not_test():
     """Rule 17: say which you have, and make the list callable rather than prose.
 
-    These three are Bitcoin Core release history, not readings of the operator's
-    daemons -- there is no GRC daemon in this session to ask. If one of them ever
-    gets measured, it moves to MEASURED and drops off this list.
+    These are rows not established against the operator's OWN daemons -- there is no
+    GRC daemon in this session to ask. If one of them ever gets measured there, it
+    moves to MEASURED and drops off this list.
+
+    NO LONGER "these three", AND NOT A COUNT AT ALL. It said three and there are
+    four, because 2026-10-09 added a row for Gridcoin's split config files. A test
+    that asserts a count has to be edited every time the map grows, and the edit is
+    the kind nobody thinks about -- so this asserts the PROPERTY every member must
+    have, plus the specific rows that must not quietly become measured.
     """
     unverified = {c.name for c in unverified_on_this_deployment()}
     assert _WALLET_PATH in unverified, "the wallet-path row was never tested against a GRC daemon"
     assert "rpcbind" in unverified
     assert any("rpcallowip" in name for name in unverified)
     for capability in unverified_on_this_deployment():
-        assert capability.evidence == RELEASE_HISTORY
+        assert capability.evidence in NOT_THIS_DEPLOYMENT, (
+            f"{capability.name} is listed as unverified-here but its evidence "
+            f"{capability.evidence!r} is not one of the not-this-deployment kinds"
+        )
+        assert capability.evidence != MEASURED
 
 
 def test_asking_about_a_non_bitcoin_chain_raises():
@@ -314,3 +340,204 @@ def test_the_per_chain_difference_list_is_derived_not_written_twice():
         "every difference is reported as an absence, so the two capabilities GRC has and "
         "BTC/LTC do not are invisible -- and those are the ones that break modern-first code"
     )
+
+
+# ---------------------------------------------------------------------------
+# A THIRD EVIDENCE KIND, and the reason it exists rather than being folded into
+# one of the two that were already here.
+#
+# The rpcallowip rows were settled on 2026-10-09 by cloning Gridcoin, checking
+# out tag 5.5.1.0, compiling ClientAllowed() and WildcardMatch() verbatim, and
+# running them on the operator's exact config. That is the chain's own code
+# executing -- far stronger than release history -- and it is still NOT the
+# operator's binary, which could have been built from anywhere in history.
+#
+# Filing it as MEASURED would have claimed their daemon was tested. Filing it as
+# RELEASE_HISTORY would have left the row reading "NOT checked against this
+# deployment" after the decisive check had been done.
+# ---------------------------------------------------------------------------
+
+
+def test_the_three_evidence_kinds_are_distinct_strings():
+    """Two of them collapsing would silently reclassify every row that used it."""
+    kinds = (MEASURED, RELEASE_HISTORY, UPSTREAM_SOURCE)
+    assert len(set(kinds)) == 3, kinds
+
+
+def test_only_MEASURED_counts_as_established_on_this_deployment():
+    """NOT_THIS_DEPLOYMENT must hold every kind EXCEPT MEASURED.
+
+    THE MUTATION THIS CATCHES IS THE ONE THAT ALMOST SHIPPED. The filter used to
+    read `c.evidence == RELEASE_HISTORY`. Adding UPSTREAM_SOURCE without widening
+    it would have dropped every upstream-source row out of
+    unverified_on_this_deployment() -- a row moving from "go and check this" to
+    invisible by being investigated MORE.
+    """
+    assert MEASURED not in NOT_THIS_DEPLOYMENT
+    assert set(NOT_THIS_DEPLOYMENT) == {RELEASE_HISTORY, UPSTREAM_SOURCE}
+
+
+def test_every_evidence_string_in_use_is_one_of_the_three():
+    """A row with a hand-written evidence string is invisible to both filters."""
+    known = {MEASURED, RELEASE_HISTORY, UPSTREAM_SOURCE}
+    for capability in CAPABILITIES:
+        assert capability.evidence in known, f"{capability.name}: {capability.evidence!r}"
+
+
+def test_unverified_on_this_deployment_is_exactly_the_non_measured_rows():
+    """Reached by construction rather than by a count, so adding a row cannot stale it."""
+    expected = tuple(c for c in CAPABILITIES if c.evidence != MEASURED)
+    assert unverified_on_this_deployment() == expected
+    assert all(c.evidence != MEASURED for c in unverified_on_this_deployment())
+
+
+# ---------------------------------------------------------------------------
+# THE TWO GRIDCOIN ANSWERS THAT ARE OPPOSITE TO BITCOIN'S, and a single edit
+# needs both right. Measured on the operator's host 2026-10-09:
+#
+#   config file   GRC splits per network (<datadir>/testnet/...); BTC/LTC use
+#                 ONE file with a [regtest] section.
+#   subnet form   GRC takes a WILDCARD and matches CIDR against nothing;
+#                 BTC/LTC take CIDR and refuse to start on a wildcard.
+#
+# Getting either backwards reproduces the other's symptom, which is what made
+# this cost five rounds.
+# ---------------------------------------------------------------------------
+
+_SPLIT_CONF = "one config file with [network] sections"
+_CIDR = "rpcallowip in CIDR form (172.18.0.0/16)"
+
+
+@pytest.mark.parametrize("name", [_SPLIT_CONF, _CIDR])
+def test_both_inverted_conventions_are_recorded_as_ABSENT_on_GRC(name):
+    """absent_on, not merely missing from present_on.
+
+    A chain in neither tuple is UNKNOWN and has() returns None, which would read
+    as "nobody has checked" -- and both of these were checked, at a cost.
+    """
+    assert has("GRC", name) is False
+    assert has("BTC", name) is True
+    assert has("LTC", name) is True
+
+
+def test_the_split_config_row_names_the_path_the_daemon_actually_reads():
+    """The remedy is a PATH, and a remedy that does not state it is not a remedy.
+
+    This is the row that cost five rounds; every one of those edits went to
+    <datadir>/gridcoinresearch.conf while the daemon read
+    <datadir>/testnet/gridcoinresearch.conf. If the sentence an operator reads
+    does not contain that second path, the row has not delivered its finding.
+    """
+    note = absence_note("GRC", _SPLIT_CONF)
+    assert "testnet/gridcoinresearch.conf" in note
+    assert "Using data directory" in note, "the log line that names it must be quoted"
+
+
+def test_the_two_rows_point_at_each_other():
+    """Rule 8: a reader who finds one must be told the other exists.
+
+    They are not duplicates -- they are two different answers for the same two
+    chains -- which is exactly the case rule 8 says belongs in a comment at BOTH
+    sites rather than being merged.
+    """
+    split = _capability(_SPLIT_CONF)
+    cidr = _capability(_CIDR)
+    assert "rpcallowip" in split.recorded_at, "the split-conf row must name the other one"
+    assert "wildcard" in cidr.instead.lower(), "the CIDR row must give GRC's actual form"
+
+
+def test_the_GRC_remedy_is_a_wildcard_and_the_BTC_remedy_is_not():
+    """If these two sentences ever agree, one of them is wrong.
+
+    MUTATION CHECKED: copying GRC's `instead` onto the rpcbind row -- the shape of
+    mistake that makes a daemon refuse to start -- fails here.
+    """
+    cidr_note = _capability(_CIDR).instead
+    assert "172.18.*" in cidr_note
+    assert "/16" in cidr_note, "it must say what the wildcard is equivalent TO"
+
+
+# ---------------------------------------------------------------------------
+# PUTTING THE REMEDY ON THE SCREEN. For the last three of the five rounds the GRC
+# 403 cost on 2026-10-09, the answer was already in this file -- in a row nothing
+# consulted. `swapterm chains` printed the bare 403 and stopped. A capability map
+# no report reads is documentation, and rule 5's test applies: if a reader has to
+# open a file to learn whether something is authorized, the authority is in the
+# wrong place. Same for learning why it is NOT.
+# ---------------------------------------------------------------------------
+
+_GRC_403 = "did not answer: 403 Client Error: Forbidden for url: http://host.docker.internal:25779/"
+_REFUSED = (
+    "did not answer: HTTPConnectionPool(host='host.docker.internal', port=18443): "
+    "Failed to establish a new connection: [Errno 111] Connection refused"
+)
+
+
+def test_a_GRC_403_names_the_FILE_PATH_first_and_the_syntax_second():
+    """BOTH causes, and the file path FIRST, because that is the one that was blocking.
+
+    MUTATION CHECKED, AND THE MUTATION IS THE MISTAKE I MADE: listing only the
+    rpcallowip row -- which was the first version of _REFUSAL_REMEDIES -- fails
+    here. That version would have handed the operator the syntax fix a fifth
+    time, the fix they had already applied correctly to a file the daemon does
+    not read.
+    """
+    remedy = refusal_remedy("GRC", _GRC_403)
+    assert "testnet/gridcoinresearch.conf" in remedy, "the file path must be there"
+    assert "172.18.*" in remedy, "and the syntax"
+    assert remedy.index("testnet/gridcoinresearch.conf") < remedy.index("172.18.*"), (
+        "the file path must come FIRST -- it is the cause no amount of staring at the "
+        "syntax reveals, and the syntax fix alone is what cost four of the five rounds"
+    )
+    assert remedy.startswith("(1)"), "two causes are numbered so neither reads as the whole answer"
+
+
+def test_a_refused_connection_on_BTC_or_LTC_names_rpcbind_and_not_the_GRC_answer():
+    """The conventions are INVERTED and handing over the wrong one breaks the daemon.
+
+    A wildcard in a modern bitcoin.conf makes Core refuse to START, so printing
+    GRC's remedy here would be worse than printing nothing.
+    """
+    for asset in ("BTC", "LTC"):
+        remedy = refusal_remedy(asset, _REFUSED)
+        assert "rpcallowip" in remedy
+        assert "172.18.*" not in remedy, f"{asset} must never be told to write a wildcard"
+
+
+def test_the_two_failure_shapes_are_told_apart():
+    assert refusal_shape(_GRC_403) == "403"
+    assert refusal_shape(_REFUSED) == "refused"
+    assert refusal_shape("did not answer: ReadTimeout") is None
+    assert refusal_shape("") is None
+
+
+@pytest.mark.parametrize(
+    ("asset", "detail", "why"),
+    [
+        ("GRC", "did not answer: ReadTimeout", "a shape nobody recorded"),
+        ("XRP", _GRC_403, "a 403 on a chain with no recorded remedies"),
+        ("BTC", _GRC_403, "BTC CAN 403 too, but no remedy is recorded for that shape"),
+        ("GRC", _REFUSED, "GRC refusing a connection is not the 403 case"),
+    ],
+)
+def test_nothing_recorded_says_NOTHING_rather_than_the_nearest_sentence(asset, detail, why):
+    """Silence is right here, and it is the lesson from a defect shipped the same day.
+
+    stack_authority's network line printed GRC's "no bech32" sentence for XRP, a
+    chain its table had no row for, because it branched on a bare None. The raw
+    failure detail always prints either way, so a chain with no recorded remedy
+    loses nothing by this returning "".
+    """
+    assert refusal_remedy(asset, detail) == "", why
+
+
+def test_every_capability_named_in_the_remedy_table_actually_exists():
+    """A typo'd name here is a KeyError on an operator's screen mid-outage.
+
+    _capability() raises rather than returning None by design, so this is the test
+    that keeps the raise from being the first thing anybody notices.
+    """
+    for asset, entries in _REFUSAL_REMEDIES.items():
+        for shape, name in entries:
+            assert shape in ("403", "refused"), f"{asset}: unknown shape {shape!r}"
+            assert _capability(name).instead.strip(), f"{asset}/{name}: empty remedy"

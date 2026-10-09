@@ -69,6 +69,12 @@ from pathlib import Path
 # names and which address prefix each one pays, and this file only renders them.
 # SAFE FOR THIS FILE'S STDLIB-ONLY CONTRACT -- daemon_network.py imports nothing
 # but __future__, so swap_stack.py on the host still needs no dependency.
+# THE REMEDY FOR A REFUSAL COMES FROM THE CAPABILITY MAP, not from a sentence here
+# (rule 8). chains/daemon_capabilities.py owns what each chain can do and what to do
+# instead, and its rows carry the measurement; this file only renders them. Both
+# imports are stdlib-only underneath, so swap_stack.py on the host still needs no
+# dependency.
+from chains.daemon_capabilities import refusal_remedy
 from chains.daemon_network import (
     CHAIN_NOT_IN_TABLE,
     NETWORK_NOT_IN_TABLE,
@@ -1373,6 +1379,60 @@ def _prefix_note(asset: str, network: str) -> str:
     return _PREFIX_NOTES[status].format(prefix=prefix)
 
 
+def _refusal_lines(refused: list) -> list[str]:
+    """One line per refused chain, plus the recorded remedy where there is one.
+
+    WHY THE REMEDY PRINTS HERE AND NOT IN A README. The GRC 403 cost five rounds on
+    2026-10-09, and for the last three of them the answer was already in
+    chains/daemon_capabilities.py -- in a row nothing consulted. A capability map no
+    report reads is documentation, and rule 5's test applies to it: if a reader has to
+    open a file to learn whether something is authorized, the authority is in the wrong
+    place. The same goes for learning why it is NOT.
+
+    WRAPPED, BECAUSE THESE SENTENCES ARRIVE AS VALUES. The `instead` fields are
+    paragraphs written for a reader, not hand-wrapped report lines, and the one for
+    rpcallowip is several hundred characters. swap_stack.say_wrapped() does the wrapping
+    at print time for the lines it owns; this returns them already split so the caller
+    stays a plain `for line in detail: say(...)` loop.
+
+    SILENT WHEN NOTHING IS RECORDED, which is deliberate and is the lesson from the XRP
+    line shipped and fixed earlier the same day: a renderer that cannot tell "no answer"
+    from "nothing to say" invents one. The raw detail always prints either way, so a
+    chain with no recorded remedy loses nothing.
+    """
+    lines = []
+    for row in refused:
+        asset = str(row.get("asset") or "?")
+        lines.append(f"  {asset}: {probe_failure_detail(row.get('detail'))}")
+        remedy = refusal_remedy(asset, str(row.get("detail") or ""))
+        if remedy:
+            lines.append(f"      RECORDED REMEDY ({asset}), from chains/daemon_capabilities.py:")
+            lines.extend(f"        {chunk}" for chunk in _wrap(remedy, 84))
+    return lines
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Greedy word wrap. textwrap would do, and does NOT, because of the embedded code.
+
+    The `instead` and `recorded_at` fields carry backticked config lines and quoted
+    source, and textwrap.fill() happily breaks `rpcallowip=172.18.*` across a newline
+    when it lands near the margin -- which turns advice an operator is about to RETYPE
+    into advice they retype wrongly. This never splits a whitespace-delimited token.
+    """
+    lines = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
 def chain_network_lines(rows: object) -> list[str]:
     """Name the network each answered daemon reports, and the addresses it can pay.
 
@@ -1551,7 +1611,7 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
         f"*** {len(refused)} CHAIN(S) THE CONTAINER CANNOT REACH: "
         f"{', '.join(row['asset'] for row in refused)} ***"
     ), [
-        *(f"  {row['asset']}: {probe_failure_detail(row.get('detail'))}" for row in refused),
+        *_refusal_lines(refused),
         "",
         # THE ONES THAT DID ANSWER STILL HAVE A NETWORK WORTH READING. A refusal on
         # one chain is no reason to stop reporting the others, and the operator

@@ -134,6 +134,23 @@ BITCOIN_FAMILY: tuple[str, ...] = tuple(CHAIN_DECIMALS)
 #: in the same voice).
 MEASURED = "measured on the operator's own daemon"
 RELEASE_HISTORY = "Bitcoin Core release history -- NOT checked against this deployment"
+#: A THIRD KIND, ADDED 2026-10-09, AND THE REASON IS THE SAME MISTAKE TWICE IN ONE DAY.
+#: The rpcallowip row below was settled by cloning gridcoin-community/Gridcoin-Research,
+#: diffing master's ClientAllowed() and WildcardMatch() against tag 5.5.1.0 to confirm they
+#: are byte-identical, compiling those two functions verbatim, and RUNNING them on the
+#: operator's exact config. That is far stronger than release history -- it is the chain's
+#: own code executing -- and it is still NOT the operator's binary, which could have been
+#: built from anywhere in history.
+#:
+#: Filing it as MEASURED would have claimed their daemon was tested. Filing it as
+#: RELEASE_HISTORY would have left the row reading "NOT checked" when the decisive check had
+#: been done. Both are the three-outcomes-collapsed-to-two defect this session already
+#: shipped once today, in stack_authority's renderer, and rule 17 is the general form: a
+#: reason to believe and a measurement must never be written in the same voice -- which
+#: needs a voice for each.
+UPSTREAM_SOURCE = (
+    "read AND executed from the chain's own source at a named tag -- not this deployment's binary"
+)
 
 
 @dataclass(frozen=True)
@@ -278,22 +295,127 @@ CAPABILITIES: tuple[Capability, ...] = (
             "Connection refused (nothing was accepting, because modern Core defaults to "
             "loopback only). GRC wants rpcallowip alone; BTC and LTC want rpcbind as well"
         ),
-        recorded_at="2026-10-09. Whether gridcoinresearchd ACCEPTS an rpcbind line is UNTESTED here",
+        recorded_at=(
+            "2026-10-09. THE OPEN QUESTION ON THIS ROW IS NOW CLOSED and the answer is "
+            "stronger than the row expected: `-rpcbind` does not exist in Gridcoin's release "
+            "line AT ALL -- `grep -rn rpcbind src/` on master returns nothing, and "
+            "src/init.cpp:602-605 declares only -rpcallowip and -rpcconnect. So a gridcoinresearch.conf "
+            "carrying an rpcbind line gets an unknown-argument, not a narrowed bind. The "
+            "widening is implicit instead: src/rpc/server.cpp:661-662 computes "
+            "`loopback = !IsArgSet(\"-rpcallowip\")` and binds address_v6::any() with "
+            "v6_only(false) when ANY rpcallowip is set, which is the `LISTEN *:25779` the "
+            "operator sees. The corollary matters: deleting the last rpcallowip line moves the "
+            "socket back to loopback, so there is no \"allow nobody\" state that still listens"
+        ),
+    ),
+    Capability(
+        name="one config file with [network] sections",
+        arrived_in="Bitcoin Core 0.17, which added [main]/[test]/[regtest] sections",
+        present_on=("BTC", "LTC"),
+        absent_on=("GRC",),
+        evidence=UPSTREAM_SOURCE,
+        instead=(
+            "GRIDCOIN USES A SEPARATE FILE PER NETWORK and a testnet daemon reads "
+            "<datadir>/testnet/gridcoinresearch.conf, NOT <datadir>/gridcoinresearch.conf. "
+            "There is no section syntax to add and none is needed; put the lines in the "
+            "net-specific file. The daemon's own startup log names the directory it chose -- "
+            "`Using data directory <datadir>/testnet` -- which is the only reliable way to "
+            "know, and it prints it every run"
+        ),
+        recorded_at=(
+            "2026-10-09, AND THIS ROW IS THE MOST EXPENSIVE THING IN THIS FILE SO FAR: it cost "
+            "five rounds on the operator's host, every one of them editing the wrong file.\n\n"
+            "src/util/system.cpp:811-815 at tag 5.5.1.0:\n\n"
+            "    fs::path GetConfigFile(const std::string& confPath)\n"
+            "    {\n"
+            "        // Unlike in Bitcoin, the net specific flag is TRUE, because we still use\n"
+            "        // split config files.\n"
+            "        return AbsPathForConfigVal(fs::path(confPath), true);\n"
+            "    }\n\n"
+            "net_specific=true makes GetDataDirPath append BaseParams().DataDir(), which is "
+            "\"testnet\" (src/chainparamsbase.cpp:35). ReadConfigFiles opens that ONE path "
+            "(src/util/system.cpp:918-921) with NO fallback to the base datadir, and a missing "
+            "file is silently fine -- \"ok to not have a config file\", line 929.\n\n"
+            "MEASURED ON THE OPERATOR'S HOST, and the two timestamps are the whole finding:\n\n"
+            "    <datadir>/gridcoinresearch.conf          modified 2026-10-09 16:21  <- edited\n"
+            "    <datadir>/testnet/gridcoinresearch.conf   modified 2026-10-04 14:22  <- READ\n\n"
+            "    base conf     rpcallowip=127.0.0.1, rpcallowip=172.18.*\n"
+            "    testnet conf  rpcallowip=127.0.0.1          <- loopback only, five days old\n\n"
+            "Adding the subnet to the TESTNET file turned the container's 403 into a 200 on the "
+            "first try.\n\n"
+            "THE SYMPTOM IS INDISTINGUISHABLE FROM A SYNTAX ERROR, which is why this cost what "
+            "it did. Loopback kept working because 127.0.0.0/8 is hardcoded allowed "
+            "(src/rpc/server.cpp:521-526), and the stale file's own rpcallowip=127.0.0.1 made "
+            "IsArgSet(\"-rpcallowip\") true -- which is what widens the bind at "
+            "src/rpc/server.cpp:661 -- so the daemon showed LISTEN *:25779 and a 403 exactly as "
+            "a daemon with an unparseable subnet would. Every piece of evidence was consistent "
+            "with the wrong hypothesis.\n\n"
+            "THE CONVENTION IS INVERTED BETWEEN THESE DAEMONS AND GETTING IT BACKWARDS FAILS "
+            "DIFFERENTLY IN EACH DIRECTION: a [regtest] section in a gridcoinresearch.conf is "
+            "read as a key nobody declared and does nothing, while GRC's net-specific file "
+            "layout applied to bitcoin.conf means the daemon reads a conf with no RPC settings "
+            "at all. Pair this row with the rpcallowip CIDR row below -- same two chains, "
+            "opposite answers, and a single edit needs BOTH right"
+        ),
     ),
     Capability(
         name="rpcallowip in CIDR form (172.18.0.0/16)",
-        arrived_in="Bitcoin Core 0.10; wildcards (172.18.*.*) were REMOVED in 0.12",
-        present_on=("BTC", "LTC"),
-        absent_on=(),
-        evidence=RELEASE_HISTORY,
-        instead=(
-            "there is no safe form for both eras, which is why this row exists. A modern daemon "
-            "REFUSES TO START on a wildcard; a pre-0.10 daemon does not understand CIDR. "
-            "Gridcoin's tree carries the modern src/rpc layout, so CIDR is expected to parse -- "
-            "expected, not measured. The daemon's own startup log is what says, and "
-            "`swap_stack.py chains` is what proves it from where it matters"
+        arrived_in=(
+            "Bitcoin Core 0.10, and wildcards were REMOVED in 0.12. On GRIDCOIN it arrived in "
+            "commit 924f36eb, 2026-08-23, which is on `development` and tag 5.5.1.7-testnet "
+            "ONLY -- not master, and not in any mainnet release"
         ),
-        recorded_at="2026-10-09, while the operator was adding rpcallowip=172.18.0.0/16 for GRC",
+        present_on=("BTC", "LTC"),
+        absent_on=("GRC",),
+        evidence=UPSTREAM_SOURCE,
+        instead=(
+            "on GRC write a WILDCARD: `rpcallowip=172.18.*`. It is exactly equivalent to "
+            "172.18.0.0/16 and does not over-match -- the mask is the seven characters "
+            "`172.18.` INCLUDING the trailing dot, so 172.180.1.1 and 172.181.0.3 are both "
+            "refused. Gridcoin's own contrib/docker/entrypoint.sh ships 10.*.*.*, 172.*.*.* "
+            "and 192.168.*.* for this reason and its README says so in one line: \"Gridcoin "
+            "uses wildcard matching for rpcallowip (not CIDR notation)\". "
+            "There is NO form that is safe on both eras, which is why this row exists: a "
+            "post-0.12 daemon refuses a wildcard and the GRC release line cannot read CIDR"
+        ),
+        recorded_at=(
+            "2026-10-09. THIS ROW USED TO SAY \"CIDR is expected to parse -- expected, not "
+            "measured\" AND THE EXPECTATION WAS WRONG, which is the argument for the evidence "
+            "field existing at all. It cost the operator most of a day: five rounds of adding "
+            "rpcallowip=172.18.0.0/16 to a conf, restarting, and getting the same 403.\n\n"
+            "WHAT ACTUALLY HAPPENS, from src/rpc/server.cpp:528-533 on master, diff-verified "
+            "byte-identical to tag 5.5.1.0 and then COMPILED AND RUN on the operator's exact "
+            "config:\n\n"
+            "    const string strAddress = address.to_string();\n"
+            "    const vector<string>& vAllow = gArgs.GetArgs(\"-rpcallowip\");\n"
+            "    for (auto const& strAllow : vAllow)\n"
+            "        if (WildcardMatch(strAddress, strAllow))\n"
+            "            return true;\n"
+            "    return false;\n\n"
+            "The entry is never PARSED. It is glob-matched against the peer's address TEXT by "
+            "util.cpp:143's WildcardMatch, where `/` is a literal character -- so "
+            "172.18.0.0/16 can only match a peer whose address string is literally "
+            "172.18.0.0/16, which no peer's ever is. The upstream commit that fixed it says "
+            "the same thing: \"matches no address string, ever... with nothing in the log to "
+            "say why\".\n\n"
+            "TWO THINGS THAT MADE THIS EXPENSIVE TO DIAGNOSE, both worth knowing before the "
+            "next one:\n"
+            "  - 127.0.0.0/8 IS HARDCODED ALLOWED at src/rpc/server.cpp:521-526, BEFORE the "
+            "    allow list is consulted. So `rpcallowip=127.0.0.1` grants nothing, and "
+            "    loopback working carries ZERO information about whether any other line "
+            "    parsed -- it works identically with `rpcallowip=garbage` beside it. Half this "
+            "    investigation leaned on loopback as evidence and it never was any.\n"
+            "  - the release line LOGS NOTHING about rpcallowip, so the config error is "
+            "    invisible. That absence is itself the build discriminator: a CIDR-capable "
+            "    Gridcoin logs one line per entry at startup, so no such lines means "
+            "    wildcard-only. The operator's log had none.\n\n"
+            "The v4-mapped-over-v6 hypothesis was WRONG and is recorded so nobody re-chases "
+            "it: the daemon does bind dual-stack and the peer does arrive as "
+            "::ffff:172.18.0.3, but src/rpc/server.cpp:510-519 lifts bytes 12-15 into an "
+            "address_v4 and recurses BEFORE any matching, so to_string() is already "
+            "\"172.18.0.3\" at line 528. Measured identical verdicts for both spellings in "
+            "every config tried"
+        ),
     ),
     Capability(
         name="AmountFromValue rounding",
@@ -417,14 +539,29 @@ def wallet_path_warning(asset: str, wallet: str) -> str:
     return ""
 
 
+#: Evidence kinds that are NOT this deployment's own daemon. UPSTREAM_SOURCE belongs
+#: here even though it is the strongest non-local evidence there is: the operator's
+#: binary could have been built from any commit, and the rpcallowip row is itself the
+#: proof that the boundary matters -- CIDR works on `development` and not on the release
+#: line, so "the source says" is only an answer once you know which source.
+NOT_THIS_DEPLOYMENT = (RELEASE_HISTORY, UPSTREAM_SOURCE)
+
+
 def unverified_on_this_deployment() -> tuple[Capability, ...]:
-    """Every row whose evidence is release history rather than a reading.
+    """Every row not established against the operator's OWN daemon.
 
     THE POINT OF THE EVIDENCE FIELD, made callable. These are the rows somebody
     should go and check against the operator's own daemons, and until they do,
     nothing may report them in the voice of a measurement (rule 17).
+
+    WIDENED 2026-10-09 FROM `== RELEASE_HISTORY` when UPSTREAM_SOURCE arrived. An
+    `== RELEASE_HISTORY` test would have silently dropped every upstream-source row
+    out of this list the moment the constant was added -- a row would have moved from
+    "go and check this" to invisible by being investigated MORE. That is the shape of
+    defect this whole module exists to make impossible, so the test is membership of a
+    named tuple and tests assert the tuple covers every kind but MEASURED.
     """
-    return tuple(c for c in CAPABILITIES if c.evidence == RELEASE_HISTORY)
+    return tuple(c for c in CAPABILITIES if c.evidence in NOT_THIS_DEPLOYMENT)
 
 
 def differences_for(asset: str) -> tuple[str, ...]:
@@ -649,3 +786,94 @@ def unresolved_divergences() -> tuple[Equivalence, ...]:
     how this function came to exist.
     """
     return tuple(row for row in EQUIVALENTS if not row.resolver)
+
+
+#: WHICH CAPABILITY ROW EXPLAINS WHICH FAILURE SHAPE, per chain.
+#:
+#: The REMEDY TEXT IS NOT HERE. This maps a failure to the NAME of a row above, and
+#: the sentence comes from that row's `instead` field (rule 8: the remedy had better
+#: have one home, and it already has one). A second copy of "write rpcallowip=172.18.*"
+#: is the shape that cost this repository three separate weather-city fixes.
+#:
+#: TWO SHAPES, AND THEY ARE THE TWO THE OPERATOR ACTUALLY HIT ON 2026-10-09:
+#:
+#:   403         the daemon ACCEPTED the connection and declined the caller by IP.
+#:               On GRC this is src/rpc/server.cpp:593, the only HTTP_FORBIDDEN
+#:               emission site in that entire tree, so it is uniquely an rpcallowip
+#:               rejection -- not a credential failure, which is 401 with a
+#:               WWW-Authenticate header and an HTML body.
+#:   refused     nothing was accepting at all. On BTC/LTC that is modern Core
+#:               defaulting to a loopback-only bind until `rpcbind` says otherwise.
+#:
+#: Keyed by chain because the SAME shape means different things: a 403 from a modern
+#: Core is an rpcallowip rejection too, but the remedy there is CIDR and on GRC it is
+#: a wildcard -- which is the entire finding this table exists to deliver.
+#: SEVERAL ROWS MAY ANSWER ONE FAILURE AND ALL OF THEM PRINT, in this order. The GRC
+#: 403 is the reason: it has TWO causes that produce an identical symptom, and the
+#: first version of this table listed only the second one -- which would have handed
+#: the operator the syntax fix again, the fix they had already applied correctly four
+#: times to a file the daemon does not read. The split-conf row is FIRST because it is
+#: the one that was actually blocking on 2026-10-09 and the one no amount of staring
+#: at the syntax reveals.
+_REFUSAL_REMEDIES: dict[str, tuple[tuple[str, str], ...]] = {
+    "GRC": (
+        ("403", "one config file with [network] sections"),
+        ("403", "rpcallowip in CIDR form (172.18.0.0/16)"),
+    ),
+    "BTC": (("refused", "rpcbind"),),
+    "LTC": (("refused", "rpcbind"),),
+}
+
+
+def refusal_shape(detail: str) -> str | None:
+    """Classify a probe failure string. None when it is neither shape we know.
+
+    A HEURISTIC OVER AN ERROR MESSAGE, AND IT SAYS SO. The input is built by
+    services/admin_view.probe_chain() from whatever exception the RPC call raised,
+    so it is our own prose wrapped around a transport library's -- which means the
+    tokens matched here can change when `requests` changes its wording.
+
+    That is survivable ONLY because the failure mode is silence: an unrecognized
+    string returns None and the report says nothing extra. It never guesses a
+    remedy, and it never suppresses the raw detail, which is printed either way.
+    This is the lesson from the XRP line shipped and fixed earlier the same day --
+    a renderer that cannot tell "no answer" from "nothing to say" invents one.
+    """
+    lowered = detail.lower()
+    if "403" in lowered or "forbidden" in lowered:
+        return "403"
+    if "connection refused" in lowered or "errno 111" in lowered:
+        return "refused"
+    return None
+
+
+def refusal_remedy(asset: str, detail: str) -> str:
+    """What to DO about this chain answering this way. "" when nothing is recorded.
+
+    Returns the matching capability row's `instead` sentence, so the advice on an
+    operator's screen is the same sentence a reader finds in CAPABILITIES -- never a
+    paraphrase that can drift from it.
+
+    WHY THIS IS WORTH A FUNCTION. The GRC 403 went five rounds on 2026-10-09: the
+    operator added `rpcallowip=172.18.0.0/16`, restarted, got the same 403, and
+    nothing anywhere said that Gridcoin's release line cannot read CIDR -- not the
+    daemon, which logs nothing about rpcallowip at all, and not `swap_stack.py
+    chains`, which printed the 403 verbatim and stopped. The knowledge was already
+    in this file by then, in a row nothing consulted. A capability map that no
+    report reads is documentation, and rule 5's test applies to it: if a reader has
+    to open a file to learn something, it is in the wrong place.
+    """
+    shape = refusal_shape(detail)
+    if shape is None:
+        return ""
+    matched = [
+        _capability(name).instead
+        for recorded_shape, name in _REFUSAL_REMEDIES.get(asset, ())
+        if recorded_shape == shape
+    ]
+    # NUMBERED ONLY WHEN THERE IS MORE THAN ONE, because "1." in front of a lone
+    # paragraph implies a second step the reader goes looking for (rule 14: state what
+    # the thing means, and do not imply what it does not).
+    if len(matched) == 1:
+        return matched[0]
+    return " ".join(f"({index}) {note}" for index, note in enumerate(matched, start=1))
