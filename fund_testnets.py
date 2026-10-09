@@ -27,8 +27,20 @@ WHY EACH CHAIN GETS COINS A DIFFERENT WAY
                J5wn3xEMDsr9r8qtF6YTWJodmgW5kG3ZThqDb8Xc37JM from the key
                rotation on 2026-09-25, so this step only CONFIRMS it rather
                than asking for more.
-               see a deposit until it has synced, and that was MEASURED at
-               33-54 hours on this hardware. It needs a decision, not a script.
+
+    ORPHANED FRAGMENT, MARKED RATHER THAN GUESSED AT (2026-10-09). The two lines
+    below were spliced into the SOL entry by an edit and start mid-clause, so as
+    written they read as if Solana needs a chain sync. It does not -- the SOL
+    step above is read-only and needs nothing. The measurement is real and is
+    load-bearing for a decision an operator makes (whether to move a daemon from
+    regtest to testnet), so it is NOT deleted; but which chain it measured cannot
+    be recovered from this text, and the BTC/LTC entry's "testnet3 would mean a
+    faucet AND a chain download" is the likeliest subject rather than a known one.
+    Whoever knows should attribute it and move it (rule 17: a reason to believe is
+    not a reading).
+
+        "... see a deposit until it has synced, and that was MEASURED at
+        33-54 hours on this hardware. It needs a decision, not a script."
     GRC        excluded at the operator's request: they already hold testnet
                Gridcoin.
 
