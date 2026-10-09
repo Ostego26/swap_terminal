@@ -133,13 +133,36 @@ key is a runtime `TypeError` found by whichever tool splats it first. Writing
 that contract as four `TypedDict`s makes it checked, which is the improvement;
 the silenced squiggle is a side effect.
 
-**Being fixed now, 2026-10-09, by eight agents on file-disjoint buckets** under a
-written mandate: no `type: ignore`, no `pyright: ignore`, no `cast()` added to
-silence a finding, no widening a parameter to `object`/`Any`, no new baseline
-(rule 19), and in tests no assertion may be weakened — annotations may change,
-behavior may not. Every finding is classified as (1) a real defect, which gets a
-failing test, (2) a missing or wrong type, or (3) a wrong comment the finding
-exposed. Anything with no honest fix comes back named rather than suppressed.
+**DONE, 2026-10-09: 488 → 85, across 94 files → 17.** Eight agents on
+file-disjoint buckets, under a written mandate: no `type: ignore`, no
+`pyright: ignore`, no `cast()` added to silence a finding, no widening a parameter
+to `object`/`Any`, no new baseline (rule 19), and in tests no assertion weakened —
+annotations may change, behavior may not. **Zero suppressions and zero baseline
+entries were added by any of the eight.**
+
+| bucket | | before | after |
+|---|---|---|---|
+| A | `Config.RPC` and its consumers | 53 | **0** |
+| B | the library under `swap_terminal/` | 97 | 6 |
+| C | atomic-swap tools | 25 | **0** |
+| D | operator panel and reports | 21 | 3 |
+| E | Solana tests | 77 | 31 |
+| F | panel and price tests | 71 | 30 |
+| G | atomic/XRP/HTLC/address tests | 78 | 16 |
+| H | the long tail of `tests/` | 61 | 22 |
+
+Commits `8287f1c`, `7ced839`, `35a1e77`, `8425058`, `97a1321`, `8f78ad7`,
+`e7195cf`, `7e41762`, plus `e12d539`, `da4a3fa`, `f903e0b`, `533b6ba`.
+Full suite after: **4109 passed, 3 skipped, 0 failed.**
+
+Almost every remainder is ONE shape: a production function declares a concrete
+class for a parameter whose body uses two or three of its members, so a
+deliberately-partial test stub is refused. Five agents converged on `Protocol`
+independently; several built one, pyright-proved it against a probe with the real
+signatures, and stopped because the file belonged to another bucket. Those are
+being landed now as a second round — merged first, because three of them were the
+same Protocol under three different names, and shipping all three would be rule 8
+created on purpose.
 
 The subset where a `None` actually reaches a use — the class that raises at
 runtime — is still the part worth reading first:
@@ -160,27 +183,10 @@ runtime — is still the part worth reading first:
 is the argument for the whole entry: the signal existed, and it was unreadable
 under 53 false positives.
 
-### 9. `static/script.js`: three entry functions are dead
-`wireQuoteForm` (L122), `wireSwapForm` (L252), `wireLampFilter` (L604) read
-`#quote-form`, `#swap-form`, `#lampstrip`. **Zero** templates define any of the
-three — established by grepping `templates/` for the NAME, not by the import
-graph (rule 2). They left with `templates/index.html`. ~266 of 666 lines.
-
-### 10. `destinations_for()` leaks operator text to the customer
-Screen 2 can render `BTC → SOL: SOL has no adapter in this process: SOL_RPC_URL
-is unset... exported in the shell that starts the server`. Pre-existing;
-`services/wizard.destinations_for()` passes `row["reason"]` straight through.
-Invisible to `test_no_operator_facing_remedy_text_reaches_the_customer_page`
-because that test GETs `/` and this only appears after a POST.
-
 ### 11. `create_quote()` stores `output_amount_estimate` unquantized
 `300.0000010967742` GRC for an 8-decimal chain. Not a money-path defect —
 `payout_service` runs `quantize_for_chain()` before broadcast — but it is on the
 order path, so named rather than changed.
-
-### 12. `routes/atm.CARRIED` includes `quote_id`, which no screen sets
-Reachable only by a crafted POST; `answers_after_back()` clears it and two tests
-pin that. Harmless, named.
 
 ### 13. Docker base images: 9 warnings, 5 that ship, 1 that matters
 **Owner: operator**, filed here because I found it — settling it needs a docker
@@ -257,26 +263,79 @@ own Debian/Alpine packages, not of anything in this repository, and a
 `rust:1.90-bookworm` with zero criticals may simply not exist. The two-stage
 change is the one that moves the number regardless of what upstream ships.
 
-### 14. The review screen speaks operator, not customer
-Screen 5 renders, verbatim and in a highlighted panel:
 
-> **RUN GREEN -- atomic_swap.py (P2SH HTLC on both legs); this terminal settles
-> it CUSTODIALLY, with no hashlock**
+### 15. `ecdsa` has no type information, and every in-file fix is dishonest
+**Owner: operator** — it changes how every `ecdsa` import in the tree resolves.
 
-`RUN GREEN` is a posture token and `atomic_swap.py` is a filename in this
-repository. Neither means anything to someone about to send money, and the one
-sentence under it that DOES mean something to them — "this desk holds your funds
-between your deposit confirming and your payout being broadcast" — is the small
-print under the jargon.
+4 findings: `swap_terminal/identity.py:442` and `:471`,
+`swap_terminal/modules/htlc_spend.py:344`, `swap_terminal/regtest/keys.py:286`.
 
-Same class as finding 10 (`destinations_for()` leaking remedy text), one screen
-further on. Found by RENDERING screen 5 in Chromium, which is the only way it
-was ever going to be found: no test asserts on that panel's wording.
+`ecdsa` 0.19.2 ships no `py.typed` and typeshed has no stub, so pyright infers
+`SigningKey.get_verifying_key()` from its body — `return self.verifying_key`.
+`__init__` sets that attribute to `None` (`ecdsa/keys.py:765`) and **every
+classmethod that fills it in assigns through a LOCAL named `self`**
+(`self = cls(_error__please_use_generate=True)`, keys.py:795), which pyright does
+not count as a declaration. The inferred type is therefore exactly `None`, not
+`VerifyingKey | None` — while the library's own docstring says
+`:rtype: VerifyingKey`.
 
-Also on that screen, and a nit rather than a defect: the answers strip at the
-top repeats "YOU SEND 0.0002 BTC" and "PAID TO mqT6…T3M", and the detail list
-twelve pixels below says both again. They cannot disagree — one template, one
-context — so this is visual redundancy, not rule 8's drift.
+**Every in-file option was tested and none is honest.** `if vk is None: raise`,
+`isinstance(vk, VerifyingKey)` and a declared local `vk: VerifyingKey | None` all
+narrow `None` to `Never`, which removes the report by removing the *analysis* of
+the two lines after it, and guards nothing at runtime that is not already a crash.
+
+The proposal is `typings/ecdsa/keys.pyi` declaring
+`verifying_key: VerifyingKey | None`; pyright reads `./typings` with no config
+change. It was not done because a partial stub makes any name it omits an error,
+so it has to be complete enough for every `ecdsa` import in the tree. The
+mechanism and the rejected options are written into docstrings at both live sites.
+
+### 16. Three fixes landed without the test that would hold them
+Each is mutation-checked by hand, and each needed a file the agent that found it
+could not reach. Named rather than absorbed.
+
+| fix | the test that is owed |
+|---|---|
+| `Config.NETWORK` never existed, so every chain derived testnet (`8287f1c`) | `tests/test_icp_custody_addresses.py`: seed GRC at 15715 and BTC at 18443, assert `expected_network("GRC") == MAINNET` and `("BTC") == TESTNET`. Fails against the old expression, which returns one value for all three |
+| `run_xrp_first()` returned `False` on its success path (`35a1e77`) | drive BOTH runners through stubbed submit/fund/claim and assert `is True`. **No test drives a runner at all today** |
+| `apply_correction` would write NULL for a SKIP plan (`8425058`) | `apply_correction(db, row, Correction(SKIP, 1.0, None, ...))` raises `ValueError` naming the verdict and leaves `payouts.amount` unchanged |
+
+Plus: each POST route on the operator panel, with its field absent, returns 400
+with the field name in the error — nine routes, no test.
+
+### 17. Duplication the pass surfaced and did not merge
+All of it is rule 8, none of it is a defect today, and every one was established
+by grepping for the NAME rather than the import graph (rule 2).
+
+- **`("BTC", "LTC", "GRC")` is spelled five times**: `wallet_custody.SCRIPT_CHAINS`,
+  `modules/atomic_swapper.SUPPORTED_ASSETS`, `chains/registry._BITCOIN_DERIVED`,
+  `workers/common.endpoint_lines()`'s inline tuple, `modules/htlc_assets.SCRIPT_HTLC_ASSETS`.
+  No sixth was added — `config.RpcSettings`'s annotations are now the one spelling
+  a checker reads, and it is named from the others' neighborhood.
+- **`workers/common.db_path_source(db_path: str, explicit_db="")` never reads
+  `db_path`.** It reads only `explicit_db` and `os.environ`. 9 call sites; the
+  honest fix is to delete the parameter.
+- **`host_of` / `LOOPBACK_HOSTS` are duplicated** between `operator_panel.py:1246-1249`
+  and `swap_terminal/loopback.py`, which its own docstring names as owed work and
+  which `kill_switch.py:544` **already claims is done**. Verified safe to merge:
+  the bodies are character-identical and `loopback.py` is stdlib-only with no
+  import-time side effects, so the panel keeps its stdlib-only invariant. Not done
+  because completing it means rewriting the paragraph of `loopback.py`'s docstring
+  that would otherwise become false — it wants to be one commit by someone who can
+  touch both.
+- **Four copies of the console recorder in tests** (`test_chain_balances.py:74`,
+  `test_xrp_balances.py:240`, `test_atomic_swap_xrp_driver.py:302`, `_QuietConsole:178`),
+  three of them byte-identical. Belongs in `tests/conftest.py`.
+- **Five copies of the `spec_from_file_location` entry-point loader**
+  (`test_operator_panel.py:50`, `test_solana_payout.py:1199`, `test_grc_htlc_verify.py:58`,
+  `test_reclaim_funding.py:43`, `test_icp_replica_entrypoint.py:34`).
+  `test_solana_payout.py` names `test_operator_panel.py::_entry()` in a comment as
+  the thing it copied — and all five carried the same unchecked-`spec.loader` hole,
+  now closed in four of them separately. One `conftest.py` helper fixes all five.
+- **Two classes are named `Console`** (`step_console.py` and `regtest/console.py`),
+  and their `check()` disagrees about whether the verdict is a `bool` or a string.
+  Not merged — they are genuinely different consoles — but `step_console.check` now
+  REFUSES a non-bool, because crossing them printed OK and exited 0 (C16).
 
 ---
 
@@ -295,3 +354,10 @@ context — so this is visual redundancy, not rule 8's drift.
 | C9 | `up` never asked whether the container could reach the chains | `1bdfef1` |
 | C10 | Pylance reported 53 import errors, all false | `f01e85c` |
 | C11 | A docker timeout returned `""` for a canister id, and the map rendered it as `http://.localhost:4943/` — three malformed URLs printed as working links. Found by pyright, under the 53 | this commit |
+| C12 | The four-screen ATM: one scrolling column became four screens, fees to the right. Rendered in Chromium at two widths, ten renders, zero overflow | `418e5a2` |
+| C13 | The review screen told a customer `RUN GREEN -- atomic_swap.py (P2SH HTLC on both legs)` above "Create the swap", and screen 2 printed which RPC variables are unset on this host to an unauthenticated reader. Five hand-written copies of one custody fact, two of them already disagreeing (was 10 and 14) | `58d6f62` |
+| C14 | `static/script.js`: seven dead functions, 666 → 395 lines — AND the payout-address autofill guard was not running on the ATM flow at all. 82.65 tGRC went to an autofilled address on 2026-10-01; the guard left with `index.html` on 10-07 (was 9) | `332d7f7` |
+| C15 | Eight signatures each refused a type their own annotation said could not arrive, with the precedent inside one of the signatures | `e12d539` |
+| C16 | A `FAIL` from the other `Console` printed `OK` and returned exit code 0 | `da4a3fa` |
+| C17 | `routes/atm.CARRIED` listed `quote_id`, which no template sets — established by grep over `templates/`, now removed (was 12) | `58d6f62` |
+| C18 | Five tests would have reported a missing element as `'NoneType' object has no attribute 'group'` | `533b6ba` |
