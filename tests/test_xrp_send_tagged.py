@@ -657,7 +657,17 @@ def test_the_source_is_never_the_destination():
     assert chosen[1] == other, "it must skip the account that IS the destination"
 
     # The ordinary case is unchanged: paying somebody else still uses the first.
-    assert xrp_send_tagged.choose_source(accounts, other)[1] == deposit
+    # Bound and refused the same way as `chosen` above, which this line had skipped:
+    # choose_source() returns None when no saved account is usable, and subscripting that
+    # raises "'NoneType' object is not subscriptable" -- which is indistinguishable from
+    # the refusal case the very next test asserts on, and says nothing about the ordinary
+    # case having stopped working.
+    ordinary = xrp_send_tagged.choose_source(accounts, other)
+    assert ordinary is not None, (
+        "paying an account that is NOT one of the saved ones must still choose a source; "
+        "None here means the skip-the-destination rule started refusing the ordinary case"
+    )
+    assert ordinary[1] == deposit
 
 
 def test_no_usable_source_returns_None_rather_than_a_doomed_payment():

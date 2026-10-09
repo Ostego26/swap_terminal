@@ -105,7 +105,12 @@ def account_info(drops="100000000", owner_count=0):
     JavaScript client cannot round them through a double. A test that seeded it
     as an int would pass against a parser that mishandles the real shape.
     """
-    data = {"Balance": drops}
+    # dict[str, object] BECAUSE account_data IS HETEROGENEOUS ON THE WIRE. Balance is a
+    # STRING of drops (see this docstring) and OwnerCount is an int, so the dict inferred
+    # from its first entry alone -- dict[str, str] -- declares the next line illegal. The
+    # mixture is the shape rippled sends, and a seeded row that did not have it would be
+    # testing a parser against something the ledger never produces.
+    data: dict[str, object] = {"Balance": drops}
     if owner_count is not None:
         data["OwnerCount"] = owner_count
     return {"status": "success", "account_data": data}

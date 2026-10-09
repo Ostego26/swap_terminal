@@ -39,6 +39,7 @@ import pytest
 pytest.importorskip("xrpl", reason="xrpl-py is an optional dependency; chains/xrp_submit imports it lazily")
 
 from chains.xrp_crypto_condition import preimage_condition, preimage_fulfillment
+from xrpl.models.transactions import EscrowCancel, EscrowCreate, EscrowFinish
 from xrpl.models.transactions.transaction import Transaction
 from xrpl.transaction import sign
 from xrpl.wallet import Wallet
@@ -66,7 +67,31 @@ FIXED = {"Fee": "10", "Sequence": 1, "LastLedgerSequence": 999_999}
 
 
 def _signable(payload: dict) -> Transaction:
-    """Parse through xrpl-py's own dispatcher and sign. Raises if either refuses."""
+    """Parse through xrpl-py's own dispatcher and sign. Raises if either refuses.
+
+    RETURNS THE BASE TYPE, AND EACH TEST BELOW NAMES THE SUBCLASS IT EXPECTS -- the one
+    line of `assert isinstance(...)` at the top of each. `Transaction.from_xrpl()` reads
+    TransactionType out of the payload and hands back whichever subclass it names, and
+    every field these tests read (`condition`, `cancel_after`, `offer_sequence`,
+    `fulfillment`, `amount`) lives on ONE of those subclasses rather than on the base. So
+    until those assertions existed, each test was reading subclass attributes off a value
+    that is only a Transaction: right at runtime, and unchecked in exactly the dimension
+    this file exists to check.
+
+    WHY THE MODEL NAME IS WORTH ASSERTING AT ALL, which is this file's own header argument:
+    "a malformed EscrowFinish with a wrong fulfillment parses and signs exactly as well as"
+    a correct one. A cancel payload that carried TransactionType EscrowFinish would parse,
+    sign, and answer `offer_sequence` -- so `assert transaction.offer_sequence == 7` would
+    pass while the builder emitted the wrong transaction entirely. The model name is the
+    only thing that separates those two, and nothing was looking at it.
+
+    The check is per-test rather than an `expected` argument here because the three tests
+    expect three different models; passing the model in would need a generic, and PEP 695's
+    syntax (which ruff's UP047 asks for under this repository's py312 target) is a
+    SyntaxError on the 3.11 interpreter these tests actually run on -- measured 2026-10-09.
+    Three distinct facts asserted in three places is not rule 8's duplication; it is each
+    test saying which transaction it is about.
+    """
     wallet = Wallet.create()
     merged = {**FIXED, **payload, "Account": wallet.classic_address}
     if payload.get("Owner"):
@@ -78,6 +103,10 @@ def _signable(payload: dict) -> Transaction:
 
 def test_the_escrow_create_payload_parses_and_signs():
     transaction = _signable(escrow_create_tx("rSENDER", RECEIVER, 1_000_000, CONDITION, 843_778_920))
+    assert isinstance(transaction, EscrowCreate), (
+        f"the dispatcher built a {type(transaction).__name__}; a create that parses as anything "
+        f"else is the wrong transaction, however well it signs"
+    )
     assert transaction.condition == CONDITION
     assert transaction.cancel_after == 843_778_920
     # Amount is a STRING of drops. xrpl-py's model accepts an int and rippled
@@ -91,6 +120,10 @@ def test_the_escrow_finish_payload_parses_and_signs_and_keeps_its_explicit_fee()
     fee = finish_fee_drops(FULFILLMENT)
     transaction = _signable(
         escrow_finish_tx("rSENDER", "rOWNER", 7, condition=CONDITION, fulfillment=FULFILLMENT, fee=fee)
+    )
+    assert isinstance(transaction, EscrowFinish), (
+        f"the dispatcher built a {type(transaction).__name__}; the fulfillment and the fee below "
+        f"only mean anything on a finish"
     )
     # The FEE is the point of asserting here. FIXED supplies "10" and the
     # payload's own Fee must win, because autofill's reference fee earns
@@ -107,6 +140,12 @@ def test_the_escrow_cancel_payload_carries_no_condition_and_no_fulfillment():
     assert "Condition" not in payload
     assert "Fulfillment" not in payload
     transaction = _signable(payload)
+    # THE MODEL NAME IS THE WHOLE POINT HERE: this test asserts a cancel carries neither a
+    # condition nor a fulfillment, and an EscrowFinish that lost both would satisfy those two
+    # assertions exactly as well. "A cancel carrying a condition is a finish" cuts both ways.
+    assert isinstance(transaction, EscrowCancel), (
+        f"the dispatcher built a {type(transaction).__name__}, not an EscrowCancel"
+    )
     assert transaction.offer_sequence == 7
 
 

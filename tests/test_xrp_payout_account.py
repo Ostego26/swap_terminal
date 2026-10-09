@@ -140,7 +140,7 @@ def test_an_unset_seed_says_so_rather_than_deriving_nothing_quietly():
         ("OTHER", "DISAGREES with the seed"),
     ],
 )
-def test_the_configured_variable_is_compared_against_the_derived_account(configured, fragment):
+def test_the_configured_variable_is_compared_against_the_derived_account(configured: str, fragment: str):
     """THE CASE THAT COSTS MONEY IS NOT "UNSET", IT IS "SET TO SOMETHING ELSE".
 
     chains/xrp_signing.derive_and_check()'s threat model: local signing lets US

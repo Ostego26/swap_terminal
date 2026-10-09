@@ -169,7 +169,15 @@ def test_THE_RATE_SENTENCE_STATES_BOTH_DIRECTIONS(capsys):
 def test_the_rate_that_reproduces_the_recorded_run_is_the_INVERSE_of_the_recorded_figure():
     """docs/atomic_swap_runs_2026_09_27.md records 1 XRP for 66.10250498 GRC. The --rate
     that produces that is ~0.0151, not 66.1 -- which is the trap, stated as a number."""
-    amount, _ = driver._rated_chain_amount(_QuietConsole(), "0.01512859", "GRC")
+    amount, why = driver._rated_chain_amount(_QuietConsole(), "0.01512859", "GRC")
+    # `why` IS NOW READ INSTEAD OF DISCARDED. _rated_chain_amount returns
+    # (Decimal | None, str) where None means "refused, and the reason is in the second
+    # element" -- so throwing the second element away was throwing away the only
+    # description of the failure this test can have. A refusal used to arrive at the
+    # comparison below as `Decimal(66) < None`, which raises TypeError: '<' not supported
+    # between instances of 'Decimal' and 'NoneType' -- a sentence that says nothing about
+    # --rate, nothing about 0.01512859, and nothing about why the driver said no (rule 14).
+    assert amount is not None, f"--rate 0.01512859 was REFUSED rather than applied: {why}"
     assert Decimal(66) < amount < Decimal(67), (
         f"--rate 0.01512859 should buy about 66 GRC per XRP, got {amount}"
     )
@@ -272,7 +280,16 @@ def test_MAIN_PASSES_EVERY_FIELD_SwapContext_REQUIRES():
 
     context_class = next(n for n in tree.body
                          if isinstance(n, ast.ClassDef) and n.name == "SwapContext")
-    required = [n.target.id for n in context_class.body if isinstance(n, ast.AnnAssign)]
+    # `isinstance(n.target, ast.Name)` IS THE FIELD TEST, not a narrowing bolted on. An
+    # ast.AnnAssign's target is Name | Attribute | Subscript, and only a bare Name becomes
+    # a dataclass field: `@dataclass` builds __init__ from __annotations__, which a class
+    # body's `holder.attr: int` or `table[0]: int` never writes to. Measured against
+    # dataclasses.fields() 2026-10-09 -- an Attribute-target AnnAssign in the body yields
+    # no field at all. Without the test the comprehension reads `.id` off exactly the
+    # entries it should be skipping and raises AttributeError, so the stricter condition
+    # is also the more correct one: `required` means "what SwapContext.__init__ demands".
+    required = [n.target.id for n in context_class.body
+                if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)]
 
     constructions = [n for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "SwapContext"]

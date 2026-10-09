@@ -747,14 +747,22 @@ class StubSourceChain:
         return bool(address)
 
 
-    def owns_address(self, address):
+    def owns_address(self, address) -> bool | None:
         """Not the desk's. Added 2026-10-04 with services/swap_service.
         refuse_unusable_payout_address()'s ownership gate, which calls this on a
         script chain -- a stub that lacks it raises AttributeError and the gate
         cannot be exercised at all. False is the right default for a CUSTOMER
         payout address, which is what every one of these fixtures supplies; a
         test that wants the refusal says so by returning True (see
-        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        test_a_payout_to_the_desks_own_wallet_is_refused).
+
+        THIS METHOD AND ITS DOCSTRING ARE DUPLICATED ON StubDestination BELOW, word for
+        word, and a reader who finds one has to be told the other exists (rule 8). Only
+        that copy is subclassed -- DeskOwnedDestination and UnanswerableDestination
+        override it -- so that copy carries the argument for why the return type is
+        `bool | None`. The two stubs share no base to merge the method into, and giving
+        them one would change the MRO of fixtures this entire file is built on. Named
+        here instead, so whoever edits one copy knows to edit both."""
         return False
 
 class StubDestination:
@@ -765,14 +773,26 @@ class StubDestination:
         return True
 
 
-    def owns_address(self, address):
+    def owns_address(self, address) -> bool | None:
         """Not the desk's. Added 2026-10-04 with services/swap_service.
         refuse_unusable_payout_address()'s ownership gate, which calls this on a
         script chain -- a stub that lacks it raises AttributeError and the gate
         cannot be exercised at all. False is the right default for a CUSTOMER
         payout address, which is what every one of these fixtures supplies; a
         test that wants the refusal says so by returning True (see
-        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        test_a_payout_to_the_desks_own_wallet_is_refused).
+
+        `-> bool | None` IS THE GATE'S REAL ANSWER SET, and it is declared here because
+        this is the base the fixtures at the bottom of this file inherit. Left
+        unannotated, the bare `return False` infers as Literal[False], which makes both
+        of those subclasses illegal overrides: DeskOwnedDestination returns True and
+        UnanswerableDestination returns None. Those are not variations on a default --
+        they are the two OTHER answers a wallet can give, and the None is the one that
+        matters. "I cannot tell whose address this is" must never collapse into "not
+        mine", which is the same distinction address_network() draws by answering UNKNOWN
+        instead of guessing a network, and it is why this gate has three states and not
+        two. Declaring the widest answer on the base is what lets each stub say which
+        single one it is."""
         return False
 
 def _quote_db(tmp_path, name):
@@ -1294,14 +1314,14 @@ class DeskOwnedDestination(StubDestination):
     XRP account because nothing asked whose it was.
     """
 
-    def owns_address(self, address):
+    def owns_address(self, address) -> bool | None:
         return True
 
 
 class UnanswerableDestination(StubDestination):
     """A destination wallet that cannot answer whether the address is its own."""
 
-    def owns_address(self, address):
+    def owns_address(self, address) -> bool | None:
         return None
 
 

@@ -409,13 +409,25 @@ class _StubChain:
                         "scriptPubKey": {"hex": p2sh_script_for(self.redeem_script).hex()}})
         return outputs
 
-    def rpc_call(self, method: str, args: list):
+    # `params`, NOT `args`, AND IT DEFAULTS -- because this is the signature the three real
+    # clients declare and atomic_swap.ScriptChainClient copies from them. It read
+    # `args: list` with no default, which is a narrower promise than any real client makes:
+    # modules/htlc_chain_read.client_caller() calls `client.rpc_call(method, list(args))`
+    # positionally, so the name never showed up at runtime and the drift was invisible. It
+    # is the same hazard this class's own redeem_contract noqa names -- a stub that does not
+    # match its real counterpart lets through calls the real clients reject.
+    def rpc_call(self, method: str, params: list | None = None):
         if method == "getnewaddress":
             address = f"{self.asset}-wallet-{len(self.addresses_issued)}"
-            self.addresses_issued.append(args[0] if args else "")
+            self.addresses_issued.append(params[0] if params else "")
             return address
         if method == "getrawtransaction":
-            txid = args[0]
+            if not params:
+                raise AssertionError(
+                    f"{self.asset}: getrawtransaction was called with no txid. The real clients "
+                    f"pass one positionally; a caller that stopped is the defect."
+                )
+            txid = params[0]
             if txid == self.funding_txid:
                 return {"vout": self._funding_outputs()}
             if txid == self.claim_txid:
@@ -426,7 +438,15 @@ class _StubChain:
         raise AssertionError(f"{self.asset}: unexpected rpc {method}")
 
     def redeem_contract(self, txid, vout, redeem_script,  # noqa: PLR0913, PLR0917 -- checked: this signature is NOT mine to choose. It mirrors modules/atomic_{btc,ltc,grc}_client.redeem_contract(), which take the same six positionally and carry the same noqa with the same reason. A stub that grouped them into a dataclass to satisfy the ceiling would accept calls the real clients reject, which is the one thing a stub must never do -- it would make this file pass while the run path was broken.
-                        secret_hex, privkey, destination):
+                        secret_hex, privkey, destination, contract_blockhash=None):
+        # `contract_blockhash` IS THE SEVENTH ARGUMENT ALL THREE CLIENTS TAKE, defaulted
+        # there and defaulted here. It was missing, which is the same defect in the other
+        # direction from the one this signature's noqa describes: a stub that is narrower
+        # than the real clients REFUSES a call they would accept, so the run path can grow
+        # a seventh argument and every test here keeps passing by never exercising it.
+        # claim_leg() passes six positionally today; the parameter exists so that stops
+        # being load-bearing.
+        #
         # THE TYPES ARE RECORDED, not just the values. All three clients declare
         # `secret: bytes` and push it with push_data(); a hex STRING reaches
         # `bytes([length]) + data` and dies with "can't concat str to bytes". That is exactly
@@ -445,6 +465,38 @@ class _StubChain:
                             "privkey": privkey, "destination": destination})
         self.order.append(self.asset)
         return self.claim_txid
+
+    def refund_contract(self, **kwargs) -> str:
+        """Present and REFUSING, because the claim path must never refund.
+
+        This class's docstring says it answers only the RPCs the claim path calls, and that
+        is still true -- but "does not answer" and "does not exist" are not the same thing,
+        and only one of them is a statement a test can read. Without this method a claim
+        path that reached a refund died on AttributeError: '_StubChain' object has no
+        attribute 'refund_contract', which names the STUB rather than the thing that went
+        wrong. Refunding a leg that was just claimed is a double spend of the same outpoint,
+        so it earns a sentence rather than an attribute error.
+
+        It is also what makes _StubChain satisfy atomic_swap.ScriptChainClient. FundedLeg
+        declares `client: ScriptChainClient` now (it was `object`, and that is how a
+        `secret` went in as `.hex()` on 2026-09-27 with both legs already funded), so a
+        stub missing a third of the contract no longer typechecks -- which is the Protocol
+        working, not an obstacle to it.
+
+        `**kwargs` RATHER THAN THE SIX KEYWORD-ONLY NAMES, unlike redeem_contract above,
+        and the difference is that this one does not look at them. Spelling six parameters
+        in order to ignore all six trips PLR0913, and rule 12 says a function over the
+        ceiling is answered by extracting the decision rather than by suppressing the code
+        -- there is no decision in a `raise` to extract, so the honest signature is the one
+        that says it reads nothing. The names are echoed in the message so the refusal
+        still identifies the outpoint it was asked about.
+        """
+        raise AssertionError(
+            f"{self.asset}: refund_contract was called on the claim path, for "
+            f"{kwargs.get('contract_txid')}:{kwargs.get('contract_vout')} at locktime "
+            f"{kwargs.get('locktime')}. The leg was claimed; refunding the same outpoint is a "
+            f"double spend. Nothing was built."
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -1095,7 +1147,25 @@ def test_a_dry_run_still_refuses_a_mainnet_daemon_before_reading_a_tip(monkeypat
 
 
 class _RefusingClient:
-    """A daemon that answers nothing. Raises the bare Exception the real clients raise."""
+    """A daemon that answers nothing. Raises the bare Exception the real clients raise.
+
+    ALL FIVE ENTRY POINTS REFUSE, and three of them were missing. The docstring's claim is
+    "answers nothing", and it only held for create_contract and call: rpc_call,
+    redeem_contract and refund_contract were absent, so a path that reached one of those
+    got AttributeError instead of the daemon refusal this stub exists to model. Those two
+    failures do not read alike and must not be confused -- a refusal is the daemon saying
+    no, and an AttributeError is this file being wrong -- which is the same distinction
+    address_network() draws between UNKNOWN and an answer.
+
+    `Exception` rather than a specific class because that is literally what
+    atomic_{btc,ltc,grc}_client raise, and the driver's refusal handling reads the message
+    text for the -18 wallet code. A stub narrowing it to a subclass would make the driver
+    look like it catches more precisely than it does.
+
+    Completing the set is also what makes this satisfy atomic_swap.ScriptChainClient, which
+    FundedLeg.client now declares; a stub that modeled a third of the interface could be
+    handed to a FundedLeg and typecheck only while `client` was annotated `object`.
+    """
 
     def __init__(self, message):
         self.message = message
@@ -1104,6 +1174,22 @@ class _RefusingClient:
         raise Exception(self.message)
 
     def call(self, method, *_params):
+        raise Exception(self.message)
+
+    def rpc_call(self, method: str, params: list | None = None):
+        raise Exception(self.message)
+
+    # `*_args`/`**_kwargs` ON THESE TWO BECAUSE THEY READ NOTHING. Both refuse before
+    # looking, so spelling the real clients' six-and-seven parameter lists here would add
+    # six names that are never touched and put the methods over PLR0913 -- and rule 12 is
+    # explicit that the answer to that is extracting the decision, never suppressing the
+    # code. There is no decision inside a `raise` to extract. _StubChain.redeem_contract
+    # DOES spell its signature out, because it inspects the types it was handed; the
+    # difference between the two is the point, and this is where it is written down.
+    def redeem_contract(self, *_args, **_kwargs) -> str:
+        raise Exception(self.message)
+
+    def refund_contract(self, **_kwargs) -> str:
         raise Exception(self.message)
 
 

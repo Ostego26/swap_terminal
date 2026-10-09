@@ -45,9 +45,27 @@ from xrp_chain_check import (
 )
 
 
-def flat_payment(tag=4242, drops="25000000", result="tesSUCCESS", txhash="C" * 64):
-    """The shape a real rippled 3.4.1 actually sent, observed 2026-09-25."""
-    entry = {
+def flat_payment(tag: int | None = 4242, drops: str = "25000000",
+                 result: str = "tesSUCCESS", txhash: str = "C" * 64) -> dict[str, object]:
+    """The shape a real rippled 3.4.1 actually sent, observed 2026-09-25.
+
+    `tag: int | None` IS A CASE AND NOT AN ABSENT ARGUMENT, which is why the annotation
+    says so. Three tests here pass None to pin the two things that follow from it: that an
+    ordinary wallet payment's missing DestinationTag is not a failure (its absence proves
+    nothing about us), and that a field present in only some payments is reported as a
+    fraction rather than unioned. `int` alone would declare the one input those three
+    tests exist to supply to be the wrong type.
+
+    `dict[str, object]` AND NOT A TypedDict, which was tried first and reverted on
+    2026-10-09. A TypedDict describes this row better -- it would have pinned
+    DestinationTag as the only NotRequired key, which is the structural fact these tests
+    turn on -- but xrp_chain_check.unwrap_shape() takes a bare `dict`, and a TypedDict is
+    not assignable to one. Writing the shape down here would have meant widening a
+    production signature to accommodate a test fixture, which is the wrong direction.
+    `object` as the value type is honest about the row regardless: a drops string, a bool,
+    an int tag and a nested metaData dict.
+    """
+    entry: dict[str, object] = {
         "TransactionType": "Payment",
         "Destination": "rngeSWu7x9H3QCNfZGufYGCykQJHiaV91p",
         "Amount": drops,
@@ -58,6 +76,28 @@ def flat_payment(tag=4242, drops="25000000", result="tesSUCCESS", txhash="C" * 6
     if tag is not None:
         entry["DestinationTag"] = tag
     return entry
+
+
+def meta_of(payment: dict[str, object]) -> dict[str, object]:
+    """`payment["metaData"]`, as the dict it is, so a test can seed one field of it.
+
+    THE SAME dict, NOT A COPY -- mutating the returned value mutates the payment, which is
+    what the four call sites below rely on when they delete or replace `delivered_amount`.
+
+    It exists because the row above is `dict[str, object]`, so `payment["metaData"]` reads
+    back as `object` and `del payment["metaData"][...]` cannot be checked. Written once
+    here rather than as an isinstance at each of the four sites (rule 8), and the check is
+    not ceremony: `metaData` arriving as anything but a dict is precisely the wire-format
+    error this module's header says this script is the only thing that can discover, so it
+    reports as that sentence instead of as "object is not subscriptable".
+    """
+    meta = payment["metaData"]
+    if not isinstance(meta, dict):
+        raise AssertionError(
+            f"metaData is a {type(meta).__name__}, not a dict. rippled sends an object here; "
+            f"a seeded row that does not is testing a shape the ledger never produces."
+        )
+    return meta
 
 
 # --- naming the network -----------------------------------------------------
@@ -124,7 +164,7 @@ def test_every_field_present_is_no_failures():
 
 def test_a_missing_required_field_is_a_failure():
     broken = flat_payment()
-    del broken["metaData"]["delivered_amount"]
+    del meta_of(broken)["delivered_amount"]
     lines, failures, _unobserved = payment_field_report(collect_payments([broken]))
     assert len(failures) == 1
     assert "delivered_amount" in failures[0]
@@ -157,7 +197,7 @@ def test_no_payments_means_unconfirmed_and_never_a_failure():
 
 def test_a_missing_delivered_amount_is_flagged_as_the_one_that_matters():
     broken = flat_payment()
-    del broken["metaData"]["delivered_amount"]
+    del meta_of(broken)["delivered_amount"]
     findings = delivered_amount_findings(collect_payments([broken]))
     assert len(findings) == 1
     assert "THIS IS THE ONE THAT MATTERS" in findings[0]
@@ -171,14 +211,14 @@ def test_an_issued_currency_is_not_a_findings_failure_here():
     ledger doing something legal that the adapter then declines.
     """
     iou = flat_payment()
-    iou["metaData"]["delivered_amount"] = {"currency": "USD", "issuer": "rIssuer", "value": "1"}
+    meta_of(iou)["delivered_amount"] = {"currency": "USD", "issuer": "rIssuer", "value": "1"}
     assert delivered_amount_findings(collect_payments([iou])) == []
 
 
 def test_a_numeric_delivered_amount_is_flagged():
     """Drop counts are strings so clients cannot round them through a double."""
     numeric = flat_payment()
-    numeric["metaData"]["delivered_amount"] = 25000000
+    meta_of(numeric)["delivered_amount"] = 25000000
     findings = delivered_amount_findings(collect_payments([numeric]))
     assert len(findings) == 1
     assert "not a drop string" in findings[0]

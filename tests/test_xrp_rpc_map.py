@@ -235,8 +235,16 @@ def test_equivalent_of_is_None_for_a_name_with_no_equivalent_AND_for_junk():
     assert equivalent_of("getblahinfo") is None
     assert equivalent_of(None) is None
     assert equivalent_of(7) is None
-    assert equivalent_of("getblockcount").method == "ledger_closed"
-    assert equivalent_of("fee").method == "fee"
+    # THE POSITIVE HALF IS WHAT MAKES THE FOUR Nones ABOVE MEAN ANYTHING: a function that
+    # had regressed to returning None for everything would satisfy all four. It is bound
+    # and refused by name rather than dotted through, because `equivalent_of(...).method`
+    # on a regression raises "'NoneType' object has no attribute 'method'" -- which reads
+    # like a defect in this test rather than like getblockcount having lost its entry.
+    block_count, fee = equivalent_of("getblockcount"), equivalent_of("fee")
+    assert block_count is not None, "getblockcount HAS an equivalent; a None here is the regression"
+    assert fee is not None, "fee HAS an equivalent; a None here is the regression"
+    assert block_count.method == "ledger_closed"
+    assert fee.method == "fee"
 
 
 def test_call_for_raises_the_refusal_TEXT_for_an_untranslatable_name():

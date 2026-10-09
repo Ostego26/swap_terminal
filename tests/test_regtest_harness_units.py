@@ -1045,7 +1045,15 @@ def test_step_7_scores_a_failing_redeem_as_a_failure_and_not_as_a_known_defect(m
     need a daemon stubbed out, so what is asserted is the grading the operator
     will actually see -- not a re-reading of the branch that produces it.
     """
-    console = Console(total_steps=9, stream=StringIO())
+    # THE BUFFER IS HELD BY THE TEST, which is the pattern
+    # test_check_prints_got_and_expected_on_one_line already uses at the top of this file.
+    # Four tests here had drifted into reading it back out through `console.stream`, and
+    # that reaches past the console's interface for a buffer the test itself created:
+    # regtest/console.py's `stream=sys.stdout` default means `.stream` is a write sink, and
+    # .getvalue() exists on it only for as long as nobody passes a real file or a pipe. The
+    # same two lines, one way, in all six places (rule 8).
+    stream = StringIO()
+    console = Console(total_steps=9, stream=stream)
     run = Run(console=console, config=resolve_chain_config("BTC"))
     outcome = ChainOutcome(asset="BTC")
     contract = _contract_stub()
@@ -1066,7 +1074,7 @@ def test_step_7_scores_a_failing_redeem_as_a_failure_and_not_as_a_known_defect(m
     assert outcome.real_redeem_unconfirmed == FAIL
     assert console.counts[XFAIL] == 0, "a redeem that cannot spend the hashlock branch is no longer expected"
     assert console.counts[FAIL] == 2
-    printed = console.stream.getvalue()
+    printed = stream.getvalue()
     assert "EXPECTED TO SUCCEED" in printed
     assert "a broadcast txid" in printed
     assert "PREDICTS this failure" not in printed
@@ -1079,7 +1087,8 @@ def test_step_7_does_not_run_the_control_when_the_real_client_spent(monkeypatch)
     cannot". When the client can, there is nothing left for it to establish --
     and the output must not let a skip read as a gap (rule 14).
     """
-    console = Console(total_steps=9, stream=StringIO())
+    stream = StringIO()
+    console = Console(total_steps=9, stream=stream)
     run = Run(console=console, config=resolve_chain_config("BTC"))
     outcome = ChainOutcome(asset="BTC")
     contract = _contract_stub()
@@ -1099,7 +1108,7 @@ def test_step_7_does_not_run_the_control_when_the_real_client_spent(monkeypatch)
     assert outcome.real_redeem_unconfirmed == OK
     assert outcome.control_redeem == SKIP
     assert control_ran == [], "the control must not spend an output the real client already spent"
-    assert "7c is SKIPPED, and that is the good outcome" in console.stream.getvalue()
+    assert "7c is SKIPPED, and that is the good outcome" in stream.getvalue()
 
 
 def _contract_stub():
@@ -1545,9 +1554,10 @@ def test_wait_for_rpc_finds_a_daemon_that_has_no_uptime(monkeypatch):
     """
     daemon = _GridcoinShapedDaemon()
     monkeypatch.setattr(daemons_module, "adapter_for", lambda _config: daemon)
-    console = Console(total_steps=10, stream=StringIO())
+    stream = StringIO()
+    console = Console(total_steps=10, stream=stream)
     wait_for_rpc(console, resolve_chain_config("BTC"))
-    printed = console.stream.getvalue()
+    printed = stream.getvalue()
     assert "RPC answered by `getblockcount`" in printed, printed
     assert daemon.asked == ["uptime", "getblockcount"], (
         "uptime is still tried first, and its miss falls through instead of deciding"
@@ -1604,13 +1614,14 @@ def test_a_daemon_with_version_instead_of_subversion_reports_its_build(monkeypat
     daemon = _GridcoinShapedDaemon()
     monkeypatch.setattr(daemons_module, "adapter_for",
                         lambda _config, wallet="": daemon)
-    console = Console(total_steps=10, stream=StringIO())
+    stream = StringIO()
+    console = Console(total_steps=10, stream=stream)
     capabilities = probe_capabilities(console, resolve_chain_config("BTC"))
     assert capabilities["subversion"] == "6.1.0.0-unk-testnet (getnetworkinfo.version)", (
         "the build string AND the field it came from, because two families use two names"
     )
     assert capabilities["subversion"] != "None"
-    assert "getnetworkinfo.version" in console.stream.getvalue()
+    assert "getnetworkinfo.version" in stream.getvalue()
 
 
 def test_a_daemon_with_neither_field_says_so_rather_than_printing_none(monkeypatch):

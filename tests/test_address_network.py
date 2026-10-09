@@ -412,8 +412,21 @@ def test_every_published_bip350_valid_vector_decodes_to_the_spec_s_own_script(ad
     """
     decoded = decode_segwit_address(address)
     assert decoded.ok, f"BIP-350 says this is valid: {decoded.why}"
-    opcode = WITNESS_VERSION_OPCODE[decoded.witness_version]
-    script = bytes([opcode, len(decoded.program)]) + decoded.program
+    # BOUND AND REFUSED SEPARATELY RATHER THAN READ OFF `ok`, because `ok` does not say
+    # this. SegwitAddress.ok is literally `self.program is not None`; it carries no claim
+    # at all about `witness_version`, and this test indexes WITNESS_VERSION_OPCODE with
+    # that field one line later. decode_segwit_address() has ONE return that populates
+    # both and THREE that return a witness version with program=None, so "ok implies a
+    # version" holds today only because of which returns exist -- nothing asserts it. Two
+    # lines make it a pinned invariant, and make a decode that ever carried a program
+    # without a version fail with that sentence instead of with a TypeError raised from
+    # inside bytes() four frames away from the cause (rule 14).
+    witness_version, program = decoded.witness_version, decoded.program
+    assert witness_version is not None and program is not None, (
+        f"a published BIP-350 VALID vector decoded ok but without BOTH a witness version "
+        f"and a program (version={witness_version!r}, program={program!r}): {decoded.why}"
+    )
+    script = bytes([WITNESS_VERSION_OPCODE[witness_version], len(program)]) + program
     assert script.hex() == expected_script, (
         f"decoded to {script.hex()} but BIP-350's table says {expected_script}"
     )
@@ -481,7 +494,13 @@ def test_the_taproot_fixtures_decode_under_the_production_decoder(fixture_name):
     assert decoded.ok, f"{fixture_name}: {decoded.why}"
     assert decoded.encoding == "bech32m"
     assert decoded.witness_version == 1
-    assert len(decoded.program) == 32, "P2TR carries a 32-byte x-only output key"
+    # Same reason as the BIP-350 vector test above: `ok` is `program is not None`, so the
+    # program is bound and refused here rather than measured through an attribute pyright
+    # -- and a reader -- can only see as optional. A None here would otherwise surface as
+    # "object of type None has no len()", which names neither the fixture nor the decoder.
+    program = decoded.program
+    assert program is not None, f"{fixture_name} decoded ok but carries no program: {decoded.why}"
+    assert len(program) == 32, "P2TR carries a 32-byte x-only output key"
 
 
 def test_taproot_addresses_resolve_to_the_network_their_hrp_names():

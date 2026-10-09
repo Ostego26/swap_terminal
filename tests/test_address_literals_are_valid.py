@@ -481,8 +481,23 @@ def test_the_published_vectors_are_not_a_place_to_hide_an_address():
         verdict = check_address(asset, address)
         assert verdict.state != INVALID, f"{address} is a published VALID vector: {verdict.why}"
         decoded = decode_segwit_address(address)
-        script = bytes([WITNESS_VERSION_OPCODE[decoded.witness_version], len(decoded.program)])
-        assert (script + decoded.program).hex() == expected_script, (
+        # THE DECODE IS ASSERTED HERE AND WAS NOT BEFORE, which is a gap the loop above
+        # does not cover: check_address() answering non-INVALID is a verdict from the
+        # ADDRESS AUTHORITY, not from decode_segwit_address(), and the two reach their
+        # answers down different paths. A vector that the authority accepted while the
+        # decoder refused would have arrived at the next line as witness_version=None and
+        # program=None and died with "object of type None has no len()" -- a sentence that
+        # names neither the vector nor which of the two disagreed. Both fields are bound
+        # and refused by name instead, for the same reason as in
+        # tests/test_address_network.py's copy of this check: SegwitAddress.ok is defined
+        # as `program is not None` and says nothing about the witness version.
+        witness_version, program = decoded.witness_version, decoded.program
+        assert witness_version is not None and program is not None, (
+            f"{address} is a published VALID vector that check_address accepted, but "
+            f"decode_segwit_address refused it: {decoded.why}"
+        )
+        script = bytes([WITNESS_VERSION_OPCODE[witness_version], len(program)])
+        assert (script + program).hex() == expected_script, (
             f"{address} decoded to a program BIP-350's table does not predict"
         )
 

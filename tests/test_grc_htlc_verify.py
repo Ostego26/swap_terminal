@@ -55,9 +55,25 @@ class _SilentRun:
 
 
 def _entry():
-    spec = importlib.util.spec_from_file_location(
-        "grc_htlc_verify_under_test", Path(__file__).resolve().parents[1] / "grc_htlc_verify.py"
-    )
+    """grc_htlc_verify.py loaded from its path, because it is an entry point and not a module.
+
+    BOTH Nones ARE REFUSED BY NAME, and the reason is rule 2's: this loads a file by PATH,
+    so nothing in the import graph points at it and a rename or a move is invisible until
+    here. `spec_from_file_location` returns None for a path it cannot build a spec for, and
+    `spec.loader` is Optional on ModuleSpec in its own right -- so the unchecked version
+    fails with "'NoneType' object has no attribute 'loader'" (or 'exec_module'), which
+    names neither the file nor the fact that the file is the thing that is missing. Every
+    test in this module calls this first, so one bad path reports as thirty identical
+    AttributeErrors with no path in any of them.
+    """
+    entry_point = Path(__file__).resolve().parents[1] / "grc_htlc_verify.py"
+    spec = importlib.util.spec_from_file_location("grc_htlc_verify_under_test", entry_point)
+    if spec is None or spec.loader is None:
+        raise AssertionError(
+            f"{entry_point} could not be loaded as a module (spec={spec!r}). This file is named "
+            f"by PATH rather than imported, so a rename or a move does not break an import -- it "
+            f"breaks here, and every test in this file with it."
+        )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -451,7 +467,22 @@ def test_recover_REFUSES_when_the_rebuilt_contract_does_not_match_the_named_tran
     """
     entry = _entry()
     _with_seed(monkeypatch)
-    console = Console(entry.TOTAL_STEPS, stream=io.StringIO())
+    # THE STREAM IS HELD HERE SO THE REFUSAL CAN BE READ. It used to go into an
+    # io.StringIO() passed inline and never looked at again, and the two lines that tried
+    # to read it back were
+    #
+    #     printed = console.text() if hasattr(console, "text") else ""
+    #     assert code == 1, printed
+    #
+    # regtest/console.py's Console has no `text()` -- its methods are banner, step, say,
+    # check, summary and elapsed -- so `hasattr` was False on every run since the line was
+    # written, `printed` was always "", and the second assertion was a verbatim copy of the
+    # first carrying an empty message. The exit code was asserted twice and the sentence
+    # this test is NAMED for was asserted zero times: "says which of the two is wrong" was
+    # a claim about output that nothing read. Found by pyright 2026-10-09 on the
+    # `console.text` that cannot resolve; it is rule 19's unreachable-veto shape, in a test.
+    stream = io.StringIO()
+    console = Console(entry.TOTAL_STEPS, stream=stream)
     monkeypatch.setattr(entry.funding_steps, "_decoded",
                         lambda run, txid: {"vout": [{"n": 0, "value": "1.0",
                                                      "scriptPubKey": {"hex": "deadbeef"}}]})
@@ -461,9 +492,18 @@ def test_recover_REFUSES_when_the_rebuilt_contract_does_not_match_the_named_tran
 
     code = entry.recover(_SilentRun(), console, 3296338, "ab" * 32)
 
-    assert code == 1
-    printed = console.text() if hasattr(console, "text") else ""
+    printed = stream.getvalue()
     assert code == 1, printed
+    # Measured against the real output 2026-10-09 rather than written from the docstring:
+    # the refusal names the transaction, says it pays none of the rebuilt contract, lists
+    # the outputs it DOES pay, offers both causes, and states that nothing was signed.
+    assert "has NO output paying the rebuilt contract" in printed, printed
+    assert "deadbeef" in printed, "the outputs it DOES pay are what tell the operator which tx this is"
+    assert "ST_ADAPTOR_FUNDING_SEED" in printed and "locktime" in printed, (
+        "the refusal must offer BOTH causes -- the P2SH is the fingerprint of the seed and "
+        "the locktime together, so naming only one sends the reader to the wrong variable"
+    )
+    assert "Nothing was signed or broadcast" in printed, printed
 
 
 def test_recover_REFUSES_BEFORE_THE_LOCKTIME_rather_than_broadcasting_a_doomed_refund(monkeypatch):

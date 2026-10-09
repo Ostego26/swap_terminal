@@ -1503,7 +1503,20 @@ def _post_through(node):
     # requests.post's own keyword and all three clients pass it by that
     # name, so the stand-in has to accept it by that name. json.dumps is
     # imported as json_dumps at the top of this file for the same reason.
-    def post(url, json=None, auth=None, timeout=None, **_kwargs):
+    # `json=None` KEEPS requests.post's OWN DEFAULT and the refusal below is what makes
+    # that safe. The stand-in has to accept the same keyword shape as the function it
+    # replaces -- requests.post's `json` is optional -- but this stub cannot answer
+    # without a body, because the body is what names the RPC method. Leaving it to fail on
+    # the subscript produced "'NoneType' object is not subscriptable" from inside a stub,
+    # which says nothing about the client under test having stopped sending a JSON body;
+    # that is the one failure this stand-in exists to be able to see (rule 14).
+    def post(url, json: dict | None = None, auth=None, timeout=None, **_kwargs):
+        if json is None:
+            raise AssertionError(
+                f"the requests.post stand-in was called for {url!r} with no json= body, so "
+                f"there is no RPC method to answer. A client that stopped sending one is the "
+                f"defect; nothing was answered."
+            )
         try:
             result = node.rpc_call(json["method"], json["params"])
         except Exception as exc:  # noqa: BLE001 -- checked: the FakeNode signals a daemon-side refusal by raising, and a real daemon signals it by answering 200 with an `error` object. Translating one into the other is this stub's job; nothing is swallowed, because the error text is handed straight back to rpc_call, which raises on it.
@@ -2774,9 +2787,20 @@ def test_the_refund_builder_NEVER_asks_for_a_third_createrawtransaction_argument
     """
     calls = []
 
-    def _rpc(method, params=None):
+    # `params=None` MATCHES THE REAL rpc_call SIGNATURE -- a no-argument RPC passes
+    # nothing -- so the default stays and the one branch that indexes it refuses the
+    # absence by name instead. This test's whole assertion is on the ARGUMENT COUNT of
+    # createrawtransaction (see the docstring: the third argument is what made the
+    # Gridcoin refund branch unbuildable), and a createrawtransaction arriving with no
+    # params at all is that same defect at its limit. It must read as that, not as
+    # "'NoneType' object is not subscriptable".
+    def _rpc(method, params: list | None = None):
         calls.append((method, list(params or [])))
         if method == "createrawtransaction":
+            assert params is not None, (
+                "createrawtransaction was called with no params at all; it takes inputs and "
+                "outputs, and the argument count is exactly what this test is asserting on"
+            )
             inputs, outputs = params[0], params[1]
             entry = inputs[0]
             laid = [(coins_to_satoshis(Decimal(str(v))), contract["destination"].p2pkh_script)

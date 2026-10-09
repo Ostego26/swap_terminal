@@ -73,8 +73,37 @@ def base58_testnet(phrase: str) -> str:
 
 
 def bech32_address(hrp: str, phrase: str) -> str:
-    """A v0 witness-program address under `hrp` (tb, bcrt, tltc)."""
-    return bech32.encode(hrp, 0, _hash160(phrase))
+    """A v0 witness-program address under `hrp` (tb, bcrt, tltc).
+
+    THE None IS REFUSED RATHER THAN RETURNED, and that matters more here than at an
+    ordinary call site. `bech32.encode()` returns Optional[str]: None when convertbits
+    cannot pack the program or when its own round-trip decode of what it just built does
+    not come back (an hrp over BIP-173's 90-character budget, a program length v0 does not
+    allow). This function was declared `-> str` and handed that straight back, so a
+    failure became the STRING None-shaped value every consumer of this module trusts as an
+    address.
+
+    What that costs is specific to a fixture file. These twelve module-level constants
+    (BTC_PARTICIPANT, LTC_REGTEST_DEPOSIT and the rest) are imported by name across the
+    suite, so a None would travel into address_network() and come back UNKNOWN with
+    "non-empty" -- which reads exactly like a test deliberately checking a bad address,
+    and tests/test_address_network.py has a case asserting that very sentence for None.
+    A broken FIXTURE would have been indistinguishable from a passing test of a broken
+    ADDRESS. Raising at import is loud and names the hrp instead.
+
+    Unreachable for the arguments used today -- four hrps, every program a 20-byte
+    hash160, checked by the suite that imports these constants -- which is the argument
+    for the raise rather than against it: the declared `-> str` was a promise the body did
+    not keep, and the next caller is the one who passes the hrp that breaks it.
+    """
+    encoded = bech32.encode(hrp, 0, _hash160(phrase))
+    if encoded is None:
+        raise ValueError(
+            f"bech32.encode refused hrp={hrp!r} with a 20-byte v0 program, so there is no "
+            f"address for {phrase!r}. Nothing was returned; a None here would be imported "
+            f"as a fixture and read downstream as an invalid address rather than a missing one."
+        )
+    return encoded
 
 
 def xrp_address(phrase: str) -> str:
