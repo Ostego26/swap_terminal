@@ -27,6 +27,7 @@ from __future__ import annotations
 import inspect
 import re
 import socket
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -2047,3 +2048,53 @@ def test_up_actually_asks_before_it_prints_SERVING():
         "the step is called but no longer announces itself, so an operator watching the probe "
         "cannot tell what it is waiting on (rule 14)"
     )
+
+
+@pytest.mark.parametrize("failure", [
+    # BOTH OF _ask_canister_id's OWN FAILURE PATHS, and the first version of this
+    # test only drove the timeout. A mutation restoring "" on the OSError branch
+    # SURVIVED -- both were broken, one was pinned. The two are different causes
+    # (a wedged replica versus docker not being on PATH) and nothing about the
+    # code makes them share a fate, so nothing about the test may assume it.
+    subprocess.TimeoutExpired("dfx", 10),
+    OSError("no such file or directory: docker"),
+], ids=["docker timed out", "docker could not be run"])
+def test_a_lookup_that_could_not_run_yields_no_id_rather_than_an_empty_one(monkeypatch, failure):
+    """"" AND None BOTH MEAN "NO ID" AND ONLY ONE OF THEM RENDERS AS ONE.
+
+    _ask_canister_id() returned "" on its two own failure paths -- a docker
+    timeout and an OSError -- while canister_lookup_verdict(), whose vocabulary
+    it claims to speak, returns None. canister_surface_lines() asks
+    `if ident is None`, so "" sailed past it and the map printed:
+
+        PAGE   operator_admin       http://.localhost:4943/
+        CANDID threshold_custody    http://127.0.0.1:4943/?canisterId=bd3sg-...&id=
+
+    Three malformed URLs as working links, from the one function whose docstring
+    says an unread id "resolves and shows the operator somebody else's canister".
+    Reachable whenever docker is wedged: the per-lookup timeout is 10s.
+
+    Found by pyright reporting the declared return type against the actual one,
+    2026-10-09 -- underneath 53 FALSE import errors in the operator's editor.
+    """
+    def never_answers(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(swap_stack, "compose", never_answers)
+    looked = swap_stack.canister_ids(())
+
+    for name, ident in looked.ids.items():
+        assert ident is None, (
+            f"{name} came back as {ident!r} from a lookup that never ran. None is what the map "
+            f"renders as 'id COULD NOT BE READ'; anything else it treats as an id and builds a "
+            f"URL from"
+        )
+    assert looked.ui_id == "", f"the Candid UI id must be '' and not None here: {looked.ui_id!r}"
+    assert looked.read == 0, looked.read
+
+    # AND THE MAP ITSELF, because the type is only half the claim (rule: verify by
+    # behavioral outcome). No row may carry a URL when no id was read.
+    rendered = surface_map(5100, looked.ids, absent=0, ui_canister_id=looked.ui_id)
+    for line in rendered:
+        assert "http://.localhost" not in line, f"a URL was built from an empty id: {line.strip()}"
+        assert not line.rstrip().endswith("&id="), f"a Candid link with no target: {line.strip()}"

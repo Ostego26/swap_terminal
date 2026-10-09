@@ -843,7 +843,14 @@ def canister_ids(files: tuple[str, ...]) -> CanisterLookups:
                if is_ui else ""))
         ident, kind, why = _ask_canister_id(name, files)
         if is_ui:
-            ui_id = ident
+            # `or ""` KEEPS THE DECLARED TYPE HONEST at the one place the two
+            # vocabularies meet: `found` holds `str | None` and renders None as
+            # "could not be read", while ui_canister_id is a `str` that
+            # candid_url() tests for emptiness. Both spellings mean "no id" and
+            # each is right for its own reader; converting here rather than
+            # letting None travel into a str parameter is what stops the next
+            # person discovering the difference the way this commit did.
+            ui_id = ident or ""
         else:
             found[name] = ident
         if kind == "found":
@@ -871,8 +878,28 @@ def canister_ids(files: tuple[str, ...]) -> CanisterLookups:
                            asked=len(lookups), read=read)
 
 
-def _ask_canister_id(name: str, files: tuple[str, ...]) -> tuple[str, str, str]:
+def _ask_canister_id(name: str, files: tuple[str, ...]) -> tuple[str | None, str, str]:
     """One `dfx canister id`. Returns (id, kind, why) -- kind is the verdict's own.
+
+    `None` FOR "NO ID", NEVER "". This returned "" on its two own failure paths
+    while canister_lookup_verdict() -- whose vocabulary it claims to speak --
+    returns None, and canister_surface_lines() asks `if ident is None`. So a
+    docker timeout put an EMPTY STRING in the map and the map treated it as a
+    successfully read id:
+
+        PAGE   operator_admin       http://.localhost:4943/
+        CANDID threshold_custody    http://127.0.0.1:4943/?canisterId=bd3sg-...&id=
+
+    Three malformed URLs printed as working links, which is the precise failure
+    the whole canister-id change was written to stop: canister_ids()' own
+    docstring says an id nobody read "resolves and shows the operator somebody
+    else's canister". Reachable whenever docker is wedged or the replica is slow
+    -- _CANISTER_ID_TIMEOUT_SECONDS is 10s per lookup.
+
+    FOUND BY A TYPE CHECKER, 2026-10-09, and that is the argument for f01e85c:
+    pyright reported the declared `tuple[str, str, str]` against a `str | None`
+    return, and the finding was sitting underneath 53 FALSE import errors in the
+    operator's editor. A channel full of noise is a channel nobody reads.
 
     THE ONE PLACE A LOOKUP IS PERFORMED, extracted when merging the Candid UI's
     duplicate copy back into the loop (rule 8/9: consolidation creates dead code,
@@ -891,12 +918,12 @@ def _ask_canister_id(name: str, files: tuple[str, ...]) -> tuple[str, str, str]:
             files, timeout=_CANISTER_ID_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return "", "unreachable", (
+        return None, "unreachable", (
             f"`dfx canister id` did not answer within "
             f"{format_duration(_CANISTER_ID_TIMEOUT_SECONDS)}, so NOTHING was read for it"
         )
     except OSError as error:
-        return "", "unreachable", f"could not run docker at all -- {type(error).__name__}: {error}"
+        return None, "unreachable", f"could not run docker at all -- {type(error).__name__}: {error}"
     # THE LAST LINE OF stdout, NOT ALL OF IT, and the decision is
     # canister_lookup_verdict's -- it separates "not deployed" from "could not
     # ask", which this loop used to merge. That merge is what let three canisters
