@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import workers.deposit_watcher as watcher
 from config import Config
+from conftest import poisoned_rpc_table
 from db import SCHEMA
 from services.deposit_service import ACTIVE_STATUSES
 from workers import common, deposit_watcher
@@ -161,11 +162,10 @@ def test_the_banner_never_prints_a_credential(monkeypatch, capsys):
     or that was written with `**rpc` in an f-string one day -- would put wallet
     RPC credentials into every log the worker writes, and nothing would fail.
     """
-    poisoned = {
-        asset: {**values, "user": "canary-rpc-user", "password": "canary-rpc-password"}
-        for asset, values in Config.RPC.items()
-    }
-    monkeypatch.setattr(Config, "RPC", poisoned)
+    # ONE DEFINITION, SHARED WITH tests/test_supervisor.py's identical check. Both
+    # built this table with the same comprehension; see conftest.poisoned_rpc_table()
+    # for why it is a loop that ASSERTS rather than one that filters.
+    monkeypatch.setattr(Config, "RPC", poisoned_rpc_table(Config.RPC))
 
     announce_start("payout_worker", 10, pid=4242)
     printed = capsys.readouterr().out
@@ -177,6 +177,44 @@ def test_the_banner_never_prints_a_credential(monkeypatch, capsys):
     assert "poll interval" in printed
     assert "10.0s" in printed
     assert "pid             4242" in printed
+
+
+def test_the_canary_table_refuses_an_entry_it_cannot_poison():
+    """The positive control for the test above, and it cannot be written as one.
+
+    THE PROBLEM THIS SOLVES. The canary test asserts an ABSENCE -- that no credential
+    reached the banner. An entry that never received a canary in the first place
+    produces exactly the same green as an entry that received one and kept it out of
+    the output. So "every chain was checked" is not provable from that test's own
+    result, at any level of care, and the only place it can be established is where
+    the table is built.
+
+    THAT IS WHY conftest.poisoned_rpc_table() ASSERTS RATHER THAN FILTERS. The
+    obvious way to satisfy pyright on `{**values}` over a TypedDict's .items() --
+    which yields `object` since Config.RPC became one on 2026-10-09 -- is
+    `if isinstance(values, Mapping)` in the comprehension. That silently drops the
+    entry, the canary test still passes, and one chain stops being covered with
+    nothing anywhere saying so. This is the test that fails if anyone makes that
+    change.
+
+    It is also the shape that burned me earlier in this same session: three mutations
+    that made a scanner check NOTHING all passed, because "no crossings found" and
+    "nothing was looked at" are the same green.
+    """
+    with pytest.raises(AssertionError) as raised:
+        poisoned_rpc_table({"GRC": {"user": "u"}, "BTC": "not-a-mapping"})
+    message = str(raised.value)
+    assert "BTC" in message, "the refusal must name the chain that could not be poisoned"
+    assert "str" in message, "and what it found instead"
+
+    with pytest.raises(AssertionError, match="empty"):
+        poisoned_rpc_table({})
+
+    # And the honest case still returns every key it was given, with the canaries in.
+    poisoned = poisoned_rpc_table({"GRC": {"user": "real", "port": 25715}})
+    assert set(poisoned) == {"GRC"}
+    assert poisoned["GRC"]["user"] == "canary-rpc-user", "the canary did not replace the real value"
+    assert poisoned["GRC"]["port"] == 25715, "a non-credential field must survive untouched"
 
 
 def test_the_banner_refuses_to_claim_a_network_it_has_not_checked(capsys):

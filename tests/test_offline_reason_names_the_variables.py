@@ -77,7 +77,7 @@ from pathlib import Path
 
 import pytest
 from chains.registry import build_adapters, missing_settings, why_unconfigured
-from config import Config
+from config import Config, bitcoin_family_rpc
 from db import SCHEMA, dict_factory
 from page_markup import tile_detail
 from services.pair_view import allowed_pair_rows, customer_availability
@@ -127,9 +127,16 @@ def unconfigured_rpc() -> dict:
     emptying the other three as well would make this file assert about a server
     posture nobody has.
     """
+    # READ THROUGH config.bitcoin_family_rpc() RATHER THAN OFF THE COPY, which is a
+    # real check and not a way around a type error. `rpc` is a deepcopy of a dict()
+    # of Config.RPC, so every value in it is `object` -- and EXPECTED_SETTINGS is
+    # BTC and LTC only, both Bitcoin-family. The accessor does the per-chain literal
+    # lookup and REFUSES anything that is not in that family by name, so a third
+    # asset added to EXPECTED_SETTINGS that has no `port` fails here with a sentence
+    # instead of writing a `port` key into an entry whose adapter has none.
     rpc = deepcopy(dict(Config.RPC))
     for asset in EXPECTED_SETTINGS:
-        rpc[asset] = {**rpc[asset], "port": 0, "user": "", "password": ""}
+        rpc[asset] = {**bitcoin_family_rpc(asset), "port": 0, "user": "", "password": ""}
     return rpc
 
 

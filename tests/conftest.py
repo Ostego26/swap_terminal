@@ -31,6 +31,7 @@ are here rather than in the tests because import order is the whole point.
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 # NOT CREDENTIALS, AND NAMED SO THAT ruff's S105/S107 ARE ANSWERED RATHER THAN
@@ -174,3 +175,42 @@ os.environ.pop("XRP_PAYOUT_SECRET_SEED", None)
 #    therefore about POSTURE determinism rather than about secret hygiene, and both
 #    reasons would call for the same line.
 os.environ.pop("SOL_PAYOUT_KEYPAIR_PATH", None)
+
+
+# ---------------------------------------------------------------------------
+# A CREDENTIAL CANARY FOR Config.RPC, IN ONE PLACE BECAUSE TWO TESTS WANT IT.
+#
+# tests/test_worker_reporting.py and tests/test_supervisor.py each check that a
+# banner never prints a wallet RPC credential, and each built its own poisoned
+# copy of Config.RPC with the same four-line comprehension. That is one rule --
+# "replace every credential field in every entry, then assert none of it reached
+# the output" -- spelled twice, which is rule 8's shape: the day Config.RPC grows
+# a third credential field, whichever copy is not updated silently stops covering
+# it, and nothing fails.
+#
+# THE FIELD LIST IS HERE RATHER THAN AT THE CALL SITES for the same reason.
+#
+# WHY A LOOP THAT ASSERTS RATHER THAN A COMPREHENSION THAT FILTERS. The obvious
+# way to satisfy a checker here -- Config.RPC is a TypedDict since 2026-10-09, so
+# .items() yields `object` and `{**values}` is refused -- is
+# `if isinstance(values, Mapping)` in the comprehension. That is a FILTER: an
+# entry that was not a mapping would be dropped, the canary would never be placed
+# in it, and the test would pass having checked one chain fewer. An assertion says
+# the same thing and fails instead.
+def poisoned_rpc_table(rpc) -> dict:
+    """Every entry of `rpc`, with each credential field replaced by a canary."""
+    poisoned = {}
+    for asset, settings in rpc.items():
+        assert isinstance(settings, Mapping), (
+            f"{asset}'s RPC entry is a {type(settings).__name__}, not a mapping, so no canary "
+            f"could be placed in it and this chain would have gone unchecked"
+        )
+        poisoned[asset] = {**settings, **RPC_CANARIES}
+    assert poisoned, "Config.RPC is empty, so the canary test below would assert nothing"
+    return poisoned
+
+
+#: The credential fields, and the value each is replaced with. Distinctive enough
+#: that a substring search for them cannot match anything a banner legitimately
+#: prints.
+RPC_CANARIES = {"user": "canary-rpc-user", "password": "canary-rpc-password"}

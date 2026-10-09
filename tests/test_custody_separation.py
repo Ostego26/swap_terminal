@@ -793,7 +793,7 @@ def test_listwallets_failing_costs_one_clause_and_not_the_chains_verdict():
     assert script_chain_verdict("GRC", "desk_hot", info, error, loaded).state == SEPARATED
 
 
-def test_a_mainnet_port_is_NOT_ESTABLISHED_and_no_socket_is_opened_at_all():
+def test_a_mainnet_port_is_NOT_ESTABLISHED_and_no_socket_is_opened_at_all(monkeypatch):
     """Looking is the hazard. 157,797 GRC reached a chat log this way on 2026-09-25.
 
     `getwalletinfo` carries a balance, so a custody report against a mainnet
@@ -809,14 +809,13 @@ def test_a_mainnet_port_is_NOT_ESTABLISHED_and_no_socket_is_opened_at_all():
     """
     daemon = RecordingDaemon()
     mainnet = CHAIN_PORTS["GRC"].mainnet_port
-    rpc = dict(wallet_custody.Config.RPC["GRC"])
-    rpc["port"] = mainnet
-    original = wallet_custody.Config.RPC["GRC"]
-    wallet_custody.Config.RPC["GRC"] = rpc
-    try:
-        lines = wallet_custody.script_chain_lines("GRC", {"GRC": daemon}, swap_row())
-    finally:
-        wallet_custody.Config.RPC["GRC"] = original
+    # monkeypatch.setitem RATHER THAN swapping the whole entry out and back: it
+    # restores even when the body raises before `finally`, and it no longer needs a
+    # copy of the dict whose TYPE is now checked (Config.RPC became a TypedDict on
+    # 2026-10-09, and `Config.RPC["GRC"] = <a plain dict>` is refused because a plain
+    # dict cannot promise the six fields BitcoinFamilyRpc declares).
+    monkeypatch.setitem(wallet_custody.Config.RPC["GRC"], "port", mainnet)
+    lines = wallet_custody.script_chain_lines("GRC", {"GRC": daemon}, swap_row())
 
     assert daemon.calls == [], f"a socket was opened to a mainnet port: {daemon.calls}"
     assert [state for _name, state, _why in lines] == [NOT_ESTABLISHED]
@@ -1210,6 +1209,14 @@ def test_the_endpoints_printable_label_is_host_and_port_and_carries_NO_credentia
     endpoint, refusal = operator_endpoint()
 
     assert refusal == ""
+    # operator_endpoint() returns (endpoint | None, refusal), so `endpoint` is
+    # Optional here no matter what the line above established -- the empty
+    # refusal and the present endpoint are two facts and only one of them was
+    # asserted. Named rather than left implicit: without it, a build that
+    # returned (None, "") would reach the next line and die with
+    # `AttributeError: 'NoneType' object has no attribute 'label'`, which reads
+    # as a broken test rather than as the refusal/endpoint pair disagreeing.
+    assert endpoint is not None, "an empty refusal has to come with an endpoint; (None, '') is the pair contradicting itself"
     assert endpoint.label == "127.0.0.1:25715"
     assert OPERATOR_CREDENTIAL_CANARY not in endpoint.label
     assert endpoint.user not in endpoint.label, "not the user either; it is half a credential"
@@ -1467,7 +1474,7 @@ def test_the_desk_half_is_translated_from_the_state_rather_than_read_twice():
 
 # --- the entry point: the port is classified before any second socket ---------
 
-def test_the_cross_daemon_check_reads_the_DESK_state_under_the_name_it_is_printed_as():
+def test_the_cross_daemon_check_reads_the_DESK_state_under_the_name_it_is_printed_as(monkeypatch):
     """Two spellings of one check name would silently lose the desk's answer forever.
 
     script_chain_lines() produces the deposit-address line as
@@ -1485,13 +1492,13 @@ def test_the_cross_daemon_check_reads_the_DESK_state_under_the_name_it_is_printe
     # environment has, and the wallet line is then the only line. The first version
     # of this test did not set it and failed on that, which is the port
     # classification working rather than an obstacle.
-    rpc = dict(wallet_custody.Config.RPC["GRC"], port=25715)
-    original = wallet_custody.Config.RPC["GRC"]
-    wallet_custody.Config.RPC["GRC"] = rpc
-    try:
-        lines = wallet_custody.script_chain_lines("GRC", {"GRC": daemon}, swap_row())
-    finally:
-        wallet_custody.Config.RPC["GRC"] = original
+    # monkeypatch.setitem RATHER THAN swapping the whole entry out and back: it
+    # restores even when the body raises before `finally`, and it no longer needs a
+    # copy of the dict whose TYPE is now checked (Config.RPC became a TypedDict on
+    # 2026-10-09, and `Config.RPC["GRC"] = <a plain dict>` is refused because a plain
+    # dict cannot promise the six fields BitcoinFamilyRpc declares).
+    monkeypatch.setitem(wallet_custody.Config.RPC["GRC"], "port", 25715)
+    lines = wallet_custody.script_chain_lines("GRC", {"GRC": daemon}, swap_row())
     names = [name for name, _state, _why in lines]
 
     assert wallet_custody.DESK_DEPOSIT_CHECK in names, (

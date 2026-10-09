@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 import supervisor
+from conftest import poisoned_rpc_table
 from db import SCHEMA
 from workers import common
 from workers.common import endpoint_lines
@@ -208,7 +209,18 @@ def test_cli_start_status_stop_round_trip(tmp_path, capsys):
     assert "database" in out
     assert "NOT VERIFIED" in out  # the network claim is labeled as unverified
 
-    pid = supervisor.read_pid_record(supervisor.pid_file(tmp_path, "sleeper"))[0]
+    # read_pid_record() returns None for a pid file that is missing, empty or
+    # junk, which here would mean `spawned=1` was printed over a worker whose
+    # pid nothing recorded -- rule 13's "a stop that cannot prove it worked",
+    # one step earlier. Subscripting it directly died with `TypeError:
+    # 'NoneType' object is not subscriptable` and said none of that (pyright
+    # reportOptionalSubscript, 2026-10-09).
+    record = supervisor.read_pid_record(supervisor.pid_file(tmp_path, "sleeper"))
+    assert record is not None, (
+        "start printed spawned=1 but left no readable pid file for 'sleeper', so the process it "
+        "spawned cannot be named, checked, or reaped"
+    )
+    pid = record[0]
 
     assert supervisor.main(["status", "--run-dir", str(tmp_path)], commands=table) == 0
     assert "running=1/1" in capsys.readouterr().out
@@ -328,7 +340,7 @@ def test_the_start_banner_still_says_the_database_and_refuses_to_claim_a_network
     assert "NOT VERIFIED" in text
 
 
-def test_the_start_banner_never_prints_a_credential():
+def test_the_start_banner_never_prints_a_credential(monkeypatch):
     """`user` and `password` are one key away from `host` and `port`.
 
     Asserted on the supervisor's own banner and not only on the workers',
@@ -337,16 +349,12 @@ def test_the_start_banner_never_prints_a_credential():
     travel. endpoint_summary() formats no credential today; this is what keeps
     a future `**rpc` in an f-string from being a silent one.
     """
-    original = supervisor.Config.RPC
-    poisoned = {
-        asset: {**values, "user": "canary-rpc-user", "password": "canary-rpc-password"}
-        for asset, values in original.items()
-    }
-    supervisor.Config.RPC = poisoned
-    try:
-        text = "\n".join(supervisor.endpoint_summary())
-    finally:
-        supervisor.Config.RPC = original
+    # ONE DEFINITION, SHARED WITH tests/test_worker_reporting.py's identical check,
+    # and monkeypatch rather than a try/finally: a restore in `finally` does not run
+    # if the setup above it raises, and the thing left behind would be a Config.RPC
+    # full of canaries for every test after this one in the same process.
+    monkeypatch.setattr(supervisor.Config, "RPC", poisoned_rpc_table(supervisor.Config.RPC))
+    text = "\n".join(supervisor.endpoint_summary())
 
     assert "canary-rpc-password" not in text
     assert "canary-rpc-user" not in text
@@ -469,13 +477,16 @@ def test_the_start_banner_says_a_grc_payout_cannot_unlock_when_no_passphrase_is_
     fails while every other banner test passes -- the state of three rehearsals.
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    # monkeypatch.setitem RATHER THAN update-and-restore, which is the idiom
+    # tests/test_swap_readiness.py already uses on this same table. It drops the
+    # hand-maintained `original` dict -- a copy of three key names that had to stay
+    # in step with the three being set -- and it restores even when the body raises
+    # before `finally` is reached.
     entry = supervisor.Config.RPC["GRC"]
-    original = {key: entry[key] for key in ("port", "user", "password")}
-    try:
-        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
-        text = "\n".join(supervisor.endpoint_summary())
-    finally:
-        entry.update(original)
+    monkeypatch.setitem(entry, "port", 25715)
+    monkeypatch.setitem(entry, "user", "fixture-user")
+    monkeypatch.setitem(entry, "password", "fixture-auth")
+    text = "\n".join(supervisor.endpoint_summary())
 
     assert "GRIDCOIN_WALLET_PASSPHRASE IS NOT SET" in text
     assert "WILL refuse before sending" in text
@@ -492,13 +503,16 @@ def test_the_banner_never_prints_the_passphrase_or_its_length(monkeypatch):
     needs it.
     """
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "canary-wallet-passphrase")
+    # monkeypatch.setitem RATHER THAN update-and-restore, which is the idiom
+    # tests/test_swap_readiness.py already uses on this same table. It drops the
+    # hand-maintained `original` dict -- a copy of three key names that had to stay
+    # in step with the three being set -- and it restores even when the body raises
+    # before `finally` is reached.
     entry = supervisor.Config.RPC["GRC"]
-    original = {key: entry[key] for key in ("port", "user", "password")}
-    try:
-        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
-        text = "\n".join(supervisor.endpoint_summary())
-    finally:
-        entry.update(original)
+    monkeypatch.setitem(entry, "port", 25715)
+    monkeypatch.setitem(entry, "user", "fixture-user")
+    monkeypatch.setitem(entry, "password", "fixture-auth")
+    text = "\n".join(supervisor.endpoint_summary())
 
     assert "canary-wallet-passphrase" not in text
     assert "24" not in text.split("GRC payout unlock")[1].split("\n")[0], "not even the length"
@@ -517,12 +531,15 @@ def test_an_unconfigured_grc_gets_no_unlock_line_at_all(monkeypatch):
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     entry = supervisor.Config.RPC["GRC"]
-    original = {key: entry[key] for key in ("port", "user", "password")}
-    try:
-        entry.update({"port": 0, "user": "", "password": ""})
-        text = "\n".join(supervisor.endpoint_summary())
-    finally:
-        entry.update(original)
+    # monkeypatch.setitem RATHER THAN update-and-restore: it drops the
+    # hand-maintained `original` dict -- a copy of three key names that had to stay
+    # in step with the three being set -- and it restores even when the body raises
+    # before `finally` is reached. Same idiom as tests/test_swap_readiness.py on
+    # this same table.
+    monkeypatch.setitem(entry, "port", 0)
+    monkeypatch.setitem(entry, "user", "")
+    monkeypatch.setitem(entry, "password", "")
+    text = "\n".join(supervisor.endpoint_summary())
 
     assert "payout unlock" not in text
     assert "not configured" in text, "and it still says the chain is unconfigured"
@@ -552,16 +569,19 @@ def test_the_spawn_warning_does_not_contradict_the_unlock_line(monkeypatch, caps
     """
     monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
     entry = supervisor.Config.RPC["GRC"]
-    original = {key: entry[key] for key in ("port", "user", "password")}
-    try:
-        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
-        # _dying_table()'s worker exits immediately, so this spawns and reaps a
-        # harmless `python3 -c` and nothing is left behind -- the banner is what
-        # is under test, not the spawn. main() returns 1 for the death, which is
-        # confirm_spawned() doing its job and not a failure of this test.
-        assert supervisor.main(["start", "--run-dir", str(tmp_path)], commands=_dying_table()) == 1
-    finally:
-        entry.update(original)
+    # monkeypatch.setitem RATHER THAN update-and-restore: it drops the
+    # hand-maintained `original` dict -- a copy of three key names that had to stay
+    # in step with the three being set -- and it restores even when the body raises
+    # before `finally` is reached. Same idiom as tests/test_swap_readiness.py on
+    # this same table.
+    monkeypatch.setitem(entry, "port", 25715)
+    monkeypatch.setitem(entry, "user", "fixture-user")
+    monkeypatch.setitem(entry, "password", "fixture-auth")
+    # _dying_table()'s worker exits immediately, so this spawns and reaps a
+    # harmless `python3 -c` and nothing is left behind -- the banner is what
+    # is under test, not the spawn. main() returns 1 for the death, which is
+    # confirm_spawned() doing its job and not a failure of this test.
+    assert supervisor.main(["start", "--run-dir", str(tmp_path)], commands=_dying_table()) == 1
     out = capsys.readouterr().out
 
     assert "IS NOT SET" in out, "setup: the unlock line must be present for there to be a contradiction"
@@ -583,12 +603,15 @@ def test_the_spawn_warning_is_the_original_one_when_every_unlock_is_ready(monkey
     """
     monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "canary-wallet-passphrase")
     entry = supervisor.Config.RPC["GRC"]
-    original = {key: entry[key] for key in ("port", "user", "password")}
-    try:
-        entry.update({"port": 25715, "user": "fixture-user", "password": "fixture-auth"})
-        warning = supervisor.spawn_warning()
-    finally:
-        entry.update(original)
+    # monkeypatch.setitem RATHER THAN update-and-restore: it drops the
+    # hand-maintained `original` dict -- a copy of three key names that had to stay
+    # in step with the three being set -- and it restores even when the body raises
+    # before `finally` is reached. Same idiom as tests/test_swap_readiness.py on
+    # this same table.
+    monkeypatch.setitem(entry, "port", 25715)
+    monkeypatch.setitem(entry, "user", "fixture-user")
+    monkeypatch.setitem(entry, "password", "fixture-auth")
+    warning = supervisor.spawn_warning()
 
     # PROPERTIES, NOT THE LITERAL SENTENCE. This asserted the exact string, which
     # broke the moment the warning started naming WHICH chains are payable

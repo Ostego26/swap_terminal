@@ -203,7 +203,7 @@ def test_an_unconfigured_chain_is_named_not_shown_as_port_zero(monkeypatch):
         )
 
 
-def test_a_configured_chain_says_which_network_the_port_belongs_to():
+def test_a_configured_chain_says_which_network_the_port_belongs_to(monkeypatch):
     """Rule 14: say what the number MEANS next to the number.
 
     A bare `rpc=127.0.0.1:15715` requires the reader to know Gridcoin's port
@@ -219,16 +219,16 @@ def test_a_configured_chain_says_which_network_the_port_belongs_to():
     # test would then be asserting the banner's UNCONFIGURED line -- which the test
     # directly above already covers. Not credentials: endpoint_lines() opens no
     # socket, and it never prints either value (see its docstring).
+    # monkeypatch.setitem RATHER THAN update-and-restore. `port` is set TWICE here
+    # on purpose -- the test reads the banner at a test port and then at the mainnet
+    # one -- and monkeypatch records the value it displaced on each call and undoes
+    # them in reverse, so the final restore lands on the true original either way.
     entry = config_module.Config.RPC["GRC"]
-    original = {key: entry[key] for key in ("port", "user", "password")}
-    try:
-        entry["user"] = RPC_FIXTURE_USER
-        entry["password"] = RPC_FIXTURE_AUTH
+    monkeypatch.setitem(entry, "user", RPC_FIXTURE_USER)
+    monkeypatch.setitem(entry, "password", RPC_FIXTURE_AUTH)
 
-        entry["port"] = 25715
-        assert any("test chain (mainnet is 15715)" in line for line in endpoint_lines())
+    monkeypatch.setitem(entry, "port", 25715)
+    assert any("test chain (mainnet is 15715)" in line for line in endpoint_lines())
 
-        entry["port"] = 15715
-        assert any("MAINNET, REAL MONEY" in line for line in endpoint_lines())
-    finally:
-        entry.update(original)
+    monkeypatch.setitem(entry, "port", 15715)
+    assert any("MAINNET, REAL MONEY" in line for line in endpoint_lines())
