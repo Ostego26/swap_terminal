@@ -307,7 +307,7 @@ from modules.script_leg import ScriptLegKeys, mint_leg_keys  # noqa: E402 -- sam
 # implementing exactly those two being refused -- 19 pyright errors on 2026-10-09, every
 # one that shape. The reasoning, the positional-only `/` and why no stub may subclass
 # Console are in step_console.StepNarrator's own docstring.
-from step_console import Console, StepNarrator, StepReporter  # noqa: E402 -- same
+from step_console import Console, StepNarrator, StepReporter, StepSession  # noqa: E402 -- same
 
 from xrp_htlc_escrow import (  # noqa: E402 -- same: the escrow payloads and the read-only helpers are that file's, not copied here (rule 8)
     RIPPLE_EPOCH_OFFSET_SECONDS,
@@ -865,7 +865,11 @@ class SwapContext:
     them is the ORDER of the same five acts and which preimage reader is used.
     """
 
-    console: Console
+    # StepSession AND NOT Console: the two runners use five members of it -- say,
+    # check, step, banner, summary, counted by grep -- and the concrete class has
+    # four more they never touch. See step_console.StepSession, which also records
+    # that this narrowing was found by the test that drives these runners.
+    console: StepSession
     #: Which script chain this run is on. Carried rather than re-derived, because every
     #: operator-facing line in both runners names it, and a line that says GRC while the
     #: run funds BTC is rule 14's defect at the one moment it costs money.
@@ -913,7 +917,13 @@ class SwapContext:
     leg_keys: ScriptLegKeys
 
 
-def the_escrow_to_finish(console: Console, created: dict, *, if_the_create_is_refused: str,
+# StepSession AND NOT StepReporter, although this body uses only say and check:
+# it HANDS its console to wait_validated(), which also needs elapsed and the
+# banner/step/summary rung. A function that passes a console down must declare what
+# the callee needs, which is the same propagation the funding walk's Run protocol
+# has (regtest/funding_steps.ChainReadingRun) and the reason all four of those
+# signatures moved together.
+def the_escrow_to_finish(console: StepSession, created: dict, *, if_the_create_is_refused: str,
                          if_there_is_no_sequence: str) -> int | None:
     """Is the escrow that was just submitted one a later step can FINISH? Its number, or None.
 

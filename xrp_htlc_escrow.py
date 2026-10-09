@@ -214,7 +214,7 @@ from microfortnights import format_duration  # noqa: E402 -- same
 # test recorder that implements the one. 19 pyright errors on 2026-10-09 were that
 # shape. step_console.StepNarrator's docstring carries the reasoning and the measured
 # reason its parameters are positional-only.
-from step_console import Console, StepNarrator  # noqa: E402 -- same
+from step_console import Console, StepNarrator, StepSession  # noqa: E402 -- same
 
 # THE EPOCH OFFSET AND ITS TWO CONVERSIONS NOW LIVE IN chains/xrp_units.py,
 # imported above beside the drop conversions. They moved there 2026-09-29 so
@@ -453,8 +453,17 @@ def create_escrow(console: Console, submitter, secret: str, tx_json: dict, label
     return sequence
 
 
-def wait_validated(console: Console, tx_hash: str) -> dict:
-    """Poll until the transaction is in a VALIDATED ledger, or give up saying so.
+def wait_validated(console: StepSession, tx_hash: str) -> dict:
+    """OVER-PROMISES BY THREE MEMBERS ON PURPOSE, and the alternative was worse.
+
+    This uses `say` and `elapsed`. A protocol of exactly those two would be a FOURTH
+    rung beside StepNarrator, StepReporter and StepSession -- and step_console's own
+    rule for when to add one is "split a Protocol when a caller needs less AND
+    something can supply less". Nothing supplies less here: both production call
+    sites pass a full runner console, and no stub in tests/ implements say+elapsed
+    and nothing else. A fourth name nothing can use is surface for its own sake.
+
+    Poll until the transaction is in a VALIDATED ledger, or give up saying so.
 
     engine_result is a PROVISIONAL answer from one server about what it expects
     to happen. tesSUCCESS from `submit` is not the ledger agreeing, and reporting
@@ -468,7 +477,7 @@ def wait_validated(console: Console, tx_hash: str) -> dict:
         polls += 1
         found = rpc("tx", {"transaction": tx_hash})
         if found.get("validated"):
-            console.say(f"{tx_hash[:16]}... validated after {polls} polls, {console._elapsed()}")
+            console.say(f"{tx_hash[:16]}... validated after {polls} polls, {console.elapsed()}")
             return found
         console.say(f"waiting for validation: poll {polls}, not yet in a validated ledger")
         time.sleep(VALIDATION_POLL_SECONDS)

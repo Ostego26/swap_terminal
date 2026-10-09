@@ -137,7 +137,49 @@ class StepReporter(StepNarrator, Protocol):
     you arrive here holding the name `StepConsole`, this is the thing you meant.
     """
 
-    def check(self, label: str, got: object, expected: object, ok: bool, /) -> bool: ...
+    # `ok` IS NOT POSITIONAL-ONLY AND THE OTHER THREE ARE. Measured 2026-10-09 after
+    # the all-positional version refused four PRODUCTION call sites:
+    # atomic_swap_xrp.py:974, 1118, 1124, 1346 and 1352 pass `ok=False` as a
+    # KEYWORD, which reads better at a site whose whole point is that the check
+    # fails. And nothing is lost by allowing it: every stub in tests/ that names
+    # this parameter at all names it `ok` (grepped -- the rest take *args), so the
+    # name-matching hazard that makes `say(text, /)` positional-only does not exist
+    # here. The first three stay positional-only because every call passes them so.
+    def check(self, label: str, got: object, expected: object, /, ok: bool) -> bool: ...
+
+
+class StepSession(StepReporter, Protocol):
+    """The whole surface a top-level RUNNER drives, as against the two a helper needs.
+
+    THE THIRD RUNG, and it exists for the same reason as the first two: a signature
+    naming the concrete `Console` is nominal, so a recorder implementing exactly
+    what the function calls is refused on its NAME. StepNarrator is one method
+    (say), StepReporter is two (+ check), and this is five -- the set a runner that
+    owns a whole swap uses: it banners its sections, numbers its steps, says lines,
+    checks assertions, and summarizes.
+
+    MEASURED RATHER THAN LISTED FROM THE CLASS: grepped `console.<member>` across
+    atomic_swap_xrp.py's two runners, 2026-10-09 -- say 31, check 19, step 10,
+    banner 2, summary 1. Nothing reads `_elapsed`, `results`, `total_steps` or
+    `started`, which is the four members declaring `Console` was promising on their
+    behalf.
+
+    WHY IT STOPS HERE AND DOES NOT BECOME "everything Console has". The point of
+    every rung is that something OTHER than Console can satisfy it. A protocol that
+    mirrored the class would be satisfiable only by the class, which is the nominal
+    typing it replaces wearing a structural costume.
+
+    FOUND BY A TEST, which is worth recording because it is the argument for the
+    whole ladder. tests/test_swap_runners_report_completion.py drives both runners
+    with a recorder implementing these five and nothing else; against
+    `console: Console` it was refused, and the refusal was about the recorder's
+    ancestry rather than anything it could not do.
+    """
+
+    def banner(self, text: str, /) -> None: ...
+    def step(self, number: int, title: str, /) -> None: ...
+    def summary(self) -> int: ...
+    def elapsed(self) -> str: ...
 
 
 class Console:
@@ -156,14 +198,21 @@ class Console:
         self.started = time.monotonic()
         self.results: list[tuple[str, bool]] = []
 
-    def _elapsed(self) -> str:
+    # PUBLIC, AND IT WAS `_elapsed` UNTIL 2026-10-09. Two things were wrong with the
+    # underscore. xrp_htlc_escrow.wait_validated() called `console._elapsed()` from
+    # another module -- a private member of another class, reached across a file
+    # boundary, which no annotation could ever have described honestly. And
+    # regtest/console.Console exposes the identical concept as a PUBLIC `elapsed()`,
+    # so one idea had two visibilities in two classes with the same name (rule 8).
+    # Three call sites in total, two of them inside this class.
+    def elapsed(self) -> str:
         return format_duration(time.monotonic() - self.started)
 
     def banner(self, text: str) -> None:
         print("\n" + "=" * 78 + f"\n{text}\n" + "=" * 78, flush=True)
 
     def step(self, number: int, title: str) -> None:
-        print(f"\nstep {number}/{self.total_steps}  {title}   [{self._elapsed()}]", flush=True)
+        print(f"\nstep {number}/{self.total_steps}  {title}   [{self.elapsed()}]", flush=True)
 
     def say(self, text: str) -> None:
         print(f"          {text}", flush=True)
@@ -194,7 +243,7 @@ class Console:
             )
         shown = got if got not in (None, "", [], {}) else "(none)"
         print(f"          {'OK  ' if ok else 'FAIL'}  {label}: got={shown}  expected={expected}  "
-              f"[{self._elapsed()}]", flush=True)
+              f"[{self.elapsed()}]", flush=True)
         self.results.append((label, ok))
         return ok
 
