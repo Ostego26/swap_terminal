@@ -316,6 +316,29 @@ def write_desktop_shortcuts(actions: dict[str, str]) -> list[str]:
     return lines
 
 
+def _icon_words() -> list[str]:
+    """The icon names as an operator sees them in the menu: Up, Down, Restart...
+
+    DERIVED FROM ACTION_ENTRIES, which is the list that decides what gets an
+    icon. Capitalized rather than taken from the `Name` field because the Name is
+    "Swap Terminal: Up" and the sentence this feeds already says "Swap Terminal".
+    """
+    return [action.capitalize() for action, _name, _comment in ACTION_ENTRIES]
+
+
+def _english_list(words: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`. Its own function so the Oxford-comma-free
+    join is in one place rather than inlined into a sentence that then has to be
+    re-punctuated by hand every time the list length changes -- which is how
+    "plus Up, Down and Restart" came to be a hardcoded string in the first place.
+    """
+    if not words:
+        return "(none)"
+    if len(words) == 1:
+        return words[0]
+    return f"{', '.join(words[:-1])} and {words[-1]}"
+
+
 def closing_lines(on_path: bool) -> list[str]:
     """What to say once it is installed. Pure, so the wording is testable.
 
@@ -327,7 +350,15 @@ def closing_lines(on_path: bool) -> list[str]:
     lines = [
         "",
         "INSTALLED.",
-        '  menu        "Swap Terminal" (the window), plus Up, Down and Restart',
+        # A THIRD HAND-WRITTEN SPELLING OF THE ICON LIST, and it survived the
+        # commit that derived the other two: it read "plus Up, Down and Restart"
+        # after `rebuild` got an icon, and the operator read THAT on their own
+        # host as well. The test that should have caught it asserted each action
+        # appeared somewhere in these lines joined together -- which the shell
+        # line above already satisfied, so the menu line being wrong was
+        # invisible to it. Derived now, and asserted per LINE rather than over
+        # the blob.
+        f'  menu        "Swap Terminal" (the window), plus {_english_list(_icon_words())}',
         f"  shell       swapterm {' | '.join(swap_stack.ACTIONS)}",
     ]
     if not on_path:

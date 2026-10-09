@@ -328,10 +328,33 @@ def test_the_printed_command_list_is_derived_from_the_dispatch_table():
     label = dict(install_desktop_icon.planned_writes(desktop_files=False))[
         install_desktop_icon.COMMAND_TARGET
     ]
-    closing = " ".join(install_desktop_icon.closing_lines(on_path=True))
+    # PER LINE, NOT OVER THE BLOB, and that is a correction to this test rather
+    # than a style choice. It joined closing_lines() into one string and asserted
+    # each action appeared in it -- which the `shell` line alone satisfied, so a
+    # THIRD hardcoded spelling on the `menu` line ("plus Up, Down and Restart",
+    # still missing `rebuild` after it got an icon) was invisible to it and the
+    # operator read it on their own host. A test that passes because the right
+    # word appears on the wrong line is a test that passes for a reason unrelated
+    # to its claim.
+    lines = install_desktop_icon.closing_lines(on_path=True)
+    shell_line = next(line for line in lines if line.strip().startswith("shell"))
+    menu_line = next(line for line in lines if line.strip().startswith("menu"))
+
     for action in swap_stack.ACTIONS:
         assert action in label, f"{action} is missing from the installer's command label: {label}"
-        assert action in closing, f"{action} is missing from the installer's shell line: {closing}"
+        assert action in shell_line, f"{action} is missing from the shell line: {shell_line}"
+
+    # AND THE MENU LINE NAMES EXACTLY THE ICONS -- every one, and nothing that has
+    # no icon, since telling an operator to look for a "Status" entry that is not
+    # there is the same defect pointing the other way.
+    for action, _name, _comment in install_desktop_icon.ACTION_ENTRIES:
+        assert action.capitalize() in menu_line, (
+            f"the {action} icon exists and the menu line does not name it: {menu_line}"
+        )
+    for action in install_desktop_icon.NO_ICON:
+        assert action.capitalize() not in menu_line, (
+            f"the menu line names {action}, which deliberately has NO icon: {menu_line}"
+        )
 
 
 def test_the_rebuild_icon_says_why_up_alone_is_not_enough():
