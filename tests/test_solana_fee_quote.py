@@ -113,7 +113,7 @@ from chains.solana_transaction import (
     wire_transaction,
 )
 from chains.solana_units import BALANCE_COMMITMENT, SIGNATURE_FEE_LAMPORTS
-from test_solana_adapter import make_adapter
+from test_solana_adapter import SEEDED_URL, SeededTransportAdapter, make_adapter, seed_transport
 from valid_addresses import SOL_DEPOSIT_ACCOUNT, SOL_PAYOUT
 
 #: The blockhash every seeded cluster below hands back. Thirty-two 0x03 bytes,
@@ -145,7 +145,31 @@ def fee_response(value) -> dict:
     return {"context": {"slot": 506_014_088}, "value": value}
 
 
-def quoting_cluster(fee=SEEDED_FEE_LAMPORTS, blockhash: str = BLOCKHASH):
+class _QuotingAdapter(SeededTransportAdapter):
+    """The seeded adapter plus the two getFeeForMessage recorders this file reads.
+
+    SeededTransportAdapter declares `calls`, which is every (method, params) pair
+    and is all the read tests need. This file needs the ARGUMENTS of one specific
+    call -- the base64 payload and the options object handed to getFeeForMessage
+    -- because the central claim here is about what was sent, not merely that it
+    was sent. Declared as a subclass rather than attached to an unannotated
+    adapter so that the two names are findable: a reader who sees
+    `adapter.priced[0]` in an assertion can learn here what fills it, which was
+    previously only discoverable by reading quoting_cluster()'s closure.
+
+    NO BEHAVIOR, exactly as its base: two annotations and nothing else, so the
+    adapter under test is still the shipped class with only its transport stubbed.
+    """
+
+    #: The base64 strings handed to getFeeForMessage, in order. Recorded rather
+    #: than inferred: a test that re-derives the payload from the function's
+    #: inputs would be asserting its own arithmetic.
+    priced: list[str]
+    #: The options objects beside them, one per call.
+    options: list[dict]
+
+
+def quoting_cluster(fee=SEEDED_FEE_LAMPORTS, blockhash: str = BLOCKHASH) -> _QuotingAdapter:
     """An adapter whose cluster answers both reads, and that RECORDS the payload it was sent.
 
     `adapter.priced` is the list of base64 strings handed to getFeeForMessage,
@@ -162,9 +186,13 @@ def quoting_cluster(fee=SEEDED_FEE_LAMPORTS, blockhash: str = BLOCKHASH):
         options.append(opts)
         return fee_response(fee)
 
-    adapter = make_adapter(
-        {"getLatestBlockhash": blockhash_response(blockhash), FEE_QUOTE_METHOD: fee_for_message}
-    )
+    # SEEDED DIRECTLY RATHER THAN THROUGH make_adapter(), because what this
+    # needs back is a _QuotingAdapter and that helper builds the plain one. The
+    # transport table itself is make_adapter()'s -- seed_transport() is the half
+    # the two share, so there is still exactly one copy of the stubbed call.
+    adapter = _QuotingAdapter(url=SEEDED_URL)
+    seed_transport(adapter, {"getLatestBlockhash": blockhash_response(blockhash),
+                             FEE_QUOTE_METHOD: fee_for_message})
     adapter.priced = priced
     adapter.options = options
     return adapter

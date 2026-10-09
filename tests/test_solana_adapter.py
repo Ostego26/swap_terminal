@@ -109,23 +109,70 @@ OTHER_SIG = (
 SIG2 = "4k8t7OjKT4KBlwhlpd29XWBtjTbdj3qyC3B7vfDKQ5uqsB3UGh0xTzUMfZpvyQCKFNaKjoFOUlqB63ZTtSX6Ejb8"
 
 
-def make_adapter(responses: dict, **kwargs) -> SolanaAdapter:
-    """A real SolanaAdapter whose ONLY stubbed member is the transport.
+#: Every (method, params) pair a seeded transport was asked for, in order. Named
+#: once rather than spelled at each site that builds one -- here and in
+#: tests/test_solana_payout.py::payout_adapter(), which imports it -- because two
+#: spellings of one shape is rule 8 at its smallest and they agree only on the
+#: day they are written.
+RecordedCalls = list[tuple[str, tuple]]
+
+#: Where a seeded adapter is told its cluster is. `.invalid` is reserved by
+#: RFC 2606 and resolves nowhere, so the url is unreachable by construction and
+#: not merely by convention -- but nothing below ever gets as far as resolving
+#: it, because the transport is replaced before the adapter is returned.
+SEEDED_URL = "http://seeded.invalid"
+
+
+class SeededTransportAdapter(SolanaAdapter):
+    """A real SolanaAdapter that also DECLARES the recorder a seeded transport attaches.
+
+    WHY THIS CLASS EXISTS AT ALL, since it adds no behavior. make_adapter() here
+    and tests/test_solana_payout.py::payout_adapter() both hang a `calls` list on
+    the adapter they return, and it is READ at 30 sites across three modules --
+    `assert ("getMinimumBalanceForRentExemption", (0,)) in adapter.calls`,
+    `assert methods(adapter) == [...]`, every "nothing was broadcast" proof.
+    Counted 2026-10-09 out of 32 lines mentioning `.calls`, two of which are the
+    helpers' own `adapter.calls = calls`: 8 reads here, 19 in
+    tests/test_solana_payout.py (18 of them through its methods() helper) and 3
+    in tests/test_solana_fee_quote.py.
+
+    `SolanaAdapter` has no such attribute and must not grow one: a call log is a
+    test-harness fact, and a production class carrying one for its tests' benefit
+    is the shape CLAUDE.md rule 19 is about. So the declaration lives here, where
+    the harness is, and the production class stays as it is.
+
+    NOTHING IS OVERRIDDEN AND NOTHING IS ASSIGNED IN THE CLASS BODY. `calls` is
+    an annotation, so at runtime this subclass is `SolanaAdapter` with a
+    different `__name__` and no other difference -- every validation, every
+    decode, every branch under test is still the shipped code, which is the
+    promise make_adapter()'s docstring makes and this must not quietly weaken.
+    """
+
+    #: Attached by seed_transport(), not by __init__: the list is the stub
+    #: transport's own closure, so the recorder and the responder are one object
+    #: and cannot disagree about what was asked.
+    calls: RecordedCalls
+
+
+def seed_transport(adapter: SeededTransportAdapter, responses: dict) -> None:
+    """Replace `adapter.call` with a table of seeded responses, and attach the recorder.
 
     `responses` maps an RPC method name to either a value or a callable taking
-    the call's params. Everything else on the adapter -- validation, decoding,
-    arithmetic, the branches -- is the shipped code.
+    the call's params. An unseeded method RAISES rather than answering a default:
+    a stub that invents a response makes the test agree with a shape the adapter
+    may no longer have, where an AssertionError says the test's premise about
+    what the adapter would do was wrong.
 
-    ITS SIBLING IS tests/test_solana_payout.py::payout_adapter(), and the
-    difference is deliberate rather than a second copy (rule 8): this one
-    answers each method with ONE value, which is all a read needs, while the
-    payout path has to poll getSignatureStatuses and see a DIFFERENT answer each
-    time -- a transaction that is unknown, then confirmed. A sequence cannot be
-    expressed here, and a reader who finds one helper should know the other
-    exists.
+    SEPARATE FROM make_adapter() SO THAT A CALLER NEEDING A DIFFERENT SUBCLASS
+    DOES NOT NEED A SECOND COPY OF IT. tests/test_solana_fee_quote.py records the
+    getFeeForMessage payloads as well, so it builds its own
+    SeededTransportAdapter subclass and seeds it with this -- which is the one
+    thing the two have in common. The alternative was a generic make_adapter()
+    taking the class to build; that reads better and does not compile here, since
+    `python3 --version` on this host is 3.11 and the type-parameter syntax ruff's
+    UP047 asks for under `target-version = "py312"` is a SyntaxError before 3.12.
     """
-    adapter = SolanaAdapter(url="http://seeded.invalid", **kwargs)
-    calls = []
+    calls: RecordedCalls = []
 
     def fake_call(method, *params):
         calls.append((method, params))
@@ -136,6 +183,24 @@ def make_adapter(responses: dict, **kwargs) -> SolanaAdapter:
 
     adapter.call = fake_call
     adapter.calls = calls
+
+
+def make_adapter(responses: dict, **kwargs) -> SeededTransportAdapter:
+    """A real SolanaAdapter whose ONLY stubbed member is the transport.
+
+    `responses` is seed_transport()'s table; everything else on the adapter --
+    validation, decoding, arithmetic, the branches -- is the shipped code.
+
+    ITS SIBLING IS tests/test_solana_payout.py::payout_adapter(), and the
+    difference is deliberate rather than a second copy (rule 8): this one
+    answers each method with ONE value, which is all a read needs, while the
+    payout path has to poll getSignatureStatuses and see a DIFFERENT answer each
+    time -- a transaction that is unknown, then confirmed. A sequence cannot be
+    expressed here, and a reader who finds one helper should know the other
+    exists.
+    """
+    adapter = SeededTransportAdapter(url=SEEDED_URL, **kwargs)
+    seed_transport(adapter, responses)
     return adapter
 
 
@@ -150,7 +215,18 @@ def memo_instruction(text):
     return {"programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "parsed": str(text)}
 
 
-def native_tx(keys, pre, post, err=None, memo=FIXTURE_TAG):
+def native_tx(keys, pre, post, err=None, memo: int | str | None = FIXTURE_TAG):
+    """A getTransaction response for a native SOL transfer, with a memo unless told otherwise.
+
+    `memo` IS ANNOTATED AND THE OTHER PARAMETERS ARE NOT, which is deliberate
+    rather than half-finished: its default is an int (FIXTURE_TAG, the ordinary
+    case since 2026-09-29), so without the annotation the only memo this helper
+    could be handed is another int -- and the two cases that matter here are
+    `None` (a deposit carrying no memo at all, which is what the unattributable
+    path is for) and a free-text string (a customer typing a sentence instead of
+    their tag). memo_instruction() str()s whatever arrives, so all three are one
+    code path on the fixture side and three different ones in the adapter.
+    """
     instructions = [] if memo is None else [memo_instruction(memo)]
     return {
         "meta": {"err": err, "preBalances": pre, "postBalances": post},
@@ -900,10 +976,18 @@ def test_an_UNARMED_host_REFUSES_a_SOL_payout_swap_so_no_deposit_is_ever_taken()
 
             asset = "SOL"
 
-            def rent_exempt_minimum(self, _space=0):
+            # THE PARAMETER NAMES ARE THE BASE CLASS'S, not this stub's. Both
+            # bodies ignore the argument, so the house `_name` would read better
+            # here -- and would break the contract: SolanaAdapter declares
+            # `space` and `address`, so one keyword call through the adapter
+            # interface (`rent_exempt_minimum(space=165)`) would be a TypeError
+            # on this subclass and not on the real one. A stub that cannot be
+            # called the way the thing it stands in for can be called is a stub
+            # that proves less than it looks like it does.
+            def rent_exempt_minimum(self, space=0):
                 return 890_880
 
-            def validate_address(self, _address):
+            def validate_address(self, address):
                 return True
 
         from_asset = sol_output[0][0]
@@ -1773,6 +1857,17 @@ def test_the_endpoint_line_truncates_a_url_at_the_query_string():
 
 
 # --- the skip count is OBSERVABLE, not just an attribute ----------------------
+#
+# EVERY skip_txids= BELOW IS A frozenset, MATCHING THE ONE REAL CALLER.
+# services/deposit_service.skip_txids() is declared `-> frozenset[str]` and is
+# what the three production call sites hand to find_deposits_to_address(), whose
+# own parameter defaults to frozenset(). Three tests in this section passed a
+# mutable `set` instead -- which the adapter happens to accept, because all it
+# does is `signature in skip_txids`, so they proved the behavior while exercising
+# a type no caller produces. The two tests above (test_a_settled_signature_*)
+# already used frozenset, so the file disagreed with itself about its own
+# fixture. Nothing about what is asserted changes; what changes is that a reader
+# can no longer conclude from this file that the adapter is handed a set.
 
 
 def test_the_skipped_signatures_are_LOGGED_and_not_only_set_as_an_attribute(caplog):
@@ -1800,7 +1895,7 @@ def test_the_skipped_signatures_are_LOGGED_and_not_only_set_as_an_attribute(capl
         }
     )
     with caplog.at_level(logging.INFO):
-        assert adapter.find_deposits_to_address(WALLET, skip_txids={settled}) == []
+        assert adapter.find_deposits_to_address(WALLET, skip_txids=frozenset({settled})) == []
     assert settled in caplog.text, "the skipped signature is NAMED, not just counted"
     assert "did not re-read 1" in caplog.text
     assert "rate-limit toll" in caplog.text, "and what the number MEANS, next to it"
@@ -1819,7 +1914,7 @@ def test_the_SAME_skip_set_is_not_re_listed_on_every_scan(caplog):
     show_unattributable.py's outstanding rows. Only the signature list is
     conditional, and a line that cannot be read is its own kind of silence.
     """
-    settled = {SIG, OTHER_SIG}
+    settled = frozenset({SIG, OTHER_SIG})
     adapter = make_adapter(
         {
             "getSignaturesForAddress": [
@@ -1865,10 +1960,10 @@ def test_a_CHANGED_skip_set_names_only_what_is_NEW(caplog):
         }
     )
     with caplog.at_level(logging.INFO):
-        adapter.find_deposits_to_address(WALLET, skip_txids={SIG})
+        adapter.find_deposits_to_address(WALLET, skip_txids=frozenset({SIG}))
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        adapter.find_deposits_to_address(WALLET, skip_txids={SIG, OTHER_SIG})
+        adapter.find_deposits_to_address(WALLET, skip_txids=frozenset({SIG, OTHER_SIG}))
     out = caplog.text
     assert "now also skipping" in out
     assert OTHER_SIG in out, "the new one is named"

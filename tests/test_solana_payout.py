@@ -105,6 +105,7 @@ from services import quote_service
 from services.payout_service import broadcast_payout, process_pending_payouts
 from services.pricing import IDS, _cache
 from services.quote_service import create_quote
+from test_solana_adapter import RecordedCalls, SeededTransportAdapter
 from workers.common import get_config_dict
 
 nacl_signing = pytest.importorskip(
@@ -149,7 +150,7 @@ def throwaway_keypair(tmp_path, name="payout.json"):
     return path, seed, base58.b58encode(public).decode("ascii")
 
 
-def payout_adapter(responses: dict, **kwargs) -> SolanaAdapter:
+def payout_adapter(responses: dict, **kwargs) -> SeededTransportAdapter:
     """A real SolanaAdapter whose ONLY stubbed member is the transport.
 
     A SIBLING OF tests/test_solana_adapter.py::make_adapter() AND NOT A COPY OF
@@ -163,9 +164,18 @@ def payout_adapter(responses: dict, **kwargs) -> SolanaAdapter:
     `adapter.calls` is the ORDERED list of (method, params), which is how
     "nothing was broadcast" and "the blockhash was fetched last" are asserted:
     on what was done, not on which exception came back.
+
+    THE CLASS IS IMPORTED FROM THAT SIBLING AND NOT RE-DECLARED HERE. What the
+    two helpers disagree about is how a response is answered; what they agree on
+    is that the adapter they hand back carries `calls`. Declaring that twice is
+    one shape with two spellings, which is rule 8 at the smallest scale it comes
+    in, and the two copies would have been identical on the day they were
+    written. SeededTransportAdapter adds no behavior -- two annotations and
+    nothing else, see its docstring -- so this is still the shipped adapter with
+    only its transport replaced.
     """
-    adapter = SolanaAdapter(url=kwargs.pop("url", "http://seeded.invalid"), **kwargs)
-    calls = []
+    adapter = SeededTransportAdapter(url=kwargs.pop("url", "http://seeded.invalid"), **kwargs)
+    calls: RecordedCalls = []
     sequences = {method: list(value) for method, value in responses.items() if isinstance(value, list)}
 
     def fake_call(method, *params):
@@ -1196,7 +1206,37 @@ def teller_entry():
 
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root / "swap_terminal"))
-    spec = importlib.util.spec_from_file_location("operator_panel_entry_sol", root / "operator_panel.py")
+    entry_point = root / "operator_panel.py"
+    spec = importlib.util.spec_from_file_location("operator_panel_entry_sol", entry_point)
+    # REFUSED BY NAME RATHER THAN DEREFERENCED. Both of these are declared
+    # optional -- spec_from_file_location() -> ModuleSpec | None, and
+    # ModuleSpec.loader -> Loader | None -- and until this check existed the two
+    # Nones were read straight through, so the symptom would have been
+    # `AttributeError: 'NoneType' object has no attribute 'exec_module'` raised
+    # inside a helper called teller_entry(), naming neither the file nor the
+    # reason. With it, the one thing a reader needs is on the screen (rule 14).
+    #
+    # WHAT IT DOES *NOT* CATCH, measured 2026-10-09 rather than assumed, because
+    # the first version of this comment claimed the opposite and was wrong
+    # (rule 16: a wrong comment is a bug, and rule 17: run the thing that would
+    # show it false). A path that does not exist still produces a perfectly good
+    # spec:
+    #
+    #     spec_from_file_location("x", "/nonexistent/operator_panel.py")
+    #       -> ModuleSpec(name='x', loader=<SourceFileLoader>, origin=...)
+    #     spec_from_file_location("y", "/tmp")           # a directory
+    #       -> None
+    #
+    # So operator_panel.py MOVING off the repository root does not reach this
+    # branch -- it reaches exec_module() and comes back as FileNotFoundError
+    # naming the path, which is already a legible failure. This branch is for the
+    # case where the path is not loadable as a source module at all.
+    if spec is None or spec.loader is None:
+        raise AssertionError(
+            f"could not load {entry_point} as a module: spec_from_file_location gave "
+            f"spec={spec!r}, so that path is not a loadable source module. The teller "
+            f"pane is a root entry point (rule 10) and this test loads it by location."
+        )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

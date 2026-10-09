@@ -45,6 +45,7 @@ from chains.solana import SolanaRPCError  # noqa: E402
 from chains.solana_address import SOLANA_DEVNET_ACCOUNT, is_valid_address  # noqa: E402
 from chains.solana_memo import MEASURED_MEMO_PROGRAM_IDS, MEMO_PROGRAM_IDS  # noqa: E402
 from chains.solana_units import DISCOVERY_COMMITMENT  # noqa: E402
+from config import SolanaRpc  # noqa: E402 -- what Config.RPC["SOL"] already is; the banner test spreads it
 
 # GENESIS_HASHES used to be imported from solana_chain_check; it moved to
 # network_target.py on 2026-10-01 so swap_readiness.py could read the same table
@@ -58,6 +59,7 @@ from solana_chain_check import (  # noqa: E402 -- the sys.path line above is wha
     MEMO_HUNT_GIVE_UP_AFTER_THROTTLES,
     MEMO_HUNT_TRANSACTION_VERSION,
     RPC_RETRIES_PER_CALL,
+    BannerSettings,
     CreditPathObserved,
     RevealingTx,
     _deposits_line,
@@ -198,7 +200,14 @@ def test_every_step_announces_before_it_runs(capsys):
 
 
 def test_the_banner_states_the_network_relevant_parameters_before_anything_runs(capsys):
-    rpc = {"url": "http://x.invalid", "mint": "", "min_commitment_rank": 3}
+    # ANNOTATED BannerSettings, WHICH IS THE WHOLE POINT OF THAT TYPE. Its own
+    # docstring names these seeded banner tests as the callers it exists for: a
+    # short dict now fails where it is WRITTEN rather than as a KeyError from
+    # inside the banner after the first line has already printed, which is what
+    # it cost twice in this file. Writing the annotation is what makes that true
+    # here -- an unannotated literal is just a dict and is checked against
+    # nothing.
+    rpc: BannerSettings = {"url": "http://x.invalid", "mint": "", "min_commitment_rank": 3}
     print_banner(rpc, "")
     out = capsys.readouterr().out
     assert "READ-ONLY" in out
@@ -210,7 +219,7 @@ def test_the_banner_states_the_network_relevant_parameters_before_anything_runs(
 
 
 def test_an_unset_endpoint_is_reported_rather_than_silently_doing_nothing(capsys):
-    rpc = {"url": "", "mint": "", "min_commitment_rank": 3}
+    rpc: BannerSettings = {"url": "", "mint": "", "min_commitment_rank": 3}
     print_banner(rpc, "")
     assert "SOL_RPC_URL is UNSET" in capsys.readouterr().out
 
@@ -392,7 +401,17 @@ def _rent_header(capsys) -> str:
     check_rent() prints the header and then runs two steps; the steps are handed a `run`
     that records instead of calling, so this exercises the real print without an endpoint.
     """
-    check_rent(None, lambda *args, **kwargs: None)
+    # A REAL ADAPTER WITH NO URL, NOT None. `run` here records instead of
+    # calling, so neither of check_rent()'s two steps ever runs its lambda and
+    # the adapter is never touched -- which is what made `None` work. It is still
+    # the wrong argument: check_rent() is declared to take a SolanaAdapter, and a
+    # test that hands it something else is relying on an internal detail (which
+    # lambda gets invoked when) to stand in for the contract. An adapter built
+    # with no url keeps the property that mattered: chains/solana.py refuses
+    # every RPC without SOL_RPC_URL, so if the header ever started reading the
+    # chain this would raise SolanaRPCError naming the variable, exactly as
+    # `None` would have raised AttributeError -- loudly, and now by name.
+    check_rent(chains_solana.SolanaAdapter(), lambda *args, **kwargs: None)
     return capsys.readouterr().out
 
 
@@ -789,7 +808,20 @@ class _WholeClusterStub:
         self.signatures = signatures
         self.methods = []
 
-    def __call__(self, _url, data=None, **_kwargs):
+    def __call__(self, _url, data=None, **_kwargs) -> _Ok | _Throttled:
+        # THE RETURN TYPE IS THE UNION, AND IT IS THE BASE'S RATHER THAN EACH
+        # SUBCLASS'S. This method only ever builds an _Ok, so the narrow answer
+        # would be `-> _Ok`. Six classes in this file subclass _WholeClusterStub
+        # and THREE of them -- OneThrottled, HolderCluster, SplitCluster
+        # (grepped 2026-10-09 for the `return _Throttled()` sites) -- override
+        # __call__ to hand back a 429 for one method and delegate the rest here.
+        # That is a LEGAL thing for a stand-in for requests.post to do, and
+        # driving it is what those three tests exist for. `-> _Ok` made each of
+        # the three a narrowing violation: a supertype has to describe what the
+        # family answers, not what this one member happens to. `_Throttled` is
+        # declared further down the file and `from __future__ import annotations`
+        # is what makes the forward reference legal.
+        #
         # `data=json.dumps(payload)`, NOT `json=payload` -- which is how chains/solana.py
         # actually posts (solana.py:418). The first version of this stub took a `json=` kwarg,
         # so every request arrived as None and the recorded bodies were a list of Nones. A stub
@@ -1040,7 +1072,18 @@ def test_the_banner_prints_where_the_address_came_from(capsys):
     # THE REAL Config.RPC["SOL"] SPREAD, not a hand-built dict. Built one by hand earlier in
     # this file and print_banner raised KeyError on 'mint'; it raised again here on
     # 'min_commitment_rank'. A hand-built config tests the hand-built config.
-    rpc = {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1"}
+    #
+    # ANNOTATED SolanaRpc AND NOT BannerSettings, and the difference is the whole
+    # reason the spread is here. The spread produces all SIX of config.SolanaRpc's
+    # keys, and a TypedDict LITERAL may not carry keys its type does not declare
+    # -- so `rpc: BannerSettings = {**...}` is refused (measured: pyright 1.1.414
+    # reads it as `dict[str, str | float | int | object]`), while the VALUE is
+    # assignable to print_banner()'s BannerSettings parameter because structural
+    # assignment does allow extra keys. BannerSettings' own docstring says that:
+    # "The full six-field entry is assignable to this ... so main() passes its
+    # copy of Config.RPC["SOL"] unchanged". Declaring what the spread actually
+    # built is what makes both statements true at once.
+    rpc: SolanaRpc = {**solana_chain_check.Config.RPC["SOL"], "url": "http://127.0.0.1:1"}
     address, why = resolve_address("", "")
     print_banner(rpc, address, why)
     out = capsys.readouterr().out
@@ -2929,7 +2972,14 @@ def test_a_step_that_RAISED_is_not_counted_as_having_decoded():
                                 credits=0, refused=0)
     failures = []
 
-    def explode(_method, *_params):
+    # THE PARAMETER NAMES ARE SolanaAdapter.call's, not this stub's. Neither is
+    # read -- the body only raises -- so the house `_name` would read better, and
+    # would be wrong: this is ASSIGNED OVER a bound method whose declared
+    # signature is `call(self, method: str, *params)`, so a caller using the
+    # keyword (`adapter.call(method="getTransaction")`) would be a TypeError
+    # against the stub and not against the adapter. Same reason as
+    # tests/test_solana_adapter.py's _Cluster overrides.
+    def explode(method, *params):
         raise chains_solana.SolanaRPCError("the endpoint went away")
 
     adapter = _seeded_adapter({}, _A_MINT)
