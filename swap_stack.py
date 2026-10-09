@@ -66,6 +66,7 @@ import json
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -90,6 +91,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     GitReading,
     canister_lookup_names,
     canister_lookup_verdict,
+    chain_exit_code,
     chain_reachability_verdict,
     code_version_verdict,
     container_id,
@@ -99,6 +101,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
+    probe_detail,
     proc_net_tcp_tables,
     readiness_verdict,
     replica_state_verdict,
@@ -107,14 +110,20 @@ from swap_terminal.stack_authority import (  # noqa: E402
     surface_map,
 )
 
-#: How long each web-port probe may take, and the marker for one that answered.
+#: How long each web-port probe may take.
+#:
+#: `_WEB_PROBE_OK = 200` used to sit beside it as "the marker for one that
+#: answered", and went with the line that used it (rule 9): probe_serving_port()
+#: stored that 200 in place of a real verdict, and storing the verdict instead
+#: left the constant with no caller. A 200 standing in for "ready" also threw
+#: away WHICH success it was -- readiness_verdict() distinguishes a 200 from a
+#: listening-but-not-200, and that distinction was being flattened on the way in.
 #:
 #: SECONDS, and short on purpose: a gunicorn that will answer does so as soon as it
 #: has bound, so the replica's 60s budget spent on four candidate ports would make
 #: a down stack take four minutes to say it is down (rule 14 -- the report has to
 #: arrive while the operator is still reading).
 _WEB_PROBE_BUDGET_SECONDS = 3.0
-_WEB_PROBE_OK = 200
 
 #: How long `up` waits for the replica to answer, and how long one probe may take.
 #:
@@ -244,6 +253,52 @@ UP_SERVICES = ("icp-replica", "web")
 def say(line: str) -> None:
     """Print immediately. Rule 14: silence is indistinguishable from hung."""
     print(line, flush=True)
+
+
+#: How wide a wrapped report line may be, including its indent.
+#:
+#: 96 RATHER THAN 80 OR 120. Every hand-written say() line in this file already
+#: sits under it -- measured 2026-10-09: exactly one of them was over 120, and it
+#: was the one added the same hour -- so this width is what the file already is
+#: rather than a new convention, and nothing existing has to move to satisfy it.
+#: It is not E501's limit: that is ignored repo-wide because rule 1 wants verbose
+#: comments, and a comment nobody prints is a different thing from a line the
+#: operator reads off a terminal.
+_REPORT_WIDTH = 96
+
+
+def say_wrapped(indent: str, text: str, first: str | None = None) -> None:
+    """Print prose that arrived as a VALUE, wrapped under `indent`.
+
+    FOR STRINGS THIS FILE DID NOT HAND-WRAP. A say() line written in the source
+    is wrapped by whoever wrote it, which is why 96 columns is a description of
+    this file rather than a rule imposed on it. A sentence returned from
+    stack_authority -- readiness_verdict()'s advice, for instance -- has no author
+    at the print site, and printing it raw produced a 190-column line that the
+    terminal broke at an arbitrary column with NO indent on the continuation, so
+    it ran back under the label column and read as a new field.
+
+    Rule 14 is about output a reader can act on, and a report whose columns stop
+    lining up halfway down is one an operator stops trusting. The one defect this
+    cannot fix is a single unbroken token longer than the width (a long URL);
+    break_long_words=False leaves those overlong on purpose, because a URL split
+    across two lines cannot be copied.
+
+    `first` is the indent for the FIRST line only, so a value can sit on its own
+    label's line and then wrap under the label column -- `  NOT SERVING  <text>`
+    continuing at column 20 rather than at column 0. Without it the headline
+    serving_verdict() returns printed as one 119-column line while the advice
+    directly beneath it wrapped at 96, which reads as two different reports.
+
+    An EMPTY `text` still prints the label rather than nothing: textwrap.wrap("")
+    returns [], and a label with no value under it is rule 14's blank gap --
+    ambiguous between "nothing to say" and "the value here came out empty".
+    """
+    for line in textwrap.wrap(
+        text, width=_REPORT_WIDTH, initial_indent=indent if first is None else first,
+        subsequent_indent=indent, break_long_words=False, break_on_hyphens=False,
+    ) or [(first or indent).rstrip()]:
+        say(line)
 
 
 def compose(
@@ -482,7 +537,15 @@ def cmd_status(files: tuple[str, ...]) -> int:
     done = compose(["ps"], files)
     body = done.stdout.strip()
     if done.returncode != 0:
-        say(f"  FAILED            docker compose exited {done.returncode}: {done.stderr.strip() or '(no stderr)'}")
+        # Same reason as the canister lookups below: this quotes compose's stderr,
+        # which arrives as a paragraph when a variable fails to interpolate (257
+        # columns on the 2026-10-09 run). `(no stderr)` rather than an empty tail,
+        # because a label with nothing after it is rule 14's blank gap.
+        say_wrapped(
+            "                    ",
+            f"docker compose exited {done.returncode}: {done.stderr.strip() or '(no stderr)'}",
+            first="  FAILED            ",
+        )
     elif len(body.splitlines()) <= 1:
         say("  (none)            no container of this stack is up <- a result, not a blank")
     else:
@@ -510,7 +573,10 @@ def cmd_status(files: tuple[str, ...]) -> int:
     # cannot see why would read it as hung.
     say(f"  web probe         probing {len(WEB_PORT_CANDIDATES)} candidate web ports, up to "
         f"{format_duration(_WEB_PROBE_BUDGET_SECONDS)} each -- a BOUND port above is not a serving one")
-    port, _detail = probe_serving_port()
+    # THE HEADLINE AND ADVICE ARE DROPPED ON PURPOSE: probe_serving_port() has
+    # already printed one line per port, and the surface map below says what is
+    # reachable. `status` wants the port, not a second account of the probe.
+    port, _headline, _advice = probe_serving_port()
     _say_surface_map(files, port)
     _say_code_version_repeat(*code)
     return 0
@@ -669,7 +735,9 @@ def cmd_down(files: tuple[str, ...]) -> int:
 _PROBEABLE_URL_PREFIX = "http://127.0.0.1:"
 
 
-def wait_for_http(url: str, budget_seconds: float, *, announce: bool = True) -> tuple[bool, str, float]:
+def wait_for_http(
+    url: str, budget_seconds: float, *, announce: bool = True
+) -> tuple[bool, str, str, float]:
     """Poll `url` until it answers. (ready, detail, seconds waited).
 
     GENERALIZED FROM wait_for_replica() ON 2026-10-07, BECAUSE `up` NEEDED THE
@@ -763,12 +831,12 @@ def wait_for_http(url: str, budget_seconds: float, *, announce: bool = True) -> 
             outcome = getattr(error, "reason", error)
             if not isinstance(outcome, BaseException):
                 outcome = error
-        ready, detail = readiness_verdict(outcome)
+        ready, summary, advice = readiness_verdict(outcome)
         waited = time.monotonic() - started
         if ready:
-            return True, detail, waited
+            return True, summary, advice, waited
         if waited >= budget_seconds:
-            return False, detail, waited
+            return False, summary, advice, waited
         # RULE 6, AND THIS LINE WAS THE ONE PLACE IN THIS FILE STILL PRINTING BARE
         # SECONDS -- found 2026-10-08 while grepping my own additions for the same
         # mistake. "Every timing this system reports -- logs, status lines, reports,
@@ -777,11 +845,16 @@ def wait_for_http(url: str, budget_seconds: float, *, announce: bool = True) -> 
         # both halves for. Written as `elapsed <both>` rather than inside the
         # parentheses it used to sit in, because format_duration() brings its own.
         if announce:
-            say(f"                    attempt {attempt}: {detail}  elapsed {format_duration(waited)}, waiting")
+            # THE SUMMARY, NOT THE WHOLE SENTENCE. This line repeats once a second
+            # for up to the budget, and the advice paragraph does not change between
+            # attempts -- sixty copies of "either nothing is bound here at all, or a
+            # published container port is..." is the thing rule 14 calls output the
+            # reader learns to skip. The caller prints the advice once, after.
+            say(f"                    attempt {attempt}: {summary}  elapsed {format_duration(waited)}, waiting")
         time.sleep(1.0)
 
 
-def probe_serving_port() -> tuple[int, str]:
+def probe_serving_port() -> tuple[int, str, list[str]]:
     """Probe every WEB_PORT_CANDIDATES port and return serving_verdict()'s answer.
 
     ONE PROBER, TWO CALLERS (rule 8). This loop was inline in cmd_up() until
@@ -802,7 +875,7 @@ def probe_serving_port() -> tuple[int, str]:
     Prints one line per port as it goes (rule 14): four ports at
     _WEB_PROBE_BUDGET_SECONDS each is a wait long enough to read as a hang.
     """
-    probes: dict[int, object] = {}
+    probes: dict[int, tuple[bool, str, str]] = {}
     for port in WEB_PORT_CANDIDATES:
         # ONE SHORT ATTEMPT PER PORT, not the replica's 60s budget. A gunicorn that
         # is going to answer answers immediately once it has bound; the long wait
@@ -811,11 +884,20 @@ def probe_serving_port() -> tuple[int, str]:
         # announce=False: the per-port line two lines down IS this probe's progress,
         # and the per-attempt lines underneath it put twelve near-identical sentences
         # in front of the surface map. See wait_for_http().
-        ready, detail, _ = wait_for_http(
+        ready, summary, advice, _ = wait_for_http(
             f"http://127.0.0.1:{port}/", _WEB_PROBE_BUDGET_SECONDS, announce=False
         )
-        probes[port] = _WEB_PROBE_OK if ready else detail
-        say(f"                    :{port} {detail}")
+        # STORED AS readiness_verdict() LEFT IT, not re-rendered and not replaced
+        # by a status code. wait_for_http() already ran the interpretation; passing
+        # the rendered sentence on meant serving_verdict() interpreted it a SECOND
+        # time and reported every refusal as `unrecognized probe outcome`. See
+        # stack_authority.serving_verdict() for the output that measured it.
+        probes[port] = (ready, summary, advice)
+        # THE SUMMARY ONLY. One line per candidate port is this probe's progress
+        # (rule 14), and the advice is identical on every one of them -- four
+        # copies here plus the summary's was five copies of one paragraph on one
+        # screen. serving_verdict() returns the advice once, per distinct reason.
+        say(f"                    :{port} {summary}")
     return serving_verdict(probes)
 
 
@@ -985,7 +1067,14 @@ def _say_surface_map(files: tuple[str, ...], serving_port: int) -> None:
         f" -- asked, never hardcoded (ids are per-replica)")
     looked = canister_ids(files)
     for line in looked.trouble:
-        say(f"  COULD NOT READ    {line}")
+        # WRAPPED, because `line` quotes docker's stderr verbatim and docker's
+        # stderr is not wrapped for anybody. Measured 2026-10-09 on a `status`
+        # run where SWAP_DB_DIR was unset: these four lines came out at 326, 332,
+        # 336 and 495 columns, each repeating the same interpolation failure, and
+        # the terminal broke every one at an arbitrary column with no indent -- so
+        # the continuations ran back under the label column and read as more
+        # fields. The four longest lines that run printed were all this one site.
+        say_wrapped("                    ", line, first="  COULD NOT READ    ")
     # ALWAYS A COUNT, AND ALWAYS OVER ITS DENOMINATOR (rule 3). This used to print
     # `read all 3 canister ids` on a clean run and NOTHING at all on a dirty one,
     # so a partial read -- three of four, with the Candid UI missing -- had no
@@ -1289,14 +1378,21 @@ def chain_reachability(serving_port: int) -> tuple[str, str, list[str]]:
     return chain_reachability_verdict(rows)
 
 
-def _say_chain_reachability(serving_port: int) -> None:
-    """Print it. Announced before the wait, because the wait can be real (rule 14)."""
+def _say_chain_reachability(serving_port: int) -> str:
+    """Print it, and return the verdict. Announced before the wait (rule 14).
+
+    RETURNS THE STATUS because `chains` is a health check and has to exit on it.
+    `up` ignores the return, exactly as it did when this was `-> None`: `up`'s
+    exit code is about whether the stack came up, and a chain daemon the operator
+    has not started yet must not fail it.
+    """
     say("  chain daemons     can the CONTAINER reach them? asked of the app, not of this host --")
     say("                    the daemons are on 127.0.0.1 here and across a bridge from there")
     status, headline, detail = chain_reachability(serving_port)
     say(f"  {('REACHABLE' if status == 'reachable' else status.upper()):<16}  {headline}")
     for line in detail:
         say(f"                    {line}" if line else "")
+    return status
 
 
 def _say_page_serving() -> int:
@@ -1308,12 +1404,18 @@ def _say_page_serving() -> int:
     out: it holds no decision -- probe_serving_port() makes the one decision and
     this only chooses which paragraph to print for it.
     """
-    port, detail = probe_serving_port()
+    port, headline, advice = probe_serving_port()
     if port:
-        say(f"  SERVING           http://127.0.0.1:{port}/ {detail}")
+        say(f"  SERVING           http://127.0.0.1:{port}/ {headline}")
         say(f"                    the swap flow is at http://127.0.0.1:{port}/")
         return port
-    say(f"  NOT SERVING       {detail}")
+    say_wrapped("                    ", headline, first="  NOT SERVING       ")
+    # ONE LINE PER DISTINCT REASON, from serving_verdict(), wrapped because these
+    # arrive as values and nobody hand-wrapped them. Printed here rather than
+    # folded into the headline so the reasons read as lines instead of one
+    # 160-word line, which is what they were until 2026-10-09.
+    for line in advice:
+        say_wrapped("                    ", line)
     say("                    The containers may be up and the page is not answering, which is a")
     say("                    DIFFERENT failure from a container that never started -- the container")
     say("                    step above says which. `docker compose logs --tail=40 web` is where")
@@ -1419,7 +1521,8 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("")
 
     say("  5. is the replica ANSWERING? (bound is not ready)")
-    ready, detail, waited = wait_for_http(REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
+    ready, summary, advice, waited = wait_for_http(REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
+    detail = probe_detail((ready, summary, advice))
     # format_duration() RATHER THAN A SECOND 1.2096, which is what this line held
     # until 2026-10-08. Rule 6 names the helper for exactly this reason -- "Use it
     # rather than writing 1.2096 again; the constant already appears separately in
@@ -1472,6 +1575,81 @@ def cmd_up(files: tuple[str, ...]) -> int:
     return 0 if port else 1
 
 
+def cmd_chains(files: tuple[str, ...]) -> int:
+    """Ask the RUNNING CONTAINER whether it can reach its chain daemons. Changes nothing.
+
+    WHY THIS IS ITS OWN ACTION. The question cost the operator a day on
+    2026-10-08 -- three daemons the container could not reach, every Confirm
+    frozen, balances 9.5 hours stale, and `up` printing SERVING and exiting 0
+    through all of it. `up` asks it now (step 7). `status` does not, and `status`
+    is the read-only command an operator actually runs to look at things.
+
+    So the only way to ask was to run the command that STARTS CONTAINERS, which is
+    backwards for a read-only probe and worse than backwards right after a daemon
+    restart -- the exact moment you want to re-ask. This asks it and starts
+    nothing.
+
+    READ-ONLY, AND THAT IS A PROPERTY OF THE ENDPOINT RATHER THAN A PROMISE HERE.
+    /api/admin/chains is a GET that makes one or two read RPCs per chain and signs
+    nothing (routes/admin.py says so, and tests/test_web_surfaces.py asserts no
+    admin route accepts a POST). No wallet is unlocked, no key is touched, no
+    order moves.
+
+    `files` is accepted and deliberately unused: every action takes the compose
+    files so ACTIONS can dispatch uniformly, and this one needs no compose call
+    because it asks the app over HTTP. Named `_files` would break that uniformity
+    for one caller's benefit.
+
+    EXIT CODE IS THE VERDICT (stack_authority.chain_exit_code): 0 only when every
+    probeable chain answered. `none_asked` and `unknown` are failures, because a
+    health check that exits 0 when nobody asked is the "skipped plus success"
+    defect rule 13 names.
+    """
+    del files  # see the docstring: uniform dispatch, no compose call needed
+    say("swap_stack: CHAINS")
+    say("  question          can the web CONTAINER reach the chain daemons on this host?")
+    say("  read-only         GET /api/admin/chains -- one or two read RPCs per chain, nothing")
+    say("                    is signed, no wallet is unlocked, no order moves")
+    # ECHO THE PARAMETERS THAT DECIDE THE ANSWER (rule 14). Pasted output has to
+    # be self-describing a day later, and both of these numbers change what the
+    # verdict can say: the budget decides how many chains get asked at all, and
+    # the fetch timeout decides whether `up` waits long enough to hear back.
+    say("  probe budget      bounded for ALL chains together by ST_CHAIN_PROBE_BUDGET_SECONDS,")
+    say("                    which is read INSIDE the container. No number is echoed for it:")
+    say("                    this host cannot read the container's environment, and printing")
+    say("                    the default from here would be a claim nobody checked (rule 17).")
+    say("                    A per-chain row says so itself when a budget ran out.")
+    say(f"  fetch timeout     {format_duration(_CHAIN_PROBE_FETCH_TIMEOUT_SECONDS)} for the whole "
+        f"request, from here")
+    say("                    above the container's own probe budget on purpose: a probe that was")
+    say("                    about to answer must not be reported as one nobody could ask")
+    say("")
+    port, headline, advice = probe_serving_port()
+    if not port:
+        say_wrapped("                    ", headline, first="  NOT SERVING       ")
+        for line in advice:
+            say_wrapped("                    ", line)
+        say("                    nothing was asked, so this says NOTHING about the chains. The")
+        say("                    probe lives INSIDE the container; with no container answering")
+        say("                    there is no vantage point. `swap_stack.py up` first.")
+        return chain_exit_code("unknown")
+    say(f"  asking            http://127.0.0.1:{port}/api/admin/chains")
+    say("")
+    status = _say_chain_reachability(port)
+    say("")
+    # SAY WHAT THE EXIT CODE MEANS NEXT TO IT (rule 14): the operator reads the
+    # screen, and a script reads the code. Neither should have to open this file.
+    code = chain_exit_code(status)
+    say(f"  exit {code}            {status} -- 0 only when every probeable chain answered; "
+        f"{'' if code else 'nothing further to do'}")
+    if code:
+        say("                    a NON-ZERO here is not always a fault: `none_asked` means no")
+        say("                    adapter has a read-only probe, and `unknown` means the endpoint")
+        say("                    could not be read. Neither is an all-clear, which is why neither")
+        say("                    is 0 -- the headline above says which one you have.")
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The command line this file accepts. Its own function so a test can ask it.
 
@@ -1500,7 +1678,7 @@ def build_parser() -> argparse.ArgumentParser:
     # new one (rule 8). `or ""` would NOT do: "".splitlines() is [] and [0] is an IndexError,
     # one line further on. argparse takes description=None and prints no summary.
     parser = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
-    parser.add_argument("action", choices=("status", "up", "down"))
+    parser.add_argument("action", choices=tuple(ACTIONS))
     # `-f` AS WELL AS `--compose-file`, AND THE HELP TEXT IS WHY THIS IS A FIX
     # RATHER THAN A CONVENIENCE. Until 2026-10-07 this took only the long form
     # while its own help string read "Repeatable, in -f order" -- naming a flag
@@ -1526,10 +1704,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Every action this file takes, and the function each one runs. THE ONLY LIST.
+#:
+#: argparse's `choices` is derived from this (build_parser), so the two cannot
+#: disagree. They were two hand-written spellings until `chains` was added:
+#: `choices=("status", "up", "down")` on one line and a dict literal with the
+#: same three keys 26 lines later. Nothing had failed, because nobody had yet
+#: added an action to one and not the other -- rule 8's "they agree on the day
+#: they are written" exactly. The two failure modes it was holding: an action
+#: argparse accepts and then KeyErrors on, and an action that dispatches fine
+#: and cannot be typed.
+#:
+#: Defined here rather than beside build_parser() because every value has to
+#: exist first, and `chains` is directly above.
+ACTIONS = {
+    "status": cmd_status,
+    "up": cmd_up,
+    "down": cmd_down,
+    "chains": cmd_chains,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     files = tuple(args.compose_file) if args.compose_file else COMPOSE_FILES
-    return {"status": cmd_status, "up": cmd_up, "down": cmd_down}[args.action](files)
+    return ACTIONS[args.action](files)
 
 
 if __name__ == "__main__":

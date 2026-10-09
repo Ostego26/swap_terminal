@@ -369,6 +369,30 @@ by grepping for the NAME rather than the import graph (rule 2).
   and their `check()` disagrees about whether the verdict is a `bool` or a string.
   Not merged — they are genuinely different consoles — but `step_console.check` now
   REFUSES a non-bool, because crossing them printed OK and exited 0 (C16).
+- **Six report lines still exceed 150 columns**, measured on one `swap_stack.py
+  status` run after C25: 255 and 222 from `swap_terminal/workers/common.py`
+  (`database`, `it holds`), and 165/174/285/212 from
+  `swap_terminal/supervisor.py` (`network`, `none`, and the two host-worker
+  warnings). All six are HAND-WRITTEN `say()` strings whose author chose the
+  width, not values arriving from elsewhere — so `say_wrapped()` is the wrong
+  tool for them and the fix is to reflow the source string. Not done because
+  neither file was otherwise touched this pass, and rule 12 is explicit that a
+  sweep across files you were not already in is a large diff with no behavioral
+  benefit. Named work, not a baseline (rule 19).
+
+- **Two unrelated functions are both named `readiness_verdict`**, with different
+  arities and different questions. `stack_authority.readiness_verdict(outcome)`
+  interprets ONE probe of an HTTP endpoint and returns
+  `(ready, summary, advice)`. `swap_terminal_desktop.py:167`'s
+  `readiness_verdict(status_code, body, error, db_path)` decides whether the
+  launcher's own server came up against the RIGHT DATABASE — a different
+  question with a four-argument signature. Not a duplicate to merge: they
+  genuinely differ, and rule 8 says the difference then "belongs in a comment at
+  BOTH sites, naming the other one." Neither site names the other today. Cheap
+  to fix and I did not, because `swap_terminal_desktop.py` is outside what this
+  pass touched (rule 12) and the comment should be written by whoever next has a
+  reason to be in that file.
+
 - **`up` reports the code version of the HOST CHECKOUT and starts the container
   without rebuilding it.** `git_reading()`'s own docstring says it reads "which
   commit this HOST checkout is running", and `cmd_up` runs `docker compose up -d
@@ -398,6 +422,12 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C25 | A report line is wrapped by whoever WROTE it, and these had no author at the print site: `COULD NOT READ` quoted docker's stderr verbatim. Measured on one `status` run — four lines at 326/332/336/495 columns, all one call site, each broken by the terminal at an arbitrary column with NO indent so the continuation ran back under the label column and read as a new field. New `say_wrapped()` wraps values at 96 columns under their label. **13 lines over 150 columns → 6, widest 495 → 285**; the 6 remaining are in `supervisor.py` (4) and `workers/common.py` (1), untouched this pass (rule 12) | `this commit` |
+| C26 | The surface map told a reader with ONE missing id that neither was read, and a reader with BOTH missing that one was. `its URL would be <shape> -- the id is the missing part` appended a singular gloss to every branch while `shape` itself carried `-- neither id was read` in only the third — two `--` clauses, one of them wrong in two branches out of three. Which ids are missing decides what the operator goes and looks up, so it is named per branch now | `this commit` |
+| C21 | Every web-probe refusal reported as `unrecognized probe outcome`. `probe_serving_port()` stored `readiness_verdict()`'s rendered SENTENCE and `serving_verdict()` fed it back INTO `readiness_verdict()`, where a `str` is neither an `int` nor an `OSError` and fell through to the fail-closed branch — so the most ordinary outcome a web probe has fired the "nobody anticipated this" path, with the careful two-readings advice coming back out inside a `repr()`. Found by running the new `chains` action; `serving_verdict()` had **no direct test**, which is why four tests of `readiness_verdict()` stayed green through it | `this commit` |
+| C22 | One 40-word paragraph printed **five times on one screen** — once per candidate port as progress, then four more concatenated into a single 119-column headline. `readiness_verdict()` now returns the short reason and the advice separately, progress lines take the reason, and `serving_verdict()` gives the advice once per DISTINCT reason. Exactly the defect `wait_for_http`'s own `announce=False` comment was written to stop, arriving by another route | `this commit` |
+| C23 | `swap_stack.py` had no read-only way to ask the one question that cost 2026-10-08. `up` asks it (step 7); `status` does not, so the only way to ask was to run the command that STARTS CONTAINERS — worst of all right after a daemon restart, which is exactly when you want to re-ask. New `chains` action: read-only, starts nothing, exits 0 only when every probeable chain answered | `this commit` |
+| C24 | `choices=("status", "up", "down")` and the dispatch dict were two hand-written spellings of the action list, 26 lines apart. Nothing had failed because nobody had yet added an action to one and not the other — rule 8's "they agree on the day they are written". `choices` is now derived from `ACTIONS` | `this commit` |
 | C19 | `up` step 7 could never read the endpoint it asks. `/api/admin/chains` has always answered with an envelope (`probed_at`, `adapters_configured`, `probes_attempted`, `chains`) and `static/admin.js:107` has always read `data.chains`; the host-side reader expected the rows to BE the body, so its first live run printed `COULD NOT ASK ... got dict, which is what an error page parses to` on a WORKING probe and sent the operator looking for an error page that does not exist. Four pure tests were green throughout because every one fabricated the body it tested against — the same defect as `3e41ad1`, one file over. Builder and extractor now share `CHAIN_PROBE_ROWS_KEY`; the test helper builds through the real producer; a behavioral test feeds the route's own body to the reader | `this commit` |
 | C20 | `swap_stack.py:731` carried an unsuppressed `S310` on `HEAD` — a lint error I committed. The comment beside it claimed "the URL is never input", true of both callers and not a constraint: a third caller passing `file:///` would have been read off local disk with the comment still reading true. Now a guard, so the `noqa` is backed by the line above it | `this commit` |
 | C1 | Candid links pointed at the default identity's wallet canister | `4d82caf` |

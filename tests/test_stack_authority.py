@@ -36,6 +36,7 @@ import swap_stack
 from swap_terminal.stack_authority import (
     CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
+    CHAIN_EXIT_CODES,
     CHAIN_PROBE_ROWS_KEY,
     DOWN_VERDICTS,
     LISTENER_VERDICTS,
@@ -50,6 +51,7 @@ from swap_terminal.stack_authority import (
     canister_lookup_names,
     canister_lookup_verdict,
     canister_surface_lines,
+    chain_exit_code,
     chain_probe_envelope,
     chain_probe_rows,
     chain_reachability_verdict,
@@ -62,10 +64,12 @@ from swap_terminal.stack_authority import (
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
+    probe_detail,
     proc_net_tcp_tables,
     process_name,
     readiness_verdict,
     replica_state_verdict,
+    serving_verdict,
     stray_verdict,
     surface_map,
     version_status,
@@ -395,25 +399,39 @@ def test_a_refused_connection_is_NOT_READY_and_names_both_things_it_can_mean():
     kept, because a test whose NAME asserts the wrong thing is read by everyone
     who greps for it (rule 2: its test changes to pin the stronger invariant).
     """
-    ready, detail = readiness_verdict(ConnectionRefusedError(111, "Connection refused"))
+    verdict = readiness_verdict(ConnectionRefusedError(111, "Connection refused"))
+    ready, summary, advice = verdict
     assert ready is False
+    # THE SHORT REASON IS SHORT, which is the half a progress line can use. It was
+    # one 40-word string until 2026-10-09, so a web probe's four per-port lines
+    # each carried the whole paragraph -- see probe_detail().
+    assert summary == "connection refused", summary
     # BOTH readings present, and neither stated as the only one.
-    assert "nothing is bound here at all" in detail
-    assert "docker-proxy" in detail
-    assert "docker compose ps" in detail, "say how to tell them apart, not just that they differ"
+    assert "nothing is bound here at all" in advice
+    assert "docker-proxy" in advice
+    assert "docker compose ps" in advice, "say how to tell them apart, not just that they differ"
     # AND NOT THE OLD ASSERTION, which claimed one of the two as fact.
-    assert "the port is bound and nothing is listening behind it" not in detail
+    assert "the port is bound and nothing is listening behind it" not in advice
+    # The joined form still says everything it used to: nothing was lost in the
+    # split, it was only made separable.
+    assert probe_detail(verdict) == f"{summary} -- {advice}"
 
 
 def test_an_answer_is_READY_and_a_non_200_is_still_listening():
     """200 is dfx's /api/v2/status. Another code means something IS there, which is the question."""
-    ready, detail = readiness_verdict(200)
+    verdict = readiness_verdict(200)
+    ready, summary, advice = verdict
     assert ready is True
-    assert "200" in detail
+    assert "200" in summary
+    # NO ADVICE, AND probe_detail() MUST NOT LEAVE A DANGLING SEPARATOR. A 200
+    # needs no gloss, so the joined form is the summary alone rather than
+    # "answered 200 -- ".
+    assert advice == "", advice
+    assert probe_detail(verdict) == summary
 
-    ready, detail = readiness_verdict(503)
+    ready, summary, advice = readiness_verdict(503)
     assert ready is True, "a 503 came from a process that is listening, which is what is asked"
-    assert "503" in detail and "not the 200" in detail
+    assert "503" in summary and "not the 200" in advice
 
 
 def test_a_timeout_and_an_unrecognized_outcome_are_both_NOT_READY():
@@ -423,13 +441,21 @@ def test_a_timeout_and_an_unrecognized_outcome_are_both_NOT_READY():
     this function does not understand must not read as success -- it would print READY
     for a replica nobody asked anything of.
     """
-    ready, detail = readiness_verdict(TimeoutError("timed out"))
+    ready, summary, advice = readiness_verdict(TimeoutError("timed out"))
     assert ready is False
-    assert "did not answer" in detail
+    assert "did not answer" in advice
+    assert summary == "timed out", summary
 
-    ready, detail = readiness_verdict("something nobody anticipated")
+    ready, summary, advice = readiness_verdict("something nobody anticipated")
     assert ready is False
-    assert "treated as NOT ready" in detail
+    assert "treated as NOT ready" in advice
+    # AND THE UNRECOGNIZED BRANCH MUST NOT FIRE ON AN ORDINARY OUTCOME, which is
+    # the half that was broken in practice rather than in theory. See
+    # test_a_refused_port_is_never_reported_as_an_unrecognized_outcome below:
+    # swap_stack.probe_serving_port() stored this function's own rendered sentence
+    # and serving_verdict() fed it back in, so every connection refusal on every
+    # candidate port landed here.
+    assert "unrecognized" in summary
 
 
 def test_DOWN_stops_containers_and_does_NOT_remove_them(monkeypatch, capsys):
@@ -908,6 +934,133 @@ def test_nothing_answered_prints_paths_and_not_one_url():
         "a reader must be told these are paths; a bare list of paths beside a healthy-looking "
         "report is ambiguous between 'not serving' and 'serving, badly formatted'"
     )
+
+
+def _refused() -> tuple[bool, str, str]:
+    """A refusal verdict, as readiness_verdict() produces it.
+
+    THROUGH THE REAL readiness_verdict() rather than a hand-written 3-tuple, for
+    the same reason _chain_body() builds through chain_probe_envelope(): a
+    fabricated verdict cannot disagree with the author's belief about the shape,
+    and that is what let the double-interpretation defect this file's tests now
+    cover go unnoticed. No port argument -- the verdict does not depend on which
+    port refused, and a parameter nobody reads is rule 9's dead name.
+    """
+    return readiness_verdict(ConnectionRefusedError(111, "Connection refused"))
+
+
+def test_a_refused_port_is_never_reported_as_an_unrecognized_outcome():
+    """serving_verdict() had NO direct test, and this is the defect that cost.
+
+    MEASURED 2026-10-09 by running `swap_stack.py chains` with nothing up:
+
+        NOT SERVING  nothing answered on any candidate port -- :5101 unrecognized
+                     probe outcome 'connection refused -- either nothing is bound
+                     here at all, or ...' -- treated as NOT ready rather than
+                     guessed, :5100 unrecognized probe outcome '...' [x4, one line]
+
+    probe_serving_port() stored readiness_verdict()'s RENDERED SENTENCE and
+    serving_verdict() passed it back INTO readiness_verdict(), where a str is
+    neither an int nor an OSError and fell through to the final branch. So the
+    most ordinary outcome a web probe has -- a refusal -- was reported as
+    `unrecognized`, i.e. the fail-closed branch firing on the normal case. Rule
+    13: "a warning that fires on every run is one the reader learns to ignore."
+
+    Four tests covered readiness_verdict() and all four passed throughout,
+    because none of them went through serving_verdict(). This is that test.
+    """
+    port, headline, detail = serving_verdict({p: _refused() for p in WEB_PORT_CANDIDATES})
+    assert port == 0, f"every port refused and this reported {port} as serving"
+    said = " ".join([headline, *detail])
+    assert "unrecognized" not in said, (
+        f"a plain connection refusal is reported as an unrecognized outcome, which sends the "
+        f"operator looking for something exotic: {said}"
+    )
+    assert "connection refused" in said, f"and it must still say what happened: {said}"
+
+
+def test_the_same_reason_on_every_port_is_explained_once_not_once_per_port():
+    """Rule 14, from the other side: five copies of one paragraph is not output.
+
+    The same run printed the refusal paragraph FIVE times on one screen -- once
+    per candidate port as progress, then four more concatenated into a single
+    160-column headline. wait_for_http()'s own announce=False comment already
+    names this defect ("twelve near-identical sentences"); it arrived again by a
+    different route, which is why the grouping is now asserted rather than
+    reviewed.
+
+    MUTATION: key `by_reason` by port instead of by summary. The headline then
+    repeats the reason per port and `detail` carries one advice line per port.
+    """
+    _port, headline, detail = serving_verdict({p: _refused() for p in WEB_PORT_CANDIDATES})
+    assert len(WEB_PORT_CANDIDATES) >= 2, "this test needs more than one candidate port to mean anything"
+    assert headline.count("connection refused") == 1, (
+        f"one reason shared by {len(WEB_PORT_CANDIDATES)} ports is named "
+        f"{headline.count('connection refused')} times: {headline}"
+    )
+    for port in WEB_PORT_CANDIDATES:
+        assert f":{port}" in headline, f"every port asked must still be named: {headline}"
+    assert len(detail) == 1, f"one distinct reason must yield one advice line, got {len(detail)}: {detail}"
+    assert "docker compose ps" in detail[0], detail[0]
+
+
+def test_two_ports_failing_differently_both_get_their_reason():
+    """The grouping must not collapse DIFFERENT failures, only identical ones.
+
+    A refusal and a timeout mean different things to fix -- nothing bound versus
+    something accepting and not answering -- so a summary that showed only the
+    first would send the operator at the wrong half.
+    """
+    first, *rest = WEB_PORT_CANDIDATES
+    answers = {first: readiness_verdict(TimeoutError("timed out"))}
+    answers.update({port: _refused() for port in rest})
+    port, headline, detail = serving_verdict(answers)
+    assert port == 0
+    assert "timed out" in headline and "connection refused" in headline, headline
+    assert len(detail) == 2, f"two distinct reasons, two advice lines: {detail}"
+
+
+def test_a_port_that_answered_wins_over_the_ones_that_did_not():
+    """The positive path, in candidate order rather than dict order."""
+    answers = {port: _refused() for port in WEB_PORT_CANDIDATES}
+    answers[WEB_PORT_CANDIDATES[-1]] = readiness_verdict(200)
+    port, headline, detail = serving_verdict(answers)
+    assert port == WEB_PORT_CANDIDATES[-1], f"the port that answered 200 is {port}"
+    assert "200" in headline, headline
+    assert detail == [], f"a serving page has no failure advice to give: {detail}"
+
+
+def test_nothing_probed_is_not_an_all_clear():
+    """Rule 14: "(none) is a result". An empty probe set must not read as serving."""
+    port, headline, _detail = serving_verdict({})
+    assert port == 0
+    assert "NOT ESTABLISHED" in headline, headline
+
+
+def test_say_wrapped_keeps_a_value_inside_the_report_width(capsys):
+    """Prose that arrives as a VALUE has no author at the print site.
+
+    readiness_verdict()'s advice is 150 characters. Printed raw under a 20-column
+    indent it ran to 190 and the terminal broke it at an arbitrary column with no
+    indent, so the continuation ran back under the label column and read as a new
+    field. A report whose columns stop lining up halfway down is one an operator
+    stops trusting.
+    """
+    advice = readiness_verdict(ConnectionRefusedError(111, "refused"))[2]
+    assert len(advice) > 100, f"this test is pointless if the advice is short: {len(advice)}"
+    swap_stack.say_wrapped(" " * 20, advice)
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) > 1, "a 150-character value under a 20-column indent must wrap"
+    for line in lines:
+        assert len(line) <= swap_stack._REPORT_WIDTH, f"{len(line)} columns: {line}"
+        assert line.startswith(" " * 20), f"a continuation line lost its indent: {line!r}"
+
+
+def test_say_wrapped_prints_the_label_even_when_the_value_is_empty(capsys):
+    """textwrap.wrap("") is [], and a label with nothing under it is rule 14's blank gap."""
+    swap_stack.say_wrapped(" " * 20, "", first="  LABEL   ")
+    out = capsys.readouterr().out
+    assert "LABEL" in out, f"an empty value swallowed its own label: {out!r}"
 
 
 def test_serving_verdicts_zero_means_nothing_answered_not_port_zero():
@@ -1696,14 +1849,47 @@ def test_a_partial_read_is_counted_and_does_not_look_like_a_complete_one(capsys)
     )
 
 
+def _trouble_block(out: str, name: str) -> list[str]:
+    """The COULD NOT READ line for `name`, PLUS its wrapped continuations.
+
+    IT USED TO FILTER FOR ONE LINE carrying both the name and "COULD NOT READ",
+    which worked only while the whole message was on that one line. It is not:
+    the trouble text quotes docker's stderr verbatim, so on the 2026-10-09
+    `status` run these four lines came out at 326 to 495 columns and the terminal
+    broke each at an arbitrary column with no indent. swap_stack.py now wraps
+    them under the label column, and the single-line filter then found the label
+    and dropped every word after the first wrap -- so the assertion below failed
+    on output that said exactly what it demanded, two lines further down.
+
+    Reading the BLOCK is also the stronger claim, which is why this is not merely
+    a repair (rule 2: its test changes to pin the stronger invariant). What the
+    test cares about is that the cost is stated WITH the failure, where an
+    operator reading that failure will see it -- not merely somewhere in 120
+    lines of report. Searching the whole output would have passed for a sentence
+    printed thirty lines away under a different heading.
+    """
+    lines = out.splitlines()
+    for at, line in enumerate(lines):
+        if name in line and "COULD NOT READ" in line:
+            block = [line]
+            for following in lines[at + 1:]:
+                # A continuation is indented to the label column and is not itself
+                # a new label. `  LABEL  text` has non-space before column 20.
+                if following.startswith(" " * 20) and following.strip():
+                    block.append(following)
+                else:
+                    break
+            return block
+    return []
+
+
 def test_a_missing_candid_ui_says_what_it_costs(capsys):
     """Not "could not read" -- WHICH links stop being written, and why none is faked."""
     out = _surface_map_output(capsys, lambda name, files: (
         ("", "unreachable", "exited 1: Cannot find canister id")
         if name == CANDID_UI_CANISTER_NAME else _all_found(name, files)
     ))
-    cost = [line for line in out.splitlines() if CANDID_UI_CANISTER_NAME in line
-            and "COULD NOT READ" in line]
+    cost = _trouble_block(out, CANDID_UI_CANISTER_NAME)
     assert cost, f"the failed Candid UI lookup produced no trouble line:\n{out}"
     said = " ".join(cost)
     assert "no CANDID link is written" in said, (
@@ -2000,6 +2186,54 @@ def test_the_probe_refuses_a_url_it_was_never_meant_to_open():
     for refused in ("file:///etc/passwd", "http://evil.example/", "ftp://127.0.0.1:4943/"):
         with pytest.raises(ValueError, match="loopback only"):
             swap_stack.wait_for_http(refused, 0.1, announce=False)
+
+
+def test_only_a_reachable_verdict_exits_zero():
+    """`chains` is a health check, and three of its four verdicts are not success.
+
+    Rule 13: "treat 'skipped' plus 'success' in the same output as a defect". A
+    check that exits 0 because NOBODY ASKED is worse than no check, because
+    something downstream reads the 0 and stops looking. `none_asked` means no
+    adapter has a read-only probe and `unknown` means the endpoint could not be
+    read; neither is an all-clear.
+    """
+    assert chain_exit_code("reachable") == 0
+    for verdict in ("unreachable", "none_asked", "unknown"):
+        assert chain_exit_code(verdict) == 1, f"{verdict} exited 0, which reads as an all-clear"
+
+
+def test_every_verdict_the_reader_can_return_has_an_exit_code():
+    """DERIVED FROM THE VERDICTS THEMSELVES, not from a list written twice.
+
+    Drives chain_reachability_verdict() through each of its four outcomes and
+    asks chain_exit_code() for every status it produced. A fifth verdict added
+    without a code fails here rather than in front of the operator.
+    """
+    produced = {
+        chain_reachability_verdict(None, "connection refused")[0],
+        chain_reachability_verdict({"error": "boom"})[0],
+        chain_reachability_verdict(_chain_body(ICP=None, SOL=None))[0],
+        chain_reachability_verdict(_chain_body(BTC=True, XRP=True))[0],
+        chain_reachability_verdict(_chain_body(BTC=False, XRP=True))[0],
+    }
+    assert produced == set(CHAIN_EXIT_CODES), (
+        f"the verdicts the reader produces and the ones with exit codes differ: "
+        f"produced-only {produced - set(CHAIN_EXIT_CODES)}, "
+        f"coded-only {set(CHAIN_EXIT_CODES) - produced}"
+    )
+    for status in produced:
+        assert chain_exit_code(status) in (0, 1), status
+
+
+def test_an_unknown_verdict_raises_rather_than_defaulting_to_failure():
+    """`.get(status, 1)` would hide a bug behind a plausible code forever.
+
+    An unmapped verdict reading as failure LOOKS safe, which is why it would
+    never be noticed -- the same "right for the wrong reason" shape the trouble
+    branch of chain_reachability_verdict() was found to have.
+    """
+    with pytest.raises(KeyError, match="no exit code for chain verdict"):
+        chain_exit_code("probably_fine")
 
 
 def test_the_envelope_derives_its_own_attempt_count():

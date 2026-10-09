@@ -397,8 +397,19 @@ def container_id(cgroup: str) -> str | None:
     return None
 
 
-def readiness_verdict(outcome: object) -> tuple[bool, str]:
-    """Interpret one probe of a service's own endpoint: (ready, what it means).
+def readiness_verdict(outcome: object) -> tuple[bool, str, str]:
+    """Interpret one probe of a service's own endpoint: (ready, short reason, advice).
+
+    THREE PARTS RATHER THAN TWO, and the split is what lets a caller choose. The
+    SUMMARY is the short reason -- "connection refused", "answered 200",
+    "timed out" -- short enough for a progress line printed once per port or a
+    column in a table. The ADVICE is the paragraph a reader needs ONCE: which two
+    readings a refusal has, which command separates them. probe_detail() joins
+    them for the places that want the whole sentence.
+
+    It returned one combined string until 2026-10-09, which left callers no way
+    to show the reason without the paragraph. See probe_detail() for what that
+    printed.
 
     WHY A PROBE AT ALL, when swap_stack.py already binds the port. Measured
     2026-10-07: `up` reported
@@ -423,8 +434,8 @@ def readiness_verdict(outcome: object) -> tuple[bool, str]:
         # is listening, which is what this is asked to decide, so it is reported
         # with its code rather than collapsed into "not ready".
         if outcome == _HTTP_OK:
-            return True, f"answered {outcome}"
-        return True, f"answered {outcome} -- listening, but not the 200 dfx's status gives"
+            return True, f"answered {outcome}", ""
+        return True, f"answered {outcome}", "listening, but not the 200 dfx's status gives"
     if isinstance(outcome, ConnectionRefusedError):
         # TWO READINGS AND THIS SENTENCE USED TO ASSERT ONLY ONE OF THEM, WHICH
         # MADE IT FALSE HALF THE TIME. It read "the port is bound and nothing is
@@ -440,16 +451,40 @@ def readiness_verdict(outcome: object) -> tuple[bool, str]:
         # prints on a screen the operator is using to decide what to fix.
         #
         # Neither reading is derivable from the refusal itself, so both are named.
-        return False, (
-            "connection refused -- either nothing is bound here at all, or a published container "
-            "port is bound by docker-proxy and the process inside has not opened it yet. "
+        return False, "connection refused", (
+            "either nothing is bound here at all, or a published container port is bound by "
+            "docker-proxy and the process inside has not opened it yet. "
             "`docker compose ps` distinguishes them"
         )
     if isinstance(outcome, TimeoutError):
-        return False, "timed out -- something accepted the connection and did not answer"
+        return False, "timed out", "something accepted the connection and did not answer"
     if isinstance(outcome, OSError):
-        return False, f"{type(outcome).__name__}: {outcome}"
-    return False, f"unrecognized probe outcome {outcome!r} -- treated as NOT ready rather than guessed"
+        return False, f"{type(outcome).__name__}: {outcome}", ""
+    return (
+        False,
+        f"unrecognized probe outcome {outcome!r}",
+        "treated as NOT ready rather than guessed",
+    )
+
+
+def probe_detail(verdict: tuple[bool, str, str]) -> str:
+    """The short reason and its advice as one sentence, for showing it ONCE.
+
+    THE ONLY PLACE THE TWO HALVES ARE JOINED, so a caller that shows the reason
+    many times (a progress line, one per port) can take the summary alone and a
+    caller that shows it once can have the whole thing. Before the split there
+    was only the whole thing, and `swap_stack.py chains` with nothing up printed
+    the same 40-word refusal sentence FIVE times on one screen -- four progress
+    lines and the summary -- which is the defect wait_for_http()'s announce=False
+    comment describes ("twelve copies of one sentence is the same defect as
+    silence approached from the other side") arriving by a different route.
+
+    An empty advice yields the summary alone rather than a trailing " -- ",
+    because two of the six branches have nothing to add: a 200 needs no gloss and
+    an OSError already carries its own message.
+    """
+    _ready, summary, advice = verdict
+    return f"{summary} -- {advice}" if advice else summary
 
 
 def container_label(inspect_output: str) -> str:
@@ -620,11 +655,11 @@ def down_verdict(bound_ports: list[int] | tuple[int, ...], owned_listeners: int)
 WEB_PORT_CANDIDATES = (5101, 5100, 5000, 5102)
 
 
-def serving_verdict(answers: dict[int, object]) -> tuple[int, str]:
-    """(port, detail) for the first candidate that answered, or (0, why none did).
+def serving_verdict(answers: dict[int, tuple[bool, str, str]]) -> tuple[int, str, list[str]]:
+    """(port, headline, detail lines) for the candidate that answered, or port 0.
 
     PURE, so the decision "is the page serving" is testable without a socket --
-    the caller does the probing and hands the outcomes in, exactly as
+    the caller does the probing and hands the verdicts in, exactly as
     listening_inodes() takes text rather than a path.
 
     WHY THIS IS A DECISION AND NOT A LOOP IN THE REPORT. `up` printed READY for
@@ -633,22 +668,69 @@ def serving_verdict(answers: dict[int, object]) -> tuple[int, str]:
     and a live one printed identically, which is rule 13's "skipped plus success
     in the same output is a defect in the output". Making the verdict a function
     is what lets a test assert that an all-refused probe does NOT read as serving.
+
+    IT TAKES readiness_verdict()'s OUTPUT, NOT A RAW PROBE OUTCOME, AND THAT IS A
+    FIX RATHER THAN A SIGNATURE PREFERENCE. It used to take `dict[int, object]`
+    and call readiness_verdict() itself -- on values its own caller had ALREADY
+    passed through readiness_verdict(). swap_stack.probe_serving_port() stored the
+    rendered SENTENCE, so the second interpretation was handed a str, which is
+    neither an int nor an OSError, and fell through to the final branch:
+
+        NOT SERVING  nothing answered on any candidate port -- :5101 unrecognized
+                     probe outcome 'connection refused -- either nothing is bound
+                     here at all, or a published container port is bound by
+                     docker-proxy and the process inside has not opened it yet.
+                     `docker compose ps` distinguishes them' -- treated as NOT
+                     ready rather than guessed, :5100 unrecognized probe outcome
+                     ... [x4, on one line]
+
+    Measured 2026-10-09 by running `swap_stack.py chains` with nothing up. Two
+    defects in one line, both of them rule 13's "a warning that fires on every
+    run is one the reader learns to ignore":
+
+      - A PLAIN REFUSAL -- the most ordinary outcome a web probe has -- reported
+        as `unrecognized`, i.e. the fail-closed branch firing on the normal case.
+        The careful two-readings sentence that branch 2 of readiness_verdict() was
+        fixed for on 2026-10-07 came back out inside a repr(), with its backticks
+        escaped, reading as a quoted blob rather than as the advice it is.
+      - FOUR COPIES of that 40-word sentence concatenated onto ONE line, which is
+        the "twelve near-identical sentences" wait_for_http()'s own announce=False
+        comment was written to stop, arriving by a different route.
+
+    Interpreting once, at the probe, is what makes both impossible: there is no
+    second interpretation to get wrong, and this function can no longer render a
+    sentence its caller has already printed.
     """
     for port in WEB_PORT_CANDIDATES:
-        outcome = answers.get(port)
-        if outcome is None:
+        verdict = answers.get(port)
+        if verdict is None:
             continue
-        ready, detail = readiness_verdict(outcome)
-        if ready:
-            return port, detail
+        if verdict[0]:
+            return port, probe_detail(verdict), []
     if not answers:
-        return 0, "no port was probed, so whether the page is serving is NOT ESTABLISHED"
-    tried = ", ".join(
-        f":{port} {readiness_verdict(answers[port])[1]}"
-        for port in WEB_PORT_CANDIDATES
-        if port in answers
+        return 0, "no port was probed, so whether the page is serving is NOT ESTABLISHED", []
+    # GROUPED BY DISTINCT REASON, so the common case -- every candidate refusing
+    # for the same reason -- prints that reason ONCE with the ports beside it
+    # instead of once per port. Nothing is lost: when two ports fail differently
+    # both reasons appear, each named with the ports that gave it. Dict insertion
+    # order is WEB_PORT_CANDIDATES order, so the first reason listed is the first
+    # port probed (rule 14: the order is the order they were asked in).
+    by_reason: dict[str, list[int]] = {}
+    advice_for: dict[str, str] = {}
+    for port in WEB_PORT_CANDIDATES:
+        if port in answers:
+            _ready, summary, advice = answers[port]
+            by_reason.setdefault(summary, []).append(port)
+            advice_for[summary] = advice
+    tried = "; ".join(
+        f"{', '.join(f':{port}' for port in ports)} {summary}" for summary, ports in by_reason.items()
     )
-    return 0, f"nothing answered on any candidate port -- {tried}"
+    asked = sum(len(ports) for ports in by_reason.values())
+    # THE ADVICE ONCE PER DISTINCT REASON, never once per port. Four candidates
+    # refusing for the same reason is the ordinary case, and it used to print that
+    # reason's paragraph four times in the headline and four more as progress.
+    detail = [f"{summary}: {advice_for[summary]}" for summary in by_reason if advice_for[summary]]
+    return 0, f"nothing answered on any of the {asked} candidate port(s) -- {tried}", detail
 
 
 # =============================================================================
@@ -1159,6 +1241,40 @@ def chain_probe_rows(body: object) -> list[dict] | None:
     return rows
 
 
+#: What each chain-reachability verdict means as an EXIT CODE, for `chains`.
+#:
+#: ONLY `reachable` IS ZERO, and the other three are not degrees of success. Rule
+#: 13's "treat 'skipped' plus 'success' in the same output as a defect" is about
+#: exactly this: a health check that exits 0 because nobody asked is worse than
+#: no health check, because something downstream will read the 0 and stop looking.
+#:
+#:   reachable     2  -> 0   every probeable chain answered.
+#:   unreachable   3  -> 1   at least one did not. The verdict that costs money.
+#:   none_asked    4  -> 1   no chain has a probe, so NOTHING was established.
+#:   unknown       5  -> 1   the endpoint could not be read. Never an all-clear.
+#:
+#: A dict rather than `status != "reachable"` so that adding a fifth verdict is a
+#: KeyError here instead of a silent 1 -- an unmapped verdict reading as failure
+#: looks safe and is the same "right for the wrong reason" the trouble branch in
+#: tests/test_stack_authority.py was found to have.
+CHAIN_EXIT_CODES = {"reachable": 0, "unreachable": 1, "none_asked": 1, "unknown": 1}
+
+
+def chain_exit_code(status: str) -> int:
+    """The exit code for a chain-reachability verdict. Raises on an unknown one.
+
+    RAISES RATHER THAN DEFAULTING. A verdict this does not know about is a bug in
+    whoever added it, and `.get(status, 1)` would hide it behind a plausible
+    failure code forever.
+    """
+    if status not in CHAIN_EXIT_CODES:
+        raise KeyError(
+            f"no exit code for chain verdict {status!r}; CHAIN_EXIT_CODES knows "
+            f"{sorted(CHAIN_EXIT_CODES)}"
+        )
+    return CHAIN_EXIT_CODES[status]
+
+
 def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, str, list[str]]:
     """Can the container reach its chain daemons? Pure; takes /api/admin/chains' body.
 
@@ -1599,13 +1715,29 @@ def canister_surface_lines(
             # shape says so rather than naming an id nobody asked for.
             if serves_page:
                 shape = f"http://<id>.localhost:{REPLICA_PORT}/"
+                missing = "the id is the missing part, not the URL"
             elif ui_canister_id:
                 shape = f"http://127.0.0.1:{REPLICA_PORT}/?canisterId={ui_canister_id}&id=<id>"
+                missing = "the id is the missing part, not the URL"
             else:
-                shape = (f"http://127.0.0.1:{REPLICA_PORT}/?canisterId=<the Candid UI canister>"
-                         "&id=<id> -- neither id was read")
+                shape = f"http://127.0.0.1:{REPLICA_PORT}/?canisterId=<the Candid UI canister>&id=<id>"
+                missing = "NEITHER id was read -- this canister's, nor the Candid UI's"
             lines.append(f"{_MAP_CONTINUATION}{what}")
-            lines.append(f"{_MAP_CONTINUATION}its URL would be {shape} -- the id is the missing part")
+            # THREE LINES, NOT ONE 156-COLUMN LINE, and the third one is a FIX
+            # rather than a reflow. It used to read
+            #
+            #     its URL would be http://...?canisterId=<the Candid UI canister>
+            #     &id=<id> -- neither id was read -- the id is the missing part
+            #
+            # with TWO `--` clauses saying almost the same thing, one of them
+            # inside `shape` and one appended to every branch. "neither id was
+            # read" is true only of the third branch and "the id is the missing
+            # part" is singular, so the two together told a reader with ONE
+            # missing id that neither was read, and a reader with BOTH missing
+            # that one was. Which ids are missing decides what they go and look
+            # up, so it is named per branch now.
+            lines.append(f"{_MAP_CONTINUATION}its URL would be {shape}")
+            lines.append(f"{_MAP_CONTINUATION}{missing}")
             continue
         if serves_page:
             lines.append(f"    {'PAGE':<6} {name:<20} http://{ident}.localhost:{REPLICA_PORT}/")
