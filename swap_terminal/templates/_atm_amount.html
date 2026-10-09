@@ -60,4 +60,22 @@
          value="{{ answers.amount or '' }}" autocomplete="off" required>
 </div>
 
-<button type="submit" class="primary">Next</button>
+{#- "GET THE QUOTE" AND NOT "NEXT". Operator, 2026-10-09: "next screen will be
+    the either/or amount and get the quote and keep the fees to the right."
+
+    AND IT HAS TO SAY WHERE THE FIGURES APPEAR, because the button does two
+    things and a label can only name one. Pressing it prices what was typed and
+    asks the next question; the priced figures land in the right-hand column of
+    THAT screen, which is the first one on which both the pair and the amount are
+    settled. A button called "Get the quote" that appeared to produce an address
+    box and nothing else would be rule 14's silence -- the work happened and the
+    screen did not say so.
+
+    NO QUOTE ROW IS WRITTEN BY THIS BUTTON, and the note says "estimate" for that
+    reason. services/quote_service.create_quote() runs at the confirm button and
+    fixes the rate from its own read; templates/_atm_confirm.html argues for why.
+    A label promising a held price would be a claim this flow does not make. -#}
+<button type="submit" class="primary">Get the quote</button>
+<p class="atm-note">The figures appear beside the next question &mdash; what you send, what you
+   receive and the fee &mdash; as an estimate at the rate read then. The price is fixed when you
+   confirm, not here.</p>

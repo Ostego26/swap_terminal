@@ -20,20 +20,23 @@ quote_service.py:582 and :615, and every assertion round-trips through it.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
 
 import pytest
 from chains.amount_solve import (
     CAPACITY_NOT_ESTABLISHED,
     CHAIN_PRECISION,
+    UNSOLVABLE_DEPOSIT,
     UNSOLVABLE_FEE,
     UNSOLVABLE_OUTPUT,
     UNSOLVABLE_PRECISION,
     UNSOLVABLE_RATE,
     deposit_for_desired_payout,
     max_deposit_for_capacity,
+    payout_for_deposit,
     payout_multiplier,
+    quantize_down,
 )
 from chains.coin_amounts import CHAIN_DECIMALS
 from chains.icp_account import ICP_DECIMALS
@@ -317,3 +320,150 @@ def test_a_capacity_solve_refuses_the_same_unsolvable_inputs():
     assert max_deposit_for_capacity(300.0, 0.0, 150, "ICP") == (0.0, UNSOLVABLE_RATE)
     assert max_deposit_for_capacity(300.0, 321.7, 10000, "ICP") == (0.0, UNSOLVABLE_FEE)
     assert max_deposit_for_capacity(300.0, 321.7, 150, "DOGE") == (0.0, UNSOLVABLE_PRECISION)
+
+
+# ===========================================================================
+# THE FORWARD DIRECTION, added 2026-10-09 with chains/amount_solve.
+# payout_for_deposit().
+#
+# The file above exists because an inverse that disagrees with the forward is a
+# silent defect. The forward now has a function of its own -- so that the ATM's
+# address and review screens can state what a deposit buys without a database --
+# and it inherits the identical hazard: a third expression for one relationship.
+#
+# `forward_payout` at the top of this file is quote_service.py's two statements
+# copied verbatim, and test_the_forward_copy_matches_quote_service_source reads
+# the real source to keep the copy honest. So these tests round-trip the new
+# function through THAT, which makes the chain complete: quote_service's source
+# -> the copy -> payout_for_deposit(). A fee change that lands on one of the
+# three fails here.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("asset", sorted(CHAIN_PRECISION))
+def test_the_forward_solver_is_the_forward_expression_quantized(asset):
+    """payout_for_deposit() must be forward_payout(), cut to the chain's precision.
+
+    Swept over every chain this system knows and over the live fee alongside two
+    extremes, because the one thing this function adds to the expression is a
+    rounding step and a rounding step is only wrong at the boundary.
+    """
+    for rate in (0.0005, 1.0, 321.7, 62000.0):
+        for fee_bps in (0, int(Config.DEFAULT_FEE_BPS), 9999):
+            for deposit in (0.001, 1.0, 7.77777777, 1234.5):
+                got, refusal = payout_for_deposit(deposit, rate, fee_bps, asset)
+                assert refusal == ""
+                exact = Decimal(repr(forward_payout(deposit, rate, fee_bps)))
+                step = Decimal(1).scaleb(-CHAIN_PRECISION[asset])
+                assert Decimal(repr(got)) == exact.quantize(step, rounding=ROUND_FLOOR), (
+                    f"{asset} at rate {rate} fee {fee_bps} on {deposit}: the forward solver and "
+                    f"quote_service's own expression disagree"
+                )
+
+
+@pytest.mark.parametrize("asset", sorted(CHAIN_PRECISION))
+def test_a_displayed_payout_is_never_more_than_the_price_actually_gives(asset):
+    """The rounding direction, which is the only decision in the function.
+
+    DOWN, and the module docstring's table says why: this figure is PRINTED
+    before a customer decides, so rounding it up is a terminal promising a
+    fraction more than the quote will deliver. The other two solvers in that file
+    round the other way for reasons about money that has already moved; swapping
+    this one would look identical in every other test.
+
+    Swept rather than spot-checked, over values chosen to land on and off the
+    chain's own precision boundary -- a ceiling and a floor agree everywhere
+    except there, which is exactly where a swapped mode would hide.
+    """
+    step = 10.0 ** -CHAIN_PRECISION[asset]
+    for deposit in (1.0, 1.0 + step, 3.0 - step / 2, 999.999999):
+        got, refusal = payout_for_deposit(deposit, 321.7, int(Config.DEFAULT_FEE_BPS), asset)
+        assert refusal == ""
+        assert got <= forward_payout(deposit, 321.7, int(Config.DEFAULT_FEE_BPS)) + 1e-12, (
+            f"{asset}: the printed payout {got} is ABOVE what the price gives for {deposit}, so the "
+            "screen is promising more than the quote will deliver"
+        )
+
+
+def test_the_two_directions_round_trip_without_ever_shorting_the_customer():
+    """Solve a deposit for a payout, price that deposit, and the payout is not less.
+
+    THE PROPERTY THAT TIES THE FILE TOGETHER, and it is what the ATM's review
+    screen now relies on: services/wizard.both_sides() shows the solved deposit
+    AND what that deposit buys, so if these two functions disagreed about
+    direction the screen would quote a customer less than they asked for.
+
+    Both roundings have to be right for this to hold -- the deposit UP and the
+    payout DOWN -- so a swap of either mode breaks it.
+    """
+    for asset_pair in (("ICP", "GRC"), ("BTC", "GRC"), ("GRC", "BTC"), ("XRP", "SOL")):
+        source, destination = asset_pair
+        for wanted in (0.5, 300.0, 1234.56):
+            deposit, refusal = deposit_for_desired_payout(wanted, 321.7, 150, source)
+            assert refusal == ""
+            delivered, refusal = payout_for_deposit(deposit, 321.7, 150, destination)
+            assert refusal == ""
+            assert delivered >= wanted, (
+                f"{source}->{destination}: asked for {wanted}, the solved deposit {deposit} prices to "
+                f"{delivered} -- a customer would be shown less than they typed"
+            )
+
+
+def test_the_forward_solver_refuses_the_same_unsolvable_inputs():
+    """Its refusals must line up with the inverse's, or one of them is wrong.
+
+    A ZERO DEPOSIT HAS ITS OWN SENTENCE and does not share UNSOLVABLE_OUTPUT.
+    The two name different boxes on the screen -- one is what you send and the
+    other is what you want back -- and a customer sent to re-read the wrong field
+    is rule 14's failure on the one screen that takes a number.
+    """
+    assert payout_for_deposit(0.0, 321.7, 150, "GRC") == (0.0, UNSOLVABLE_DEPOSIT)
+    assert payout_for_deposit(-1.0, 321.7, 150, "GRC") == (0.0, UNSOLVABLE_DEPOSIT)
+    assert UNSOLVABLE_DEPOSIT != UNSOLVABLE_OUTPUT, (
+        "the two directions' 'not a positive amount' sentences have become one, so a customer who "
+        "typed a bad SEND figure is now told about the RECEIVE box"
+    )
+    assert payout_for_deposit(1.0, 0.0, 150, "GRC") == (0.0, UNSOLVABLE_RATE)
+    assert payout_for_deposit(1.0, 321.7, 10000, "GRC") == (0.0, UNSOLVABLE_FEE)
+    assert payout_for_deposit(1.0, 321.7, 150, "DOGE") == (0.0, UNSOLVABLE_PRECISION)
+
+
+def test_a_desk_figure_is_cut_to_the_chains_precision_before_it_is_printed():
+    """The 407.50974481000003 case, which is the measurement that added this.
+
+    MEASURED on the real amount screen 2026-10-09 with a GRC desk balance of
+    407.51074481 and a 0.001 reserve: services/payout_capacity.
+    largest_fundable_payout() subtracts them in float and the ceiling line
+    rendered
+
+        Most you can send: 0.00020685 BTC -- because that is all this desk can pay
+        out on the other side (407.50974481000003 GRC).
+
+    Seventeen significant digits, five of which describe nothing that exists on
+    any chain. The value is not wrong; its PRINTED form says this terminal cannot
+    count.
+    """
+    assert quantize_down(407.51074481 - 0.001, "GRC") == (407.50974481, "")
+
+    # DOWN, like payout_for_deposit() and for the same reason: this is the desk's
+    # own capacity, and a displayed maximum rounded UP is one the desk cannot pay.
+    cut, refusal = quantize_down(1.123456789, "GRC")
+    assert (cut, refusal) == (1.12345678, "")
+    assert cut < 1.123456789
+
+    # An exact value is unchanged, so this cannot be a function that quietly
+    # perturbs every figure it is handed.
+    assert quantize_down(407.5, "GRC") == (407.5, "")
+    assert quantize_down(0.0, "GRC") == (0.0, "")
+
+
+def test_an_unknown_chain_is_reported_rather_than_silently_unquantized():
+    """A passthrough that says nothing is indistinguishable from nothing to do.
+
+    This returns the figure AS GIVEN plus the reason, so a caller that started
+    printing raw floats for a new chain can find out why. Rule 13: did-nothing
+    must not look like did-work.
+    """
+    value, refusal = quantize_down(1.23456789012, "DOGE")
+    assert value == 1.23456789012, "an unknown chain's figure must not be altered"
+    assert refusal == UNSOLVABLE_PRECISION, "and the caller must be told it was not quantized"

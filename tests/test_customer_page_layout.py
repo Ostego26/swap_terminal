@@ -665,6 +665,171 @@ def test_the_retired_label_value_grids_have_no_call_site_left():
     assert offenders == {}, f"the retired grids are still named: {offenders}"
 
 
+def test_the_atm_screens_two_columns_become_one_rather_than_overflowing():
+    """The phone decision for the ATM's right-hand column, and it is TWO claims.
+
+    Operator 2026-10-09 asked for "the colum to the right the fees etc", and a
+    right-hand column that squeezes the coin buttons to a strip on a narrow
+    screen is a regression rather than a layout. Two separate things have to be
+    true and only one of them is about the column count:
+
+      IT WRAPS -- the two flex bases plus the gap cannot both fit a phone, so the
+          aside drops onto its own line with no media query to keep in step.
+      IT SHRINKS -- a flex item whose shrink factor is zero does NOT fit a phone,
+          it OVERFLOWS it. That is not hypothetical here: the first version of
+          this rule was `repeat(auto-fit, minmax(34rem, 1fr))`, which wraps
+          correctly and then renders a 544px column inside a 390px viewport.
+          Measured in Chromium on three of the five screens --
+          documentElement.scrollWidth 560 against innerWidth 390 -- which is a
+          horizontal scrollbar on a kiosk flow. A grid track has no shrink
+          factor; a flex item does, and that is why this is flex.
+
+    NOT BEHAVIORAL, for the reason the two tests above give: no browser in this
+    suite. The layout WAS rendered and measured in one during the change, at
+    1280 and 390, and this pins the declarations that measurement depended on --
+    which is the part a later edit can break silently.
+    """
+    css = STYLESHEET.read_text()
+    screen = re.search(r"\.atm-screen\s*\{(.*?)\}", css, flags=re.DOTALL)
+    assert screen, "the ATM screen wrapper has no rule"
+    assert "flex-wrap: wrap" in screen.group(1), (
+        "the two columns no longer wrap, so the aside cannot drop below the question on a phone"
+    )
+
+    bases, grows = {}, {}
+    for name in ("panel", "atm-aside"):
+        rule = re.search(rf"\.atm-screen > \.{name}\s*\{{(.*?)\}}", css, flags=re.DOTALL)
+        assert rule, f".atm-screen > .{name} has no flex rule, so its width is unmanaged"
+        shorthand = re.search(r"flex:\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)rem", rule.group(1))
+        assert shorthand, f".{name}'s flex shorthand is not `grow shrink basis-in-rem`: {rule.group(1)!r}"
+        grow, shrink, basis = shorthand.groups()
+        grows[name] = float(grow)
+        assert float(shrink) > 0, (
+            f".{name} has flex-shrink {shrink}, so below its {basis}rem basis it overflows the "
+            "viewport instead of fitting it -- the exact failure auto-fit produced here"
+        )
+        bases[name] = float(basis) * 16
+
+    assert bases["panel"] > bases["atm-aside"], (
+        "the reference column is no narrower than the question, so a customer gets as much room "
+        "for the fee table as for the thing they came to do"
+    )
+    assert grows["panel"] > grows["atm-aside"], (
+        f"the question grows at {grows['panel']} and the reference at {grows['atm-aside']}, so the "
+        "extra width on a desk monitor goes to the fee table rather than to the coin buttons"
+    )
+    assert sum(bases.values()) + 16 > 560, (
+        f"the two bases are {bases} and total {sum(bases.values()) + 16:.0f}px with the gap, which "
+        "fits a 560px phone -- so the fee table would sit beside the coin buttons there"
+    )
+
+
+def test_the_reviews_phone_override_actually_outranks_the_rule_it_overrides():
+    """A media query does NOT beat source order, and this one silently did not.
+
+    MEASURED IN CHROMIUM, which is the only reason it was found. `.atm-review >
+    div` is declared at two-column width about 700 lines BELOW the 560px
+    breakpoint. The override written inside that breakpoint was spelled
+    `.atm-review > div` too -- equal specificity, later rule wins, media query
+    irrelevant -- so the review rendered two columns on a 390px phone with
+    "150 bps, taken by sending that much less" running down five lines of two or
+    three words. The stylesheet parsed, the rule was present, and it did nothing.
+    No test in this file would have caught it, because every one of them asks
+    whether a declaration EXISTS.
+
+    So this asks the question that actually decides it: does the override's
+    selector carry more class-level specificity than the rule it is fighting? A
+    count of class selectors is a weak proxy for the cascade in general and is
+    exact for this pair, which differ only by a prepended ancestor class.
+
+    Same family as tests/test_atm_surface_is_styled.py's
+    test_the_tiles_do_not_ALSO_take_the_operator_strips_grid -- "which one wins is
+    decided by source order in styles.css" -- approached from the other side.
+    """
+    css = STYLESHEET.read_text()
+    bare = re.sub(r"/\*.*?\*/", " ", css, flags=re.DOTALL)
+
+    base = re.search(r"(?<!\.atm )\.atm-review > div\s*\{", bare)
+    assert base, "the review's own row rule is gone; this test guards an override of it"
+
+    override = re.search(r"([.\w \[\]=\"-]*\.atm-review > div)\s*\{[^}]*grid-template-columns:\s*1fr",
+                         bare)
+    assert override, (
+        "nothing collapses the review to one column at phone width, so five label/value rows share "
+        "a 358px screen two columns wide"
+    )
+    selector = override.group(1).strip()
+    assert selector.count(".") > ".atm-review > div".count("."), (
+        f"the phone override is spelled {selector!r}, which has the SAME specificity as the "
+        "two-column rule declared later in the file. The later rule wins and the override is inert "
+        "-- which is exactly how it shipped the first time, parsing cleanly and doing nothing."
+    )
+    assert bare.index(selector) < bare.index(base.group(0)), (
+        "the override now sits after the rule it overrides, so the extra specificity is carrying "
+        "weight it no longer needs -- which hides the next edit that drops it"
+    )
+    assert ".atm-review dd.num { text-align: left; }" in bare.replace(".atm .atm-review", ".atm-review"), (
+        "a stacked review still right-aligns its figures, so each value floats to the far side of "
+        "the panel from the label it belongs to -- the defect `.kvt td.num` is fixed for above"
+    )
+
+
+def test_the_narrow_column_table_stacks_the_same_way_the_phone_one_does():
+    """Two rules, one treatment, and BOTH must exist or the aside clips its prose.
+
+    `.kvt-stacked` is a table that stacks because its COLUMN is narrow;
+    the `@media (max-width: 560px)` block above stacks every `.kvt` because the
+    SCREEN is. They are two declaration blocks for one treatment, which is rule
+    8's hazard -- so they are pinned together here and each one's comment in the
+    stylesheet names the other.
+
+    WHY TWO AND NOT ONE. Plain CSS cannot share a declaration block between a
+    media query and a class. A container query could, and converting every `.kvt`
+    on the swap and operator pages to one is a tree-wide restyle with no
+    behavioral benefit, which is the trade rule 12 refuses.
+
+    WHAT IT COSTS IF THE CLASS GOES. The costs table is three columns and the
+    third is prose; in a ~340px aside, unstacked, the label takes its content
+    width and the explanation is left with about ten characters a line. That is
+    the clipped text a two-column layout exists to avoid, arriving inside the
+    column that was meant to be the improvement.
+    """
+    css = STYLESHEET.read_text()
+
+    for declaration in (".kvt-stacked tbody tr {", ".kvt-stacked th[scope=\"row\"],",
+                        ".kvt-stacked td.num { text-align: left; }"):
+        assert declaration in css, f"the narrow-column table lost {declaration!r}"
+
+    # THE PHONE BLOCK IS BOUNDED BY ITS OWN BRACES AND COMMENTS ARE STRIPPED
+    # FIRST, and the first version of this was bounded by "whatever @media comes
+    # next" and failed on its own evidence: the stylesheet's comment inside the
+    # breakpoint NAMES `.kvt-stacked` (rule 8 asks for exactly that cross
+    # reference), and the slice ran past the closing brace into the new block.
+    # Both are the same mistake tests/test_customer_page_layout.status_card_of()
+    # records -- a region found by what follows it rather than by where it ends.
+    bare = re.sub(r"/\*.*?\*/", " ", css, flags=re.DOTALL)
+    start = bare.index("@media (max-width: 560px)")
+    depth, end = 0, None
+    for match in re.finditer(r"[{}]", bare[start:]):
+        depth += 1 if match.group(0) == "{" else -1
+        if depth == 0:
+            end = start + match.end()
+            break
+    assert end, "the phone breakpoint is never closed"
+    assert ".kvt-stacked" not in bare[start:end], (
+        "the narrow-column rules were moved INSIDE the phone breakpoint, so the aside's table is "
+        "three columns on every desktop -- which is the clipping this class exists to prevent"
+    )
+    assert ".kvt tbody tr {" in bare[start:end], (
+        "the phone breakpoint no longer stacks a plain .kvt, so the swap page's label/value tables "
+        "went back to two columns at 360px"
+    )
+    assert ".kvt-stacked thead { display: none; }" in css, (
+        "a stacked table still prints 'term / value / what it decides' above its first row, "
+        "labelling three columns that are no longer on screen"
+    )
+
+
 def test_the_label_value_tables_stack_rather_than_scroll_at_phone_width():
     """The phone decision, stated once so it cannot be read as an accident.
 

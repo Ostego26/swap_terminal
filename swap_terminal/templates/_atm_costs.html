@@ -1,0 +1,124 @@
+{#
+  What a swap costs, and -- where an amount is settled -- what this one comes to.
+
+  Role: template partial (rendering only; holds no decision)
+  Reads: fee_bps, quote_ttl_seconds, tolerance_pct and `estimate`, all put in
+         the context by routes/atm.render_step()
+  Writes: nothing
+  Can move funds: no
+  Mainnet-safe: yes
+
+  ITS OWN FILE SINCE 2026-10-09, because it is now included from one place and
+  rendered on three screens rather than appended once to the bottom of step 1.
+  Operator: "the colum to the right the fees etc" and "keep the fees to the
+  right." templates/atm.html's aside includes it; services/wizard.
+  screen_furniture() decides which steps have that aside.
+
+  THE TABLE IS CARRIED VERBATIM and that is not laziness, it is the second time
+  this content has been moved and the first move broke three tests by rewriting
+  it. atm.html's own comment records it: "the first version of this merge rewrote
+  it as a <dl> and broke three tests saying so: the key had no heading, the terms
+  table had no 'Service fee' row, and no row was labeled 'Network fee'. Those
+  tests were right and my rewrite was the defect." A reworded explanation is a
+  second wording of one explanation -- rule 8 arriving as prose -- and that
+  rewrite silently dropped the Network fee row whose whole point is to say "(not
+  fixed)" rather than invent a figure (rule 14).
+
+  SO THE MARKUP IS UNCHANGED EXCEPT FOR ONE CLASS. `kvt-stacked` makes the three
+  columns stack into label / value / explanation, because this table now lives in
+  a ~340px column where a prose third column would be about ten characters wide.
+  That is the clipped-text regression a two-column layout exists to avoid, and
+  the rule is the same treatment the phone breakpoint already gives every `.kvt`
+  -- see static/styles.css, where both sites name the other.
+#}
+{#- THE ESTIMATE COMES FIRST AND THE STANDING REFERENCE SECOND. Specific before
+    general: on screen 4 these two figures are what the customer just pressed "Get
+    the quote" for, and the fee schedule is the same on every screen and every
+    day. It matters most on a phone, where the column stacks UNDER the question --
+    measured at 390px with the other order, the quote sat at the very bottom of a
+    2155px page behind the whole four-row costs table, which is the furthest
+    possible place from the button that produced it (rule 14: a screen that did
+    work must say so where the person is looking). -#}
+{#- WHAT THIS ONE COMES TO, on the screens where both the pair and the amount are
+    settled. `estimate` is empty elsewhere, so this block is simply absent rather
+    than rendering an empty box.
+
+    THE WORD "ESTIMATE" IS LOAD-BEARING AND IS NOT A DISCLAIMER. No quote row
+    exists yet: services/quote_service.create_quote() runs at the confirm button
+    and fixes the rate from its own read of the feed (routes/atm.py's header says
+    so, and templates/_atm_confirm.html argues for it -- pricing before a screen
+    a customer pauses on would make an expired quote the ordinary case). So these
+    two figures are what the trade comes to at a rate read a moment ago, and the
+    quote window sits in the table directly above them.
+
+    THE SEND SIDE IS THE POINT OF THE BLOCK, not the receive side. A customer who
+    answered "I want 300 GRC" was never shown the deposit they must make: step
+    5's review printed "&#8776; solved from what you want" where the number goes,
+    and routes/atm._commit() solved the real figure only AFTER the confirm button.
+    They agreed to send an amount nobody had told them. services/wizard.
+    both_sides() is what states it here, and _commit() still re-solves it from the
+    same inputs rather than trusting a figure carried through the browser.
+
+    A REFUSAL PRINTS INSTEAD OF THE FIGURES, never beside them, and it is the
+    solver's own sentence (chains/amount_solve.py's UNSOLVABLE_* are written to be
+    read off a screen). A blank where a number belongs is ambiguous between zero
+    and broken (rule 14). -#}
+{% if estimate %}
+<section class="atm-aside-block" aria-labelledby="estimate-heading">
+  <h3 id="estimate-heading" class="atm-aside-subheading">What this one comes to</h3>
+  {% if estimate.refusal %}
+  <p class="atm-estimate-unknown">
+    <strong>No figures can be shown right now.</strong> {{ estimate.refusal }}
+    Nothing has been created and nothing is owed; the price is read again when you confirm.
+  </p>
+  {% else %}
+  <dl class="atm-estimate">
+    <div><dt>You send</dt><dd class="num">{{ estimate.send }} {{ answers.from_asset }}</dd></div>
+    <div><dt>You receive</dt><dd class="num">{{ estimate.receive }} {{ answers.to_asset }}</dd></div>
+    <div><dt>Service fee</dt><dd class="num">{{ fee_bps }} bps</dd></div>
+  </dl>
+  <p class="atm-estimate-note">
+    An <strong>estimate</strong> at the rate read just now, not a quote. The price is fixed when you
+    press the button on the review screen, and that is the figure the swap is created with.
+    {% if estimate.side == 'receive' %}
+    You typed what you want back, so the send figure above was solved for it and is rounded
+    <em>up</em> &mdash; sending a hair less than a swap expects is what sends a deposit to a human
+    instead of paying it out. The receive figure is what that rounded-up deposit actually buys, so
+    it is a little more than you asked for rather than exactly it.
+    {% endif %}
+  </p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="atm-aside-block" aria-labelledby="terms-heading">
+  <h3 id="terms-heading" class="atm-aside-subheading">What a swap costs, and how long a price lasts</h3>
+  <table class="kvt kvt-stacked">
+    <thead><tr><th scope="col">term</th><th scope="col" class="num">value</th><th scope="col">what it decides</th></tr></thead>
+    <tbody>
+      <tr>
+        <th scope="row">Service fee</th>
+        <td class="num">{{ fee_bps }}</td>
+        <td>basis points, taken out of the payout. {{ (fee_bps / 100) | round(2) }}% of the amount swapped.</td>
+      </tr>
+      <tr>
+        <th scope="row">Quote validity</th>
+        <td class="num">{{ (quote_ttl_seconds / 1.2096) | round(1) }}&#181;fn</td>
+        <td>how long a quoted rate is held ({{ quote_ttl_seconds }}s). Past it, ask for another quote; nothing
+           in this system cancels a swap when a window passes.</td>
+      </tr>
+      <tr>
+        <th scope="row">Amount tolerance</th>
+        <td class="num">{{ (tolerance_pct * 100) | round(2) }}%</td>
+        <td>how far the confirmed deposit may differ from the expected amount. Outside the band the swap is
+           <strong>held for a human</strong> rather than paid out at a rate nobody quoted.</td>
+      </tr>
+      <tr>
+        <th scope="row">Network fee</th>
+        <td><span class="empty-mark">(not fixed)</span></td>
+        <td>the destination chain's own fee, held back out of the payout. It is a chain cost and not this
+           terminal's, so it is not a figure this page can fix in advance.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>

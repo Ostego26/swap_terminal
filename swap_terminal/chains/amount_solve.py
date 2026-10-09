@@ -1,4 +1,11 @@
-"""Solve the deposit amount a customer must send to RECEIVE a chosen payout.
+"""Both sides of one trade at one rate: what to send for a payout, what a deposit buys.
+
+The INVERSE is what this file was built for (deposit_for_desired_payout); the
+FORWARD arrived 2026-10-09 (payout_for_deposit) when the ATM's amount screen had
+to show a customer what they would get before any quote row exists. The header
+below still explains the inverse at length because it is the one with the
+interesting derivation; the forward is one multiplication and its only decision
+is the rounding mode, which the table further down names.
 
 Role: submodule (decisions only -- pure arithmetic, no socket, no database)
 Reads: the per-chain precision constants, imported from the modules that own them
@@ -41,8 +48,20 @@ operator instead of paying out. Round UP and they send a hair more, the deposit
 credits, and the surplus is the desk's by the same arithmetic that already governs
 an over-payment inside tolerance.
 
-TWO DIRECTIONS LIVE IN THIS FILE AND THEY MUST NOT BE SWAPPED.
-max_deposit_for_capacity() at the bottom rounds DOWN, for the mirror-image reason:
+FOUR ROUNDING DECISIONS LIVE IN THIS FILE AND THEY MUST NOT BE SWAPPED. This
+paragraph named TWO until 2026-10-09 and the list is kept current rather than
+left to be rediscovered, because its whole purpose is that a reader checks which
+function they are in before changing a rounding mode.
+
+    deposit_for_desired_payout   UP    what the CUSTOMER SENDS
+    max_deposit_for_capacity     DOWN  the limit the DESK can honor
+    payout_for_deposit           DOWN  what a screen PROMISES (display only)
+    quantize_down                DOWN  any desk figure on its way to a screen
+
+Only the first rounds up, and it is the only one of the four where the figure is
+a number the customer puts into a wallet.
+
+max_deposit_for_capacity() rounds DOWN, for the mirror-image reason:
 it turns the desk's payout ceiling into a maximum deposit, and rounding that UP
 would show a customer a limit the desk cannot actually pay -- they send it and the
 payout is refused at broadcast, which is the 2026-10-03 failure
@@ -93,6 +112,11 @@ CHAIN_PRECISION: dict[str, int] = {
 UNSOLVABLE_RATE = "no usable rate is available for this pair right now"
 UNSOLVABLE_FEE = "the configured fee leaves nothing to pay out, so no deposit size can produce this payout"
 UNSOLVABLE_OUTPUT = "the payout you asked for is not a positive amount"
+#: The forward direction's mirror of UNSOLVABLE_OUTPUT. Its own sentence rather
+#: than a shared "that is not a positive amount", because the two name different
+#: fields on the screen and a customer who typed one must not be sent to read the
+#: other (rule 14: say what the number means, next to the number).
+UNSOLVABLE_DEPOSIT = "the amount you asked to send is not a positive amount"
 UNSOLVABLE_PRECISION = "this chain's precision is not recorded, so the deposit amount cannot be rounded safely"
 
 
@@ -164,6 +188,142 @@ def deposit_for_desired_payout(
     step = Decimal(1).scaleb(-decimals)
     rounded = Decimal(repr(exact)).quantize(step, rounding=ROUND_CEILING)
     return float(rounded), ""
+
+
+def payout_for_deposit(
+    deposit: float, rate: float, fee_bps: int, to_asset: str
+) -> tuple[float, str]:
+    """How much `to_asset` a deposit of `deposit` buys. The FORWARD of the function above.
+
+    Returns (amount, "") or (0.0, reason).
+
+    WHY IT IS HERE AND NOT IN quote_service.py, WHICH ALREADY DOES THIS SUM.
+    create_quote() computes the same product as two statements inside a function
+    that needs a database handle, an adapters dict and a live price feed -- so the
+    ONE screen that wants to show a customer what they would get, before anything
+    is written, could not call it. The alternative was a third spelling of
+    `input * rate * (1 - fee/10000)` in a route or a template, which is rule 8's
+    subject: this product already existed twice (quote_service.py:582+615 and
+    payout_multiplier() above) and a third copy in a Jinja file would be the one
+    nothing type-checks.
+
+    IT EVALUATES quote_service's TWO STATEMENTS IN quote_service's ORDER, AND THE
+    FIRST VERSION USED payout_multiplier() AND WAS MEASURABLY DIFFERENT.
+
+    `(deposit * rate) * (1 - fee)` and `deposit * (rate * (1 - fee))` are the same
+    number in arithmetic and not in binary floating point. Caught by
+    test_the_forward_solver_is_the_forward_expression_quantized on its first run,
+    at rate 321.7, 150bps, 1234.5 XRP:
+
+        quote_service's order   391181.57024999993  ->  391181.570249
+        payout_multiplier()     391181.57025        ->  391181.570250
+
+    -- one unit in the sixth decimal, which is nothing as money and is everything
+    for what this function is for. The figure a customer reads on the review has
+    to be the figure `output_amount_estimate` carries on the swap row created one
+    click later, or the two disagree in the last digit and the only person who can
+    reconcile them is whoever wrote both. payout_multiplier() stays the authority
+    for the FACTOR -- the inverse divides by it and the sign test below uses it --
+    and the forward reproduces the product the way the quote computes it.
+
+    THAT MAKES THIS A COPY, AND THE COPY IS GUARDED RATHER THAN TRUSTED (rule 8).
+    tests/test_amount_solve.py holds `forward_payout`, which is quote_service.py's
+    two statements copied verbatim, AND
+    test_the_forward_copy_matches_quote_service_source, which reads the real
+    source and asserts the expression is still spelled that way. Every assertion
+    about this function round-trips through that copy, so the chain is
+    quote_service's source -> the checked copy -> here, and a fee change that
+    lands on one of the three fails the suite. The alternative -- having
+    create_quote() call this -- is a change to the function that prices live
+    swaps, which is rule 16's line and the operator's call, not mine.
+
+    AN ESTIMATE, AND THE CALLER MUST SAY SO. `rate` here is whatever the caller
+    read from the price feed a moment ago; the rate a swap is actually priced at
+    is fixed by create_quote() at confirm time, from its own read. Showing this
+    figure without the word "estimate" beside it would be a price this terminal
+    has not committed to -- see templates/_atm_costs.html, which prints it with
+    the quote window next to it for exactly that reason.
+
+    ROUNDING GOES DOWN, WHICH IS THE THIRD DIRECTION IN THIS FILE AND THE THIRD
+    JUSTIFICATION. The two above round away from whoever would otherwise find out
+    after the money moved; this one is not a figure anyone sends, it is a figure
+    the customer is shown BEFORE they decide. So it rounds away from the desk's
+    mouth: a displayed payout that rounds UP is a terminal promising a fraction
+    more than the quote will deliver, and the customer who notices has been given
+    a reason to distrust every other number on the page. Down is the direction in
+    which being wrong costs nothing.
+
+    This is also the direction chains/payout_quantization.quantize_for_chain()
+    takes for what the desk SENDS, and the agreement is not a coincidence -- both
+    are the desk's own side of a figure. The two still do not share an
+    implementation, because that one quantizes an amount about to be broadcast
+    and is measured over 60,015 amounts per chain; this one rounds a display.
+
+    A ZERO IS A REAL ANSWER and returns (0.0, ""): a deposit so small that the
+    destination chain cannot represent any of it after the fee really does buy
+    nothing, and the screen must be able to say that rather than report it as a
+    failure to measure (rule 13).
+    """
+    if deposit <= 0:
+        return 0.0, UNSOLVABLE_DEPOSIT
+    if rate <= 0:
+        return 0.0, UNSOLVABLE_RATE
+    decimals = CHAIN_PRECISION.get(to_asset)
+    if decimals is None:
+        return 0.0, UNSOLVABLE_PRECISION
+    if payout_multiplier(rate, fee_bps) <= 0:
+        # A fee at or above 100% pays out nothing at any size. Reported rather
+        # than rendered as 0.0, because "you receive 0" and "the configured fee
+        # leaves nothing to pay out" are different facts and only the second one
+        # tells an operator what to change.
+        #
+        # THE MULTIPLIER IS USED HERE AS A SIGN TEST AND NOT AS A FACTOR. The
+        # product below is quote_service's two statements in quote_service's
+        # order, for the floating-point reason the docstring measures; whether
+        # the fee leaves anything at all is a question about the fee, and
+        # payout_multiplier() is the one place that expression lives.
+        return 0.0, UNSOLVABLE_FEE
+    # quote_service.py:582 and :615, in that order and with its clamp. Not
+    # `deposit * payout_multiplier(...)`: see the docstring for the measurement.
+    gross_output = deposit * rate
+    exact = max(gross_output * (1 - fee_bps / 10000.0), 0.0)
+    step = Decimal(1).scaleb(-decimals)
+    rounded = Decimal(repr(exact)).quantize(step, rounding=ROUND_FLOOR)
+    return float(rounded), ""
+
+
+def quantize_down(amount: float, asset: str) -> tuple[float, str]:
+    """`amount` cut to what `asset` can represent, never upward. For DISPLAY.
+
+    WHY A SCREEN NEEDS THIS AT ALL, measured 2026-10-09 on the real amount step
+    with the stub desk balances: the step-3 ceiling line rendered
+
+        (407.50974481000003 GRC)
+
+    -- seventeen significant digits of binary floating point, out of
+    `407.51074481 - 0.001` in services/payout_capacity.largest_fundable_payout().
+    GRC has eight decimals, so five of those digits describe nothing that exists
+    on the chain. A customer reading it learns that this terminal does not know
+    how much it holds, which is the opposite of what the line is for (rule 14:
+    state what the number means, next to the number).
+
+    DOWN, for payout_for_deposit()'s reason: this is the desk's own figure, and a
+    displayed capacity rounded UP is a maximum the desk cannot actually pay.
+
+    NOT A SUBSTITUTE FOR chains/payout_quantization.quantize_for_chain(). That one
+    governs what is BROADCAST and carries the measurement to prove it; this one
+    governs what is PRINTED. Named at both sites (rule 8) so neither is reached
+    for by mistake: an amount on its way to a chain goes through that module, and
+    nothing on the order path may call this.
+    """
+    decimals = CHAIN_PRECISION.get(asset)
+    if decimals is None:
+        # NOT a silent passthrough. An unknown asset's figure is printed as it
+        # came, and the caller is told -- a screen that quietly stopped
+        # quantizing would look exactly like one that had nothing to quantize.
+        return float(amount), UNSOLVABLE_PRECISION
+    step = Decimal(1).scaleb(-decimals)
+    return float(Decimal(repr(float(amount))).quantize(step, rounding=ROUND_FLOOR)), ""
 
 
 #: Why no maximum deposit could be stated. Distinguished from a maximum of ZERO,

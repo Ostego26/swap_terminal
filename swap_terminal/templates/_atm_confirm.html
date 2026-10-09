@@ -16,14 +16,57 @@
   quote and fail with a message about a quote id. Pricing on confirm means the
   figures below are an ESTIMATE at the rate just read, and this screen says so
   rather than implying a fixed price it does not hold.
+
+  THAT PARAGRAPH WAS ALWAYS RIGHT AND routes/atm.py's HEADER CONTRADICTED IT
+  until 2026-10-09, claiming a quotes row was written at step 3. Nothing failed:
+  the design was in this file, the wrong fact was in that one, and the two were
+  never read together. Noted here as well because a reader who finds the
+  contradiction again should know which side was correct.
 #}
+{#- BOTH SIDES ARE NUMBERS NOW, AND ONE OF THEM USED TO BE A SENTENCE.
+
+    Until 2026-10-09 this list read
+
+        You send      &#8776; solved from what you want ICP
+        You receive   300 GRC
+
+    for a customer who had typed the RECEIVE side -- a phrase where the amount
+    goes, on the screen whose entire job is "every figure once more". The deposit
+    is the one number they have to put into a wallet, and routes/atm._commit()
+    solved it only AFTER this button, so the first place it appeared was the swap
+    page of a swap that already existed. They agreed to send an amount nobody had
+    told them.
+
+    `estimate` is services/wizard.both_sides(), which calls the same
+    chains/amount_solve solvers _commit() calls. _commit() STILL RE-SOLVES from
+    its own read rather than taking anything carried through the browser -- this
+    is a display of the same arithmetic, not a value the commit trusts.
+
+    THE THREE ARMS, AND WHICH STATE REACHES EACH. Written out because the first
+    version of this comment guessed and guessed wrong -- it said the fallback
+    arm was for an empty `estimate`, which never happens on this step (the route
+    builds one whenever `amount` is answered, and step 5 is unreachable until it
+    is). Evaluated rather than reasoned about (rule 17):
+
+        feed OK, either side        the solved figure
+        feed DEAD, send side        the figure they typed, which IS the deposit
+        feed DEAD, receive side     the sentence -- and ONLY here
+
+    So the old wording survives for exactly one state: the feed is unreadable AND
+    the customer typed what they want back, which is the one case where no number
+    on this screen can be derived. It keeps its place because a blank where a
+    number belongs is ambiguous between zero and broken (rule 14), and the
+    "Why no figures" row below prints the reason beside it. -#}
 <dl class="atm-review">
   <div><dt>You send</dt>
-    <dd>{{ answers.amount if answers.amount_side != 'receive' else '&#8776; solved from what you want' | safe }}
+    <dd class="num">{% if estimate and not estimate.refusal %}{{ estimate.send }}{% elif answers.amount_side != 'receive' %}{{ answers.amount }}{% else %}&#8776; solved when you confirm{% endif %}
         {{ answers.from_asset }}</dd></div>
   <div><dt>You receive</dt>
-    <dd>{{ answers.amount if answers.amount_side == 'receive' else 'priced when you confirm' }}
+    <dd class="num">{% if estimate and not estimate.refusal %}{{ estimate.receive }}{% elif answers.amount_side == 'receive' %}{{ answers.amount }}{% else %}priced when you confirm{% endif %}
         {{ answers.to_asset }}</dd></div>
+  {% if estimate and estimate.refusal %}
+  <div><dt>Why no figures</dt><dd>{{ estimate.refusal }}</dd></div>
+  {% endif %}
   <div><dt>Fee</dt><dd>{{ fee_bps }} bps, taken by sending that much less</dd></div>
   <div><dt>Paid to</dt><dd class="mono breakable">{{ answers.payout_address }}</dd></div>
   <div><dt>Deposit tolerance</dt>

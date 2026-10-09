@@ -2,8 +2,9 @@
 
 Role: submodule (decisions only -- pure functions over answers already collected;
       no database, no socket, no adapter call)
-Reads: the answers dict a caller hands it, and pair rows
-      services/pair_view.allowed_pair_rows() has already built
+Reads: the answers dict a caller hands it, pair rows
+      services/pair_view.allowed_pair_rows() has already built, and -- since
+      2026-10-09 -- a rate and a fee the caller has already read, for both_sides()
 Writes: nothing
 Can move funds: no. It decides which screen to draw. The commit at the end of the
       flow is routes/swaps.py calling services/swap_service.create_swap(), exactly
@@ -40,6 +41,8 @@ than offering a button that silently does something else.
 """
 
 from __future__ import annotations
+
+from chains.amount_solve import deposit_for_desired_payout, payout_for_deposit
 
 from .asset_identity import color_class_for, symbol_for, symbol_title_for
 from .pair_view import ASSET_ROLLUP_STATES
@@ -116,6 +119,68 @@ AMOUNT_STEP = 3
 #: The first step a customer cannot leave by going back. See the module docstring:
 #: at this point a swap row exists and a deposit address has been issued.
 POINT_OF_NO_RETURN = 6
+
+#: The step that asks where the payout goes. Named for REVIEW_STEP's reason, and
+#: used by screen_furniture() below to decide which screens carry a priced
+#: estimate -- the first screen after the amount is settled is the first one that
+#: CAN carry one.
+ADDRESS_STEP = 4
+
+#: WHAT EACH SCREEN CARRIES BESIDE ITS ONE QUESTION, keyed by step number.
+#:
+#: Operator, 2026-10-09: "the first screen only have the buttons, the colum to
+#: the right the fees etc OR the swap id they can enter at the bottom. next page
+#: will just be the buttons they want to covert into. next screen will be the
+#: either/or amount and get the quote and keep the fees to the right. then they
+#: can enter their final wallet address for their swapped crypto."
+#:
+#: WHAT THIS REPLACES, because the shape of the old answer is why a table is
+#: needed now. routes/atm.py carried ONE boolean, `show_reference = step.number
+#: == 1`, and templates/atm.html hung THREE panels off it -- the swap lookup, the
+#: 30-direction matrix and the costs table -- stacked below the question in one
+#: scrolling column. The instruction above splits those three apart: the costs go
+#: to a right-hand column on TWO screens, the lookup stays at the bottom of ONE,
+#: and the matrix is reference material that belongs with the costs rather than
+#: with the lookup. One boolean cannot say that, and three booleans computed in a
+#: route are three decisions outside the module that owns the flow (rule 10).
+#:
+#: A TABLE AND NOT A CHAIN OF `if`s, for the reason STEPS itself is a tuple of
+#: dicts: the arrangement across screens is the thing under test, and an `elif`
+#: ladder hides it. A reader can see at a glance that `lookup` is true exactly
+#: once, which is the property that matters -- a swap-id box on every screen
+#: would be a second way in competing with the question in front of you.
+#:
+#: STEP 2 IS DELIBERATELY EMPTY: "next page will just be the buttons they want to
+#: covert into."
+#:
+#: THE REVIEW TAKES `estimate` AND NOT `costs`, AND THE SPLIT IS THE WHOLE REASON
+#: THIS IS A TABLE OF NAMES RATHER THAN A BOOLEAN. Step 5 already states every
+#: figure in templates/_atm_confirm.html, so a right-hand column repeating the fee
+#: beside it would be two renderings of the numbers the next button commits to --
+#: rule 8 on the one screen where disagreement costs the deposit. What it DID
+#: lack is the send figure itself: a customer who typed the RECEIVE side read
+#: "&#8776; solved from what you want" where the amount goes. So the review is
+#: given the priced pair and no aside, and _atm_confirm.html puts the number in
+#: its own list.
+#:
+#: STEP 6 HAS NO ENTRY AND THAT IS NOT AN OVERSIGHT: screen_furniture() returns
+#: all-false for any step not listed, so the deposit screen -- which is normally a
+#: redirect to /swap/<id> anyway -- carries nothing.
+_SCREEN_FURNITURE: dict[int, tuple[str, ...]] = {
+    1: ("costs", "pair_reference", "lookup"),
+    AMOUNT_STEP: ("costs",),
+    ADDRESS_STEP: ("costs", "estimate"),
+    REVIEW_STEP: ("estimate",),
+}
+
+#: Every key screen_furniture() answers, so a caller gets the same dict shape for
+#: every step and a template can ask for any of them without a `default`. Derived
+#: from the table rather than typed again (rule 11's shape): a piece of furniture
+#: added above arrives here with no edit, and one removed cannot linger as a key
+#: nothing sets.
+FURNITURE_KEYS: tuple[str, ...] = tuple(
+    sorted({name for names in _SCREEN_FURNITURE.values() for name in names})
+)
 
 #: What the amount step was given, so step 3 can echo the side the customer typed
 #: rather than silently converting it. "send" means they typed what they are
@@ -300,6 +365,145 @@ def progress(step_number: int) -> list[dict]:
         }
         for step in STEPS
     ]
+
+
+def screen_furniture(step_number: int) -> dict:
+    """What this screen carries beside its question. Every key present, always.
+
+    Returns one bool per FURNITURE_KEYS, so templates/atm.html can ask
+    `furniture.costs` on any step without a default and without knowing which
+    steps are in the table. A missing key rendering as falsey in Jinja is exactly
+    the silent failure this shape removes: `{% if furniture.cost %}` -- one
+    letter out -- would hide the whole right-hand column on every screen and
+    nothing would fail, because an undefined attribute is false and an absent
+    panel renders as absence (rule 14).
+
+    AN UNKNOWN STEP GETS ALL-FALSE RATHER THAN RAISING, which is the opposite of
+    step_by_number() twenty lines up and the difference is the point. That one is
+    asked "which step is this?" and a wrong answer draws the wrong screen over a
+    customer's answers, so it refuses. This one is asked "does this screen also
+    show the fee table?", and the honest answer for a screen nobody listed is no.
+    Raising here would turn a new step into a 500 on a page that would otherwise
+    have rendered its question correctly.
+    """
+    carries = _SCREEN_FURNITURE.get(step_number, ())
+    return {key: key in carries for key in FURNITURE_KEYS}
+
+
+def both_sides(answers: dict, rate: float, fee_bps: int) -> dict:
+    """Both legs of the trade from whichever one the customer typed. AN ESTIMATE.
+
+    Returns {"send", "receive", "refusal", "side"}. `send` is in the source asset
+    and `receive` in the destination; `refusal` is "" or the sentence to print
+    instead of the figures.
+
+    IT TAKES `answers` AND NOT SIX ARGUMENTS, and the first version took the six
+    -- typed, side, rate, fee_bps, from_asset, to_asset -- with a `noqa: PLR0913`
+    arguing they were all load-bearing. They are, and that was still the wrong
+    shape: four of them are things this module already reads out of `answers`
+    everywhere else (current_step, answers_after_back, every reject_*), so
+    spelling them as parameters made ONE caller responsible for unpacking a dict
+    in the same order this function would have put it back together. Rule 19 is
+    explicit that a suppression is a claim you checked rather than a way past a
+    finding, and rule 12 says the fix for a limit is to change the shape, not to
+    raise the ceiling. The two genuine outsiders -- a rate read from a feed and a
+    fee read from config -- stay as parameters, because this module reads neither
+    and must not start.
+
+    WHY THE SCREEN NEEDS THIS AND WHAT IT FIXES, which is a defect rather than a
+    nicety. A customer who answers "I want 300 GRC" tells this flow the RECEIVE
+    side, and until 2026-10-09 the deposit it solves for them was never shown
+    before they committed: templates/_atm_confirm.html printed
+
+        <dt>You send</dt><dd>&#8776; solved from what you want ICP</dd>
+
+    -- a sentence where the number goes. routes/atm._commit() calls
+    chains/amount_solve.deposit_for_desired_payout() AFTER the confirm button, so
+    the one figure the customer has to put into a wallet was first visible on the
+    swap page, after the swap existed. They agreed to send an amount nobody had
+    told them. This function is what lets the address screen and the review state
+    it, and _commit() still re-solves it from the same inputs rather than
+    trusting anything carried through the browser.
+
+    "ESTIMATE" IS NOT A HEDGE, IT IS THE ACCURATE WORD. `rate` is a read of the
+    price feed by whoever called this; the rate a swap is priced at is fixed by
+    services/quote_service.create_quote() at confirm, from its own read. The two
+    are minutes apart at most and will usually agree to several digits, and
+    "usually" is precisely why the screen has to say which it is holding (rule
+    17). templates/_atm_costs.html prints the quote window beside it.
+
+    THE SOLVERS ARE amount_solve's, NOT ARITHMETIC WRITTEN HERE. Each side has a
+    rounding direction that file argues at length and gets opposite ways round;
+    reimplementing either as `amount * rate` in a service would be the third
+    spelling of a product that already exists twice, and the one that quietly
+    rounds the wrong way (rule 8).
+    """
+    # DEFAULTED TO "send", THE SAME DEFAULT routes/atm._first_bad_answer() AND
+    # _commit() APPLY TO THE SAME FIELD. A customer whose browser dropped the
+    # radio is treated as having typed the send side by all three, so the figure
+    # this screen shows is the figure the commit will use -- which is the only
+    # property that matters when a display and an authority read one answer.
+    side = answers.get("amount_side") or "send"
+    if side not in AMOUNT_SIDES:
+        # Same sentence reject_amount() gives for the same condition, built from
+        # the same tuple, so a customer cannot be told two things about one field.
+        return {
+            "side": side,
+            "send": 0.0,
+            "receive": 0.0,
+            "refusal": f"Choose whether that figure is what you send or what you receive ({' or '.join(AMOUNT_SIDES)}).",
+        }
+    amount, bad = amount_as_number(answers.get("amount", ""))
+    if bad:
+        return {"side": side, "send": 0.0, "receive": 0.0, "refusal": bad}
+    send, receive, refusal = _solved_legs(answers, rate, fee_bps, side, amount)
+    return {"side": side, "send": send, "receive": receive, "refusal": refusal}
+
+
+def _solved_legs(answers: dict, rate: float, fee_bps: int, side: str, amount: float) -> tuple[float, float, str]:
+    """(send, receive, "") or (0.0, 0.0, why not). The solving half of both_sides().
+
+    ITS OWN FUNCTION FOR THE REASON amount_as_number() IS, thirty lines down: with
+    it inlined, both_sides() had SEVEN return statements against PLR0911's six.
+    Rule 12 is explicit that a crossed limit means extracting the decision rather
+    than raising the ceiling or adding a `noqa`, and rule 19 that a suppression is
+    a claim you checked rather than a way past a finding. The split is also where
+    the seam already was: above this line is "which side did they mean and is the
+    figure usable", below it is "what do the solvers say".
+
+    FIGURES OR A REASON, NEVER BOTH. Every refusal path zeroes both legs, so a
+    caller reading `send` without checking `refusal` gets 0.0 rather than a
+    plausible number that means nothing -- the shape rule 12 names as "the caller
+    cannot tell the failure from a real answer". The first version passed the
+    typed figure through on the forward path's refusal and
+    test_an_unpriceable_pair_refuses_rather_than_printing_a_zero caught it.
+    """
+    if side == "receive":
+        send, refusal = deposit_for_desired_payout(
+            amount, rate, fee_bps, answers.get("from_asset", "")
+        )
+        if refusal:
+            return 0.0, 0.0, refusal
+        # THE RECEIVE LEG IS WHAT THE SOLVED DEPOSIT BUYS, NOT WHAT WAS ASKED FOR,
+        # and the difference is small, real, and the swap row's.
+        #
+        # deposit_for_desired_payout() rounds the deposit UP, so the payout it
+        # produces is a hair ABOVE the figure typed -- that is its whole contract,
+        # "send X to receive AT LEAST Y". Measured on the live flow 2026-10-09 for
+        # "I want 300 GRC" out of BTC: the solved deposit is 0.00015229 BTC and
+        # services/quote_service.create_quote() stamps output_amount_estimate =
+        # 300.0113 on the swap. Echoing the typed 300.0 here would put a number on
+        # the review that the row created one click later does not contain, which
+        # is rule 8 on the two figures a customer checks afterwards.
+        #
+        # So both legs come out of the same forward function the quote applies,
+        # and the screen and the row agree by construction rather than by luck.
+        receive, forward_refusal = payout_for_deposit(
+            send, rate, fee_bps, answers.get("to_asset", "")
+        )
+        return (0.0, 0.0, forward_refusal) if forward_refusal else (send, receive, "")
+    receive, refusal = payout_for_deposit(amount, rate, fee_bps, answers.get("to_asset", ""))
+    return (0.0, 0.0, refusal) if refusal else (amount, receive, "")
 
 
 # =============================================================================

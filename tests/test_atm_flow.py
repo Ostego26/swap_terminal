@@ -31,6 +31,12 @@ import sqlite3
 import pytest
 import routes.atm as atm_module
 import services.quote_service as quote_module
+from chains.amount_solve import (
+    CHAIN_PRECISION,
+    deposit_for_desired_payout,
+    payout_for_deposit,
+    quantize_down,
+)
 from chains.icp_account import account_identifier, subaccount_from_index
 from db import SCHEMA, dict_factory
 from test_web_surfaces import DEPOSIT_ACCOUNTS, StubAdapter
@@ -359,3 +365,404 @@ def test_a_field_no_step_asked_for_is_dropped_rather_than_echoed(client):
     body = page.get_data(as_text=True)
     assert "injected" not in body
     assert "alert(1)" not in body
+
+
+# ===========================================================================
+# THE SCREEN'S ARRANGEMENT, RENDERED. Added 2026-10-09.
+#
+# Operator: "the first screen only have the buttons, the colum to the right the
+# fees etc OR the swap id they can enter at the bottom. next page will just be
+# the buttons they want to covert into. next screen will be the either/or amount
+# and get the quote and keep the fees to the right. then they can enter their
+# final wallet address for their swapped crypto."
+#
+# tests/test_wizard.py asserts WHICH screens carry what, against a seeded step
+# number. These assert the rendered consequence: that the fee table really is in
+# the <aside> and not in the question's panel, that the lookup really is outside
+# the two-column wrapper, that "Get the quote" really produces figures. A correct
+# decision rendered into the wrong element is this project's recurring defect --
+# "a correct decision read from the wrong place" is why this file exists at all.
+#
+# THE ELEMENT BOUNDARIES ARE FOUND BY COUNTING TAGS, NOT BY SLICING TO THE NEXT
+# ONE. tests/test_customer_page_layout.status_card_of() records why: a slice
+# bounded by whatever came next still contained the thing after it had been moved
+# out, and the mutation survived.
+# ===========================================================================
+
+
+def element(body: str, open_tag: str, tag: str = "div") -> str:
+    """Exactly one element's markup, from `open_tag` to its own matching close.
+
+    Depth-counted rather than sliced to the next `</tag>`, because every
+    assertion below is of the form "X is INSIDE this and Y is not" and a slice
+    that overruns the element makes both halves of that true.
+    """
+    start = body.index(open_tag)
+    depth = 0
+    for match in re.finditer(rf"<{tag}\b|</{tag}>", body[start:]):
+        depth += 1 if match.group(0) != f"</{tag}>" else -1
+        if depth == 0:
+            return body[start : start + match.end()]
+    raise AssertionError(f"{open_tag} is never closed")
+
+
+def reading(markup: str) -> str:
+    """An element's markup as a reader sees it: tags gone, whitespace collapsed.
+
+    NEEDED BECAUSE A FIGURE AND ITS TICKER ARE ON TWO LINES in the templates, so
+    `"0.94416244 ICP" in markup` is false for a page that shows exactly that --
+    which is a test failing on where a newline is rather than on what the screen
+    says. The same reason tests/test_customer_page_layout.rows_of() normalizes
+    before comparing, and the same reason tests/page_markup.py exists.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", markup)).strip()
+
+
+def test_the_first_screen_keeps_the_coin_buttons_alone_with_the_question(client):
+    """The question's panel holds the buttons and NOTHING ELSE the operator moved.
+
+    THE STATE BEING REPLACED, measured in Chromium at 1280px before this change:
+    four panels stacked down one column -- coins, swap-id lookup, the 30-direction
+    matrix, the costs table -- 1291px of page with the right 40% empty. The
+    question was one panel of four.
+
+    Asserted on the question's own <section>, depth-counted, so "the fee table
+    moved to the right-hand column" cannot be satisfied by it merely still being
+    somewhere on the page.
+    """
+    body = client.get("/").get_data(as_text=True)
+    question = element(body, '<section class="panel atm"', "section")
+
+    for asset in ("BTC", "GRC", "ICP", "LTC"):
+        assert f'name="from_asset" value="{asset}"' in question, f"{asset}'s button left the question"
+
+    assert "What a swap costs" not in question, "the costs table is still inside the question's panel"
+    assert "Service fee" not in question
+    assert 'name="swap_id"' not in question, "the swap-id box is still inside the question's panel"
+    assert "swaptile" not in question, "the 30-direction matrix is still inside the question's panel"
+
+
+def test_the_costs_are_in_a_right_hand_column_and_not_a_panel_below(client):
+    """"the colum to the right the fees etc" -- an <aside>, inside the flex row.
+
+    <aside> AND NOT A SECOND <section>: it is content related to the question and
+    separable from it, so a screen reader announces a complementary landmark and
+    a customer tabbing through reaches the coin buttons before the fee table.
+    """
+    body = client.get("/").get_data(as_text=True)
+    assert '<aside class="atm-aside"' in body, "there is no right-hand column at all"
+
+    screen = element(body, '<div class="atm-screen"', "div")
+    assert '<aside class="atm-aside"' in screen, (
+        "the aside is outside the two-column wrapper, so it cannot sit beside the question"
+    )
+    aside = element(body, '<aside class="atm-aside"', "aside")
+    for label in ("Service fee", "Quote validity", "Amount tolerance", "Network fee"):
+        assert label in aside, f"the {label!r} row is not in the right-hand column"
+
+
+def test_the_swap_id_box_is_at_the_bottom_below_both_columns(client):
+    """"OR the swap id they can enter at the bottom."
+
+    OUTSIDE the two-column wrapper, which is the structural half of "at the
+    bottom": it is neither the question nor reference, it is the other thing you
+    might have come to do. Position is asserted as well, because a lookup box
+    that rendered first would be "at the bottom" in no sense a customer cares
+    about.
+    """
+    body = client.get("/").get_data(as_text=True)
+    assert 'name="swap_id"' in body, "a returning customer has no way back into their swap"
+
+    screen = element(body, '<div class="atm-screen"', "div")
+    assert 'name="swap_id"' not in screen, (
+        "the swap-id box is inside the two-column wrapper, so it is beside the question rather "
+        "than under it"
+    )
+    assert body.index('<div class="atm-screen"') < body.index('name="swap_id"'), (
+        "the swap-id box renders before the question it is an alternative to"
+    )
+
+
+def test_the_pair_directory_survived_the_move_and_is_still_complete(client):
+    """All 30 directions, still listed, still collapsed, now in the right column.
+
+    IT HAD TO GO SOMEWHERE AND DELETING IT WAS NOT AN OPTION.
+    routes/atm.start()'s docstring records that it is the only answer to "what
+    does this terminal do at all", and that it survived templates/index.html
+    being deleted for that reason. A layout change that quietly dropped it would
+    be a deletion wearing a reflow's clothes -- which is the failure
+    tests/test_customer_page_layout.py's header is about.
+    """
+    body = client.get("/").get_data(as_text=True)
+    allowed = client.application.config["ALLOWED_PAIRS"]
+    aside = element(body, '<aside class="atm-aside"', "aside")
+
+    tiles = re.findall(r'<li class="swaptile swaptile-([a-z]+)"[^>]*>', aside)
+    assert len(tiles) == len(allowed), (
+        f"{len(allowed)} directions are allowed and the right-hand column lists {len(tiles)}"
+    )
+    assert "<details>" in aside, (
+        "the directory is no longer collapsed, so thirty rows are open beside a question whose "
+        "whole premise is one thing per screen"
+    )
+    assert "What the markers mean" in aside, "the key moved away from the badges it explains"
+
+
+def test_the_limit_line_prints_a_figure_the_chain_could_actually_hold(client):
+    """No seventeen-digit floats on the screen a customer sizes a deposit against.
+
+    MEASURED 2026-10-09 on this very flow: the desk holds 407.51074481 GRC and
+    services/payout_capacity.largest_fundable_payout() subtracts a 0.001 reserve
+    in float, so the ceiling line rendered
+
+        ... that is all this desk can pay out on the other side (407.50974481000003 GRC)
+
+    GRC has eight decimals. Five of those digits describe nothing that exists on
+    any chain, and what a customer learns from them is that this terminal cannot
+    count -- on the one line they are about to size a deposit against (rule 14:
+    state what the number means, next to the number).
+
+    THE GATE IS NOT TOUCHED AND THIS TEST SAYS SO. `ceiling` -- the figure an
+    amount is actually refused against -- is already cut to the SOURCE chain's
+    precision by max_deposit_for_capacity(), and re-rounding it here would be a
+    second authority over a refusal. Only the parenthetical display figure goes
+    through quantize_down().
+    """
+    body = post(client, from_asset="ICP", to_asset="GRC").get_data(as_text=True)
+    limit = re.search(r'<p class="atm-limit[^"]*">(.*?)</p>', body, flags=re.DOTALL)
+    assert limit, "the amount screen states no limit at all, which is the dead end it exists to remove"
+
+    for figure in re.findall(r"\d+\.(\d+)", reading(limit.group(1))):
+        assert len(figure) <= CHAIN_PRECISION["GRC"], (
+            f"the limit line prints {figure!r} after the point -- more decimals than GRC's "
+            f"{CHAIN_PRECISION['GRC']}, so it is showing float noise as if it were a balance. "
+            f"The line reads: {reading(limit.group(1))!r}"
+        )
+
+    # AND THE FIGURE IS STILL THE RIGHT ONE, cut rather than replaced: a test that
+    # only counted digits would pass against a line that had stopped printing the
+    # capacity at all.
+    assert "407.50974481" in reading(limit.group(1)), (
+        "the GRC the desk can pay out is no longer on the line; the digit check above would pass "
+        "for a screen that simply dropped it"
+    )
+
+
+def test_the_destination_screen_carries_no_second_column_at_all(client):
+    """"next page will just be the buttons they want to covert into."
+
+    Every piece of furniture absent, not just the fee table: a swap-id box or a
+    pair directory drifting onto this screen is the same defect as the costs
+    doing it.
+    """
+    body = post(client, from_asset="ICP").get_data(as_text=True)
+    assert asking_body(body) == "What do you want back?"
+    assert "atm-aside" not in body, "the destination screen grew a right-hand column"
+    assert 'name="swap_id"' not in body
+    assert "swaptile" not in body
+    assert "What a swap costs" not in body
+
+
+def test_the_amount_screen_keeps_the_fees_to_the_right_of_the_either_or(client):
+    """"the either/or amount and get the quote and keep the fees to the right."
+
+    All three clauses in one test because they are one sentence: the sides, the
+    button, and the column.
+    """
+    body = post(client, from_asset="ICP", to_asset="GRC").get_data(as_text=True)
+    assert asking_body(body) == "How much?"
+
+    question = element(body, '<section class="panel atm"', "section")
+    assert 'value="send"' in question and 'value="receive"' in question, "the either/or is gone"
+    assert "Get the quote" in question, (
+        "the amount screen's button does not say what the operator called it"
+    )
+
+    aside = element(body, '<aside class="atm-aside"', "aside")
+    assert "Service fee" in aside and "Quote validity" in aside, "the fees are not to the right"
+    # And the reference material does NOT follow mid-flow: a customer answering
+    # "how much?" is not shopping for a pair.
+    assert "swaptile" not in aside and 'name="swap_id"' not in body
+
+
+def test_getting_the_quote_actually_produces_figures_on_the_next_screen(client):
+    """A button called "Get the quote" must visibly produce one (rule 14).
+
+    THE LABEL IS THE CLAIM AND THIS IS THE CHECK ON IT. No quotes row is written
+    by that button -- create_quote() runs at the confirm button and this file's
+    other tests pin that -- so what "get the quote" has to mean is that the
+    figures appear. If they did not, the relabelling would be a louder word for
+    the same silence.
+    """
+    body = post(client, from_asset="ICP", to_asset="GRC",
+                amount="0.001", amount_side="send").get_data(as_text=True)
+    assert asking_body(body) == "Where should it go?"
+
+    aside = element(body, '<aside class="atm-aside"', "aside")
+    assert "What this one comes to" in aside, "pressing 'Get the quote' showed no quote"
+    assert "You send" in aside and "You receive" in aside, "only one leg of the trade is stated"
+    assert "estimate" in aside, (
+        "the figures are not called an estimate. No quote row exists yet and the rate is fixed at "
+        "the confirm button, so a screen that implied a held price would be claiming something "
+        "this flow does not do"
+    )
+
+    # The figures are the solvers', not markup: the receive leg must be what the
+    # deposit actually buys at the fixture's rate.
+    expected, refusal = payout_for_deposit(
+        0.001, USD_PRICES["ICP_USD"] / USD_PRICES["GRC_USD"],
+        int(client.application.config["DEFAULT_FEE_BPS"]), "GRC",
+    )
+    assert refusal == ""
+    assert f"{expected} GRC" in reading(aside), f"the screen does not state {expected} GRC"
+
+
+def test_a_customer_who_typed_what_they_want_is_told_what_to_send(client):
+    """THE DEFECT, END TO END: a number where a sentence used to be.
+
+    templates/_atm_confirm.html printed "&#8776; solved from what you want" in
+    the "You send" row for a RECEIVE-side answer, and routes/atm._commit() solved
+    the real deposit only after the confirm button -- so the one figure a
+    customer has to put into a wallet first appeared on the swap page of a swap
+    that already existed. They agreed to send an amount nobody had told them.
+
+    Asserted against the solver rather than against a literal, so the test cannot
+    pass by agreeing with a hard-coded number that drifted from the arithmetic.
+    """
+    page = post(client, from_asset="ICP", to_asset="GRC", amount="300", amount_side="receive",
+                payout_address=GRC_PAYOUT)
+    body = page.get_data(as_text=True)
+    assert asking(page) == "Is this right?"
+
+    review = element(body, '<dl class="atm-review"', "dl")
+    assert "solved from what you want" not in review, (
+        "the review still shows a phrase where the deposit amount goes"
+    )
+    rate = USD_PRICES["ICP_USD"] / USD_PRICES["GRC_USD"]
+    fee_bps = int(client.application.config["DEFAULT_FEE_BPS"])
+    deposit, refusal = deposit_for_desired_payout(300.0, rate, fee_bps, "ICP")
+    assert refusal == ""
+    assert f"{deposit} ICP" in reading(review), (
+        f"the review does not state the {deposit} ICP deposit; it reads {reading(review)!r}"
+    )
+
+
+def test_what_the_review_promised_is_what_the_swap_row_records(client):
+    """The screen and the row must carry the same two figures, not nearly the same.
+
+    THE REASON THIS IS AN ASSERTION AND NOT A COMMENT. The displayed payout is
+    computed by chains/amount_solve.payout_for_deposit() and the stored one by
+    services/quote_service.create_quote(); they are two expressions for one
+    relationship, which is rule 8's shape and already bit once in this change --
+    `deposit * payout_multiplier(rate, fee)` and `(deposit * rate) * (1 - fee)`
+    differ in the sixth decimal, measured, so the first version of that function
+    showed a customer a number the row did not contain.
+
+    Driven through the REAL handler and read back out of the REAL row, because
+    that is the only comparison that covers both expressions at once.
+    """
+    review_body = post(client, from_asset="ICP", to_asset="GRC", amount="300",
+                       amount_side="receive", payout_address=GRC_PAYOUT).get_data(as_text=True)
+    review = element(review_body, '<dl class="atm-review"', "dl")
+
+    created = post(client, from_asset="ICP", to_asset="GRC", amount="300", amount_side="receive",
+                   payout_address=GRC_PAYOUT, confirmed="1")
+    assert created.status_code == 302, created.get_data(as_text=True)[:400]
+
+    conn = sqlite3.connect(client.application.config["DB_PATH"])
+    conn.row_factory = dict_factory
+    row = conn.execute(
+        "SELECT expected_input_amount, output_amount_estimate FROM swaps"
+    ).fetchone()
+    conn.close()
+
+    assert f"{row['expected_input_amount']} ICP" in reading(review), (
+        f"the review promised a different deposit than the swap row's "
+        f"{row['expected_input_amount']} ICP"
+    )
+    # THE PAYOUT IS COMPARED AT THE CHAIN'S OWN PRECISION, NOT DIGIT FOR DIGIT,
+    # and the difference is a measurement rather than a loosened assertion.
+    #
+    # create_quote() stores output_amount_estimate UNQUANTIZED: this swap's row
+    # holds 300.0000010967742 GRC, eight decimals more than Gridcoin can
+    # represent. That is not a defect on the money path -- services/
+    # payout_service.py runs chains/payout_quantization.quantize_for_chain()
+    # before anything is broadcast, and that module exists precisely because an
+    # over-precise figure handed to the GRC daemon is rounded half UP and sends a
+    # satoshi more than intended. So the row keeps the raw estimate and the send
+    # is cut later.
+    #
+    # The screen cuts it at display time instead, which is why the two strings
+    # differ. What must hold is that they are the SAME NUMBER at the precision
+    # the chain can actually pay, and that the screen never promises MORE than
+    # the row -- which is still strong enough to catch the drift this change
+    # already hit: `deposit * payout_multiplier()` and `(deposit * rate) * (1 -
+    # fee)` differ by one unit in XRP's sixth decimal, exactly AT the
+    # quantization step rather than below it.
+    shown, refusal = quantize_down(row["output_amount_estimate"], "GRC")
+    assert refusal == ""
+    assert f"{shown} GRC" in reading(review), (
+        f"the review promised a different payout than the swap row's "
+        f"{row['output_amount_estimate']} GRC (cut to {shown}) -- the displayed and the stored "
+        "expression have drifted, which is the whole hazard of having two of them"
+    )
+    assert shown <= row["output_amount_estimate"], (
+        "the screen's payout is ABOVE the one the row records, so the terminal is promising more "
+        "than it quoted"
+    )
+
+
+def test_a_price_feed_that_cannot_be_read_says_so_instead_of_printing_zeros(client, monkeypatch):
+    """Rule 14: never a blank, and never a figure, where the feed did not answer.
+
+    routes/atm._rate_hint() already degrades rather than 500ing -- that was a
+    defect this file caught on 2026-10-07 -- and the estimate has to inherit the
+    same property, because it is rendered on two screens that previously made no
+    price call at all. A zero here would read as "the desk values your coin at
+    nothing", which is a much worse statement than "we could not price it".
+    """
+    def dead_feed(_ttl=0):
+        raise OSError("Tunnel connection failed: 403 Forbidden")
+
+    monkeypatch.setattr(atm_module, "fetch_usd_prices", dead_feed)
+
+    # BOTH SIDES, because they take DIFFERENT arms of the review's fallback and
+    # only one of them can still show a number. A customer who typed the SEND
+    # side already knows their deposit -- it is the figure they typed -- so the
+    # screen keeps it. A customer who typed the RECEIVE side has no derivable
+    # number at all, and that is the single state the old "solved when you
+    # confirm" wording still exists for. Testing only the first would leave the
+    # one arm that prints a sentence unexercised.
+    for side, amount, still_shown in (("send", "0.001", "0.001 ICP"), ("receive", "300", "300 GRC")):
+        page = post(client, from_asset="ICP", to_asset="GRC", amount=amount,
+                    amount_side=side, payout_address=GRC_PAYOUT)
+        body = page.get_data(as_text=True)
+        assert page.status_code == 200, f"a dead price feed 500d the {side} side"
+        assert asking(page) == "Is this right?", f"a dead feed moved the {side} side off the review"
+
+        review = reading(element(body, '<dl class="atm-review"', "dl"))
+        assert "0.0 GRC" not in review, f"the {side} side printed a payout of zero for a dead feed"
+        assert "0.0 ICP" not in review, f"the {side} side printed a deposit of zero for a dead feed"
+        assert "price feed could not be read" in body, (
+            f"the {side} side shows no figures and does not say why"
+        )
+        # The half that IS still knowable stays on the screen: the figure they
+        # typed. Dropping it would make a readable feed and a dead one look the
+        # same from the customer's side, which is a worse answer than either.
+        assert still_shown in review, f"the {side} side lost the figure the customer typed"
+
+    # AND THE SENTENCE IS REACHED, on the one path that reaches it. Asserted
+    # explicitly because a template arm nothing renders is a template arm nobody
+    # notices has broken.
+    receive_body = post(client, from_asset="ICP", to_asset="GRC", amount="300",
+                        amount_side="receive", payout_address=GRC_PAYOUT).get_data(as_text=True)
+    assert "solved when you confirm" in reading(element(receive_body, '<dl class="atm-review"', "dl")), (
+        "a customer who typed what they want back, with no readable price, is shown a blank where "
+        "the deposit amount goes -- which is ambiguous between zero and broken (rule 14)"
+    )
+
+
+def asking_body(body: str) -> str:
+    """`asking()` for a body a caller already holds, so the <h1> is read once."""
+    match = re.search(r'<h1 id="atm-question" class="atm-question">(.*?)</h1>', body)
+    return match.group(1).strip() if match else "(no question heading rendered)"

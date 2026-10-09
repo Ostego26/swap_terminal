@@ -4,9 +4,22 @@ Role: submodule (HTTP handlers; every decision is in services/wizard.py,
       services/pair_view.py and chains/amount_solve.py)
 Reads: swap_terminal.db through create_quote/create_swap, current_app.config,
        and one balance per render of the amount step
-Writes: a `quotes` row at step 3 and a `swaps` row at step 5, both through the
-       same service functions routes/quotes.py and routes/swaps.py call. Nothing
-       here writes SQL of its own.
+Writes: a `quotes` row AND a `swaps` row, both at the confirm button and both
+       through the same service functions routes/quotes.py and routes/swaps.py
+       call. Nothing here writes SQL of its own.
+
+       THIS SAID "a `quotes` row at step 3" UNTIL 2026-10-09 AND NO QUOTE HAS
+       EVER BEEN WRITTEN AT STEP 3. `create_quote()` is called in exactly one
+       place in this file -- inside `_commit()`, one statement before
+       `create_swap()` -- and `_commit()` runs only when the current step is
+       REVIEW_STEP and `confirmed` is present. templates/_atm_confirm.html has
+       said so correctly the whole time ("THE QUOTE IS CREATED AFTER THIS BUTTON,
+       NOT BEFORE") and argues for it: a review screen is where a customer
+       pauses, so pricing before it would routinely expire the quote and fail
+       with a message about a quote id. The header on top of the file and the
+       template agreed on the design and disagreed on the fact, which is rule
+       19's "one of those files said both things twenty lines apart" -- found by
+       reading the two together, not by anything failing.
 Can move funds: NO ORDER IS SENT HERE. Step 5 creates a swap row and a deposit
        address; the payout is services/payout_service.py's, driven by the payout
        worker, exactly as for a swap made through the one-page form.
@@ -50,16 +63,19 @@ Three reasons, and the third is the one that settles it:
   call on this side. That is the same contract services/swap_view.py states on
   the live swap page: "Nothing is decided in your browser."
 
-THE QUOTE IS CREATED AT STEP 3 AND CAN EXPIRE BEFORE STEP 5, which is a real
-state rather than an edge case: QUOTE_TTL_SECONDS is the window and a customer
-reading a confirm screen is exactly the person likely to pause. An expired quote
-sends them back to the amount step with the price having moved, said plainly,
-rather than failing at create_swap() with a message about a quote id.
+THE QUOTE IS CREATED AT THE CONFIRM BUTTON, SO IT CANNOT EXPIRE INSIDE THE FLOW.
+QUOTE_TTL_SECONDS is the window and a customer reading a confirm screen is
+exactly the person likely to pause, so pricing earlier would make an expired
+quote the ordinary case rather than an edge one. The cost of pricing late is that
+every figure a screen shows before the button is an ESTIMATE at the rate read a
+moment ago -- which is why services/wizard.both_sides() is named for what it
+returns and why templates/_atm_costs.html prints the quote window beside it.
 """
 
 from chains.amount_solve import (
     deposit_for_desired_payout,
     max_deposit_for_capacity,
+    quantize_down,
 )
 from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
@@ -79,6 +95,7 @@ from services.wizard import (
     STEPS,
     amount_as_number,
     answers_after_back,
+    both_sides,
     current_step,
     destinations_for,
     may_go_back,
@@ -87,6 +104,7 @@ from services.wizard import (
     reject_destination,
     reject_payout_address,
     reject_source,
+    screen_furniture,
     source_lamps,
 )
 
@@ -158,6 +176,14 @@ def render_step(answers: dict, error: str = "") -> str:
     from_asset = answers.get("from_asset", "")
     options = destinations_for(rows, from_asset) if from_asset else []
 
+    # WHAT THIS SCREEN CARRIES BESIDE ITS QUESTION, decided in services/wizard.py
+    # and merely read here. It was `show_reference = step["number"] == 1` until
+    # 2026-10-09 -- one boolean gating three different panels, computed in this
+    # route, which is a layout decision living where it cannot be called with a
+    # seeded step number (rule 10). The table that replaced it is next to STEPS,
+    # where the order of the flow already is.
+    furniture = screen_furniture(step["number"])
+
     # THE CEILING IS READ ONLY WHEN THE AMOUNT SCREEN IS BEING DRAWN, because
     # reading it costs a price-feed request AND a get_balance() per render. Every
     # other step would pay that for a figure it does not show -- and step 1, the
@@ -168,26 +194,61 @@ def render_step(answers: dict, error: str = "") -> str:
         ceiling, ceiling_refusal, payout_ceiling, ceiling_how = amount_ceiling(
             answers.get("to_asset", ""), from_asset, _rate_hint(answers)
         )
+        # QUANTIZED FOR DISPLAY ONLY, and the gate above is untouched. This figure
+        # is the parenthetical "(407.50974481000003 GRC)" the ceiling line prints
+        # -- seventeen digits of binary float out of a subtraction inside
+        # services/payout_capacity.largest_fundable_payout(). GRC has eight
+        # decimals, so five of those digits describe nothing on any chain, and a
+        # customer reading them learns that this terminal cannot count.
+        #
+        # `ceiling` itself is NOT re-quantized: max_deposit_for_capacity() already
+        # rounds it down to the SOURCE chain's precision, and a second rounding
+        # here would be a second authority over the number this screen refuses
+        # amounts against (rule 8). Only the display-side figure passes through.
+        payout_ceiling, _unquantizable = quantize_down(payout_ceiling, answers.get("to_asset", ""))
 
-    # THE THREE THINGS THAT CAME ACROSS FROM templates/index.html when it was
-    # deleted, built ONLY for step 1 -- see start()'s docstring for why each one
-    # had to survive. Mid-flow they would be noise: a customer answering "how
-    # much?" is not shopping for a pair, and the legend explains lamps that are no
-    # longer on screen.
+    # THE PAIR DIRECTORY, built only for the screen that shows it -- see start()'s
+    # docstring for why it survived templates/index.html's deletion at all. Mid-flow
+    # it would be noise: a customer answering "how much?" is not shopping for a pair.
     #
     # DERIVED FROM THE ROWS ALREADY BUILT, never evaluated a second time. That is
     # services/pair_view.py's own header rule, and the defect it records is a page
     # badging a pair ENABLED that another reading of the same question refused.
-    show_reference = step["number"] == 1
     reference_pairs = []
-    if show_reference:
+    if furniture["pair_reference"]:
         for row in rows:
             row["customer"] = customer_availability(row)
         reference_pairs = rows
 
+    # WHAT THEY WOULD SEND AND RECEIVE, priced only where a screen shows it.
+    #
+    # ONE EXTRA PRICE-FEED READ, ON ONE SCREEN, AND IT IS CACHED. The ceiling note
+    # above refuses to pay for a figure a screen does not show, and this obeys the
+    # same rule: the address step is the first screen on which both the pair and
+    # the amount are settled, so it is the first one that CAN state the trade.
+    # fetch_usd_prices() is memoized for Config.RATE_CACHE_SECONDS and the amount
+    # screen immediately before this one has just populated it, so in the ordinary
+    # walk through the flow this costs no request at all. NO BALANCE IS READ here
+    # -- that is the half of amount_ceiling() that costs a chain round trip, and an
+    # estimate does not need it.
+    estimate = {}
+    if furniture["estimate"] and answers.get("amount"):
+        rate, rate_refusal = _rate_hint(answers)
+        # A FEED THAT DID NOT ANSWER IS ITS OWN REFUSAL, carried in the same key
+        # both_sides() uses for a solver that could not. The screen then prints
+        # one sentence instead of two numbers either way, and never a blank where
+        # a figure belongs (rule 14).
+        estimate = (
+            {"refusal": rate_refusal, "send": 0.0, "receive": 0.0,
+             "side": answers.get("amount_side") or "send"}
+            if rate_refusal
+            else both_sides(answers, rate, int(current_app.config["DEFAULT_FEE_BPS"]))
+        )
+
     context = {
         "surface": "user",
-        "show_reference": show_reference,
+        "furniture": furniture,
+        "estimate": estimate,
         "reference_pairs": reference_pairs,
         "customer_states": CUSTOMER_STATES,
         # THE LIMIT, AND THE SENTENCE WHEN THERE IS NO LIMIT TO STATE. Three

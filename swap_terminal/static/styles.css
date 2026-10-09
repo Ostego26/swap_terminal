@@ -1342,7 +1342,20 @@ h2:target {
    * The six-column deposit and payout tables keep .scroll-x and slide sideways
    * instead. They cannot stack into anything a reader can scan -- six stacked
    * labels per row, times N rows -- and sideways scroll was already this page's
-   * answer for them before this change, so it stays its answer. */
+   * answer for them before this change, so it stays its answer.
+   *
+   * THERE IS A SECOND BLOCK OF THESE SAME DECLARATIONS, `.kvt-stacked` BELOW
+   * THIS MEDIA QUERY, AND THE DIFFERENCE IS THE POINT (rule 8: when two
+   * implementations genuinely differ, say so at BOTH sites and name the other).
+   * This one is keyed on the VIEWPORT: every .kvt on the page stacks because the
+   * screen is narrow. That one is keyed on the COLUMN: one particular table
+   * stacks at any viewport width, because it has been put in a 22rem aside where
+   * a third prose column would be about ten characters wide. Plain CSS has no
+   * way to share a declaration block between a media query and a class -- a
+   * container query could, and converting every .kvt on the swap and operator
+   * pages to one is a tree-wide restyle with no behavioral benefit, which is the
+   * trade rule 12 refuses. tests/test_customer_page_layout.py pins both, so
+   * neither can be dropped quietly. */
   .kvt tbody tr {
     display: block;
     border-bottom: 1px solid var(--line);
@@ -1364,7 +1377,92 @@ h2:target {
    * label. tabular-nums is kept: it costs nothing and still helps a reader
    * compare two stacked amounts. */
   .kvt td.num { text-align: left; }
+
+  /* THE REVIEW STACKS FOR THE SAME REASON ITS TABLES DO, and this was already
+   * true before the two-column change rather than caused by it -- recorded as a
+   * measurement so nobody reads it as a regression. `.atm-review > div` is
+   * `minmax(8rem, 12rem) 1fr`, which inside a 358px phone leaves the value about
+   * 130px. Captured in Chromium at 390px: "150 bps, taken by sending that much
+   * less" rendered over five lines of two or three words, and the payout address
+   * over four.
+   *
+   * It is fixed here because this is the screen whose entire job is "every
+   * figure once more" (templates/_atm_confirm.html) and because it is in this
+   * change's files -- rule 12's "leave a file better than you found it; do not
+   * go looking". The same treatment as .kvt above and for the identical reason:
+   * the label is a small line and the value gets the full panel width under it.
+   *
+   * The label keeps its own line rather than being hidden: a figure with no name
+   * beside it is worse than a narrow one, and this list has five of them.
+   *
+   * `.atm .atm-review`, NOT `.atm-review`, AND THE EXTRA CLASS IS LOAD-BEARING.
+   * The rule it overrides sits ~700 lines BELOW this breakpoint, and at equal
+   * specificity the later rule wins whatever the media query says -- so the
+   * one-class version rendered a two-column review on a 390px phone and nothing
+   * reported it. Measured in Chromium, not assumed: the first attempt here was
+   * `.atm-review > div`, the screenshot came back unchanged, and that is how the
+   * override was found to be inert.
+   *
+   * This is the same hazard tests/test_atm_surface_is_styled.py's
+   * test_the_tiles_do_not_ALSO_take_the_operator_strips_grid exists for -- "which
+   * one wins is decided by source order in styles.css" -- arriving from the other
+   * direction. `.atm` is the question panel and is an ancestor of every review on
+   * this surface, so the selector is true rather than padded. */
+  .atm .atm-review > div { grid-template-columns: 1fr; gap: 0; }
+  .atm .atm-review dt { font-size: var(--t-sm); }
+  /* And the figures stop being right-aligned, for the reason `.kvt td.num` above
+   * gives in full: right alignment is what makes a COLUMN of digits readable, and
+   * stacked there is no column -- a lone right-aligned value just floats away
+   * from the label it belongs to. Caught in the same screenshot that found the
+   * override above was inert: "You send" sat left and "0.0002 BTC" sat hard
+   * right on the next line, with the whole panel between them. */
+  .atm .atm-review dd.num { text-align: left; }
 }
+
+/* A .kvt THAT STACKS BECAUSE ITS COLUMN IS NARROW, NOT BECAUSE THE SCREEN IS.
+ *
+ * The media query directly above does the same thing for the same reason at
+ * phone width, and its comment names this block; read both before changing
+ * either. The two are not redundant: this one applies at EVERY width, to the
+ * tables templates/_atm_costs.html puts in the ATM's 22rem right-hand column.
+ *
+ * MEASURED, which is why it is here at all. The costs table is three columns and
+ * the third is prose -- "basis points, taken out of the payout. 1.5% of the
+ * amount swapped." Unstacked in that column the label takes its content width
+ * (`width: 1%` on .kvt th), the value takes its digits, and the prose is left
+ * with roughly ten characters per line. That is the clipped-text regression a
+ * two-column layout exists to avoid, arriving inside the column that was
+ * supposed to be the improvement.
+ *
+ * Applied by a class on the TABLE rather than by `.atm-aside .kvt`, so a table
+ * that moves out of the aside keeps whichever treatment it was given and a
+ * reader can see from the markup which one it has. */
+.kvt-stacked tbody tr {
+  display: block;
+  border-bottom: 1px solid var(--line);
+}
+.kvt-stacked tbody tr:last-child { border-bottom: 0; }
+.kvt-stacked th[scope="row"],
+.kvt-stacked td {
+  display: block;
+  width: auto;
+  border-bottom: 0;
+}
+.kvt-stacked th[scope="row"] {
+  white-space: normal;
+  padding: var(--s2) 0 0;
+}
+.kvt-stacked td { padding: 0 0 var(--s2); }
+/* Same reason the phone block gives: stacked, there is no column for a value to
+ * be right-aligned within, so it would just float away from its label. */
+.kvt-stacked td.num { text-align: left; }
+/* THE HEADER ROW GOES, and only on a stacked table. "term / value / what it
+ * decides" labels three columns, and a stacked table has one -- so the words
+ * would sit above the first row describing a shape that is no longer on screen.
+ * The <thead> stays in the markup because tests/test_customer_page_layout.py
+ * reads the table structurally and because a screen reader still announces the
+ * column each cell belongs to. */
+.kvt-stacked thead { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
@@ -1717,7 +1815,160 @@ h2:target {
  * Seven names on four other surfaces. They are not in this change's files.
  * ======================================================================== */
 
+/* ---- THE SCREEN: the question on the left, reference on the right.
+ *
+ * Operator, 2026-10-09: "the first screen only have the buttons, the colum to
+ * the right the fees etc OR the swap id they can enter at the bottom... next
+ * screen will be the either/or amount and get the quote and keep the fees to
+ * the right."
+ *
+ * MEASURED BEFORE, through the real app in Chromium at 1280px: step 1 was four
+ * panels down one column -- coins, swap-id lookup, the 30-direction matrix, the
+ * costs table -- 1291px tall, with the right 40% of the page empty. The question
+ * the screen exists to ask was one panel of four.
+ *
+ * ONE MECHANISM FOR THE COLUMN COUNT, NOT A FLOOR PLUS A BREAKPOINT THAT COULD
+ * DISAGREE. That is the choice `.band` and `.swapgrid` already make and that
+ * tests/test_customer_page_layout.py pins for each of them. Here it is flex-wrap
+ * rather than their `repeat(auto-fit, minmax())`, and the difference is measured
+ * rather than stylistic -- see below.
+ *
+ * WHY NOT auto-fit, WHICH IS WHAT THIS FILE ALREADY USES TWICE. Two reasons,
+ * both found by probing the real page in Chromium instead of reasoning about it:
+ *
+ *   1. auto-fit TRACKS ARE EQUAL. `1fr 1fr` gives the reference column exactly as
+ *      much room as the question, and the question is a six-tile grid while the
+ *      reference is stacked label/value rows. `.band` can use auto-fit because
+ *      its children are peers; these two are not.
+ *   2. A FLOOR BIG ENOUGH FOR THE QUESTION NEVER FITS TWICE. Measured: the grid
+ *      container is 1068px at a 1280px viewport (main's own max-width, not the
+ *      window), so two 34rem tracks plus the gap want 1104px and the second
+ *      track is dropped at EVERY width. The first attempt here read
+ *      `repeat(auto-fit, minmax(min(34rem, 100%), 1fr))` and resolved to a single
+ *      1068px track at 1280, 1100, 900, 700 and 390 -- one column everywhere,
+ *      which rendered as the fee table sitting UNDER the coin buttons, exactly
+ *      the stacked layout this change exists to replace. It looked correct in the
+ *      stylesheet and was wrong on the screen.
+ *
+ * SO: flex-wrap with two bases. The row holds both while 30rem + 19rem + the gap
+ * fit (about 816px of container, so roughly an 850px window); below that the
+ * aside wraps to its own line and both items grow to the full width. No media
+ * query, nothing to keep in step with a breakpoint, and -- the property auto-fit
+ * does NOT have -- a flex item SHRINKS below its basis rather than overflowing,
+ * so a 390px phone gets a 358px column instead of a horizontal scrollbar.
+ *
+ * THE BASES ARE IN rem AND THAT IS DELIBERATE, for `.swapgrid`'s reason: a
+ * reader at 200% text size wraps to one column rather than reading two columns
+ * of two-word lines.
+ *
+ * NO SEPARATE CLASS FOR THE SCREENS WITH NO ASIDE. Steps 2, 5 and 6 have one
+ * child, and a lone flex item with `flex-grow: 3` fills the row by itself --
+ * there is no phantom second track to suppress, which is the other thing a grid
+ * would have needed a rule for. */
+.atm-screen {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--s4);
+}
+
+/* The question. Grows three times as fast as the reference beside it, so the
+ * extra width on a desk monitor goes to the thing the customer came for. */
+.atm-screen > .panel { flex: 3 1 30rem; }
+
+/* The reference. A smaller basis AND a smaller growth share: it holds stacked
+ * rows, and a 500px-wide column of them is not more readable than a 330px one,
+ * it is just louder than the question. */
+.atm-screen > .atm-aside { flex: 1 1 19rem; }
+
 .atm { display: grid; gap: var(--s4); }
+
+/* ---- the right-hand column itself. A panel by treatment, quieter than the
+ * one beside it: it is reference, and reference that competes with the question
+ * is the scroll this flow was built to remove. */
+.atm-aside {
+  display: grid;
+  gap: var(--s4);
+  align-content: start;
+  padding: var(--s4);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.atm-aside-heading {
+  margin: 0;
+  font-size: var(--t-sm);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.atm-aside-block { display: grid; gap: var(--s2); }
+
+.atm-aside-subheading {
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+/* The directory's own details/summary inside the column. `.swapgrid` is
+ * `minmax(15rem, 1fr)` so it is one column in here, which is what makes thirty
+ * rows readable rather than a 2x15 block of clipped labels. */
+.atm-aside details { font-size: var(--t-sm); }
+.atm-aside summary { cursor: pointer; color: var(--ink-soft); }
+.atm-aside summary:hover { color: var(--ink); }
+
+/* ---- what this one comes to. Blue, because the palette's own division is
+ * green for SETTLED and blue for IN MOTION (:root's note), and an estimate at a
+ * rate read a moment ago is the definition of not yet settled. Using --ok here
+ * would say "this is the price", which is the one thing it is not. */
+.atm-estimate {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: var(--s3);
+  background: var(--working-soft);
+  border-left: 3px solid var(--working);
+  border-radius: var(--radius-sm);
+}
+
+.atm-estimate > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s3);
+  align-items: baseline;
+}
+
+.atm-estimate dt { color: var(--ink-faint); font-size: var(--t-sm); }
+.atm-estimate dd { margin: 0; color: var(--ink); font-family: var(--mono); }
+
+.atm-estimate-note {
+  margin: 0;
+  font-size: var(--t-xs);
+  color: var(--ink-soft);
+}
+
+/* NOT ESTABLISHED IS VIOLET, the same claim `.atm-limit-unknown` makes twenty
+ * rules down and for the same reason :root gives for --unknown: a figure that
+ * could not be read must not look like a quiet version of a figure that could.
+ * Here it is the price feed, and proceeding on it is the one case where the
+ * customer is guessing. */
+.atm-estimate-unknown {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--unknown);
+  background: var(--unknown-soft);
+  border-radius: var(--radius-sm);
+  font-size: var(--t-sm);
+  color: var(--ink);
+}
+
+/* ---- the swap-id box at the bottom of screen 1. Full width under both
+ * columns, because it is neither the question nor reference: it is the OTHER
+ * thing you might have come to do, which is what the operator's "OR" says. */
+.atm-lookup { margin-top: var(--s4); }
 
 /* ---- the step strip. A LIST OF STATES, never a percentage: atm.html's own
  * comment says why, and `done`/`current`/`future` is the vocabulary the live

@@ -18,18 +18,25 @@ wrong function. tests/page_markup.py exists because of the same lesson.
 from __future__ import annotations
 
 import pytest
+from chains.amount_solve import deposit_for_desired_payout, payout_for_deposit
 from services.pair_view import asset_rollups
 from services.wizard import (
+    ADDRESS_STEP,
     AMOUNT_SIDES,
     AMOUNT_STEP,
+    FURNITURE_KEYS,
     POINT_OF_NO_RETURN,
     REVIEW_STEP,
     STEPS,
+    amount_as_number,
     answers_after_back,
+    both_sides,
     current_step,
     destinations_for,
     may_go_back,
     progress,
+    reject_amount,
+    screen_furniture,
     source_lamps,
     step_by_number,
 )
@@ -391,3 +398,259 @@ def test_the_named_step_constants_match_their_positions_in_STEPS():
         "the review must be the step immediately before the irreversible one, or a confirmed flow "
         "either commits early or never reaches the commit at all"
     )
+
+
+# ===========================================================================
+# WHAT EACH SCREEN CARRIES BESIDE ITS QUESTION, added 2026-10-09.
+#
+# Operator: "the first screen only have the buttons, the colum to the right the
+# fees etc OR the swap id they can enter at the bottom. next page will just be
+# the buttons they want to covert into. next screen will be the either/or amount
+# and get the quote and keep the fees to the right. then they can enter their
+# final wallet address for their swapped crypto."
+#
+# TESTED HERE AND NOT THROUGH A PAGE, for this file's own reason: the
+# arrangement is a function of a step NUMBER, so it is one call per claim. The
+# RENDERED consequences -- that the costs really are inside the <aside>, that the
+# lookup really is outside the two-column wrapper -- are in
+# tests/test_atm_flow.py, where the real handler draws them. Both halves are
+# needed: a correct table rendered into the wrong element is the defect class
+# this project keeps paying for.
+# ===========================================================================
+
+
+def test_the_first_screen_carries_the_costs_the_directory_and_the_lookup():
+    """Screen 1's three pieces, named one at a time so a failure says which.
+
+    This is the operator's sentence turned into assertions. The costs go to the
+    right-hand column, the swap-id box to the bottom, and the 30-direction
+    directory -- which is neither, and which rule 2 would otherwise have deleted
+    -- rides with the costs because it is the same KIND of thing: something you
+    look up while choosing, not something you answer.
+    """
+    first = screen_furniture(1)
+    assert first["costs"] is True, "screen 1 lost the fee column the operator asked for"
+    assert first["lookup"] is True, "the swap-id box is not at the bottom of screen 1"
+    assert first["pair_reference"] is True, (
+        "the 30-direction directory is on no screen at all. routes/atm.start()'s docstring records "
+        "that it is the ONLY answer to 'what does this terminal do', which is why it survived "
+        "templates/index.html being deleted -- dropping it is a deletion, not a layout change"
+    )
+    assert first["estimate"] is False, (
+        "screen 1 prices something, and nothing has been chosen yet -- there is no pair and no "
+        "amount, so any figure there would be invented"
+    )
+
+
+def test_the_destination_screen_carries_nothing_but_its_buttons():
+    """"next page will just be the buttons they want to covert into."
+
+    EVERY key false, not just the ones that were true on screen 1. A test that
+    checked only `costs` would pass if the swap-id box drifted onto this screen,
+    and a second way out of the flow sitting beside the question is exactly what
+    the one-question-per-screen premise is against.
+    """
+    assert set(screen_furniture(2).values()) == {False}, (
+        f"screen 2 carries {[k for k, v in screen_furniture(2).items() if v]}"
+    )
+
+
+def test_the_amount_screen_keeps_the_fees_to_the_right_and_prices_nothing_yet():
+    """"keep the fees to the right" -- and not the estimate, which has no input yet.
+
+    The amount screen is where the figure is TYPED, so there is nothing to price
+    until it has been submitted. An estimate block here would either be empty or
+    be showing the previous answer, and both read as a number about this screen.
+    """
+    amount = screen_furniture(AMOUNT_STEP)
+    assert amount["costs"] is True, "the fee column is not on the amount screen"
+    assert amount["estimate"] is False
+    assert amount["lookup"] is False, "a swap-id box mid-flow competes with the question"
+    assert amount["pair_reference"] is False, (
+        "a customer answering 'how much?' is not shopping for a pair"
+    )
+
+
+def test_the_address_screen_is_where_the_quote_they_asked_for_lands():
+    """"get the quote" happens on screen 3; this is the screen that can show it.
+
+    It is the FIRST step on which the pair and the amount are both settled, so it
+    is the first that can state what the trade comes to. Pinned because the whole
+    point of relabelling step 3's button is that pressing it visibly produces
+    something -- a button called "Get the quote" that led to a bare address box
+    would be rule 14's silence with a louder label on it.
+    """
+    address = screen_furniture(ADDRESS_STEP)
+    assert address["estimate"] is True, (
+        "nothing on the address screen states the price, so 'Get the quote' on the screen before it "
+        "produces no visible quote"
+    )
+    assert address["costs"] is True, "the quote window belongs beside the figures it governs"
+
+
+def test_the_review_states_the_figures_itself_and_takes_no_second_column():
+    """Step 5 gets the priced pair and NOT the aside, which is the whole split.
+
+    templates/_atm_confirm.html already lists every figure, so a right-hand
+    column repeating the fee beside it would be two renderings of the numbers the
+    next button commits to -- rule 8 on the one screen where disagreement costs
+    the deposit. What it lacked was the send figure itself, so it is given the
+    estimate and no furniture.
+    """
+    review = screen_furniture(REVIEW_STEP)
+    assert review["estimate"] is True, (
+        "the review has no priced figures, so a customer who typed the RECEIVE side is back to "
+        "reading a sentence where the deposit amount goes"
+    )
+    assert review["costs"] is False, (
+        "the review now has a second column stating the fee as well as its own list -- two "
+        "renderings of one number on the screen whose button moves money"
+    )
+
+
+def test_the_deposit_screen_and_any_unknown_step_carry_nothing_and_do_not_raise():
+    """All-false rather than an exception, which is the opposite of step_by_number().
+
+    The difference is deliberate and both directions are pinned. step_by_number()
+    is asked WHICH STEP THIS IS and refuses a wrong answer, because drawing the
+    wrong screen over a customer's answers looks like the flow resetting itself.
+    This one is asked whether a screen also shows the fee table, and the honest
+    answer for a screen nobody listed is no -- raising would turn a newly added
+    step into a 500 on a page whose question would otherwise have rendered.
+    """
+    for unknown in (POINT_OF_NO_RETURN, 0, -1, 99):
+        carried = screen_furniture(unknown)
+        assert set(carried.values()) == {False}, f"step {unknown} carries {carried}"
+        assert set(carried) == set(FURNITURE_KEYS), (
+            f"step {unknown} answers {sorted(carried)} and not every key -- a template asking for a "
+            "missing one gets Undefined, which Jinja renders as absence and nothing reports"
+        )
+
+
+def test_every_step_answers_every_key_so_a_template_never_reads_undefined():
+    """The shape invariant, over the whole flow.
+
+    WHY IT IS WORTH ITS OWN TEST. In Jinja an attribute that does not exist is
+    Undefined, which is falsey and renders as nothing -- so `{% if furniture.cost %}`,
+    one letter out, hides the right-hand column on every screen and no test,
+    template or log says so. A uniform dict is what makes that a typo in a key
+    name rather than a silent layout change.
+    """
+    assert FURNITURE_KEYS, "the furniture vocabulary is empty, so these tests assert nothing"
+    for step in STEPS:
+        carried = screen_furniture(step["number"])
+        assert set(carried) == set(FURNITURE_KEYS)
+        assert all(isinstance(value, bool) for value in carried.values()), (
+            f"step {step['number']} answers with something other than a bool: {carried}"
+        )
+
+
+def test_the_lookup_appears_on_exactly_one_screen():
+    """One way back into an existing swap, on the screen where you have not started one.
+
+    A swap-id box on a later screen is a second thing to do beside the question,
+    and on the review it would sit next to the button that creates a swap.
+    Counted over the whole flow rather than asserted per-step, so a new entry in
+    the table cannot quietly add a second one.
+    """
+    carrying = [step["number"] for step in STEPS if screen_furniture(step["number"])["lookup"]]
+    assert carrying == [1], f"the swap-id box is on steps {carrying}"
+
+
+# ===========================================================================
+# BOTH SIDES OF THE TRADE, which is what "get the quote" shows.
+# ===========================================================================
+
+
+def test_typing_the_send_side_prices_what_comes_back():
+    """The forward case: the receive leg is solved and the send leg is echoed."""
+    priced = both_sides({"amount": "2", "amount_side": "send",
+                         "from_asset": "ICP", "to_asset": "GRC"}, 321.7, 150)
+    assert priced["refusal"] == ""
+    assert priced["send"] == 2.0, "the typed figure must come back unaltered on the side it was typed"
+    assert priced["receive"] == payout_for_deposit(2.0, 321.7, 150, "GRC")[0]
+    assert priced["side"] == "send"
+
+
+def test_typing_the_receive_side_states_the_deposit_that_was_never_shown():
+    """THE DEFECT THIS FUNCTION EXISTS FOR, pinned as a number rather than a phrase.
+
+    Until 2026-10-09 a customer who answered "I want 300 GRC" saw
+    "&#8776; solved from what you want" on the review where the deposit amount
+    goes, and routes/atm._commit() solved the real figure only AFTER the confirm
+    button -- so the one number they had to put into a wallet first appeared on
+    the swap page of a swap that already existed.
+    """
+    priced = both_sides({"amount": "300", "amount_side": "receive",
+                         "from_asset": "ICP", "to_asset": "GRC"}, 321.7, 150)
+    assert priced["refusal"] == ""
+    assert priced["send"] == deposit_for_desired_payout(300.0, 321.7, 150, "ICP")[0]
+    assert priced["send"] > 0, "the deposit figure is still not a number"
+
+    # AND THE RECEIVE LEG IS WHAT THAT DEPOSIT BUYS, NOT WHAT WAS ASKED FOR. The
+    # deposit rounds UP, so the payout lands a hair above the figure typed, and
+    # that is the figure services/quote_service.create_quote() stamps on the swap
+    # row one click later. Echoing the typed 300.0 would put a number on the
+    # review that the row does not contain.
+    assert priced["receive"] == payout_for_deposit(priced["send"], 321.7, 150, "GRC")[0]
+    assert priced["receive"] >= 300.0, "a customer would be shown less than they asked for"
+
+
+def test_a_side_the_flow_does_not_know_is_refused_in_the_validators_own_words():
+    """One sentence for one condition, built from AMOUNT_SIDES rather than typed.
+
+    reject_amount() refuses the same condition, and a customer told two different
+    things about one radio button has been told nothing. Asserted by comparing the
+    two functions' output rather than against a literal, so a reworded sentence
+    stays in step automatically.
+    """
+    answers = {"amount": "1", "amount_side": "sideways", "from_asset": "ICP", "to_asset": "GRC"}
+    priced = both_sides(answers, 321.7, 150)
+    assert priced["refusal"] == reject_amount("1", "sideways", 10.0, "")
+    assert (priced["send"], priced["receive"]) == (0.0, 0.0), (
+        "a refused side still produced figures, so a screen could print both the reason and a number"
+    )
+
+
+def test_a_missing_side_is_the_send_side_everywhere_or_the_screen_lies():
+    """The default has to be the SAME one routes/atm.py commits with.
+
+    _first_bad_answer() and _commit() both read `answers.get("amount_side", "send")`,
+    so a browser that dropped the radio is treated as having typed the send side
+    by the code that creates the swap. If this function defaulted the other way,
+    the review would show a deposit solved for a payout and the commit would take
+    the typed figure as the deposit -- the screen and the authority disagreeing
+    about which number the customer meant.
+    """
+    without = both_sides({"amount": "2", "from_asset": "ICP", "to_asset": "GRC"}, 321.7, 150)
+    explicit = both_sides({"amount": "2", "amount_side": "send",
+                           "from_asset": "ICP", "to_asset": "GRC"}, 321.7, 150)
+    assert without == explicit
+    assert without["side"] == "send"
+    # An empty string is what a submitted-but-blank field gives, and current_step()
+    # already treats that as unanswered. It must not fall through to the refusal.
+    assert both_sides({"amount": "2", "amount_side": "",
+                       "from_asset": "ICP", "to_asset": "GRC"}, 321.7, 150) == explicit
+
+
+def test_an_unusable_amount_reports_the_same_sentence_the_amount_step_does():
+    """A bad figure refuses with amount_as_number()'s wording, not a second one."""
+    for typed in ("", "1,5", "0", "-3"):
+        answers = {"amount": typed, "amount_side": "send", "from_asset": "ICP", "to_asset": "GRC"}
+        priced = both_sides(answers, 321.7, 150)
+        assert priced["refusal"] == amount_as_number(typed)[1], f"{typed!r} got a second wording"
+        assert (priced["send"], priced["receive"]) == (0.0, 0.0)
+
+
+def test_an_unpriceable_pair_refuses_rather_than_printing_a_zero():
+    """A rate of zero is not a price of zero, and the two must not render alike.
+
+    routes/atm._rate_hint() already returns a sentence beside a zero rate for
+    exactly this reason, and this is the same distinction one layer down: a
+    screen that printed "you receive 0.0 GRC" for an unreadable feed would be
+    telling a customer the desk values their coin at nothing.
+    """
+    priced = both_sides({"amount": "2", "amount_side": "send",
+                         "from_asset": "ICP", "to_asset": "GRC"}, 0.0, 150)
+    assert priced["refusal"], "an unpriceable pair produced figures with no reason attached"
+    assert (priced["send"], priced["receive"]) == (0.0, 0.0)

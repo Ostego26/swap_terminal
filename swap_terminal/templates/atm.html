@@ -30,6 +30,44 @@
 {% block title %}{{ step.question }} &middot; Swap Terminal{% endblock %}
 
 {% block content %}
+{#- TWO COLUMNS, AND THE RIGHT ONE IS REFERENCE RATHER THAN A SECOND QUESTION.
+
+    Operator, 2026-10-09: "the first screen only have the buttons, the colum to
+    the right the fees etc OR the swap id they can enter at the bottom... next
+    screen will be the either/or amount and get the quote and keep the fees to
+    the right."
+
+    WHAT IT REPLACES. Step 1 used to be four panels stacked down one column --
+    the coin buttons, the swap-id lookup, the 30-direction matrix and the costs
+    table -- 1291px tall on a 1280px screen with the right 40% of the width
+    empty. The question the screen exists to ask was one panel of four, and
+    everything under it competed with the thing the customer came to do.
+
+    WHICH SCREENS GET WHICH IS NOT DECIDED HERE. `furniture` is
+    services/wizard.screen_furniture(step.number), so this file holds a lookup on
+    a value a function already decided and the arrangement can be asserted
+    against a seeded step number rather than against a rendered page (rule 10).
+
+    IT COLLAPSES TO ONE COLUMN ON A PHONE, which is a stylesheet rule and not a
+    second branch here: `.atm-screen` is a wrapping flex row whose two bases
+    cannot both fit below roughly 850px, and a flex item SHRINKS rather than
+    overflowing. One mechanism, so there is no breakpoint that can disagree with
+    a column count. static/styles.css records why it is flex-wrap and not the
+    `repeat(auto-fit, minmax())` this stylesheet uses elsewhere: that was tried
+    first and measured as ONE column at every width, which rendered as the fee
+    table under the coin buttons -- the stacked layout this change replaces.
+
+    ONE CLASS AND NO CONDITIONAL. A screen with no aside has a single flex child,
+    which fills the row by itself, so the steps that carry no reference need no
+    rule of their own. The branch that used to choose between two class names
+    here was a layout decision this file is not allowed to make (rule 10) and was
+    also doing nothing.
+
+    DOM ORDER IS READING ORDER AT PHONE WIDTH. Question first, then the aside,
+    then the lookup -- so a customer on a 390px screen still meets the coins
+    before anything else, and the swap-id box is still last, which is where the
+    instruction above puts it. -#}
+<div class="atm-screen">
 <section class="panel atm" aria-labelledby="atm-question">
 
   {#- THE STRIP IS A LIST OF STATES, not a percentage. A percentage of six steps
@@ -106,21 +144,129 @@
 
 </section>
 
-{#- EVERYTHING BELOW CAME FROM templates/index.html, WHICH THIS PAGE REPLACED on
-    2026-10-07. Operator: "we should merge the swap UI and the atm terminal into
-    just the ATM terminal with any cool features from the swap terminal included."
+{#- THE RIGHT-HAND COLUMN. Everything in it is REFERENCE: a figure or a list a
+    customer may want to look up, never a question they have to answer. That
+    division is what makes a second column legitimate on a flow whose premise is
+    one question per screen -- the question is still alone in the main column,
+    and nothing over here takes an answer.
 
-    STEP 1 ONLY. Mid-flow these are noise -- a customer answering "how much?" is
-    not shopping for a pair, and a legend explaining lamps that are no longer on
-    screen explains nothing. `show_reference` is decided in routes/atm.py, not
-    here, so the template still holds no branch of its own (base.html's header). -#}
-{% if show_reference %}
+    AN <aside> AND NOT A SECOND <section>, because that is what the element
+    means: content related to the main content and separable from it. A screen
+    reader announces it as a complementary landmark, so a customer tabbing
+    through reaches the coin buttons before the fee table rather than after it.
 
-{#- THE SWAP LOOKUP, AND IT IS THE ONE THAT WOULD HAVE BEEN LOST. A swap is a wait
-    measured in blocks, so a customer closes the tab and comes back -- and without
-    this they would need to have kept the /swap/<id> URL themselves. It is a GET
-    with a real action, so it works with no JavaScript. -#}
-<section class="panel" aria-labelledby="find-heading">
+    WHICH SCREENS SHOW IT IS services/wizard.screen_furniture()'S, and it is
+    steps 1, 3 and 4: the two the operator named ("the colum to the right the
+    fees etc", "keep the fees to the right"), plus the address screen, which is
+    the first one on which both the pair and the amount are settled and is
+    therefore the first that can state what the trade comes to. -#}
+{% if furniture.costs %}
+<aside class="atm-aside" aria-labelledby="aside-heading">
+  <h2 id="aside-heading" class="atm-aside-heading">Before you decide</h2>
+
+  {% include "_atm_costs.html" %}
+
+  {#- WHAT THIS TERMINAL DOES AT ALL. Step 1's lamps answer "can I send this";
+      step 2's options answer "what can this become". Neither answers "what pairs
+      exist", and a customer who came for a direction that is down deserves to
+      see it listed rather than inferred from an absence (rule 14).
+
+      WHY IT IS IN THIS COLUMN AND NOT AT THE BOTTOM OF THE PAGE, which is the
+      question CLAUDE.md's rule 2 would otherwise ask as "why keep it at all".
+      It is the same KIND of thing as the costs table: something a customer looks
+      up while choosing, not something they answer. Putting it here leaves the
+      bottom of screen 1 holding exactly one thing -- the swap-id box the
+      operator put there -- and leaves the main column holding exactly the coin
+      buttons. Deleting it was never an option: routes/atm.start()'s docstring
+      records that it is the ONLY answer to "what does this terminal do at all"
+      and that it survived templates/index.html's deletion for that reason.
+
+      STILL IN A CLOSED <details>, which is what makes thirty rows affordable in
+      a 340px column. The summary carries the count, so it is worth opening; shut,
+      it costs one line. -#}
+  {% if furniture.pair_reference %}
+  <section class="atm-aside-block" aria-labelledby="pairs-heading">
+    <h3 id="pairs-heading" class="atm-aside-subheading">What can be swapped right now</h3>
+    <details>
+      <summary>Every direction this terminal knows &mdash; {{ reference_pairs | length }} pairs over
+        {{ lamps | length }} coins</summary>
+
+      {#- THE "WHAT A COIN'S LAMP MEANS" TABLE WAS HERE AND IS GONE (2026-10-08).
+          Operator: "get rid of anything redundant."
+
+          MEASURED, not trimmed by taste: it rendered rollup_states -- the
+          ALL/SOME/NONE vocabulary of the COIN tiles -- inside a <details> whose
+          grid renders only `pair.customer.*` badges, four lines below. So it
+          explained a widget that is not in this block, under a heading about pair
+          directions, while the widget it described sits at the top of the page
+          where a reader looking at a lamp cannot see it.
+
+          And the tiles do not need it. Each one carries a drawn mark, the coin's
+          symbol, a state dot, the WORD (ALL/SOME/NONE) and the counts, plus
+          `title="{{ lamp.detail }}"` -- "BTC: 2 of 5 directions out of BTC can be
+          quoted right now", which is the generic legend row made specific to the
+          tile under the cursor. The legend restated the weaker version of a
+          sentence already attached to every instance.
+
+          "What the markers mean" below STAYS: those badges ARE in this block, its
+          states are the pair verdicts the grid renders, and nothing else on the
+          page explains ENABLED vs CANNOT COMPLETE. -#}
+
+      {#- ONE LINE PER TILE AND THE SENTENCE IS NOT ON IT. The sentence is per STATE,
+          so it is in the key below -- once each. Carried over verbatim from the page
+          this replaced, where thirteen tiles once repeated one sentence eleven
+          times. -#}
+      <ul class="swapgrid" id="swapgrid">
+        {% for pair in reference_pairs %}
+        <li class="swaptile swaptile-{{ pair.customer.key }}"
+            data-from="{{ pair.from_asset }}" data-to="{{ pair.to_asset }}">
+          <span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
+          {{ badges.level_badge(pair.customer.level, pair.customer.word) }}
+        </li>
+        {% endfor %}
+      </ul>
+
+      <table class="kvt kvt-stacked">
+        <caption class="subbox-title">What the markers mean</caption>
+        <tbody>
+          {% for state in customer_states %}
+          <tr>
+            <th scope="row">{{ badges.level_badge(state.level, state.word) }}</th>
+            <td>{{ state.note }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {#- WHO HOLDS THE MONEY, said once here as well as on the review screen.
+          Measured 2026-10-07: all 30 pairs settle CUSTODIALLY in this terminal, and
+          three of them have an atomic path that has run green and is not used. A
+          customer comparing directions is entitled to know that the answer does not
+          vary by pair. -#}
+      <p class="panel-note">Every pair above settles the same way: this desk takes your coin and pays
+         you from its own wallet. There is no hashlock and nothing is atomic &mdash; between your
+         deposit confirming and your payout broadcasting, this desk holds your funds.</p>
+    </details>
+  </section>
+  {% endif %}
+</aside>
+{% endif %}
+</div>
+
+{#- THE SWAP LOOKUP, AT THE BOTTOM AND ON THE FIRST SCREEN ONLY. Operator,
+    2026-10-09: "OR the swap id they can enter at the bottom."
+
+    IT IS THE ONE THAT WOULD HAVE BEEN LOST. A swap is a wait measured in blocks,
+    so a customer closes the tab and comes back -- and without this they would
+    need to have kept the /swap/<id> URL themselves. It is a GET with a real
+    action, so it works with no JavaScript.
+
+    OUTSIDE THE TWO-COLUMN GRID, DELIBERATELY. It is not reference and it is not
+    the question: it is the OTHER thing you might have come to do, which is what
+    the operator's "OR" is saying. Full width under both columns is where that
+    reads as an alternative rather than as a step. -#}
+{% if furniture.lookup %}
+<section class="panel atm-lookup" aria-labelledby="find-heading">
   <h2 id="find-heading">Already started one?</h2>
   <p class="panel-note">A swap waits on block confirmations, so you can close this and come back.
      Paste the id you were given.</p>
@@ -133,120 +279,5 @@
     <button type="submit">Find it</button>
   </form>
 </section>
-
-{#- WHAT THIS TERMINAL DOES AT ALL. Step 1's lamps answer "can I send this"; step
-    2's options answer "what can this become". Neither answers "what pairs exist",
-    and a customer who came for a direction that is down deserves to see it listed
-    rather than inferred from an absence (rule 14).
-
-    IN A <details> BECAUSE IT IS REFERENCE AND NOT THE QUESTION. The ATM's whole
-    premise is one question per screen; thirty rows above the first question would
-    be the scroll this page was built to remove. Closed by default, and the summary
-    carries the count so it is worth opening. -#}
-<section class="panel" aria-labelledby="pairs-heading">
-  <h2 id="pairs-heading">What can be swapped right now</h2>
-  <details>
-    <summary>Every direction this terminal knows &mdash; {{ reference_pairs | length }} pairs over
-      {{ lamps | length }} coins</summary>
-
-    {#- THE "WHAT A COIN'S LAMP MEANS" TABLE WAS HERE AND IS GONE (2026-10-08).
-        Operator: "get rid of anything redundant."
-
-        MEASURED, not trimmed by taste: it rendered rollup_states -- the
-        ALL/SOME/NONE vocabulary of the COIN tiles -- inside a <details> whose
-        grid renders only `pair.customer.*` badges, four lines below. So it
-        explained a widget that is not in this block, under a heading about pair
-        directions, while the widget it described sits at the top of the page
-        where a reader looking at a lamp cannot see it.
-
-        And the tiles do not need it. Each one carries a drawn mark, the coin's
-        symbol, a state dot, the WORD (ALL/SOME/NONE) and the counts, plus
-        `title="{{ lamp.detail }}"` -- "BTC: 2 of 5 directions out of BTC can be
-        quoted right now", which is the generic legend row made specific to the
-        tile under the cursor. The legend restated the weaker version of a
-        sentence already attached to every instance.
-
-        "What the markers mean" below STAYS: those badges ARE in this block, its
-        states are the pair verdicts the grid renders, and nothing else on the
-        page explains ENABLED vs CANNOT COMPLETE. -#}
-
-    {#- ONE LINE PER TILE AND THE SENTENCE IS NOT ON IT. The sentence is per STATE,
-        so it is in the key below -- once each. Carried over verbatim from the page
-        this replaced, where thirteen tiles once repeated one sentence eleven
-        times. -#}
-    <ul class="swapgrid" id="swapgrid">
-      {% for pair in reference_pairs %}
-      <li class="swaptile swaptile-{{ pair.customer.key }}"
-          data-from="{{ pair.from_asset }}" data-to="{{ pair.to_asset }}">
-        <span class="pair-label">{{ pair.from_asset }} &#8594; {{ pair.to_asset }}</span>
-        {{ badges.level_badge(pair.customer.level, pair.customer.word) }}
-      </li>
-      {% endfor %}
-    </ul>
-
-    <table class="kvt">
-      <caption class="subbox-title">What the markers mean</caption>
-      <tbody>
-        {% for state in customer_states %}
-        <tr>
-          <th scope="row">{{ badges.level_badge(state.level, state.word) }}</th>
-          <td>{{ state.note }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-
-    {#- WHO HOLDS THE MONEY, said once here as well as on the review screen.
-        Measured 2026-10-07: all 30 pairs settle CUSTODIALLY in this terminal, and
-        three of them have an atomic path that has run green and is not used. A
-        customer comparing directions is entitled to know that the answer does not
-        vary by pair. -#}
-    <p class="panel-note">Every pair above settles the same way: this desk takes your coin and pays
-       you from its own wallet. There is no hashlock and nothing is atomic &mdash; between your
-       deposit confirming and your payout broadcasting, this desk holds your funds.</p>
-  </details>
-</section>
-
-{#- WHAT A SWAP COSTS -- CARRIED VERBATIM from templates/index.html rather than
-    rewritten, and the first version of this merge rewrote it as a <dl> and broke
-    three tests saying so: the key had no heading, the terms table had no 'Service
-    fee' row, and no row was labeled 'Network fee'.
-
-    Those tests were right and my rewrite was the defect. "Any cool features from
-    the swap terminal included" (operator, 2026-10-07) means CARRIED, not
-    paraphrased -- a reworded table is a second wording of one explanation, which
-    is rule 8 arriving as prose, and it silently dropped the Network fee row whose
-    whole point is to say "(not fixed)" rather than invent a figure (rule 14). -#}
-<section class="panel" aria-labelledby="terms-heading">
-  <h2 id="terms-heading">What a swap costs, and how long a price lasts</h2>
-  <table class="kvt">
-    <thead><tr><th scope="col">term</th><th scope="col" class="num">value</th><th scope="col">what it decides</th></tr></thead>
-    <tbody>
-      <tr>
-        <th scope="row">Service fee</th>
-        <td class="num">{{ fee_bps }}</td>
-        <td>basis points, taken out of the payout. {{ (fee_bps / 100) | round(2) }}% of the amount swapped.</td>
-      </tr>
-      <tr>
-        <th scope="row">Quote validity</th>
-        <td class="num">{{ (quote_ttl_seconds / 1.2096) | round(1) }}&#181;fn</td>
-        <td>how long a quoted rate is held ({{ quote_ttl_seconds }}s). Past it, ask for another quote; nothing
-           in this system cancels a swap when a window passes.</td>
-      </tr>
-      <tr>
-        <th scope="row">Amount tolerance</th>
-        <td class="num">{{ (tolerance_pct * 100) | round(2) }}%</td>
-        <td>how far the confirmed deposit may differ from the expected amount. Outside the band the swap is
-           <strong>held for a human</strong> rather than paid out at a rate nobody quoted.</td>
-      </tr>
-      <tr>
-        <th scope="row">Network fee</th>
-        <td><span class="empty-mark">(not fixed)</span></td>
-        <td>the destination chain's own fee, held back out of the payout. It is a chain cost and not this
-           terminal's, so it is not a figure this page can fix in advance.</td>
-      </tr>
-    </tbody>
-  </table>
-
 {% endif %}
 {% endblock %}
