@@ -28,6 +28,7 @@ are here rather than in the tests because import order is the whole point.
    checkout.
 """
 
+import importlib.util
 import os
 import sys
 import tempfile
@@ -197,6 +198,82 @@ os.environ.pop("SOL_PAYOUT_KEYPAIR_PATH", None)
 # entry that was not a mapping would be dropped, the canary would never be placed
 # in it, and the test would pass having checked one chain fewer. An assertion says
 # the same thing and fails instead.
+def root_entry_point(relative_path: str, module_name: str | None = None):
+    """Import an entry point by path, as a module. The one copy.
+
+    Rule 10 puts entry points at the project root, and they are not importable as
+    package members from there -- so a test that wants one has to load it by path.
+    Five tests did, with five copies of this function:
+
+        test_operator_panel.py:50       _entry()
+        test_solana_payout.py:1199
+        test_grc_htlc_verify.py:58
+        test_reclaim_funding.py:43
+        test_icp_replica_entrypoint.py:34
+
+    test_solana_payout.py names test_operator_panel.py::_entry() in a comment as
+    the thing it was copied from, and ALL FIVE carried the same unchecked
+    `spec.loader` hole -- closed separately in four of them. One bug, four
+    diagnoses, which is rule 8's cost made explicit. OPEN_FINDINGS.md has recorded
+    "One conftest.py helper fixes all five" since; this is that helper.
+
+    It exists because I nearly wrote the SIXTH copy 2026-10-09, in the test for a
+    commit about consolidating duplicated knowledge, twenty minutes after
+    discovering I had made BITCOIN_FAMILY the sixth spelling of ("BTC","LTC","GRC")
+    in the commit before. Rule 9's "every time you are in a file, leave less of it
+    behind" is aimed at exactly this reflex.
+
+    BOTH FAILURE MODES ARE NAMED, which is the fix the five copies each needed:
+    spec_from_file_location() returns None when the path does not exist or no
+    loader claims it, and `spec.loader` is None for a spec carrying no loader. Left
+    unchecked, a renamed entry point arrives at every test in the file as
+    `AttributeError: 'NoneType' object has no attribute 'loader'`, naming neither
+    the file nor the reason.
+
+    A RELATIVE PATH RATHER THAN A BARE NAME, because one of the five is not at the
+    root: tests/test_icp_replica_entrypoint.py loads
+    `docker/icp_replica_entrypoint.py`, which lives in the Docker build context. A
+    helper taking a bare name could not express that, and a helper that could not
+    absorb all five would leave a copy behind -- which is how five became five.
+
+    `module_name` defaults to the path's stem, and is separate because two callers
+    load THE SAME FILE under two names on purpose: test_operator_panel.py as
+    "operator_panel_entry" and test_solana_payout.py as "operator_panel_entry_sol",
+    so the two test files get independent module objects. That distinction is
+    preserved rather than flattened while merging.
+
+    NO sys.path INSERT, and that is a removal rather than an omission. Two of the
+    five did `sys.path.insert(0, root / "swap_terminal")` first -- which this
+    conftest already does at import (see the APP_ROOT block above), so those lines
+    were dead. RUF100 found the same redundancy in a `noqa: E402` earlier on this
+    branch; it is the same dead idiom, copied.
+
+    THE EXISTENCE CHECK IS FIRST, AND IT IS THE FIX ALL FIVE NEEDED.
+    test_solana_payout.py records the measurement: a path that does NOT EXIST
+    still produces a perfectly good spec, so `spec is None` never fires for the
+    realistic failure. Checking the file is there is what actually names a renamed
+    entry point.
+    """
+    source = REPO_ROOT / relative_path
+    if not source.exists():
+        raise FileNotFoundError(
+            f"{source} does not exist -- the entry point was renamed or removed, so nothing "
+            f"that imports it can be checked against it. This file is named by PATH, so no "
+            f"import graph points at it and nothing else would have caught the move."
+        )
+    spec = importlib.util.spec_from_file_location(module_name or source.stem, source)
+    if spec is None:
+        raise ImportError(
+            f"no import spec for {source} -- the entry point is unreadable, so nothing in the "
+            f"calling test file can be checked against it"
+        )
+    if spec.loader is None:
+        raise ImportError(f"the import spec for {source} carries no loader, so it cannot be executed")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def poisoned_rpc_table(rpc) -> dict:
     """Every entry of `rpc`, with each credential field replaced by a canary."""
     poisoned = {}

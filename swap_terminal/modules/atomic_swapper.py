@@ -122,6 +122,21 @@ logger = logging.getLogger(__name__)
 # was missing was a way to reach it.
 _AMOUNT_KWARG = AMOUNT_KEYWORD
 
+#:
+#: FIVE NAMES, ONE MEMBERSHIP, AND THEY ARE NOT THE SAME CONCEPT (rule 8: "If
+#: they genuinely differ, the difference is the point and belongs in a comment at
+#: BOTH sites, naming the other one"). Counted 2026-10-09:
+#:
+#:   wallet_custody.SCRIPT_CHAINS                 custody is by WALLET
+#:   modules/atomic_swapper.SUPPORTED_ASSETS      pairs the script swapper can do
+#:   show_payout_fees.MEASURABLE                  payout fee measurable from here
+#:   icp_custody_addresses._P2PKH_CHAINS          has legacy P2PKH addresses
+#:   chains/daemon_capabilities.BITCOIN_FAMILY    has a Bitcoin Core release
+#:
+#: They agree today and can diverge -- a bech32-only Bitcoin fork would be in
+#: SCRIPT_CHAINS and not in _P2PKH_CHAINS -- so they are NOT merged.
+#: tests/test_daemon_capabilities.py asserts they agree now, which makes a future
+#: divergence deliberate rather than an accident nobody notices.
 SUPPORTED_ASSETS = ("BTC", "LTC", "GRC")
 
 

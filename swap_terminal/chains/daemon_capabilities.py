@@ -83,10 +83,51 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: The three Bitcoin-derived chains this file speaks for. XRP, SOL and ICP are
-#: not Bitcoin-derived and have no Core release to compare against; asking about
-#: them is a bug in the caller rather than a gap here, so it raises.
-BITCOIN_FAMILY = ("BTC", "LTC", "GRC")
+from .coin_amounts import CHAIN_DECIMALS
+
+#: The Bitcoin-derived chains this file speaks for. XRP, SOL and ICP are not
+#: Bitcoin-derived and have no Core release to compare against; asking about them
+#: is a bug in the caller rather than a gap here, so it raises.
+#:
+#: DERIVED FROM coin_amounts.CHAIN_DECIMALS, AND THE FIRST VERSION OF THIS LINE
+#: WAS `("BTC", "LTC", "GRC")` -- which made it the SIXTH spelling of that tuple,
+#: written in the commit whose entire purpose was consolidating duplicated chain
+#: knowledge. config.py:308 and workers/common.py:108 both already say it is
+#: spelled in five places, and config.py:1339 records that there is deliberately
+#: no tuple in that file "-- rule 8 counts copies". I added one anyway, and found
+#: it only by going looking afterwards, which is the whole argument for rule 9's
+#: "every time you are in a file, leave less of it behind".
+#:
+#: CHAIN_DECIMALS is the right authority rather than the nearest one. Its own
+#: docstring says XRP and SOL are "DELIBERATELY ABSENT" because both convert to
+#: integer base units before sending, so no decimal string ever reaches those
+#: RPCs -- which is a property of NOT being a Bitcoin-family daemon, stated at
+#: the only place that had to decide it. Its keys are therefore the same set this
+#: file needs, for the same underlying reason rather than by coincidence.
+#:
+#: ORDER IS PRESERVED and matters elsewhere: wallet_custody.py:805 does
+#: `enumerate(SCRIPT_CHAINS, start=1)` for a numbered display and
+#: icp_custody_addresses.py loops twice. dict insertion order makes
+#: tuple(CHAIN_DECIMALS) == ("BTC", "LTC", "GRC"), asserted in
+#: tests/test_daemon_capabilities.py rather than assumed.
+#:
+#: THE OTHER FIVE ARE NOT MERGED INTO THIS, and that is rule 8's harder half
+#: rather than laziness: "If they genuinely differ, the difference is the point
+#: and belongs in a comment at BOTH sites, naming the other one." They are five
+#: DIFFERENT concepts whose membership happens to coincide today --
+#:
+#:   wallet_custody.SCRIPT_CHAINS            custody is by WALLET (XRP/SOL by account)
+#:   modules/atomic_swapper.SUPPORTED_ASSETS pairs the script swapper can do
+#:   show_payout_fees.MEASURABLE             payout fee is measurable from here
+#:   icp_custody_addresses._P2PKH_CHAINS     has legacy P2PKH addresses
+#:   this                                    has a Bitcoin Core release to compare to
+#:
+#: -- and they can diverge: a bech32-only Bitcoin fork would be in SCRIPT_CHAINS
+#: and not in _P2PKH_CHAINS. Collapsing them would be asserting an identity
+#: nobody has established. What was missing is that none of them named the
+#: others, so the coincidence looked like a copy; the test asserts they agree
+#: TODAY, which makes a future divergence deliberate instead of accidental.
+BITCOIN_FAMILY: tuple[str, ...] = tuple(CHAIN_DECIMALS)
 
 #: Evidence kinds, and the whole reason the field exists (rule 17: a reason to
 #: believe is not the same as having checked, and the two must never be written

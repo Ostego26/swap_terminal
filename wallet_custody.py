@@ -176,6 +176,21 @@ from workers.common import db_path_source, get_config_dict, root_tool_command
 #: The chains whose custody separation is a WALLET on a Bitcoin-derived daemon.
 #: Named here rather than written into three loops, and deliberately in the same
 #: order chains/registry and swap_readiness use so two reports scan alike.
+#:
+#: FIVE NAMES, ONE MEMBERSHIP, AND THEY ARE NOT THE SAME CONCEPT (rule 8: "If
+#: they genuinely differ, the difference is the point and belongs in a comment at
+#: BOTH sites, naming the other one"). Counted 2026-10-09:
+#:
+#:   wallet_custody.SCRIPT_CHAINS                 custody is by WALLET
+#:   modules/atomic_swapper.SUPPORTED_ASSETS      pairs the script swapper can do
+#:   show_payout_fees.MEASURABLE                  payout fee measurable from here
+#:   icp_custody_addresses._P2PKH_CHAINS          has legacy P2PKH addresses
+#:   chains/daemon_capabilities.BITCOIN_FAMILY    has a Bitcoin Core release
+#:
+#: They agree today and can diverge -- a bech32-only Bitcoin fork would be in
+#: SCRIPT_CHAINS and not in _P2PKH_CHAINS -- so they are NOT merged.
+#: tests/test_daemon_capabilities.py asserts they agree now, which makes a future
+#: divergence deliberate rather than an accident nobody notices.
 SCRIPT_CHAINS = ("BTC", "LTC", "GRC")
 
 #: The one chain whose separation is established by asking a SECOND daemon, and

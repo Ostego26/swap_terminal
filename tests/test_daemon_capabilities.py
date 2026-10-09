@@ -17,7 +17,10 @@ the one divergence nothing absorbs yet.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from chains.coin_amounts import CHAIN_DECIMALS
 from chains.daemon_capabilities import (
     BITCOIN_FAMILY,
     CAPABILITIES,
@@ -34,8 +37,115 @@ from chains.daemon_capabilities import (
     unverified_on_this_deployment,
     wallet_path_warning,
 )
+from conftest import root_entry_point
+from modules.atomic_swapper import SUPPORTED_ASSETS
 
 _WALLET_PATH = "multi-wallet HTTP endpoint (/wallet/<name>)"
+
+
+def test_the_family_tuple_is_derived_and_not_a_sixth_spelling():
+    """IT WAS A SIXTH SPELLING, written in the commit meant to stop duplication.
+
+    `BITCOIN_FAMILY = ("BTC", "LTC", "GRC")` was the first version of that line.
+    config.py:308 and workers/common.py:108 both already record that this tuple is
+    spelled in five places, and config.py:1339 says there is deliberately no
+    tuple in that file "-- rule 8 counts copies". I added a sixth anyway, in
+    35edf70, whose whole subject was consolidating scattered chain knowledge, and
+    found it only by going looking afterwards.
+
+    It now derives from coin_amounts.CHAIN_DECIMALS, whose own docstring explains
+    that XRP and SOL are absent because they convert to integer base units before
+    sending -- a property of not being a Bitcoin-family daemon, decided at the one
+    place that had to decide it. So the sets coincide for the same reason rather
+    than by luck.
+
+    ASSERTED ON THE SOURCE AS WELL AS THE VALUE, and the value half alone is NOT
+    enough -- measured. Restoring the literal `("BTC", "LTC", "GRC")` passed the
+    value comparison clean, because a hand-written copy that AGREES is exactly
+    what a value comparison cannot distinguish from a derivation. That is the same
+    shape as the vacuous screen test caught earlier the same day: the assertion
+    was true for a reason unrelated to what it claimed to check.
+
+    So the source assertion is the one that bites, and it is justified the way
+    test_up_actually_asks_before_it_prints_SERVING is: the claim is "this value is
+    DERIVED", which has no behavior to exercise, because a correct derivation and
+    a correct copy evaluate identically until the day they do not.
+    """
+    source = (Path(__file__).resolve().parents[1]
+              / "swap_terminal/chains/daemon_capabilities.py").read_text()
+    assignment = next(
+        line for line in source.splitlines() if line.startswith("BITCOIN_FAMILY")
+    )
+    assert "CHAIN_DECIMALS" in assignment, (
+        f"BITCOIN_FAMILY is not derived; it is assigned: {assignment.strip()}"
+    )
+    assert '"BTC"' not in assignment, (
+        f"BITCOIN_FAMILY spells the chains out, which makes it another copy of a tuple this "
+        f"tree already spells five times: {assignment.strip()}"
+    )
+
+    assert tuple(CHAIN_DECIMALS) == BITCOIN_FAMILY, (
+        f"BITCOIN_FAMILY {BITCOIN_FAMILY} is not derived from CHAIN_DECIMALS "
+        f"{tuple(CHAIN_DECIMALS)} -- one of them is a hand-written copy"
+    )
+    # ORDER, NOT JUST MEMBERSHIP. wallet_custody.py:805 does
+    # `enumerate(SCRIPT_CHAINS, start=1)` for a numbered display, and
+    # icp_custody_addresses.py loops twice, so a reorder would silently renumber
+    # an operator-facing report.
+    assert BITCOIN_FAMILY == ("BTC", "LTC", "GRC"), (
+        f"the order changed to {BITCOIN_FAMILY}; a numbered report elsewhere follows it"
+    )
+
+
+def test_the_five_sibling_tuples_agree_today_and_each_names_the_others():
+    """Rule 8's HARDER half: they genuinely differ, so they are not merged.
+
+    Five names, one membership, five different concepts -- wallet custody, swapper
+    support, fee measurability, P2PKH addresses, and having a Bitcoin Core release
+    to compare against. They CAN diverge: a bech32-only Bitcoin fork belongs in
+    SCRIPT_CHAINS and not in _P2PKH_CHAINS. Collapsing them would assert an
+    identity nobody has established, which is why rule 8 asks instead for "a
+    comment at BOTH sites, naming the other one".
+
+    What was missing is exactly that: none of the five named the others, so the
+    coincidence read as a copy somebody forgot to merge. This asserts the
+    agreement TODAY, which makes a future divergence a deliberate edit to a
+    failing test rather than a silent drift nobody sees.
+    """
+    # conftest.root_entry_point(), NOT a sixth copy of the loader. I started to
+    # write one here -- in the test for a commit about consolidating duplicated
+    # knowledge -- which is the same reflex that made BITCOIN_FAMILY a sixth
+    # spelling one commit earlier. OPEN_FINDINGS has asked for this helper since
+    # the five copies were counted.
+    siblings = {
+        "chains/daemon_capabilities.BITCOIN_FAMILY": BITCOIN_FAMILY,
+        "modules/atomic_swapper.SUPPORTED_ASSETS": SUPPORTED_ASSETS,
+        "wallet_custody.SCRIPT_CHAINS": root_entry_point("wallet_custody.py").SCRIPT_CHAINS,
+        "show_payout_fees.MEASURABLE": root_entry_point("show_payout_fees.py").MEASURABLE,
+        "icp_custody_addresses._P2PKH_CHAINS": root_entry_point("icp_custody_addresses.py")._P2PKH_CHAINS,
+    }
+    for name, value in siblings.items():
+        assert tuple(value) == BITCOIN_FAMILY, (
+            f"{name} is {tuple(value)} and BITCOIN_FAMILY is {BITCOIN_FAMILY}. If that "
+            f"divergence is INTENDED, say so in both comments and change this test -- the "
+            f"point is that it cannot happen quietly"
+        )
+
+    # AND EACH ONE NAMES THE OTHERS, which is the half a value comparison cannot
+    # check. A reader who finds one of these must be told the other four exist.
+    repo = Path(__file__).resolve().parents[1]
+    sources = {
+        "wallet_custody.py": repo / "wallet_custody.py",
+        "show_payout_fees.py": repo / "show_payout_fees.py",
+        "icp_custody_addresses.py": repo / "icp_custody_addresses.py",
+        "atomic_swapper.py": repo / "swap_terminal/modules/atomic_swapper.py",
+        "daemon_capabilities.py": repo / "swap_terminal/chains/daemon_capabilities.py",
+    }
+    for label, path in sources.items():
+        text = path.read_text()
+        assert "BITCOIN_FAMILY" in text, f"{label} does not name BITCOIN_FAMILY"
+        assert "_P2PKH_CHAINS" in text, f"{label} does not name _P2PKH_CHAINS"
+        assert "SCRIPT_CHAINS" in text, f"{label} does not name SCRIPT_CHAINS"
 
 
 def test_a_chain_nobody_checked_answers_None_and_not_False():
