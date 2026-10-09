@@ -62,7 +62,33 @@ truncating off the word that distinguished them until C27 below.
 ### 2. GRC rejects the container's RPC with 403
 **Measured**: `did not answer: 403 Client Error: Forbidden for url:
 http://host.docker.internal:25779/`. Socket open, RPC refused — so `rpcallowip`,
-not the bind. **Remedy**: `rpcallowip=172.18.0.0/16` in `gridcoinresearch.conf`.
+not the bind.
+
+**THE FILE, NAMED CORRECTLY 2026-10-09 AFTER I NAMED IT WRONG REPEATEDLY.** The
+operator runs THREE GRC wallets and the remedy above pointed at the wrong one's
+conf for several rounds, which is why applying it changed nothing:
+
+    /usr/local/bin/gridcoinresearch -datadir=~/.GridcoinResearch -min    mainnet GUI
+    gridcoinresearch -testnet -disableupdatecheck ...                    testnet GUI (external)
+    gridcoinresearchd -datadir=~/.GridcoinResearch-desk -daemon          THE DESK
+
+`~/.GridcoinResearch/gridcoinresearch.conf` belongs to the GUI wallets (measured:
+`rpcport=15715`, `rpcallowip=127.0.0.1`). The desk daemon has its own datadir, so
+the file to edit is **`~/.GridcoinResearch-desk/gridcoinresearch.conf`**.
+
+**Remedy**: `rpcallowip=172.18.0.0/16` in
+`~/.GridcoinResearch-desk/gridcoinresearch.conf`, keeping the existing
+`rpcallowip=127.0.0.1`, then restart THAT daemon only. Measured: the container is
+172.18.0.3 on gateway 172.18.0.1, and `rpcallowip=127.0.0.1` alone is the 403
+exactly. If a `/16` still 403s afterward, that build does not honor CIDR (one of
+the three unverified rows in `chains/daemon_capabilities.py`) and the pre-0.10
+form `rpcallowip=172.18.*.*` is what it understands -- GRC's conf ONLY, since
+modern Core refuses to start on a wildcard.
+
+**Lesson, because it cost several rounds:** "which conf" is as much a part of a
+config remedy as the line itself, and I never asked which daemon owned the port
+until the operator said there were three. Rule 17 -- a remedy aimed at an
+unverified path is a hypothesis in the register of an instruction.
 
 ### 3. The ufw rule names a subnet docker can reassign
 `172.18.0.0/16` was read from `docker network inspect` on 2026-10-09. Docker
