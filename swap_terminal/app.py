@@ -50,6 +50,7 @@ import logging
 import os
 from collections.abc import Mapping
 
+from chains.daemon_capabilities import BITCOIN_FAMILY, wallet_path_warning
 from chains.registry import build_adapters
 from config import Config
 from db import close_db, init_db
@@ -184,6 +185,25 @@ def create_app() -> Flask:
     # the thing you must have meant to do.
     for line in startup_lines(app.config["RPC"]):
         logger.info("chain target  %s", line)
+    # A WALLET PATH A DAEMON CANNOT SERVE, said at startup or not at all.
+    #
+    # chains/base.RPCAdapter.url appends /wallet/<name> for ANY chain whose
+    # wallet is configured, and the multi-wallet HTTP endpoint arrived in Bitcoin
+    # Core 0.17 -- which chains/base.py:339 already records Gridcoin as predating.
+    # So GRC_RPC_WALLET being set would send every GRC call, payouts included, to
+    # a route that does not exist, and it would read as a transport failure
+    # rather than as a configuration error.
+    #
+    # REPORTED, NOT REFUSED (rule 16). This is the order path, and a session that
+    # cannot see the operator's .env must not decide their live configuration
+    # should stop working. WARNING rather than INFO for the same reason the
+    # mainnet line below is: it is visible at the default level, and it is the
+    # thing you must have meant to do.
+    for chain in BITCOIN_FAMILY:
+        trouble = wallet_path_warning(chain, str((app.config["RPC"].get(chain) or {}).get("wallet", "")))
+        if trouble:
+            logger.warning("chain config  %s", trouble)
+
     on_mainnet = mainnet_chains(app.config["RPC"])
     if on_mainnet:
         logger.warning(

@@ -396,6 +396,22 @@ by grepping for the NAME rather than the import graph (rule 2).
   sweep across files you were not already in is a large diff with no behavioral
   benefit. Named work, not a baseline (rule 19).
 
+- **Should the GRC wallet-path warning become a refusal?** `wallet_path_warning()`
+  currently logs at WARNING. A hard refusal at URL-construction time would fail
+  fast and visibly instead of producing a 404 mid-payout, and on a configuration
+  that CANNOT work that is strictly safer. I did not ship it because it is the
+  order path and this session cannot see your `.env`: if `GRC_RPC_WALLET` were
+  set on the live host, a refusal would stop GRC dead. The evidence says it is
+  unset (your 403 came from a bare `http://host:25779/`), so the refusal is
+  probably a no-op — "probably" being exactly why it is yours (rule 16).
+
+- **Three capability rows are unverified against your daemons** (rule 17), all
+  Bitcoin Core release history rather than readings: the `/wallet/<name>`
+  endpoint at 0.17, `rpcbind` at 0.12, and CIDR `rpcallowip` at 0.10 with
+  wildcards removed in 0.12. `unverified_on_this_deployment()` lists them. The
+  cheap check for all three is `gridcoinresearchd help` plus the daemon's own
+  startup log, which says if it rejected a netmask.
+
 - **Two unrelated functions are both named `readiness_verdict`**, with different
   arities and different questions. `stack_authority.readiness_verdict(outcome)`
   interprets ONE probe of an HTTP endpoint and returns
@@ -438,6 +454,8 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C32 | **GRC/LTC/BTC capability knowledge was spelled in prose across eleven files** — all correct, all measured, none askable. `chains/base.py:339`, `payout_quantization.py:211`, `rpc_method_support.py:21`, `script_chain.py:549`, `htlc_fee.py:232`, `htlc_rpc.py:377`, `funding_steps.py:505`, `daemons.py:853`, `admin_view.py:1496`, `custody_separation.py:234`, `fee_sweep.py:564` — and `daemons.py:658` says out loud that one file held two copies of the `uptime` fact. New `chains/daemon_capabilities.py` is the one place to ask: a capability map with the Core release each feature arrived in, and an **equivalence tree keyed by the JOB** (operator: *"a tree of equivalence betwen rpc comamnds for ltc, btc, and grc"*). Every row names the function that ALREADY resolves the divergence rather than re-implementing it. **Evidence is a field** — `MEASURED` vs `RELEASE_HISTORY` — and `unverified_on_this_deployment()` lists the three rows I could not test here (rule 17) | `this commit` |
+| C33 | **A `/wallet/<name>` path would be built for GRC, which has no such endpoint.** `chains/base.RPCAdapter.url` AND `chains/daemon_conf.rpc_url()` both append it whenever a wallet is configured, for any chain, with no test between them — two copies of one rule, and the rule neither has is that multi-wallet HTTP arrived in Core **0.17**, which `base.py:339` already records Gridcoin as predating. **Latent, not live**: `GRC_RPC_WALLET` defaults to `""` and the 403 came from a bare `http://host:25779/`. One env var from breaking every GRC call including payouts, and it would read as a transport failure rather than a config error. Now reported at startup by `wallet_path_warning()`; **turning it into a refusal is the operator's call (rule 16)** — it is the order path and I cannot see your `.env` | `this commit` |
 | C31 | A test I wrote this session was **flaky by construction** and had been passing on luck since `8287f1c`. `assert grc.startswith("S")` over a RANDOM `generate_key()` — but a one-byte version prefix does not pin the leading base58 digit. Measured over 2000 random keys: **272 failures, 13.6%**, against **0** for the version-byte assertion that replaced it. It surfaced in a full-suite run and passed in isolation, the shape that gets written off as a flake. `0x3E`'s 25-byte range straddles a base58 carry where `0x00` and `0x30` do not, which is why the same heuristic is safe for BTC and LTC and not for GRC. **And the repo already knew**: `test_address_network.py:91` records that a `not startswith("S")` check "called it testnet, which is what it was written to prevent", and two more files note `startswith("S")` "had it answering backwards" — three written refutations, and I wrote a fourth instance. Now asserts `network_of_version(b58decode_check(addr)[0])`, the round trip through production rather than a literal | `this commit` |
 | C29 | The ATM review screen showed a customer `You send 8.061e-05 BTC` one click before **Create the swap**. Python's float `str()` switches to scientific notation below 1e-4, and the templates interpolated `{{ estimate.send }}` — a raw float straight into Jinja. At the BTC price this desk quotes, 0.0001 BTC is roughly ten dollars, so this was most small swaps, not an edge case. Operator: *"do all scientific notation in engineering notation where all powers are multiples of 3 since we have a number with a unit which is btc."* New `engineering_notation.py` on the `microfortnights.py` pattern — one module, one convention — renders `80.61e-6`; registered once as a `coin` Jinja filter. **Measured surface: 4 raw-float renderings against 19 already using `'%.8f'\|format`, which cannot produce an exponent. Those 4 were the whole defect** | `this commit` |
 | C30 | And my first two tests for C29 were VACUOUS. At the stub prices (BTC 62000 / GRC 0.031 = 2,000,000 GRC per BTC) a 1000 GRC payout solves to 0.00050762 BTC, which writes plainly — so "no scientific notation on this screen" asserted nothing, and the mutation reverting `\| coin` passed clean. The boundary is 197 GRC; the tests now use 100 GRC and each **asserts `needs_engineering(solved)` first**, so they fail loudly rather than going quietly vacuous if the stub prices move. Separately, the review screen has no `<aside>` at all (`_SCREEN_FURNITURE` gives step 5 `("estimate",)`), so the costs partial needed step 4 — one test, two posts, both partials, each independently mutation-checked | `this commit` |

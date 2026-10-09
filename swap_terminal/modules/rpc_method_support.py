@@ -54,6 +54,14 @@ other; what they must not do is disagree about which absences are expected, so e
 other. regtest/steps._WALLET_CAPABILITY_MARKERS is a third reader of the same -32601, as a
 redeem-stage diagnosis rather than a capability question.
 
+NOT THE CAPABILITY MAP, AND chains/daemon_capabilities.py IS (rule 8 asks for the difference
+at both sites; that file carries the other half of this paragraph). This table holds ONLY
+methods a caller already falls back from, because quieting anything else would hide a real
+failure -- so it is deliberately narrower than "what does this daemon have". That file answers
+"does it have it at all, which Core release did it arrive in, what do I call instead, and was
+that MEASURED or read off release notes", and it carries the equivalence tree keyed by job.
+A capability with no fallback anywhere belongs there and must never be added here.
+
 ONE COPY, THREE CLIENTS (rule 8). atomic_btc_client.py and atomic_grc_client.py each have the
 blanket handler this feeds; atomic_ltc_client.py does not (measured 2026-09-28: it catches
 RequestException only, so a `-32601` there propagates with no logging at all -- quieter than
