@@ -248,7 +248,7 @@ def read_fees(rows: list[dict], adapters: dict, *, ask_chain: bool, say) -> dict
 DROPS_PER_XRP = 1_000_000
 
 
-def ask_base_fee(asset: str, adapter) -> tuple[str, str] | None:
+def ask_base_fee(asset: str, adapter) -> tuple[str | None, str] | None:
     """What the CHAIN says one payout costs right now, for a chain with no payout yet.
 
     WHY THIS EXISTS AT ALL. The operator asked 2026-10-03 what all four reserves
@@ -286,10 +286,20 @@ def ask_base_fee(asset: str, adapter) -> tuple[str, str] | None:
     READ FROM THE SERVER label would make the label false -- which is the one
     outcome worse than no figure.
 
-    Returns (figure, provenance) or None when the chain cannot be asked. A FAILED
-    ASK RETURNS THE REASON, never a number: this function's whole job is to replace
-    a typed-in figure with a measured one, and a fallback that looked measured
-    would defeat it.
+    THREE RETURNS, AND THE SIGNATURE SAID TWO. This hands back whatever the asker
+    in _ASKERS returned, verbatim, and that table's own comment states the contract
+    in full: `(figure, provenance)` on a read, `(None, reason)` on a failure, bare
+    `None` for an adapter that cannot be asked at all. The annotation here read
+    `tuple[str, str] | None` and so denied the middle one -- the case
+    test_show_payout_fees.py asserts on by name ("a refusing cluster must be
+    REPORTED, not treated as unaskable") and the case report_asset() branches on
+    four lines after calling this (`if figure is None`). A declared type that
+    excludes a tested, handled, reachable answer is a wrong comment in the one place
+    a reader is most likely to trust without checking (rule 16).
+
+    A FAILED ASK RETURNS THE REASON, never a number: this function's whole job is to
+    replace a typed-in figure with a measured one, and a fallback that looked
+    measured would defeat it.
     """
     asker = _ASKERS.get(asset)
     if adapter is None or asker is None:

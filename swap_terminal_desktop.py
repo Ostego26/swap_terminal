@@ -983,7 +983,21 @@ def main(argv: list[str] | None = None) -> int:
     "unrecognized arguments: tests/...". Added here while adding --window, so the
     flag could be asserted at all.
     """
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # `__doc__ and` BECAUSE -OO STRIPS DOCSTRINGS AND THIS FILE THEN DIED BEFORE IT PARSED.
+    # Measured 2026-10-09: `python3 -OO` on this file raises
+    #
+    #     AttributeError: 'NoneType' object has no attribute 'splitlines'
+    #
+    # on this line, for every action and for --help -- the tool refuses to start and says
+    # nothing about why, which is the shape rule 14 is about. PYTHONOPTIMIZE is set nowhere in
+    # this tree today, so this was latent rather than live; -OO or PYTHONOPTIMIZE=2 in a
+    # container image or a shell is all it takes, and a launcher that cannot print its own
+    # help is a bad place to discover that.
+    #
+    # market_context_report.py:119 already spells it this way; this is that spelling, not a
+    # new one (rule 8). `or ""` would NOT do: "".splitlines() is [] and [0] is an IndexError,
+    # one line further on. argparse takes description=None and prints no summary.
+    parser = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
     parser.add_argument("--host", default=os.environ.get("SWAP_TERMINAL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("SWAP_TERMINAL_PORT", "5000")))
     parser.add_argument(

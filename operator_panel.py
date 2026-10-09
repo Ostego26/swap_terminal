@@ -50,6 +50,7 @@ import argparse
 import json
 import sys
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1173,7 +1174,12 @@ def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page:
     """
     if path in ("/", "/index.html"):
         return page.encode(), "text/html; charset=utf-8", 200
-    routes = {
+    # THE TABLE'S CALLING CONVENTION, WRITTEN DOWN. Every value takes nothing and returns the
+    # dict that gets serialized, which is what lets the prefix route below join the table
+    # instead of keeping a branch of its own -- and what stops a new route inventing a
+    # different shape. swapper_payload and controls_payload take an optional run_dir and so
+    # satisfy it; teller_payload takes nothing.
+    routes: dict[str, Callable[[], dict]] = {
         "/api/state": lambda: state_payload(run, runner),
         "/api/funding": lambda: funding_payload(run, memory),
         "/api/swapper": swapper_payload,
@@ -1185,8 +1191,18 @@ def answer_a_get(path: str, run: funding_steps.Run, runner: HarnessRunner, page:
         asset = path.rsplit("/", 1)[-1]
         # A def rather than a lambda so it closes over `asset` readably; the prefix route
         # joins the table's calling convention instead of keeping a branch of its own.
-        def handler():
+        #
+        # AND IT IS NAMED one_chain AND THEN ASSIGNED, rather than being a second `def handler`.
+        # A `def` that reuses the name the table already bound is two declarations of one local:
+        # the function's signature wins as the DECLARED type, so `handler = routes.get(path)`
+        # four lines up is then an assignment of `dict.get`'s `... | None` into a slot declared
+        # to hold a callable, and the `if handler is None` that exists to catch exactly that
+        # reads as unreachable. Same objects, same order, same calls -- the name just stops
+        # meaning two things.
+        def one_chain() -> dict:
             return chain_payload(asset, run, memory)
+
+        handler = one_chain
     if handler is None:
         return json.dumps({"error": f"no such route: {path}"}).encode(), "application/json", 404
     return json.dumps(handler()).encode(), "application/json", 200
@@ -1296,6 +1312,94 @@ def refuse_a_cross_origin_post(headers, port: int) -> str:
     return ""
 
 
+def a_string_field(body: dict, field: str) -> tuple[str, str]:
+    """(the field as a string, "") -- or ("", why this request is malformed).
+
+    WHAT THIS IS FOR. Every POST route here reads its fields out of a parsed JSON body, so a
+    field holds whatever the caller sent: a string, a number, null, or nothing at all. The
+    decisions those fields reach -- refuse_daemon_control(), refuse_unless_read_only(),
+    refuse_worker_control() -- each guard themselves, and the panel is not where that guarding
+    belongs (rule 10). What this adds is that the value handed to a decision is OBSERVABLY a
+    string at the call site, rather than something a reader has to open another file to find
+    out is handled.
+
+    ONE FUNCTION AND NOT AN `isinstance` PER ROUTE, because the routes did not agree and the
+    disagreement was invisible. Counted in regtest/operator_panel.py on 2026-10-09, the five
+    fields four POST routes read this way reach decisions annotated three different ways:
+
+        refuse_unless_read_only(method: object)         guards itself, names a None
+        refuse_worker_control(name: object, action: object)   guards itself, names a None
+        refuse_daemon_control(tab, action: str)         guards itself, names a None
+        call_read_only(run, method: str, args)          delegates to the first one
+        call_translated_read_only(..., method: str, ...)       its map's own table
+
+    Every one of them is safe at runtime -- each refuses a None by name rather than raising --
+    so what this adds is not a guard but a VISIBLE one: four callers were relying on a check
+    written in another file, and `object` versus `str` in those signatures says nothing about
+    which. The teller's amount is the field where nobody had written the check at all; see
+    a_number_field().
+
+    400 AND NOT 403, WHICH IS answer_an_rpc()'s OWN DOCTRINE APPLIED CONSISTENTLY: "one is a
+    boundary this panel holds on purpose and the other is a mistake in the request. A single
+    status for both would make the deliberate one look like a bug worth working around." A
+    field that is absent is the second kind. The refusal names the field, because rule 14's
+    "state what the number means, next to the number" is about a missing value too -- an
+    operator reading `None is not start or stop` out of an alert box has to work out that
+    `action` was what was missing.
+
+    AN EMPTY STRING IS NOT MISSING, DELIBERATELY. `""` is a string and passes straight through
+    to the decision, which already names it (`'' is not a method name`, `'' is not a worker
+    this panel knows`). The page posts "" from an empty input box, so refusing it here would
+    move a decision out of the function that owns it and change what the browser is told -- and
+    the tests that hand those decisions "" would be asserting on a path nothing reaches.
+    """
+    value = body.get(field)
+    if not isinstance(value, str):
+        return "", (f"this request carries no {field!r} -- it sent {value!r}, and this route "
+                    f"needs a string there. That is a malformed request rather than a refusal: "
+                    f"nothing was decided about it and nothing was started, stopped or sent.")
+    return value, ""
+
+
+def a_number_field(body: dict, field: str) -> tuple[float, str]:
+    """(the field as a float, "") -- or (0.0, why this request is malformed).
+
+    THE SAME QUESTION AS a_string_field() FOR THE ONE FIELD THAT IS A NUMBER, and it is here
+    because the teller's quote route was answering it with a traceback. Measured by reading
+    services/quote_service.create_quote(), whose first act on the amount is `float(input_amount)`:
+    a POST with no `amount` reached that line as None, raised
+
+        TypeError: float() argument must be a string or a real number, not 'NoneType'
+
+    and the route's broad catch turned it into {"ok": false, "error": "TypeError: float()
+    argument ..."} with a 200 beside it. That route's own docstring says "this function's only
+    job is to carry the failure back as a sentence instead of a traceback" -- so the string in
+    the alert box was the one thing the code was written not to produce (rule 16: a wrong
+    comment is a bug, and here the comment was right and the code was wrong).
+
+    IT ACCEPTS EXACTLY WHAT float() ACCEPTS, AND THAT IS THE POINT RATHER THAN LAZINESS. The
+    panel's own page posts `amount: $("telleramount").value` -- a STRING out of an input box --
+    so a parse that took only int and float would refuse every quote the page has ever made.
+    int, float, bool and a numeric string are what create_quote() converts today and are what
+    this converts; None, a list, an object and a non-numeric string are what it raised on and
+    are what this names.
+
+    IT DECIDES NOTHING ELSE. Not the sign, not the pair, not whether the asset can be priced:
+    quote_service refuses a non-positive amount, validate_pair() refuses the pair, and
+    re-checking either here would be the second opinion that route's docstring forbids -- two
+    answers to one question, disagreeing the first time one of them moves (rule 8).
+    """
+    value = body.get(field)
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value), ""
+        except ValueError:
+            pass
+    return 0.0, (f"this request's {field!r} is not a number -- it sent {value!r}. That is a "
+                 f"malformed request rather than a refusal: no price was fetched, nothing was "
+                 f"quoted and nothing was written.")
+
+
 def answer_a_daemon_switch(body: object, chains: dict | None) -> tuple[dict, int]:
     """Start or stop one chain's daemon, or say why this panel will not.
 
@@ -1313,10 +1417,18 @@ def answer_a_daemon_switch(body: object, chains: dict | None) -> tuple[dict, int
     """
     if not isinstance(body, dict):
         return {"ok": False, "error": "the request body was not an object"}, 400
-    asset, action = body.get("asset"), body.get("action")
+    asset = body.get("asset")
     tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
     if tab is None:
         return {"ok": False, "refused": True, "error": f"{asset!r} is not a chain here"}, 403
+    # THE ASSET IS CHECKED FIRST AND THAT ORDER IS KEPT: a request naming a chain this panel
+    # does not serve is refused for THAT, whatever else is wrong with it, because it is the
+    # answer the operator can act on. Only then is `action` read -- refuse_daemon_control()
+    # below decides whether it is one of the two actions and says so by name; this only
+    # establishes that there is a string for it to decide about.
+    action, malformed = a_string_field(body, "action")
+    if malformed:
+        return {"ok": False, "error": malformed}, 400
     refusal = decisions.refuse_daemon_control(tab, action)
     if refusal:
         return {"ok": False, "refused": True, "error": refusal}, 403
@@ -1325,6 +1437,31 @@ def answer_a_daemon_switch(body: object, chains: dict | None) -> tuple[dict, int
     if run is None:
         return {"ok": False, "refused": True,
                 "error": f"{asset} has no connection parameters in this panel"}, 403
+    return throw_a_daemon_switch(asset, action, run)
+
+
+def throw_a_daemon_switch(asset, action: str, run) -> tuple[dict, int]:
+    """Start or stop one daemon and say what happened. NEVER RAISES.
+
+    EXTRACTED FROM answer_a_daemon_switch() 2026-10-09, AND FOR RULE 12's REASON RATHER THAN
+    FOR TIDINESS. That route carries five distinct refusals -- not an object, not a chain here,
+    no action field, the policy's own refusal, no connection parameters -- and rule 14 is why
+    each is its own sentence with its own status rather than one shared "not allowed". Reading
+    the `action` field as a string added the sixth return and PLR0911 fired at seven. Rule 12 is
+    explicit that a function past that ceiling has swallowed something and the answer is to
+    extract it rather than raise the limit or write a noqa, so the ACT moved out and the five
+    refusals stayed where an operator's answer is assembled.
+
+    IT IS THE SAME CALLS IN THE SAME ORDER, with the same arguments and the same sentences;
+    `action` is already known to be "start" or "stop" here because refuse_daemon_control() has
+    returned "" for it. What it buys is that the one part of this route that TOUCHES A DAEMON
+    can be called with a seeded run and no HTTP anywhere near it (rule 10).
+
+    THE SPAWN AND THE REAP ARE daemons.py's AND STAY THERE. Nothing here holds a pid, a pattern
+    or a Popen: start_daemon and stop_daemon live in one file so neither can be edited without
+    the other in view, and stop_daemon PROVES the process is gone rather than trusting an exit
+    code (rule 13). A second lifecycle in this file would be a spawn whose reaper is elsewhere.
+    """
     try:
         if action == "start":
             # THE SAME PREPARATION THE HARNESS DOES, and this call is the fix for a defect this
@@ -1545,6 +1682,12 @@ def answer_a_teller_quote(body: object) -> tuple[dict, int]:
     """
     if not isinstance(body, dict):
         return {"ok": False, "error": "the request body was not an object"}, 400
+    # READ BEFORE THE IMPORT, so a request with no amount costs no module load and reaches no
+    # database session. The figure itself is still quote_service's to judge -- see
+    # a_number_field() for why this parses and refuses nothing else.
+    amount, malformed = a_number_field(body, "amount")
+    if malformed:
+        return {"ok": False, "error": malformed}, 400
     try:
         from services.quote_service import (  # noqa: PLC0415 -- checked: deferred like the imports in _teller_db_and_config().
             create_quote,
@@ -1567,7 +1710,7 @@ def answer_a_teller_quote(body: object) -> tuple[dict, int]:
         session, config, adapters = _teller_db_and_config()
         with session as db:
             quote = create_quote(db, config, str(body.get("from_asset", "")),
-                                 str(body.get("to_asset", "")), body.get("amount"),
+                                 str(body.get("to_asset", "")), amount,
                                  adapters=adapters)
     except Exception as error:  # noqa: BLE001 -- checked: every refusal quote_service can make -- an unsupported pair, a non-positive amount, a missing price, a feed that answered nothing -- is a sentence an operator standing at a counter needs to READ, and a traceback in an alert box is not one. `ok` False with the reason is the answer; nothing downstream reads a decision from this.
         return {"ok": False, "error": f"{type(error).__name__}: {error}"}, 200
@@ -1649,7 +1792,18 @@ def answer_a_worker_switch(body: object, run_dir=None) -> tuple[dict, int]:
     """
     if not isinstance(body, dict):
         return {"ok": False, "error": "the request body was not an object"}, 400
-    name, action = body.get("worker"), body.get("action")
+    # BOTH FIELDS AS STRINGS BEFORE EITHER IS DECIDED ON. refuse_worker_control() checks `name`
+    # against supervisor.worker_commands() -- by isinstance AND by membership -- and `action`
+    # against ("start", "stop"), and it is the only place either rule lives. What this adds is
+    # that the `name` which then indexes worker_commands() and reaches start_worker() is one
+    # the reader can see is a string, instead of a value whose safety is established in a
+    # function two files away.
+    name, malformed = a_string_field(body, "worker")
+    if malformed:
+        return {"ok": False, "error": malformed}, 400
+    action, malformed = a_string_field(body, "action")
+    if malformed:
+        return {"ok": False, "error": malformed}, 400
     refusal = decisions.refuse_worker_control(name, action)
     if refusal:
         return {"ok": False, "refused": True, "error": refusal}, 403
@@ -1691,6 +1845,14 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     """
     if not isinstance(body, dict):
         return {"ok": False, "error": "the request body was not an object"}, 400
+    # READ ONCE, HERE, FOR BOTH PROTOCOLS. The bitcoin path calls decisions.call_read_only()
+    # and the translated path calls decisions.call_translated_read_only(), and both used to
+    # pull `body.get("method")` out of the body themselves -- one question asked in two places,
+    # which is rule 8's shape even while both copies agree. The allowlist is still the
+    # decision's: refuse_unless_read_only() for bitcoind, each map's own table for the others.
+    method, malformed = a_string_field(body, "method")
+    if malformed:
+        return {"ok": False, "error": malformed}, 400
     asset = body.get("asset")
     tab = next((c for c in decisions.CHAINS if c.asset == asset), None)
     # THE XRP TAB SPEAKS A DIFFERENT PROTOCOL AND TAKES A DIFFERENT ROUTE, decided by the tab
@@ -1699,7 +1861,7 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     # XRP request fell into the run-is-None branch below and was refused -- correctly then, and
     # wrongly now that chains/xrp_rpc_map.py can translate the question.
     if tab is not None and decisions.console_protocol(tab) in decisions.CONSOLE_MAPS:
-        answer = answer_a_translated_rpc(body, tab)
+        answer = answer_a_translated_rpc(body, tab, method)
         return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
     run = (chains or {}).get(asset) if isinstance(asset, str) else None
     if run is None:
@@ -1726,12 +1888,18 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     args = body.get("args")
     if not isinstance(args, list):
         args = []
-    answer = decisions.call_read_only(run, body.get("method"), args)
+    answer = decisions.call_read_only(run, method, args)
     return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
 
 
-def answer_a_translated_rpc(body: dict, tab) -> dict:
+def answer_a_translated_rpc(body: dict, tab, method: str) -> dict:
     """One translated XRP Ledger read, or the reason there is none. Never raises.
+
+    `method` IS PASSED RATHER THAN RE-READ FROM `body`, because answer_an_rpc() -- the only
+    caller -- has already read it, and a field read twice is a field two routes can disagree
+    about the day one of them starts trimming it (rule 8). The ARGUMENTS still come out of the
+    body here, because what counts as one argument is this protocol's own question and is
+    answered differently below than the bitcoin path answers it.
 
     THE ADAPTER IS BUILT FROM CONFIGURATION, not held by this panel, and that is the honest
     shape: the XRP tab has no funding_steps.Run because this panel does not and cannot drive a
@@ -1782,7 +1950,7 @@ def answer_a_translated_rpc(body: dict, tab) -> dict:
     args = body.get("args")
     argument = args[0] if isinstance(args, list) and args else (None if isinstance(args, list) else args)
     answer = decisions.call_translated_read_only(
-        adapter, decisions.console_protocol(tab), body.get("method"), argument, account)
+        adapter, decisions.console_protocol(tab), method, argument, account)
     if isinstance(args, list) and len(args) > 1:
         # SAID RATHER THAN IGNORED (rule 14). An operator who typed three arguments and got an
         # answer computed from one must be told which one was used.
@@ -1808,7 +1976,12 @@ def start_named_run(runner: HarnessRunner, body: object) -> tuple[dict, int]:
     """
     key = body.get("key") if isinstance(body, dict) else None
     entry = decisions.RUNNABLE.get(key) if isinstance(key, str) else None
-    if entry is None:
+    # THE isinstance IS NAMED IN THE REFUSAL'S OWN CONDITION rather than only in the line above
+    # it. The two clauses cannot disagree -- a `key` that is not a str makes `entry` None, so
+    # this refuses exactly the requests it refused before, with the same sentence -- and the
+    # gain is that the `key` handed to runner.start() below is a string where it is READ, not
+    # one whose stringness has to be re-derived from a conditional expression two lines up.
+    if not isinstance(key, str) or entry is None:
         return {"error": f"{key!r} is not a run this panel offers"}, 400
     refusal = runner.start(key, list(entry[1]), str(REPO_ROOT))
     return ({"error": refusal}, 409) if refusal else ({"started": key}, 200)
@@ -1824,12 +1997,21 @@ def build_handler(run: funding_steps.Run, runner: HarnessRunner, page: str,
     """
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             """Silence the default access log.
 
             NOT hiding anything: the panel prints what it does through Console, in the
             repository's own vocabulary. stderr access lines interleaved with a harness's
             streamed output make both unreadable, and rule 14 is about output a human can use.
+
+            THE PARAMETERS ARE NAMED AS THE BASE CLASS NAMES THEM, and `*args` alone was not
+            the same signature. BaseHTTPRequestHandler.log_message(self, format, *args) takes
+            `format` POSITIONALLY OR BY KEYWORD, and an override of only `*args` cannot be
+            called with `log_message(format=...)` at all -- it would be a TypeError from a
+            caller the base class permits. Nothing in http.server calls it that way today, so
+            this is a signature that was narrower than the one it replaces rather than a live
+            failure (rule 17), and `format` shadows the builtin here for the same reason it is
+            spelled that way in the base: matching a signature means matching the names.
             """
 
         def _send(self, code: int, body: bytes, content_type: str) -> None:

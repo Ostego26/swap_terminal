@@ -327,6 +327,59 @@ class Correction(NamedTuple):
     authority: str
     why: str
 
+    def figure_to_write(self) -> float:
+        """`corrected`, refusing to be asked on a verdict that writes nothing.
+
+        THE INVARIANT ABOVE LIVED ONLY IN PROSE, AND IT IS TRUE. Counted in this
+        file 2026-10-09: plan_for_payout() constructs six Corrections, and the
+        three carrying CORRECT (:452 arithmetic, :473 chain-over-quantizer, :481
+        chain) are exactly the three that pass a figure; the two SKIPs (:434, :447)
+        and the one REFUSE (:466) all pass None. What a reader of `plan.corrected`
+        had to do was derive that from those six sites -- and the guard that makes
+        each USE safe is not next to the use:
+
+            describe():610          `if plan.verdict != CORRECT: return` is in
+                                    the same function, ten lines up
+            apply_correction():521  has NO guard of its own; main():953 is what
+                                    skips a non-CORRECT verdict, four hundred
+                                    lines away and one call frame out
+            audit_message():502     the same, through apply_correction()
+
+        This states the invariant once, as code, at the bottom where a test can
+        call it with a seeded Correction (rule 10).
+
+        IT RAISES, AND THAT IS NOT A NEW FAILURE -- IT IS A NAMED ONE. Asking a
+        SKIP or REFUSE plan for its figure already failed, three different ways
+        depending on which caller asked:
+
+            difference()    Decimal(str(None)) -> decimal.InvalidOperation
+            misstatement()  the same, one frame deeper
+            apply_correction()  WORSE: sqlite3 takes None happily and the UPDATE
+                            sets payouts.amount to NULL, on the one code path in
+                            this tool that writes
+
+        A decimal.InvalidOperation in an operator's terminal does not name the
+        payout row, the verdict, or the word `corrected`, and the NULL write does
+        not fail at all. NEITHER IS REACHABLE TODAY and this says so rather than
+        implying a live defect (rule 17): main():953 continues past any verdict
+        that is not CORRECT before it calls apply_correction(), and describe():610
+        returns before it reaches misstatement(). What this buys is that the
+        invariant is enforced where the figure is TAKEN instead of asserted a call
+        frame away -- and the NULL write was measured, not assumed: with .corrected
+        in the UPDATE, handing apply_correction() a SKIP plan executes the statement
+        and leaves payouts.amount reading NULL before anything raises.
+        """
+        if self.corrected is None:
+            raise ValueError(
+                f"Correction(verdict={self.verdict!r}) carries no corrected figure, because a "
+                f"verdict that is not {CORRECT} writes nothing. Something asked a "
+                f"{self.verdict} row for a figure to write -- recorded={self.recorded!r}, "
+                f"authority={self.authority!r} -- which is a caller that skipped the "
+                f"`verdict != {CORRECT}` check rather than a row with a missing value. Nothing "
+                f"was written."
+            )
+        return self.corrected
+
 
 def plan_for_payout(row, chain: ChainAmount, *, trust_chain_over_quantizer: bool = False) -> Correction:
     """What to do with one payout row, given what the chain said. THE DECISION.
@@ -468,7 +521,7 @@ def audit_message(row, plan: Correction) -> str:
     """
     return (
         f"{SELF}: payouts.id={row['id']} amount CORRECTED from {plan.recorded!r} to "
-        f"{plan.corrected!r} {row['asset']} (difference {difference(plan.recorded, plan.corrected):f} "
+        f"{plan.corrected!r} {row['asset']} (difference {difference(plan.recorded, plan.figure_to_write()):f} "
         f"{row['asset']}). txid={row['txid']}. Authority: {plan.authority} -- {plan.why}. The "
         f"recorded figure was the one the QUOTE computed; the chain cannot express it. No status, "
         f"amount basis or other column was changed by this correction and the swap stays "
@@ -488,9 +541,15 @@ def apply_correction(db, row, plan: Correction) -> tuple[bool, str]:
     Commits per row. See ONE TRANSACTION PER ROW in this module's docstring for
     why the boundary is here and not around the batch.
     """
+    # figure_to_write() RATHER THAN .corrected, because this is the statement that
+    # writes and sqlite3 binds None as NULL without complaint. The guard that makes
+    # a figure exist here is `if plan.verdict != CORRECT: continue` in main(), 400
+    # lines away; this takes the figure through the accessor that states the same
+    # invariant at the point of use. No reachable call changes: main() is the only
+    # caller and it has already skipped every non-CORRECT verdict.
     moved = db.execute(
         "UPDATE payouts SET amount = ? WHERE id = ? AND amount = ? AND txid = ?",
-        (plan.corrected, row["id"], plan.recorded, row["txid"]),
+        (plan.figure_to_write(), row["id"], plan.recorded, row["txid"]),
     ).rowcount
     if not moved:
         db.rollback()
@@ -573,7 +632,7 @@ def describe(row, plan: Correction) -> list[str]:
         f"           recorded    {plan.recorded!r}  <- what the quote computed, which the chain cannot "
         f"express at its own precision",
         f"           correct to  {plan.corrected!r}  <- {marker}{plan.authority}",
-        f"           {misstatement(plan.recorded, plan.corrected)} {row['asset']}"
+        f"           {misstatement(plan.recorded, plan.figure_to_write())} {row['asset']}"
         f"   txid={row['txid']}",
         f"           {plan.why}",
     ]
