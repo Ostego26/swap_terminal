@@ -543,7 +543,107 @@ def server_environment(db_path: str, host: str, port: int) -> dict:
     return environment
 
 
-def chain_report(environment: dict) -> str:
+#: The line chain_report()'s child prints its configured-chain COUNT on.
+#:
+#: A sentinel rather than a search for "NOT CONFIGURED" in the rendered lines,
+#: for the reason written at the call site: recovering a fact from text formatted
+#: for a human is how a reader and a writer of the same string drift apart.
+#: Stripped before the text is shown, so it never reaches the operator.
+CONFIGURED_SENTINEL = "__swap_terminal_configured_chains__="
+
+
+def say_chain_report(environment: dict) -> None:
+    """Print which chains the server will see, and the remedy if that is none.
+
+    EXTRACTED FROM launch() 2026-10-09, when adding the no-chain note put it at
+    PLR0915 51 > 50. Rule 12 is explicit that a function past the ceiling has
+    swallowed something and the fix is to take it out rather than raise the
+    limit -- and this is the right seam: everything here is about reporting the
+    chain configuration, and launch() is about starting and reaping processes.
+
+    BEFORE THE SERVER STARTS, not after (rule 14: announce before, not only
+    after). An operator about to be told nothing is reachable should read the
+    remedy on the same screen rather than scrolling back for it.
+    """
+    print("  chains the SERVER will see (read from its own environment, not this launcher's):", flush=True)
+    report, configured = chain_report(environment)
+    print(report, flush=True)
+    for line in no_chain_note(configured):
+        print(line, flush=True)
+
+
+def split_configured(output: str) -> tuple[str, int]:
+    """(the text to show, the configured-chain count) out of the child's stdout.
+
+    Pure, so the parsing is testable without starting a subprocess. Returns -1
+    when the sentinel is absent, which is "not established" rather than zero --
+    an older child, a crash after the chain lines, or stderr-only output must not
+    read as "no chain is configured" (rule 17).
+
+    The sentinel line is REMOVED from the text. An operator reading
+    `__swap_terminal_configured_chains__=0` on a startup banner learns nothing
+    and would reasonably ask what it means.
+    """
+    kept, configured = [], -1
+    for line in output.splitlines():
+        if line.startswith(CONFIGURED_SENTINEL):
+            try:
+                configured = int(line[len(CONFIGURED_SENTINEL):].strip())
+            except ValueError:
+                configured = -1
+            continue
+        kept.append(line)
+    return "\n".join(kept), configured
+
+
+def no_chain_note(configured: int) -> list[str]:
+    """What to say when the server this launcher started can reach NO chain. Pure.
+
+    MEASURED ON THE OPERATOR'S HOST 2026-10-09. They clicked the "Swap Terminal"
+    icon and got, correctly reported and entirely unexplained:
+
+        BTC  NOT CONFIGURED  <- set BTC_RPC_PORT to reach this chain
+        GRC  NOT CONFIGURED
+        LTC  NOT CONFIGURED
+
+    All five. The banner was right and the remedy it offered was the wrong one
+    for the situation: it says "set BTC_RPC_PORT", when what the operator
+    actually has is a fully configured .env that THIS deployment does not read.
+
+    swap_terminal/config.py:17 records why, and it is deliberate: "Nothing in the
+    serving path loads a .env (not wsgi.py, ...)", because a load_dotenv() in a
+    module read at import is an import-time side effect (rule 12). `docker
+    compose` reads .env by itself, so the CONTAINERIZED deployment gets the chain
+    ports and a host gunicorn gets nothing. Two deployments, one of which cannot
+    see the operator's configuration, and the only thing that said so was five
+    lines offering a remedy for a different problem.
+
+    So this names the OTHER deployment. It is not a correction of the per-chain
+    lines -- those are accurate -- it is the sentence that makes them actionable.
+    """
+    # EXPLICIT, not `if configured:`. -1 is "not established" and happens to be
+    # truthy, so the truthy test gave the right answer for the wrong reason --
+    # which is the shape this whole session has been correcting. Only an actual
+    # zero means no chain is reachable.
+    if configured != 0:
+        return []
+    return [
+        "",
+        "  NO CHAIN IS REACHABLE from the server this just started, and the five lines above",
+        "  offer the wrong remedy for the usual cause. THIS deployment reads no .env --",
+        "  swap_terminal/config.py says so deliberately, because a load_dotenv() at import",
+        "  time makes every later import order-dependent. `docker compose` DOES read .env,",
+        "  so the containerized stack gets your chain ports and this host server does not.",
+        "",
+        "  If you have a configured .env, the deployment that uses it is:",
+        "      swapterm up        (or the Up icon)   -- containerized, serves :5100",
+        "  This window is a HOST dev server on :5000 with whatever the launching shell",
+        "  exported, which is nothing unless you exported it. Both can run at once and",
+        "  write the same database, which is what `swapterm up` refuses over.",
+    ]
+
+
+def chain_report(environment: dict) -> tuple[str, int]:
     """What the SERVER will see, read in a subprocess with the server's environment.
 
     A subprocess, not an in-process call, and that is the fix for a measured
@@ -558,21 +658,35 @@ def chain_report(environment: dict) -> str:
     NOTHING. A double-clicked terminal would serve the UI with no chain reachable
     and say nothing about it.
     """
+    # THE COUNT COMES BACK AS DATA, on its own sentinel line, rather than being
+    # recovered by searching the rendered text for "NOT CONFIGURED". Reading a
+    # fact back out of a string that was formatted for a human is the defect this
+    # branch spent the day removing -- serving_verdict() re-interpreting a
+    # sentence it had produced, a test matching a .desktop comment instead of its
+    # directive. The child already knows the number; it says so.
     script = (
         "import sys; sys.path.insert(0, 'swap_terminal');"
         "from config import Config;"
-        "from network_target import mainnet_chains, startup_lines;"
+        "from network_target import CHAIN_PORTS, UNCONFIGURED_PORT, mainnet_chains, startup_lines;"
         "print(chr(10).join(startup_lines(Config.RPC)));"
-        "print('  mainnet chains -> ' + (', '.join(mainnet_chains(Config.RPC)) or '(none)'))"
-    )
+        "print('  mainnet chains -> ' + (', '.join(mainnet_chains(Config.RPC)) or '(none)'));"
+        "print(CONFIGURED_SENTINEL + str(sum("
+        "1 for c in CHAIN_PORTS"
+        " if int((Config.RPC.get(c) or {}).get('port') or UNCONFIGURED_PORT) != UNCONFIGURED_PORT"
+        ")))"
+    ).replace("CONFIGURED_SENTINEL", repr(CONFIGURED_SENTINEL))
     try:
         done = subprocess.run(  # noqa: S603 -- checked: sys.executable, a literal script, no shell, and the only variable is the env dict this launcher built
             [sys.executable, "-c", script],
             cwd=str(REPO_ROOT), env=environment, capture_output=True, text=True, timeout=30, check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        return f"  could not read the chain configuration: {error}"
-    return done.stdout.rstrip() or f"  the chain report produced nothing (rc={done.returncode})"
+        # -1 FOR "NOT ESTABLISHED", never 0. Zero means "no chain is configured"
+        # and would print the whole note above on a run where the lookup merely
+        # failed -- asserting something nobody measured (rule 17).
+        return f"  could not read the chain configuration: {error}", -1
+    text, configured = split_configured(done.stdout.rstrip())
+    return text or f"  the chain report produced nothing (rc={done.returncode})", configured
 
 
 def run_shim() -> int:
@@ -838,8 +952,7 @@ def launch(host: str, port: int, *, app_mode: bool = True) -> int:
     db_path = os.environ.get("SWAP_DB_PATH") or str(REPO_ROOT / "swap_terminal" / "swap_terminal.db")
     environment = server_environment(db_path, host, port)
     print(f"  database        {db_path}", flush=True)
-    print("  chains the SERVER will see (read from its own environment, not this launcher's):", flush=True)
-    print(chain_report(environment), flush=True)
+    say_chain_report(environment)
 
     shim = subprocess.Popen(  # noqa: S603 -- checked: sys.executable and this file's own absolute path; no value from outside reaches the argv
         # `--shim` alone. The host, port and database reach the child through

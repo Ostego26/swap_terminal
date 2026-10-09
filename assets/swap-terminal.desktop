@@ -1,9 +1,23 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Swap Terminal
-GenericName=Atomic swap terminal
-Comment=Start the swap terminal, open its window, and stop everything when the window closes
+# THE NAME AND COMMENT SAY WHICH DEPLOYMENT THIS IS, and they did not.
+#
+# Measured on the operator's host 2026-10-09: they clicked "Swap Terminal" and
+# got a host gunicorn on :5000 reporting all five chains NOT CONFIGURED, because
+# nothing in the serving path reads a .env (swap_terminal/config.py:17 says so,
+# deliberately -- load_dotenv() at import makes every later import
+# order-dependent). `docker compose` reads .env by itself, so the CONTAINERIZED
+# stack gets the chain ports and this one does not.
+#
+# The old Comment read "Start the swap terminal, open its window, and stop
+# everything when the window closes" -- true of what it does and wrong about
+# what it IS. An operator clicking a thing called "Swap Terminal" expects the
+# swap terminal, and an icon carries no other documentation (rule 16: a wrong
+# comment is a bug, and this one is in the only place a one-click user reads).
+Name=Swap Terminal: Window (dev server)
+GenericName=Atomic swap terminal, host dev server
+Comment=HOST gunicorn on :5000 with whatever the launching shell exported -- it reads NO .env, so chains are usually NOT CONFIGURED. For the real stack use the Up icon or `swapterm up` (containerized, :5100, reads .env). Closing this window stops this server.
 # Exec IS REWRITTEN BY install_desktop_icon.py, because a .desktop Exec= must be an
 # ABSOLUTE path -- the desktop runs it with a minimal environment and no working
 # directory of ours, so a relative path or a bare name finds nothing. The token

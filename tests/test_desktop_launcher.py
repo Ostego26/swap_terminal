@@ -308,6 +308,140 @@ def _directives(entry: str) -> dict[str, str]:
     return values
 
 
+# =============================================================================
+# THE WINDOW LAUNCHER IS A DIFFERENT DEPLOYMENT, AND THE ICON DID NOT SAY SO
+#
+# Measured on the operator's host 2026-10-09. They clicked "Swap Terminal" and
+# got, correctly reported and entirely unexplained:
+#
+#     bind            127.0.0.1:5000
+#     BTC  NOT CONFIGURED  <- set BTC_RPC_PORT to reach this chain
+#     GRC  NOT CONFIGURED
+#     LTC  NOT CONFIGURED
+#     swap workers    NOT STARTED HERE
+#
+# All five chains, on a host whose .env is fully configured. swap_terminal/
+# config.py:17 records why and it is deliberate: nothing in the serving path
+# loads a .env, because load_dotenv() in a module read at import makes every
+# later import order-dependent (rule 12). `docker compose` reads .env by itself,
+# so the containerized stack gets the chain ports and a host gunicorn gets
+# nothing.
+#
+# Two deployments, one of which cannot see the operator's configuration, and the
+# only thing that said so was five lines offering the remedy for a different
+# problem ("set BTC_RPC_PORT", when what they have is a .env this deployment
+# does not read).
+# =============================================================================
+
+
+def test_the_remedy_is_only_offered_when_no_chain_is_reachable():
+    """And NOT when the count could not be established, which is the subtle half.
+
+    -1 means the child's sentinel was absent -- an older build, a crash after the
+    chain lines, stderr-only output. Printing "NO CHAIN IS REACHABLE" for that
+    would assert something nobody measured (rule 17), and the first version of
+    this check got the right answer by accident: `if configured:` is FALSE only
+    for 0, and -1 is truthy, so it worked for a reason unrelated to the intent.
+    It tests `!= 0` now.
+
+    MUTATION: `if configured is None` or `if not configured`. The second is the
+    accidental version and still passes zero; only an explicit comparison
+    survives a reader asking what -1 does.
+    """
+    assert launcher.no_chain_note(0), "no remedy offered when nothing is reachable"
+    assert launcher.no_chain_note(3) == [], "the remedy was offered on a configured server"
+    assert launcher.no_chain_note(1) == [], "one chain is reachable; this is not the no-chain case"
+    assert launcher.no_chain_note(-1) == [], (
+        "the remedy was offered when the count was NOT ESTABLISHED, which asserts a reading "
+        "nobody took (rule 17)"
+    )
+
+
+def test_the_remedy_names_the_deployment_that_does_read_dotenv():
+    """The per-chain lines are accurate; they are just not actionable.
+
+    "set BTC_RPC_PORT" is the remedy for an unconfigured host. It is the WRONG
+    remedy for the common case -- a configured .env that this deployment does not
+    read -- and the operator has no way to know that from the five lines. So the
+    note names the other deployment, the port it serves on, and why the two
+    differ.
+    """
+    said = " ".join(" ".join(launcher.no_chain_note(0)).split())
+    assert "swapterm up" in said, f"the note does not name the deployment that works: {said}"
+    assert ".env" in said, f"nor why this one sees nothing: {said}"
+    assert "5100" in said and "5000" in said, (
+        f"both ports must appear, or an operator cannot tell the two servers apart: {said}"
+    )
+    assert "same database" in said, (
+        f"and it must warn that both can run at once over one database: {said}"
+    )
+
+
+def test_the_configured_count_is_read_as_data_not_parsed_out_of_the_report():
+    """A sentinel line, stripped before the operator sees it.
+
+    Recovering the count by searching the rendered lines for "NOT CONFIGURED"
+    would be reading a fact out of text formatted for a human -- the defect this
+    branch removed from serving_verdict() (which re-interpreted a sentence it had
+    produced) and from three assertions in this very file. The child knows the
+    number; it says so on its own line.
+    """
+    sentinel = launcher.CONFIGURED_SENTINEL
+    text, count = launcher.split_configured(f"BTC  NOT CONFIGURED\n{sentinel}0")
+    assert count == 0
+    assert sentinel not in text, (
+        f"the sentinel reached the operator's screen, where it means nothing: {text!r}"
+    )
+    assert text == "BTC  NOT CONFIGURED"
+
+    assert launcher.split_configured(f"BTC ok\n{sentinel}3")[1] == 3
+
+    # ABSENT AND UNPARSEABLE BOTH GIVE -1, never 0: "not established" is not
+    # "none", and conflating them is what would print the remedy on a failed
+    # lookup.
+    assert launcher.split_configured("no sentinel at all")[1] == -1
+    assert launcher.split_configured(f"BTC ok\n{sentinel}garbage")[1] == -1
+
+
+def test_a_failed_chain_lookup_does_not_read_as_zero_chains():
+    """The error path returns -1 for the same reason split_configured() does.
+
+    `return ..., 0` would print the whole no-chain remedy on a run where the
+    lookup merely failed -- a report asserting something it did not measure.
+    SOURCE-BASED, because reaching the except branch needs a subprocess failure
+    and the claim is about which constant is returned.
+    """
+    source = inspect.getsource(launcher.chain_report)
+    assert "-1" in source, "the error path does not return the not-established sentinel"
+    assert "return f\"  could not read the chain configuration: {error}\", -1" in source, source
+
+
+def test_the_window_icon_says_which_deployment_it_starts():
+    """An icon carries no other documentation, and this one said "Swap Terminal".
+
+    Which is what an operator wants and not what it is: a host dev server on
+    :5000 that reads no .env. Rule 16 -- a wrong comment is a bug -- and this one
+    is in the only text a one-click user reads.
+    """
+    entry = _directives(
+        install_desktop_icon.rendered_desktop_entry("/p", Path("/l.py"), Path("/i.svg"))
+    )
+    assert "dev server" in entry["Name"].lower(), (
+        f"the window icon is still named as if it were the stack: {entry['Name']}"
+    )
+    comment = entry["Comment"]
+    assert "5000" in comment, f"the Comment does not say which port: {comment}"
+    assert "5100" in comment or "swapterm up" in comment, (
+        f"nor point at the deployment that actually reaches the chains: {comment}"
+    )
+    assert "NO .env" in comment or "no .env" in comment, (
+        f"nor say why its chains are unconfigured: {comment}"
+    )
+    # AND IT MUST NOT CLAIM TO BE THE STACK. The old Comment opened "Start the
+    # swap terminal", which is the sentence that misled.
+    assert not comment.startswith("Start the swap terminal"), comment
+
+
 def test_no_launcher_asks_for_a_startup_notification_it_cannot_send():
     """THE DEFECT THAT MADE THE ICONS DEAD, measured on the operator's own desktop.
 
