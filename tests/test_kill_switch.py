@@ -956,8 +956,25 @@ def test_the_controls_route_is_the_only_post_that_can_signal_or_spawn_a_process(
     # `@bp.get` and `@bp.post` on one path register TWO rules, so the set of
     # PATHS is what is asked about rather than a path-keyed mapping -- which
     # silently kept only one of the two and compared the wrong method list.
-    posts = {rule.rule for rule in app_module.app.url_map.iter_rules() if "POST" in rule.methods}
-    gets = {rule.rule for rule in app_module.app.url_map.iter_rules() if "GET" in rule.methods}
+    #
+    # A RULE THAT DECLARES NO METHODS IS REFUSED BY NAME, NOT SKIPPED. werkzeug
+    # types Rule.methods as `set[str] | None` -- None is a rule that matches any
+    # method -- and the obvious narrowing, `if rule.methods and "POST" in
+    # rule.methods`, would drop such a rule out of `posts` without a word. That
+    # is precisely this gate's failure mode: an unreviewed write surface that is
+    # absent from the set it is compared against passes. So the Optional is
+    # resolved by asserting it away first (pyright reportOperatorIssue x2,
+    # 2026-10-09), and the `is not None` filter below only restates what that
+    # assertion has already established.
+    declared = [(rule.rule, rule.methods) for rule in app_module.app.url_map.iter_rules()]
+    undeclared = sorted(path for path, methods in declared if methods is None)
+    assert not undeclared, (
+        f"these url rules declare no methods, so this gate cannot classify them and a POST "
+        f"could hide among them: {undeclared}"
+    )
+    classified = [(path, methods) for path, methods in declared if methods is not None]
+    posts = {path for path, methods in classified if "POST" in methods}
+    gets = {path for path, methods in classified if "GET" in methods}
     assert "/admin/controls" in posts, "the controls endpoint does not accept a POST; the buttons do nothing"
     assert "/admin/controls" in gets, "the controls page cannot be opened, only submitted to"
     unexpected = posts - REVIEWED_NON_SPAWNING_POST_ROUTES - {"/admin/controls"}

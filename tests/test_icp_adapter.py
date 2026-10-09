@@ -174,7 +174,15 @@ def test_deposit_confirmations_is_one_and_says_it_is_a_compatibility_value():
     """
     a = adapter()
     assert a.deposit_confirmations() == 1
-    assert "compatibility" in a.deposit_confirmations.__doc__.lower()
+    # __doc__ IS Optional and not only in theory: `python -OO` discards every
+    # docstring in the process, so this assertion read through a None there and
+    # died with `AttributeError: 'NoneType' object has no attribute 'lower'`
+    # instead of saying the method stopped explaining itself (pyright
+    # reportOptionalMemberAccess, 2026-10-09). The claim being tested is
+    # unchanged: the docstring has to say the word.
+    explanation = a.deposit_confirmations.__doc__
+    assert explanation is not None, "deposit_confirmations() must keep the docstring that says 1 is a compatibility value"
+    assert "compatibility" in explanation.lower()
 
 
 @pytest.mark.parametrize("junk", ["", "(variant { Err = 3 })", "nonsense", "( : nat)"])
@@ -482,7 +490,12 @@ def test_already_recorded_txids_are_skipped():
     sub = account_identifier(OWNER, subaccount_from_index(1))
     a = scanning_adapter(blocks_page([("Transfer", sub, 1), ("Transfer", sub, 2)]))
     assert [e["txid"] for e in a.find_deposits_to_address(sub)] == ["0", "1"]
-    assert [e["txid"] for e in a.find_deposits_to_address(sub, skip_txids={"0"})] == ["1"]
+    # A frozenset, which is what every real caller hands in:
+    # services/deposit_service.skip_txids() is annotated `-> frozenset[str]` and
+    # is the only producer of this argument in the tree. The parameter defaults
+    # to frozenset() too, so a bare `set` was the one shape nothing passes
+    # (pyright reportArgumentType, 2026-10-09).
+    assert [e["txid"] for e in a.find_deposits_to_address(sub, skip_txids=frozenset({"0"}))] == ["1"]
 
 
 def test_archived_blocks_RAISE_rather_than_being_scanned_past():

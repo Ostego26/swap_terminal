@@ -88,6 +88,15 @@ def test_two_different_rpc_errors_do_not_render_the_same_way():
     locked = rpc_error_from_body(StubResponse(LOCKED_WALLET, status=500))
     broke = rpc_error_from_body(StubResponse(INSUFFICIENT, status=500))
 
+    # BOTH HAVE TO HAVE RENDERED FOR "they differ" TO MEAN ANYTHING.
+    # rpc_error_from_body() returns None for a body that is not a JSON-RPC error
+    # -- the fall-through the two tests below pin -- so a None here is the
+    # daemon's reason being dropped, which is the exact defect this module
+    # exists to prevent. `locked != broke` is satisfied by one of them being
+    # None, and `"Insufficient funds" in None` raised TypeError rather than
+    # saying so (pyright reportOperatorIssue, 2026-10-09).
+    assert locked is not None, "a locked-wallet body produced no message; the daemon's reason was dropped"
+    assert broke is not None, "an insufficient-funds body produced no message; the daemon's reason was dropped"
     assert locked != broke
     assert "Insufficient funds" in broke
 

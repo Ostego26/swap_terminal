@@ -428,6 +428,14 @@ def test_the_plan_keeps_the_chain_fee_back_from_the_whole_source_balance(monkeyp
     plan = grc_plan(lambda _text: None, 120549.32)
     fee, how = fund_desk.chain_fee_for("GRC")
     assert how == "GRC_NETWORK_FEE_RESERVE"
+    # chain_fee_for() returns (fee | None, how): None is its REFUSAL, carrying the
+    # sentence about an unreadable reserve in the second slot. The line above
+    # established the `how`, which is not the same fact, so the fee is still
+    # Optional here -- and `3687.32154338 - fee` on a None would have raised
+    # `TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'`
+    # rather than saying the reserve could not be read (pyright
+    # reportOperatorIssue, 2026-10-09).
+    assert fee is not None, f"the chain fee could not be read, so no amount can be sized: {how}"
     assert plan["amount"] == pytest.approx(3687.32154338 - fee)
     assert plan["amount"] < 3687.32154338, (
         "the whole balance is not sendable: sendtoaddress pays the fee from the sending wallet's "

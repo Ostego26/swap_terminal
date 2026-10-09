@@ -78,6 +78,28 @@ SPELLINGS = ("GRC", "GRIDCOIN")
 SPOKEN_METHODS = frozenset({"say", "check", "step", "banner"})
 
 
+def _joined_text(node: ast.JoinedStr) -> str:
+    """An f-string's literal text, with {...} standing in for each interpolation.
+
+    `ast.Constant.value` is typed as EVERY constant kind Python has -- str,
+    bytes, bool, int, float, complex, None, Ellipsis -- so the literal parts
+    have to be established as str before they can be joined; `"".join(...)` over
+    that union matched no overload (pyright reportCallIssue +
+    reportArgumentType, 2026-10-09).
+
+    THE NARROWING CANNOT DROP TEXT, which is the only thing that would matter
+    here. CPython's parser builds a JoinedStr out of str Constants and
+    FormattedValues and nothing else, so the str test is true for every literal
+    part that can actually arrive; a part that somehow were not a str renders as
+    the same {...} placeholder an interpolation already renders as, which this
+    file's whole point is that it reads as NOT a hardcoded chain name.
+    """
+    return "".join(
+        part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else "{...}"
+        for part in node.values
+    )
+
+
 def _spoken_strings(tree: ast.AST) -> list[tuple[int, str]]:
     """Every string handed to console.say() or console.check(), flattened.
 
@@ -96,9 +118,7 @@ def _spoken_strings(tree: ast.AST) -> list[tuple[int, str]]:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                 spoken.append((node.lineno, argument.value))
             elif isinstance(argument, ast.JoinedStr):
-                spoken.append((node.lineno, "".join(
-                    part.value if isinstance(part, ast.Constant) else "{...}"
-                    for part in argument.values)))
+                spoken.append((node.lineno, _joined_text(argument)))
     return spoken
 
 
@@ -141,6 +161,15 @@ def test_the_wallet_LABEL_names_the_chain_it_will_live_on():
     assert labels, "no getnewaddress call found; this test has stopped measuring anything"
     for label in labels:
         if isinstance(label, ast.Constant):
+            # ast.Constant.value is every constant kind at once, so being a str
+            # is established rather than assumed: `"GRC" not in b"..."` raises
+            # TypeError, and a label that is not text is a defect in its own
+            # right -- getnewaddress writes this into the daemon's address book
+            # (pyright reportOperatorIssue, 2026-10-09).
+            assert isinstance(label.value, str), (
+                f"getnewaddress is labeled with the non-string constant {label.value!r}; a wallet "
+                f"label is text an operator reads months later"
+            )
             assert "GRC" not in label.value, (
                 f"getnewaddress is labeled {label.value!r}, which is written into whichever chain's "
                 f"wallet the swap runs against"

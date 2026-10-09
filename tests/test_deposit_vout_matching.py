@@ -584,8 +584,19 @@ class NoTxindexAdapter(StubAdapter):
         raise AssertionError(f"stub had no scripted answer for {method}")
 
 
-def _wallet_record(confirmations, *, hex_=MEASURED_TX_HEX, block_hash=MEASURED_BLOCK_HASH):
-    """A `gettransaction` result, in the shape Core 28.1 and Litecoin 0.21.4 both return."""
+def _wallet_record(confirmations, *, hex_: str | None = MEASURED_TX_HEX,
+                   block_hash: str | None = MEASURED_BLOCK_HASH):
+    """A `gettransaction` result, in the shape Core 28.1 and Litecoin 0.21.4 both return.
+
+    `hex_=None` and `block_hash=None` are the ABSENT-KEY cases, which is why both
+    are annotated `str | None` rather than left to be inferred as `str` from
+    their defaults. The body below drops the key entirely when it is None, and
+    three tests pass None on purpose -- a daemon that answers gettransaction
+    without a `hex` (the no-txindex shape) or without a `blockhash` (a mempool
+    transaction). Inferring the type from the default made those three calls
+    type errors while the ONLY reason the parameters exist is to be None
+    (pyright reportArgumentType x3, 2026-10-09).
+    """
     record = {"confirmations": confirmations, "txid": MEASURED_TXID, "amount": MEASURED_AMOUNT}
     if hex_ is not None:
         record["hex"] = hex_

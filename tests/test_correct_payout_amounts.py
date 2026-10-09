@@ -444,7 +444,19 @@ class SeededGridcoinDaemon:
         ]}
 
 
-def grc_rows() -> list[tuple]:
+#: The shape of one CORRECTABLE row: id, swap, asset, recorded, chain figure,
+#: destination. Written down rather than left as a bare `tuple` because the
+#: ELEMENTS get used as values, not just unpacked: gridcoin_as_the_operators_
+#: daemon_answers() passes row[4] as the default to GRIDCOIN_ROUNDED_UP.get(),
+#: and under `list[tuple]` that default was Unknown, so the comprehension built
+#: a dict[str, float | None] and SeededGridcoinDaemon's dict[str, float] no
+#: longer matched it (pyright reportArgumentType, 2026-10-09). The rows have
+#: always been this shape -- CORRECTABLE's own inferred type is exactly this --
+#: so the annotation only stops throwing that away at the function boundary.
+CorrectableRow = tuple[int, str, str, float, float, str]
+
+
+def grc_rows() -> list[CorrectableRow]:
     return [row for row in CORRECTABLE if row[2] == "GRC"]
 
 

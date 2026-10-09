@@ -392,7 +392,15 @@ def test_main_reports_a_duration_that_is_not_a_bare_zero(tmp_path, capsys):
 class _Server:
     """An XRP adapter that answers server_parameters() the way chains/xrp.py does."""
 
-    def __init__(self, drops=10, source="server_info.validated_ledger.base_fee_xrp", raises=False):
+    def __init__(self, drops: int | None = 10,
+                 source: str = "server_info.validated_ledger.base_fee_xrp", raises: bool = False):
+        # `drops: int | None` because a server that omits the fee field is the
+        # case test_a_server_that_omits_the_fee_field_is_a_failed_ask_and_not_a_
+        # zero exists for -- chains/xrp.py documents base_fee_xrp as OPTIONAL,
+        # and the distinction between "no figure" and "a fee of zero" is the
+        # whole subject of this file. Inferred from the default it was `int`, so
+        # the one test that passes None was a type error (pyright
+        # reportArgumentType, 2026-10-09).
         self._drops, self._source, self._raises = drops, source, raises
 
     def server_parameters(self):
@@ -596,7 +604,13 @@ def test_an_asset_with_no_configured_reserve_reports_no_configured_ratio():
 class FeeMeasuringAdapter:
     """An adapter that answers measure_send_fee and records what it was asked."""
 
-    def __init__(self, fee=0.0000282, how="measured", valid=True):
+    def __init__(self, fee: float | None = 0.0000282, how: str = "measured", valid: bool = True):
+        # `fee: float | None` because None is the UNMEASURABLE case, and
+        # measure_send_fee() below already branches on it: a daemon with no
+        # fundrawtransaction answers (None, why), which has to print NOT
+        # ESTABLISHED rather than a fabricated figure. Inferred from the default
+        # it was `float`, so the test for that line was a type error (pyright
+        # reportArgumentType, 2026-10-09).
         self._fee, self._how, self._valid = fee, how, valid
         self.asked = []
 

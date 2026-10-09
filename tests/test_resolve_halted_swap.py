@@ -41,7 +41,15 @@ SCALED_PAYOUT = 55.44825689015776
 REASON = f"Confirmed amount {SEEN} outside tolerance for expected {EXPECTED}"
 
 
-def swap_row(status="under_review", actual=SEEN):
+def swap_row(status: str = "under_review", actual: float | None = SEEN):
+    """A swaps row as resolve_verdict() reads it.
+
+    `actual: float | None` because "nothing credited" is one of the eight
+    refusals parametrized below and db.py has `actual_input_amount REAL`,
+    nullable -- a NULL there is a row that really exists, which is why the tool
+    must refuse it rather than divide by it. Inferring the type from SEEN made
+    that case a type error (pyright reportArgumentType, 2026-10-09).
+    """
     return {"status": status, "actual_input_amount": actual, "from_asset": "XRP", "to_asset": "GRC",
             "expected_input_amount": EXPECTED, "output_amount_estimate": LOCKED_PAYOUT,
             "failed_reason": REASON}

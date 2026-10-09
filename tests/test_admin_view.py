@@ -590,12 +590,28 @@ class _RefusingAdapter(RPCAdapter):
     def __init__(self):
         super().__init__(user="", password="", host="127.0.0.1", port=8332)
 
-    def call(self, method, *params):
+    # ANNOTATED FOR THE RETURN IT PROMISES, NOT THE ONE THIS BODY REACHES.
+    #
+    # This body only raises, so the inferred return type is `NoReturn` -- and
+    # every subclass below, which is where the answering daemons live, then
+    # overrode an unoverridable base (pyright
+    # reportIncompatibleMethodOverride, 3 findings, 2026-10-09). The
+    # annotation has to describe the CONTRACT the family shares: a JSON-RPC
+    # `result` object, which is what probe_chain() reads with .get(). A
+    # refusing daemon satisfies that contract by raising, exactly as the real
+    # RPCAdapter.call() does when requests cannot connect.
+    #
+    # `object` as the value type, not str/int/bool: these stubs deliberately
+    # carry all three (`chain` is a str, `blocks` an int, `testnet` a bool),
+    # and dict is INVARIANT in its value type -- so the subclasses have to
+    # name this same type rather than letting a narrower literal dict be
+    # inferred. That is why each override below repeats it.
+    def call(self, method, *params) -> dict[str, object]:
         raise ConnectionError("Connection refused")
 
 
 class _AnsweringAdapter(_RefusingAdapter):
-    def call(self, method, *params):
+    def call(self, method, *params) -> dict[str, object]:
         assert method == "getblockchaininfo", "the probe must be a READ"
         return {"chain": "test"}
 
@@ -616,7 +632,7 @@ class _GridcoinShapedAdapter(_RefusingAdapter):
 
     asset = "GRC"
 
-    def call(self, method, *params):
+    def call(self, method, *params) -> dict[str, object]:
         if method == "getblockchaininfo":
             return {"blocks": 1234}
         if method == "getinfo":
@@ -627,7 +643,7 @@ class _GridcoinShapedAdapter(_RefusingAdapter):
 class _MuteAdapter(_RefusingAdapter):
     """Answers both reads and names its network in neither."""
 
-    def call(self, method, *params):
+    def call(self, method, *params) -> dict[str, object]:
         return {"blocks": 1234}
 
 

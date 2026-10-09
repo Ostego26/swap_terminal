@@ -122,9 +122,17 @@ def test_a_conf_MISSING_the_password_raises_instead_of_returning_a_partial_mappi
 
 
 def test_a_missing_FILE_names_the_path_it_looked_at():
-    """Rule 14: "the conf did not supply one" is useless without which conf."""
+    """Rule 14: "the conf did not supply one" is useless without which conf.
+
+    A pathlib.Path, not the bare string this used to pass. rpc_settings_from_conf
+    declares `path: Path` and the string only worked because the body happens to
+    re-wrap it (`Path(path).read_text()`) -- so the test was exercising a
+    tolerance the signature does not promise, and pyright said so
+    (reportArgumentType, 2026-10-09). The assertion below is unchanged: str() of
+    this Path is the same text the message interpolated before.
+    """
     with pytest.raises(DaemonConfError) as raised:
-        rpc_settings_from_conf("/definitely/not/here/litecoin.conf", network="regtest")
+        rpc_settings_from_conf(pathlib.Path("/definitely/not/here/litecoin.conf"), network="regtest")
     assert "/definitely/not/here/litecoin.conf" in str(raised.value)
     assert "FileNotFoundError" in str(raised.value)
 
@@ -153,7 +161,10 @@ def test_the_PASSWORD_never_appears_in_the_line_that_describes_the_connection(tm
     conf = tmp_path / "litecoin.conf"
     conf.write_text(REGTEST_CONF)
     settings = rpc_settings_from_conf(conf, network="regtest")
-    line = describe("/some/path/litecoin.conf", settings, network="regtest")
+    # A Path for the same reason as the missing-file test above: describe()
+    # declares `path: Path` and only ever interpolates it, so the rendered line
+    # is identical either way.
+    line = describe(pathlib.Path("/some/path/litecoin.conf"), settings, network="regtest")
     assert CANARY not in line, f"describe() printed the password:\n{line}"
     # The names ARE printed: they are what makes a parse failure diagnosable.
     assert "rpcpassword" in line and "NOT shown" in line, line

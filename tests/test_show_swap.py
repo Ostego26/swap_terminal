@@ -316,7 +316,18 @@ def test_the_watcher_counts_exactly_the_statuses_this_tool_lists():
     assert HALTED_STATUSES, "an empty tuple would make admin_view's `IN ()` a syntax error"
     assert HALTED_STATUSES == ("under_review",)
 
-    source = Path(sys.modules["workers.deposit_watcher"].__file__).read_text()
+    # sys.modules[...] hands back a plain ModuleType, whose `__file__` is
+    # `str | None` -- None for a namespace package or a module with no file. It
+    # cannot be None for this one, and the point is that if it ever were, the
+    # assertion below would silently have no source to search and this test
+    # would stop measuring the agreement it exists for. So it is named rather
+    # than dereferenced (pyright reportArgumentType, 2026-10-09).
+    watcher_file = sys.modules["workers.deposit_watcher"].__file__
+    assert watcher_file is not None, (
+        "workers.deposit_watcher reports no __file__, so its source cannot be read and the "
+        "watcher/tool agreement below is unverifiable rather than verified"
+    )
+    source = Path(watcher_file).read_text()
     assert "status = 'under_review'" in source, "the watcher must count the status this tool lists"
 
     # The count's NAME is spelled in two files -- the watcher's counts dict and

@@ -34,12 +34,35 @@ from fund_testnets import (
 
 
 class Args:
-    """Stands in for argparse's namespace."""
+    """Stands in for argparse's namespace.
+
+    THE FIELDS ARE SPELLED OUT rather than set by a `setattr` loop over a tuple
+    of names. The loop hid every one of them from a reader and from a checker
+    both: test_grc_mainnet_is_off_by_default_in_the_dispatch_table reads
+    `Args(all=True).grc_mainnet` directly, and pyright could not establish that
+    the attribute exists at all (reportAttributeAccessIssue, 2026-10-09) -- on a
+    namespace whose whole job is to say which chains a run selected, "that
+    attribute is unknown" and "that flag is off" are the same silence.
+
+    Annotating the eight instead would have left the names in TWO places, the
+    tuple and the annotations, which is rule 8's duplication rather than a fix.
+    Written out, each name appears once.
+
+    Every flag is `store_true` in fund_testnets' real parser, which is why False
+    is the default for all eight; `blocks` takes an integer and defaults to the
+    maturity depth, exactly as the parser does.
+    """
 
     def __init__(self, **kwargs):
-        for name in ("btc", "ltc", "xrp", "sol", "grc", "all", "wipe", "grc_mainnet"):
-            setattr(self, name, kwargs.get(name, False))
-        self.blocks = kwargs.get("blocks", COINBASE_MATURITY_BLOCKS)
+        self.btc: bool = kwargs.get("btc", False)
+        self.ltc: bool = kwargs.get("ltc", False)
+        self.xrp: bool = kwargs.get("xrp", False)
+        self.sol: bool = kwargs.get("sol", False)
+        self.grc: bool = kwargs.get("grc", False)
+        self.all: bool = kwargs.get("all", False)
+        self.wipe: bool = kwargs.get("wipe", False)
+        self.grc_mainnet: bool = kwargs.get("grc_mainnet", False)
+        self.blocks: int = kwargs.get("blocks", COINBASE_MATURITY_BLOCKS)
 
 
 def test_nothing_selected_selects_nothing():

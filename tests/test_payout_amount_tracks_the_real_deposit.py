@@ -45,8 +45,20 @@ import pytest
 from services.payout_service import payout_amount
 
 
-def swap_row(*, estimate=0.0975, expected=100.0, actual=100.0):
+def swap_row(*, estimate: float = 0.0975, expected: float | None = 100.0,
+             actual: float | None = 100.0):
     """The four fields payout_amount() reads. A dict, because it only subscripts.
+
+    TWO OF THE THREE ARE OPTIONAL BECAUSE THE TESTS BELOW PASS None ON PURPOSE,
+    and db.py's schema is only half the reason. `actual_input_amount REAL` is
+    nullable, so a NULL actual is a row SQLite can really hold;
+    `expected_input_amount REAL NOT NULL` is not, and None is passed for it
+    anyway because payout_amount() GUARDS for it -- a guard with no test is a
+    claim rather than a measurement (rule 17), and the guard is what keeps a
+    ZeroDivisionError out of the payout loop. `estimate` stays `float`:
+    output_amount_estimate is NOT NULL and nothing passes None for it. Inferring
+    all three from their float defaults made both deliberate None cases type
+    errors (pyright reportArgumentType x2, 2026-10-09).
 
     DELIBERATELY SEEDED INCONSISTENT by default: estimate=0.0975 against
     expected=100.0 is NOT 100*0.001*0.985, and that is the whole point -- it is

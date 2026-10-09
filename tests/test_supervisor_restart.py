@@ -61,6 +61,27 @@ def _reap(pid: int) -> None:
         os.waitpid(pid, 0)
 
 
+def _pid_from_file(run_dir: Path, name: str) -> int:
+    """The pid this worker's pid file names, or a named assertion failure.
+
+    read_pid_record() returns None for a pid file that is missing, empty, or
+    junk -- all of which mean "this file tells us nothing". For a RESTART test
+    that is the failure under test, not a precondition: subscripting it
+    directly (`read_pid_record(...)[0] for name in table`) died with `TypeError:
+    'NoneType' object is not subscriptable`, naming neither the worker nor the
+    reason, where what the reader needs is "the restart reported success and
+    left no pid it can point at" -- rule 13's "a stop that cannot prove it
+    worked is not a stop", arrived at from the start side. Found by pyright
+    (reportOptionalSubscript x2, 2026-10-09).
+    """
+    record = supervisor.read_pid_record(supervisor.pid_file(run_dir, name))
+    assert record is not None, (
+        f"no readable pid file for worker {name!r} after a restart that returned 0 -- a restart "
+        f"that cannot name the pid it left cannot be proven to have restarted anything (rule 13)"
+    )
+    return record[0]
+
+
 def _gone(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -80,9 +101,7 @@ def test_restart_replaces_every_worker_and_the_old_pids_are_gone(tmp_path):
             ["restart", "--run-dir", str(tmp_path), "--grace-seconds", "5"], commands=table
         )
         assert code == 0, f"restart returned {code}"
-        after = [
-            supervisor.read_pid_record(supervisor.pid_file(tmp_path, name))[0] for name in table
-        ]
+        after = [_pid_from_file(tmp_path, name) for name in table]
         assert set(before).isdisjoint(after), (
             f"pid files still name the old processes {before}; nothing was restarted, which "
             f"is the failure that would leave stale code running while reporting success"
@@ -152,7 +171,7 @@ def test_restart_on_nothing_running_is_just_a_start(tmp_path):
     pids = []
     try:
         assert code == 0, f"restart on a cold run dir returned {code}"
-        pids = [supervisor.read_pid_record(supervisor.pid_file(tmp_path, n))[0] for n in table]
+        pids = [_pid_from_file(tmp_path, n) for n in table]
         assert all(not _gone(pid) for pid in pids)
     finally:
         for name in table:

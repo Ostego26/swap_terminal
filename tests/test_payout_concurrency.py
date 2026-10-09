@@ -87,6 +87,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 
 import pytest
 from db import SCHEMA, add_column_if_missing, apply_migrations, connect_db
@@ -116,8 +117,16 @@ class RecordingAdapter:
     def __init__(self, asset: str):
         self.asset = asset
         self.sends: list[tuple[str, float]] = []
-        self.release = None
-        self.on_send = None
+        # BOTH ARE ANNOTATED FOR WHAT THE TESTS ASSIGN, not for the None they
+        # start as. The docstring above already says each one is optional and
+        # settable per instance; left to be inferred from `= None`, their type
+        # WAS None, so the four `adapter.release = threading.Event()` /
+        # `adapter.on_send = observe` lines below -- which are the entire
+        # mechanism that makes the two-worker overlap deterministic rather than
+        # timing-dependent -- were each an assignment of the wrong type
+        # (pyright reportAttributeAccessIssue x4, 2026-10-09).
+        self.release: threading.Event | None = None
+        self.on_send: Callable[[], None] | None = None
         self._lock = threading.Lock()
 
     def send_to_address(self, address: str, amount: float) -> str:
@@ -213,6 +222,18 @@ def _run_two_overlapping_workers(path: str, adapters: dict, adapter: RecordingAd
     absence of an exception rather than on a green run that swallowed one.
     """
     failures: list[BaseException] = []
+    # THE EVENT IS THE HELPER'S PRECONDITION, so it is read once and named here.
+    # Blocking A's first send on it is what makes the overlap deterministic; an
+    # adapter arriving without one is not a slower test, it is a timing race
+    # that measures nothing -- and it used to show up as `AttributeError:
+    # 'NoneType' object has no attribute 'set'` forty lines further down, after
+    # both threads had already run (pyright reportAttributeAccessIssue,
+    # 2026-10-09).
+    release = adapter.release
+    assert release is not None, (
+        "adapter.release must be a threading.Event before this helper runs: worker A blocks its "
+        "first send on it, which is the only thing holding the two workers in the same window"
+    )
 
     def worker():
         # Each thread opens its own connection, because sqlite3 objects are
@@ -244,7 +265,7 @@ def _run_two_overlapping_workers(path: str, adapters: dict, adapter: RecordingAd
     # second is roughly five orders of magnitude more than an indexed UPDATE on
     # a local temp file needs.
     time.sleep(0.5)
-    adapter.release.set()
+    release.set()
 
     thread_a.join(timeout=30)
     thread_b.join(timeout=30)
@@ -791,7 +812,13 @@ class GridcoinWalletStub:
             self.fully_unlocked = not (len(params) > 2 and params[2])
         return {}
 
-    def send_to_address(self, address, amount):
+    def send_to_address(self, address, amount) -> str:
+        # `-> str` because a txid is a string, not this one string. Inferred
+        # from the single return below it was Literal['grc-txid-1'], which made
+        # BitcoinStub -- a subclass whose whole point is that a non-GRC chain
+        # gets no unlock -- an illegal override for answering 'btc-txid-1'
+        # (pyright reportIncompatibleMethodOverride, 2026-10-09). The value
+        # returned here is unchanged, and so is the refusal above it.
         self.sends += 1
         if not self.fully_unlocked:
             raise RuntimeError(

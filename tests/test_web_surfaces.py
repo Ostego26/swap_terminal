@@ -535,6 +535,17 @@ def test_the_admin_blueprint_registers_no_write_method():
     writes = set()
     for rule in app_module.app.url_map.iter_rules():
         if rule.endpoint.startswith("admin."):
+            # werkzeug types Rule.methods as `set[str] | None`, and None means
+            # the rule matches ANY method. On a surface whose whole claim is
+            # "no write verb is registered", that is the one case that must not
+            # be skipped quietly -- `set(None)` raised TypeError and
+            # `if rule.methods and ...` would have dropped it from `writes`
+            # altogether (pyright reportArgumentType, 2026-10-09). The same
+            # Optional is resolved the same way in
+            # tests/test_kill_switch.py::test_the_controls_route_is_the_only_post...
+            assert rule.methods is not None, (
+                f"admin rule {rule.rule} declares no methods, so it answers ANY verb including POST"
+            )
             writes |= set(rule.methods) - {"GET", "HEAD", "OPTIONS"}
     assert writes == set(), f"the admin surface must be read-only; found {sorted(writes)}"
 
@@ -1406,10 +1417,25 @@ def test_every_admin_route_including_the_peg_check_is_still_a_GET():
     asserts it over the real URL map, so adding one with a POST fails here
     rather than waiting to be caught by a reader.
     """
+    # A RULE WITH NO DECLARED METHODS IS REFUSED BY NAME, NOT DROPPED.
+    # werkzeug types Rule.methods as `set[str] | None` and None matches any
+    # verb, so on a GET-only surface it is the exact thing this test exists to
+    # catch; filtering it out of the comprehension would have made the loop
+    # below pass by not looking at it (pyright reportOptionalOperand,
+    # 2026-10-09).
+    admin_rules = [
+        rule for rule in app_module.app.url_map.iter_rules()
+        if rule.endpoint.startswith("admin.")
+    ]
+    undeclared = sorted(rule.rule for rule in admin_rules if rule.methods is None)
+    assert not undeclared, (
+        f"these admin rules declare no methods, so they answer ANY verb -- including the POST this "
+        f"surface must not accept: {undeclared}"
+    )
     methods = {
         rule.rule: rule.methods - {"HEAD", "OPTIONS"}
-        for rule in app_module.app.url_map.iter_rules()
-        if rule.endpoint.startswith("admin.")
+        for rule in admin_rules
+        if rule.methods is not None
     }
     assert "/api/admin/peg" in methods, "the peg route is not registered on the admin blueprint"
     for path, verbs in methods.items():

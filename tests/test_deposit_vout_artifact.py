@@ -952,14 +952,31 @@ def test_refusal_for_accepts_only_a_reported_vout_zero_row_on_a_live_swap():
     rows = rows_for([(0, 1.5), (2, 1.5)])
     assessment = assess_swap(rows, 0.01)
     assert refusal_for(1, (rows[0], assessment)) is None
-    assert "not one of the rows reported" in refusal_for(99, None)
-    assert "vout=2, not 0" in refusal_for(2, (rows[1], assessment))
+    # EACH REFUSAL IS BOUND AND CHECKED FOR None BEFORE ITS TEXT IS READ.
+    #
+    # refusal_for() returns `str | None` and None is a MEANINGFUL answer -- it
+    # is "this id may be deleted", which the line above asserts for id 1. So
+    # `"vout=2, not 0" in refusal_for(...)` was asserting on a value that can
+    # legitimately be None, and if the refusal ever stopped firing the test
+    # would die with `TypeError: argument of type 'NoneType' is not iterable`
+    # instead of saying that an id the migration must refuse was allowed
+    # through. On a tool that DELETES deposit rows, "the test crashed" and "the
+    # refusal is gone" have to read differently (pyright reportOperatorIssue x3,
+    # 2026-10-09). The substring assertions themselves are unchanged.
+    unreported = refusal_for(99, None)
+    assert unreported is not None, "an id this run never reported must be REFUSED, and None means allowed"
+    assert "not one of the rows reported" in unreported
+    wrong_vout = refusal_for(2, (rows[1], assessment))
+    assert wrong_vout is not None, "a row at vout=2 must be REFUSED, and None means allowed"
+    assert "vout=2, not 0" in wrong_vout
 
     settled_rows = rows_for([(0, 1.5), (2, 1.5)])
     for row in settled_rows:
         row["swap_status"] = "failed"
     settled = assess_swap(settled_rows, 0.01)
-    assert "is failed" in refusal_for(1, (settled_rows[0], settled))
+    settled_refusal = refusal_for(1, (settled_rows[0], settled))
+    assert settled_refusal is not None, "a settled swap's row must be REFUSED, and None means allowed"
+    assert "is failed" in settled_refusal
 
 
 def test_deletion_plan_raises_rather_than_returning_a_partial_plan():

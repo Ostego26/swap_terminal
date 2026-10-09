@@ -176,14 +176,34 @@ class StubGRC:
         raise AssertionError(f"a dry run must not derive a GRC address (label={label})")
 
 
-    def owns_address(self, address):
+    def owns_address(self, address) -> bool | None:
         """Not the desk's. Added 2026-10-04 with services/swap_service.
         refuse_unusable_payout_address()'s ownership gate, which calls this on a
         script chain -- a stub that lacks it raises AttributeError and the gate
         cannot be exercised at all. False is the right default for a CUSTOMER
         payout address, which is what every one of these fixtures supplies; a
         test that wants the refusal says so by returning True (see
-        test_a_payout_to_the_desks_own_wallet_is_refused)."""
+        test_a_payout_to_the_desks_own_wallet_is_refused).
+
+        `-> bool | None` IS chains/base.RPCAdapter.owns_address's OWN DECLARED
+        TYPE, and all three answers are real: True is ismine, False is somebody
+        else's, and None is "not established" -- a daemon that answers validity
+        and not ownership, which is Bitcoin Core 0.18 moving `ismine` out of
+        validateaddress into getaddressinfo. Letting `return False` be inferred
+        as Literal[False] made OwnWalletGRC and SilentGRC below ILLEGAL
+        OVERRIDES of the very method they exist to vary (pyright
+        reportIncompatibleMethodOverride x2, 2026-10-09): a stub cannot answer
+        True or None to a base that has promised False. So this annotation is
+        what lets SilentGRC exist at all -- and SilentGRC is the fixture for the
+        one answer that must never be printed as "not yours". The value returned
+        here is unchanged.
+
+        FOUR OTHER STUBS IN THIS FILE ANSWER THIS QUESTION THE SAME WAY --
+        StubXRP, UnaskableGRC, _Payer and _ViewOnly -- and none of them is
+        subclassed, which is why only this one needed the annotation. They are
+        named here so whoever changes this answer knows where the others are
+        (rule 8); all five agree today.
+        """
         return False
 
 class UnaskableGRC:
@@ -1250,8 +1270,15 @@ def test_an_adapter_without_owns_address_is_not_an_error(monkeypatch, tmp_path, 
     and a missing capability is not a reason to refuse a swap.
     """
     class NoSuchMethod(StubGRC):
-        owns_address = None
-
+        # `owns_address = None` USED TO BE HERE AND WAS UNREACHABLE. The
+        # __getattribute__ below raises AttributeError for that name before any
+        # lookup reaches the class dict, so the attribute's value was never
+        # read -- hasattr() is False either way, which is what this test is
+        # about. It was also the wrong mechanism on its own: a None class
+        # attribute makes hasattr() TRUE and then fails with TypeError when the
+        # gate calls it, which is not "an adapter predating the method".
+        # Removed rather than annotated (rule 9); pyright had flagged it as the
+        # assignment-over-a-method it was (reportAssignmentType, 2026-10-09).
         def __getattribute__(self, name):
             if name == "owns_address":
                 raise AttributeError(name)

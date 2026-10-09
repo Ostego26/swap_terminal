@@ -32,6 +32,22 @@ from pathlib import Path
 
 _SOURCE = Path(__file__).resolve().parents[1] / "docker" / "icp_replica_entrypoint.py"
 _SPEC = importlib.util.spec_from_file_location("icp_replica_entrypoint", _SOURCE)
+# BOTH FAILURES OF THE LOAD ARE NAMED, and this one runs at COLLECTION time.
+# spec_from_file_location() returns None when the path does not exist or no
+# loader claims it, and a spec can carry no loader -- so moving or renaming
+# docker/icp_replica_entrypoint.py made every test in this file fail with
+# `AttributeError: 'NoneType' object has no attribute 'loader'` during
+# collection, naming neither the file nor the reason (pyright
+# reportArgumentType + reportOptionalMemberAccess x2, 2026-10-09). The file
+# lives in the Docker image's build context, so "it moved" is the realistic
+# cause. Same guard, same words, as tests/test_operator_panel.py::_entry and
+# tests/test_solana_payout.py's teller_entry().
+if _SPEC is None or _SPEC.loader is None:
+    raise ImportError(
+        f"could not load {_SOURCE} as a module: spec_from_file_location gave spec={_SPEC!r}. "
+        f"This file tests the replica container's entrypoint by location, so if that script "
+        f"moved this path moves with it."
+    )
 entrypoint = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(entrypoint)
 
