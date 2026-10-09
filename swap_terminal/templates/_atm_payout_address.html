@@ -8,10 +8,37 @@
   decides where the money lands -- and address_authority already carries the
   per-chain validators, including ICP's.
 
-  NO autocomplete AND NO BROWSER VALIDATION PATTERN. A pattern here would be a
-  third spelling of the per-chain address rule, in a language the server cannot
-  check; `autocomplete="one-time-code"` is what index.html uses on the same field
-  so a browser does not offer the customer somebody else's saved address.
+  NO BROWSER VALIDATION PATTERN. A pattern here would be a third spelling of the
+  per-chain address rule, in a language the server cannot check.
+
+  `autocomplete="one-time-code"` IS NOT THE GUARD, AND THIS COMMENT USED TO SAY IT
+  WAS. It read: "`autocomplete="one-time-code"` is what index.html uses on the same
+  field so a browser does not offer the customer somebody else's saved address."
+  Two things wrong with that (rule 16: a wrong comment is a bug).
+
+  index.html is gone -- the ATM flow replaced it on 2026-10-07 -- so the sentence
+  pointed at a file nobody can read.
+
+  And the attribute was already MEASURED NOT TO WORK, in the incident that is the
+  whole reason the guard exists. From static/script.js's own comment, the
+  operator's host, 2026-10-01: "The field carries autocomplete="off" (and now
+  "one-time-code") and Brave filled it anyway" -- with a stale Bitcoin testnet
+  address that passed every check the server has, because Gridcoin shares Bitcoin
+  testnet's 0xc4 P2SH version byte and validateaddress returned isvalid: true.
+  82.65 tGRC was broadcast to an address nobody held the key for.
+
+  THE GUARD IS clearBrowserFilledPayoutAddress() in static/script.js, which empties
+  this field after load and again on a zero-delay timeout. The attribute stays
+  because it costs nothing and may help a browser that honors it; it is not what is
+  relied on.
+
+  AND IT WAS NOT RUNNING ON THIS PAGE UNTIL 2026-10-09. This partial renders inside
+  templates/atm.html, which loaded no script at all -- only swap.html,
+  _swap_live.html and _copy_field.html did. So the page that REPLACED the one the
+  guard was written for asked for a payout address with nothing but the attribute
+  that had already failed. Measured in Chromium both ways: with the script tag the
+  simulated autofill is cleared, without it the stale address survives into the
+  field. atm.html's own {% block scripts %} carries the reasoning.
 #}
 <div class="field">
   <label for="payout_address">Your {{ answers.to_asset }} address</label>

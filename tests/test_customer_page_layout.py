@@ -1589,6 +1589,70 @@ def test_no_operator_facing_remedy_text_reaches_the_customer_page(client, monkey
         assert f"{asset}_RPC" not in body, f"{asset}'s RPC settings are named to a customer"
 
 
+def test_every_page_that_asks_for_a_payout_address_loads_the_guard(client, monkeypatch):
+    """82.65 tGRC went to a browser-autofilled address. The guard stopped running.
+
+    THE INCIDENT, from static/script.js's own comment, measured on the operator's
+    host 2026-10-01 and three times in one afternoon: the payout field carried
+    autocomplete="off" (and later "one-time-code") and Brave filled it anyway with
+    a stale Bitcoin testnet address. It passed every check this server has --
+    Gridcoin shares Bitcoin testnet's 0xc4 P2SH version byte, so validateaddress
+    returns isvalid: true -- the daemon later answered ismine: false, and the coins
+    were already broadcast. A payout is final the moment it is sent.
+
+    clearBrowserFilledPayoutAddress() was written for that and empties the field
+    after load. THEN templates/index.html was replaced by the ATM flow on
+    2026-10-07, and templates/atm.html loaded no script at all: only swap.html,
+    _swap_live.html and _copy_field.html did. So from that day until 2026-10-09 the
+    page asking for a payout address relied on exactly the attribute the incident
+    had already defeated.
+
+    Nothing failed. Nothing could: a guard that does not run looks identical to a
+    guard that ran and found nothing.
+
+    WHY THE INVARIANT IS "EVERY PAGE", NOT "THE ATM PAGE". A test naming atm.html
+    would have been written the same day atm.html was, and would not have covered
+    the page that replaces it next. The rule is about the FIELD: wherever
+    id="payout_address" renders, the thing that clears it must be on the page. So
+    this walks the real flow, finds the screens that render it, and asserts on
+    those -- and it asserts at least one was found, because "no page asks for a
+    payout address" and "every page that does is guarded" are the same green.
+
+    VERIFIED IN CHROMIUM, BOTH WAYS, rather than inferred from the markup (rule
+    17). A <script> tag proves the file was requested, not that the function ran
+    and beat the autofill. Simulating the write at DOMContentLoaded -- the moment
+    Chrome-family autofill lands, per that function's own comment -- the field is
+    "" with the tag and holds 2N3bqzcWSDasdmqKkDKUAFU8f5Hk11NZzYN without it. This
+    test cannot do that (no browser here), so it asserts the weaker, necessary
+    condition and says so.
+    """
+    fully_reachable(client, monkeypatch, "BTC", "GRC", "LTC", "SOL", "XRP")
+    answers: dict[str, str] = {}
+    asked = 0
+    for fields in (
+        {},
+        {"from_asset": "BTC"},
+        {"to_asset": "GRC"},
+        {"amount": "0.0002", "amount_side": "send"},
+        {"payout_address": GRC_PAYOUT},
+    ):
+        answers.update(fields)
+        body = (client.get("/") if not answers else client.post("/", data=dict(answers))).get_data(as_text=True)
+        if 'id="payout_address"' not in body:
+            continue
+        asked += 1
+        assert "script.js" in body, (
+            "this screen renders id=\"payout_address\" and loads no script, so "
+            "clearBrowserFilledPayoutAddress() cannot run on it -- which is the exact state "
+            "the ATM flow shipped in between 2026-10-07 and 2026-10-09"
+        )
+
+    assert asked == 1, (
+        f"the walk found {asked} screens asking for a payout address, expected exactly 1. "
+        f"Zero means this test asserted nothing; more than one means the flow asks twice"
+    )
+
+
 def test_no_operator_vocabulary_reaches_any_screen_of_the_flow(client, monkeypatch):
     """THE GUARD ABOVE, ASKED OF ALL FIVE SCREENS INSTEAD OF ONLY THE FIRST.
 

@@ -2,11 +2,44 @@
  * Progressive enhancement for the customer surface. It decides nothing.
  *
  * Role: static asset (behavior only)
- * Reads: /api/quotes and /api/swaps (the same endpoints the forms POST to
- *        without it), and /swap/<id>/fragment for live status
+ * Reads: /swap/<id>/fragment, for live status on the swap page
  * Writes: nothing but the DOM
- * Can move funds: no
+ * Can move funds: no, and one function here exists BECAUSE money moved --
+ *        clearBrowserFilledPayoutAddress(). See its own comment.
  * Mainnet-safe: yes
+ *
+ * ==========================================================================
+ * 666 -> 361 LINES ON 2026-10-09, AND WHAT WENT IS WHY THIS HEADER CHANGED
+ * ==========================================================================
+ *
+ * Seven functions were deleted as dead: wireQuoteForm, wireSwapForm,
+ * wireLampFilter, and the four helpers they were the only callers of (say,
+ * sayRows, postJson, appendDepth). 302 lines, 45% of the file.
+ *
+ * Established by grepping the WHOLE TREE for each DOM id by NAME rather than by
+ * following imports, which is rule 2's guard and which mattered here -- one of
+ * the three nearly survived on a false hit:
+ *
+ *     quote-form, quote-result, create-swap   nowhere in the tree
+ *     swap-form                               nowhere in the tree
+ *     lamp-filter-note                        nowhere in the tree
+ *     lampstrip                               templates/admin.html:830, BUT as
+ *                                             class="lampstrip", never id=. The
+ *                                             function did getElementById.
+ *     swapgrid                                templates/atm.html, which does
+ *                                             not load this file at all
+ *
+ * They left with templates/index.html when the ATM flow replaced it. A grep that
+ * had stopped at "lampstrip appears in a template" would have kept 55 lines of
+ * code that cannot run.
+ *
+ * THE HEADER THIS REPLACES WAS WRONG IN FOUR PLACES after that cull, which is
+ * the reason it is rewritten rather than trimmed (rule 16: a wrong comment is a
+ * bug). It said this file reads /api/quotes and /api/swaps -- no code here calls
+ * either now. It said "every form below has a real method and action" -- there is
+ * no form below. It said "every fetch announces before it starts", which was
+ * say()'s job and say() is gone. And `let latestQuote = null` sat at the top with
+ * zero readers left in the file.
  *
  * ==========================================================================
  * WHAT IS DELIBERATELY NOT IN THIS FILE, AND WHY THAT IS THE POINT
@@ -37,10 +70,14 @@
  *       in services/quote_service.py, and displayed as returned. A browser that
  *       recomputed them would be a second fee schedule.
  *
- * WHAT IT DOES DO is rule 14: say what is happening WHILE it happens. Every
- * fetch announces before it starts, names what it is contacting, and reports an
- * empty or failed result as a statement rather than by leaving the previous
- * text on screen.
+ * WHAT IS LEFT IS FOUR THINGS, and every one of them is inert on a page that
+ * does not carry its markup -- each opens with an early return on a missing
+ * element, which is what makes this file safe to load from any template:
+ *
+ *   wireLivePolling                  #swap-live + script[data-swap-fragment]
+ *   clearBrowserFilledPayoutAddress  #payout_address
+ *   wireCopyButtons                  delegated; needs no element at load
+ *   wireWalletMenu                   .wallet-menu
  */
 
 "use strict";
@@ -49,265 +86,15 @@
 // action, so a browser with scripting off posts and gets the API's own JSON.
 // This only replaces that with something nicer.
 
-/** The quote most recently returned by the server, or null. */
-let latestQuote = null;
-
 function el(id) {
   return document.getElementById(id);
 }
 
-/** Replace a result region's contents with one line of text and a class. */
-function say(region, text, className) {
-  if (!region) return;
-  region.innerHTML = "";
-  const p = document.createElement("p");
-  p.className = className || "";
-  p.textContent = text;
-  region.appendChild(p);
-}
 
-/** Render a list of label/value rows into a result region. */
-function sayRows(region, heading, rows, headingClass) {
-  if (!region) return;
-  region.innerHTML = "";
-  const title = document.createElement("p");
-  title.className = headingClass || "";
-  title.textContent = heading;
-  region.appendChild(title);
-  const list = document.createElement("dl");
-  list.className = "kv";
-  rows.forEach(function (row) {
-    const wrap = document.createElement("div");
-    const dt = document.createElement("dt");
-    dt.textContent = row[0];
-    const dd = document.createElement("dd");
-    dd.textContent = row[1];
-    wrap.appendChild(dt);
-    wrap.appendChild(dd);
-    list.appendChild(wrap);
-  });
-  region.appendChild(list);
-}
 
-/**
- * POST JSON and return the parsed body, raising with the server's own message.
- *
- * A non-JSON response is reported AS a non-JSON response rather than as a
- * generic failure: "the server answered with something that is not JSON" and
- * "the server refused this quote" are different facts, and collapsing them is
- * how an outage gets read as a bad input.
- */
-async function postJson(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  let body;
-  try {
-    body = await response.json();
-  } catch (parseError) {
-    throw new Error(
-      "the server answered " + response.status + " with a body that is not JSON; nothing was created"
-    );
-  }
-  if (!response.ok) {
-    throw new Error(body.error || "the server refused this with status " + response.status);
-  }
-  return body;
-}
 
-// --- quotes ----------------------------------------------------------------
 
-function wireQuoteForm() {
-  const form = el("quote-form");
-  const region = el("quote-result");
-  const createButton = el("create-swap");
-  if (!form) return;
 
-  form.addEventListener("submit", async function (event) {
-    event.preventDefault();
-    const pair = el("pair");
-    const amountField = el("input_amount");
-    if (!pair || !pair.value) {
-      say(region, "No direction is selected. Nothing was sent.", "result-error");
-      return;
-    }
-    const parts = pair.value.split(":");
-    const amount = Number(amountField.value);
-    if (!(amount > 0)) {
-      say(region, "Enter an amount greater than zero. Nothing was sent.", "result-error");
-      return;
-    }
-
-    // Announce BEFORE (rule 14), naming what is being contacted and what for.
-    say(
-      region,
-      // TWO FEEDS SINCE 2026-09-30, and this line said "One outbound call." until
-      // then. CoinGecko is tried first and CoinPaprika second, because CoinGecko
-      // returns 403 from some hosts at the CloudFront edge -- so the number of
-      // calls is one or many, and the answer names which feed it came from.
-      "Pricing " + amount + " " + parts[0] + " to " + parts[1] + ": asking the server, which fetches a live USD " +
-        "price for each asset. Two feeds are tried in order and the answer says which one priced it.",
-      "result-working"
-    );
-
-    try {
-      latestQuote = await postJson("/api/quotes", {
-        from_asset: parts[0],
-        to_asset: parts[1],
-        input_amount: amount,
-      });
-      sayRows(
-        region,
-        "Quote " + latestQuote.id,
-        [
-          ["You send", latestQuote.input_amount + " " + latestQuote.from_asset],
-          ["Estimated payout", latestQuote.output_amount_estimate + " " + latestQuote.to_asset],
-          ["Rate used", latestQuote.quoted_rate + " " + latestQuote.to_asset + " per " + latestQuote.from_asset],
-          ["Fee", latestQuote.fee_bps + " bps"],
-          ["Network fee reserved", latestQuote.network_fee_reserve + " " + latestQuote.to_asset],
-          ["Valid until", latestQuote.expires_at],
-          // RULE 14: echo the parameter that decides the answer. A rate with no
-          // source is a number nobody can check, and this terminal now has two
-          // feeds that could have produced it.
-          ["Priced by", latestQuote.price_source || "(the server did not say)"],
-        ]
-      );
-      appendDepth(region, latestQuote.confidence);
-      if (createButton) createButton.disabled = false;
-    } catch (error) {
-      latestQuote = null;
-      if (createButton) createButton.disabled = true;
-      // THE PREFIX IS ADDED ONLY IF THE SERVER DID NOT ALREADY SAY IT. The house
-      // shape for a refused quote is a message that begins "No quote:" --
-      // services/quote_service.py writes three of them and tests/test_solana_payout.py
-      // asserts that shape -- and prepending it unconditionally doubled it on the
-      // operator's screen 2026-10-02:
-      //
-      //     No quote: No quote: nobody has recorded what one XRP payout costs this desk
-      //
-      // The prefix still exists for the errors that are NOT the server's prose: a
-      // dropped connection arrives here as "Failed to fetch", and a bare
-      // "Failed to fetch" in the quote region does not say what failed.
-      var message = error.message || "the server gave no reason";
-      say(region, message.indexOf("No quote:") === 0 ? message : "No quote: " + message, "result-error");
-    }
-  });
-}
-
-/**
- * The market-depth reading for both legs of a quote, appended under its rows.
- *
- * WHY A CUSTOMER SEES THIS AT ALL. A spot price is only as good as the money
- * behind it, and one of this terminal's assets is thin enough for that to matter:
- * measured 2026-09-29, GRC turned over 0.0039% of its market cap in a day
- * against Litecoin's 7.5%, and a $100 swap was a third of GRC's entire 24h
- * volume. At that depth the swap is not priced BY the market, it IS the market --
- * and a quote that shows a confident rate with no mention of that is telling the
- * customer something the server knows to be shaky.
- *
- * IT CHANGES NO NUMBER. services/market_context.price_confidence() lists four
- * ways it could be wired; three of them move money (refuse, widen the fee, cap
- * the size) and are the operator's. This is the fourth: display.
- *
- * AND AN UNAVAILABLE READING SAYS SO. Silence would read as "the market is
- * fine", which is the one thing it cannot mean -- no reading is no evidence, not
- * good evidence.
- */
-function appendDepth(region, confidence) {
-  if (!region || !confidence) return;
-  const note = document.createElement("p");
-  note.className = "panel-note";
-  if (confidence.available !== true) {
-    note.textContent =
-      "Market depth: NOT MEASURED for this quote (" + (confidence.why || "no reason given") +
-      "). The rate above stands; how much money set it is unknown.";
-    region.appendChild(note);
-    return;
-  }
-  const legs = confidence.legs || {};
-  const parts = [];
-  ["from", "to"].forEach(function (role) {
-    const leg = legs[role];
-    if (!leg) return;
-    parts.push(leg.asset + ": " + leg.verdict + " -- " + (leg.reason || "no reason given"));
-  });
-  note.textContent = parts.length
-    ? "Market depth. " + parts.join("  |  ")
-    : "Market depth: no leg was readable for this quote.";
-  const thin = ["from", "to"].some(function (role) {
-    return legs[role] && legs[role].verdict !== "OK";
-  });
-  // `panel-note warn`, NOT a new class. styles.css:251 already styles exactly
-  // this state -- a left rule in the "slow" colour over a soft background -- and
-  // index.html's own comments make the same point about `pair-off` and `subtle`:
-  // a second vocabulary for one state is rule 8 with a stylesheet attached.
-  if (thin) note.className = "panel-note warn";
-  region.appendChild(note);
-}
-
-// --- swaps -----------------------------------------------------------------
-
-function wireSwapForm() {
-  const form = el("swap-form");
-  const region = el("swap-result");
-  if (!form) return;
-
-  form.addEventListener("submit", async function (event) {
-    event.preventDefault();
-    if (!latestQuote) {
-      say(region, "There is no quote to create a swap from. Get one first; nothing was sent.", "result-error");
-      return;
-    }
-    const addressField = el("payout_address");
-    const address = (addressField.value || "").trim();
-    if (!address) {
-      say(region, "Enter the address you want to be paid at. Nothing was sent.", "result-error");
-      return;
-    }
-
-    say(
-      region,
-      "Creating a swap from quote " + latestQuote.id + ": the server checks this " + latestQuote.to_asset +
-        " address with that chain's own daemon, then derives a deposit address. That is two RPC calls and can " +
-        "take a few seconds.",
-      "result-working"
-    );
-
-    try {
-      const swap = await postJson("/api/swaps", {
-        quote_id: latestQuote.id,
-        payout_address: address,
-      });
-      // The status page is a real URL, so going there is a navigation rather
-      // than a view swap. It survives closing the tab, which a swap measured in
-      // blocks needs.
-      say(region, "Swap " + swap.id + " created. Opening its page...", "result-working");
-      window.location.href = "/swap/" + encodeURIComponent(swap.id);
-    } catch (error) {
-      // DO NOT PREPEND WHAT THE SERVER ALREADY SAID. Measured in the operator's
-      // browser 2026-10-04, when the new payout-ownership refusal fired for real:
-      //
-      //   No swap was created: No swap was created: mg3gJAm... is an address this
-      //   terminal's own GRC wallet holds the key for (ismine=true) ...
-      //
-      // Seven of the eight create-path raises in services/swap_service.py already
-      // open with that phrase, because the SERVER owns the sentence a customer
-      // reads -- it is the side that knows what was and was not written. This line
-      // added a second copy to every one of them, and the doubling was in the one
-      // place the refusal is actually useful: on screen, at the moment someone
-      // pasted the wrong address.
-      //
-      // The short raises ("Quote not found", "Quote expired") do NOT carry it, so
-      // the prefix is not simply deleted -- it is added only when absent. That is
-      // a rendering decision and not policy: the message text stays the server's.
-      var message = String(error.message || error);
-      var prefix = "No swap was created";
-      say(region, message.indexOf(prefix) === 0 ? message : prefix + ": " + message, "result-error");
-    }
-  });
-}
 
 // --- the live status region ------------------------------------------------
 
@@ -601,65 +388,7 @@ function wireWalletMenu() {
   });
 }
 
-function wireLampFilter() {
-  // ONE LAMP PER COIN, CLICKED TO FILTER THE DIRECTION GRID. Operator 2026-10-07:
-  // "grc led ltc led, etc should indicate which pairs are available for that coin"
-  // and the page should be "point/click".
-  //
-  // EVERY NUMBER ON THE PAGE IS ALREADY CORRECT WITHOUT THIS. The lamps, their
-  // counts and the "N of M directions" line are rendered by the server from
-  // services/pair_view.asset_rollups(). This function hides tiles and nothing else,
-  // so with JavaScript off the panel is complete and merely unfiltered -- which is
-  // why the lamps are <button>s on a page that works without them rather than the
-  // only way to read the state.
-  const strip = document.getElementById("lampstrip");
-  const grid = document.getElementById("swapgrid");
-  const note = document.getElementById("lamp-filter-note");
-  if (!strip || !grid) return;
 
-  const tiles = Array.from(grid.querySelectorAll(".swaptile"));
-
-  function apply(asset) {
-    let shown = 0;
-    for (const tile of tiles) {
-      // A COIN'S DIRECTIONS ARE BOTH HALVES. Filtering on `from` alone would answer
-      // "what can I send this as", and the lamp's own counts report in AND out --
-      // a filter narrower than the lamp beside it would contradict it.
-      const involved =
-        !asset || tile.dataset.from === asset || tile.dataset.to === asset;
-      tile.hidden = !involved;
-      if (involved) shown += 1;
-    }
-    for (const lamp of strip.querySelectorAll(".lamp")) {
-      lamp.setAttribute("aria-pressed", String(lamp.dataset.asset === asset));
-    }
-    if (note) {
-      // SAY WHAT THE SCREEN IS NOW SHOWING, with its denominator (rule 3). A filter
-      // that silently removes rows is indistinguishable from a page that has fewer,
-      // and "3 shown" without "of 30" says nothing about whether something is wrong.
-      note.textContent = asset
-        ? "Showing " + shown + " of " + tiles.length + " directions, filtered to " + asset +
-          ". Click " + asset + " again to show all."
-        : "Click a coin to show only its directions. Click it again to show all. " +
-          "out is that coin going out of your hands into the desk's; in is the desk paying it to you.";
-    }
-  }
-
-  let active = "";
-  strip.addEventListener("click", function (event) {
-    const lamp = event.target.closest(".lamp");
-    if (!lamp) return;
-    // CLICKING THE ACTIVE LAMP CLEARS THE FILTER rather than reapplying it. Without
-    // this there is no way back to the full list except reloading, which is the
-    // failure mode of every filter that only ever narrows.
-    active = lamp.dataset.asset === active ? "" : lamp.dataset.asset;
-    apply(active);
-  });
-}
-
-wireLampFilter();
-wireQuoteForm();
-wireSwapForm();
 wireLivePolling();
 clearBrowserFilledPayoutAddress();
 wireCopyButtons();

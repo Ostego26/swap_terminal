@@ -289,3 +289,39 @@
 </section>
 {% endif %}
 {% endblock %}
+
+{#- THE GUARD THAT EXISTS BECAUSE MONEY WENT TO THE WRONG ADDRESS, and it was not
+    running on this page at all.
+
+    static/script.js's clearBrowserFilledPayoutAddress() empties `#payout_address`
+    after load. Its own comment records why, measured on the operator's host
+    2026-10-01: the field carried autocomplete="off" and Brave filled it anyway
+    with a stale Bitcoin testnet address, which passed every check the server has
+    -- Gridcoin shares Bitcoin testnet's 0xc4 P2SH version byte, so validateaddress
+    returned isvalid: true -- and 82.65 tGRC was broadcast to an address nobody
+    held the key for.
+
+    WHAT WAS WRONG HERE, established by rendering step 4 rather than by reading
+    (2026-10-09): this page renders id="payout_address" and did NOT load
+    static/script.js. Only swap.html, _swap_live.html and _copy_field.html did. So
+    the ATM flow -- the page that REPLACED the one that guard was written for --
+    asked for a payout address with nothing but the attribute that had already
+    been measured to fail.
+
+    _atm_payout_address.html's own comment said `autocomplete="one-time-code"` is
+    "what index.html uses on the same field so a browser does not offer the
+    customer somebody else's saved address". It inherited the attribute and not
+    the script, and index.html is gone.
+
+    SAFE TO LOAD FROM HERE because every function in that file opens with an early
+    return on a missing element: wireLivePolling wants #swap-live and a
+    data-swap-fragment script, wireWalletMenu wants .wallet-menu, wireCopyButtons
+    is delegated. None of those is on this page. Verified in Chromium across all
+    five screens rather than reasoned -- see the commit.
+
+    `defer` and not `async`: the clear has to happen after the field exists, and
+    the function also re-clears on a zero-delay timeout because Chrome-family
+    autofill often runs after DOMContentLoaded. -#}
+{% block scripts %}
+<script src="{{ url_for('static', filename='script.js') }}" defer></script>
+{% endblock %}
