@@ -182,41 +182,80 @@ order path, so named rather than changed.
 Reachable only by a crafted POST; `answers_after_back()` clears it and two tests
 pin that. Harmless, named.
 
-### 13. `node:22-alpine` is a floating tag with 11 high vulnerabilities
-**Owner: operator**, although it is filed under this section because I found it —
-it needs a docker daemon, which this session does not have.
+### 13. Docker base images: 9 warnings, 5 that ship, 1 that matters
+**Owner: operator**, filed here because I found it — settling it needs a docker
+daemon, which this session does not have.
 
-`swap_terminal/grc-sol-swap/abstergo_exchange/Dockerfile:28` and `:46`. Docker
-DX reports 11 high vulnerabilities in the base image it resolved
-(`sha256-2c752226…505a8`).
+Docker DX flagged five Dockerfiles across several pastes, one file at a time.
+Taken as a stream that reads like nine problems. Counted properly it is not, and
+the distinction the editor cannot make is the whole finding: **it warns on every
+`FROM`, including build stages whose contents are thrown away.**
 
-**I cannot verify or fix this from here and I am not going to pretend
-otherwise** (rule 17): there is no docker daemon in this session, so I cannot
-pull the image, cannot run a scan, and cannot tell you whether a different tag
-has fewer. The count above is the language server's, relayed.
+| Dockerfile | line | stage | base image | ships? | reported |
+|---|---|---|---|---|---|
+| `docker/grc-desk.Dockerfile` | 42 | `build` | `debian:bookworm-slim` | **no** | 4 crit / 11 high |
+| `docker/grc-desk.Dockerfile` | 81 | `runtime` | `debian:bookworm-slim` | yes | 4 crit / 11 high |
+| `docker/harness.Dockerfile` | 27 | `chains` | `debian:bookworm-slim` | **no** | 4 crit / 11 high |
+| `docker/harness.Dockerfile` | 74 | `runtime` | `python:3.12-slim-bookworm` | yes | 8 high |
+| `docker/icp-replica.Dockerfile` | 25 | **single stage** | `rust:1.90-bookworm` | yes | **13 crit / 169 high** |
+| `docker/web.Dockerfile` | 31 | `deps` | `python:3.12-slim-bookworm` | **no** | — |
+| `docker/web.Dockerfile` | 45 | `runtime` | `python:3.12-slim-bookworm` | yes | — |
+| `.../abstergo_exchange/Dockerfile` | 28 | `deps` | `node:22-alpine` | **no** | 11 high |
+| `.../abstergo_exchange/Dockerfile` | 46 | `runtime` | `node:22-alpine` | yes | 11 high |
 
-What IS establishable by reading the file, and is a real defect independent of
-the vulnerability count: `22-alpine` **floats**. It resolves to whatever the
-latest 22.x alpine is at build time, so two builds of this Dockerfile a week
-apart produce different images — in a file whose own header is entirely about
-being able to say what is running ("verify the artifact, not the deploy", rule
-13). Pinning a digest would make the build reproducible and would make a
-vulnerability count mean something, because it would be a count of a specific
-image rather than of a moving target.
+Four of the nine are builder stages. `grc-desk` copies three files out of its
+builder and `harness` copies four binaries; `web` copies `/wheels`; `abstergo`
+copies `node_modules`. Nothing else from those stages reaches a running
+container, so their CVE counts are build-time noise. **Established by reading
+every `FROM` and every `COPY --from` in the tree**, not by assuming the warnings
+were duplicates.
 
-**That is a proposal, not a fix** (rule 16): it changes what gets deployed, and
-choosing the digest needs a scan I cannot run. The two commands that would
-settle it are yours:
+**THE ONE THAT MATTERS IS `icp-replica.Dockerfile`, and it is the only Dockerfile
+here that is not multi-stage.** A full Rust 1.90 toolchain is the runtime image,
+so all 182 of its reported vulnerabilities are in the container that actually
+runs — against 11 and 8 for the others. It is also the largest image in the
+topology by a wide margin, for a container whose job after build is to run
+`dfx start`.
+
+What keeps this from being urgent, and it is the file's own header rather than my
+reading of it: *"Can move funds: NO, and structurally. A local replica has its own
+genesis and its own threshold keys; the key named `dfx_test_key` exists only
+inside this container and controls nothing on any real chain."* It is a local dev
+replica holding nothing. So this is image hygiene and image size, not an exposure.
+
+**THE FIX IS A SECOND STAGE, AND IT IS A PROPOSAL** (rule 16: a change I cannot
+test here is a proposal, not a fix — and this one also changes what gets
+deployed). Build the replica and `dfx` in the `rust:1.90-bookworm` stage, then
+`COPY --from=` the binaries into a `debian:bookworm-slim` runtime, exactly the
+shape `grc-desk.Dockerfile` already uses twenty lines of comment to justify. The
+toolchain, `rustup`, the wasm target and the cargo registry all stop shipping.
+I cannot build it to confirm the binaries' runtime deps come across — that is
+what the `libunwind8` line in the current file is for and it would need checking
+in the new stage.
+
+**SEPARATELY, AND IT IS TRUE OF ALL FIVE FILES: not one base image is pinned by
+digest.** Zero `FROM ... @sha256:` in the tree, measured. `22-alpine`,
+`bookworm-slim` and `3.12-slim-bookworm` all float, so two builds a week apart
+produce different images — in files whose headers are about being able to say
+what is running ("verify the artifact, not the deploy", rule 13), and
+`icp-replica.Dockerfile`'s own comment says *"PINNED, NOT LATEST. A replica
+version is a consensus implementation"* while pinning the dfx version and leaving
+its base floating. Pinning digests would also make a vulnerability count mean
+something, because it would be a count of a specific image rather than of a
+moving target.
+
+The commands that settle the counts are yours; I can run none of them:
 
 ```
-docker pull node:22-alpine && docker image inspect node:22-alpine --format '{{index .RepoDigests 0}}'
-docker scout cves node:22-alpine
+docker image inspect node:22-alpine --format '{{index .RepoDigests 0}}'
+docker scout cves rust:1.90-bookworm
+docker scout cves debian:bookworm-slim
 ```
 
-Worth knowing before you spend time on it: this server signs Solana payouts
-(`server.js:245`), so its base image is not a cosmetic concern — but the 11
-highs are in the base image's own packages, not in this repository's code, and
-a `node:22-alpine` with zero highs may simply not exist today.
+Worth knowing before spending time on it: these counts are of the BASE images'
+own Debian/Alpine packages, not of anything in this repository, and a
+`rust:1.90-bookworm` with zero criticals may simply not exist. The two-stage
+change is the one that moves the number regardless of what upstream ships.
 
 ### 14. The review screen speaks operator, not customer
 Screen 5 renders, verbatim and in a highlighted panel:
