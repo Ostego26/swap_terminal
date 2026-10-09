@@ -104,6 +104,18 @@
         )
       );
 
+      // THESE FOUR KEYS ARE BUILT BY stack_authority.chain_probe_envelope(), which
+      // routes/admin.py returns verbatim. This file is the only consumer that
+      // cannot import the constant naming them, so it is pinned from the other
+      // side instead: tests/test_web_surfaces.py::
+      // test_the_admin_page_javascript_reads_the_key_python_writes fails if
+      // CHAIN_PROBE_ROWS_KEY changes and this line does not.
+      //
+      // Worth pinning because the OTHER reader of this envelope got it wrong and
+      // stayed wrong: swap_stack.py's `up` expected the rows to be the whole body
+      // and printed "COULD NOT ASK ... got dict" on a working probe until
+      // 2026-10-09. This line was right the whole time, by luck of being written
+      // against the route rather than against a belief about it.
       const chains = data.chains || [];
       if (chains.length === 0) {
         // `(none)` is a result (rule 14). An empty region here would be

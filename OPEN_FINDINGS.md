@@ -369,6 +369,28 @@ by grepping for the NAME rather than the import graph (rule 2).
   and their `check()` disagrees about whether the verdict is a `bool` or a string.
   Not merged — they are genuinely different consoles — but `step_console.check` now
   REFUSES a non-bool, because crossing them printed OK and exited 0 (C16).
+- **`up` reports the code version of the HOST CHECKOUT and starts the container
+  without rebuilding it.** `git_reading()`'s own docstring says it reads "which
+  commit this HOST checkout is running", and `cmd_up` runs `docker compose up -d
+  icp-replica web` with no `--build`. `docker/web.Dockerfile:150` is `COPY
+  swap_terminal ./swap_terminal` — the app is BAKED IN, and only `/data` and
+  `/runtime` are mounts. So after a `git pull`, `up` prints
+
+      code 3e41ad1 (xrp-adapter), tree clean
+
+  while the container keeps serving whatever was baked at its last build. That is
+  precisely the shape of defect rule 13 names ("verify the artifact, not the
+  deploy") in the section written to prevent it, and the same shape as C19 above:
+  a check reporting on something adjacent to the thing it claims to check.
+
+  Two ways to close it and they are not equivalent. Rebuilding on every `up` is
+  honest and costs the operator a build on a command they run to look at things.
+  Reading the commit back OUT of the container (`docker compose exec web cat
+  <baked marker>`) and comparing to `git_reading()` is cheap and reports the real
+  state, including "container is 4 commits behind, run with --build". The second
+  is what rule 13 actually asks for. NOT DONE: it needs a commit marker baked at
+  image build time, which is a Dockerfile change, and I would want to watch one
+  real build before claiming it works.
 
 ---
 
@@ -376,6 +398,8 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C19 | `up` step 7 could never read the endpoint it asks. `/api/admin/chains` has always answered with an envelope (`probed_at`, `adapters_configured`, `probes_attempted`, `chains`) and `static/admin.js:107` has always read `data.chains`; the host-side reader expected the rows to BE the body, so its first live run printed `COULD NOT ASK ... got dict, which is what an error page parses to` on a WORKING probe and sent the operator looking for an error page that does not exist. Four pure tests were green throughout because every one fabricated the body it tested against — the same defect as `3e41ad1`, one file over. Builder and extractor now share `CHAIN_PROBE_ROWS_KEY`; the test helper builds through the real producer; a behavioral test feeds the route's own body to the reader | `this commit` |
+| C20 | `swap_stack.py:731` carried an unsuppressed `S310` on `HEAD` — a lint error I committed. The comment beside it claimed "the URL is never input", true of both callers and not a constraint: a third caller passing `file:///` would have been read off local disk with the comment still reading true. Now a guard, so the `noqa` is backed by the line above it | `this commit` |
 | C1 | Candid links pointed at the default identity's wallet canister | `4d82caf` |
 | C2 | No output said which commit produced it | `697c1db` |
 | C3 | Four canister lookups announced as three | `764ec96` |

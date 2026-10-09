@@ -1088,8 +1088,78 @@ def replica_state_verdict(
 #: makes a real one get ignored).
 _NOT_ASKED = None
 
+#: The key /api/admin/chains puts its per-chain rows under, and the ONE spelling
+#: of it on the Python side of that endpoint.
+#:
+#: WRITTEN DOWN HERE BECAUSE THE SECOND SPELLING WAS WRONG AND NOBODY NOTICED
+#: (rule 8). The route has always answered with an ENVELOPE -- rows under this
+#: key, beside the three facts that say what decided the answer -- and
+#: static/admin.js:107 has always read `data.chains`. The reader below was
+#: written on 2026-10-09 against a BARE LIST, so its first live run on the
+#: operator's stack printed
+#:
+#:     UNKNOWN  COULD NOT ASK: /api/admin/chains did not return a list of chain
+#:              rows, got dict, which is what an error page parses to
+#:
+#: on a working endpoint, and sent the operator looking for an error page that
+#: did not exist. Two readers of one shape, one of them wrong, and the wrong one
+#: fails CLOSED -- so it looked like the cautious behavior rather than a bug.
+#:
+#: Nothing caught it because every test fabricated the body it tested against
+#: (tests/test_stack_authority.py::_chain_rows, whose own docstring claimed
+#: "/api/admin/chains' shape"). That is the defect 3e41ad1 fixed one file over:
+#: a test written against the author's belief about a shape, not against the
+#: shape the code emits. The behavioral test now feeds the ROUTE's own body in.
+CHAIN_PROBE_ROWS_KEY = "chains"
 
-def chain_reachability_verdict(rows: object, trouble: str = "") -> tuple[str, str, list[str]]:
+
+def chain_probe_envelope(
+    chains: list[dict], probed_at: str, adapters_configured: int
+) -> dict:
+    """Build /api/admin/chains' body. Pure; the route's only answer shape.
+
+    Echo what decided the answer (rule 14): WHEN it was asked, how many adapters
+    exist, and how many were actually contacted -- because "0 of 6 answered" and
+    "0 of 6 could be probed" are different facts and a bare list of failures
+    cannot distinguish them.
+
+    `probes_attempted` is DERIVED from the rows rather than passed in, so it
+    cannot disagree with the rows it describes. The route used to compute it
+    inline next to the dict literal, which is the same count-in-two-places shape
+    canister_lookup_names() below was extracted for.
+    """
+    return {
+        "probed_at": probed_at,
+        "adapters_configured": adapters_configured,
+        "probes_attempted": sum(1 for chain in chains if chain.get("probed")),
+        CHAIN_PROBE_ROWS_KEY: chains,
+    }
+
+
+def chain_probe_rows(body: object) -> list[dict] | None:
+    """The rows out of a /api/admin/chains body, or None if that is not what this is.
+
+    FAIL CLOSED AND SAY WHICH. Returns None for anything that is not the
+    envelope chain_probe_envelope() builds carrying a list of row-shaped dicts --
+    an error page, a 500 with an HTML body, an older build, a bare list. The
+    caller turns None into `unknown`, which is never `reachable`.
+
+    A BARE LIST IS REFUSED ON PURPOSE even though it would be trivial to accept.
+    Nothing emits one; tolerating both shapes here would mean the next reader
+    cannot tell which one the endpoint actually sends, which is how this defect
+    survived in the first place.
+    """
+    if not isinstance(body, dict):
+        return None
+    rows = body.get(CHAIN_PROBE_ROWS_KEY)
+    if not isinstance(rows, list):
+        return None
+    if not all(isinstance(row, dict) and "asset" in row for row in rows):
+        return None
+    return rows
+
+
+def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, str, list[str]]:
     """Can the container reach its chain daemons? Pure; takes /api/admin/chains' body.
 
     Returns `(status, headline, detail)`.
@@ -1099,12 +1169,18 @@ def chain_reachability_verdict(rows: object, trouble: str = "") -> tuple[str, st
       none_asked    no chain in the list has a probe -- nothing was established.
       unknown       the endpoint could not be read. NEVER reads as reachable.
 
-    `rows` is whatever json.loads() produced, including None or a dict, because
-    this is handed the result of parsing a response that may be an error page.
-    Anything that is not a list of row-shaped dicts is `unknown` with the reason,
-    rather than an exception out of a report (rule 12: a broad catch is only
-    legitimate when the caller can tell a failure from a real answer -- here the
-    status is the answer and `unknown` is not `reachable`).
+    `body` is whatever json.loads() produced, which is the WHOLE RESPONSE and not
+    the rows -- an envelope with the rows under CHAIN_PROBE_ROWS_KEY, or None, or
+    an error page, because this is handed the result of parsing a response that
+    may be any of those. chain_probe_rows() is the one place that tells them
+    apart; anything it refuses is `unknown` with the reason, rather than an
+    exception out of a report (rule 12: a broad catch is only legitimate when the
+    caller can tell a failure from a real answer -- here the status is the answer
+    and `unknown` is not `reachable`).
+
+    THAT PARAMETER USED TO BE NAMED `rows` AND WAS TREATED AS A LIST, which is why
+    this check reported `unknown` on every run between being written and
+    2026-10-09. See CHAIN_PROBE_ROWS_KEY above for what that cost.
 
     A chain with reachable=None is NOT COUNTED AS A FAILURE. ICP and SOL have no
     read-only probe in this application by design, and reporting them alongside a
@@ -1117,10 +1193,16 @@ def chain_reachability_verdict(rows: object, trouble: str = "") -> tuple[str, st
             "the app serves /api/admin/chains and probes from INSIDE the container, which is",
             "the only vantage point that matters: the daemons answer the host just fine.",
         ]
-    if not isinstance(rows, list) or not all(isinstance(row, dict) and "asset" in row for row in rows):
-        return "unknown", "COULD NOT ASK: /api/admin/chains did not return a list of chain rows", [
-            f"got {type(rows).__name__}, which is what an error page parses to. Open the URL by",
+    rows = chain_probe_rows(body)
+    if rows is None:
+        return "unknown", (
+            f"COULD NOT ASK: /api/admin/chains did not answer in the shape it serves "
+            f"(rows under {CHAIN_PROBE_ROWS_KEY!r})"
+        ), [
+            f"got {type(body).__name__}, which is what an error page parses to. Open the URL by",
             "hand; this says nothing about reachability either way.",
+            "if the body LOOKS right, the container may be serving older code than this host",
+            "checkout -- `up` passes no --build, so a pull alone does not change what it runs.",
         ]
 
     answered = [row["asset"] for row in rows if row.get("reachable") is True]

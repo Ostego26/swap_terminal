@@ -33,6 +33,11 @@ from network_target import configuring_variable
 from page_markup import TILE_WITH_LABEL
 from services import coinpaprika, market_context, pricing
 from services.wallet_leveling import PEG_ASSETS
+from stack_authority import (
+    CHAIN_PROBE_ROWS_KEY,
+    chain_probe_rows,
+    chain_reachability_verdict,
+)
 from valid_addresses import GRC_DESK_DEPOSIT, GRC_PAYOUT, SOL_DEPOSIT_ACCOUNT
 
 # `app` imports and calls create_app() at module scope, and conftest.py has
@@ -548,6 +553,66 @@ def test_the_admin_blueprint_registers_no_write_method():
             )
             writes |= set(rule.methods) - {"GET", "HEAD", "OPTIONS"}
     assert writes == set(), f"the admin surface must be read-only; found {sorted(writes)}"
+
+
+def test_up_can_actually_read_the_chain_probe_it_asks_for(client):
+    """The route's OWN body, handed to the host-side reader that consumes it.
+
+    THIS IS THE TEST WHOSE ABSENCE COST THE OPERATOR A FALSE ALARM. `swap_stack.py`
+    step 7 fetches /api/admin/chains and passes the parsed body to
+    chain_reachability_verdict(). Written 2026-10-09 expecting a BARE LIST of
+    rows; the route has always answered with an envelope. So its first live run
+    printed, on a stack whose probe was working:
+
+        UNKNOWN  COULD NOT ASK: /api/admin/chains did not return a list of chain
+                 rows, got dict, which is what an error page parses to
+
+    and sent the operator looking for an error page that did not exist.
+
+    Four pure tests in tests/test_stack_authority.py were green throughout,
+    because every one of them fabricated the body it tested against. Only
+    something that asks the real route can catch this -- which is the
+    behavioral-verification principle in CLAUDE.md applied across an HTTP
+    boundary instead of a SQL one: run the real thing, assert on what it
+    actually produced, never on a hand-copied shape.
+
+    THE ASSERTION IS "READABLE", NOT "REACHABLE". With no adapters configured the
+    honest verdict is `none_asked`, and with stub adapters it may be
+    `unreachable`; both mean the contract held. `unknown` is the one verdict that
+    says the two sides disagree about the shape, and it is the one this refuses.
+    """
+    response = client.get("/api/admin/chains")
+    assert response.status_code == 200, response.status_code
+    body = response.get_json()
+
+    rows = chain_probe_rows(body)
+    assert rows is not None, (
+        f"the host-side reader cannot find rows under {CHAIN_PROBE_ROWS_KEY!r} in the body this "
+        f"route actually serves: {sorted(body) if isinstance(body, dict) else type(body).__name__}"
+    )
+
+    status, headline, _detail = chain_reachability_verdict(body)
+    assert status != "unknown", (
+        f"`up` step 7 cannot read its own endpoint, so it reports COULD NOT ASK on a working "
+        f"probe: {headline}"
+    )
+    assert status in {"reachable", "unreachable", "none_asked"}, f"{status}: {headline}"
+
+
+def test_the_admin_page_javascript_reads_the_key_python_writes(client):
+    """static/admin.js is the third consumer and cannot import the constant.
+
+    It is JavaScript, so rule 8's "the shared version goes where both callers can
+    reach it" has nowhere to put this one -- and a hand-written `data.chains` in a
+    .js file is exactly the second spelling that drifts. Pinning it from here is
+    the closest thing available to deriving it: change CHAIN_PROBE_ROWS_KEY and
+    this fails until the page follows.
+    """
+    script = (Path(__file__).resolve().parents[1] / "swap_terminal/static/admin.js").read_text()
+    assert f"data.{CHAIN_PROBE_ROWS_KEY}" in script, (
+        f"admin.js does not read data.{CHAIN_PROBE_ROWS_KEY}, so the Reachability panel is "
+        f"reading a key the route does not write"
+    )
 
 
 def test_no_admin_route_accepts_a_post(client):

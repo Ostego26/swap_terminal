@@ -63,6 +63,13 @@ from flask import Blueprint, current_app, jsonify, render_template
 from services.admin_view import overview, probe_chains, probe_peg
 from services.helpers import utc_now_iso
 
+# ONE SPELLING OF /api/admin/chains' BODY, shared with the host-side reader in
+# swap_stack.py. stack_authority is pure stdlib and live-safe to import (its own
+# header says so), which is why the contract lives there rather than in
+# services/admin_view.py -- `up` runs on the HOST and must not drag flask, the
+# adapters or the supervisor in to learn one key name.
+from stack_authority import chain_probe_envelope
+
 bp = Blueprint("admin", __name__)
 
 
@@ -105,18 +112,14 @@ def admin_chains_route():
     """
     adapters = current_app.config["ADAPTERS"]
     chains = probe_chains(adapters)
-    # Echo what decided the answer (rule 14): when it was asked, how many
-    # adapters exist, and how many were actually contacted -- because "0 of 6
-    # answered" and "0 of 6 could be probed" are different facts and a bare list
-    # of failures does not distinguish them.
-    return jsonify(
-        {
-            "probed_at": utc_now_iso(),
-            "adapters_configured": len(adapters),
-            "probes_attempted": sum(1 for chain in chains if chain["probed"]),
-            "chains": chains,
-        }
-    )
+    # THE BODY IS BUILT BY stack_authority.chain_probe_envelope(), NOT BY A DICT
+    # LITERAL HERE. It used to be a literal, and swap_stack.py's `up` read the
+    # same endpoint expecting a bare list -- so step 7 printed "COULD NOT ASK ...
+    # got dict" on a working probe for as long as it existed. One producer, one
+    # key, and the host-side reader pulls the rows out through the same constant
+    # (rule 8). static/admin.js is the third consumer and cannot share the symbol;
+    # it names this function in a comment instead.
+    return jsonify(chain_probe_envelope(chains, utc_now_iso(), len(adapters)))
 
 
 @bp.get("/api/admin/peg")

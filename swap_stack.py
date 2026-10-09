@@ -660,6 +660,15 @@ def cmd_down(files: tuple[str, ...]) -> int:
     return 0
 
 
+#: The only prefix wait_for_http() will open. Loopback, http, this host.
+#:
+#: A CONSTANT RATHER THAN A LITERAL IN THE GUARD because the guard and the error
+#: message both name it, and two spellings of one rule is rule 8's bug-with-a-
+#: delay-on-it. stack_authority.REPLICA_STATUS_URL and the web-port URLs built in
+#: probe_serving_port() are the two things that have to satisfy it.
+_PROBEABLE_URL_PREFIX = "http://127.0.0.1:"
+
+
 def wait_for_http(url: str, budget_seconds: float, *, announce: bool = True) -> tuple[bool, str, float]:
     """Poll `url` until it answers. (ready, detail, seconds waited).
 
@@ -712,23 +721,39 @@ def wait_for_http(url: str, budget_seconds: float, *, announce: bool = True) -> 
     copies of one sentence is the same defect as silence approached from the
     other side.
     """
+    # THE URL IS NEVER INPUT, AND THIS IS WHAT MAKES THAT TRUE RATHER THAN A
+    # PROMISE. Both callers build it from the literal "http://127.0.0.1:" plus a
+    # constant path or an int from stack_authority.WEB_PORT_CANDIDATES, so no
+    # scheme but http can appear -- but that was written in a COMMENT, and a
+    # comment is not a constraint. S310's concern is a `file:` or custom scheme
+    # arriving from somewhere, and ruff cannot see the literal prefix through a
+    # `url: str` parameter, so the finding is correct about what it can prove.
+    #
+    # Rule 19's test for a patch is "does it stop the symptom being reported, or
+    # does it stop the cause existing?" A bare noqa here would be the first. The
+    # cause is that nothing checks, so checking is the fix and the suppression
+    # below is then a claim backed by the line above it rather than by my memory
+    # of two call sites (rule 12: "a reviewer should be able to see which from
+    # the line").
+    #
+    # Not changing the signature to (port, path) instead: REPLICA_STATUS_URL is
+    # one constant that the surface map also PRINTS whole, so splitting it would
+    # ripple into a report for no reader benefit.
+    if not url.startswith(_PROBEABLE_URL_PREFIX):
+        raise ValueError(
+            f"wait_for_http probes this host's own loopback only, and was handed {url!r}. "
+            f"Every URL it opens must start with {_PROBEABLE_URL_PREFIX!r}."
+        )
     started = time.monotonic()
     attempt = 0
     while True:
         attempt += 1
         try:
-            # THE URL IS NEVER INPUT. Every caller builds it from the literal
-            # "http://127.0.0.1:" plus either a constant path or an int from
-            # stack_authority.WEB_PORT_CANDIDATES, so no scheme but http can
-            # appear and S310's concern (file: or a custom scheme arriving from
-            # somewhere) cannot.
-            #
-            # This comment used to START with the word "noqa", and ruff read it as
-            # a BLANKET noqa directive and then reported it as unused (RUF100).
-            # A comment whose first word is noqa is a suppression, whatever the
-            # rest of the sentence says -- which is a good argument for rule 19's
-            # position that a suppression should be rare enough to be deliberate.
-            with urllib.request.urlopen(
+            # A PRIOR ATTEMPT AT THIS COMMENT STARTED WITH THE WORD "noqa", and
+            # ruff read it as a BLANKET directive and then reported it as unused
+            # (RUF100). A comment whose first word is noqa is a suppression
+            # whatever the rest of the sentence says.
+            with urllib.request.urlopen(  # noqa: S310  -- scheme enforced above
                 url, timeout=_REPLICA_PROBE_TIMEOUT_SECONDS
             ) as answer:
                 outcome: object = answer.status

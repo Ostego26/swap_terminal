@@ -36,6 +36,7 @@ import swap_stack
 from swap_terminal.stack_authority import (
     CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
+    CHAIN_PROBE_ROWS_KEY,
     DOWN_VERDICTS,
     LISTENER_VERDICTS,
     NEVER_STOPPED,
@@ -49,6 +50,8 @@ from swap_terminal.stack_authority import (
     canister_lookup_names,
     canister_lookup_verdict,
     canister_surface_lines,
+    chain_probe_envelope,
+    chain_probe_rows,
     chain_reachability_verdict,
     code_version_verdict,
     container_id,
@@ -1949,21 +1952,99 @@ def test_the_preflight_inspects_the_stack_up_will_act_on(monkeypatch, capsys):
 # =============================================================================
 
 
-def _chain_rows(**reachable) -> list[dict]:
-    """Rows in /api/admin/chains' shape. `reachable=` per asset: True, False or None."""
-    return [
+def _chain_body(**reachable) -> dict:
+    """A WHOLE /api/admin/chains body. `reachable=` per asset: True, False or None.
+
+    BUILT THROUGH THE REAL chain_probe_envelope() RATHER THAN SPELLED OUT, and
+    that is the fix this helper exists to carry rather than a tidy-up. It used to
+    be `_chain_rows()` returning a bare list, with a docstring claiming
+    "/api/admin/chains' shape" -- and the endpoint has never served a bare list.
+    routes/admin.py wraps the rows in an envelope and static/admin.js reads
+    `data.chains`, so every test in this section asserted on a shape no reader
+    would ever be handed, and the one reader that mattered --
+    `swap_stack.py`'s step 7 -- printed "COULD NOT ASK ... got dict" on the
+    operator's working stack 2026-10-09.
+
+    Four tests green on a check that had never once produced a real verdict. The
+    helper is what made that possible: a fabricated body cannot disagree with the
+    author's belief about the body. Going through the producer means the next
+    change to that shape breaks these tests instead of hiding from them.
+
+    The ROWS are still fabricated here, deliberately -- probe_chain() makes
+    network calls, and the verdict logic under test is about what the rows SAY,
+    not about getting them. The envelope is what was wrong and the envelope is
+    what is now real. tests/test_web_surfaces.py drives the actual route end to
+    end, which is the half no pure test can reach.
+    """
+    rows = [
         {"asset": asset, "probed": state is not None, "reachable": state,
          "network": "regtest" if state else None,
          "detail": "answered" if state else f"did not answer: stub for {asset}"}
         for asset, state in reachable.items()
     ]
+    return chain_probe_envelope(rows, "2026-10-09T00:00:00+00:00", len(rows))
+
+
+def test_the_probe_refuses_a_url_it_was_never_meant_to_open():
+    """The guard that makes `noqa: S310` a claim rather than a promise.
+
+    The comment at that call site said "the URL is never input" and was correct
+    about both callers -- which is not the same thing as a constraint, and is
+    exactly rule 2's "I could not find a caller is not there is no caller" wearing
+    a lint code. A third caller passing a `file:` URL would have been read off
+    local disk with the comment still reading true.
+
+    MUTATION: delete the startswith check. This fails; nothing else in the suite
+    does, because no existing caller violates it -- which is the point.
+    """
+    for refused in ("file:///etc/passwd", "http://evil.example/", "ftp://127.0.0.1:4943/"):
+        with pytest.raises(ValueError, match="loopback only"):
+            swap_stack.wait_for_http(refused, 0.1, announce=False)
+
+
+def test_the_envelope_derives_its_own_attempt_count():
+    """`probes_attempted` must come from the rows, not from a second count.
+
+    MUTATION: return a fixed 0. An operator reading "0 of 6 could be probed"
+    beside six answered rows cannot tell which number to believe, and rule 3's
+    denominator is the whole point of the field.
+    """
+    body = chain_probe_envelope(
+        [{"asset": "BTC", "probed": True}, {"asset": "ICP", "probed": False}], "t", 6
+    )
+    assert body["probes_attempted"] == 1, body
+    assert body["adapters_configured"] == 6, body
+    assert body[CHAIN_PROBE_ROWS_KEY] == body["chains"], (
+        "the constant and the literal key have drifted, which is the whole defect"
+    )
+
+
+def test_the_reader_accepts_what_the_builder_builds():
+    """The contract, in one line, from both ends.
+
+    This is the assertion whose absence cost a day of UNKNOWN: the producer and
+    the host-side consumer of /api/admin/chains were never once checked against
+    each other.
+    """
+    rows = [{"asset": "BTC", "probed": True, "reachable": True}]
+    assert chain_probe_rows(chain_probe_envelope(rows, "t", 1)) == rows
+
+
+def test_a_bare_list_of_rows_is_refused_rather_than_tolerated():
+    """Accepting both shapes is how the next reader gets it wrong too.
+
+    Nothing emits a bare list. If this ever starts passing, the extractor has
+    been loosened to accept a shape no route serves, and the question "which
+    shape does it send?" becomes unanswerable from the reader again.
+    """
+    assert chain_probe_rows([{"asset": "BTC", "probed": True, "reachable": True}]) is None
 
 
 def test_a_chain_with_no_probe_is_not_counted_as_a_failure():
     """ICP and SOL have no read-only probe BY DESIGN, and an alarm that includes
     them is the false alarm that teaches an operator to skim past the real one."""
     status, headline, detail = chain_reachability_verdict(
-        _chain_rows(BTC=True, XRP=True, ICP=None, SOL=None)
+        _chain_body(BTC=True, XRP=True, ICP=None, SOL=None)
     )
     assert status == "reachable", f"{status}: {headline}"
     said = " ".join([headline, *detail])
@@ -1975,7 +2056,7 @@ def test_a_chain_with_no_probe_is_not_counted_as_a_failure():
 
 def test_one_unreachable_chain_is_named_and_shouted():
     status, headline, detail = chain_reachability_verdict(
-        _chain_rows(BTC=False, GRC=False, LTC=False, XRP=True, ICP=None, SOL=None)
+        _chain_body(BTC=False, GRC=False, LTC=False, XRP=True, ICP=None, SOL=None)
     )
     assert status == "unreachable"
     # STARTSWITH, NOT `in`. The marker is written at BOTH ends of the headline, so
@@ -2009,7 +2090,7 @@ def test_an_endpoint_that_could_not_be_read_never_reads_as_reachable():
         # the `trouble` branch: every other input here is ALSO caught by the
         # shape check below it, so a mutation disabling `if trouble:` survived
         # until this line existed -- the verdict was right for the wrong reason.
-        (_chain_rows(BTC=True, XRP=True), "the page is not serving, so its probe cannot be asked"),
+        (_chain_body(BTC=True, XRP=True), "the page is not serving, so its probe cannot be asked"),
         (None, "connection refused"),
         ({"error": "boom"}, ""),
         ("<html>500</html>", ""),
@@ -2024,7 +2105,7 @@ def test_an_endpoint_that_could_not_be_read_never_reads_as_reachable():
 
 def test_the_empty_case_says_nothing_was_established():
     """Rule 14: "(none) is a result". No probeable chain is not an all-clear."""
-    status, headline, _detail = chain_reachability_verdict(_chain_rows(ICP=None, SOL=None))
+    status, headline, _detail = chain_reachability_verdict(_chain_body(ICP=None, SOL=None))
     assert status == "none_asked", f"{status}: {headline}"
     assert status != "reachable", "zero chains probed must never report as all reachable"
 
